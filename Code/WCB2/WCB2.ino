@@ -96,7 +96,8 @@
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
 
-  // Serial Baud Rates. IF YOU CHANGED THES
+  // Default Serial Baud Rates   THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
+  // The correct baud rates will be shown on the serial console on bootup.
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
   #define SERIAL2_DEFAULT_BAUD_RATE 9600 
   #define SERIAL3_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
@@ -669,10 +670,27 @@ void sendESPNOWCommand(String starget, String scomm){
  }
 
  void saveBaud(const char* Port, int32_t Baud){
-  preferences.begin("serial-baud", false);
-  preferences.putInt(Port, Baud);
-  preferences.end();
-
+  if (Baud == 110     ||     // checks to make sure a valid baudrate is used
+      Baud == 300     ||
+      Baud == 600     ||
+      Baud == 1200    ||
+      Baud == 2400    ||
+      Baud == 9600    ||
+      Baud == 14400   ||
+      Baud == 19200   ||
+      Baud == 38400   ||
+      Baud == 57600   ||
+      Baud == 115200  ||
+      Baud == 128000  ||
+      Baud == 256000
+      ){
+        preferences.begin("serial-baud", false);
+        preferences.putInt(Port, Baud);
+        preferences.end();
+        Serial.printf("\n\nThe Serial Port Baud Rate has changed and the system will reboot in 3 seconds\n\n");
+        delay(3000);
+        ESP.restart();
+      } else {Serial.printf("Wrong Baudrate given");}
  }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -926,16 +944,15 @@ void loop(){
               serialSubStringCommand = serialStringCommand.substring(2,commandLength);
               Debug.LOOP("Serial Baudrate: %s on Serial Port: %s\n", serialSubStringCommand.c_str(), serialPort); 
               int tempBaud = serialSubStringCommand.toInt();
-              Debug.LOOP("Int of baud rate %i \n", tempBaud);
-              if (serialPort == "S1"){
+              if (serialPort == "S1"|| serialPort == "s1"){
                   saveBaud("S1BAUD", tempBaud);
-              } else if (serialPort == "S2"){
+              } else if (serialPort == "S2" || serialPort == "s2"){
                   saveBaud("S2BAUD", tempBaud);
-              } else if (serialPort == "S3"){
+              } else if (serialPort == "S3" || serialPort == "s3"){
                   saveBaud("S3BAUD", tempBaud);
-              }else if (serialPort == "S4"){
+              }else if (serialPort == "S4" || serialPort == "s4"){
                   saveBaud("S4BAUD", tempBaud);
-              } else if (serialPort == "S5"){
+              } else if (serialPort == "S5" || serialPort == "s15"){
                   saveBaud("S5BAUD", tempBaud);
               }else {Debug.LOOP("No valid serial port given \n");}
               
@@ -995,15 +1012,15 @@ void loop(){
               serialPort = serialStringCommand.substring(0,2);
               serialSubStringCommand = serialStringCommand.substring(2,commandLength);
               Debug.LOOP("Serial Command: %s to Serial Port: %s\n", serialSubStringCommand.c_str(), serialPort);  
-              if (serialPort == "S1"){
+              if (serialPort == "S1" || serialPort == "s1"){
                 writes1SerialString(serialSubStringCommand);
-              } else if (serialPort == "S2"){
+              } else if (serialPort == "S2" || serialPort == "s2"){
                 writes2SerialString(serialSubStringCommand);
-              } else if (serialPort == "S3"){
+              } else if (serialPort == "S3" || serialPort == "s3"){
                 writes3SerialString(serialSubStringCommand);
-              }else if (serialPort == "S4"){
+              }else if (serialPort == "S4" || serialPort == "s4"){
                 writes4SerialString(serialSubStringCommand);
-              } else if (serialPort == "S5"){
+              } else if (serialPort == "S5" || serialPort == "s5"){
                 writes5SerialString(serialSubStringCommand);
               }else {Debug.LOOP("No valid serial port given \n");}
               serialStringCommand = "";
