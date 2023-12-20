@@ -944,7 +944,6 @@ void loop(){
               serialSubStringCommand = serialStringCommand.substring(2,commandLength);
               Debug.LOOP("Serial Baudrate: %s on Serial Port: %s\n", serialSubStringCommand.c_str(), serialPort); 
               int tempBaud = serialSubStringCommand.toInt();
-              Debug.LOOP("Int of baud rate %i \n", tempBaud);
               if (serialPort == "S1"|| serialPort == "s1"){
                   saveBaud("S1BAUD", tempBaud);
               } else if (serialPort == "S2" || serialPort == "s2"){
