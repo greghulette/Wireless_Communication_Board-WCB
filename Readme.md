@@ -47,10 +47,11 @@ The following lists out possible commands for local use.
  - x: 1-5 : Serial port 1-5
 - yyyy: any valid baud rate that the IDE can be set at.  
 
+
+<br>
 The following is the syntax for sending commands
 
 Wireless Communication Command Sytax
-
 
 :W(x):S(y)(zzzzz....)
 <br>    - x: 1-9 : Target WCB's number.  If sending to WCB2, enter 2
@@ -60,8 +61,6 @@ Wireless Communication Command Sytax
     Examples
     - :W3:S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
     - :W2:S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
-
-
 
 Serial Communications Command Syntax
 
