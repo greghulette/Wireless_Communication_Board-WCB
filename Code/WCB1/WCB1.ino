@@ -80,7 +80,6 @@
 //////////////////////////////////////////////////////////////////////
 ///*****          Preferences/Items to change                 *****///
 //////////////////////////////////////////////////////////////////////
- int WCB_Quantity = 2;          // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
 
   // Uncomment only the board that you are loading this sketch onto. 
   #define WCB1 
@@ -92,6 +91,9 @@
   // #define WCB7 
   // #define WCB8 
   // #define WCB9
+
+  // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
+ int WCB_Quantity = 2;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String ESPNOWPASSWORD = "WCB_Astromech_xxxxx";

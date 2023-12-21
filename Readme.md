@@ -22,16 +22,15 @@ Below, you will see some possible connections that can exist to the WCB's.  In t
 <br>
 <img src="./Images/OverviewImage.png"><br>
 
-<br>Now if we lay the different types of communications over this picture, you can see how the boards can send the various types of messages.
+<br>Now if we lay the different types of communications over this picture, you can see how the boards can send the various types of messages.  The green microcontrollers are some examples of the boards that can communicate over serial and can be hooked up to this system.
 <img src="./Images/Transmission_example.png">
 
-
+As you can see in the above image, you can send any other board a direct message.  
 
 
 <h2>Command Syntax</h2>
 I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "#" and the execution commands start with ":".  <br>
 
-The thought was that with only adding 4 characters to your string you send out of your microcontroller, you can send 
 
 <br>
 
@@ -42,7 +41,7 @@ The following lists out possible commands for local use.
     #L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
     #L02  -  Restarts the ESP32
     #DESPNOW  - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
-    #DSERIAL  -  Toggles the serial debugging to allow you to debug serial related functions
+    #DSERIAL  - Toggles the serial debugging to allow you to debug serial related functions
     #DLOOP   -  Toggles the loop debugging to allow you to debug the main loop
     #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
@@ -91,12 +90,12 @@ Other than that change, you can setup the Stealth's config.txt file to send out 
     b=3,5,1
     g=454,5,2
 
-    a=:W2:S3:PP100
-    a=:W2:S2#SD0
+    a=:W3:S1:PP100
+    a=:W2:S2:SE00
 
-The b=3,5,1 assigns button 3 send out the serial port, designated by the 5, and to send the first string, shown as the first a=xxxxx.
+The b=3,5,1 assigns button 3's action to send a string out the serial port, designated by the 5 in the command, and to send the first string, designated by the 1 in the command. The 1st string in this example is ":W3:S1:PP100"
 
-The g=454,5,2 assigns the gesture 454 to send out the serial port, and to send the 2nd string<br>
+The g=454,5,2 assigns the gesture 454(left twice) to send a string out the serial port, and to send the 2nd string.  The string in this example is ":W2:S2:SE00<br>
 
 This is a more comprehensive list of gestures and buttons as an example:
 
@@ -136,3 +135,23 @@ This is a more comprehensive list of gestures and buttons as an example:
     a=:W3:S3:PDA0
     a=:W3:S5:LM052
   
+In this example, button 7 would make the Stealth send the string ":W2:S1:PS4" out it's serial port.  The WCB would accept that command and forward the string ":PS4" out the WCB2's Serial 1 port. 
+
+
+<h2>Code Preferences/Changes Needed</h2>
+There are a few things that should be changed in the code when updating it.  There is a section on the top of the sketch that has all those items.
+
+<img src="./Images/Code_Preferences.png"><br>
+There are 6 things to change to the code before uploading to the WCB. <br>
+
+    1. Uncomment out the board that you using.  Only have 1 board uncommented at a time
+    2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change your baud rate from the command line.  Once it is changed via the command (#Sx,yyyy), the correct value is show on bootup and the value in this code is no longer accurate.
+
+    ******** (MUST MATCH ON ALL BOARDS)*********
+    1. Change the quantity of WCB's you are using in your setup
+    2. Change the ESPNOW password. This should be unique to your droid and prevents others with the same system from sending your droid commmands if they didn't change their password.  
+    3. Change the umac_oct2 and oct2_String variables.  This represents the second octect of the MacAddress that the ESP-NOW protocol uses.  By changin this, you ensure that your WCB's will not commincate with other WCBs since they will not know each others MAC address.  
+    4. Change the umac_oct3 and oct3_String variables.  This represents the second octect of the MacAddress that the ESP-NOW protocol uses.  By changin this, you ensure that your WCB's will not commincate with other WCBs since they will not know each others MAC address. Adding this octect to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address.  
+
+
+
