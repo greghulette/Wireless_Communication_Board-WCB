@@ -96,7 +96,7 @@
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
 
-  // Default Serial Baud Rates   THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
+  // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
   #define SERIAL2_DEFAULT_BAUD_RATE 9600 
@@ -528,10 +528,11 @@ void serialEvent() {
     char inChar = (char)Serial.read();
     inputString += inChar;
       if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-        stringComplete = true;            // set a flag so the main loop can do something about it.
-      }
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
+      Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
+    }
   }
-  Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
 }
 
 void s1SerialEvent() {
@@ -539,7 +540,8 @@ void s1SerialEvent() {
     char inChar = (char)s1Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      stringComplete = true;            // set a flag so the main loop can do something about it.
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
       Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
     }
   }
@@ -550,7 +552,8 @@ void s2SerialEvent() {
     char inChar = (char)s2Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      stringComplete = true;            // set a flag so the main loop can do something about it.
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
     }
   }
@@ -561,7 +564,8 @@ void s3SerialEvent() {
     char inChar = (char)s3Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      stringComplete = true;            // set a flag so the main loop can do something about it.
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
       Debug.SERIAL_EVENT("Serial 3 Input: %s \n",inputString.c_str());
     }
   }
@@ -571,7 +575,8 @@ void s4SerialEvent() {
     char inChar = (char)s4Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      stringComplete = true;            // set a flag so the main loop can do something about it.
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
       Debug.SERIAL_EVENT("Serial 4 Input: %s \n",inputString.c_str());
     }
   }
@@ -581,7 +586,8 @@ void s5SerialEvent() {
     char inChar = (char)s5Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      stringComplete = true;            // set a flag so the main loop can do something about it.
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      enqueueCommand(inputString);
       Debug.SERIAL_EVENT("Serial 5 Input: %s \n",inputString.c_str());
     }
   }
@@ -692,6 +698,76 @@ void sendESPNOWCommand(String starget, String scomm){
         ESP.restart();
       } else {Serial.printf("Wrong Baudrate given");}
  }
+
+
+////////////////////////////////////////////////////
+
+#define MAX_QUEUE_DEPTH 5
+
+////////////////////////////////////////////////////
+
+template<class T, int maxitems>
+class Queue {
+  private:
+    int _front = 0, _back = 0, _count = 0;
+    T _data[maxitems + 1];
+    int _maxitems = maxitems;
+  public:
+    inline int count() { return _count; }
+    inline int front() { return _front; }
+    inline int back()  { return _back;  }
+
+    void push(const T &item) {
+      if(_count < _maxitems) { // Drops out when full
+        _data[_back++]=item;
+        ++_count;
+        // Check wrap around
+        if (_back > _maxitems)
+          _back -= (_maxitems + 1);
+      }
+    }
+
+    T peek() {
+      return (_count <= 0) ? T() : _data[_front];
+    }
+
+    T pop() {
+      if (_count <= 0)
+        return T(); // Returns empty
+
+      T result = _data[_front];
+      _front++;
+      --_count;
+      // Check wrap around
+      if (_front > _maxitems) 
+        _front -= (_maxitems + 1);
+      return result; 
+    }
+
+    void clear() {
+      _front = _back;
+      _count = 0;
+    }
+};
+
+template <int maxitems = MAX_QUEUE_DEPTH>
+using CommandQueue = Queue<String, maxitems>;
+
+////////////////////////////////////////////////////
+
+
+CommandQueue<> commandQueue;
+
+bool havePendingCommands(){return (commandQueue.count() > 0);}
+
+String getNextCommand(){return commandQueue.pop();}
+
+void enqueueCommand(String command){commandQueue.push(command);}
+
+
+
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////                                                                                       /////////     
@@ -903,10 +979,13 @@ void loop(){
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
 
-    if (stringComplete) {autoComplete=false;}
-    if (stringComplete || autoComplete) {
-      if(stringComplete) {inputString.toCharArray(inputBuffer, 100);inputString="";}
-      else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 100);autoInputString="";}
+    // if (stringComplete) {autoComplete=false;}
+    // if (stringComplete || autoComplete) {
+    //    if(stringComplete) {inputString.toCharArray(inputBuffer, 100);inputString="";}
+    if (havePendingCommands()) {autoComplete=false;}
+    if (havePendingCommands() || autoComplete) {
+    if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString);inputString.toCharArray(inputBuffer, 100);inputString="";}
+    else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 100);autoInputString="";}
       if (inputBuffer[0] == '#'){
         if (
             inputBuffer[1]=='D' ||          // Command for debugging
