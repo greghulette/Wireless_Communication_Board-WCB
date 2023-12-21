@@ -27,6 +27,7 @@ Below, you will see some possible connections that can exist to the WCB's.  In t
 
 
 
+
 <h2>Command Syntax</h2>
 I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "#" and the execution commands start with ":".  <br>
 
@@ -38,19 +39,14 @@ The following lists out possible commands for local use.
 
  <br>
 
-#L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
-
-#L02  -  Restarts the ESP32
-
-#DESPNOW  - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
-
-#DSERIAL  -  Toggles the serial debugging to allow you to debug serial related functions
-
-#DLOOP   -  Toggles the loop debugging to allow you to debug the main loop
-
-#S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
- - x: 1-5 : Serial port 1-5
-- yyyy: any valid baud rate that the IDE can be set at.  
+    #L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
+    #L02  -  Restarts the ESP32
+    #DESPNOW  - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
+    #DSERIAL  -  Toggles the serial debugging to allow you to debug serial related functions
+    #DLOOP   -  Toggles the loop debugging to allow you to debug the main loop
+    #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
+        x: 1-5 : Serial port 1-5
+        yyyy: any valid baud rate that the IDE can be set at.  
 
 
 <br>
@@ -58,24 +54,26 @@ The following is the syntax for sending commands
 
 Wireless Communication Command Sytax
 
-:W(x):S(y)(zzzzz....)
-<br>    - x: 1-9 : Target WCB's number.  If sending to WCB2, enter 2
-<br>    - y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
-<br>    - zzzz.... : String to send to end device
+    :W(x):S(y)(zzzzz....)
+    
+    x: 1-9 : Target WCB's number.  If sending to WCB2, enter 2
+    y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
+    zzzz.... : String to send to end device
 
     Examples
-    - :W3:S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
-    - :W2:S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
+    :W3:S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
+    :W2:S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
 
 Serial Communications Command Syntax
 
-:S(y)(zzzzz....)
-<br>    - y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
-<br>    - zzzz.... : String to send to end device
+    :S(y)(zzzzz....)
+
+    y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
+    zzzz.... : String to send to end device
 
     Examples
-    - :S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
-    - :S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
+    :S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
+    :S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
 
 
 <h2>Stealth Users</h2>
