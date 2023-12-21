@@ -27,7 +27,11 @@ Below, you will see some possible connections that can exist to the WCB's.  In t
 <h2>Command Syntax</h2>
 I have broken the command structure down into 2 catagories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "#" and the execution commands start with ":".
 
-The following lists out possible commands for local use
+<br>
+The following lists out possible commands for local use.
+
+ <br>
+
 
 #L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
 
