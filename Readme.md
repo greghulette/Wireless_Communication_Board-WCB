@@ -6,7 +6,7 @@ I developed these boards to allow the various microcontrollers in R2 to communic
  The wireless technology is using ESP-NOW for it's trasnmissioni protocol.  ESP-NOW is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  
 
 <h2>Board Overview</h2>
-<img src="./Images/CADImage.png" style="width: 200px;"><br><br>
+<img src="./Images/CADImage.png" style="width: 400px;"><br><br>
 
  Features of the board: 
 - LilyGo T7 Mini32 V1.5

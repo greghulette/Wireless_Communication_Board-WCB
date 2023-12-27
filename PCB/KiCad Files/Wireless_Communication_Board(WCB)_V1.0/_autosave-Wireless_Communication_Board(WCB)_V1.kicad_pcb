@@ -535,8 +535,8 @@
       (scale (xyz 1 1 1))
       (rotate (xyz 0 0 0))
     )
-    (model "/Users/gregoryhulette/Downloads/esp32-lilygo-t7-mini-v1-4-1.snapshot.2/Untitled.step" hide
-      (opacity 0.9900)      (offset (xyz -121.5 91.5 -13.5))
+    (model "/Users/gregoryhulette/Downloads/esp32-lilygo-t7-mini-v1-4-1.snapshot.2/Untitled.step"
+      (opacity 0.9900)      (offset (xyz -121.5 91.5 -2))
       (scale (xyz 1 1 1))
       (rotate (xyz 0 0 0))
     )
