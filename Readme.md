@@ -1,7 +1,7 @@
 <h1 style="display:; font-size:50px;">Wireless Communication Boards (WCB)</h1>
 
 <h2> Description/Purpose </h2>
-I developed these boards to allow the various microcontrollers in R2 to communicate wirelessly.  I was initially having issues getting signals into and out of the dome reliably and wanted a better way to accomplish this.  These boards also allow you to have multiple serially connected devices to communicate with each other bi-directionaly. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
+I developed these boards to allow the various microcontrollers in R2 to communicate wirelessly as well as a Serial "router".  I was initially having issues getting signals into and out of the dome reliably and wanted a better way to accomplish this.  These boards also allow you to have multiple serially connected devices to communicate with each other bi-directionaly. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
 
  The wireless technology is using ESP-NOW for it's trasnmissioni protocol.  ESP-NOW is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  
 
@@ -145,7 +145,9 @@ There are a few things that should be changed in the code when updating it.  The
 There are 6 things to change to the code before uploading to the WCB. <br>
 
     1. Uncomment out the board that you using.  Only have 1 board uncommented at a time
-    2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change your baud rate from the command line.  Once it is changed via the command (#Sx,yyyy), the correct value is show on bootup and the value in this code is no longer accurate.
+    2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change your baud rate from the command line.  
+        Once it is changed via the command (#Sxyyyy), the correct value is show on bootup and the value in this code is no longer accurate.  
+        The value stored in the ESP32 will persist even after you upload the code again and changning this value will now affect the baud rate stored in the ESP32.
 
     ******** (MUST MATCH ON ALL BOARDS)*********
     1. Change the quantity of WCB's you are using in your setup
