@@ -145,9 +145,10 @@ There are a few things that should be changed in the code when updating it.  The
 There are 6 things to change to the code before uploading to the WCB. <br>
 
     1. Uncomment out the board that you using.  Only have 1 board uncommented at a time
-    2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change your baud rate from the command line.  
-        Once it is changed via the command (#Sxyyyy), the correct value is show on bootup and the value in this code is no longer accurate.  
-        The value stored in the ESP32 will persist even after you upload the code again and changning this value will now affect the baud rate stored in the ESP32.
+    2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change your baud rate
+         from the command line.  Once it is changed via the command (#Sxyyyy), the correct value is show on bootup
+         and the value in this code is no longer accurate.  The value stored in the ESP32 will persist even after you 
+         upload the code again and changning this value will not affect the baud rate stored in the ESP32.
 
     ******** (MUST MATCH ON ALL BOARDS)*********
     1. Change the quantity of WCB's you are using in your setup
