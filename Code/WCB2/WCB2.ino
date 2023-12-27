@@ -446,8 +446,7 @@ void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
   Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
   if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
-    inputString = incomingCommand;
-    stringComplete = true; 
+    enqueueCommand(incomingCommand);
     Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
   }
 }

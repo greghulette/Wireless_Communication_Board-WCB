@@ -1,4 +1,4 @@
-#include "DebugR2.h"
+#include "DebugWCB.h"
 
 
 debugClass::debugClass(bool displayMsg){

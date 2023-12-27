@@ -1,5 +1,5 @@
-#ifndef DebugR2_h
-#define DebugR2_h
+#ifndef DebugWCB_h
+#define DebugWCB_h
 
 
 #if (ARDUINO >= 100)
