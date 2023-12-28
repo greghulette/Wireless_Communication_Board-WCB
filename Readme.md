@@ -46,6 +46,7 @@ The following lists out possible commands for local use.
     #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
         yyyy: any valid baud rate that the IDE can be set at.  
+    #SC   - Clears all stored baud rates.  Will revert to the rates defined in the sketch.
 
 
 <br>

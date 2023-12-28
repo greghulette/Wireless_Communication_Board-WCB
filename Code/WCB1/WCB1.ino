@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
-///*****                                          Created by Greg Hulette.                                      *****////                                                                                 
+///*****                                          Created by Greg Hulette.                                      *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -10,47 +10,47 @@
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****//// 
 ///*****                       Wireless Command Syntax:                                                         *****////                        
-///*****                       :(xx)(yy)(zzz...)                                                                *****////
-///*****                       xx: 2 Digit Identifier for the destination  (i.e. W1 - W9, BR)                   *****////
-///*****                          xx: W1 = WCB1                                                                 *****//// 
-///*****                          xx: W2 = WCB2                                                                 *****//// 
-///*****                          xx: W3 = WCB3                                                                 *****//// 
-///*****                          xx: W4 = WCB4                                                                 *****//// 
-///*****                          xx: W5 = WCB5                                                                 *****//// 
-///*****                          xx: W6 = WCB6                                                                 *****//// 
-///*****                          xx: W7 = WCB7                                                                 *****//// 
-///*****                          xx: W8 = WCB8                                                                 *****//// 
-///*****                          xx: W9 = WCB9                                                                 *****//// 
-///*****                          xx: BR = Broadcast                                                            *****//// 
-///*****                       yy :Target's Serial Port (i.e. S1-S5)                                            *****////
-///*****                          yy: S1 = Serial 1 Port                                                        *****//// 
-///*****                          yy: S2 = Serial 2 Port                                                        *****//// 
-///*****                          yy: S3 = Serial 3 Port                                                        *****//// 
-///*****                          yy: S4 = Serial 4 Port                                                        *****//// 
-///*****                          yy: S5 = Serial 5 Port                                                        *****//// 
+///*****                       :W(x):S(y)(zzz...)                                                               *****////
+///*****                       x: 1 Digit Identifier for the destination  (i.e. W1 - W9, BR)                    *****////
+///*****                          x: 1 = WCB1                                                                   *****//// 
+///*****                          x: 2 = WCB2                                                                   *****//// 
+///*****                          x: 3 = WCB3                                                                   *****//// 
+///*****                          x: 4 = WCB4                                                                   *****//// 
+///*****                          x: 5 = WCB5                                                                   *****//// 
+///*****                          x: 6 = WCB6                                                                   *****//// 
+///*****                          x: 7 = WCB7                                                                   *****//// 
+///*****                          x: 8 = WCB8                                                                   *****//// 
+///*****                          x: 9 = WCB9                                                                   *****//// 
+///*****                          x: B = Broadcast                                                              *****//// 
+///*****                       y :Target's Serial Port (i.e. S1-S5)                                             *****////
+///*****                          y: 1 = Serial 1 Port                                                          *****//// 
+///*****                          y: 2 = Serial 2 Port                                                          *****//// 
+///*****                          y: 3 = Serial 3 Port                                                          *****//// 
+///*****                          y: 4 = Serial 4 Port                                                          *****//// 
+///*****                          y: 5 = Serial 5 Port                                                          *****//// 
 ///*****                       zzz...: String to send out the destination serial port                           *****////
 ///*****                          zzz...: any string of characters up to 90 characters long                     *****//// 
 ///*****                                                                                                        *****////
-///*****          Example1: :W2S2:PP100  (Sends to WCB2's Serial 2 port and sends string ":PP100" + "\r")       *****////
-///*****          Example2: :W3S3:R01    (Sends to WCB3's Serial 3 port and sends string ":R01" + "\r")         *****////
-///*****          Example3: :W5S4MD904   (Sends to WCB5's Serial 4 port and sends string "MD904" + "\r")        *****////
+///*****          Example1: :W2:S2:PP100  (Sends to WCB2's Serial 2 port and sends string ":PP100" + "\r")      *****////
+///*****          Example2: :W3:S3:R01    (Sends to WCB3's Serial 3 port and sends string ":R01" + "\r")        *****////
+///*****          Example3: :W5:S4MD904   (Sends to WCB5's Serial 4 port and sends string "MD904" + "\r")       *****////
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****////
 ///*****                       Local Serial Command Syntax:                                                     *****////                        
-///*****                       :(yy)(zzz...)                                                                    *****////
-///*****                       yy :Target Serial Port (i.e. S1-S5)                                              *****////
-///*****                          yy: S1 = Serial 1 Port                                                        *****//// 
-///*****                          yy: S2 = Serial 2 Port                                                        *****//// 
-///*****                          yy: S3 = Serial 3 Port                                                        *****//// 
-///*****                          yy: S4 = Serial 4 Port                                                        *****//// 
-///*****                          yy: S5 = Serial 5 Port                                                        *****//// 
+///*****                       :S(y)(zzz...)                                                                    *****////
+///*****                       y :Target Serial Port (i.e. S1-S5)                                               *****////
+///*****                          y: 1 = Serial 1 Port                                                          *****//// 
+///*****                          y: 2 = Serial 2 Port                                                          *****//// 
+///*****                          y: 3 = Serial 3 Port                                                          *****//// 
+///*****                          y: 4 = Serial 4 Port                                                          *****//// 
+///*****                          y: 5 = Serial 5 Port                                                          *****//// 
 ///*****                       zzz...: String to send out the destination serial port                           *****////
 ///*****                          zzz...: any string of characters up to 90 characters long                     *****//// 
 ///*****                                                                                                        *****////
 ///*****          Example1: :S2:PP100  (Sends to local Serial 2 port and sends string ":PP100" + "\r")          *****////
 ///*****          Example2: :S3:R01    (Sends to local Serial 3 port and sends string ":R01" + "\r")            *****////
 ///*****          Example3: :S4MD904   (Sends to local Serial 4 port and sends string "MD904" + "\r")           *****////
-///*****                                                                                                        *****////                      
+///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -93,7 +93,7 @@
   // #define WCB9
 
   // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
- int WCB_Quantity = 2;          
+ int WCB_Quantity = 3;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
@@ -668,15 +668,27 @@ void sendESPNOWCommand(String starget, String scomm){
   } else {Debug.ESPNOW("No valid destination \n");}
 };
 
- void turnOnLED(){
-  digitalWrite(ONBOARD_LED, HIGH);
- }
 
- void turnOffLED(){
-  digitalWrite(ONBOARD_LED, LOW);
- }
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////                              Miscellaneous Functions                                          /////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
 
- void saveBaud(const char* Port, int32_t Baud){
+/////////////////////////////////////////////////////////
+///*****          On-Board LED Function          *****///
+/////////////////////////////////////////////////////////
+
+ void turnOnLED(){digitalWrite(ONBOARD_LED, HIGH); }  // Turns om the onboard Green LED
+
+ void turnOffLED(){digitalWrite(ONBOARD_LED, LOW); }  // Turns off the onboard Green LED
+
+
+/////////////////////////////////////////////////////////
+///*****          Baud Rate Functions.           *****///
+/////////////////////////////////////////////////////////
+ void saveBaud(const char* Port, int32_t Baud)
+ {
   if (Baud == 110     ||     // checks to make sure a valid baudrate is used
       Baud == 300     ||
       Baud == 600     ||
@@ -698,14 +710,31 @@ void sendESPNOWCommand(String starget, String scomm){
         delay(3000);
         ESP.restart();
       } else {Serial.printf("Wrong Baudrate given");}
+}
+
+ void clearBaud(){
+  preferences.begin("serial-baud", false);
+    preferences.clear();
+  preferences.end();
+  Serial.printf("\n\nThe Serial Port Baud Rates have been cleared and the system will reboot in 3 seconds\n\n");
+  delay(3000);
+  ESP.restart();
  }
 
 
-////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////
+///*****              Command Queueing Functions              *****///
+///*****                                                      *****///
+///*****    Function to store commands in a queue before      *****///
+///*****    processing to ensure commands aren't lost while   *****///
+///*****    processing other commands                         *****///
+///*****                                                      *****///
+///*****  A huge thanks to Mimir for this section of code!!   *****///
+///*****                                                      *****///
+//////////////////////////////////////////////////////////////////////
 
 #define MAX_QUEUE_DEPTH 5
-
-////////////////////////////////////////////////////
 
 template<class T, int maxitems>
 class Queue {
@@ -980,9 +1009,6 @@ void loop(){
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
 
-    // if (stringComplete) {autoComplete=false;}
-    // if (stringComplete || autoComplete) {
-    //    if(stringComplete) {inputString.toCharArray(inputBuffer, 100);inputString="";}
     if (havePendingCommands()) {autoComplete=false;}
     if (havePendingCommands() || autoComplete) {
     if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString);inputString.toCharArray(inputBuffer, 100);inputString="";}
@@ -993,8 +1019,6 @@ void loop(){
             inputBuffer[1]=='d' ||          // Command for debugging
             inputBuffer[1]=='L' ||          // Command designator for internal functions
             inputBuffer[1]=='l' ||          // Command designator for internal functions
-            inputBuffer[1]=='E' ||          // Command designator for storing EEPROM data
-            inputBuffer[1]=='e' ||          // Command designator for storing EEPROM data
             inputBuffer[1]=='S' ||
             inputBuffer[1]=='s'
           ){commandLength = strlen(inputBuffer); 
@@ -1012,9 +1036,6 @@ void loop(){
                 Local_Command[0]   = '\0';                                                            // Flushes Array
                 Local_Command[0] = localCommandFunction;
               Debug.LOOP("Entered the Local Command Structure /n");
-              } else if (inputBuffer[1] == 'E' || inputBuffer[1] == 'e'){
-                Debug.LOOP("EEPROM configuration selected /n");
-                // need to actually add the code to implement this.
               } else if (inputBuffer[1]=='S' || inputBuffer[1]=='s'){
                 for (int i=1; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
@@ -1032,8 +1053,10 @@ void loop(){
                   saveBaud("S3BAUD", tempBaud);
               }else if (serialPort == "S4" || serialPort == "s4"){
                   saveBaud("S4BAUD", tempBaud);
-              } else if (serialPort == "S5" || serialPort == "s15"){
+              } else if (serialPort == "S5" || serialPort == "s5"){
                   saveBaud("S5BAUD", tempBaud);
+              }else if (serialPort == "SC" || serialPort == "sc"){
+                  clearBaud();
               }else {Debug.LOOP("No valid serial port given \n");}
               
               serialStringCommand = "";
