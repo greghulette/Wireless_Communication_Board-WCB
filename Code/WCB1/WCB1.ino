@@ -1019,8 +1019,8 @@ void loop(){
             inputBuffer[1]=='d' ||          // Command for debugging
             inputBuffer[1]=='L' ||          // Command designator for internal functions
             inputBuffer[1]=='l' ||          // Command designator for internal functions
-            inputBuffer[1]=='S' ||
-            inputBuffer[1]=='s'
+            inputBuffer[1]=='S' ||          // Command designator for changing Serial Baud Rates
+            inputBuffer[1]=='s'             // Command designator for changing Serial Baud Rates
           ){commandLength = strlen(inputBuffer); 
             if (inputBuffer[1]=='D' || inputBuffer[1]=='d'){
               debugInputIdentifier = "";                            // flush the string
