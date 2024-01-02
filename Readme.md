@@ -16,7 +16,7 @@ While these boards don't control any components within R2, it does allow for the
 
 <h2>Board Overview</h2>
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
-<img src="./Images/CADImage.png" style="width: 220px;"> &emsp; <img src="./Images/LoadedPCB.png" style="height: 220px">&emsp;<img src="./Images/PCBwithConnectors.png" style="height: 220px;">
+<img src="./Images/CADImage.png" style="width: 220px; display: inline;"> &emsp; <img src="./Images/LoadedPCB.png" style="height: 220px; display: inline;">&emsp;<img src="./Images/PCBwithConnectors.png" style="height: 220px; display: inline;">
 
  Features of the board: 
 - LilyGo T7 Mini32 V1.5
