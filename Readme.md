@@ -7,7 +7,7 @@
 <br>Background: <br>I was initially having issues getting signals into and out of the dome reliably and wanted a better way to accomplish this.  I started out with I2C like most builders but quickly found out that I2C wasn't meant for longer distances or electricly noisy environments.  I realized that serial communications are better in this type of environment, but wasn't sure how to get serial to the many different devices within my Droid since serial can only be connected to a single device at a time.  The connected device can replicate the signal out another port, but I didn't feel like that was the most efficient means of communication.   
 
 <br>Hence, the reason I made these boards.  I developed these boards to allow the various microcontrollers in R2 to communicate out their serial port directly to another board, no matter where they are in my droid.  I accomplished this by accepting a serial command into the WCB from a microcontroller, evaluting whether it will go out another locally connected serial port, or foward it to another WCB to send it out their locally connected serial port.  This is essentially how computer networks work as well.  
-<br>I decided to go with a wireless technology between the WCBs to alleviate some of the issues with being in an electrically noisy envrionment as well as remove the need for passing data through the slip ring between the body and dome. The WCB is using ESP-NOW for it's wireless trasnmission protocol.  ESP-NOW is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  By using this method, all you need in the dome is power and you can control the dome without it being physically connected to the body.  
+<br>I decided to go with a wireless technology between the WCBs to alleviate some of the issues with being in an electrically noisy envrionment as well as remove the need for passing data through the slip ring between the body and dome. The WCB is using ESP-NOW, which is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  By using this method, all you need in the dome is power and you can control the dome without it being physically connected to the body.  
 
 
 While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other direclty and bi-directionaly. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
@@ -16,7 +16,7 @@ While these boards don't control any components within R2, it does allow for the
 
 <h2>Board Overview</h2>
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
-<img src="./Images/CADImage.png" style="width: 300px;"> &emsp; <img src="./Images/LoadedPCB.png" style="height: 290px">&emsp;<img src="./Images/PCBwithConnectors.png" style="height: 290px;">
+<img src="./Images/CADImage.png" style="width: 270px;"> &emsp; <img src="./Images/LoadedPCB.png" style="height: 270px">&emsp;<img src="./Images/PCBwithConnectors.png" style="height: 270px;">
 
  Features of the board: 
 - LilyGo T7 Mini32 V1.5
@@ -182,7 +182,7 @@ There are 6 things to change to the code before uploading to the WCB.   <br>
 As the code specifies, Serial 3 Serial 5 should hae a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baudrate of 9600 on them whenever I use them.  
 <br><br> 
 <h2>Loading the sketches onto the WCB</h2>
-Follow these steps to create your own set of files for your board with your own saved preferences. <br><br> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  
+All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, plese follow these steps to create your own set of files for your board with your own saved preferences. <br><br> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  
 
 1. Download the Repository to your computer by selecing the pulldown arrow in the green "Code" button on the top of this page, then select "Download Zip".  
 2. Unzip the file
@@ -192,7 +192,7 @@ Follow these steps to create your own set of files for your board with your own 
 6. Rename the WCB1.ino file in the newly copied folder to match the folder number.
 7. Open the WCBx.ino file.
 8. Comment out "#define WCB1" by adding "//" to the beginning of the line.
-9. Uncomment out the WCB number that you are loading the sketch onto.  Only 1 WCBx should be uncommented in a single sketch.  WCB2 section should look like this.<br>
+9. Uncomment out the WCB number that you are loading the sketch onto.  Only 1 WCBx should be uncommented in a single sketch.  WCB2's code should look like this.<br>
 
         Uncomment only the board that you are loading this sketch onto. 
         // #define WCB1 
