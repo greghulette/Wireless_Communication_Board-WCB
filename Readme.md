@@ -245,4 +245,4 @@ It may be a little hard to see in the above image, but the Tx of the WCB is conn
 <h2>Ordering</h2>
 If you are an astromech user, head over to this thread to order them.
 
-[Astromech.net forum post to order](https://astromech.net)
+[Astromech.net forum post to order](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
