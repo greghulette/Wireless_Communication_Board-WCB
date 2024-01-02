@@ -81,16 +81,16 @@
 ///*****          Preferences/Items to change                 *****///
 //////////////////////////////////////////////////////////////////////
 
-  // Uncomment only the board that you are loading this sketch onto. 
-  #define WCB1 
-  // #define WCB2 
-  // #define WCB3 
-  // #define WCB4 
-  // #define WCB5 
-  // #define WCB6 
-  // #define WCB7 
-  // #define WCB8 
-  // #define WCB9
+    // Uncomment only the board that you are loading this sketch onto. 
+    // #define WCB1 
+    #define WCB2 
+    // #define WCB3 
+    // #define WCB4 
+    // #define WCB5 
+    // #define WCB6 
+    // #define WCB7 
+    // #define WCB8 
+    // #define WCB9
 
   // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
  int WCB_Quantity = 3;          
@@ -865,7 +865,7 @@ void setup(){
   #endif
 
   //Prints out local Mac on bootup
-  Serial.print("Local STA MAC address = ");
+  Serial.print("Local MAC address = ");
   Serial.println(WiFi.macAddress());
 
   
