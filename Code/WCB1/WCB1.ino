@@ -82,8 +82,8 @@
 //////////////////////////////////////////////////////////////////////
 
     // Uncomment only the board that you are loading this sketch onto. 
-    // #define WCB1 
-    #define WCB2 
+    #define WCB1 
+    // #define WCB2 
     // #define WCB3 
     // #define WCB4 
     // #define WCB5 
@@ -110,8 +110,8 @@
   // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
   // Can be any 2-digit hexidecimal number.  Just match the hex number with the string.  Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
 
-  const uint8_t umac_oct2 = 0x01;     
-  String umac_oct2_String = "01:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  const uint8_t umac_oct2 = 0x02;     
+  String umac_oct2_String = "02:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
 
   const uint8_t umac_oct3 = 0x00;
   String umac_oct3_String = "00:";      // Must match the unique Mac Address "umac_oct3" variable withouth the "0x"
@@ -832,6 +832,8 @@ void setup(){
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
+
+  Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
 
   //Reserve the memory for inputStrings
   inputString.reserve(100);                                                              // Reserve 100 bytes for the inputString:
