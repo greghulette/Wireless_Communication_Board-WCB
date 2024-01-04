@@ -93,11 +93,11 @@
     // #define WCB9
 
   // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
- int WCB_Quantity = 3;          
+ int Default_WCB_Quantity = 3;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
-  String ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
-
+  String DEFAULT_ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
+  String ESPNOWPASSWORD;
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
@@ -714,14 +714,48 @@ void sendESPNOWCommand(String starget, String scomm){
 
  void clearBaud(){
   preferences.begin("serial-baud", false);
-    preferences.clear();
+  preferences.clear();
   preferences.end();
   Serial.printf("\n\nThe Serial Port Baud Rates have been cleared and the system will reboot in 3 seconds\n\n");
   delay(3000);
   ESP.restart();
  }
 
+void saveQuantity(int32_t quant ){
+  preferences.begin("ESP-Quantity", false);
+    preferences.putInt("WCBQuantity", quant);          
+  preferences.end();  
+    Serial.printf("\n\nThe WCB Quanity has changed to %i and the system will reboot in 3 seconds\n\n", quant);
+  delay(3000);
+  ESP.restart();
+}
 
+void clearQuantity(){
+   preferences.begin("ESP-Quantity", false);
+    preferences.clear();         
+  preferences.end();
+  Serial.printf("\n\nThe WCB Quantity has been cleard and the system will reboot in 3 seconds\n\n");
+  delay(3000);
+  ESP.restart();  
+}
+
+  void savePassword(String pass ){
+  preferences.begin("Password", false);
+   preferences.putString("DPASS", pass);          
+  preferences.end(); 
+    Serial.printf("\n\nThe ESP-NOW password has changed and the system will reboot in 3 seconds\n\n");
+  delay(3000);
+  ESP.restart();
+  }
+
+void clearPassword(){
+   preferences.begin("Password", false);
+    preferences.clear();         
+  preferences.end();  
+    Serial.printf("\n\nThe ESP-NOW password has been cleared and the system will reboot in 3 seconds\n\n");
+  delay(3000);
+  ESP.restart();
+}
 
 //////////////////////////////////////////////////////////////////////
 ///*****              Command Queueing Functions              *****///
@@ -819,6 +853,14 @@ void setup(){
  unsigned long SERIAL4_BAUD_RATE = preferences.getInt("S4BAUD", SERIAL4_DEFAULT_BAUD_RATE);
  unsigned long SERIAL5_BAUD_RATE = preferences.getInt("S5BAUD", SERIAL5_DEFAULT_BAUD_RATE);
   preferences.end();
+
+  preferences.begin("ESP-Quantity", false);
+  int32_t WCB_Quantity = preferences.getInt( "WCBQuantity", Default_WCB_Quantity);          
+  preferences.end(); 
+
+  preferences.begin("Password", false);
+   ESPNOWPASSWORD = preferences.getString( "DPASS", DEFAULT_ESPNOWPASSWORD);          
+  preferences.end(); 
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
@@ -1021,6 +1063,10 @@ void loop(){
             inputBuffer[1]=='d' ||          // Command for debugging
             inputBuffer[1]=='L' ||          // Command designator for internal functions
             inputBuffer[1]=='l' ||          // Command designator for internal functions
+            inputBuffer[1]=='E' ||          // Command designator for storing ESPNOW Password
+            inputBuffer[1]=='e' ||          // Command designator for storing ESPNOW Password
+            inputBuffer[1]=='Q' ||          // Command designator for storing Quantity of WCBs
+            inputBuffer[1]=='q' ||          // Command designator for storing Quantity of WCBs
             inputBuffer[1]=='S' ||          // Command designator for changing Serial Baud Rates
             inputBuffer[1]=='s'             // Command designator for changing Serial Baud Rates
           ){commandLength = strlen(inputBuffer); 
@@ -1063,7 +1109,22 @@ void loop(){
               
               serialStringCommand = "";
               serialPort = "";
-              } 
+              } else if (inputBuffer[1]=='Q' || inputBuffer[1]=='q'){
+                int WCBQuantity = inputBuffer[2]-'0';
+                if (WCBQuantity == 0){
+                  clearQuantity();
+                } else {saveQuantity(WCBQuantity);}
+                
+              }else if (inputBuffer[1]=='E' || inputBuffer[1]=='e'){
+                String tempESPNOWPASSWORD;                            // flush the string
+                for (int i=2; i<=commandLength-2; i++){
+                  char inCharRead = inputBuffer[i];
+                  tempESPNOWPASSWORD += inCharRead;                   // add it to the inputString:
+              }
+                if (tempESPNOWPASSWORD == "CLEAR"){
+                  clearPassword();
+                } else{savePassword(tempESPNOWPASSWORD); }
+              }
               else {Debug.LOOP("No valid command entered /n");}
           }
               if(Local_Command[0]){
