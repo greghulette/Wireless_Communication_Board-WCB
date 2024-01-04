@@ -60,6 +60,10 @@ The following lists out possible commands for local use.
         x: 1-5 : Serial port 1-5
         yyyy: any valid baud rate that the IDE can be set at.  
     #SC   - Clears all stored baud rates.  Will revert to the rates defined in the sketch.
+    #E(xxxx)  - Allows you to change the ESP-NOW password
+    #ECLEAR   - Clears the stored ESP-NOW password and reverts to the password defined in the sketch
+    #Q(y)     - Allows you to change the WCB quantity
+    #Q0        - Clears the stored WCB quantity and reverts to the value stored in the sketch.
 
 
 <br>
