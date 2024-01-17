@@ -274,6 +274,20 @@ if (debugType == "DBG"){
     debugflag_status = 0;
     debugflag_param = 0;
     Serial.println("All Debugging Turned Off");
+}else if (debugType == "ON"){
+    debugflag = 1;  // Used for optional level of debuging
+    debugflag1 = 1;  // Used for optional level of debuging
+    debugflag2 = 1;  // Used for optional level of debuging
+    debugflag_espnow = 1;
+    debugflag_servo = 1;
+    debugflag_serial_event = 1;
+    debugflag_loop = 1;
+    debugflag_http = 1;
+    debugflag_lora = 1;
+    debugflag_json = 1;
+    debugflag_status = 1;
+    debugflag_param = 1;
+    Serial.println("All Debugging Turned On");
 } else {Serial.println("No valid debug given");}
 
 };

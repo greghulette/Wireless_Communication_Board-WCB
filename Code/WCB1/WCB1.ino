@@ -9,7 +9,7 @@
 ///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****//// 
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****//// 
-///*****                       Wireless Command Syntax:                                                         *****////                        
+///*****                       Wireless Command Syntax:                                                         *****////
 ///*****                       :W(x):S(y)(zzz...)                                                               *****////
 ///*****                       x: 1 Digit Identifier for the destination  (i.e. W1 - W9, BR)                    *****////
 ///*****                          x: 1 = WCB1                                                                   *****//// 
@@ -97,7 +97,7 @@
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String DEFAULT_ESPNOWPASSWORD = "WCB_Astromech_xxxxx";
-  String ESPNOWPASSWORD;
+
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
@@ -140,6 +140,7 @@
   String ESPNOWStringCommand;
   String ESPNOWTarget;
   String ESPNOWSubStringCommand;
+  String ESPNOWPASSWORD;
 
   debugClass Debug;
   String debugInputIdentifier ="";
@@ -314,6 +315,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
       incomingTargetID = commandsToReceiveFromWCB1.structTargetID;
       incomingCommandIncluded = commandsToReceiveFromWCB1.structCommandIncluded;
       incomingCommand = commandsToReceiveFromWCB1.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
       processESPNOWIncomingMessage();
     } 
   } else if (IncomingMacAddress == WCB2MacAddressString){
@@ -326,6 +328,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB2.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB2.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB2.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB3MacAddressString){
@@ -338,6 +341,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB3.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB3.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB3.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB4MacAddressString){
@@ -350,6 +354,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB4.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB4.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB4.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB5MacAddressString){
@@ -362,6 +367,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB5.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB6MacAddressString){
@@ -374,6 +380,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB5.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB6MacAddressString){
@@ -386,6 +393,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB6.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB6.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB6.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB7MacAddressString){
@@ -398,6 +406,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB7.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB7.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB7.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB8MacAddressString){
@@ -410,6 +419,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB8.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB8.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB8.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == WCB9MacAddressString){
@@ -422,6 +432,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         incomingTargetID = commandsToReceiveFromWCB9.structTargetID;
         incomingCommandIncluded = commandsToReceiveFromWCB9.structCommandIncluded;
         incomingCommand = commandsToReceiveFromWCB9.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
         processESPNOWIncomingMessage();
       }
   } else if (IncomingMacAddress == broadcastMACAddressString) {
@@ -434,6 +445,7 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
       incomingTargetID = commandsToReceiveFromBroadcast.structTargetID;
       incomingCommandIncluded = commandsToReceiveFromBroadcast.structCommandIncluded;
       incomingCommand = commandsToReceiveFromBroadcast.structCommand;
+        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
       processESPNOWIncomingMessage();
     }
   } 
