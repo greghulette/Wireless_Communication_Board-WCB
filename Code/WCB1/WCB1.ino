@@ -1,10 +1,11 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
-///*****                                            Branch for testing Delimeters                               *****////
+///*****                                            Branch for testing DELIMITERs                               *****////
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
+///*****                                                Version 1.1                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -114,18 +115,21 @@
   // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
   // Can be any 2-digit hexidecimal number.  Just match the hex number with the string.  Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
 
-  const uint8_t umac_oct2 = 0x02;     
-  String umac_oct2_String = "02:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  const uint8_t umac_oct2 = 0x00;     
+  String umac_oct2_String = "00:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
 
   const uint8_t umac_oct3 = 0x00;
   String umac_oct3_String = "00:";      // Must match the unique Mac Address "umac_oct3" variable withouth the "0x"
 
+  #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
+
+  char DELIMITER = '&';                 // The character that separates the simultaneous commmands that were sent
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
 //////////////////////////////////////////////////////////////////////
   
-  char inputBuffer[100];
+  char inputBuffer[200];
   String inputString;         // a string to hold incoming data
   
   volatile boolean stringComplete  = false;      // whether the serial string is complete
@@ -191,6 +195,7 @@
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
+  String version = "V1.1";
 
  
 //////////////////////////////////////////////////////////////////
@@ -546,7 +551,8 @@ void serialEvent() {
     inputString += inChar;
       if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);
       Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
     }
   }
@@ -558,7 +564,8 @@ void s1SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);
       Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
     }
   }
@@ -570,7 +577,8 @@ void s2SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);
       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
     }
   }
@@ -582,7 +590,8 @@ void s3SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);
       Debug.SERIAL_EVENT("Serial 3 Input: %s \n",inputString.c_str());
     }
   }
@@ -593,7 +602,8 @@ void s4SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);
       Debug.SERIAL_EVENT("Serial 4 Input: %s \n",inputString.c_str());
     }
   }
@@ -604,12 +614,28 @@ void s5SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       // stringComplete = true;            // set a flag so the main loop can do something about it.
-      enqueueCommand(inputString);
+      inputString += DELIMITER;
+      processSerial(inputString);      
       Debug.SERIAL_EVENT("Serial 5 Input: %s \n",inputString.c_str());
     }
   }
 }
 
+void processSerial(String incomingSerialCommand){
+  int saArrayLength = MAX_QUEUE_DEPTH + 1;
+  String sa[saArrayLength];  int r = 0;
+  int  t =0;
+
+  for (int i=0; i <= incomingSerialCommand.length()+1; i++){ 
+    if(incomingSerialCommand.charAt(i) == DELIMITER){ 
+      sa[t] = incomingSerialCommand.substring(r, i);
+      enqueueCommand(sa[t]);
+      Serial.println(sa[t]);
+      r=(i+1); 
+      t++; 
+    }
+  }
+}
 
 //////////////////////////////////////////////////////////////////////
 ///*****             ESP-NOW Functions                        *****///
@@ -784,7 +810,6 @@ void clearPassword(){
 ///*****                                                      *****///
 //////////////////////////////////////////////////////////////////////
 
-#define MAX_QUEUE_DEPTH 5
 
 template<class T, int maxitems>
 class Queue {
@@ -884,18 +909,19 @@ void setup(){
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
 
-  Serial.printf("S1: %i \n S2: %i\n S3: %i \n S4: %i \n S5: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
+  // Serial.printf("S1: %i \n S2: %i\n S3: %i \n S4: %i \n S5: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
+  Serial.print("Version: "); Serial.println(version);
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
 
   Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
 
   //Reserve the memory for inputStrings
-  inputString.reserve(100);                                                              // Reserve 100 bytes for the inputString:
-  autoInputString.reserve(100);
+  inputString.reserve(200);                                                              // Reserve 100 bytes for the inputString:
+  autoInputString.reserve(200);
 
   // Onboard LED setup
   pinMode(ONBOARD_LED, OUTPUT);
@@ -1071,8 +1097,8 @@ void loop(){
 
     if (havePendingCommands()) {autoComplete=false;}
     if (havePendingCommands() || autoComplete) {
-    if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString);inputString.toCharArray(inputBuffer, 100);inputString="";}
-    else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 100);autoInputString="";}
+    if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString);inputString.toCharArray(inputBuffer, 200);inputString="";}
+    else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 200);autoInputString="";}
       if (inputBuffer[0] == '#'){
         if (
             inputBuffer[1]=='D' ||          // Command for debugging
