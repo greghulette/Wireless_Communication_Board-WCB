@@ -10,7 +10,7 @@
 <br>I decided to go with a wireless technology between the WCBs to alleviate some of the issues with being in an electrically noisy environment as well as remove the need for passing data through the slip ring between the body and dome. The WCB is using ESP-NOW, which is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  By using this method, all you need in the dome is power and you can control the dome without it being physically connected to the body.  
 
 
-While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other directly and bi-directionaly. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
+While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other directly and bi-directionally. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
 
 
 
@@ -30,7 +30,7 @@ While these boards don't control any components within R2, it does allow for the
   *** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
 
 
-Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 9 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the domeplate.
+Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 9 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
 
 <br>
 <img src="./Images/OverviewImage.png"><br>
@@ -93,20 +93,28 @@ The following is the syntax for sending commands
     :S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
 
 ### Chaining Commands:
-You can chain commands together and have the WCB process those commands one after another.  You can do this by adding a "&" in between different commands in the string.
+You can chain commands together and have the WCB process those commands one after another.  You can do this by adding a "*" in between different commands in the string.
 
 Example:<br>
     
-    :W3:S4:PP100&:W3:S2#SD0&:W3:S1:PDA180
+    :W3:S4:PP100*:W3:S2#SD0*:W3:S1:PDA180
 
-The command would take that string and break it into 3 different commands.  
+The command would take that string and break it into 3 different commands and processed immediately.  
 1. :W3:S4:PP100
 2. :W3:S2#SD0
 3. W3:S1:PDA180
 
-There can be a maximum of 10 chained commands by default, but this can be changed in the sketch.  
+There can be a maximum of 10 chained commands by default, but this can be changed in the sketch.
 
-THe delimiter is "&" by default, but also can be changed in the sketch.
+    #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
+
+
+The delimiter is * by default, but also can be changed in the sketch.
+
+      char DELIMITER = '*';             // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
+
+
+Change the * to another character to change the delimiter.  I have tested the following characters (& * ^ . - ) but do not see why others won't work as well.
 
 <br><br> 
 ----
@@ -200,7 +208,7 @@ There are 6 things to change to the code before uploading to the WCB.   <br>
     Adding this octet to the uniqueness of the MAC address give more chances that there will 
     not be another droid with your same mac address.  
 
-As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baudrate of 9600 on them whenever I use them.  
+As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
 <h2>Loading the sketches onto the WCB</h2>
 All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. <br><br> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  
@@ -233,17 +241,22 @@ All the boards will come loaded with unique preferences as listed above to ensur
 
         ----------------------------------------
         Booting up the Wireless Control Board 1 (W1)
+        Version: V1.1
         ----------------------------------------
         Serial 1 Baudrate: 9600 
         Serial 2 Baudrate: 9600
         Serial 3 Baudrate: 9600 
         Serial 4 Baudrate: 9600 
         Serial 5 Baudrate: 9600 
+        ESPNOW Password: ESPNOW_xxxxxxxxx 
+        Quantity of WCB's in system: 3 
+        2nd Octet: 0x01: 
+        3rd Octet: 0x00:
         Local MAC address = 02:01:00:00:00:01
         Startup complete
         Starting main loop
 
-    The first line should change to match the board you are connected to.  Ensure it matches what you loaded onto the board.  If you do not see this on  the screen after you load the sketch, try hitting the reset button on the side of the ESP32 module to view this message.  The Arduino IDE does not usually show this on the initial bootup after loading a sketch for some reason.  
+    The first text line should change to match the board you are connected to.  Ensure it matches what you loaded onto the board.  If you do not see this on  the screen after you load the sketch, try hitting the reset button on the side of the ESP32 module to view this message.  The Arduino IDE does not usually show this on the initial bootup after loading a sketch for some reason.  
 
 12. Repeat for other boards if necessary.
 
@@ -300,3 +313,4 @@ You will have to have a better understanding of how things are connected in this
  This is how you would connect the WCB in Serial only mode
 
  <img src="./Images/SerialOnlyWiring.png">
+
