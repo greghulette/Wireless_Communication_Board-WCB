@@ -83,8 +83,8 @@
 //////////////////////////////////////////////////////////////////////
 
     // Uncomment only the board that you are loading this sketch onto. 
-    #define WCB1 
-    // #define WCB2 
+    // #define WCB1 
+    #define WCB2 
     // #define WCB3 
     // #define WCB4 
     // #define WCB5 
@@ -604,6 +604,10 @@ void s5SerialEvent() {
     }
   }
 }
+
+/////////////////////////////////////////////////////////
+///*****        Serial Parsing Function          *****///
+/////////////////////////////////////////////////////////
 
 void processSerial(String incomingSerialCommand){
   incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
