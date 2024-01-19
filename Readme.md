@@ -284,7 +284,7 @@ If you are an astromech user, head over to this thread to order them.
 
 <br><br><br>
 ------
-# Alternate Connection Option
+# Serial Only Connection Option
 Some members are concerned about using wireless at conventions and while I have not seen any issues, it got me thinking about how you could use this without using wireless at all.  The way the code works, you can only use serial if you want.  You do lose some of the serial capacity due to the need of connecting the boards together with serial instead of wireless, but it will work just fine.  
 
 This is the theoretical network when using only serial.  You can see that the serial 5 of WCB1 is connected to Serial 4 of WCB2, and Serial 5 of WCB2 is connected to Serial 5 of WCB3.  
