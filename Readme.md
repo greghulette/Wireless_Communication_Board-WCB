@@ -99,7 +99,7 @@ Example:<br>
     
     :W3:S4:PP100*:W3:S2#SD0*:W3:S1:PDA180
 
-The command would take that string and break it into 3 different commands and processed immediately.  
+The command would take that string and break it into 3 different commands and process them immediately.  There is only a few millisecond delay between each command.
 1. :W3:S4:PP100
 2. :W3:S2#SD0
 3. W3:S1:PDA180
