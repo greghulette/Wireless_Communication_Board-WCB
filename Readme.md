@@ -299,13 +299,13 @@ Here is the first example:
 
     :S5:S1:PS1
 
-In this example, WCB1 will receive the full command, act on the first serial section ":S5" and then forward everything else onto its Serial 5 port.  Then WCB2 receives ":S1:PS1" and then processes the serial section, ":S1" and then forwards the rest of the command, ":PS1" out Serial 1.  In this instance towards the Uppity Spinner.  
+In this example, WCB1 will receive the full command, act on the first serial section ":S5" and then forward everything else (:S1:PS1) onto its Serial 5 port.  Then WCB2 receives ":S1:PS1" and then processes the serial section, ":S1" and then forwards the rest of the command, (:PS1) out Serial 1.  In this instance towards the Uppity Spinner.  
 
 Here is the second example: 
 
     :S5:S5:S2:F018
 
-In this example, WCB 1ill receive the full command, act on the first serial section, ":S5", and then forward everything else onto its Serial 5 port.  Then WCB2 receives ":S5:S2:F018".  It then processes the first serial section that it received, ":S5" then forwards the rest of the command out it's serial 5 port.  Then WCB3 receives ":S2:F018", processes the first serial section that it received, ":S2", and forwards the rest of the command out its serial 2 port.  Then the Flthy HP controller processes the ":F018" command.  
+In this example, WCB will receive the full command(:S5:S1:PS1), act on the first serial section, ":S5", and then forward everything else(:S5:S2:F018) onto its Serial 5 port.  Then WCB2 receives ":S5:S2:F018".  It then processes the first serial section that it received, ":S5" then forwards the rest of the command (:S2:F018) out it's serial 5 port.  Then WCB3 receives ":S2:F018", processes the first serial section that it received, ":S2", and forwards the rest of the command (:F018) out its serial 2 port.  Then the Flthy HP controller processes the ":F018" command.  
 
 You will have to have a better understanding of how things are connected in this arrangement, but this will work if you do not want to use wireless.  
 
