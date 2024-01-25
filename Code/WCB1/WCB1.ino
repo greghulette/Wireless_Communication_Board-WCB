@@ -114,31 +114,31 @@
 
   #ifdef WCB1
     String ESPNOW_SenderID = "W1";
-    String HOSTNAME = "Wireless Control Board 1 (W1)";
+    String HOSTNAME = "Wireless Communication Board 1 (W1)";
   #elif defined (WCB2)
     String ESPNOW_SenderID = "W2";
-    String HOSTNAME = "Wireless Control Board 2 (W2)";
+    String HOSTNAME = "Wireless Communication Board 2 (W2)";
   #elif defined (WCB3)
     String ESPNOW_SenderID = "W3";
-    String HOSTNAME = "Wireless Control Board 3 (W3)";
+    String HOSTNAME = "Wireless Communication Board 3 (W3)";
   #elif defined (WCB4)
     String ESPNOW_SenderID = "W4";
-    String HOSTNAME = "Wireless Control Board 4 (W4)";
+    String HOSTNAME = "Wireless Communication Board 4 (W4)";
   #elif defined (WCB5)
     String ESPNOW_SenderID = "W5";
-    String HOSTNAME = "Wireless Control Board 5 (W5)";
+    String HOSTNAME = "Wireless Communication Board 5 (W5)";
   #elif defined (WCB6)
     String ESPNOW_SenderID = "W6";
-    String HOSTNAME = "Wireless Control Board 6 (W6)";
+    String HOSTNAME = "Wireless Communication Board 6 (W6)";
   #elif defined (WCB7)
     String ESPNOW_SenderID = "W7";
-    String HOSTNAME = "Wireless Control Board 7 (W7)";
+    String HOSTNAME = "Wireless Communication Board 7 (W7)";
   #elif defined (WCB8)
     String ESPNOW_SenderID = "W8";
-    String HOSTNAME = "Wireless Control Board 8 (W8)";
+    String HOSTNAME = "Wireless Communication Board 8 (W8)";
   #elif defined (WCB9)
     String ESPNOW_SenderID = "W9";
-    String HOSTNAME = "Wireless Control Board 9 (W9)";
+    String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
   Preferences preferences;

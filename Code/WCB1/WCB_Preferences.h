@@ -25,7 +25,7 @@
  int Default_WCB_Quantity = 3;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
-  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx1234567890123";
+  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx";
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.

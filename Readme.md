@@ -28,18 +28,32 @@ Actual Image<br>
 <img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 350px;">
 
 
- Features of the board: 
+
+ Features of the board:
+
+HW Version 1.0
 - LilyGo T7 Mini32 V1.5
 - 5V Terminal Block
 - 5 Serial ports that can be used to communicate with microcontrollers  
 - Up to 9 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
+- Can support bi-directional communications<br>
+
+***  PLEASE NOTE THE DIRECTION OF THE ESP32 WHEN PLUGGING IT INTO THE PCB ON VERSION 1.0. ***
+
+*** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
+
+HW Version 2.1
+- Integrated ESP32-PICO-MINI-02
+- 5V Terminal Block
+- 5 Serial ports that can be used to communicate with microcontrollers  
+- Up to 9 WCB's can be used at once in a fully meshed network
+- Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications<br><br>
-***  PLEASE NOTE THE DIRECTION OF THE ESP32 WHEN PLUGGING IT INTO THE PCB. ***
 
-  *** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
+HW Versions 1.0 and 2.1 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
 
-
+## Concept of Operations
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 9 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
 
 <br>
@@ -114,7 +128,7 @@ The command would take that string and break it into 3 different commands and pr
 2. :W3:S2#SD0
 3. W3:S1:PDA180
 
-There can be a maximum of 10 chained commands by default, but this can be changed in the sketch.
+There can be a maximum of 10 chained commands by default, but this can be changed in the sketch in the WCB_Preferences.h tab.
 
     #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
 
@@ -193,13 +207,16 @@ In this example, button 7 would make the Stealth send the string ":W2:S1:PS4" ou
 
 ----
 <h2>Code Preferences/Changes Needed</h2>
-There are a few things that should be changed in the code when updating it.  There is a section on the top of the sketch that has all those items.<br><br>NOTE: These items are populated in the default sketch so it will work if you don't change them, but you risk someone else sending your droid commands if another builder has this system.  I highly recommend you change these items. <br><br>
+There are a few things that should be changed in the code when updating it.  There is a separate tab on the top of the sketch that has all those items.<br><img src="./Images/WCB_Preferences_Tab.png"><br>
+<br>NOTE: These items are populated with values in the default sketch so it will work if you don't change them, but you risk someone else sending your droid commands if another builder has this system and also does not change them.  <em><strong>I highly recommend you change these items.</strong></em> <br><br>
 
-<img src="./Images/Code_Preferences.png"><br>
-There are 6 things to change to the code before uploading to the WCB.   <br>
+<img src="./Images/Preferences_Overview.png"><br>
 
-1. Uncomment out the board that you are using.  Only have 1 board uncommented at a time
-2. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change
+There are some things to change to the code before uploading to the WCB.   <br>
+
+1. Uncomment out the HW Version of board that you are using.  Only have 1 board uncommented at a time
+2. Uncomment out the WCB Number board that you are loading this sketch onto.  Only have 1 board uncommented at a time
+3. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change
     your baud rate from the command line.  Once it is changed via the command (#Sxyyyy), 
     the correct value is shown on bootup and the value in this code is no longer accurate.  
     The value stored in the ESP32 will persist even after you upload the code again and 
@@ -207,21 +224,16 @@ There are 6 things to change to the code before uploading to the WCB.   <br>
 
 ******** (MUST MATCH ON ALL BOARDS)*********
 1. Change the quantity of WCB's you are using in your setup
-2. Change the ESPNOW password. This should be unique to your droid and prevents others with 
-    the same system from sending your droid commands if they didn't change their password.  
-3. Change the umac_oct2 and oct2_String variables.  This represents the second octet of the
-    MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's 
-    will not communicate with other WCBs since they will not know each other's MAC address.  
-4. Change the umac_oct3 and oct3_String variables.  This represents the second octet of the
-    MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's 
-    will not communicate with other WCBs since they will not know each others MAC address. 
-    Adding this octet to the uniqueness of the MAC address give more chances that there will 
-    not be another droid with your same mac address.  
+2. Change the ESPNOW password. This should be unique to your droid and prevents others with the same system from sending your droid commands if they didn't change their password.  (There is a 40 character limit on the password)
+3. Change the umac_oct2 and oct2_String variables.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each other's MAC address.  
+4. Change the umac_oct3 and oct3_String variables.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each others MAC address. Adding this octet to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address. 
+5. Optionally change the delimiter to be the same across all boards 
 
 As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
 <h2>Loading the sketches onto the WCB</h2>
-All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. <br><br> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  
+<p>All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. If you are adding more WCB's into your system at a later date, you can obtain all the necessary values to input into your code by watching your current WCBs boot up.</p> 
+<p> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  </p>
 
 1. Download the Repository to your computer by selecting the pulldown arrow in the green "Code" button on the top of this page, then select "Download Zip".  
 2. Unzip the file
@@ -233,7 +245,7 @@ All the boards will come loaded with unique preferences as listed above to ensur
 8. Comment out "#define WCB1" by adding "//" to the beginning of the line.
 9. Uncomment out the WCB number that you are loading the sketch onto.  Only 1 WCBx should be uncommented in a single sketch.  WCB2's code should look like this.<br>
 
-        Uncomment only the board that you are loading this sketch onto. 
+       // Uncomment only the board that you are loading this sketch onto. 
         // #define WCB1 
         #define WCB2 
         // #define WCB3 
@@ -250,8 +262,9 @@ All the boards will come loaded with unique preferences as listed above to ensur
 
 
         ----------------------------------------
-        Booting up the Wireless Control Board 1 (W1)
-        Version: V1.1
+        Booting up the Wireless Communication Board 1 (W1)
+        FW Version: V2.1
+        HW Version 2.1
         ----------------------------------------
         Serial 1 Baudrate: 9600 
         Serial 2 Baudrate: 9600
@@ -266,9 +279,15 @@ All the boards will come loaded with unique preferences as listed above to ensur
         Startup complete
         Starting main loop
 
-    The first text line should change to match the board you are connected to.  Ensure it matches what you loaded onto the board.  If you do not see this on  the screen after you load the sketch, try hitting the reset button on the side of the ESP32 module to view this message.  The Arduino IDE does not usually show this on the initial bootup after loading a sketch for some reason.  
+    The first text line should change to match the board you are connected to.  Ensure it matches what you loaded onto the board.  If you do not see this on  the screen after you load the sketch, try hitting the reset button to view this message.  The Arduino IDE does not usually show this on the initial bootup after loading a sketch for some reason.  Ensure all the of the preferences match what you have configured in your sketch.
 
 12. Repeat for other boards if necessary.
+
+NOTE: If you are adding boards into your existing setup, you will need to change the quantity of boards in your existing WCBs.  You can do this by inputting the following command on all of your existing boards:
+
+        #Qx         //x should be a number between 1-9.
+
+  Once changed, you can reboot and verify that it is correct in the boot up message.
 
 ----
 
