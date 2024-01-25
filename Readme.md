@@ -28,7 +28,7 @@ While these boards don't control any components within R2, it does allow for the
 
 CAD Image       |    Actual Image       | Bare PCB
 :---------------:|:---------------------:|:-------------:
-<img src="./Images/CADImage.png" style="height: 250px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 250px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 250px;">
+<img src="./Images/CADImage.png" style="height: 200px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 200px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">
 
 
 
@@ -38,9 +38,12 @@ CAD Image       |    Actual Image       | Bare PCB
 ### HW Version 2.1
 
 CAD Image<br>
-<img src="./Images/HWV2.1_CAD.png" style="width: 350px;"><br>
+
+CAD Image       |    Actual Image     
+:---------------:|:---------------------:
+<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">:
+ 
 Actual Image<br>
-<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 350px;">
 
 
 
