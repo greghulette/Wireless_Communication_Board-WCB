@@ -23,6 +23,7 @@ While these boards don't control any components within R2, it does allow for the
 &emsp;<img src="./Images/LoadedPCB.jpg" style="width: 30%">
 &emsp;<img src="./Images/PCBwithConnectors.jpg" style="width: 30%;">
 </p>
+<br>
 
 ### HW Version 2.1
 
