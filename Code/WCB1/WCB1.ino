@@ -95,6 +95,11 @@
   String autoInputString;         // a string to hold incoming data
   volatile boolean autoComplete    = false;    // whether an Auto command is setA
   
+  String umac_oct2_String ;      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  char umac_oct2_CharArray[2];      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+
+  String umac_oct3_String ;      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  char umac_oct3_CharArray[2];      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
   int commandLength;
 
   String serialStringCommand;
@@ -108,6 +113,9 @@
   String ESPNOWTarget;
   String ESPNOWSubStringCommand;
   String ESPNOWPASSWORD;
+  uint32_t SuccessCounter = 0;
+  uint32_t FailureCounter = 0;
+
 
   debugClass Debug;
   String debugInputIdentifier ="";
@@ -219,15 +227,15 @@ bool BoardVer2 = true;
   const uint8_t broadcastMACAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
   // Uses these Strings for comparators
-  String WCB1MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:01";
-  String WCB2MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:02";
-  String WCB3MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:03";
-  String WCB4MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:04";
-  String WCB5MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:05";
-  String WCB6MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:06";
-  String WCB7MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:07";
-  String WCB8MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:08";
-  String WCB9MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:09";
+  String WCB1MacAddressString;
+  String WCB2MacAddressString; 
+  String WCB3MacAddressString; 
+  String WCB4MacAddressString; 
+  String WCB5MacAddressString; 
+  String WCB6MacAddressString;
+  String WCB7MacAddressString;
+  String WCB8MacAddressString;
+  String WCB9MacAddressString;
   String broadcastMACAddressString =  "FF:FF:FF:FF:FF:FF";
 
   // Define variables to store commands to be sent
@@ -287,6 +295,7 @@ bool BoardVer2 = true;
 
   // Callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  if (status ==0){SuccessCounter ++;} else {FailureCounter ++;};
   if (Debug.debugflag_espnow == 1){
     Serial.print("\r\nLast Packet Send Status:\t");
     Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
@@ -295,6 +304,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     }
     else{
       success = "Delivery Fail :(";
+ 
     }
   }
 }
@@ -902,8 +912,6 @@ void enqueueCommand(String command){commandQueue.push(command);}
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
 void setup(){
   // initializes the 5 serial ports
   Serial.begin(115200);
@@ -943,8 +951,26 @@ void setup(){
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
+  
+  // Takes the variables in the WCB_Preference.h file and converts them to strings, then assigns them to larger strings which the callback for ESP-NOW uses.  
+  sprintf(umac_oct2_CharArray, "%02x", umac_oct2);
+  umac_oct2_String = umac_oct2_CharArray;
+  umac_oct2_String.toUpperCase();
+  sprintf(umac_oct3_CharArray, "%02x", umac_oct3);
+  umac_oct3_String = umac_oct3_CharArray;
+  umac_oct3_String.toUpperCase();
+  WCB1MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:01";
+  WCB2MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:02";
+  WCB3MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:03";
+  WCB4MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:04";
+  WCB5MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:05";
+  WCB6MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:06";
+  WCB7MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:07";
+  WCB8MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:08";
+  WCB9MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:09";  
 
   Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
+  
 
   //Reserve the memory for inputStrings
   inputString.reserve(300);                                                              // Reserve 100 bytes for the inputString:
@@ -1217,7 +1243,9 @@ void loop(){
                         //  DelayCall::schedule([] {ESP.restart();}, 3000);
                         ESP.restart();
                         Local_Command[0]   = '\0';                                                           break;
-                  case 3: ; break;  //reserved for future use
+                  case 3:printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
+                        Local_Command[0]   = '\0'; 
+                        break;  //prints out failure rate of ESPNOW
                   case 4: ; break;  //reserved for future use
                   case 5: ; break;  //reserved for future use
                   case 6: ; break;  //reserved for future use

@@ -61,6 +61,7 @@
 
 // Standard Arduino library
 #include <Arduino.h>
+#include <string.h>
 
 //Used for ESP-NOW
 #include <WiFi.h>
@@ -94,6 +95,11 @@
   String autoInputString;         // a string to hold incoming data
   volatile boolean autoComplete    = false;    // whether an Auto command is setA
   
+  String umac_oct2_String ;      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  char umac_oct2_CharArray[2];      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+
+  String umac_oct3_String ;      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
+  char umac_oct3_CharArray[2];      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
   int commandLength;
 
   String serialStringCommand;
@@ -113,31 +119,31 @@
 
   #ifdef WCB1
     String ESPNOW_SenderID = "W1";
-    String HOSTNAME = "Wireless Control Board 1 (W1)";
+    String HOSTNAME = "Wireless Communication Board 1 (W1)";
   #elif defined (WCB2)
     String ESPNOW_SenderID = "W2";
-    String HOSTNAME = "Wireless Control Board 2 (W2)";
+    String HOSTNAME = "Wireless Communication Board 2 (W2)";
   #elif defined (WCB3)
     String ESPNOW_SenderID = "W3";
-    String HOSTNAME = "Wireless Control Board 3 (W3)";
+    String HOSTNAME = "Wireless Communication Board 3 (W3)";
   #elif defined (WCB4)
     String ESPNOW_SenderID = "W4";
-    String HOSTNAME = "Wireless Control Board 4 (W4)";
+    String HOSTNAME = "Wireless Communication Board 4 (W4)";
   #elif defined (WCB5)
     String ESPNOW_SenderID = "W5";
-    String HOSTNAME = "Wireless Control Board 5 (W5)";
+    String HOSTNAME = "Wireless Communication Board 5 (W5)";
   #elif defined (WCB6)
     String ESPNOW_SenderID = "W6";
-    String HOSTNAME = "Wireless Control Board 6 (W6)";
+    String HOSTNAME = "Wireless Communication Board 6 (W6)";
   #elif defined (WCB7)
     String ESPNOW_SenderID = "W7";
-    String HOSTNAME = "Wireless Control Board 7 (W7)";
+    String HOSTNAME = "Wireless Communication Board 7 (W7)";
   #elif defined (WCB8)
     String ESPNOW_SenderID = "W8";
-    String HOSTNAME = "Wireless Control Board 8 (W8)";
+    String HOSTNAME = "Wireless Communication Board 8 (W8)";
   #elif defined (WCB9)
     String ESPNOW_SenderID = "W9";
-    String HOSTNAME = "Wireless Control Board 9 (W9)";
+    String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
   Preferences preferences;
@@ -218,15 +224,15 @@ bool BoardVer2 = true;
   const uint8_t broadcastMACAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
   // Uses these Strings for comparators
-  String WCB1MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:01";
-  String WCB2MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:02";
-  String WCB3MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:03";
-  String WCB4MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:04";
-  String WCB5MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:05";
-  String WCB6MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:06";
-  String WCB7MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:07";
-  String WCB8MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:08";
-  String WCB9MacAddressString = "02:" + umac_oct2_String + umac_oct3_String + "00:00:09";
+  String WCB1MacAddressString;
+  String WCB2MacAddressString; 
+  String WCB3MacAddressString; 
+  String WCB4MacAddressString; 
+  String WCB5MacAddressString; 
+  String WCB6MacAddressString;
+  String WCB7MacAddressString;
+  String WCB8MacAddressString;
+  String WCB9MacAddressString;
   String broadcastMACAddressString =  "FF:FF:FF:FF:FF:FF";
 
   // Define variables to store commands to be sent
@@ -252,7 +258,7 @@ bool BoardVer2 = true;
         char structSenderID[4];
         char structTargetID[4];
         bool structCommandIncluded;
-        char structCommand[100];
+        char structCommand[200];
     } espnow_struct_message;
 
 
@@ -901,8 +907,6 @@ void enqueueCommand(String command){commandQueue.push(command);}
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
 void setup(){
   // initializes the 5 serial ports
   Serial.begin(115200);
@@ -942,8 +946,24 @@ void setup(){
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
-
+  
+  sprintf(umac_oct2_CharArray, "%02x", umac_oct2);
+  umac_oct2_String = umac_oct2_CharArray;
+  umac_oct2_String.toUpperCase();
+  sprintf(umac_oct3_CharArray, "%02x", umac_oct3);
+  umac_oct3_String = umac_oct3_CharArray;
+  umac_oct3_String.toUpperCase();
+  WCB1MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:01";
+  WCB2MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:02";
+  WCB3MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:03";
+  WCB4MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:04";
+  WCB5MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:05";
+  WCB6MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:06";
+  WCB7MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:07";
+  WCB8MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:08";
+  WCB9MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:09";  
   Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
+  
 
   //Reserve the memory for inputStrings
   inputString.reserve(300);                                                              // Reserve 100 bytes for the inputString:

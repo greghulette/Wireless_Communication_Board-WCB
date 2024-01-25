@@ -25,7 +25,7 @@
  int Default_WCB_Quantity = 3;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
-  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx1234567890123";
+  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx";
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
@@ -37,13 +37,10 @@
 
 
   // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
-  // Can be any 2-digit hexidecimal number.  Just match the hex number with the string.  Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
+  // Can be any 2-digit hexidecimal number. Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
 
-  const uint8_t umac_oct2 = 0x01;     
-  String umac_oct2_String = "01:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
-
-  const uint8_t umac_oct3 = 0x00;
-  String umac_oct3_String = "00:";      // Must match the unique Mac Address "umac_oct3" variable withouth the "0x"
+  const uint8_t umac_oct2 = 0x01;     // unique MAC address for the 2nd Octet
+  const uint8_t umac_oct3 = 0x00;     // unique MAC address for the 3rd Octet
 
   #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
 

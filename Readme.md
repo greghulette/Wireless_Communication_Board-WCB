@@ -1,7 +1,7 @@
 <h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Wireless Communication Board (WCB)</h1>
 
 
-<h2> Description/Purpose </h2>
+## Description/Purpose
 
 
 <br>Background: <br>I was initially having issues getting signals into and out of the dome reliably and wanted a better way to accomplish this.  I started out with I2C like most builders but quickly found out that I2C wasn't meant for longer distances or electrically noisy environments.  I realized that serial communications are better in this type of environment, but wasn't sure how to get serial to the many different devices within my Droid since serial can only be connected to a single device at a time.  The connected device can replicate the signal out another port, but I didn't feel like that was the most efficient means of communication.   
@@ -14,7 +14,7 @@ While these boards don't control any components within R2, it does allow for the
 
 
 
-<h2>Board Overview</h2>
+## Board Overview
 
 ### HW Version 1.0
 
@@ -83,7 +83,7 @@ Below, you will see some possible connections that can exist to the WCB's.  In t
 As you can see in the above image, you can send any other board a direct message.  <br><br> <br><br> 
 
 ---
-<h2>Command Syntax</h2>
+## Command Syntax
 I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "#" and the execution commands start with ":".  <br>
 
 
@@ -111,7 +111,7 @@ The following lists out possible commands for local use.
 <br>
 The following is the syntax for sending commands
 
-### Wireless Communication Command Sytax
+### Wireless Communication Command Syntax
 
     :W(x):S(y)(zzzzz....)
     
@@ -158,9 +158,10 @@ The delimiter is * by default, but also can be changed in the sketch.
 
 Change the * to another character to change the delimiter.  I have tested the following characters (& * ^ . - ) but do not see why others won't work as well.
 
-<br><br> 
-----
-<h2>Stealth Users</h2>
+
+<br>
+
+## Stealth Users
 The Stealth users should note that the Stealth uses the character ":" to break up a string when it's executing a function with a string. Myself and many builders also use the ":" in their command syntax and this can cause a complication.  There is an easy solution that can be implemented on the Stealth to combat this.  All you will need to do is change the delimiter that it uses to break up its string.  Add this line towards the top of your config.txt file to accomplish this.
 
 <br>
@@ -224,7 +225,7 @@ This is a more comprehensive list of gestures and buttons as an example:
 In this example, button 7 would make the Stealth send the string ":W2:S1:PS4" out it's serial port.  The WCB would accept that command and forward the string ":PS4" out the WCB2's Serial 1 port. <br><br> <br><br> 
 
 ----
-<h2>Code Preferences/Changes Needed</h2>
+## Code Preferences/Changes Needed
 There are a few things that should be changed in the code when updating it.  There is a separate tab on the top of the sketch that has all those items.<br><img src="./Images/WCB_Preferences_Tab.png"><br>
 <br>NOTE: These items are populated with values in the default sketch so it will work if you don't change them, but you risk someone else sending your droid commands if another builder has this system and also does not change them.  <em><strong>I highly recommend you change these items.</strong></em> <br><br>
 
@@ -243,13 +244,15 @@ There are some things to change to the code before uploading to the WCB.   <br>
 ******** (MUST MATCH ON ALL BOARDS)*********
 1. Change the quantity of WCB's you are using in your setup
 2. Change the ESPNOW password. This should be unique to your droid and prevents others with the same system from sending your droid commands if they didn't change their password.  (There is a 40 character limit on the password)
-3. Change the umac_oct2 and oct2_String variables.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each other's MAC address.  
-4. Change the umac_oct3 and oct3_String variables.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each others MAC address. Adding this octet to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address. 
-5. Optionally change the delimiter to be the same across all boards 
+3. Change the umac_oct2 variable.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each other's MAC address.  
+4. Change the umac_oct3 variable.  This represents the third octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each others MAC address. Adding this octet to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address. 
+5. Optionally change the max number of chained commands 
+6. Optionally change the delimiter to be the same across all boards 
 
 As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
-<h2>Loading the sketches onto the WCB</h2>
+## Loading the sketches onto the WCB
+
 <p>All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. If you are adding more WCB's into your system at a later date, you can obtain all the necessary values to input into your code by watching your current WCBs boot up.</p> 
 <p> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  </p>
 
@@ -309,35 +312,37 @@ NOTE: If you are adding boards into your existing setup, you will need to change
 
 ----
 
-<h2> Wiring</h2>
-<h3>Power</h3>
+## Wiring
+### Power
 Can be power 2 different ways.  The terminal block or the 5V pins on the serial port.  Would not recommend powering the board with both at the same time. <br><br>
 <img src="./Images/PowerOptions.png" >
 
 
 
-<h3>Data/Communication/Serial Connections</h3>
+### Data/Communication/Serial Connections
 Ensure Tx is wired to Rx of remote board, and Rx is wired to Tx on remote board<br><br>
 <img src="./Images/DataConnection.png">
 
 It  may be a little hard to see in the above image, but the Tx of the WCB is connected to the Rx of the Stealth.  And in turn, the Rx of the WCB is connected to the Tx of the Stealth.  Continue connecting all the serial connections in this manner.  Some remote boards do not have a Tx on them, so the only connection needed in that scenario is the Ground, and the Tx from the WCB to the Rx on the remote board.  
 
 <br><br>
-<h2>Ordering</h2>
+## Ordering
 If you are an astromech user, head over to this thread to order them.
 
 [Astromech.net forum post to order](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
 
 
-<br><br><br>
-------
+<br>
+
+---
+
 # Serial Only Connection Option
 Some members are concerned about using wireless at conventions and while I have not seen any issues, it got me thinking about how you could use this without using wireless at all.  The way the code works, you can only use serial if you want.  You do lose some of the serial capacity due to the need of connecting the boards together with serial instead of wireless, but it will work just fine.  
 
-This is the theoretical network when using only serial.  You can see that the serial 5 of WCB1 is connected to Serial 4 of WCB2, and Serial 5 of WCB2 is connected to Serial 5 of WCB3.  
+This is the concept of operations when using serial only.  You can see that the serial 5 of WCB1 is connected to Serial 4 of WCB2, and Serial 5 of WCB2 is connected to Serial 5 of WCB3.  
 
 <img src="./Images/SerialOnlyConcept.png"><br><br>
-You can then pass commands to either WCB2 or WCB3(using WCB as the forwarder)<br>
+You can then pass commands to either WCB2 or WCB3(using WCB2 as the forwarder/router)<br>
 <img src="./Images/SerialOnlyConceptTransmission.png">
 
 In the yellow boxes in the image above, you can see two examples.  Let's break them down.
