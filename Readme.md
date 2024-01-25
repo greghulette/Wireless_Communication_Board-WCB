@@ -17,8 +17,8 @@ While these boards don't control any components within R2, it does allow for the
 <h2>Board Overview</h2>
 
 ### HW Version 1.0
-&emsp;&emsp;&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
-<img src="./Images/CADImage.png" style="width: 200px;"> <img src="./Images/LoadedPCB.jpg" style="height: 200px"><img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">
+&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
+<img src="./Images/CADImage.png" style="width: 150px;"> <img src="./Images/LoadedPCB.jpg" style="height: 150px"><img src="./Images/PCBwithConnectors.jpg" style="height: 150px;">
 
 ### HW Version 2.1
 
