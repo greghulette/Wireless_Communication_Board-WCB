@@ -248,7 +248,7 @@ bool BoardVer2 = true;
   //Structure example to send data
   //Must match the receiver structure
   typedef struct espnow_struct_message {
-        char structPassword[20];
+        char structPassword[40];
         char structSenderID[4];
         char structTargetID[4];
         bool structCommandIncluded;

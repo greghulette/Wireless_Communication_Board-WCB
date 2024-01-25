@@ -61,6 +61,7 @@
 
 // Standard Arduino library
 #include <Arduino.h>
+#include <string.h>
 
 //Used for ESP-NOW
 #include <WiFi.h>
@@ -248,7 +249,7 @@ bool BoardVer2 = true;
   //Structure example to send data
   //Must match the receiver structure
   typedef struct espnow_struct_message {
-        char structPassword[20];
+        char structPassword[40];
         char structSenderID[4];
         char structTargetID[4];
         bool structCommandIncluded;
