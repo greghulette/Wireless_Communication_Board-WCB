@@ -302,7 +302,7 @@ Can be power 2 different ways.  The terminal block or the 5V pins on the serial 
 Ensure Tx is wired to Rx of remote board, and Rx is wired to Tx on remote board<br><br>
 <img src="./Images/DataConnection.png">
 
-It may be a little hard to see in the above image, but the Tx of the WCB is connected to the Rx of the Stealth.  And in turn, the Rx of the WCB is connected to the Tx of the Stealth.  Continue connecting all the serial connections in this manner.  Some remote boards do not have a Tx on them, so the only connection needed in that scenario is the Ground, and the Tx from the WCB to the Rx on the remote board.  
+It  may be a little hard to see in the above image, but the Tx of the WCB is connected to the Rx of the Stealth.  And in turn, the Rx of the WCB is connected to the Tx of the Stealth.  Continue connecting all the serial connections in this manner.  Some remote boards do not have a Tx on them, so the only connection needed in that scenario is the Ground, and the Tx from the WCB to the Rx on the remote board.  
 
 <br><br>
 <h2>Ordering</h2>
