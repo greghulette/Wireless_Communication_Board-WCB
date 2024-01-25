@@ -253,7 +253,7 @@ bool BoardVer2 = true;
         char structSenderID[4];
         char structTargetID[4];
         bool structCommandIncluded;
-        char structCommand[100];
+        char structCommand[200];
     } espnow_struct_message;
 
 
