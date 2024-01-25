@@ -15,8 +15,18 @@ While these boards don't control any components within R2, it does allow for the
 
 
 <h2>Board Overview</h2>
-&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
-<img src="./Images/CADImage.png" style="width: 300px;"> &emsp; <img src="./Images/LoadedPCB.jpg" style="height: 290px">&emsp;<img src="./Images/PCBwithConnectors.jpg" style="height: 290px;">
+
+### HW Version 1.0
+&emsp;&emsp;&emsp;&emsp;&emsp;Cad Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Actual Image&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;Bare PCB<br>
+<img src="./Images/CADImage.png" style="width: 260px;"> &emsp; <img src="./Images/LoadedPCB.jpg" style="height: 260px">&emsp;<img src="./Images/PCBwithConnectors.jpg" style="height: 260px;">
+
+### HW Version 2.1
+
+CAD Image<br>
+<img src="./Images/HWV2.1_CAD.png" style="width: 350px;"><br>
+Actual Image<br>
+<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 350px;">
+
 
  Features of the board: 
 - LilyGo T7 Mini32 V1.5

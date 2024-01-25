@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 1.1                                             *****////
+///*****                                                Version 2.1                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -76,50 +76,12 @@
 // Used for Software Serial to allow more serial port capacity
 #include <SoftwareSerial.h>
 
+// Used to store parameters after reboot/power loss
 #include <Preferences.h>
 
-//////////////////////////////////////////////////////////////////////
-///*****          Preferences/Items to change                 *****///
-//////////////////////////////////////////////////////////////////////
+//Used for the Status LED on Board version 2.1
+#include <Adafruit_NeoPixel.h>
 
-    // Uncomment only the board that you are loading this sketch onto. 
-    // #define WCB1 
-    #define WCB2 
-    // #define WCB3 
-    // #define WCB4 
-    // #define WCB5 
-    // #define WCB6 
-    // #define WCB7 
-    // #define WCB8 
-    // #define WCB9
-
-  // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
- int Default_WCB_Quantity = 3;          
-
-  // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
-  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx";
-
-  // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
-  // The correct baud rates will be shown on the serial console on bootup.
-  #define SERIAL1_DEFAULT_BAUD_RATE 9600
-  #define SERIAL2_DEFAULT_BAUD_RATE 9600 
-  #define SERIAL3_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
-  #define SERIAL4_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
-  #define SERIAL5_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
-
-
-  // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
-  // Can be any 2-digit hexidecimal number.  Just match the hex number with the string.  Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
-
-  const uint8_t umac_oct2 = 0x01;     
-  String umac_oct2_String = "01:";      // Must match the unique Mac Address "umac_oct2" variable withouth the "0x"
-
-  const uint8_t umac_oct3 = 0x00;
-  String umac_oct3_String = "00:";      // Must match the unique Mac Address "umac_oct3" variable withouth the "0x"
-
-  #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
-
-  char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
@@ -191,8 +153,16 @@
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V1.1";
+  String version = "V2.1";
 
+
+#ifdef HWVERSION_1
+bool BoardVer1 = true;
+bool BoardVer2 = false;
+#elif defined HWVERSION_2
+bool BoardVer1 = false;
+bool BoardVer2 = true;
+#endif
  
 //////////////////////////////////////////////////////////////////
 ///******       Serial Ports Definitions                  *****///
@@ -205,7 +175,32 @@
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
+
+//////////////////////////////////////////////////////////////////////
+///*****            Status LED Variables and settings       *****///
+//////////////////////////////////////////////////////////////////////
   
+// -------------------------------------------------
+// Define some constants to help reference objects,
+// pins, leds, colors etc by name instead of numbers
+// -------------------------------------------------
+//    CAMERA LENS LED VARIABLES
+  const uint32_t red     = 0xFF0000;
+  const uint32_t orange  = 0xFF8000;
+  const uint32_t yellow  = 0xFFFF00;
+  const uint32_t green   = 0x00FF00;
+  const uint32_t cyan    = 0x00FFFF;
+  const uint32_t blue    = 0x0000FF;
+  const uint32_t magenta = 0xFF00FF;
+  const uint32_t white   = 0xFFFFFF;
+  const uint32_t off     = 0x000000;
+
+  const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
+
+  #define STATUS_LED_COUNT 1
+
+  Adafruit_NeoPixel ESP_LED = Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+
 /////////////////////////////////////////////////////////////////////////
 ///*****                  ESP NOW Set Up                         *****///
 /////////////////////////////////////////////////////////////////////////
@@ -305,7 +300,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 // Callback when data is received
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  turnOnLED();
+  turnOnLEDESPNOW();
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -456,8 +451,9 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   } 
   else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");}  
   IncomingMacAddress ="";  
-  turnOffLED();
-} 
+
+    
+    } 
 
 void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming target: %s\n", incomingTargetID.c_str());
@@ -465,9 +461,10 @@ void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
   Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
   if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
-      enqueueCommand(incomingCommand);
+    enqueueCommand(incomingCommand);
     Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
   }
+  turnOffLED();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -605,11 +602,8 @@ void s5SerialEvent() {
   }
 }
 
-/////////////////////////////////////////////////////////
-///*****        Serial Parsing Function          *****///
-/////////////////////////////////////////////////////////
-
 void processSerial(String incomingSerialCommand){
+  turnOnLEDSerial();
   incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
   int saArrayLength = MAX_QUEUE_DEPTH + 1;
   String sa[saArrayLength];  int r = 0;
@@ -624,6 +618,7 @@ void processSerial(String incomingSerialCommand){
       t++; 
     }
   }
+  turnOffLED();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -705,15 +700,51 @@ void sendESPNOWCommand(String starget, String scomm){
 /////                              Miscellaneous Functions                                          /////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+// const char *str = '"ES",blue,20';
 /////////////////////////////////////////////////////////
 ///*****          On-Board LED Function          *****///
 /////////////////////////////////////////////////////////
 
- void turnOnLED(){digitalWrite(ONBOARD_LED, HIGH); }  // Turns om the onboard Green LED
+void turnOnLEDESPNOW(){
+if (BoardVer1){
+  digitalWrite(ONBOARD_LED, HIGH); 
+  } else if (BoardVer2){
+    colorWipeStatus("ES", green, 255);
+  }
+}  // Turns om the onboard Green LED
 
- void turnOffLED(){digitalWrite(ONBOARD_LED, LOW); }  // Turns off the onboard Green LED
+void turnOnLEDSerial(){
+  if (BoardVer2){
+    colorWipeStatus("ES", red, 255);
+  }
+}  
 
+void turnOnLEDSerialOut(){
+  if (BoardVer2){
+    colorWipeStatus("ES", orange, 255);
+  }
+}  
+
+void turnOffLED(){
+  if (BoardVer1){
+    digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
+  } else if (BoardVer2){
+    colorWipeStatus("ES", blue, 10);
+  }
+}
+
+
+//////////////////////////////////////////////////////////////////////
+///*****   ColorWipe Function for Status LED                  *****///
+//////////////////////////////////////////////////////////////////////
+void colorWipeStatus(String statusled, uint32_t c, int brightness) {
+  if(statusled == "ES"){
+    ESP_LED.setBrightness(brightness);
+    ESP_LED.setPixelColor(0, c);
+    ESP_LED.show();
+  } 
+  else{Debug.DBG("No LED was chosen \n");}
+};
 
 /////////////////////////////////////////////////////////
 ///*****          Baud Rate Functions.           *****///
@@ -894,6 +925,7 @@ void setup(){
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
+  // s2Serial.begin(SERIAL2_BAUD_RATE,SWSERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN,false,95);  
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
@@ -902,7 +934,12 @@ void setup(){
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
-  Serial.print("Version: "); Serial.println(version);
+  Serial.print("FW Version: "); Serial.println(version);
+  #ifdef HWVERSION_1
+  Serial.println("HW Version 1.0");
+  #elif defined HWVERSION_2
+  Serial.println("HW Version 2.1");
+  #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
 
@@ -914,6 +951,16 @@ void setup(){
 
   // Onboard LED setup
   pinMode(ONBOARD_LED, OUTPUT);
+
+  // NeoPixel Setup
+  ESP_LED.begin();
+  ESP_LED.show();
+  colorWipeStatus("ES",red,10);
+
+    // Tasks_Init();
+
+
+  // Tasks_Start();
 
   //initialize WiFi for ESP-NOW
   WiFi.mode(WIFI_STA);
@@ -1065,6 +1112,8 @@ if (WCB_Quantity >= 9 ){
   // Register for a callback function that will be called when data is received
   esp_now_register_recv_cb(OnDataRecv);
   
+
+
 }   // end of setup
 
 
@@ -1072,6 +1121,7 @@ void loop(){
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
+        colorWipeStatus("ES",blue,10);
       startUp = false;
       Serial.print("Startup complete\nStarting main loop\n\n\n");
     }
