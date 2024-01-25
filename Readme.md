@@ -35,15 +35,6 @@ CAD Image       |    Actual Image       | Bare PCB
 
 
 
-### HW Version 2.1
-
-CAD Image<br>
-
-CAD Image       |    Actual Image     
-:---------------:|:---------------------:
-<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">:
- 
-Actual Image<br>
 
 
 
@@ -61,7 +52,16 @@ HW Version 1.0
 
 *** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
 
-HW Version 2.1
+<br><br>
+### HW Version 2.1
+
+CAD Image       |    Actual Image     
+:---------------:|:---------------------:
+<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">
+ 
+
+
+ Features of the board:
 - Integrated ESP32-PICO-MINI-02
 - 5V Terminal Block
 - 5 Serial ports that can be used to communicate with microcontrollers  
