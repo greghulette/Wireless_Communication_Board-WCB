@@ -242,6 +242,7 @@ There are some things to change to the code before uploading to the WCB.   <br>
 4. Change the umac_oct3 variable.  This represents the third octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each others MAC address. Adding this octet to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address. 
 5. Optionally change the max number of chained commands 
 6. Optionally change the delimiter to be the same across all boards 
+7. Optionally change the character that is used to designate a command.  By default, it is ":", but can be changed if that interferes with other boards.
 
 As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
