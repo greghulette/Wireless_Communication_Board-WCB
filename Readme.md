@@ -16,10 +16,6 @@ While these boards don't control any components within R2, it does allow for the
 
 ## Board Overview
 
-CAD Image       |    Actual Image       | Bare PCB
-:---------------:|:---------------------:|:-------------:
-<img src="./Images/CADImage.png" style="height: 250px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 250px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 250px;">
-
 
 ### HW Version 1.0
 
