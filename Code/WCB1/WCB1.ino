@@ -61,7 +61,6 @@
 
 // Standard Arduino library
 #include <Arduino.h>
-#include <string.h>
 
 //Used for ESP-NOW
 #include <WiFi.h>
