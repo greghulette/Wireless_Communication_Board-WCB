@@ -95,15 +95,20 @@ The following lists out possible commands for local use.
 
     #L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
     #L02  -  Restarts the ESP32
+    #L03  -  Displays ESP-NOW statistics
+
     #DESPNOW  - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
     #DSERIAL  - Toggles the serial debugging to allow you to debug serial related functions
     #DLOOP   -  Toggles the loop debugging to allow you to debug the main loop
+
     #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
         yyyy: any valid baud rate that the IDE can be set at.  
     #SC   - Clears all stored baud rates.  Will revert to the rates defined in the sketch.
+
     #E(xxxx)  - Allows you to change the ESP-NOW password
     #ECLEAR   - Clears the stored ESP-NOW password and reverts to the password defined in the sketch
+
     #Q(y)     - Allows you to change the WCB quantity
     #Q0        - Clears the stored WCB quantity and reverts to the value stored in the sketch.
 
@@ -144,17 +149,11 @@ Example:<br>
 The command would take that string and break it into 3 different commands and process them immediately.  There is only a few millisecond delay between each command.
 1. :W3:S4:PP100
 2. :W3:S2#SD0
-3. W3:S1:PDA180
+3. :W3:S1:PDA180
 
 There can be a maximum of 10 chained commands by default, but this can be changed in the sketch in the WCB_Preferences.h tab.
 
-    #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
-
-
 The delimiter is * by default, but also can be changed in the sketch.
-
-      char DELIMITER = '*';             // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
-
 
 Change the * to another character to change the delimiter.  I have tested the following characters (& * ^ . - ) but do not see why others won't work as well.
 
@@ -276,9 +275,17 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
         // #define WCB7 
         // #define WCB8 
         // #define WCB9
-10. Save File.
-11.  Upload to the WCB.  The board type should be "ESP32 Dev Module."
-12. Watch the board boot up in the serial monitor to ensure you see the correct boot up message.  You should see  the following on bootup: <br>
+
+10. Optionally change the maximum number of chained commands
+
+        #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
+11.  Optionally, change the delimiter that separates the commands
+
+         char DELIMITER = '*';             // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
+
+12. Save File.
+13.  Upload to the WCB.  The board type should be "ESP32 Dev Module."
+14. Watch the board boot up in the serial monitor to ensure you see the correct boot up message.  You should see  the following on bootup: <br>
 
 
 
@@ -302,7 +309,7 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 
     The first text line should change to match the board you are connected to.  Ensure it matches what you loaded onto the board.  If you do not see this on  the screen after you load the sketch, try hitting the reset button to view this message.  The Arduino IDE does not usually show this on the initial bootup after loading a sketch for some reason.  Ensure all the of the preferences match what you have configured in your sketch.
 
-12. Repeat for other boards if necessary.
+15. Repeat for other boards if necessary.
 
 NOTE: If you are adding boards into your existing setup, you will need to change the quantity of boards in your existing WCBs.  You can do this by inputting the following command on all of your existing boards:
 
