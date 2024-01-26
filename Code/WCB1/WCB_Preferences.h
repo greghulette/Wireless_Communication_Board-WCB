@@ -45,3 +45,5 @@
   #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
 
   char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
+
+  char CommandCharacter = ':';

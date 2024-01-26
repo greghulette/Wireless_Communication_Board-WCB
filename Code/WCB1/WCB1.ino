@@ -1242,11 +1242,11 @@ void loop(){
                         //  DelayCall::schedule([] {ESP.restart();}, 3000);
                         ESP.restart();
                         Local_Command[0]   = '\0';                                                           break;
-                  case 3:printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
-                        Local_Command[0]   = '\0'; 
-                        break;  //prints out failure rate of ESPNOW
+                  case 3: break;  //reserved for future use
                   case 4: ; break;  //reserved for future use
-                  case 5: ; break;  //reserved for future use
+                  case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
+                        Local_Command[0]   = '\0';
+                         break;  //prints out failure rate of ESPNOW
                   case 6: ; break;  //reserved for future use
                   case 7: ; break;  //reserved for future use
                   case 8: ; break;  //reserved for future use                                                         break;  //reserved for future use
@@ -1255,7 +1255,7 @@ void loop(){
                 }
               }
 
-      }else if (inputBuffer[0] == ':'){
+      }else if (inputBuffer[0] == CommandCharacter){
         if( inputBuffer[1]=='W' ||        // Command for Sending ESP-NOW Messages
             inputBuffer[1]=='w' ||        // Command for Sending ESP-NOW Messages
             inputBuffer[1]=='S' ||        // Command for sending Serial Strings out Serial ports
