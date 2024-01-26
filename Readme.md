@@ -155,7 +155,7 @@ There can be a maximum of 10 chained commands by default, but this can be change
 
 The delimiter is * by default, but also can be changed in the sketch.
 
-Change the * to another character to change the delimiter.  I have tested the following characters (& * ^ . - ) but do not see why others won't work as well.
+I have tested the following characters (& * ^ . - ) but do not see why others won't work as well.
 
 
 <br>
