@@ -54,6 +54,7 @@ CAD Image       |    Actual Image
  
 
 
+
  Features of the board:
 - Integrated ESP32-PICO-MINI-02
 - 5V Terminal Block
