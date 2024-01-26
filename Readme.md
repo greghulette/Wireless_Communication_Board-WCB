@@ -257,7 +257,7 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 
 1. Download the Repository to your computer by selecting the pulldown arrow in the green "Code" button on the top of this page, then select "Download Zip".  
 2. Unzip the file
-3. Open Code Folder, then WCB1 Folder, then the WCB1.ino file.
+3. Open Code Folder, then WCB1 Folder, then the WCB1.ino file. (Make sure there are 6 files in this folder)
 4. Edit the sketch preferences as mentioned above and save the file.
 5. Copy the WCB1 Folder and rename it to WCB2, or WCB3, ...
 6. Rename the WCB1.ino file in the newly copied folder to match the folder number.
