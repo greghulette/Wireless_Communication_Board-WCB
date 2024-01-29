@@ -74,13 +74,13 @@
 #include "DebugWCB.h" 
 
 // Used for Software Serial to allow more serial port capacity
-#include <SoftwareSerial.h>
+#include <SoftwareSerial.h>                 //EspSoftwareSerial by Dirk Kaar, Peter Lerup Library
 
 // Used to store parameters after reboot/power loss
 #include <Preferences.h>
 
 //Used for the Status LED on Board version 2.1
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_NeoPixel.h>                 // Adafruit NeoPixel by Adafruit Library
 
 
 //////////////////////////////////////////////////////////////////////
