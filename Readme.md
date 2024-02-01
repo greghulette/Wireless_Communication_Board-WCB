@@ -47,6 +47,7 @@ HW Version 1.0
 *** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
 
 <br><br>
+
 ### HW Version 2.1
 
 CAD Image       |    Actual Image     
@@ -63,6 +64,10 @@ CAD Image       |    Actual Image
 - Up to 9 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications<br><br>
+
+
+
+
 
 HW Versions 1.0 and 2.1 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
 
@@ -88,13 +93,15 @@ The following lists out possible commands for local use.
 
  <br>
 
-    #L01  -  Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
-    #L02  -  Restarts the ESP32
-    #L03  -  Displays ESP-NOW statistics
+    #L01        - Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
+    #L02        - Restarts the ESP32
+    #L05        - Displays ESP-NOW statistics
 
-    #DESPNOW  - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
-    #DSERIAL  - Toggles the serial debugging to allow you to debug serial related functions
-    #DLOOP   -  Toggles the loop debugging to allow you to debug the main loop
+    #DESPNOW    - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
+    #DSERIAL    - Toggles the serial debugging to allow you to debug serial related functions
+    #DLOOP      - Toggles the loop debugging to allow you to debug the main loop
+    #DON        - Enable all debugging
+    #DOFF       - Disables all debugging
 
     #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
@@ -216,7 +223,7 @@ This is a more comprehensive list of gestures and buttons as an example:
     a=:W3:S5:LM052
   
 
-In this example, button 7 would make the Stealth send the string ":W2:S1:PS4" out it's serial port.  The WCB would accept that command and forward the string ":PS4" out the WCB2's Serial 1 port. <br><br> <br><br> 
+In this example, button 3 would make the Stealth send the string ":W3:S3:PDA0" out it's serial port.  The WCB would accept that command and forward the string ":PDA0" out the WCB3's Serial 3 port. <br><br> <br><br> 
 
 ----
 ## Code Preferences/Changes Needed
@@ -246,6 +253,7 @@ There are some things to change to the code before uploading to the WCB.   <br>
 
 As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
+
 ## Loading the sketches onto the WCB
 
 <p>All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. If you are adding more WCB's into your system at a later date, you can obtain all the necessary values to input into your code by watching your current WCBs boot up.</p> 
@@ -255,9 +263,9 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 2. Unzip the file
 3. Open Code Folder, then WCB1 Folder, then the WCB1.ino file. (Make sure there are 6 files in this folder)
 4. Edit the sketch preferences as mentioned above and save the file.
-5. Copy the WCB1 Folder and rename it to WCB2, or WCB3, ...
+5. Copy the WCB1 folder and rename it to WCB2, or WCB3, ...
 6. Rename the WCB1.ino file in the newly copied folder to match the folder number.
-7. Open the WCBx.ino file.
+7. Open the WCBx.ino file in the new folders.
 8. Comment out "#define WCB1" by adding "//" to the beginning of the line.
 9. Uncomment out the WCB number that you are loading the sketch onto.  Only 1 WCBx should be uncommented in a single sketch.  WCB2's code should look like this.<br>
 
@@ -271,17 +279,9 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
         // #define WCB7 
         // #define WCB8 
         // #define WCB9
-
-10. Optionally change the maximum number of chained commands
-
-        #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
-11.  Optionally, change the delimiter that separates the commands
-
-         char DELIMITER = '*';             // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
-
-12. Save File.
-13.  Upload to the WCB.  The board type should be "ESP32 Dev Module."
-14. Watch the board boot up in the serial monitor to ensure you see the correct boot up message.  You should see  the following on bootup: <br>
+10. Save File.
+11.  Upload to the WCB.  The board type should be "ESP32 Dev Module"
+12. Watch the board boot up in the serial monitor to ensure you see the correct boot up message.  You should see  the following on bootup: <br>
 
 
 
@@ -317,9 +317,14 @@ NOTE: If you are adding boards into your existing setup, you will need to change
 
 ## Wiring
 ### Power
-Can be power 2 different ways.  The terminal block or the 5V pins on the serial port.  Would not recommend powering the board with both at the same time. <br><br>
-<img src="./Images/PowerOptions.png" >
+ The WCB an be power 2 different ways.  The terminal block, or the 5V pins on the serial port.  I would not recommend powering the board with both at the same time. <br>
+ 
+ Note:  The 5V pins on the serial header are not connected to the USB 5V output.  They are only connected to the 5V terminal block.  What this means for you is that if you power another device with the 5V pin in the serial header, you can not power that external board via the USB power.  You must power the external board via the 5V terminal block.  It is ok to have both the USB and 5V terminal supplying power to the board at the same time.  There is on board protection and the board will prefer the 5V source over the USB power.   <br><br>
 
+V1.0      |    V2.1     
+:---------------:|:---------------------:
+<img src="./Images/PowerOptions.png" style="width: 400px;"><br>|<img src="./Images/PowerV2.1.png" style="width:400px;">
+ 
 
 
 ### Data/Communication/Serial Connections
@@ -328,27 +333,25 @@ Ensure Tx is wired to Rx of remote board, and Rx is wired to Tx on remote board<
 
 It  may be a little hard to see in the above image, but the Tx of the WCB is connected to the Rx of the Stealth.  And in turn, the Rx of the WCB is connected to the Tx of the Stealth.  Continue connecting all the serial connections in this manner.  Some remote boards do not have a Tx on them, so the only connection needed in that scenario is the Ground, and the Tx from the WCB to the Rx on the remote board.  
 
-<br><br>
-## Ordering
-If you are an astromech user, head over to this thread to order them.
-
-[Astromech.net forum post to order](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
-
 
 <br>
 
 ---
 
-# Serial Only Connection Option
-Some members are concerned about using wireless at conventions and while I have not seen any issues, it got me thinking about how you could use this without using wireless at all.  The way the code works, you can only use serial if you want.  You do lose some of the serial capacity due to the need of connecting the boards together with serial instead of wireless, but it will work just fine.  
+# Serial Only Connection Method
+Some members are concerned about using wireless communications at conventions, and while I have not seen any issues, it got me thinking about how you could use this system without using wireless at all.  The way the code works, you can only use serial if you want.  You do lose some of the serial capacity due to the need of connecting the boards together with serial instead of wireless, but it will work just fine.  
+## Connection Options
 
-This is the concept of operations when using serial only.  You can see that the serial 5 of WCB1 is connected to Serial 4 of WCB2, and Serial 5 of WCB2 is connected to Serial 5 of WCB3.  
+I have thought of 2 different ways to accomplish this.  You an choose what works best for you if you want to go down this path.  
+### Option 1
 
-<img src="./Images/SerialOnlyConcept.png"><br><br>
+This is the concept of operations when using serial only by passing the signal through the WCB's.  You can see that the serial 5 of WCB1 is connected to Serial 4 of WCB2, and Serial 5 of WCB2 is connected to Serial 5 of WCB3.  
+
+<img src="./Images/SerialOnlyConceptOption1.png"><br><br>
 You can then pass commands to either WCB2 or WCB3(using WCB2 as the forwarder/router)<br>
-<img src="./Images/SerialOnlyConceptTransmission.png">
+<img src="./Images/SerialOnlyConceptTransmissionOption1.png">
 
-In the yellow boxes in the image above, you can see two examples.  Let's break them down.
+In the yellow boxes in the image above, you can see some examples.  Let's break them down.
 
 Here is the first example: 
 
@@ -364,8 +367,57 @@ In this example, WCB will receive the full command(:S5:S1:PS1), act on the first
 
 You will have to have a better understanding of how things are connected in this arrangement, but this will work if you do not want to use wireless.  
 
-### Wiring Example for Serial Only
+### Option 2
+
+In this option, you can setup one WCB as a Hub and the other WCB's as Spokes.  
+
+This method has 2 advantages that I can see. 
+
+1. It makes it a little easier to understand if all your Spoke WCB's use their Serial 5 port for communication to other boards.  You can then plug in the WCB 1 into port 1 of the WCB Hub (WCB4 in the image below), WCB2 into serial 2 of WCB, ....
+2. You can have 4 serial ports for end devices on every spoke WCB.  In Option 1, the passthrough WCB only has 3 serial ports available for end devices.
+
+The disadvantages of this method that I can see are:
+
+1. It requires you to buy another board to act as the Hub.
+2. It uses more power in your droid. It doesn't use a lot of power, but does use some.
+
+
+Here is the concept of operations image for option 2.
+
+
+<img src="./Images/SerialOnlyConceptOption2.png">
+
+
+Here is how the messages will look passing through this type of network.
+
+<img src="./Images/SerialOnlyConceptTransmissionOption2.png"><br>
+
+In the yellow boxes, you  an see the bottom box for examples on how to send the messages with this connection method.  
+
+    :S5:S3:S2:F0158
+
+With this method, you can see that the first part of the command is ":S5" so the WCB1 can send it out it's serial 5 port, then you can see the ":S3".  This would send it to WCB3.  When WCB3 gets the last bit of the command, it processes the ":S2:F0158" and sends the command ":F0158" out its Serial 2 port. 
+
+## Wiring Example for Serial Only
  This is how you would connect the WCB in Serial only mode
 
  <img src="./Images/SerialOnlyWiring.png">
+
+You can extrapolate from there to connect the rest of the WCBs.  
+<br><br><br>
+
+# Dimensions
+
+Here are the dimensions for the boards.  With these dimensions, you can plan you setup or make a custom mount for your boards.
+
+V1.0      |    V2.1     
+:---------------:|:---------------------:
+<img src="./Images/DimensionsV1.0.png" style="width: 400px;"><br>|<img src="./Images/DimensionsV2.1.png" style="width:400px;">
+ 
+
+<br><br>
+# Ordering
+If you are an astromech user, head over to this thread to order them.
+
+[Astromech.net forum post to order](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
 
