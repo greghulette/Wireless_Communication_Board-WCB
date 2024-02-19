@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 2.1                                             *****////
+///*****                                                Version 2.2                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -161,7 +161,7 @@
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V2.1";
+  String version = "V2.2";
 
 
 #ifdef HWVERSION_1
@@ -1162,7 +1162,7 @@ void loop(){
 
     if (havePendingCommands()) {autoComplete=false;}
     if (havePendingCommands() || autoComplete) {
-    if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString);inputString.toCharArray(inputBuffer, 300);inputString="";}
+    if(havePendingCommands()) {inputString = getNextCommand(); Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString.c_str());inputString.toCharArray(inputBuffer, 300);inputString="";}
     else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
       if (inputBuffer[0] == '#'){
         if (
