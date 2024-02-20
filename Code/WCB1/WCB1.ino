@@ -555,6 +555,7 @@ void serialEvent() {
       if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       processSerial(inputString);
       Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
+      
     }
   }
 }
@@ -564,8 +565,8 @@ void s1SerialEvent() {
     char inChar = (char)s1Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
       processSerial(inputString);
+      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
     }
   }
 }
@@ -577,6 +578,7 @@ void s2SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
       processSerial(inputString);
+      s2Serial.flush();
     }
   }
 }
@@ -615,7 +617,7 @@ void s5SerialEvent() {
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
   incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
-  int saArrayLength = MAX_QUEUE_DEPTH + 1;
+  int saArrayLength = MAX_QUEUE_DEPTH;
   String sa[saArrayLength];  int r = 0;
   int  t =0;
 
@@ -933,12 +935,10 @@ void setup(){
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
-  // s2Serial.begin(SERIAL2_BAUD_RATE,SWSERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN,false,95);  
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
 
-  // Serial.printf("S1: %i \n S2: %i\n S3: %i \n S4: %i \n S5: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
@@ -1144,6 +1144,13 @@ if (WCB_Quantity >= 9 ){
 
 
 void loop(){
+    if(Serial.available()){serialEvent();}
+    if(s1Serial.available()){s1SerialEvent();}
+    if(s2Serial.available()){s2SerialEvent();}
+    if(s3Serial.available()){s3SerialEvent();}
+    if(s4Serial.available()){s4SerialEvent();}
+    if(s5Serial.available()){s5SerialEvent();}
+
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1153,12 +1160,7 @@ void loop(){
     }
 
     // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
-    if(Serial.available()){serialEvent();}
-    if(s1Serial.available()){s1SerialEvent();}
-    if(s2Serial.available()){s2SerialEvent();}
-    if(s3Serial.available()){s3SerialEvent();}
-    if(s4Serial.available()){s4SerialEvent();}
-    if(s5Serial.available()){s5SerialEvent();}
+   
 
     if (havePendingCommands()) {autoComplete=false;}
     if (havePendingCommands() || autoComplete) {
