@@ -1,5 +1,7 @@
 #ifndef WCB_Preferences.h
+
 #define WCB_Preferences.h
+
 #endif
 
 //////////////////////////////////////////////////////////////////////
@@ -7,8 +9,8 @@
 //////////////////////////////////////////////////////////////////////
 
 // Board Revision
-#define HWVERSION_1                //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
-// #define HWVERSION_2            // Run 3 and above with custom board with version 2.1 on the label
+// #define HWVERSION_1                //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
+#define HWVERSION_2            // Run 3 and above with custom board with version 2.1 on the label
 
     // Uncomment only the board that you are loading this sketch onto. 
     #define WCB1 
