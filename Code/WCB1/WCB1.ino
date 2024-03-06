@@ -104,7 +104,7 @@
   String serialStringCommand;
   String serialPort;
   String serialSubStringCommand;
-
+  int serialicomingport = 0;
   String serialBroadcastCommand;
   String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
 
@@ -556,10 +556,10 @@ void serialEvent() {
     char inChar = (char)Serial.read();
     inputString += inChar;
       if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      processSerial(inputString);
-      Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
-      
-    }
+        Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
+        serialicomingport = 1;
+        processSerial(inputString);
+      }
   }
 }
 
@@ -568,8 +568,9 @@ void s1SerialEvent() {
     char inChar = (char)s1Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      processSerial(inputString);
       Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
+      serialicomingport = 1;
+      processSerial(inputString);
     }
   }
 }
@@ -580,8 +581,8 @@ void s2SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
+      serialicomingport = 2;
       processSerial(inputString);
-      s2Serial.flush();
     }
   }
 }
@@ -592,6 +593,7 @@ void s3SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 3 Input: %s \n", inputString.c_str());
+      serialicomingport = 3;
       processSerial(inputString);
     }
   }
@@ -602,6 +604,7 @@ void s4SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
+      serialicomingport = 4;
       processSerial(inputString);
     }
   }
@@ -612,6 +615,7 @@ void s5SerialEvent() {
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
+      serialicomingport = 5;
       processSerial(inputString);
     }
   }
@@ -1315,11 +1319,11 @@ void loop(){
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
               Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
-              writes1SerialString(serialBroadcastCommand);
-              writes2SerialString(serialBroadcastCommand);
-              writes3SerialString(serialBroadcastCommand);
-              writes4SerialString(serialBroadcastCommand);
-              writes5SerialString(serialBroadcastCommand);
+              if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
               sendESPNOWCommand("BR", serialBroadcastCommand);
       }
 
@@ -1328,6 +1332,8 @@ void loop(){
       autoComplete = false;
       inputBuffer[0] = '\0';
       inputBuffer[1] = '\0';
+      serialBroadcastCommand = "";
+      serialicomingport = 0;
     
       // reset Local ESP Command Variables
       int espCommandFunction;
