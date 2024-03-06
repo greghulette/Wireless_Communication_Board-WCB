@@ -105,6 +105,9 @@
   String serialPort;
   String serialSubStringCommand;
 
+  String serialBroadcastCommand;
+  String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
+
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
 
@@ -1305,6 +1308,19 @@ void loop(){
             } 
           }
         }
+      } else {
+      commandLength = strlen(inputBuffer);
+      for (int i=1; i<commandLength;i++ ){
+                char inCharRead = inputBuffer[i];
+                serialBroadcastCommand += inCharRead;  // add it to the inputString:
+              }
+              Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
+              writes1SerialString(serialBroadcastCommand);
+              writes2SerialString(serialBroadcastCommand);
+              writes3SerialString(serialBroadcastCommand);
+              writes4SerialString(serialBroadcastCommand);
+              writes5SerialString(serialBroadcastCommand);
+              sendESPNOWCommand("BR", serialBroadcastCommand);
       }
 
       ///***  Clear States and Reset for next command.  ***///
