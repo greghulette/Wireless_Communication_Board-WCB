@@ -1325,11 +1325,10 @@ void loop(){
             } 
           }
         }
-      } else { if (inputBuffer[0] != '\0'){
-    
+      } else {
         // Serial.println("Entered other stuctures");
       commandLength = strlen(inputBuffer);
-      Serial.println(commandLength);
+      // Serial.println(commandLength);
       for (int i=0; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
@@ -1342,7 +1341,6 @@ void loop(){
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);} 
-      }
       }
 
       ///***  Clear States and Reset for next command.  ***///
