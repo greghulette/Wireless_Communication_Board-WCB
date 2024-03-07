@@ -70,7 +70,7 @@
 //pin definitions
 #include "wcb_pin_map.h"
 
-// Debug Functions  - Using my own library for this.  This should be in the same folder as this sketch.
+// Debuging Functions  - Using my own library for this.  This should be in the same folder as this sketch.
 #include "DebugWCB.h" 
 
 // Used for Software Serial to allow more serial port capacity
@@ -108,6 +108,7 @@
   String serialBroadcastCommand;
   String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
   bool ESPNOWBroadcastCommand;
+  bool serialCommandisTrue;
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -570,7 +571,8 @@ void serialEvent() {
     inputString += inChar;
       if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
         Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
-        serialicomingport = 1;
+        serialicomingport = 0;
+        serialCommandisTrue  = true;
         processSerial(inputString);
       }
   }
@@ -583,6 +585,7 @@ void s1SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
       serialicomingport = 1;
+      serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
@@ -595,6 +598,7 @@ void s2SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
       serialicomingport = 2;
+      serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
@@ -607,6 +611,7 @@ void s3SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 3 Input: %s \n", inputString.c_str());
       serialicomingport = 3;
+      serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
@@ -618,6 +623,7 @@ void s4SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
       serialicomingport = 4;
+      serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
@@ -629,6 +635,7 @@ void s5SerialEvent() {
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
       Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
       serialicomingport = 5;
+      serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
@@ -1325,7 +1332,7 @@ void loop(){
             } 
           }
         }
-      } else { if (inputBuffer[0] != '\0'){
+      } else { if (serialCommandisTrue  == true){
     
         // Serial.println("Entered other stuctures");
       commandLength = strlen(inputBuffer);
@@ -1341,7 +1348,8 @@ void loop(){
               if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
-              if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);} 
+              if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
+              serialCommandisTrue  = false; 
       }
       }
 
