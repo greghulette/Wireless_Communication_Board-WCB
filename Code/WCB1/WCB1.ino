@@ -1332,7 +1332,7 @@ void loop(){
             } 
           }
         }
-      } else { if (serialCommandisTrue  == true){
+      } else { if (serialCommandisTrue  == true ||  ESPNOWBroadcastCommand  == true){
     
         // Serial.println("Entered other stuctures");
       commandLength = strlen(inputBuffer);
