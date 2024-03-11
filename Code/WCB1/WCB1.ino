@@ -649,7 +649,7 @@ void processSerial(String incomingSerialCommand){
   int  t =0;
 
   for (int i=0; i < incomingSerialCommand.length(); i++){ 
-    if(incomingSerialCommand.charAt(i) == DELIMITER){ 
+    if(incomingSerialCommand.charAt(i) == CommandCharacter){ 
       sa[t] = incomingSerialCommand.substring(r, i);
       enqueueCommand(sa[t]);
       Debug.SERIAL_EVENT("Serial Chain Command %i: %s \n", t+1 , sa[t].c_str());
@@ -1357,7 +1357,7 @@ void loop(){
       stringComplete =false;
       autoComplete = false;
       inputBuffer[0] = '\0';
-      inputBuffer[1] = '\0';
+      inputBuffer[1] = '\0'; 
       serialBroadcastCommand = "";
       serialicomingport = 0;
       ESPNOWBroadcastCommand = false;
