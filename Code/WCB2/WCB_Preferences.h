@@ -9,8 +9,10 @@
 //////////////////////////////////////////////////////////////////////
 
 // Board Revision
-// #define HWVERSION_1                //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
-#define HWVERSION_2            // Run 3 and above with custom board with version 2.1 on the label
+// #define HWVERSION_1                 //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
+#define HWVERSION_2_1               // Run 3 with custom board with version 2.1 on the label
+// #define HWVERSION_2_2               // Run 4 and above with custom board with version 2.1 on the label
+
 
     // Uncomment only the board that you are loading this sketch onto. 
     // #define WCB1 
@@ -48,4 +50,6 @@
 
   char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
-  char CommandCharacter = ':';
+  char CommandCharacter = ';';
+
+  // char DELIMITER = CommandCharacter; 
