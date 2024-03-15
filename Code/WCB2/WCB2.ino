@@ -123,6 +123,9 @@
   int qcount;
   int lqcount = -1;
   bool haveCommands;
+  String currentCommand;
+  String previousCommand;
+  unsigned long previousCommandMillis;
 
   String peekAt;
   debugClass Debug;
@@ -1196,7 +1199,7 @@ void loop(){
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
-
+  if ( previousCommandMillis > 20){previousCommand="nothingheretosee";} //resets the previous command after 50ms
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1217,6 +1220,7 @@ void loop(){
       // queue.push(inputString);
       Debug.SERIAL_EVENT("New Queue String: %s\nQueue Count %i\n", queue.peek().c_str(),queue.count());
         haveCommands = queue.count()>0; 
+        currentCommand = queue.peek();
         // qcount =  commandQueue.count(); 
         // Debug.SERIAL_EVENT("Command Queue Count %i\n", qcount);
         // peekAt = peekAtCommand();
@@ -1371,7 +1375,9 @@ void loop(){
             } 
           }
         }
-      } else if (haveCommands){
+      } else if (haveCommands == true & currentCommand != previousCommand){
+        previousCommand = inputBuffer;
+        previousCommandMillis = millis();
         // qcount  > 0  & qcount != lqcount
         // Debug.SERIAL_EVENT("qcount in if function: %i\nlqcount in if function %i\n", qcount,lqcount);
         // lqcount = qcount;

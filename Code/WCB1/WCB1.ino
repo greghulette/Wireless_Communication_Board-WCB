@@ -1199,7 +1199,7 @@ void loop(){
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
-
+  if ( previousCommandMillis > 200){previousCommand="nothingheretosee";} //resets the previous command after 50ms
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1375,7 +1375,7 @@ void loop(){
             } 
           }
         }
-      } else if (haveCommands & (currentCommand != previousCommand & previousCommandMillis > 500)){
+      } else if (haveCommands == true & currentCommand != previousCommand){
         previousCommand = inputBuffer;
         previousCommandMillis = millis();
         // qcount  > 0  & qcount != lqcount
