@@ -663,12 +663,28 @@ void s5SerialEvent() {
   }
 }
 
+
+long resetSerialNumberMillis;
+uint16_t resetInterval = 150;
+
+
+void resetserialnumber(){
+if (millis() - resetSerialNumberMillis >= resetInterval)
+serialicomingport = 0;
+}
+
+void resetSerialCommand(){
+  if ( millis() - previousCommandMillis > resetInterval){
+    previousCommand="nothingheretosee"; }  //resets the previous command after 50ms
+
+}
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
   incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
   int saArrayLength = MAX_QUEUE_DEPTH;
   String sa[saArrayLength];  int r = 0;
   int  t =0;
+  resetSerialNumberMillis = millis();
 
   for (int i=0; i < incomingSerialCommand.length(); i++){ 
     if(incomingSerialCommand.charAt(i) == DELIMITER){ 
@@ -953,7 +969,6 @@ void clearPassword(){
 // String peekAtCommand(){return commandQueue.peek();}
 
 
-
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////                                                                                       /////////     
@@ -1199,7 +1214,8 @@ void loop(){
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
-  if ( previousCommandMillis > 200){previousCommand="nothingheretosee";} //resets the previous command after 50ms
+    resetserialnumber();
+    resetSerialCommand();
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1217,21 +1233,12 @@ void loop(){
     if (queue.count()>0) {autoComplete=false;}
     if (queue.count()>0 || autoComplete) {
     if(queue.count()>0) {
-      // queue.push(inputString);
       Debug.SERIAL_EVENT("New Queue String: %s\nQueue Count %i\n", queue.peek().c_str(),queue.count());
-        haveCommands = queue.count()>0; 
-        currentCommand = queue.peek();
-        // qcount =  commandQueue.count(); 
-        // Debug.SERIAL_EVENT("Command Queue Count %i\n", qcount);
-        // peekAt = peekAtCommand();
-        // Debug.SERIAL_EVENT("Peek: %s\n", peekAt); 
-        // inputString = getNextCommand(); 
-        inputString = queue.pop(); 
-        // peekAt = peekAtCommand();
-        // Debug.SERIAL_EVENT("Peek after getNext: %s\n", peekAt); 
-
-        Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString.c_str());
-        inputString.toCharArray(inputBuffer, 300);inputString="";}
+      haveCommands = queue.count()>0; 
+      currentCommand = queue.peek();
+      inputString = queue.pop(); 
+      Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString.c_str());
+      inputString.toCharArray(inputBuffer, 300);inputString="";}
 
     else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
       if (inputBuffer[0] == '#'){
@@ -1376,8 +1383,9 @@ void loop(){
           }
         }
       } else if (haveCommands == true & currentCommand != previousCommand){
-        previousCommand = inputBuffer;
-        previousCommandMillis = millis();
+        previousCommand = currentCommand;
+      previousCommandMillis = millis();
+
         // qcount  > 0  & qcount != lqcount
         // Debug.SERIAL_EVENT("qcount in if function: %i\nlqcount in if function %i\n", qcount,lqcount);
         // lqcount = qcount;
@@ -1403,14 +1411,12 @@ void loop(){
               serialCommandisTrue  = false; 
       }
       // }
-
       ///***  Clear States and Reset for next command.  ***///
       stringComplete =false;
       autoComplete = false;
       inputBuffer[0] = '\0';
       inputBuffer[1] = '\0'; 
       serialBroadcastCommand = "";
-      serialicomingport = 0;
     
       // reset Local ESP Command Variables
       int espCommandFunction;
