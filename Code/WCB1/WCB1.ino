@@ -106,10 +106,16 @@
   String serialPort;
   String serialSubStringCommand;
   int serialicomingport = 0;
+  
+  
   String serialBroadcastCommand;
   String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
   bool ESPNOWBroadcastCommand;
   bool serialCommandisTrue;
+  long resetSerialNumberMillis;
+  uint16_t resetInterval = 150;
+
+
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -664,8 +670,6 @@ void s5SerialEvent() {
 }
 
 
-long resetSerialNumberMillis;
-uint16_t resetInterval = 150;
 
 
 void resetserialnumber(){
@@ -908,66 +912,6 @@ void clearPassword(){
 ///*****                                                      *****///
 //////////////////////////////////////////////////////////////////////
 
-// template<class T, int maxitems>
-// class Queue {
-//   private:
-//     int _front = 0, _back = 0, _count = 0;
-//     T _data[maxitems + 1];
-//     int _maxitems = maxitems;
-//   public:
-//     inline int count() { return _count; }
-//     inline int front() { return _front; }
-//     inline int back()  { return _back;  }
-
-//     void push(const T &item) {
-//       if(_count < _maxitems) { // Drops out when full
-//         _data[_back++]=item;
-//         ++_count;
-//         // Check wrap around
-//         if (_back > _maxitems)
-//           _back -= (_maxitems + 1);
-//       }
-//     }
-
-//     T peek() {
-//       return (_count <= 0) ? T() : _data[_front];
-//     }
-
-//     T pop() {
-//       if (_count <= 0)
-//         return T(); // Returns empty
-
-//       T result = _data[_front];
-//       _front++;
-//       --_count;
-//       // Check wrap around
-//       if (_front > _maxitems) 
-//         _front -= (_maxitems + 1);
-//       return result; 
-//     }
-
-//     void clear() {
-//       _front = _back;
-//       _count = 0;
-//     }
-// };
-
-// template <int maxitems = MAX_QUEUE_DEPTH>
-// using CommandQueue = Queue<String, maxitems>;
-
-// ////////////////////////////////////////////////////
-
-
-// CommandQueue<> commandQueue;
-
-// bool havePendingCommands(){return (commandQueue.count() > 0);}
-
-// String getNextCommand(){return commandQueue.pop();}
-
-// void enqueueCommand(String command){commandQueue.push(command);}
-
-// String peekAtCommand(){return commandQueue.peek();}
-
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1208,14 +1152,19 @@ if (WCB_Quantity >= 9 ){
 
 
 void loop(){
+  // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
     if(s1Serial.available()){s1SerialEvent();}
     if(s2Serial.available()){s2SerialEvent();}
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
+
+    //resets the variable for the broadcast messages
     resetserialnumber();
     resetSerialCommand();
+
+    //main loop execution
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1223,13 +1172,6 @@ void loop(){
       startUp = false;
       Serial.print("Startup complete\nStarting main loop\n\n\n");
     }
-
-    // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
-   
-
-    // if (havePendingCommands()) {autoComplete=false;}
-    // if (havePendingCommands() || autoComplete) {
-    // if(havePendingCommands()) { 
     if (queue.count()>0) {autoComplete=false;}
     if (queue.count()>0 || autoComplete) {
     if(queue.count()>0) {
