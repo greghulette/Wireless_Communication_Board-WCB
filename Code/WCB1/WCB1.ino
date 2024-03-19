@@ -188,7 +188,7 @@ bool BoardVer1 = false;
 bool BoardVer2_1 = true;
 bool Boardver2_2 = false;
 
-#elif defined HWVERSION_2_1
+#elif defined HWVERSION_2_2
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
 bool Boardver2_2 = true;
@@ -804,7 +804,7 @@ void turnOnLEDSerialOut(){
 }  
 
 void turnOffLED(){
-  if (BoardVer1 ||  Boardver2_2){
+  if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
   } else if (BoardVer2_1 ||  Boardver2_2){
     colorWipeStatus("ES", blue, 10);
