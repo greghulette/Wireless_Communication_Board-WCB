@@ -105,17 +105,17 @@
   String serialStringCommand;
   String serialPort;
   String serialSubStringCommand;
+ 
   int serialicomingport = 0;
-  
-  
-  String serialBroadcastCommand;
-  String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
+  bool haveCommands;
   bool ESPNOWBroadcastCommand;
   bool serialCommandisTrue;
+  String serialBroadcastCommand;
+  String currentCommand;
+  String previousCommand;
+  unsigned long previousCommandMillis;
   long resetSerialNumberMillis;
   uint16_t resetInterval = 150;
-
-
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -126,14 +126,7 @@
   String ESPNOWPASSWORD;
   uint32_t SuccessCounter = 0;
   uint32_t FailureCounter = 0;
-  int qcount;
-  int lqcount = -1;
-  bool haveCommands;
-  String currentCommand;
-  String previousCommand;
-  unsigned long previousCommandMillis;
 
-  String peekAt;
   debugClass Debug;
   String debugInputIdentifier ="";
 
@@ -1328,19 +1321,12 @@ void loop(){
         previousCommand = currentCommand;
       previousCommandMillis = millis();
 
-        // qcount  > 0  & qcount != lqcount
-        // Debug.SERIAL_EVENT("qcount in if function: %i\nlqcount in if function %i\n", qcount,lqcount);
-        // lqcount = qcount;
-      // } else { 
-    
-        // Serial.println("Entered other stuctures");
+        
       commandLength = strlen(inputBuffer);
-      // Serial.println(commandLength);
       for (int i=0; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
-              // Serial.println(serialBroadcastCommand);
               Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
               if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
               if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
