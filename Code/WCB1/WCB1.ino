@@ -316,7 +316,28 @@ bool Boardver2_2 = true;
 
   esp_now_peer_info_t peerInfo;
 
-  // Callback when data is sent
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////                                                                                       /////////     
+/////////                             Start OF FUNCTIONS                                        /////////
+/////////                                                                                       /////////     
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////                              Communication Functions                                          /////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////
+///*****       ESP-NOW Callback Functions        *****///
+/////////////////////////////////////////////////////////
+
+
+  // Callback FUnction called when ESP-NOW messages are sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   if (status ==0){SuccessCounter ++;} else {FailureCounter ++;};
   if (Debug.debugflag_espnow == 1){
@@ -332,7 +353,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   }
 }
 
-// Callback when data is received
+// Callback when ESP-NOW messages are received
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   turnOnLEDESPNOW();
   char macStr[18];
@@ -485,9 +506,84 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   } 
   else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");}  
   IncomingMacAddress ="";  
+} 
 
-    
-    } 
+//////////////////////////////////////////////////////////////////////
+///*****             ESP-NOW Send Functions                   *****///
+//////////////////////////////////////////////////////////////////////
+
+void setupSendStruct(espnow_struct_message* msg, String pass, String sender, String targetID, bool hascommand, String cmd)
+{
+    snprintf(msg->structPassword, sizeof(msg->structPassword), "%s", pass.c_str());
+    snprintf(msg->structSenderID, sizeof(msg->structSenderID), "%s", sender.c_str());
+    snprintf(msg->structTargetID, sizeof(msg->structTargetID), "%s", targetID.c_str());
+    msg->structCommandIncluded = hascommand;
+    snprintf(msg->structCommand, sizeof(msg->structCommand), "%s", cmd.c_str());
+};
+
+void sendESPNOWCommand(String starget, String scomm){
+  String scommEval = "";
+  bool hasCommand;
+  if (scommEval == scomm){
+    hasCommand = 0;
+  } else {hasCommand = 1;};
+
+  if (starget == "W1"){
+    setupSendStruct(&commandsToSendtoWCB1, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB1MacAddress, (uint8_t *) &commandsToSendtoWCB1, sizeof(commandsToSendtoWCB1));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB1 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB1 Neighbor \n");}
+  }  else if (starget == "W2"){
+    setupSendStruct(&commandsToSendtoWCB2, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB2MacAddress, (uint8_t *) &commandsToSendtoWCB2, sizeof(commandsToSendtoWCB2));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB2 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB2 Neighbor\n");}
+  } else if (starget == "W3"){
+    setupSendStruct(&commandsToSendtoWCB3, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB3MacAddress, (uint8_t *) &commandsToSendtoWCB3, sizeof(commandsToSendtoWCB3));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB3 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB3 Neighbor\n");}
+  } else if (starget == "W4"){
+    setupSendStruct(&commandsToSendtoWCB4, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB4MacAddress, (uint8_t *) &commandsToSendtoWCB4, sizeof(commandsToSendtoWCB4));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB4 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB4 Neighbor\n");}
+  } else if (starget == "W5"){
+    setupSendStruct(&commandsToSendtoWCB5, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB5MacAddress, (uint8_t *) &commandsToSendtoWCB5, sizeof(commandsToSendtoWCB5));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB5 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB5 Neighbor\n");}
+  } else if (starget == "W6"){
+    setupSendStruct(&commandsToSendtoWCB6, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB6MacAddress, (uint8_t *) &commandsToSendtoWCB6, sizeof(commandsToSendtoWCB6));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB6 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB6 Neighbor\n");}
+  } else if (starget == "W7"){
+    setupSendStruct(&commandsToSendtoWCB7, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB7MacAddress, (uint8_t *) &commandsToSendtoWCB7, sizeof(commandsToSendtoWCB7));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB7 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the datato ESP-NOW WCB7 Neighbor\n");}
+  } else if (starget == "W8"){
+    setupSendStruct(&commandsToSendtoWCB8, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB8MacAddress, (uint8_t *) &commandsToSendtoWCB8, sizeof(commandsToSendtoWCB8));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB8 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB8 Neighbor\n");}
+  } else if (starget == "W9"){
+    setupSendStruct(&commandsToSendtoWCB9, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+    esp_err_t result = esp_now_send(WCB9MacAddress, (uint8_t *) &commandsToSendtoWCB9, sizeof(commandsToSendtoWCB9));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB9 Neighbor\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB9 Neighbor\n");}
+  } else if (starget == "BR"){
+    setupSendStruct(&commandsToSendtoBroadcast, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
+       esp_err_t result = esp_now_send(broadcastMACAddress, (uint8_t *) &commandsToSendtoBroadcast, sizeof(commandsToSendtoBroadcast));
+    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW Neighbors\n", scomm.c_str());
+    }else {Debug.ESPNOW("Error sending the data\n");}
+  } else {Debug.ESPNOW("No valid destination \n");}
+};
+
+/////////////////////////////////////////////////////////
+///*****      ESP-NOW Processing Function        *****///
+/////////////////////////////////////////////////////////
 
 void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming target: %s\n", incomingTargetID.c_str());
@@ -504,20 +600,7 @@ void processESPNOWIncomingMessage(){
   turnOffLED();
 }
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////                                                                                       /////////     
-/////////                             Start OF FUNCTIONS                                        /////////
-/////////                                                                                       /////////     
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////                              Communication Functions                                          /////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////
 ///*****          Serial Write Function          *****///
@@ -583,7 +666,7 @@ void writes5SerialString(String stringData){
 }
 
 /////////////////////////////////////////////////////////
-///*****          Serial Event Function          *****///
+///*****          Serial Read Function           *****///
 /////////////////////////////////////////////////////////
 
 void serialEvent() {
@@ -662,8 +745,9 @@ void s5SerialEvent() {
   }
 }
 
-
-
+/////////////////////////////////////////////////////////
+///*****      Serial Processing Function         *****///
+/////////////////////////////////////////////////////////
 
 void resetserialnumber(){
 if (millis() - resetSerialNumberMillis >= resetInterval)
@@ -696,86 +780,13 @@ void processSerial(String incomingSerialCommand){
   turnOffLED();
 }
 
-//////////////////////////////////////////////////////////////////////
-///*****             ESP-NOW Functions                        *****///
-//////////////////////////////////////////////////////////////////////
-
-void setupSendStruct(espnow_struct_message* msg, String pass, String sender, String targetID, bool hascommand, String cmd)
-{
-    snprintf(msg->structPassword, sizeof(msg->structPassword), "%s", pass.c_str());
-    snprintf(msg->structSenderID, sizeof(msg->structSenderID), "%s", sender.c_str());
-    snprintf(msg->structTargetID, sizeof(msg->structTargetID), "%s", targetID.c_str());
-    msg->structCommandIncluded = hascommand;
-    snprintf(msg->structCommand, sizeof(msg->structCommand), "%s", cmd.c_str());
-};
-
-void sendESPNOWCommand(String starget, String scomm){
-  String scommEval = "";
-  bool hasCommand;
-  if (scommEval == scomm){
-    hasCommand = 0;
-  } else {hasCommand = 1;};
-
-  if (starget == "W1"){
-    setupSendStruct(&commandsToSendtoWCB1, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB1MacAddress, (uint8_t *) &commandsToSendtoWCB1, sizeof(commandsToSendtoWCB1));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB1 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB1 Neighbor \n");}
-  }  else if (starget == "W2"){
-    setupSendStruct(&commandsToSendtoWCB2, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB2MacAddress, (uint8_t *) &commandsToSendtoWCB2, sizeof(commandsToSendtoWCB2));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB2 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB2 Neighbor\n");}
-  } else if (starget == "W3"){
-    setupSendStruct(&commandsToSendtoWCB3, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB3MacAddress, (uint8_t *) &commandsToSendtoWCB3, sizeof(commandsToSendtoWCB3));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB3 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB3 Neighbor\n");}
-  } else if (starget == "W4"){
-    setupSendStruct(&commandsToSendtoWCB4, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB4MacAddress, (uint8_t *) &commandsToSendtoWCB4, sizeof(commandsToSendtoWCB4));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB4 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB4 Neighbor\n");}
-  } else if (starget == "W5"){
-    setupSendStruct(&commandsToSendtoWCB5, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB5MacAddress, (uint8_t *) &commandsToSendtoWCB5, sizeof(commandsToSendtoWCB5));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB5 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB5 Neighbor\n");}
-  } else if (starget == "W6"){
-    setupSendStruct(&commandsToSendtoWCB6, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB6MacAddress, (uint8_t *) &commandsToSendtoWCB6, sizeof(commandsToSendtoWCB6));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB6 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB6 Neighbor\n");}
-  } else if (starget == "W7"){
-    setupSendStruct(&commandsToSendtoWCB7, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB7MacAddress, (uint8_t *) &commandsToSendtoWCB7, sizeof(commandsToSendtoWCB7));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB7 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the datato ESP-NOW WCB7 Neighbor\n");}
-  } else if (starget == "W8"){
-    setupSendStruct(&commandsToSendtoWCB8, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB8MacAddress, (uint8_t *) &commandsToSendtoWCB8, sizeof(commandsToSendtoWCB8));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB8 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB8 Neighbor\n");}
-  } else if (starget == "W9"){
-    setupSendStruct(&commandsToSendtoWCB9, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-    esp_err_t result = esp_now_send(WCB9MacAddress, (uint8_t *) &commandsToSendtoWCB9, sizeof(commandsToSendtoWCB9));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW WCB9 Neighbor\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data to ESP-NOW WCB9 Neighbor\n");}
-  } else if (starget == "BR"){
-    setupSendStruct(&commandsToSendtoBroadcast, ESPNOWPASSWORD, ESPNOW_SenderID, starget, hasCommand, scomm);
-       esp_err_t result = esp_now_send(broadcastMACAddress, (uint8_t *) &commandsToSendtoBroadcast, sizeof(commandsToSendtoBroadcast));
-    if (result == ESP_OK) {Debug.ESPNOW("Sent the command: %s to ESP-NOW Neighbors\n", scomm.c_str());
-    }else {Debug.ESPNOW("Error sending the data\n");}
-  } else {Debug.ESPNOW("No valid destination \n");}
-};
-
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////                              Miscellaneous Functions                                          /////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-// const char *str = '"ES",blue,20';
+
 /////////////////////////////////////////////////////////
 ///*****          On-Board LED Function          *****///
 /////////////////////////////////////////////////////////
@@ -893,18 +904,6 @@ void clearPassword(){
   delay(3000);
   ESP.restart();
 }
-
-//////////////////////////////////////////////////////////////////////
-///*****              Command Queueing Functions              *****///
-///*****                                                      *****///
-///*****    Function to store commands in a queue before      *****///
-///*****    processing to ensure commands aren't lost while   *****///
-///*****    processing other commands                         *****///
-///*****                                                      *****///
-///*****  A huge thanks to Mimir for this section of code!!   *****///
-///*****                                                      *****///
-//////////////////////////////////////////////////////////////////////
-
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
