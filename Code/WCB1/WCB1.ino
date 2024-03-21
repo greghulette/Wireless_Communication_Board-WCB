@@ -159,8 +159,10 @@
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
-  Preferences preferences;
+// Sets up the Preferences to store values after reboot
+Preferences preferences;
 
+// Sets up the queueinig for the incoming commands to process
 Queue<String> queue = Queue<String>();
 
 //////////////////////////////////////////////////////////////////////
@@ -592,7 +594,6 @@ void serialEvent() {
         Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
         serialicomingport = 0;
         serialCommandisTrue  = true;
-        // inputString += DELIMITER;
         processSerial(inputString);
       }
   }
@@ -656,7 +657,6 @@ void s5SerialEvent() {
       Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
       serialicomingport = 5;
       serialCommandisTrue  = true;
-      // inputString += DELIMITER;
       processSerial(inputString);
     }
   }
@@ -678,7 +678,7 @@ void resetSerialCommand(){
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
   incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
-  int saArrayLength = MAX_QUEUE_DEPTH;
+  int saArrayLength = 256;
   String sa[saArrayLength];  int r = 0;
   int  t =0;
   resetSerialNumberMillis = millis();

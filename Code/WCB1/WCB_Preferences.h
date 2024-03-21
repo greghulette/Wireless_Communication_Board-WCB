@@ -11,7 +11,7 @@
 // Board Revision
 // #define HWVERSION_1                 //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
 // #define HWVERSION_2_1               // Run 3 with custom board with version 2.1 on the label
-#define HWVERSION_2_2               // Run 4 and above with custom board with version 2.1 on the label
+#define HWVERSION_2_2               // Run 4 and above with custom board with version 2.2 on the label
 
 
     // Uncomment only the board that you are loading this sketch onto. 
@@ -46,10 +46,8 @@
   const uint8_t umac_oct2 = 0x01;     // unique MAC address for the 2nd Octet
   const uint8_t umac_oct3 = 0x00;     // unique MAC address for the 3rd Octet
 
-  #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
+  // #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
 
   char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
   char CommandCharacter = ';';
-
-  // char DELIMITER = CommandCharacter; 
