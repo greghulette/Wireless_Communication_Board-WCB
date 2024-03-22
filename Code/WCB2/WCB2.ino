@@ -105,11 +105,17 @@
   String serialStringCommand;
   String serialPort;
   String serialSubStringCommand;
+ 
   int serialicomingport = 0;
-  String serialBroadcastCommand;
-  String serialBroadcastSubCommand;  //not sure if I'm going to need this but creating in case for now
+  bool haveCommands;
   bool ESPNOWBroadcastCommand;
   bool serialCommandisTrue;
+  String serialBroadcastCommand;
+  String currentCommand;
+  String previousCommand;
+  unsigned long previousCommandMillis;
+  long resetSerialNumberMillis;
+  uint16_t resetInterval = 150;
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -120,14 +126,7 @@
   String ESPNOWPASSWORD;
   uint32_t SuccessCounter = 0;
   uint32_t FailureCounter = 0;
-  int qcount;
-  int lqcount = -1;
-  bool haveCommands;
-  String currentCommand;
-  String previousCommand;
-  unsigned long previousCommandMillis;
 
-  String peekAt;
   debugClass Debug;
   String debugInputIdentifier ="";
 
@@ -160,8 +159,10 @@
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
-  Preferences preferences;
+// Sets up the Preferences to store values after reboot
+Preferences preferences;
 
+// Sets up the queueinig for the incoming commands to process
 Queue<String> queue = Queue<String>();
 
 //////////////////////////////////////////////////////////////////////
@@ -175,7 +176,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V2.2";
+  String version = "V3.0";
 
 
 #ifdef HWVERSION_1
@@ -188,7 +189,7 @@ bool BoardVer1 = false;
 bool BoardVer2_1 = true;
 bool Boardver2_2 = false;
 
-#elif defined HWVERSION_2_1
+#elif defined HWVERSION_2_2
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
 bool Boardver2_2 = true;
@@ -315,7 +316,28 @@ bool Boardver2_2 = true;
 
   esp_now_peer_info_t peerInfo;
 
-  // Callback when data is sent
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////                                                                                       /////////     
+/////////                             Start OF FUNCTIONS                                        /////////
+/////////                                                                                       /////////     
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////                              Communication Functions                                          /////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////
+///*****       ESP-NOW Callback Functions        *****///
+/////////////////////////////////////////////////////////
+
+
+  // Callback FUnction called when ESP-NOW messages are sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   if (status ==0){SuccessCounter ++;} else {FailureCounter ++;};
   if (Debug.debugflag_espnow == 1){
@@ -331,7 +353,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   }
 }
 
-// Callback when data is received
+// Callback when ESP-NOW messages are received
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   turnOnLEDESPNOW();
   char macStr[18];
@@ -484,223 +506,10 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   } 
   else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");}  
   IncomingMacAddress ="";  
-
-    
-    } 
-
-void processESPNOWIncomingMessage(){
-  Debug.ESPNOW("incoming target: %s\n", incomingTargetID.c_str());
-  Debug.ESPNOW("incoming sender: %s\n", incomingSenderID.c_str());
-  Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
-  Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
-  if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
-    ESPNOWBroadcastCommand = true;
-    queue.push(incomingCommand);
-    // enqueueCommand(incomingCommand);
-
-    Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
-  }
-  turnOffLED();
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////                                                                                       /////////     
-/////////                             Start OF FUNCTIONS                                        /////////
-/////////                                                                                       /////////     
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////                              Communication Functions                                          /////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/////////////////////////////////////////////////////////
-///*****          Serial Write Function          *****///
-/////////////////////////////////////////////////////////
-
-void writeSerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    Serial.write(completeString[i]);
-  }
-  Debug.SERIAL_EVENT("Sent Command: %s out Serial port USB\n", completeString.c_str());
-}
-
-void writes1SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s1Serial.write(completeString[i]);
-  }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-
-}
-
-void writes2SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s2Serial.write(completeString[i]);
-  }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
-
-}
-
-void writes3SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s3Serial.write(completeString[i]);
-  }
-      Debug.SERIAL_EVENT("Sent Command: %s out Serial port 3\n", completeString.c_str());
-
-}
-
-void writes4SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s4Serial.write(completeString[i]);
-  }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 4\n", completeString.c_str());
-
-}
-
-void writes5SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s5Serial.write(completeString[i]);
-  }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 5\n", completeString.c_str());
-
-}
-
-/////////////////////////////////////////////////////////
-///*****          Serial Event Function          *****///
-/////////////////////////////////////////////////////////
-
-void serialEvent() {
-  while (Serial.available() > 0) {
-    char inChar = (char)Serial.read();
-    inputString += inChar;
-      if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-        Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
-        serialicomingport = 0;
-        serialCommandisTrue  = true;
-        // inputString += DELIMITER;
-        processSerial(inputString);
-      }
-  }
-}
-
-void s1SerialEvent() {
-  while (s1Serial.available() > 0) {
-    char inChar = (char)s1Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-      serialicomingport = 1;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
-  }
-}
-
-void s2SerialEvent() {
-  while (s2Serial.available() > 0) {
-    char inChar = (char)s2Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
-      serialicomingport = 2;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
-  }
-}
-
-void s3SerialEvent() {
-  while (s3Serial.available() > 0) {
-    char inChar = (char)s3Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 3 Input: %s \n", inputString.c_str());
-      serialicomingport = 3;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
-  }
-}
-void s4SerialEvent() {
-  while (s4Serial.available() > 0) {
-    char inChar = (char)s4Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
-      serialicomingport = 4;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
-  }
-}
-void s5SerialEvent() {
-  while (s5Serial.available() > 0) {
-    char inChar = (char)s5Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
-      serialicomingport = 5;
-      serialCommandisTrue  = true;
-      // inputString += DELIMITER;
-      processSerial(inputString);
-    }
-  }
-}
-
-
-long resetSerialNumberMillis;
-uint16_t resetInterval = 150;
-
-
-void resetserialnumber(){
-if (millis() - resetSerialNumberMillis >= resetInterval)
-serialicomingport = 0;
-}
-
-void resetSerialCommand(){
-  if ( millis() - previousCommandMillis > resetInterval){
-    previousCommand="nothingheretosee"; }  //resets the previous command after 50ms
-
-}
-void processSerial(String incomingSerialCommand){
-  turnOnLEDSerial();
-  incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
-  int saArrayLength = MAX_QUEUE_DEPTH;
-  String sa[saArrayLength];  int r = 0;
-  int  t =0;
-  resetSerialNumberMillis = millis();
-
-  for (int i=0; i < incomingSerialCommand.length(); i++){ 
-    if(incomingSerialCommand.charAt(i) == DELIMITER){ 
-      sa[t] = incomingSerialCommand.substring(r, i);
-      // enqueueCommand(sa[t]);
-      queue.push(sa[t]);
-      Debug.SERIAL_EVENT("Serial Chain Command %i: %s \n", t+1 , sa[t].c_str());
-      r=(i+1); 
-      t++; 
-    }
-  }
-  turnOffLED();
-}
+} 
 
 //////////////////////////////////////////////////////////////////////
-///*****             ESP-NOW Functions                        *****///
+///*****             ESP-NOW Send Functions                   *****///
 //////////////////////////////////////////////////////////////////////
 
 void setupSendStruct(espnow_struct_message* msg, String pass, String sender, String targetID, bool hascommand, String cmd)
@@ -772,13 +581,212 @@ void sendESPNOWCommand(String starget, String scomm){
   } else {Debug.ESPNOW("No valid destination \n");}
 };
 
+/////////////////////////////////////////////////////////
+///*****      ESP-NOW Processing Function        *****///
+/////////////////////////////////////////////////////////
+
+void processESPNOWIncomingMessage(){
+  Debug.ESPNOW("incoming target: %s\n", incomingTargetID.c_str());
+  Debug.ESPNOW("incoming sender: %s\n", incomingSenderID.c_str());
+  Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
+  Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
+  if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
+    ESPNOWBroadcastCommand = true;
+    queue.push(incomingCommand);
+    // enqueueCommand(incomingCommand);
+
+    Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+  }
+  turnOffLED();
+}
+
+
+
+/////////////////////////////////////////////////////////
+///*****          Serial Write Function          *****///
+/////////////////////////////////////////////////////////
+
+void writeSerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    Serial.write(completeString[i]);
+  }
+  Debug.SERIAL_EVENT("Sent Command: %s out Serial port USB\n", completeString.c_str());
+}
+
+void writes1SerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s1Serial.write(completeString[i]);
+  }
+    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
+
+}
+
+void writes2SerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
+    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
+
+}
+
+void writes3SerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s3Serial.write(completeString[i]);
+  }
+      Debug.SERIAL_EVENT("Sent Command: %s out Serial port 3\n", completeString.c_str());
+
+}
+
+void writes4SerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s4Serial.write(completeString[i]);
+  }
+    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 4\n", completeString.c_str());
+
+}
+
+void writes5SerialString(String stringData){
+  String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s5Serial.write(completeString[i]);
+  }
+    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 5\n", completeString.c_str());
+
+}
+
+/////////////////////////////////////////////////////////
+///*****          Serial Read Function           *****///
+/////////////////////////////////////////////////////////
+
+void serialEvent() {
+  while (Serial.available() > 0) {
+    char inChar = (char)Serial.read();
+    inputString += inChar;
+      if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+        Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
+        serialicomingport = 0;
+        serialCommandisTrue  = true;
+        processSerial(inputString);
+      }
+  }
+}
+
+void s1SerialEvent() {
+  while (s1Serial.available() > 0) {
+    char inChar = (char)s1Serial.read();
+    inputString += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
+      serialicomingport = 1;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
+  }
+}
+
+void s2SerialEvent() {
+  while (s2Serial.available() > 0) {
+    char inChar = (char)s2Serial.read();
+    inputString += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
+      serialicomingport = 2;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
+  }
+}
+
+void s3SerialEvent() {
+  while (s3Serial.available() > 0) {
+    char inChar = (char)s3Serial.read();
+    inputString += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 3 Input: %s \n", inputString.c_str());
+      serialicomingport = 3;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
+  }
+}
+void s4SerialEvent() {
+  while (s4Serial.available() > 0) {
+    char inChar = (char)s4Serial.read();
+    inputString += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
+      serialicomingport = 4;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
+  }
+}
+void s5SerialEvent() {
+  while (s5Serial.available() > 0) {
+    char inChar = (char)s5Serial.read();
+    inputString += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
+      serialicomingport = 5;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
+  }
+}
+
+/////////////////////////////////////////////////////////
+///*****      Serial Processing Function         *****///
+/////////////////////////////////////////////////////////
+
+void resetserialnumber(){
+if (millis() - resetSerialNumberMillis >= resetInterval)
+serialicomingport = 0;
+}
+
+void resetSerialCommand(){
+  if ( millis() - previousCommandMillis > resetInterval){
+    previousCommand="nothingheretosee"; }  //resets the previous command after 50ms
+
+}
+void processSerial(String incomingSerialCommand){
+  turnOnLEDSerial();
+  incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
+  int saArrayLength = 256;
+  String sa[saArrayLength];  int r = 0;
+  int  t =0;
+  resetSerialNumberMillis = millis();
+
+  for (int i=0; i < incomingSerialCommand.length(); i++){ 
+    if(incomingSerialCommand.charAt(i) == DELIMITER){ 
+      sa[t] = incomingSerialCommand.substring(r, i);
+      // enqueueCommand(sa[t]);
+      queue.push(sa[t]);
+      Debug.SERIAL_EVENT("Serial Chain Command %i: %s \n", t+1 , sa[t].c_str());
+      r=(i+1); 
+      t++; 
+    }
+  }
+  turnOffLED();
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////                              Miscellaneous Functions                                          /////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-// const char *str = '"ES",blue,20';
+
 /////////////////////////////////////////////////////////
 ///*****          On-Board LED Function          *****///
 /////////////////////////////////////////////////////////
@@ -804,7 +812,7 @@ void turnOnLEDSerialOut(){
 }  
 
 void turnOffLED(){
-  if (BoardVer1 ||  Boardver2_2){
+  if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
   } else if (BoardVer2_1 ||  Boardver2_2){
     colorWipeStatus("ES", blue, 10);
@@ -897,78 +905,6 @@ void clearPassword(){
   ESP.restart();
 }
 
-//////////////////////////////////////////////////////////////////////
-///*****              Command Queueing Functions              *****///
-///*****                                                      *****///
-///*****    Function to store commands in a queue before      *****///
-///*****    processing to ensure commands aren't lost while   *****///
-///*****    processing other commands                         *****///
-///*****                                                      *****///
-///*****  A huge thanks to Mimir for this section of code!!   *****///
-///*****                                                      *****///
-//////////////////////////////////////////////////////////////////////
-
-// template<class T, int maxitems>
-// class Queue {
-//   private:
-//     int _front = 0, _back = 0, _count = 0;
-//     T _data[maxitems + 1];
-//     int _maxitems = maxitems;
-//   public:
-//     inline int count() { return _count; }
-//     inline int front() { return _front; }
-//     inline int back()  { return _back;  }
-
-//     void push(const T &item) {
-//       if(_count < _maxitems) { // Drops out when full
-//         _data[_back++]=item;
-//         ++_count;
-//         // Check wrap around
-//         if (_back > _maxitems)
-//           _back -= (_maxitems + 1);
-//       }
-//     }
-
-//     T peek() {
-//       return (_count <= 0) ? T() : _data[_front];
-//     }
-
-//     T pop() {
-//       if (_count <= 0)
-//         return T(); // Returns empty
-
-//       T result = _data[_front];
-//       _front++;
-//       --_count;
-//       // Check wrap around
-//       if (_front > _maxitems) 
-//         _front -= (_maxitems + 1);
-//       return result; 
-//     }
-
-//     void clear() {
-//       _front = _back;
-//       _count = 0;
-//     }
-// };
-
-// template <int maxitems = MAX_QUEUE_DEPTH>
-// using CommandQueue = Queue<String, maxitems>;
-
-// ////////////////////////////////////////////////////
-
-
-// CommandQueue<> commandQueue;
-
-// bool havePendingCommands(){return (commandQueue.count() > 0);}
-
-// String getNextCommand(){return commandQueue.pop();}
-
-// void enqueueCommand(String command){commandQueue.push(command);}
-
-// String peekAtCommand(){return commandQueue.peek();}
-
-
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////                                                                                       /////////     
@@ -1009,8 +945,10 @@ void setup(){
   Serial.print("FW Version: "); Serial.println(version);
   #ifdef HWVERSION_1
   Serial.println("HW Version 1.0");
-  #elif defined HWVERSION_2
+  #elif defined HWVERSION_2_1
   Serial.println("HW Version 2.1");
+    #elif defined HWVERSION_2_2
+  Serial.println("HW Version 2.2");
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
@@ -1208,14 +1146,19 @@ if (WCB_Quantity >= 9 ){
 
 
 void loop(){
+  // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
     if(s1Serial.available()){s1SerialEvent();}
     if(s2Serial.available()){s2SerialEvent();}
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
+
+    //resets the variable for the broadcast messages
     resetserialnumber();
     resetSerialCommand();
+
+    //main loop execution
   if (millis() - MLMillis >= mainLoopDelayVar){
     MLMillis = millis();
     if(startUp) {
@@ -1223,13 +1166,6 @@ void loop(){
       startUp = false;
       Serial.print("Startup complete\nStarting main loop\n\n\n");
     }
-
-    // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
-   
-
-    // if (havePendingCommands()) {autoComplete=false;}
-    // if (havePendingCommands() || autoComplete) {
-    // if(havePendingCommands()) { 
     if (queue.count()>0) {autoComplete=false;}
     if (queue.count()>0 || autoComplete) {
     if(queue.count()>0) {
@@ -1386,19 +1322,12 @@ void loop(){
         previousCommand = currentCommand;
       previousCommandMillis = millis();
 
-        // qcount  > 0  & qcount != lqcount
-        // Debug.SERIAL_EVENT("qcount in if function: %i\nlqcount in if function %i\n", qcount,lqcount);
-        // lqcount = qcount;
-      // } else { 
-    
-        // Serial.println("Entered other stuctures");
+        
       commandLength = strlen(inputBuffer);
-      // Serial.println(commandLength);
       for (int i=0; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
-              // Serial.println(serialBroadcastCommand);
               Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
               if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
               if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}

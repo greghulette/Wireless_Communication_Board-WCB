@@ -176,7 +176,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V2.2";
+  String version = "V3.0";
 
 
 #ifdef HWVERSION_1
@@ -945,8 +945,10 @@ void setup(){
   Serial.print("FW Version: "); Serial.println(version);
   #ifdef HWVERSION_1
   Serial.println("HW Version 1.0");
-  #elif defined HWVERSION_2
+  #elif defined HWVERSION_2_1
   Serial.println("HW Version 2.1");
+    #elif defined HWVERSION_2_2
+  Serial.println("HW Version 2.2");
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
