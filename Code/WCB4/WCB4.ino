@@ -84,7 +84,7 @@
 
 #include "Queue.h"
 
-
+#include <PololuMaestro.h>
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
@@ -93,11 +93,6 @@
   char inputBuffer[300];
   String inputString;         // a string to hold incoming data
   
-
-
-  char inputM[5];
-  int inputStringInt;
-
   volatile boolean stringComplete  = false;      // whether the serial string is complete
   String autoInputString;         // a string to hold incoming data
   volatile boolean autoComplete    = false;    // whether an Auto command is setA
@@ -209,12 +204,14 @@ bool Boardver2_2 = true;
 
 
   #define s1Serial Serial1
-  #define s2Serial Serial2
+  // #define s2Serial Serial2
+  #define maestroSerial Serial2
+  // SoftwareSerial maestroSerial(7, 20);
   SoftwareSerial s3Serial;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
-
+MicroMaestro maestro(maestroSerial);
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
@@ -633,14 +630,11 @@ void writes1SerialString(String stringData){
 }
 
 void writes2SerialString(String stringData){
-  uint8_t ServoSequenceNumber= stringData.toInt();
   String completeString = stringData + '\r';
-  s2Serial.write(ServoSequenceNumber);
-
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+  for (int i=0; i<completeString.length(); i++)
+  {
+    // s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
@@ -695,35 +689,28 @@ void serialEvent() {
 void s1SerialEvent() {
   while (s1Serial.available() > 0) {
     char inChar = (char)s1Serial.read();
-
-    inputString += inChar;
-    inputString.toCharArray(inputM, 5);
-    inputStringInt = inputM[0] - '0';
-    // inputString = String(inputString);
-    Debug.SERIAL_EVENT("Incoming %i\n", inputStringInt);
-    String t = String(inputStringInt);
-    processSerial(t);
-    // if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-    //   Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-    //   serialicomingport = 1;
-    //   serialCommandisTrue  = true;
-    //   processSerial(inputString);
-    // }
-  }
-}
-
-void s2SerialEvent() {
-  while (s2Serial.available() > 0) {
-    char inChar = (char)s2Serial.read();
     inputString += inChar;
     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
-      serialicomingport = 2;
+      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
+      serialicomingport = 1;
       serialCommandisTrue  = true;
       processSerial(inputString);
     }
   }
 }
+
+// void s2SerialEvent() {
+//   while (s2Serial.available() > 0) {
+//     char inChar = (char)s2Serial.read();
+//     inputString += inChar;
+//     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+//       Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
+//       serialicomingport = 2;
+//       serialCommandisTrue  = true;
+//       processSerial(inputString);
+//     }
+//   }
+// }
 
 void s3SerialEvent() {
   while (s3Serial.available() > 0) {
@@ -951,14 +938,15 @@ void setup(){
   preferences.end(); 
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
-  s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
+  // s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
+  maestroSerial.begin(57692,SERIAL_8N1,7, 20);
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
 
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
-  Serial.print("Booting up the ");Serial.println(HOSTNAME);
+  Serial.println("Booting up the Kyber Emulator");
   Serial.print("FW Version: "); Serial.println(version);
   #ifdef HWVERSION_1
   Serial.println("HW Version 1.0");
@@ -968,7 +956,7 @@ void setup(){
   Serial.println("HW Version 2.2");
   #endif
   Serial.println("----------------------------------------");
-  Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
+  // Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
   
   // Takes the variables in the WCB_Preference.h file and converts them to strings, then assigns them to larger strings which the callback for ESP-NOW uses.  
   sprintf(umac_oct2_CharArray, "%02x", umac_oct2);
@@ -1166,7 +1154,7 @@ void loop(){
   // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
     if(s1Serial.available()){s1SerialEvent();}
-    if(s2Serial.available()){s2SerialEvent();}
+    // if(s2Serial.available()){s2SerialEvent();}
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
@@ -1181,6 +1169,10 @@ void loop(){
     if(startUp) {
         colorWipeStatus("ES",blue,10);
       startUp = false;
+      delay(750);
+        // maestro.stopScript();
+      maestro.restartScript(0);
+      delay(4000);
       Serial.print("Startup complete\nStarting main loop\n\n\n");
     }
     if (queue.count()>0) {autoComplete=false;}
@@ -1233,7 +1225,7 @@ void loop(){
               if (serialPort == "S1"|| serialPort == "s1"){
                   saveBaud("S1BAUD", tempBaud);
               } else if (serialPort == "S2" || serialPort == "s2"){
-                  saveBaud("S2BAUD", tempBaud);
+                  // saveBaud("S2BAUD", tempBaud);
               } else if (serialPort == "S3" || serialPort == "s3"){
                   saveBaud("S3BAUD", tempBaud);
               }else if (serialPort == "S4" || serialPort == "s4"){
@@ -1322,13 +1314,18 @@ void loop(){
               if (serialPort == "S1" || serialPort == "s1"){
                 writes1SerialString(serialSubStringCommand);
               } else if (serialPort == "S2" || serialPort == "s2"){
-                writes2SerialString(serialSubStringCommand);
+                // writes2SerialString(serialSubStringCommand);
               } else if (serialPort == "S3" || serialPort == "s3"){
                 writes3SerialString(serialSubStringCommand);
               }else if (serialPort == "S4" || serialPort == "s4"){
                 writes4SerialString(serialSubStringCommand);
               } else if (serialPort == "S5" || serialPort == "s5"){
                 writes5SerialString(serialSubStringCommand);
+              }else if (serialPort == "S6" || serialPort == "s6"){
+                uint8_t maestroSequenceNumber = serialSubStringCommand.toInt();
+                Serial.println(maestroSequenceNumber);
+                maestro.restartScript(maestroSequenceNumber);
+                maestro.reset();
               }else {Debug.LOOP("No valid serial port given \n");}
               serialStringCommand = "";
               serialPort = "";
@@ -1347,7 +1344,7 @@ void loop(){
               }
               Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
               if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
+              // if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
               if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}

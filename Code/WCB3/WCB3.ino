@@ -84,8 +84,6 @@
 
 #include "Queue.h"
 
-
-
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
 //////////////////////////////////////////////////////////////////////
@@ -93,11 +91,6 @@
   char inputBuffer[300];
   String inputString;         // a string to hold incoming data
   
-
-
-  char inputM[5];
-  int inputStringInt;
-
   volatile boolean stringComplete  = false;      // whether the serial string is complete
   String autoInputString;         // a string to hold incoming data
   volatile boolean autoComplete    = false;    // whether an Auto command is setA
@@ -633,14 +626,11 @@ void writes1SerialString(String stringData){
 }
 
 void writes2SerialString(String stringData){
-  uint8_t ServoSequenceNumber= stringData.toInt();
   String completeString = stringData + '\r';
-  s2Serial.write(ServoSequenceNumber);
-
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
@@ -695,20 +685,13 @@ void serialEvent() {
 void s1SerialEvent() {
   while (s1Serial.available() > 0) {
     char inChar = (char)s1Serial.read();
-
     inputString += inChar;
-    inputString.toCharArray(inputM, 5);
-    inputStringInt = inputM[0] - '0';
-    // inputString = String(inputString);
-    Debug.SERIAL_EVENT("Incoming %i\n", inputStringInt);
-    String t = String(inputStringInt);
-    processSerial(t);
-    // if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-    //   Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-    //   serialicomingport = 1;
-    //   serialCommandisTrue  = true;
-    //   processSerial(inputString);
-    // }
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
+      serialicomingport = 1;
+      serialCommandisTrue  = true;
+      processSerial(inputString);
+    }
   }
 }
 

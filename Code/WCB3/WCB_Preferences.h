@@ -16,8 +16,8 @@
 
     // Uncomment only the board that you are loading this sketch onto. 
     // #define WCB1 
-    #define WCB2 
-    // #define WCB3 
+    // #define WCB2 
+    #define WCB3 
     // #define WCB4 
     // #define WCB5 
     // #define WCB6 

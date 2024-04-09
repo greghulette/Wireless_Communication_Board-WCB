@@ -47,8 +47,10 @@
 ////////////////////////////////
 #define SERIAL1_TX_PIN      8  //  // Serial 1 Tx Pin
 #define SERIAL1_RX_PIN      21  //  // Serial 1 Rx Pin
-#define SERIAL2_TX_PIN      20 //  // Serial 4 Tx Pin
-#define SERIAL2_RX_PIN	    7  //  // Serial 2 Rx Pin
+// #define SERIAL2_TX_PIN      20 //  // Serial 4 Tx Pin
+// #define SERIAL2_RX_PIN	    7  //  // Serial 2 Rx Pin
+#define SERIAL2_TX_PIN      22 //  // Serial 4 Tx Pin
+#define SERIAL2_RX_PIN	    23  //  // Serial 2 Rx Pin
 #define SERIAL3_TX_PIN      25 //  // Serial 4 Rx Pin
 #define SERIAL3_RX_PIN      4  //  // Serial 5 Tx Pin
 #define SERIAL4_TX_PIN	    14 //  // Serial 5 Rx Pin 
