@@ -196,7 +196,7 @@ bool BoardVer1 = false;
 bool BoardVer2_1 = true;
 bool Boardver2_2 = false;
 
-#elif defined HWVERSION_2_2
+#elif defined HWVERSION_2_3
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
 bool Boardver2_2 = true;
@@ -964,7 +964,7 @@ void setup(){
   Serial.println("HW Version 1.0");
   #elif defined HWVERSION_2_1
   Serial.println("HW Version 2.1");
-    #elif defined HWVERSION_2_2
+    #elif defined HWVERSION_2_3
   Serial.println("HW Version 2.2");
   #endif
   Serial.println("----------------------------------------");
