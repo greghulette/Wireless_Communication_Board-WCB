@@ -15,10 +15,10 @@
 
 
     // Uncomment only the board that you are loading this sketch onto. 
-    #define WCB1 
+    // #define WCB1 
     // #define WCB2 
     // #define WCB3 
-    // #define WCB4 
+    #define WCB4 
     // #define WCB5 
     // #define WCB6 
     // #define WCB7 
@@ -26,10 +26,10 @@
     // #define WCB9
 
   // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
- int Default_WCB_Quantity = 3;          
+ int Default_WCB_Quantity = 4;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
-  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_geepfrog";
+  String DEFAULT_ESPNOWPASSWORD = "ESPNOW_Lord_Hotwing";
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
@@ -43,8 +43,8 @@
   // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
   // Can be any 2-digit hexidecimal number. Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
 
-  const uint8_t umac_oct2 = 0x2F;     // unique MAC address for the 2nd Octet
-  const uint8_t umac_oct3 = 0x02;     // unique MAC address for the 3rd Octet
+  const uint8_t umac_oct2 = 0x24;     // unique MAC address for the 2nd Octet
+  const uint8_t umac_oct3 = 0x00;     // unique MAC address for the 3rd Octet
 
   #define MAX_QUEUE_DEPTH 10            // The max number of simultaneous commands that can be accepted
 
