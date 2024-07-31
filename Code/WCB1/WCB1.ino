@@ -161,7 +161,7 @@
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V2.2";
+  String version = "V2.3";
 
 
 
