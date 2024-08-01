@@ -602,15 +602,19 @@ void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming sender: %s\n", incomingSenderID.c_str());
   Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
   Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
-  if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
-    ESPNOWBroadcastCommand = true;
-    queue.push(incomingCommand);
-    // enqueueCommand(incomingCommand);
-
-    Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
-  }
+  if (incomingTargetID == ESPNOW_SenderID){
+      ESPNOWBroadcastCommand = false;
+      queue.push(incomingCommand);
+      Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+    }
+    if (incomingTargetID == "BR"){
+      ESPNOWBroadcastCommand = true;
+      queue.push(incomingCommand);
+      Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+    }
   turnOffLED();
 }
+
 
 
 
@@ -685,87 +689,50 @@ void writes5SerialString(String stringData){
 /////////////////////////////////////////////////////////
 
 void serialEvent() {
-      while (Serial.available() > 0) {    
-      serialResponse = Serial.readStringUntil('\r');
-      Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
-      processSerial(serialResponse);
+  while (Serial.available() > 0) {    
+    serialResponse = Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
-  
-  // while (Serial.available() > 0) {
-  //   char inChar = (char)Serial.read();
-  //   inputString += inChar;
-  //     if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-  //       Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
-  //       serialicomingport = 0;
-  //       serialCommandisTrue  = true;
-  //       processSerial(inputString);
-  //     }
-  // }
 }
 
 void s1SerialEvent() {
-  while (s1Serial.available() > 0) {
-    char inChar = (char)s1Serial.read();
-
-    inputString += inChar;
-    inputString.toCharArray(inputM, 5);
-    inputStringInt = inputM[0] - '0';
-    // inputString = String(inputString);
-    Debug.SERIAL_EVENT("Incoming %i\n", inputStringInt);
-    String t = String(inputStringInt);
-    processSerial(t);
-    // if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-    //   Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-    //   serialicomingport = 1;
-    //   serialCommandisTrue  = true;
-    //   processSerial(inputString);
-    // }
+  while (s1Serial.available() > 0) {    
+    serialResponse = s1Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
 }
 
 void s2SerialEvent() {
-  while (s2Serial.available() > 0) {
-    char inChar = (char)s2Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
-      serialicomingport = 2;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s2Serial.available() > 0) {    
+    serialResponse = s2Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
 }
 
 void s3SerialEvent() {
-    while (s3Serial.available() > 0) {    
-      serialResponse = s3Serial.readStringUntil('\r');
-      Debug.SERIAL_EVENT("Serial 3 Input: %s \n", serialResponse.c_str());
-      processSerial(serialResponse);
+  while (s3Serial.available() > 0) {    
+    serialResponse = s3Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("Serial 3 Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
 }
 
 void s4SerialEvent() {
-  while (s4Serial.available() > 0) {
-    char inChar = (char)s4Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
-      serialicomingport = 4;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s4Serial.available() > 0) {    
+    serialResponse = s4Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
 }
+
 void s5SerialEvent() {
-  while (s5Serial.available() > 0) {
-    char inChar = (char)s5Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
-      serialicomingport = 5;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s5Serial.available() > 0) {    
+    serialResponse = s5Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    processSerial(serialResponse);
   }
 }
 
@@ -795,26 +762,6 @@ void processSerial(String incomingSerialCommand){
   // Serial.println(s1);
   queue.push(s1);
   };
-
-
-
-
-  // incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
-  // int saArrayLength = 256;
-  // String sa[saArrayLength];  
-  // int r = 0;
-  // int  t =0;
-  // resetSerialNumberMillis = millis();
-  // for (int i=0; i < incomingSerialCommand.length(); i++){ 
-  //   if(incomingSerialCommand.charAt(i) == DELIMITER){ 
-  //     sa[t] = incomingSerialCommand.substring(r, i);
-  //     // enqueueCommand(sa[t]);
-  //     queue.push(sa[t]);
-  //     Debug.SERIAL_EVENT("Serial Chain Command %i: %s \n", t , sa[t].c_str());
-  //     r=(i+1); 
-  //     t++; 
-  //   }
-  // }
   turnOffLED();
 }
 
@@ -1373,7 +1320,7 @@ void loop(){
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
-              ESPNOWBroadcastCommand = false;
+              // ESPNOWBroadcastCommand = false;
 
               serialCommandisTrue  = false; 
       }
