@@ -3449,13 +3449,21 @@
 					(hide yes)
 				)
 			)
+<<<<<<< Updated upstream
 			(property "Description" "2 NPN pre-biased (Dual) 100mA 50V SC-70-6(SOT-363) Digital Transistors RoHS"
 				(at 0 5.08 0)
+=======
+			(property "Description" ""
+				(at 0 0 0)
+>>>>>>> Stashed changes
 				(effects
 					(font
 						(size 1.27 1.27)
 					)
+<<<<<<< Updated upstream
 					(justify bottom)
+=======
+>>>>>>> Stashed changes
 					(hide yes)
 				)
 			)
@@ -3509,6 +3517,19 @@
 					(hide yes)
 				)
 			)
+<<<<<<< Updated upstream
+=======
+			(property "DESCRIPTION" "2 NPN pre-biased (Dual) 100mA 50V SC-70-6(SOT-363) Digital Transistors RoHS"
+				(at 0 5.08 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify bottom)
+					(hide yes)
+				)
+			)
+>>>>>>> Stashed changes
 			(property "RS_PRICE-STOCK" ""
 				(at 0 0 0)
 				(effects
@@ -9594,6 +9615,45 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 257.81 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 257.81 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Digikey Part Number" ""
+			(at 257.81 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Mouser Part Number" ""
+			(at 257.81 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "b3d812bb-fca3-4f67-a011-f9590321d2ca")
 		)
@@ -10747,6 +10807,27 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 209.55 142.24 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 209.55 142.24 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "8fa49c5b-830f-4fa7-babd-fd8fb77cd095")
 		)
@@ -12117,6 +12198,27 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 176.53 38.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 176.53 38.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "27c9f77e-ff2e-40ae-be5b-42cfe45c1c8b")
 		)
@@ -12894,6 +12996,27 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 194.31 71.12 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 194.31 71.12 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "97c0b0c3-5953-4312-892e-f556ea943c4e")
 		)
@@ -13447,6 +13570,45 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 26.67 69.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 26.67 69.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Digikey Part Number" ""
+			(at 26.67 69.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Mouser Part Number" ""
+			(at 26.67 69.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "70822674-80d9-4239-b922-097ec613278b")
 		)
@@ -14396,6 +14558,27 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 86.36 50.8 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 86.36 50.8 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "0a245dfe-f3ef-49e2-91b8-c86551b3a6d1")
 		)
@@ -14776,6 +14959,45 @@
 				(hide yes)
 			)
 		)
+<<<<<<< Updated upstream
+=======
+		(property "Manufacturer" ""
+			(at 142.24 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer's Part Number" ""
+			(at 142.24 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Digikey Part Number" ""
+			(at 142.24 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Mouser Part Number" ""
+			(at 142.24 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+>>>>>>> Stashed changes
 		(pin "1"
 			(uuid "f6f25352-d426-4575-bed5-2ff0b911aa0d")
 		)

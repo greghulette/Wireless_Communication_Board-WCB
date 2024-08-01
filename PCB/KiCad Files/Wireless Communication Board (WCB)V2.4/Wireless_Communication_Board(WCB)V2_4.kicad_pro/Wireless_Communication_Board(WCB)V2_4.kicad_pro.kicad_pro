@@ -136,7 +136,7 @@
         "min_via_diameter": 0.4,
         "solder_mask_clearance": 0.0,
         "solder_mask_min_width": 0.0,
-        "solder_mask_to_copper_clearance": 0.0,
+        "solder_mask_to_copper_clearance": 0.005,
         "use_height_for_length_calcs": true
       },
       "teardrop_options": [
@@ -462,7 +462,7 @@
     ]
   },
   "meta": {
-    "filename": "Wireless_Communincation_Board(WCB)V2.kicad_pro",
+    "filename": "Wireless_Communication_Board(WCB)V2_4.kicad_pro.kicad_pro",
     "version": 1
   },
   "net_settings": {
@@ -617,7 +617,7 @@
   "sheets": [
     [
       "52b7efa1-42f1-4c3e-8ff3-77ca28801a0d",
-      ""
+      "Root"
     ]
   ],
   "text_variables": {}

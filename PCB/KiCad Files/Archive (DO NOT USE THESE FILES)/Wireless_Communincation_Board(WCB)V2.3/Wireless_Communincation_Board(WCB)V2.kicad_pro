@@ -126,7 +126,11 @@
         "min_hole_to_hole": 0.25,
         "min_microvia_diameter": 0.2,
         "min_microvia_drill": 0.1,
+<<<<<<< Updated upstream
         "min_resolved_spokes": 2,
+=======
+        "min_resolved_spokes": 1,
+>>>>>>> Stashed changes
         "min_silk_clearance": 0.0,
         "min_text_height": 0.8,
         "min_text_thickness": 0.08,
@@ -617,7 +621,7 @@
   "sheets": [
     [
       "52b7efa1-42f1-4c3e-8ff3-77ca28801a0d",
-      ""
+      "Root"
     ]
   ],
   "text_variables": {}
