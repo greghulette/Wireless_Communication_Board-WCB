@@ -182,17 +182,17 @@ Queue<String> queue = Queue<String>();
 #ifdef HWVERSION_1
 bool BoardVer1 = true;
 bool BoardVer2_1 = false;
-bool Boardver2_2 = false;
+bool Boardver2_3 = false;
 
 #elif defined HWVERSION_2_1
 bool BoardVer1 = false;
 bool BoardVer2_1 = true;
-bool Boardver2_2 = false;
+bool Boardver2_3 = false;
 
 #elif defined HWVERSION_2_2
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
-bool Boardver2_2 = true;
+bool Boardver2_3 = true;
 
 #endif
  
@@ -504,7 +504,9 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
       processESPNOWIncomingMessage();
     }
   } 
-  else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");}  
+  else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");
+          turnOffLED();
+        }  
   IncomingMacAddress ="";  
 } 
 
@@ -590,7 +592,14 @@ void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming sender: %s\n", incomingSenderID.c_str());
   Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
   Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
-  if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
+  if (incomingTargetID == ESPNOW_SenderID){
+    ESPNOWBroadcastCommand = false;
+    queue.push(incomingCommand);
+    // enqueueCommand(incomingCommand);
+
+    Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+  }
+  if (incomingTargetID == "BR"){
     ESPNOWBroadcastCommand = true;
     queue.push(incomingCommand);
     // enqueueCommand(incomingCommand);
@@ -794,19 +803,19 @@ void processSerial(String incomingSerialCommand){
 void turnOnLEDESPNOW(){
 if (BoardVer1){
   digitalWrite(ONBOARD_LED, HIGH); 
-  } else if (BoardVer2_1 || Boardver2_2){
+  } else if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", green, 255);
   }
 }  // Turns om the onboard Green LED
 
 void turnOnLEDSerial(){
-  if (BoardVer2_1 || Boardver2_2){
+  if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", red, 255);
   }
 }  
 
 void turnOnLEDSerialOut(){
-  if (BoardVer2_1 ||  Boardver2_2){
+  if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", orange, 255);
   }
 }  
@@ -814,7 +823,7 @@ void turnOnLEDSerialOut(){
 void turnOffLED(){
   if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
-  } else if (BoardVer2_1 ||  Boardver2_2){
+  } else if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", blue, 10);
   }
 }
@@ -1328,14 +1337,14 @@ void loop(){
                 char inCharRead = inputBuffer[i];
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
-              Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
+              Debug.DBG_2("Broadcast Command: %s\n", serialBroadcastCommand.c_str());
               if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
               if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
               if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
-              ESPNOWBroadcastCommand = false;
+              // ESPNOWBroadcastCommand = false;
 
               serialCommandisTrue  = false; 
       }
