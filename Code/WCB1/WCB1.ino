@@ -11,8 +11,8 @@
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****//// 
 ///*****                       Wireless Command Syntax:                                                         *****////
-///*****                       :W(x):S(y)(zzz...)                                                               *****////
-///*****                       x: 1 Digit Identifier for the destination  (i.e. W1 - W9, BR)                    *****////
+///*****                       ;W(x);S(y)(zzz...)                                                               *****////
+///*****                       x: 1 Digit Identifier for the destination  (i.e. W1 - W9)                        *****////
 ///*****                          x: 1 = WCB1                                                                   *****//// 
 ///*****                          x: 2 = WCB2                                                                   *****//// 
 ///*****                          x: 3 = WCB3                                                                   *****//// 
@@ -709,7 +709,7 @@ void serialEvent() {
 void s1SerialEvent() {
   while (s1Serial.available() > 0) {    
     serialResponse = s1Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    Debug.SERIAL_EVENT("Serial 1 Input: %s \n", serialResponse.c_str());
     serialicomingport = 1;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
@@ -719,7 +719,7 @@ void s1SerialEvent() {
 void s2SerialEvent() {
   while (s2Serial.available() > 0) {    
     serialResponse = s2Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    Debug.SERIAL_EVENT("Serial 2 Input: %s \n", serialResponse.c_str());
     serialicomingport = 2;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
@@ -739,7 +739,7 @@ void s3SerialEvent() {
 void s4SerialEvent() {
   while (s4Serial.available() > 0) {    
     serialResponse = s4Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    Debug.SERIAL_EVENT("Serial 4 Input: %s \n", serialResponse.c_str());
     serialicomingport = 4;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
@@ -749,7 +749,7 @@ void s4SerialEvent() {
 void s5SerialEvent() {
   while (s5Serial.available() > 0) {    
     serialResponse = s5Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    Debug.SERIAL_EVENT("Serial 5 Input: %s \n", serialResponse.c_str());
     serialicomingport = 5;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
@@ -972,10 +972,11 @@ void setup(){
   Serial.println("HW Version 2.3");
   #endif
   Serial.println("----------------------------------------");
-  Serial.printf("Serial 1 Baudrate: %i, Bdcst Enabled: %i\nSerial 2 Baudrate: %i, Bdcst Enabled: %i\nSerial 3 Baudrate: %i, Bdcst Enabled: %i\n \
-                  Serial 4 Baudrate: %i, Bdcst Enabled: %i\nSerial 5 Baudrate: %i, Bdcst Enabled: %i\n", SERIAL1_BAUD_RATE, SERIAL1_BROADCAST_ENABLE, 
-                  SERIAL2_BAUD_RATE, SERIAL2_BROADCAST_ENABLE, SERIAL3_BAUD_RATE, SERIAL3_BROADCAST_ENABLE, SERIAL4_BAUD_RATE, SERIAL4_BROADCAST_ENABLE,  
-                  SERIAL5_BAUD_RATE, SERIAL5_BROADCAST_ENABLE );
+  Serial.printf("Serial 1 Baudrate: %i, Brdcst Enabled: %s\nSerial 2 Baudrate: %i, Brdcst Enabled: %s\nSerial 3 Baudrate: %i, Brdcst Enabled: %s\n"
+                "Serial 4 Baudrate: %i, Brdcst Enabled: %s\nSerial 5 Baudrate: %i, Brdcst Enabled: %s\n", SERIAL1_BAUD_RATE, SERIAL1_BROADCAST_ENABLE 
+                ? "True" : "False", SERIAL2_BAUD_RATE, SERIAL2_BROADCAST_ENABLE ? "True" : "False", SERIAL3_BAUD_RATE, SERIAL3_BROADCAST_ENABLE ?
+                 "True" : "False", SERIAL4_BAUD_RATE, SERIAL4_BROADCAST_ENABLE ? "True" : "False", SERIAL5_BAUD_RATE, SERIAL5_BROADCAST_ENABLE 
+                 ? "True" : "False" );
   
   // Takes the variables in the WCB_Preference.h file and converts them to strings, then assigns them to larger strings which the callback for ESP-NOW uses.  
   sprintf(umac_oct2_CharArray, "%02x", umac_oct2);
@@ -994,7 +995,8 @@ void setup(){
   WCB8MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:08";
   WCB9MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:09";  
   broadcastMACAddressString= "FF:" + umac_oct2_String + ":" + umac_oct3_String + ":FF:FF:FF";
-  Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
+  Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n",
+                 ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
   
 
   //Reserve the memory for inputStrings
