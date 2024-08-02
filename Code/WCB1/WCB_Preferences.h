@@ -51,3 +51,10 @@
   char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
   char CommandCharacter = ';';
+
+  #define SERIAL1_BROADCAST_DEFAULT true
+  #define SERIAL2_BROADCAST_DEFAULT true
+  #define SERIAL3_BROADCAST_DEFAULT true
+  #define SERIAL4_BROADCAST_DEFAULT true
+  #define SERIAL5_BROADCAST_DEFAULT true
+

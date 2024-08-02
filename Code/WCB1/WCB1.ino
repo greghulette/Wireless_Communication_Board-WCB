@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 2.2                                             *****////
+///*****                                                Version 3.0                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,6 +82,7 @@
 //Used for the Status LED on Board version 2.1
 #include <Adafruit_NeoPixel.h>                 // Adafruit NeoPixel by Adafruit Library
 
+// Used for queing commands so they can be chained without interupting the operations of the WCB
 #include "Queue.h"
 
 
@@ -115,7 +116,12 @@
   String serialResponse = "";
   String s1;
 
- 
+  unsigned long SERIAL1_BROADCAST_ENABLE; 
+  unsigned long SERIAL2_BROADCAST_ENABLE;
+  unsigned long SERIAL3_BROADCAST_ENABLE;
+  unsigned long SERIAL4_BROADCAST_ENABLE;
+  unsigned long SERIAL5_BROADCAST_ENABLE;
+
   int serialicomingport = 0;
   int haveCommands;
   bool ESPNOWBroadcastCommand;
@@ -837,7 +843,9 @@ void colorWipeStatus(String statusled, uint32_t c, int brightness) {
 /////////////////////////////////////////////////////////
  void saveBaud(const char* Port, int32_t Baud)
  {
-  if (Baud == 110     ||     // checks to make sure a valid baudrate is used
+  if (Baud == 0       ||
+      Baud == 1       ||
+      Baud == 110     ||     // checks to make sure a valid baudrate is used
       Baud == 300     ||
       Baud == 600     ||
       Baud == 1200    ||
@@ -854,7 +862,7 @@ void colorWipeStatus(String statusled, uint32_t c, int brightness) {
         preferences.begin("serial-baud", false);
         preferences.putInt(Port, Baud);
         preferences.end();
-        Serial.printf("\n\nThe Serial Port Baud Rate has changed and the system will reboot in 3 seconds\n\n");
+        Serial.printf("\n\nThe Serial Port Baud Option has changed and the system will reboot in 3 seconds\n\n");
         delay(3000);
         ESP.restart();
       } else {Serial.printf("Wrong Baudrate given");}
@@ -918,20 +926,33 @@ void setup(){
   Serial.begin(115200);
 
   preferences.begin("serial-baud", false);
- unsigned long SERIAL1_BAUD_RATE = preferences.getInt("S1BAUD", SERIAL1_DEFAULT_BAUD_RATE);
- unsigned long SERIAL2_BAUD_RATE = preferences.getInt("S2BAUD", SERIAL2_DEFAULT_BAUD_RATE);
- unsigned long SERIAL3_BAUD_RATE = preferences.getInt("S3BAUD", SERIAL3_DEFAULT_BAUD_RATE);
- unsigned long SERIAL4_BAUD_RATE = preferences.getInt("S4BAUD", SERIAL4_DEFAULT_BAUD_RATE);
- unsigned long SERIAL5_BAUD_RATE = preferences.getInt("S5BAUD", SERIAL5_DEFAULT_BAUD_RATE);
+    unsigned long SERIAL1_BAUD_RATE = preferences.getInt("S1BAUD", SERIAL1_DEFAULT_BAUD_RATE);
+    unsigned long SERIAL2_BAUD_RATE = preferences.getInt("S2BAUD", SERIAL2_DEFAULT_BAUD_RATE);
+    unsigned long SERIAL3_BAUD_RATE = preferences.getInt("S3BAUD", SERIAL3_DEFAULT_BAUD_RATE);
+    unsigned long SERIAL4_BAUD_RATE = preferences.getInt("S4BAUD", SERIAL4_DEFAULT_BAUD_RATE);
+    unsigned long SERIAL5_BAUD_RATE = preferences.getInt("S5BAUD", SERIAL5_DEFAULT_BAUD_RATE);
+    SERIAL1_BROADCAST_ENABLE = preferences.getInt("S1BDCST", SERIAL1_BROADCAST_DEFAULT);
+    SERIAL2_BROADCAST_ENABLE = preferences.getInt("S2BDCST", SERIAL2_BROADCAST_DEFAULT);
+    SERIAL3_BROADCAST_ENABLE = preferences.getInt("S3BDCST", SERIAL3_BROADCAST_DEFAULT);
+    SERIAL4_BROADCAST_ENABLE = preferences.getInt("S4BDCST", SERIAL4_BROADCAST_DEFAULT);
+    SERIAL5_BROADCAST_ENABLE = preferences.getInt("S5BDCST", SERIAL5_BROADCAST_DEFAULT);
   preferences.end();
 
   preferences.begin("ESP-Quantity", false);
-  int32_t WCB_Quantity = preferences.getInt( "WCBQuantity", Default_WCB_Quantity);          
+    int32_t WCB_Quantity = preferences.getInt( "WCBQuantity", Default_WCB_Quantity);          
   preferences.end(); 
 
   preferences.begin("Password", false);
-   ESPNOWPASSWORD = preferences.getString( "DPASS", DEFAULT_ESPNOWPASSWORD);          
+    ESPNOWPASSWORD = preferences.getString( "DPASS", DEFAULT_ESPNOWPASSWORD);          
   preferences.end(); 
+
+  // preferences.begin("Broadcast-Port-Enabled", false);
+  //   bool SERIAL1_BROADCAST_ENABLE = preferences.getBool("S1BDCST", SERIAL1_BROADCAST_DEFAULT);
+  //   bool SERIAL2_BROADCAST_ENABLE = preferences.getBool("S2BDCST", SERIAL2_BROADCAST_DEFAULT);
+  //   bool SERIAL3_BROADCAST_ENABLE = preferences.getBool("S3BDCST", SERIAL3_BROADCAST_DEFAULT);
+  //   bool SERIAL4_BROADCAST_ENABLE = preferences.getBool("S4BDCST", SERIAL4_BROADCAST_DEFAULT);
+  //   bool SERIAL5_BROADCAST_ENABLE = preferences.getBool("S5BDCST", SERIAL5_BROADCAST_DEFAULT);
+  // preferences.end();
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
@@ -948,10 +969,13 @@ void setup(){
   #elif defined HWVERSION_2_1
   Serial.println("HW Version 2.1");
     #elif defined HWVERSION_2_3
-  Serial.println("HW Version 2.2");
+  Serial.println("HW Version 2.3");
   #endif
   Serial.println("----------------------------------------");
-  Serial.printf("Serial 1 Baudrate: %i \nSerial 2 Baudrate: %i\nSerial 3 Baudrate: %i \nSerial 4 Baudrate: %i \nSerial 5 Baudrate: %i \n", SERIAL1_BAUD_RATE, SERIAL2_BAUD_RATE, SERIAL3_BAUD_RATE, SERIAL4_BAUD_RATE, SERIAL5_BAUD_RATE );
+  Serial.printf("Serial 1 Baudrate: %i, Bdcst Enabled: %i\nSerial 2 Baudrate: %i, Bdcst Enabled: %i\nSerial 3 Baudrate: %i, Bdcst Enabled: %i\n \
+                  Serial 4 Baudrate: %i, Bdcst Enabled: %i\nSerial 5 Baudrate: %i, Bdcst Enabled: %i\n", SERIAL1_BAUD_RATE, SERIAL1_BROADCAST_ENABLE, 
+                  SERIAL2_BAUD_RATE, SERIAL2_BROADCAST_ENABLE, SERIAL3_BAUD_RATE, SERIAL3_BROADCAST_ENABLE, SERIAL4_BAUD_RATE, SERIAL4_BROADCAST_ENABLE,  
+                  SERIAL5_BAUD_RATE, SERIAL5_BROADCAST_ENABLE );
   
   // Takes the variables in the WCB_Preference.h file and converts them to strings, then assigns them to larger strings which the callback for ESP-NOW uses.  
   sprintf(umac_oct2_CharArray, "%02x", umac_oct2);
@@ -1179,6 +1203,8 @@ void loop(){
     else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
       if (inputBuffer[0] == '#'){
         if (
+            inputBuffer[1]=='B' ||          // Command deignator for changing Broadcast for specific port
+            inputBuffer[1]=='b' ||          // Command deignator for changing Broadcast for specific port
             inputBuffer[1]=='D' ||          // Command for debugging
             inputBuffer[1]=='d' ||          // Command for debugging
             inputBuffer[1]=='L' ||          // Command designator for internal functions
@@ -1214,15 +1240,36 @@ void loop(){
               Debug.LOOP("Serial Baudrate: %s on Serial Port: %s\n", serialSubStringCommand.c_str(), serialPort); 
               int tempBaud = serialSubStringCommand.toInt();
               if (serialPort == "S1"|| serialPort == "s1"){
+                if (tempBaud == 0 || tempBaud == 1){
+                  saveBaud("S1BDCST", tempBaud);
+                }else{
                   saveBaud("S1BAUD", tempBaud);
+                }
+                  
               } else if (serialPort == "S2" || serialPort == "s2"){
+                  if (tempBaud == 0 || tempBaud == 1){
+                  saveBaud("S2BDCST", tempBaud);
+                }else{
                   saveBaud("S2BAUD", tempBaud);
+                }
               } else if (serialPort == "S3" || serialPort == "s3"){
+                  if (tempBaud == 0 || tempBaud == 1){
+                  saveBaud("S3BDCST", tempBaud);
+                }else{
                   saveBaud("S3BAUD", tempBaud);
+                }
               }else if (serialPort == "S4" || serialPort == "s4"){
+                  if (tempBaud == 0 || tempBaud == 1){
+                  saveBaud("S4BDCST", tempBaud);
+                }else{
                   saveBaud("S4BAUD", tempBaud);
+                }
               } else if (serialPort == "S5" || serialPort == "s5"){
+                  if (tempBaud == 0 || tempBaud == 1){
+                  saveBaud("S5BDCST", tempBaud);
+                }else{
                   saveBaud("S5BAUD", tempBaud);
+                }
               }else if (serialPort == "SC" || serialPort == "sc"){
                   clearBaud();
               }else {Debug.LOOP("No valid serial port given \n");}
@@ -1331,11 +1378,11 @@ void loop(){
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
               Debug.DBG_2("Broadcast Command: %s\n", serialBroadcastCommand.c_str());
-              if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 1 && SERIAL1_BROADCAST_ENABLE == true){writes1SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 2 && SERIAL2_BROADCAST_ENABLE == true){writes2SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 3 && SERIAL3_BROADCAST_ENABLE == true){writes3SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 4 && SERIAL4_BROADCAST_ENABLE == true){writes4SerialString(serialBroadcastCommand);}
+              if (serialicomingport != 5 && SERIAL5_BROADCAST_ENABLE == true){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
 
               serialCommandisTrue  = false; 
