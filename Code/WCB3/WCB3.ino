@@ -84,6 +84,8 @@
 
 #include "Queue.h"
 
+
+
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
 //////////////////////////////////////////////////////////////////////
@@ -91,6 +93,11 @@
   char inputBuffer[300];
   String inputString;         // a string to hold incoming data
   
+
+
+  char inputM[5];
+  int inputStringInt;
+
   volatile boolean stringComplete  = false;      // whether the serial string is complete
   String autoInputString;         // a string to hold incoming data
   volatile boolean autoComplete    = false;    // whether an Auto command is setA
@@ -105,9 +112,12 @@
   String serialStringCommand;
   String serialPort;
   String serialSubStringCommand;
+  String serialResponse = "";
+  String s1;
+
  
   int serialicomingport = 0;
-  bool haveCommands;
+  int haveCommands;
   bool ESPNOWBroadcastCommand;
   bool serialCommandisTrue;
   String serialBroadcastCommand;
@@ -182,17 +192,17 @@ Queue<String> queue = Queue<String>();
 #ifdef HWVERSION_1
 bool BoardVer1 = true;
 bool BoardVer2_1 = false;
-bool Boardver2_2 = false;
+bool Boardver2_3 = false;
 
 #elif defined HWVERSION_2_1
 bool BoardVer1 = false;
 bool BoardVer2_1 = true;
-bool Boardver2_2 = false;
+bool Boardver2_3 = false;
 
-#elif defined HWVERSION_2_2
+#elif defined HWVERSION_2_3
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
-bool Boardver2_2 = true;
+bool Boardver2_3 = true;
 
 #endif
  
@@ -247,7 +257,7 @@ bool Boardver2_2 = true;
   const uint8_t WCB7MacAddress[] =  {0x02, umac_oct2, umac_oct3, 0x00, 0x00, 0x07};
   const uint8_t WCB8MacAddress[] =  {0x02, umac_oct2, umac_oct3, 0x00, 0x00, 0x08};
   const uint8_t WCB9MacAddress[] =  {0x02, umac_oct2, umac_oct3, 0x00, 0x00, 0x09};
-  const uint8_t broadcastMACAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  const uint8_t broadcastMACAddress[] =  {0xFF, umac_oct2, umac_oct3, 0xFF, 0xFF, 0xFF};
 
   // Uses these Strings for comparators
   String WCB1MacAddressString;
@@ -504,7 +514,9 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
       processESPNOWIncomingMessage();
     }
   } 
-  else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");}  
+  else {Debug.ESPNOW("ESP-NOW Mesage ignored \n");
+        turnOffLED();
+  }  
   IncomingMacAddress ="";  
 } 
 
@@ -590,15 +602,19 @@ void processESPNOWIncomingMessage(){
   Debug.ESPNOW("incoming sender: %s\n", incomingSenderID.c_str());
   Debug.ESPNOW("incoming command included: %d\n", incomingCommandIncluded);
   Debug.ESPNOW("incoming command: %s\n", incomingCommand.c_str());
-  if (incomingTargetID == ESPNOW_SenderID || incomingTargetID == "BR"){
-    ESPNOWBroadcastCommand = true;
-    queue.push(incomingCommand);
-    // enqueueCommand(incomingCommand);
-
-    Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
-  }
+  if (incomingTargetID == ESPNOW_SenderID){
+      ESPNOWBroadcastCommand = false;
+      queue.push(incomingCommand);
+      Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+    }
+    if (incomingTargetID == "BR"){
+      ESPNOWBroadcastCommand = true;
+      queue.push(incomingCommand);
+      Debug.ESPNOW("Recieved command from %s \n", incomingSenderID);
+    }
   turnOffLED();
 }
+
 
 
 
@@ -626,11 +642,14 @@ void writes1SerialString(String stringData){
 }
 
 void writes2SerialString(String stringData){
+  uint8_t ServoSequenceNumber= stringData.toInt();
   String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s2Serial.write(completeString[i]);
-  }
+  s2Serial.write(ServoSequenceNumber);
+
+  // for (int i=0; i<completeString.length(); i++)
+  // {
+  //   s2Serial.write(completeString[i]);
+  // }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
@@ -670,78 +689,63 @@ void writes5SerialString(String stringData){
 /////////////////////////////////////////////////////////
 
 void serialEvent() {
-  while (Serial.available() > 0) {
-    char inChar = (char)Serial.read();
-    inputString += inChar;
-      if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-        Debug.SERIAL_EVENT("USB Serial Input: %s \n",inputString.c_str());
-        serialicomingport = 0;
-        serialCommandisTrue  = true;
-        processSerial(inputString);
-      }
+  while (Serial.available() > 0) {    
+    serialResponse = Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    // serialResponse += DELIMITER;
+    serialicomingport = 0;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
 
 void s1SerialEvent() {
-  while (s1Serial.available() > 0) {
-    char inChar = (char)s1Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-      serialicomingport = 1;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s1Serial.available() > 0) {    
+    serialResponse = s1Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    serialicomingport = 1;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
 
 void s2SerialEvent() {
-  while (s2Serial.available() > 0) {
-    char inChar = (char)s2Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 2 Input: %s \n", inputString.c_str());
-      serialicomingport = 2;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s2Serial.available() > 0) {    
+    serialResponse = s2Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    serialicomingport = 2;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
 
 void s3SerialEvent() {
-  while (s3Serial.available() > 0) {
-    char inChar = (char)s3Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 3 Input: %s \n", inputString.c_str());
-      serialicomingport = 3;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s3Serial.available() > 0) {    
+    serialResponse = s3Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("Serial 3 Input: %s \n", serialResponse.c_str());
+    serialicomingport = 3;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
+
 void s4SerialEvent() {
-  while (s4Serial.available() > 0) {
-    char inChar = (char)s4Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 4 Input: %s \n", inputString.c_str());
-      serialicomingport = 4;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s4Serial.available() > 0) {    
+    serialResponse = s4Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    serialicomingport = 4;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
+
 void s5SerialEvent() {
-  while (s5Serial.available() > 0) {
-    char inChar = (char)s5Serial.read();
-    inputString += inChar;
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      Debug.SERIAL_EVENT("Serial 5 Input: %s \n", inputString.c_str());
-      serialicomingport = 5;
-      serialCommandisTrue  = true;
-      processSerial(inputString);
-    }
+  while (s5Serial.available() > 0) {    
+    serialResponse = s5Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+    serialicomingport = 5;
+    serialCommandisTrue  = true;
+    processSerial(serialResponse);
   }
 }
 
@@ -761,22 +765,17 @@ void resetSerialCommand(){
 }
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
-  incomingSerialCommand += DELIMITER;               // add the deliimiter to the end so that next part knows when to end the splicing of commands
-  int saArrayLength = 256;
-  String sa[saArrayLength];  int r = 0;
-  int  t =0;
-  resetSerialNumberMillis = millis();
-
-  for (int i=0; i < incomingSerialCommand.length(); i++){ 
-    if(incomingSerialCommand.charAt(i) == DELIMITER){ 
-      sa[t] = incomingSerialCommand.substring(r, i);
-      // enqueueCommand(sa[t]);
-      queue.push(sa[t]);
-      Debug.SERIAL_EVENT("Serial Chain Command %i: %s \n", t+1 , sa[t].c_str());
-      r=(i+1); 
-      t++; 
-    }
-  }
+    resetSerialNumberMillis = millis();
+  // incomingSerialCommand += DELIMITER;
+    char buf[200];
+  serialResponse.toCharArray(buf, sizeof(buf));
+  char *p = buf;
+  char *str;
+  while ((str = strtok_r(p,"*", &p)) !=NULL){
+  s1 = String(str);
+  // Serial.println(s1);
+  queue.push(s1);
+  };
   turnOffLED();
 }
 
@@ -794,19 +793,19 @@ void processSerial(String incomingSerialCommand){
 void turnOnLEDESPNOW(){
 if (BoardVer1){
   digitalWrite(ONBOARD_LED, HIGH); 
-  } else if (BoardVer2_1 || Boardver2_2){
+  } else if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", green, 255);
   }
 }  // Turns om the onboard Green LED
 
 void turnOnLEDSerial(){
-  if (BoardVer2_1 || Boardver2_2){
+  if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", red, 255);
   }
 }  
 
 void turnOnLEDSerialOut(){
-  if (BoardVer2_1 ||  Boardver2_2){
+  if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", orange, 255);
   }
 }  
@@ -814,7 +813,7 @@ void turnOnLEDSerialOut(){
 void turnOffLED(){
   if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
-  } else if (BoardVer2_1 ||  Boardver2_2){
+  } else if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", blue, 10);
   }
 }
@@ -947,7 +946,7 @@ void setup(){
   Serial.println("HW Version 1.0");
   #elif defined HWVERSION_2_1
   Serial.println("HW Version 2.1");
-    #elif defined HWVERSION_2_2
+    #elif defined HWVERSION_2_3
   Serial.println("HW Version 2.2");
   #endif
   Serial.println("----------------------------------------");
@@ -1170,7 +1169,7 @@ void loop(){
     if (queue.count()>0 || autoComplete) {
     if(queue.count()>0) {
       Debug.SERIAL_EVENT("New Queue String: %s\nQueue Count %i\n", queue.peek().c_str(),queue.count());
-      haveCommands = queue.count()>0; 
+      haveCommands = queue.count(); 
       currentCommand = queue.peek();
       inputString = queue.pop(); 
       Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString.c_str());
@@ -1192,7 +1191,7 @@ void loop(){
           ){commandLength = strlen(inputBuffer); 
             if (inputBuffer[1]=='D' || inputBuffer[1]=='d'){
               debugInputIdentifier = "";                            // flush the string
-              for (int i=2; i<=commandLength-2; i++){
+              for (int i=2; i<=commandLength-1; i++){
                 char inCharRead = inputBuffer[i];
                 debugInputIdentifier += inCharRead;                   // add it to the inputString:
               }
@@ -1203,7 +1202,7 @@ void loop(){
                 localCommandFunction = (inputBuffer[2]-'0')*10+(inputBuffer[3]-'0');
                 Local_Command[0]   = '\0';                                                            // Flushes Array
                 Local_Command[0] = localCommandFunction;
-              Debug.LOOP("Entered the Local Command Structure /n");
+              Debug.LOOP("Entered the Local Command Structure \n");
               } else if (inputBuffer[1]=='S' || inputBuffer[1]=='s'){
                 for (int i=1; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
@@ -1318,7 +1317,9 @@ void loop(){
             } 
           }
         }
-      } else if (haveCommands == true & currentCommand != previousCommand){
+      } else if (currentCommand == ""){
+        
+      }else if ((haveCommands  >0 & currentCommand != previousCommand) || currentCommand !=""){
         previousCommand = currentCommand;
       previousCommandMillis = millis();
 
@@ -1328,14 +1329,13 @@ void loop(){
                 char inCharRead = inputBuffer[i];
                 serialBroadcastCommand += inCharRead;  // add it to the inputString:
               }
-              Debug.DBG_2("Broadcast Command: %s", serialBroadcastCommand.c_str());
+              Debug.DBG_2("Broadcast Command: %s\n", serialBroadcastCommand.c_str());
               if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
               if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
               if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
               if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
               if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
-              ESPNOWBroadcastCommand = false;
 
               serialCommandisTrue  = false; 
       }
@@ -1346,6 +1346,7 @@ void loop(){
       inputBuffer[0] = '\0';
       inputBuffer[1] = '\0'; 
       serialBroadcastCommand = "";
+      String serialResponse;
     
       // reset Local ESP Command Variables
       int espCommandFunction;

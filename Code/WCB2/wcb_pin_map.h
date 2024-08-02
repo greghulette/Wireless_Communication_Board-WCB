@@ -41,7 +41,7 @@
 #define ONBOARD_LED         25 //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
 #define STATUS_LED_PIN      19 //  // ESP32 Status NeoPixel Pin
 
- #elif defined HWVERSION_2_2
+ #elif defined HWVERSION_2_3
 //////////////////////////////// 
 // This pinout is for a Version 2.0 (Custom Board)
 ////////////////////////////////
