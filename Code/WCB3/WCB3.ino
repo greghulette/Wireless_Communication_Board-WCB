@@ -258,6 +258,7 @@ bool Boardver2_3 = true;
   const uint8_t WCB8MacAddress[] =  {0x02, umac_oct2, umac_oct3, 0x00, 0x00, 0x08};
   const uint8_t WCB9MacAddress[] =  {0x02, umac_oct2, umac_oct3, 0x00, 0x00, 0x09};
   const uint8_t broadcastMACAddress[] =  {0xFF, umac_oct2, umac_oct3, 0xFF, 0xFF, 0xFF};
+  const uint8_t publicMACAddress[] =  {0xFF, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF};
 
   // Uses these Strings for comparators
   String WCB1MacAddressString;
@@ -269,7 +270,7 @@ bool Boardver2_3 = true;
   String WCB7MacAddressString;
   String WCB8MacAddressString;
   String WCB9MacAddressString;
-  String broadcastMACAddressString =  "FF:FF:FF:FF:FF:FF";
+  String broadcastMACAddressString;
 
   // Define variables to store commands to be sent
   String  senderID;
@@ -968,7 +969,7 @@ void setup(){
   WCB7MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:07";
   WCB8MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:08";
   WCB9MacAddressString = "02:" + umac_oct2_String + ":" + umac_oct3_String + ":00:00:09";  
-
+  broadcastMACAddressString= "FF:" + umac_oct2_String + ":" + umac_oct3_String + ":FF:FF:FF";
   Serial.printf("ESPNOW Password: %s \nQuantity of WCB's in system: %i \n2nd Octet: 0x%s \n3rd Octet: 0x%s\n", ESPNOWPASSWORD.c_str(), WCB_Quantity, umac_oct2_String, umac_oct3_String);
   
 
