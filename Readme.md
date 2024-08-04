@@ -66,10 +66,25 @@ CAD Image       |    Actual Image
 - Can support bi-directional communications<br><br>
 
 
+### HW Version 2.3
+
+CAD Image       |    Actual Image     
+:---------------:|:---------------------:
+<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">
+ 
 
 
 
-HW Versions 1.0 and 2.1 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
+ Features of the board:
+- Integrated ESP32-PICO-MINI-02
+- 5V Terminal Block
+- 5 Serial ports that can be used to communicate with microcontrollers  
+- Up to 9 WCB's can be used at once in a fully meshed network
+- Communication can be individual (Unicast), or be broadcasted to all devices at once.
+- Can support bi-directional communications
+- Future pin for possible limited Maestro capability.<br><br>
+
+HW Versions 1.0 and 2.1/2.3 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
 
 ## Concept of Operations
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 9 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
@@ -77,10 +92,17 @@ Below, you will see some possible connections that can exist to the WCB's.  In t
 <br>
 <img src="./Images/OverviewImage.png"><br>
 
-<br>Now if we lay the different types of communications over this picture, you can see how the boards can send the various types of messages.  The green microcontrollers are some examples of the boards that can communicate over serial and can be hooked up to this system.
+<br> (Please note the Future status of the Maestro capability.  I am working on an update that will allow limited Maestro support.  I want to be able to trigger animations, but don't think I will ever have the channel passthrough enabled)
+
+Now if we lay the different types of communications over this picture, you can see how the boards can send the various types of messages.  The green microcontrollers are some examples of the boards that can communicate over serial and can be hooked up to this system.
 <img src="./Images/Transmission_example.png">
 
-As you can see in the above image, you can send any other board a direct message.  <br><br> <br><br> 
+As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.   
+
+The WCBs can also Broadcast messages.  The GIF below shows the broadcast messages.  
+![til](/Images/ezgif.com-effects.gif)<br><br> <br><br> 
+
+
 
 ---
 ## Command Syntax
@@ -138,8 +160,8 @@ The following is the syntax for sending commands
     zzzz.... : String to send to end device
 
     Examples
-    :S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
-    :S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
+    :S4:PP100  : This would send the string ":PP100" out it's local Serial 4 port
+    :S2#SD0    : This would send the string "#SD0" out it's local Serial 2 port
 
 ### Chaining Commands:
 You can chain commands together and have the WCB process those commands one after another.  You can do this by adding a "*" in between different commands in the string.
