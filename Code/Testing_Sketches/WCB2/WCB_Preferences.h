@@ -26,7 +26,7 @@
     // #define WCB9
 
   // Change to match the amount of WCB's that you are using.  This alleviates initialing ESP-NOW peers if they are not used.
- int Default_WCB_Quantity = 3;          
+ int Default_WCB_Quantity = 5;          
 
   // ESPNOW Password - This must be the same across all devices and unique to your droid/setup. (PLEASE CHANGE THIS)
   String DEFAULT_ESPNOWPASSWORD = "ESPNOW_xxxxxxxxx";
@@ -34,7 +34,7 @@
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
-  #define SERIAL2_DEFAULT_BAUD_RATE 57692 
+  #define SERIAL2_DEFAULT_BAUD_RATE 9600 
   #define SERIAL3_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL4_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL5_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
@@ -51,3 +51,10 @@
   char DELIMITER = '*';                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
   char CommandCharacter = ';';
+
+  #define SERIAL1_BROADCAST_DEFAULT true
+  #define SERIAL2_BROADCAST_DEFAULT true
+  #define SERIAL3_BROADCAST_DEFAULT true
+  #define SERIAL4_BROADCAST_DEFAULT true
+  #define SERIAL5_BROADCAST_DEFAULT true
+

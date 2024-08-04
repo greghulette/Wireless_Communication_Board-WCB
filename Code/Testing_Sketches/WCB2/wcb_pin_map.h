@@ -41,23 +41,22 @@
 #define ONBOARD_LED         25 //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
 #define STATUS_LED_PIN      19 //  // ESP32 Status NeoPixel Pin
 
- #elif defined HWVERSION_2_2
+ #elif defined HWVERSION_2_3
 //////////////////////////////// 
 // This pinout is for a Version 2.0 (Custom Board)
 ////////////////////////////////
 #define SERIAL1_TX_PIN      8  //  // Serial 1 Tx Pin
 #define SERIAL1_RX_PIN      21  //  // Serial 1 Rx Pin
-// #define SERIAL2_TX_PIN      20 //  // Serial 4 Tx Pin
-// #define SERIAL2_RX_PIN	    7  //  // Serial 2 Rx Pin
-#define SERIAL2_TX_PIN      22 //  // Serial 4 Tx Pin
-#define SERIAL2_RX_PIN	    23  //  // Serial 2 Rx Pin
+#define SERIAL2_TX_PIN      20 //  // Serial 4 Tx Pin
+#define SERIAL2_RX_PIN	    7  //  // Serial 2 Rx Pin
 #define SERIAL3_TX_PIN      25 //  // Serial 4 Rx Pin
 #define SERIAL3_RX_PIN      4  //  // Serial 5 Tx Pin
 #define SERIAL4_TX_PIN	    14 //  // Serial 5 Rx Pin 
 #define SERIAL4_RX_PIN      27 //  // Serial 3 Rx Pin
 #define SERIAL5_TX_PIN	    13 //  // Serial 2 Tx Pin
 #define SERIAL5_RX_PIN	    26 //  // Serial 3 Tx Pin
-#define ONBOARD_LED         22 //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
+#define ONBOARD_LED         32 //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
 #define STATUS_LED_PIN      19 //  // ESP32 Status NeoPixel Pin
+#define CHAIN               22 //  // Future Pin Allocation
 
 #endif
