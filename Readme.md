@@ -70,7 +70,7 @@ CAD Image       |    Actual Image
 
 CAD Image       |    Actual Image     
 :---------------:|:---------------------:
-<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWVer2.3Image.jpg" style="width: 300px;">
+<img src="./Images/HW2.3CAD.png" style="width: 300px;"><br>|<img src="./Images/HWVer2.3Image.jpg" style="width: 300px;">
  
 
 
@@ -100,7 +100,7 @@ Now if we lay the different types of communications over this picture, you can s
 As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.   
 
 The WCBs can also Broadcast messages.  The thought is that you send a command everywhere, and if the receiving device accepts the command, it acts on it.  Otherwise it would ignore the command.  The GIF below shows the broadcast messages.  
-![til](/Images/ezgif.com-effects.gif)<br><br> <br><br> 
+![til](/Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
 
 
 
