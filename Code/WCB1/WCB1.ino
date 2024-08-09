@@ -90,7 +90,7 @@
 // Used for queing commands so they can be chained without interupting the operations of the WCB
 #include "Queue.h"
 
-
+#include <PololuMaestro.h>
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
@@ -180,11 +180,20 @@
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
+#ifdef KYBER
+  bool KyberEnabled=true;
+#endif
+#ifndef KYBER
+  bool KyberEnabled=false;
+#endif
+
 // Sets up the Preferences to store values after reboot
 Preferences preferences;
 
 // Sets up the queueinig for the incoming commands to process
 Queue<String> queue = Queue<String>();
+
+
 
 //////////////////////////////////////////////////////////////////////
 ///*****       Startup and Loop Variables                     *****///
@@ -228,7 +237,9 @@ bool Boardver2_3 = true;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
-
+MiniMaestro maestro1(s1Serial,0,1,0);
+MiniMaestro maestro2(s1Serial,0,2,0);
+// domeMaestro maestro(s1Serial)
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
@@ -644,13 +655,27 @@ void writeSerialString(String stringData){
 }
 
 void writes1SerialString(String stringData){
-  String completeString = stringData + '\r';
+  if (KyberEnabled == false){
+     String completeString = stringData + '\r';
   for (int i=0; i<completeString.length(); i++)
   {
     s1Serial.write(completeString[i]);
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-
+  } else if(KyberEnabled == true){
+    int maestroCommandLength = stringData.length();
+    String deviceID= stringData.substring(0,1);
+    String SeqeunceIDString = stringData.substring(1,maestroCommandLength+1);
+    int  maestroDevice = deviceID.toInt();
+    uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
+    // s1Serial.write(maestroCommandSequence);
+    if (maestroDevice == 1 || maestroDevice ==3){
+      maestro1.restartScript(maestroCommandSequence);
+    }  
+    if (maestroDevice ==2 || maestroDevice ==3){
+      maestro2.restartScript(maestroCommandSequence);
+    }
+  }
 }
 
 void writes2SerialString(String stringData){

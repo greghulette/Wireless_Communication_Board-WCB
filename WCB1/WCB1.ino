@@ -237,9 +237,7 @@ bool Boardver2_3 = true;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
-MiniMaestro maestro1(s1Serial,0,1,0);
-MiniMaestro maestro2(s1Serial,0,2,0);
-// domeMaestro maestro(s1Serial)
+MiniMaestro maestro(s1Serial);
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
@@ -663,19 +661,13 @@ void writes1SerialString(String stringData){
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
   } else if(KyberEnabled == true){
-    int maestroCommandLength = stringData.length();
-    String deviceID= stringData.substring(0,1);
-    String SeqeunceIDString = stringData.substring(1,maestroCommandLength+1);
-    int  maestroDevice = deviceID.toInt();
-    uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
+    uint8_t maestroCommandSequence = stringData.toInt();
     // s1Serial.write(maestroCommandSequence);
-    if (maestroDevice == 1 || maestroDevice ==3){
-      maestro1.restartScript(maestroCommandSequence);
-    } 
-     if (maestroDevice ==2 || maestroDevice ==3){
-      maestro2.restartScript(maestroCommandSequence);
-    }
+    maestro.restartScript(maestroCommandSequence);
+    
   }
+ 
+
 }
 
 void writes2SerialString(String stringData){
