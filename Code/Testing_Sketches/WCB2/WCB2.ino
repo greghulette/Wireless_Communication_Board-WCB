@@ -654,16 +654,12 @@ void writes1SerialString(String stringData){
 }
 
 void writes2SerialString(String stringData){
-  uint8_t ServoSequenceNumber= stringData.toInt();
   String completeString = stringData + '\r';
-  s2Serial.write(ServoSequenceNumber);
-
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
-
 }
 
 void writes3SerialString(String stringData){
