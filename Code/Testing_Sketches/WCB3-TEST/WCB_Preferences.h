@@ -33,8 +33,8 @@
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
-  #define SERIAL1_DEFAULT_BAUD_RATE 9600
-  #define SERIAL2_DEFAULT_BAUD_RATE 57692 
+  #define SERIAL1_DEFAULT_BAUD_RATE 57692
+  #define SERIAL2_DEFAULT_BAUD_RATE 9600 
   #define SERIAL3_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL4_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL5_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability

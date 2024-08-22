@@ -14,6 +14,7 @@
 #define HWVERSION_2_3               // Run 4 and above with custom board with version 2.2 on the label
 
 #define KYBER
+
     // Uncomment only the board that you are loading this sketch onto. 
     #define WCB1 
     // #define WCB2 
@@ -38,7 +39,7 @@
   #else
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
   #endif
-  #define SERIAL2_DEFAULT_BAUD_RATE 9600 
+  #define SERIAL2_DEFAULT_BAUD_RATE 57692 
   #define SERIAL3_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL4_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL5_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability

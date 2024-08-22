@@ -102,7 +102,7 @@
 
 #include "Queue.h"
 
-
+#include <PololuMaestro.h>
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
@@ -235,7 +235,8 @@ bool Boardver2_3 = true;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
-
+MiniMaestro maestro1(s1Serial,0,1,0);
+MiniMaestro maestro2(s1Serial,0,2,0);
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
@@ -1279,10 +1280,13 @@ void loop(){
                   case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
                         Local_Command[0]   = '\0';
                          break;  //prints out failure rate of ESPNOW
-                  case 6: ; break;  //reserved for future use
-                  case 7: ; break;  //reserved for future use
-                  case 8: ; break;  //reserved for future use                                                         break;  //reserved for future use
-                  case 9: ; break;  //reserved for future use
+                  case 6: maestro1.restartScript(0); break;  //reserved for future use
+                  case 7: maestro2.restartScript(0); break;  //reserved for future use
+                  case 8: maestro1.restartScript(1); break;  //reserved for future use                                                         break;  //reserved for future use
+                  case 9: maestro2.restartScript(1); break;  //reserved for future use
+                  case 10: maestro2.stopScript(); break;
+                  case 11: maestro2.goHome(); break;
+                  case 12: maestro2.restartScriptWithParameter(1, 1000); break;
 
                 }
               }
