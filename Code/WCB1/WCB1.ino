@@ -92,11 +92,41 @@
 
 #include <PololuMaestro.h>
 #include <Stream.h>
+#include "PololuProtocol.h"
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
 //////////////////////////////////////////////////////////////////////
   
+
+
+  size_t bytesReceived;
+char messageBuffer[50];
+uint8_t serialBuffer[5];
+
+
+#define MAX_BYTES 256
+// Array to store the received bytes
+byte receivedBytes[MAX_BYTES];
+String hexString = "";
+String hexData = "";
+unsigned long currentTime;
+unsigned long lastReceiveTime = 0;  // To keep track of the last received time
+const unsigned long timeout = 1;  // 150ms timeout for clearing the data
+
+int byteIndex = 0;  // Index to track where to write next byte
+
+const int maxSegments = 10;  // Maximum number of segments you expect
+String segments[maxSegments];  // Array to store the segments
+int segmentCount = 0;  // Variable to keep track of how many segments were found
+
+
+
+
+
+
+
+
   char inputBuffer[300];
   String inputString;         // a string to hold incoming data
   
@@ -240,9 +270,10 @@ bool Boardver2_3 = true;
   
 MiniMaestro maestro1(s1Serial,0,1,0);
 MiniMaestro maestro2(s1Serial,0,2,0);
+PololuProtocol pololu(s2Serial, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
 // domeMaestro maestro(s1Serial)
 //////////////////////////////////////////////////////////////////////
-///*****            Status LED Variables and settings       *****///
+///*****               Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
   
 // -------------------------------------------------
@@ -664,20 +695,34 @@ void writes1SerialString(String stringData){
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
   } else if(KyberEnabled == true){
-    int maestroCommandLength = stringData.length();
-    String deviceID= stringData.substring(0,1);
-    Debug.DBG("DeviceID = %s", deviceID.c_str());
-    String SeqeunceIDString = stringData.substring(1,maestroCommandLength+1);
-    Debug.DBG(" Sequnce Number: %s\n", SeqeunceIDString.c_str());
-    int  maestroDevice = deviceID.toInt();
-    uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
-    // s1Serial.write(maestroCommandSequence);
-    if (maestroDevice == 1 || maestroDevice ==3){
-      maestro1.restartScript(maestroCommandSequence);
-    }  
-    if (maestroDevice ==2 || maestroDevice ==3){
-      maestro2.restartScript(maestroCommandSequence);
-    }
+    // 
+    int len = stringData.length();
+  
+  // Convert each pair of hex characters to a byte and send it over Serial1
+  for (int i = 0; i < len; i += 2) {
+    String byteString = stringData.substring(i, i + 2); // Get 2 characters at a time
+    byte byteValue = (byte)strtol(byteString.c_str(), NULL, 16); // Convert to byte
+    Serial1.write(byteValue); // Send the byte
+  }
+  
+  Serial.println("Sent hex string: " + stringData); // Print the hex string for debugging
+
+
+
+    // int maestroCommandLength = stringData.length();
+    // String deviceID= stringData.substring(0,2);
+    // Debug.DBG("DeviceID = %s", deviceID.c_str());
+    // String SeqeunceIDString = stringData.substring(2,maestroCommandLength+1);
+    // Debug.DBG(" Sequnce Number: %s\n", SeqeunceIDString.c_str());
+    // int  maestroDevice = deviceID.toInt();
+    // uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
+    // // s1Serial.write(maestroCommandSequence);
+    // if (maestroDevice == 1 || maestroDevice ==3){
+    //   maestro1.restartScript(maestroCommandSequence);
+    // }  
+    // if (maestroDevice ==2 || maestroDevice ==3){
+    //   maestro2.restartScript(maestroCommandSequence);
+    // }
   }
 }
 
@@ -757,37 +802,25 @@ void s1SerialEvent() {
     }
   }
 }
-size_t bytesReceived;
-char messageBuffer[50];
-uint8_t serialBuffer[5];
-
-
-#define MAX_BYTES 256
-// Array to store the received bytes
-byte receivedBytes[MAX_BYTES];
-String hexString = "";
-String hexData = "";
-unsigned long currentTime;
-unsigned long lastReceiveTime = 0;  // To keep track of the last received time
-const unsigned long timeout = 10;  // 150ms timeout for clearing the data
-
-int byteIndex = 0;  // Index to track where to write next byte
 
 void s2SerialEvent() {
- if (Serial2.available() > 0) {
-    // Read the incoming byte from Serial2
-    int incomingByte = Serial2.read();
+//  if (Serial2.available() > 0) {
+//     // Read the incoming byte from Serial2
+//     int incomingByte = Serial2.read();
     
-    // Convert the byte to a two-character hex string
-    char hexString[3];
-    sprintf(hexString, "%02X,", incomingByte);
+//     // Convert the byte to a two-character hex string
+//     char hexString[3];
+//     sprintf(hexString, "%02X", incomingByte);
     
-    // Append the hex string to the accumulated hex data
-    hexData += String(hexString);
+//     if (hexData.length() > 0) {
+//       hexData += ",";  // Add a comma before appending new data if hexData is not empty
+//     }
+//     // Append the hex string to the accumulated hex data
+//     hexData += String(hexString);
     
-    // Update the last receive time
-    lastReceiveTime = millis();
-  }
+//     // Update the last receive time
+//     lastReceiveTime = millis();
+//   }
 }
 
 void s3SerialEvent() {
@@ -850,15 +883,96 @@ void resetSerialCommand(){
 
 }
 
+
+
 void processKyberCommand(){
-  unsigned long currentTime = millis();
-  if (currentTime - lastReceiveTime >= timeout && hexData.length() > 0) {
-    // Print the final concatenated hex string to the serial monitor
-    Serial.println(hexData);
-    queue.push(hexData);
-    // Clear the hexData string after timeout
-    hexData = "";
+  if (pololu.commandRecieved == true){
+    Serial.println("Processing Maestro Command");
+    Serial.print(pololu.maestraoStartBit, HEX);
+    Serial.print(pololu.maestroDeviceID, HEX);
+    Serial.print(pololu.maestroCommandByte, HEX);
+    Serial.println(pololu.maestroSequence, HEX);
+    if (pololu.maestroDeviceID == 0x01){
+       s1Serial.write(pololu.maestraoStartBit);
+    s1Serial.write(pololu.maestroDeviceID);
+    s1Serial.write(pololu.maestroCommandByte);
+    s1Serial.write(pololu.maestroSequence);
+    } else if (pololu.maestroDeviceID == 0x02){
+      Serial.println("second maestro");
+        uint8_t hex1 = pololu.maestraoStartBit;
+        uint8_t hex2 = pololu.maestroDeviceID;
+        uint8_t hex3 = pololu.maestroCommandByte;
+        uint8_t hex4 = pololu.maestroSequence;
+        
+        String combinedString = String();
+      
+        combinedString += String(hex1 < 16 ? "0" : "") + String(hex1, HEX);
+        combinedString += String(hex2 < 16 ? "0" : "") + String(hex2, HEX);
+        combinedString += String(hex3 < 16 ? "0" : "") + String(hex3, HEX);
+        combinedString += String(hex4 < 16 ? "0" : "") + String(hex4, HEX);
+        
+        combinedString.toUpperCase(); // Ensure uppercase
+        Serial.println(combinedString);
+      combinedString.toUpperCase(); // To ensure the string is in uppercase
+      Serial.println(combinedString);
+      queue.push(combinedString);
+
+
+
+
+    }
+   
+    pololu.commandRecieved = false;
   }
+  // unsigned long currentTime = millis();
+  // if (currentTime - lastReceiveTime >= timeout && hexData.length() > 0) {
+  //   // Print the final concatenated hex string to the serial monitor
+  //   String data = hexData;
+
+  //   // Variable to store each part of the string
+  //   String part;
+
+  //   // Loop to keep splitting the string until all parts are processed
+  //   while (data.length() > 0 && segmentCount < maxSegments) {
+  //     int index = data.indexOf(',');  // Find the index of the first comma
+
+  //     // If there's a comma, extract the substring
+  //     if (index != -1) {
+  //       part = data.substring(0, index);
+  //       data = data.substring(index + 1);
+  //     } else {
+  //       part = data;  // If no more commas, take the rest of the string
+  //       data = "";    // Clear the string to exit the loop
+  //     }
+
+  //     // Store each part into the array
+  //     segments[segmentCount] = part;
+  //     segmentCount++;
+
+  //     // Serial.println(hexData);
+   
+  //     // Clear the hexData string after timeout
+  //     // hexData = "";
+     
+  //   }
+  //   Serial.print("Segment 1: ");Serial.println(segments[0]);
+  //   Serial.print("Segment 2: ");Serial.println(segments[1]);
+  //   Serial.print("Segment 3: ");Serial.println(segments[2]);
+  //   Serial.print("Segment 4: ");Serial.println(segments[3]);
+  //   Serial.print("Segment 5: ");Serial.println(segments[4]);
+  //   String startOfCommand = segments[0];
+  //   String DeviceIDString = segments[1];
+  //   String MaestroCommand = segments[2];
+  //   String SequenceIDString1 = segments[3];
+  //   queue.push(startOfCommand+DeviceIDString+MaestroCommand+SequenceIDString1);
+  
+  // for (int i = 0; i < segmentCount; i++) {
+  //   segments[i] = "";  // Clear each element in the array
+  // }
+  //     segmentCount=0;
+       
+  // }
+  
 }
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
@@ -868,7 +982,7 @@ void processSerial(String incomingSerialCommand){
   serialResponse.toCharArray(buf, sizeof(buf));
   char *p = buf;
   char *str;
-  while ((str = strtok_r(p,"*", &p)) !=NULL){
+  while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
   s1 = String(str);
   // Serial.println(s1);
   queue.push(s1);
@@ -1049,7 +1163,7 @@ void setup(){
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
-
+  pololu.begin(57692);
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
@@ -1261,7 +1375,7 @@ if (WCB_Quantity >= 9 ){
 
 
 void loop(){
-
+  pololu.processCommands();  // Continuously process incoming commands
   processKyberCommand();
   // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
@@ -1489,6 +1603,7 @@ void loop(){
       serialBroadcastCommand = "";
       String serialResponse;
        hexData = "";
+       segmentCount=0;
     
       // reset Local ESP Command Variables
       int espCommandFunction;

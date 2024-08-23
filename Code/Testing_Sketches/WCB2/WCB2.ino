@@ -663,20 +663,31 @@ void writes1SerialString(String stringData){
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
   } else if(KyberEnabled == true){
-    int maestroCommandLength = stringData.length();
-    String deviceID= stringData.substring(0,1);
-    Debug.DBG("DeviceID = %s", deviceID.c_str());
-    String SeqeunceIDString = stringData.substring(1,maestroCommandLength+1);
-    Debug.DBG(" Sequnce Number: %s\n", SeqeunceIDString.c_str());
-    int  maestroDevice = deviceID.toInt();
-    uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
-    // s1Serial.write(maestroCommandSequence);
-    if (maestroDevice == 1 || maestroDevice ==3){
-      maestro1.restartScript(maestroCommandSequence);
-    }  
-    if (maestroDevice ==2 || maestroDevice ==3){
-      maestro2.restartScript(maestroCommandSequence);
-    }
+        int len = stringData.length();
+  
+  // Convert each pair of hex characters to a byte and send it over Serial1
+  for (int i = 0; i < len; i += 2) {
+    String byteString = stringData.substring(i, i + 2); // Get 2 characters at a time
+    byte byteValue = (byte)strtol(byteString.c_str(), NULL, 16); // Convert to byte
+    Serial1.write(byteValue); // Send the byte
+  }
+  
+  Serial.println("Sent hex string: " + stringData); // Print the hex string for debugging
+
+    // int maestroCommandLength = stringData.length();
+    // String deviceID= stringData.substring(0,2);
+    // Debug.DBG("DeviceID = %s", deviceID.c_str());
+    // String SeqeunceIDString = stringData.substring(2,maestroCommandLength+1);
+    // Debug.DBG(" Sequnce Number: %s\n", SeqeunceIDString.c_str());
+    // int  maestroDevice = deviceID.toInt();
+    // uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
+    // // s1Serial.write(maestroCommandSequence);
+    // if (maestroDevice == 1 || maestroDevice ==3){
+    //   maestro1.restartScript(maestroCommandSequence);
+    // }  
+    // if (maestroDevice ==2 || maestroDevice ==3){
+    //   maestro2.restartScript(maestroCommandSequence);
+    // }
   }
 }
 

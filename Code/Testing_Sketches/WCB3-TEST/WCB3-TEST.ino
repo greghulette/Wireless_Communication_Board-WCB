@@ -792,7 +792,7 @@ void processSerial(String incomingSerialCommand){
   serialResponse.toCharArray(buf, sizeof(buf));
   char *p = buf;
   char *str;
-  while ((str = strtok_r(p,"*", &p)) !=NULL){
+  while ((str = strtok_r(p,DELIMITER, &p)) !=NULL){
   s1 = String(str);
   // Serial.println(s1);
   queue.push(s1);
@@ -1286,7 +1286,7 @@ void loop(){
                   case 9: maestro2.restartScript(1); break;  //reserved for future use
                   case 10: maestro2.stopScript(); break;
                   case 11: maestro2.goHome(); break;
-                  case 12: maestro2.restartScriptWithParameter(1, 1000); break;
+                  case 12: maestro2.restartScriptWithParameter(1, 1500); break;
 
                 }
               }
