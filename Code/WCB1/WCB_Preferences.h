@@ -13,7 +13,7 @@
 // #define HWVERSION_2_1               // Run 3 with custom board with version 2.1 on the label
 #define HWVERSION_2_3               // Run 4 and above with custom board with version 2.2 on the label
 
-#define KYBER
+#define MAESTRO
 
     // Uncomment only the board that you are loading this sketch onto. 
     #define WCB1 
@@ -34,7 +34,7 @@
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
-  #ifdef KYBER 
+  #ifdef MAESTRO 
   #define SERIAL1_DEFAULT_BAUD_RATE 57692
   #else
   #define SERIAL1_DEFAULT_BAUD_RATE 9600

@@ -211,11 +211,11 @@ int segmentCount = 0;  // Variable to keep track of how many segments were found
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
-#ifdef KYBER
-  bool KyberEnabled=true;
+#ifdef MAESTRO
+  bool maestroEnabled=true;
 #endif
-#ifndef KYBER
-  bool KyberEnabled=false;
+#ifndef MAESTRO
+  bool maestroEnabled=false;
 #endif
 
 // Sets up the Preferences to store values after reboot
@@ -687,14 +687,14 @@ void writeSerialString(String stringData){
 }
 
 void writes1SerialString(String stringData){
-  if (KyberEnabled == false){
+  if (maestroEnabled == false){
      String completeString = stringData + '\r';
   for (int i=0; i<completeString.length(); i++)
   {
     s1Serial.write(completeString[i]);
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-  } else if(KyberEnabled == true){
+  } else if(maestroEnabled == true){
     // 
     int len = stringData.length();
   
@@ -885,7 +885,7 @@ void resetSerialCommand(){
 
 
 
-void processKyberCommand(){
+void processmaestroCommand(){
   if (pololu.commandRecieved == true){
     Serial.println("Processing Maestro Command");
     Serial.print(pololu.maestraoStartBit, HEX);
@@ -1376,7 +1376,7 @@ if (WCB_Quantity >= 9 ){
 
 void loop(){
   pololu.processCommands();  // Continuously process incoming commands
-  processKyberCommand();
+  processmaestroCommand();
   // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
     if(s1Serial.available()){s1SerialEvent();}

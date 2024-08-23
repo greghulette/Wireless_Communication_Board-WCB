@@ -180,11 +180,11 @@
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
-#ifdef KYBER
-  bool KyberEnabled=true;
+#ifdef MAESTRO
+  bool maestroEnabled=true;
 #endif
-#ifndef KYBER
-  bool KyberEnabled=false;
+#ifndef MAESTRO
+  bool maestroEnabled=false;
 #endif
 
 // Sets up the Preferences to store values after reboot
@@ -655,14 +655,14 @@ void writeSerialString(String stringData){
 }
 
 void writes1SerialString(String stringData){
-  if (KyberEnabled == false){
+  if (maestroEnabled == false){
      String completeString = stringData + '\r';
   for (int i=0; i<completeString.length(); i++)
   {
     s1Serial.write(completeString[i]);
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-  } else if(KyberEnabled == true){
+  } else if(maestroEnabled == true){
         int len = stringData.length();
   
   // Convert each pair of hex characters to a byte and send it over Serial1
