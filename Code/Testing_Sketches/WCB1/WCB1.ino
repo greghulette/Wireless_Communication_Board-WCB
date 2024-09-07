@@ -204,27 +204,17 @@ Queue<String> queue = Queue<String>();
 bool BoardVer1 = true;
 bool BoardVer2_1 = false;
 bool Boardver2_3 = false;
-bool Boardver2_4 = false;
 
 #elif defined HWVERSION_2_1
 bool BoardVer1 = false;
-
 bool BoardVer2_1 = true;
-
 bool Boardver2_3 = false;
-bool Boardver2_4 = false;
 
 #elif defined HWVERSION_2_3
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
 bool Boardver2_3 = true;
-bool Boardver2_4 = false;
 
-#elif defined HWVERSION_2_4
-bool BoardVer1 = false;
-bool BoardVer2_1 = false;
-bool Boardver2_3 = false;
-bool Boardver2_4 = true;
 #endif
  
 //////////////////////////////////////////////////////////////////
@@ -793,10 +783,9 @@ void processSerial(String incomingSerialCommand){
   serialResponse.toCharArray(buf, sizeof(buf));
   char *p = buf;
   char *str;
-  while ((str = strtok_r(p, DELIMITER, &p)) !=NULL){
+  while ((str = strtok_r(p,"*", &p)) !=NULL){
   s1 = String(str);
   // Serial.println(s1);
-  ESPNOWBroadcastCommand = false;
   queue.push(s1);
   };
   turnOffLED();
@@ -816,19 +805,19 @@ void processSerial(String incomingSerialCommand){
 void turnOnLEDESPNOW(){
 if (BoardVer1){
   digitalWrite(ONBOARD_LED, HIGH); 
-  } else if (BoardVer2_1 || Boardver2_3 || Boardver2_4){
+  } else if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", green, 255);
   }
 }  // Turns om the onboard Green LED
 
 void turnOnLEDSerial(){
-  if (BoardVer2_1 || Boardver2_3 || Boardver2_4){
+  if (BoardVer2_1 || Boardver2_3){
     colorWipeStatus("ES", red, 255);
   }
 }  
 
 void turnOnLEDSerialOut(){
-  if (BoardVer2_1 ||  Boardver2_3 || Boardver2_4){
+  if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", orange, 255);
   }
 }  
@@ -836,7 +825,7 @@ void turnOnLEDSerialOut(){
 void turnOffLED(){
   if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
-  } else if (BoardVer2_1 ||  Boardver2_3 || Boardver2_4){
+  } else if (BoardVer2_1 ||  Boardver2_3){
     colorWipeStatus("ES", blue, 10);
   }
 }
@@ -981,13 +970,11 @@ void setup(){
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
   Serial.print("FW Version: "); Serial.println(version);
   #ifdef HWVERSION_1
-    Serial.println("HW Version 1.0");
+  Serial.println("HW Version 1.0");
   #elif defined HWVERSION_2_1
-    Serial.println("HW Version 2.1");
-  #elif defined HWVERSION_2_3
-    Serial.println("HW Version 2.3");
-  #elif defined HWVERSION_2_4
-    Serial.println("HW Version 2.4");
+  Serial.println("HW Version 2.1");
+    #elif defined HWVERSION_2_3
+  Serial.println("HW Version 2.3");
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i, Brdcst Enabled: %s\nSerial 2 Baudrate: %i, Brdcst Enabled: %s\nSerial 3 Baudrate: %i, Brdcst Enabled: %s\n"
@@ -1220,7 +1207,7 @@ void loop(){
       inputString.toCharArray(inputBuffer, 300);inputString="";}
 
     else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
-      if (inputBuffer[0] == LocalFunctionIdentifier){
+      if (inputBuffer[0] == '#'){
         if (
             inputBuffer[1]=='B' ||          // Command deignator for changing Broadcast for specific port
             inputBuffer[1]=='b' ||          // Command deignator for changing Broadcast for specific port

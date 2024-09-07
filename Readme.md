@@ -100,7 +100,9 @@ Now if we lay the different types of communications over this picture, you can s
 As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.   
 
 The WCBs can also Broadcast messages.  The thought is that you send a command everywhere, and if the receiving device accepts the command, it acts on it.  Otherwise it would ignore the command.  The GIF below shows the broadcast messages.  
-![til](/Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
+![til](/Images/NetworkBroadcastGIF.gif)<br><br> 
+
+This was designed to allow the Kyber, and now the stealth to send updates to the HCR without having to know if the HCR was plugged directly into it. 
 
 
 
@@ -127,8 +129,9 @@ The following lists out possible commands for local use.
 
     #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
-        yyyy: any valid baud rate that the IDE can be set at.  
-    #SC   - Clears all stored baud rates.  Will revert to the rates defined in the sketch.
+        yyyy: any valid baud rate that the IDE can be set at.
+            y: if you use only a single digit of a 0 or 1, you can disable or enable broadcast for a specific port.    
+    #SC   - Clears all stored baud rates and broadcast preferences.  Will revert to the values defined in the sketch preferences.
 
     #E(xxxx)  - Allows you to change the ESP-NOW password
     #ECLEAR   - Clears the stored ESP-NOW password and reverts to the password defined in the sketch
@@ -142,38 +145,54 @@ The following is the syntax for sending commands
 
 ### Wireless Communication Command Syntax
 
-    :W(x):S(y)(zzzzz....)
+**** <b>Updated commands used in version 3.0 of the code *****</b>
+
+    ;W(x);S(y)(zzzzz....)
     
     x: 1-9 : Target WCB's number.  If sending to WCB2, enter 2
     y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
     zzzz.... : String to send to end device
 
     Examples
-    :W3:S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
-    :W2:S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
+    ;W3;S4:PP100  : This would send the string ":PP100" to WCB3, and out it's Serial 4 port
+    ;W2;S2#SD0    : This would send the string "#SD0" to WCB2, and out it's Serial 2 port
 
 ### Serial Communications Command Syntax
 
-    :S(y)(zzzzz....)
+    ;S(y)(zzzzz....)
 
     y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
     zzzz.... : String to send to end device
 
     Examples
-    :S4:PP100  : This would send the string ":PP100" out it's local Serial 4 port
-    :S2#SD0    : This would send the string "#SD0" out it's local Serial 2 port
+    ;S4:PP100  : This would send the string ":PP100" out it's local Serial 4 port
+    ;S2#SD0    : This would send the string "#SD0" out it's local Serial 2 port
+
+### Broadcast Operations
+
+In order to broadcast messages, you simply leave off the ;Wx;Sx part of the command.  When the WCB receives a command that does not use the ;Wx or ;Sx, it knows to send it out to every serial port, besides the one it received the command on, and to every WCB.  The receiving WCBs will then forward it out all of it's serial ports. 
+ 
+
+
 
 ### Chaining Commands:
 You can chain commands together and have the WCB process those commands one after another.  You can do this by adding a "*" in between different commands in the string.
 
 Example:<br>
     
-    :W3:S4:PP100*:W3:S2#SD0*:W3:S1:PDA180
+    Unicast Style
+
+    ;W3;S4:PP100*;W3;S2#SD0*;W3;S1:PDA180
+
+    Broadcast Style:
+
+    :PP100*#SD0*:PDA180
 
 The command would take that string and break it into 3 different commands and process them immediately.  There is only a few millisecond delay between each command.
-1. :W3:S4:PP100
-2. :W3:S2#SD0
-3. :W3:S1:PDA180
+1. ;W3;S4:PP100
+2. ;W3;S2#SD0
+3. ;W3;S1:PDA180
+4. 
 
 There can be a maximum of 10 chained commands by default, but this can be changed in the sketch in the WCB_Preferences.h tab.
 
@@ -309,19 +328,17 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 
         ----------------------------------------
         Booting up the Wireless Communication Board 1 (W1)
-        FW Version: V2.1
-        HW Version 2.1
+        FW Version: V3.0
+        HW Version 2.4
         ----------------------------------------
-        Serial 1 Baudrate: 9600 
-        Serial 2 Baudrate: 9600
-        Serial 3 Baudrate: 9600 
-        Serial 4 Baudrate: 9600 
-        Serial 5 Baudrate: 9600 
-        ESPNOW Password: ESPNOW_xxxxxxxxx 
-        Quantity of WCB's in system: 3 
-        2nd Octet: 0x01: 
-        3rd Octet: 0x00:
-        Local MAC address = 02:01:00:00:00:01
+        Serial 1 Baudrate: 9600, Brdcst Enabled: True
+        Serial 2 Baudrate: 9600, Brdcst Enabled: True
+        Serial 3 Baudrate: 9600, Brdcst Enabled: True
+        Serial 4 Baudrate: 9600, Brdcst Enabled: True
+        Serial 5 Baudrate: 9600, Brdcst Enabled: True
+        ESPNOW Password: ESPNOW_gisle 
+        Quantity of WCB's in system: 3
+        Local MAC address = 02:1D:00:00:00:01
         Startup complete
         Starting main loop
 
@@ -439,7 +456,7 @@ V1.0      |    V2.1
 
 <br><br>
 # Ordering
-If you are an astromech user, head over to this thread to order them.
+If you are an astromech.net user, head over to this thread to order them.
 
 [Astromech.net forum post to order](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
 
