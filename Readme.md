@@ -1,5 +1,6 @@
 <h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Wireless Communication Board (WCB)</h1>
 
+# Software 3.0 release changes the command structure.  Please read below to ensure proper operations.
 
 ## Description/Purpose
 
@@ -217,12 +218,12 @@ Other than that change, you can set up the Stealth's config.txt file to send out
     b=3,5,1
     g=454,5,2
 
-    a=:W3:S1:PP100
-    a=:W2:S2:SE00
+    a=;W3;S1:PP100
+    a=;W2;S2:SE00
 
-The b=3,5,1 assigns button 3's action to send a string out the serial port, designated by the 5 in the command, and to send the first string, designated by the 1 in the command. The 1st string in this example is ":W3:S1:PP100"
+The b=3,5,1 assigns button 3's action to send a string out the serial port, designated by the 5 in the command, and to send the first string, designated by the 1 in the command. The 1st string in this example is ";W3;S1:PP100"
 
-The g=454,5,2 assigns the gesture 454(left twice) to send a string out the serial port, and to send the 2nd string.  The string in this example is ":W2:S2:SE00<br>
+The g=454,5,2 assigns the gesture 454(left twice) to send a string out the serial port, and to send the 2nd string.  The string in this example is ";W2;S2:SE00<br>
 
 This is a more comprehensive list of gestures and buttons as an example:
 
@@ -254,7 +255,7 @@ This is a more comprehensive list of gestures and buttons as an example:
     a=;W2;S1:SE00
     a=;W2;S1:SE01
     a=:SE02
-    a=:W2;S1:SE03
+    a=;W2;S1:SE03
     a=:PS1
     a=;S1:PS2
     a=;S1:PS3
@@ -263,7 +264,7 @@ This is a more comprehensive list of gestures and buttons as an example:
     a=;W3;S5:LM052
   
 
-In this example, button 3 would make the Stealth send the string ":W3:S3:PDA0" out it's serial port.  The WCB would accept that command and forward the string ":PDA0" out the WCB3's Serial 3 port. <br><br> <br><br> 
+In this example, button 3 would make the Stealth send the string ";W3;S3:PDA0" out it's serial port.  The WCB would accept that command and forward the string ":PDA0" out the WCB3's Serial 3 port. <br><br> <br><br> 
 
 ----
 ## Code Preferences/Changes Needed
@@ -403,7 +404,7 @@ Here is the first example:
 
     ;S5;S1:PS1
 
-In this example, WCB1 will receive the full command, act on the first serial section ":S5" and then forward everything else (:S1:PS1) onto its Serial 5 port.  Then WCB2 receives ":S1:PS1" and then processes the serial section, ":S1" and then forwards the rest of the command, (:PS1) out Serial 1.  In this instance towards the Uppity Spinner.  
+In this example, WCB1 will receive the full command, act on the first serial section ";S5" and then forward everything else (;S1:PS1) onto its Serial 5 port.  Then WCB2 receives ";S1:PS1" and then processes the serial section, ";S1" and then forwards the rest of the command, (:PS1) out Serial 1.  In this instance towards the Uppity Spinner.  
 
 Here is the second example: 
 
