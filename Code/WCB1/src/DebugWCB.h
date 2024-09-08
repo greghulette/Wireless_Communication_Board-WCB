@@ -12,13 +12,13 @@
 class debugClass {
   public:
   // Flags to enable/disable debugging in runtime
-    bool debugflag = 1;  // Used for optional level of debuging
-    bool debugflag1 = 1;  // Used for optional level of debuging
-    bool debugflag2 = 1;  // Used for optional level of debuging
-    bool debugflag_espnow = 1;
+    bool debugflag = 0;  // Used for optional level of debuging
+    bool debugflag1 = 0;  // Used for optional level of debuging
+    bool debugflag2 = 0;  // Used for optional level of debuging
+    bool debugflag_espnow = 0;
     bool debugflag_servo = 0;
-    bool debugflag_serial_event = 1;
-    bool debugflag_loop = 1;
+    bool debugflag_serial_event = 0;
+    bool debugflag_loop = 0;
     bool debugflag_http = 0;
     bool debugflag_lora = 0;
     bool debugflag_json = 0;

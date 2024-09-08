@@ -73,10 +73,10 @@
 #include <esp_now.h>
 
 //pin definitions
-#include "wcb_pin_map.h"
+#include "./src/wcb_pin_map.h"
 
 // Debuging Functions  - Using my own library for this.  This should be in the same folder as this sketch.
-#include "DebugWCB.h" 
+#include "./src/DebugWCB.h"
 
 // Used for Software Serial to allow more serial port capacity
 #include <SoftwareSerial.h>                 //EspSoftwareSerial by Dirk Kaar, Peter Lerup Library
@@ -88,7 +88,7 @@
 #include <Adafruit_NeoPixel.h>                 // Adafruit NeoPixel by Adafruit Library
 
 // Used for queing commands so they can be chained without interupting the operations of the WCB
-#include "Queue.h"
+#include "./src/Queue.h"
 
 
 
@@ -961,14 +961,6 @@ void setup(){
   preferences.begin("Password", false);
     ESPNOWPASSWORD = preferences.getString( "DPASS", DEFAULT_ESPNOWPASSWORD);          
   preferences.end(); 
-
-  // preferences.begin("Broadcast-Port-Enabled", false);
-  //   bool SERIAL1_BROADCAST_ENABLE = preferences.getBool("S1BDCST", SERIAL1_BROADCAST_DEFAULT);
-  //   bool SERIAL2_BROADCAST_ENABLE = preferences.getBool("S2BDCST", SERIAL2_BROADCAST_DEFAULT);
-  //   bool SERIAL3_BROADCAST_ENABLE = preferences.getBool("S3BDCST", SERIAL3_BROADCAST_DEFAULT);
-  //   bool SERIAL4_BROADCAST_ENABLE = preferences.getBool("S4BDCST", SERIAL4_BROADCAST_DEFAULT);
-  //   bool SERIAL5_BROADCAST_ENABLE = preferences.getBool("S5BDCST", SERIAL5_BROADCAST_DEFAULT);
-  // preferences.end();
 
   s1Serial.begin(SERIAL1_BAUD_RATE,SERIAL_8N1,SERIAL1_RX_PIN,SERIAL1_TX_PIN);
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  

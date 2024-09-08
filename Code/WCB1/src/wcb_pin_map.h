@@ -1,7 +1,7 @@
 //////////////////////////////// 
 // Wireless Communincation Board (WCB) Pinout
 //////////////////////////////// 
-#include "WCB_Preferences.h"
+#include "../WCB_Preferences.h"
 
 #ifndef wcb_pin_map.h
 #define wcb_pin_map.h
