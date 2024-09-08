@@ -108,7 +108,7 @@ This was designed to allow the Kyber, and now the stealth to send updates to the
 
 ---
 ## Command Syntax
-I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "#" and the execution commands start with ":".  <br>
+I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "?" and the execution commands start with ";".  <br>
 
 
 <br>
@@ -117,27 +117,27 @@ The following lists out possible commands for local use.
 
  <br>
 
-    #L01        - Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
-    #L02        - Restarts the ESP32
-    #L05        - Displays ESP-NOW statistics
+    ?L01        - Displays the local hostname.  Useful to identify which board you are looking at in the serial monitor
+    ?L02        - Restarts the ESP32
+    ?L05        - Displays ESP-NOW statistics
 
-    #DESPNOW    - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
-    #DSERIAL    - Toggles the serial debugging to allow you to debug serial related functions
-    #DLOOP      - Toggles the loop debugging to allow you to debug the main loop
-    #DON        - Enable all debugging
-    #DOFF       - Disables all debugging
+    ?DESPNOW    - Toggles the ESPNOW debugging to allow you to debug ESPNOW related functions
+    ?DSERIAL    - Toggles the serial debugging to allow you to debug serial related functions
+    ?DLOOP      - Toggles the loop debugging to allow you to debug the main loop
+    ?DON        - Enable all debugging
+    ?DOFF       - Disables all debugging
 
-    #S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
+    ?S(x)(yyyy) - Allows you to change the baud rate of a serial port.  Persists after reboot.
         x: 1-5 : Serial port 1-5
         yyyy: any valid baud rate that the IDE can be set at.
             y: if you use only a single digit of a 0 or 1, you can disable or enable broadcast for a specific port.    
-    #SC   - Clears all stored baud rates and broadcast preferences.  Will revert to the values defined in the sketch preferences.
+    ?SC   - Clears all stored baud rates and broadcast preferences.  Will revert to the values defined in the sketch preferences.
 
-    #E(xxxx)  - Allows you to change the ESP-NOW password
-    #ECLEAR   - Clears the stored ESP-NOW password and reverts to the password defined in the sketch
+    ?E(xxxx)  - Allows you to change the ESP-NOW password
+    ?ECLEAR   - Clears the stored ESP-NOW password and reverts to the password defined in the sketch
 
-    #Q(y)     - Allows you to change the WCB quantity
-    #Q0        - Clears the stored WCB quantity and reverts to the value stored in the sketch.
+    ?Q(y)     - Allows you to change the WCB quantity
+    ?Q0        - Clears the stored WCB quantity and reverts to the value stored in the sketch.
 
 
 <br>
@@ -170,7 +170,7 @@ The following is the syntax for sending commands
 
 ### Broadcast Operations
 
-In order to broadcast messages, you simply leave off the ;Wx;Sx part of the command.  When the WCB receives a command that does not use the ;Wx or ;Sx, it knows to send it out to every serial port, besides the one it received the command on, and to every WCB.  The receiving WCBs will then forward it out all of it's serial ports. 
+In order to broadcast messages, you simply leave off the ;Wx;Sy part of the command.  When the WCB receives a command that does not use the ;Wx or ;Sx, it knows to send it out to every serial port, besides the one it received the command on, and to every WCB.  The receiving WCBs will then forward it out all of it's serial ports. 
  
 
 
@@ -180,11 +180,11 @@ You can chain commands together and have the WCB process those commands one afte
 
 Example:<br>
     
-    Unicast Style
+    Unicast:
 
     ;W3;S4:PP100*;W3;S2#SD0*;W3;S1:PDA180
 
-    Broadcast Style:
+    Broadcast:
 
     :PP100*#SD0*:PDA180
 
@@ -192,7 +192,6 @@ The command would take that string and break it into 3 different commands and pr
 1. ;W3;S4:PP100
 2. ;W3;S2#SD0
 3. ;W3;S1:PDA180
-4. 
 
 There can be a maximum of 10 chained commands by default, but this can be changed in the sketch in the WCB_Preferences.h tab.
 
@@ -204,13 +203,13 @@ I have tested the following characters (& * ^ . - ) but do not see why others wo
 <br>
 
 ## Stealth Users
-The Stealth users should note that the Stealth uses the character ":" to break up a string when it's executing a function with a string. Myself and many builders also use the ":" in their command syntax and this can cause a complication.  There is an easy solution that can be implemented on the Stealth to combat this.  All you will need to do is change the delimiter that it uses to break up its string.  Add this line towards the top of your config.txt file to accomplish this.
+The Stealth users should note that the Stealth uses the character ":" to break up a string when it's executing a function with a string. Many builders also use the ":" in their command syntax and this can cause a complication.  There is an easy solution that can be implemented on the Stealth to combat this.  All you will need to do is change the delimiter that it uses to break up its string.  Add this line towards the top of your config.txt file to accomplish this.
 
 <br>
 
-    auxdelim=;
+    auxdelim=!
 
-You can change the ";" to another character if that interferes with something in your system.
+You can change the "!" to another character if that interferes with something in your system.
 
 Other than that change, you can set up the Stealth's config.txt file to send out strings via the serial command like normal.  
 
@@ -246,22 +245,22 @@ This is a more comprehensive list of gestures and buttons as an example:
     g=45454,5,9
     g=65656,5,10
     g=25252,5,11
-    a=:W2:S1:PP100
-    a=:W2:S1:PH
-    a=:W2:S1:PS1
-    a=:W2:S1:PS2
-    a=:W2:S1:PS4
-    a=:W2:S2:SE00
-    a=:W2:S1:SE00
-    a=:W2:S1:SE01
-    a=:W2:S1:SE02
-    a=:W2:S1:SE03
-    a=:W2:S1:PS1
-    a=:S1:PS2
-    a=:S1:PS3
-    a=:S1:PDA0
-    a=:W3:S3:PDA0
-    a=:W3:S5:LM052
+    a=;W2;S1:PP100
+    a=;W2;S1:PH
+    a=;W2;S1:PS1
+    a=;W2;S1:PS2
+    a=;W2;S1:PS4
+    a=;W2;S2:SE00
+    a=;W2;S1:SE00
+    a=;W2;S1:SE01
+    a=:SE02
+    a=:W2;S1:SE03
+    a=:PS1
+    a=;S1:PS2
+    a=;S1:PS3
+    a=;S1:PDA0
+    a=;W3;S3:PDA0
+    a=;W3;S5:LM052
   
 
 In this example, button 3 would make the Stealth send the string ":W3:S3:PDA0" out it's serial port.  The WCB would accept that command and forward the string ":PDA0" out the WCB3's Serial 3 port. <br><br> <br><br> 
@@ -278,7 +277,7 @@ There are some things to change to the code before uploading to the WCB.   <br>
 1. Uncomment out the HW Version of board that you are using.  Only have 1 board uncommented at a time
 2. Uncomment out the WCB Number board that you are loading this sketch onto.  Only have 1 board uncommented at a time
 3. Serial Baud Rate of each of your serial ports.  This is only valid if you did not change
-    your baud rate from the command line.  Once it is changed via the command (#Sxyyyy), 
+    your baud rate from the command line.  Once it is changed via the command (?Sxyyyy), 
     the correct value is shown on bootup and the value in this code is no longer accurate.  
     The value stored in the ESP32 will persist even after you upload the code again and 
     changing this value will not affect the baud rate stored in the ESP32.
@@ -288,21 +287,29 @@ There are some things to change to the code before uploading to the WCB.   <br>
 2. Change the ESPNOW password. This should be unique to your droid and prevents others with the same system from sending your droid commands if they didn't change their password.  (There is a 40 character limit on the password)
 3. Change the umac_oct2 variable.  This represents the second octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each other's MAC address.  
 4. Change the umac_oct3 variable.  This represents the third octet of the MacAddress that the ESP-NOW protocol uses.  By changing this, you ensure that your WCB's will not communicate with other WCBs since they will not know each others MAC address. Adding this octet to the uniqueness of the MAC address give more chances that there will not be another droid with your same mac address. 
-5. Optionally change the max number of chained commands 
-6. Optionally change the delimiter to be the same across all boards 
-7. Optionally change the character that is used to designate a command.  By default, it is ":", but can be changed if that interferes with other boards.
+5. Optionally change the delimiter to be the same across all boards 
+6. Optionally change the character that is used to designate a command.  By default, it is ";", but can be changed if that interferes with other boards.
+7. Optionally change the character that is used to designate local commands.  By default it is "?", but can be changed if that interferes with other boards
 
 As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 57600.  These serial ports are using software serial and are more reliable at the slower speeds.  I personally run he baud-rate of 9600 on them whenever I use them.  
 <br><br> 
 
 ## Loading the sketches onto the WCB
 
+### USB Driver: 
+If you don't see the WCB when you plug it into your computer, you may have to install the driver for the CP210x driver.  You can find it [here.](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers?tab=downloads)
+
+### Libraries to install:
+Adafruit Neo Pixel Library
+<br>SoftwareSerial.h by Dirk Kaar, Peter Lerup Library
+
+<br>
 <p>All the boards will come loaded with unique preferences as listed above to ensure you won't interfere with other users, but if you want to configure them for yourselves, please follow these steps to create your own set of files for your board with your own saved preferences. If you are adding more WCB's into your system at a later date, you can obtain all the necessary values to input into your code by watching your current WCBs boot up.</p> 
 <p> In the code folder, you will only see the WCB1 folder.  This is the starting point for all the other boards.  I could have put up 9 folders, but then you would have to change the preferences in all 9 files, and could create a problem if some items don't match exactly.  This method should avoid that problem.  </p>
 
 1. Download the Repository to your computer by selecting the pulldown arrow in the green "Code" button on the top of this page, then select "Download Zip".  
 2. Unzip the file
-3. Open Code Folder, then WCB1 Folder, then the WCB1.ino file. (Make sure there are 6 files in this folder)
+3. Open Code Folder, then WCB1 Folder, then the WCB1.ino file. (Make sure there are 2 files in this folder and the folder called "src")
 4. Edit the sketch preferences as mentioned above and save the file.
 5. Copy the WCB1 folder and rename it to WCB2, or WCB3, ...
 6. Rename the WCB1.ino file in the newly copied folder to match the folder number.
@@ -348,7 +355,7 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 
 NOTE: If you are adding boards into your existing setup, you will need to change the quantity of boards in your existing WCBs.  You can do this by inputting the following command on all of your existing boards:
 
-        #Qx         //x should be a number between 1-9.
+        ?Qx         //x should be a number between 1-9.
 
   Once changed, you can reboot and verify that it is correct in the boot up message.
 
@@ -394,15 +401,15 @@ In the yellow boxes in the image above, you can see some examples.  Let's break 
 
 Here is the first example: 
 
-    :S5:S1:PS1
+    ;S5;S1:PS1
 
 In this example, WCB1 will receive the full command, act on the first serial section ":S5" and then forward everything else (:S1:PS1) onto its Serial 5 port.  Then WCB2 receives ":S1:PS1" and then processes the serial section, ":S1" and then forwards the rest of the command, (:PS1) out Serial 1.  In this instance towards the Uppity Spinner.  
 
 Here is the second example: 
 
-    :S5:S5:S2:F018
+    ;S5;S5;S2:F018
 
-In this example, WCB will receive the full command(:S5:S1:PS1), act on the first serial section, ":S5", and then forward everything else(:S5:S2:F018) onto its Serial 5 port.  Then WCB2 receives ":S5:S2:F018".  It then processes the first serial section that it received, ":S5" then forwards the rest of the command (:S2:F018) out it's serial 5 port.  Then WCB3 receives ":S2:F018", processes the first serial section that it received, ":S2", and forwards the rest of the command (:F018) out its serial 2 port.  Then the Flthy HP controller processes the ":F018" command.  
+In this example, WCB will receive the full command(;S5;S1:PS1), act on the first serial section, ";S5", and then forward everything else(;S5;S2:F018) onto its Serial 5 port.  Then WCB2 receives ";S5;S2:F018".  It then processes the first serial section that it received, ";S5" then forwards the rest of the command (;S2:F018) out it's serial 5 port.  Then WCB3 receives ";S2:F018", processes the first serial section that it received, ";S2", and forwards the rest of the command (:F018) out its serial 2 port.  Then the Flthy HP controller processes the ":F018" command.  
 
 You will have to have a better understanding of how things are connected in this arrangement, but this will work if you do not want to use wireless.  
 
@@ -433,9 +440,9 @@ Here is how the messages will look passing through this type of network.
 
 In the yellow boxes, you  an see the bottom box for examples on how to send the messages with this connection method.  
 
-    :S5:S3:S2:F0158
+    ;S5;S3;S2:F0158
 
-With this method, you can see that the first part of the command is ":S5" so the WCB1 can send it out it's serial 5 port, then you can see the ":S3".  This would send it to WCB3.  When WCB3 gets the last bit of the command, it processes the ":S2:F0158" and sends the command ":F0158" out its Serial 2 port. 
+With this method, you can see that the first part of the command is ";S5" so the WCB1 can send it out it's serial 5 port, then you can see the ";S3".  This would send it to WCB3.  When WCB3 gets the last bit of the command, it processes the ";S2:F0158" and sends the command ":F0158" out its Serial 2 port. 
 
 ## Wiring Example for Serial Only
  This is how you would connect the WCB in Serial only mode
@@ -449,7 +456,7 @@ You can extrapolate from there to connect the rest of the WCBs.
 
 Here are the dimensions for the boards.  With these dimensions, you can plan you setup or make a custom mount for your boards.
 
-V1.0      |    V2.1     
+V1.0      |    V2.1/2.3/2.4     
 :---------------:|:---------------------:
 <img src="./Images/DimensionsV1.0.png" style="width: 400px;"><br>|<img src="./Images/DimensionsV2.1.png" style="width:400px;">
  

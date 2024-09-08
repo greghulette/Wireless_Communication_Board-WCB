@@ -12,7 +12,7 @@
 // #define HWVERSION_1                 //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
 // #define HWVERSION_2_1               // custom board with version 2.1 on the label
 // #define HWVERSION_2_3               // custom board with version 2.3 on the label
-#define HWVERSION_2_4                  // custom board with version 2.3 on the label
+#define HWVERSION_2_4                  // custom board with version 2.4 on the label
 
     // Uncomment only the board that you are loading this sketch onto. 
     #define WCB1 
