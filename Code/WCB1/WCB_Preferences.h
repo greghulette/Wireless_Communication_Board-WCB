@@ -48,7 +48,7 @@
   // Mac Address Customization: MUST BE THE SAME ON ALL BOARDS - Allows you to easily change 2nd and 3rd octects of the mac addresses so that there are more unique addresses out there.  
   // Can be any 2-digit hexidecimal number. Each digit can be 0-9 or A-F.  Example is "0x1A", or "0x56" or "0xB2"
 
-  const uint8_t umac_oct2 = 0x01;     // unique MAC address for the 2nd Octet
+  const uint8_t umac_oct2 = 0x00;     // unique MAC address for the 2nd Octet
   const uint8_t umac_oct3 = 0x00;     // unique MAC address for the 3rd Octet
 
   const char* DELIMITER = "*";                 // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
