@@ -297,6 +297,8 @@ As the code specifies, Serial 3 Serial 5 should have a baud rate lower than 5760
 
 ## Loading the sketches onto the WCB
 
+<strong>Use ESP Board Library 2.0.17 or earlier to compile the code.</strong>
+
 ### USB Driver: 
 If you don't see the WCB when you plug it into your computer, you may have to install the driver for the CP210x driver.  You can find it [here.](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers?tab=downloads)
 
