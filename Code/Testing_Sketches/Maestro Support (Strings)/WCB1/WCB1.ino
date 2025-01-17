@@ -1,14 +1,14 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 3.0                                             *****////
+///*****                                                Version 3.1                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
 ///*****                       - Sends Serial commands to other locally connected devices                       *****////
 ///*****                       - Sends Serial commands to other remotely connected devices                      *****////
 ///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****//// 
-///*****                                                                                                        *****////
+///*****                       - Supports Maestro with the Stealth                                                                                 *****////
 ///*****                                                                                                        *****//// 
 ///*****                       Broadcast Command Syntax:                                                        *****////
 ///*****                        (zzzzz)                                                                         *****//// 
@@ -206,7 +206,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 5;
-  String version = "V3.0";
+  String version = "V3.1(Maestro (Stealth)";
 
 
 #ifdef HWVERSION_1
@@ -685,10 +685,10 @@ void writes2SerialString(String stringData){
   String completeString = stringData + '\r';
   s2Serial.write(ServoSequenceNumber);
 
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
@@ -834,7 +834,7 @@ void processSerial(String incomingSerialCommand){
   serialResponse.toCharArray(buf, sizeof(buf));
   char *p = buf;
   char *str;
-  while ((str = strtok_r(p,"*", &p)) !=NULL){
+  while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
   s1 = String(str);
   // Serial.println(s1);
   queue.push(s1);

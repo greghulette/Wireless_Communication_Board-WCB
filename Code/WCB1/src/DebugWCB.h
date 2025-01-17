@@ -24,6 +24,7 @@ class debugClass {
     bool debugflag_json = 0;
     bool debugflag_status = 0;
     bool debugflag_param = 0;
+    bool debugflag_maestro = 1;
 
 
   //constructor
@@ -42,6 +43,7 @@ class debugClass {
     void JSON(const char *format, ...);
     void STATUS(const char *format, ...);
     void PARAM(const char *format, ...);
+    void MAESTRO_DEBUG(const char *format, ...);
     void toggle(String debugType);
     void toggle_Debug();
     void toggle_Debug1();
@@ -55,7 +57,7 @@ class debugClass {
     void toggle_JSON();
     void toggle_STATUS();
     void toggle_PARAM();
-    
+    void toggle_MAESTRO();
 
 
 

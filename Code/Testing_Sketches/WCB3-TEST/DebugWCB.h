@@ -17,7 +17,7 @@ class debugClass {
     bool debugflag2 = 0;  // Used for optional level of debuging
     bool debugflag_espnow = 0;
     bool debugflag_servo = 0;
-    bool debugflag_serial_event = 0;
+    bool debugflag_serial_event = 1;
     bool debugflag_loop = 0;
     bool debugflag_http = 0;
     bool debugflag_lora = 0;

@@ -143,7 +143,7 @@
   String previousCommand;
   unsigned long previousCommandMillis;
   long resetSerialNumberMillis;
-  uint16_t resetInterval = 150;
+  uint16_t resetInterval = 10;
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -203,7 +203,7 @@ Queue<String> queue = Queue<String>();
   //Main Loop Timers
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
-  byte mainLoopDelayVar = 5;
+  byte mainLoopDelayVar = 0;
   String version = "V3.0";
 
 
@@ -237,6 +237,8 @@ bool Boardver2_3 = true;
   
 MiniMaestro maestro1(s1Serial,0,1,0);
 MiniMaestro maestro2(s1Serial,0,2,0);
+MicroMaestro maestro3(s1Serial,0,3,0);
+
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
@@ -663,14 +665,14 @@ void writes1SerialString(String stringData){
 }
 
 void writes2SerialString(String stringData){
-  uint8_t ServoSequenceNumber= stringData.toInt();
+  // uint8_t ServoSequenceNumber= stringData.toInt();
   String completeString = stringData + '\r';
-  s2Serial.write(ServoSequenceNumber);
+  // s2Serial.write(ServoSequenceNumber);
 
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
@@ -710,14 +712,26 @@ void writes5SerialString(String stringData){
 /////////////////////////////////////////////////////////
 
 void serialEvent() {
-  while (Serial.available() > 0) {    
-    serialResponse = Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
-    // serialResponse += DELIMITER;
-    serialicomingport = 0;
-    serialCommandisTrue  = true;
-    processSerial(serialResponse);
+   while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    serialResponse += inChar;
+    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
+      // stringComplete = true;            // set a flag so the main loop can do something about it.
+      serialicomingport = 0;
+      serialCommandisTrue  = true;
+      processSerial(serialResponse);
+      serialResponse = "";
+    }
   }
+  Debug.SERIAL_EVENT("USB Serial Input: %s \n",serialResponse.c_str());
+  // while (Serial.available() > 0) {    
+  //   serialResponse = Serial.readStringUntil('\r');
+  //   Debug.SERIAL_EVENT("USB Serial Input: %s \n", serialResponse.c_str());
+  //   // serialResponse += DELIMITER;
+  //   serialicomingport = 0;
+  //   serialCommandisTrue  = true;
+  //   processSerial(serialResponse);
+  // }
 }
 
 void s1SerialEvent() {
@@ -786,7 +800,7 @@ void resetSerialCommand(){
 }
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
-    resetSerialNumberMillis = millis();
+    // resetSerialNumberMillis = millis();
   // incomingSerialCommand += DELIMITER;
     char buf[200];
   serialResponse.toCharArray(buf, sizeof(buf));
@@ -1280,13 +1294,20 @@ void loop(){
                   case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
                         Local_Command[0]   = '\0';
                          break;  //prints out failure rate of ESPNOW
-                  case 6: maestro1.restartScript(0); break;  //reserved for future use
-                  case 7: maestro2.restartScript(0); break;  //reserved for future use
-                  case 8: maestro1.restartScript(1); break;  //reserved for future use                                                         break;  //reserved for future use
-                  case 9: maestro2.restartScript(1); break;  //reserved for future use
-                  case 10: maestro2.stopScript(); break;
-                  case 11: maestro2.goHome(); break;
-                  case 12: maestro2.restartScriptWithParameter(1, 1500); break;
+                  case 10: maestro1.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 11: maestro1.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 12: maestro1.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 18: maestro1.getScriptStatus(); Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 19: maestro1.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 20: maestro2.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 21: maestro2.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 22: maestro2.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 29: maestro2.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 30: maestro3.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 31: maestro3.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 32: maestro3.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use                  case 20: maestro1.restartScript(19);  Local_Command[0] = '\0';  break;  //reserved for future use                                                         break;  //reserved for future use
+                  case 39: maestro3.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 93: Serial.print("Status:");bool maestrostatusloop = maestro1.getScriptStatus(); delay(200); Serial.println(maestrostatusloop);Local_Command[0] = '\0';break;
 
                 }
               }
@@ -1341,28 +1362,27 @@ void loop(){
             } 
           }
         }
-      } else if (currentCommand == ""){
-        
-      }else if ((haveCommands  >0 & currentCommand != previousCommand) || currentCommand !=""){
-        previousCommand = currentCommand;
-      previousCommandMillis = millis();
+      } 
+      // else if ((haveCommands  >0 & currentCommand != previousCommand) || currentCommand !=""){
+      //   previousCommand = currentCommand;
+      // previousCommandMillis = millis();
 
         
-      commandLength = strlen(inputBuffer);
-      for (int i=0; i<commandLength;i++ ){
-                char inCharRead = inputBuffer[i];
-                serialBroadcastCommand += inCharRead;  // add it to the inputString:
-              }
-              Debug.DBG_2("Broadcast Command: %s\n", serialBroadcastCommand.c_str());
-              if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
-              // if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
+      // commandLength = strlen(inputBuffer);
+      // for (int i=0; i<commandLength;i++ ){
+      //           char inCharRead = inputBuffer[i];
+      //           serialBroadcastCommand += inCharRead;  // add it to the inputString:
+      //         }
+      //         Debug.DBG_2("Broadcast Command: %s\n", serialBroadcastCommand.c_str());
+      //         if (serialicomingport != 1){writes1SerialString(serialBroadcastCommand);}
+      //         if (serialicomingport != 2){writes2SerialString(serialBroadcastCommand);}
+      //         if (serialicomingport != 3){writes3SerialString(serialBroadcastCommand);}
+      //         if (serialicomingport != 4){writes4SerialString(serialBroadcastCommand);}
+      //         if (serialicomingport != 5){writes5SerialString(serialBroadcastCommand);}
+      //         // if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
 
-              serialCommandisTrue  = false; 
-      }
+      //         serialCommandisTrue  = false; 
+      // }
       // }
       ///***  Clear States and Reset for next command.  ***///
       stringComplete =false;
@@ -1371,7 +1391,7 @@ void loop(){
       inputBuffer[1] = '\0'; 
       serialBroadcastCommand = "";
       String serialResponse;
-    
+      localCommandFunction = 0;
       // reset Local ESP Command Variables
       int espCommandFunction;
 

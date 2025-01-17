@@ -1,3 +1,5 @@
+#include <sys/_stdint.h>
+#pragma once
 #ifndef WCB_Preferences.h
 
 #define WCB_Preferences.h
@@ -9,11 +11,25 @@
 //////////////////////////////////////////////////////////////////////
 
 // Board Revision
-// #define HWVERSION_1                 //Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
-// #define HWVERSION_2_1               // Run 3 with custom board with version 2.1 on the label
-#define HWVERSION_2_3               // Run 4 and above with custom board with version 2.2 on the label
+// #define HWVERSION_1                              // Run 1 and 2, with LilyGo T7 v1.5 Board with version 1.0 on the label
+// #define HWVERSION_2_1                            // WCB  with version 2.1 on the label
+// #define HWVERSION_2_3                               // WCB with version 2.3  on the label
+#define HWVERSION_2_4                               // WCB with version  2.4 on the label
 
-#define MAESTRO
+// #define MAESTRO_ENABLED                                     // Comment this out if not using the Maestro Servo Controller
+
+#ifdef MAESTRO_ENABLED
+  
+  #define MAESTRO_CONNECTION Serial2                // The serial port that the Maestro 6/12/18 is plugging into 
+  #define MESTRO_CONTROLLER_POLOLU_LIBRARY          // Uncomment this out for Kyber/Microcontroller using the Maestro Library
+  // #define MAESTRO_CONTROLLER_STRING              // Uncomment this out for devices sending serial strings (i.e.Stealth/Shadow/Padawan,...)
+  // #define MAESTRO_QTY 4  
+  #ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY
+    #define MAESTRO_CONTROLLER Serial1                // The serial port that the device sending the commands to the Maestro is connected to.
+  // #define MAESTRO_QTY 4  
+  #endif
+#endif
+  uint8_t localMaestroID = 0x01;                           // Change to match the quantity of Maestrols that you are using. 
 
     // Uncomment only the board that you are loading this sketch onto. 
     #define WCB1 
@@ -34,9 +50,14 @@
 
   // Default Serial Baud Rates   ******THESE ARE ONLY CORRECT UNTIL YOU CHANGE THEM VIA THE COMMAND LINE.  ONCE CHANGED, THEY MAY NOT MATCH THIS NUMBER.
   // The correct baud rates will be shown on the serial console on bootup.
-  #ifdef MAESTRO 
-  #define SERIAL1_DEFAULT_BAUD_RATE 57692
-  #else
+  #ifdef MAESTRO_ENABLED
+    #ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY 
+      #define SERIAL1_DEFAULT_BAUD_RATE 57692
+    #else
+      #define SERIAL1_DEFAULT_BAUD_RATE 9600
+    #endif
+  // #endif
+    #else 
   #define SERIAL1_DEFAULT_BAUD_RATE 9600
   #endif
   #define SERIAL2_DEFAULT_BAUD_RATE 57692 
@@ -44,7 +65,7 @@
   #define SERIAL4_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
   #define SERIAL5_DEFAULT_BAUD_RATE 9600  //Should be lower than 57600, I'd recommend 9600 or lower for best reliability
 
-  #define SERIAL1_BROADCAST_DEFAULT true
+  #define SERIAL1_BROADCAST_DEFAULT false
   #define SERIAL2_BROADCAST_DEFAULT true
   #define SERIAL3_BROADCAST_DEFAULT true
   #define SERIAL4_BROADCAST_DEFAULT true
@@ -61,6 +82,6 @@
  const char* DELIMITER = "*";                // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
   char CommandCharacter = ';';
-
+  
 
 

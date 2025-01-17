@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 3.0                                             *****////
+///*****                                                Version 4.0                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -66,40 +66,55 @@
 
 // Standard Arduino library
 #include <Arduino.h>
+#include "Libraries.h"
 
-//Used for ESP-NOW
-#include <WiFi.h>
-#include "esp_wifi.h"
-#include <esp_now.h>
-
-//pin definitions
-#include "wcb_pin_map.h"
-
-// Debuging Functions  - Using my own library for this.  This should be in the same folder as this sketch.
-#include "DebugWCB.h" 
-
-// Used for Software Serial to allow more serial port capacity
-#include <SoftwareSerial.h>                 //EspSoftwareSerial by Dirk Kaar, Peter Lerup Library
-
-// Used to store parameters after reboot/power loss
-#include <Preferences.h>
-
-//Used for the Status LED on Board version 2.1
-#include <Adafruit_NeoPixel.h>                 // Adafruit NeoPixel by Adafruit Library
-
-// Used for queing commands so they can be chained without interupting the operations of the WCB
-#include "Queue.h"
-
-#include <PololuMaestro.h>
 
 //////////////////////////////////////////////////////////////////////
 ///*****        Command Varaiables, Containers & Flags        *****///
 //////////////////////////////////////////////////////////////////////
   
+
+
+  size_t bytesReceived;
+  char messageBuffer[50];
+  uint8_t serialBuffer[5];
+
+
+  #define MAX_BYTES 256
+  // Array to store the received bytes
+  byte receivedBytes[MAX_BYTES];
+  String hexString = "";
+  String hexData = "";
+  unsigned long currentTime;
+  unsigned long lastReceiveTime = 0;  // To keep track of the last received time
+  const unsigned long timeout = 1;  // 150ms timeout for clearing the data
+
+  int byteIndex = 0;  // Index to track where to write next byte
+
+  const int maxSegments = 10;  // Maximum number of segments you expect
+  String segments[maxSegments];  // Array to store the segments
+  int segmentCount = 0;  // Variable to keep track of how many segments were found
+
+
+
+
+
+
+
+
   char inputBuffer[300];
   String inputString;         // a string to hold incoming data
   
-
+  String MaestroString;
+  String MaestroStringComplete;
+  String MaestroStringSubString;
+  String MaestroString1;
+  String MaestroString2;
+  String MaestroString3;
+  String MaestroDeviceIDLoop;
+  int MaestroDeviceIDInt;
+  String MaestroSequenceLoop;
+  int MaestroSequenceInt;
 
   char inputM[5];
   int inputStringInt;
@@ -136,7 +151,7 @@
   String previousCommand;
   unsigned long previousCommandMillis;
   long resetSerialNumberMillis;
-  uint16_t resetInterval = 150;
+  uint16_t resetInterval = 1;
 
   uint32_t Local_Command[6]  = {0,0,0,0,0,0};
   int localCommandFunction     = 0;
@@ -180,12 +195,7 @@
     String HOSTNAME = "Wireless Communication Board 9 (W9)";
   #endif
 
-#ifdef MAESTRO
-  bool maestroEnabled=true;
-#endif
-#ifndef MAESTRO
-  bool maestroEnabled=false;
-#endif
+
 
 // Sets up the Preferences to store values after reboot
 Preferences preferences;
@@ -205,25 +215,33 @@ Queue<String> queue = Queue<String>();
   //Main Loop Timers
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
-  byte mainLoopDelayVar = 5;
-  String version = "V3.0";
+  byte mainLoopDelayVar = 0;
+  String version = "V4.0";
 
 
 #ifdef HWVERSION_1
 bool BoardVer1 = true;
 bool BoardVer2_1 = false;
 bool Boardver2_3 = false;
+bool Boardver2_4 = false;
 
 #elif defined HWVERSION_2_1
 bool BoardVer1 = false;
 bool BoardVer2_1 = true;
 bool Boardver2_3 = false;
+bool Boardver2_4 = false;
 
 #elif defined HWVERSION_2_3
 bool BoardVer1 = false;
 bool BoardVer2_1 = false;
 bool Boardver2_3 = true;
+bool Boardver2_4 = false;
 
+#elif defined HWVERSION_2_4
+bool BoardVer1 = false;
+bool BoardVer2_1 = false;
+bool Boardver2_3 = false;
+bool Boardver2_4 = true;
 #endif
  
 //////////////////////////////////////////////////////////////////
@@ -236,12 +254,28 @@ bool Boardver2_3 = true;
   SoftwareSerial s3Serial;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
-  
-MiniMaestro maestro1(s1Serial,0,1,0);
-MiniMaestro maestro2(s1Serial,0,2,0);
-// domeMaestro maestro(s1Serial)
+
+//////////////////////////////////////////////////////////////////
+///******         Maestro Definitions                     *****///
+//////////////////////////////////////////////////////////////////
+// void setupMaestro(){
+#ifdef MAESTRO_ENABLED
+  bool maestroEnabled=true;
+  int maestroQuantity = MAESTRO_QTY;
+  MiniMaestro maestro(MAESTRO_CONNECTION,0,localMaestroID,0);
+  #ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY
+    PololuProtocol pololu(MAESTRO_CONTROLLER, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+    bool maestroContollerLibrary = true;
+  #elif defined MAESTRO_CONTROLLER_STRING
+    bool maestroContollerLibrary = false;;
+  #endif  
+#endif
+#ifndef MAESTRO_ENABLED
+  bool maestroEnabled=false;
+#endif
+
 //////////////////////////////////////////////////////////////////////
-///*****            Status LED Variables and settings       *****///
+///*****               Status LED Variables and settings       *****///
 //////////////////////////////////////////////////////////////////////
   
 // -------------------------------------------------
@@ -655,24 +689,28 @@ void writeSerialString(String stringData){
 }
 
 void writes1SerialString(String stringData){
-  if (maestroEnabled == false){
-     String completeString = stringData + '\r';
+  // if (maestroEnabled == false){
+  String completeString = stringData + '\r';
   for (int i=0; i<completeString.length(); i++)
   {
     s1Serial.write(completeString[i]);
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-  } else if(maestroEnabled == true){
-        int len = stringData.length();
+  } 
+  // else if(maestroEnabled == true){
+  //   // 
+  //   int len = stringData.length();
   
-  // Convert each pair of hex characters to a byte and send it over Serial1
-  for (int i = 0; i < len; i += 2) {
-    String byteString = stringData.substring(i, i + 2); // Get 2 characters at a time
-    byte byteValue = (byte)strtol(byteString.c_str(), NULL, 16); // Convert to byte
-    Serial1.write(byteValue); // Send the byte
-  }
+  // // Convert each pair of hex characters to a byte and send it over Serial1
+  // for (int i = 0; i < len; i += 2) {
+  //   String byteString = stringData.substring(i, i + 2); // Get 2 characters at a time
+  //   byte byteValue = (byte)strtol(byteString.c_str(), NULL, 16); // Convert to byte
+  //   Serial1.write(byteValue); // Send the byte
+  // }
   
-  Serial.println("Sent hex string: " + stringData); // Print the hex string for debugging
+  // Serial.println("Sent hex string: " + stringData); // Print the hex string for debugging
+
+
 
     // int maestroCommandLength = stringData.length();
     // String deviceID= stringData.substring(0,2);
@@ -688,19 +726,91 @@ void writes1SerialString(String stringData){
     // if (maestroDevice ==2 || maestroDevice ==3){
     //   maestro2.restartScript(maestroCommandSequence);
     // }
-  }
-}
+  // }
+// }
 
 void writes2SerialString(String stringData){
-  uint8_t ServoSequenceNumber= stringData.toInt();
-  String completeString = stringData + '\r';
-  s2Serial.write(ServoSequenceNumber);
-
-  // for (int i=0; i<completeString.length(); i++)
-  // {
-  //   s2Serial.write(completeString[i]);
-  // }
+ if (maestroEnabled == false){
+     String completeString = stringData + '\r';
+  for (int i=0; i<completeString.length(); i++)
+  {
+    s2Serial.write(completeString[i]);
+  }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
+  } else if(maestroEnabled == true && maestroContollerLibrary == true){
+    // Debug.SERIAL_EVENT("Sending Maestro Commands");
+        String maestroStartBitTemp = stringData.substring(0,2);
+        String MaestroDeviceIDTemp = stringData.substring(2,4);
+        String MaestroCommandByteTemp = stringData.substring(4,6);
+        String maestroSequenceTemp = stringData.substring(6,stringData.length()+1);
+        Debug.MAESTRO_DEBUG("Sending Maestro Command: %s, %s, %s, %s\n", maestroStartBitTemp, 
+        MaestroDeviceIDTemp, MaestroCommandByteTemp, maestroSequenceTemp);
+        uint8_t startB = (uint8_t)strtol(maestroStartBitTemp.c_str(), NULL, 16);
+        uint8_t devIDB = (uint8_t)strtol(MaestroDeviceIDTemp.c_str(), NULL, 16);
+        uint8_t commB = (uint8_t)strtol(MaestroCommandByteTemp.c_str(), NULL, 16);
+        uint8_t seqB = (uint8_t)strtol(maestroSequenceTemp.c_str(), NULL, 16);
+        if (devIDB == localMaestroID){
+          Debug.MAESTRO_DEBUG("Entered local maestro write\n");
+            s2Serial.write(startB);
+            s2Serial.write(devIDB);
+            s2Serial.write(commB);
+            s2Serial.write(seqB);
+            // s2Serial.write(MaestroDeviceIDTemp);
+            // s2Serial.write(MaestroCommandByteTemp);
+            // s2Serial.write(maestroSequenceTemp);
+        }
+        
+
+ 
+ 
+ 
+  //   int maestroCommandLength = stringData.length();
+  //   String maestroCommandDesignator = stringData.substring(0,1);
+  //   if (maestroCommandDesignator == "M" || maestroCommandDesignator == "m"){
+  //   String deviceID= stringData.substring(1,2);
+  //   Debug.DBG("DeviceID = %s", deviceID.c_str());
+  //   String SeqeunceIDString = stringData.substring(3,maestroCommandLength+1);
+  //   Debug.DBG(" Sequnce Number: %s\n", SeqeunceIDString.c_str());
+  //   int  maestroDevice = deviceID.toInt();
+  //   uint8_t maestroCommandSequence = SeqeunceIDString.toInt();
+  //   // s1Serial.write(maestroCommandSequence);
+  //   if (maestroDevice == localMaestroID || maestroDevice ==0){
+  //     maestro.restartScript(maestroCommandSequence);
+  //   }  
+  //   if (maestroDevice ==2 || maestroDevice ==3){
+  //     // maestro2.restartScript(maestroCommandSequence);
+  //   }
+  // }
+   
+  // //   int len = stringData.length();
+  
+  // // // Convert each pair of hex characters to a byte and send it over Serial1
+  // // for (int i = 0; i < len; i += 2) {
+  // //   String byteString = stringData.substring(i, i + 2); // Get 2 characters at a time
+  // //   byte byteValue = (byte)strtol(byteString.c_str(), NULL, 16); // Convert to byte
+  // //   s2Serial.write(byteValue); // Send the byte
+  // // }
+  
+  // Serial.println("Sent hex string: " + stringData); // Print the hex string for debugging
+
+
+
+    // 
+  }
+ 
+ 
+ 
+ 
+ 
+  // uint8_t ServoSequenceNumber= stringData.toInt();
+  // String completeString = stringData + '\r';
+  // s2Serial.write(ServoSequenceNumber);
+
+  // // for (int i=0; i<completeString.length(); i++)
+  // // {
+  // //   s2Serial.write(completeString[i]);
+  // // }
+  //   Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
 
 }
 
@@ -750,32 +860,65 @@ void serialEvent() {
 }
 
 void s1SerialEvent() {
-  // while (s1Serial.available() > 0) {    
-  //   serialResponse = s1Serial.readStringUntil('\r');
-  //   Debug.SERIAL_EVENT("Serial 1 Input: %s \n", serialResponse.c_str());
-  //   serialicomingport = 1;
-  //   serialCommandisTrue  = true;
-  //   processSerial(serialResponse);
+  // if (maestroEnabled == true){
+    
   // }
-  while (s1Serial.available() > 0) {
-    char inChar = (char)s1Serial.read();
-    inputString += inChar;
-    Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-    if (inChar == '\r') {               // if the incoming character is a carriage return (\r)
-      processSerial(inputString);
-      Debug.SERIAL_EVENT("Serial 1 Input: %s \n",inputString.c_str());
-    }
-  }
-}
-
-void s2SerialEvent() {
-  while (s2Serial.available() > 0) {    
-    serialResponse = s2Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("Serial 2 Input: %s \n", serialResponse.c_str());
-    serialicomingport = 2;
+  // if (maestroContollerLibrary == false){
+  //   if (Serial1.available() > 0) {
+  //       // Read the incoming byte from Serial2
+  //       // int firstByte = Serial1.read();
+  //       // int secondByte = Serial1.read();
+  //       // int thirdByte = Serial1.read();
+  //       int incomingByte = Serial1.read();
+        
+  //       // Convert the byte to a two-character hex string
+  //       char hexString[3];
+  //       sprintf(hexString, "%02X", incomingByte);
+        
+  //       if (hexData.length() > 0) {
+  //         hexData += ",";  // Add a comma before appending new data if hexData is not empty
+  //       }
+  //       // Append the hex string to the accumulated hex data
+  //       hexData += String(hexString);
+        
+  //       if (incomingByte == '\r') {               // if the incoming character is a carriage return (\r)
+  //         processSerial(hexData);
+  //         Debug.SERIAL_EVENT("Serial 1 Input: %s \n",hexData.c_str());
+  //         hexData = "";
+  //       }
+  //       // Update the last receive time
+  //       lastReceiveTime = millis();
+  //     }
+  //     // Serial.println(hexData);
+  // } else {
+  while (s1Serial.available() > 0) {    
+    serialResponse = s1Serial.readStringUntil('\r');
+    Debug.SERIAL_EVENT("Serial 1 Input: %s \n", serialResponse.c_str());
+    serialicomingport = 1;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
   }
+  // } 
+}
+
+void s2SerialEvent() {
+//  if (Serial2.available() > 0) {
+//     // Read the incoming byte from Serial2
+//     int incomingByte = Serial2.read();
+    
+//     // Convert the byte to a two-character hex string
+//     char hexString[3];
+//     sprintf(hexString, "%02X", incomingByte);
+    
+//     if (hexData.length() > 0) {
+//       hexData += ",";  // Add a comma before appending new data if hexData is not empty
+//     }
+//     // Append the hex string to the accumulated hex data
+//     hexData += String(hexString);
+    
+//     // Update the last receive time
+//     lastReceiveTime = millis();
+//   }
 }
 
 void s3SerialEvent() {
@@ -800,9 +943,9 @@ void s4SerialEvent() {
 
 void s5SerialEvent() {
   while (s5Serial.available() > 0) {    
-    uint8_t devid =  maestro1.readDeviceNumber();
+    // uint8_t devid =  maestro1.readDeviceNumber();
     // Debug.DBG("DEVICEID = %i", devid);
-    Serial.println(devid);
+    // Serial.println(devid);
     serialResponse = s5Serial.readStringUntil('\r');
     Debug.SERIAL_EVENT("Serial 5 Input: %s \n", serialResponse.c_str());
     serialicomingport = 5;
@@ -837,6 +980,134 @@ void resetSerialCommand(){
     previousCommand="nothingheretosee"; }  //resets the previous command after 50ms
 
 }
+
+
+
+void processmaestroCommand(){
+#ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY
+if (maestroContollerLibrary == true){
+  if (pololu.commandRecieved == true){
+      Debug.MAESTRO_DEBUG("Entered maestro Command Function\n");
+
+    Debug.MAESTRO_DEBUG("Processing Maestro Command: %02X %02X %02X %02X\n", pololu.maestraoStartBit, pololu.maestroDeviceID, pololu.maestroCommandByte, pololu.maestroSequence);
+    // Serial.println("Processing Maestro Command");
+    // Serial.print(pololu.maestraoStartBit, HEX);
+    // Serial.print(pololu.maestroDeviceID, HEX);
+    // Serial.print(pololu.maestroCommandByte, HEX);
+    // Serial.println(pololu.maestroSequence, HEX);
+    if (pololu.maestroDeviceID == localMaestroID){
+      Debug.MAESTRO_DEBUG("Entered 0x01\n");
+      MAESTRO_CONNECTION.write(pololu.maestraoStartBit);
+      MAESTRO_CONNECTION.write(pololu.maestroDeviceID);
+      MAESTRO_CONNECTION.write(pololu.maestroCommandByte);
+      MAESTRO_CONNECTION.write(pololu.maestroSequence);
+    } else if (pololu.maestroDeviceID != localMaestroID){
+      Debug.MAESTRO_DEBUG("Not the lcoal Maestro.  Storing values to send to other maestros\n");
+      uint8_t hex1 = pololu.maestraoStartBit;
+      uint8_t hex2 = pololu.maestroDeviceID;
+      uint8_t hex3 = pololu.maestroCommandByte;
+      uint8_t hex4 = pololu.maestroSequence;
+      
+        String combinedString = String();
+      
+        combinedString += String(hex1 < 16 ? "0" : "") + String(hex1, HEX);
+        combinedString += String(hex2 < 16 ? "0" : "") + String(hex2, HEX);
+        combinedString += String(hex3 < 16 ? "0" : "") + String(hex3, HEX);
+        combinedString += String(hex4 < 16 ? "0" : "") + String(hex4, HEX);
+        
+        combinedString.toUpperCase(); // Ensure uppercase
+        Serial.println(combinedString);
+      // combinedString.toUpperCase(); // To ensure the string is in uppercase
+      // Serial.println(combinedString);
+      queue.push(combinedString);
+
+
+
+
+    }
+   
+    pololu.commandRecieved = false;
+  }
+}
+#endif
+  // unsigned long currentTime = millis();
+  // if (currentTime - lastReceiveTime >= timeout && hexData.length() > 0) {
+  //   // Print the final concatenated hex string to the serial monitor
+  //   String data = hexData;
+
+  //   // Variable to store each part of the string
+  //   String part;
+
+  //   // Loop to keep splitting the string until all parts are processed
+  //   while (data.length() > 0 && segmentCount < maxSegments) {
+  //     int index = data.indexOf(',');  // Find the index of the first comma
+
+  //     // If there's a comma, extract the substring
+  //     if (index != -1) {
+  //       part = data.substring(0, index);
+  //       data = data.substring(index + 1);
+  //     } else {
+  //       part = data;  // If no more commas, take the rest of the string
+  //       data = "";    // Clear the string to exit the loop
+  //     }
+
+  //     // Store each part into the array
+  //     segments[segmentCount] = part;
+  //     segmentCount++;
+
+  //     // Serial.println(hexData);
+   
+  //     // Clear the hexData string after timeout
+  //     // hexData = "";
+     
+  //   }
+  //   Serial.print("Segment 1: ");Serial.println(segments[0]);
+  //   Serial.print("Segment 2: ");Serial.println(segments[1]);
+  //   Serial.print("Segment 3: ");Serial.println(segments[2]);
+  //   Serial.print("Segment 4: ");Serial.println(segments[3]);
+  //   Serial.print("Segment 5: ");Serial.println(segments[4]);
+  //   String startOfCommand = segments[0];
+  //   String DeviceIDString = segments[1];
+  //   String MaestroCommand = segments[2];
+  //   String SequenceIDString1 = segments[3];
+  //   queue.push(startOfCommand+DeviceIDString+MaestroCommand+SequenceIDString1);
+  
+  // for (int i = 0; i < segmentCount; i++) {
+  //   segments[i] = "";  // Clear each element in the array
+  // }
+  //     segmentCount=0;
+       
+  // }
+  
+}
+
+void ProcessSerialMaestroCommand(int devID, int seqID){
+  if (devID == localMaestroID){
+    maestro.restartScript(seqID);
+  } else if (devID == 0){
+    maestro.restartScript(seqID);
+    String tempDevID = "9";
+    String tempSeqID = String(seqID);
+    String tempMaestro = "MRS" + tempDevID + tempSeqID;
+    sendESPNOWCommand("BR", tempMaestro);
+  } else if (devID == 9){
+    maestro.restartScript(seqID);
+  } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
+      String tempDevID = String(devID);
+      String tempSeqID = String(seqID);
+      String tempMaestro = "MRB" + tempDevID + tempSeqID;
+      sendESPNOWCommand("BR", tempMaestro);  } 
+    else {
+  }
+}
+void ProcessSerialMaestroCommandBroadcast(int devID, int seqID){
+  if (devID == localMaestroID){
+    maestro.restartScript(seqID);
+  } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
+    Debug.MAESTRO_DEBUG("Maestro Command not for local Maestro\n");
+  }
+}
+
 void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
     resetSerialNumberMillis = millis();
@@ -845,7 +1116,7 @@ void processSerial(String incomingSerialCommand){
   serialResponse.toCharArray(buf, sizeof(buf));
   char *p = buf;
   char *str;
-  while ((str = strtok_r(p,"*", &p)) !=NULL){
+  while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
   s1 = String(str);
   // Serial.println(s1);
   queue.push(s1);
@@ -867,19 +1138,19 @@ void processSerial(String incomingSerialCommand){
 void turnOnLEDESPNOW(){
 if (BoardVer1){
   digitalWrite(ONBOARD_LED, HIGH); 
-  } else if (BoardVer2_1 || Boardver2_3){
+  } else if (BoardVer2_1 || Boardver2_3 || Boardver2_4){
     colorWipeStatus("ES", green, 255);
   }
 }  // Turns om the onboard Green LED
 
 void turnOnLEDSerial(){
-  if (BoardVer2_1 || Boardver2_3){
+  if (BoardVer2_1 || Boardver2_3 || Boardver2_4){
     colorWipeStatus("ES", red, 255);
   }
 }  
 
 void turnOnLEDSerialOut(){
-  if (BoardVer2_1 ||  Boardver2_3){
+  if (BoardVer2_1 ||  Boardver2_3 || Boardver2_4){
     colorWipeStatus("ES", orange, 255);
   }
 }  
@@ -887,7 +1158,7 @@ void turnOnLEDSerialOut(){
 void turnOffLED(){
   if (BoardVer1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
-  } else if (BoardVer2_1 ||  Boardver2_3){
+  } else if (BoardVer2_1 ||  Boardver2_3 || Boardver2_4){
     colorWipeStatus("ES", blue, 10);
   }
 }
@@ -1026,7 +1297,9 @@ void setup(){
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
   s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
-
+  #ifdef  MESTRO_CONTROLLER_POLOLU_LIBRARY
+  pololu.begin(57692);
+  #endif
   // prints out a bootup message of the local hostname
   Serial.println("\n\n----------------------------------------");
   Serial.print("Booting up the ");Serial.println(HOSTNAME);
@@ -1037,6 +1310,8 @@ void setup(){
   Serial.println("HW Version 2.1");
     #elif defined HWVERSION_2_3
   Serial.println("HW Version 2.3");
+    #elif defined HWVERSION_2_4
+  Serial.println("HW Version 2.4");
   #endif
   Serial.println("----------------------------------------");
   Serial.printf("Serial 1 Baudrate: %i, Brdcst Enabled: %s\nSerial 2 Baudrate: %i, Brdcst Enabled: %s\nSerial 3 Baudrate: %i, Brdcst Enabled: %s\n"
@@ -1077,10 +1352,18 @@ void setup(){
   ESP_LED.show();
   colorWipeStatus("ES",red,10);
 
-    // Tasks_Init();
-
-
-  // Tasks_Start();
+// Setup maestro controllers
+// if (maestroEnabled == true){
+//   if (maestroQuantity >0){MiniMaestro maestro1(MAESTRO_CONNECTION,0,1,0);}
+//   if (maestroQuantity >1){MiniMaestro maestro2(MAESTRO_CONNECTION,0,2,0);}
+//   if (maestroQuantity >2){MiniMaestro maestro3(MAESTRO_CONNECTION,0,3,0);}
+//   if (maestroQuantity >3){MiniMaestro maestro4(MAESTRO_CONNECTION,0,4,0);}
+//   if (maestroQuantity >4){MiniMaestro maestro5(MAESTRO_CONNECTION,0,5,0);}
+//   if (maestroQuantity >5){MiniMaestro maestro6(MAESTRO_CONNECTION,0,6,0);}
+//   if (maestroQuantity >6){MiniMaestro maestro7(MAESTRO_CONNECTION,0,7,0);}
+//   if (maestroQuantity >7){MiniMaestro maestro8(MAESTRO_CONNECTION,0,8,0);}
+//   if (maestroQuantity >8){MiniMaestro maestro9(MAESTRO_CONNECTION,0,9,0);}
+// }
 
   //initialize WiFi for ESP-NOW
   WiFi.mode(WIFI_STA);
@@ -1238,6 +1521,13 @@ if (WCB_Quantity >= 9 ){
 
 
 void loop(){
+  #ifdef  MESTRO_CONTROLLER_POLOLU_LIBRARY
+
+  // if (maestroContollerLibrary == true){
+    pololu.processCommands();  // Continuously process incoming commands
+    processmaestroCommand();
+  // } 
+#endif
   // looks for new serial commands (Needed because ESP's do not have an onSerialEvent function)
     if(Serial.available()){serialEvent();}
     if(s1Serial.available()){s1SerialEvent();}
@@ -1266,9 +1556,14 @@ void loop(){
       currentCommand = queue.peek();
       inputString = queue.pop(); 
       Debug.LOOP("Comamand Accepted into Loop: %s \n", inputString.c_str());
-      inputString.toCharArray(inputBuffer, 300);inputString="";}
-
-    else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
+      inputString.toCharArray(inputBuffer, 300);inputString="";
+       MaestroString1 = inputBuffer[0];
+       MaestroString2 = inputBuffer[1];
+       MaestroString3 = inputBuffer[2];
+      MaestroString = MaestroString1 + MaestroString2 + MaestroString3;
+      // MaestroString = MaestroString.toUpperCase();
+      Serial.println(MaestroString);
+      } else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
       if (inputBuffer[0] == '#'){
         if (
             inputBuffer[1]=='B' ||          // Command deignator for changing Broadcast for specific port
@@ -1365,15 +1660,19 @@ void loop(){
               if(Local_Command[0]){
                 switch (Local_Command[0]){
                   case 1: Serial.println(HOSTNAME);
-                        Local_Command[0]   = '\0';                                                           break;
+                        Local_Command[0] = '\0';                                                           break;
                   case 2: Serial.println("Resetting the ESP in 3 Seconds");
                         //  DelayCall::schedule([] {ESP.restart();}, 3000);
                         ESP.restart();
-                        Local_Command[0]   = '\0';                                                           break;
-                  case 3: break;  //reserved for future use
-                  case 4: ; break;  //reserved for future use
+                        Local_Command[0] = '\0';                                                           break;
+                  case 3: maestroContollerLibrary = 0; 
+                          Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerLibrary);
+                          Local_Command[0] = '\0';                                                          break;  //reserved for future use
+                  case 4: maestroContollerLibrary = 1; 
+                          Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerLibrary);
+                        Local_Command[0] = '\0';      break;  //reserved for future use
                   case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
-                        Local_Command[0]   = '\0';
+                        Local_Command[0] = '\0';
                          break;  //prints out failure rate of ESPNOW
                   case 6: ; break;  //reserved for future use
                   case 7: ; break;  //reserved for future use
@@ -1433,7 +1732,43 @@ void loop(){
             } 
           }
         }
-      } else if (currentCommand == ""){
+      } else if (MaestroString == "MRS" || MaestroString == "mrs"){
+        Serial.println("entered maestro loop");
+       commandLength = strlen(inputBuffer);
+        for (int i=1; i<commandLength;i++ ){
+            char inCharRead = inputBuffer[i];
+            MaestroStringComplete += inCharRead;  // add it to the inputString:
+        }
+        MaestroDeviceIDLoop = MaestroStringComplete.substring(2,3);
+        MaestroSequenceLoop = MaestroStringComplete.substring(3,commandLength+1);
+        MaestroDeviceIDInt = MaestroDeviceIDLoop.toInt();
+        MaestroSequenceInt = MaestroSequenceLoop.toInt();
+
+        Debug.LOOP("Maestro Dest ID: %i, Sequence %i:", MaestroDeviceIDInt, MaestroSequenceInt);
+        ProcessSerialMaestroCommand(MaestroDeviceIDInt,  MaestroSequenceInt);
+        MaestroString = "";
+        MaestroStringComplete = "";
+        MaestroDeviceIDLoop = "8";
+        MaestroSequenceLoop = "8";
+        
+      }else if (MaestroString == "MRB"){
+        Serial.println("entered maestro Braodcast loop");
+       commandLength = strlen(inputBuffer);
+        for (int i=1; i<commandLength;i++ ){
+            char inCharRead = inputBuffer[i];
+            MaestroStringComplete += inCharRead;  // add it to the inputString:
+        }
+        MaestroDeviceIDLoop = MaestroStringComplete.substring(2,3);
+        MaestroSequenceLoop = MaestroStringComplete.substring(3,commandLength+1);
+        MaestroDeviceIDInt = MaestroDeviceIDLoop.toInt();
+        MaestroSequenceInt = MaestroSequenceLoop.toInt();
+
+        Debug.LOOP("Maestro Dest ID: %i, Sequence %i:", MaestroDeviceIDInt, MaestroSequenceInt);
+        ProcessSerialMaestroCommandBroadcast(MaestroDeviceIDInt,  MaestroSequenceInt);
+        MaestroString = "";
+        MaestroStringComplete = "";
+        MaestroDeviceIDLoop = "8";
+        MaestroSequenceLoop = "8";
         
       }else if ((haveCommands  >0 & currentCommand != previousCommand) || currentCommand !=""){
         previousCommand = currentCommand;
@@ -1463,6 +1798,9 @@ void loop(){
       inputBuffer[1] = '\0'; 
       serialBroadcastCommand = "";
       String serialResponse;
+      hexData = "";
+      segmentCount=0;
+      localCommandFunction = 0;
     
       // reset Local ESP Command Variables
       int espCommandFunction;

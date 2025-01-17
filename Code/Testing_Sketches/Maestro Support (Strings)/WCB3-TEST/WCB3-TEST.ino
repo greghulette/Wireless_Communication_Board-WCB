@@ -867,6 +867,7 @@ void colorWipeStatus(String statusled, uint32_t c, int brightness) {
       Baud == 19200   ||
       Baud == 38400   ||
       Baud == 57600   ||
+      Baud == 57692   ||
       Baud == 115200  ||
       Baud == 128000  ||
       Baud == 256000

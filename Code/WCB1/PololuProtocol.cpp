@@ -1,9 +1,17 @@
+// #pragma once
 #include "Print.h"
 #include <sys/_stdint.h>
 #include "PololuProtocol.h"
+#include "./src/DebugWCB.h"
+// #include "WCB_Preferences.h"
+
+#define MAESTRO_CONTROLLER_SERIAL_PORT Serial1       // The serial port that the incoming pololu protocol commands are coming from
+
+debugClass Pololu_Debug;
+
 
 PololuProtocol::PololuProtocol(HardwareSerial& serial, int rxPin, int txPin)
-    : _serial(Serial2), _rxPin(rxPin), _txPin(txPin), bufferIndex(0) {
+    : _serial(MAESTRO_CONTROLLER_SERIAL_PORT), _rxPin(rxPin), _txPin(txPin), bufferIndex(0) {
 }
 
 void PololuProtocol::begin(uint32_t baudRate) {
@@ -48,9 +56,11 @@ void PololuProtocol::processCommands() {
             case 0x24:  // Stop Script
                 handleStopScript();
                 break;
+            case 0x2E:  // Get Script Status
+                handleGetScriptStatus();
+                break;
             default:
-                Serial.print("Unknown command byte of: 0x");
-                Serial.println(commandByte, HEX);
+                Pololu_Debug.MAESTRO_DEBUG("Unknown command byte of: 0x%02X\n", commandByte);
                 break;
         }
     }
@@ -60,7 +70,7 @@ void PololuProtocol::storePololuProtocolData(uint8_t data) {
     if (bufferIndex < BUFFER_SIZE) {
         pololuProtocolBuffer[bufferIndex++] = data;
     } else {
-        Serial.println("Buffer overflow. Data not stored.");
+        Pololu_Debug.MAESTRO_DEBUG("Buffer overflow. Data not stored.");
     }
 }
 
@@ -70,14 +80,17 @@ void PololuProtocol::handleSetTarget() {
     }
     uint8_t channel = _serial.read();
     uint16_t target = _serial.read() | (_serial.read() << 8);
+    
     storePololuProtocolData(channel);
     storePololuProtocolData(target & 0xFF);
     storePololuProtocolData((target >> 8) & 0xFF);
-
-    Serial.print("Set Target Command: Channel ");
-    Serial.print(channel);
-    Serial.print(", Target ");
-    Serial.println(target);
+    maestroChannel = channel;
+    maestroTarget = target;
+    Pololu_Debug.MAESTRO_DEBUG("Set Target Command: Channel %02X, Target: %02X", channel, target);
+    // Serial.print("Set Target Command: Channel ");
+    // Serial.print(channel);
+    // Serial.print(", Target ");
+    // Serial.println(target);
 }
 
 void PololuProtocol::handleSetSpeedOrAcceleration(uint8_t command) {
@@ -86,6 +99,8 @@ void PololuProtocol::handleSetSpeedOrAcceleration(uint8_t command) {
     }
     uint8_t channel = _serial.read();
     uint16_t value = _serial.read() | (_serial.read() << 8);
+    maestroChannel = channel;
+    maestroValue = value;
     storePololuProtocolData(channel);
     storePololuProtocolData(value & 0xFF);
     storePololuProtocolData((value >> 8) & 0xFF);
@@ -170,4 +185,16 @@ void PololuProtocol::handleRestartScriptWithParameter() {
 
 void PololuProtocol::handleStopScript() {
     Serial.println("Stop Script Command");
+}
+
+void PololuProtocol::handleGetScriptStatus() {
+    while (_serial.available() < 1) {}
+    uint8_t scriptNumber = _serial.read();
+    storePololuProtocolData(scriptNumber);
+
+    Serial.print("Get Script Status Command: Script Number ");
+    Serial.println(scriptNumber);
+
+    uint8_t status = 0; // Example status (0 = not running, 1 = running)
+    _serial.write(status);
 }
