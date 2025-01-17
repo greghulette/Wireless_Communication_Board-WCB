@@ -223,7 +223,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 0;
-  String version = "V4.0";
+  String version = "V4.1";
 
 
 #ifdef HWVERSION_1
