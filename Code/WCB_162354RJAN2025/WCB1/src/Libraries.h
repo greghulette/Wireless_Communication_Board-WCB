@@ -32,6 +32,9 @@
 
 #include "../WCB_Preferences.h"
 
-#include "../StoredSerialCommands.h"
+// #include "../StoredSerialCommands.h"
+
+#include "PersistentStringHandler.h"
+
 
 #endif

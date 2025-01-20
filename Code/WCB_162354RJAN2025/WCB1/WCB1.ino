@@ -206,6 +206,9 @@
 
 // Sets up the Preferences to store values after reboot
 Preferences preferences;
+PersistentStringHandler StoredCommands("Stored_Commands");
+
+
 
 // Sets up the queueinig for the incoming commands to process
 Queue<String> queue = Queue<String>();
@@ -223,7 +226,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 0;
-  String version = "V4.1";
+  String version = "V4.0";
 
 
 #ifdef HWVERSION_1
@@ -911,13 +914,22 @@ void processSerial(String incomingSerialCommand){
   turnOnLEDSerial();
   resetSerialNumberMillis = millis();
   char buf[200];
-  serialResponse.toCharArray(buf, sizeof(buf));
-  char *p = buf;
-  char *str;
-  while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
-    s1 = String(str);
-    queue.push(s1);
+  String tempSerial = incomingSerialCommand.substring(0,2);
+  if (tempSerial == "?C" || tempSerial == "?c"){
+    queue.push(incomingSerialCommand);
+    Serial.println("Entered stored string saving mode");
+    
+  } else{
+    serialResponse.toCharArray(buf, sizeof(buf));
+    char *p = buf;
+    char *str;
+    while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
+      s1 = String(str);
+      queue.push(s1);
+    }
   };
+  
+ 
   turnOffLED();
 }
 
@@ -1306,6 +1318,8 @@ if (WCB_Quantity >= 9 ){
   // Register for a callback function that will be called when data is received
   esp_now_register_recv_cb(OnDataRecv);
   
+  StoredCommands.begin();
+
 
 
 }   // end of setup
@@ -1352,7 +1366,7 @@ void loop(){
       // MaestroString = MaestroString.toUpperCase();
       Serial.println(MaestroString);
       } else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
-      if (inputBuffer[0] == '#'){
+      if (inputBuffer[0] == LocalFunctionIdentifier){
         if (
             inputBuffer[1]=='B' ||          // Command deignator for changing Broadcast for specific port
             inputBuffer[1]=='b' ||          // Command deignator for changing Broadcast for specific port
@@ -1365,7 +1379,9 @@ void loop(){
             inputBuffer[1]=='Q' ||          // Command designator for storing Quantity of WCBs
             inputBuffer[1]=='q' ||          // Command designator for storing Quantity of WCBs
             inputBuffer[1]=='S' ||          // Command designator for changing Serial Baud Rates
-            inputBuffer[1]=='s'             // Command designator for changing Serial Baud Rates
+            inputBuffer[1]=='s' ||          // Command designator for changing Serial Baud Rates
+            inputBuffer[1]=='C' ||          // Command designator for storing Stored Commands 
+            inputBuffer[1]=='c'             // Command designator for storing Stored Commands
           ){commandLength = strlen(inputBuffer); 
             if (inputBuffer[1]=='D' || inputBuffer[1]=='d'){
               debugInputIdentifier = "";                            // flush the string
@@ -1442,6 +1458,27 @@ void loop(){
                 if (tempESPNOWPASSWORD == "CLEAR"){
                   clearPassword();
                 } else{savePassword(tempESPNOWPASSWORD); }
+              }else if (inputBuffer[1]=='C' || inputBuffer[1]=='c'){
+                String tempStoredCommands;                            // flush the string
+                for (int i=2; i<=commandLength-1; i++){
+                  char inCharRead = inputBuffer[i];
+                  tempStoredCommands += inCharRead;                   // add it to the inputString:
+              }
+                if (tempStoredCommands == "CLEAR"){
+                  StoredCommands.clearAll();
+                  Serial.println("All Stored Seqences Cleared.");
+                } else if (tempStoredCommands == "PRINT" || tempStoredCommands == "print" || tempStoredCommands == "LIST" || tempStoredCommands == "list"){
+                  Serial.println("Print out stored Commands");
+                  StoredCommands.listKeys();
+                }else {
+                  Serial.print("Stored Sequence Entered "); Serial.println(tempStoredCommands);
+                  String tempKeyID = tempStoredCommands.substring(0,2);
+                  int tempKeyIDInt = tempKeyID.toInt();
+                  // Serial.println(tempKeyIDInt);
+                  String tempStoredCommandsSubString = tempStoredCommands.substring(2, commandLength+1);
+                  Serial.println(tempStoredCommandsSubString);
+                  StoredCommands.saveString(tempKeyID.c_str(),tempStoredCommandsSubString.c_str()); 
+                  }
               }
               else {Debug.LOOP("No valid command entered /n");}
           }
@@ -1496,7 +1533,7 @@ void loop(){
               ESPNOWStringCommand = "";
               ESPNOWSubStringCommand = "";
               ESPNOWTarget = "";  
-              }  
+            }  
             if(inputBuffer[1]=='S' || inputBuffer[1]=='s') {
               for (int i=1; i<commandLength;i++ ){
                 char inCharRead = inputBuffer[i];
@@ -1520,20 +1557,24 @@ void loop(){
               serialStringCommand = "";
               serialPort = "";
             }
-              if(inputBuffer[1]=='C' || inputBuffer[1]=='c') {
-                Debug.LOOP("entered new menu\n");
-                storedCommandFunction = (inputBuffer[2]-'0')*10+(inputBuffer[3]-'0');
-                Stored_Command[0] = '\0';
-                Stored_Command[0] = storedCommandFunction;
-
-              // processStoredCommands(CommandSequence1);          
-              } 
+            if(inputBuffer[1]=='C' || inputBuffer[1]=='c') {
+              Debug.LOOP("entered new menu\n");
+              String tempStoredCommandsFunction;                            // flush the string
+              for (int i=2; i<=commandLength; i++){
+                char inCharRead = inputBuffer[i];
+                tempStoredCommandsFunction += inCharRead;                   // add it to the inputString:
+              }
+            String tempStoredCommandsFunctionID = tempStoredCommandsFunction.substring(0,commandLength);
+            Serial.println(tempStoredCommandsFunctionID);
+            String tempscf = StoredCommands.getString(tempStoredCommandsFunctionID.c_str());
+            processStoredCommands(tempscf);       
+            } 
           }
         }
       } else if (MaestroString == "MRS" || MaestroString == "mrs"){
           Serial.println("entered maestro loop");
           commandLength = strlen(inputBuffer);
-            for (int i=1; i<commandLength;i++ ){
+            for (int i=2; i<commandLength+1;i++ ){
                 char inCharRead = inputBuffer[i];
                 MaestroStringComplete += inCharRead;  // add it to the inputString:
             }
@@ -1588,64 +1629,6 @@ void loop(){
               serialCommandisTrue  = false; 
       }
 
-             if(Stored_Command[0]){
-            switch (Stored_Command[0]){
-              case 1: processStoredCommands(CommandSequence1); Stored_Command[0] = '\0'; break;
-              case 2: processStoredCommands(CommandSequence2); Stored_Command[0] = '\0';break;
-              case 3: processStoredCommands(CommandSequence3); Stored_Command[0] = '\0';break;
-              case 4: processStoredCommands(CommandSequence4); Stored_Command[0] = '\0';break;
-              case 5: processStoredCommands(CommandSequence5); Stored_Command[0] = '\0';break;
-              case 6: processStoredCommands(CommandSequence6); Stored_Command[0] = '\0';break;
-              case 7: processStoredCommands(CommandSequence7); Stored_Command[0] = '\0';break;
-              case 8: processStoredCommands(CommandSequence8); Stored_Command[0] = '\0';break;
-              case 9: processStoredCommands(CommandSequence9); Stored_Command[0] = '\0';break;
-              case 10: processStoredCommands(CommandSequence10); Stored_Command[0] = '\0';break;
-              case 11: processStoredCommands(CommandSequence11); Stored_Command[0] = '\0';break;
-              case 12: processStoredCommands(CommandSequence12); Stored_Command[0] = '\0';break;
-              case 13: processStoredCommands(CommandSequence13); Stored_Command[0] = '\0';break;
-              case 14: processStoredCommands(CommandSequence14); Stored_Command[0] = '\0';break;
-              case 15: processStoredCommands(CommandSequence15); Stored_Command[0] = '\0';break;
-              case 16: processStoredCommands(CommandSequence16); Stored_Command[0] = '\0';break;
-              case 17: processStoredCommands(CommandSequence17); Stored_Command[0] = '\0';break;
-              case 18: processStoredCommands(CommandSequence18); Stored_Command[0] = '\0';break;
-              case 19: processStoredCommands(CommandSequence19); Stored_Command[0] = '\0';break;
-              case 20: processStoredCommands(CommandSequence20); Stored_Command[0] = '\0';break;
-              case 21: processStoredCommands(CommandSequence21); Stored_Command[0] = '\0';break;
-              case 22: processStoredCommands(CommandSequence22); Stored_Command[0] = '\0';break;
-              case 23: processStoredCommands(CommandSequence23); Stored_Command[0] = '\0';break;
-              case 24: processStoredCommands(CommandSequence24); Stored_Command[0] = '\0';break;
-              case 25: processStoredCommands(CommandSequence25); Stored_Command[0] = '\0';break;
-              case 26: processStoredCommands(CommandSequence26); Stored_Command[0] = '\0';break;
-              case 27: processStoredCommands(CommandSequence27); Stored_Command[0] = '\0';break;
-              case 28: processStoredCommands(CommandSequence28); Stored_Command[0] = '\0';break;
-              case 29: processStoredCommands(CommandSequence29); Stored_Command[0] = '\0';break;
-              case 30: processStoredCommands(CommandSequence30); Stored_Command[0] = '\0';break;
-              case 31: processStoredCommands(CommandSequence31); Stored_Command[0] = '\0';break;
-              case 32: processStoredCommands(CommandSequence32); Stored_Command[0] = '\0';break;
-              case 33: processStoredCommands(CommandSequence33); Stored_Command[0] = '\0';break;
-              case 34: processStoredCommands(CommandSequence34); Stored_Command[0] = '\0';break;
-              case 35: processStoredCommands(CommandSequence35); Stored_Command[0] = '\0';break;
-              case 36: processStoredCommands(CommandSequence36); Stored_Command[0] = '\0';break;
-              case 37: processStoredCommands(CommandSequence37); Stored_Command[0] = '\0';break;
-              case 38: processStoredCommands(CommandSequence38); Stored_Command[0] = '\0';break;
-              case 39: processStoredCommands(CommandSequence39); Stored_Command[0] = '\0';break;
-              case 40: processStoredCommands(CommandSequence40); Stored_Command[0] = '\0';break;
-              case 41: processStoredCommands(CommandSequence41); Stored_Command[0] = '\0';break;
-              case 42: processStoredCommands(CommandSequence42); Stored_Command[0] = '\0';break;
-              case 43: processStoredCommands(CommandSequence43); Stored_Command[0] = '\0';break;
-              case 44: processStoredCommands(CommandSequence44); Stored_Command[0] = '\0';break;
-              case 45: processStoredCommands(CommandSequence45); Stored_Command[0] = '\0';break;
-              case 46: processStoredCommands(CommandSequence46); Stored_Command[0] = '\0';break;
-              case 47: processStoredCommands(CommandSequence47); Stored_Command[0] = '\0';break;
-              case 48: processStoredCommands(CommandSequence48); Stored_Command[0] = '\0';break;
-              case 49: processStoredCommands(CommandSequence49); Stored_Command[0] = '\0';break;
-              case 50: processStoredCommands(CommandSequence50); Stored_Command[0] = '\0';break;
-
-
-            }
-          }
-
-      // }
       ///***  Clear States and Reset for next command.  ***///
       stringComplete =false;
       autoComplete = false;
@@ -1656,7 +1639,7 @@ void loop(){
       hexData = "";
       segmentCount=0;
       localCommandFunction = 0;
-              String storedCommands = "";
+      // String storedCommands = "";
 
     
       // reset Local ESP Command Variables

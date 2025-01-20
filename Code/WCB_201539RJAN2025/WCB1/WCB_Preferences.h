@@ -76,5 +76,5 @@
   const char* DELIMITER = "*";                // The character that separates the simultaneous commmands that were sent (Tested: & * ^ . - )
 
   char CommandCharacter = ';';                // The character that triggers unicast commands
-
+  char LocalFunctionIdentifier = '?';
 
