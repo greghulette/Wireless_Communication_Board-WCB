@@ -1,13 +1,14 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 4.0                                             *****////
+///*****                                                Version 4.2                                             *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
 ///*****                       - Sends Serial commands to other locally connected devices                       *****////
 ///*****                       - Sends Serial commands to other remotely connected devices                      *****////
 ///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****//// 
+///*****                       - Sends and recieves signals from the Maestro controller                         *****//// 
 ///*****                                                                                                        *****////
 ///*****                                                                                                        *****//// 
 ///*****                       Broadcast Command Syntax:                                                        *****////
@@ -226,7 +227,7 @@ Queue<String> queue = Queue<String>();
   unsigned long mainLoopTime; 
   unsigned long MLMillis;
   byte mainLoopDelayVar = 0;
-  String version = "V4.0";
+  String version = "V4.2";
 
 
 #ifdef HWVERSION_1
@@ -264,6 +265,7 @@ bool Boardver2_4 = true;
   SoftwareSerial s3Serial;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
+  SoftwareSerial chainSerial;
 
 //////////////////////////////////////////////////////////////////
 ///******         Maestro Definitions                     *****///
@@ -273,15 +275,20 @@ bool Boardver2_4 = true;
   bool maestroEnabled=true;
   int maestroQuantity = MAESTRO_QTY;
   MiniMaestro maestro(MAESTRO_CONNECTION,0,localMaestroID,0);
-  #ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY
-    PololuProtocol pololu(MAESTRO_CONTROLLER, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-    bool maestroContollerLibrary = true;
+  #ifdef MAESTRO_CONTROLLER_KYBER
+    PololuProtocol pololu(MAESTRO_CONTROLLER, MAESTRO_CONNECTION, SERIAL1_RX_PIN, SERIAL1_TX_PIN,SERIAL2_RX_PIN,SERIAL2_TX_PIN);
+    #ifdef MAESTRO_CONTROLLER_KYBER_LOCAL
+    bool Maestro_Controller_Local = true;
+    #endif
+    bool maestroContollerKyber = true;
   #elif defined MAESTRO_CONTROLLER_STRING
-    bool maestroContollerLibrary = false;;
+    bool maestroContollerKyber = false;;
   #endif  
 #endif
 #ifndef MAESTRO_ENABLED
   bool maestroEnabled=false;
+      bool maestroContollerKyber = false;;
+
 #endif
 
 //////////////////////////////////////////////////////////////////////
@@ -705,8 +712,8 @@ void writes1SerialString(String stringData){
   {
     s1Serial.write(completeString[i]);
   }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
-  } 
+  Debug.SERIAL_EVENT("Sent Command: %s out Serial port 1\n", completeString.c_str());
+} 
 
 void writes2SerialString(String stringData){
   if (maestroEnabled == false){
@@ -715,7 +722,7 @@ void writes2SerialString(String stringData){
     s2Serial.write(completeString[i]);
     }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 2\n", completeString.c_str());
-  } else if(maestroEnabled == true && maestroContollerLibrary == true){
+  } else if(maestroEnabled == true && maestroContollerKyber == true){
     Debug.SERIAL_EVENT("Sending Maestro Commands");
     String maestroStartBitTemp = stringData.substring(0,2);
     String MaestroDeviceIDTemp = stringData.substring(2,4);
@@ -743,8 +750,7 @@ void writes3SerialString(String stringData){
   {
     s3Serial.write(completeString[i]);
   }
-      Debug.SERIAL_EVENT("Sent Command: %s out Serial port 3\n", completeString.c_str());
-
+  Debug.SERIAL_EVENT("Sent Command: %s out Serial port 3\n", completeString.c_str());
 }
 
 void writes4SerialString(String stringData){
@@ -753,8 +759,7 @@ void writes4SerialString(String stringData){
   {
     s4Serial.write(completeString[i]);
   }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 4\n", completeString.c_str());
-
+  Debug.SERIAL_EVENT("Sent Command: %s out Serial port 4\n", completeString.c_str());
 }
 
 void writes5SerialString(String stringData){
@@ -764,7 +769,6 @@ void writes5SerialString(String stringData){
     s5Serial.write(completeString[i]);
   }
     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 5\n", completeString.c_str());
-
 }
 
 /////////////////////////////////////////////////////////
@@ -783,14 +787,15 @@ void serialEvent() {
 }
 
 void s1SerialEvent() {
-  while (s1Serial.available() > 0) {    
+  if (maestroContollerKyber == false){
+    while (s1Serial.available() > 0) {    
     serialResponse = s1Serial.readStringUntil('\r');
     Debug.SERIAL_EVENT("Serial 1 Input: %s \n", serialResponse.c_str());
     serialicomingport = 1;
     serialCommandisTrue  = true;
     processSerial(serialResponse);
   }
-  // } 
+}
 }
 
 void s2SerialEvent() {
@@ -835,6 +840,14 @@ void s5SerialEvent() {
   }  
 }
 
+void chainSerialEvent() {
+  while (chainSerial.available() > 0) { 
+    uint8_t incomingByte = chainSerial.read(); // Read a byte from the chain pin
+        Serial.print("Received: 0x");
+        Serial.println(incomingByte, HEX); 
+  }  
+}
+
 /////////////////////////////////////////////////////////
 ///*****      Serial Processing Function         *****///
 /////////////////////////////////////////////////////////
@@ -847,16 +860,18 @@ serialicomingport = 0;
 void resetSerialCommand(){
   if ( millis() - previousCommandMillis > resetInterval){
     previousCommand="nothingheretosee"; }  //resets the previous command after 50ms
-
 }
 
 void processmaestroCommand(){
-  #ifdef MESTRO_CONTROLLER_POLOLU_LIBRARY
-    if (maestroContollerLibrary == true){
+  #ifdef MAESTRO_CONTROLLER_KYBER
+    if (maestroContollerKyber == true){
       if (pololu.commandRecieved == true){
         Debug.MAESTRO_DEBUG("Entered maestro Command Function\n");
         Debug.MAESTRO_DEBUG("Processing Maestro Command: %02X %02X %02X %02X\n", pololu.maestraoStartBit, pololu.maestroDeviceID, pololu.maestroCommandByte, pololu.maestroSequence);
         if (pololu.maestroDeviceID == localMaestroID){
+          if (pololu.maestroCommandByte == 0x2E ){
+            Serial.println("mosing forward");
+          }
           Debug.MAESTRO_DEBUG("Entered 0x01\n");
           MAESTRO_CONNECTION.write(pololu.maestraoStartBit);
           MAESTRO_CONNECTION.write(pololu.maestroDeviceID);
@@ -884,30 +899,36 @@ void processmaestroCommand(){
 }
 
 void ProcessSerialMaestroCommand(int devID, int seqID){
-  if (devID == localMaestroID){
-    maestro.restartScript(seqID);
-  } else if (devID == 0){
+  #ifdef MAESTRO_ENABLED
+    if (devID == localMaestroID){
       maestro.restartScript(seqID);
-      String tempDevID = "9";
-      String tempSeqID = String(seqID);
-      String tempMaestro = "MRS" + tempDevID + tempSeqID;
-      sendESPNOWCommand("BR", tempMaestro);
-  } else if (devID == 9){
-      maestro.restartScript(seqID);
-  } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
-      String tempDevID = String(devID);
-      String tempSeqID = String(seqID);
-      String tempMaestro = "MRB" + tempDevID + tempSeqID;
-      sendESPNOWCommand("BR", tempMaestro);  } 
-    else {
-  }
+    } else if (devID == 0){
+        maestro.restartScript(seqID);
+        String tempDevID = "9";
+        String tempSeqID = String(seqID);
+        String tempMaestro = "MRS" + tempDevID + tempSeqID;
+        sendESPNOWCommand("BR", tempMaestro);
+    } else if (devID == 9){
+        maestro.restartScript(seqID);
+    } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
+        String tempDevID = String(devID);
+        String tempSeqID = String(seqID);
+        String tempMaestro = "MRB" + tempDevID + tempSeqID;
+        sendESPNOWCommand("BR", tempMaestro);  
+    } else {
+        Debug.MAESTRO_DEBUG("No Valid Targets Identified\n");
+    }
+  #endif
 }
+
 void ProcessSerialMaestroCommandBroadcast(int devID, int seqID){
-  if (devID == localMaestroID){
-    maestro.restartScript(seqID);
-  } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
-    Debug.MAESTRO_DEBUG("Maestro Command not for local Maestro\n");
-  }
+  #ifdef MAESTRO_ENABLED
+    if (devID == localMaestroID){
+        maestro.restartScript(seqID);
+    } else if (devID != localMaestroID && (devID > 0 && devID <9)) {
+        Debug.MAESTRO_DEBUG("Maestro Command not for local Maestro\n");
+    }
+  #endif
 }
 
 void processSerial(String incomingSerialCommand){
@@ -918,13 +939,14 @@ void processSerial(String incomingSerialCommand){
   if (tempSerial == "?C" || tempSerial == "?c"){
     queue.push(incomingSerialCommand);
     Serial.println("Entered stored string saving mode");
-    
   } else{
     serialResponse.toCharArray(buf, sizeof(buf));
     char *p = buf;
     char *str;
     while ((str = strtok_r(p, DELIMITER , &p)) !=NULL){
       s1 = String(str);
+          ESPNOWBroadcastCommand = false;
+
       queue.push(s1);
     }
   };
@@ -1112,8 +1134,10 @@ void setup(){
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
-  s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
-  #ifdef  MESTRO_CONTROLLER_POLOLU_LIBRARY
+  s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95); 
+  chainSerial.begin(CHAIN_DEFAULT_BAUD_RATE,SWSERIAL_8N1,CHAIN_RX_PIN,CHAIN_TX_PIN,false,95);  
+ 
+  #ifdef  MAESTRO_CONTROLLER_KYBER
     pololu.begin(57692);
   #endif
   // prints out a bootup message of the local hostname
@@ -1320,13 +1344,11 @@ if (WCB_Quantity >= 9 ){
   
   StoredCommands.begin();
 
-
-
 }   // end of setup
 
 
 void loop(){
-  #ifdef  MESTRO_CONTROLLER_POLOLU_LIBRARY
+  #ifdef  MAESTRO_CONTROLLER_KYBER
     pololu.processCommands();  // Continuously process incoming commands
     processmaestroCommand();
   #endif
@@ -1337,6 +1359,7 @@ void loop(){
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
     if(s5Serial.available()){s5SerialEvent();}
+    if(chainSerial.available()){chainSerialEvent();}
 
     //resets the variable for the broadcast messages
     resetserialnumber();
@@ -1364,7 +1387,7 @@ void loop(){
        MaestroString3 = inputBuffer[2];
       MaestroString = MaestroString1 + MaestroString2 + MaestroString3;
       // MaestroString = MaestroString.toUpperCase();
-      Serial.println(MaestroString);
+      // Serial.println(MaestroString);
       } else if (autoComplete) {autoInputString.toCharArray(inputBuffer, 300);autoInputString="";}
       if (inputBuffer[0] == LocalFunctionIdentifier){
         if (
@@ -1490,11 +1513,11 @@ void loop(){
                         //  DelayCall::schedule([] {ESP.restart();}, 3000);
                         ESP.restart();
                         Local_Command[0] = '\0';                                                           break;
-                  case 3: maestroContollerLibrary = 0; 
-                          Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerLibrary);
-                          Local_Command[0] = '\0';                                                          break;  //reserved for future use
-                  case 4: maestroContollerLibrary = 1; 
-                          Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerLibrary);
+                  // case 3: maestroContollerKyber = 0; 
+                  //         Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerKyber);
+                  //         Local_Command[0] = '\0';                                                          break;  //reserved for future use
+                  case 4: maestroContollerKyber = 1; 
+                          Serial.print("MaestroLibrary Status: ");Serial.println(maestroContollerKyber);
                         Local_Command[0] = '\0';      break;  //reserved for future use
                   case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
                         Local_Command[0] = '\0';
@@ -1641,7 +1664,6 @@ void loop(){
       localCommandFunction = 0;
       // String storedCommands = "";
 
-    
       // reset Local ESP Command Variables
       int espCommandFunction;
 

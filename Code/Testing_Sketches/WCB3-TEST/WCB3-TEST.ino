@@ -84,6 +84,7 @@
 #include <WiFi.h>
 #include "esp_wifi.h"
 #include <esp_now.h>
+#include <string>
 
 //pin definitions
 #include "wcb_pin_map.h"
@@ -132,7 +133,10 @@
   String serialSubStringCommand;
   String serialResponse = "";
   String s1;
-
+ bool maestrostatusloop ;
+ bool maestros1tatusloop;
+ bool maestro2statusloop;
+ bool maestro3statusloop;
  
   int serialicomingport = 0;
   int haveCommands;
@@ -235,9 +239,9 @@ bool Boardver2_3 = true;
   SoftwareSerial s4Serial;
   SoftwareSerial s5Serial;
   
-MiniMaestro maestro1(s1Serial,0,1,0);
-MiniMaestro maestro2(s1Serial,0,2,0);
-MicroMaestro maestro3(s1Serial,0,3,0);
+MicroMaestro maestro1(s1Serial,255,1);
+MicroMaestro maestro2(s1Serial,255,2);
+MicroMaestro maestro3(s1Serial,255,3);
 
 //////////////////////////////////////////////////////////////////////
 ///*****            Status LED Variables and settings       *****///
@@ -385,163 +389,218 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   }
 }
 
-// Callback when ESP-NOW messages are received
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  turnOnLEDESPNOW();
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  String IncomingMacAddress(macStr);
-  if (IncomingMacAddress == WCB1MacAddressString) {
-    memcpy(&commandsToReceiveFromWCB1, incomingData, sizeof(commandsToReceiveFromWCB1));
+// #include <esp_now.h>
+// #include <string>
+void processIncomingData(const uint8_t *incomingData, size_t dataSize, const String &macAddress) {
+  if (macAddress == WCB1MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB1, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB1.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-    Debug.ESPNOW("Wrong ESP-NOW Password was sent.  Message Ignored\n");  
-    } else {
-      incomingSenderID = commandsToReceiveFromWCB1.structSenderID;
-      incomingTargetID = commandsToReceiveFromWCB1.structTargetID;
-      incomingCommandIncluded = commandsToReceiveFromWCB1.structCommandIncluded;
-      incomingCommand = commandsToReceiveFromWCB1.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-      processESPNOWIncomingMessage();
-    } 
-  } else if (IncomingMacAddress == WCB2MacAddressString){
-    memcpy(&commandsToReceiveFromWCB2, incomingData, sizeof(commandsToReceiveFromWCB2));
+  } else if (macAddress == WCB2MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB2, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB2.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB2.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB2.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB2.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB2.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB3MacAddressString){
-    memcpy(&commandsToReceiveFromWCB3, incomingData, sizeof(commandsToReceiveFromWCB3));
+  } else if (macAddress == WCB3MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB3, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB3.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB3.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB3.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB3.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB3.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB4MacAddressString){
-    memcpy(&commandsToReceiveFromWCB4, incomingData, sizeof(commandsToReceiveFromWCB4));
+  } else if (macAddress == WCB4MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB4, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB4.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB4.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB4.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB4.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB4.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB5MacAddressString){
-    memcpy(&commandsToReceiveFromWCB5, incomingData, sizeof(commandsToReceiveFromWCB5));
-    incomingPassword = commandsToReceiveFromWCB4.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB5.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB5.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB6MacAddressString){
-    memcpy(&commandsToReceiveFromWCB5, incomingData, sizeof(commandsToReceiveFromWCB5));
+  } else if (macAddress == WCB5MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB5, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB5.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB5.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB5.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB6MacAddressString){
-    memcpy(&commandsToReceiveFromWCB6, incomingData, sizeof(commandsToReceiveFromWCB6));
+  } else if (macAddress == WCB6MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB6, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB6.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB6.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB6.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB6.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB6.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB7MacAddressString){
-    memcpy(&commandsToReceiveFromWCB7, incomingData, sizeof(commandsToReceiveFromWCB7));
+  } else if (macAddress == WCB7MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB7, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB7.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB7.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB7.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB7.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB7.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB8MacAddressString){
-    memcpy(&commandsToReceiveFromWCB8, incomingData, sizeof(commandsToReceiveFromWCB8));
+  } else if (macAddress == WCB8MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB8, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB8.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB8.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB8.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB8.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB8.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == WCB9MacAddressString){
-    memcpy(&commandsToReceiveFromWCB9, incomingData, sizeof(commandsToReceiveFromWCB9));
+  } else if (macAddress == WCB9MacAddressString) {
+    memcpy(&commandsToReceiveFromWCB9, incomingData, dataSize);
     incomingPassword = commandsToReceiveFromWCB9.structPassword;
-    if (incomingPassword != ESPNOWPASSWORD){
-        Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
-      } else {
-        incomingSenderID = commandsToReceiveFromWCB9.structSenderID;
-        incomingTargetID = commandsToReceiveFromWCB9.structTargetID;
-        incomingCommandIncluded = commandsToReceiveFromWCB9.structCommandIncluded;
-        incomingCommand = commandsToReceiveFromWCB9.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-        processESPNOWIncomingMessage();
-      }
-  } else if (IncomingMacAddress == broadcastMACAddressString) {
-  memcpy(&commandsToReceiveFromBroadcast, incomingData, sizeof(commandsToReceiveFromBroadcast));
-  incomingPassword = commandsToReceiveFromBroadcast.structPassword;
-  if (incomingPassword != ESPNOWPASSWORD){
-    Debug.ESPNOW("Wrong ESP-NOW Password was sent.  Message Ignored\n");  
+  } else if (macAddress == broadcastMACAddressString) {
+    memcpy(&commandsToReceiveFromBroadcast, incomingData, dataSize);
+    incomingPassword = commandsToReceiveFromBroadcast.structPassword;
   } else {
-      incomingSenderID = commandsToReceiveFromBroadcast.structSenderID;
-      incomingTargetID = commandsToReceiveFromBroadcast.structTargetID;
-      incomingCommandIncluded = commandsToReceiveFromBroadcast.structCommandIncluded;
-      incomingCommand = commandsToReceiveFromBroadcast.structCommand;
-        Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
-      processESPNOWIncomingMessage();
-    }
-  } 
-  else {
-    // Debug.ESPNOW("ESP-NOW Mesage ignored \n");
-        turnOffLED();
-  }  
-  IncomingMacAddress ="";  
-} 
+    turnOffLED();
+    return; // Unknown MAC address, stop processing
+  }
+
+  // Validate the ESP-NOW password
+  if (incomingPassword != ESPNOWPASSWORD) {
+    Debug.ESPNOW("Wrong ESP-NOW Password from %s. Message Ignored\n", macAddress.c_str());
+    return;
+  }
+
+  // Process valid data
+  incomingSenderID = commandsToReceiveFromWCB1.structSenderID;
+  incomingTargetID = commandsToReceiveFromWCB1.structTargetID;
+  incomingCommandIncluded = commandsToReceiveFromWCB1.structCommandIncluded;
+  incomingCommand = commandsToReceiveFromWCB1.structCommand;
+
+  Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID.c_str());
+  processESPNOWIncomingMessage();
+}
+
+
+// Callback when ESP-NOW messages are received
+// void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+//   turnOnLEDESPNOW();
+//   char macStr[18];
+//   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+//             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+//   String IncomingMacAddress(macStr);
+//   if (IncomingMacAddress == WCB1MacAddressString) {
+//     memcpy(&commandsToReceiveFromWCB1, incomingData, sizeof(commandsToReceiveFromWCB1));
+//     incomingPassword = commandsToReceiveFromWCB1.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//     Debug.ESPNOW("Wrong ESP-NOW Password was sent.  Message Ignored\n");  
+//     } else {
+//       incomingSenderID = commandsToReceiveFromWCB1.structSenderID;
+//       incomingTargetID = commandsToReceiveFromWCB1.structTargetID;
+//       incomingCommandIncluded = commandsToReceiveFromWCB1.structCommandIncluded;
+//       incomingCommand = commandsToReceiveFromWCB1.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//       processESPNOWIncomingMessage();
+//     } 
+//   } else if (IncomingMacAddress == WCB2MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB2, incomingData, sizeof(commandsToReceiveFromWCB2));
+//     incomingPassword = commandsToReceiveFromWCB2.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB2.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB2.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB2.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB2.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB3MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB3, incomingData, sizeof(commandsToReceiveFromWCB3));
+//     incomingPassword = commandsToReceiveFromWCB3.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB3.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB3.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB3.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB3.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB4MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB4, incomingData, sizeof(commandsToReceiveFromWCB4));
+//     incomingPassword = commandsToReceiveFromWCB4.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB4.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB4.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB4.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB4.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB5MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB5, incomingData, sizeof(commandsToReceiveFromWCB5));
+//     incomingPassword = commandsToReceiveFromWCB4.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB5.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB5.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB6MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB5, incomingData, sizeof(commandsToReceiveFromWCB5));
+//     incomingPassword = commandsToReceiveFromWCB5.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB5.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB5.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB5.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB5.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB6MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB6, incomingData, sizeof(commandsToReceiveFromWCB6));
+//     incomingPassword = commandsToReceiveFromWCB6.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB6.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB6.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB6.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB6.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB7MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB7, incomingData, sizeof(commandsToReceiveFromWCB7));
+//     incomingPassword = commandsToReceiveFromWCB7.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB7.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB7.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB7.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB7.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB8MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB8, incomingData, sizeof(commandsToReceiveFromWCB8));
+//     incomingPassword = commandsToReceiveFromWCB8.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB8.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB8.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB8.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB8.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == WCB9MacAddressString){
+//     memcpy(&commandsToReceiveFromWCB9, incomingData, sizeof(commandsToReceiveFromWCB9));
+//     incomingPassword = commandsToReceiveFromWCB9.structPassword;
+//     if (incomingPassword != ESPNOWPASSWORD){
+//         Debug.ESPNOW("Wrong ESP-NOW Password of %s was sent.  Message Ignored\n", incomingPassword.c_str());  
+//       } else {
+//         incomingSenderID = commandsToReceiveFromWCB9.structSenderID;
+//         incomingTargetID = commandsToReceiveFromWCB9.structTargetID;
+//         incomingCommandIncluded = commandsToReceiveFromWCB9.structCommandIncluded;
+//         incomingCommand = commandsToReceiveFromWCB9.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//         processESPNOWIncomingMessage();
+//       }
+//   } else if (IncomingMacAddress == broadcastMACAddressString) {
+//   memcpy(&commandsToReceiveFromBroadcast, incomingData, sizeof(commandsToReceiveFromBroadcast));
+//   incomingPassword = commandsToReceiveFromBroadcast.structPassword;
+//   if (incomingPassword != ESPNOWPASSWORD){
+//     Debug.ESPNOW("Wrong ESP-NOW Password was sent.  Message Ignored\n");  
+//   } else {
+//       incomingSenderID = commandsToReceiveFromBroadcast.structSenderID;
+//       incomingTargetID = commandsToReceiveFromBroadcast.structTargetID;
+//       incomingCommandIncluded = commandsToReceiveFromBroadcast.structCommandIncluded;
+//       incomingCommand = commandsToReceiveFromBroadcast.structCommand;
+//         Debug.ESPNOW("ESP-NOW Message Received from %s\n", incomingSenderID);
+//       processESPNOWIncomingMessage();
+//     }
+//   } 
+//   else {
+//     // Debug.ESPNOW("ESP-NOW Mesage ignored \n");
+//         turnOffLED();
+//   }  
+//   IncomingMacAddress ="";  
+// } 
 
 //////////////////////////////////////////////////////////////////////
 ///*****             ESP-NOW Send Functions                   *****///
@@ -938,6 +997,50 @@ void clearPassword(){
   delay(3000);
   ESP.restart();
 }
+uint8_t status; 
+// const unsigned long TIMEOUT = 2000; // Timeout in milliseconds (2 seconds)
+
+// uint8_t getScriptStatusWithTimeout() {
+//   unsigned long startMillis = millis();
+  
+//   while (millis() - startMillis < TIMEOUT) {
+//     uint8_t status = maestro2.getScriptStatus();
+//     if (status != 255) { // 255 means no status returned, indicating timeout
+//       return status;
+//     }
+//   }
+
+//   // Timeout reached without getting a status
+//   Serial.println("Timeout while waiting for script status.");
+//   return 255; // Indicate timeout
+//   // Local_Command[0] = '\0';
+// }
+
+// void checkMaestroStatus(int mnum){
+// uint8_t status;
+// if (mnum == 1){
+//    status = maestro1.getScriptStatus();
+// } else if (mnum == 2){
+//    status = maestro2.getScriptStatus();
+// } else if (mnum == 3){
+//    status = maestro3.getScriptStatus();
+// }
+
+//   // Print the script status
+//   Serial.print("Script Status: ");  
+//   switch (status) {
+//     case 0:
+//       Serial.println("Script is not running.");
+//       break;
+//     case 1:
+//       Serial.println("Script is running.");
+//       break;
+//     default:
+//       Serial.println("Unknown status.");
+//       break;
+//   }
+
+// }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1172,7 +1275,7 @@ if (WCB_Quantity >= 9 ){
 }
 
   // Register for a callback function that will be called when data is received
-  esp_now_register_recv_cb(OnDataRecv);
+  // esp_now_register_recv_cb(OnDataRecv);
   
 
 
@@ -1294,21 +1397,40 @@ void loop(){
                   case 5: printf("ESP-NOW Success Count: %i \nESP-NOW Failure Count %i \n", SuccessCounter, FailureCounter);
                         Local_Command[0]   = '\0';
                          break;  //prints out failure rate of ESPNOW
-                  case 10: maestro1.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 11: maestro1.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 12: maestro1.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 10: maestro1.restartScript(0);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 11: maestro1.restartScript(1);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 12: maestro1.restartScript(2);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
                   case 18: maestro1.getScriptStatus(); Local_Command[0] = '\0';  break;  //reserved for future use
                   case 19: maestro1.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 20: maestro2.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 21: maestro2.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 22: maestro2.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 29: maestro2.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 30: maestro3.restartScript(0);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 31: maestro3.restartScript(1);  Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 32: maestro3.restartScript(2);  Local_Command[0] = '\0';  break;  //reserved for future use                  case 20: maestro1.restartScript(19);  Local_Command[0] = '\0';  break;  //reserved for future use                                                         break;  //reserved for future use
-                  case 39: maestro3.stopScript();      Local_Command[0] = '\0';  break;  //reserved for future use
-                  case 93: Serial.print("Status:");bool maestrostatusloop = maestro1.getScriptStatus(); delay(200); Serial.println(maestrostatusloop);Local_Command[0] = '\0';break;
+                  case 20: maestro2.restartScript(0);  
+                          Serial.println("Sent Maestro Command");
+                          Local_Command[0] = '\0'; 
+                          break;  //reserved for future use
+                  case 21: maestro2.restartScript(1);  Serial.println("Sent Maestro Command");                          
+                           
+                          Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 22: maestro2.restartScript(2);  Serial.println("Sent Maestro Command");
+                          // status = maestro2.getScriptStatus();
+                          // Serial.print("Script Status after restart: ");
+                          // Serial.println(status);
+                          Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 29: maestro2.stopScript();      Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 30: maestro3.restartScript(0);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 31: maestro3.restartScript(1);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
+                  case 32: maestro3.restartScript(2);  Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use                  case 20: maestro1.restartScript(19);  Local_Command[0] = '\0';  break;  //reserved for future use                                                         break;  //reserved for future use
+                  case 39: maestro3.stopScript();      Serial.println("Sent Maestro Command");Local_Command[0] = '\0';  break;  //reserved for future use
 
+                  case 91: uint8_t status = maestro1.readDeviceNumber();
+                          Serial.print("Script Status: ");
+                          Serial.println(status);
+                          // Local_Command[0] = '\0';
+                          break;
+                  // case 92: checkMaestroStatus(2);Local_Command[0] = '\0';break;
+                  // case 93: checkMaestroStatus(3);Local_Command[0] = '\0';break;
+                //  case 91: Serial.print("Status:");  maestros1tatusloop = maestro1.getScriptStatus(); Serial.println(maestros1tatusloop);Local_Command[0] = '\0';break;
+                  // case 92: Serial.print("Status:");  maestro2statusloop = maestro2.getScriptStatus(); Serial.println(maestro2statusloop);Local_Command[0] = '\0';break;
+                  // case 93: Serial.print("Status:");  maestro3statusloop = maestro3.getScriptStatus(); Serial.println(maestro3statusloop);Local_Command[0] = '\0';break;
+                  // maestro1.getScriptStatus()
                 }
               }
 

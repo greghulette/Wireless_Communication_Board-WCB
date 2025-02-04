@@ -263,7 +263,7 @@ bool Boardver2_4 = true;
   #define s2Serial Serial2
   SoftwareSerial s3Serial;
   SoftwareSerial s4Serial;
-  SoftwareSerial s5Serial;
+  // SoftwareSerial s5Serial;
 
 //////////////////////////////////////////////////////////////////
 ///******         Maestro Definitions                     *****///
@@ -308,6 +308,7 @@ bool Boardver2_4 = true;
   #define STATUS_LED_COUNT 1
 
   Adafruit_NeoPixel ESP_LED = Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+  Adafruit_NeoPixel EYE_LED = Adafruit_NeoPixel(5, CHAIN, NEO_GRB + NEO_KHZ800);
 
 /////////////////////////////////////////////////////////////////////////
 ///*****                  ESP NOW Set Up                         *****///
@@ -757,15 +758,15 @@ void writes4SerialString(String stringData){
 
 }
 
-void writes5SerialString(String stringData){
-  String completeString = stringData + '\r';
-  for (int i=0; i<completeString.length(); i++)
-  {
-    s5Serial.write(completeString[i]);
-  }
-    Debug.SERIAL_EVENT("Sent Command: %s out Serial port 5\n", completeString.c_str());
+// void writes5SerialString(String stringData){
+//   String completeString = stringData + '\r';
+//   for (int i=0; i<completeString.length(); i++)
+//   {
+//     s5Serial.write(completeString[i]);
+//   }
+//     Debug.SERIAL_EVENT("Sent Command: %s out Serial port 5\n", completeString.c_str());
 
-}
+// }
 
 /////////////////////////////////////////////////////////
 ///*****          Serial Read Function           *****///
@@ -825,15 +826,15 @@ void s4SerialEvent() {
   }
 }
 
-void s5SerialEvent() {
-  while (s5Serial.available() > 0) {    
-    serialResponse = s5Serial.readStringUntil('\r');
-    Debug.SERIAL_EVENT("Serial 5 Input: %s \n", serialResponse.c_str());
-    serialicomingport = 5;
-    serialCommandisTrue  = true;
-    processSerial(serialResponse);
-  }  
-}
+// void s5SerialEvent() {
+//   while (s5Serial.available() > 0) {    
+//     serialResponse = s5Serial.readStringUntil('\r');
+//     Debug.SERIAL_EVENT("Serial 5 Input: %s \n", serialResponse.c_str());
+//     serialicomingport = 5;
+//     serialCommandisTrue  = true;
+//     processSerial(serialResponse);
+//   }  
+// }
 
 /////////////////////////////////////////////////////////
 ///*****      Serial Processing Function         *****///
@@ -995,6 +996,14 @@ void colorWipeStatus(String statusled, uint32_t c, int brightness) {
     ESP_LED.setBrightness(brightness);
     ESP_LED.setPixelColor(0, c);
     ESP_LED.show();
+  } else if(statusled == "EY"){
+    Serial.println("In eye setting");
+    EYE_LED.setBrightness(brightness);
+    for (int i = 0; i< 3; i++){
+      EYE_LED.setPixelColor(0, c);
+    }
+    EYE_LED.setPixelColor(0, c);
+    EYE_LED.show();
   } 
   else{Debug.DBG("No LED was chosen \n");}
 };
@@ -1112,7 +1121,7 @@ void setup(){
   s2Serial.begin(SERIAL2_BAUD_RATE,SERIAL_8N1,SERIAL2_RX_PIN,SERIAL2_TX_PIN);  
   s3Serial.begin(SERIAL3_BAUD_RATE,SWSERIAL_8N1,SERIAL3_RX_PIN,SERIAL3_TX_PIN,false,95);  
   s4Serial.begin(SERIAL4_BAUD_RATE,SWSERIAL_8N1,SERIAL4_RX_PIN,SERIAL4_TX_PIN,false,95);  
-  s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
+  // s5Serial.begin(SERIAL5_BAUD_RATE,SWSERIAL_8N1,SERIAL5_RX_PIN,SERIAL5_TX_PIN,false,95);  
   #ifdef  MESTRO_CONTROLLER_POLOLU_LIBRARY
     pololu.begin(57692);
   #endif
@@ -1167,6 +1176,10 @@ void setup(){
   ESP_LED.begin();
   ESP_LED.show();
   colorWipeStatus("ES",red,10);
+
+  EYE_LED.begin();
+  EYE_LED.show();
+  colorWipeStatus("EY", white, 200);
 
   //initialize WiFi for ESP-NOW
   WiFi.mode(WIFI_STA);
@@ -1336,7 +1349,7 @@ void loop(){
     if(s2Serial.available()){s2SerialEvent();}
     if(s3Serial.available()){s3SerialEvent();}
     if(s4Serial.available()){s4SerialEvent();}
-    if(s5Serial.available()){s5SerialEvent();}
+    // if(s5Serial.available()){s5SerialEvent();}
 
     //resets the variable for the broadcast messages
     resetserialnumber();
@@ -1347,6 +1360,8 @@ void loop(){
     MLMillis = millis();
     if(startUp) {
         colorWipeStatus("ES",blue,10);
+        colorWipeStatus("EY",blue,200);
+
       startUp = false;
       Serial.print("Startup complete\nStarting main loop\n\n\n");
     }
@@ -1552,7 +1567,7 @@ void loop(){
               }else if (serialPort == "S4" || serialPort == "s4"){
                 writes4SerialString(serialSubStringCommand);
               } else if (serialPort == "S5" || serialPort == "s5"){
-                writes5SerialString(serialSubStringCommand);
+                // writes5SerialString(serialSubStringCommand);
               }else {Debug.LOOP("No valid serial port given \n");}
               serialStringCommand = "";
               serialPort = "";
@@ -1623,7 +1638,7 @@ void loop(){
               if (serialicomingport != 2 && SERIAL2_BROADCAST_ENABLE == true){writes2SerialString(serialBroadcastCommand);}
               if (serialicomingport != 3 && SERIAL3_BROADCAST_ENABLE == true){writes3SerialString(serialBroadcastCommand);}
               if (serialicomingport != 4 && SERIAL4_BROADCAST_ENABLE == true){writes4SerialString(serialBroadcastCommand);}
-              if (serialicomingport != 5 && SERIAL5_BROADCAST_ENABLE == true){writes5SerialString(serialBroadcastCommand);}
+              // if (serialicomingport != 5 && SERIAL5_BROADCAST_ENABLE == true){writes5SerialString(serialBroadcastCommand);}
               if (ESPNOWBroadcastCommand == false){sendESPNOWCommand("BR", serialBroadcastCommand);}
 
               serialCommandisTrue  = false; 
