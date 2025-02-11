@@ -1,3 +1,4 @@
+#include <sys/_types.h>
 #ifndef WCB_STORAGE_H
 #define WCB_STORAGE_H
 
@@ -15,9 +16,14 @@ extern int Default_WCB_Quantity;
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
-extern int baudRates[5];
+extern unsigned long baudRates[5];
 extern char commandDelimiter;
 extern int wcb_hw_version;
+extern int storedBaudRate[6];
+extern bool Kyber_Remote;
+extern bool Kyber_Local;
+extern String Kyber_Location;
+
 
 // For stored commands
 #define MAX_STORED_COMMANDS 50
@@ -40,11 +46,22 @@ void saveWCBQuantityPreferences(int quantity);
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();
 void printBaudRates();
+void recallBaudRatefromSerial(int ser);
+void setBaudRateForSerial(int ser);
 
-void recallCommandSlot(int slot, int sourceID);
+void recallCommandSlot(const String &key, int sourceID);
 void loadStoredCommandsFromPreferences();
-void saveStoredCommandsToPreferences();
+void saveStoredCommandsToPreferences(const String &message);
+void listStoredCommands();
+
 void clearAllStoredCommands();
+
+// void storeCommand(const String &message);
+// void recallStoredCommand(const String &key, int sourceID);
+
+void storeKyberSettings(const String &message);
+void loadKyberSettings();
+void printKyberSettings();
 
 void saveBroadcastSettingsToPreferences();
 void loadBroadcastSettingsFromPreferences();

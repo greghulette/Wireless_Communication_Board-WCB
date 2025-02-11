@@ -1,10 +1,11 @@
+#include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
 // #include "wcb_pin_map.h"
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
-extern int baudRates[5];
+extern unsigned long baudRates[5];
 extern bool serialBroadcastEnabled[5];
 extern char LocalFunctionIdentifier;
 extern char CommandCharacter;
@@ -16,7 +17,20 @@ extern uint8_t umac_oct3;
 extern char espnowPassword[40];
 extern String storedCommands[MAX_STORED_COMMANDS];
 extern int wcb_hw_version;
+extern char espnowPassword[40];
 extern void updatePinMap();
+extern int SERIAL1_TX_PIN;        //  // Serial 1 Tx Pin
+extern int SERIAL1_RX_PIN;       //  // Serial 1 Rx Pin
+extern int SERIAL2_TX_PIN;       //  // Serial 2 Tx Pin
+extern int SERIAL2_RX_PIN;	     //  // Serial 2 Rx Pin
+extern int SERIAL3_TX_PIN;       //  // Serial 3 Tx Pin
+extern int SERIAL3_RX_PIN;       //  // Serial 3 Rx Pin
+extern int SERIAL4_TX_PIN;      //  // Serial 4 Tx Pin 
+extern int SERIAL4_RX_PIN;      //  // Serial 4 Rx Pin
+extern int SERIAL5_TX_PIN;	     //  // Serial 5 Tx Pin
+extern int SERIAL5_RX_PIN;	     //  // Serial 5 Rx Pin
+extern int ONBOARD_LED;       //  // ESP32 Status NeoPixel Pin
+extern int STATUS_LED_PIN;       //  // Not used on this board but defining it to match version 2.1 board
 
 // ==================== Load & Save Functions ====================
 
@@ -36,14 +50,15 @@ void saveHWversion(int wcb_hw_version_f){
   } else {
     Serial.println("No valid HW version identified.");
   }
+  // updatePinMap();
 }
 
 void loadHWversion(){
 preferences.begin("hw_version", true);
 wcb_hw_version =  preferences.getInt("hw_version", 0);
+// Serial.printf("Pin out version %d\n", wcb_hw_version);
 preferences.end();
 updatePinMap();
-
 }
 
 void printHWversion(){
@@ -101,20 +116,6 @@ void saveWCBNumberToPreferences(int wcb_number_f) {
     preferences.end();
     Serial.printf("Changed WCB Number to: %d\nPlease reboot to take effect\n", wcb_number_f);
 }
-// Recall a Stored Command
-void recallCommandSlot(int slot, int sourceID) {
-  if (slot < 1 || slot > MAX_STORED_COMMANDS) {
-    Serial.println("Invalid command slot number.");
-    return;
-  }
-  String recalledCommand = storedCommands[slot - 1];
-  if (recalledCommand.length() == 0) {
-    Serial.println("No command stored in the requested slot.");
-    return;
-  }
-  Serial.printf("Recalling command slot %d: %s\n", slot, recalledCommand.c_str());
-  parseCommandsAndEnqueue(recalledCommand, sourceID);
-}
 
 // Load baud rates from preferences
 void loadBaudRatesFromPreferences() {
@@ -125,6 +126,21 @@ void loadBaudRatesFromPreferences() {
     }
     preferences.end();
 }
+
+void recallBaudRatefromSerial(int ser){
+  preferences.begin("serial_baud", true);
+  String key = "Serial" + String(ser);
+  storedBaudRate[ser] = preferences.getInt(key.c_str(), storedBaudRate[ser]);
+  preferences.end();
+}
+
+void setBaudRateForSerial(int ser){
+  preferences.begin("serial_baud", false);
+  String key = "Serial" + String(ser);
+  storedBaudRate[ser] = preferences.putInt(key.c_str(), storedBaudRate[ser]);
+  preferences.end();
+}
+
 
 // Save baud rates to preferences
 void saveBaudRatesToPreferences() {
@@ -193,14 +209,21 @@ void saveWCBQuantityPreferences(int quantity) {
     preferences.putInt("wcb_quantity", quantity);
     preferences.end();
     Default_WCB_Quantity = quantity;
+    Serial.printf("Saved new WCB Quantities to: %d.  Please reboot to take effect\n", Default_WCB_Quantity);
 }
 
 // Load ESP-NOW password from preferences
 void loadESPNowPasswordFromPreferences() {
-    preferences.begin("espnow_config", true);
+    preferences.begin("espnow_config", true); // Open in read mode
+
+    // Use the external `espnowPassword` as the default value
     preferences.getString("password", espnowPassword, sizeof(espnowPassword));
+
     preferences.end();
+    Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
 }
+
+
 
 // Save ESP-NOW password to preferences
 void setESPNowPassword(const char* newPassword) {
@@ -262,24 +285,103 @@ void loadStoredCommandsFromPreferences() {
         storedCommands[i] = String(storedCommandBuffer);
     }
     preferences.end();
+
+}
+// Recall a Stored Command
+void recallCommandSlot(const String &key, int sourceID) {
+    preferences.begin("stored_cmds", true);
+    String recalledCommand = preferences.getString(key.c_str(), "");
+    preferences.end();
+
+    if (recalledCommand.isEmpty()) {
+        Serial.printf("No command stored under key: '%s'\n", key.c_str());
+        return;
+    }
+
+    Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
+
+    // Enqueue for execution
+    parseCommandsAndEnqueue(recalledCommand, sourceID);
 }
 
 // Save stored commands to preferences
-void saveStoredCommandsToPreferences() {
-    preferences.begin("stored_commands", false);
-    for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        String key = "CMD" + String(i + 1);
-        preferences.putString(key.c_str(), storedCommands[i]);
+void saveStoredCommandsToPreferences(const String &message) {
+int commaIndex = message.indexOf(','); // Find first `,`
+    if (commaIndex == -1 || commaIndex == 0) {
+        Serial.println("Invalid format. Use ?Ckey,value");
+        return;
     }
+
+    String key = message.substring(0, commaIndex);
+    String value = message.substring(commaIndex + 1);
+    key.trim();
+    value.trim();
+
+    if (key.length() == 0 || value.length() == 0) {
+        Serial.println("Key or value cannot be empty.");
+        return;
+    }
+
+    // Open Preferences in read-write mode
+    preferences.begin("stored_cmds", false);
+    
+    // Save the command
+    preferences.putString(key.c_str(), value);
+
+    // Retrieve the existing key list
+    String existingKeys = preferences.getString("key_list", "");
+    
+    // Add new key only if it's not already present
+    if (existingKeys.indexOf("," + key + ",") == -1) {
+        existingKeys += key + ",";
+        preferences.putString("key_list", existingKeys);
+    }
+
     preferences.end();
+
+    Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+}
+
+void listStoredCommands() {
+    preferences.begin("stored_cmds", true); // Open in read mode
+    String keyList = preferences.getString("key_list", ""); // Retrieve stored keys
+    preferences.end();
+
+    if (keyList.length() == 0) {
+        Serial.println("No stored commands.");
+        return;
+    }
+
+    Serial.println("\n--- Stored Commands ---");
+    int startIdx = 0;
+    while (true) {
+        int commaIndex = keyList.indexOf(',', startIdx);
+        if (commaIndex == -1) break;
+
+        String key = keyList.substring(startIdx, commaIndex);
+        key.trim();
+        
+        if (key.length() > 0) {
+            preferences.begin("stored_cmds", true);
+            String value = preferences.getString(key.c_str(), "");
+            preferences.end();
+            Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
+        }
+
+        startIdx = commaIndex + 1;
+    }
+    Serial.println("--- End of Stored Commands ---\n");
 }
 
 // Clear all stored commands
 void clearAllStoredCommands() {
-    for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        storedCommands[i] = "";
-    }
-    saveStoredCommandsToPreferences();
+  preferences.begin("stored_cmds", false);
+    preferences.clear();
+    preferences.end();   
+    // for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
+    //     storedCommands[i] = "";
+    // }
+    // saveStoredCommandsToPreferences();
 }
 
 // Erase all NVS preferences
@@ -311,8 +413,75 @@ void eraseNVSFlash() {
     preferences.begin("stored_commands", false);
     preferences.clear();
     preferences.end();
+      
+    preferences.begin("kyber_settings", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("hw_version", false);
+    preferences.clear();
+    preferences.end();
 
     Serial.println("NVS cleared. Restarting...");
     delay(2000);
     ESP.restart();
 }
+
+void storeKyberSettings(const String &message){
+  Serial.println(message);
+  if (message.equals("local")){
+    Kyber_Local = true;
+    Kyber_Remote = false;
+    Kyber_Location = "local";
+  } else if (message.equals("remote")){
+    Kyber_Local = false;
+    Kyber_Remote = true;
+    Kyber_Location = "remote";
+  } else if (message.equals("clear")){
+    Kyber_Location = " ";
+    Kyber_Local = false;
+    Kyber_Remote =false;
+  }
+  preferences.begin("kyber_settings", false);
+  preferences.putString("K_Location", Kyber_Location);
+  preferences.end();
+    Serial.printf("Saving stored location: %s\n", Kyber_Location);
+
+};
+
+
+void loadKyberSettings(){
+  preferences.begin("kyber_settings", true);
+  Kyber_Location = preferences.getString("K_Location", "");
+  preferences.end();
+
+  if (Kyber_Location == "local"){
+      Kyber_Local = true;
+      Kyber_Remote = false;
+  } else if (Kyber_Location == "remote"){
+      Kyber_Local = false;
+      Kyber_Remote = true;
+  } else if (Kyber_Location == " "){
+      Kyber_Local = false;
+      Kyber_Remote = false;
+  }
+};
+
+
+void printKyberSettings(){
+  String temp;
+  // Serial.printf("REcalling stored location: %s\n", temp);
+  if (Kyber_Location == "local"){
+      temp = "Local";
+      Serial.printf("Kyber is %s\n", temp);
+  } else if (Kyber_Location == "remote"){
+      temp = "Remote";
+      Serial.printf("Kyber is %s\n", temp);
+  } else if (Kyber_Location == " "){
+            temp = "Not used";
+  }
+  // Serial.printf("Kyber is %s\n", temp);
+};
+
+
+
