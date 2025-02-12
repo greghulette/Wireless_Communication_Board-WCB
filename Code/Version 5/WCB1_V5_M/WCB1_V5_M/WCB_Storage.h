@@ -56,9 +56,6 @@ void listStoredCommands();
 
 void clearAllStoredCommands();
 
-// void storeCommand(const String &message);
-// void recallStoredCommand(const String &key, int sourceID);
-
 void storeKyberSettings(const String &message);
 void loadKyberSettings();
 void printKyberSettings();
