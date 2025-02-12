@@ -53,7 +53,7 @@ int wcb_hw_version = 0;  // Default = 0, Version 2.1 = 21, Version 2.3 = 23, Ver
 String SoftwareVersion = "5.0";
 
 // Uncomment only the board that you are loading this sketch onto.
-#define WCB1
+// #define WCB1
 // #define WCB2
 // #define WCB3
 // #define WCB4
@@ -67,22 +67,19 @@ String SoftwareVersion = "5.0";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
-// #define STATUS_LED_PIN 19 // ESP32 Status NeoPixel Pin
-
-
 // // Serial port pin assignments
-    int SERIAL1_TX_PIN;         //  // Serial 1 Tx Pin
-    int SERIAL1_RX_PIN;         //  // Serial 1 Rx Pin
-    int SERIAL2_TX_PIN;         //  // Serial 2 Tx Pin
-    int SERIAL2_RX_PIN;	        //  // Serial 2 Rx Pin
-    int SERIAL3_TX_PIN;         //  // Serial 3 Tx Pin
-    int SERIAL3_RX_PIN;         //  // Serial 3 Rx Pin
-    int SERIAL4_TX_PIN;         //  // Serial 4 Tx Pin 
-    int SERIAL4_RX_PIN;         //  // Serial 4 Rx Pin
-    int SERIAL5_TX_PIN;	        //  // Serial 5 Tx Pin
-    int SERIAL5_RX_PIN;	        //  // Serial 5 Rx Pin
-    int ONBOARD_LED;            //  // Pin for the onboard LED on version 1.0
-    int STATUS_LED_PIN;         //  // Pin for the onboard NeoPixel LED on version 2.x boards
+int SERIAL1_TX_PIN;         //  // Serial 1 Tx Pin
+int SERIAL1_RX_PIN;         //  // Serial 1 Rx Pin
+int SERIAL2_TX_PIN;         //  // Serial 2 Tx Pin
+int SERIAL2_RX_PIN;	        //  // Serial 2 Rx Pin
+int SERIAL3_TX_PIN;         //  // Serial 3 Tx Pin
+int SERIAL3_RX_PIN;         //  // Serial 3 Rx Pin
+int SERIAL4_TX_PIN;         //  // Serial 4 Tx Pin 
+int SERIAL4_RX_PIN;         //  // Serial 4 Rx Pin
+int SERIAL5_TX_PIN;	        //  // Serial 5 Tx Pin
+int SERIAL5_RX_PIN;	        //  // Serial 5 Rx Pin
+int ONBOARD_LED;            //  // Pin for the onboard LED on version 1.0
+int STATUS_LED_PIN;         //  // Pin for the onboard NeoPixel LED on version 2.x boards
   
 // Default baud rates
 #define SERIAL1_DEFAULT_BAUD_RATE 9600
@@ -157,7 +154,6 @@ if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
    } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24){
     colorWipeStatus("ES", red, 255); 
-    Serial.println("Turning LED Red");
   } else {
     Serial.println("No LED yet defined");
   }
@@ -214,10 +210,6 @@ SoftwareSerial Serial3(SERIAL3_RX_PIN, SERIAL3_TX_PIN);
 SoftwareSerial Serial4(SERIAL4_RX_PIN, SERIAL4_TX_PIN);
 SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
 
-
-
-
-
 // ============================= FreeRTOS Queue Setup =============================
 typedef struct {
   char *cmd;     // Dynamically allocated
@@ -236,25 +228,7 @@ void sendESPNowMessage(uint8_t target, const char *message);
 // void handleSingleCommand(const String &cmd, int sourceID);
 void enqueueCommand(const String &cmd, int sourceID);
 
-// ============================= Setup & Loop =============================
 
-// Helper to set a color on the status LED
-void setLEDColor(const String &colorName) {
-  static const uint32_t off=0x000000,red=0xFF0000,orange=0xFF8000,yellow=0xFFFF00,green=0x00FF00,cyan=0x00FFFF,blue=0x0000FF,magenta=0xFF00FF,white=0xFFFFFF;
-  uint32_t color = off;
-
-  if (colorName.equalsIgnoreCase("red")) color = red;
-  else if (colorName.equalsIgnoreCase("orange")) color = orange;
-  else if (colorName.equalsIgnoreCase("yellow")) color = yellow;
-  else if (colorName.equalsIgnoreCase("green")) color = green;
-  else if (colorName.equalsIgnoreCase("cyan")) color = cyan;
-  else if (colorName.equalsIgnoreCase("blue")) color = blue;
-  else if (colorName.equalsIgnoreCase("magenta")) color = magenta;
-  else if (colorName.equalsIgnoreCase("white")) color = white;
-
-  statusLED->fill(color);
-  statusLED->show();
-}
 
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
@@ -336,42 +310,38 @@ void printConfigInfo() {
   printHWversion();
   Serial.printf("Software Version %s\n", SoftwareVersion);
   loadBaudRatesFromPreferences();
-  Serial.println("Serial Baud Rates and Broadcast Settings:");
+  Serial.println("--------------- Serial Settings ----------------------");
   for (int i = 0; i < 5; i++) {
-    Serial.printf("  Serial%d Baud Rate: %d,  Broadcast: %s\n",
+    Serial.printf("Serial%d Baud Rate: %d,  Broadcast: %s\n",
                   i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
   }
-Serial.printf("Serial1 TX: %d, RX: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
-Serial.printf("Serial2 TX: %d, RX: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
-Serial.printf("Serial3 TX: %d, RX: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
-Serial.printf("Serial4 TX: %d, RX: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
-Serial.printf("Serial5 TX: %d, RX: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
+  Serial.printf("Serial1 TX Pin: %d, RX Pin: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
+  Serial.printf("Serial2 TX Pin: %d, RX Pin: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
+  Serial.printf("Serial3 TX Pin: %d, RX Pin: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
+  Serial.printf("Serial4 TX Pin: %d, RX Pin: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
+  Serial.printf("Serial5 TX Pin: %d, RX Pin: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
 
+  Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
-
   // Print MAC address used for ESP-NOW (station MAC)
   uint8_t baseMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, baseMac);
   Serial.printf("ESP-NOW (STA) MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 
+  Serial.println("--------------- ESP Command Settings ----------------------");
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);
 
   // Print all stored commands
-  // Serial.println("Stored Commands:");
   listStoredCommands(); // List stored commands
-
-  // for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-  //   if (storedCommands[i].length() > 0) {
-  //     Serial.printf("  Stored Sequence: %d: %s\n", i + 1, storedCommands[i].c_str());
-  //   }
-  // }
   Serial.println("--- End of Configuration Info ---\n");
 }
-
+//*******************************
+/// ESP-NOW Functions
+//*******************************
 // Send an ESP-NOW message (unicast or broadcast)
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
@@ -422,9 +392,6 @@ void sendESPNowMessage(uint8_t target, const char *message) {
   // turnOffLED();
 }
 
-
-
-
 void sendESPNowRaw(const uint8_t *data, size_t len) {
     size_t offset = 0;
     while (offset < len) {
@@ -467,49 +434,6 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
 
         offset += chunkSize;
     }
-}
-
-// We'll read from Serial2 & forward to Serial1 + bridging
-void forwardDataFromKyber() {
-  static uint8_t buffer[64];
-
-  // **Check if Serial2 has data**
-  if (Serial2.available() > 0) {
-    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
-
-    // **Forward data to Serial1**
-    Serial1.write(buffer, len);
-    Serial1.flush(); // Ensure immediate transmission
-
-    // **Forward via ESP-NOW broadcast**
-    sendESPNowRaw(buffer, len);
-  }
-}
-
-void forwardMaestroDataToLocalKyber() {
-  static uint8_t buffer[64];
-
-  // **Check if Serial2 has data**
-  if (Serial1.available() > 0) {
-    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-
-    // **Forward data to Serial1**
-    Serial2.write(buffer, len);
-    Serial2.flush(); // Ensure immediate transmission
-    // **Forward via ESP-NOW broadcast**
-    if (Kyber_Remote){sendESPNowRaw(buffer, len);}
-
-  }
-}
-
-void forwardMaestroDataToRemoteKyber() {
-  static uint8_t buffer[64];
-
-  // **Check if Serial2 has data**
-  if (Serial1.available() > 0) {
-    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-  sendESPNowRaw(buffer, len);
-  }
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
@@ -584,7 +508,56 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   colorWipeStatus("ES", blue, 10);
 }
 
+//*******************************
+/// Kyber Serial Forwarding Commands
+//*******************************
+void forwardDataFromKyber() {
+  static uint8_t buffer[64];
 
+  // **Check if Serial2 has data**
+  if (Serial2.available() > 0) {
+    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
+
+    // **Forward data to Serial1**
+    Serial1.write(buffer, len);
+    Serial1.flush(); // Ensure immediate transmission
+
+    // **Forward via ESP-NOW broadcast**
+    sendESPNowRaw(buffer, len);
+  }
+}
+
+void forwardMaestroDataToLocalKyber() {
+  static uint8_t buffer[64];
+
+  // **Check if Serial2 has data**
+  if (Serial1.available() > 0) {
+    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
+
+    // **Forward data to Serial1**
+    Serial2.write(buffer, len);
+    Serial2.flush(); // Ensure immediate transmission
+    // **Forward via ESP-NOW broadcast**
+    if (Kyber_Remote){sendESPNowRaw(buffer, len);}
+
+  }
+}
+
+void forwardMaestroDataToRemoteKyber() {
+  static uint8_t buffer[64];
+
+  // **Check if Serial2 has data**
+  if (Serial1.available() > 0) {
+    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
+  sendESPNowRaw(buffer, len);
+  }
+}
+
+
+
+//*******************************
+/// Processing Input Functions
+//*******************************
 void handleSingleCommand(String cmd, int sourceID) {
     // cmd.toLowerCase(); // Convert entire command to lowercase
 
@@ -602,8 +575,9 @@ void handleSingleCommand(String cmd, int sourceID) {
         processBroadcastCommand(cmd, sourceID);
     }
 }
+
 //*******************************
-/// Processing Local Function Identifier Functions
+/// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
     if (message == "don") {
@@ -680,6 +654,9 @@ void processLocalCommand(const String &message) {
     }
 }
 
+//*******************************
+/// Processing Local Function Identifier Functions
+//*******************************
 void updateLocalFunctionIdentifier(const String &message){
   if (message.length() >= 3) {
     LocalFunctionIdentifier = message.charAt(2);
@@ -714,7 +691,6 @@ void updateCommandDelimiter(const String &message){
   }
 }
 
-
 void update2ndMACOctet(const String &message){
     String hexValue = message.substring(2, 4);
     int newValue = strtoul(hexValue.c_str(), NULL, 16);
@@ -737,7 +713,6 @@ void updateWCBQuantity(const String &message){
 }
 
 void updateSerialSettings(const String &message){
-//  Handle enabling/disabling broadcast on serial ports
   int port = message.substring(1, 2).toInt();
   int state = message.substring(2, 3).toInt();
   if ((state == 0 || state == 1) && message.length()==3){
@@ -789,7 +764,9 @@ void updateHWVersion(const String &message) {
   saveHWversion(temp_hw_version);
 }
 
-
+//*******************************
+/// Processing Command Character
+//*******************************
 void processCommandCharcter(const String &message, int sourceID) {
     if (message.startsWith("s") || message.startsWith("S")) {
         processSerialMessage(message);
@@ -865,24 +842,6 @@ void processMaestroCommand(const String &message){
 //*******************************
 /// Processing Broadcast Function
 //*******************************
-// void processBroadcastCommand(const String &cmd, int sourceID) {
-//     if (debugEnabled) {
-//         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
-//     }
-
-//     // Send to all serial ports
-//     for (int i = 1; i <= 5; i++) {
-//         if (i == sourceID || !serialBroadcastEnabled[i - 1]) continue;
-//         writeSerialString(getSerialStream(i), cmd);
-//         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
-//     }
-
-//     // Also send via ESP-NOW broadcast
-//     // if (!lastReceivedViaESPNOW) {sendESPNowMessage(0, cmd.c_str());}
-//     sendESPNowMessage(0, cmd.c_str());
-//     if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
-// }
-
 void processBroadcastCommand(const String &cmd, int sourceID) {
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
@@ -906,10 +865,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
 
-
-
 // processIncomingSerial for each serial port
-
 void processIncomingSerial(Stream &serial, int sourceID) {
     if (!serial.available()) return;  // Exit if no data available
 
@@ -921,7 +877,7 @@ void processIncomingSerial(Stream &serial, int sourceID) {
         if (c == '\r' || c == '\n') {  // End of command
             if (!serialBuffer.isEmpty()) {
                 serialBuffer.trim();  // Remove leading/trailing spaces
-                Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());
+                if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
 
                 // Reset last received flag since we are reading from Serial
                 lastReceivedViaESPNOW = false;
@@ -975,69 +931,6 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 }
 
-// void processIncomingSerial(Stream &serial, int sourceID) {
-//   if (!serial.available()) return;
-//   // turnOnLEDSerial();
-//   // String data = serial.readStringUntil('\r');
-// //   String data = "";
-// //   while (serial.available()) {
-// //       char c = serial.read();
-// //       if (c == '\r' || c == '\n') break;  // Stop on new line or carriage return
-// //       if (isPrintable(c)) data += c;  // Only add printable characters
-// // }
-//     static String serialBuffer = ""; // Buffer for incoming serial data
-
-//     while (serial.available()) {
-//         char c = serial.read();
-        
-//         if (c == '\r' || c == '\n') {  // End of command
-//             if (!serialBuffer.isEmpty()) {
-//                 serialBuffer.trim();
-//                 Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());
-//                 enqueueCommand(serialBuffer, sourceID);
-//                 serialBuffer = ""; // Clear buffer for next command
-//             }
-//         } else {
-//             serialBuffer += c; // Append new characters to buffer
-//         }
-//     }
-//   // Because we read from Serial, we reset lastReceivedViaESPNOW
-//   lastReceivedViaESPNOW = false;
-
-//   data.trim();
-//   if (debugEnabled) {
-//     Serial.printf("Processing input from Serial%d: %s\n", sourceID, data.c_str());
-//   }
-//   if (data.length() == 0) return;
-
-//   // If command starts with "?C", just enqueue it directly
-//   if (data.startsWith(String(LocalFunctionIdentifier) + "C") || data.startsWith(String(LocalFunctionIdentifier) + "c") ) {
-//     enqueueCommand(data, sourceID);
-//     return;
-//   }
-
-//   // Otherwise, parse by the commandDelimiter
-//   int startIdx = 0;
-//   while (true) {
-//     int delimPos = data.indexOf(commandDelimiter, startIdx);
-//     if (delimPos == -1) {
-//       String singleCmd = data.substring(startIdx);
-//       singleCmd.trim();
-//       if (!singleCmd.isEmpty()) {
-//         enqueueCommand(singleCmd, sourceID);
-//       }
-//       break;
-//     } else {
-//       String singleCmd = data.substring(startIdx, delimPos);
-//       singleCmd.trim();
-//       if (!singleCmd.isEmpty()) {
-//         enqueueCommand(singleCmd, sourceID);
-//       }
-//       startIdx = delimPos + 1;
-//     }
-//   }
-//   // turnOffLED();
-// }
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -1056,7 +949,7 @@ void printResetReason() {
     }
 }
 
-
+/// Task Definition for multi threading.  Act as separate loops within the main loop.
 void KyberLocalTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToLocalKyber();
@@ -1064,6 +957,7 @@ void KyberLocalTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5)); // Reduce CPU usage while maintaining speed
     }
 }
+
 void KyberRemoteTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToRemoteKyber();
@@ -1091,76 +985,18 @@ void serialCommandTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
     }
 }
-// void serial0CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial, 0);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void serial1CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial1, 1);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void serial2CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial2, 2);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void serial3CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial3, 3);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void serial4CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial4, 4);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void serial5CommandTask(void *pvParameters) {
-//     while (true) {
-//         processIncomingSerial(Serial5, 5);  // USB Serial
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
-// void espnowTask(void *pvParameters) {
-//     while (true) {
-//         vTaskDelay(pdMS_TO_TICKS(10)); // Prevent CPU overload
-
-//         if (!lastReceivedViaESPNOW) continue;
-
-//         // Process any pending ESP-NOW messages (already handled in callback)
-//         lastReceivedViaESPNOW = false;
-//     }
-// }
-
 
 // ============================= Setup & Loop =============================
 
 void setup() {
-  // updatePinMap();
+  
   Serial.begin(115200);
 
   loadHWversion();
-  // updatePinMap();
-
-  delay(100);
-
+  loadKyberSettings();
   printResetReason();  // Show the exact cause of reset
 
-    // Initialize the NeoPixel status LED
-  loadKyberSettings();
-
+// Initialize the NeoPixel status LED
   if (wcb_hw_version == 0){
     Serial.println("No LED was setup.  Define HW version");
   } else if (wcb_hw_version == 1){
@@ -1169,22 +1005,12 @@ void setup() {
     statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
      statusLED->begin();
       statusLED->show();
-      colorWipeStatus("ES", red, 10);
-      Serial.println("Started NeoPixel");
 
   }
-  // turnOnLEDforBoot();
-  // colorWipeStatus("ES", red, 10);
-  delay(500);
-
-
-
+  turnOnLEDforBoot();
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
-
-  // Start Serial
-
 
   // Create the command queue
   commandQueue = xQueueCreate(20, sizeof(CommandQueueItem));
@@ -1199,39 +1025,17 @@ void setup() {
   Serial.printf("Software Version: %s\n", SoftwareVersion);
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
-
   loadBaudRatesFromPreferences();
   printBaudRates();
   Serial.println("-------------------------------------------------------");
 
-Serial.printf("Initializing Serial Ports...\n");
-
-// delay(2000);
   // Initialize hardware serial
   Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
   Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+  Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+  Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+  Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
 
-  // Initialize software serial
-// Serial3.begin(baudRates[2]);
-// Serial4.begin(baudRates[3]);
-// Serial5.begin(baudRates[4]);
-Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
-
-
-Serial.printf("Serial1 TX: %d, RX: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
-Serial.printf("Serial2 TX: %d, RX: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
-Serial.printf("Serial3 TX: %d, RX: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
-Serial.printf("Serial4 TX: %d, RX: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
-Serial.printf("Serial5 TX: %d, RX: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
-
-Serial.printf("Status LED Pin: %d\n", STATUS_LED_PIN);
-// Serial.println("Done Loading Serial ports");
-// delay(1000);
-
-// Serial.println("Loading WiFi");
-// delay(1000);
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
 
@@ -1292,11 +1096,8 @@ Serial.printf("Status LED Pin: %d\n", STATUS_LED_PIN);
   broadcastPeer.channel = 0;
   broadcastPeer.encrypt = false;
   if (esp_now_add_peer(&broadcastPeer) == ESP_OK) {
-    Serial.println("Added ESP-NOW broadcast peer.");
-  //   uint8_t broadmac[6];
-  //  broadmac = broadcastMACAddress[];
-  //   Serial.printf("ESP-NOW Broadcast MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
-  //               broadmac[0], broadmac[1], broadmac[2], broadmac[3], broadmac[4], broadmac[5]);
+    Serial.printf("Added ESP-NOW broadcast peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2], broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
 
   } else {
     Serial.println("Failed to add ESP-NOW broadcast peer!");
@@ -1314,50 +1115,20 @@ Serial.printf("Status LED Pin: %d\n", STATUS_LED_PIN);
   Serial.println("-------------------------------------------------------");
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
-Serial.println("Finished setting up espnow");
-delay(1500);
 
   // Create FreeRTOS Tasks
-  Serial.println("Starting tasks...");
+  xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
 
-Serial.println("Creating Serial Command Task...");
-xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 8192, NULL, 1, NULL, 1);
-
-if (Kyber_Local) {
-    Serial.println("Creating Kyber Local Task...");
-    xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 8192, NULL, 1, NULL, 1);
-}
-
-if (Kyber_Remote) {
-    Serial.println("Creating Kyber Remote Task...");
-    xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 8192, NULL, 1, NULL, 1);
-}
-
-Serial.println("All tasks created.");
-  
-  // xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
-// xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 8192, NULL, 1, NULL, 1);
-
-
-  // xTaskCreatePinnedToCore(serial0CommandTask, "USB Serial Command Task", 4096, NULL, 1, NULL, 1);
-    // if (!Kyber_Local || !Kyber_Remote){xTaskCreatePinnedToCore(serial1CommandTask, "Serial 1 Command Task", 4096, NULL, 1, NULL, 1);}        
-    // if (!Kyber_Local){xTaskCreatePinnedToCore(serial2CommandTask, "Serial 2 Command Task", 4096, NULL, 1, NULL, 1);}        
-
-    // xTaskCreatePinnedToCore(serial3CommandTask, "Serial 3 Command Task", 4096, NULL, 2, NULL, 1);
-    // xTaskCreatePinnedToCore(serial4CommandTask, "Serial 4 Command Task", 4096, NULL, 3, NULL, 1);
-    // xTaskCreatePinnedToCore(serial5CommandTask, "Serial 5 Command Task", 4096, NULL, 4, NULL, 1);
-
-    // If bridging is enabled, create the bridging task
-    // if (Kyber_Local) {
-    //     xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
-    //     Serial.println("Kyber_Local Task Created");
-    // }    
-    // if (Kyber_Remote) {
-    //     xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
-    //     Serial.println("Kyber_Remote Task Created");
-    // }
+  // If bridging is enabled, create the bridging task
+  if (Kyber_Local) {
+      xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
+      Serial.println("Kyber_Local Task Created");
+  }    
+  if (Kyber_Remote) {
+      xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
+      Serial.println("Kyber_Remote Task Created");
+  }
   turnOffLED();
-  // colorWipeStatus("ES", blue, 10);
 
 }
 

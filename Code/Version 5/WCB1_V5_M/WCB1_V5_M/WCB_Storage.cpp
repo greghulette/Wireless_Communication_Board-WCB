@@ -155,7 +155,7 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
-        Serial.printf("  Serial%d Baud Rate: %d,  Broadcast: %s\n",
+        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
                       i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
     }
 }

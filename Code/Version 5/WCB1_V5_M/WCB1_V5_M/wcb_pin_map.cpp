@@ -23,7 +23,7 @@ extern void updatePinMap(){
     SERIAL5_RX_PIN = 5;   //  // Serial 5 Rx Pin
     ONBOARD_LED = 19;     //  // ESP32 Status NeoPixel Pin
     STATUS_LED_PIN = 19;  //  // Not used on this board but defining it to match   
-    Serial.println("Loaded Default Pinout");
+    // Serial.println("Loaded Default Pinout");
  } else if (wcb_hw_version == 1){
     //////////////////////////////// 
     // This pinout is for a Version 1.0 board (LilyGo T7 V1.5 ESP32)
@@ -41,7 +41,7 @@ extern void updatePinMap(){
      ONBOARD_LED = 19; //  // ESP32 Status NeoPixel Pin
      STATUS_LED_PIN = 12; //  // Not used on this board but defining it to match version 2.1 board
     
-    Serial.println("Loaded HW Version 1.0 Pinout");
+    // Serial.println("Loaded HW Version 1.0 Pinout");
 
  } else if (wcb_hw_version == 21){
     //////////////////////////////// 
@@ -59,7 +59,7 @@ extern void updatePinMap(){
      SERIAL5_RX_PIN	= 12; //  // Serial 5 Rx Pin
      ONBOARD_LED = 25; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
      STATUS_LED_PIN = 19; //  // ESP32 Status NeoPixel Pin
-    Serial.println("Loaded HW Version 2.1 Pinout");
+    // Serial.println("Loaded HW Version 2.1 Pinout");
  } else if (wcb_hw_version == 23){
       //////////////////////////////// 
     // This pinout is for a Version 2.3 (Custom Board)
@@ -76,7 +76,7 @@ extern void updatePinMap(){
      SERIAL5_RX_PIN	= 26; //  // Serial 5 Rx Pin
      ONBOARD_LED = 32; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
      STATUS_LED_PIN = 19; //  // ESP32 Status NeoPixel Pin
-    Serial.println("Loaded HW Version 2.3 Pinout");
+    // Serial.println("Loaded HW Version 2.3 Pinout");
  } else if (wcb_hw_version == 24){
   //////////////////////////////// 
   // This pinout is for a Version 2.4 (Custom Board)
@@ -93,7 +93,7 @@ extern void updatePinMap(){
   SERIAL5_RX_PIN	= 26; //  // Serial 5 Rx Pin
   ONBOARD_LED = 32; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
   STATUS_LED_PIN = 19; //  // ESP32 Status NeoPixel Pin
-  Serial.println("Loaded HW Version 2.4 Pinout");
+  // Serial.println("Loaded HW Version 2.4 Pinout");
  }
 }
 
