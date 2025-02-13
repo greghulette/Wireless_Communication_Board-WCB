@@ -19,6 +19,7 @@ While these boards don't control any components within R2, it does allow for the
 - **FreeRTOS Multi-Tasking**: Optimized for efficient parallel processing.
 - **Dynamic Configuration**: Adjust baud rates, stored commands, and WCB settings via commands.
 - **Persistent Storage**: Save and retrieve settings using NVS (Non-Volatile Storage). These settings are stored in NVS which persists after reboot and even after reloading of the sketch.  
+- **Store Command Sequences in NVS**: Store your command sequences in the WCB instead of your controller.  200 character limit per stored command.
 
 
 ### **1.3 Physical Board Versions**
@@ -31,8 +32,6 @@ CAD Image       |    Actual Image       | Bare PCB
 <img src="./Images/CADImage.png" style="height: 200px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 200px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">
 
 Features of the board:
-
-HW Version 1.0
 - LilyGo T7 Mini32 V1.5
 - 5V Terminal Block
 - 5 Serial ports that can be used to communicate with microcontrollers  
@@ -87,15 +86,27 @@ HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capa
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 8 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
 
 <br>
-<img src="./Images/OverviewImage.png"><br>
+<img src="./Images/Network_Model_1.jpg"><br>
 
-<br> (Please note the Future status of the Maestro capability.  I am working on an update that will allow limited Maestro support.  I want to be able to trigger animations, but don't think I will ever have the channel passthrough enabled)
+
 
 Now if we lay the different types of communications over this picture, you can see how the boards can send the various types of messages.  The green microcontrollers are some examples of the boards that can communicate over serial and can be hooked up to this system.
-<img src="./Images/Transmission_example.png">
+<img src="./Images/WCB_Unicast.gif">
 
-As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.   
+As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.  
 
+With this method, your controller would send each command separately and the WCB will process them as they come in.  There is an option to chain the commands together so your controller only has to send one command.  You would separate each of the inidividual commands with the ^ character.  The WCB will separate the commands when it receives it.  Below is an example
+
+<img src ="./Images/Chained_Commands.gif">
+
+You can see the commands in the previous example are chained together and now the controller is sending that long string of commands to the WCB.  
+<br>
+
+If you want to or have a limitation on the length of command you can send to the WCB, you are able to store that chained command on the WCB.  Below is an example on how that would look.  
+
+<img src="./Images/Stored_Commands.gif">
+
+<br>
 The WCBs can also Broadcast messages.  The thought is that you send a command everywhere, and if the receiving device accepts the command, it acts on it.  Otherwise it would ignore the command.  The GIF below shows the broadcast messages.  
 ![til](./Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
 
