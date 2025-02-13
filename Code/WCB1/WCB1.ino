@@ -90,6 +90,7 @@
 // Used for queing commands so they can be chained without interupting the operations of the WCB
 #include "./src/Queue.h"
 
+#include "SerialCommands.h"
 
 
 //////////////////////////////////////////////////////////////////////
@@ -654,7 +655,7 @@ void writeSerialString(String stringData){
 }
 
 void writes1SerialString(String stringData){
-  String completeString = stringData + '\r';
+  String completeString = stringData + '\n';
   for (int i=0; i<completeString.length(); i++)
   {
     s1Serial.write(completeString[i]);
@@ -665,7 +666,7 @@ void writes1SerialString(String stringData){
 
 void writes2SerialString(String stringData){
   // uint8_t ServoSequenceNumber= stringData.toInt();
-  String completeString = stringData + '\r';
+  String completeString = stringData + '\n';
   // s2Serial.write(ServoSequenceNumber);
 
   for (int i=0; i<completeString.length(); i++)
@@ -800,6 +801,32 @@ void processSerial(String incomingSerialCommand){
   queue.push(s1);
   };
   turnOffLED();
+}
+
+
+ uint32_t Stored_Command[6]  = {0,0,0,0,0,0};
+  int storedCommandFunction     = 0;
+
+  String storedCommands = "";
+  String sC;
+
+
+
+
+void processStoredCommands(String storedC){
+ char buf[200];
+  storedC.toCharArray(buf, sizeof(buf));
+  char *p = buf;
+  char *str;
+  while ((str = strtok_r(p, DELIMITER, &p)) !=NULL){
+  sC = String(str);
+  // Serial.println(s1);
+  ESPNOWBroadcastCommand = false;
+  queue.push(sC);
+  };
+
+
+
 }
 
 
@@ -1330,7 +1357,10 @@ void loop(){
         if( inputBuffer[1]=='W' ||        // Command for Sending ESP-NOW Messages
             inputBuffer[1]=='w' ||        // Command for Sending ESP-NOW Messages
             inputBuffer[1]=='S' ||        // Command for sending Serial Strings out Serial ports
-            inputBuffer[1]=='s'           // Command for sending Serial Strings out Serial ports
+            inputBuffer[1]=='s' ||        // Command for sending Serial Strings out Serial ports
+            inputBuffer[1]=='C' ||        // Command for Sending stored Serial Commands
+            inputBuffer[1]=='c'           // Command for Sending stored Serial Commands
+
         ){commandLength = strlen(inputBuffer);                     //  Determines length of command character array.
           Debug.DBG("Command Length is: %i\n" , commandLength);
           if(commandLength >= 3) {
@@ -1374,6 +1404,14 @@ void loop(){
               serialStringCommand = "";
               serialPort = "";
             } 
+            if(inputBuffer[1]=='C' || inputBuffer[1]=='c') {
+              Debug.LOOP("entered new menu\n");
+                storedCommandFunction = (inputBuffer[2]-'0')*10+(inputBuffer[3]-'0');
+                Stored_Command[0] = '\0';
+                Stored_Command[0] = storedCommandFunction;
+
+              // processStoredCommands(CommandSequence1);          
+            }
           }
         }
       } else if (currentCommand == ""){
@@ -1398,12 +1436,71 @@ void loop(){
 
               serialCommandisTrue  = false; 
       }
+
+        if(Stored_Command[0]){
+            switch (Stored_Command[0]){
+              case 1: processStoredCommands(CommandSequence1); Stored_Command[0] = '\0'; break;
+              case 2: processStoredCommands(CommandSequence2); Stored_Command[0] = '\0';break;
+              case 3: processStoredCommands(CommandSequence3); Stored_Command[0] = '\0';break;
+              case 4: processStoredCommands(CommandSequence4); Stored_Command[0] = '\0';break;
+              case 5: processStoredCommands(CommandSequence5); Stored_Command[0] = '\0';break;
+              case 6: processStoredCommands(CommandSequence6); Stored_Command[0] = '\0';break;
+              case 7: processStoredCommands(CommandSequence7); Stored_Command[0] = '\0';break;
+              case 8: processStoredCommands(CommandSequence8); Stored_Command[0] = '\0';break;
+              case 9: processStoredCommands(CommandSequence9); Stored_Command[0] = '\0';break;
+              case 10: processStoredCommands(CommandSequence10); Stored_Command[0] = '\0';break;
+              case 11: processStoredCommands(CommandSequence11); Stored_Command[0] = '\0';break;
+              case 12: processStoredCommands(CommandSequence12); Stored_Command[0] = '\0';break;
+              case 13: processStoredCommands(CommandSequence13); Stored_Command[0] = '\0';break;
+              case 14: processStoredCommands(CommandSequence14); Stored_Command[0] = '\0';break;
+              case 15: processStoredCommands(CommandSequence15); Stored_Command[0] = '\0';break;
+              case 16: processStoredCommands(CommandSequence16); Stored_Command[0] = '\0';break;
+              case 17: processStoredCommands(CommandSequence17); Stored_Command[0] = '\0';break;
+              case 18: processStoredCommands(CommandSequence18); Stored_Command[0] = '\0';break;
+              case 19: processStoredCommands(CommandSequence19); Stored_Command[0] = '\0';break;
+              case 20: processStoredCommands(CommandSequence20); Stored_Command[0] = '\0';break;
+              case 21: processStoredCommands(CommandSequence21); Stored_Command[0] = '\0';break;
+              case 22: processStoredCommands(CommandSequence22); Stored_Command[0] = '\0';break;
+              case 23: processStoredCommands(CommandSequence23); Stored_Command[0] = '\0';break;
+              case 24: processStoredCommands(CommandSequence24); Stored_Command[0] = '\0';break;
+              case 25: processStoredCommands(CommandSequence25); Stored_Command[0] = '\0';break;
+              case 26: processStoredCommands(CommandSequence26); Stored_Command[0] = '\0';break;
+              case 27: processStoredCommands(CommandSequence27); Stored_Command[0] = '\0';break;
+              case 28: processStoredCommands(CommandSequence28); Stored_Command[0] = '\0';break;
+              case 29: processStoredCommands(CommandSequence29); Stored_Command[0] = '\0';break;
+              case 30: processStoredCommands(CommandSequence30); Stored_Command[0] = '\0';break;
+              case 31: processStoredCommands(CommandSequence31); Stored_Command[0] = '\0';break;
+              case 32: processStoredCommands(CommandSequence32); Stored_Command[0] = '\0';break;
+              case 33: processStoredCommands(CommandSequence33); Stored_Command[0] = '\0';break;
+              case 34: processStoredCommands(CommandSequence34); Stored_Command[0] = '\0';break;
+              case 35: processStoredCommands(CommandSequence35); Stored_Command[0] = '\0';break;
+              case 36: processStoredCommands(CommandSequence36); Stored_Command[0] = '\0';break;
+              case 37: processStoredCommands(CommandSequence37); Stored_Command[0] = '\0';break;
+              case 38: processStoredCommands(CommandSequence38); Stored_Command[0] = '\0';break;
+              case 39: processStoredCommands(CommandSequence39); Stored_Command[0] = '\0';break;
+              case 40: processStoredCommands(CommandSequence40); Stored_Command[0] = '\0';break;
+              case 41: processStoredCommands(CommandSequence41); Stored_Command[0] = '\0';break;
+              case 42: processStoredCommands(CommandSequence42); Stored_Command[0] = '\0';break;
+              case 43: processStoredCommands(CommandSequence43); Stored_Command[0] = '\0';break;
+              case 44: processStoredCommands(CommandSequence44); Stored_Command[0] = '\0';break;
+              case 45: processStoredCommands(CommandSequence45); Stored_Command[0] = '\0';break;
+              case 46: processStoredCommands(CommandSequence46); Stored_Command[0] = '\0';break;
+              case 47: processStoredCommands(CommandSequence47); Stored_Command[0] = '\0';break;
+              case 48: processStoredCommands(CommandSequence48); Stored_Command[0] = '\0';break;
+              case 49: processStoredCommands(CommandSequence49); Stored_Command[0] = '\0';break;
+              case 50: processStoredCommands(CommandSequence50); Stored_Command[0] = '\0';break;
+
+
+            }
+          }
       // }
       ///***  Clear States and Reset for next command.  ***///
       stringComplete =false;
       autoComplete = false;
       inputBuffer[0] = '\0';
       inputBuffer[1] = '\0'; 
+        String storedCommands = "";
+
       serialBroadcastCommand = "";
       String serialResponse;
     
