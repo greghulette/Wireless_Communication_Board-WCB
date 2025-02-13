@@ -9,19 +9,50 @@ The Wireless Communication Board (WCB) is a versatile communication system desig
 ### **1.2 Features**
 
 - **ESP-NOW Communication**: Unicast and broadcast messaging across multiple WCB units.
-- **Serial Bridging**: Forward data between Serial1 and Serial2 with low latency.
-- **Command Processing**: Handle commands locally and over ESP-NOW.
+- **Serial Communication**: Unicast and broadcast messaging across Serial ports.
+- **Serial Bridging**: Forward data between Serial1 and Serial2 with low latency to support Kyber/Maestros.
 - **FreeRTOS Multi-Tasking**: Optimized for efficient parallel processing.
 - **Dynamic Configuration**: Adjust baud rates, stored commands, and WCB settings via commands.
 - **Persistent Storage**: Save and retrieve settings using NVS (Non-Volatile Storage).
 
 ## **2. Getting Started**
 
-## **2.1 Setting Up the WCB System**
 
+### **2.1 Hardware Setup**
+
+1. **Connect the ESP32-based WCB to a power source.**
+2. **Ensure you have the latest code downloaded and open in the Arduino IDE**
+3. **Do NOT Connect required peripherals until after code is installed and configured** (e.g., Pololu Maestro, Kyber, Stealth, ...).
+4. **Configure the correct pin map** using the `HW` command.
+
+### **2.2 Firmware Installation**
+
+### **Required Drivers**
+To recognize the WCB on your computer, ensure you have the correct driver installed:
+- **CP2102N Driver** (Required for many ESP32 boards)
+  - Download: [Silicon Labs CP2102N Driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)
+
+
+### **Installation Steps**
+1. Install **Arduino IDE** and required **ESP32 v3.1** libraries.
+2. Clone the WCB firmware repository.
+3. Open the `WCB_V5_M.ino` file.
+4. Compile and upload the firmware to your ESP32 board.**
+5. Open the serial monitor to verify successful setup.
+
+### ****Required Libraries**
+Before compiling the firmware, install the following libraries in the Arduino IDE:
+- **EspSoftwareSerial** by Dirk Kaar, Peter Lerup, V8.1.0 (For software-based serial communication)
+- **Adafruit NeoPixel** By Adafruit, V1.12.14 (For controlling LED status indicators)
+
+
+
+## **2.3 Setting Up the WCB System**
 To ensure proper communication between multiple WCB devices, follow these setup steps:
 
 ### **Step 1: Set the Hardware Version**
+
+**NOTHING WILL WORK WITHOUT PERFORMING THIS STEP!!!!**
 
 Each WCB must be configured with the correct hardware version before use. Use the following command:
 
@@ -33,6 +64,8 @@ Example:
 
 ```
 ?HW1  // Set WCB to hardware version 1
+or 
+?HW24 // Set WCB to hardware verion 2.4
 ```
 
 ### **Step 2: Set the WCB Number**
@@ -116,13 +149,7 @@ Example:
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
 
-All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly.
-
-Once configured, you can chain all these commands using the command delimiter and reboot at the end:
-
-```
-?HW1^?WCB1^?WCBQ3^?EPASSsecure123^?M222^?M333^?REBOOT
-```
+All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly and to ensure other WCBs don't communicate with your system.
 
 This ensures all settings are applied before the reboot.
 
@@ -132,26 +159,21 @@ Once configured, reboot each WCB with:
 ?REBOOT
 ```
 
+You don't have to enter all these commands one at a time if you don't want to.  You can chain all these commands using the command delimiter and reboot at the end:
+
+Example: 
+```
+?HW1^?WCB2^?WCBQ3^?EPASSsecure123^?M222^?M333^?REBOOT
+```
+
+
+
 ## **2.2 Hardware Setup**
 
-### **2.1 Hardware Setup**
-
-1. **Connect the ESP32-based WCB to a power source.**
-2. **Ensure all devices are running the latest firmware.**
-3. **Connect required peripherals** (e.g., Pololu Maestro, Kyber Light).
-4. **Configure the correct pin map** using the `HW` command.
-
-### **2.2 Firmware Installation**
-
-1. Install **Arduino IDE** and required ESP32 libraries.
-2. Clone the WCB firmware repository.
-3. Open the `WCB1_V5_M.ino` file.
-4. Compile and upload the firmware to your ESP32 board.
-5. Open the serial monitor to verify successful setup.
 
 ## **3. Command Reference**
 
-### **3.1 Local Function Commands (********`?COMMANDS`********)**
+### **3.1 Local Function Commands (**`?COMMANDS`**)**
 
 | **Command**       | **Description**                                                                                                                                                            |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -176,7 +198,7 @@ Once configured, reboot each WCB with:
 | `?KYBER_CLEAR`    | Clear Kyber settings.                                                                                                                                                      |
 | `?HWx`            | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system.                                                                                          |
 
-### **3.2 Command Character-Based Commands (********`;COMMANDS`********\*\*\*\*)**
+### **3.2 Command Character-Based Commands (**`;COMMANDS`**)**
 
 | **Command**  | **Description**                                                                                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -215,10 +237,10 @@ Once configured, reboot each WCB with:
 ### **5.2 Kyber Support**
 
 - Forwarding data **between Serial1 and Serial2** when Kyber is enabled. 
-- Supports **Kyber Local and Remote modes**. The local mode is for when the Kyber is plugged directly into the WCB and the remote mode is when only the maestro with the ID of 2 is plugged into the WCB.
+- Supports **Kyber Local and Remote modes**. The local mode is for when the Kyber Maestro Output is plugged directly into the WCB in Serial 2 and the remote mode is when only the maestro with the ID of 2 is plugged into the WCB Serial 1.
 
 ### **5.3 FreeRTOS Tasks**
-
+ Task allows the ESP32
 - **`serialCommandTask`**: Handles all incoming serial data.
 - **`KyberLocalTask`**: Forwards Maestro data to a locally connected Kyber.
 - **`KyberRemoteTask`**: Forwards Maestro data to a remote Kyber via ESP-NOW.
