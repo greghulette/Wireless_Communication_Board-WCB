@@ -11,27 +11,26 @@
 
 While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other directly and bi-directionally. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
 
+### **1.2 Features**
+
+- **ESP-NOW Communication**: Unicast and broadcast messaging across multiple WCB units.
+- **Serial Bridging**: Forward data between Serial1 and Serial2 with low latency to support Kyber/Maestro Communication.
+- **Command Processing**: Handle commands locally and over ESP-NOW.
+- **FreeRTOS Multi-Tasking**: Optimized for efficient parallel processing.
+- **Dynamic Configuration**: Adjust baud rates, stored commands, and WCB settings via commands.
+- **Persistent Storage**: Save and retrieve settings using NVS (Non-Volatile Storage). These settings are stored in NVS which persists after reboot and even after reloading of the sketch.  
 
 
-### 1.2 Board Overview
+### **1.3 Physical Board Versions**
 
-
-##### HW Version 1.0
+#### **HW Version 1.0**
 
 
 CAD Image       |    Actual Image       | Bare PCB
 :---------------:|:---------------------:|:-------------:
 <img src="./Images/CADImage.png" style="height: 200px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 200px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">
 
-
-
-
-
-
-
-
-
- Features of the board:
+Features of the board:
 
 HW Version 1.0
 - LilyGo T7 Mini32 V1.5
@@ -47,7 +46,7 @@ HW Version 1.0
 
 <br><br>
 
-### HW Version 2.1
+#### **HW Version 2.1**
 
 CAD Image       |    Actual Image     
 :---------------:|:---------------------:
@@ -65,7 +64,7 @@ CAD Image       |    Actual Image
 - Can support bi-directional communications<br><br>
 
 
-### HW Version 2.3/2.4
+#### **HW Version 2.3/2.4**
 
 CAD Image       |    Actual Image     
 :---------------:|:---------------------:
@@ -84,7 +83,7 @@ CAD Image       |    Actual Image
 
 HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
 
-## Concept of Operations
+### **1.4 Concept of Operations**
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 8 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
 
 <br>
@@ -98,7 +97,7 @@ Now if we lay the different types of communications over this picture, you can s
 As you can see in the above image, you can send any other board a direct message. This is what I'm calling a Unicast message.   
 
 The WCBs can also Broadcast messages.  The thought is that you send a command everywhere, and if the receiving device accepts the command, it acts on it.  Otherwise it would ignore the command.  The GIF below shows the broadcast messages.  
-![til](/Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
+![til](./Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
 
 
 
@@ -109,22 +108,48 @@ The WCBs can also Broadcast messages.  The thought is that you send a command ev
 
 The Wireless Communication Board (WCB) is a versatile communication system designed to facilitate **ESP-NOW** wireless communication between multiple ESP32-based devices. The system also provides **serial bridging**, command processing, and dynamic configuration for a variety of use cases.
 
-### **1.2 Features**
-
-- **ESP-NOW Communication**: Unicast and broadcast messaging across multiple WCB units.
-- **Serial Bridging**: Forward data between Serial1 and Serial2 with low latency to support Kyber/Maestro Communication.
-- **Command Processing**: Handle commands locally and over ESP-NOW.
-- **FreeRTOS Multi-Tasking**: Optimized for efficient parallel processing.
-- **Dynamic Configuration**: Adjust baud rates, stored commands, and WCB settings via commands.
-- **Persistent Storage**: Save and retrieve settings using NVS (Non-Volatile Storage). These settings are stored in NVS which persists after reboot and even after reloading of the sketch.  
 
 ## **2. Getting Started**
 
-## **2.1 Setting Up the WCB System**
+### **Required Drivers**
+
+To recognize the WCB on your computer, ensure you have the correct driver installed gpt versions 2.x and higher:
+
+- **CP2102N Driver** (Required for many ESP32 boards)
+
+  - Download: [Silicon Labs CP2102N Driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)
+
+
+
+### **Required Libraries**
+
+Before compiling the firmware, install the following libraries in the Arduino IDE:
+
+
+- **EspSoftwareSerial** (For software-based serial communication)
+
+- **Adafruit NeoPixel** (For controlling LED status indicators)
+
+### **2.1 Firmware Installation**
+
+1. Install **Arduino IDE** and required ESP32 libraries.  ESP32 board version 3.1
+2. Clone the WCB firmware repository.
+3. Open the `WCB1_V5_M.ino` file.
+4. Compile and upload the firmware to your ESP32 board.
+5. Open the serial monitor to verify successful setup.
+
+
+### **2.2 Hardware Setup**
+1. **Connect the ESP32-based WCB to a power source.**
+2. **Ensure all devices are running the latest firmware.**
+3. **Do NOT Connect any peripherals util the WCBs are configured** (e.g., Pololu Maestro, Kyber, Stealth, Roam a Dome Home, ...).
+4. **Configure the correct pin map** using the `HW` command.
+
+### **2.3 Setting Up the WCB System**
 
 To ensure proper communication between multiple WCB devices, follow these setup steps:
 
-### **Step 1: Set the Hardware Version**
+#### **Step 1: Set the Hardware Version**
 
 Each WCB must be configured with the correct hardware version before use. 
 
@@ -144,7 +169,7 @@ or
 ?HW24  // Set WCB to hardware version 2.4
 ```
 
-### **Step 2: Set the WCB Number**
+#### **Step 2: Set the WCB Number**
 
 Each WCB must have a unique identifier between 1-8. Use the following command:
 
@@ -158,7 +183,7 @@ Example:
 ?WCB2  // Set this WCB as unit 2
 ```
 
-### **Step 3: Set the WCB Quantity**
+#### **Step 3: Set the WCB Quantity**
 
 The total number of WCBs in the system must be set and must match on all devices.
 
@@ -172,7 +197,7 @@ Example:
 ?WCBQ3  // There are 3 WCBs in the system
 ```
 
-### **Step 4: Configure the ESP-NOW Password**
+#### **Step 4: Configure the ESP-NOW Password**
 
 All WCBs must use the same ESP-NOW password to communicate.
 
@@ -186,7 +211,7 @@ Example:
 ?EPASSsecure123  // Set the ESP-NOW password to 'secure123'
 ```
 
-### **Step 5: Set the MAC Addresses**
+#### **Step 5: Set the MAC Addresses**
 
 To prevent interference between different WCB systems, all devices in the same system must have the same MAC octets.
 
@@ -202,7 +227,7 @@ Example:
 ?M333  // Set 3rd MAC octet to 0x33
 ```
 
-### **Example Setup for a 3-WCB System:**
+#### **Example Setup for a 3-WCB System:**
 
 | **WCB Unit** | **Command**       | **Value**          |
 | ------------ | ----------------- | ------------------ |
@@ -243,24 +268,6 @@ Example:
 
 
 
-
-
-## **2.2 Hardware Setup**
-
-### **2.1 Hardware Setup**
-
-1. **Connect the ESP32-based WCB to a power source.**
-2. **Ensure all devices are running the latest firmware.**
-3. **Connect required peripherals** (e.g., Pololu Maestro, Kyber Light).
-4. **Configure the correct pin map** using the `HW` command.
-
-### **2.2 Firmware Installation**
-
-1. Install **Arduino IDE** and required ESP32 libraries.
-2. Clone the WCB firmware repository.
-3. Open the `WCB1_V5_M.ino` file.
-4. Compile and upload the firmware to your ESP32 board.
-5. Open the serial monitor to verify successful setup.
 
 ## **3. Command Reference**
 
@@ -338,7 +345,7 @@ Kyber is not supported in the Serial only mode.  You must be using the ESPNOW to
 - Can trigger Maestros from based on a command sent to the WCB.  You do not need to utilize the Pololu Maestro Library within your code. 
 
 Maestro comms is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality. 
-- 
+
 ### **5.4 FreeRTOS Tasks**
 
 - **`serialCommandTask`**: Handles all incoming serial data.
