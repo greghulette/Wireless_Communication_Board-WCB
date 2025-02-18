@@ -213,7 +213,7 @@ Example:
 All WCBs must use the same ESP-NOW password to communicate.
 
 ```
-?EPASSyourpassword
+?EPASSxxxxxxx
 ```
 
 Example:
