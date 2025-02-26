@@ -111,12 +111,6 @@ The WCBs can also Broadcast messages.  The thought is that you send a command ev
 ![til](./Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
 
 
-
-
-<!-- ## **1. Introduction**
-
-### **1.1 Overview** -->
-
 The Wireless Communication Board (WCB) is a versatile communication system designed to facilitate **ESP-NOW** wireless communication between multiple ESP32-based devices. The system also provides **serial bridging**, command processing, and dynamic configuration for a variety of use cases.
 
 
@@ -137,26 +131,20 @@ To recognize the WCB on your computer, ensure you have the correct driver instal
 Before compiling the firmware, install the following libraries in the Arduino IDE:
 
 
-- **EspSoftwareSerial** (For software-based serial communication)
+- **EspSoftwareSerial** (For software-based serial communication) By : Dunkirk, Version tested: 
 
-- **Adafruit NeoPixel** (For controlling LED status indicators)
+- **Adafruit NeoPixel** (For controlling LED status indicators) By: Adafruit, Version tested: 
 
 ### **2.1 Firmware Installation**
 
 1. Install **Arduino IDE** and required ESP32 libraries.  ESP32 board version 3.1
 2. Clone the WCB firmware repository.
-3. Open the `WCB1_V5_M.ino` file.
-4. Compile and upload the firmware to your ESP32 board.
-5. Open the serial monitor to verify successful setup.
+3. Open the `WCB_V5_M.ino` file found in the Code folder.
+4. Compile and upload the firmware to your ESP32 board, selecting "ESP Dev Module" as your board type.
+5. Open the serial monitor to verify successful setup. You will have to hit the reset button on the WCB to show that it booted up after a reload.
 
 
-### **2.2 Hardware Setup**
-1. **Connect the ESP32-based WCB to a power source.**
-2. **Ensure all devices are running the latest firmware.**
-3. **Do NOT Connect any peripherals util the WCBs are configured** (e.g., Pololu Maestro, Kyber, Stealth, Roam a Dome Home, ...).
-4. **Configure the correct pin map** using the `HW` command.
-
-### **2.3 Setting Up the WCB System**
+### **2.2 Setting Up the WCB System**
 
 To ensure proper communication between multiple WCB devices, follow these setup steps:
 
@@ -164,7 +152,7 @@ To ensure proper communication between multiple WCB devices, follow these setup 
 
 Each WCB must be configured with the correct hardware version before use. 
 
-NOTHING WILL WORK WITHOUT PERFORMING THIS STEP!!!! 
+**NOTHING WILL WORK WITHOUT PERFORMING THIS STEP!!!!**
 
 Use the following command:
 
@@ -175,7 +163,7 @@ Use the following command:
 Examples:
 
 ```
-?HW1  // Set WCB to hardware version 1
+?HW1  // Set WCB to hardware version 1.0
 or 
 ?HW24  // Set WCB to hardware version 2.4
 ```
@@ -191,7 +179,7 @@ Each WCB must have a unique identifier between 1-8. Use the following command:
 Example:
 
 ```
-?WCB2  // Set this WCB as unit 2
+?WCB2  // Set this WCB as WCB 2
 ```
 
 #### **Step 3: Set the WCB Quantity**
@@ -210,7 +198,7 @@ Example:
 
 #### **Step 4: Configure the ESP-NOW Password**
 
-All WCBs must use the same ESP-NOW password to communicate.
+All WCBs must use the same ESP-NOW password to communicate. Note, all passwords will be stored as a lower case, so it is not case sensitive and will convert it to lowercase if entered as uppercase characters.
 
 ```
 ?EPASSxxxxxxx
@@ -224,7 +212,12 @@ Example:
 
 #### **Step 5: Set the MAC Addresses**
 
-To prevent interference between different WCB systems, all devices in the same system must have the same MAC octets.
+To prevent interference between different WCB systems, all devices in the same system must have the same MAC octets, and be different than other WCB systems.  This is accomplished by changing the 2nd and 3rd octet of the MAC address.  All WCBs will have the 1st, 4th, 5th, and 6th octects match, but the 2nd and 3rd must be unique.  The MAC Address should be 
+
+```
+02:xx:yy:00:00:0w
+``` 
+where the xx is the second octet that you set, the yy is the 3rd octet that you set, and the w, the WCB number.  The w is automatically set when you identified the WCB number.  You set the 2nd and 3rd octets with the following commands:
 
 ```
 ?M2xx  // Set the 2nd MAC octet
@@ -238,7 +231,9 @@ Example:
 ?M333  // Set 3rd MAC octet to 0x33
 ```
 
-#### **Example Setup for a 3-WCB System:**
+The valid characters that can be used are 0-9, and A-F.  Do not use FF though because that would introduce a possible interference with other systems.
+
+### **Example Setup for a 3-WCB System:**
 
 | **WCB Unit** | **Command**       | **Value**          |
 | ------------ | ----------------- | ------------------ |
@@ -248,26 +243,27 @@ Example:
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
-| WCB2         | `?HW1`            | Version 1.0        |
+| WCB2         | `?HW21`           | Version 2.1        |
 |              | `?WCB2`           | Unit 2             |
 |              | `?WCBQ3`          | 3 WCBs total       |
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
-| WCB3         | `?HW1`            | Version 1.0        |
+| WCB3         | `?HW24            | Version    2.4     |
 |              | `?WCB3`           | Unit 3             |
 |              | `?WCBQ3`          | 3 WCBs total       |
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
 
-All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly.
+All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly.  The WCBs HW versions do not need to match.  They are all completely interoperable with one another.
+
 Once configured, reboot each WCB with:
 
 ```
 ?REBOOT
 ```
-The rebooting is critical since a lot of these settings are setup at boot, and not after.
+The rebooting is critical since a lot of these settings are set up at boot, and not after.
 
 <br>
 You don't have to enter thse commands one at a time if you don't want to.  You can chain all these commands using the command delimiter and reboot at the end:
@@ -284,36 +280,37 @@ Example:
 
 ### **3.1 Local Function Commands (********`?COMMANDS`********)**
 
-| **Command**       | **Description**                                                                                                                                                            |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `?CONFIG`         | Display current configuration settings.                                                                                                                                    |
-| `?DON`            | Enable debugging mode.                                                                                                                                                     |
-| `?DOFF`           | Disable debugging mode.                                                                                                                                                    |
-| `?CCLEAR`         | Clear all stored commands.                                                                                                                                                 |
-| `?CSkey,value`    | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands. |
-|                   |                                                                                                                                                                            |
-| `?WCBx`           | Set the WCB number (1-8).                                                                                                                                                  |
-| `?WCBQx`          | Set the total number of WCBs in the system.MUST match on all boards in system                                                                                              |
-| `?WCB_ERASE`      | Erase all WCB stored settings.                                                                                                                                             |
-| `?M2xx`           | Set the 2nd MAC Octet (hex)  0x00 - 0xFE   \*\*\*MUST match on all boards in system                                                                                        |
-| `?M3xx`           | Set the 3rd MAC octet (hex).   0x00 - 0x FE  \*\*\*MUST match on all boards in system                                                                                      |
-| `?Sx0/1`          | Enable/Disable broadcast for Serial x. 0 for disabled, 1 for enabled                                                                                                       |
-| `?SxBAUDRATE`     | Set baud rate for Serial x.                                                                                                                                                |
-| `?EPASSnewpass`   | Update ESP-NOW password.  \*\*\*MUST match on all boards in system                                                                                                         |
-| `?REBOOT`         | Reboot the WCB.                                                                                                                                                            |
-| `?MAESTRO_ENABLE` | Enable Maestro communication.                                                                                                                                              |
-| `?KYBER_LOCAL`    | Enable Kyber communication locally.                                                                                                                                        |
-| `?KYBER_REMOTE`   | Enable Kyber communication remotely.                                                                                                                                       |
-| `?KYBER_CLEAR`    | Clear Kyber settings.                                                                                                                                                      |
-| `?HWx`            | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system.                                                                                          |
+| **Command**        | **Description**                               |
+| -------------------| -------------------------------------------   |
+| `?CONFIG`          | Display current configuration settings.       |
+| `?DON`             | Enable debugging mode                         |
+| `?DOFF`            | Disable debugging mode.                    |
+| `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
+| `?CCLEAR`          | Clear all stored commands | 
+| `?WCBx`            | Set the WCB number (1-8).|
+| `?WCBQx`           | Set the total number of WCBs in the system.MUST match on all boards in system |
+| `?WCB_ERASE`       | Erase all WCB stored settings.  |
+| `?M2xx`            | Set the 2nd MAC Octet (hex)  0x00 - 0xFE   \*\*\*MUST match on all boards in system   |
+| `?M3xx`            | Set the 3rd MAC octet (hex).   0x00 - 0x FE  \*\*\*MUST match on all boards in system  |
+| `?Sx0/1`           | Enable/Disable broadcast for Serial x. 0 for disabled, 1 for enabled|
+| `?SxBAUDRATE`      | Set baud rate for Serial x. |
+| `?EPASSxxxx`       | Update ESP-NOW password.  \*\*\*MUST match on all boards in system |
+| `?REBOOT`          | Reboot the WCB |
+| `?MAESTRO_ENABLE`  | Enable Maestro communication |
+| `?KYBER_LOCAL`     | Enable Kyber communication locally. |
+| `?KYBER_REMOTE`    | Enable Kyber communication remotely. |
+| `?KYBER_CLEAR`     | Clear Kyber settings. |
+| `?HWx`             | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system. |
 
 ### **3.2 Command Character-Based Commands (********`;COMMANDS`********\*\*\*\*)**
 
-| **Command**  | **Description**                                                                                                                                              |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `;Sxmessage` | Send a message to Serial x (1-5).                                                                                                                            |
-| `;Wxmessage` | Send a unicast message to WCB x.                                                                                                                             |
-| `;Ckey`      | Recall a stored command by key.                                                                                                                              |
+These will be the majority of what you will use to interact with the WCB on a normal basis.  These are not case sensitive, so feel free to use uppor or lower case characters.
+
+| **Command**  | **Description**  |
+| ------------ | -------------------------------- |
+| `;Sxmessage` | Send a message to Serial x (1-5).|
+| `;Wxmessage` | Send a unicast message to WCB x. |
+| `;Ckey`      | Recall a stored command by key.  |
 | `;Mxyy`      | Send a Maestro command (x = Maestro ID, yy = sequence). 1-8 valid Maestro IDs.  0 = send to all Maestros.  ID's must match WCB number they are plugged into. |
 
 ## **4. Configuration Options**
@@ -333,8 +330,6 @@ Example:
 
 - Store command: `?CSkey,value`
 - Retrieve command: `;Ckey`
-- List stored commands: `?CLIST`
-- Delete stored command: `?CDELkey`
 
 ## **5. Advanced Features**
 
@@ -345,17 +340,31 @@ Example:
 
 ### **5.2 Kyber Support**
 
-- Kyber must be plugged into Serial 2.
-- Forwarding data **between Serial1 and Serial2** when Kyber is enabled. 
-- Supports **Kyber Local and Remote modes**. The local mode is for when the Kyber is plugged directly into the WCB and the remote mode is when only the maestro with the ID of 2 is plugged into the WCB.
+The WCB supports the Kyber with both the serial commands the Maestro control.  The WCB supports the serial commands by default, but there is specific congiruation you need to enable in the WCB to enable Maestro communication between the Kyber and Maestro.  
 
-Kyber is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality.
+The WCBs have to modes for Kyber support,  **Kyber Local and Kyber Remote**. The local mode is for when the Kyber is plugged directly into the WCB along with a Maestro, and the remote mode is when only the maestro is plugged into the WCB but triggered by the Kyber remotely.  
 
-### **5.3 Maestro Support**
+ Connections: 
+ - The Maestro must be plugged into Serial 1 
+ - The Kyber's Maestro port must be plugged into Serial 2.  
+ - The Kyber's MarcDuino port can be plugged into any of the remaining serial ports.  
+
+
+
+ **NOTE:** Kyber is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality.
+
+### **5.3 Maestro Support without Kyber**
+If you don't have Kyber, but still use the Maestro, you can still trigger sequences with the WCB.  You do not have to utilize the Pololu Maestro Library to accomplish this if you are using the WCBs.  
+All you have to do is send the command `;mxyy` to the WCB, where x is the ID of the Maestro, and yy is the sequence that you want to start. 
+
+Connections/Requirements:
 - Maestros must be plugged into Serial 1.
-- Can trigger Maestros from based on a command sent to the WCB.  You do not need to utilize the Pololu Maestro Library within your code. 
+- Maestro ID must match the WCB number that it is plugged into (i.e. Maestro ID of 2 plugged into WCB2, Maestro ID of 3 plugged into WCB3)
+- Can have up to 8 Maestros when controlling them this way.
 
-Maestro comms is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality. 
+**Note:** Maestro comms is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality. 
+
+Only the Restart Sequence is supported when utilizing the Maestros in this method.  It does not return status or have the ability to do servo passthrough.
 
 ### **5.4 FreeRTOS Tasks**
 
@@ -385,7 +394,7 @@ This will completely wipe the stored settings, including MAC addresses, ESP-NOW 
 | No response from WCB          | Verify power and USB connection. Check baud rate settings.         |
 | ESP-NOW messages not received | Ensure correct MAC octets and ESP-NOW password.                    |
 | Serial bridging not working   | Confirm correct pin configuration and baud rates.                  |
-| Stored commands not executing | Use `?CLIST` to check saved commands. Ensure delimiter is correct. |
+| Stored commands not executing | Use `?CONFIG` to check saved commands. Ensure delimiter is correct. |
 
 ## **7. Appendices**
 
