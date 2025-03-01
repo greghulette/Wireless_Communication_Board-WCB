@@ -23,7 +23,7 @@ uint8_t umac_oct2 = 0x00;                                           // Default s
 uint8_t umac_oct3 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
 
 // User-defined ESP-NOW password
-char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting.  Change to match your setup here or via command line
+char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting. Change to match your setup here or via command line.  Lower case characters only!
 
 // Delimiter character (default '^')
 char commandDelimiter = '^';                                        // Default setting.  Change to match your setup here or via command line
@@ -563,7 +563,7 @@ void handleSingleCommand(String cmd, int sourceID) {
 
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
     if (cmd.startsWith(String(LocalFunctionIdentifier))) {
-        cmd.toLowerCase();
+        // cmd.toLowerCase();
         processLocalCommand(cmd.substring(1)); // Process local function
     } 
     // 2) CommandCharacter-based commands (e.g., `;commands`)
@@ -580,73 +580,73 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-    if (message == "don") {
+    if (message == "don" || message = "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
         return;
-    } else if (message == "doff") {
+    } else if (message == "doff" || message == "DOFF") {
         debugEnabled = false;
         Serial.println("Debugging disabled");
         return;
-    } else if (message.startsWith("lf")) {
+    } else if (message.startsWith("lf") || message.startWith("LF")) {
         updateLocalFunctionIdentifier(message);
         return;
-    } else if (message.equals("cclear")) {
+    } else if (message.equals("cclear") || message.equals("CCLEAR")) {
         clearAllStoredCommands();
         return;
-    } else if (message.startsWith("cc")) {
+    } else if (message.startsWith("cc") || message.startsWith("CC")) {
         updateCommandCharacter(message);
         return;
-    } else if (message.startsWith("cs")) {
+    } else if (message.startsWith("cs") || message.startsWith("CS")) {
         storeCommand(message);
         return;
-    } else if (message == "reboot") {
+    } else if (message == "reboot" || message == "REBOOT") {
         reboot();
-    } else if (message == "config") {
+    } else if (message == "config" || message == "CONFIG") {
         printConfigInfo();
         return;
-    } else if (message.startsWith("d")) {
+    } else if (message.startsWith("d") || message.startsWith("D")) {
         updateCommandDelimiter(message);
         return;
-    }  else if (message.startsWith("m2")){
+    }  else if (message.startsWith("m2") || message.startsWith("M2")){
         update2ndMACOctet(message);
         return;
-    } else if (message.startsWith("m3")) {
+    } else if (message.startsWith("m3") || message.startsWith("M3")) {
         update3rdMACOctet(message);
         return;
-    } else if (message == "wcb_erase") {
+    } else if (message == "wcb_erase" || message == "WCB_ERASE") {
         eraseNVSFlash();
-    } else if (message.startsWith("wcbq")) {
+    } else if (message.startsWith("wcbq") || message.startsWith("WCBQ")) {
         updateWCBQuantity(message);
         return;
-    } else if (message.startsWith("wcb")) {
+    } else if (message.startsWith("wcb") || message.startsWith("WCB")) {
         updateWCBNumber(message);
         return;
-    } else if (message.startsWith("epass")) {
+    } else if (message.startsWith("epass") || message.startsWith("EPASS")) {
         updateESPNowPassword(message);
         return;
-    } else if (message.startsWith("s")) {
+    } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
         return;
-    } else if (message.startsWith("maestro_enable")) {
+    } else if (message.startsWith("maestro_enable") || message.startsWith("MAESTRO_ENABLE")) {
         enableMaestroSerialBaudRate();
         return;
-    }else if (message.startsWith("maestro_disable")) {
+    }else if (message.startsWith("maestro_disable") || message.startsWith("MAESTRO_DISABLE")) {
         disableMaestroSerialBaudRate();
         return;
-    } else if (message.equals("kyber_local")){
+    } else if (message.equals("kyber_local") || message.equals("KYBER_LOCAL")){
         storeKyberSettings("local");
         printKyberSettings();
         return;
-    } else if (message.equals("kyber_remote")){
+    } else if (message.equals("kyber_remote") || message.equals("KYBER_REMOTE")){
         storeKyberSettings("remote");
         printKyberSettings();
         return;
-    } else if (message.equals("kyber_clear")){
+    } else if (message.equals("kyber_clear") || message.equals("KYBER_CLEAR")){
         storeKyberSettings("clear");
         printKyberSettings();
         return;
-    } else if (message.startsWith("hw")) {
+    } else if (message.startsWith("hw") || message.startsWith("HW")) {
         updateHWVersion(message);
         return;
     } else {
