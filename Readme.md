@@ -216,16 +216,16 @@ To recognize the WCB on your computer, ensure you have the correct driver instal
 Before compiling the firmware, install the following libraries in the Arduino IDE:
 
 
-- **EspSoftwareSerial** (For software-based serial communication) By : Dunkirk, Version tested: 
+- **EspSoftwareSerial** (For software-based serial communication) By : Dirk Kaar and Peter Lerup, Version tested 8.1.0: 
 
-- **Adafruit NeoPixel** (For controlling LED status indicators) By: Adafruit, Version tested: 
+- **Adafruit NeoPixel** (For controlling LED status indicators) By: Adafruit, Version tested: 1.12.4
 
 ### **3.1 Firmware Installation**
 
 1. Install **Arduino IDE** and required ESP32 libraries.  ESP32 board version 3.1
 2. Install libraries mentioned above.
 3. Clone the WCB firmware repository.
-4. Open the `WCB_V5_M.ino` file found in the Code folder.
+4. Open the `WCB.ino` file found in the Code folder.
 5. Compile and upload the firmware to your ESP32 board, selecting "ESP Dev Module" as your board type.
 6. Open the serial monitor to verify successful setup. You will have to hit the reset button on the WCB to show that it booted up after a reload.
 
