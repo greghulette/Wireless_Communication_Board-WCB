@@ -9,7 +9,7 @@
 <br>Hence, the reason I made these boards.  I developed these boards to allow the various microcontrollers in R2 to communicate out of their serial port directly to another board, no matter where they are in a droid.  I accomplished this by accepting a serial command into the WCB from a microcontroller, evaluating whether it will go out another locally connected serial port, or forward it to another WCB to send it out to one of their locally connected serial ports.  This is essentially how computer networks work as well.  
 <br>I decided to go with a wireless technology between the WCBs to alleviate some of the issues with being in an electrically noisy environment as well as remove the need for passing data through the slip ring between the body and dome. The WCB's are using ESP-NOW, which is a connectionless wireless communication protocol that allows the quick and low-power control of smart devices without a router.  It uses the same frequencies that WiFi uses, but I have not seen any RF congestion issues that traditional WiFi sees at conventions.  By using this method, all you need in the dome is power and you can control the dome without it being physically connected to the body.  
 
-While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other directly and bi-directionally. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.<br><br>
+While these boards don't control any components within R2, it does allow for the efficient communication of all other microcontrollers.  These boards also allow you to have multiple serially connected devices to communicate with each other directly and bi-directionally. The serially connected devices can communicate to other serial devices connected to the same WCB, or devices connected to remote WCBs. This is accomplished by adding up to 6 characters to your string that you send to the remote device.
 
 ### **1.2 Features**
 
@@ -20,15 +20,20 @@ While these boards don't control any components within R2, it does allow for the
 - **Persistent Storage**: Save and retrieve settings using NVS (Non-Volatile Storage). These settings are stored in NVS which persists after reboot and even after reloading of the sketch.  
 - **Store Command Sequences in NVS**: Store your command sequences in the WCB instead of your controller.  200 character limit per stored command.
 
+- **ESP-NOW Communication**: Unicast and broadcast messaging across multiple WCBs.
+- **Serial Communicatons**: Bi-Directional Unicast and Broadcast messages to its 5 Serial ports
+- **Kyber Support**: Forward data between Serial1 and Serial2 with low latency to support Kyber/Maestro Communication.
+- **Dynamic Configuration**: Adjust baud rates, stored commands, and all WCB settings via commands.
+- **Persistent Storage for Settings and Commands**: Save and retrieve settings using NVS (Non-Volatile Storage).  Store your command sequences in the WCB instead of your controller.  200 character limit per stored command.  These settings are stored in NVS which persists after reboot and even after reloading of the sketch. 
 
 ### **1.3 Physical Board Versions**
 
-#### **HW Version 1.0**
+#### **1.3.1 HW Version 1.0**
 
 
-CAD Image       |    Actual Image       | Bare PCB
-:---------------:|:---------------------:|:-------------:
-<img src="./Images/CADImage.png" style="height: 200px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 200px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">
+CAD Image       |    Actual Image       | Bare PCB |
+:---------------:|:---------------------:|:-------------:|
+<img src="./Images/CADImage.png" style="height: 200px;"> |<img src="./Images/LoadedPCB.jpg" style="height: 200px;"> | <img src="./Images/PCBwithConnectors.jpg" style="height: 200px;">|
 
 Features of the board:
 - LilyGo T7 Mini32 V1.5
@@ -42,13 +47,11 @@ Features of the board:
 
 *** THE MICRO USB PORT SHOULD BE ON THE SIDE WITH THE LABEL.  YOU MAY DESTROY YOUR ESP32 IF PLUGGED IN THE WRONG DIRECTION ***
 
-<br><br>
+#### **1.3.2 HW Version 2.1**
 
-#### **HW Version 2.1**
-
-CAD Image       |    Actual Image     
-:---------------:|:---------------------:
-<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">
+CAD Image       |    Actual Image     |
+:---------------:|:---------------------:|
+<img src="./Images/HWV2.1_CAD.png" style="width: 300px;"><br>|<img src="./Images/HWV2.1_Image_Cropped.jpg" style="width: 300px;">|
  
 
 
@@ -59,10 +62,9 @@ CAD Image       |    Actual Image
 - 5 Serial ports that can be used to communicate with microcontrollers  
 - Up to 8 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
-- Can support bi-directional communications<br><br>
+- Can support bi-directional communications
 
-
-#### **HW Version 2.3/2.4**
+#### **1.3.3 HW Version 2.3/2.4**
 
 CAD Image       |    Actual Image     
 :---------------:|:---------------------:
@@ -79,7 +81,7 @@ CAD Image       |    Actual Image
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications
 
-HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  
+HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  All WCBs must be running the same version of Software though to ensure they are interoperable.
 
 ### **1.4 Concept of Operations**
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 8 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
@@ -101,6 +103,8 @@ As you can see in the above image, you can send any other board a direct message
 With this method, your controller would send each command separately and the WCB will process them as they come in.  There is an option to chain the commands together so your controller only has to send one command.  You would separate each of the individual commands with the ^ character.  The WCB will separate the commands when it receives it.  Below is an example
 <br><br>
 
+With this method, your controller would send each command separately and the WCB will process them as they come in.  There is an option to chain the commands together so your controller only has to send one command.  You would separate each of the individual commands with the ^ character.  The WCB will separate the commands when it receives it.  Below is an example
+
 <img src ="./Images/Chained_Commands.gif">
 <br>
 You can see the commands in the previous example are chained together and now the controller is sending that long string of commands to the WCB.  
@@ -113,21 +117,104 @@ If you want to or have a limitation on the length of command you can send to the
 
 <br>
 The WCBs can also Broadcast messages.  The thought is that you send a command everywhere, and if the receiving device accepts the command, it acts on it.  Otherwise it would ignore the command.  The GIF below shows the broadcast messages.  
-<br>
-<img src=".\Images/NetworkBroadcastGIF.gif">
-<!-- [til](./Images/NetworkBroadcastGIF.gif)<br><br> <br><br>  -->
+![til](./Images/NetworkBroadcastGIF.gif)<br><br> <br><br> 
+
+
+The Wireless Communication Board (WCB) is a versatile communication system designed to facilitate **ESP-NOW** wireless communication between multiple ESP32-based devices. The system also provides **serial bridging**, command processing, and dynamic configuration for a variety of use cases.
+
+## **2. Command Reference**
+
+### **2.1 Command Refence Intro**
+I have broken the command structure down into 2 categories.  One of them is to control the board itself, and the other is to execute commands that transfer the data.  The local commands start with the "?" and the execution commands start with ";". These can be changed as needed via a command
+
+### **2.2 Local Function Commands (**`?COMMANDS`**)**
+
+| **Command**        | **Description**                      |
+| :------------------| --------------------------------   |
+| `?CONFIG`          | Display current configuration settings.       |
+| `?DON`             | Enable debugging mode                         |
+| `?DOFF`            | Disable debugging mode.                    |
+| `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
+| `?CCLEAR`          | Clear all stored commands | 
+| `?WCBx`            | Set the WCB number (1-8).|
+| `?WCBQx`           | Set the total number of WCBs in the system MUST match on all boards in system |
+| `?WCB_ERASE`       | Erase all WCB stored settings.  |
+| `?M2xx`            | Set the 2nd MAC Octet (hex)  0x00 - 0xFE   \*\*\*MUST match on all boards in system   |
+| `?M3xx`            | Set the 3rd MAC octet (hex).   0x00 - 0x FE  \*\*\*MUST match on all boards in system  |
+| `?Sx0/1`           | Enable/Disable broadcast for Serial x. 0 for disabled, 1 for enabled|
+| `?SxBAUDRATE`      | Set baud rate for Serial x. |
+| `?EPASSxxxx`       | Update ESP-NOW password.  \*\*\*MUST match on all boards in system |
+| `?REBOOT`          | Reboot the WCB |
+| `?MAESTRO_ENABLE`  | Enable Maestro communication |
+| `?KYBER_LOCAL`     | Enable Kyber communication locally. |
+| `?KYBER_REMOTE`    | Enable Kyber communication remotely. |
+| `?KYBER_CLEAR`     | Clear Kyber settings. |
+| `?HWx`             | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system. |
+
+### **2.3 Command Character-Based Commands (**`;COMMANDS`**)**
+
+These will be the majority of what you will use to interact with the WCB on a normal basis.  These are not case sensitive, so feel free to use upper or lower case characters.
+
+| **Command**  | **Description**  |
+| ------------ | -------------------------------- |
+| `;Sxyyy`     | Send a message to Serial x (1-5) with the message of yyy. |
+| `;Wxyyy` | Send a unicast message to WCB x. with the message of yyy      |
+| `;Ckey`      | Recall a stored command by key.                           |
+| `;Mxyy`      | Send a Maestro command (x = Maestro ID, yy = sequence). 1-8 valid Maestro IDs.  0 = send to all Maestros.  ID's must match WCB number they are plugged into. |
+
+### **2.4 Syntax for Commands**
+
+#### **2.4.1 WCB to WCB->Serial Communication**
+```
+;W(x);S(y)(zzzzz....)
+
+x: 1-8 : Target WCB's number.  If sending to WCB2, enter 2
+y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
+zzzz.... : String to send to end device
+```
+Examples
+```
+;W3;S4:PP100  : This would send the string ":PP100" to WCB3, and out its Serial 4 port
+;W2;S2#SD0    : This would send the string "#SD0" to WCB2, and out its Serial 2 port
+```
+
+#### **2.4.2 Serial Communications Command Syntax**
+```
+;S(y)(zzzzz....)
+
+y: 1-5 : Target's Serial Port, if sending to Serial 1 on target board, enter 1
+zzzz.... : String to send to end device
+```
+Examples
+```
+;S4:PP100  : This would send the string ":PP100" out its local Serial 4 port
+;S2#SD0    : This would send the string "#SD0" out its local Serial 2 port
+```
+
+#### **2.4.3 Chaining Commands:**
+You can chain commands together and have the WCB process those commands one after another.  You can do this by adding a "^" in between different commands in the string.
+
+Example:<br>
+
+ ```   
+;W3;S4:PP100^;W3;S2#SD0^;W3;S1:PDA180
+```
+
+The command would take that string and break it into 3 different commands and process them immediately.  There is only a few millisecond delay between each command.
+```
+1. ;W3;S4:PP100
+2. ;W3;S2#SD0
+3. ;W3;S1:PDA180
+```
+
+The delimiter is ^ by default, but also can be changed.
+
+I have tested the following characters (& * . - / ) but do not see why others wouldn't work as well.
 
 
 
-
-<!-- ## **1. Introduction**
-
-### **1.1 Overview** -->
-
-<!-- The Wireless Communication Board (WCB) is a versatile communication system designed to facilitate **ESP-NOW** wireless communication between multiple ESP32-based devices. The system also provides **serial bridging**, command processing, and dynamic configuration for a variety of use cases. -->
-
-
-## **2. Getting Started**
+## **3. Loading and Configuring the WCB**
+**All WCBs are configured prior to shipping, but if you want to upgrade an existing WCB or setup a new one, follow these steps.**
 
 ### **Required Drivers**
 
@@ -144,26 +231,20 @@ To recognize the WCB on your computer, ensure you have the correct driver instal
 Before compiling the firmware, install the following libraries in the Arduino IDE:
 
 
-- **EspSoftwareSerial** (For software-based serial communication)
+- **EspSoftwareSerial** (For software-based serial communication) By : Dunkirk, Version tested: 
 
-- **Adafruit NeoPixel** (For controlling LED status indicators)
+- **Adafruit NeoPixel** (For controlling LED status indicators) By: Adafruit, Version tested: 
 
-### **2.1 Firmware Installation**
+### **3.1 Firmware Installation**
 
 1. Install **Arduino IDE** and required ESP32 libraries.  ESP32 board version 3.1
-2. Clone the WCB firmware repository.
-3. Open the `WCB1_V5_M.ino` file.
-4. Compile and upload the firmware to your ESP32 board.
-5. Open the serial monitor to verify successful setup.
+2. Install libraries mentioned above.
+3. Clone the WCB firmware repository.
+4. Open the `WCB_V5_M.ino` file found in the Code folder.
+5. Compile and upload the firmware to your ESP32 board, selecting "ESP Dev Module" as your board type.
+6. Open the serial monitor to verify successful setup. You will have to hit the reset button on the WCB to show that it booted up after a reload.
 
-
-### **2.2 Hardware Setup**
-1. **Connect the ESP32-based WCB to a power source.**
-2. **Ensure all devices are running the latest firmware.**
-3. **Do NOT Connect any peripherals util the WCBs are configured** (e.g., Pololu Maestro, Kyber, Stealth, Roam a Dome Home, ...).
-4. **Configure the correct pin map** using the `HW` command.
-
-### **2.3 Setting Up the WCB System**
+### **3.2 Setting Up the WCB System**
 
 To ensure proper communication between multiple WCB devices, follow these setup steps:
 
@@ -171,7 +252,7 @@ To ensure proper communication between multiple WCB devices, follow these setup 
 
 Each WCB must be configured with the correct hardware version before use. 
 
-NOTHING WILL WORK WITHOUT PERFORMING THIS STEP!!!! 
+**NOTHING WILL WORK WITHOUT PERFORMING THIS STEP!!!!**
 
 Use the following command:
 
@@ -182,7 +263,7 @@ Use the following command:
 Examples:
 
 ```
-?HW1  // Set WCB to hardware version 1
+?HW1  // Set WCB to hardware version 1.0
 or 
 ?HW24  // Set WCB to hardware version 2.4
 ```
@@ -198,7 +279,7 @@ Each WCB must have a unique identifier between 1-8. Use the following command:
 Example:
 
 ```
-?WCB2  // Set this WCB as unit 2
+?WCB2  // Set this WCB as WCB 2
 ```
 
 #### **Step 3: Set the WCB Quantity**
@@ -220,7 +301,7 @@ Example:
 All WCBs must use the same ESP-NOW password to communicate.
 
 ```
-?EPASSyourpassword
+?EPASSxxxxxxx
 ```
 
 Example:
@@ -231,7 +312,12 @@ Example:
 
 #### **Step 5: Set the MAC Addresses**
 
-To prevent interference between different WCB systems, all devices in the same system must have the same MAC octets.
+To prevent interference between different WCB systems, all devices in the same system must have the same MAC octets, and be different than other WCB systems.  This is accomplished by changing the 2nd and 3rd octet of the MAC address.  All WCBs will have the 1st, 4th, 5th, and 6th octets match, but the 2nd and 3rd must be unique.  The MAC Address should be 
+
+```
+02:xx:yy:00:00:0w
+``` 
+where the xx is the second octet that you set, the yy is the 3rd octet that you set, and the w, the WCB number.  The w is automatically set when you identified the WCB number.  You set the 2nd and 3rd octets with the following commands:
 
 ```
 ?M2xx  // Set the 2nd MAC octet
@@ -245,7 +331,9 @@ Example:
 ?M333  // Set 3rd MAC octet to 0x33
 ```
 
-#### **Example Setup for a 3-WCB System:**
+The valid characters that can be used are 0-9, and A-F.  Do not use FF though because that would introduce a possible interference with other systems.
+
+#### **3.2.1 Example Setup for a 3-WCB System:**
 
 | **WCB Unit** | **Command**       | **Value**          |
 | ------------ | ----------------- | ------------------ |
@@ -255,29 +343,30 @@ Example:
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
-| WCB2         | `?HW1`            | Version 1.0        |
+| WCB2         | `?HW21`           | Version 2.1        |
 |              | `?WCB2`           | Unit 2             |
 |              | `?WCBQ3`          | 3 WCBs total       |
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
-| WCB3         | `?HW1`            | Version 1.0        |
+| WCB3         | `?HW24            | Version    2.4     |
 |              | `?WCB3`           | Unit 3             |
 |              | `?WCBQ3`          | 3 WCBs total       |
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
 
-All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly.
+All WCBs must have **matching** `WCBQ`, `EPASS`, `M2`, and `M3` values to communicate properly.  The WCBs HW versions do not need to match.  They are all completely interoperable with one another.
+
 Once configured, reboot each WCB with:
 
 ```
 ?REBOOT
 ```
-The rebooting is critical since a lot of these settings are setup at boot, and not after.
+The rebooting is critical since a lot of these settings are set up at boot, and not after.
 
 <br>
-You don't have to enter thse commands one at a time if you don't want to.  You can chain all these commands using the command delimiter and reboot at the end:
+You don't have to enter these commands one at a time if you don't want to.  You can chain all these commands using the command delimiter and reboot at the end:
 
 Example:
 ```
@@ -285,92 +374,188 @@ Example:
 ```
 
 
+## **4. Features Overview/Details**
 
+### **4.1 Serial Communication**
 
-## **3. Command Reference**
+- Supports **Unicast** (Single Serial Port Communcations) and **Broadcast** (All Configured Serial Ports Communicatoin). 
+- If you don't specify a Serial Port, your message will automatically be broadcasted.  
+- The baud rate can be changed via commands.  All serial ports are set to 9600 by default.
+- You an choose to allow each serial port to be part of the broadcasts or not.  This will ensure messages are not getting sent to boards that don't want them.  You will have to send commands to these boards directly via unicast messages.  Broadcasts are enabled by default for all ports.
+- If you don't specify a Serial Port, your message will automatically be broadcasted to all ports with broadcast enabled. 
 
-### **3.1 Local Function Commands (********`?COMMANDS`********)**
+### **4.2 ESP-NOW Communication**
 
-| **Command**       | **Description**                                                                                                                                                            |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `?CONFIG`         | Display current configuration settings.                                                                                                                                    |
-| `?DON`            | Enable debugging mode.                                                                                                                                                     |
-| `?DOFF`           | Disable debugging mode.                                                                                                                                                    |
-| `?CCLEAR`         | Clear all stored commands.                                                                                                                                                 |
-| `?CSkey,value`    | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands. |
-|                   |                                                                                                                                                                            |
-| `?WCBx`           | Set the WCB number (1-8).                                                                                                                                                  |
-| `?WCBQx`          | Set the total number of WCBs in the system.MUST match on all boards in system                                                                                              |
-| `?WCB_ERASE`      | Erase all WCB stored settings.                                                                                                                                             |
-| `?M2xx`           | Set the 2nd MAC Octet (hex)  0x00 - 0xFE   \*\*\*MUST match on all boards in system                                                                                        |
-| `?M3xx`           | Set the 3rd MAC octet (hex).   0x00 - 0x FE  \*\*\*MUST match on all boards in system                                                                                      |
-| `?Sx0/1`          | Enable/Disable broadcast for Serial x. 0 for disabled, 1 for enabled                                                                                                       |
-| `?SxBAUDRATE`     | Set baud rate for Serial x.                                                                                                                                                |
-| `?EPASSnewpass`   | Update ESP-NOW password.  \*\*\*MUST match on all boards in system                                                                                                         |
-| `?REBOOT`         | Reboot the WCB.                                                                                                                                                            |
-| `?MAESTRO_ENABLE` | Enable Maestro communication.                                                                                                                                              |
-| `?KYBER_LOCAL`    | Enable Kyber communication locally.                                                                                                                                        |
-| `?KYBER_REMOTE`   | Enable Kyber communication remotely.                                                                                                                                       |
-| `?KYBER_CLEAR`    | Clear Kyber settings.                                                                                                                                                      |
-| `?HWx`            | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system.                                                                                          |
-
-### **3.2 Command Character-Based Commands (********`;COMMANDS`********\*\*\*\*)**
-
-| **Command**  | **Description**                                                                                                                                              |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `;Sxmessage` | Send a message to Serial x (1-5).                                                                                                                            |
-| `;Wxmessage` | Send a unicast message to WCB x.                                                                                                                             |
-| `;Ckey`      | Recall a stored command by key.                                                                                                                              |
-| `;Mxyy`      | Send a Maestro command (x = Maestro ID, yy = sequence). 1-8 valid Maestro IDs.  0 = send to all Maestros.  ID's must match WCB number they are plugged into. |
-
-## **4. Configuration Options**
-
-### **4.1 Serial Port Settings**
-
-- Default baud rates: `9600`
-- Adjust baud rate: `?SxBAUDRATE`
-- Enable/Disable broadcast: `?Sx0/1`
-
-### **4.2 ESP-NOW Settings**
-
-- Update ESP-NOW password: `?EPASSnewpassword`
-- Change WCB ID: `?WCBx`
-
-### **4.3 Stored Commands Management**
-
-- Store command: `?CSkey,value`
-- Retrieve command: `;Ckey`
-- List stored commands: `?CLIST`
-- Delete stored command: `?CDELkey`
-
-## **5. Advanced Features**
-
-### **5.1 ESP-NOW Communication**
-
-- Supports **unicast** (WCB-to-WCB) and **broadcast** (WCB group-wide).
+- Supports **Unicast** (WCB-to-WCB) and **Broadcast** (WCB group-wide).
 - Automatically ignores messages from unrelated groups (different MAC octets and passwords) for security.
+- If you don't specify a WCB#, your message will automatically be broadcasted to all WCBs.  
 
-### **5.2 Kyber Support**
+### **4.3 Kyber Support**
 
-- Kyber must be plugged into Serial 2.
-- Forwarding data **between Serial1 and Serial2** when Kyber is enabled. 
-- Supports **Kyber Local and Remote modes**. The local mode is for when the Kyber is plugged directly into the WCB and the remote mode is when only the maestro with the ID of 2 is plugged into the WCB.
+The WCB supports the Kyber with both the serial commands, via its MarcDuino port, and the Maestro control via its Maestro port.  The WCB supports the serial commands by default, but there is specific configuration you need to enable in the WCB to enable Maestro communication between the Kyber and Maestro.  
 
-Kyber is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality.
+The WCBs have two modes for Kyber support,  **Kyber Local** and **Kyber Remote**. The local mode is for when the Kyber is plugged directly into the WCB along with a Maestro, and the remote mode is when only the maestro is plugged into the WCB but triggered by the Kyber remotely.  
 
-### **5.3 Maestro Support**
-- Maestros must be plugged into Serial 1.
-- Can trigger Maestros from based on a command sent to the WCB.  You do not need to utilize the Pololu Maestro Library within your code. 
+ Connections: 
+ - The Maestro must be plugged into Serial 1 
+ - The Kyber's Maestro port must be plugged into Serial 2.  
+ - The Kyber's MarcDuino port can be plugged into any of the remaining serial ports.  
 
-Maestro comms is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality. 
+To enable Kyber Local Mode, use the command `?kyber_local`.  To enable the Kyber Remote mode, use `?kyber_remote`. You should not run both of these modes on the same WCB.  You will be notified which mode you are running during the boot message
 
-### **5.4 FreeRTOS Tasks**
 
-- **`serialCommandTask`**: Handles all incoming serial data.
-- **`KyberLocalTask`**: Forwards Maestro data to a locally connected Kyber.
-- **`KyberRemoteTask`**: Forwards Maestro data to a remote Kyber via ESP-NOW.
+Here is a simple wiring diagram to show how it would be connected.
 
-## **6. Troubleshooting & Debugging**
+<img src="./Images/Kyber Wiring.png">
+
+
+<br>I know it's a little hard to see, so here's a little closer view of the wiring.  
+
+
+<img src="./Images/Kyber_Close_Up.png">
+
+Please note that the Tx from the Kyber goes to the Rx of the WCB, and the Rx of the Kyber goes to the Tx of the WCB
+
+
+ **NOTE:** Kyber is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality.
+
+### **4.4 Maestro Support without Kyber**
+If you don't have Kyber, but still use the Maestro, you can still trigger sequences with the WCB.  You do not have to utilize the Pololu Maestro Library to accomplish this if you are using the WCBs.  
+All you have to do is send the command `;Mxyy` to the WCB, where x is the ID of the Maestro, and yy is the sequence that you want to start. 
+
+Connections/Requirements:
+- Maestros must be plugged into Serial 1.  
+- Only 1 Maestro is supported per WCB.
+- Maestro ID must match the WCB number that it is plugged into (i.e. Maestro ID of 2 plugged into WCB2, Maestro ID of 3 plugged into WCB3)
+- Can have up to 8 Maestros when controlling them this way.
+- You can broadcast to all Maestros by using the Maestro ID of 0.  This will trigger all Maestros with the Sequence ID that is given.  
+
+**Note:** Maestro comms is not supported in the Serial only mode.  You must be using the ESPNOW to enable this functionality. 
+
+**NOTE:** Only the Restart Sequence is supported when utilizing the Maestros in this method.  It does not return status or have the ability to do servo passthrough at this time.
+
+### **4.5 Stored Commands**
+
+You can  store commands in the WCB's memory and recall them later.  This is accomplished by saving the commands in NVS (Non-Volatile Storage).  There are 2 parts of the stored commands.  The <i>**Key**</i>, and the <i>**Command**</i>.  The Key is used to identify the command being stored.  The Key can be anything you want with the characters of A-Z and 0-9.  The command can be any string of characters you would normally send the WCB.  The command can include delimeters, so mutlitple commands can be issued at once from the WCB.
+
+**Example**
+Now that you understand what the key and command do, lets go through how to use them.  You store commands by using the `?CS` command.  The CS stands for Command Store.  The format to store a key/command is `?CSkey,command`.  You would enter the `?CS`, then the key, followed by a comma, then the command.  This comma is only read once so that if you need to store a comma in your command, it will allow that.  So lets save the command of `;m11` to the WCB.  
+
+`?CSwave,;m11`
+
+This saves the command `;m11` with the key of `wave`
+
+Now that the key/command is saved into the WCB, you would call that with the:
+
+ `;cwave`
+
+ If you wanted to store a more complex command to wave and to play a sound, you may want to do somehting like this
+
+ `?CSWaveAndSound,;m11^;S5<SH1,M1>`
+
+ Now when you issue the command of `;cWandAndSound`, you start the sequence with the ID of 1 on Maestro 1, and play a sound on the HCR that's connected to Serial port 5 of WCB1.
+
+#### **4.5.1 Stored Command Example**
+
+For this example, I'm going to assume that there is a Maestro connected to Serial 1 on WCB1 and that the Stealth is connected to Serial 2.  That Maestro has an ID of 1 and has a script with a sequence ID of 1 that triggers a wave function.  
+
+
+In WCB1, you would issue the command `?CSwave,;m11`.  This saves the command `;m11` with a key of `wave` into the WCB memory and called when it receives `;cwave` command.  Now in the stealth, in the aux string 16, you would put `a=;cwave`.  This is shown in the above on the last line in the config example.  Now you have a more clear understanding what is being called with that aux string.  
+
+I go into more details of the stored commands below in section x.x
+
+### ** 4.6 Stealth Users**
+The Stealth users should note that the Stealth uses the character ":" to break up a string when it's executing a function with a string. Myself and many builders also use the ":" in their command syntax and this can cause a complication.  There is an easy solution that can be implemented on the Stealth to combat this.  All you will need to do is change the delimiter that it uses to break up its string.  Add this line towards the top of your config.txt file to accomplish this.
+
+<br>
+
+```
+auxdelim=&
+```
+
+You can change the `&` to another character if that interferes with something in your system.  If you are only using the stored commands specfied below, you may not need to change this auxdelim.  
+
+Other than that change, you can set up the Stealth's config.txt file to send out strings via the serial command like normal.  
+
+Examples to add to Stealth config.txt: 
+```
+b=3,5,1
+g=454,5,2
+
+a=;W3;S1:PP100
+a=;W2;S2:SE00
+```
+The b=3,5,1 assigns button 3's action to send a string out the serial port, designated by the 5 in the command, and to send the first string, designated by the 1 in the command. The 1st string in this example is `;W3;S1:PP100`
+
+The g=454,5,2 assigns the gesture 454(left twice) to send a string out the serial port, and to send the 2nd string.  The string in this example is ";W2;S2:SE00<br>
+
+This is a more comprehensive list of gestures and buttons as an example:
+
+```
+b=1,5,13
+b=2,5,14
+b=3,5,15
+b=4,5,16
+b=6,1,12
+b=7,1,5
+b=8,1,6
+b=9,1,2
+g=4,5,1
+g=6,5,2
+g=2,5,3
+g=8,5,4
+g=454,5,5
+g=656,5,6
+g=252,5,7
+g=858,5,8
+g=45454,5,9
+g=65656,5,10
+g=25252,5,11
+a=;W2;S1:PP100
+a=;W2;S1:PH
+a=;W2;S1:PS1
+a=;W2;S1:PS2
+a=;W2;S1:PS4
+a=;W2;S2:SE00
+a=;W2;S1:SE00
+a=;W2;S1:SE01
+a=;W2;S1:SE02
+a=;W2;S1:SE03
+a=;W2;S1:PS1
+a=;S1:PS2
+a=;S1:PS3
+a=;S1:PDA0
+a=;W3;S3:PDA0
+a=;cwave
+```
+
+In this example, button 3 would make the Stealth send the string `;W3;S3:PDA0` out it's serial port.  The WCB would accept that command and forward the string ":PDA0" out the WCB3's Serial 3 port. <br>
+
+This would be a perfect opportunity  to use the stored commands.  You can specify what you want to run in the WCB, then in the Stealth, you just call that sequence. 
+
+## **5.0 Power**
+ The WCB accepts only 5V power input.  The WCB can be powered by 2 different ways.  The screw terminal block, or the 5V pins on the serial port.  I do not recommend powering the board with both at the same time. <br>
+ 
+ Note:  The 5V pins on the serial header are not connected to the USB 5V output.  The 5V pins are only connected to the 5V terminal block.  What this means for you is that if you power another device with the 5V pin in the serial header, you can not power that external board via the USB power.  You must power the WCB via the 5V terminal block to power an external board.  It is ok to have both the USB and 5V terminal supplying power to the board at the same time.  There is on board protection and the board will prefer the 5V source over the USB power. <br><br>
+
+V1.0      |    V2.x+     
+:---------------:|:---------------------:
+<img src="./Images/PowerOptions.png" style="width: 400px;"><br>|<img src="./Images/PowerV2.1.png" style="width:400px;">
+ 
+
+
+## **6.0 Dimensions**
+
+Here are the dimensions for the boards.  With these dimensions, you can plan you setup or make a custom mount for your boards.
+
+V1.0      |    V2.1+    
+:---------------:|:---------------------:
+<img src="./Images/DimensionsV1.0.png" style="width: 400px;"><br>|<img src="./Images/DimensionsV2.1.png" style="width:400px;">
+ 
+
+<br><br>
+
+## **7. Troubleshooting & Debugging**
 
 ### **Erasing Flash & Resetting WCB to Factory Defaults**
 
@@ -392,7 +577,9 @@ This will completely wipe the stored settings, including MAC addresses, ESP-NOW 
 | No response from WCB          | Verify power and USB connection. Check baud rate settings.         |
 | ESP-NOW messages not received | Ensure correct MAC octets and ESP-NOW password.                    |
 | Serial bridging not working   | Confirm correct pin configuration and baud rates.                  |
-| Stored commands not executing | Use `?CLIST` to check saved commands. Ensure delimiter is correct. |
+| Stored commands not executing | Use `?CONFIG` to check saved commands. Ensure key is correct. |
+| Command not being sent         | Try issuing the command you are sending to the WCB in the IDE's Serial Monitor to see if there is an issue with the communication between the WCB, or the incoming serial port.|
+
 
 ## **7. Appendices**
 
@@ -412,7 +599,14 @@ Refer to `wcb_pin_map.h` for pin configurations based on hardware version.
 - [Arduino ESP32 Core](https://github.com/espressif/arduino-esp32)
 - [Pololu Maestro Documentation](https://www.pololu.com/docs/0J40)
 
----
 
+
+## **8.0 Ordering**
+If you are an astromech user, head over to this thread to order a set.
+
+[Astromech.net Forum Post](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024&p=581076#post581076)
+
+
+## 
 This guide provides a complete reference for configuring and using the **Wireless Communication Board (WCB) system**. 🚀
 
