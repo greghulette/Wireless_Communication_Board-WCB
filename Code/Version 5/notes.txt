@@ -1,0 +1,158 @@
+#include <Arduino.h>
+#include <esp_wifi.h>
+#include <esp_now.h>
+#include <WiFi.h>
+#include <HardwareSerial.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_NeoPixel.h>
+#include "WCB_Storage.h"
+
+bool lastReceivedViaESPNOW = false;
+bool debugEnabled = false;
+char LocalFunctionIdentifier = '?';
+char CommandCharacter = ';';
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+
+#define WCB1
+
+int WCB_Number = 1;
+Preferences preferences;
+
+#define STATUS_LED_PIN 19
+#define STATUS_LED_COUNT 1
+
+const uint32_t red = 0xFF0000;
+const uint32_t blue = 0x0000FF;
+const uint32_t off = 0x000000;
+
+Adafruit_NeoPixel statusLED(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+#define SERIAL1_TX_PIN 8
+#define SERIAL1_RX_PIN 21
+#define SERIAL2_TX_PIN 20
+#define SERIAL2_RX_PIN 7
+#define SERIAL3_TX_PIN 25
+#define SERIAL3_RX_PIN 4
+#define SERIAL4_TX_PIN 14
+#define SERIAL4_RX_PIN 27
+#define SERIAL5_TX_PIN 13
+#define SERIAL5_RX_PIN 26
+
+#define SERIAL1_DEFAULT_BAUD_RATE 9600
+#define SERIAL2_DEFAULT_BAUD_RATE 9600
+#define SERIAL3_DEFAULT_BAUD_RATE 9600
+#define SERIAL4_DEFAULT_BAUD_RATE 9600
+#define SERIAL5_DEFAULT_BAUD_RATE 9600
+
+bool serialBroadcastEnabled[5] = {true, true, true, true, true};
+int baudRates[5] = {
+  SERIAL1_DEFAULT_BAUD_RATE,
+  SERIAL2_DEFAULT_BAUD_RATE,
+  SERIAL3_DEFAULT_BAUD_RATE,
+  SERIAL4_DEFAULT_BAUD_RATE,
+  SERIAL5_DEFAULT_BAUD_RATE
+};
+
+int Default_WCB_Quantity = 1;
+uint8_t umac_oct2 = 0x00;
+uint8_t umac_oct3 = 0x00;
+
+bool maestroEnabled = false;
+
+void reboot() {
+  Serial.println("Rebooting in 2 seconds");
+  delay(2000);
+  ESP.restart();
+}
+
+uint8_t WCBMacAddresses[9][6];
+uint8_t broadcastMACAddress[1][6];
+
+SoftwareSerial Serial3(SERIAL3_RX_PIN, SERIAL3_TX_PIN);
+SoftwareSerial Serial4(SERIAL4_RX_PIN, SERIAL4_TX_PIN);
+SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
+
+char espnowPassword[40] = "CHANGE_ME_PLEASE_OR_RISK_TAKEOVER";
+char commandDelimiter = '^';
+
+#define MAX_STORED_COMMANDS 50
+String storedCommands[MAX_STORED_COMMANDS];
+
+void updateSerialBaudRates() {
+  if (maestroEnabled) {
+    baudRates[0] = 57600;
+    baudRates[1] = 57600;
+  } else {
+    baudRates[0] = SERIAL1_DEFAULT_BAUD_RATE;
+    baudRates[1] = SERIAL2_DEFAULT_BAUD_RATE;
+  }
+  Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+  Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+}
+
+void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
+  uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
+  Serial1.write(command, sizeof(command));
+  Serial1.flush();
+  Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
+}
+
+void handleSingleCommand(const String &cmd, int sourceID) {
+  if (cmd.startsWith(String(LocalFunctionIdentifier))) {
+    String message = cmd.substring(1);
+    if (message.equals("MAESTROENABLE")) {
+      maestroEnabled = true;
+      preferences.putBool("maestroEnabled", maestroEnabled);
+      updateSerialBaudRates();
+      Serial.println("Maestro mode enabled.");
+    } else if (message.equals("MAESTRODISABLE")) {
+      maestroEnabled = false;
+      preferences.putBool("maestroEnabled", maestroEnabled);
+      updateSerialBaudRates();
+      Serial.println("Maestro mode disabled.");
+    }
+  } else if (cmd.startsWith(String(CommandCharacter))) {
+    String message = cmd.substring(1);
+    if (maestroEnabled && message.startsWith("M")) {
+      int maestroID = message.substring(1, 2).toInt();
+      int scriptNumber = message.substring(2).toInt();
+      if (maestroID == WCB_Number) {
+        sendMaestroCommand(maestroID, scriptNumber);
+      }
+    }
+  }
+}
+
+void setup() {
+  preferences.begin("WCB", false);
+  maestroEnabled = preferences.getBool("maestroEnabled", false);
+  loadWCBNumberFromPreferences();
+  loadWCBQuantitiesFromPreferences();
+  loadMACPreferences();
+  Serial.begin(115200);
+  updateSerialBaudRates();
+  Serial3.begin(baudRates[2]);
+  Serial4.begin(baudRates[3]);
+  Serial5.begin(baudRates[4]);
+  statusLED.begin();
+  statusLED.setBrightness(10);
+  statusLED.fill(blue);
+  statusLED.show();
+  WiFi.mode(WIFI_STA);
+  loadESPNowPasswordFromPreferences();
+  loadCommandDelimiter();
+  loadLocalFunctionIdentifierAndCommandCharacter();
+  loadStoredCommandsFromPreferences();
+}
+
+void loop() {
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\r');
+    data.trim();
+    if (!data.isEmpty()) {
+      handleSingleCommand(data, 0);
+    }
+  }
+}
+?lf/^/wcb1^/wcbq2^/m222^/m333^kyber_local^

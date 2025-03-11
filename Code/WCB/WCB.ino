@@ -440,7 +440,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
    
 
   if (len != sizeof(espnow_struct_message)) {
-      Serial.printf("Received unexpected size: %d (expected %d)\n", len, (int)sizeof(espnow_struct_message));
+      // Serial.printf("Received unexpected size: %d (expected %d)\n", len, (int)sizeof(espnow_struct_message));
       return;
   }
 
@@ -503,7 +503,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // If valid, enqueue the command
     enqueueCommand(String(received.structCommand), 0);
   } else {
-    Serial.println("ESPNOW password does not match local password!");
+    // Serial.println("ESPNOW password does not match local password!");
   }
   colorWipeStatus("ES", blue, 10);
 }
@@ -989,7 +989,7 @@ void serialCommandTask(void *pvParameters) {
 // ============================= Setup & Loop =============================
 
 void setup() {
-  
+  delay(1000);
   Serial.begin(115200);
 
   loadHWversion();
