@@ -580,7 +580,7 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-    if (message == "don" || message = "DON") {
+    if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
         return;
@@ -588,7 +588,7 @@ void processLocalCommand(const String &message) {
         debugEnabled = false;
         Serial.println("Debugging disabled");
         return;
-    } else if (message.startsWith("lf") || message.startWith("LF")) {
+    } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
         return;
     } else if (message.equals("cclear") || message.equals("CCLEAR")) {
