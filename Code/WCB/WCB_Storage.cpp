@@ -461,7 +461,7 @@ void loadKyberSettings(){
   } else if (Kyber_Location == "remote"){
       Kyber_Local = false;
       Kyber_Remote = true;
-  } else if (Kyber_Location == " "){
+  } else if (Kyber_Location == ""){
       Kyber_Local = false;
       Kyber_Remote = false;
   }

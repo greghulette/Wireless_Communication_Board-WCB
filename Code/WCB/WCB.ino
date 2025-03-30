@@ -49,7 +49,7 @@ bool debugEnabled = false;
 
 
 // WCB Board HW and SW version Variables
-int wcb_hw_version = 0;  // Default = 0, Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
+int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
 String SoftwareVersion = "5.0";
 
 // Uncomment only the board that you are loading this sketch onto.
@@ -127,16 +127,18 @@ Adafruit_NeoPixel *statusLED;
 // Adafruit_NeoPixel statusLED(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
-  if(statusled1 == "ES"){
+  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24){
+    if (statusled1 == "ES"){
     statusLED->setBrightness(brightness);
     for (int i = 0; i<STATUS_LED_COUNT; i++){
       statusLED->setPixelColor(i, c);
       statusLED->show();
     } 
-  } 
-  else {
-    if (debugEnabled){ }
-   Serial.printf("No LED was chosen \n");
+    } 
+    else {
+      if (debugEnabled){ }
+      Serial.printf("No LED was chosen \n");
+    };
   };
 }
 
@@ -193,11 +195,11 @@ uint8_t WCBMacAddresses[9][6];
 uint8_t broadcastMACAddress[1][6]; // Will be updated dynamically
 
 // ESP-NOW message struct
-typedef struct espnow_struct_message {
+typedef struct __attribute__((packed)) {
   char structPassword[40];
   char structSenderID[4];
   char structTargetID[4];
-  bool structCommandIncluded;
+  uint8_t structCommandIncluded;
   char structCommand[200];
 } espnow_struct_message;
 
@@ -445,8 +447,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   }
 
   espnow_struct_message received;
-  memcpy(&received, incomingData, len);
-  String temp_espnowpassword = received.structPassword;
+  memcpy(&received, incomingData, sizeof(received));
+  received.structPassword[sizeof(received.structPassword) - 1] = '\0';
+
+  // memcpy(&received, incomingData, len);
+  String temp_espnowpassword = String(received.structPassword);
   if (temp_espnowpassword == espnowPassword){
     // Serial.printf("Received ESP-NOW Message from MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
@@ -491,9 +496,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
         return;
     }
+
      lastReceivedViaESPNOW = true; // Prevent loopback issues
       colorWipeStatus("ES", green, 200);
-
     // Check if this message is meant for this WCB
     if (targetWCB != 0 && targetWCB != WCB_Number ) {
         Serial.println("Message not for this WCB, ignoring.");
@@ -505,7 +510,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   } else {
     // Serial.println("ESPNOW password does not match local password!");
   }
-  colorWipeStatus("ES", blue, 10);
+    colorWipeStatus("ES", blue, 10);
 }
 
 //*******************************
