@@ -91,7 +91,7 @@ void updateBaudRate(int port, int baud) {
     Serial2.updateBaudRate(baud);
   } else {
     Serial.printf("Invalid serial port: %d\n", port);
-    return;
+    // return;
   }
 
   // Save to preferences
