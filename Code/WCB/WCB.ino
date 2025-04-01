@@ -1,3 +1,11 @@
+//
+// 
+// 
+// 
+
+
+
+//  Libraries to include
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
@@ -13,7 +21,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
+//////// DO NOT CHANGE ANYTHING BELOW THIS LINE /////////////
+////// All variables should be changed via the command line //////
 
+
+// ============================= Global Variables =============================
 // Number of WCB boards in the system
 int WCB_Number = 1;                                                 // Default to WCB1.  Change to match your setup here or via command line
 int Default_WCB_Quantity = 1;                                       // Default setting.  Change to match your setup here or via command line
@@ -32,7 +44,6 @@ char commandDelimiter = '^';                                        // Default s
 char LocalFunctionIdentifier = '?';                                 // Default setting.  Change to match your setup here or via command line
 char CommandCharacter = ';';                                        // Default setting.  Change to match your setup here or via command line
 
-
 bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
 bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this board directly
@@ -44,26 +55,9 @@ bool lastReceivedViaESPNOW = false;
 // Debugging flag (default: off)
 bool debugEnabled = false;
 
-
-
-
-
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
 String SoftwareVersion = "5.0";
-
-// Uncomment only the board that you are loading this sketch onto.
-// #define WCB1
-// #define WCB2
-// #define WCB3
-// #define WCB4
-// #define WCB5
-// #define WCB6
-// #define WCB7
-// #define WCB8
-// #define WCB9
-
-
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -123,8 +117,6 @@ const uint32_t off     = 0x000000;
 
 const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
 Adafruit_NeoPixel *statusLED;
-
-// Adafruit_NeoPixel statusLED(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
   if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24){
@@ -341,6 +333,8 @@ void printConfigInfo() {
   listStoredCommands(); // List stored commands
   Serial.println("--- End of Configuration Info ---\n");
 }
+
+
 //*******************************
 /// ESP-NOW Functions
 //*******************************
@@ -351,8 +345,6 @@ void sendESPNowMessage(uint8_t target, const char *message) {
         return;
     }
       // turnOnLEDESPNOW();
-
-    // lastReceivedViaESPNOW = false; // Reset after check
 
     // Prepare the struct
     espnow_struct_message msg;
