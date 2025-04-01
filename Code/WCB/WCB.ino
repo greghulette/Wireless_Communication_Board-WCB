@@ -1,9 +1,22 @@
-//
-// 
-// 
-// 
-
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///*****                                                                                                        *****////
+///*****                                          Created by Greg Hulette.                                      *****////
+///*****                                                Version 5.0                                             *****////
+///*****                                                                                                        *****////
+///*****                                 So exactly what does this all do.....?                                 *****////
+///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
+///*****                       - Sends Serial commands to other locally connected devices                       *****////
+///*****                       - Sends Serial commands to other remotely connected devices                      *****////
+///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****////     
+///*****                       - Controls Maestro Servo Controller via Serial Commands                          *****////  
+///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****////
+///*****                       - Controls Maestro Servo Controller via Kyber                                    *****//// 
+///*****                       - Store commands and recall them for later processing                            *****////
+///*****                                                                                                        *****////
+///*****                            Full command syntax can be found at                                         *****////
+///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB                   *****////
+///*****                                                                                                        *****////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //  Libraries to include
 #include <Arduino.h>
