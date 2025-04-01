@@ -34,8 +34,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-//////// DO NOT CHANGE ANYTHING BELOW THIS LINE /////////////
+
+
+//////// DO NOT CHANGE ANYTHING IN THIS FILE  /////////////
 ////// All variables should be changed via the command line //////
+
+
 
 
 // ============================= Global Variables =============================
