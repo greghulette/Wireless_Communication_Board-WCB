@@ -13,19 +13,22 @@
 ///*****                       - Controls Maestro Servo Controller via Kyber                                    *****//// 
 ///*****                       - Store commands and recall them for later processing                            *****////
 ///*****                                                                                                        *****////
-///*****                            Full command syntax can be found at                                         *****////
+///*****                            Full command syntax and description can be found at                         *****////
 ///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB                   *****////
 ///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-//  Libraries to include
+// ============================= Librarires  =============================
+//You must install these into your Arduino IDE
+#include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
+#include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
+
+//  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
 #include <WiFi.h>
 #include <HardwareSerial.h>
-#include <SoftwareSerial.h>
-#include <Adafruit_NeoPixel.h>
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "wcb_pin_map.h"
@@ -36,9 +39,12 @@
 
 
 
-//////// DO NOT CHANGE ANYTHING IN THIS FILE  /////////////
-////// All variables should be changed via the command line //////
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///*****                                                                                                        *****////
+///*****                                    DO NOT CHANGE ANYTHING IN THIS FILE                                 *****////
+///*****                             All variables should be changed via the command line                       *****////
+///*****                                                                                                        *****////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 
