@@ -365,6 +365,7 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
+      Serial.println("insdie retrun");
         return;
     }
       // turnOnLEDESPNOW();
@@ -402,7 +403,7 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     // Send ESP-NOW message
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
-        // Serial.println("ESP-NOW message sent successfully!");
+        Serial.println("ESP-NOW message sent successfully!");
     } else {
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
@@ -472,13 +473,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
     //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
 
-    // Serial.printf("Received Command: %s\n", received.structCommand);
+    Serial.printf("Received Command: %s\n", received.structCommand);
 
     // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    // Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
+    Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -1042,7 +1043,7 @@ void setup() {
   String hostname = getBoardHostname();
   Serial.printf("Booting up the %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version: %s\n", SoftwareVersion);
+  Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
