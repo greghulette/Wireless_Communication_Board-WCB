@@ -80,7 +80,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
-String SoftwareVersion = "5.0";
+String SoftwareVersion = "5.0_021103RJUN25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -854,8 +854,8 @@ void recallStoredCommand(const String &message, int sourceID) {
 
 void processMaestroCommand(const String &message){
   int message_maestroID = message.substring(1,2).toInt();
-    int message_maestroSeq = message.substring(2).toInt();
-    sendMaestroCommand(message_maestroID,message_maestroSeq);
+  int message_maestroSeq = message.substring(2).toInt();
+  sendMaestroCommand(message_maestroID,message_maestroSeq);
 }
 
 
