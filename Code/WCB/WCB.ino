@@ -277,7 +277,6 @@ void enqueueCommand(const String &cmd, int sourceID) {
   }
 }
 
-// parseCommandsAndEnqueue used by recallCommandSlot
 void parseCommandsAndEnqueue(const String &data, int sourceID) {
   int startIdx = 0;
   while (true) {
@@ -286,19 +285,28 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String singleCmd = data.substring(startIdx);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        enqueueCommand(singleCmd, sourceID);
+        if (!singleCmd.startsWith("***")) {
+          enqueueCommand(singleCmd, sourceID);
+        } else {
+          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+        }
       }
       break;
     } else {
       String singleCmd = data.substring(startIdx, delimPos);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        enqueueCommand(singleCmd, sourceID);
+        if (!singleCmd.startsWith("***")) {
+          enqueueCommand(singleCmd, sourceID);
+        } else {
+          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+        }
       }
       startIdx = delimPos + 1;
     }
   }
 }
+
 
 String getBoardHostname() {
   return "Wireless Communication Board " + String(WCB_Number) + " (W" + String(WCB_Number) + ")";
@@ -605,6 +613,9 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("cs") || message.startsWith("CS")) {
         storeCommand(message);
         return;
+    } else if (message.startsWith("ce") || message.startsWith("CE")) {
+        eraseSingleCommand(message);
+        return;
     } else if (message == "reboot" || message == "REBOOT") {
         reboot();
     } else if (message == "config" || message == "CONFIG") {
@@ -684,6 +695,10 @@ void updateCommandCharacter(const String &message){
 
 void storeCommand(const String &message){
   saveStoredCommandsToPreferences(message.substring(2));
+}
+
+void eraseSingleCommand(const String &message){
+  eraseStoredCommandByName(message.substring(2));
 }
 
 void updateCommandDelimiter(const String &message){

@@ -136,6 +136,7 @@ I have broken the command structure down into 2 categories.  One of them is to c
 | `?DOFF`            | Disable debugging mode.                    |
 | `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
 | `?CCLEAR`          | Clear all stored commands | 
+| `?CEkey`           | Clear a specific stored command with the key name given | 
 | `?WCBx`            | Set the WCB number (1-8).|
 | `?WCBQx`           | Set the total number of WCBs in the system MUST match on all boards in system |
 | `?WCB_ERASE`       | Erase all WCB stored settings.  |
@@ -436,7 +437,7 @@ Connections/Requirements:
 
 ### **4.5 Stored Commands**
 
-You can  store commands in the WCB's memory and recall them later.  This is accomplished by saving the commands in NVS (Non-Volatile Storage).  There are 2 parts of the stored commands.  The <i>**Key**</i>, and the <i>**Command**</i>.  The Key is used to identify the command being stored.  The Key can be anything you want with the characters of A-Z and 0-9.  The command can be any string of characters you would normally send the WCB.  The command can include delimeters, so mutlitple commands can be issued at once from the WCB.
+You can  store commands in the WCB's memory and recall them later.  This is accomplished by saving the commands in NVS (Non-Volatile Storage).  There are 2 parts of the stored commands.  The <i>**Key**</i>, and the <i>**Command**</i>.  The Key is used to identify the command being stored.  The Key can be anything you want with the characters of A-Z and 0-9.  The command can be any string of characters you would normally send the WCB.  The command can include delimeters, so mutlitple commands can be issued at once from the WCB. 
 
 **Example**
 Now that you understand what the key and command do, lets go through how to use them.  You store commands by using the `?CS` command.  The CS stands for Command Store.  The format to store a key/command is `?CSkey,command`.  You would enter the `?CS`, then the key, followed by a comma, then the command.  This comma is only read once so that if you need to store a comma in your command, it will allow that.  So lets save the command of `;m11` to the WCB.  
@@ -455,6 +456,15 @@ Now that the key/command is saved into the WCB, you would call that with the:
 
  Now when you issue the command of `;cWandAndSound`, you start the sequence with the ID of 1 on Maestro 1, and play a sound on the HCR that's connected to Serial port 5 of WCB1.
 
+ You can also have comments in your chain commands.  If you use the 3 stars *** you can add a command to your chain commands.
+
+ ```
+ ?cstest,;W2:S2A006^***All Holos to Rainbow^;m02^***All Maestros Seq 2
+ ```
+ and if you issue a ```?config``` you will see this
+ ```
+   Key: 'test' -> Value: ';W2:S2A006^***All Holos to Rainbow^;m02^***All Maestros Seq 2'
+```
 #### **4.5.1 Stored Command Example**
 
 For this example, I'm going to assume that there is a Maestro connected to Serial 1 on WCB1 and that the Stealth is connected to Serial 2.  That Maestro has an ID of 1 and has a script with a sequence ID of 1 that triggers a wave function.  

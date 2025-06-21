@@ -53,6 +53,7 @@ void recallCommandSlot(const String &key, int sourceID);
 void loadStoredCommandsFromPreferences();
 void saveStoredCommandsToPreferences(const String &message);
 void listStoredCommands();
+void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();
 

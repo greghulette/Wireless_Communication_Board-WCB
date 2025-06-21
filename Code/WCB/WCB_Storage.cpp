@@ -342,6 +342,52 @@ int commaIndex = message.indexOf(','); // Find first `,`
     Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
 }
 
+void eraseStoredCommandByName(const String &name) {
+    if (name.length() == 0) {
+        Serial.println("Command name cannot be empty.");
+        return;
+    }
+
+    preferences.begin("stored_cmds", false);
+
+    // Step 1: Remove the key from NVS
+    bool removed = preferences.remove(name.c_str());
+
+    // Step 2: Retrieve and split key_list safely
+    String existingKeys = preferences.getString("key_list", "");
+    existingKeys.trim();
+
+    // Split into an array
+    std::vector<String> keys;
+    int start = 0;
+    while (start < existingKeys.length()) {
+        int comma = existingKeys.indexOf(',', start);
+        if (comma == -1) break;
+        String k = existingKeys.substring(start, comma);
+        if (k != name) {
+            keys.push_back(k);  // only keep keys not matching `name`
+        }
+        start = comma + 1;
+    }
+
+    // Rebuild the key_list
+    String updatedList = "";
+    for (const auto& k : keys) {
+        updatedList += k + ",";
+    }
+
+    preferences.putString("key_list", updatedList);
+    preferences.end();
+
+    if (removed) {
+        Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
+    } else {
+        Serial.printf("No stored value found for key: '%s', but removed from list if present.\n", name.c_str());
+    }
+}
+
+
+
 void listStoredCommands() {
     preferences.begin("stored_cmds", true); // Open in read mode
     String keyList = preferences.getString("key_list", ""); // Retrieve stored keys
