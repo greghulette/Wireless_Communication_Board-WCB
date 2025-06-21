@@ -1,10 +1,34 @@
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///*****                                                                                                        *****////
+///*****                                          Created by Greg Hulette.                                      *****////
+///*****                                                Version 5.0                                             *****////
+///*****                                                                                                        *****////
+///*****                                 So exactly what does this all do.....?                                 *****////
+///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
+///*****                       - Sends Serial commands to other locally connected devices                       *****////
+///*****                       - Sends Serial commands to other remotely connected devices                      *****////
+///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****////     
+///*****                       - Controls Maestro Servo Controller via Serial Commands                          *****////  
+///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****////
+///*****                       - Controls Maestro Servo Controller via Kyber                                    *****//// 
+///*****                       - Store commands and recall them for later processing                            *****////
+///*****                                                                                                        *****////
+///*****                            Full command syntax and description can be found at                         *****////
+///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB                   *****////
+///*****                                                                                                        *****////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// ============================= Librarires  =============================
+//You must install these into your Arduino IDE
+#include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
+#include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
+
+//  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
 #include <WiFi.h>
 #include <HardwareSerial.h>
-#include <SoftwareSerial.h>
-#include <Adafruit_NeoPixel.h>
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "wcb_pin_map.h"
@@ -14,6 +38,17 @@
 #include <freertos/queue.h>
 
 
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///*****                                                                                                        *****////
+///*****                                    DO NOT CHANGE ANYTHING IN THIS FILE                                 *****////
+///*****                             All variables should be changed via the command line                       *****////
+///*****                                                                                                        *****////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+// ============================= Global Variables =============================
 // Number of WCB boards in the system
 int WCB_Number = 1;                                                 // Default to WCB1.  Change to match your setup here or via command line
 int Default_WCB_Quantity = 1;                                       // Default setting.  Change to match your setup here or via command line
@@ -32,7 +67,6 @@ char commandDelimiter = '^';                                        // Default s
 char LocalFunctionIdentifier = '?';                                 // Default setting.  Change to match your setup here or via command line
 char CommandCharacter = ';';                                        // Default setting.  Change to match your setup here or via command line
 
-
 bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
 bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this board directly
@@ -44,26 +78,9 @@ bool lastReceivedViaESPNOW = false;
 // Debugging flag (default: off)
 bool debugEnabled = false;
 
-
-
-
-
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
-String SoftwareVersion = "5.0";
-
-// Uncomment only the board that you are loading this sketch onto.
-// #define WCB1
-// #define WCB2
-// #define WCB3
-// #define WCB4
-// #define WCB5
-// #define WCB6
-// #define WCB7
-// #define WCB8
-// #define WCB9
-
-
+String SoftwareVersion = "5.0_021440RJUN25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -123,8 +140,6 @@ const uint32_t off     = 0x000000;
 
 const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
 Adafruit_NeoPixel *statusLED;
-
-// Adafruit_NeoPixel statusLED(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
   if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24){
@@ -349,6 +364,8 @@ void printConfigInfo() {
   listStoredCommands(); // List stored commands
   Serial.println("--- End of Configuration Info ---\n");
 }
+
+
 //*******************************
 /// ESP-NOW Functions
 //*******************************
@@ -356,11 +373,10 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
+      Serial.println("insdie retrun");
         return;
     }
       // turnOnLEDESPNOW();
-
-    // lastReceivedViaESPNOW = false; // Reset after check
 
     // Prepare the struct
     espnow_struct_message msg;
@@ -395,7 +411,7 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     // Send ESP-NOW message
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
-        // Serial.println("ESP-NOW message sent successfully!");
+        Serial.println("ESP-NOW message sent successfully!");
     } else {
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
@@ -465,13 +481,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
     //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
 
-    // Serial.printf("Received Command: %s\n", received.structCommand);
+    Serial.printf("Received Command: %s\n", received.structCommand);
 
     // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    // Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
+    Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -854,8 +870,8 @@ void recallStoredCommand(const String &message, int sourceID) {
 
 void processMaestroCommand(const String &message){
   int message_maestroID = message.substring(1,2).toInt();
-    int message_maestroSeq = message.substring(2).toInt();
-    sendMaestroCommand(message_maestroID,message_maestroSeq);
+  int message_maestroSeq = message.substring(2).toInt();
+  sendMaestroCommand(message_maestroID,message_maestroSeq);
 }
 
 
@@ -1042,7 +1058,7 @@ void setup() {
   String hostname = getBoardHostname();
   Serial.printf("Booting up the %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version: %s\n", SoftwareVersion);
+  Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
