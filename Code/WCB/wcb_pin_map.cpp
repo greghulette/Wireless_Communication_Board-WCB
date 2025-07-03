@@ -95,22 +95,22 @@ extern void updatePinMap(){
     STATUS_LED_PIN = 19; //  // ESP32 on board NeoPixel Pin
     // Serial.println("Loaded HW Version 2.4 Pinout");
  }else if (wcb_hw_version == 30){
-  //////////////////////////////// 
-  // This pinout is for a Version 3.0 (DIY Version)
-  ////////////////////////////////
-  SERIAL1_TX_PIN  = 4;  //  // Serial 1 Tx Pin
-  SERIAL1_RX_PIN  = 5; //  // Serial 1 Rx Pin
-  SERIAL2_TX_PIN  = 6; //  // Serial 2 Tx Pin
-  SERIAL2_RX_PIN	= 7;  //  // Serial 2 Rx Pin
-  SERIAL3_TX_PIN  = 15; //  // Serial 3 Tx Pin
-  SERIAL3_RX_PIN  = 16;  //  // Serial 3 Rx Pin
-  SERIAL4_TX_PIN	= 17; //  // Serial 4 Tx Pin 
-  SERIAL4_RX_PIN  = 18; //  // Serial 4 Rx Pin
-  SERIAL5_TX_PIN	= 9; //  // Serial 5 Tx Pin
-  SERIAL5_RX_PIN	= 10; //  // Serial 5 Rx Pin
-  ONBOARD_LED     = 32; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
-  STATUS_LED_PIN  = 48; //  // ESP32 on board NeoPixel Pin
-  // Serial.println("Loaded HW Version 2.4 Pinout");
+    //////////////////////////////// 
+    // This pinout is for a Version 3.0 (DIY Version)
+    ////////////////////////////////
+    SERIAL1_TX_PIN  = 4;  //  // Serial 1 Tx Pin
+    SERIAL1_RX_PIN  = 5; //  // Serial 1 Rx Pin
+    SERIAL2_TX_PIN  = 6; //  // Serial 2 Tx Pin
+    SERIAL2_RX_PIN	= 7;  //  // Serial 2 Rx Pin
+    SERIAL3_TX_PIN  = 15; //  // Serial 3 Tx Pin
+    SERIAL3_RX_PIN  = 16;  //  // Serial 3 Rx Pin
+    SERIAL4_TX_PIN	= 17; //  // Serial 4 Tx Pin 
+    SERIAL4_RX_PIN  = 18; //  // Serial 4 Rx Pin
+    SERIAL5_TX_PIN	= 9; //  // Serial 5 Tx Pin
+    SERIAL5_RX_PIN	= 10; //  // Serial 5 Rx Pin
+    ONBOARD_LED     = 32; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
+    STATUS_LED_PIN  = 48; //  // ESP32 on board NeoPixel Pin
+    // Serial.println("Loaded HW Version 3.0 Pinout");
  }
 }
 
