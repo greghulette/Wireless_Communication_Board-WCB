@@ -47,6 +47,8 @@ void saveHWversion(int wcb_hw_version_f){
     Serial.println("Saved HW Ver: 2.3 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 24){
     Serial.println("Saved HW Ver: 2.4 to NVS.  Reboot to take effect!");
+  } else if (wcb_hw_version_f == 30){
+    Serial.println("Saved HW Ver: 3.0 to NVS.  Reboot to take effect!");
   } else {
     Serial.println("No valid HW version identified.");
   }
@@ -71,6 +73,8 @@ void printHWversion(){
     Serial.println("HW Version: 2.3");
   } else if (wcb_hw_version == 24){
     Serial.println("HW Version: 2.4");
+  } else if (wcb_hw_version == 30){
+    Serial.println("HW Version: 3.0");
   } else {
     Serial.println("SET YOUR HARDWARE VERSION BEFORE PROCEEDING!!");
   }
