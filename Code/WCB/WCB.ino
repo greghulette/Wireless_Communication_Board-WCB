@@ -62,7 +62,7 @@ char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting.
 
 // Delimiter character (default '^')
 char commandDelimiter = '^';                                        // Default setting.  Change to match your setup here or via command line
-
+String commentDelimiter = "***";                                  // Default setting.  Change to match your setup here or via command line
 // Characters for local functions and commands
 char LocalFunctionIdentifier = '?';                                 // Default setting.  Change to match your setup here or via command line
 char CommandCharacter = ';';                                        // Default setting.  Change to match your setup here or via command line
@@ -300,7 +300,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String singleCmd = data.substring(startIdx);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith("***")) {
+        if (!singleCmd.startsWith(commentDelimiter)) {
           enqueueCommand(singleCmd, sourceID);
         } else {
           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
