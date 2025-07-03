@@ -79,8 +79,8 @@ bool lastReceivedViaESPNOW = false;
 bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
-int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
+String SoftwareVersion = "5.0_030942RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
