@@ -311,7 +311,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String singleCmd = data.substring(startIdx, delimPos);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commandDelimiter)) {
+        if (!singleCmd.startsWith(commentDelimiter)) {
           enqueueCommand(singleCmd, sourceID);
         } else {
           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());

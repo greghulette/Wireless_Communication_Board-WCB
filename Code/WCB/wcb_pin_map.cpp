@@ -104,10 +104,10 @@ extern void updatePinMap(){
     SERIAL2_RX_PIN	= 7;  //  // Serial 2 Rx Pin
     SERIAL3_TX_PIN  = 15; //  // Serial 3 Tx Pin
     SERIAL3_RX_PIN  = 16;  //  // Serial 3 Rx Pin
-    SERIAL4_TX_PIN	= 17; //  // Serial 4 Tx Pin 
+    SERIAL4_TX_PIN  = 17; //  // Serial 4 Tx Pin
     SERIAL4_RX_PIN  = 18; //  // Serial 4 Rx Pin
-    SERIAL5_TX_PIN	= 9; //  // Serial 5 Tx Pin
-    SERIAL5_RX_PIN	= 10; //  // Serial 5 Rx Pin
+    SERIAL5_TX_PIN  = 9; //  // Serial 5 Tx Pin
+    SERIAL5_RX_PIN  = 10; //  // Serial 5 Rx Pin
     ONBOARD_LED     = 32; //  // Not Used in this board but there to match the Version 1.0 board's onboard Green LED
     STATUS_LED_PIN  = 48; //  // ESP32 on board NeoPixel Pin
     // Serial.println("Loaded HW Version 3.0 Pinout");
