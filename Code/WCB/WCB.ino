@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                                Version 5.0                                             *****////
+///*****                                          Version 5.0_081516RJUL25                                      *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -34,11 +34,6 @@
 #include "wcb_pin_map.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
-#include "esp_pm.h"
-#include "esp_sleep.h"
-#include "driver/rtc_io.h"
-
-
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -68,6 +63,7 @@ char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting.
 // Delimiter character (default '^')
 char commandDelimiter = '^';                                        // Default setting.  Change to match your setup here or via command line
 String commentDelimiter = "***";                                  // Default setting.  Change to match your setup here or via command line
+
 // Characters for local functions and commands
 char LocalFunctionIdentifier = '?';                                 // Default setting.  Change to match your setup here or via command line
 char CommandCharacter = ';';                                        // Default setting.  Change to match your setup here or via command line
@@ -144,7 +140,6 @@ const uint32_t white   = 0xFFFFFF;
 const uint32_t off     = 0x000000;
 
 const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
-// Adafruit_NeoPixel *statusLED;
 Adafruit_NeoPixel* statusLED = nullptr;
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
@@ -470,7 +465,6 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
-   
 
   if (len != sizeof(espnow_struct_message)) {
       // Serial.printf("Received unexpected size: %d (expected %d)\n", len, (int)sizeof(espnow_struct_message));
@@ -595,7 +589,6 @@ void forwardMaestroDataToRemoteKyber() {
 /// Processing Input Functions
 //*******************************
 void handleSingleCommand(String cmd, int sourceID) {
-    // cmd.toLowerCase(); // Convert entire command to lowercase
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
 
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
@@ -912,32 +905,32 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-    if (!serial.available()) return;  // Exit if no data available
+  if (!serial.available()) return;  // Exit if no data available
 
-    // static String serialBuffer = "";  // Buffer for incoming serial data
-    static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
-    String &serialBuffer = serialBuffers[sourceID];
-    while (serial.available()) {
-        char c = serial.read();
-        // Serial.printf("Serial%d read: '%c' (0x%02X)\n", sourceID, c, (uint8_t)c);
-        if (c == '\r' || c == '\n') {  // End of command
-            if (!serialBuffer.isEmpty()) {
-                serialBuffer.trim();  // Remove leading/trailing spaces
-                if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
+  // static String serialBuffer = "";  // Buffer for incoming serial data
+  static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
+  String &serialBuffer = serialBuffers[sourceID];
+  while (serial.available()) {
+    char c = serial.read();
+  // Serial.printf("Serial%d read: '%c' (0x%02X)\n", sourceID, c, (uint8_t)c);
+    if (c == '\r' || c == '\n') {  // End of command
+      if (!serialBuffer.isEmpty()) {
+          serialBuffer.trim();  // Remove leading/trailing spaces
+          if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
 
-                // Reset last received flag since we are reading from Serial
-                lastReceivedViaESPNOW = false;
+          // Reset last received flag since we are reading from Serial
+          lastReceivedViaESPNOW = false;
 
-                // Process the command
-                processSerialCommandHelper(serialBuffer, sourceID);
+          // Process the command
+          processSerialCommandHelper(serialBuffer, sourceID);
 
-                // Clear buffer for next command
-                serialBuffer = "";
-            }
-        } else {
-            serialBuffer += c;  // Append new characters to buffer
-        }
+            // Clear buffer for next command
+          serialBuffer = "";
+      }
+    } else {
+      serialBuffer += c;  // Append new characters to buffer
     }
+  }
 }
 
 // Helper function to process serial commands
@@ -1032,27 +1025,6 @@ void serialCommandTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
     }
 }
-#include "esp_pm.h"
-#include "esp_sleep.h"
-
-void disableLightSleep() {
-  // Lock CPU frequency and disable light sleep for ESP32-S3
-  esp_pm_config_esp32s3_t pm_config = {
-    .max_freq_mhz = 240,
-    .min_freq_mhz = 240,
-    .light_sleep_enable = false
-  };
-
-  esp_err_t result = esp_pm_configure(&pm_config);
-  if (result == ESP_OK) {
-    Serial.println("Power management configured: light sleep disabled.");
-  } else {
-    Serial.printf("Failed to configure PM: error %d\n", result);
-  }
-
-  // Extra safety: clear any existing wakeup sources
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-}
 
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
   int attempt = 0;
@@ -1091,10 +1063,6 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
     Serial.println("❌ Failed to initialize NeoPixel after retries.");
   } else {
     // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
-    // delay(1500);
-    // turnOnLEDforBoot();
-    // delay(250);
-    // turnOffLED();
   }
 }
 
@@ -1102,7 +1070,6 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
 
 void setup() {
 
-  // delay(1000);
   Serial.begin(115200);
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
@@ -1123,15 +1090,8 @@ void setup() {
     statusLED->show();
   } else if (wcb_hw_version == 30){
       initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
-      // pinMode(STATUS_LED_PIN, OUTPUT);        // Prepare pin
-      // digitalWrite(STATUS_LED_PIN, LOW);      // Ensure clean start
-      // delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
-      // statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-      // delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
-      // statusLED->begin();
-      // statusLED->show();
-     
   } 
+  
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
   // Create the command queue
