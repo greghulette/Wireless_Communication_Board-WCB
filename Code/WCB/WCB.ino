@@ -21,6 +21,7 @@
 // ============================= Librarires  =============================
 //You must install these into your Arduino IDE
 #include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
+// #define NEO_USE_BITBANG
 #include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
 
 //  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
@@ -34,6 +35,11 @@
 #include "wcb_pin_map.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
+#include "esp_pm.h"
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
+
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -80,7 +86,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.0_030942RJUL25";
+String SoftwareVersion = "5.0_081125RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -139,7 +145,8 @@ const uint32_t white   = 0xFFFFFF;
 const uint32_t off     = 0x000000;
 
 const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
-Adafruit_NeoPixel *statusLED;
+// Adafruit_NeoPixel *statusLED;
+Adafruit_NeoPixel* statusLED = nullptr;
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
   if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 30){
@@ -163,14 +170,14 @@ if (wcb_hw_version == 1){
    }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 30){
     colorWipeStatus("ES", green, 255);
   }
-}  // Turns om the onboard Green LED
+}  
 
 
 void   turnOnLEDforBoot(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
    } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 30){
-    colorWipeStatus("ES", red, 255); 
+    colorWipeStatus("ES", red, 255);
   } else {
     Serial.println("No LED yet defined");
   }
@@ -194,6 +201,7 @@ void turnOffLED(){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
    }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 30){
     colorWipeStatus("ES", blue, 10);
+    
   }
 }
 
@@ -589,6 +597,7 @@ void forwardMaestroDataToRemoteKyber() {
 //*******************************
 void handleSingleCommand(String cmd, int sourceID) {
     // cmd.toLowerCase(); // Convert entire command to lowercase
+    // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
 
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
     if (cmd.startsWith(String(LocalFunctionIdentifier))) {
@@ -609,6 +618,7 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
+  Serial.printf("processLocalCommand called with: [%s]\n", message.c_str());
     if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
@@ -905,11 +915,12 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 void processIncomingSerial(Stream &serial, int sourceID) {
     if (!serial.available()) return;  // Exit if no data available
 
-    static String serialBuffer = "";  // Buffer for incoming serial data
-
+    // static String serialBuffer = "";  // Buffer for incoming serial data
+    static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
+    String &serialBuffer = serialBuffers[sourceID];
     while (serial.available()) {
         char c = serial.read();
-
+        // Serial.printf("Serial%d read: '%c' (0x%02X)\n", sourceID, c, (uint8_t)c);
         if (c == '\r' || c == '\n') {  // End of command
             if (!serialBuffer.isEmpty()) {
                 serialBuffer.trim();  // Remove leading/trailing spaces
@@ -1002,6 +1013,7 @@ void KyberRemoteTask(void *pvParameters) {
 }
 
 void serialCommandTask(void *pvParameters) {
+  vTaskDelay(pdMS_TO_TICKS(500));  // at top of task
     while (true) {
         processIncomingSerial(Serial, 0);  // USB Serial
         processIncomingSerial(Serial3, 3);
@@ -1021,29 +1033,83 @@ void serialCommandTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
     }
 }
+#include "esp_pm.h"
+#include "esp_sleep.h"
+
+void disableLightSleep() {
+  // Lock CPU frequency and disable light sleep for ESP32-S3
+  esp_pm_config_esp32s3_t pm_config = {
+    .max_freq_mhz = 240,
+    .min_freq_mhz = 240,
+    .light_sleep_enable = false
+  };
+
+  esp_err_t result = esp_pm_configure(&pm_config);
+  if (result == ESP_OK) {
+    Serial.println("Power management configured: light sleep disabled.");
+  } else {
+    Serial.printf("Failed to configure PM: error %d\n", result);
+  }
+
+  // Extra safety: clear any existing wakeup sources
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+}
+
+void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
+  int attempt = 0;
+  bool initialized = false;
+
+  while (attempt < maxRetries && !initialized) {
+    if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
+
+    // Optional: prep the pin to reduce false starts
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+
+    // Try to init
+    statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+    delay(750);  // let internal structures stabilize
+    statusLED->begin();
+
+    // Try setting a test color
+    statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
+    statusLED->show();
+    delay(750);
+
+    // Check if the LED actually changed (simple test)
+    if (statusLED->getPixelColor(0) != 0) {
+      initialized = true;
+    } else {
+      delete statusLED;
+      statusLED = nullptr;
+      delay(delayBetweenMs);  // wait before next attempt
+    }
+
+    attempt++;
+  }
+
+  if (!initialized) {
+    Serial.println("❌ Failed to initialize NeoPixel after retries.");
+  } else {
+    Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
+    delay(1500);
+    // turnOnLEDforBoot();
+    delay(250);
+    turnOffLED();
+  }
+}
 
 // ============================= Setup & Loop =============================
 
 void setup() {
+
   delay(1000);
   Serial.begin(115200);
-
+  delay(1000);  // allow USB to stabilize
+  while (Serial.available()) Serial.read();  // 🔥 flush startup junk
   loadHWversion();
   loadKyberSettings();
   printResetReason();  // Show the exact cause of reset
-
-// Initialize the NeoPixel status LED
-  if (wcb_hw_version == 0){
-    Serial.println("No LED was setup.  Define HW version");
-  } else if (wcb_hw_version == 1){
-    pinMode(ONBOARD_LED, OUTPUT);
-  } else {
-    statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-     statusLED->begin();
-      statusLED->show();
-
-  }
-  turnOnLEDforBoot();
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
@@ -1164,6 +1230,29 @@ void setup() {
       xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Remote Task Created");
   }
+
+// Initialize the NeoPixel status LED
+  if (wcb_hw_version == 0){
+    Serial.println("No LED was setup.  Define HW version");
+  } else if (wcb_hw_version == 1){
+    pinMode(ONBOARD_LED, OUTPUT);
+  } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
+    statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+    statusLED->begin();
+    statusLED->show();
+  } else if (wcb_hw_version == 30){
+      pinMode(STATUS_LED_PIN, OUTPUT);        // Prepare pin
+      digitalWrite(STATUS_LED_PIN, LOW);      // Ensure clean start
+      delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+      statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+      delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+      statusLED->begin();
+      statusLED->show();
+     
+  } 
+  delay(1500);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+  turnOnLEDforBoot();
+  delay(150);     
   turnOffLED();
 
 }
