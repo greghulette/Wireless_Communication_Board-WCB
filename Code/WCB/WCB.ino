@@ -21,7 +21,6 @@
 // ============================= Librarires  =============================
 //You must install these into your Arduino IDE
 #include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
-// #define NEO_USE_BITBANG
 #include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
 
 //  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
@@ -86,7 +85,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.0_081125RJUL25";
+String SoftwareVersion = "5.0_081516RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -618,7 +617,7 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-  Serial.printf("processLocalCommand called with: [%s]\n", message.c_str());
+  // Serial.printf("processLocalCommand called with: [%s]\n", message.c_str());
     if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
@@ -1065,7 +1064,7 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
     // Optional: prep the pin to reduce false starts
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
-
+    delay(750);  // let internal structures stabilize
     // Try to init
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
     delay(750);  // let internal structures stabilize
@@ -1091,11 +1090,11 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
   if (!initialized) {
     Serial.println("❌ Failed to initialize NeoPixel after retries.");
   } else {
-    Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
-    delay(1500);
+    // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
+    // delay(1500);
     // turnOnLEDforBoot();
-    delay(250);
-    turnOffLED();
+    // delay(250);
+    // turnOffLED();
   }
 }
 
@@ -1103,7 +1102,7 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
 
 void setup() {
 
-  delay(1000);
+  // delay(1000);
   Serial.begin(115200);
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
@@ -1113,7 +1112,28 @@ void setup() {
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
-
+// Initialize the NeoPixel status LED
+  if (wcb_hw_version == 0){
+    Serial.println("No LED was setup.  Define HW version");
+  } else if (wcb_hw_version == 1){
+    pinMode(ONBOARD_LED, OUTPUT);
+  } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
+    statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+    statusLED->begin();
+    statusLED->show();
+  } else if (wcb_hw_version == 30){
+      initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
+      // pinMode(STATUS_LED_PIN, OUTPUT);        // Prepare pin
+      // digitalWrite(STATUS_LED_PIN, LOW);      // Ensure clean start
+      // delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+      // statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+      // delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+      // statusLED->begin();
+      // statusLED->show();
+     
+  } 
+  delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+  turnOnLEDforBoot();
   // Create the command queue
   commandQueue = xQueueCreate(20, sizeof(CommandQueueItem));
   if (!commandQueue) {
@@ -1231,30 +1251,10 @@ void setup() {
       Serial.println("Kyber_Remote Task Created");
   }
 
-// Initialize the NeoPixel status LED
-  if (wcb_hw_version == 0){
-    Serial.println("No LED was setup.  Define HW version");
-  } else if (wcb_hw_version == 1){
-    pinMode(ONBOARD_LED, OUTPUT);
-  } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
-    statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-    statusLED->begin();
-    statusLED->show();
-  } else if (wcb_hw_version == 30){
-      pinMode(STATUS_LED_PIN, OUTPUT);        // Prepare pin
-      digitalWrite(STATUS_LED_PIN, LOW);      // Ensure clean start
-      delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
-      statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-      delay(750);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
-      statusLED->begin();
-      statusLED->show();
-     
-  } 
-  delay(1500);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
-  turnOnLEDforBoot();
+
   delay(150);     
   turnOffLED();
-
+  // Serial.println("------------- Setup Complete-----------------");
 }
 
 void loop() {
