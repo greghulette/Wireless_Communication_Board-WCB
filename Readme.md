@@ -1,6 +1,6 @@
 <h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Wireless Communication Board (WCB)</h1>
 
-# Software 3.0 release changes the command structure.  Please read below to ensure proper operations.
+# Software 3.0 and newer release changes the command structure.  Please read below to ensure proper operations.  Current Software version is 5.0_091116RJUL25
 
 ## **1. Introduction**
 
