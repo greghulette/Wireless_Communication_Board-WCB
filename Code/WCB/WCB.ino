@@ -375,7 +375,7 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
-      Serial.println("insdie retrun");
+      // Serial.println("insdie retrun");
         return;
     }
       // turnOnLEDESPNOW();
@@ -1005,7 +1005,7 @@ void KyberRemoteTask(void *pvParameters) {
 }
 
 void serialCommandTask(void *pvParameters) {
-  vTaskDelay(pdMS_TO_TICKS(500));  // at top of task
+  vTaskDelay(pdMS_TO_TICKS(500));  // at top of task to enable proper startup timing
     while (true) {
         processIncomingSerial(Serial, 0);  // USB Serial
         processIncomingSerial(Serial3, 3);
@@ -1091,7 +1091,7 @@ void setup() {
   } else if (wcb_hw_version == 30){
       initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
   } 
-  
+
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
   // Create the command queue
@@ -1198,7 +1198,7 @@ void setup() {
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
 
-  // Create FreeRTOS Tasks
+  // Create FreeRTOS Tasks-
   xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
 
   // If bridging is enabled, create the bridging task
