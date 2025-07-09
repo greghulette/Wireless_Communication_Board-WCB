@@ -41,7 +41,8 @@ Features of the board:
 - 5 Serial ports that can be used to communicate with microcontrollers  
 - Up to 8 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
-- Can support bi-directional communications<br>
+- Can support bi-directional communications
+- Supports Maestros (up to 8 with Strings, or 2 with Kyber)<br>
 
 ***  PLEASE NOTE THE DIRECTION OF THE ESP32 WHEN PLUGGING IT INTO THE PCB ON VERSION 1.0. ***
 
@@ -63,6 +64,7 @@ CAD Image       |    Actual Image     |
 - Up to 8 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications
+- Supports Maestros (up to 8 with Strings, or 2 with Kyber)
 
 #### **1.3.3 HW Version 2.3/2.4**
 
@@ -80,6 +82,26 @@ CAD Image       |    Actual Image
 - Up to 8 WCB's can be used at once in a fully meshed network
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications
+- Supports Maestros (up to 8 with Strings, or 2 with Kyber)
+
+
+#### **1.3.4 HW Version 3.1**
+
+CAD Image       |    Actual Image     
+:---------------:|:---------------------:
+<img src="./Images/CAD3.1.png" style="width: 300px;"><br>|<img src="./Images/Image_of_3.1.jpg" style="width: 300px;">
+ 
+
+
+
+ Features of the board:
+- ESP32S3-DevKit-1C
+- 5V Terminal Block
+- 5 Serial ports that can be used to communicate with microcontrollers  
+- Up to 8 WCB's can be used at once in a fully meshed network
+- Communication can be individual (Unicast), or be broadcasted to all devices at once.
+- Can support bi-directional communications
+- Supports Maestros (up to 8 with Strings, or 2 with Kyber)
 
 HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  All WCBs must be running the same version of Software though to ensure they are interoperable.
 
@@ -135,6 +157,7 @@ I have broken the command structure down into 2 categories.  One of them is to c
 | `?DON`             | Enable debugging mode                         |
 | `?DOFF`            | Disable debugging mode.                    |
 | `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
+| `***`              | Only used in conjuction with the stored command above.  This allows you to write a comment for each stored command inline for the key.  Example given below. |
 | `?CCLEAR`          | Clear all stored commands | 
 | `?CEkey`           | Clear a specific stored command with the key name given | 
 | `?WCBx`            | Set the WCB number (1-8).|
@@ -242,7 +265,7 @@ Before compiling the firmware, install the following libraries in the Arduino ID
 2. Install libraries mentioned above.
 3. Clone the WCB firmware repository.
 4. Open the `WCB.ino` file found in the Code folder.
-5. Compile and upload the firmware to your ESP32 board, selecting "ESP Dev Module" as your board type.
+5. Compile and upload the firmware to your ESP32 board, selecting "ESP Dev Module" as your board type for versions 2.1-2.4.  Select "ESP32S3 Dev Module" for version 3.1.
 6. Open the serial monitor to verify successful setup. You will have to hit the reset button on the WCB to show that it booted up after a reload.
 
 ### **3.2 Setting Up the WCB System**
@@ -258,7 +281,7 @@ Each WCB must be configured with the correct hardware version before use.
 Use the following command:
 
 ```
-?HWx  (Replace x with the hardware version number: `1` for Version 1.0, `21` for Version 2.1, `23` for Version 2.3, `24` for Version 2.4)
+?HWx  (Replace x with the hardware version number: `1` for Version 1.0, `21` for Version 2.1, `23` for Version 2.3, `24` for Version 2.4, '31' for version 3.1)
 ```
 
 Examples:
@@ -350,7 +373,7 @@ The valid characters that can be used are 0-9, and A-F.  Do not use FF though be
 |              | `?EPASSsecure123` | ESP-NOW password   |
 |              | `?M222`           | MAC Octet 2 = 0x22 |
 |              | `?M333`           | MAC Octet 3 = 0x33 |
-| WCB3         | `?HW24            | Version    2.4     |
+| WCB3         | `?HW24`            | Version    2.4     |
 |              | `?WCB3`           | Unit 3             |
 |              | `?WCBQ3`          | 3 WCBs total       |
 |              | `?EPASSsecure123` | ESP-NOW password   |
@@ -373,7 +396,7 @@ Example:
 ```
 ?HW1^?WCB1^?WCBQ3^?EPASSsecure123^?M222^?M333^?REBOOT
 ```
-
+By doing it this way, it makes it easy to configure all the WCBs at once by copying this string and pasting it into a new WCB, only changing the ?WCBx for the WCB number.
 
 ## **4. Features Overview/Details**
 
@@ -465,6 +488,8 @@ Now that the key/command is saved into the WCB, you would call that with the:
  ```
    Key: 'test' -> Value: ';W2:S2A006^***All Holos to Rainbow^;m02^***All Maestros Seq 2'
 ```
+
+When you run this command with the `;cWaveAndSound`, it will ignore the comments and only process the valid commands.
 #### **4.5.1 Stored Command Example**
 
 For this example, I'm going to assume that there is a Maestro connected to Serial 1 on WCB1 and that the Stealth is connected to Serial 2.  That Maestro has an ID of 1 and has a script with a sequence ID of 1 that triggers a wave function.  
@@ -546,7 +571,7 @@ This would be a perfect opportunity  to use the stored commands.  You can specif
 ## **5.0 Power**
  The WCB accepts only 5V power input.  The WCB can be powered by 2 different ways.  The screw terminal block, or the 5V pins on the serial port.  I do not recommend powering the board with both at the same time. <br>
  
- Note:  The 5V pins on the serial header are not connected to the USB 5V output.  The 5V pins are only connected to the 5V terminal block.  What this means for you is that if you power another device with the 5V pin in the serial header, you can not power that external board via the USB power.  You must power the WCB via the 5V terminal block to power an external board.  It is ok to have both the USB and 5V terminal supplying power to the board at the same time.  There is on board protection and the board will prefer the 5V source over the USB power. <br><br>
+ Note:  The 5V pins on the serial header are not connected to the USB 5V output on versions 2.x.  The 5V pins are only connected to the 5V terminal block.  What this means for you is that if you power another device with the 5V pin in the serial header, you can not power that external board via the USB power.  You must power the WCB via the 5V terminal block to power an external board.  It is ok to have both the USB and 5V terminal supplying power to the board at the same time.  There is on board protection and the board will prefer the 5V source over the USB power. <br><br>
 
 V1.0      |    V2.x+     
 :---------------:|:---------------------:
@@ -560,7 +585,8 @@ Here are the dimensions for the boards.  With these dimensions, you can plan you
 
 V1.0      |    V2.1+    
 :---------------:|:---------------------:
-<img src="./Images/DimensionsV1.0.png" style="width: 400px;"><br>|<img src="./Images/DimensionsV2.1.png" style="width:400px;">
+|<img src="./Images/DimensionsV1.0.png" style="width: 400px;"><br>|<img src="./Images/DimensionsV2.1.png" style="width:400px;">|
+|<img src="./Images/DimensionsV3.1.png">
  
 
 <br><br>
