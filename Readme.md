@@ -88,9 +88,9 @@ CAD Image       |    Actual Image
 
 #### **1.3.4 HW Version 3.1**
 
-CAD Image       |    Actual Image     
-:---------------:|:---------------------:
-<img src="./Images/CAD3.1.png" style="width: 300px;"><br>|<img src="./Images/Image_of_3.1.jpg" style="width: 300px;">
+CAD Image       |    Actual Image     |         Bare                |
+:---------------:|:---------------------:|:---------------------:
+<img src="./Images/CAD3.1.png" style="width: 300px;"><br>|<img src="./Images/Image_of_3.1.jpg" style="width: 300px;">|<img src="./Images/CAD3.1_Bare.png" style="width:300px;">|
  
 
 
@@ -103,6 +103,8 @@ CAD Image       |    Actual Image
 - Communication can be individual (Unicast), or be broadcasted to all devices at once.
 - Can support bi-directional communications
 - Supports Maestros (up to 8 with Strings, or 2 with Kyber)
+##### **Build Instructions** ####
+  You can find the build instructions for the version 3.1 boards [here](./version3.1_build.md)
 
 HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  All WCBs must be running the same version of Software though to ensure they are interoperable.
 
