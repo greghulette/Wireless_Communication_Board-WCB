@@ -2,7 +2,7 @@
 
 ## 1.0 Bill of Material ##
 ### 1.1 - PCB ###
-There are two ways to get the PCB, download the code and have a PCB manufacturer, like JLCPCB,PCBWay,OshPark....., or buy them from me with the following link [Order Form](blank).  
+There are two ways to get the PCB, download the code and have a PCB manufacturer, like JLCPCB,PCBWay,OshPark....., or buy them from me with the following link [Order Form](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024).  
 
 #### 1.1.1 Steps to order from PCB Manufacturer ####
 
