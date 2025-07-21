@@ -24,7 +24,7 @@ There are two ways to get the PCB, download the code and have a PCB manufacturer
 #### 1.1.2 Steps to order from me ####
 1. If you are an Astromech user, please head to the forum post about Wireless Communication Boards and place an order there
 
-### 1.3 ESP32-S3-DEVKITC-1-N8R2 ###
+### 1.2 ESP32-S3-DEVKITC-1-N8R2 ###
 
 You need one of these per WCB
 - (3) ESP32 Boards (Header Pins Unsoldered) ($17.88)- [Amazon - 3 Boards](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DFTKFWT2/)
@@ -60,3 +60,51 @@ You need (2) 1x22 female pin headers per WCB
 - Female Headers (optional but recommended) - [Female PCB Header 1x22](https://www.amazon.com/dp/B0CTKF8V53/)  
 
 This allows you to plug in the ESP32 into the board and replace it easily.  It does add extra height to the WCB, so if that's a concern, you do not need this and can solder the ESP32 directly to the PCB.  
+
+## 2.0 Build
+
+1. Layout the components
+    <img src="./Images/3.1_Instructions/components.jpg" >
+2. Start by inserting the female headers into the long rows.
+    <img src="./Images/3.1_Instructions/Solder14.jpg">
+3. Turn over the PCB and solder the top pin on both of the headers.  
+    <img src="./Images/3.1_Instructions/Solder2.jpg">
+4. Straighten out the headers by looking at them from the side angle.  Then touch the soldering iron to the one pad and straighten them both to be vertical.  You can also trying installing the ESP32 into the headers to ensure they are going to be soldered correctly.  
+    <img src="./Images/3.1_Instructions/Solder3.jpg">
+5. Once they are straight, continue to solder the rest of the pads
+    <img src="./Images/3.1_Instructions/Solder4.jpg">
+6. Place the 4 pin headers in the serial ports
+    <img src="./Images/3.1_Instructions/Solder5.jpg">
+7. Tape them down to hold them in place.  
+    <img src="./Images/3.1_Instructions/SolerTape.jpg">
+8. Turn over and solder 1 pin on each of the headers.
+    <img src="./Images/3.1_Instructions/Solder6.jpg">
+9. Straighten each of the headers.
+    <img src="./Images/3.1_Instructions/Solder7.jpg">
+10. Once straight, solder the rest of the pads.
+    <img src="./Images/3.1_Instructions/Solder8.jpg">
+11. Insert the power terminal block
+    <img src="./Images/3.1_Instructions/Solder9.jpg">
+12. Turn over and solder the 2 pins.
+    <img src="./Images/3.1_Instructions/Solder10.jpg">
+13. Finished Soldered PCB
+    <img src="./Images/3.1_Instructions/Solder13.jpg">
+
+14. Plug in the ESP32-S3-Devkit with the orientation shown.  The two USB plugs should go over the two boxes on the PCB.
+    <img src="./Images/3.1_Instructions/Solder12.jpg">
+
+
+<br>
+<b>You have now succesfully created a WCB Version 3.1</b>
+
+To load the sketch, plug the USB micro cable into the port of the left and follow the instruction on the main page.
+    <img src="./Images/3.1_Instructions/Plug_Front.jpg">
+
+
+
+
+
+
+
+
+
