@@ -64,7 +64,7 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
 ## 2.0 Build
 
 1. Layout the components
-    <img src="./Images/3.1_Instructions/components.jpg" >
+    <img src="./Images/3.1_Instructions/components.jpg " style="width: 300px;">
 2. Start by inserting the female headers into the long rows.
     <img src="./Images/3.1_Instructions/Solder14.jpg">
 3. Turn over the PCB and solder the top pin on both of the headers.  
