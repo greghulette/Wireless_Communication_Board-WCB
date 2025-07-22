@@ -112,8 +112,8 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
 <br>
 <b>You have now succesfully created a WCB Version 3.1</b>
 
-To load the sketch, plug the USB micro cable into the port of the left and follow the instruction on the main page.
-    <img src="./Images/3.1_Instructions/Plug_Front.jpg">
+To load the sketch, plug the USB micro cable into the port of the left and follow the instruction on the main page.<br>
+    <img src="./Images/3.1_Instructions/Plug_Front.jpg" style="width: 500px;">
 
 
 
