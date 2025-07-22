@@ -67,10 +67,10 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
     <img src="./Images/3.1_Instructions/components.jpg " style="width: 500px;">
     <br>
 2. Start by inserting the female headers into the long rows.
-    <img src="./Images/3.1_Instructions/Solder14.jpg"style="width: 500px;">
+    <img src="./Images/3.1_Instructions/Solder14.jpg" style="width: 500px;">
     <br>
 3. Turn over the PCB and solder the top pin on both of the headers.  
-    <img src="./Images/3.1_Instructions/Solder2.jpg"style="width: 500px;">
+    <img src="./Images/3.1_Instructions/Solder2.jpg" style="width: 500px;">
     <br>
 4. Straighten out the headers by looking at them from the side angle.  Then touch the soldering iron to the one pad and straighten them both to be vertical.  You can also trying installing the ESP32 into the headers to ensure they are going to be soldered correctly.  
     <img src="./Images/3.1_Instructions/Solder3.jpg">
