@@ -76,28 +76,37 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
     <img src="./Images/3.1_Instructions/Solder2.jpg" style="width: 500px;">
     <br>
 4. Straighten out the headers by looking at them from the side angle.  Then touch the soldering iron to the one pad and straighten them both to be vertical.  You can also trying installing the ESP32 into the headers to ensure they are going to be soldered correctly.  
-    <img src="./Images/3.1_Instructions/Solder3.jpg">
+<br>
+    <img src="./Images/3.1_Instructions/Solder3.jpg" style="width: 500px;">
+        <br>
 5. Once they are straight, continue to solder the rest of the pads
-    <img src="./Images/3.1_Instructions/Solder4.jpg">
+    <br>
+    <img src="./Images/3.1_Instructions/Solder4.jpg" style="width: 500px;">
+    <br>
 6. Place the 4 pin headers in the serial ports
-    <img src="./Images/3.1_Instructions/Solder5.jpg">
+    <br>
+    <img src="./Images/3.1_Instructions/Solder5.jpg" style="width: 500px;">
+    <br>
 7. Tape them down to hold them in place.  
-    <img src="./Images/3.1_Instructions/SolerTape.jpg">
+    <br>
+    <img src="./Images/3.1_Instructions/SolerTape.jpg" style="width: 500px;">
+    <br>
 8. Turn over and solder 1 pin on each of the headers.
-    <img src="./Images/3.1_Instructions/Solder6.jpg">
-9. Straighten each of the headers.
-    <img src="./Images/3.1_Instructions/Solder7.jpg">
-10. Once straight, solder the rest of the pads.
-    <img src="./Images/3.1_Instructions/Solder8.jpg">
-11. Insert the power terminal block
-    <img src="./Images/3.1_Instructions/Solder9.jpg">
-12. Turn over and solder the 2 pins.
-    <img src="./Images/3.1_Instructions/Solder10.jpg">
-13. Finished Soldered PCB
-    <img src="./Images/3.1_Instructions/Solder13.jpg">
+<br>
+    <img src="./Images/3.1_Instructions/Solder6.jpg" style="width: 500px;"><br>
+9. Straighten each of the headers.<br>
+    <img src="./Images/3.1_Instructions/Solder7.jpg" style="width: 500px;"><br>
+10. Once straight, solder the rest of the pads.<br>
+    <img src="./Images/3.1_Instructions/Solder8.jpg" style="width: 500px;"><br>
+11. Insert the power terminal block<br>
+    <img src="./Images/3.1_Instructions/Solder9.jpg" style="width: 500px;"><br>
+12. Turn over and solder the 2 pins.<br>
+    <img src="./Images/3.1_Instructions/Solder10.jpg" style="width: 500px;"><br>
+13. Finished Soldered PCB<br>
+    <img src="./Images/3.1_Instructions/Solder13.jpg" style="width: 500px;"><br>
 
 14. Plug in the ESP32-S3-Devkit with the orientation shown.  The two USB plugs should go over the two boxes on the PCB.
-    <img src="./Images/3.1_Instructions/Solder12.jpg">
+    <img src="./Images/3.1_Instructions/Solder12.jpg" style="width: 500px;">
 
 
 <br>
