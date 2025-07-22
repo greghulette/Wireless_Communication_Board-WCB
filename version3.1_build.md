@@ -64,6 +64,7 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
 ## 2.0 Build
 
 1. Layout the components
+    <br>
     <img src="./Images/3.1_Instructions/components.jpg " style="width: 500px;">
     <br>
 2. Start by inserting the female headers into the long rows.
