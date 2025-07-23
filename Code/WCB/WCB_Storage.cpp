@@ -1,7 +1,6 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-// #include "wcb_pin_map.h"
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
@@ -305,7 +304,13 @@ void recallCommandSlot(const String &key, int sourceID) {
     Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
 
     // Enqueue for execution
-    parseCommandsAndEnqueue(recalledCommand, sourceID);
+    // parseCommandsAndEnqueue(recalledCommand, sourceID);
+    if (isTimerCommand(recalledCommand)) {
+  parseCommandGroups(recalledCommand);
+} else {
+  parseCommandsAndEnqueue(recalledCommand, sourceID);
+}
+
 }
 
 // Save stored commands to preferences

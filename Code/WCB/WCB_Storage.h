@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include "command_timer_queue.h"
 
 // =============== Global Variables ===============
 extern Preferences preferences;
@@ -50,6 +51,7 @@ void loadBaudRatesFromPreferences();
 void printBaudRates();
 void recallBaudRatefromSerial(int ser);
 void setBaudRateForSerial(int ser);
+bool isTimerCommand(const String &input);
 
 void recallCommandSlot(const String &key, int sourceID);
 void loadStoredCommandsFromPreferences();

@@ -981,42 +981,6 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 }
 
-// void processSerialCommandHelper(String &data, int sourceID) {
-//     if (debugEnabled) {
-//         Serial.printf("Processing command from Serial%d: %s\n", sourceID, data.c_str());
-//     }
-
-//     if (data.length() == 0) return;
-
-//     // Direct enqueue if command starts with "?C"
-//     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
-//         data.startsWith(String(LocalFunctionIdentifier) + "c")) {
-//         enqueueCommand(data, sourceID);
-//         return;
-//     }
-
-//     // Parse command using the stored delimiter
-//     int startIdx = 0;
-//     while (true) {
-//         int delimPos = data.indexOf(commandDelimiter, startIdx);
-//         if (delimPos == -1) {
-//             String singleCmd = data.substring(startIdx);
-//             singleCmd.trim();
-//             if (!singleCmd.isEmpty()) {
-//                 enqueueCommand(singleCmd, sourceID);
-//             }
-//             break;
-//         } else {
-//             String singleCmd = data.substring(startIdx, delimPos);
-//             singleCmd.trim();
-//             if (!singleCmd.isEmpty()) {
-//                 enqueueCommand(singleCmd, sourceID);
-//             }
-//             startIdx = delimPos + 1;
-//         }
-//     }
-// }
-
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);

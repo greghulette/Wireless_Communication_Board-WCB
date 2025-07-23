@@ -1,4 +1,4 @@
-#include "WCB_Storage.h" // Or wherever your commandDelimiter and parseCommandsAndEnqueue are
+#include "WCB_Storage.h" 
 #include "command_timer_queue.h"
 
 std::vector<CommandGroup> commandGroups;
@@ -6,6 +6,10 @@ unsigned long lastGroupTime = 0;
 size_t currentGroupIndex = 0;
 bool commandTimerModeEnabled = false;
 bool waitingForNextGroup = false;
+
+bool isTimerCommand(const String &input);
+void stopTimerSequence();
+bool checkForTimerStopRequest(const String &input);
 
 std::vector<String> splitString(const String &str, char delimiter) {
   std::vector<String> result;
@@ -18,6 +22,11 @@ std::vector<String> splitString(const String &str, char delimiter) {
   }
   result.push_back(str.substring(start));
   return result;
+}
+
+bool isTimerCommand(const String &input) {
+  return input.indexOf(String(CommandCharacter) + "T") != -1 ||
+         input.indexOf(String(CommandCharacter) + "t") != -1;
 }
 
 void stopTimerSequence() {

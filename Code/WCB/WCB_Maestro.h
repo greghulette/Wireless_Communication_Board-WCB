@@ -2,7 +2,6 @@
 #define WCB_MAESTRO_H
 #include "WCB_Storage.h"
 #include <Arduino.h>
-// #include <Preferences.h>
 
 extern bool maestroEnabled;
 extern bool lastReceivedViaESPNOW;
