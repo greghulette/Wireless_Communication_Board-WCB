@@ -1,4 +1,4 @@
-#include "WCB_Storage.h" 
+#include "WCB_Storage.h" // Or wherever your commandDelimiter and parseCommandsAndEnqueue are
 #include "command_timer_queue.h"
 
 std::vector<CommandGroup> commandGroups;
@@ -10,6 +10,8 @@ bool waitingForNextGroup = false;
 bool isTimerCommand(const String &input);
 void stopTimerSequence();
 bool checkForTimerStopRequest(const String &input);
+
+
 
 std::vector<String> splitString(const String &str, char delimiter) {
   std::vector<String> result;
@@ -72,7 +74,17 @@ void parseCommandGroups(const String &input) {
         delayStr = token.substring(2);
         remaining = "";
       }
-      currentGroup.delayAfterPrevious = delayStr.toInt();
+      unsigned long parsedDelay = delayStr.toInt();
+      if (debugEnabled && parsedDelay > 30000) {
+        Serial.printf("⚠️ Warning: Delay exceeds 30 seconds. Input: %s ms\n", delayStr.c_str());
+      }
+      if (parsedDelay > 30000) {
+        parsedDelay = 30000;
+        if (debugEnabled) {
+          Serial.printf("⏱️ Delay capped to 30000 ms (30 seconds): originally requested %s ms\n", delayStr.c_str());
+        }
+      }
+      currentGroup.delayAfterPrevious = parsedDelay;
       if (!remaining.isEmpty()) {
         currentGroup.commands.push_back(remaining);
       }

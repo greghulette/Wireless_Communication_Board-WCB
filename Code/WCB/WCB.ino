@@ -82,7 +82,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.1_231550RJUL25";
+String SoftwareVersion = "5.1_240956RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -336,7 +336,7 @@ void printConfigInfo() {
   Serial.println("\n\n----------- Configuration Info ------------\n");
   Serial.printf("Hostname: %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version %s\n", SoftwareVersion);
+  Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   for (int i = 0; i < 5; i++) {
