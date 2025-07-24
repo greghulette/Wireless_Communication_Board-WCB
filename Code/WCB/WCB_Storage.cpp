@@ -282,7 +282,7 @@ void setCommandDelimiter(char c) {
 void loadStoredCommandsFromPreferences() {
     preferences.begin("stored_commands", true);
     for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        char storedCommandBuffer[400] = {0};
+        char storedCommandBuffer[1800] = {0};
         String key = "CMD" + String(i + 1);
         preferences.getString(key.c_str(), storedCommandBuffer, sizeof(storedCommandBuffer));
         storedCommands[i] = String(storedCommandBuffer);
