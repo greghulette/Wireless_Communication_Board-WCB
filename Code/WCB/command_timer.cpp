@@ -75,13 +75,14 @@ void parseCommandGroups(const String &input) {
         remaining = "";
       }
       unsigned long parsedDelay = delayStr.toInt();
-      if (debugEnabled && parsedDelay > 30000) {
-        Serial.printf("⚠️ Warning: Delay exceeds 30 seconds. Input: %s ms\n", delayStr.c_str());
+      unsigned long parsedDelayLimit = 1800000; // 30 Minutes (30 * 60 * 1000) (Minutes * Seconds in a Minute * milliseconds in a second)
+      if (debugEnabled && parsedDelay > parsedDelayLimit) {
+        Serial.printf("⚠️ Warning: Delay exceeds configured limits of %i. Input: %s ms\n", parsedDelayLimit, delayStr.c_str());
       }
-      if (parsedDelay > 30000) {
-        parsedDelay = 30000;
+      if (parsedDelay > parsedDelayLimit) {
+        parsedDelay = parsedDelayLimit;
         if (debugEnabled) {
-          Serial.printf("⏱️ Delay capped to 30000 ms (30 seconds): originally requested %s ms\n", delayStr.c_str());
+          Serial.printf("⏱️ Delay capped to %i ms : originally requested %s ms\n", parsedDelayLimit, delayStr.c_str());
         }
       }
       currentGroup.delayAfterPrevious = parsedDelay;
