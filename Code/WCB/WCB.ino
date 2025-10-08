@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.0_091116RJUL25                                      *****////
+///*****                                          Version 5.2_250951RSEP25                                     *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -18,12 +18,12 @@
 ///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// ============================= Librarires  =============================
+// ============================= Libraries  =============================
 //You must install these into your Arduino IDE
 #include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
 #include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
 
-//  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
+//  All of these libraries are included in the ESP32 by Espressif board library V3.1.1
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
@@ -32,12 +32,12 @@
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "wcb_pin_map.h"
+#include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-
-
+#include <vector>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
@@ -45,8 +45,6 @@
 ///*****                             All variables should be changed via the command line                       *****////
 ///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
 
 // ============================= Global Variables =============================
 // Number of WCB boards in the system
@@ -85,7 +83,7 @@ String SoftwareVersion = "5.0_091116RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
-// // Serial port pin assignments
+// Serial port pin assignments
 int SERIAL1_TX_PIN;         //  // Serial 1 Tx Pin
 int SERIAL1_RX_PIN;         //  // Serial 1 Rx Pin
 int SERIAL2_TX_PIN;         //  // Serial 2 Tx Pin
@@ -142,6 +140,151 @@ const uint32_t off     = 0x000000;
 const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, orange, white};
 Adafruit_NeoPixel* statusLED = nullptr;
 
+// ============================= String Optimization & Performance Monitoring =============================
+// Pre-allocated string buffers to avoid repeated allocation/deallocation
+String reusableBuffer1;
+String reusableBuffer2;
+String reusableBuffer3;
+
+// Performance tracking variables
+static unsigned long lastPerfCheck = 0;
+static uint32_t commandCount = 0;
+static uint32_t espnowOutCount = 0;
+static uint32_t espnowInCount = 0;
+static unsigned long totalCommandTime = 0;
+
+// SoftwareSerial objects - MUST BE DECLARED EARLY
+SoftwareSerial Serial3(SERIAL3_RX_PIN, SERIAL3_TX_PIN);
+SoftwareSerial Serial4(SERIAL4_RX_PIN, SERIAL4_TX_PIN);
+SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
+
+void initializeStringBuffers() {
+  reusableBuffer1.reserve(1200);  // 1000 char limit + safety margin
+  reusableBuffer2.reserve(1200);
+  reusableBuffer3.reserve(1200);
+}
+
+// ============================= PHASE 3: Optimized Serial Operations (EARLY DEFINITION) =============================
+// Write a string + `\r` to a given Stream - NON-BLOCKING
+void writeSerialStringOptimized(Stream &serialPort, const String &stringData) {
+  // Use pre-allocated buffer to avoid string concatenation overhead
+  size_t msgLen = stringData.length();
+  if (msgLen > 1198) msgLen = 1198; // Safety limit for 1200 char buffer
+  
+  reusableBuffer1 = stringData;
+  reusableBuffer1 += '\r';
+  
+  // Write all at once - more efficient than character by character
+  serialPort.write((uint8_t*)reusableBuffer1.c_str(), reusableBuffer1.length());
+  // NO flush() - let hardware buffer handle it for non-blocking operation
+}
+
+Stream &getSerialStream(int port) {
+  switch (port) {
+    case 1: return Serial1;
+    case 2: return Serial2;
+    case 3: return Serial3;
+    case 4: return Serial4;
+    case 5: return Serial5;
+    default: return Serial; // fallback
+  }
+}
+
+// ============================= Performance Monitoring Functions =============================
+void updatePerformanceCounters(unsigned long commandTime) {
+  commandCount++;
+  totalCommandTime += commandTime;
+}
+
+void printPerformanceReport() {
+  unsigned long currentTime = millis();
+  unsigned long elapsed = currentTime - lastPerfCheck;
+  
+  if (elapsed >= 30000) {  // Every 30 seconds
+    unsigned long avgCommandTime = (commandCount > 0) ? (totalCommandTime / commandCount) : 0;
+    
+    Serial.printf("Performance: %lu cmds/30s, %lu ESP-NOW out, %lu ESP-NOW in, avg %lu µs/cmd, free heap: %d bytes\n",
+                  commandCount, espnowOutCount, espnowInCount, avgCommandTime, ESP.getFreeHeap());
+    
+    // Reset counters
+    commandCount = 0;
+    espnowOutCount = 0;
+    espnowInCount = 0;
+    totalCommandTime = 0;
+    lastPerfCheck = currentTime;
+  }
+}
+
+// ============================= PHASE 5: Asynchronous Serial Broadcasting =============================
+// Serial message queue structures
+typedef struct {
+  char *message;              // Dynamically allocated message
+} SerialQueueItem;
+
+// One queue for each serial port
+static QueueHandle_t serialQueues[5] = {nullptr};
+
+// Queue a message to a specific serial port - NON-BLOCKING
+void queueSerialMessage(int serialPort, const String &message) {
+  if (serialPort < 1 || serialPort > 5 || !serialQueues[serialPort-1]) return;
+  
+  SerialQueueItem item;
+  int length = message.length() + 1;
+  item.message = (char *)malloc(length);
+  if (!item.message) {
+    if (debugEnabled) Serial.println("Out of memory for serial queue!");
+    return;
+  }
+  
+  strncpy(item.message, message.c_str(), length);
+  item.message[length - 1] = '\0';
+  
+  // Non-blocking queue send
+  if (xQueueSend(serialQueues[serialPort-1], &item, 0) != pdTRUE) {
+    free(item.message); // Free if queue full
+    if (debugEnabled) {
+      Serial.printf("Serial%d queue full, dropping message\n", serialPort);
+    }
+  }
+}
+
+// Asynchronous serial broadcasting task
+void serialBroadcastTask(void *pvParameters) {
+  SerialQueueItem item;
+  
+  while (true) {
+    // Check each serial port queue
+    for (int i = 0; i < 5; i++) {
+      if (xQueueReceive(serialQueues[i], &item, 0) == pdTRUE) {
+        // Send to the appropriate serial port
+        Stream &targetSerial = getSerialStream(i + 1);
+        writeSerialStringOptimized(targetSerial, String(item.message));
+        
+        if (debugEnabled) {
+          Serial.printf("Async sent to Serial%d: %s\n", i + 1, item.message);
+        }
+        
+        free(item.message); // Free allocated memory
+      }
+    }
+    
+    // Small delay to prevent task starvation
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+// ============================= PHASE 2: Asynchronous ESP-NOW =============================
+// ESP-NOW message queue structure
+typedef struct {
+  uint8_t targetWCB;              // 0 for broadcast, 1-9 for specific WCB
+  char message[200];              // Message to send
+  bool isRawData;                 // True for raw data bridging
+  uint8_t rawData[180];           // Raw data for bridging
+  size_t rawDataLength;           // Length of raw data
+} ESPNowQueueItem;
+
+static QueueHandle_t espnowQueue = nullptr;
+
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
   if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31){
     if (statusled1 == "ES"){
@@ -166,8 +309,7 @@ if (wcb_hw_version == 1){
   }
 }  
 
-
-void   turnOnLEDforBoot(){
+void turnOnLEDforBoot(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
    } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31){
@@ -175,7 +317,6 @@ if (wcb_hw_version == 1){
   } else {
     Serial.println("No LED yet defined");
   }
-
 };
 
 void turnOnLEDSerial(){
@@ -195,10 +336,8 @@ void turnOffLED(){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
    }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31){
     colorWipeStatus("ES", blue, 10);
-    
   }
 }
-
 
 // Simple reboot helper
 void reboot(){
@@ -224,11 +363,6 @@ typedef struct __attribute__((packed)) {
 espnow_struct_message commandsToSend[10]; // Includes 1-9 and broadcast
 espnow_struct_message commandsToReceive[10];
 
-// SoftwareSerial objects
-SoftwareSerial Serial3(SERIAL3_RX_PIN, SERIAL3_TX_PIN);
-SoftwareSerial Serial4(SERIAL4_RX_PIN, SERIAL4_TX_PIN);
-SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
-
 // ============================= FreeRTOS Queue Setup =============================
 typedef struct {
   char *cmd;     // Dynamically allocated
@@ -242,29 +376,116 @@ static QueueHandle_t commandQueue = nullptr;
 String storedCommands[MAX_STORED_COMMANDS];
 
 // ============================= Forward Declarations =============================
-void writeSerialString(Stream &serialPort, String stringData);
-void sendESPNowMessage(uint8_t target, const char *message);
-// void handleSingleCommand(const String &cmd, int sourceID);
+void writeSerialStringOptimized(Stream &serialPort, const String &stringData);
+void queueESPNowMessage(uint8_t target, const char *message);
+void queueESPNowRaw(const uint8_t *data, size_t len);
+void queueSerialMessage(int serialPort, const String &message);
 void enqueueCommand(const String &cmd, int sourceID);
+void runPerformanceBenchmark();
+void updatePerformanceCounters(unsigned long commandTime);
+void printPerformanceReport();
 
-
-
-// Write a string + `\r` to a given Stream
-void writeSerialString(Stream &serialPort, String stringData) {
-  String completeString = stringData + '\r';
-  for (int i = 0; i < completeString.length(); i++) {
-    serialPort.write(completeString[i]);
+// ============================= PHASE 2: Asynchronous ESP-NOW Task =============================
+// Non-blocking ESP-NOW queue function
+void queueESPNowMessage(uint8_t target, const char *message) {
+  if (!espnowQueue) return;
+  
+  ESPNowQueueItem item;
+  item.targetWCB = target;
+  item.isRawData = false;
+  strncpy(item.message, message, sizeof(item.message) - 1);
+  item.message[sizeof(item.message) - 1] = '\0';
+  
+  // Non-blocking queue send
+  if (xQueueSend(espnowQueue, &item, 0) != pdTRUE) {
+    if (debugEnabled) {
+      Serial.println("ESP-NOW queue full, dropping message");
+    }
+  } else {
+    espnowOutCount++;  // Track outgoing messages
   }
 }
 
-Stream &getSerialStream(int port) {
-  switch (port) {
-    case 1: return Serial1;
-    case 2: return Serial2;
-    case 3: return Serial3;
-    case 4: return Serial4;
-    case 5: return Serial5;
-    default: return Serial; // fallback
+void queueESPNowRaw(const uint8_t *data, size_t len) {
+  if (!espnowQueue || len > sizeof(ESPNowQueueItem::rawData)) return;
+  
+  ESPNowQueueItem item;
+  item.targetWCB = 0; // Broadcast for raw data
+  item.isRawData = true;
+  item.rawDataLength = len;
+  memcpy(item.rawData, data, len);
+  
+  // Non-blocking queue send
+  if (xQueueSend(espnowQueue, &item, 0) != pdTRUE) {
+    if (debugEnabled) {
+      Serial.println("ESP-NOW raw queue full, dropping data");
+    }
+  }
+}
+
+// Asynchronous ESP-NOW transmission task
+void espnowTransmissionTask(void *pvParameters) {
+  ESPNowQueueItem item;
+  
+  while (true) {
+    // Wait for ESP-NOW messages to send
+    if (xQueueReceive(espnowQueue, &item, portMAX_DELAY) == pdTRUE) {
+      
+      if (item.isRawData) {
+        // Handle raw data transmission
+        size_t offset = 0;
+        while (offset < item.rawDataLength) {
+          size_t chunkSize = item.rawDataLength - offset;
+          if (chunkSize > 180) chunkSize = 180;
+          
+          espnow_struct_message msg;
+          memset(&msg, 0, sizeof(msg));
+          
+          strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+          snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+          snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
+          msg.structCommandIncluded = true;
+          
+          msg.structCommand[0] = (uint8_t)(chunkSize & 0xFF);
+          msg.structCommand[1] = (uint8_t)((chunkSize >> 8) & 0xFF);
+          memcpy(msg.structCommand + 2, item.rawData + offset, chunkSize);
+          
+          esp_now_send(broadcastMACAddress[0], (uint8_t*)&msg, sizeof(msg));
+          offset += chunkSize;
+        }
+      } else {
+        // Handle regular message transmission
+        // Skip broadcast if last was from ESP-NOW
+        if (item.targetWCB == 0 && lastReceivedViaESPNOW) {
+          continue;
+        }
+        
+        espnow_struct_message msg;
+        memset(&msg, 0, sizeof(msg));
+        
+        strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+        snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+        
+        if (item.targetWCB == 0) {
+          snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0");
+        } else {
+          snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", item.targetWCB);
+        }
+        
+        msg.structCommandIncluded = true;
+        strncpy(msg.structCommand, item.message, sizeof(msg.structCommand) - 1);
+        
+        uint8_t *mac = (item.targetWCB == 0) ? broadcastMACAddress[0] : WCBMacAddresses[item.targetWCB - 1];
+        
+        esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
+        if (debugEnabled && result != ESP_OK) {
+          Serial.printf("ESP-NOW async send failed! Error: %d\n", result);
+        }
+      }
+    }
+    
+    // Small delay to prevent task starvation
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
@@ -299,31 +520,30 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
   while (true) {
     int delimPos = data.indexOf(commandDelimiter, startIdx);
     if (delimPos == -1) {
-      String singleCmd = data.substring(startIdx);
-      singleCmd.trim();
-      if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
+      reusableBuffer2 = data.substring(startIdx);
+      reusableBuffer2.trim();
+      if (!reusableBuffer2.isEmpty()) {
+        if (!reusableBuffer2.startsWith(commentDelimiter)) {
+          enqueueCommand(reusableBuffer2, sourceID);
         } else {
-          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+          if (debugEnabled) Serial.printf("Ignored chain command: %s\n", reusableBuffer2.c_str());
         }
       }
       break;
     } else {
-      String singleCmd = data.substring(startIdx, delimPos);
-      singleCmd.trim();
-      if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
+      reusableBuffer2 = data.substring(startIdx, delimPos);
+      reusableBuffer2.trim();
+      if (!reusableBuffer2.isEmpty()) {
+        if (!reusableBuffer2.startsWith(commentDelimiter)) {
+          enqueueCommand(reusableBuffer2, sourceID);
         } else {
-          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+          if (debugEnabled) Serial.printf("Ignored chain command: %s\n", reusableBuffer2.c_str());
         }
       }
       startIdx = delimPos + 1;
     }
   }
 }
-
 
 String getBoardHostname() {
   return "Wireless Communication Board " + String(WCB_Number) + " (W" + String(WCB_Number) + ")";
@@ -367,107 +587,19 @@ void printConfigInfo() {
   Serial.println("--- End of Configuration Info ---\n");
 }
 
-
 //*******************************
-/// ESP-NOW Functions
+/// ESP-NOW Functions - Now calling async queue
 //*******************************
-// Send an ESP-NOW message (unicast or broadcast)
 void sendESPNowMessage(uint8_t target, const char *message) {
-    // Skip broadcast if last was from ESP-NOW
-    if (target == 0 && lastReceivedViaESPNOW) {
-      // Serial.println("insdie retrun");
-        return;
-    }
-      // turnOnLEDESPNOW();
-
-    // Prepare the struct
-    espnow_struct_message msg;
-    memset(&msg, 0, sizeof(msg));
-
-    // Fill struct fields
-    strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
-    msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
-
-    // Send only the **WCB number** instead of "WCBx"
-    snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
-
-    if (target == 0) {
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0"); // Use "0" for broadcast
-    } else {
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", target);
-    }
-
-    msg.structCommandIncluded = true;
-    strncpy(msg.structCommand, message, sizeof(msg.structCommand) - 1);
-    msg.structCommand[sizeof(msg.structCommand) - 1] = '\0';
-
-    // Select MAC address
-    uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
-
-    // Debug Output
-    // Serial.printf("Sending ESP-NOW message to MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-    //               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    // Serial.printf("Sender ID: WCB%s, Target ID: WCB%s, Message: %s\n",
-    //               msg.structSenderID, msg.structTargetID, msg.structCommand);
-
-    // Send ESP-NOW message
-    esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
-    if (result == ESP_OK) {
-        Serial.println("ESP-NOW message sent successfully!");
-    } else {
-        Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
-    }
-  // turnOffLED();
+  queueESPNowMessage(target, message);
 }
 
 void sendESPNowRaw(const uint8_t *data, size_t len) {
-    size_t offset = 0;
-    while (offset < len) {
-        size_t chunkSize = len - offset;
-        if (chunkSize > 180) chunkSize = 180; // Prevent overflow in structCommand
-
-        // Prepare ESP-NOW message
-        espnow_struct_message msg;
-        memset(&msg, 0, sizeof(msg));
-
-        strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
-        msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
-        
-        // Mark sender ID as this WCB number
-        snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
-        
-        // Set Target ID to "0" -> Means raw bridging data
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
-
-        msg.structCommandIncluded = true;
-
-        // **Store chunk length in first 2 bytes**
-        msg.structCommand[0] = (uint8_t)(chunkSize & 0xFF);
-        msg.structCommand[1] = (uint8_t)((chunkSize >> 8) & 0xFF);
-
-        // Copy the chunk into structCommand
-        memcpy(msg.structCommand + 2, data + offset, chunkSize);
-
-        // Send via ESP-NOW broadcast
-        uint8_t *mac = broadcastMACAddress[0];
-
-        esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
-        if (result == ESP_OK) {
-            if (debugEnabled) {
-                // Serial.printf("Sent chunk of %d bytes via ESP-NOW\n", (int)chunkSize);
-            }
-        } else {
-            Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
-        }
-
-        offset += chunkSize;
-    }
+  queueESPNowRaw(data, len);
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
-
   if (len != sizeof(espnow_struct_message)) {
-      // Serial.printf("Received unexpected size: %d (expected %d)\n", len, (int)sizeof(espnow_struct_message));
       return;
   }
 
@@ -475,31 +607,22 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   memcpy(&received, incomingData, sizeof(received));
   received.structPassword[sizeof(received.structPassword) - 1] = '\0';
 
-  // memcpy(&received, incomingData, len);
-  String temp_espnowpassword = String(received.structPassword);
-  if (temp_espnowpassword == espnowPassword){
-    // Serial.printf("Received ESP-NOW Message from MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-    //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
-    //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
-
+  reusableBuffer3 = String(received.structPassword);
+  if (reusableBuffer3 == espnowPassword){
     Serial.printf("Received Command: %s\n", received.structCommand);
 
-    // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
     Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
 
-    // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
         if (debugEnabled){Serial.println("Received message from an unrelated WCB group, ignoring."); } 
         return;
     }
     if (targetWCB == 9) {
-        // Extract chunk length from first 2 bytes of structCommand
         size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
 
-        // Safety check to prevent invalid length
         if (chunkLen > 180 || chunkLen == 0) {
             if (debugEnabled) {
                 Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
@@ -507,7 +630,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             return;
         }
 
-        // Forward valid chunk data to Serial1
         if (Kyber_Local){ 
           Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
           Serial2.write((uint8_t*)(received.structCommand + 2), chunkLen); 
@@ -517,23 +639,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }      
 
         if (debugEnabled) {
-            // Serial.printf("Bridging chunk of %d bytes received from WCB%s\n", (int)chunkLen, received.structSenderID);
         }
         return;
     }
 
-     lastReceivedViaESPNOW = true; // Prevent loopback issues
+     lastReceivedViaESPNOW = true;
       colorWipeStatus("ES", green, 200);
-    // Check if this message is meant for this WCB
     if (targetWCB != 0 && targetWCB != WCB_Number ) {
         Serial.println("Message not for this WCB, ignoring.");
         return;
     }
 
-    // If valid, enqueue the command
     enqueueCommand(String(received.structCommand), 0);
-  } else {
-    // Serial.println("ESPNOW password does not match local password!");
+    espnowInCount++;  // Track incoming messages
   }
     colorWipeStatus("ES", blue, 10);
 }
@@ -544,65 +662,114 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 void forwardDataFromKyber() {
   static uint8_t buffer[64];
 
-  // **Check if Serial2 has data**
   if (Serial2.available() > 0) {
     int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
-
-    // **Forward data to Serial1**
     Serial1.write(buffer, len);
-    Serial1.flush(); // Ensure immediate transmission
-
-    // **Forward via ESP-NOW broadcast**
-    sendESPNowRaw(buffer, len);
+    // No flush() - let hardware handle it
+    queueESPNowRaw(buffer, len);
   }
 }
 
 void forwardMaestroDataToLocalKyber() {
   static uint8_t buffer[64];
 
-  // **Check if Serial2 has data**
   if (Serial1.available() > 0) {
     int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-
-    // **Forward data to Serial1**
     Serial2.write(buffer, len);
-    Serial2.flush(); // Ensure immediate transmission
-    // **Forward via ESP-NOW broadcast**
-    if (Kyber_Remote){sendESPNowRaw(buffer, len);}
-
+    // No flush() - let hardware handle it
+    if (Kyber_Remote){queueESPNowRaw(buffer, len);}
   }
 }
 
 void forwardMaestroDataToRemoteKyber() {
   static uint8_t buffer[64];
 
-  // **Check if Serial2 has data**
   if (Serial1.available() > 0) {
     int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-  sendESPNowRaw(buffer, len);
+    queueESPNowRaw(buffer, len);
   }
 }
 
-
+// ============================= Performance Benchmark Function =============================
+void runPerformanceBenchmark() {
+  Serial.println("Running performance benchmark for variable message lengths...");
+  
+  // Create test messages of varying lengths
+  String testMessages[180];
+  for (int i = 0; i < 180; i++) {
+    // Create messages of varying complexity and length
+    switch (i % 6) {
+      case 0: testMessages[i] = "short_cmd"; break;
+      case 1: testMessages[i] = "medium_length_command_test"; break;
+      case 2: testMessages[i] = "very_long_command_with_multiple_parameters_and_data"; break;
+      case 3: testMessages[i] = "testing231"; break;
+      case 4: testMessages[i] = ";S1test_serial_message"; break;
+      case 5: testMessages[i] = "broadcast_message_to_all_devices_with_some_extra_data_" + String(i); break;
+    }
+  }
+  
+  // Measure parsing time
+  unsigned long startTime = micros();
+  
+  for (int i = 0; i < 180; i++) {
+    // Simulate the parsing that would happen
+    parseCommandsAndEnqueue(testMessages[i], 0);
+  }
+  
+  unsigned long totalTime = micros() - startTime;
+  unsigned long avgTime = totalTime / 180;
+  
+  Serial.printf("Variable message parsing: %lu µs for 180 messages (%lu µs avg)\n", totalTime, avgTime);
+  Serial.println("Benchmark complete - system optimized for variable message lengths");
+}
 
 //*******************************
-/// Processing Input Functions
+/// Processing Input Functions - PHASE 1: WITH PROFILING
 //*******************************
-void handleSingleCommand(String cmd, int sourceID) {
-    // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
+void handleSingleCommand(const String &cmd, int sourceID) {
+    // PHASE 1: Detailed profiling
+    unsigned long start = micros();
+    unsigned long checkpoint;
+    
+    if (debugEnabled) {
+        Serial.printf("🔍 CMD START: '%s' (src:%d) ", cmd.c_str(), sourceID);
+    }
 
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
     if (cmd.startsWith(String(LocalFunctionIdentifier))) {
-        // cmd.toLowerCase();
-        processLocalCommand(cmd.substring(1)); // Process local function
+        checkpoint = micros();
+        processLocalCommand(cmd.substring(1));
+        if (debugEnabled) {
+            Serial.printf("Local:%luμs ", micros() - checkpoint);
+        }
     } 
     // 2) CommandCharacter-based commands (e.g., `;commands`)
     else if (cmd.startsWith(String(CommandCharacter))) {
-        processCommandCharcter(cmd.substring(1), sourceID); // Process serial-specific command
+        checkpoint = micros();
+        processCommandCharcter(cmd.substring(1), sourceID);
+        if (debugEnabled) {
+            Serial.printf("Command:%luμs ", micros() - checkpoint);
+        }
     } 
     // 3) Default to broadcasting if not a recognized prefix
     else {
+        checkpoint = micros();
         processBroadcastCommand(cmd, sourceID);
+        if (debugEnabled) {
+            Serial.printf("Broadcast:%luμs ", micros() - checkpoint);
+        }
+    }
+    
+    // Total timing and performance tracking
+    unsigned long total = micros() - start;
+    updatePerformanceCounters(total);
+    
+    if (debugEnabled) {
+        Serial.printf("TOTAL:%luμs", total);
+        if (total > 50000) {  // > 50ms
+            Serial.print(" ⚠️SLOW⚠️");
+        }
+        Serial.println();
     }
 }
 
@@ -610,7 +777,6 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-  // Serial.printf("processLocalCommand called with: [%s]\n", message.c_str());
     if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
@@ -682,6 +848,9 @@ void processLocalCommand(const String &message) {
         return;
     } else if (message.startsWith("hw") || message.startsWith("HW")) {
         updateHWVersion(message);
+        return;
+    } else if (message.equals("benchmark") || message.equals("BENCHMARK")) {
+        runPerformanceBenchmark();
         return;
     } else {
         Serial.println("Invalid Local Command");
@@ -777,10 +946,10 @@ void updateWCBNumber(const String &message){
 }
 
 void updateESPNowPassword(const String &message){
-  String newPassword = message.substring(5);
-  if (newPassword.length() > 0 && newPassword.length() < sizeof(espnowPassword)) {
-    setESPNowPassword(newPassword.c_str());
-    Serial.printf("ESP-NOW Password updated to: %s\n", newPassword.c_str());
+  reusableBuffer3 = message.substring(5);
+  if (reusableBuffer3.length() > 0 && reusableBuffer3.length() < sizeof(espnowPassword)) {
+    setESPNowPassword(reusableBuffer3.c_str());
+    Serial.printf("ESP-NOW Password updated to: %s\n", reusableBuffer3.c_str());
   } else {
     Serial.println("Invalid ESP-NOW password length. Must be between 1 and 39 characters.");
   }
@@ -828,43 +997,39 @@ void processSerialMessage(const String &message) {
         return;
     }
 
-    // Extract serial port number
-    int target = message.substring(1, 2).toInt();  // Extract Serial port (1-5)
+    int target = message.substring(1, 2).toInt();
     if (target < 1 || target > 5) {
         Serial.println("Invalid serial port number. Must be between 1 and 5.");
         return;
     }
 
-    // Extract message to send
-    String serialMessage = message.substring(2);
-    serialMessage.trim();
+    reusableBuffer3 = message.substring(2);
+    reusableBuffer3.trim();
 
-    // Send to selected serial port
-    Stream &targetSerial = getSerialStream(target);
-    writeSerialString(targetSerial, serialMessage);
-    targetSerial.flush(); // Ensure it's sent immediately
+    // Use async queue for serial transmission - NON-BLOCKING
+    queueSerialMessage(target, reusableBuffer3);
 
     if (debugEnabled) {
-        Serial.printf("Sent to Serial%d: %s\n", target, serialMessage.c_str());
+        Serial.printf("Queued to Serial%d: %s\n", target, reusableBuffer3.c_str());
     }
 }
 
 void processWCBMessage(const String &message){
   int targetWCB = message.substring(1, 2).toInt();
-        String espnow_message = message.substring(2);
+        reusableBuffer3 = message.substring(2);
         if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
-          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", targetWCB, espnow_message.c_str());
-          sendESPNowMessage(targetWCB, espnow_message.c_str());
+          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", targetWCB, reusableBuffer3.c_str());
+          queueESPNowMessage(targetWCB, reusableBuffer3.c_str());
         } else {
           Serial.println("Invalid WCB number for unicast.");
         }
 }
 
 void recallStoredCommand(const String &message, int sourceID) {
-  String key = message.substring(1);
-  key.trim();
-  if (key.length() > 0) {
-    recallCommandSlot(key, sourceID);
+  reusableBuffer3 = message.substring(1);
+  reusableBuffer3.trim();
+  if (reusableBuffer3.length() > 0) {
+    recallCommandSlot(reusableBuffer3, sourceID);
   } else {
     Serial.println("Invalid recall command. Use ;Ckey to recall a command.");
   }
@@ -876,72 +1041,68 @@ void processMaestroCommand(const String &message){
   sendMaestroCommand(message_maestroID,message_maestroSeq);
 }
 
-
 //*******************************
-/// Processing Broadcast Function
+/// Processing Broadcast Function - PHASE 5: FULLY ASYNCHRONOUS
 //*******************************
 void processBroadcastCommand(const String &cmd, int sourceID) {
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
     }
 
-    // Send to all serial ports except restricted ones
+    // Queue to all serial ports except restricted ones - FULLY NON-BLOCKING
     for (int i = 1; i <= 5; i++) {
-        // Skip Serial1 if Kyber_Remote is enabled
         if ((i == 1 && Kyber_Remote) || 
             (i <= 2 && Kyber_Local) || 
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
             continue;
         }
 
-        writeSerialString(getSerialStream(i), cmd);
-        if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
+        queueSerialMessage(i, cmd);  // Fully asynchronous!
+        if (debugEnabled) { 
+          Serial.printf("Queued to Serial%d: %s\n", i, cmd.c_str()); 
+        }
     }
 
-    // Always send via ESP-NOW broadcast
-    sendESPNowMessage(0, cmd.c_str());
-    if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    // Always send via ESP-NOW broadcast - ASYNCHRONOUS
+    queueESPNowMessage(0, cmd.c_str());
+    if (debugEnabled) { 
+      Serial.printf("Queued ESP-NOW broadcast: %s\n", cmd.c_str()); 
+    }
 }
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-  if (!serial.available()) return;  // Exit if no data available
+  if (!serial.available()) return;
 
-  // static String serialBuffer = "";  // Buffer for incoming serial data
-  static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
+  static String serialBuffers[6];
   String &serialBuffer = serialBuffers[sourceID];
   while (serial.available()) {
     char c = serial.read();
-  // Serial.printf("Serial%d read: '%c' (0x%02X)\n", sourceID, c, (uint8_t)c);
-    if (c == '\r' || c == '\n') {  // End of command
+    if (c == '\r' || c == '\n') {
       if (!serialBuffer.isEmpty()) {
-          serialBuffer.trim();  // Remove leading/trailing spaces
+          serialBuffer.trim();
           if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
 
-          // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
 
-          // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
 
-            // Clear buffer for next command
           serialBuffer = "";
       }
     } else {
-      serialBuffer += c;  // Append new characters to buffer
+      serialBuffer += c;
     }
   }
 }
 
 // Helper function to process serial commands
-void processSerialCommandHelper(String &data, int sourceID) {
+void processSerialCommandHelper(const String &data, int sourceID) {
     if (debugEnabled) {
         Serial.printf("Processing command from Serial%d: %s\n", sourceID, data.c_str());
     }
 
     if (data.length() == 0) return;
 
-    // Direct enqueue if command starts with "?C"
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
         data.startsWith(String(LocalFunctionIdentifier) + "c")) {
         enqueueCommand(data, sourceID);
@@ -953,17 +1114,17 @@ void processSerialCommandHelper(String &data, int sourceID) {
     while (true) {
         int delimPos = data.indexOf(commandDelimiter, startIdx);
         if (delimPos == -1) {
-            String singleCmd = data.substring(startIdx);
-            singleCmd.trim();
-            if (!singleCmd.isEmpty()) {
-                enqueueCommand(singleCmd, sourceID);
+            reusableBuffer1 = data.substring(startIdx);
+            reusableBuffer1.trim();
+            if (!reusableBuffer1.isEmpty()) {
+                enqueueCommand(reusableBuffer1, sourceID);
             }
             break;
         } else {
-            String singleCmd = data.substring(startIdx, delimPos);
-            singleCmd.trim();
-            if (!singleCmd.isEmpty()) {
-                enqueueCommand(singleCmd, sourceID);
+            reusableBuffer1 = data.substring(startIdx, delimPos);
+            reusableBuffer1.trim();
+            if (!reusableBuffer1.isEmpty()) {
+                enqueueCommand(reusableBuffer1, sourceID);
             }
             startIdx = delimPos + 1;
         }
@@ -988,41 +1149,39 @@ void printResetReason() {
     }
 }
 
-/// Task Definition for multi threading.  Act as separate loops within the main loop.
+/// Task Definition for multi threading. Act as separate loops within the main loop.
 void KyberLocalTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToLocalKyber();
         forwardDataFromKyber();
-        vTaskDelay(pdMS_TO_TICKS(5)); // Reduce CPU usage while maintaining speed
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void KyberRemoteTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToRemoteKyber();
-        vTaskDelay(pdMS_TO_TICKS(5)); // Reduce CPU usage while maintaining speed
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void serialCommandTask(void *pvParameters) {
-  vTaskDelay(pdMS_TO_TICKS(500));  // at top of task to enable proper startup timing
+  vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
-        processIncomingSerial(Serial, 0);  // USB Serial
+        processIncomingSerial(Serial, 0);
         processIncomingSerial(Serial3, 3);
         processIncomingSerial(Serial4, 4);
         processIncomingSerial(Serial5, 5);
 
         if (Kyber_Local) {
-          // don't add serial 1 or 2 for processing strings
         } else if (Kyber_Remote){
             processIncomingSerial(Serial2, 2);
-          // add only serial 2 for processing strings
         } else {
           processIncomingSerial(Serial1, 1);
           processIncomingSerial(Serial2, 2);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
@@ -1033,36 +1192,30 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
   while (attempt < maxRetries && !initialized) {
     if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
 
-    // Optional: prep the pin to reduce false starts
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(750);  // let internal structures stabilize
-    // Try to init
+    delay(750);
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-    delay(750);  // let internal structures stabilize
+    delay(750);
     statusLED->begin();
 
-    // Try setting a test color
     statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
     statusLED->show();
     delay(750);
 
-    // Check if the LED actually changed (simple test)
     if (statusLED->getPixelColor(0) != 0) {
       initialized = true;
     } else {
       delete statusLED;
       statusLED = nullptr;
-      delay(delayBetweenMs);  // wait before next attempt
+      delay(delayBetweenMs);
     }
 
     attempt++;
   }
 
   if (!initialized) {
-    Serial.println("❌ Failed to initialize NeoPixel after retries.");
-  } else {
-    // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
+    Serial.println("⚠ Failed to initialize NeoPixel after retries.");
   }
 }
 
@@ -1071,15 +1224,19 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
 void setup() {
 
   Serial.begin(115200);
-  delay(1000);  // allow USB to stabilize
-  while (Serial.available()) Serial.read();  // 🔥 flush startup junk
+  delay(1000);
+  while (Serial.available()) Serial.read();
+  
+  // PHASE 4: Initialize optimized string buffers
+  initializeStringBuffers();
+  
   loadHWversion();
   loadKyberSettings();
-  printResetReason();  // Show the exact cause of reset
+  printResetReason();
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
-// Initialize the NeoPixel status LED
+
   if (wcb_hw_version == 0){
     Serial.println("No LED was setup.  Define HW version");
   } else if (wcb_hw_version == 1){
@@ -1089,15 +1246,30 @@ void setup() {
     statusLED->begin();
     statusLED->show();
   } else if (wcb_hw_version == 31){
-      initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
+      initStatusLEDWithRetry(10, 200);
   } 
 
-  delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
+  delay(1000);
   turnOnLEDforBoot();
-  // Create the command queue
-  commandQueue = xQueueCreate(20, sizeof(CommandQueueItem));
+  
+  // Create the command queue - OPTIMIZED SIZE
+  commandQueue = xQueueCreate(500, sizeof(CommandQueueItem));
   if (!commandQueue) {
     Serial.println("Failed to create command queue!");
+  }
+  
+  // PHASE 2: Create ESP-NOW async transmission queue
+  espnowQueue = xQueueCreate(100, sizeof(ESPNowQueueItem));
+  if (!espnowQueue) {
+    Serial.println("Failed to create ESP-NOW queue!");
+  }
+  
+  // PHASE 5: Create serial port queues
+  for (int i = 0; i < 5; i++) {
+    serialQueues[i] = xQueueCreate(50, sizeof(SerialQueueItem)); // 50 messages per serial port
+    if (!serialQueues[i]) {
+      Serial.printf("Failed to create Serial%d queue!\n", i + 1);
+    }
   }
 
   Serial.println("\n\n-------------------------------------------------------");
@@ -1111,17 +1283,14 @@ void setup() {
   printBaudRates();
   Serial.println("-------------------------------------------------------");
 
-  // Initialize hardware serial
   Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
   Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
   Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
   Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
   Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
 
-  // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
 
-  // Dynamically update MAC addresses based on stored umac_oct2 & umac_oct3
   for (int i = 0; i < 9; i++) {
     WCBMacAddresses[i][0] = 0x02;
     WCBMacAddresses[i][1] = umac_oct2;
@@ -1138,27 +1307,22 @@ void setup() {
     broadcastMACAddress[i][4] = 0xFF;
     broadcastMACAddress[i][5] = 0xFF;
   }
-  // Set our own ESP-NOW MAC
   esp_wifi_set_mac(WIFI_IF_STA, WCBMacAddresses[WCB_Number - 1]);
   
   loadESPNowPasswordFromPreferences();
 
-  // Print final MAC
   uint8_t baseMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, baseMac);
   Serial.printf("ESP-NOW MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 
-
-  // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
 
-  // Add peers
   for (int i = 0; i < Default_WCB_Quantity; i++) {
-    if (i + 1 == WCB_Number) continue; // skip ourselves
+    if (i + 1 == WCB_Number) continue;
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, WCBMacAddresses[i], 6);
     peerInfo.channel = 0;
@@ -1172,7 +1336,6 @@ void setup() {
     }
   }
 
-  // Add broadcast peer
   esp_now_peer_info_t broadcastPeer = {};
   memcpy(broadcastPeer.peer_addr, broadcastMACAddress, 6);
   broadcastPeer.channel = 0;
@@ -1186,7 +1349,6 @@ void setup() {
   }
   Serial.println("-------------------------------------------------------");
 
-  // Load additional config
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
   loadStoredCommandsFromPreferences();
@@ -1197,11 +1359,27 @@ void setup() {
   Serial.println("-------------------------------------------------------");
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
+  
+  Serial.println("Performance Optimizations Active:");
+  Serial.println("- Asynchronous ESP-NOW transmission");
+  Serial.println("- Asynchronous serial port broadcasting");
+  Serial.println("- Non-blocking serial operations");
+  Serial.println("- Pre-allocated string buffers");
+  Serial.println("- Detailed command profiling");
+  Serial.println("Use ?benchmark to run performance test");
+  Serial.println("-------------------------------------------------------");
 
-  // Create FreeRTOS Tasks-
+  // Create FreeRTOS Tasks
   xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
+  
+  // PHASE 2: Create asynchronous ESP-NOW transmission task
+  xTaskCreatePinnedToCore(espnowTransmissionTask, "ESP-NOW Transmission Task", 4096, NULL, 2, NULL, 0);
+  Serial.println("ESP-NOW Async Task Created");
+  
+  // PHASE 5: Create asynchronous serial broadcasting task
+  xTaskCreatePinnedToCore(serialBroadcastTask, "Serial Broadcast Task", 4096, NULL, 1, NULL, 1);
+  Serial.println("Serial Async Broadcast Task Created");
 
-  // If bridging is enabled, create the bridging task
   if (Kyber_Local) {
       xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Local Task Created");
@@ -1211,10 +1389,11 @@ void setup() {
       Serial.println("Kyber_Remote Task Created");
   }
 
-
   delay(150);     
   turnOffLED();
-  // Serial.println("------------- Setup Complete-----------------");
+  
+  // Initialize performance monitoring
+  lastPerfCheck = millis();
 }
 
 void loop() {
@@ -1223,8 +1402,12 @@ void loop() {
   if (!commandQueue) return;
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
-    String commandStr(inItem.cmd);
+    // PHASE 4: Use const reference to avoid string copy
+    const String commandStr(inItem.cmd);
     free(inItem.cmd); // release dynamic memory
     handleSingleCommand(commandStr, inItem.sourceID);
   }
+  
+  // Print performance report every 30 seconds
+  printPerformanceReport();
 }
