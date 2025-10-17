@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.0_091116RJUL25                                      *****////
+///*****                                          Version 5.2_170941ROCT2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -12,6 +12,7 @@
 ///*****                       - Serial Commands sent ends with a Carriage Return "\r"                          *****////
 ///*****                       - Controls Maestro Servo Controller via Kyber                                    *****//// 
 ///*****                       - Store commands and recall them for later processing                            *****////
+///*****                       - Servo passthrough from RC Receiver to remote servo                             *****////
 ///*****                                                                                                        *****////
 ///*****                            Full command syntax and description can be found at                         *****////
 ///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB                   *****////
@@ -36,7 +37,7 @@
 #include "esp_system.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-
+#include "WCB_PWM.h"
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -78,10 +79,14 @@ bool lastReceivedViaESPNOW = false;
 
 // Debugging flag (default: off)
 bool debugEnabled = false;
-
+bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
+<<<<<<< Updated upstream
 String SoftwareVersion = "5.0_091116RJUL25";
+=======
+String SoftwareVersion = "5.2_170941ROCT2025";
+>>>>>>> Stashed changes
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -246,8 +251,10 @@ void writeSerialString(Stream &serialPort, String stringData);
 void sendESPNowMessage(uint8_t target, const char *message);
 // void handleSingleCommand(const String &cmd, int sourceID);
 void enqueueCommand(const String &cmd, int sourceID);
-
-
+void processPWMPassthrough();
+void addPWMOutputPort(int port);
+void removePWMOutputPort(int port);
+bool isSerialPortPWMOutput(int port);
 
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
@@ -364,6 +371,9 @@ void printConfigInfo() {
 
   // Print all stored commands
   listStoredCommands(); // List stored commands
+  // Print PWM mappings
+  listPWMMappings();  // Print PWM mappings
+
   Serial.println("--- End of Configuration Info ---\n");
 }
 
@@ -482,13 +492,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
     //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
 
-    Serial.printf("Received Command: %s\n", received.structCommand);
+    // Serial.printf("Received Command: %s\n", received.structCommand);
 
     // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
+    // Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -514,6 +524,18 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
           }  
         else if (Kyber_Remote) {
           Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
+          uint8_t* dataPtr = (uint8_t*)(received.structCommand + 2);
+
+        if (debugKyber){
+          Serial.print("Chunk (hex): ");
+          for (int i = 0; i < chunkLen; i++) {
+            if (dataPtr[i] < 0x10) Serial.print("0"); // leading zero
+            Serial.print(dataPtr[i], HEX);
+            Serial.print(" ");
+          }
+          Serial.println();
+        } 
+         
         }      
 
         if (debugEnabled) {
@@ -542,18 +564,42 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 /// Kyber Serial Forwarding Commands
 //*******************************
 void forwardDataFromKyber() {
-  static uint8_t buffer[64];
+  static uint8_t espnowBurst[64];   // tune if you want
+  static size_t  burstLen = 0;
 
-  // **Check if Serial2 has data**
-  if (Serial2.available() > 0) {
-    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
+  bool gotAny = false;
 
-    // **Forward data to Serial1**
-    Serial1.write(buffer, len);
-    Serial1.flush(); // Ensure immediate transmission
+  while (Serial2.available()) {
+    int b = Serial2.read();
+    if (b < 0) break;
 
-    // **Forward via ESP-NOW broadcast**
-    sendESPNowRaw(buffer, len);
+    // Forward immediately to Serial1
+    Serial1.write((uint8_t)b);
+
+    // Debug (hex)
+    if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
+    
+
+    // Accumulate for ESP-NOW
+    if (burstLen < sizeof(espnowBurst)) {
+      espnowBurst[burstLen++] = (uint8_t)b;
+    } else {
+      // buffer full -> flush now
+      sendESPNowRaw(espnowBurst, burstLen);
+      burstLen = 0;
+      espnowBurst[burstLen++] = (uint8_t)b;
+    }
+
+    gotAny = true;
+  }
+
+  Serial1.flush();
+
+  // If this call consumed a burst and UART is now idle, flush once to ESP-NOW
+  if (gotAny && burstLen > 0 && Serial2.available() == 0) {
+    sendESPNowRaw(espnowBurst, burstLen);
+    burstLen = 0;
+    Serial.println();  // newline after hex dump
   }
 }
 
@@ -619,6 +665,14 @@ void processLocalCommand(const String &message) {
         debugEnabled = false;
         Serial.println("Debugging disabled");
         return;
+            } else if (message == "dkoff" || message == "DKOFF") {
+        debugKyber = false;
+        Serial.println("Kyber Debugging disabled");
+        return;
+    } else if (message == "dkon" || message == "DKON") {
+        debugKyber = true;
+        Serial.println("Kyber Debugging enabled");
+        return;
     } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
         return;
@@ -682,6 +736,29 @@ void processLocalCommand(const String &message) {
         return;
     } else if (message.startsWith("hw") || message.startsWith("HW")) {
         updateHWVersion(message);
+        return;
+    } else if (message.startsWith("pms") || message.startsWith("PMS")) {
+      addPWMMapping(message);
+      return;
+    } else if (message.startsWith("prs") || message.startsWith("PRS")) {
+        String portStr = message.substring(3);
+        int port = portStr.toInt();
+        removePWMMapping(port);
+        return;
+    } else if (message.equals("plist") || message.equals("PLIST")) {
+        listPWMMappings();
+        return;
+    } else if (message.equals("pclear") || message.equals("PCLEAR")) {
+      
+        clearAllPWMMappings();
+    return;
+    } else if (message.startsWith("po") || message.startsWith("PO")) {
+    int port = message.substring(2).toInt();
+    addPWMOutputPort(port);
+    return;
+    } else if (message.startsWith("px") || message.startsWith("PX")) {
+        int port = message.substring(2).toInt();
+        removePWMOutputPort(port);
         return;
     } else {
         Serial.println("Invalid Local Command");
@@ -814,6 +891,8 @@ void processCommandCharcter(const String &message, int sourceID) {
         recallStoredCommand(message, sourceID);
     } else if (message.startsWith("m") || message.startsWith("M")) {
         processMaestroCommand(message);
+    } else if (message.startsWith("p") || message.startsWith("P")) {
+      processPWMOutput(message);
     } else {
         Serial.println("Invalid Serial Command");
     }
@@ -874,6 +953,33 @@ void processMaestroCommand(const String &message){
   int message_maestroID = message.substring(1,2).toInt();
   int message_maestroSeq = message.substring(2).toInt();
   sendMaestroCommand(message_maestroID,message_maestroSeq);
+}
+
+void processPWMOutput(const String &message) {
+    // Format: ;Pxnnnn where x=port, nnnn=pulse width in microseconds
+    int port = message.substring(1, 2).toInt();
+    unsigned long pulseWidth = message.substring(2).toInt();
+    
+    if (port < 1 || port > 5 || pulseWidth < 800 || pulseWidth > 2200) {
+        if (debugEnabled) Serial.println("Invalid PWM output command");
+        return;
+    }
+    
+    int txPin = 0;
+    switch(port) {
+        case 1: txPin = SERIAL1_TX_PIN; break;
+        case 2: txPin = SERIAL2_TX_PIN; break;
+        case 3: txPin = SERIAL3_TX_PIN; break;
+        case 4: txPin = SERIAL4_TX_PIN; break;
+        case 5: txPin = SERIAL5_TX_PIN; break;
+    }
+    
+    if (txPin > 0) {
+        pinMode(txPin, OUTPUT);
+        digitalWrite(txPin, HIGH);
+        delayMicroseconds(pulseWidth);
+        digitalWrite(txPin, LOW);
+    }
 }
 
 
@@ -1005,24 +1111,64 @@ void KyberRemoteTask(void *pvParameters) {
 }
 
 void serialCommandTask(void *pvParameters) {
-  vTaskDelay(pdMS_TO_TICKS(500));  // at top of task to enable proper startup timing
+  vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
-        processIncomingSerial(Serial, 0);  // USB Serial
-        processIncomingSerial(Serial3, 3);
-        processIncomingSerial(Serial4, 4);
-        processIncomingSerial(Serial5, 5);
+        processIncomingSerial(Serial, 0);
+        
+        // Only process Serial3-5 if not used for PWM
+        if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
+            processIncomingSerial(Serial3, 3);
+        }
+        if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
+            processIncomingSerial(Serial4, 4);
+        }
+        if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
+            processIncomingSerial(Serial5, 5);
+        }
 
         if (Kyber_Local) {
           // don't add serial 1 or 2 for processing strings
         } else if (Kyber_Remote){
             processIncomingSerial(Serial2, 2);
-          // add only serial 2 for processing strings
         } else {
-          processIncomingSerial(Serial1, 1);
-          processIncomingSerial(Serial2, 2);
+          if (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+              processIncomingSerial(Serial1, 1);
+          }
+          if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+              processIncomingSerial(Serial2, 2);
+          }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+// void serialCommandTask(void *pvParameters) {
+//   vTaskDelay(pdMS_TO_TICKS(500));  // at top of task to enable proper startup timing
+//     while (true) {
+//         processIncomingSerial(Serial, 0);  // USB Serial
+//         processIncomingSerial(Serial3, 3);
+//         processIncomingSerial(Serial4, 4);
+//         processIncomingSerial(Serial5, 5);
+
+//         if (Kyber_Local) {
+//           // don't add serial 1 or 2 for processing strings
+//         } else if (Kyber_Remote){
+//             processIncomingSerial(Serial2, 2);
+//           // add only serial 2 for processing strings
+//         } else {
+//           processIncomingSerial(Serial1, 1);
+//           processIncomingSerial(Serial2, 2);
+//         }
+
+//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
+//     }
+// }
+
+void PWMTask(void *pvParameters) {
+    while (true) {
+        processPWMPassthrough();
+        vTaskDelay(pdMS_TO_TICKS(5)); // Process every 5ms for ~200Hz update rate
     }
 }
 
@@ -1036,7 +1182,7 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
     // Optional: prep the pin to reduce false starts
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(750);  // let internal structures stabilize
+    delay(1000);  // let internal structures stabilize
     // Try to init
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
     delay(750);  // let internal structures stabilize
@@ -1108,15 +1254,36 @@ void setup() {
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
+  initPWM();  // <-- This loads PWM mappings from preferences
+
   printBaudRates();
   Serial.println("-------------------------------------------------------");
 
   // Initialize hardware serial
-  Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-  Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-  Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-  Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-  Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+  // Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+  // Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+  // Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+  // Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+  // Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+  
+
+  // Initialize hardware serial - but skip ports used for PWM input
+ // Initialize hardware serial - but skip ports used for PWM or Kyber
+if (!Kyber_Local && !Kyber_Remote && !isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+    Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+}
+if (!Kyber_Local && !isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+    Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+}
+if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
+    Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+}
+if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
+    Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+}
+if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
+    Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+}
 
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -1211,6 +1378,7 @@ void setup() {
       Serial.println("Kyber_Remote Task Created");
   }
 
+  xTaskCreatePinnedToCore(PWMTask, "PWM Task", 2048, NULL, 2, NULL, 0); 
 
   delay(150);     
   turnOffLED();

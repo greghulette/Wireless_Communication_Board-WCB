@@ -1,7 +1,11 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
+<<<<<<< Updated upstream
 // #include "wcb_pin_map.h"
+=======
+#include "WCB_PWM.h"
+>>>>>>> Stashed changes
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
@@ -156,11 +160,30 @@ void saveBaudRatesToPreferences() {
     preferences.end();
 }
 
+// void printBaudRates() {
+//     Serial.println("Serial Baud Rates and Broadcast Settings:");
+//     for (int i = 0; i < 5; i++) {
+//         Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
+//                       i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+//     }
+// }
 void printBaudRates() {
-    Serial.println("Serial Baud Rates and Broadcast Settings:");
+    Serial.println("--------------- Serial Settings ----------------------");
     for (int i = 0; i < 5; i++) {
-        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        int port = i + 1;
+        
+        if ((port == 1 || port == 2) && Kyber_Local) {
+            Serial.printf(" Serial%d: Used by Kyber (Local)\n", port);
+        } else if (port == 1 && Kyber_Remote) {
+            Serial.printf(" Serial%d: Used by Kyber (Remote)\n", port);
+        } else if (isSerialPortUsedForPWMInput(port)) {
+            Serial.printf(" Serial%d: Configured for PWM Input\n", port);
+        } else if (isSerialPortPWMOutput(port)) {
+            Serial.printf(" Serial%d: Configured for PWM Output\n", port);
+        } else {
+            Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
+                          port, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        }
     }
 }
 
