@@ -387,6 +387,7 @@ void clearAllPWMMappings() {
     delay(3000);
     ESP.restart();
 }
+
 void savePWMMappingsToPreferences() {
     preferences.begin("pwm_mappings", false);
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
