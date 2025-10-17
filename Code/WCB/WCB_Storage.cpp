@@ -1,11 +1,7 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-<<<<<<< Updated upstream
-// #include "wcb_pin_map.h"
-=======
 #include "WCB_PWM.h"
->>>>>>> Stashed changes
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
