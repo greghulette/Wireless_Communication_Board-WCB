@@ -1,6 +1,6 @@
 <h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Build Instructions for WCB V3.2</h1>
 
-## There was an issue with the version 3.1 that was found.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either the knock off boards with USB C, or the official board with USB Micro.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
+## There was an issue with the version 3.1 that was found that would not allow all ESP32 DEVKITC to fit in the PCB.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either the knock off boards with USB C, or the official board with USB Micro.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
 
 3.1 Populate Image      |    3.2 Populated Image       |
 :---------------:|:---------------------:|
@@ -36,10 +36,10 @@ There are two ways to get the PCB, download the code and have a PCB manufacturer
 #### 1.1.2 Steps to order from me ####
 1. If you are an Astromech user, please head to the forum post about Wireless Communication Boards and place an order there
 
-### 1.2 ESP32-S3-DEVKITC-1-N8R2 ###
+### 1.2 ESP32-S3-DEVKITC-1-N8R8 or ESP32-S3-DEVKITC-1-N16R8  ###
 
 You need one of these per WCB
-- (3) ESP32 Boards (Header Pins Unsoldered) ($17.88)- [Amazon - 3 Boards](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DFTKFWT2/)
+- (3) ESP32 Boards (Header Pins Unsoldered) ($18.99)- [Amazon - 3 Boards](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DKF4DSQ4/?th=1)
 <br>
 Or
 <br>
