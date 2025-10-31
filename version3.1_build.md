@@ -1,4 +1,16 @@
-<h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Build Instructions for WCB V3.1</h1>
+<h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Build Instructions for WCB V3.2</h1>
+
+## There was an issue with the version 3.1 that was found.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either the knock off boards with USB C, or the official board with USB Micro.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
+
+3.1 Populate Image      |    3.2 Populated Image       |
+:---------------:|:---------------------:|
+<img src="./Images/CAD3.1.png">:|<img src="./Images/CAD3.2.png">:|
+
+3.1 Bare PCB | 3.2 Bare PCB|
+:---------------:|:---------------------:|
+:<img src="./Images/CAD3.1_Bare.png">":|:<img src="./Images/CAD3.2_Bare.png">":|
+
+
 
 ## 1.0 Bill of Material ##
 ### 1.1 - PCB ###
@@ -8,7 +20,7 @@ There are two ways to get the PCB, download the code and have a PCB manufacturer
 
 1. Download the GitHub Repository to your computer.
     <img src="./Images/3.1_Instructions/download.png">
-2. Navigate to the Folder that the Gerber file is stored by going to  the PCB>Wireless Communication Board (WCB)V3.1> Folder.  The Gerber File is called `WCB_V3.1_Gerber.zip`.  
+2. Navigate to the Folder that the Gerber file is stored by going to  the PCB>Wireless Communication Board (WCB)V3.1> Folder.  The Gerber File is called `WCB_V3.2_Gerber.zip`.  
 3. Navigate to the PCB Manufacturer of your choice.  I will go through an example using JLCPCB so some of the steps will be tailored to their ordering system, but most of the ones I've seen are similar.  
 <img src="./Images/3.1_Instructions/jlc_home.png">
 4. Drag the gerber file onto the "add gerber file" icon
@@ -67,7 +79,7 @@ This allows you to plug in the ESP32 into the board and replace it easily.  It d
     <br>
     <img src="./Images/3.1_Instructions/components.jpg " style="width: 500px;">
     <br>
-2. Start by inserting the female headers into the long rows.
+2. Start by inserting the female headers into the long rows.  <b>NOTE:</b> Choose what ever row fits your ESP32's.  Image only shows 1 row on the right but you should have 2 of them.
 <br>
     <img src="./Images/3.1_Instructions/Solder14.jpg" style="width: 500px;">
     <br>
