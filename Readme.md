@@ -160,7 +160,7 @@ I have broken the command structure down into 2 categories.  One of them is to c
 | `?DON`             | Enable debugging mode                         |
 | `?DOFF`            | Disable debugging mode.                    |
 | `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
-| `***`              | Only used in conjuction with the stored command above.  This allows you to write a comment for each stored command inline for the key.  Example given below. |
+| `***`              | Only used in conjunction with the stored command above.  This allows you to write a comment for each stored command inline for the key.  Example given below. |
 | `?CCLEAR`          | Clear all stored commands | 
 | `?CEkey`           | Clear a specific stored command with the key name given | 
 | `?WCBx`            | Set the WCB number (1-8).|
@@ -177,6 +177,8 @@ I have broken the command structure down into 2 categories.  One of them is to c
 | `?KYBER_REMOTE`    | Enable Kyber communication remotely. |
 | `?KYBER_CLEAR`     | Clear Kyber settings. |
 | `?HWx`             | Set the hardware version.   \*\*\*\* MUST set hardware version to use the system. |
+| `?STOP`            | Stop the commands that have timers associated with them|
+
 
 ### **2.3 Command Character-Based Commands (**`;COMMANDS`**)**
 
@@ -188,6 +190,7 @@ These will be the majority of what you will use to interact with the WCB on a no
 | `;Wxyyy` | Send a unicast message to WCB x. with the message of yyy      |
 | `;Ckey`      | Recall a stored command by key.                           |
 | `;Mxyy`      | Send a Maestro command (x = Maestro ID, yy = sequence). 1-8 valid Maestro IDs.  0 = send to all Maestros.  ID's must match WCB number they are plugged into. |
+| `;Txxx,`     | Timer for processing commands|
 
 ### **2.4 Syntax for Commands**
 
@@ -238,7 +241,80 @@ The delimiter is ^ by default, but also can be changed.
 
 I have tested the following characters (& * . - / ) but do not see why others wouldn't work as well.
 
+#### **2.4.4 Timers for Processing Commands:**
 
+With this feature, you  can delay a command from processing in a chained command.  This allows you to adjust the timing that the WCB sends messages out.  
+
+The format to utilize this function is the 
+
+` ;Txxx,` where xxx is a time in ms.  You must use a comma after the time and before the command that will be executed.  
+
+Let's add the previous chained command and add some timers to it as well.
+
+ ```   
+;W3;S4:PP100^;M21^;T2500,;W3;S2#SD0^<SH1>^;T500,;W3;S1:PDA180
+```
+Let's break this down like before into its separate commands.
+
+```
+1. ;W3;S4:PP100
+2. ;M21
+3. ;T2500,;W3;S2#SD0
+4. <SH1>
+5. ;T500;W3;S1:PDA180
+```
+When you use timers, you create timer groups that apply to all the commands after the ;T and before the next ;T.  So in this example, we created 3 timer groups.  Let's look at them closer and the commands associated with each timer group.
+
+```
+Timer Group 1
+1. ;W3;S4:PP100
+2. ;M21
+```
+The first timer group is executed immediately.  You can not put a timer to delay this first group.  
+
+```
+Timer Group 2 (2500ms)
+3. ;S2#SD0
+4. <SH1>
+```
+This group is executed 2500ms (2.5 seconds) after the command was initiated
+
+```
+Timer Group 3 (500ms)
+W3;S1:PDA180
+```
+This group is executed 500ms after the timer group before it (timer group 2 in this example).
+
+With the debug turned on, you can see the debug messages with timestamps on to see how this is processed.
+
+```
+14:36:09.530 -> Processing input from Serial0: ;W3;S4:PP100^;M21^;T2500,;W3;S2#SD0^<SH1>^;T500,;W3;S1:PDA180
+14:36:09.530 -> Processing command from Serial0: ;W3;S4:PP100^;M21^;T2500,;W3;S2#SD0^<SH1>^;T500,;W3;S1:PDA180
+14:36:09.530 -> [TimerGroup 1] Executing command: ;W3;S4:PP100
+14:36:09.530 -> [TimerGroup 1] Executing command: ;M21
+14:36:09.530 -> Sending Unicast ESP-NOW message to WCB3: ;S4:PP100
+14:36:09.530 -> ESP-NOW message sent successfully!
+14:36:09.530 -> Sending Maestro Triggered
+14:36:09.577 -> ;M21
+14:36:09.577 -> Inside Maestro 2
+14:36:09.577 -> ESP-NOW message sent successfully!
+14:36:12.026 -> [TimerGroup 2] Executing command: ;W3;S2#SD0
+14:36:12.026 -> [TimerGroup 2] Executing command: <SH1>
+14:36:12.060 -> Sending Unicast ESP-NOW message to WCB3: ;S2#SD0
+14:36:12.060 -> ESP-NOW message sent successfully!
+14:36:12.060 -> Broadcasting command: <SH1>
+14:36:12.060 -> Sent to Serial1: <SH1>
+14:36:12.060 -> Sent to Serial2: <SH1>
+14:36:12.060 -> Sent to Serial3: <SH1>
+14:36:12.060 -> Sent to Serial4: <SH1>
+14:36:12.060 -> Sent to Serial5: <SH1>
+14:36:12.060 -> ESP-NOW message sent successfully!
+14:36:12.060 -> Broadcasted via ESP-NOW: <SH1>
+14:36:12.560 -> [TimerGroup 3] Executing command: ;W3;S1:PDA180
+14:36:12.560 -> ✅ Timer command sequence complete.
+14:36:12.560 -> Sending Unicast ESP-NOW message to WCB3: ;S1:PDA180
+14:36:12.560 -> ESP-NOW message sent successfully!
+```
 
 ## **3. Loading and Configuring the WCB**
 **All WCBs are configured prior to shipping, but if you want to upgrade an existing WCB or setup a new one, follow these steps.**
@@ -463,7 +539,7 @@ Connections/Requirements:
 
 ### **4.5 Stored Commands**
 
-You can  store commands in the WCB's memory and recall them later.  This is accomplished by saving the commands in NVS (Non-Volatile Storage).  There are 2 parts of the stored commands.  The <i>**Key**</i>, and the <i>**Command**</i>.  The Key is used to identify the command being stored.  The Key can be anything you want with the characters of A-Z and 0-9.  The command can be any string of characters you would normally send the WCB.  The command can include delimeters, so mutlitple commands can be issued at once from the WCB. 
+You can  store commands in the WCB's memory and recall them later.  This is accomplished by saving the commands in NVS (Non-Volatile Storage).  There are 2 parts of the stored commands.  The <i>**Key**</i>, and the <i>**Command**</i>.  The Key is used to identify the command being stored.  The Key can be anything you want with the characters of A-Z and 0-9.  The command can be any string of characters you would normally send the WCB.  The command can include delimiters, so multiple commands can be issued at once from the WCB. 
 
 **Example**
 Now that you understand what the key and command do, lets go through how to use them.  You store commands by using the `?CS` command.  The CS stands for Command Store.  The format to store a key/command is `?CSkey,command`.  You would enter the `?CS`, then the key, followed by a comma, then the command.  This comma is only read once so that if you need to store a comma in your command, it will allow that.  So lets save the command of `;m11` to the WCB.  
@@ -476,7 +552,7 @@ Now that the key/command is saved into the WCB, you would call that with the:
 
  `;cwave`
 
- If you wanted to store a more complex command to wave and to play a sound, you may want to do somehting like this
+ If you wanted to store a more complex command to wave and to play a sound, you may want to do something like this
 
  `?CSWaveAndSound,;m11^;S5<SH1,M1>`
 
@@ -511,7 +587,7 @@ The Stealth users should note that the Stealth uses the character ":" to break u
 auxdelim=&
 ```
 
-You can change the `&` to another character if that interferes with something in your system.  If you are only using the stored commands specfied below, you may not need to change this auxdelim.  
+You can change the `&` to another character if that interferes with something in your system.  If you are only using the stored commands specified below, you may not need to change this auxdelim.  
 
 Other than that change, you can set up the Stealth's config.txt file to send out strings via the serial command like normal.  
 
