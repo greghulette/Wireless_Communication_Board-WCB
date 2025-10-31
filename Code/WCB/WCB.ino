@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.0_310836ROCT25                                      *****////
+///*****                                          Version 5.2_311403ROCT25                                      *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,7 +82,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.0_310836ROCT25";
+String SoftwareVersion = "5.2_311403ROCT25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -376,7 +376,7 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
-      // Serial.println("insdie retrun");
+      if (debugEnabled) {Serial.printf("Skipping ESPNOW broadcast to avoid loops\n");};
         return;
     }
       // turnOnLEDESPNOW();
@@ -438,7 +438,7 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
         
         // Set Target ID to "0" -> Means raw bridging data
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0");
 
         msg.structCommandIncluded = true;
 
@@ -900,8 +900,11 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     }
 
     // Always send via ESP-NOW broadcast
-    sendESPNowMessage(0, cmd.c_str());
-    if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    if (!lastReceivedViaESPNOW){
+      sendESPNowMessage(0, cmd.c_str());
+      if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    // if (debugEnabled && !lastReceivedViaESPNOW) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    }
 }
 
 // processIncomingSerial for each serial port
