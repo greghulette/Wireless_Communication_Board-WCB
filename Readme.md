@@ -86,11 +86,11 @@ CAD Image       |    Actual Image
 - Supports Maestros (up to 8 with Strings, or 2 with Kyber)
 
 
-#### **1.3.4 HW Version 3.1**
+#### **1.3.4 HW Version 3.2**
 
 CAD Image       |    Actual Image     |         Bare                |
 :---------------:|:---------------------:|:---------------------:
-<img src="./Images/CAD3.1.png" style="width: 300px;"><br>|<img src="./Images/Image_of_3.1.jpg" style="width: 300px;">|<img src="./Images/CAD3.1_Bare.png" style="width:300px;">|
+<img src="./Images/CAD3.2.png" style="width: 300px;"><br>|<img src="./Images/Image_of_3.1.jpg" style="width: 300px;">|<img src="./Images/CAD3.2_Bare.png" style="width:300px;">|
  
 
 
@@ -104,9 +104,9 @@ CAD Image       |    Actual Image     |         Bare                |
 - Can support bi-directional communications
 - Supports Maestros (up to 8 with Strings, or 2 with Kyber)
 ##### **Build Instructions** ####
-  You can find the build instructions for the version 3.1 boards [here](./version3.1_build.md)
+  You can find the build instructions for the version 3.2 boards [here](./version3.1_build.md)
 
-HW Versions 1.0 and 2.1/2.3/2.4 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  All WCBs must be running the same version of Software though to ensure they are interoperable.
+HW Versions 1.0 and 2.1/2.3/2.4/3.2 are physically different, but have the same capabilities and are operated the exact same way.  They are 100% interoperable with each other and can be mixed in the same network.  All WCBs must be running the same version of Software though to ensure they are interoperable.
 
 ### **1.4 Concept of Operations**
 Below, you will see some possible connections that can exist to the WCB's.  In the picture, there are only 4 WCBs, but the system can handle up to 8 of them.  Each one of the microcontrollers, represented by a green box, can communicate directly with any other microcontroller, regardless if they are physically connected to the same WCB.  I can envision most people using 2 or 3 WCBs.  One in the body, one in the dome, and one on the dome-plate.
@@ -159,6 +159,8 @@ I have broken the command structure down into 2 categories.  One of them is to c
 | `?CONFIG`          | Display current configuration settings.       |
 | `?DON`             | Enable debugging mode                         |
 | `?DOFF`            | Disable debugging mode.                    |
+| `?DKON`             | Enable Kyber Maestro debugging mode                         |
+| `?DKOFF`            | Disable Kyber Maestro debugging mode.                    |
 | `?CSkey,value`     | Store a command with a key-val, separate the name and the stored command with a comma.  You have commas in the command and it will not affect the storing of the commands.|
 | `***`              | Only used in conjunction with the stored command above.  This allows you to write a comment for each stored command inline for the key.  Example given below. |
 | `?CCLEAR`          | Clear all stored commands | 
