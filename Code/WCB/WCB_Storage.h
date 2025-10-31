@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include "command_timer_queue.h"
 
 // =============== Global Variables ===============
 extern Preferences preferences;
@@ -17,7 +18,9 @@ extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
 extern unsigned long baudRates[5];
+extern char CommandCharacter;
 extern char commandDelimiter;
+extern char LocalFunctionIdentifier;
 extern int wcb_hw_version;
 extern int storedBaudRate[6];
 extern bool Kyber_Remote;
@@ -48,6 +51,7 @@ void loadBaudRatesFromPreferences();
 void printBaudRates();
 void recallBaudRatefromSerial(int ser);
 void setBaudRateForSerial(int ser);
+bool isTimerCommand(const String &input);
 
 void recallCommandSlot(const String &key, int sourceID);
 void loadStoredCommandsFromPreferences();

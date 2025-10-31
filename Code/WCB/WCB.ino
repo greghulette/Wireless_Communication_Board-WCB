@@ -32,6 +32,7 @@
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "wcb_pin_map.h"
+#include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include <freertos/FreeRTOS.h>
@@ -81,7 +82,7 @@ bool debugEnabled = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.0_091116RJUL25";
+String SoftwareVersion = "5.1_240956RJUL25";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -335,7 +336,7 @@ void printConfigInfo() {
   Serial.println("\n\n----------- Configuration Info ------------\n");
   Serial.printf("Hostname: %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version %s\n", SoftwareVersion);
+  Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   for (int i = 0; i < 5; i++) {
@@ -940,6 +941,10 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 
     if (data.length() == 0) return;
+      if (checkForTimerStopRequest(data)) {
+          stopTimerSequence();
+          return;
+      }
 
     // Direct enqueue if command starts with "?C"
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
@@ -948,7 +953,13 @@ void processSerialCommandHelper(String &data, int sourceID) {
         return;
     }
 
-    // Parse command using the stored delimiter
+    // Timer-aware parsing: if command contains ;T or ;t, use grouped mode
+    if (data.indexOf(";T") != -1 || data.indexOf(";t") != -1) {
+        parseCommandGroups(data);  // Uses non-blocking delay between command groups
+        return;
+    }
+
+    // Otherwise, parse normally
     int startIdx = 0;
     while (true) {
         int delimPos = data.indexOf(commandDelimiter, startIdx);
@@ -1218,6 +1229,7 @@ void setup() {
 }
 
 void loop() {
+  processCommandGroups();
 
   // Handle all queued commands
   if (!commandQueue) return;

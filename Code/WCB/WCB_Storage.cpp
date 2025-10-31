@@ -1,7 +1,6 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-// #include "wcb_pin_map.h"
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
@@ -283,7 +282,7 @@ void setCommandDelimiter(char c) {
 void loadStoredCommandsFromPreferences() {
     preferences.begin("stored_commands", true);
     for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        char storedCommandBuffer[200] = {0};
+        char storedCommandBuffer[1800] = {0};
         String key = "CMD" + String(i + 1);
         preferences.getString(key.c_str(), storedCommandBuffer, sizeof(storedCommandBuffer));
         storedCommands[i] = String(storedCommandBuffer);
@@ -305,46 +304,56 @@ void recallCommandSlot(const String &key, int sourceID) {
     Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
 
     // Enqueue for execution
-    parseCommandsAndEnqueue(recalledCommand, sourceID);
+    // parseCommandsAndEnqueue(recalledCommand, sourceID);
+    if (isTimerCommand(recalledCommand)) {
+  parseCommandGroups(recalledCommand);
+} else {
+  parseCommandsAndEnqueue(recalledCommand, sourceID);
+}
+
 }
 
 // Save stored commands to preferences
 void saveStoredCommandsToPreferences(const String &message) {
-int commaIndex = message.indexOf(','); // Find first `,`
-    if (commaIndex == -1 || commaIndex == 0) {
-        Serial.println("Invalid format. Use ?Ckey,value");
-        return;
-    }
+  int commaIndex = message.indexOf(',');
+  if (commaIndex == -1 || commaIndex == 0) {
+    Serial.println("Invalid format. Use ?Ckey,value");
+    return;
+  }
 
-    String key = message.substring(0, commaIndex);
-    String value = message.substring(commaIndex + 1);
-    key.trim();
-    value.trim();
+  String key = message.substring(0, commaIndex);
+  String value = message.substring(commaIndex + 1);
+  key.trim();
+  value.trim();
 
-    if (key.length() == 0 || value.length() == 0) {
-        Serial.println("Key or value cannot be empty.");
-        return;
-    }
+  if (key.length() == 0 || value.length() == 0) {
+    Serial.println("Key or value cannot be empty.");
+    return;
+  }
 
-    // Open Preferences in read-write mode
-    preferences.begin("stored_cmds", false);
-    
-    // Save the command
-    preferences.putString(key.c_str(), value);
+  preferences.begin("stored_cmds", false);
+  preferences.putString(key.c_str(), value);
 
-    // Retrieve the existing key list
-    String existingKeys = preferences.getString("key_list", "");
-    
-    // Add new key only if it's not already present
-    if (existingKeys.indexOf("," + key + ",") == -1) {
-        existingKeys += key + ",";
-        preferences.putString("key_list", existingKeys);
-    }
+  String existingKeys = preferences.getString("key_list", "");
+  bool alreadyExists = false;
 
-    preferences.end();
+  // Check against variations to catch duplicates
+  if (existingKeys == key + "," ||
+      existingKeys.startsWith(key + ",") ||
+      existingKeys.endsWith("," + key + ",") ||
+      existingKeys.indexOf("," + key + ",") != -1) {
+    alreadyExists = true;
+  }
 
-    Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+  if (!alreadyExists) {
+    existingKeys += key + ",";
+    preferences.putString("key_list", existingKeys);
+  }
+
+  preferences.end();
+  Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
 }
+
 
 void eraseStoredCommandByName(const String &name) {
     if (name.length() == 0) {
@@ -404,22 +413,24 @@ void listStoredCommands() {
 
     Serial.println("\n--- Stored Commands ---");
     int startIdx = 0;
-    while (true) {
-        int commaIndex = keyList.indexOf(',', startIdx);
-        if (commaIndex == -1) break;
+while (startIdx < keyList.length()) {
+    int commaIndex = keyList.indexOf(',', startIdx);
+    if (commaIndex == -1) commaIndex = keyList.length();
 
-        String key = keyList.substring(startIdx, commaIndex);
-        key.trim();
-        
-        if (key.length() > 0) {
-            preferences.begin("stored_cmds", true);
-            String value = preferences.getString(key.c_str(), "");
-            preferences.end();
-            Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
-        }
+    String key = keyList.substring(startIdx, commaIndex);
+    key.trim();
 
-        startIdx = commaIndex + 1;
+    if (key.length() > 0) {
+        preferences.begin("stored_cmds", true);
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+        Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
     }
+
+    startIdx = commaIndex + 1;
+}
+
+
     Serial.println("--- End of Stored Commands ---\n");
 }
 
