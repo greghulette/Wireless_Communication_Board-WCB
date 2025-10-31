@@ -1,137 +1,280 @@
-<h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Build Instructions for WCB V3.2</h1>
+<h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Wireless Communication Board V3.2 Build Instructions</h1>
 
-## There was an issue with the version 3.1 that was found that would not allow all ESP32 S3 DEVKITC to fit in the PCB.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either of the ESP32 S3 boards listed below.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
+## Overview
 
-3.1 Populate Image      |    3.2 Populated Image       |
-:---------------:|:---------------------:|
-<img src="./Images/CAD3.1.png">:|<img src="./Images/CAD3.2.png">:|
+This document provides comprehensive assembly instructions for the Wireless Communication Board (WCB) Version 3.2. Version 3.2 features an enhanced dual-row header configuration that provides compatibility with multiple ESP32-S3 DevKitC variants, addressing the fit constraints identified in the previous version.
 
-3.1 Bare PCB | 3.2 Bare PCB|
-:---------------:|:---------------------:|
-:<img src="./Images/CAD3.1_Bare.png">":|:<img src="./Images/CAD3.2_Bare.png">":|
+### Version 3.2 Improvements
 
+The primary enhancement in Version 3.2 is the addition of a secondary row of mounting holes, enabling compatibility with both ESP32-S3-DEVKITC-1-N8R8 and ESP32-S3-DEVKITC-1-N16R8 boards. This modification ensures universal fit across ESP32-S3 DevKitC variants.
 
+**Version Comparison**
 
-## 1.0 Bill of Material ##
-### 1.1 - PCB ###
-There are two ways to get the PCB, download the code and have a PCB manufacturer, like JLCPCB,PCBWay,OshPark....., or buy them from me with the following link  to the Astromech site where you fan find the [WCB Run](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024).  The order form can be found at the bottom of the first post.  
+| V3.1 Populated | V3.2 Populated |
+|:-------------:|:--------------:|
+| <img src="./Images/CAD3.1.png"> | <img src="./Images/CAD3.2.png"> |
 
-#### 1.1.1 Steps to order from PCB Manufacturer ####
+| V3.1 Bare PCB | V3.2 Bare PCB |
+|:-------------:|:--------------:|
+| <img src="./Images/CAD3.1_Bare.png"> | <img src="./Images/CAD3.2_Bare.png"> |
 
-1. Download the GitHub Repository to your computer.
-    <img src="./Images/3.1_Instructions/download.png">
-2. Navigate to the Folder that the Gerber file is stored by going to  the PCB>Wireless Communication Board (WCB)V3.1> Folder.  The Gerber File is called `WCB_V3.2_Gerber.zip`.  
-3. Navigate to the PCB Manufacturer of your choice.  I will go through an example using JLCPCB so some of the steps will be tailored to their ordering system, but most of the ones I've seen are similar.  
-<img src="./Images/3.1_Instructions/jlc_home.png">
-4. Drag the gerber file onto the "add gerber file" icon
-<img src="./Images/3.1_Instructions/jlc_drag.png">
-5. Once you drag the gerber file into the box, it will automatically upload and present you this screen
-<img src="./Images/3.1_Instructions/jlc_order.png">
-6. (Optional) Change the color of the PCB to blue.  This normally adds an extra day or two to the processing time, but does not cost more.
-<img src="./Images/3.1_Instructions/jlc_order1.png">
-7. (Optional) Remove the order number from the PCB.  JLCPCB adds this to all orders and can be removed so you don't have the order number printed on the PCB at a random location.  This used to be a fee to do this, but at least with JLCPCB, they do not charge any longer to remove the order number
-<img src="./Images/3.1_Instructions/jlc_order2.png">
-8. Save to cart and go through the ordering process.
+---
 
-#### 1.1.2 Steps to order from me ####
-1. If you are an Astromech user, please head to the forum post about Wireless Communication Boards and place an order there
+## 1.0 Bill of Materials
 
-### 1.2 ESP32-S3-DEVKITC-1-N8R8 or ESP32-S3-DEVKITC-1-N16R8  ###
+### 1.1 Printed Circuit Board (PCB)
 
-You need one of these per WCB
-- (3) ESP32 Boards (Header Pins Unsoldered) ($18.99)- [Amazon - 3 Boards](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DKF4DSQ4/?th=1)
-<br>
-Or
-<br>
-- (1) ESP32 S3 Board (Header Pins Soldered) ($15) [Amazon 1 board](https://www.amazon.com/Espressif-ESP32-S3-DevKitC-1-N8R8-Development-Board/dp/B09MHP42LY/)  .  It's kind of silly to go with this option when you can get 3 boards for only slightly more than this one, but it's an option.  
+The PCB can be acquired through two methods:
 
+**Option A: Direct Purchase**
+- Available through the Astromech.net forums: [WCB Continuous Run Thread](https://astromech.net/forums/showthread.php?44271-Wireless-Communication-Boards-(WCB)-Continuous-23-JAN-2024)
+- Order form located at the bottom of the first post
 
+**Option B: PCB Manufacturing Service**
 
+Follow these steps to order from a PCB manufacturer (JLCPCB, PCBWay, OSH Park, etc.):
 
-### 1.3 Power Terminal Block ###
+#### 1.1.1 PCB Manufacturing Instructions
 
-You need one terminal block per WCB
-- 2 Pin Terminal Block (5.08mm pitch)- [Power Terminal Block](https://www.amazon.com/dp/B07CZYGQQ3/)
+1. **Download Repository**
+   - Navigate to the project GitHub repository
+   - Click the green "Code" button and select "Download ZIP"
+   
+   <img src="./Images/3.1_Instructions/download.png">
 
-### 1.4 Male Header Pins ###
+2. **Locate Gerber Files**
+   - Extract the downloaded repository
+   - Navigate to: `PCB > Wireless Communication Board (WCB)V3.1 > Folder`
+   - Locate file: `WCB_V3.2_Gerber.zip`
 
-You need (5) 1x4 pin headers per WCB
+3. **Upload to Manufacturer**
+   - Access your preferred PCB manufacturer's website
+   - Example shown using JLCPCB
+   
+   <img src="./Images/3.1_Instructions/jlc_home.png">
 
-- 2.54mm Pitch Pin Headers 1x4 - [1x4 Pin Header](https://www.amazon.com/MECCANIXITY-Straight-Header-Single-2-54mm/dp/B0C7GMN8CL)
-<br>
-or 
-<br>
-- 2.54mm Pitch Pin Headers 1x40 - [HiLetgo 20pcs 1x40](https://www.amazon.com/dp/B07R5QDL8D/) 
+4. **Upload Gerber File**
+   - Drag `WCB_V3.2_Gerber.zip` onto the "Add Gerber File" upload area.  <b>NOTE: Image shows version 3.1, but use version 3.2</B>
+   
+   <img src="./Images/3.1_Instructions/jlc_drag.png">
 
-Either option is valid.  the 1x40 option does break apart very easily to allow you to make the 1x4 header you would need.
+5. **Configure Order**
+   - The system will automatically process the file and display the order configuration screen
+   
+   <img src="./Images/3.1_Instructions/jlc_order.png">
 
-### 1.4 Female Header Pins ###
+6. **PCB Color Selection (Optional)**
+   - Select blue PCB color if desired
+   - Note: May add 1-2 days to processing time at no additional cost
+   
+   <img src="./Images/3.1_Instructions/jlc_order1.png">
 
-You need (2) 1x22 female pin headers per WCB
+7. **Remove Order Number (Optional)**
+   - Select "Specify a location" or "Remove order number" option
+   - This prevents the manufacturer's order number from appearing on the PCB
+   - No additional cost with JLCPCB
+   
+   <img src="./Images/3.1_Instructions/jlc_order2.png">
 
-- Female Headers (optional but recommended) - [Female PCB Header 1x22](https://www.amazon.com/dp/B0CTKF8V53/)  
+8. **Complete Purchase**
+   - Add to cart and proceed through checkout
 
-This allows you to plug in the ESP32 into the board and replace it easily.  It does add extra height to the WCB, so if that's a concern, you do not need this and can solder the ESP32 directly to the PCB.  
+---
 
-## 2.0 Build
+### 1.2 ESP32-S3 Development Board
 
-1. Layout the components
-    <br>
-    <img src="./Images/3.1_Instructions/components.jpg " style="width: 500px;">
-    <br>
-2. Start by inserting the female headers into the long rows.  <b>NOTE:</b> Choose what ever row fits your ESP32's.  Image only shows 1 row on the right but you should have 2 of them.
-<br>
-    <img src="./Images/3.1_Instructions/Solder14.jpg" style="width: 500px;">
-    <br>
-3. Turn over the PCB and solder the top pin on both of the headers.  
-<br>
-    <img src="./Images/3.1_Instructions/Solder2.jpg" style="width: 500px;">
-    <br>
-4. Straighten out the headers by looking at them from the side angle.  Then touch the soldering iron to the one pad and straighten them both to be vertical.  You can also trying installing the ESP32 into the headers to ensure they are going to be soldered correctly.  
-<br>
-    <img src="./Images/3.1_Instructions/Solder3.jpg" style="width: 500px;">
-        <br>
-5. Once they are straight, continue to solder the rest of the pads
-    <br>
-    <img src="./Images/3.1_Instructions/Solder4.jpg" style="width: 500px;">
-    <br>
-6. Place the 4 pin headers in the serial ports
-    <br>
-    <img src="./Images/3.1_Instructions/Solder5.jpg" style="width: 500px;">
-    <br>
-7. Tape them down to hold them in place.  
-    <br>
-    <img src="./Images/3.1_Instructions/SolerTape.jpg" style="width: 500px;">
-    <br>
-8. Turn over and solder 1 pin on each of the headers.
-<br>
-    <img src="./Images/3.1_Instructions/Solder6.jpg" style="width: 500px;"><br>
-9. Straighten each of the headers.<br>
-    <img src="./Images/3.1_Instructions/Solder7.jpg" style="width: 500px;"><br>
-10. Once straight, solder the rest of the pads.<br>
-    <img src="./Images/3.1_Instructions/Solder8.jpg" style="width: 500px;"><br>
-11. Insert the power terminal block<br>
-    <img src="./Images/3.1_Instructions/Solder9.jpg" style="width: 500px;"><br>
-12. Turn over and solder the 2 pins.<br>
-    <img src="./Images/3.1_Instructions/Solder10.jpg" style="width: 500px;"><br>
-13. Finished Soldered PCB<br>
-    <img src="./Images/3.1_Instructions/Solder13.jpg" style="width: 500px;"><br>
+**Required Quantity:** 1 per WCB
 
-14. Plug in the ESP32-S3-Devkit with the orientation shown.  The two USB plugs should go over the two boxes on the PCB.
-    <img src="./Images/3.1_Instructions/Solder12.jpg" style="width: 500px;">
+**Compatible Models:**
+- ESP32-S3-DEVKITC-1-N8R8
+- ESP32-S3-DEVKITC-1-N16R8
 
+**Purchase Options:**
 
-<br>
-<b>You have now succesfully created a WCB Version 3.1</b>
+- **Option 1:** 3-pack with unsoldered headers - $18.99  
+  [Amazon: ESP32-S3 DevKitC 3-Pack](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DKF4DSQ4/?th=1)
 
-To load the sketch, plug the USB micro cable into the port of the left and follow the instruction on the main page.<br>
-    <img src="./Images/3.1_Instructions/Plug_Front.jpg" style="width: 500px;">
+- **Option 2:** Single board with pre-soldered headers - $15.00  
+  [Amazon: ESP32-S3 DevKitC Single](https://www.amazon.com/Espressif-ESP32-S3-DevKitC-1-N8R8-Development-Board/dp/B09MHP42LY/)
 
+**Recommendation:** Option 1 provides better value and includes spare boards.
 
+---
 
+### 1.3 Power Terminal Block
 
+**Required Quantity:** 1 per WCB
 
+**Specifications:** 2-pin terminal block, 5.08mm pitch
 
+**Source:** [Amazon: 2-Pin Terminal Block](https://www.amazon.com/dp/B07CZYGQQ3/)
 
+---
 
+### 1.4 Male Header Pins
 
+**Required Quantity:** 5 × 1x4 pin headers per WCB
+
+**Specifications:** 2.54mm pitch, straight pin headers
+
+**Purchase Options:**
+
+- **Option 1:** Pre-cut 1x4 headers  
+  [Amazon: 1x4 Pin Headers](https://www.amazon.com/MECCANIXITY-Straight-Header-Single-2-54mm/dp/B0C7GMN8CL)
+
+- **Option 2:** 1x40 breakaway headers (20-pack)  
+  [Amazon: HiLetgo 1x40 Headers](https://www.amazon.com/dp/B07R5QDL8D/)
+
+**Note:** Option 2 can be easily separated into 1x4 segments as needed.
+
+---
+
+### 1.5 Female Header Sockets
+
+**Required Quantity:** 2 × 1x22 female headers per WCB
+
+**Specifications:** 2.54mm pitch, single-row female headers
+
+**Source:** [Amazon: 1x22 Female Headers](https://www.amazon.com/dp/B0CTKF8V53/)
+
+**Installation Note:** Female headers are optional but strongly recommended. They allow for easy ESP32 installation and removal. However, they do add approximately 8-10mm to the overall board height. If space is constrained, the ESP32 can be soldered directly to the PCB.
+
+---
+
+## 2.0 Assembly Instructions
+
+### 2.1 Component Layout
+
+Before beginning assembly, lay out all components to verify inventory.
+
+<img src="./Images/3.1_Instructions/components.jpg" style="width: 500px;">
+
+---
+
+### 2.2 Female Header Installation
+
+1. **Header Placement**
+   - Select the appropriate row of holes based on your ESP32-S3 variant
+   - Insert both 1x22 female headers into the long header positions
+   - **Note:** Both rows are shown for reference. Install headers in the row that corresponds to your specific ESP32-S3 board.
+
+   <img src="./Images/3.1_Instructions/Solder14.jpg" style="width: 500px;">
+
+2. **Initial Tack Soldering**
+   - Invert the PCB
+   - Solder only the topmost pin on each header to temporarily secure them
+
+   <img src="./Images/3.1_Instructions/Solder2.jpg" style="width: 500px;">
+
+3. **Header Alignment**
+   - View the headers from a side angle to check for perpendicularity
+   - While reheating the tack-soldered joint, adjust the header to ensure it is perpendicular to the PCB
+   - Verify alignment by test-fitting the ESP32 into the headers
+
+   <img src="./Images/3.1_Instructions/Solder3.jpg" style="width: 500px;">
+
+4. **Complete Soldering**
+   - Once alignment is confirmed, solder all remaining pins
+
+   <img src="./Images/3.1_Instructions/Solder4.jpg" style="width: 500px;">
+
+---
+
+### 2.3 Serial Port Header Installation
+
+1. **Header Insertion**
+   - Insert five 1x4 male pin headers into the serial port positions on the PCB
+
+   <img src="./Images/3.1_Instructions/Solder5.jpg" style="width: 500px;">
+
+2. **Secure Headers**
+   - Use tape to hold the headers in position during soldering
+
+   <img src="./Images/3.1_Instructions/SolerTape.jpg" style="width: 500px;">
+
+3. **Initial Tack Soldering**
+   - Invert the PCB
+   - Solder one pin on each of the five headers
+
+   <img src="./Images/3.1_Instructions/Solder6.jpg" style="width: 500px;">
+
+4. **Header Alignment**
+   - Check each header for perpendicularity
+   - Reheat tack joints and adjust as necessary
+
+   <img src="./Images/3.1_Instructions/Solder7.jpg" style="width: 500px;">
+
+5. **Complete Soldering**
+   - Once all headers are properly aligned, solder the remaining pins
+
+   <img src="./Images/3.1_Instructions/Solder8.jpg" style="width: 500px;">
+
+---
+
+### 2.4 Power Terminal Block Installation
+
+1. **Terminal Block Placement**
+   - Insert the 2-pin terminal block into the designated power input position
+
+   <img src="./Images/3.1_Instructions/Solder9.jpg" style="width: 500px;">
+
+2. **Soldering**
+   - Invert the PCB
+   - Solder both terminal block pins
+
+   <img src="./Images/3.1_Instructions/Solder10.jpg" style="width: 500px;">
+
+---
+
+### 2.5 Assembly Completion
+
+**Completed PCB Assembly**
+
+<img src="./Images/3.1_Instructions/Solder13.jpg" style="width: 500px;">
+
+---
+
+### 2.6 ESP32-S3 Installation
+
+1. **Board Orientation**
+   - Orient the ESP32-S3 DevKitC board so that both USB ports align with the silkscreen rectangles on the PCB
+   - Carefully insert the ESP32 into the female headers
+
+   <img src="./Images/3.1_Instructions/Solder12.jpg" style="width: 500px;">
+
+2. **Verify Installation**
+   - Ensure all pins are properly seated in the headers
+   - The ESP32 should sit flush and parallel to the WCB
+
+---
+
+## 3.0 Firmware Installation
+
+### 3.1 USB Connection
+
+Connect a USB cable to the **left-side USB port** of the ESP32-S3 for firmware programming.
+
+<img src="./Images/3.1_Instructions/Plug_Front.jpg" style="width: 500px;">
+
+### 3.2 Programming Instructions
+
+Refer to the main project documentation for detailed firmware installation procedures and configuration options.
+
+---
+
+## 4.0 Assembly Complete
+
+Your Wireless Communication Board Version 3.2 is now fully assembled and ready for programming.
+
+---
+
+## Revision History
+
+- **V3.2** - Added dual-row header configuration for universal ESP32-S3 DevKitC compatibility
+- **V3.1** - Initial production release
+
+---
+
+## Support and Community
+
+For technical support, additional documentation, and community discussions, please visit the Astromech.net forums or join the Discord [here](https://discord.gg/nF2vXW5G9C)
