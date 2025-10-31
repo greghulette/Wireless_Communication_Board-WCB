@@ -1,6 +1,6 @@
 <h1 style="display:inline; height: 75px; font-size:51px;"><img src="./Images/r2logo.png" style="height: 75px; display: inline;" align="center">Build Instructions for WCB V3.2</h1>
 
-## There was an issue with the version 3.1 that was found that would not allow all ESP32 DEVKITC to fit in the PCB.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either the knock off boards with USB C, or the official board with USB Micro.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
+## There was an issue with the version 3.1 that was found that would not allow all ESP32 S3 DEVKITC to fit in the PCB.  I modified the boards and will be using version 3.2 from here on out.  3.2 is very similar to 3.1.  The only difference is that I added a second row of holes that will allow you to use either of the ESP32 S3 boards listed below.  I am not updating most of the instructions since they are so simmilar, but will identify where the differences are.  Here is the side by side image comparison for your reference.  
 
 3.1 Populate Image      |    3.2 Populated Image       |
 :---------------:|:---------------------:|
