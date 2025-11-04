@@ -414,7 +414,7 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     // Send ESP-NOW message
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
-        Serial.println("ESP-NOW message sent successfully!");
+        if (debugEnabled) { Serial.println("ESP-NOW message sent successfully!"); }
     } else {
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
@@ -489,7 +489,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
+    if (debugEnabled) { Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); }
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -527,7 +527,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       colorWipeStatus("ES", green, 200);
     // Check if this message is meant for this WCB
     if (targetWCB != 0 && targetWCB != WCB_Number ) {
-        Serial.println("Message not for this WCB, ignoring.");
+        if (debugEnabled) { Serial.println("Message not for this WCB, ignoring."); }
         return;
     }
 
@@ -903,7 +903,6 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     if (!lastReceivedViaESPNOW){
       sendESPNowMessage(0, cmd.c_str());
       if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
-    // if (debugEnabled && !lastReceivedViaESPNOW) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
     }
 }
 
