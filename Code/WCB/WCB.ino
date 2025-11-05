@@ -33,6 +33,7 @@
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "wcb_pin_map.h"
+#include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include <freertos/FreeRTOS.h>
@@ -75,8 +76,7 @@ bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this boa
 String Kyber_Location;
 
 // Flag to track if last received message was via ESP-NOW
-bool lastReceivedViaESPNOW = false;
-
+volatile bool lastReceivedViaESPNOW = false;
 // Debugging flag (default: off)
 bool debugEnabled = false;
 bool debugKyber = false;
@@ -154,8 +154,7 @@ void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
     } 
     } 
     else {
-      if (debugEnabled){ }
-      Serial.printf("No LED was chosen \n");
+      if (debugEnabled){Serial.printf("No LED was chosen \n"); }
     };
   };
 }
@@ -337,7 +336,7 @@ void printConfigInfo() {
   Serial.println("\n\n----------- Configuration Info ------------\n");
   Serial.printf("Hostname: %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version %s\n", SoftwareVersion);
+  Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   for (int i = 0; i < 5; i++) {
@@ -380,6 +379,7 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
+            if (debugEnabled) {Serial.printf("Skipping ESPNOW broadcast to avoid loops\n");};
         return;
     }
       // turnOnLEDESPNOW();
@@ -417,7 +417,13 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     // Send ESP-NOW message
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
-        if (debugEnabled) {Serial.println("ESP-NOW message sent successfully!");}
+        // Check if this is a PWM message (starts with ";P")
+        bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
+        
+        // Only print success if debug is on AND it's not a PWM message
+        if (debugEnabled && !isPWMMessage) {
+            Serial.println("ESP-NOW message sent successfully!");
+        }
     } else {
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
@@ -441,7 +447,7 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
         
         // Set Target ID to "0" -> Means raw bridging data
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0");
 
         msg.structCommandIncluded = true;
 
@@ -486,13 +492,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
     //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
 
-    // Serial.printf("Received Command: %s\n", received.structCommand);
+    // if (debugEnabled){.printf("Received Command: %s\n", received.structCommand);}
 
     // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    // Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
+    if (debugEnabled) { Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); }
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -529,8 +535,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
           }
           Serial.println();
         } 
-         
-        }      
+      }      
 
         if (debugEnabled) {
             // Serial.printf("Bridging chunk of %d bytes received from WCB%s\n", (int)chunkLen, received.structSenderID);
@@ -542,7 +547,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       colorWipeStatus("ES", green, 200);
     // Check if this message is meant for this WCB
     if (targetWCB != 0 && targetWCB != WCB_Number ) {
-        Serial.println("Message not for this WCB, ignoring.");
+        if (debugEnabled) { Serial.println("Message not for this WCB, ignoring."); }
         return;
     }
 
@@ -801,19 +806,37 @@ void updateCommandDelimiter(const String &message){
 }
 
 void update2ndMACOctet(const String &message){
+  if (message.length() >= 4) {
     String hexValue = message.substring(2, 4);
-    int newValue = strtoul(hexValue.c_str(), NULL, 16);
-    umac_oct2 = static_cast<uint8_t>(newValue);
-    saveMACPreferences();
-    Serial.printf("Updated the 2nd Octet to 0x%02X\n", umac_oct2);
+    char *endptr = NULL;
+    long newValue = strtol(hexValue.c_str(), &endptr, 16);
+    if (endptr != NULL && *endptr == '\0' && newValue >= 0 && newValue <= 0xFF) {
+      umac_oct2 = static_cast<uint8_t>(newValue);
+      saveMACPreferences();
+      Serial.printf("Updated the 2nd Octet to 0x%02X\n", umac_oct2);
+    } else {
+      Serial.println("Invalid hex value for 2nd MAC octet. Use two hex digits (00-FF).");
+    }
+  } else {
+    Serial.println("Invalid command. Use ?M2xx where xx is two hex digits.");
+  }
 }
 
 void update3rdMACOctet(const String &message){
-  String hexValue = message.substring(2, 4);
-  int newValue = strtoul(hexValue.c_str(), NULL, 16);
-  umac_oct3 = static_cast<uint8_t>(newValue);
-  saveMACPreferences();
-  Serial.printf("Updated the 3rd Octet to 0x%02X\n", umac_oct3);
+  if (message.length() >= 4) {
+    String hexValue = message.substring(2, 4);
+    char *endptr = NULL;
+    long newValue = strtol(hexValue.c_str(), &endptr, 16);
+    if (endptr != NULL && *endptr == '\0' && newValue >= 0 && newValue <= 0xFF) {
+      umac_oct3 = static_cast<uint8_t>(newValue);
+      saveMACPreferences();
+      Serial.printf("Updated the 3rd Octet to 0x%02X\n", umac_oct3);
+    } else {
+      Serial.println("Invalid hex value for 3rd MAC octet. Use two hex digits (00-FF).");
+    }
+  } else {
+    Serial.println("Invalid command. Use ?M3xx where xx is two hex digits.");
+  }
 }
 
 void updateWCBQuantity(const String &message){
@@ -858,8 +881,9 @@ void updateESPNowPassword(const String &message){
 }
 
 void enableMaestroSerialBaudRate(){
-    recallBaudRatefromSerial(1);
-    Serial.printf("Saved original baud rate of %d for Serial 1\n, Updating to 57600 to support Maestro\n", storedBaudRate[1], 1);
+    recallBaudRatefromSerial(1);  
+    // Print the saved baud rate and then update to Maestro-compatible baud
+  Serial.printf("Saved original baud rate of %d for Serial 1, updating to 57600 to support Maestro\n", storedBaudRate[1]);
     updateBaudRate(1, 57600);
 }
 
@@ -999,9 +1023,11 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     }
 
     // Always send via ESP-NOW broadcast
-    sendESPNowMessage(0, cmd.c_str());
-    if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
-}
+    if (!lastReceivedViaESPNOW){
+      sendESPNowMessage(0, cmd.c_str());
+      if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    }
+  }
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
@@ -1040,6 +1066,10 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 
     if (data.length() == 0) return;
+          if (checkForTimerStopRequest(data)) {
+          stopTimerSequence();
+          return;
+      }
 
     // Direct enqueue if command starts with "?C"
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
@@ -1048,7 +1078,13 @@ void processSerialCommandHelper(String &data, int sourceID) {
         return;
     }
 
-    // Parse command using the stored delimiter
+    // Timer-aware parsing: if command contains ;T or ;t, use grouped mode
+    if (data.indexOf(";T") != -1 || data.indexOf(";t") != -1) {
+        parseCommandGroups(data);  // Uses non-blocking delay between command groups
+        return;
+    }
+
+    // Otherwise, parse normally
     int startIdx = 0;
     while (true) {
         int delimPos = data.indexOf(commandDelimiter, startIdx);
@@ -1108,7 +1144,6 @@ void serialCommandTask(void *pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
         processIncomingSerial(Serial, 0);
-        
         // Only process Serial3-5 if not used for PWM
         if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
             processIncomingSerial(Serial3, 3);
