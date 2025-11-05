@@ -79,7 +79,7 @@ volatile bool lastReceivedViaESPNOW = false;
 
 // Debugging flag (default: off)
 bool debugEnabled = false;
-
+bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
 String SoftwareVersion = "5.2_311403ROCT25";
@@ -482,7 +482,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
     //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
 
-    Serial.printf("Received Command: %s\n", received.structCommand);
+    // if (debugEnabled){.printf("Received Command: %s\n", received.structCommand);}
 
     // Convert sender and target ID to integers
     int senderWCB = atoi(received.structSenderID);
@@ -514,7 +514,18 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
           }  
         else if (Kyber_Remote) {
           Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
-        }      
+          uint8_t* dataPtr = (uint8_t*)(received.structCommand + 2);
+
+        if (debugKyber){
+          Serial.print("Chunk (hex): ");
+          for (int i = 0; i < chunkLen; i++) {
+            if (dataPtr[i] < 0x10) Serial.print("0"); // leading zero
+            Serial.print(dataPtr[i], HEX);
+            Serial.print(" ");
+          }
+          Serial.println();
+        } 
+      }      
 
         if (debugEnabled) {
             // Serial.printf("Bridging chunk of %d bytes received from WCB%s\n", (int)chunkLen, received.structSenderID);
@@ -542,18 +553,42 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 /// Kyber Serial Forwarding Commands
 //*******************************
 void forwardDataFromKyber() {
-  static uint8_t buffer[64];
+  static uint8_t espnowBurst[64];   // tune if you want
+  static size_t  burstLen = 0;
 
-  // **Check if Serial2 has data**
-  if (Serial2.available() > 0) {
-    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
+  bool gotAny = false;
 
-    // **Forward data to Serial1**
-    Serial1.write(buffer, len);
-    Serial1.flush(); // Ensure immediate transmission
+  while (Serial2.available()) {
+    int b = Serial2.read();
+    if (b < 0) break;
 
-    // **Forward via ESP-NOW broadcast**
-    sendESPNowRaw(buffer, len);
+    // Forward immediately to Serial1
+    Serial1.write((uint8_t)b);
+
+    // Debug (hex)
+    if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
+    
+
+    // Accumulate for ESP-NOW
+    if (burstLen < sizeof(espnowBurst)) {
+      espnowBurst[burstLen++] = (uint8_t)b;
+    } else {
+      // buffer full -> flush now
+      sendESPNowRaw(espnowBurst, burstLen);
+      burstLen = 0;
+      espnowBurst[burstLen++] = (uint8_t)b;
+    }
+
+    gotAny = true;
+  }
+
+  Serial1.flush();
+
+  // If this call consumed a burst and UART is now idle, flush once to ESP-NOW
+  if (gotAny && burstLen > 0 && Serial2.available() == 0) {
+    sendESPNowRaw(espnowBurst, burstLen);
+    burstLen = 0;
+    Serial.println();  // newline after hex dump
   }
 }
 
@@ -618,6 +653,14 @@ void processLocalCommand(const String &message) {
     } else if (message == "doff" || message == "DOFF") {
         debugEnabled = false;
         Serial.println("Debugging disabled");
+        return;
+    } else if (message == "dkoff" || message == "DKOFF") {
+        debugKyber = false;
+        Serial.println("Kyber Debugging disabled");
+        return;
+    } else if (message == "dkon" || message == "DKON") {
+        debugKyber = true;
+        Serial.println("Kyber Debugging enabled");
         return;
     } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
@@ -1067,7 +1110,7 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
     // Optional: prep the pin to reduce false starts
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(750);  // let internal structures stabilize
+    delay(1000);  // let internal structures stabilize
     // Try to init
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
     delay(750);  // let internal structures stabilize
