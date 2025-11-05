@@ -75,7 +75,7 @@ bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this boa
 String Kyber_Location;
 
 // Flag to track if last received message was via ESP-NOW
-bool lastReceivedViaESPNOW = false;
+volatile bool lastReceivedViaESPNOW = false;
 
 // Debugging flag (default: off)
 bool debugEnabled = false;
@@ -153,8 +153,7 @@ void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
     } 
     } 
     else {
-      if (debugEnabled){ }
-      Serial.printf("No LED was chosen \n");
+      if (debugEnabled){Serial.printf("No LED was chosen \n"); }
     };
   };
 }
@@ -731,19 +730,37 @@ void updateCommandDelimiter(const String &message){
 }
 
 void update2ndMACOctet(const String &message){
+  if (message.length() >= 4) {
     String hexValue = message.substring(2, 4);
-    int newValue = strtoul(hexValue.c_str(), NULL, 16);
-    umac_oct2 = static_cast<uint8_t>(newValue);
-    saveMACPreferences();
-    Serial.printf("Updated the 2nd Octet to 0x%02X\n", umac_oct2);
+    char *endptr = NULL;
+    long newValue = strtol(hexValue.c_str(), &endptr, 16);
+    if (endptr != NULL && *endptr == '\0' && newValue >= 0 && newValue <= 0xFF) {
+      umac_oct2 = static_cast<uint8_t>(newValue);
+      saveMACPreferences();
+      Serial.printf("Updated the 2nd Octet to 0x%02X\n", umac_oct2);
+    } else {
+      Serial.println("Invalid hex value for 2nd MAC octet. Use two hex digits (00-FF).");
+    }
+  } else {
+    Serial.println("Invalid command. Use ?M2xx where xx is two hex digits.");
+  }
 }
 
 void update3rdMACOctet(const String &message){
-  String hexValue = message.substring(2, 4);
-  int newValue = strtoul(hexValue.c_str(), NULL, 16);
-  umac_oct3 = static_cast<uint8_t>(newValue);
-  saveMACPreferences();
-  Serial.printf("Updated the 3rd Octet to 0x%02X\n", umac_oct3);
+  if (message.length() >= 4) {
+    String hexValue = message.substring(2, 4);
+    char *endptr = NULL;
+    long newValue = strtol(hexValue.c_str(), &endptr, 16);
+    if (endptr != NULL && *endptr == '\0' && newValue >= 0 && newValue <= 0xFF) {
+      umac_oct3 = static_cast<uint8_t>(newValue);
+      saveMACPreferences();
+      Serial.printf("Updated the 3rd Octet to 0x%02X\n", umac_oct3);
+    } else {
+      Serial.println("Invalid hex value for 3rd MAC octet. Use two hex digits (00-FF).");
+    }
+  } else {
+    Serial.println("Invalid command. Use ?M3xx where xx is two hex digits.");
+  }
 }
 
 void updateWCBQuantity(const String &message){
@@ -788,9 +805,10 @@ void updateESPNowPassword(const String &message){
 }
 
 void enableMaestroSerialBaudRate(){
-    recallBaudRatefromSerial(1);
-    Serial.printf("Saved original baud rate of %d for Serial 1\n, Updating to 57600 to support Maestro\n", storedBaudRate[1], 1);
-    updateBaudRate(1, 57600);
+  recallBaudRatefromSerial(1);
+  // Print the saved baud rate and then update to Maestro-compatible baud
+  Serial.printf("Saved original baud rate of %d for Serial 1, updating to 57600 to support Maestro\n", storedBaudRate[1]);
+  updateBaudRate(1, 57600);
 }
 
 void disableMaestroSerialBaudRate(){
