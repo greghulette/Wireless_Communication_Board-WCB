@@ -11,6 +11,19 @@ extern bool debugEnabled;
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
 
+// PWM Stability Tracking - NEW
+PWMStabilityTracker pwmStability[5] = {
+    {0, {0}, 0, false, 0},
+    {0, {0}, 0, false, 0},
+    {0, {0}, 0, false, 0},
+    {0, {0}, 0, false, 0},
+    {0, {0}, 0, false, 0}
+};
+
+const unsigned long PWM_MIN_TRANSMIT_INTERVAL = 15;  // ms between transmits
+const int PWM_CHANGE_THRESHOLD = 6;  // μs change to trigger transmission
+const int PWM_STABILITY_RANGE = 6;   // μs range for stability
+
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;
 
@@ -18,12 +31,11 @@ int pwmOutputCount = 0;
 volatile unsigned long pwmRiseTime[5] = {0};
 volatile unsigned long pwmPulseWidth[5] = {0};
 volatile bool pwmNewData[5] = {false};
-extern bool espNowInitialized;  // Add this extern declaration
+extern bool espNowInitialized;
 
-// Add this helper function after the includes
+// Helper function
 bool canSendESPNow() {
-    // Check if we're past initial boot and ESP-NOW is ready
-    return (millis() > 5000);  // Simple check: wait 5 seconds after boot
+    return (millis() > 5000);
 }
 
 // ISR handlers for each input port
@@ -79,7 +91,7 @@ void initPWM() {
         pwmMappings[i].outputCount = 0;
     }
     loadPWMMappingsFromPreferences();
-    loadPWMOutputPortsFromPreferences();  // <-- Add this line
+    loadPWMOutputPortsFromPreferences();
 }
 
 void attachPWMInterrupt(int port) {
@@ -113,15 +125,12 @@ void detachPWMInterrupt(int port) {
 }
 
 void addPWMMapping(const String &config, bool autoReboot) {
-    // Parse: PMSx,Sy,WySz,WySz...
-    // Example: PMS1,S2,W2S3 means input on Serial1, output to local Serial2 and WCB2 Serial3
-    
     if (!config.startsWith("PMS") && !config.startsWith("pms")) {
         Serial.println("Invalid PWM mapping format");
         return;
     }
     
-    String working = config.substring(3); // Skip "PMS"
+    String working = config.substring(3);
     int commaPos = working.indexOf(',');
     if (commaPos == -1) {
         Serial.println("Invalid format. Use: ?PMSx,Sy,WySz... where x=input port, S=local serial, Wy=WCB#, Sz=serial port");
@@ -134,7 +143,6 @@ void addPWMMapping(const String &config, bool autoReboot) {
         return;
     }
     
-    // Find or create mapping slot
     int slot = -1;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active && pwmMappings[i].inputPort == inputPort) {
@@ -151,7 +159,6 @@ void addPWMMapping(const String &config, bool autoReboot) {
         return;
     }
     
-    // Parse outputs
     working = working.substring(commaPos + 1);
     PWMMapping &mapping = pwmMappings[slot];
     mapping.inputPort = inputPort;
@@ -167,12 +174,10 @@ void addPWMMapping(const String &config, bool autoReboot) {
         int serialPort = 0;
         
         if (output.startsWith("S") || output.startsWith("s")) {
-            // Local output: Sx
-            wcbNum = 0; // 0 means local
+            wcbNum = 0;
             serialPort = output.substring(1).toInt();
         } else if (output.startsWith("W") || output.startsWith("w")) {
-            // Remote output: WySz
-            output = output.substring(1); // Remove 'W'
+            output = output.substring(1);
             int sPos = output.indexOf('S');
             if (sPos == -1) sPos = output.indexOf('s');
             
@@ -200,12 +205,10 @@ void addPWMMapping(const String &config, bool autoReboot) {
     mapping.active = true;
     attachPWMInterrupt(inputPort);
     
-    // Track if we need to configure remote outputs
     bool hasRemoteOutputs = false;
     
-    // Configure output pins for local outputs
     for (int i = 0; i < mapping.outputCount; i++) {
-        if (mapping.outputs[i].wcbNumber == 0) {  // Local output
+        if (mapping.outputs[i].wcbNumber == 0) {
             int txPin = 0;
             switch(mapping.outputs[i].serialPort) {
                 case 1: txPin = SERIAL1_TX_PIN; break;
@@ -220,7 +223,6 @@ void addPWMMapping(const String &config, bool autoReboot) {
             }
             addPWMOutputPort(mapping.outputs[i].serialPort);
         } else {
-            // Remote output - mark for configuration
             hasRemoteOutputs = true;
         }
     }
@@ -229,20 +231,19 @@ void addPWMMapping(const String &config, bool autoReboot) {
     
     Serial.printf("PWM Mapping added: Serial%d -> %d output(s)\n", inputPort, mapping.outputCount);
         
-    // Send remote configuration commands if any (after preferences saved)
     if (hasRemoteOutputs && canSendESPNow()) {
         for (int i = 0; i < mapping.outputCount; i++) {
             if (mapping.outputs[i].wcbNumber != 0) {
                 char remoteCmd[32];
                 snprintf(remoteCmd, sizeof(remoteCmd), "?PO%d", mapping.outputs[i].serialPort);
                 sendESPNowMessage(mapping.outputs[i].wcbNumber, remoteCmd);
-                delay(50);  // Small delay between messages
+                delay(50);
                 if (debugEnabled) {
                     Serial.printf("Sent PWM output config to WCB%d: %s\n", mapping.outputs[i].wcbNumber, remoteCmd);
                 }
             }
         }
-        delay(100);  // Give time for PWM configs to be processed
+        delay(100);
         for (int i = 0; i < mapping.outputCount; i++) {
             if (mapping.outputs[i].wcbNumber != 0) {
                 sendESPNowMessage(mapping.outputs[i].wcbNumber, "?REBOOT");
@@ -260,18 +261,15 @@ void addPWMMapping(const String &config, bool autoReboot) {
     }
 }
 
-
 void removePWMMapping(int inputPort) {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active && pwmMappings[i].inputPort == inputPort) {
             detachPWMInterrupt(inputPort);
             
-            // Remove local output ports and notify remote boards
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
-                if (pwmMappings[i].outputs[j].wcbNumber == 0) {  // Local output
+                if (pwmMappings[i].outputs[j].wcbNumber == 0) {
                     removePWMOutputPort(pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    // Remote output - send removal command
                     char remoteCmd[32];
                     snprintf(remoteCmd, sizeof(remoteCmd), "?PX%d", pwmMappings[i].outputs[j].serialPort);
                     sendESPNowMessage(pwmMappings[i].outputs[j].wcbNumber, remoteCmd);
@@ -286,7 +284,6 @@ void removePWMMapping(int inputPort) {
             savePWMMappingsToPreferences();
             Serial.printf("Removed PWM mapping for Serial%d\n", inputPort);
             
-            // Auto-reboot after 3 seconds
             Serial.println("Rebooting in 3 seconds to apply changes...");
             delay(3000);
             ESP.restart();
@@ -305,10 +302,8 @@ void listPWMMappings() {
             Serial.printf("Input: Serial%d -> Outputs: ", pwmMappings[i].inputPort);
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
-                    // Local output
                     Serial.printf("S%d ", pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    // Remote output
                     Serial.printf("W%dS%d ", 
                         pwmMappings[i].outputs[j].wcbNumber,
                         pwmMappings[i].outputs[j].serialPort);
@@ -322,21 +317,18 @@ void listPWMMappings() {
 }
 
 void clearAllPWMMappings() {
-    // Track which remote boards need clearing commands
-    bool remoteBoards[10] = {false}; // Track WCB 0-9
-    int remotePorts[10][5]; // Track which ports on each board
+    bool remoteBoards[10] = {false};
+    int remotePorts[10][5];
     int remotePortCounts[10] = {0};
     
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
             detachPWMInterrupt(pwmMappings[i].inputPort);
             
-            // Remove all local output ports and track remote ones
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
-                if (pwmMappings[i].outputs[j].wcbNumber == 0) {  // Local output
+                if (pwmMappings[i].outputs[j].wcbNumber == 0) {
                     removePWMOutputPort(pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    // Track remote output for batch clearing
                     int wcb = pwmMappings[i].outputs[j].wcbNumber;
                     remoteBoards[wcb] = true;
                     remotePorts[wcb][remotePortCounts[wcb]++] = pwmMappings[i].outputs[j].serialPort;
@@ -347,7 +339,6 @@ void clearAllPWMMappings() {
         }
     }
     
-    // Send clear commands to all remote boards that had outputs
     if (canSendESPNow()) {
         for (int wcb = 1; wcb <= 9; wcb++) {
             if (remoteBoards[wcb]) {
@@ -355,13 +346,12 @@ void clearAllPWMMappings() {
                     char remoteCmd[32];
                     snprintf(remoteCmd, sizeof(remoteCmd), "?PX%d", remotePorts[wcb][p]);
                     sendESPNowMessage(wcb, remoteCmd);
-                    delay(50);  // Small delay between messages
+                    delay(50);
                     if (debugEnabled) {
                         Serial.printf("Sent PWM output removal to WCB%d: %s\n", wcb, remoteCmd);
                     }
                 }
                 
-                // Send reboot command to this remote board
                 delay(50);
                 sendESPNowMessage(wcb, "?REBOOT");
                 if (debugEnabled) {
@@ -371,7 +361,6 @@ void clearAllPWMMappings() {
         }
     }
     
-    // Clear both preferences namespaces
     preferences.begin("pwm_mappings", false);
     preferences.clear();
     preferences.end();
@@ -382,7 +371,6 @@ void clearAllPWMMappings() {
     
     Serial.println("All PWM mappings cleared");
     
-    // Auto-reboot after 3 seconds (gives remote boards time to process)
     Serial.println("Rebooting in 3 seconds to apply changes...");
     delay(3000);
     ESP.restart();
@@ -396,10 +384,8 @@ void savePWMMappingsToPreferences() {
             String value = String(pwmMappings[i].inputPort) + ",";
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
-                    // Local output
                     value += "S" + String(pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    // Remote output
                     value += "W" + String(pwmMappings[i].outputs[j].wcbNumber) + 
                              "S" + String(pwmMappings[i].outputs[j].serialPort);
                 }
@@ -419,13 +405,70 @@ void loadPWMMappingsFromPreferences() {
         String key = "map" + String(i);
         String value = preferences.getString(key.c_str(), "");
         if (value.length() > 0) {
-            addPWMMapping("PMS" + value, false);  // Pass false to prevent reboot during loading
+            addPWMMapping("PMS" + value, false);
         }
     }
     preferences.end();
 }
 
-// Call this from a FreeRTOS task to handle PWM passthrough
+// NEW STABILITY CHECKING FUNCTIONS
+bool checkPWMStabilityForPort(int portIdx, unsigned long currentValue) {
+    PWMStabilityTracker &tracker = pwmStability[portIdx];
+    
+    tracker.readings[tracker.readingIndex] = currentValue;
+    tracker.readingIndex = (tracker.readingIndex + 1) % 5;
+    
+    unsigned long minVal = tracker.readings[0];
+    unsigned long maxVal = tracker.readings[0];
+    
+    for (int i = 1; i < 5; i++) {
+        if (tracker.readings[i] < minVal) minVal = tracker.readings[i];
+        if (tracker.readings[i] > maxVal) maxVal = tracker.readings[i];
+    }
+    
+    return ((maxVal - minVal) <= PWM_STABILITY_RANGE);
+}
+
+bool shouldTransmitPWM_Port(int portIdx, unsigned long currentValue) {
+    PWMStabilityTracker &tracker = pwmStability[portIdx];
+    unsigned long currentTime = millis();
+    
+    if (currentTime - tracker.lastTransmitTime < PWM_MIN_TRANSMIT_INTERVAL) {
+        return false;
+    }
+    
+    if (tracker.lastTransmittedValue == 0) {
+        tracker.lastTransmittedValue = currentValue;
+        tracker.lastTransmitTime = currentTime;
+        tracker.stabilized = false;
+        return true;
+    }
+    
+    unsigned long change = (currentValue > tracker.lastTransmittedValue) ? 
+                          (currentValue - tracker.lastTransmittedValue) : 
+                          (tracker.lastTransmittedValue - currentValue);
+    
+    bool significantChange = (change >= PWM_CHANGE_THRESHOLD);
+    bool stable = checkPWMStabilityForPort(portIdx, currentValue);
+    
+    if (significantChange) {
+        tracker.lastTransmittedValue = currentValue;
+        tracker.lastTransmitTime = currentTime;
+        tracker.stabilized = false;
+        return true;
+    }
+    
+    if (stable && !tracker.stabilized && change > 0) {
+        tracker.lastTransmittedValue = currentValue;
+        tracker.lastTransmitTime = currentTime;
+        tracker.stabilized = true;
+        return true;
+    }
+    
+    return false;
+}
+
+// MODIFIED FUNCTION WITH STABILITY CHECK
 void processPWMPassthrough() {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (!pwmMappings[i].active) continue;
@@ -436,16 +479,22 @@ void processPWMPassthrough() {
         unsigned long pulseWidth = pwmPulseWidth[portIdx];
         pwmNewData[portIdx] = false;
         
-        // Validate PWM range (typically 1000-2000μs for RC)
         if (pulseWidth < 500 || pulseWidth > 2500) continue;
         
-        // Send to each configured output
+        // Check stability before transmitting
+        if (!shouldTransmitPWM_Port(portIdx, pulseWidth)) {
+            continue;
+        }
+        
+        if (debugEnabled) {
+            Serial.printf("PWM: Serial%d -> %lu μs\n", pwmMappings[i].inputPort, pulseWidth);
+        }
+        
         for (int j = 0; j < pwmMappings[i].outputCount; j++) {
             int targetWCB = pwmMappings[i].outputs[j].wcbNumber;
             int targetPort = pwmMappings[i].outputs[j].serialPort;
             
             if (targetWCB == 0 || targetWCB == WCB_Number) {
-                // Local output - generate PWM on TX pin
                 int txPin = 0;
                 switch(targetPort) {
                     case 1: txPin = SERIAL1_TX_PIN; break;
@@ -460,7 +509,6 @@ void processPWMPassthrough() {
                     digitalWrite(txPin, LOW);
                 }
             } else {
-                // Remote output via ESP-NOW
                 char msg[32];
                 snprintf(msg, sizeof(msg), ";P%d%lu", targetPort, pulseWidth);
                 sendESPNowMessage(targetWCB, msg);
@@ -512,7 +560,6 @@ void addPWMOutputPort(int port) {
         return;
     }
     
-    // Check if already exists
     if (isSerialPortPWMOutput(port)) {
         Serial.printf("Serial%d already configured as PWM output\n", port);
         return;
@@ -525,7 +572,6 @@ void addPWMOutputPort(int port) {
     
     pwmOutputPorts[pwmOutputCount++] = port;
     
-    // Configure the TX pin immediately
     configureRemotePWMOutput(port);
     
     savePWMOutputPortsToPreferences();
@@ -535,7 +581,6 @@ void addPWMOutputPort(int port) {
 void removePWMOutputPort(int port) {
     for (int i = 0; i < pwmOutputCount; i++) {
         if (pwmOutputPorts[i] == port) {
-            // Shift remaining ports down
             for (int j = i; j < pwmOutputCount - 1; j++) {
                 pwmOutputPorts[j] = pwmOutputPorts[j + 1];
             }
@@ -570,4 +615,3 @@ void loadPWMOutputPortsFromPreferences() {
     }
     preferences.end();
 }
-

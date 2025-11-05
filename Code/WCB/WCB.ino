@@ -84,6 +84,18 @@ bool debugKyber = false;
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
 String SoftwareVersion = "5.2_170941ROCT2025";
 
+
+// PWM tracking variables (add to global variables section)
+int lastTransmittedPWM = -1;
+int pwmReadings[5] = {0};  // Store last 5 readings
+int pwmReadingIndex = 0;
+bool pwmStabilized = false;
+unsigned long lastPWMTransmitTime = 0;
+const unsigned long MIN_TRANSMIT_INTERVAL = 100; // ms between transmits
+bool checkPWMStability(int currentPWM, int stabilityRange = 6);
+bool shouldTransmitPWM(int currentPWM, int changeThreshold = 6);
+void transmitPWMValue(int pwmValue, bool viaESPNOW = false);
+
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
 // // Serial port pin assignments
@@ -200,7 +212,6 @@ void turnOffLED(){
   }
 }
 
-
 // Simple reboot helper
 void reboot(){
   Serial.println("Rebooting in 2 seconds");
@@ -251,7 +262,9 @@ void processPWMPassthrough();
 void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
-
+// bool checkPWMStability(int currentPWM, int stabilityRange = 3);
+// bool shouldTransmitPWM(int currentPWM, int changeThreshold = 3);
+// void transmitPWMValue(int pwmValue, bool viaESPNOW = true);
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
   String completeString = stringData + '\r';
@@ -419,7 +432,7 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     // Send ESP-NOW message
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
-        Serial.println("ESP-NOW message sent successfully!");
+        if (debugEnabled) {Serial.println("ESP-NOW message sent successfully!");}
     } else {
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
@@ -1072,6 +1085,169 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 }
 
+bool checkPWMStability(int currentPWM, int stabilityRange) {
+  pwmReadings[pwmReadingIndex] = currentPWM;
+  pwmReadingIndex = (pwmReadingIndex + 1) % 5;
+  
+  int minPWM = pwmReadings[0];
+  int maxPWM = pwmReadings[0];
+  
+  for (int i = 1; i < 5; i++) {
+    if (pwmReadings[i] < minPWM) minPWM = pwmReadings[i];
+    if (pwmReadings[i] > maxPWM) maxPWM = pwmReadings[i];
+  }
+  
+  int range = maxPWM - minPWM;
+  return (range <= stabilityRange);
+}
+
+// bool shouldTransmitPWM(int currentPWM, int changeThreshold) {
+//   unsigned long currentTime = millis();
+  
+//   if (currentTime - lastPWMTransmitTime < MIN_TRANSMIT_INTERVAL) {
+//     return false;
+//   }
+  
+//   if (lastTransmittedPWM == -1) {
+//     lastTransmittedPWM = currentPWM;
+//     lastPWMTransmitTime = currentTime;
+//     return true;
+//   }
+  
+//   int change = abs(currentPWM - lastTransmittedPWM);
+//   bool significantChange = (change >= changeThreshold);
+//   bool stable = checkPWMStability(currentPWM);
+  
+//   if (significantChange || (stable && change > 0)) {
+//     lastTransmittedPWM = currentPWM;
+//     lastPWMTransmitTime = currentTime;
+//     pwmStabilized = stable;
+//     return true;
+//   }
+  
+//   return false;
+// }
+// bool shouldTransmitPWM(int currentPWM, int changeThreshold) {
+//   unsigned long currentTime = millis();
+  
+//   // Check minimum time interval
+//   if (currentTime - lastPWMTransmitTime < MIN_TRANSMIT_INTERVAL) {
+//     return false;
+//   }
+  
+//   // First transmission
+//   if (lastTransmittedPWM == -1) {
+//     lastTransmittedPWM = currentPWM;
+//     lastPWMTransmitTime = currentTime;
+//     pwmStabilized = false;
+//     return true;
+//   }
+  
+//   // Calculate change from last transmitted value
+//   int change = abs(currentPWM - lastTransmittedPWM);
+  
+//   // Check if it's a significant change (above threshold)
+//   bool significantChange = (change >= changeThreshold);
+  
+//   // Check if readings are now stable
+//   bool stable = checkPWMStability(currentPWM, changeThreshold);
+  
+//   // Transmit if:
+//   // 1. Significant change detected (always send), OR
+//   // 2. Just became stable AND we haven't sent stable value yet
+//   if (significantChange) {
+//     lastTransmittedPWM = currentPWM;
+//     lastPWMTransmitTime = currentTime;
+//     pwmStabilized = false;  // Reset stability flag on significant change
+//     return true;
+//   }
+  
+//   // If stable AND we haven't sent the final stable value yet
+//   if (stable && !pwmStabilized) {
+//     lastTransmittedPWM = currentPWM;
+//     lastPWMTransmitTime = currentTime;
+//     pwmStabilized = true;  // Mark that we've sent the stable value
+//     return true;
+//   }
+  
+//   // Otherwise, don't transmit (already stable and transmitted)
+//   return false;
+// }
+
+bool shouldTransmitPWM(int currentPWM, int changeThreshold) {
+  unsigned long currentTime = millis();
+  
+  // Check minimum time interval - MUST return false if too soon
+  if (currentTime - lastPWMTransmitTime < MIN_TRANSMIT_INTERVAL) {
+    if (debugEnabled) {
+      Serial.printf("Blocked: Too soon (only %lums since last)\n", 
+                    currentTime - lastPWMTransmitTime);
+    }
+    return false;
+  }
+  
+  // First transmission
+  if (lastTransmittedPWM == -1) {
+    if (debugEnabled) Serial.println("First transmission");
+    lastTransmittedPWM = currentPWM;
+    lastPWMTransmitTime = currentTime;
+    pwmStabilized = false;
+    return true;
+  }
+  
+  // Calculate change from last transmitted value
+  int change = abs(currentPWM - lastTransmittedPWM);
+  
+  // Check if it's a significant change (above threshold)
+  bool significantChange = (change >= changeThreshold);
+  
+  // Check if readings are now stable
+  bool stable = checkPWMStability(currentPWM, changeThreshold);
+  
+  if (debugEnabled) {
+    Serial.printf("PWM Check: current=%d, last=%d, change=%d, stable=%s, pwmStabilized=%s\n",
+                  currentPWM, lastTransmittedPWM, change, 
+                  stable ? "YES" : "NO", pwmStabilized ? "YES" : "NO");
+  }
+  
+  // Transmit if significant change detected
+  if (significantChange) {
+    if (debugEnabled) Serial.println("Transmit: Significant change");
+    lastTransmittedPWM = currentPWM;
+    lastPWMTransmitTime = currentTime;
+    pwmStabilized = false;
+    return true;
+  }
+  
+  // If stable AND we haven't sent the final stable value yet
+  if (stable && !pwmStabilized) {
+    if (debugEnabled) Serial.println("Transmit: Stabilized");
+    lastTransmittedPWM = currentPWM;
+    lastPWMTransmitTime = currentTime;
+    pwmStabilized = true;
+    return true;
+  }
+  
+  // Otherwise, don't transmit
+  return false;
+}
+
+void transmitPWMValue(int pwmValue, bool viaESPNOW) {
+  String pwmCommand = "PWM:" + String(pwmValue);
+  
+  if (viaESPNOW) {
+    sendESPNowMessage(0, pwmCommand.c_str());
+  }
+  
+  if (serialBroadcastEnabled[0]) {
+    writeSerialString(Serial1, pwmCommand);
+  }
+  
+  if (debugEnabled) {
+    Serial.printf("Transmitted PWM: %d (Stable: %s)\n", 
+                  pwmValue, pwmStabilized ? "Yes" : "No");
+  }
+}
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -1382,13 +1558,25 @@ if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
 }
 
 void loop() {
+    // processCommandGroups();
 
-  // Handle all queued commands
+  // PWM monitoring - only check every 20ms
+  // static unsigned long lastPWMCheck = 0;
+  // if (millis() - lastPWMCheck >= 20) {
+  //   lastPWMCheck = millis();
+  //   int currentPWM = analogRead(36);  // Your PWM pin
+    
+  //   if (shouldTransmitPWM(currentPWM, 3)) {
+  //     transmitPWMValue(currentPWM);
+  //   }
+  // }
+
+  // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
     String commandStr(inItem.cmd);
-    free(inItem.cmd); // release dynamic memory
+    free(inItem.cmd);
     handleSingleCommand(commandStr, inItem.sourceID);
   }
 }

@@ -18,6 +18,17 @@ struct PWMMapping {
 extern PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 extern int activePWMCount;
 
+// PWM stability tracking (one per input port)
+struct PWMStabilityTracker {
+    unsigned long lastTransmittedValue;
+    unsigned long readings[5];
+    int readingIndex;
+    bool stabilized;
+    unsigned long lastTransmitTime;
+};
+
+extern PWMStabilityTracker pwmStability[5];  // One tracker per serial port
+
 void initPWM();
 void addPWMMapping(const String &config, bool autoReboot = true);
 void removePWMMapping(int inputPort);
