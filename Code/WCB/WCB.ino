@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.2_170941ROCT2025                                    *****////
+///*****                                          Version 5.3_050816RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,7 +82,7 @@ bool debugEnabled = false;
 bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.2_170941ROCT2025";
+String SoftwareVersion = "5.3_050816RNOV2025";
 
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
@@ -245,15 +245,12 @@ String storedCommands[MAX_STORED_COMMANDS];
 // ============================= Forward Declarations =============================
 void writeSerialString(Stream &serialPort, String stringData);
 void sendESPNowMessage(uint8_t target, const char *message);
-// void handleSingleCommand(const String &cmd, int sourceID);
 void enqueueCommand(const String &cmd, int sourceID);
 void processPWMPassthrough();
 void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
-// bool checkPWMStability(int currentPWM, int stabilityRange = 3);
-// bool shouldTransmitPWM(int currentPWM, int changeThreshold = 3);
-// void transmitPWMValue(int pwmValue, bool viaESPNOW = true);
+
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
   String completeString = stringData + '\r';
@@ -383,7 +380,6 @@ void printConfigInfo() {
 void sendESPNowMessage(uint8_t target, const char *message) {
     // Skip broadcast if last was from ESP-NOW
     if (target == 0 && lastReceivedViaESPNOW) {
-      // Serial.println("insdie retrun");
         return;
     }
       // turnOnLEDESPNOW();
