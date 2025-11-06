@@ -48,6 +48,7 @@ void saveWCBQuantityPreferences(int quantity);
 
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();
+void resetBroadcastSettingsNamespace();
 void printBaudRates();
 void recallBaudRatefromSerial(int ser);
 void setBaudRateForSerial(int ser);

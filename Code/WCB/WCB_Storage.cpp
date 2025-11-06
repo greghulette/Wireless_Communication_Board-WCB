@@ -163,24 +163,46 @@ void printBaudRates() {
     }
 }
 
-// Load broadcast settings from preferences
-void loadBroadcastSettingsFromPreferences() {
-    preferences.begin("broadcast_settings", true);
+void saveBroadcastSettingsToPreferences() {
+    preferences.begin("bdcst_set", false);
+    Serial.println("DEBUG: Saving broadcast (INT):");
     for (int i = 0; i < 5; i++) {
-        String key = "BroadcastSerial" + String(i + 1);
-        serialBroadcastEnabled[i] = preferences.getBool(key.c_str(), true); // FIX: Use `.c_str()`
+        String key = "S" + String(i + 1);
+        int value = serialBroadcastEnabled[i] ? 1 : 0;
+        size_t result = preferences.putInt(key.c_str(), value);
+        // Serial.printf("  %s = %d (bytes written: %d)\n", key.c_str(), value, result);
     }
     preferences.end();
 }
 
-// Save broadcast settings to preferences
-void saveBroadcastSettingsToPreferences() {
-    preferences.begin("broadcast_settings", false);
+void loadBroadcastSettingsFromPreferences() {
+    preferences.begin("bdcst_set", true);
     for (int i = 0; i < 5; i++) {
-        String key = "BroadcastSerial" + String(i + 1);
-        preferences.putBool(key.c_str(), serialBroadcastEnabled[i]); // FIX: Use `.c_str()`
+        String key = "S" + String(i + 1);
+        int value = preferences.getInt(key.c_str(), 1);  // default = 1 (enabled)
+        serialBroadcastEnabled[i] = (value == 1);
     }
     preferences.end();
+}
+void resetBroadcastSettingsNamespace() {
+    Serial.println("Clearing broadcast_settings namespace...");
+    preferences.begin("bdcst_set", false);
+    preferences.clear();
+    preferences.end();
+    
+    delay(100);
+    
+    Serial.println("Recreating broadcast_settings with defaults...");
+    preferences.begin("bdcst_set", false);
+    for (int i = 0; i < 5; i++) {
+        String key = "S" + String(i + 1);
+        int result = preferences.putInt(key.c_str(), true);
+        Serial.printf("  Created %s = true (result: %s)\n", 
+                      key.c_str(), 
+                      result ? "SUCCESS" : "FAILED");
+    }
+    preferences.end();
+    Serial.println("Done. Please reboot.");
 }
 
 // Load MAC address preferences
@@ -451,7 +473,7 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    preferences.begin("broadcast_settings", false);
+    preferences.begin("bdcst_set", false);
     preferences.clear();
     preferences.end();
 
