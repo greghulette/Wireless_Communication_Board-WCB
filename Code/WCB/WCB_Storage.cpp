@@ -184,6 +184,7 @@ void loadBroadcastSettingsFromPreferences() {
     }
     preferences.end();
 }
+
 void resetBroadcastSettingsNamespace() {
     Serial.println("Clearing broadcast_settings namespace...");
     preferences.begin("bdcst_set", false);
