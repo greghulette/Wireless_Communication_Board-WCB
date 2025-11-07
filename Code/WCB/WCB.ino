@@ -1415,7 +1415,7 @@ if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
 }
 
 void loop() {
-
+  processCommandGroups();
   // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;

@@ -1,7 +1,6 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-#include "WCB_PWM.h"
 
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
@@ -156,51 +155,55 @@ void saveBaudRatesToPreferences() {
     preferences.end();
 }
 
-// void printBaudRates() {
-//     Serial.println("Serial Baud Rates and Broadcast Settings:");
-//     for (int i = 0; i < 5; i++) {
-//         Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-//                       i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
-//     }
-// }
 void printBaudRates() {
-    Serial.println("--------------- Serial Settings ----------------------");
+    Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
-        int port = i + 1;
-        
-        if ((port == 1 || port == 2) && Kyber_Local) {
-            Serial.printf(" Serial%d: Used by Kyber (Local)\n", port);
-        } else if (port == 1 && Kyber_Remote) {
-            Serial.printf(" Serial%d: Used by Kyber (Remote)\n", port);
-        } else if (isSerialPortUsedForPWMInput(port)) {
-            Serial.printf(" Serial%d: Configured for PWM Input\n", port);
-        } else if (isSerialPortPWMOutput(port)) {
-            Serial.printf(" Serial%d: Configured for PWM Output\n", port);
-        } else {
-            Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                          port, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
-        }
+        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
+                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
     }
 }
 
-// Load broadcast settings from preferences
-void loadBroadcastSettingsFromPreferences() {
-    preferences.begin("broadcast_settings", true);
-    for (int i = 0; i < 5; i++) {
-        String key = "BroadcastSerial" + String(i + 1);
-        serialBroadcastEnabled[i] = preferences.getBool(key.c_str(), true); // FIX: Use `.c_str()`
-    }
-    preferences.end();
-}
-
-// Save broadcast settings to preferences
 void saveBroadcastSettingsToPreferences() {
-    preferences.begin("broadcast_settings", false);
+    preferences.begin("bdcst_set", false);
+    Serial.println("DEBUG: Saving broadcast (INT):");
     for (int i = 0; i < 5; i++) {
-        String key = "BroadcastSerial" + String(i + 1);
-        preferences.putBool(key.c_str(), serialBroadcastEnabled[i]); // FIX: Use `.c_str()`
+        String key = "S" + String(i + 1);
+        int value = serialBroadcastEnabled[i] ? 1 : 0;
+        size_t result = preferences.putInt(key.c_str(), value);
+        // Serial.printf("  %s = %d (bytes written: %d)\n", key.c_str(), value, result);
     }
     preferences.end();
+}
+
+void loadBroadcastSettingsFromPreferences() {
+    preferences.begin("bdcst_set", true);
+    for (int i = 0; i < 5; i++) {
+        String key = "S" + String(i + 1);
+        int value = preferences.getInt(key.c_str(), 1);  // default = 1 (enabled)
+        serialBroadcastEnabled[i] = (value == 1);
+    }
+    preferences.end();
+}
+
+void resetBroadcastSettingsNamespace() {
+    Serial.println("Clearing broadcast_settings namespace...");
+    preferences.begin("bdcst_set", false);
+    preferences.clear();
+    preferences.end();
+    
+    delay(100);
+    
+    Serial.println("Recreating broadcast_settings with defaults...");
+    preferences.begin("bdcst_set", false);
+    for (int i = 0; i < 5; i++) {
+        String key = "S" + String(i + 1);
+        int result = preferences.putInt(key.c_str(), true);
+        Serial.printf("  Created %s = true (result: %s)\n", 
+                      key.c_str(), 
+                      result ? "SUCCESS" : "FAILED");
+    }
+    preferences.end();
+    Serial.println("Done. Please reboot.");
 }
 
 // Load MAC address preferences
@@ -302,7 +305,7 @@ void setCommandDelimiter(char c) {
 void loadStoredCommandsFromPreferences() {
     preferences.begin("stored_commands", true);
     for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        char storedCommandBuffer[200] = {0};
+        char storedCommandBuffer[1800] = {0};
         String key = "CMD" + String(i + 1);
         preferences.getString(key.c_str(), storedCommandBuffer, sizeof(storedCommandBuffer));
         storedCommands[i] = String(storedCommandBuffer);
@@ -324,46 +327,56 @@ void recallCommandSlot(const String &key, int sourceID) {
     Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
 
     // Enqueue for execution
-    parseCommandsAndEnqueue(recalledCommand, sourceID);
+    // parseCommandsAndEnqueue(recalledCommand, sourceID);
+    if (isTimerCommand(recalledCommand)) {
+  parseCommandGroups(recalledCommand);
+} else {
+  parseCommandsAndEnqueue(recalledCommand, sourceID);
+}
+
 }
 
 // Save stored commands to preferences
 void saveStoredCommandsToPreferences(const String &message) {
-int commaIndex = message.indexOf(','); // Find first `,`
-    if (commaIndex == -1 || commaIndex == 0) {
-        Serial.println("Invalid format. Use ?Ckey,value");
-        return;
-    }
+  int commaIndex = message.indexOf(',');
+  if (commaIndex == -1 || commaIndex == 0) {
+    Serial.println("Invalid format. Use ?Ckey,value");
+    return;
+  }
 
-    String key = message.substring(0, commaIndex);
-    String value = message.substring(commaIndex + 1);
-    key.trim();
-    value.trim();
+  String key = message.substring(0, commaIndex);
+  String value = message.substring(commaIndex + 1);
+  key.trim();
+  value.trim();
 
-    if (key.length() == 0 || value.length() == 0) {
-        Serial.println("Key or value cannot be empty.");
-        return;
-    }
+  if (key.length() == 0 || value.length() == 0) {
+    Serial.println("Key or value cannot be empty.");
+    return;
+  }
 
-    // Open Preferences in read-write mode
-    preferences.begin("stored_cmds", false);
-    
-    // Save the command
-    preferences.putString(key.c_str(), value);
+  preferences.begin("stored_cmds", false);
+  preferences.putString(key.c_str(), value);
 
-    // Retrieve the existing key list
-    String existingKeys = preferences.getString("key_list", "");
-    
-    // Add new key only if it's not already present
-    if (existingKeys.indexOf("," + key + ",") == -1) {
-        existingKeys += key + ",";
-        preferences.putString("key_list", existingKeys);
-    }
+  String existingKeys = preferences.getString("key_list", "");
+  bool alreadyExists = false;
 
-    preferences.end();
+  // Check against variations to catch duplicates
+  if (existingKeys == key + "," ||
+      existingKeys.startsWith(key + ",") ||
+      existingKeys.endsWith("," + key + ",") ||
+      existingKeys.indexOf("," + key + ",") != -1) {
+    alreadyExists = true;
+  }
 
-    Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+  if (!alreadyExists) {
+    existingKeys += key + ",";
+    preferences.putString("key_list", existingKeys);
+  }
+
+  preferences.end();
+  Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
 }
+
 
 void eraseStoredCommandByName(const String &name) {
     if (name.length() == 0) {
@@ -423,22 +436,24 @@ void listStoredCommands() {
 
     Serial.println("\n--- Stored Commands ---");
     int startIdx = 0;
-    while (true) {
-        int commaIndex = keyList.indexOf(',', startIdx);
-        if (commaIndex == -1) break;
+while (startIdx < keyList.length()) {
+    int commaIndex = keyList.indexOf(',', startIdx);
+    if (commaIndex == -1) commaIndex = keyList.length();
 
-        String key = keyList.substring(startIdx, commaIndex);
-        key.trim();
-        
-        if (key.length() > 0) {
-            preferences.begin("stored_cmds", true);
-            String value = preferences.getString(key.c_str(), "");
-            preferences.end();
-            Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
-        }
+    String key = keyList.substring(startIdx, commaIndex);
+    key.trim();
 
-        startIdx = commaIndex + 1;
+    if (key.length() > 0) {
+        preferences.begin("stored_cmds", true);
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+        Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
     }
+
+    startIdx = commaIndex + 1;
+}
+
+
     Serial.println("--- End of Stored Commands ---\n");
 }
 
@@ -459,7 +474,7 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    preferences.begin("broadcast_settings", false);
+    preferences.begin("bdcst_set", false);
     preferences.clear();
     preferences.end();
 
@@ -551,6 +566,5 @@ void printKyberSettings(){
   }
   // Serial.printf("Kyber is %s\n", temp);
 };
-
 
 
