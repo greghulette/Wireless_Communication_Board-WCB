@@ -715,6 +715,9 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
         return;
+    } else if (message == "reset_broadcast" || message == "RESET_BROADCAST") {
+        resetBroadcastSettingsNamespace();
+        return;
     } else if (message.startsWith("maestro_enable") || message.startsWith("MAESTRO_ENABLE")) {
         enableMaestroSerialBaudRate();
         return;
