@@ -28,49 +28,49 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   } else if (maestroID == 1 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 1");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(1,temp_espnowmessage.c_str());
   } else if (maestroID == 2 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 2");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(2,temp_espnowmessage.c_str());
   } else if (maestroID == 3 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 3");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(3,temp_espnowmessage.c_str());
   } else if (maestroID == 4 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 4");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(4,temp_espnowmessage.c_str());
   } else if (maestroID == 5 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 5");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(5,temp_espnowmessage.c_str());
   } else if (maestroID == 6 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 6");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(6,temp_espnowmessage.c_str());
   } else if (maestroID == 7 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 7");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(7,temp_espnowmessage.c_str());
   } else if (maestroID == 8 ) {
     String temp_espnowmessage = ";M" + String(maestroID) + String(scriptNumber);
     Serial.println(temp_espnowmessage);
-    Serial.println("Inside Maestro 8");
+    Serial.printf("Sent Maestro Command to ID %d, Script %d\n", maestroID, scriptNumber);
     // lastReceivedViaESPNOW = false;
     sendESPNowMessage(8,temp_espnowmessage.c_str());
   }
