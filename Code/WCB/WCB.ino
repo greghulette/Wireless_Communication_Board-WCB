@@ -598,87 +598,10 @@ void forwardDataFromKyber() {
   if (gotAny && burstLen > 0 && Serial2.available() == 0) {
     sendESPNowRaw(espnowBurst, burstLen);
     burstLen = 0;
-    Serial.println(); // newline after hex dump
+    if (debugKyber) Serial.println();  // Format: newline after hex dump for readability
   }
 }
-// void forwardDataFromKyber() {
-//   static uint8_t espnowBurst[64];   // tune if you want
-//   static size_t  burstLen = 0;
-//   static unsigned long lastHeartbeat = 0;  // ADD THIS
 
-//   // ADD THIS HEARTBEAT
-//   if (debugKyber && millis() - lastHeartbeat > 5000) {
-//     Serial.println("\n[Kyber] forwardDataFromKyber() task alive");
-//     Serial.printf("[Kyber] Serial2.available(): %d bytes\n", Serial2.available());
-//     lastHeartbeat = millis();
-//   }
-
-//   bool gotAny = false;
-
-//   while (Serial2.available()) {
-//     int b = Serial2.read();
-//     if (b < 0) break;
-
-//     // Forward immediately to Serial1
-//     Serial1.write((uint8_t)b);
-
-//     // Debug (hex)
-//     if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
-    
-
-//     // Accumulate for ESP-NOW
-//     if (burstLen < sizeof(espnowBurst)) {
-//       espnowBurst[burstLen++] = (uint8_t)b;
-//     } else {
-//       // buffer full -> flush now
-//       sendESPNowRaw(espnowBurst, burstLen);
-//       burstLen = 0;
-//       espnowBurst[burstLen++] = (uint8_t)b;
-//     }
-
-//     gotAny = true;
-//   }
-
-//   Serial1.flush();
-
-//   // If this call consumed a burst and UART is now idle, flush once to ESP-NOW
-//   if (gotAny && burstLen > 0 && Serial2.available() == 0) {
-//     sendESPNowRaw(espnowBurst, burstLen);
-//     burstLen = 0;
-//     if (debugKyber) Serial.println();  // newline after hex dump
-//   }
-// }
-
-// void forwardMaestroDataToLocalKyber() {
-//   static uint8_t buffer[64];
-//   static unsigned long lastHeartbeat = 0;  // ADD THIS
-
-//   // ADD THIS HEARTBEAT
-//   if (debugKyber && millis() - lastHeartbeat > 5000) {
-//     Serial.println("\n[Kyber] forwardMaestroDataToLocalKyber() task alive");
-//     Serial.printf("[Kyber] Serial1.available(): %d bytes\n", Serial1.available());
-//     lastHeartbeat = millis();
-//   }
-
-//   // **Check if Serial1 has data**
-//   if (Serial1.available() > 0) {
-//     int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-
-//     if (debugKyber) {
-//       Serial.printf("\n[Maestro→Kyber] %d bytes from Serial1: ", len);
-//       for (int i = 0; i < len; i++) {
-//         Serial.printf("%02X ", buffer[i]);
-//       }
-//       Serial.println();
-//     }
-
-//     // **Forward data to Serial2**
-//     Serial1.write(buffer, len);
-//     Serial1.flush(); // Ensure immediate transmission
-//     // **Forward via ESP-NOW broadcast**
-//     if (Kyber_Remote){sendESPNowRaw(buffer, len);}
-//   }
-// }
 void forwardMaestroDataToLocalKyber() {
   static uint8_t buffer[64];
 
@@ -1555,7 +1478,6 @@ if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
         Serial.println("PWM Task Created");
     }
 
-  // xTaskCreatePinnedToCore(PWMTask, "PWM Task", 2048, NULL, 2, NULL, 0); 
 
   delay(150);     
   turnOffLED();
