@@ -1,7 +1,7 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-
+#include "WCB_PWM.h"
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
 extern unsigned long baudRates[5];

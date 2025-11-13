@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_101455RNOV2025                                    *****////
+///*****                                          Version 5.3_122034RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -76,7 +76,7 @@ bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this boa
 String Kyber_Location;
 
 // Flag to track if last received message was via ESP-NOW
-volatile bool lastReceivedViaESPNOW = false;
+bool lastReceivedViaESPNOW = false;
 // Debugging flag (default: off)
 bool debugEnabled = false;
 bool debugKyber = false;
@@ -447,7 +447,7 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
         
         // Set Target ID to "0" -> Means raw bridging data
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0");
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
 
         msg.structCommandIncluded = true;
 
@@ -598,10 +598,87 @@ void forwardDataFromKyber() {
   if (gotAny && burstLen > 0 && Serial2.available() == 0) {
     sendESPNowRaw(espnowBurst, burstLen);
     burstLen = 0;
-    Serial.println();  // newline after hex dump
+    Serial.println(); // newline after hex dump
   }
 }
+// void forwardDataFromKyber() {
+//   static uint8_t espnowBurst[64];   // tune if you want
+//   static size_t  burstLen = 0;
+//   static unsigned long lastHeartbeat = 0;  // ADD THIS
 
+//   // ADD THIS HEARTBEAT
+//   if (debugKyber && millis() - lastHeartbeat > 5000) {
+//     Serial.println("\n[Kyber] forwardDataFromKyber() task alive");
+//     Serial.printf("[Kyber] Serial2.available(): %d bytes\n", Serial2.available());
+//     lastHeartbeat = millis();
+//   }
+
+//   bool gotAny = false;
+
+//   while (Serial2.available()) {
+//     int b = Serial2.read();
+//     if (b < 0) break;
+
+//     // Forward immediately to Serial1
+//     Serial1.write((uint8_t)b);
+
+//     // Debug (hex)
+//     if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
+    
+
+//     // Accumulate for ESP-NOW
+//     if (burstLen < sizeof(espnowBurst)) {
+//       espnowBurst[burstLen++] = (uint8_t)b;
+//     } else {
+//       // buffer full -> flush now
+//       sendESPNowRaw(espnowBurst, burstLen);
+//       burstLen = 0;
+//       espnowBurst[burstLen++] = (uint8_t)b;
+//     }
+
+//     gotAny = true;
+//   }
+
+//   Serial1.flush();
+
+//   // If this call consumed a burst and UART is now idle, flush once to ESP-NOW
+//   if (gotAny && burstLen > 0 && Serial2.available() == 0) {
+//     sendESPNowRaw(espnowBurst, burstLen);
+//     burstLen = 0;
+//     if (debugKyber) Serial.println();  // newline after hex dump
+//   }
+// }
+
+// void forwardMaestroDataToLocalKyber() {
+//   static uint8_t buffer[64];
+//   static unsigned long lastHeartbeat = 0;  // ADD THIS
+
+//   // ADD THIS HEARTBEAT
+//   if (debugKyber && millis() - lastHeartbeat > 5000) {
+//     Serial.println("\n[Kyber] forwardMaestroDataToLocalKyber() task alive");
+//     Serial.printf("[Kyber] Serial1.available(): %d bytes\n", Serial1.available());
+//     lastHeartbeat = millis();
+//   }
+
+//   // **Check if Serial1 has data**
+//   if (Serial1.available() > 0) {
+//     int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
+
+//     if (debugKyber) {
+//       Serial.printf("\n[Maestro→Kyber] %d bytes from Serial1: ", len);
+//       for (int i = 0; i < len; i++) {
+//         Serial.printf("%02X ", buffer[i]);
+//       }
+//       Serial.println();
+//     }
+
+//     // **Forward data to Serial2**
+//     Serial1.write(buffer, len);
+//     Serial1.flush(); // Ensure immediate transmission
+//     // **Forward via ESP-NOW broadcast**
+//     if (Kyber_Remote){sendESPNowRaw(buffer, len);}
+//   }
+// }
 void forwardMaestroDataToLocalKyber() {
   static uint8_t buffer[64];
 
@@ -1286,7 +1363,6 @@ void setup() {
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
-  initPWM();  // <-- This loads PWM mappings from preferences
 
   printBaudRates();
   Serial.println("-------------------------------------------------------");
@@ -1301,21 +1377,78 @@ void setup() {
 
   // Initialize hardware serial - but skip ports used for PWM input
  // Initialize hardware serial - but skip ports used for PWM or Kyber
-if (!Kyber_Local && !Kyber_Remote && !isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+// if (!Kyber_Local && !Kyber_Remote && !isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+//     Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+// }
+// if (!Kyber_Local && !isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+//     Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+// }
+// if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
+//     Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+// }
+// if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
+//     Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+// }
+// if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
+//     Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+// }
+
+// Initialize hardware serial
+// Initialize hardware serial with proper priority:
+// 1. Kyber has top priority (critical communication)
+// 2. PWM can use ports when Kyber doesn't need them
+// 3. Normal serial communication otherwise
+
+if (Kyber_Local) {
+    // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
     Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-}
-if (!Kyber_Local && !isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
     Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+    Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
+} else if (Kyber_Remote) {
+    // Kyber Remote REQUIRES Serial1 (Maestro only)
+    Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+    Serial.println("Initialized Serial1 for Kyber Remote mode");
+    
+    // Serial2 available for PWM or normal serial
+    if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+        Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+    } else {
+        Serial.println("Serial2 reserved for PWM - skipping UART init");
+    }
+} else {
+    // No Kyber - check PWM usage for both Serial1 and Serial2
+    if (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+        Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+    } else {
+        Serial.println("Serial1 reserved for PWM - skipping UART init");
+    }
+    
+    if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+        Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+    } else {
+        Serial.println("Serial2 reserved for PWM - skipping UART init");
+    }
 }
+
+// Serial3-5: Only initialize if NOT used for PWM
 if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
     Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+} else {
+    Serial.println("Serial3 reserved for PWM - skipping UART init");
 }
+
 if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
     Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+} else {
+    Serial.println("Serial4 reserved for PWM - skipping UART init");
 }
+
 if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
     Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+} else {
+    Serial.println("Serial5 reserved for PWM - skipping UART init");
 }
+  initPWM();  // <-- This loads PWM mappings from preferences
 
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -1409,8 +1542,20 @@ if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
       xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Remote Task Created");
   }
+    bool hasPWMMappings = false;
+    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+        if (pwmMappings[i].active) {
+            hasPWMMappings = true;
+            break;
+        }
+    }
+    
+    if (hasPWMMappings) {
+        xTaskCreatePinnedToCore(PWMTask, "PWM Task", 2048, NULL, 2, NULL, 0);
+        Serial.println("PWM Task Created");
+    }
 
-  xTaskCreatePinnedToCore(PWMTask, "PWM Task", 2048, NULL, 2, NULL, 0); 
+  // xTaskCreatePinnedToCore(PWMTask, "PWM Task", 2048, NULL, 2, NULL, 0); 
 
   delay(150);     
   turnOffLED();

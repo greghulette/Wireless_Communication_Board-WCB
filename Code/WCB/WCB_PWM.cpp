@@ -7,11 +7,13 @@ extern Preferences preferences;
 extern int WCB_Number;
 extern void sendESPNowMessage(uint8_t target, const char *message);
 extern bool debugEnabled;
+extern bool Kyber_Local;
+extern bool Kyber_Remote;
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
 
-// PWM Stability Tracking - NEW
+// PWM Stability Tracking
 PWMStabilityTracker pwmStability[5] = {
     {0, {0}, 0, false, 0},
     {0, {0}, 0, false, 0},
@@ -36,6 +38,23 @@ extern bool espNowInitialized;
 // Helper function
 bool canSendESPNow() {
     return (millis() > 5000);
+}
+
+// Validation function to prevent PWM conflicts with Kyber
+bool canUsePWMOnPort(int port) {
+    // Serial1 is reserved when Kyber_Local or Kyber_Remote
+    if (port == 1 && (Kyber_Local || Kyber_Remote)) {
+        Serial.println("❌ Cannot use PWM on Serial1 - reserved for Maestro/Kyber");
+        return false;
+    }
+    
+    // Serial2 is reserved when Kyber_Local
+    if (port == 2 && Kyber_Local) {
+        Serial.println("❌ Cannot use PWM on Serial2 - reserved for Kyber");
+        return false;
+    }
+    
+    return true;
 }
 
 // ISR handlers for each input port
@@ -95,6 +114,11 @@ void initPWM() {
 }
 
 void attachPWMInterrupt(int port) {
+    // Check if port can be used for PWM
+    if (!canUsePWMOnPort(port)) {
+        return;
+    }
+    
     int pin = 0;
     void (*isr)() = nullptr;
     
@@ -143,6 +167,12 @@ void addPWMMapping(const String &config, bool autoReboot) {
         return;
     }
     
+    // Validate input port is not in use by Kyber
+    if (!canUsePWMOnPort(inputPort)) {
+        Serial.println("PWM mapping blocked - input port in use by Kyber/Maestro");
+        return;
+    }
+    
     int slot = -1;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active && pwmMappings[i].inputPort == inputPort) {
@@ -188,9 +218,14 @@ void addPWMMapping(const String &config, bool autoReboot) {
         }
         
         if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
-            mapping.outputs[mapping.outputCount].wcbNumber = wcbNum;
-            mapping.outputs[mapping.outputCount].serialPort = serialPort;
-            mapping.outputCount++;
+            // Validate local output ports aren't in use by Kyber
+            if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
+                Serial.printf("⚠️  Skipping output Serial%d - reserved for Kyber\n", serialPort);
+            } else {
+                mapping.outputs[mapping.outputCount].wcbNumber = wcbNum;
+                mapping.outputs[mapping.outputCount].serialPort = serialPort;
+                mapping.outputCount++;
+            }
         }
         
         if (nextComma == -1) break;
@@ -375,6 +410,7 @@ void clearAllPWMMappings() {
     delay(3000);
     ESP.restart();
 }
+
 void savePWMMappingsToPreferences() {
     preferences.begin("pwm_mappings", false);
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
@@ -410,7 +446,7 @@ void loadPWMMappingsFromPreferences() {
     preferences.end();
 }
 
-// NEW STABILITY CHECKING FUNCTIONS
+// Stability checking functions
 bool checkPWMStabilityForPort(int portIdx, unsigned long currentValue) {
     PWMStabilityTracker &tracker = pwmStability[portIdx];
     
@@ -467,7 +503,6 @@ bool shouldTransmitPWM_Port(int portIdx, unsigned long currentValue) {
     return false;
 }
 
-// MODIFIED FUNCTION WITH STABILITY CHECK
 void processPWMPassthrough() {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (!pwmMappings[i].active) continue;
@@ -526,6 +561,11 @@ bool isSerialPortUsedForPWMInput(int port) {
 }
 
 void configureRemotePWMOutput(int serialPort) {
+    // Check if port can be used for PWM
+    if (!canUsePWMOnPort(serialPort)) {
+        return;
+    }
+    
     int txPin = 0;
     switch(serialPort) {
         case 1: txPin = SERIAL1_TX_PIN; break;
@@ -556,6 +596,11 @@ bool isSerialPortPWMOutput(int port) {
 void addPWMOutputPort(int port) {
     if (port < 1 || port > 5) {
         Serial.println("Invalid port number. Must be 1-5");
+        return;
+    }
+    
+    // Check if port can be used for PWM
+    if (!canUsePWMOnPort(port)) {
         return;
     }
     
@@ -604,13 +649,49 @@ void savePWMOutputPortsToPreferences() {
 
 void loadPWMOutputPortsFromPreferences() {
     preferences.begin("pwm_outputs", true);
-    pwmOutputCount = preferences.getInt("count", 0);
-    for (int i = 0; i < pwmOutputCount; i++) {
+    int savedCount = preferences.getInt("count", 0);
+    preferences.end();
+    
+    if (savedCount == 0) return;
+    
+    // Load and validate each port
+    preferences.begin("pwm_outputs", true);
+    pwmOutputCount = 0;  // Reset counter
+    bool needsCleanup = false;
+    
+    for (int i = 0; i < savedCount; i++) {
         String key = "port" + String(i);
-        pwmOutputPorts[i] = preferences.getInt(key.c_str(), 0);
-        if (pwmOutputPorts[i] > 0) {
-            configureRemotePWMOutput(pwmOutputPorts[i]);
+        int port = preferences.getInt(key.c_str(), 0);
+        
+        if (port > 0) {
+            // Check if this port conflicts with Kyber
+            if (canUsePWMOnPort(port)) {
+                pwmOutputPorts[pwmOutputCount++] = port;
+                configureRemotePWMOutput(port);
+            } else {
+                Serial.printf("⚠️  Skipping PWM output port Serial%d - conflicts with Kyber\n", port);
+                needsCleanup = true;
+            }
         }
     }
     preferences.end();
+    
+    // If we skipped any ports, clean up NVS
+    if (needsCleanup) {
+        Serial.println("Cleaning up conflicting PWM output ports from NVS...");
+        savePWMOutputPortsToPreferences();
+    }
 }
+
+// void loadPWMOutputPortsFromPreferences() {
+//     preferences.begin("pwm_outputs", true);
+//     pwmOutputCount = preferences.getInt("count", 0);
+//     for (int i = 0; i < pwmOutputCount; i++) {
+//         String key = "port" + String(i);
+//         pwmOutputPorts[i] = preferences.getInt(key.c_str(), 0);
+//         if (pwmOutputPorts[i] > 0 && canUsePWMOnPort(pwmOutputPorts[i])) {
+//             configureRemotePWMOutput(pwmOutputPorts[i]);
+//         }
+//     }
+//     preferences.end();
+// }
