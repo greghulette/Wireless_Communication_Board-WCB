@@ -683,15 +683,3 @@ void loadPWMOutputPortsFromPreferences() {
     }
 }
 
-// void loadPWMOutputPortsFromPreferences() {
-//     preferences.begin("pwm_outputs", true);
-//     pwmOutputCount = preferences.getInt("count", 0);
-//     for (int i = 0; i < pwmOutputCount; i++) {
-//         String key = "port" + String(i);
-//         pwmOutputPorts[i] = preferences.getInt(key.c_str(), 0);
-//         if (pwmOutputPorts[i] > 0 && canUsePWMOnPort(pwmOutputPorts[i])) {
-//             configureRemotePWMOutput(pwmOutputPorts[i]);
-//         }
-//     }
-//     preferences.end();
-// }
