@@ -1175,28 +1175,6 @@ void serialCommandTask(void *pvParameters) {
     }
 }
 
-// void serialCommandTask(void *pvParameters) {
-//   vTaskDelay(pdMS_TO_TICKS(500));  // at top of task to enable proper startup timing
-//     while (true) {
-//         processIncomingSerial(Serial, 0);  // USB Serial
-//         processIncomingSerial(Serial3, 3);
-//         processIncomingSerial(Serial4, 4);
-//         processIncomingSerial(Serial5, 5);
-
-//         if (Kyber_Local) {
-//           // don't add serial 1 or 2 for processing strings
-//         } else if (Kyber_Remote){
-//             processIncomingSerial(Serial2, 2);
-//           // add only serial 2 for processing strings
-//         } else {
-//           processIncomingSerial(Serial1, 1);
-//           processIncomingSerial(Serial2, 2);
-//         }
-
-//         vTaskDelay(pdMS_TO_TICKS(5)); // Allow time for other tasks
-//     }
-// }
-
 void PWMTask(void *pvParameters) {
     while (true) {
         processPWMPassthrough();
@@ -1290,87 +1268,53 @@ void setup() {
   printBaudRates();
   Serial.println("-------------------------------------------------------");
 
-  // Initialize hardware serial
-  // Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-  // Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-  // Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-  // Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-  // Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
-  
+  if (Kyber_Local) {
+      // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
+      Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+      Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+      Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
+  } else if (Kyber_Remote) {
+      // Kyber Remote REQUIRES Serial1 (Maestro only)
+      Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+      Serial.println("Initialized Serial1 for Kyber Remote mode");
+      // Serial2 available for PWM or normal serial
+      if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+          Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+      } else {
+          Serial.println("Serial2 reserved for PWM - skipping UART init");
+      }
+  } else {
+      // No Kyber - check PWM usage for both Serial1 and Serial2
+      if (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
+          Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+      } else {
+          Serial.println("Serial1 reserved for PWM - skipping UART init");
+      }
+      if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
+          Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+      } else {
+          Serial.println("Serial2 reserved for PWM - skipping UART init");
+      }
+  }
 
-  // Initialize hardware serial - but skip ports used for PWM input
- // Initialize hardware serial - but skip ports used for PWM or Kyber
-// if (!Kyber_Local && !Kyber_Remote && !isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
-//     Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-// }
-// if (!Kyber_Local && !isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
-//     Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-// }
-// if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
-//     Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-// }
-// if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
-//     Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-// }
-// if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
-//     Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
-// }
+  // Serial3-5: Only initialize if NOT used for PWM
+  if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
+      Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+  } else {
+      Serial.println("Serial3 reserved for PWM - skipping UART init");
+  }
 
-// Initialize hardware serial
-// Initialize hardware serial with proper priority:
-// 1. Kyber has top priority (critical communication)
-// 2. PWM can use ports when Kyber doesn't need them
-// 3. Normal serial communication otherwise
+  if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
+      Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+  } else {
+      Serial.println("Serial4 reserved for PWM - skipping UART init");
+  }
 
-if (Kyber_Local) {
-    // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
-    Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-    Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-    Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
-} else if (Kyber_Remote) {
-    // Kyber Remote REQUIRES Serial1 (Maestro only)
-    Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-    Serial.println("Initialized Serial1 for Kyber Remote mode");
-    
-    // Serial2 available for PWM or normal serial
-    if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
-        Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-    } else {
-        Serial.println("Serial2 reserved for PWM - skipping UART init");
-    }
-} else {
-    // No Kyber - check PWM usage for both Serial1 and Serial2
-    if (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
-        Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-    } else {
-        Serial.println("Serial1 reserved for PWM - skipping UART init");
-    }
-    
-    if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
-        Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-    } else {
-        Serial.println("Serial2 reserved for PWM - skipping UART init");
-    }
-}
-
-// Serial3-5: Only initialize if NOT used for PWM
-if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
-    Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-} else {
-    Serial.println("Serial3 reserved for PWM - skipping UART init");
-}
-
-if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
-    Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-} else {
-    Serial.println("Serial4 reserved for PWM - skipping UART init");
-}
-
-if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
-    Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
-} else {
-    Serial.println("Serial5 reserved for PWM - skipping UART init");
-}
+  if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
+      Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+  } else {
+      Serial.println("Serial5 reserved for PWM - skipping UART init");
+  }
   initPWM();  // <-- This loads PWM mappings from preferences
 
   // Initialize Wi-Fi
