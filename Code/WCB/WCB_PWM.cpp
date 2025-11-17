@@ -357,7 +357,7 @@ void listPWMMappings() {
         for (int i = 0; i < pwmOutputCount; i++) {
             Serial.printf("S%d ", pwmOutputPorts[i]);
         }
-        Serial.println("(receive PWM via ESP-NOW)");
+        Serial.println();
     } else {
         // Serial.println("No output-only ports configured");
     }
@@ -390,15 +390,15 @@ void listPWMMappingsBoot() {
     if (!foundMappings) Serial.println("No input mappings configured");
     
     // Show output-only ports
-    Serial.println("PWM Output-Only Ports:");
     if (pwmOutputCount > 0) {
+        Serial.println("PWM Output-Only Ports:");
         Serial.print("Configured outputs: ");
         for (int i = 0; i < pwmOutputCount; i++) {
             Serial.printf("S%d ", pwmOutputPorts[i]);
         }
-        Serial.println("(receive PWM via ESP-NOW)");
+        Serial.println();
     } else {
-        Serial.println("No output-only ports configured");
+        // Serial.println("No output-only ports configured");
     }
     
   Serial.println("-------------------------------------------------------");
