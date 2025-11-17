@@ -517,6 +517,8 @@ void eraseNVSFlash() {
     preferences.begin("hw_version", false);
     preferences.clear();
     preferences.end();
+    
+    clearAllPWMMappings();
 
     Serial.println("NVS cleared. Restarting...");
     delay(2000);
