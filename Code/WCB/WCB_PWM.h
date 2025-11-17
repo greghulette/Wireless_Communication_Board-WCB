@@ -33,6 +33,7 @@ void initPWM();
 void addPWMMapping(const String &config, bool autoReboot = true);
 void removePWMMapping(int inputPort);
 void listPWMMappings();
+void listPWMMappingsBoot();
 void clearAllPWMMappings();
 void savePWMMappingsToPreferences();
 void loadPWMMappingsFromPreferences();

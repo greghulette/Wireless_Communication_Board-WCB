@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_142035RNOV2025                                    *****////
+///*****                                          Version 5.3_171524RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,7 +82,7 @@ bool debugEnabled = false;
 bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.3_142035RNOV2025";
+String SoftwareVersion = "5.3_171524RNOV2025";
 
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
@@ -1266,9 +1266,10 @@ void setup() {
   Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
+  // Serial.println("PWM Mappings:");
   loadBaudRatesFromPreferences();
   initPWM();  // <-- This loads PWM mappings from preferences
-
+  Serial.println("-------------------------------------------------------");
   printBaudRates();
   Serial.println("-------------------------------------------------------");
 
@@ -1319,7 +1320,7 @@ void setup() {
   } else {
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
-
+  listPWMMappingsBoot();
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
 

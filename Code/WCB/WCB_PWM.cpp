@@ -263,7 +263,7 @@ void addPWMMapping(const String &config, bool autoReboot) {
     
     savePWMMappingsToPreferences();
     
-    Serial.printf("PWM Mapping added: Serial%d -> %d output(s)\n", inputPort, mapping.outputCount);
+    // Serial.printf("PWM Mapping added: Serial%d -> %d output(s)\n", inputPort, mapping.outputCount);
         
     if (hasRemoteOutputs && canSendESPNow()) {
         for (int i = 0; i < mapping.outputCount; i++) {
@@ -328,7 +328,46 @@ void removePWMMapping(int inputPort) {
 }
 
 void listPWMMappings() {
-    Serial.println("\n--- PWM Mappings ---");
+    Serial.println("--------------- PWM Mappings ---------------");
+    
+    // Show input-to-output mappings
+    bool foundMappings = false;
+    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+        if (pwmMappings[i].active) {
+            foundMappings = true;
+            Serial.printf("Input: Serial%d -> Outputs: ", pwmMappings[i].inputPort);
+            for (int j = 0; j < pwmMappings[i].outputCount; j++) {
+                if (pwmMappings[i].outputs[j].wcbNumber == 0) {
+                    Serial.printf("S%d ", pwmMappings[i].outputs[j].serialPort);
+                } else {
+                    Serial.printf("W%dS%d ", 
+                        pwmMappings[i].outputs[j].wcbNumber,
+                        pwmMappings[i].outputs[j].serialPort);
+                }
+            }
+            Serial.println();
+        }
+    }
+    if (!foundMappings) Serial.println("No input mappings configured");
+    
+
+    if (pwmOutputCount > 0) {    // Show output-only ports
+        Serial.println("PWM Output-Only Ports:");
+        Serial.print("Configured outputs: ");
+        for (int i = 0; i < pwmOutputCount; i++) {
+            Serial.printf("S%d ", pwmOutputPorts[i]);
+        }
+        Serial.println("(receive PWM via ESP-NOW)");
+    } else {
+        // Serial.println("No output-only ports configured");
+    }
+    
+    Serial.println("--------------- End PWM Mappings ---------------");
+}
+
+void listPWMMappingsBoot() {
+    Serial.println("-------------------------------------------------------");
+    Serial.println(" PWM Mappings:");
     
     // Show input-to-output mappings
     bool foundMappings = false;
@@ -351,7 +390,7 @@ void listPWMMappings() {
     if (!foundMappings) Serial.println("No input mappings configured");
     
     // Show output-only ports
-    Serial.println("\nPWM Output-Only Ports:");
+    Serial.println("PWM Output-Only Ports:");
     if (pwmOutputCount > 0) {
         Serial.print("Configured outputs: ");
         for (int i = 0; i < pwmOutputCount; i++) {
@@ -362,7 +401,7 @@ void listPWMMappings() {
         Serial.println("No output-only ports configured");
     }
     
-    Serial.println("--- End PWM Mappings ---\n");
+  Serial.println("-------------------------------------------------------");
 }
 
 void clearAllPWMMappings() {
@@ -453,8 +492,82 @@ void loadPWMMappingsFromPreferences() {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         String key = "map" + String(i);
         String value = preferences.getString(key.c_str(), "");
+        
         if (value.length() > 0) {
-            addPWMMapping("PMS" + value, false);
+            // Parse the stored mapping directly (silent restore)
+            int commaPos = value.indexOf(',');
+            if (commaPos == -1) continue;
+            
+            int inputPort = value.substring(0, commaPos).toInt();
+            if (inputPort < 1 || inputPort > 5 || !canUsePWMOnPort(inputPort)) continue;
+            
+            // Fill the mapping structure
+            PWMMapping &mapping = pwmMappings[i];
+            mapping.inputPort = inputPort;
+            mapping.outputCount = 0;
+            mapping.active = false;  // Set true only if we have valid outputs
+            
+            String outputs = value.substring(commaPos + 1);
+            int startIdx = 0;
+            
+            while (startIdx < outputs.length() && mapping.outputCount < 5) {
+                int nextComma = outputs.indexOf(',', startIdx);
+                String output = (nextComma == -1) ? outputs.substring(startIdx) : outputs.substring(startIdx, nextComma);
+                output.trim();
+                
+                int wcbNum = 0;
+                int serialPort = 0;
+                
+                if (output.startsWith("S") || output.startsWith("s")) {
+                    wcbNum = 0;
+                    serialPort = output.substring(1).toInt();
+                } else if (output.startsWith("W") || output.startsWith("w")) {
+                    output = output.substring(1);
+                    int sPos = output.indexOf('S');
+                    if (sPos == -1) sPos = output.indexOf('s');
+                    if (sPos > 0) {
+                        wcbNum = output.substring(0, sPos).toInt();
+                        serialPort = output.substring(sPos + 1).toInt();
+                    }
+                }
+                
+                if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
+                    if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
+                        // Skip local outputs that conflict with Kyber
+                    } else {
+                        mapping.outputs[mapping.outputCount].wcbNumber = wcbNum;
+                        mapping.outputs[mapping.outputCount].serialPort = serialPort;
+                        mapping.outputCount++;
+                    }
+                }
+                
+                if (nextComma == -1) break;
+                startIdx = nextComma + 1;
+            }
+            
+            // Only activate if we got valid outputs
+            if (mapping.outputCount > 0) {
+                mapping.active = true;
+                attachPWMInterrupt(inputPort);
+                
+                // Configure local output pins
+                for (int j = 0; j < mapping.outputCount; j++) {
+                    if (mapping.outputs[j].wcbNumber == 0) {
+                        int txPin = 0;
+                        switch(mapping.outputs[j].serialPort) {
+                            case 1: txPin = SERIAL1_TX_PIN; break;
+                            case 2: txPin = SERIAL2_TX_PIN; break;
+                            case 3: txPin = SERIAL3_TX_PIN; break;
+                            case 4: txPin = SERIAL4_TX_PIN; break;
+                            case 5: txPin = SERIAL5_TX_PIN; break;
+                        }
+                        if (txPin > 0) {
+                            pinMode(txPin, OUTPUT);
+                            digitalWrite(txPin, LOW);
+                        }
+                    }
+                }
+            }
         }
     }
     preferences.end();
