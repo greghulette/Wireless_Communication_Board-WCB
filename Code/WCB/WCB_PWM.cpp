@@ -242,25 +242,24 @@ void addPWMMapping(const String &config, bool autoReboot) {
     
     bool hasRemoteOutputs = false;
     
-    for (int i = 0; i < mapping.outputCount; i++) {
-        if (mapping.outputs[i].wcbNumber == 0) {
-            int txPin = 0;
-            switch(mapping.outputs[i].serialPort) {
-                case 1: txPin = SERIAL1_TX_PIN; break;
-                case 2: txPin = SERIAL2_TX_PIN; break;
-                case 3: txPin = SERIAL3_TX_PIN; break;
-                case 4: txPin = SERIAL4_TX_PIN; break;
-                case 5: txPin = SERIAL5_TX_PIN; break;
-            }
-            if (txPin > 0) {
-                pinMode(txPin, OUTPUT);
-                digitalWrite(txPin, LOW);
-            }
-            addPWMOutputPort(mapping.outputs[i].serialPort);
-        } else {
-            hasRemoteOutputs = true;
+   for (int i = 0; i < mapping.outputCount; i++) {
+    if (mapping.outputs[i].wcbNumber == 0) {
+        int txPin = 0;
+        switch(mapping.outputs[i].serialPort) {
+            case 1: txPin = SERIAL1_TX_PIN; break;
+            case 2: txPin = SERIAL2_TX_PIN; break;
+            case 3: txPin = SERIAL3_TX_PIN; break;
+            case 4: txPin = SERIAL4_TX_PIN; break;
+            case 5: txPin = SERIAL5_TX_PIN; break;
         }
+        if (txPin > 0) {
+            pinMode(txPin, OUTPUT);
+            digitalWrite(txPin, LOW);
+        }
+    } else {
+        hasRemoteOutputs = true;  // 👈 ADD THIS
     }
+}
     
     savePWMMappingsToPreferences();
     
@@ -330,10 +329,12 @@ void removePWMMapping(int inputPort) {
 
 void listPWMMappings() {
     Serial.println("\n--- PWM Mappings ---");
-    bool found = false;
+    
+    // Show input-to-output mappings
+    bool foundMappings = false;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
-            found = true;
+            foundMappings = true;
             Serial.printf("Input: Serial%d -> Outputs: ", pwmMappings[i].inputPort);
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
@@ -347,7 +348,20 @@ void listPWMMappings() {
             Serial.println();
         }
     }
-    if (!found) Serial.println("No PWM mappings configured");
+    if (!foundMappings) Serial.println("No input mappings configured");
+    
+    // Show output-only ports
+    Serial.println("\nPWM Output-Only Ports:");
+    if (pwmOutputCount > 0) {
+        Serial.print("Configured outputs: ");
+        for (int i = 0; i < pwmOutputCount; i++) {
+            Serial.printf("S%d ", pwmOutputPorts[i]);
+        }
+        Serial.println("(receive PWM via ESP-NOW)");
+    } else {
+        Serial.println("No output-only ports configured");
+    }
+    
     Serial.println("--- End PWM Mappings ---\n");
 }
 

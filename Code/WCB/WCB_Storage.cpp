@@ -158,8 +158,20 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
-        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        int port = i + 1;
+        
+        // Check if port is used for PWM
+        bool isPWMInput = isSerialPortUsedForPWMInput(port);
+        bool isPWMOutput = isSerialPortPWMOutput(port);
+        
+        if (isPWMInput) {
+            Serial.printf(" Serial%d: PWM INPUT (RX pin)\n", port);
+        } else if (isPWMOutput) {
+            Serial.printf(" Serial%d: PWM OUTPUT (TX pin, receives via ESP-NOW)\n", port);
+        } else {
+            Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
+                          port, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        }
     }
 }
 
@@ -454,7 +466,7 @@ while (startIdx < keyList.length()) {
 }
 
 
-    Serial.println("--- End of Stored Commands ---\n");
+    Serial.println("--- End of Stored Commands ---");
 }
 
 // Clear all stored commands

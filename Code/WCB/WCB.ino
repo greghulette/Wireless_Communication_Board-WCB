@@ -339,15 +339,16 @@ void printConfigInfo() {
   Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
-  for (int i = 0; i < 5; i++) {
-    Serial.printf("Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                  i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
-  }
-  Serial.printf("Serial1 TX Pin: %d, RX Pin: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
-  Serial.printf("Serial2 TX Pin: %d, RX Pin: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
-  Serial.printf("Serial3 TX Pin: %d, RX Pin: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
-  Serial.printf("Serial4 TX Pin: %d, RX Pin: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
-  Serial.printf("Serial5 TX Pin: %d, RX Pin: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
+  // for (int i = 0; i < 5; i++) {
+  //   Serial.printf("Serial%d Baud Rate: %d,  Broadcast: %s\n",
+  //                 i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+  // }
+  // Serial.printf("Serial1 TX Pin: %d, RX Pin: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
+  // Serial.printf("Serial2 TX Pin: %d, RX Pin: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
+  // Serial.printf("Serial3 TX Pin: %d, RX Pin: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
+  // Serial.printf("Serial4 TX Pin: %d, RX Pin: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
+  // Serial.printf("Serial5 TX Pin: %d, RX Pin: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
+  printBaudRates();  // 👈 Use the function that already has PWM checking
 
   Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
@@ -1014,12 +1015,14 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
     // Send to all serial ports except restricted ones
     for (int i = 1; i <= 5; i++) {
-        // Skip Serial1 if Kyber_Remote is enabled
-        if ((i == 1 && Kyber_Remote) || 
-            (i <= 2 && Kyber_Local) || 
-            i == sourceID || !serialBroadcastEnabled[i - 1]) {
-            continue;
-        }
+      // Skip Serial1 if Kyber_Remote is enabled
+      if ((i == 1 && Kyber_Remote) || 
+          (i <= 2 && Kyber_Local) || 
+          i == sourceID || 
+          !serialBroadcastEnabled[i - 1] ||
+          isSerialPortPWMOutput(i)) {  
+          continue;
+      }
 
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
@@ -1264,6 +1267,7 @@ void setup() {
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
+  initPWM();  // <-- This loads PWM mappings from preferences
 
   printBaudRates();
   Serial.println("-------------------------------------------------------");
@@ -1315,7 +1319,6 @@ void setup() {
   } else {
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
-  initPWM();  // <-- This loads PWM mappings from preferences
 
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
