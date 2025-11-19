@@ -31,6 +31,7 @@ extern String Kyber_Location;
 // For stored commands
 #define MAX_STORED_COMMANDS 50
 extern String storedCommands[MAX_STORED_COMMANDS];
+
 extern void enqueueCommand(const String &cmd, int sourceID);  // Declare it as an external function
 extern void parseCommandsAndEnqueue(const String &data, int sourceID);
 
@@ -79,5 +80,8 @@ void setCommandDelimiter(char delimiter);
 void loadCommandDelimiter();
 
 void eraseNVSFlash();
+
+extern bool isSerialPortUsedForPWMInput(int port);
+extern bool isSerialPortPWMOutput(int port);
 
 #endif

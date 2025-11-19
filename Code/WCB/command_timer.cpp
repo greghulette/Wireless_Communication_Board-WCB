@@ -108,7 +108,6 @@ void processCommandGroups() {
   if (currentGroupIndex != lastProcessedGroupIndex) {
     lastProcessedGroupIndex = currentGroupIndex;
   }
-  
   CommandGroup &group = commandGroups[currentGroupIndex];
 
   if (checkForTimerStopRequest(group.commands[0])) {
@@ -123,7 +122,7 @@ void processCommandGroups() {
           Serial.printf("[TimerGroup %u] Executing command: %s\n", currentGroupIndex + 1, cmd.c_str());
         }
         parseCommandsAndEnqueue(cmd, 0);
-        vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
+                vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
       }
       lastGroupTime = millis();
       currentGroupIndex++;
@@ -135,6 +134,6 @@ void processCommandGroups() {
     }
   } else {
     waitingForNextGroup = true;
-    vTaskDelay(pdMS_TO_TICKS(1)); // ← Ensure millis() increments before next check
+        vTaskDelay(pdMS_TO_TICKS(1)); // ← Ensure millis() increments before next check
   }
-}
+} 

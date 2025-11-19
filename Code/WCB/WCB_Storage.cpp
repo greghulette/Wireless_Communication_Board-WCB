@@ -1,7 +1,7 @@
 #include <sys/_types.h>
 #include "WCB_Storage.h"
 #include <Preferences.h>
-
+#include "WCB_PWM.h"
 // Declare the external variables that are defined in the main sketch
 extern Preferences preferences;
 extern unsigned long baudRates[5];
@@ -48,8 +48,6 @@ void saveHWversion(int wcb_hw_version_f){
     Serial.println("Saved HW Ver: 2.4 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 31){
     Serial.println("Saved HW Ver: 3.1 to NVS.  Reboot to take effect!");
-  } else if (wcb_hw_version_f == 31){
-    Serial.println("Saved HW Ver: 3.1 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 32){
     Serial.println("Saved HW Ver: 3.2 to NVS.  Reboot to take effect!");
   } else {
@@ -76,6 +74,8 @@ void printHWversion(){
     Serial.println("HW Version: 2.3");
   } else if (wcb_hw_version == 24){
     Serial.println("HW Version: 2.4");
+  } else if (wcb_hw_version == 31){
+    Serial.println("HW Version: 3.1");
   } else if (wcb_hw_version == 31){
     Serial.println("HW Version: 3.1");
   } else if (wcb_hw_version == 32){
@@ -164,8 +164,20 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
-        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        int port = i + 1;
+        
+        // Check if port is used for PWM
+        bool isPWMInput = isSerialPortUsedForPWMInput(port);
+        bool isPWMOutput = isSerialPortPWMOutput(port);
+        
+        if (isPWMInput) {
+            Serial.printf(" Serial%d: PWM INPUT (RX pin)\n", port);
+        } else if (isPWMOutput) {
+            Serial.printf(" Serial%d: PWM OUTPUT (TX pin, receives via ESP-NOW)\n", port);
+        } else {
+            Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
+                          port, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        }
     }
 }
 
@@ -460,7 +472,7 @@ while (startIdx < keyList.length()) {
 }
 
 
-    Serial.println("--- End of Stored Commands ---\n");
+    Serial.println("--- End of Stored Commands ---");
 }
 
 // Clear all stored commands
@@ -511,6 +523,8 @@ void eraseNVSFlash() {
     preferences.begin("hw_version", false);
     preferences.clear();
     preferences.end();
+    
+    clearAllPWMMappings();
 
     Serial.println("NVS cleared. Restarting...");
     delay(2000);
@@ -572,6 +586,5 @@ void printKyberSettings(){
   }
   // Serial.printf("Kyber is %s\n", temp);
 };
-
 
 

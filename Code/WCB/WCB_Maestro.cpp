@@ -2,7 +2,7 @@
 
 extern bool maestroEnabled;
 extern int WCB_Number;
-extern volatile bool lastReceivedViaESPNOW;
+ extern bool lastReceivedViaESPNOW;
 extern void sendESPNowMessage(uint8_t target, const char *message);
 
 

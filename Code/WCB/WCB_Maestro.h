@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 extern bool maestroEnabled;
-extern volatile bool lastReceivedViaESPNOW;
+ extern bool lastReceivedViaESPNOW;
 
 void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber);
 
