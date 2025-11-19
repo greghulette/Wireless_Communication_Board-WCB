@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_171524RNOV2025                                    *****////
+///*****                                          Version 5.3_19107RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -81,9 +81,8 @@ bool lastReceivedViaESPNOW = false;
 bool debugEnabled = false;
 bool debugKyber = false;
 // WCB Board HW and SW version Variables
-int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.0 = 30
-String SoftwareVersion = "5.3_171524RNOV2025";
-
+int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
+String SoftwareVersion = "5.3_19107RNOV2025";
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -145,7 +144,7 @@ const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, o
 Adafruit_NeoPixel* statusLED = nullptr;
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
-  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     if (statusled1 == "ES"){
     statusLED->setBrightness(brightness);
     for (int i = 0; i<STATUS_LED_COUNT; i++){
@@ -162,7 +161,7 @@ void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
 void turnOnLEDESPNOW(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
-   }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+   }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", green, 255);
   }
 }  
@@ -171,7 +170,7 @@ if (wcb_hw_version == 1){
 void   turnOnLEDforBoot(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
-   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", red, 255);
   } else {
     Serial.println("No LED yet defined");
@@ -180,13 +179,13 @@ if (wcb_hw_version == 1){
 };
 
 void turnOnLEDSerial(){
-  if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+  if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", red, 255);
   }
 }  
 
 void turnOnLEDSerialOut(){
-  if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+  if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", orange, 255);
   }
 }  
@@ -194,7 +193,7 @@ void turnOnLEDSerialOut(){
 void turnOffLED(){
   if (wcb_hw_version == 1 ){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
-   }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32){
+   }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", blue, 10);
     
   }
