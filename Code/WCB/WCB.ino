@@ -89,6 +89,23 @@ unsigned long espnowSendAttempts = 0;
 unsigned long espnowSendSuccess = 0;
 unsigned long espnowSendFailed = 0;
 
+// Regular command messages
+unsigned long espnowCommandAttempts = 0;
+unsigned long espnowCommandSuccess = 0;
+unsigned long espnowCommandFailed = 0;
+
+// PWM passthrough messages
+unsigned long espnowPWMAttempts = 0;
+unsigned long espnowPWMSuccess = 0;
+unsigned long espnowPWMFailed = 0;
+
+// Raw data (Kyber)
+unsigned long espnowRawAttempts = 0;
+unsigned long espnowRawSuccess = 0;
+unsigned long espnowRawFailed = 0;
+
+
+
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
 // // Serial port pin assignments
@@ -368,18 +385,50 @@ void printConfigInfo() {
 
 void printESPNowStats() {
   Serial.println("\n--- ESP-NOW Statistics (Since Last Reboot) ---");
-  Serial.printf("Total Send Attempts: %lu\n", espnowSendAttempts);
-  Serial.printf("Successful Sends:    %lu\n", espnowSendSuccess);
-  Serial.printf("Failed Sends:        %lu\n", espnowSendFailed);
   
-  if (espnowSendAttempts > 0) {
-    float successRate = (float)espnowSendSuccess / (float)espnowSendAttempts * 100.0;
-    float failureRate = (float)espnowSendFailed / (float)espnowSendAttempts * 100.0;
-    Serial.printf("Success Rate:        %.2f%%\n", successRate);
-    Serial.printf("Failure Rate:        %.2f%%\n", failureRate);
-  } else {
-    Serial.println("No ESP-NOW messages sent yet.");
+  // Always show command messages
+  Serial.println("Command Messages:");
+  Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
+                espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
+  if (espnowCommandAttempts > 0) {
+    Serial.printf("  Success Rate: %.2f%%\n", 
+                  (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
   }
+  
+  // Only show PWM if there have been any PWM messages
+  if (espnowPWMAttempts > 0) {
+    Serial.println("\nPWM Passthrough:");
+    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
+                  espnowPWMAttempts, espnowPWMSuccess, espnowPWMFailed);
+    Serial.printf("  Success Rate: %.2f%%\n", 
+                  (float)espnowPWMSuccess / espnowPWMAttempts * 100.0);
+  }
+  
+  // Only show Kyber if Kyber is enabled OR there have been raw messages
+  if (Kyber_Local || Kyber_Remote || espnowRawAttempts > 0) {
+    Serial.println("\nRaw Data (Kyber):");
+    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
+                  espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
+    if (espnowRawAttempts > 0) {
+      Serial.printf("  Success Rate: %.2f%%\n", 
+                    (float)espnowRawSuccess / espnowRawAttempts * 100.0);
+    }
+  }
+  
+  // Show combined total only if there are multiple categories in use
+  bool hasMultipleCategories = (espnowCommandAttempts > 0 ? 1 : 0) + 
+                               (espnowPWMAttempts > 0 ? 1 : 0) + 
+                               (espnowRawAttempts > 0 ? 1 : 0) > 1;
+  
+  if (hasMultipleCategories) {
+    unsigned long totalAttempts = espnowCommandAttempts + espnowPWMAttempts + espnowRawAttempts;
+    unsigned long totalSuccess = espnowCommandSuccess + espnowPWMSuccess + espnowRawSuccess;
+    Serial.println("\nCombined Total:");
+    Serial.printf("  Attempts: %lu, Success: %lu, Success Rate: %.2f%%\n", 
+                  totalAttempts, totalSuccess,
+                  totalAttempts > 0 ? (float)totalSuccess / totalAttempts * 100.0 : 0.0);
+  }
+  
   Serial.println("--- End of ESP-NOW Statistics ---\n");
 }
 
@@ -427,20 +476,38 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     //               msg.structSenderID, msg.structTargetID, msg.structCommand);
 
     // Send ESP-NOW message
-    espnowSendAttempts++;
-    esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
-    if (result == ESP_OK) {
-        // Check if this is a PWM message (starts with ";P")
-        bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
-        espnowSendSuccess++;
-        // Only print success if debug is on AND it's not a PWM message
-        if (debugEnabled && !isPWMMessage) {
-            Serial.println("ESP-NOW message sent successfully!");
-        }
+    // Check if this is a PWM message (starts with ";P") - MUST BE FIRST
+bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
+
+// Track attempts by type
+if (isPWMMessage) {
+    espnowPWMAttempts++;
+} else {
+    espnowCommandAttempts++;
+}
+
+// Send ESP-NOW message
+esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
+
+// Track success/failure by type
+if (result == ESP_OK) {
+    if (isPWMMessage) {
+        espnowPWMSuccess++;
     } else {
-        espnowSendFailed++;
-        Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
+        espnowCommandSuccess++;
     }
+    // Only print success if debug is on AND it's not a PWM message
+    if (debugEnabled && !isPWMMessage) {
+        Serial.println("ESP-NOW message sent successfully!");
+    }
+} else {
+    if (isPWMMessage) {
+        espnowPWMFailed++;
+    } else {
+        espnowCommandFailed++;
+    }
+    Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
+}
   // turnOffLED();
 }
 
@@ -474,15 +541,15 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
 
         // Send via ESP-NOW broadcast
         uint8_t *mac = broadcastMACAddress[0];
-        espnowSendAttempts++;
+        espnowRawAttempts++;
         esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
         if (result == ESP_OK) {
-            espnowSendSuccess++;
+            espnowRawSuccess++;
             if (debugEnabled) {
                 // Serial.printf("Sent chunk of %d bytes via ESP-NOW\n", (int)chunkSize);
             }
         } else {
-            espnowSendFailed++;
+            espnowRawFailed++;
             Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
         }
 
