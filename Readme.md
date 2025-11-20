@@ -2,7 +2,8 @@
 
 
 <br>
-<img src="https://img.shields.io/github/v/release/greghulette/Wireless_Communication_Board-WCB?label=Latest%20Version&style=for-the-badge" height="50">
+
+![Version](https://img.shields.io/github/v/release/greghulette/Wireless_Communication_Board-WCB?label=Latest%20Version&style=for-the-badge)
 
 
 
