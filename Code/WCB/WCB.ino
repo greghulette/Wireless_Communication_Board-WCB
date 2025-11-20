@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_191007RNOV2025                                    *****////
+///*****                                          Version 5.3_201101RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,7 +82,12 @@ bool debugEnabled = false;
 bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_191007RNOV2025";
+String SoftwareVersion = "5.3_201101RNOV2025";
+
+// ESP-NOW Statistics
+unsigned long espnowSendAttempts = 0;
+unsigned long espnowSendSuccess = 0;
+unsigned long espnowSendFailed = 0;
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -338,17 +343,7 @@ void printConfigInfo() {
   Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
-  // for (int i = 0; i < 5; i++) {
-  //   Serial.printf("Serial%d Baud Rate: %d,  Broadcast: %s\n",
-  //                 i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
-  // }
-  // Serial.printf("Serial1 TX Pin: %d, RX Pin: %d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
-  // Serial.printf("Serial2 TX Pin: %d, RX Pin: %d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
-  // Serial.printf("Serial3 TX Pin: %d, RX Pin: %d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
-  // Serial.printf("Serial4 TX Pin: %d, RX Pin: %d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
-  // Serial.printf("Serial5 TX Pin: %d, RX Pin: %d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
-  printBaudRates();  // 👈 Use the function that already has PWM checking
-
+  printBaudRates();  // Print baud rates
   Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
@@ -369,6 +364,23 @@ void printConfigInfo() {
   listPWMMappings();  // Print PWM mappings
 
   Serial.println("--- End of Configuration Info ---\n");
+}
+
+void printESPNowStats() {
+  Serial.println("\n--- ESP-NOW Statistics (Since Last Reboot) ---");
+  Serial.printf("Total Send Attempts: %lu\n", espnowSendAttempts);
+  Serial.printf("Successful Sends:    %lu\n", espnowSendSuccess);
+  Serial.printf("Failed Sends:        %lu\n", espnowSendFailed);
+  
+  if (espnowSendAttempts > 0) {
+    float successRate = (float)espnowSendSuccess / (float)espnowSendAttempts * 100.0;
+    float failureRate = (float)espnowSendFailed / (float)espnowSendAttempts * 100.0;
+    Serial.printf("Success Rate:        %.2f%%\n", successRate);
+    Serial.printf("Failure Rate:        %.2f%%\n", failureRate);
+  } else {
+    Serial.println("No ESP-NOW messages sent yet.");
+  }
+  Serial.println("--- End of ESP-NOW Statistics ---\n");
 }
 
 
@@ -415,16 +427,18 @@ void sendESPNowMessage(uint8_t target, const char *message) {
     //               msg.structSenderID, msg.structTargetID, msg.structCommand);
 
     // Send ESP-NOW message
+    espnowSendAttempts++;
     esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
     if (result == ESP_OK) {
         // Check if this is a PWM message (starts with ";P")
         bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
-        
+        espnowSendSuccess++;
         // Only print success if debug is on AND it's not a PWM message
         if (debugEnabled && !isPWMMessage) {
             Serial.println("ESP-NOW message sent successfully!");
         }
     } else {
+        espnowSendFailed++;
         Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
     }
   // turnOffLED();
@@ -460,13 +474,15 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
 
         // Send via ESP-NOW broadcast
         uint8_t *mac = broadcastMACAddress[0];
-
+        espnowSendAttempts++;
         esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
         if (result == ESP_OK) {
+            espnowSendSuccess++;
             if (debugEnabled) {
                 // Serial.printf("Sent chunk of %d bytes via ESP-NOW\n", (int)chunkSize);
             }
         } else {
+            espnowSendFailed++;
             Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
         }
 
@@ -638,7 +654,6 @@ void handleSingleCommand(String cmd, int sourceID) {
 
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
     if (cmd.startsWith(String(LocalFunctionIdentifier))) {
-        // cmd.toLowerCase();
         processLocalCommand(cmd.substring(1)); // Process local function
     } 
     // 2) CommandCharacter-based commands (e.g., `;commands`)
@@ -655,7 +670,6 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-  // Serial.printf("processLocalCommand called with: [%s]\n", message.c_str());
     if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
@@ -691,6 +705,9 @@ void processLocalCommand(const String &message) {
         reboot();
     } else if (message == "config" || message == "CONFIG") {
         printConfigInfo();
+        return;
+    } else if (message == "stats" || message == "STATS") {
+        printESPNowStats();
         return;
     } else if (message.startsWith("d") || message.startsWith("D")) {
         updateCommandDelimiter(message);

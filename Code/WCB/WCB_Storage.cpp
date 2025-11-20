@@ -480,10 +480,6 @@ void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
     preferences.end();   
-    // for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-    //     storedCommands[i] = "";
-    // }
-    // saveStoredCommandsToPreferences();
 }
 
 // Erase all NVS preferences
