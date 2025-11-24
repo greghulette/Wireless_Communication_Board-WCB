@@ -23,8 +23,8 @@ PWMStabilityTracker pwmStability[5] = {
 };
 
 const unsigned long PWM_MIN_TRANSMIT_INTERVAL = 1;  // ms between transmits
-const int PWM_CHANGE_THRESHOLD = 3;  // μs change to trigger transmission
-const int PWM_STABILITY_RANGE = 3;   // μs range for stability
+const int PWM_CHANGE_THRESHOLD = 6;  // μs change to trigger transmission
+const int PWM_STABILITY_RANGE = 6;   // μs range for stability
 
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;

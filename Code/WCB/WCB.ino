@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_201101RNOV2025                                    *****////
+///*****                                          Version 5.3_240004RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -82,7 +82,7 @@ bool debugEnabled = false;
 bool debugKyber = false;
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_201101RNOV2025";
+String SoftwareVersion = "5.3_240004RNOV2025";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -166,7 +166,13 @@ const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, o
 Adafruit_NeoPixel* statusLED = nullptr;
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
-  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
+  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 ){
+    // Add this nullptr check:
+    if (statusLED == nullptr) {
+      if (debugEnabled) Serial.println("⚠️ statusLED is nullptr, skipping LED operation");
+      return;
+    }
+    
     if (statusled1 == "ES"){
     statusLED->setBrightness(brightness);
     for (int i = 0; i<STATUS_LED_COUNT; i++){
@@ -175,7 +181,8 @@ void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
     } 
     } 
     else {
-      if (debugEnabled){Serial.printf("No LED was chosen \n"); }
+      if (debugEnabled){ }
+      Serial.printf("No LED was chosen \n");
     };
   };
 }
@@ -184,7 +191,9 @@ void turnOnLEDESPNOW(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
    }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
+    if (statusLED != nullptr) {  // ADD THIS CHECK
     colorWipeStatus("ES", green, 255);
+    }
   }
 }  
 
@@ -192,23 +201,33 @@ if (wcb_hw_version == 1){
 void   turnOnLEDforBoot(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
-   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
-    colorWipeStatus("ES", red, 255);
+   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 ){
+    if (statusLED != nullptr) {  // ADD THIS CHECK
+      colorWipeStatus("ES", red, 255);
+    }
+  } else if (wcb_hw_version == 31 || wcb_hw_version == 32 ){
+    // esp_task_wdt_init(30, false);  // Increase watchdog timeout temporarily
+    // initStatusLEDWithRetry(10, 100);  // Now uses shorter delays
+    // esp_task_wdt_init(5, true);    // Restore normal watchdog timeout
+
   } else {
     Serial.println("No LED yet defined");
   }
-
 };
 
 void turnOnLEDSerial(){
   if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
+    if (statusLED != nullptr) {  // ADD THIS CHECK
     colorWipeStatus("ES", red, 255);
+    }
   }
 }  
 
 void turnOnLEDSerialOut(){
   if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
+    if (statusLED != nullptr) {  // ADD THIS CHECK
     colorWipeStatus("ES", orange, 255);
+    }
   }
 }  
 
@@ -1608,46 +1627,88 @@ void PWMTask(void *pvParameters) {
     }
 }
 
-void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
+// void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
+//   int attempt = 0;
+//   bool initialized = false;
+
+//   while (attempt < maxRetries && !initialized) {
+//     if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
+
+//     // Optional: prep the pin to reduce false starts
+//     pinMode(STATUS_LED_PIN, OUTPUT);
+//     digitalWrite(STATUS_LED_PIN, LOW);
+//     delay(1000);  // let internal structures stabilize
+//     // Try to init
+//     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+//     delay(750);  // let internal structures stabilize
+//     statusLED->begin();
+
+//     // Try setting a test color
+//     statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
+//     statusLED->show();
+//     delay(750);
+
+//     // Check if the LED actually changed (simple test)
+//     if (statusLED->getPixelColor(0) != 0) {
+//       initialized = true;
+//     } else {
+//       delete statusLED;
+//       statusLED = nullptr;
+//       delay(delayBetweenMs);  // wait before next attempt
+//     }
+
+//     attempt++;
+//   }
+
+//   if (!initialized) {
+//     Serial.println("❌ Failed to initialize NeoPixel after retries.");
+//   } else {
+//     // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
+//   }
+// }
+void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100) {
   int attempt = 0;
   bool initialized = false;
 
   while (attempt < maxRetries && !initialized) {
     if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
 
-    // Optional: prep the pin to reduce false starts
+    // Feed watchdog to prevent timeout
+    esp_task_wdt_reset();
+    
+    // Prep the pin
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(1000);  // let internal structures stabilize
+    delay(50);  // Reduced from 750ms
+    
     // Try to init
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-    delay(750);  // let internal structures stabilize
+    delay(50);  // Reduced from 750ms
     statusLED->begin();
 
     // Try setting a test color
     statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
     statusLED->show();
-    delay(750);
+    delay(100);  // Reduced from 750ms
 
-    // Check if the LED actually changed (simple test)
+    // Check if the LED actually changed
     if (statusLED->getPixelColor(0) != 0) {
       initialized = true;
+      if (debugEnabled) Serial.printf("✅ NeoPixel initialized on attempt %d\n", attempt + 1);
     } else {
       delete statusLED;
       statusLED = nullptr;
-      delay(delayBetweenMs);  // wait before next attempt
+      delay(delayBetweenMs);
     }
 
     attempt++;
   }
 
   if (!initialized) {
-    Serial.println("❌ Failed to initialize NeoPixel after retries.");
-  } else {
-    // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
+    Serial.println("⚠️ Failed to initialize NeoPixel after retries - continuing without LED");
+    statusLED = nullptr;  // Ensure it's explicitly null
   }
 }
-
 // ============================= Setup & Loop =============================
 
 void setup() {
@@ -1661,18 +1722,34 @@ void setup() {
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
+// // Initialize the NeoPixel status LED
+//   if (wcb_hw_version == 0){
+//     Serial.println("No LED was setup.  Define HW version");
+//   } else if (wcb_hw_version == 1){
+//     pinMode(ONBOARD_LED, OUTPUT);
+//   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
+//     statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+//     statusLED->begin();
+//     statusLED->show();
+//   } else if (wcb_hw_version == 32 || wcb_hw_version == 31) {
+//       initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
+//   } 
 // Initialize the NeoPixel status LED
-  if (wcb_hw_version == 0){
-    Serial.println("No LED was setup.  Define HW version");
-  } else if (wcb_hw_version == 1){
-    pinMode(ONBOARD_LED, OUTPUT);
-  } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
-    statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-    statusLED->begin();
-    statusLED->show();
-  } else if (wcb_hw_version == 32 || wcb_hw_version == 31) {
-      initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
-  } 
+if (wcb_hw_version == 0){
+  Serial.println("No LED was setup.  Define HW version");
+} else if (wcb_hw_version == 1){
+  pinMode(ONBOARD_LED, OUTPUT);
+} else if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32) {
+  // Use safe initialization with retry for ALL NeoPixel versions
+  Serial.println("Initializing NeoPixel LED...");
+  initStatusLEDWithRetry(5, 100);  // Try 5 times with 100ms between attempts
+  
+  if (statusLED == nullptr) {
+    Serial.println("⚠️ NeoPixel initialization failed - board will function without status LED");
+  } else {
+    Serial.println("✅ NeoPixel initialized successfully");
+  }
+}
 
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
