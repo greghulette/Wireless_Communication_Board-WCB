@@ -86,7 +86,7 @@ void printHWversion(){
 }
 
 void updateBaudRate(int port, int baud) {
-  if (!(baud == 0 || baud == 110 || baud == 300 || baud == 600 || baud == 1200 ||
+  if (!(baud == 110 || baud == 300 || baud == 600 || baud == 1200 ||
         baud == 2400 || baud == 9600 || baud == 14400 || baud == 19200 || baud == 38400 ||
         baud == 57600 || baud == 115200 || baud == 128000 || baud == 256000)) {
     Serial.println("Invalid baud rate");
@@ -99,7 +99,7 @@ void updateBaudRate(int port, int baud) {
   } else if (port == 2) {
     Serial2.updateBaudRate(baud);
   } else {
-    Serial.printf("Invalid serial port: %d\n", port);
+    // Serial.printf("Invalid serial port: %d\n", port);
     // return;
   }
 
@@ -164,30 +164,32 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
-        int port = i + 1;
+        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s",
+                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
         
-        // Check if port is used for PWM
-        bool isPWMInput = isSerialPortUsedForPWMInput(port);
-        bool isPWMOutput = isSerialPortPWMOutput(port);
-        
-        if (isPWMInput) {
-            Serial.printf(" Serial%d: PWM INPUT (RX pin)\n", port);
-        } else if (isPWMOutput) {
-            Serial.printf(" Serial%d: PWM OUTPUT (TX pin, receives via ESP-NOW)\n", port);
-        } else {
-            Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s\n",
-                          port, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        // Add label if it exists
+        if (serialPortLabels[i].length() > 0) {
+            Serial.printf(" (%s)", serialPortLabels[i].c_str());
         }
+        // Add auto-detected labels for Kyber
+        else if ((i == 0 && (Kyber_Local || Kyber_Remote))) {
+            Serial.print(" (Maestro)");
+        } else if (i == 1 && Kyber_Local) {
+            Serial.print(" (Kyber)");
+        }
+        
+        Serial.println();
     }
 }
 
 void saveBroadcastSettingsToPreferences() {
     preferences.begin("bdcst_set", false);
-    Serial.println("DEBUG: Saving broadcast (INT):");
+    Serial.println("DEBUG: Saving Broadcast Setting:");
     for (int i = 0; i < 5; i++) {
         String key = "S" + String(i + 1);
         int value = serialBroadcastEnabled[i] ? 1 : 0;
         size_t result = preferences.putInt(key.c_str(), value);
+        // Serial.printf("Broadcast setting for Serial%d saved as %d\n", i + 1, value);
         // Serial.printf("  %s = %d (bytes written: %d)\n", key.c_str(), value, result);
     }
     preferences.end();
@@ -519,6 +521,10 @@ void eraseNVSFlash() {
     preferences.begin("hw_version", false);
     preferences.clear();
     preferences.end();
+
+    preferences.begin("serial_labels", false);
+    preferences.clear();
+    preferences.end();
     
     clearAllPWMMappings();
 
@@ -582,5 +588,37 @@ void printKyberSettings(){
   }
   // Serial.printf("Kyber is %s\n", temp);
 };
+
+void loadSerialLabelsFromPreferences() {
+    preferences.begin("serial_labels", true);
+    for (int i = 0; i < 5; i++) {
+        String key = "label" + String(i + 1);
+        serialPortLabels[i] = preferences.getString(key.c_str(), "");
+    }
+    preferences.end();
+}
+
+void saveSerialLabelToPreferences(int port, const String &label) {
+    if (port < 1 || port > 5) return;
+    
+    preferences.begin("serial_labels", false);
+    String key = "label" + String(port);
+    if (label.length() > 0) {
+        preferences.putString(key.c_str(), label);
+    } else {
+        preferences.remove(key.c_str());
+    }
+    preferences.end();
+    
+    serialPortLabels[port - 1] = label;
+    Serial.printf("Serial%d label set to: '%s'\n", port, label.c_str());
+}
+
+void clearSerialLabel(int port) {
+    if (port < 1 || port > 5) return;
+    saveSerialLabelToPreferences(port, "");
+    Serial.printf("Serial%d label cleared\n", port);
+}
+
 
 

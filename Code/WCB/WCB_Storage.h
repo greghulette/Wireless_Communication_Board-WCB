@@ -26,6 +26,8 @@ extern int storedBaudRate[6];
 extern bool Kyber_Remote;
 extern bool Kyber_Local;
 extern String Kyber_Location;
+extern String serialPortLabels[5];
+
 
 
 // For stored commands
@@ -83,5 +85,10 @@ void eraseNVSFlash();
 
 extern bool isSerialPortUsedForPWMInput(int port);
 extern bool isSerialPortPWMOutput(int port);
+
+void loadSerialLabelsFromPreferences();
+void saveSerialLabelToPreferences(int port, const String &label);
+void clearSerialLabel(int port);
+
 
 #endif

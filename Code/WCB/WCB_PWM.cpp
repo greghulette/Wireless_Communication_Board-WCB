@@ -22,9 +22,9 @@ PWMStabilityTracker pwmStability[5] = {
     {0, {0}, 0, false, 0}
 };
 
-const unsigned long PWM_MIN_TRANSMIT_INTERVAL = 15;  // ms between transmits
-const int PWM_CHANGE_THRESHOLD = 6;  // μs change to trigger transmission
-const int PWM_STABILITY_RANGE = 6;   // μs range for stability
+const unsigned long PWM_MIN_TRANSMIT_INTERVAL = 1;  // ms between transmits
+const int PWM_CHANGE_THRESHOLD = 3;  // μs change to trigger transmission
+const int PWM_STABILITY_RANGE = 3;   // μs range for stability
 
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;
@@ -648,7 +648,7 @@ void processPWMPassthrough() {
         }
         
         if (debugEnabled) {
-            Serial.printf("PWM: Serial%d -> %lu μs\n", pwmMappings[i].inputPort, pulseWidth);
+            Serial.printf("PWM: %s -> %lu μs\n", getSerialLabel(pwmMappings[i].inputPort).c_str(), pulseWidth);
         }
         
         for (int j = 0; j < pwmMappings[i].outputCount; j++) {

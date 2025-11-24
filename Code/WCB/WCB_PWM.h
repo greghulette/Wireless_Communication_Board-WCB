@@ -5,6 +5,11 @@
 
 #define MAX_PWM_MAPPINGS 10
 #define MAX_PWM_OUTPUT_PORTS 5
+
+extern String serialPortLabels[5];
+extern String getSerialLabel(int port);
+
+
 struct PWMMapping {
     int inputPort;           // 1-5: which serial port RX pin to read PWM from
     int outputCount;         // How many outputs

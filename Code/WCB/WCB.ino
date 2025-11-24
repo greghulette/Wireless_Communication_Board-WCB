@@ -131,7 +131,7 @@ int STATUS_LED_PIN;         //  // Pin for the onboard NeoPixel LED on version 2
 
 // Broadcast enabled settings for each serial port (modifiable)
 bool serialBroadcastEnabled[5] = {true, true, true, true, true};
-
+String serialPortLabels[5] = {"", "", "", "", ""};
 // Current baud rates (modifiable)
 unsigned long baudRates[5] = {
   SERIAL1_DEFAULT_BAUD_RATE,
@@ -221,6 +221,20 @@ void turnOffLED(){
   }
 }
 
+// CRC32 calculation for backup verification
+uint32_t calculateCRC32(const String &data) {
+    const uint8_t *bytes = (const uint8_t *)data.c_str();
+    size_t length = data.length();
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < length; i++) {
+        crc ^= bytes[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+    }
+    return ~crc;
+}
 // Simple reboot helper
 void reboot(){
   Serial.println("Rebooting in 2 seconds");
@@ -316,7 +330,79 @@ void enqueueCommand(const String &cmd, int sourceID) {
   }
 }
 
+// void parseCommandsAndEnqueue(const String &data, int sourceID) {
+//   int startIdx = 0;
+//   while (true) {
+//     int delimPos = data.indexOf(commandDelimiter, startIdx);
+//     if (delimPos == -1) {
+//       String singleCmd = data.substring(startIdx);
+//       singleCmd.trim();
+//       if (!singleCmd.isEmpty()) {
+//         if (!singleCmd.startsWith(commentDelimiter)) {
+//           enqueueCommand(singleCmd, sourceID);
+//         } else {
+//           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+//         }
+//       }
+//       break;
+//     } else {
+//       String singleCmd = data.substring(startIdx, delimPos);
+//       singleCmd.trim();
+//       if (!singleCmd.isEmpty()) {
+//         if (!singleCmd.startsWith(commentDelimiter)) {
+//           enqueueCommand(singleCmd, sourceID);
+//         } else {
+//           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+//         }
+//       }
+//       startIdx = delimPos + 1;
+//     }
+//   }
+// }
 void parseCommandsAndEnqueue(const String &data, int sourceID) {
+  // Check if this is a restore with checksum
+  int firstDelim = data.indexOf(commandDelimiter);
+  if (firstDelim != -1) {
+    // Look for ?CHK command in the chain
+    int chkPos = data.indexOf(String(commandDelimiter) + "?CHK");
+    if (chkPos == -1) {
+      chkPos = data.indexOf(String(commandDelimiter) + "?chk");
+    }
+    
+    if (chkPos != -1) {
+      // Extract checksum command
+      int chkStart = chkPos + 1; // Skip the delimiter
+      int chkEnd = data.indexOf(commandDelimiter, chkStart);
+      if (chkEnd == -1) chkEnd = data.length();
+      
+      String checksumCmd = data.substring(chkStart, chkEnd);
+      String providedChecksum = checksumCmd.substring(4); // Skip "?CHK"
+      providedChecksum.toUpperCase();
+      
+      // Get data without checksum for verification
+      String dataWithoutChecksum = data.substring(0, chkPos);
+      uint32_t calculatedChecksum = calculateCRC32(dataWithoutChecksum);
+      String calculatedChecksumStr = String(calculatedChecksum, HEX);
+      calculatedChecksumStr.toUpperCase();
+      
+      if (providedChecksum.equals(calculatedChecksumStr)) {
+        Serial.println("✓ Backup checksum VERIFIED - Configuration is intact");
+        Serial.println("  Provided:   " + providedChecksum);
+        Serial.println("  Calculated: " + calculatedChecksumStr);
+        // Continue processing without the checksum command
+        parseCommandsAndEnqueue(dataWithoutChecksum, sourceID);
+        return;
+      } else {
+        Serial.println("✗ Backup checksum FAILED - Configuration may be corrupted!");
+        Serial.println("  Provided:   " + providedChecksum);
+        Serial.println("  Calculated: " + calculatedChecksumStr);
+        Serial.println("  Aborting restore to prevent corruption.");
+        return;
+      }
+    }
+  }
+  
+  // Normal parsing (no checksum found)
   int startIdx = 0;
   while (true) {
     int delimPos = data.indexOf(commandDelimiter, startIdx);
@@ -345,7 +431,6 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     }
   }
 }
-
 
 String getBoardHostname() {
   return "Wireless Communication Board " + String(WCB_Number) + " (W" + String(WCB_Number) + ")";
@@ -776,6 +861,12 @@ void processLocalCommand(const String &message) {
     } else if (message == "stats" || message == "STATS") {
         printESPNowStats();
         return;
+    } else if (message == "backup" || message == "BACKUP") {
+        printBackupConfig();
+        return;
+    } else if (message.startsWith("chk") || message.startsWith("CHK")) {
+        verifyBackupChecksum(message);
+        return;
     } else if (message.startsWith("d") || message.startsWith("D")) {
         updateCommandDelimiter(message);
         return;
@@ -795,6 +886,12 @@ void processLocalCommand(const String &message) {
         return;
     } else if (message.startsWith("epass") || message.startsWith("EPASS")) {
         updateESPNowPassword(message);
+        return;
+    } else if (message.startsWith("sl") || message.startsWith("SL")) {
+        updateSerialLabel(message);
+        return;
+    } else if (message.startsWith("slc") || message.startsWith("SLC")) {
+        clearSerialLabelCommand(message);
         return;
     } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
@@ -883,7 +980,7 @@ void eraseSingleCommand(const String &message){
 }
 
 void updateCommandDelimiter(const String &message){
-  if (message.length() == 2) {
+  if (message.length() >= 2) {  // <-- Change from == 2 to >= 2
     char newDelimiter = message.charAt(1);
     setCommandDelimiter(newDelimiter);
     Serial.printf("Command delimiter updated to: '%c'\n", newDelimiter);
@@ -929,6 +1026,52 @@ void update3rdMACOctet(const String &message){
 void updateWCBQuantity(const String &message){
   int wcbQty = message.substring(4).toInt();
   saveWCBQuantityPreferences(wcbQty);
+}
+
+void updateSerialLabel(const String &message) {
+    // Format: ?SLx,label text
+    if (message.length() < 3) {
+        Serial.println("Invalid format. Use: ?SLx,label where x=1-5");
+        return;
+    }
+    
+    int port = message.substring(2, 3).toInt();
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port. Must be 1-5");
+        return;
+    }
+    
+    int commaPos = message.indexOf(',');
+    if (commaPos == -1) {
+        Serial.println("Invalid format. Use: ?SLx,label");
+        return;
+    }
+    
+    String label = message.substring(commaPos + 1);
+    label.trim();
+    
+    if (label.length() > 30) {
+        Serial.println("Label too long. Maximum 30 characters.");
+        return;
+    }
+    
+    saveSerialLabelToPreferences(port, label);
+}
+
+void clearSerialLabelCommand(const String &message) {
+    // Format: ?SLCx where x=1-5
+    if (message.length() < 4) {
+        Serial.println("Invalid format. Use: ?SLCx where x=1-5");
+        return;
+    }
+    
+    int port = message.substring(3, 4).toInt();
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port. Must be 1-5");
+        return;
+    }
+    
+    clearSerialLabel(port);
 }
 
 void updateSerialSettings(const String &message){
@@ -984,6 +1127,211 @@ void updateHWVersion(const String &message) {
   saveHWversion(temp_hw_version);
 }
 
+ void printBackupConfig() {
+    Serial.println("\n" + commentDelimiter + " ========================================");
+    Serial.println(commentDelimiter + " WCB Configuration Backup");
+    Serial.println(commentDelimiter + " Copy and paste these commands to restore");
+    Serial.println(commentDelimiter + " ========================================\n");
+    
+    String chainedConfig = "";
+    String chainedConfigDefault = "";  // For factory reset restore
+    String cmd;
+    char hexBuffer[3];
+    
+    // Hardware Version
+    String hwCmd = "";
+    if (wcb_hw_version == 1) {
+        hwCmd = "?HW1";
+    } else if (wcb_hw_version == 21) {
+        hwCmd = "?HW21";
+    } else if (wcb_hw_version == 23) {
+        hwCmd = "?HW23";
+    } else if (wcb_hw_version == 24) {
+        hwCmd = "?HW24";
+    } else if (wcb_hw_version == 31) {
+        hwCmd = "?HW31";
+    } else if (wcb_hw_version == 32) {
+        hwCmd = "?HW32";
+    }
+    Serial.println(hwCmd);
+    chainedConfig += hwCmd;
+    chainedConfigDefault += hwCmd;
+    
+    // Network Settings
+    sprintf(hexBuffer, "%02X", umac_oct2);
+    cmd = "?M2" + String(hexBuffer);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    sprintf(hexBuffer, "%02X", umac_oct3);
+    cmd = "?M3" + String(hexBuffer);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    cmd = "?WCB" + String(WCB_Number);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    cmd = "?WCBQ" + String(Default_WCB_Quantity);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    cmd = "?EPASS" + String(espnowPassword);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    // Delimiter command - ALWAYS print for visibility
+    cmd = "?D" + String(commandDelimiter);
+    Serial.println(cmd);
+    // Always add to current delimiter chain
+    chainedConfig += String(commandDelimiter) + cmd;
+    // Only add to default chain if delimiter is NOT default
+    if (commandDelimiter != '^') {
+        chainedConfigDefault += "^" + cmd;
+    }
+    
+    // Command Characters
+    cmd = "?LF" + String(LocalFunctionIdentifier);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    cmd = "?CC" + String(CommandCharacter);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+    
+    // Serial Port Settings
+    for (int i = 0; i < 5; i++) {
+        cmd = "?S" + String(i + 1) + String(baudRates[i]);
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+        
+        cmd = "?S" + String(i + 1) + String(serialBroadcastEnabled[i] ? 1 : 0);
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+    }
+    
+    // Kyber Settings
+    if (Kyber_Local) {
+        cmd = "?KYBER_LOCAL";
+    } else if (Kyber_Remote) {
+        cmd = "?KYBER_REMOTE";
+    } else {
+        cmd = "?KYBER_CLEAR";
+    }
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+
+    // Serial Port Labels
+    for (int i = 0; i < 5; i++) {
+        if (serialPortLabels[i].length() > 0) {
+            cmd = "?SL" + String(i + 1) + "," + serialPortLabels[i];
+            Serial.println(cmd);
+            chainedConfig += String(commandDelimiter) + cmd;
+            chainedConfigDefault += "^" + cmd;
+        }
+    }
+    // Stored Commands
+    preferences.begin("stored_cmds", true);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+    
+    if (keyList.length() > 0) {
+        int startIdx = 0;
+        while (startIdx < keyList.length()) {
+            int commaIndex = keyList.indexOf(',', startIdx);
+            if (commaIndex == -1) commaIndex = keyList.length();
+            
+            String key = keyList.substring(startIdx, commaIndex);
+            key.trim();
+            
+            if (key.length() > 0) {
+                preferences.begin("stored_cmds", true);
+                String value = preferences.getString(key.c_str(), "");
+                preferences.end();
+                cmd = "?CS" + key + "," + value;
+                Serial.println(cmd);
+                chainedConfig += String(commandDelimiter) + cmd;
+                chainedConfigDefault += "^" + cmd;
+            }
+            
+            startIdx = commaIndex + 1;
+        }
+    }
+    
+    // PWM Output Ports (before mappings)
+    for (int i = 0; i < pwmOutputCount; i++) {
+        cmd = "?PO" + String(pwmOutputPorts[i]);
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+    }
+    
+    // PWM Mappings (LAST - will trigger reboot)
+    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+        if (pwmMappings[i].active) {
+            cmd = "?PMS" + String(pwmMappings[i].inputPort);
+            for (int j = 0; j < pwmMappings[i].outputCount; j++) {
+                cmd += ",";
+                if (pwmMappings[i].outputs[j].wcbNumber == 0) {
+                    cmd += "S" + String(pwmMappings[i].outputs[j].serialPort);
+                } else {
+                    cmd += "W" + String(pwmMappings[i].outputs[j].wcbNumber) + 
+                           "S" + String(pwmMappings[i].outputs[j].serialPort);
+                }
+            }
+            Serial.println(cmd);
+            chainedConfig += String(commandDelimiter) + cmd;
+            chainedConfigDefault += "^" + cmd;
+        }
+    }
+    
+    // Calculate checksums for both versions
+    uint32_t checksum = calculateCRC32(chainedConfig);
+    String checksumCmd = "?CHK" + String(checksum, HEX);
+    checksumCmd.toUpperCase();
+    
+    uint32_t checksumDefault = calculateCRC32(chainedConfigDefault);
+    String checksumCmdDefault = "?CHK" + String(checksumDefault, HEX);
+    checksumCmdDefault.toUpperCase();
+    
+    String chainedWithChecksum = chainedConfig + String(commandDelimiter) + checksumCmd;
+    String chainedWithChecksumDefault = chainedConfigDefault + "^" + checksumCmdDefault;
+    
+    // Print current delimiter version
+    Serial.println("\n" + commentDelimiter + " === For Configured Boards (Current Delimiter: '" + String(commandDelimiter) + "') ===");
+    Serial.println(chainedWithChecksum);
+    Serial.println(commentDelimiter + " Checksum: " + checksumCmd);
+    
+    // Print default delimiter version
+    Serial.println("\n" + commentDelimiter + " === For Factory Reset/Fresh Boards (Uses Default '^' Delimiter) ===");
+    Serial.println(chainedWithChecksumDefault);
+    Serial.println(commentDelimiter + " Checksum: " + checksumCmdDefault);
+    
+    Serial.println("--------- End of Backup ---------\n");
+}
+
+void verifyBackupChecksum(const String &message) {
+    // Extract the provided checksum
+    String providedChecksum = message.substring(3);
+    providedChecksum.toUpperCase();
+    
+    Serial.println("Checksum verification command received.");
+    Serial.println("This checksum is automatically validated when restoring a backup.");
+    Serial.println("Provided checksum: " + providedChecksum);
+    
+    // Note: The actual verification happens during restore processing
+    // This command just acknowledges receipt
+}
 //*******************************
 /// Processing Command Character
 //*******************************
@@ -1029,7 +1377,7 @@ void processSerialMessage(const String &message) {
     targetSerial.flush(); // Ensure it's sent immediately
 
     if (debugEnabled) {
-        Serial.printf("Sent to Serial%d: %s\n", target, serialMessage.c_str());
+      Serial.printf("Sent to %s: %s\n", getSerialLabel(target).c_str(), serialMessage.c_str());
     }
 }
 
@@ -1108,7 +1456,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
       }
 
         writeSerialString(getSerialStream(i), cmd);
-        if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
+        Serial.printf("Sent to %s: %s\n", getSerialLabel(i).c_str(), cmd.c_str()); 
     }
 
     // Always send via ESP-NOW broadcast
@@ -1151,14 +1499,15 @@ void processIncomingSerial(Stream &serial, int sourceID) {
 // Helper function to process serial commands
 void processSerialCommandHelper(String &data, int sourceID) {
     if (debugEnabled) {
-        Serial.printf("Processing command from Serial%d: %s\n", sourceID, data.c_str());
+      Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), data.c_str());
     }
 
     if (data.length() == 0) return;
-          if (checkForTimerStopRequest(data)) {
-          stopTimerSequence();
-          return;
-      }
+    
+    if (checkForTimerStopRequest(data)) {
+        stopTimerSequence();
+        return;
+    }
 
     // Direct enqueue if command starts with "?C"
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
@@ -1169,32 +1518,23 @@ void processSerialCommandHelper(String &data, int sourceID) {
 
     // Timer-aware parsing: if command contains ;T or ;t, use grouped mode
     if (data.indexOf(";T") != -1 || data.indexOf(";t") != -1) {
-        parseCommandGroups(data);  // Uses non-blocking delay between command groups
+        parseCommandGroups(data);
         return;
     }
 
-    // Otherwise, parse normally
-    int startIdx = 0;
-    while (true) {
-        int delimPos = data.indexOf(commandDelimiter, startIdx);
-        if (delimPos == -1) {
-            String singleCmd = data.substring(startIdx);
-            singleCmd.trim();
-            if (!singleCmd.isEmpty()) {
-                enqueueCommand(singleCmd, sourceID);
-            }
-            break;
-        } else {
-            String singleCmd = data.substring(startIdx, delimPos);
-            singleCmd.trim();
-            if (!singleCmd.isEmpty()) {
-                enqueueCommand(singleCmd, sourceID);
-            }
-            startIdx = delimPos + 1;
-        }
-    }
+    // USE parseCommandsAndEnqueue for ALL other cases (includes checksum verification)
+    parseCommandsAndEnqueue(data, sourceID);
 }
 
+String getSerialLabel(int port) {
+    if (port < 1 || port > 5) return "Serial" + String(port);
+    
+    String label = "Serial" + String(port);
+    if (serialPortLabels[port - 1].length() > 0) {
+        label += " (" + serialPortLabels[port - 1] + ")";
+    }
+    return label;
+}
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -1337,7 +1677,7 @@ void setup() {
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
   // Create the command queue
-  commandQueue = xQueueCreate(20, sizeof(CommandQueueItem));
+  commandQueue = xQueueCreate(100, sizeof(CommandQueueItem));
   if (!commandQueue) {
     Serial.println("Failed to create command queue!");
   }
@@ -1351,6 +1691,7 @@ void setup() {
   Serial.println("-------------------------------------------------------");
   // Serial.println("PWM Mappings:");
   loadBaudRatesFromPreferences();
+  loadSerialLabelsFromPreferences();  // 
   initPWM();  // <-- This loads PWM mappings from preferences
   Serial.println("-------------------------------------------------------");
   printBaudRates();
@@ -1385,21 +1726,33 @@ void setup() {
       }
   }
 
-  // Serial3-5: Only initialize if NOT used for PWM
+  // Serial3-5: Only initialize if NOT used for PWM AND baud rate is valid
   if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
-      Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+      if (baudRates[2] > 0) {
+          Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+      } else {
+          Serial.println("Serial3 has invalid baud rate (0) - skipping UART init");
+      }
   } else {
       Serial.println("Serial3 reserved for PWM - skipping UART init");
   }
 
   if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
-      Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+      if (baudRates[3] > 0) {
+          Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+      } else {
+          Serial.println("Serial4 has invalid baud rate (0) - skipping UART init");
+      }
   } else {
       Serial.println("Serial4 reserved for PWM - skipping UART init");
   }
 
   if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
-      Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+      if (baudRates[4] > 0) {
+          Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+      } else {
+          Serial.println("Serial5 has invalid baud rate (0) - skipping UART init");
+      }
   } else {
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
