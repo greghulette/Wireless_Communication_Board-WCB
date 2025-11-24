@@ -405,14 +405,14 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       calculatedChecksumStr.toUpperCase();
       
       if (providedChecksum.equals(calculatedChecksumStr)) {
-        Serial.println("✓ Backup checksum VERIFIED - Configuration is intact");
+        Serial.println("✓ Command checksum VERIFIED - Configuration is intact");
         Serial.println("  Provided:   " + providedChecksum);
         Serial.println("  Calculated: " + calculatedChecksumStr);
         // Continue processing without the checksum command
         parseCommandsAndEnqueue(dataWithoutChecksum, sourceID);
         return;
       } else {
-        Serial.println("✗ Backup checksum FAILED - Configuration may be corrupted!");
+        Serial.println("✗ Command checksum FAILED - Configuration may be corrupted!");
         Serial.println("  Provided:   " + providedChecksum);
         Serial.println("  Calculated: " + calculatedChecksumStr);
         Serial.println("  Aborting restore to prevent corruption.");
