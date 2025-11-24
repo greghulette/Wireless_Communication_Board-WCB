@@ -77,9 +77,11 @@ String Kyber_Location;
 
 // Flag to track if last received message was via ESP-NOW
 bool lastReceivedViaESPNOW = false;
+
 // Debugging flag (default: off)
 bool debugEnabled = false;
 bool debugKyber = false;
+
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
 String SoftwareVersion = "5.3_240004RNOV2025";
@@ -104,6 +106,11 @@ unsigned long espnowRawAttempts = 0;
 unsigned long espnowRawSuccess = 0;
 unsigned long espnowRawFailed = 0;
 
+// Delivery confirmation tracking
+unsigned long espnowCommandDelivered = 0;
+
+// Delivery tracking enable flags (can toggle each independently)
+bool trackCommandDelivery = true;
 
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
@@ -349,35 +356,7 @@ void enqueueCommand(const String &cmd, int sourceID) {
   }
 }
 
-// void parseCommandsAndEnqueue(const String &data, int sourceID) {
-//   int startIdx = 0;
-//   while (true) {
-//     int delimPos = data.indexOf(commandDelimiter, startIdx);
-//     if (delimPos == -1) {
-//       String singleCmd = data.substring(startIdx);
-//       singleCmd.trim();
-//       if (!singleCmd.isEmpty()) {
-//         if (!singleCmd.startsWith(commentDelimiter)) {
-//           enqueueCommand(singleCmd, sourceID);
-//         } else {
-//           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
-//         }
-//       }
-//       break;
-//     } else {
-//       String singleCmd = data.substring(startIdx, delimPos);
-//       singleCmd.trim();
-//       if (!singleCmd.isEmpty()) {
-//         if (!singleCmd.startsWith(commentDelimiter)) {
-//           enqueueCommand(singleCmd, sourceID);
-//         } else {
-//           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
-//         }
-//       }
-//       startIdx = delimPos + 1;
-//     }
-//   }
-// }
+
 void parseCommandsAndEnqueue(const String &data, int sourceID) {
   // Check if this is a restore with checksum
   int firstDelim = data.indexOf(commandDelimiter);
@@ -490,47 +469,25 @@ void printConfigInfo() {
 void printESPNowStats() {
   Serial.println("\n--- ESP-NOW Statistics (Since Last Reboot) ---");
   
-  // Always show command messages
-  Serial.println("Command Messages:");
-  Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
-                espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
-  if (espnowCommandAttempts > 0) {
-    Serial.printf("  Success Rate: %.2f%%\n", 
-                  (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
-  }
-  
-  // Only show PWM if there have been any PWM messages
-  if (espnowPWMAttempts > 0) {
-    Serial.println("\nPWM Passthrough:");
-    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
-                  espnowPWMAttempts, espnowPWMSuccess, espnowPWMFailed);
-    Serial.printf("  Success Rate: %.2f%%\n", 
-                  (float)espnowPWMSuccess / espnowPWMAttempts * 100.0);
-  }
-  
-  // Only show Kyber if Kyber is enabled OR there have been raw messages
-  if (Kyber_Local || Kyber_Remote || espnowRawAttempts > 0) {
-    Serial.println("\nRaw Data (Kyber):");
-    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n", 
-                  espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
-    if (espnowRawAttempts > 0) {
-      Serial.printf("  Success Rate: %.2f%%\n", 
-                    (float)espnowRawSuccess / espnowRawAttempts * 100.0);
+  if (trackCommandDelivery) {
+    // Show delivery tracking stats
+    Serial.println("Unicast Command Messages:");
+    Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n", 
+                  espnowCommandAttempts, espnowCommandDelivered, espnowCommandFailed);
+    if (espnowCommandAttempts > 0) {
+      Serial.printf("  Delivery Success Rate: %.2f%%\n", 
+                    (float)espnowCommandDelivered / espnowCommandAttempts * 100.0);
     }
-  }
-  
-  // Show combined total only if there are multiple categories in use
-  bool hasMultipleCategories = (espnowCommandAttempts > 0 ? 1 : 0) + 
-                               (espnowPWMAttempts > 0 ? 1 : 0) + 
-                               (espnowRawAttempts > 0 ? 1 : 0) > 1;
-  
-  if (hasMultipleCategories) {
-    unsigned long totalAttempts = espnowCommandAttempts + espnowPWMAttempts + espnowRawAttempts;
-    unsigned long totalSuccess = espnowCommandSuccess + espnowPWMSuccess + espnowRawSuccess;
-    Serial.println("\nCombined Total:");
-    Serial.printf("  Attempts: %lu, Success: %lu, Success Rate: %.2f%%\n", 
-                  totalAttempts, totalSuccess,
-                  totalAttempts > 0 ? (float)totalSuccess / totalAttempts * 100.0 : 0.0);
+  } else {
+    // Tracking is off - show basic transmission stats
+    Serial.println("Unicast Command Messages:");
+    Serial.printf("  Transmission Attempts: %lu, Success: %lu, Failed: %lu\n", 
+                  espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
+    if (espnowCommandAttempts > 0) {
+      Serial.printf("  Transmission Success Rate: %.2f%%\n", 
+                    (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
+    }
+    Serial.println("  (Delivery tracking: OFF - Enable with ?TRACK_CMD_ON)");
   }
   
   Serial.println("--- End of ESP-NOW Statistics ---\n");
@@ -581,38 +538,38 @@ void sendESPNowMessage(uint8_t target, const char *message) {
 
     // Send ESP-NOW message
     // Check if this is a PWM message (starts with ";P") - MUST BE FIRST
-bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
+  bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
 
-// Track attempts by type
-if (isPWMMessage) {
-    espnowPWMAttempts++;
-} else {
-    espnowCommandAttempts++;
-}
+  // Track attempts by type
+  if (isPWMMessage) {
+      espnowPWMAttempts++;
+  } else {
+      espnowCommandAttempts++;
+  }
 
-// Send ESP-NOW message
-esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
+  // Send ESP-NOW message
+  esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
 
-// Track success/failure by type
-if (result == ESP_OK) {
-    if (isPWMMessage) {
-        espnowPWMSuccess++;
-    } else {
-        espnowCommandSuccess++;
-    }
-    // Only print success if debug is on AND it's not a PWM message
-    if (debugEnabled && !isPWMMessage) {
-        Serial.println("ESP-NOW message sent successfully!");
-    }
-} else {
-    if (isPWMMessage) {
-        espnowPWMFailed++;
-    } else {
-        espnowCommandFailed++;
-    }
-    Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
-}
-  // turnOffLED();
+  // Track success/failure by type
+  if (result == ESP_OK) {
+      if (isPWMMessage) {
+          espnowPWMSuccess++;
+      } else {
+          espnowCommandSuccess++;
+      }
+      // Only print success if debug is on AND it's not a PWM message
+      if (debugEnabled && !isPWMMessage) {
+          Serial.println("ESP-NOW message sent successfully!");
+      }
+  } else {
+      if (isPWMMessage) {
+          espnowPWMFailed++;
+      } else {
+          espnowCommandFailed++;
+      }
+      Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
+  }
+    // turnOffLED();
 }
 
 void sendESPNowRaw(const uint8_t *data, size_t len) {
@@ -646,6 +603,7 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         // Send via ESP-NOW broadcast
         uint8_t *mac = broadcastMACAddress[0];
         espnowRawAttempts++;
+
         esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
         if (result == ESP_OK) {
             espnowRawSuccess++;
@@ -656,7 +614,6 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
             espnowRawFailed++;
             Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
         }
-
         offset += chunkSize;
     }
 }
@@ -744,6 +701,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // Serial.println("ESPNOW password does not match local password!");
   }
     colorWipeStatus("ES", blue, 10);
+}
+
+void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        // Message was ACKed by receiver - actual delivery confirmed
+        if ( trackCommandDelivery) {
+            espnowCommandDelivered++;
+        }
+    }
+    // Reset flags
+
 }
 
 //*******************************
@@ -885,6 +853,20 @@ void processLocalCommand(const String &message) {
         return;
     } else if (message.startsWith("chk") || message.startsWith("CHK")) {
         verifyBackupChecksum(message);
+        return;
+    } else if (message == "track_all_on" || message == "TRACK_ALL_ON") {
+        trackCommandDelivery = true;
+        Serial.println("ALL delivery tracking: ENABLED");
+        return;
+    } else if (message == "track_all_off" || message == "TRACK_ALL_OFF") {
+        trackCommandDelivery = false;
+        Serial.println("ALL delivery tracking: DISABLED");
+        return;
+    } else if (message == "track_status" || message == "TRACK_STATUS") {
+        Serial.println("\n--- Delivery Tracking Status ---");
+        Serial.printf("Command tracking: %s (unicast messages only)\n", trackCommandDelivery ? "ON" : "OFF");
+        Serial.println("PWM/Kyber: Broadcast only - no ACKs available");
+        Serial.println("--- End Status ---\n");
         return;
     } else if (message.startsWith("d") || message.startsWith("D")) {
         updateCommandDelimiter(message);
@@ -1498,7 +1480,7 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
-          if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
+          if (debugEnabled){Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), serialBuffer.c_str());}
 
           // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
@@ -1518,7 +1500,7 @@ void processIncomingSerial(Stream &serial, int sourceID) {
 // Helper function to process serial commands
 void processSerialCommandHelper(String &data, int sourceID) {
     if (debugEnabled) {
-      Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), data.c_str());
+      // Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), data.c_str());
     }
 
     if (data.length() == 0) return;
@@ -1546,14 +1528,18 @@ void processSerialCommandHelper(String &data, int sourceID) {
 }
 
 String getSerialLabel(int port) {
-    if (port < 1 || port > 5) return "Serial" + String(port);
-    
-    String label = "Serial" + String(port);
-    if (serialPortLabels[port - 1].length() > 0) {
-        label += " (" + serialPortLabels[port - 1] + ")";
-    }
-    return label;
+  if (port == 0) {
+        return "Serial0 (USB)";
+  }
+  if (port < 1 || port > 5) return "Serial" + String(port);
+  
+  String label = "Serial" + String(port);
+  if (serialPortLabels[port - 1].length() > 0) {
+      label += " (" + serialPortLabels[port - 1] + ")";
+  }
+  return label;
 }
+
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -1627,45 +1613,6 @@ void PWMTask(void *pvParameters) {
     }
 }
 
-// void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 200) {
-//   int attempt = 0;
-//   bool initialized = false;
-
-//   while (attempt < maxRetries && !initialized) {
-//     if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
-
-//     // Optional: prep the pin to reduce false starts
-//     pinMode(STATUS_LED_PIN, OUTPUT);
-//     digitalWrite(STATUS_LED_PIN, LOW);
-//     delay(1000);  // let internal structures stabilize
-//     // Try to init
-//     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-//     delay(750);  // let internal structures stabilize
-//     statusLED->begin();
-
-//     // Try setting a test color
-//     statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
-//     statusLED->show();
-//     delay(750);
-
-//     // Check if the LED actually changed (simple test)
-//     if (statusLED->getPixelColor(0) != 0) {
-//       initialized = true;
-//     } else {
-//       delete statusLED;
-//       statusLED = nullptr;
-//       delay(delayBetweenMs);  // wait before next attempt
-//     }
-
-//     attempt++;
-//   }
-
-//   if (!initialized) {
-//     Serial.println("❌ Failed to initialize NeoPixel after retries.");
-//   } else {
-//     // Serial.printf("✅ NeoPixel initialized successfully after %d attempt(s).\n", attempt);
-//   }
-// }
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100) {
   int attempt = 0;
   bool initialized = false;
@@ -1722,34 +1669,23 @@ void setup() {
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
   loadMACPreferences();
-// // Initialize the NeoPixel status LED
-//   if (wcb_hw_version == 0){
-//     Serial.println("No LED was setup.  Define HW version");
-//   } else if (wcb_hw_version == 1){
-//     pinMode(ONBOARD_LED, OUTPUT);
-//   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24) {
-//     statusLED = new  Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-//     statusLED->begin();
-//     statusLED->show();
-//   } else if (wcb_hw_version == 32 || wcb_hw_version == 31) {
-//       initStatusLEDWithRetry(10, 200);  // Up to 10 tries with 200ms delay between
-//   } 
-// Initialize the NeoPixel status LED
-if (wcb_hw_version == 0){
-  Serial.println("No LED was setup.  Define HW version");
-} else if (wcb_hw_version == 1){
-  pinMode(ONBOARD_LED, OUTPUT);
-} else if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32) {
-  // Use safe initialization with retry for ALL NeoPixel versions
-  Serial.println("Initializing NeoPixel LED...");
-  initStatusLEDWithRetry(5, 100);  // Try 5 times with 100ms between attempts
-  
-  if (statusLED == nullptr) {
-    Serial.println("⚠️ NeoPixel initialization failed - board will function without status LED");
-  } else {
-    Serial.println("✅ NeoPixel initialized successfully");
+
+  // Initialize the NeoPixel status LED
+  if (wcb_hw_version == 0){
+    Serial.println("No LED was setup.  Define HW version");
+  } else if (wcb_hw_version == 1){
+    pinMode(ONBOARD_LED, OUTPUT);
+  } else if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32) {
+    // Use safe initialization with retry for ALL NeoPixel versions
+    Serial.println("Initializing NeoPixel LED...");
+    initStatusLEDWithRetry(5, 100);  // Try 5 times with 100ms between attempts
+    
+    if (statusLED == nullptr) {
+      Serial.println("⚠️ NeoPixel initialization failed - board will function without status LED");
+    } else {
+      Serial.println("✅ NeoPixel initialized successfully");
+    }
   }
-}
 
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
@@ -1913,7 +1849,9 @@ if (wcb_hw_version == 0){
   Serial.println("-------------------------------------------------------");
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
-
+  // Register send callback for delivery tracking
+  esp_now_register_send_cb(espNowSendCallback);
+  Serial.println("ESP-NOW send callback registered");
   // Create FreeRTOS Tasks-
   xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
 
