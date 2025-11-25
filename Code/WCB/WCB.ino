@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_240004RNOV2025                                    *****////
+///*****                                          Version 5.3_251117RNOV2025                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -84,7 +84,7 @@ bool debugKyber = false;
 
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_240004RNOV2025";
+String SoftwareVersion = "5.3_251117RNOV2025";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -173,19 +173,18 @@ const uint32_t basicColors[9] = {off, red, yellow, green, cyan, blue, magenta, o
 Adafruit_NeoPixel* statusLED = nullptr;
 
 void colorWipeStatus(String statusled1, uint32_t c, int brightness) {
-  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 ){
+  if (wcb_hw_version == 21 || wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32){
     // Add this nullptr check:
     if (statusLED == nullptr) {
       if (debugEnabled) Serial.println("⚠️ statusLED is nullptr, skipping LED operation");
       return;
     }
-    
     if (statusled1 == "ES"){
-    statusLED->setBrightness(brightness);
-    for (int i = 0; i<STATUS_LED_COUNT; i++){
-      statusLED->setPixelColor(i, c);
-      statusLED->show();
-    } 
+      statusLED->setBrightness(brightness);
+      for (int i = 0; i<STATUS_LED_COUNT; i++){
+        statusLED->setPixelColor(i, c);
+        statusLED->show();
+      } 
     } 
     else {
       if (debugEnabled){ }
@@ -208,15 +207,10 @@ if (wcb_hw_version == 1){
 void   turnOnLEDforBoot(){
 if (wcb_hw_version == 1){
   digitalWrite(ONBOARD_LED, HIGH); 
-   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 ){
+   } else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 ||wcb_hw_version == 31 || wcb_hw_version == 32){
     if (statusLED != nullptr) {  // ADD THIS CHECK
       colorWipeStatus("ES", red, 255);
     }
-  } else if (wcb_hw_version == 31 || wcb_hw_version == 32 ){
-    // esp_task_wdt_init(30, false);  // Increase watchdog timeout temporarily
-    // initStatusLEDWithRetry(10, 100);  // Now uses shorter delays
-    // esp_task_wdt_init(5, true);    // Restore normal watchdog timeout
-
   } else {
     Serial.println("No LED yet defined");
   }
@@ -310,6 +304,7 @@ void processPWMPassthrough();
 void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
+void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
 
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
@@ -1386,7 +1381,7 @@ void processWCBMessage(const String &message){
   int targetWCB = message.substring(1, 2).toInt();
         String espnow_message = message.substring(2);
         if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
-          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", targetWCB, espnow_message.c_str());
+          if (debugEnabled) {Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", targetWCB, espnow_message.c_str()); }
           sendESPNowMessage(targetWCB, espnow_message.c_str());
         } else {
           Serial.println("Invalid WCB number for unicast.");
@@ -1457,7 +1452,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
       }
 
         writeSerialString(getSerialStream(i), cmd);
-        Serial.printf("Sent to %s: %s\n", getSerialLabel(i).c_str(), cmd.c_str()); 
+        if(debugEnabled){ Serial.printf("Sent to %s: %s\n", getSerialLabel(i).c_str(), cmd.c_str()); }
     }
 
     // Always send via ESP-NOW broadcast
@@ -1613,15 +1608,14 @@ void PWMTask(void *pvParameters) {
     }
 }
 
-void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100) {
-  int attempt = 0;
+void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt = 0;
   bool initialized = false;
 
   while (attempt < maxRetries && !initialized) {
     if (debugEnabled) Serial.printf("Attempting NeoPixel init (try %d)...\n", attempt + 1);
 
     // Feed watchdog to prevent timeout
-    esp_task_wdt_reset();
+    // esp_task_wdt_reset();
     
     // Prep the pin
     pinMode(STATUS_LED_PIN, OUTPUT);
@@ -1634,7 +1628,7 @@ void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100) {
     statusLED->begin();
 
     // Try setting a test color
-    statusLED->setPixelColor(0, statusLED->Color(0, 0, 5));
+    statusLED->setPixelColor(0, statusLED->Color(5, 0, 0));
     statusLED->show();
     delay(100);  // Reduced from 750ms
 
@@ -1851,7 +1845,7 @@ void setup() {
   esp_now_register_recv_cb(espNowReceiveCallback);
   // Register send callback for delivery tracking
   esp_now_register_send_cb(espNowSendCallback);
-  Serial.println("ESP-NOW send callback registered");
+  // Serial.println("ESP-NOW send callback registered");
   // Create FreeRTOS Tasks-
   xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
 
