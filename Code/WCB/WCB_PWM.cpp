@@ -712,11 +712,27 @@ void configureRemotePWMOutput(int serialPort) {
 }
 
 bool isSerialPortPWMOutput(int port) {
+    // Check explicit output-only ports list
     for (int i = 0; i < pwmOutputCount; i++) {
         if (pwmOutputPorts[i] == port) {
             return true;
         }
     }
+    
+    // Check if port is used as an output in any PWM mapping
+    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+        if (pwmMappings[i].active) {
+            for (int j = 0; j < pwmMappings[i].outputCount; j++) {
+                // Check local outputs (wcbNumber == 0 or == WCB_Number)
+                if ((pwmMappings[i].outputs[j].wcbNumber == 0 || 
+                     pwmMappings[i].outputs[j].wcbNumber == WCB_Number) &&
+                    pwmMappings[i].outputs[j].serialPort == port) {
+                    return true;
+                }
+            }
+        }
+    }
+    
     return false;
 }
 

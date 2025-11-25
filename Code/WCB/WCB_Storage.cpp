@@ -164,6 +164,29 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
+        // Check if port is reserved for PWM output
+        if (isSerialPortPWMOutput(i + 1)) {
+            Serial.printf(" Serial%d: Reserved for PWM Output", i + 1);
+            // Add label if it exists
+            if (serialPortLabels[i].length() > 0) {
+                Serial.printf(" (%s)", serialPortLabels[i].c_str());
+            }
+            Serial.println();
+            continue;
+        }
+        
+        // Check if port is reserved for PWM input
+        if (isSerialPortUsedForPWMInput(i + 1)) {
+            Serial.printf(" Serial%d: Reserved for PWM Input", i + 1);
+            // Add label if it exists
+            if (serialPortLabels[i].length() > 0) {
+                Serial.printf(" (%s)", serialPortLabels[i].c_str());
+            }
+            Serial.println();
+            continue;
+        }
+        
+        // Normal serial port - show baud and broadcast
         Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s",
                       i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
         
