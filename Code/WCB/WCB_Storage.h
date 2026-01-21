@@ -90,5 +90,18 @@ void loadSerialLabelsFromPreferences();
 void saveSerialLabelToPreferences(int port, const String &label);
 void clearSerialLabel(int port);
 
+// Serial monitoring
+extern bool serialMonitorEnabled[5];
+extern bool mirrorToUSB;
+extern bool mirrorToKyber;
+
+// Broadcast blocking
+extern bool blockBroadcastFrom[5];
+
+void loadSerialMonitorSettings();
+void saveSerialMonitorSettings();
+void loadBroadcastBlockSettings();
+void saveBroadcastBlockSettings();
+
 
 #endif

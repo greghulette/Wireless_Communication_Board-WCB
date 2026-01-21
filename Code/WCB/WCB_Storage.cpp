@@ -548,6 +548,14 @@ void eraseNVSFlash() {
     preferences.begin("serial_labels", false);
     preferences.clear();
     preferences.end();
+
+    preferences.begin("serial_monitor", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("bcast_block", false);
+    preferences.clear();
+    preferences.end();
     
     clearAllPWMMappings();
 
@@ -656,3 +664,44 @@ String getSerialLabel(int port) {
   }
   return label;
 }
+
+void loadSerialMonitorSettings() {
+    preferences.begin("serial_monitor", true);
+    for (int i = 0; i < 5; i++) {
+        String key = "mon" + String(i + 1);
+        serialMonitorEnabled[i] = preferences.getBool(key.c_str(), false);
+    }
+    mirrorToUSB = preferences.getBool("mirror_usb", true);
+    mirrorToKyber = preferences.getBool("mirror_kyber", false);
+    preferences.end();
+}
+
+void saveSerialMonitorSettings() {
+    preferences.begin("serial_monitor", false);
+    for (int i = 0; i < 5; i++) {
+        String key = "mon" + String(i + 1);
+        preferences.putBool(key.c_str(), serialMonitorEnabled[i]);
+    }
+    preferences.putBool("mirror_usb", mirrorToUSB);
+    preferences.putBool("mirror_kyber", mirrorToKyber);
+    preferences.end();
+}
+
+void loadBroadcastBlockSettings() {
+    preferences.begin("bcast_block", true);
+    for (int i = 0; i < 5; i++) {
+        String key = "blk" + String(i + 1);
+        blockBroadcastFrom[i] = preferences.getBool(key.c_str(), false);
+    }
+    preferences.end();
+}
+
+void saveBroadcastBlockSettings() {
+    preferences.begin("bcast_block", false);
+    for (int i = 0; i < 5; i++) {
+        String key = "blk" + String(i + 1);
+        preferences.putBool(key.c_str(), blockBroadcastFrom[i]);
+    }
+    preferences.end();
+}
+

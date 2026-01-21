@@ -113,6 +113,13 @@ unsigned long espnowCommandDelivered = 0;
 // Delivery tracking enable flags (can toggle each independently)
 bool trackCommandDelivery = true;
 
+// Serial port monitoring/mirroring
+bool serialMonitorEnabled[5] = {false, false, false, false, false};  // Which ports to monitor
+bool mirrorToUSB = true;      // Mirror monitored ports to USB Serial
+bool mirrorToKyber = false;   // Mirror monitored ports to Kyber serial
+
+// Broadcast blocking
+bool blockBroadcastFrom[5] = {false, false, false, false, false};  // Block broadcasts from these ports
 
 Preferences preferences;  // Allows you to store information that persists after reboot and after reloading of sketch
 
@@ -306,6 +313,8 @@ void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
+
+
 // String getSerialLabel(int port);
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
@@ -440,6 +449,27 @@ void printConfigInfo() {
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   printBaudRates();  // Print baud rates
+   Serial.println("--------------- Serial Monitoring ----------------------");
+  Serial.println("Port Monitoring:");
+  for (int i = 0; i < 5; i++) {
+      if (serialMonitorEnabled[i]) {
+          Serial.printf(" Serial%d: MONITORING ENABLED\n", i + 1);
+      }
+  }
+  Serial.printf("Mirror to USB: %s\n", mirrorToUSB ? "ENABLED" : "DISABLED");
+  Serial.printf("Mirror to Kyber: %s\n", mirrorToKyber ? "ENABLED" : "DISABLED");
+  
+  Serial.println("--------------- Broadcast Blocking ----------------------");
+  bool anyBlocked = false;
+  for (int i = 0; i < 5; i++) {
+      if (blockBroadcastFrom[i]) {
+          Serial.printf(" Serial%d: Broadcasts BLOCKED\n", i + 1);
+          anyBlocked = true;
+      }
+  }
+  if (!anyBlocked) {
+      Serial.println(" No ports blocked");
+  }
   Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
@@ -898,6 +928,64 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabelCommand(message);
         return;
+        } else if (message.startsWith("smon") || message.startsWith("SMON")) {  // <-- MOVE BEFORE "s"
+    // Format: ?SMONx1 or ?SMONx0 to enable/disable monitoring on port x
+    if (message.length() < 6) {
+        Serial.println("Invalid format. Use ?SMONx1 or ?SMONx0 (x=1-5)");
+        return;
+    }
+    int port = message.substring(4, 5).toInt();
+    int state = message.substring(5, 6).toInt();
+    if (debugEnabled) {
+        Serial.printf("SMON command: port=%d, state=%d\n", port, state);
+    }
+    if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
+        serialMonitorEnabled[port - 1] = (state == 1);
+        saveSerialMonitorSettings();
+        Serial.printf("Serial%d monitoring %s\n", port, state ? "ENABLED" : "DISABLED");
+    } else {
+        Serial.printf("Invalid values: port=%d, state=%d. Use ?SMONx1 or ?SMONx0 (x=1-5)\n", port, state);
+    }
+    return;
+} else if (message == "smon_usb1" || message == "SMON_USB1") {
+    mirrorToUSB = true;
+    saveSerialMonitorSettings();
+    Serial.println("USB mirroring ENABLED");
+    return;
+} else if (message == "smon_usb0" || message == "SMON_USB0") {
+    mirrorToUSB = false;
+    saveSerialMonitorSettings();
+    Serial.println("USB mirroring DISABLED");
+    return;
+} else if (message == "smon_kyber1" || message == "SMON_KYBER1") {
+    mirrorToKyber = true;
+    saveSerialMonitorSettings();
+    Serial.println("Kyber mirroring ENABLED");
+    return;
+} else if (message == "smon_kyber0" || message == "SMON_KYBER0") {
+    mirrorToKyber = false;
+    saveSerialMonitorSettings();
+    Serial.println("Kyber mirroring DISABLED");
+    return;
+} else if (message.startsWith("sblk") || message.startsWith("SBLK")) {
+    // Format: ?SBLKx1 or ?SBLKx0 to block/allow broadcasts from port x
+    if (message.length() < 6) {
+        Serial.println("Invalid format. Use ?SBLKx1 or ?SBLKx0 (x=1-5)");
+        return;
+    }
+    int port = message.substring(4, 5).toInt();
+    int state = message.substring(5, 6).toInt();
+    if (debugEnabled) {
+        Serial.printf("SBLK command: port=%d, state=%d\n", port, state);
+    }
+    if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
+        blockBroadcastFrom[port - 1] = (state == 1);
+        saveBroadcastBlockSettings();
+        Serial.printf("Serial%d broadcast blocking %s\n", port, state ? "ENABLED" : "DISABLED");
+    } else {
+        Serial.printf("Invalid values: port=%d, state=%d. Use ?SBLKx1 or ?SBLKx0 (x=1-5)\n", port, state);
+    }
+    return;
     } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
         return;
@@ -939,11 +1027,11 @@ void processLocalCommand(const String &message) {
     } else if (message.equals("pclear") || message.equals("PCLEAR")) {
       
         clearAllPWMMappings();
-    return;
+      return;
     } else if (message.startsWith("po") || message.startsWith("PO")) {
-    int port = message.substring(2).toInt();
-    addPWMOutputPort(port);
-    return;
+      int port = message.substring(2).toInt();
+      addPWMOutputPort(port);
+      return;
     } else if (message.startsWith("px") || message.startsWith("PX")) {
         int port = message.substring(2).toInt();
         removePWMOutputPort(port);
@@ -952,7 +1040,6 @@ void processLocalCommand(const String &message) {
         Serial.println("Invalid Local Command");
     }
 }
-
 //*******************************
 /// Processing Local Function Identifier Functions
 //*******************************
@@ -1223,7 +1310,40 @@ void updateHWVersion(const String &message) {
         chainedConfig += String(commandDelimiter) + cmd;
         chainedConfigDefault += "^" + cmd;
     }
-    
+    // ADD SERIAL MONITORING SETTINGS
+for (int i = 0; i < 5; i++) {
+    if (serialMonitorEnabled[i]) {
+        cmd = "?SMON" + String(i + 1) + "1";
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+    }
+}
+
+// Mirror settings (only save if non-default)
+if (!mirrorToUSB) {  // Default is true, so only save if disabled
+    cmd = "?SMON_USB0";
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+}
+if (mirrorToKyber) {  // Default is false, so only save if enabled
+    cmd = "?SMON_KYBER1";
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+}
+
+// ADD BROADCAST BLOCKING SETTINGS
+for (int i = 0; i < 5; i++) {
+    if (blockBroadcastFrom[i]) {
+        cmd = "?SBLK" + String(i + 1) + "1";
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+    }
+}
+
     // Kyber Settings
     if (Kyber_Local) {
         cmd = "?KYBER_LOCAL";
@@ -1445,6 +1565,23 @@ void processPWMOutput(const String &message) {
 /// Processing Broadcast Function
 //*******************************
 void processBroadcastCommand(const String &cmd, int sourceID) {
+  // Check if broadcasts are blocked from this source
+    if (sourceID >= 1 && sourceID <= 5 && blockBroadcastFrom[sourceID - 1]) {
+        if (debugEnabled) {
+            Serial.printf("Broadcast blocked from %s (port blocking enabled)\n", getSerialLabel(sourceID).c_str());
+        }
+        return;  // Don't broadcast
+    }
+    
+    // Monitor override: if monitoring is enabled, allow broadcast even if blocked
+    if (sourceID >= 1 && sourceID <= 5 && serialMonitorEnabled[sourceID - 1]) {
+        if (debugEnabled) {
+            Serial.printf("Broadcast allowed from %s (monitoring override)\n", getSerialLabel(sourceID).c_str());
+        }
+        // Continue with broadcast...
+    }
+    
+
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
     }
@@ -1473,30 +1610,39 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-  if (!serial.available()) return;  // Exit if no data available
+  if (!serial.available()) return;
 
-  // static String serialBuffer = "";  // Buffer for incoming serial data
-  static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
+  static String serialBuffers[6];
   String &serialBuffer = serialBuffers[sourceID];
+  
   while (serial.available()) {
     char c = serial.read();
-  // Serial.printf("Serial%d read: '%c' (0x%02X)\n", sourceID, c, (uint8_t)c);
-    if (c == '\r' || c == '\n') {  // End of command
+    
+    // Mirror to USB if monitoring is enabled for this port
+    if (sourceID >= 1 && sourceID <= 5 && serialMonitorEnabled[sourceID - 1] && mirrorToUSB) {
+        Serial.write(c);
+    }
+    
+    // Mirror to Kyber if monitoring is enabled
+    if (sourceID >= 1 && sourceID <= 5 && serialMonitorEnabled[sourceID - 1] && mirrorToKyber) {
+        if (Kyber_Local) {
+            Serial2.write(c);
+        }
+    }
+    
+    if (c == '\r' || c == '\n') {
       if (!serialBuffer.isEmpty()) {
-          serialBuffer.trim();  // Remove leading/trailing spaces
-          if (debugEnabled){Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), serialBuffer.c_str());}
+          serialBuffer.trim();
+          if (debugEnabled){
+              Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), serialBuffer.c_str());
+          }
 
-          // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
-
-          // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
-
-            // Clear buffer for next command
           serialBuffer = "";
       }
     } else {
-      serialBuffer += c;  // Append new characters to buffer
+      serialBuffer += c;
     }
   }
 }
@@ -1794,6 +1940,48 @@ void setup() {
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
   listPWMMappingsBoot();
+  // ADD MONITORING/BLOCKING STATUS
+bool hasMonitoring = false;
+bool hasBlocking = false;
+
+for (int i = 0; i < 5; i++) {
+    if (serialMonitorEnabled[i]) hasMonitoring = true;
+    if (blockBroadcastFrom[i]) hasBlocking = true;
+}
+
+if (hasMonitoring) {
+    Serial.println("Serial Monitoring Active:");
+    for (int i = 0; i < 5; i++) {
+        if (serialMonitorEnabled[i]) {
+            Serial.printf(" Serial%d monitoring enabled", i + 1);
+            if (serialPortLabels[i].length() > 0) {
+                Serial.printf(" (%s)", serialPortLabels[i].c_str());
+            }
+            Serial.println();
+        }
+    }
+    Serial.printf(" Mirror to USB: %s\n", mirrorToUSB ? "YES" : "NO");
+    if (Kyber_Local || Kyber_Remote) {
+        Serial.printf(" Mirror to Kyber: %s\n", mirrorToKyber ? "YES" : "NO");
+    }
+}
+
+if (hasBlocking) {
+    Serial.println("Broadcast Blocking Active:");
+    for (int i = 0; i < 5; i++) {
+        if (blockBroadcastFrom[i]) {
+            Serial.printf(" Serial%d broadcasts blocked", i + 1);
+            if (serialPortLabels[i].length() > 0) {
+                Serial.printf(" (%s)", serialPortLabels[i].c_str());
+            }
+            Serial.println();
+        }
+    }
+}
+
+if (hasMonitoring || hasBlocking) {
+    Serial.println("-------------------------------------------------------");
+}
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
 
@@ -1866,7 +2054,8 @@ void setup() {
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
   loadStoredCommandsFromPreferences();
-
+  loadSerialMonitorSettings(); 
+  loadBroadcastBlockSettings();  
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);
