@@ -27,7 +27,7 @@ extern bool Kyber_Remote;
 extern bool Kyber_Local;
 extern String Kyber_Location;
 extern String serialPortLabels[5];
-
+String getSerialLabel(int port);
 
 
 // For stored commands

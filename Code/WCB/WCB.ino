@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_182018RJAN2026                                   *****////
+///*****                                          Version 5.3_202309RJAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_182018RJAN2026";
+String SoftwareVersion = "5.3_202309RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -306,7 +306,7 @@ void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
-
+// String getSerialLabel(int port);
 // Write a string + `\r` to a given Stream
 void writeSerialString(Stream &serialPort, String stringData) {
   String completeString = stringData + '\r';
@@ -1514,12 +1514,46 @@ void processSerialCommandHelper(String &data, int sourceID) {
         return;
     }
 
-    // Direct enqueue if command starts with "?C"
-    if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
-        data.startsWith(String(LocalFunctionIdentifier) + "c")) {
+    // Handle ?C commands with checksum validation BEFORE storing
+if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
+    data.startsWith(String(LocalFunctionIdentifier) + "c")) {
+    
+    // Look for delimiter + ?CHK pattern (not just ?CHK)
+    String chkPattern = String(commandDelimiter) + "?CHK";
+    int chkPos = data.indexOf(chkPattern);
+    if (chkPos == -1) {
+        chkPattern = String(commandDelimiter) + "?chk";
+        chkPos = data.indexOf(chkPattern);
+    }
+    
+    if (chkPos != -1) {
+        // Extract the command without checksum (everything before delimiter+?CHK)
+        String cmdWithoutChecksum = data.substring(0, chkPos);
+        // Extract checksum (skip delimiter + "?CHK")
+        String providedChecksum = data.substring(chkPos + chkPattern.length());
+        providedChecksum.toUpperCase();
+        
+        // Calculate checksum for the command WITHOUT the checksum itself
+        uint32_t calculatedChecksum = calculateCRC32(cmdWithoutChecksum);
+        char calculatedChecksumStr[9];  // 8 hex chars + null terminator
+        sprintf(calculatedChecksumStr, "%08X", calculatedChecksum);  // Always 8 chars with leading zeros
+        
+        if (providedChecksum.equals(calculatedChecksumStr)) {
+            Serial.println("✓ Command checksum VERIFIED");
+            // Enqueue the command WITHOUT the checksum
+            enqueueCommand(cmdWithoutChecksum, sourceID);
+        } else {
+            Serial.println("✗ Command checksum FAILED!");
+            Serial.println("  Provided:   " + providedChecksum);
+            Serial.println("  Calculated: " + String(calculatedChecksumStr));
+        }
+        return;
+    } else {
+        // No checksum - process normally
         enqueueCommand(data, sourceID);
         return;
     }
+}
 
     // Timer-aware parsing: if command contains ;T or ;t, use grouped mode
     if (data.indexOf(";T") != -1 || data.indexOf(";t") != -1) {
@@ -1529,19 +1563,6 @@ void processSerialCommandHelper(String &data, int sourceID) {
 
     // USE parseCommandsAndEnqueue for ALL other cases (includes checksum verification)
     parseCommandsAndEnqueue(data, sourceID);
-}
-
-String getSerialLabel(int port) {
-  if (port == 0) {
-        return "Serial0 (USB)";
-  }
-  if (port < 1 || port > 5) return "Serial" + String(port);
-  
-  String label = "Serial" + String(port);
-  if (serialPortLabels[port - 1].length() > 0) {
-      label += " (" + serialPortLabels[port - 1] + ")";
-  }
-  return label;
 }
 
 void printResetReason() {

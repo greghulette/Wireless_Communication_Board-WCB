@@ -644,4 +644,15 @@ void clearSerialLabel(int port) {
 }
 
 
-
+String getSerialLabel(int port) {
+  if (port == 0) {
+    return "Serial0 (USB)";
+  }
+  if (port < 1 || port > 5) return "Serial" + String(port);
+  
+  String label = "Serial" + String(port);
+  if (serialPortLabels[port - 1].length() > 0) {
+      label += " (" + serialPortLabels[port - 1] + ")";
+  }
+  return label;
+}
