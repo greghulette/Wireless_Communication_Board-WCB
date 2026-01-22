@@ -1619,32 +1619,70 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   static String serialBuffers[6];
   String &serialBuffer = serialBuffers[sourceID];
   
+  // NEW: Monitor buffers - one per input port
+  static String monitorBuffers[6];  // Index 0-5 (0=Serial/USB, 1-5=Serial1-5)
+  
   while (serial.available()) {
     char c = serial.read();
     
     // NEW: Check if this port has monitor mappings
+    bool isMonitored = false;
+    int mappingIndex = -1;
+    
     if (sourceID >= 1 && sourceID <= 5) {
         for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
             if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == sourceID) {
-                // Found mapping - forward to all destinations
-                for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-                    uint8_t destWCB = serialMonitorMappings[i].outputs[j].wcbNumber;
-                    uint8_t destPort = serialMonitorMappings[i].outputs[j].serialPort;
+                isMonitored = true;
+                mappingIndex = i;
+                break;
+            }
+        }
+    }
+    
+    if (isMonitored) {
+        // Accumulate character in monitor buffer
+        monitorBuffers[sourceID] += c;
+        
+        // Check for terminators: \r, \n, or >
+        if (c == '\r' || c == '\n' || c == '>') {
+            // Message complete - send to all destinations
+            if (monitorBuffers[sourceID].length() > 0) {
+                for (int j = 0; j < serialMonitorMappings[mappingIndex].outputCount; j++) {
+                    uint8_t destWCB = serialMonitorMappings[mappingIndex].outputs[j].wcbNumber;
+                    uint8_t destPort = serialMonitorMappings[mappingIndex].outputs[j].serialPort;
                     
                     if (destWCB == 0) {
                         // Local destination
                         if (destPort == 0) {
-                            Serial.write(c);  // USB
+                            Serial.print(monitorBuffers[sourceID]);  // USB
                         } else {
-                            writeSerialString(getSerialStream(destPort), String(c));
+                            // Send to local serial port (without \r since writeSerialString adds it)
+                            String msg = monitorBuffers[sourceID];
+                            if (msg.endsWith("\r") || msg.endsWith("\n")) {
+                                msg = msg.substring(0, msg.length() - 1);
+                            }
+                            writeSerialString(getSerialStream(destPort), msg);
                         }
                     } else {
-                        // Remote destination - send via ESP-NOW
-                        String cmd = ";S" + String(destPort) + String(c);
+                        // Remote destination via ESP-NOW
+                        // Remove terminator before sending (receiving WCB's writeSerialString will add \r)
+                        String msg = monitorBuffers[sourceID];
+                        if (msg.endsWith("\r") || msg.endsWith("\n") || msg.endsWith(">")) {
+                            msg = msg.substring(0, msg.length() - 1);
+                        }
+                        
+                        String cmd = ";S" + String(destPort) + msg;
                         sendESPNowMessage(destWCB, cmd.c_str());
+                        
+                        if (debugEnabled) {
+                            Serial.printf("Monitor forwarded to WCB%d Serial%d: %s\n", 
+                                destWCB, destPort, msg.c_str());
+                        }
                     }
                 }
-                break;  // Only one mapping per port
+                
+                // Clear buffer after sending
+                monitorBuffers[sourceID] = "";
             }
         }
     }
@@ -1666,6 +1704,8 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     }
   }
 }
+
+
 // Helper function to process serial commands
 void processSerialCommandHelper(String &data, int sourceID) {
     if (debugEnabled) {
