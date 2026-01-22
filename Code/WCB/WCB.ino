@@ -405,9 +405,39 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     }
   }
   
-  // Normal parsing (no checksum found)
+  // Normal parsing with special handling for ?CS commands
   int startIdx = 0;
-  while (true) {
+  while (startIdx < data.length()) {
+    // Check if we're at the start of a ?CS command
+    String restOfString = data.substring(startIdx);
+    bool isCSCommand = restOfString.startsWith(String(LocalFunctionIdentifier) + "CS") || 
+                       restOfString.startsWith(String(LocalFunctionIdentifier) + "cs");
+    
+    if (isCSCommand) {
+      // Find the end of this ?CS command (next ^?CS or end of string)
+      int nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "CS", startIdx + 1);
+      if (nextCSPos == -1) {
+        nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "cs", startIdx + 1);
+      }
+      
+      // Extract the entire ?CS command including all its sub-commands
+      int endPos = (nextCSPos == -1) ? data.length() : nextCSPos;
+      String csCommand = data.substring(startIdx, endPos);
+      csCommand.trim();
+      
+      if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
+        enqueueCommand(csCommand, sourceID);
+      }
+      
+      // Move past this command
+      startIdx = endPos;
+      if (startIdx < data.length() && data.charAt(startIdx) == commandDelimiter) {
+        startIdx++; // skip the delimiter
+      }
+      continue;
+    }
+    
+    // Normal command processing (not ?CS)
     int delimPos = data.indexOf(commandDelimiter, startIdx);
     if (delimPos == -1) {
       String singleCmd = data.substring(startIdx);
@@ -835,6 +865,19 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
+   if (message.equals("kyber_local") || message.equals("KYBER_LOCAL")){
+        storeKyberSettings("local");
+        printKyberSettings();
+        return;
+    } else if (message.equals("kyber_remote") || message.equals("KYBER_REMOTE")){
+        storeKyberSettings("remote");
+        printKyberSettings();
+        return;
+    } else if (message.equals("kyber_clear") || message.equals("KYBER_CLEAR")){
+        storeKyberSettings("clear");
+        printKyberSettings();
+        return;
+    }
     if (message == "don" || message == "DON") {
         debugEnabled = true;
         Serial.println("Debugging enabled");
@@ -997,18 +1040,6 @@ void processLocalCommand(const String &message) {
         return;
     }else if (message.startsWith("maestro_disable") || message.startsWith("MAESTRO_DISABLE")) {
         disableMaestroSerialBaudRate();
-        return;
-    } else if (message.equals("kyber_local") || message.equals("KYBER_LOCAL")){
-        storeKyberSettings("local");
-        printKyberSettings();
-        return;
-    } else if (message.equals("kyber_remote") || message.equals("KYBER_REMOTE")){
-        storeKyberSettings("remote");
-        printKyberSettings();
-        return;
-    } else if (message.equals("kyber_clear") || message.equals("KYBER_CLEAR")){
-        storeKyberSettings("clear");
-        printKyberSettings();
         return;
     } else if (message.startsWith("hw") || message.startsWith("HW")) {
         updateHWVersion(message);
@@ -1661,45 +1692,45 @@ void processSerialCommandHelper(String &data, int sourceID) {
     }
 
     // Handle ?C commands with checksum validation BEFORE storing
-if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
-    data.startsWith(String(LocalFunctionIdentifier) + "c")) {
-    
-    // Look for delimiter + ?CHK pattern (not just ?CHK)
-    String chkPattern = String(commandDelimiter) + "?CHK";
-    int chkPos = data.indexOf(chkPattern);
-    if (chkPos == -1) {
-        chkPattern = String(commandDelimiter) + "?chk";
-        chkPos = data.indexOf(chkPattern);
-    }
-    
-    if (chkPos != -1) {
-        // Extract the command without checksum (everything before delimiter+?CHK)
-        String cmdWithoutChecksum = data.substring(0, chkPos);
-        // Extract checksum (skip delimiter + "?CHK")
-        String providedChecksum = data.substring(chkPos + chkPattern.length());
-        providedChecksum.toUpperCase();
+    if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
+        data.startsWith(String(LocalFunctionIdentifier) + "c")) {
         
-        // Calculate checksum for the command WITHOUT the checksum itself
-        uint32_t calculatedChecksum = calculateCRC32(cmdWithoutChecksum);
-        char calculatedChecksumStr[9];  // 8 hex chars + null terminator
-        sprintf(calculatedChecksumStr, "%08X", calculatedChecksum);  // Always 8 chars with leading zeros
-        
-        if (providedChecksum.equals(calculatedChecksumStr)) {
-            Serial.println("✓ Command checksum VERIFIED");
-            // Enqueue the command WITHOUT the checksum
-            enqueueCommand(cmdWithoutChecksum, sourceID);
-        } else {
-            Serial.println("✗ Command checksum FAILED!");
-            Serial.println("  Provided:   " + providedChecksum);
-            Serial.println("  Calculated: " + String(calculatedChecksumStr));
+        // Look for delimiter + ?CHK pattern (not just ?CHK)
+        String chkPattern = String(commandDelimiter) + "?CHK";
+        int chkPos = data.indexOf(chkPattern);
+        if (chkPos == -1) {
+            chkPattern = String(commandDelimiter) + "?chk";
+            chkPos = data.indexOf(chkPattern);
         }
-        return;
-    } else {
-        // No checksum - process normally
-        enqueueCommand(data, sourceID);
-        return;
+        
+        if (chkPos != -1) {
+            // Extract the command without checksum (everything before delimiter+?CHK)
+            String cmdWithoutChecksum = data.substring(0, chkPos);
+            // Extract checksum (skip delimiter + "?CHK")
+            String providedChecksum = data.substring(chkPos + chkPattern.length());
+            providedChecksum.toUpperCase();
+            
+            // Calculate checksum for the command WITHOUT the checksum itself
+            uint32_t calculatedChecksum = calculateCRC32(cmdWithoutChecksum);
+            char calculatedChecksumStr[9];  // 8 hex chars + null terminator
+            sprintf(calculatedChecksumStr, "%08X", calculatedChecksum);  // Always 8 chars with leading zeros
+            
+            if (providedChecksum.equals(calculatedChecksumStr)) {
+                Serial.println("✓ Command checksum VERIFIED");
+                // Enqueue the command WITHOUT the checksum
+                enqueueCommand(cmdWithoutChecksum, sourceID);
+            } else {
+                Serial.println("✗ Command checksum FAILED!");
+                Serial.println("  Provided:   " + providedChecksum);
+                Serial.println("  Calculated: " + String(calculatedChecksumStr));
+            }
+            return;
+        } else {
+            // No checksum - just process the command as-is
+            enqueueCommand(data, sourceID);
+            return;
+        }
     }
-}
 
     // Timer-aware parsing: if command contains ;T or ;t, use grouped mode
     if (data.indexOf(";T") != -1 || data.indexOf(";t") != -1) {
@@ -1707,9 +1738,10 @@ if (data.startsWith(String(LocalFunctionIdentifier) + "C") ||
         return;
     }
 
-    // USE parseCommandsAndEnqueue for ALL other cases (includes checksum verification)
+    // USE parseCommandsAndEnqueue for ALL other cases
     parseCommandsAndEnqueue(data, sourceID);
 }
+
 
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();

@@ -575,7 +575,7 @@ void storeKyberSettings(const String &message){
     Kyber_Remote = true;
     Kyber_Location = "remote";
   } else if (message.equals("clear")){
-    Kyber_Location = " ";
+    Kyber_Location = "";
     Kyber_Local = false;
     Kyber_Remote =false;
   }
