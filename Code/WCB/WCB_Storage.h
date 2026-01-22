@@ -28,7 +28,7 @@ extern bool Kyber_Local;
 extern String Kyber_Location;
 extern String serialPortLabels[5];
 String getSerialLabel(int port);
-
+extern bool blockBroadcastFrom[5];
 
 // For stored commands
 #define MAX_STORED_COMMANDS 80

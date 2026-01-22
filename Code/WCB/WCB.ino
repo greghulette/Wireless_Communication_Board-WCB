@@ -481,27 +481,18 @@ void printConfigInfo() {
   printBaudRates();  // Print baud rates
   listSerialMonitorMappings();
 
-   Serial.println("--------------- Serial Monitoring ----------------------");
-  Serial.println("Port Monitoring:");
-  for (int i = 0; i < 5; i++) {
-      if (serialMonitorEnabled[i]) {
-          Serial.printf(" Serial%d: MONITORING ENABLED\n", i + 1);
-      }
-  }
-  Serial.printf("Mirror to USB: %s\n", mirrorToUSB ? "ENABLED" : "DISABLED");
-  Serial.printf("Mirror to Kyber: %s\n", mirrorToKyber ? "ENABLED" : "DISABLED");
-  
-  Serial.println("--------------- Broadcast Blocking ----------------------");
-  bool anyBlocked = false;
-  for (int i = 0; i < 5; i++) {
-      if (blockBroadcastFrom[i]) {
-          Serial.printf(" Serial%d: Broadcasts BLOCKED\n", i + 1);
-          anyBlocked = true;
-      }
-  }
-  if (!anyBlocked) {
-      Serial.println(" No ports blocked");
-  }
+
+  // Serial.println("--------------- Broadcast Blocking ----------------------");
+  // bool anyBlocked = false;
+  // for (int i = 0; i < 5; i++) {
+  //     if (blockBroadcastFrom[i]) {
+  //         Serial.printf(" Serial%d: Broadcasts BLOCKED\n", i + 1);
+  //         anyBlocked = true;
+  //     }
+  // }
+  // if (!anyBlocked) {
+  //     Serial.println(" No ports blocked");
+  // }
   Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
@@ -1929,6 +1920,9 @@ void setup() {
   // Serial.println("PWM Mappings:");
   loadBaudRatesFromPreferences();
   loadSerialLabelsFromPreferences();  // 
+   loadSerialMonitorSettings(); 
+  loadBroadcastBlockSettings();  
+  loadSerialMonitorMappings();
   initPWM();  // <-- This loads PWM mappings from preferences
   Serial.println("-------------------------------------------------------");
   printBaudRates();
@@ -2109,9 +2103,7 @@ if (hasMonitoring || hasBlocking) {
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
   loadStoredCommandsFromPreferences();
-  loadSerialMonitorSettings(); 
-  loadBroadcastBlockSettings();  
-  loadSerialMonitorMappings();
+ 
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);

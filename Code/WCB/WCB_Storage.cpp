@@ -219,7 +219,7 @@ void saveBroadcastSettingsToPreferences() {
         String key = "S" + String(i + 1);
         int value = serialBroadcastEnabled[i] ? 1 : 0;
         size_t result = preferences.putInt(key.c_str(), value);
-        // Serial.printf("Broadcast setting for Serial%d saved as %d\n", i + 1, value);
+        Serial.printf("Broadcast setting for Serial%d saved as %d\n", i + 1, value);
         // Serial.printf("  %s = %d (bytes written: %d)\n", key.c_str(), value, result);
     }
     preferences.end();
@@ -797,10 +797,18 @@ void addSerialMonitorMapping(const String &message) {
     
     serialMonitorMappings[slotIndex].outputCount = outputIndex;
     serialMonitorMappings[slotIndex].active = true;
-    
+    // AUTO-ENABLE INPUT BLOCKING for this port
+    if (inputPort >= 1 && inputPort <= 5) {
+        blockBroadcastFrom[inputPort - 1] = true;
+        saveBroadcastBlockSettings();
+        if (debugEnabled) {
+            Serial.printf("Auto-enabled broadcast input blocking for Serial%d\n", inputPort);
+        }
+    }
+
     saveSerialMonitorMappings();
     
-    Serial.printf("Serial Monitor mapping added for Serial%d -> %d destinations\n", inputPort, outputIndex);
+    Serial.printf("Serial mapping added for Serial%d -> %d destinations\n", inputPort, outputIndex);
     listSerialMonitorMappings();
 }
 
@@ -814,12 +822,12 @@ void removeSerialMonitorMapping(int port) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == port) {
             serialMonitorMappings[i].active = false;
             saveSerialMonitorMappings();
-            Serial.printf("Removed Serial Monitor mapping for Serial%d\n", port);
+            Serial.printf("Removed Serial mapping for Serial%d\n", port);
             return;
         }
     }
     
-    Serial.printf("No Serial Monitor mapping found for Serial%d\n", port);
+    Serial.printf("No Serial mapping found for Serial%d\n", port);
 }
 
 void clearAllSerialMonitorMappings() {
@@ -831,17 +839,17 @@ void clearAllSerialMonitorMappings() {
     preferences.clear();
     preferences.end();
     
-    Serial.println("All Serial Monitor mappings cleared");
+    Serial.println("All Serial mappings cleared");
 }
 
 void listSerialMonitorMappings() {
     bool found = false;
     
-    Serial.println("\n--- Serial Monitor Mappings ---");
+    Serial.println("\n--- Serial Mappings ---");
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active) {
             found = true;
-            Serial.printf("Serial%d monitors to: ", serialMonitorMappings[i].inputPort);
+            Serial.printf("Serial%d mapped to: ", serialMonitorMappings[i].inputPort);
             
             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                 if (j > 0) Serial.print(", ");
@@ -867,7 +875,7 @@ void listSerialMonitorMappings() {
     }
     
     if (!found) {
-        Serial.println("No Serial Monitor mappings configured");
+        Serial.println("No Serial mappings configured");
     }
     Serial.println("--- End of Mappings ---\n");
 }
@@ -896,7 +904,7 @@ void saveSerialMonitorMappings() {
     }
     
     preferences.end();
-    Serial.println("Serial Monitor mappings saved to NVS");
+    Serial.println("Serial mappings saved to NVS");
 }
 
 void loadSerialMonitorMappings() {
