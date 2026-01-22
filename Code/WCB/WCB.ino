@@ -1275,6 +1275,10 @@ void updateHWVersion(const String &message) {
         hwCmd = "?HW31";
     } else if (wcb_hw_version == 32) {
         hwCmd = "?HW32";
+    } else {
+    Serial.println("⚠️ WARNING: Hardware version not set! Use ?HWxx to set version before backup.");
+    Serial.println("?HW0  // ⚠️ HARDWARE VERSION NOT SET - SET BEFORE RESTORING!");
+    hwCmd = "?HW0";  // Add a warning command to the backup
     }
     Serial.println(hwCmd);
     chainedConfig += hwCmd;
