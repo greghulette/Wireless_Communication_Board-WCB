@@ -31,11 +31,27 @@ String getSerialLabel(int port);
 
 
 // For stored commands
-#define MAX_STORED_COMMANDS 50
+#define MAX_STORED_COMMANDS 80
+#define MAX_SERIAL_MONITOR_MAPPINGS 5  // One per input port
+
 extern String storedCommands[MAX_STORED_COMMANDS];
 
 extern void enqueueCommand(const String &cmd, int sourceID);  // Declare it as an external function
 extern void parseCommandsAndEnqueue(const String &data, int sourceID);
+
+struct SerialMonitorOutput {
+    uint8_t wcbNumber;    // 0 = local, 1-9 = remote WCB
+    uint8_t serialPort;   // 0 = USB, 1-5 = Serial ports
+};
+
+struct SerialMonitorMapping {
+    bool active;
+    uint8_t inputPort;    // 1-5 (which local serial port to monitor)
+    uint8_t outputCount;
+    SerialMonitorOutput outputs[10];  // Up to 10 output destinations
+};
+
+extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
 // =============== Function Declarations ===============
 void saveHWversion(int wcb_hw_version_f);
@@ -103,5 +119,12 @@ void saveSerialMonitorSettings();
 void loadBroadcastBlockSettings();
 void saveBroadcastBlockSettings();
 
+void addSerialMonitorMapping(const String &message);
+void removeSerialMonitorMapping(int port);
+void clearAllSerialMonitorMappings();
+void listSerialMonitorMappings();
+void saveSerialMonitorMappings();
+void loadSerialMonitorMappings();
+bool isSerialPortMonitored(int port); 
 
 #endif
