@@ -479,6 +479,8 @@ void printConfigInfo() {
   loadBaudRatesFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   printBaudRates();  // Print baud rates
+  listSerialMonitorMappings();
+
    Serial.println("--------------- Serial Monitoring ----------------------");
   Serial.println("Port Monitoring:");
   for (int i = 0; i < 5; i++) {
@@ -1572,20 +1574,11 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
   // Check if broadcasts are blocked from this source
     if (sourceID >= 1 && sourceID <= 5 && blockBroadcastFrom[sourceID - 1]) {
         if (debugEnabled) {
-            Serial.printf("Broadcast blocked from %s (port blocking enabled)\n", getSerialLabel(sourceID).c_str());
+            Serial.printf("Broadcast blocked from %s (input blocking enabled)\n", getSerialLabel(sourceID).c_str());
         }
-        return;  // Don't broadcast
+        return;  // Don't broadcast - port is mapped
     }
     
-    // Monitor override: if monitoring is enabled, allow broadcast even if blocked
-    if (sourceID >= 1 && sourceID <= 5 && serialMonitorEnabled[sourceID - 1]) {
-        if (debugEnabled) {
-            Serial.printf("Broadcast allowed from %s (monitoring override)\n", getSerialLabel(sourceID).c_str());
-        }
-        // Continue with broadcast...
-    }
-    
-
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
     }
@@ -1610,7 +1603,8 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
       sendESPNowMessage(0, cmd.c_str());
       if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
     }
-  }
+}
+
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
@@ -1938,6 +1932,7 @@ void setup() {
   initPWM();  // <-- This loads PWM mappings from preferences
   Serial.println("-------------------------------------------------------");
   printBaudRates();
+  listSerialMonitorMappings();
   Serial.println("-------------------------------------------------------");
 
   if (Kyber_Local) {

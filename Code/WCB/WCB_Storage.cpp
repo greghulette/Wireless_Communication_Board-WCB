@@ -187,9 +187,15 @@ void printBaudRates() {
             continue;
         }
         
-        // Normal serial port - show baud and broadcast
-        Serial.printf(" Serial%d Baud Rate: %d,  Broadcast: %s",
-                      i + 1, baudRates[i], serialBroadcastEnabled[i] ? "Enabled" : "Disabled");
+        // Normal serial port - show baud and broadcast settings
+        // Determine broadcast input status (blocked or enabled)
+        String inputStatus = blockBroadcastFrom[i] ? "Disabled" : "Enabled";
+        
+        // Determine broadcast output status
+        String outputStatus = serialBroadcastEnabled[i] ? "Enabled" : "Disabled";
+        
+        Serial.printf(" Serial%d Baud Rate: %lu, Broadcast Input: %s, Broadcast Output: %s",
+                      i + 1, baudRates[i], inputStatus.c_str(), outputStatus.c_str());
         
         // Add label if it exists
         if (serialPortLabels[i].length() > 0) {
