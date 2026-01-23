@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_211014RJAN2026                                   *****////
+///*****                                          Version 5.3_212026RJAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_211014RJAN2026";
+String SoftwareVersion = "5.3_212026RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1485,9 +1485,9 @@ void processSerialMessage(const String &message) {
     }
 
     // Extract serial port number
-    int target = message.substring(1, 2).toInt();  // Extract Serial port (1-5)
-    if (target < 1 || target > 5) {
-        Serial.println("Invalid serial port number. Must be between 1 and 5.");
+    int target = message.substring(1, 2).toInt();  // Extract Serial port (0-5, where 0=USB)
+    if (target < 0 || target > 5) {  // ← CHANGED: was "target < 1"
+        Serial.println("Invalid serial port number. Must be between 0 and 5 (0=USB).");  // ← UPDATED MESSAGE
         return;
     }
 
@@ -1495,7 +1495,16 @@ void processSerialMessage(const String &message) {
     String serialMessage = message.substring(2);
     serialMessage.trim();
 
-    // Send to selected serial port
+    // Handle USB (Serial0) separately
+    if (target == 0) {
+        Serial.println(serialMessage);  // Send to USB
+        if (debugEnabled) {
+            Serial.printf("Sent to USB: %s\n", serialMessage.c_str());
+        }
+        return;
+    }
+
+    // Send to selected serial port (1-5)
     Stream &targetSerial = getSerialStream(target);
     writeSerialString(targetSerial, serialMessage);
     targetSerial.flush(); // Ensure it's sent immediately
@@ -1504,7 +1513,6 @@ void processSerialMessage(const String &message) {
       Serial.printf("Sent to %s: %s\n", getSerialLabel(target).c_str(), serialMessage.c_str());
     }
 }
-
 void processWCBMessage(const String &message){
   int targetWCB = message.substring(1, 2).toInt();
         String espnow_message = message.substring(2);
