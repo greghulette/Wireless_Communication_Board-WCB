@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_221018JAN2026                                   *****////
+///*****                                          Version 5.3_221123JAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_221018JAN2026";
+String SoftwareVersion = "5.3_221123JAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -479,6 +479,8 @@ void printConfigInfo() {
   printHWversion();
   Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
   loadBaudRatesFromPreferences();
+  loadBroadcastBlockSettings();
+  // loadBroadcastSettingsFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   printBaudRates();  // Print baud rates
   listSerialMonitorMappings();
@@ -1937,6 +1939,7 @@ void setup() {
    loadSerialMonitorSettings(); 
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
+  loadBroadcastSettingsFromPreferences(); 
   initPWM();  // <-- This loads PWM mappings from preferences
   Serial.println("-------------------------------------------------------");
   printBaudRates();
