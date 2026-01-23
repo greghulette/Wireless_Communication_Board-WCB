@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_202309RJAN2026                                   *****////
+///*****                                          Version 5.3_211014RJAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_202309RJAN2026";
+String SoftwareVersion = "5.3_211014RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -164,6 +164,8 @@ int storedBaudRate[6] = {
   SERIAL4_DEFAULT_BAUD_RATE,
   SERIAL5_DEFAULT_BAUD_RATE
 };
+
+extern bool serialMonitorEnabled[5];
 
 #define STATUS_LED_COUNT 1
 
@@ -1562,41 +1564,80 @@ void processPWMOutput(const String &message) {
 /// Processing Broadcast Function
 //*******************************
 void processBroadcastCommand(const String &cmd, int sourceID) {
-  // Check if broadcasts are blocked from this source
-    if (sourceID >= 1 && sourceID <= 5 && blockBroadcastFrom[sourceID - 1]) {
-        if (debugEnabled) {
-            Serial.printf("Broadcast blocked from %s (input blocking enabled)\n", getSerialLabel(sourceID).c_str());
-        }
-        return;  // Don't broadcast - port is mapped
-    }
-    
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
     }
 
-    // Send to all serial ports except restricted ones
+    // Check if source port has an active serial monitor mapping
+    bool hasMappingActive = false;
+    int mappingIndex = -1;
+    
+    if (sourceID >= 1 && sourceID <= 5) {
+        for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+            if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == sourceID) {
+                hasMappingActive = true;
+                mappingIndex = i;
+                break;
+            }
+        }
+    }
+    
+    if (hasMappingActive) {
+        // Mapping is active - only send to mapped destinations, NO normal broadcast
+        if (debugEnabled) {
+            Serial.printf("Serial mapping active on Serial%d - sending only to mapped ports\n", sourceID);
+        }
+        
+        // Send to all mapped outputs
+        for (int j = 0; j < serialMonitorMappings[mappingIndex].outputCount; j++) {
+            uint8_t destWCB = serialMonitorMappings[mappingIndex].outputs[j].wcbNumber;
+            uint8_t destPort = serialMonitorMappings[mappingIndex].outputs[j].serialPort;
+            
+            if (destWCB == 0) {
+                // Local destination
+                if (destPort == 0) {
+                    Serial.println(cmd);  // USB
+                    if (debugEnabled) { Serial.printf("Sent to USB: %s\n", cmd.c_str()); }
+                } else {
+                    writeSerialString(getSerialStream(destPort), cmd);
+                    if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", destPort, cmd.c_str()); }
+                }
+            } else {
+                // Remote destination via ESP-NOW
+                String espnowCmd = ";S" + String(destPort) + cmd;
+                sendESPNowMessage(destWCB, espnowCmd.c_str());
+                if (debugEnabled) {
+                    Serial.printf("Sent to WCB%d Serial%d via ESP-NOW: %s\n", 
+                        destWCB, destPort, cmd.c_str());
+                }
+            }
+        }
+        
+        return;  // Exit early - mapping replaces all broadcast behavior
+    }
+
+    // Check if broadcast is blocked on this port
+    if (sourceID >= 1 && sourceID <= 5 && blockBroadcastFrom[sourceID - 1]) {
+        Serial.printf("Broadcast blocked from Serial%d (input blocking enabled)\n", sourceID);
+        return;
+    }
+
+    // Normal broadcast behavior - send to all serial ports except restricted ones
     for (int i = 1; i <= 5; i++) {
-      // Skip Serial1 if Kyber_Remote is enabled
-      if ((i == 1 && Kyber_Remote) || 
-          (i <= 2 && Kyber_Local) || 
-          i == sourceID || 
-          !serialBroadcastEnabled[i - 1] ||
-          isSerialPortPWMOutput(i)) {  
-          continue;
-      }
+        if ((i == 1 && Kyber_Remote) || 
+            (i <= 2 && Kyber_Local) || 
+            i == sourceID || !serialBroadcastEnabled[i - 1]) {
+            continue;
+        }
 
         writeSerialString(getSerialStream(i), cmd);
-        if(debugEnabled){ Serial.printf("Sent to %s: %s\n", getSerialLabel(i).c_str(), cmd.c_str()); }
+        if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
     }
 
-    // Always send via ESP-NOW broadcast
-    if (!lastReceivedViaESPNOW){
-      sendESPNowMessage(0, cmd.c_str());
-      if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
-    }
+    // Always send via ESP-NOW broadcast (only when NOT using serial mapping)
+    sendESPNowMessage(0, cmd.c_str());
+    if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
-
-
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
   if (!serial.available()) return;
@@ -1604,75 +1645,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   static String serialBuffers[6];
   String &serialBuffer = serialBuffers[sourceID];
   
-  // NEW: Monitor buffers - one per input port
-  static String monitorBuffers[6];  // Index 0-5 (0=Serial/USB, 1-5=Serial1-5)
-  
   while (serial.available()) {
     char c = serial.read();
     
-    // NEW: Check if this port has monitor mappings
-    bool isMonitored = false;
-    int mappingIndex = -1;
-    
-    if (sourceID >= 1 && sourceID <= 5) {
-        for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-            if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == sourceID) {
-                isMonitored = true;
-                mappingIndex = i;
-                break;
-            }
-        }
-    }
-    
-    if (isMonitored) {
-        // Accumulate character in monitor buffer
-        monitorBuffers[sourceID] += c;
-        
-        // Check for terminators: \r, \n, or >
-        if (c == '\r' || c == '\n' || c == '>') {
-            // Message complete - send to all destinations
-            if (monitorBuffers[sourceID].length() > 0) {
-                for (int j = 0; j < serialMonitorMappings[mappingIndex].outputCount; j++) {
-                    uint8_t destWCB = serialMonitorMappings[mappingIndex].outputs[j].wcbNumber;
-                    uint8_t destPort = serialMonitorMappings[mappingIndex].outputs[j].serialPort;
-                    
-                    if (destWCB == 0) {
-                        // Local destination
-                        if (destPort == 0) {
-                            Serial.print(monitorBuffers[sourceID]);  // USB
-                        } else {
-                            // Send to local serial port (without \r since writeSerialString adds it)
-                            String msg = monitorBuffers[sourceID];
-                            if (msg.endsWith("\r") || msg.endsWith("\n")) {
-                                msg = msg.substring(0, msg.length() - 1);
-                            }
-                            writeSerialString(getSerialStream(destPort), msg);
-                        }
-                    } else {
-                        // Remote destination via ESP-NOW
-                        // Remove terminator before sending (receiving WCB's writeSerialString will add \r)
-                        String msg = monitorBuffers[sourceID];
-                        if (msg.endsWith("\r") || msg.endsWith("\n") || msg.endsWith(">")) {
-                            msg = msg.substring(0, msg.length() - 1);
-                        }
-                        
-                        String cmd = ";S" + String(destPort) + msg;
-                        sendESPNowMessage(destWCB, cmd.c_str());
-                        
-                        if (debugEnabled) {
-                            Serial.printf("Monitor forwarded to WCB%d Serial%d: %s\n", 
-                                destWCB, destPort, msg.c_str());
-                        }
-                    }
-                }
-                
-                // Clear buffer after sending
-                monitorBuffers[sourceID] = "";
-            }
-        }
-    }
-    
-    // Continue with normal command processing
+    // Simple command processing - accumulate until terminator
     if (c == '\r' || c == '\n') {
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();

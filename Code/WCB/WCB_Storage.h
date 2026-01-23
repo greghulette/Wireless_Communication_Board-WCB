@@ -29,7 +29,7 @@ extern String Kyber_Location;
 extern String serialPortLabels[5];
 String getSerialLabel(int port);
 extern bool blockBroadcastFrom[5];
-
+extern bool serialMonitorEnabled[5];
 // For stored commands
 #define MAX_STORED_COMMANDS 80
 #define MAX_SERIAL_MONITOR_MAPPINGS 5  // One per input port
