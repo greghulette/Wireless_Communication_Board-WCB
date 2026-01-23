@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_221004JAN2026                                   *****////
+///*****                                          Version 5.3_221018JAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_221004JAN2026";
+String SoftwareVersion = "5.3_221018JAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -976,24 +976,44 @@ void processLocalCommand(const String &message) {
     } else if (message.equals("smclear") || message.equals("SMCLEAR")) {
         clearAllSerialMonitorMappings();
         return;
-    } else if (message.startsWith("sb") || message.startsWith("SB")) {
-        // Format: ?SBx1 or ?SBx0 to block/allow broadcasts from port x
-      if (message.length() < 6) {
-          Serial.println("Invalid format. Use ?SBx1 or ?SBx0 (x=1-5)");
-      return;
-      }
-        int port = message.substring(4, 5).toInt();
-        int state = message.substring(5, 6).toInt();
-      if (debugEnabled) {
-        Serial.printf("SB command: port=%d, state=%d\n", port, state);
+    } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
+        // Format: ?SBIx1 or ?SBIx0 to enable/disable broadcast INPUT from port x
+        if (message.length() < 5) {
+            Serial.println("Invalid format. Use ?SBIx1 or ?SBIx0 (x=1-5)");
+            return;
         }
-      if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
-          blockBroadcastFrom[port - 1] = (state == 1);
-          saveBroadcastBlockSettings();
-          Serial.printf("Serial%d broadcast blocking %s\n", port, state ? "ENABLED" : "DISABLED");
-      } else {
-          Serial.printf("Invalid values: port=%d, state=%d. Use ?SBx1 or ?SBx0 (x=1-5)\n", port, state);
-      }
+        int port = message.substring(3, 4).toInt();
+        int state = message.substring(4, 5).toInt();
+        if (debugEnabled) {
+            Serial.printf("SBI command: port=%d, state=%d\n", port, state);
+        }
+        if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
+            // INVERTED LOGIC: state=1 means ALLOW (false=not blocked), state=0 means BLOCK (true=blocked)
+            blockBroadcastFrom[port - 1] = (state == 0);  // ← Changed from (state == 1)
+            saveBroadcastBlockSettings();
+            Serial.printf("Serial%d broadcast input %s\n", port, state ? "ENABLED" : "DISABLED");
+        } else {
+            Serial.printf("Invalid values. Use ?SBIx1 or ?SBIx0 (x=1-5)\n");
+        }
+        return;
+    } else if (message.startsWith("sbo") || message.startsWith("SBO")) {
+        // Format: ?SBOx1 or ?SBOx0 to enable/disable broadcast OUTPUT to port x
+        if (message.length() < 5) {
+            Serial.println("Invalid format. Use ?SBOx1 or ?SBOx0 (x=1-5)");
+            return;
+        }
+        int port = message.substring(3, 4).toInt();
+        int state = message.substring(4, 5).toInt();
+        if (debugEnabled) {
+            Serial.printf("SBO command: port=%d, state=%d\n", port, state);
+        }
+        if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
+            serialBroadcastEnabled[port - 1] = (state == 1);
+            saveBroadcastSettingsToPreferences();
+            Serial.printf("Serial%d broadcast output %s\n", port, state ? "ENABLED" : "DISABLED");
+        } else {
+            Serial.printf("Invalid values. Use ?SBOx1 or ?SBOx0 (x=1-5)\n");
+        }
         return;
     } else if (message.startsWith("sm") || message.startsWith("SM")) {
       addSerialMonitorMapping(message.substring(2));
@@ -1171,6 +1191,7 @@ void updateSerialSettings(const String &message){
   int state = message.substring(2, 3).toInt();
   if ((state == 0 || state == 1) && message.length()==3){
     if (port >= 1 && port <= 5) {
+      Serial.println("⚠️ WARNING: ?Sx0/1 is being deprecated. Use ?SBOx0/1 for broadcast output control. This command will still function for now but will be removed in future versions.");
       serialBroadcastEnabled[port - 1] = (state == 1);
       saveBroadcastSettingsToPreferences();
       Serial.printf("Serial%d broadcast %s and stored in NVS\n",
@@ -1309,10 +1330,10 @@ void updateHWVersion(const String &message) {
         chainedConfig += String(commandDelimiter) + cmd;
         chainedConfigDefault += "^" + cmd;
         
-        cmd = "?S" + String(i + 1) + String(serialBroadcastEnabled[i] ? 1 : 0);
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        // cmd = "?S" + String(i + 1) + String(serialBroadcastEnabled[i] ? 1 : 0);
+        // Serial.println(cmd);
+        // chainedConfig += String(commandDelimiter) + cmd;
+        // chainedConfigDefault += "^" + cmd;
     }
     // Serial Monitor Mappings
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
@@ -1333,15 +1354,23 @@ void updateHWVersion(const String &message) {
         }
     }
 
-    // ADD BROADCAST BLOCKING SETTINGS
-    for (int i = 0; i < 5; i++) {
-        if (blockBroadcastFrom[i]) {
-            cmd = "?SB" + String(i + 1) + "1";
-            Serial.println(cmd);
-            chainedConfig += String(commandDelimiter) + cmd;
-            chainedConfigDefault += "^" + cmd;
-        }
+  // Serial Port Broadcast OUTPUT Settings
+for (int i = 0; i < 5; i++) {
+    cmd = "?SBO" + String(i + 1) + String(serialBroadcastEnabled[i] ? 1 : 0);
+    Serial.println(cmd);
+    chainedConfig += String(commandDelimiter) + cmd;
+    chainedConfigDefault += "^" + cmd;
+}
+
+// Broadcast INPUT Blocking Settings
+for (int i = 0; i < 5; i++) {
+    if (blockBroadcastFrom[i]) {
+        cmd = "?SBI" + String(i + 1) + "0";
+        Serial.println(cmd);
+        chainedConfig += String(commandDelimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
     }
+}
 
     // Kyber Settings
     if (Kyber_Local) {

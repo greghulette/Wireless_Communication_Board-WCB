@@ -190,7 +190,7 @@ void printBaudRates() {
         // Normal serial port - show baud and broadcast settings
         // Determine broadcast input status (blocked or enabled)
         String inputStatus = blockBroadcastFrom[i] ? "Disabled" : "Enabled";
-        
+
         // Determine broadcast output status
         String outputStatus = serialBroadcastEnabled[i] ? "Enabled" : "Disabled";
         
