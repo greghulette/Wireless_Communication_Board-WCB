@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_212026RJAN2026                                   *****////
+///*****                                          Version 5.3_221004JAN2026                                   *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,7 +85,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_212026RJAN2026";
+String SoftwareVersion = "5.3_221004JAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -966,9 +966,6 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabelCommand(message);
         return;
-    } else if (message.startsWith("sm") || message.startsWith("SM")) {
-    addSerialMonitorMapping(message.substring(2));
-    return;
     } else if (message.startsWith("smr") || message.startsWith("SMR")) {
         int port = message.substring(3).toInt();
         removeSerialMonitorMapping(port);
@@ -979,24 +976,27 @@ void processLocalCommand(const String &message) {
     } else if (message.equals("smclear") || message.equals("SMCLEAR")) {
         clearAllSerialMonitorMappings();
         return;
-    } else if (message.startsWith("sblk") || message.startsWith("SBLK")) {
-        // Format: ?SBLKx1 or ?SBLKx0 to block/allow broadcasts from port x
+    } else if (message.startsWith("sb") || message.startsWith("SB")) {
+        // Format: ?SBx1 or ?SBx0 to block/allow broadcasts from port x
       if (message.length() < 6) {
-          Serial.println("Invalid format. Use ?SBLKx1 or ?SBLKx0 (x=1-5)");
+          Serial.println("Invalid format. Use ?SBx1 or ?SBx0 (x=1-5)");
       return;
       }
         int port = message.substring(4, 5).toInt();
         int state = message.substring(5, 6).toInt();
       if (debugEnabled) {
-        Serial.printf("SBLK command: port=%d, state=%d\n", port, state);
+        Serial.printf("SB command: port=%d, state=%d\n", port, state);
         }
       if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
           blockBroadcastFrom[port - 1] = (state == 1);
           saveBroadcastBlockSettings();
           Serial.printf("Serial%d broadcast blocking %s\n", port, state ? "ENABLED" : "DISABLED");
       } else {
-          Serial.printf("Invalid values: port=%d, state=%d. Use ?SBLKx1 or ?SBLKx0 (x=1-5)\n", port, state);
+          Serial.printf("Invalid values: port=%d, state=%d. Use ?SBx1 or ?SBx0 (x=1-5)\n", port, state);
       }
+        return;
+    } else if (message.startsWith("sm") || message.startsWith("SM")) {
+      addSerialMonitorMapping(message.substring(2));
       return;
     } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
@@ -1336,7 +1336,7 @@ void updateHWVersion(const String &message) {
     // ADD BROADCAST BLOCKING SETTINGS
     for (int i = 0; i < 5; i++) {
         if (blockBroadcastFrom[i]) {
-            cmd = "?SBLK" + String(i + 1) + "1";
+            cmd = "?SB" + String(i + 1) + "1";
             Serial.println(cmd);
             chainedConfig += String(commandDelimiter) + cmd;
             chainedConfigDefault += "^" + cmd;
@@ -1634,6 +1634,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     for (int i = 1; i <= 5; i++) {
         if ((i == 1 && Kyber_Remote) || 
             (i <= 2 && Kyber_Local) || 
+            isSerialPortPWMOutput(i) ||
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
             continue;
         }
