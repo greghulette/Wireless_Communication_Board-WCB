@@ -351,18 +351,18 @@ void setCommandDelimiter(char c) {
     commandDelimiter = c;
 }
 
-// Load stored commands from preferences
-void loadStoredCommandsFromPreferences() {
-    preferences.begin("stored_commands", true);
-    for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
-        char storedCommandBuffer[1800] = {0};
-        String key = "CMD" + String(i + 1);
-        preferences.getString(key.c_str(), storedCommandBuffer, sizeof(storedCommandBuffer));
-        storedCommands[i] = String(storedCommandBuffer);
-    }
-    preferences.end();
+// // Load stored commands from preferences
+// void loadStoredCommandsFromPreferences() {
+//     preferences.begin("stored_commands", true);
+//     for (int i = 0; i < MAX_STORED_COMMANDS; i++) {
+//         char storedCommandBuffer[1800] = {0};
+//         String key = "CMD" + String(i + 1);
+//         preferences.getString(key.c_str(), storedCommandBuffer, sizeof(storedCommandBuffer));
+//         storedCommands[i] = String(storedCommandBuffer);
+//     }
+//     preferences.end();
 
-}
+// }
 // Recall a Stored Command
 void recallCommandSlot(const String &key, int sourceID) {
     preferences.begin("stored_cmds", true);
@@ -540,10 +540,13 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    preferences.begin("stored_commands", false);
+    // preferences.begin("stored_commands", false);
+    // preferences.clear();
+    // preferences.end();
+    preferences.begin("stored_cmds", false);
     preferences.clear();
     preferences.end();
-      
+
     preferences.begin("kyber_settings", false);
     preferences.clear();
     preferences.end();
@@ -713,7 +716,7 @@ void saveBroadcastBlockSettings() {
 }
 
 void addSerialMonitorMapping(const String &message) {
-    // Format: ?SM3,S1,W3S3,S0,W2S0
+    // Format: ?SMS3,S1,W3S3,S0,W2S0
     // message = "3,S1,W3S3,S0,W2S0"
     
     int firstComma = message.indexOf(',');
@@ -722,7 +725,16 @@ void addSerialMonitorMapping(const String &message) {
         return;
     }
     
-    int inputPort = message.substring(0, firstComma).toInt();
+    // Extract source port - expect format "Sx"
+    String sourceStr = message.substring(0, firstComma);
+    sourceStr.trim();
+    
+    if (!sourceStr.startsWith("S") && !sourceStr.startsWith("s")) {
+        Serial.println("Invalid format. Source must be Sx (e.g., S1, S2). Use: ?SMSx,dest1,dest2,...");
+        return;
+    }
+
+    int inputPort = sourceStr.substring(1).toInt(); 
     if (inputPort < 1 || inputPort > 5) {
         Serial.println("Invalid input port. Must be 1-5");
         return;

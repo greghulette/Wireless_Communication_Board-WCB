@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.3_221123JAN2026                                   *****////
+///*****                                          Version 5.4_261550RJAN2026                                 *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -13,9 +13,11 @@
 ///*****                       - Controls Maestro Servo Controller via Kyber                                    *****//// 
 ///*****                       - Store commands and recall them for later processing                            *****////
 ///*****                       - Servo passthrough from RC Receiver to remote servo                             *****////
+///*****                       - PWM Passthrough natively with PWM Mapping Commands                             *****////
+///*****                       - Complete Control of broadcast messages                                         *****////
 ///*****                                                                                                        *****////
 ///*****                            Full command syntax and description can be found at                         *****////
-///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB                   *****////
+///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB/wiki              *****////
 ///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -85,7 +87,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.3_221123JAN2026";
+String SoftwareVersion = "5.4_261550RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -304,7 +306,7 @@ static QueueHandle_t commandQueue = nullptr;
 
 // ============================= Stored Commands =============================
 #define MAX_STORED_COMMANDS 80
-String storedCommands[MAX_STORED_COMMANDS];
+// String storedCommands[MAX_STORED_COMMANDS];
 
 // ============================= Forward Declarations =============================
 void writeSerialString(Stream &serialPort, String stringData);
@@ -2119,7 +2121,7 @@ if (hasMonitoring || hasBlocking) {
   // Load additional config
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
-  loadStoredCommandsFromPreferences();
+  // loadStoredCommandsFromPreferences();
  
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
