@@ -120,7 +120,7 @@ void loadBroadcastBlockSettings();
 void saveBroadcastBlockSettings();
 
 void addSerialMonitorMapping(const String &message);
-void removeSerialMonitorMapping(int port);
+void removeSerialMonitorMapping(const String &portStr);
 void clearAllSerialMonitorMappings();
 void listSerialMonitorMappings();
 void saveSerialMonitorMappings();
