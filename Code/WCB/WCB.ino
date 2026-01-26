@@ -971,8 +971,9 @@ void processLocalCommand(const String &message) {
         clearSerialLabelCommand(message);
         return;
     } else if (message.startsWith("smr") || message.startsWith("SMR")) {
-        int port = message.substring(3).toInt();
-        removeSerialMonitorMapping(port);
+        String portStr = message.substring(3);
+        portStr.trim();
+        removeSerialMonitorMapping(portStr);
         return;
     } else if (message.equals("smlist") || message.equals("SMLIST")) {
         listSerialMonitorMappings();

@@ -824,9 +824,16 @@ void addSerialMonitorMapping(const String &message) {
     listSerialMonitorMappings();
 }
 
-void removeSerialMonitorMapping(int port) {
+void removeSerialMonitorMapping(const String &portStr) {
+    // Expect format: "Sx" where x=1-5
+    if (!portStr.startsWith("S") && !portStr.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SMRSx where x=1-5");
+        return;
+    }
+    
+    int port = portStr.substring(1).toInt();
     if (port < 1 || port > 5) {
-        Serial.println("Invalid port. Must be 1-5");
+        Serial.println("Invalid port. Must be S1-S5");
         return;
     }
     
