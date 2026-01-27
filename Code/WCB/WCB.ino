@@ -81,7 +81,7 @@ String Kyber_Location;
 bool lastReceivedViaESPNOW = false;
 
 // Debugging flag (default: off)
-bool debugEnabled = false;
+bool debugEnabled = false; 
 bool debugKyber = false;
 bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
@@ -672,6 +672,41 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         offset += chunkSize;
     }
 }
+void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uint8_t targetPort) {
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunkSize = len - offset;
+        if (chunkSize > 180) chunkSize = 180;
+
+        espnow_struct_message msg;
+        memset(&msg, 0, sizeof(msg));
+
+        strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+        msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
+        
+        snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "8");  // Target ID 8 = raw serial mapping
+
+        msg.structCommandIncluded = true;
+
+        // First byte = target serial port
+        msg.structCommand[0] = targetPort;
+        // Next 2 bytes = chunk length
+        msg.structCommand[1] = (uint8_t)(chunkSize & 0xFF);
+        msg.structCommand[2] = (uint8_t)((chunkSize >> 8) & 0xFF);
+        // Copy data
+        memcpy(msg.structCommand + 3, data + offset, chunkSize);
+
+        uint8_t *mac = (targetWCB == 0) ? broadcastMACAddress[0] : WCBMacAddresses[targetWCB - 1];
+
+        esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
+        if (result != ESP_OK && debugEnabled) {
+            Serial.printf("ESP-NOW raw serial send failed! Error: %d\n", result);
+        }
+
+        offset += chunkSize;
+    }
+}
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
 
@@ -697,7 +732,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    if (debugEnabled) { Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); }
+    if (debugEnabled & targetWCB != 9) { Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); }
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
@@ -741,7 +776,28 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
         return;
     }
+    if (targetWCB == 8) {
+        // Raw serial mapping data
+        uint8_t targetPort = (uint8_t)received.structCommand[0];
+        size_t chunkLen = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
 
+        if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
+            if (debugEnabled) {
+                Serial.printf("Invalid raw serial chunk: port=%d, len=%d\n", targetPort, (int)chunkLen);
+            }
+            return;
+        }
+
+        // Forward to target serial port
+        Stream &targetSerial = getSerialStream(targetPort);
+        targetSerial.write((uint8_t*)(received.structCommand + 3), chunkLen);
+        targetSerial.flush();
+
+        if (debugEnabled) {
+            Serial.printf("Raw serial: %d bytes -> Serial%d\n", (int)chunkLen, targetPort);
+        }
+        return;
+    }
      lastReceivedViaESPNOW = true; // Prevent loopback issues
       colorWipeStatus("ES", green, 200);
     // Check if this message is meant for this WCB
@@ -1813,28 +1869,28 @@ void serialCommandTask(void *pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
         processIncomingSerial(Serial, 0);
-        // Only process Serial3-5 if not used for PWM
-        if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
-            processIncomingSerial(Serial3, 3);
-        }
-        if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
-            processIncomingSerial(Serial4, 4);
-        }
-        if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
-            processIncomingSerial(Serial5, 5);
-        }
+        
+        // Process serial ports 3-5 (always safe)
+        processIncomingSerial(Serial3, 3);
+        processIncomingSerial(Serial4, 4);
+        processIncomingSerial(Serial5, 5);
 
+        // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
-          // don't add serial 1 or 2 for processing strings
-        } else if (Kyber_Remote){
-            processIncomingSerial(Serial2, 2);
+            // Skip Serial1 and Serial2 - handled by Kyber task
+        } else if (Kyber_Remote) {
+            // Process Serial2 only if not raw-mapped
+            if (!isSerialPortRawMapped(2)) {
+                processIncomingSerial(Serial2, 2);
+            }
         } else {
-          if (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1)) {
-              processIncomingSerial(Serial1, 1);
-          }
-          if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
-              processIncomingSerial(Serial2, 2);
-          }
+            // Normal mode - process if not raw-mapped
+            if (!isSerialPortRawMapped(1)) {
+                processIncomingSerial(Serial1, 1);
+            }
+            if (!isSerialPortRawMapped(2)) {
+                processIncomingSerial(Serial2, 2);
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -1847,6 +1903,45 @@ void PWMTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5)); // Process every 5ms for ~200Hz update rate
     }
 }
+
+void RawSerialForwardingTask(void *pvParameters) {
+    static uint8_t buffer[64];
+    
+    while (true) {
+        // Process each active raw serial mapping
+        for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+            if (!serialMonitorMappings[i].active || !serialMonitorMappings[i].rawMode) {
+                continue;
+            }
+            
+            int inputPort = serialMonitorMappings[i].inputPort;
+            Stream &inputSerial = getSerialStream(inputPort);
+            
+            // Read raw bytes if available
+            if (inputSerial.available() > 0) {
+                int len = inputSerial.readBytes((char*)buffer, sizeof(buffer));
+                
+                // Forward to each output
+                for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+                    auto &output = serialMonitorMappings[i].outputs[j];
+                    
+                    if (output.wcbNumber == 0) {
+                        // Local output
+                        Stream &outputSerial = getSerialStream(output.serialPort);
+                        outputSerial.write(buffer, len);
+                        outputSerial.flush();
+                    } else {
+                        // Remote output via ESP-NOW
+                        sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                    }
+                }
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
 
 void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt = 0;
   bool initialized = false;
@@ -2158,7 +2253,10 @@ if (hasMonitoring || hasBlocking) {
         Serial.println("PWM Task Created");
     }
 
-
+  // Create raw serial forwarding task
+  xTaskCreatePinnedToCore(RawSerialForwardingTask, "Raw Serial Task", 4096, NULL, 1, NULL, 1);
+  Serial.println("Raw Serial Forwarding Task Created");
+  
   delay(150);     
   turnOffLED();
   // Serial.println("------------- Setup Complete-----------------");

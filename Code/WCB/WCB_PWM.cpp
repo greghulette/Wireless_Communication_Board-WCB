@@ -9,6 +9,7 @@ extern void sendESPNowMessage(uint8_t target, const char *message);
 extern bool debugEnabled;
 extern bool Kyber_Local;
 extern bool Kyber_Remote;
+extern bool debugPWMPassthrough;
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
@@ -647,7 +648,7 @@ void processPWMPassthrough() {
             continue;
         }
         
-        if (debugEnabled) {
+        if (debugPWMPassthrough) {
             Serial.printf("PWM: %s -> %lu μs\n", getSerialLabel(pwmMappings[i].inputPort).c_str(), pulseWidth);
         }
         

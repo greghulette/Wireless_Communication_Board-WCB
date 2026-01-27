@@ -675,14 +675,31 @@ String getSerialLabel(int port) {
   return label;
 }
 
-void loadSerialMonitorSettings() {
-    preferences.begin("serial_monitor", true);
-    for (int i = 0; i < 5; i++) {
-        String key = "mon" + String(i + 1);
-        serialMonitorEnabled[i] = preferences.getBool(key.c_str(), false);
+void loadSerialMonitorMappings() {
+    preferences.begin("serial_map", true);
+    
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        String keyActive = "sm" + String(i) + "_act";
+        serialMonitorMappings[i].active = preferences.getBool(keyActive.c_str(), false);
+        
+        if (serialMonitorMappings[i].active) {
+            String keyInput = "sm" + String(i) + "_in";
+            String keyCount = "sm" + String(i) + "_cnt";
+            String keyRaw = "sm" + String(i) + "_raw";
+            
+            serialMonitorMappings[i].inputPort = preferences.getUChar(keyInput.c_str(), 0);
+            serialMonitorMappings[i].outputCount = preferences.getUChar(keyCount.c_str(), 0);
+            serialMonitorMappings[i].rawMode = preferences.getBool(keyRaw.c_str(), false);
+            
+            for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+                String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
+                String keyPort = "sm" + String(i) + "_" + String(j) + "p";
+                serialMonitorMappings[i].outputs[j].wcbNumber = preferences.getUChar(keyWCB.c_str(), 0);
+                serialMonitorMappings[i].outputs[j].serialPort = preferences.getUChar(keyPort.c_str(), 0);
+            }
+        }
     }
-    mirrorToUSB = preferences.getBool("mirror_usb", true);
-    mirrorToKyber = preferences.getBool("mirror_kyber", false);
+    
     preferences.end();
 }
 
@@ -716,202 +733,241 @@ void saveBroadcastBlockSettings() {
 }
 
 void addSerialMonitorMapping(const String &message) {
-    // Format: ?SMS3,S1,W3S3,S0,W2S0
-    // message = "3,S1,W3S3,S0,W2S0"
+    // Format: ?SMSxR,dest1,dest2  or ?SMSx,dest1R,dest2
+    // Where R indicates raw binary mode for that port
     
     int firstComma = message.indexOf(',');
     if (firstComma == -1) {
-        Serial.println("Invalid format. Use: ?SMx,dest1,dest2,... where x=1-5");
-        return;
-    }
-    
-    // Extract source port - expect format "Sx"
-    String sourceStr = message.substring(0, firstComma);
-    sourceStr.trim();
-    
-    if (!sourceStr.startsWith("S") && !sourceStr.startsWith("s")) {
-        Serial.println("Invalid format. Source must be Sx (e.g., S1, S2). Use: ?SMSx,dest1,dest2,...");
+        Serial.println("Invalid format. Use: ?SMSx[R],dest1[R],dest2[R],...");
         return;
     }
 
-    int inputPort = sourceStr.substring(1).toInt(); 
+    // Parse input port
+    String sourceStr = message.substring(0, firstComma);
+    sourceStr.trim();
+
+    if (!sourceStr.startsWith("S") && !sourceStr.startsWith("s")) {
+        Serial.println("Invalid format. Source must be Sx or SxR (e.g., S1, S3R)");
+        return;
+    }
+
+    // Check for 'R' suffix on input
+    bool inputRawMode = false;
+    if (sourceStr.endsWith("R") || sourceStr.endsWith("r")) {
+        inputRawMode = true;
+        sourceStr = sourceStr.substring(0, sourceStr.length() - 1);  // Remove 'R'
+    }
+
+    int inputPort = sourceStr.substring(1).toInt();
     if (inputPort < 1 || inputPort > 5) {
         Serial.println("Invalid input port. Must be 1-5");
         return;
     }
-    
-    // Find or create mapping slot
-    int slotIndex = -1;
+
+    // Check for conflicts
+    if (isSerialPortUsedForPWMInput(inputPort)) {
+        Serial.println("Cannot create mapping: Port is used for PWM input");
+        return;
+    }
+    if (isSerialPortPWMOutput(inputPort)) {
+        Serial.println("Cannot create mapping: Port is configured as PWM output");
+        return;
+    }
+
+    // Find or create mapping for this input port
+    SerialMonitorMapping *mapping = nullptr;
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == inputPort) {
-            slotIndex = i;
+            mapping = &serialMonitorMappings[i];
             break;
         }
     }
-    
-    if (slotIndex == -1) {
-        // Find empty slot
+
+    if (!mapping) {
         for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
             if (!serialMonitorMappings[i].active) {
-                slotIndex = i;
+                mapping = &serialMonitorMappings[i];
+                mapping->active = true;
+                mapping->inputPort = inputPort;
+                mapping->outputCount = 0;
+                mapping->rawMode = inputRawMode;
                 break;
             }
         }
     }
-    
-    if (slotIndex == -1) {
-        Serial.println("No available mapping slots!");
+
+    if (!mapping) {
+        Serial.println("Maximum serial mappings reached");
         return;
     }
-    
-    // Clear existing mapping
-    serialMonitorMappings[slotIndex].active = false;
-    serialMonitorMappings[slotIndex].inputPort = inputPort;
-    serialMonitorMappings[slotIndex].outputCount = 0;
-    
+
+    // Update raw mode if different
+    if (mapping->rawMode != inputRawMode) {
+        mapping->rawMode = inputRawMode;
+    }
+
     // Parse outputs
     String remaining = message.substring(firstComma + 1);
-    int outputIndex = 0;
-    int startIdx = 0;
-    
-    while (startIdx < remaining.length() && outputIndex < 10) {
-        int nextComma = remaining.indexOf(',', startIdx);
-        String output = (nextComma == -1) ? remaining.substring(startIdx) : remaining.substring(startIdx, nextComma);
-        output.trim();
-        
-        if (output.length() > 0) {
+    int outputsAdded = 0;
+
+    while (remaining.length() > 0) {
+        int nextComma = remaining.indexOf(',');
+        String dest = (nextComma == -1) ? remaining : remaining.substring(0, nextComma);
+        dest.trim();
+
+        if (dest.length() > 0) {
             uint8_t wcbNum = 0;
-            uint8_t serialNum = 0;
-            
-            // Parse format: "S1" or "W3S3" or "S0" (USB)
-            if (output.startsWith("W") || output.startsWith("w")) {
-                int sPos = output.indexOf('S', 1);
-                if (sPos == -1) sPos = output.indexOf('s', 1);
+            uint8_t serialPort = 0;
+            bool outputRawMode = false;
+
+            // Check for 'R' suffix on output
+            if (dest.endsWith("R") || dest.endsWith("r")) {
+                outputRawMode = true;
+                dest = dest.substring(0, dest.length() - 1);
+            }
+
+            // Parse destination
+            if (dest.startsWith("W") || dest.startsWith("w")) {
+                int sPos = dest.indexOf('S', 1);
+                if (sPos == -1) sPos = dest.indexOf('s', 1);
                 if (sPos != -1) {
-                    wcbNum = output.substring(1, sPos).toInt();
-                    serialNum = output.substring(sPos + 1).toInt();
+                    wcbNum = dest.substring(1, sPos).toInt();
+                    serialPort = dest.substring(sPos + 1).toInt();
+                } else {
+                    Serial.printf("Invalid destination format: %s\n", dest.c_str());
+                    continue;
                 }
-            } else if (output.startsWith("S") || output.startsWith("s")) {
-                wcbNum = 0;  // Local
-                serialNum = output.substring(1).toInt();
+            } else if (dest.startsWith("S") || dest.startsWith("s")) {
+                wcbNum = 0;
+                serialPort = dest.substring(1).toInt();
+            } else {
+                Serial.printf("Invalid destination format: %s\n", dest.c_str());
+                continue;
             }
-            
-            if (wcbNum <= 9 && serialNum <= 5) {
-                serialMonitorMappings[slotIndex].outputs[outputIndex].wcbNumber = wcbNum;
-                serialMonitorMappings[slotIndex].outputs[outputIndex].serialPort = serialNum;
-                outputIndex++;
+
+            if (wcbNum > 9 || serialPort < 1 || serialPort > 5) {
+                Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
+                continue;
+            }
+
+            // Add output
+            if (mapping->outputCount < 10) {
+                mapping->outputs[mapping->outputCount].wcbNumber = wcbNum;
+                mapping->outputs[mapping->outputCount].serialPort = serialPort;
+                mapping->outputCount++;
+                outputsAdded++;
+
+               // Automatically disable BOTH broadcast input and output for this port
+              if (!blockBroadcastFrom[inputPort - 1]) {
+                  blockBroadcastFrom[inputPort - 1] = true;
+                  saveBroadcastBlockSettings();
+                  Serial.printf("Auto-enabled broadcast input blocking on Serial%d\n", inputPort);
+              }
+              if (serialBroadcastEnabled[inputPort - 1]) {
+                  serialBroadcastEnabled[inputPort - 1] = false;
+                  saveBroadcastSettingsToPreferences();
+                  Serial.printf("Auto-disabled broadcast output on Serial%d\n", inputPort);
+              }
             }
         }
-        
+
         if (nextComma == -1) break;
-        startIdx = nextComma + 1;
-    }
-    
-    serialMonitorMappings[slotIndex].outputCount = outputIndex;
-    serialMonitorMappings[slotIndex].active = true;
-    // AUTO-ENABLE INPUT BLOCKING for this port
-    if (inputPort >= 1 && inputPort <= 5) {
-        blockBroadcastFrom[inputPort - 1] = true;
-        saveBroadcastBlockSettings();
-        if (debugEnabled) {
-            Serial.printf("Auto-enabled broadcast input blocking for Serial%d\n", inputPort);
-        }
+        remaining = remaining.substring(nextComma + 1);
     }
 
-    saveSerialMonitorMappings();
-    
-    Serial.printf("Serial mapping added for Serial%d -> %d destinations\n", inputPort, outputIndex);
-    listSerialMonitorMappings();
+    if (outputsAdded > 0) {
+        saveSerialMonitorMappings();
+        Serial.printf("Serial mapping created: Serial%d%s -> %d destination(s)\n",
+                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded);
+    } else {
+        Serial.println("No valid outputs added");
+    }
 }
 
-void removeSerialMonitorMapping(const String &portStr) {
-    // Expect format: "Sx" where x=1-5
-    if (!portStr.startsWith("S") && !portStr.startsWith("s")) {
-        Serial.println("Invalid format. Use: ?SMRSx where x=1-5");
-        return;
+void loadSerialMonitorSettings() {
+    preferences.begin("serial_monitor", true);
+    for (int i = 0; i < 5; i++) {
+        String key = "mon" + String(i + 1);
+        serialMonitorEnabled[i] = preferences.getBool(key.c_str(), false);
     }
+    mirrorToUSB = preferences.getBool("mirror_usb", true);
+    mirrorToKyber = preferences.getBool("mirror_kyber", false);
+    preferences.end();
+}
+
+// void loadSerialMonitorMappings() {
+//     preferences.begin("serial_monitor", true);
     
-    int port = portStr.substring(1).toInt();
-    if (port < 1 || port > 5) {
-        Serial.println("Invalid port. Must be S1-S5");
-        return;
-    }
+//     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+//         String keyActive = "sm" + String(i) + "_act";
+//         serialMonitorMappings[i].active = preferences.getBool(keyActive.c_str(), false);
+        
+//         if (serialMonitorMappings[i].active) {
+//             String keyInput = "sm" + String(i) + "_in";
+//             String keyCount = "sm" + String(i) + "_cnt";
+            
+//             serialMonitorMappings[i].inputPort = preferences.getUChar(keyInput.c_str(), 0);
+//             serialMonitorMappings[i].outputCount = preferences.getUChar(keyCount.c_str(), 0);
+            
+//             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+//                 String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
+//                 String keyPort = "sm" + String(i) + "_" + String(j) + "p";
+//                 serialMonitorMappings[i].outputs[j].wcbNumber = preferences.getUChar(keyWCB.c_str(), 0);
+//                 serialMonitorMappings[i].outputs[j].serialPort = preferences.getUChar(keyPort.c_str(), 0);
+//             }
+//         }
+//     }
     
+//     preferences.end();
+// }
+
+bool isSerialPortMonitored(int port) {
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == port) {
-            serialMonitorMappings[i].active = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isSerialPortRawMapped(int port) {
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        if (serialMonitorMappings[i].active && 
+            serialMonitorMappings[i].inputPort == port && 
+            serialMonitorMappings[i].rawMode) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void setSerialMappingRawMode(int inputPort, bool raw) {
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == inputPort) {
+            serialMonitorMappings[i].rawMode = raw;
             saveSerialMonitorMappings();
-            Serial.printf("Removed Serial mapping for Serial%d\n", port);
+            Serial.printf("Serial%d raw mode set to: %s\n", inputPort, raw ? "ENABLED" : "DISABLED");
             return;
         }
     }
-    
-    Serial.printf("No Serial mapping found for Serial%d\n", port);
-}
-
-void clearAllSerialMonitorMappings() {
-    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-        serialMonitorMappings[i].active = false;
-    }
-    
-    preferences.begin("serial_monitor", false);
-    preferences.clear();
-    preferences.end();
-    
-    Serial.println("All Serial mappings cleared");
-}
-
-void listSerialMonitorMappings() {
-    bool found = false;
-    
-    Serial.println("\n--- Serial Mappings ---");
-    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-        if (serialMonitorMappings[i].active) {
-            found = true;
-            Serial.printf("Serial%d mapped to: ", serialMonitorMappings[i].inputPort);
-            
-            for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-                if (j > 0) Serial.print(", ");
-                
-                if (serialMonitorMappings[i].outputs[j].wcbNumber == 0) {
-                    if (serialMonitorMappings[i].outputs[j].serialPort == 0) {
-                        Serial.print("Local USB");
-                    } else {
-                        Serial.printf("Local Serial%d", serialMonitorMappings[i].outputs[j].serialPort);
-                    }
-                } else {
-                    if (serialMonitorMappings[i].outputs[j].serialPort == 0) {
-                        Serial.printf("WCB%d USB", serialMonitorMappings[i].outputs[j].wcbNumber);
-                    } else {
-                        Serial.printf("WCB%d Serial%d", 
-                            serialMonitorMappings[i].outputs[j].wcbNumber,
-                            serialMonitorMappings[i].outputs[j].serialPort);
-                    }
-                }
-            }
-            Serial.println();
-        }
-    }
-    
-    if (!found) {
-        Serial.println("No Serial mappings configured");
-    }
-    Serial.println("--- End of Mappings ---\n");
+    Serial.printf("No mapping found for Serial%d\n", inputPort);
 }
 
 void saveSerialMonitorMappings() {
-    preferences.begin("serial_monitor", false);
+    preferences.begin("serial_map", false);
     
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         String keyActive = "sm" + String(i) + "_act";
-        String keyInput = "sm" + String(i) + "_in";
-        String keyCount = "sm" + String(i) + "_cnt";
-        
         preferences.putBool(keyActive.c_str(), serialMonitorMappings[i].active);
         
         if (serialMonitorMappings[i].active) {
+            String keyInput = "sm" + String(i) + "_in";
+            String keyCount = "sm" + String(i) + "_cnt";
+            String keyRaw = "sm" + String(i) + "_raw";
+            
             preferences.putUChar(keyInput.c_str(), serialMonitorMappings[i].inputPort);
             preferences.putUChar(keyCount.c_str(), serialMonitorMappings[i].outputCount);
+            preferences.putBool(keyRaw.c_str(), serialMonitorMappings[i].rawMode);
             
             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                 String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
@@ -923,40 +979,116 @@ void saveSerialMonitorMappings() {
     }
     
     preferences.end();
-    Serial.println("Serial mappings saved to NVS");
 }
 
-void loadSerialMonitorMappings() {
-    preferences.begin("serial_monitor", true);
-    
-    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-        String keyActive = "sm" + String(i) + "_act";
-        serialMonitorMappings[i].active = preferences.getBool(keyActive.c_str(), false);
-        
-        if (serialMonitorMappings[i].active) {
-            String keyInput = "sm" + String(i) + "_in";
-            String keyCount = "sm" + String(i) + "_cnt";
-            
-            serialMonitorMappings[i].inputPort = preferences.getUChar(keyInput.c_str(), 0);
-            serialMonitorMappings[i].outputCount = preferences.getUChar(keyCount.c_str(), 0);
-            
-            for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-                String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
-                String keyPort = "sm" + String(i) + "_" + String(j) + "p";
-                serialMonitorMappings[i].outputs[j].wcbNumber = preferences.getUChar(keyWCB.c_str(), 0);
-                serialMonitorMappings[i].outputs[j].serialPort = preferences.getUChar(keyPort.c_str(), 0);
-            }
-        }
+void removeSerialMonitorMapping(const String &portStr) {
+    if (!portStr.startsWith("S") && !portStr.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SMRSx where x=1-5");
+        return;
     }
     
-    preferences.end();
-}
-
-bool isSerialPortMonitored(int port) {
+    int port = portStr.substring(1).toInt();
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port number. Must be 1-5");
+        return;
+    }
+    
+    bool found = false;
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == port) {
-            return true;
+            serialMonitorMappings[i].active = false;
+            serialMonitorMappings[i].inputPort = 0;
+            serialMonitorMappings[i].outputCount = 0;
+            serialMonitorMappings[i].rawMode = false;
+            
+            // Clear the output array
+            for (int j = 0; j < 10; j++) {
+                serialMonitorMappings[i].outputs[j].wcbNumber = 0;
+                serialMonitorMappings[i].outputs[j].serialPort = 0;
+            }
+            
+            found = true;
+            
+            // Re-enable broadcast input for this port
+            if (blockBroadcastFrom[port - 1]) {
+                blockBroadcastFrom[port - 1] = false;
+                saveBroadcastBlockSettings();
+                Serial.printf("Auto-disabled broadcast input blocking on Serial%d\n", port);
+            }
+            
+            // Re-enable broadcast output for this port
+            if (!serialBroadcastEnabled[port - 1]) {
+                serialBroadcastEnabled[port - 1] = true;
+                saveBroadcastSettingsToPreferences();
+                Serial.printf("Auto-enabled broadcast output on Serial%d\n", port);
+            }
+            
+            break;
         }
     }
-    return false;
+    
+    if (found) {
+        saveSerialMonitorMappings();
+        Serial.printf("Serial mapping removed for Serial%d\n", port);
+    } else {
+        Serial.printf("No mapping found for Serial%d\n", port);
+    }
+}
+
+void clearAllSerialMonitorMappings() {
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        if (serialMonitorMappings[i].active) {
+            int port = serialMonitorMappings[i].inputPort;
+            
+            // Re-enable broadcast for each port
+            if (blockBroadcastFrom[port - 1]) {
+                blockBroadcastFrom[port - 1] = false;
+            }
+        }
+        
+        serialMonitorMappings[i].active = false;
+        serialMonitorMappings[i].inputPort = 0;
+        serialMonitorMappings[i].outputCount = 0;
+        serialMonitorMappings[i].rawMode = false;
+    }
+    
+    saveBroadcastBlockSettings();
+    saveSerialMonitorMappings();
+    Serial.println("All serial mappings cleared");
+}
+
+void listSerialMonitorMappings() {
+    bool hasAny = false;
+    
+    Serial.println("\n--- Serial Monitor Mappings ---");
+    
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        if (serialMonitorMappings[i].active) {
+            hasAny = true;
+            
+            Serial.printf("Mapping %d: Serial%d%s -> ", 
+                i + 1, 
+                serialMonitorMappings[i].inputPort,
+                serialMonitorMappings[i].rawMode ? " (RAW)" : "");
+            
+            for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+                if (j > 0) Serial.print(", ");
+                
+                if (serialMonitorMappings[i].outputs[j].wcbNumber == 0) {
+                    Serial.printf("S%d", serialMonitorMappings[i].outputs[j].serialPort);
+                } else {
+                    Serial.printf("W%dS%d", 
+                        serialMonitorMappings[i].outputs[j].wcbNumber,
+                        serialMonitorMappings[i].outputs[j].serialPort);
+                }
+            }
+            Serial.println();
+        }
+    }
+    
+    if (!hasAny) {
+        Serial.println("No serial mappings configured");
+    }
+    
+    Serial.println("--- End of Mappings ---");
 }
