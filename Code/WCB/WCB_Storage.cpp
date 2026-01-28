@@ -581,10 +581,20 @@ void storeKyberSettings(const String &message){
     Kyber_Local = true;
     Kyber_Remote = false;
     Kyber_Location = "local";
+
+     // Automatically set baud rates for Kyber Local
+    updateBaudRate(1, 115200);  // Serial1 for Maestro
+    updateBaudRate(2, 115200);  // Serial2 for Kyber
+    Serial.println("Auto-configured Serial1 and Serial2 to 115200 baud for Kyber Local");
+      
   } else if (message.equals("remote")){
     Kyber_Local = false;
     Kyber_Remote = true;
     Kyber_Location = "remote";
+     // Automatically set baud rate for Kyber Remote
+    updateBaudRate(1, 115200);  // Serial1 for Maestro
+    Serial.println("Auto-configured Serial1 to 115200 baud for Kyber Remote");
+    
   } else if (message.equals("clear")){
     Kyber_Location = "";
     Kyber_Local = false;
