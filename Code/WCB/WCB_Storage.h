@@ -44,12 +44,21 @@ struct SerialMonitorOutput {
     uint8_t serialPort;   // 0 = USB, 1-5 = Serial ports
 };
 
+// struct SerialMonitorMapping {
+//     bool active;
+//     uint8_t inputPort;    // 1-5 (which local serial port to monitor)
+//     uint8_t outputCount;
+//     SerialMonitorOutput outputs[10];  // Up to 10 output destinations
+// };
 struct SerialMonitorMapping {
     bool active;
-    uint8_t inputPort;    // 1-5 (which local serial port to monitor)
+    uint8_t inputPort;
     uint8_t outputCount;
-    SerialMonitorOutput outputs[10];  // Up to 10 output destinations
+    SerialMonitorOutput outputs[10];
+    bool rawMode;  // ← ADD THIS
 };
+
+
 
 extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
@@ -126,5 +135,8 @@ void listSerialMonitorMappings();
 void saveSerialMonitorMappings();
 void loadSerialMonitorMappings();
 bool isSerialPortMonitored(int port); 
+
+bool isSerialPortRawMapped(int port);
+void setSerialMappingRawMode(int inputPort, bool raw);
 
 #endif
