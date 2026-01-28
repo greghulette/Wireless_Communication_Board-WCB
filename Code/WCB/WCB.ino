@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.5_271626RJAN2026                                 *****////
+///*****                                          Version 5.5_272134RJAN2026                                 *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -87,7 +87,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.5_271626RJAN2026";
+String SoftwareVersion = "5.5_272134RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -780,7 +780,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         // Raw serial mapping data
         uint8_t targetPort = (uint8_t)received.structCommand[0];
         size_t chunkLen = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
-
         if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
             if (debugEnabled) {
                 Serial.printf("Invalid raw serial chunk: port=%d, len=%d\n", targetPort, (int)chunkLen);
@@ -1908,6 +1907,8 @@ void RawSerialForwardingTask(void *pvParameters) {
     static uint8_t buffer[64];
     
     while (true) {
+        bool hadData = false;
+        
         // Process each active raw serial mapping
         for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
             if (!serialMonitorMappings[i].active || !serialMonitorMappings[i].rawMode) {
@@ -1917,31 +1918,42 @@ void RawSerialForwardingTask(void *pvParameters) {
             int inputPort = serialMonitorMappings[i].inputPort;
             Stream &inputSerial = getSerialStream(inputPort);
             
-            // Read raw bytes if available
+            // Read raw bytes if available - use read() not readBytes()
             if (inputSerial.available() > 0) {
-                int len = inputSerial.readBytes((char*)buffer, sizeof(buffer));
+                int len = 0;
+                // Read all available bytes (up to buffer size)
+                while (inputSerial.available() > 0 && len < sizeof(buffer)) {
+                    buffer[len++] = inputSerial.read();
+                }
                 
-                // Forward to each output
-                for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-                    auto &output = serialMonitorMappings[i].outputs[j];
+                if (len > 0) {
+                    hadData = true;
                     
-                    if (output.wcbNumber == 0) {
-                        // Local output
-                        Stream &outputSerial = getSerialStream(output.serialPort);
-                        outputSerial.write(buffer, len);
-                        outputSerial.flush();
-                    } else {
-                        // Remote output via ESP-NOW
-                        sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                    // Forward to each output
+                    for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+                        auto &output = serialMonitorMappings[i].outputs[j];
+                        
+                        if (output.wcbNumber == 0) {
+                            // Local output
+                            Stream &outputSerial = getSerialStream(output.serialPort);
+                            outputSerial.write(buffer, len);
+                            outputSerial.flush();
+                        } else {
+                            // Remote output via ESP-NOW
+                            sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                        }
                     }
                 }
             }
         }
         
-        vTaskDelay(pdMS_TO_TICKS(5));
+        // Only delay if we didn't process any data
+        if (!hadData) {
+            vTaskDelay(pdMS_TO_TICKS(1));  // 1ms when idle
+        }
+        // No delay if we processed data - loop immediately
     }
 }
-
 
 void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt = 0;
   bool initialized = false;
