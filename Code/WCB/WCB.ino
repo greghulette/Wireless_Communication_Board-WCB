@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.5_272134RJAN2026                                 *****////
+///*****                                          Version 5.5_281025RJAN2026                                 *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -87,7 +87,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.5_272134RJAN2026";
+String SoftwareVersion = "5.5_281025RJAN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -149,6 +149,7 @@ int STATUS_LED_PIN;         //  // Pin for the onboard NeoPixel LED on version 2
 // Broadcast enabled settings for each serial port (modifiable)
 bool serialBroadcastEnabled[5] = {true, true, true, true, true};
 String serialPortLabels[5] = {"", "", "", "", ""};
+
 // Current baud rates (modifiable)
 unsigned long baudRates[5] = {
   SERIAL1_DEFAULT_BAUD_RATE,
@@ -487,18 +488,6 @@ void printConfigInfo() {
   printBaudRates();  // Print baud rates
   listSerialMonitorMappings();
 
-
-  // Serial.println("--------------- Broadcast Blocking ----------------------");
-  // bool anyBlocked = false;
-  // for (int i = 0; i < 5; i++) {
-  //     if (blockBroadcastFrom[i]) {
-  //         Serial.printf(" Serial%d: Broadcasts BLOCKED\n", i + 1);
-  //         anyBlocked = true;
-  //     }
-  // }
-  // if (!anyBlocked) {
-  //     Serial.println(" No ports blocked");
-  // }
   Serial.println("--------------- ESPNOW Settings ----------------------");
   // Print ESP-NOW password
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
@@ -1604,13 +1593,29 @@ void processSerialMessage(const String &message) {
 }
 void processWCBMessage(const String &message){
   int targetWCB = message.substring(1, 2).toInt();
-        String espnow_message = message.substring(2);
-        if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
-          if (debugEnabled) {Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", targetWCB, espnow_message.c_str()); }
-          sendESPNowMessage(targetWCB, espnow_message.c_str());
-        } else {
-          Serial.println("Invalid WCB number for unicast.");
-        }
+  String espnow_message = message.substring(2);
+  
+  // Check if target is the local WCB
+  if (targetWCB == WCB_Number) {
+      if (debugEnabled) {
+          Serial.printf("Target WCB%d is local - processing command directly: %s\n", 
+                       targetWCB, espnow_message.c_str());
+      }
+      // Process the command locally instead of sending via ESP-NOW
+      enqueueCommand(espnow_message, 0);
+      return;
+  }
+  
+  // Remote target - send via ESP-NOW
+  if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
+      if (debugEnabled) {
+          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", 
+                       targetWCB, espnow_message.c_str());
+      }
+      sendESPNowMessage(targetWCB, espnow_message.c_str());
+  } else {
+      Serial.println("Invalid WCB number for unicast.");
+  }
 }
 
 void recallStoredCommand(const String &message, int sourceID) {
@@ -1933,15 +1938,20 @@ void RawSerialForwardingTask(void *pvParameters) {
                     for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                         auto &output = serialMonitorMappings[i].outputs[j];
                         
-                        if (output.wcbNumber == 0) {
-                            // Local output
-                            Stream &outputSerial = getSerialStream(output.serialPort);
-                            outputSerial.write(buffer, len);
-                            outputSerial.flush();
-                        } else {
-                            // Remote output via ESP-NOW
-                            sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
-                        }
+                        if (output.wcbNumber == 0 || output.wcbNumber == WCB_Number) {
+                          // Local output (either explicitly local or targeting self)
+                          Stream &outputSerial = getSerialStream(output.serialPort);
+                          outputSerial.write(buffer, len);
+                          outputSerial.flush();
+                          
+                          if (debugEnabled && output.wcbNumber == WCB_Number) {
+                              Serial.printf("Mapping target W%dS%d is local - forwarding directly\n", 
+                                          output.wcbNumber, output.serialPort);
+                          }
+                      } else {
+                          // Remote output via ESP-NOW
+                          sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                      }
                     }
                 }
             }
@@ -2229,7 +2239,6 @@ if (hasMonitoring || hasBlocking) {
   // Load additional config
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
-  // loadStoredCommandsFromPreferences();
  
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);

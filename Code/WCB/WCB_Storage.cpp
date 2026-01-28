@@ -540,9 +540,6 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    // preferences.begin("stored_commands", false);
-    // preferences.clear();
-    // preferences.end();
     preferences.begin("stored_cmds", false);
     preferences.clear();
     preferences.end();
@@ -559,7 +556,11 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    preferences.begin("serial_monitor", false);
+    preferences.begin("serial_map", false); 
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("serial_monitor", false); 
     preferences.clear();
     preferences.end();
 
