@@ -721,7 +721,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     int senderWCB = atoi(received.structSenderID);
     int targetWCB = atoi(received.structTargetID);
 
-    if (debugEnabled & targetWCB != 9) { Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); }
+    // Check if this is a PWM command (starts with ";P" or ";p")
+      bool isPWMCommand = (received.structCommand[0] == ';' && 
+                          (received.structCommand[1] == 'P' || received.structCommand[1] == 'p'));
+
+      // Only print debug if it's not Target 9 (Kyber) AND not a PWM command
+      if (debugEnabled && targetWCB != 9 && !isPWMCommand) { 
+          Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); 
+      }
 
     // Ensure message is from a WCB in the same group
     if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
