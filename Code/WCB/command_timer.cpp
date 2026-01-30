@@ -42,6 +42,15 @@ void stopTimerSequence() {
 bool checkForTimerStopRequest(const String &input) {
   return input.equalsIgnoreCase(String(LocalFunctionIdentifier) + "STOP");
 }
+void printTimerDebugInfo(const String &delayStr, unsigned long parsedDelay, unsigned long limit) {
+  Serial.printf("=== TIMER DEBUG ===\n");
+  Serial.printf("Input string: '%s'\n", delayStr.c_str());
+  Serial.printf("String length: %d\n", delayStr.length());
+  Serial.printf("Parsed delay: %lu ms\n", parsedDelay);
+  Serial.printf("Limit: %lu ms\n", limit);
+  Serial.printf("Exceeds limit: %s\n", (parsedDelay > limit) ? "YES" : "NO");
+  Serial.printf("===================\n");
+}
 
 void parseCommandGroups(const String &input) {
   commandGroups.clear();
@@ -76,8 +85,12 @@ void parseCommandGroups(const String &input) {
       }
       unsigned long parsedDelay = delayStr.toInt();
       unsigned long parsedDelayLimit = 1800000; // 30 Minutes (30 * 60 * 1000) (Minutes * Seconds in a Minute * milliseconds in a second)
-      if (debugEnabled && parsedDelay > parsedDelayLimit) {
+      if (debugEnabled) {
+        // printTimerDebugInfo(delayStr, parsedDelay, parsedDelayLimit);
+      }
+    if (debugEnabled && parsedDelay > parsedDelayLimit) {
         Serial.printf("⚠️ Warning: Delay exceeds configured limits of %i. Input: %s ms\n", parsedDelayLimit, delayStr.c_str());
+        // printTimerDebugInfo(delayStr, parsedDelay, parsedDelayLimit);
       }
       if (parsedDelay > parsedDelayLimit) {
         parsedDelay = parsedDelayLimit;
@@ -137,3 +150,5 @@ void processCommandGroups() {
         vTaskDelay(pdMS_TO_TICKS(1)); // ← Ensure millis() increments before next check
   }
 } 
+
+
