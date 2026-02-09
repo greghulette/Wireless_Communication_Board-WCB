@@ -32,8 +32,18 @@ extern int ONBOARD_LED;       //  // ESP32 Status NeoPixel Pin
 extern int STATUS_LED_PIN;       //  // Not used on this board but defining it to match version 2.1 board
 SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
-// ==================== Load & Save Functions ====================
 
+bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uint8_t serialPort) {
+    for (int i = 0; i < mapping->outputCount; i++) {
+        if (mapping->outputs[i].wcbNumber == wcbNum && 
+            mapping->outputs[i].serialPort == serialPort) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ==================== Load & Save Functions ====================
 
 void saveHWversion(int wcb_hw_version_f){
   preferences.begin("hw_version", false);
@@ -826,72 +836,96 @@ void addSerialMonitorMapping(const String &message) {
         String dest = (nextComma == -1) ? remaining : remaining.substring(0, nextComma);
         dest.trim();
 
-        if (dest.length() > 0) {
-            uint8_t wcbNum = 0;
-            uint8_t serialPort = 0;
-            bool outputRawMode = false;
+        // CRITICAL: Advance 'remaining' BEFORE processing to prevent infinite loops
+        if (nextComma == -1) {
+            remaining = "";  // Last item - clear remaining
+        } else {
+            remaining = remaining.substring(nextComma + 1);
+        }
 
-            // Check for 'R' suffix on output
-            if (dest.endsWith("R") || dest.endsWith("r")) {
-                outputRawMode = true;
-                dest = dest.substring(0, dest.length() - 1);
-            }
+        // Now process the destination
+        if (dest.length() == 0) {
+            continue;  // Skip empty destinations
+        }
 
-            // Parse destination
-            if (dest.startsWith("W") || dest.startsWith("w")) {
-                int sPos = dest.indexOf('S', 1);
-                if (sPos == -1) sPos = dest.indexOf('s', 1);
-                if (sPos != -1) {
-                    wcbNum = dest.substring(1, sPos).toInt();
-                    serialPort = dest.substring(sPos + 1).toInt();
-                } else {
-                    Serial.printf("Invalid destination format: %s\n", dest.c_str());
-                    continue;
-                }
-            } else if (dest.startsWith("S") || dest.startsWith("s")) {
-                wcbNum = 0;
-                serialPort = dest.substring(1).toInt();
+        uint8_t wcbNum = 0;
+        uint8_t serialPort = 0;
+        bool outputRawMode = false;
+
+        // Check for 'R' suffix on output
+        if (dest.endsWith("R") || dest.endsWith("r")) {
+            outputRawMode = true;
+            dest = dest.substring(0, dest.length() - 1);
+        }
+
+        // Parse destination
+        if (dest.startsWith("W") || dest.startsWith("w")) {
+            int sPos = dest.indexOf('S', 1);
+            if (sPos == -1) sPos = dest.indexOf('s', 1);
+            if (sPos != -1) {
+                wcbNum = dest.substring(1, sPos).toInt();
+                serialPort = dest.substring(sPos + 1).toInt();
             } else {
                 Serial.printf("Invalid destination format: %s\n", dest.c_str());
                 continue;
             }
-
-            if (wcbNum > 9 || serialPort < 1 || serialPort > 5) {
-                Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
-                continue;
-            }
-
-            // Add output
-            if (mapping->outputCount < 10) {
-                mapping->outputs[mapping->outputCount].wcbNumber = wcbNum;
-                mapping->outputs[mapping->outputCount].serialPort = serialPort;
-                mapping->outputCount++;
-                outputsAdded++;
-
-               // Automatically disable BOTH broadcast input and output for this port
-              if (!blockBroadcastFrom[inputPort - 1]) {
-                  blockBroadcastFrom[inputPort - 1] = true;
-                  saveBroadcastBlockSettings();
-                  Serial.printf("Auto-enabled broadcast input blocking on Serial%d\n", inputPort);
-              }
-              if (serialBroadcastEnabled[inputPort - 1]) {
-                  serialBroadcastEnabled[inputPort - 1] = false;
-                  saveBroadcastSettingsToPreferences();
-                  Serial.printf("Auto-disabled broadcast output on Serial%d\n", inputPort);
-              }
-            }
+        } else if (dest.startsWith("S") || dest.startsWith("s")) {
+            wcbNum = 0;
+            serialPort = dest.substring(1).toInt();
+        } else {
+            Serial.printf("Invalid destination format: %s\n", dest.c_str());
+            continue;
         }
 
-        if (nextComma == -1) break;
-        remaining = remaining.substring(nextComma + 1);
+        if (wcbNum > 9 || serialPort < 0 || serialPort > 5) {
+            Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
+            continue;
+        }
+
+        // Check for duplicate before adding
+        if (mappingDestinationExists(mapping, wcbNum, serialPort)) {
+            String destStr;
+            if (wcbNum == 0) {
+                if (serialPort == 0) {
+                    destStr = "S0 (USB)";
+                } else {
+                    destStr = "S" + String(serialPort);
+                }
+            } else {
+                destStr = "W" + String(wcbNum) + "S" + String(serialPort);
+            }
+            Serial.printf("Mapping already exists: Serial%d -> %s - skipping duplicate\n",
+                         inputPort, destStr.c_str());
+            continue;  // Now safe - 'remaining' was already updated above
+        }
+
+        // Add output
+        if (mapping->outputCount < 10) {
+            mapping->outputs[mapping->outputCount].wcbNumber = wcbNum;
+            mapping->outputs[mapping->outputCount].serialPort = serialPort;
+            mapping->outputCount++;
+            outputsAdded++;
+
+            // Automatically disable BOTH broadcast input and output for this port
+            if (!blockBroadcastFrom[inputPort - 1]) {
+                blockBroadcastFrom[inputPort - 1] = true;
+                saveBroadcastBlockSettings();
+                Serial.printf("Auto-enabled broadcast input blocking on Serial%d\n", inputPort);
+            }
+            if (serialBroadcastEnabled[inputPort - 1]) {
+                serialBroadcastEnabled[inputPort - 1] = false;
+                saveBroadcastSettingsToPreferences();
+                Serial.printf("Auto-disabled broadcast output on Serial%d\n", inputPort);
+            }
+        }
     }
 
     if (outputsAdded > 0) {
         saveSerialMonitorMappings();
-        Serial.printf("Serial mapping created: Serial%d%s -> %d destination(s)\n",
-                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded);
+        Serial.printf("Serial mapping updated: Serial%d%s -> %d new destination(s) added (total: %d)\n",
+                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded, mapping->outputCount);
     } else {
-        Serial.println("No valid outputs added");
+        Serial.println("No new destinations added (all were duplicates or invalid)");
     }
 }
 
