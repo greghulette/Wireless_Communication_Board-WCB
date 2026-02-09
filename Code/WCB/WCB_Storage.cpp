@@ -229,7 +229,7 @@ void saveBroadcastSettingsToPreferences() {
         String key = "S" + String(i + 1);
         int value = serialBroadcastEnabled[i] ? 1 : 0;
         size_t result = preferences.putInt(key.c_str(), value);
-        Serial.printf("Broadcast setting for Serial%d saved as %d\n", i + 1, value);
+        // Serial.printf("Broadcast setting for Serial%d saved as %d\n", i + 1, value);
         // Serial.printf("  %s = %d (bytes written: %d)\n", key.c_str(), value, result);
     }
     preferences.end();
@@ -745,6 +745,7 @@ void loadBroadcastBlockSettings() {
 }
 
 void saveBroadcastBlockSettings() {
+    Serial.println("DEBUG: Saving Broadcast Setting:");
     preferences.begin("bcast_block", false);
     for (int i = 0; i < 5; i++) {
         String key = "blk" + String(i + 1);
@@ -753,15 +754,6 @@ void saveBroadcastBlockSettings() {
     preferences.end();
 }
 
-bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uint8_t serialPort) {
-    for (int i = 0; i < mapping->outputCount; i++) {
-        if (mapping->outputs[i].wcbNumber == wcbNum && 
-            mapping->outputs[i].serialPort == serialPort) {
-            return true;
-        }
-    }
-    return false;
-}
 
 void addSerialMonitorMapping(const String &message) {
     // Format: ?SMSxR,dest1,dest2  or ?SMSx,dest1R,dest2

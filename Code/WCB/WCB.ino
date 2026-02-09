@@ -1,7 +1,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.5_071602RFEB2026                                 *****////
+///*****                                          Version 5.5_091311RFEB2026                                 *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -24,12 +24,12 @@
 // ============================= Librarires  =============================
 //You must install these into your Arduino IDE
 #include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
-#include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.12.5
+#include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.15.3
 
-//  All of these librarires are included in the ESP32 by Espressif board library V3.1.1
+//  All of these librarires are included in the ESP32 by Espressif board library V3.3.4
 #include <Arduino.h>
 #include <esp_wifi.h>
-#include <esp_now.h>
+#include <esp_now.h> 
 #include <WiFi.h>
 #include <HardwareSerial.h>
 #include "WCB_Storage.h"
@@ -87,7 +87,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "5.5_071602RFEB2026";
+String SoftwareVersion = "5.5_091311RFEB2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1015,12 +1015,13 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("epass") || message.startsWith("EPASS")) {
         updateESPNowPassword(message);
         return;
-    } else if (message.startsWith("sl") || message.startsWith("SL")) {
-        updateSerialLabel(message);
-        return;
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabelCommand(message);
         return;
+    } else if (message.startsWith("sl") || message.startsWith("SL")) {
+        updateSerialLabel(message);
+        return;
+    
     } else if (message.startsWith("smr") || message.startsWith("SMR")) {
         String portStr = message.substring(3);
         portStr.trim();
@@ -1032,44 +1033,11 @@ void processLocalCommand(const String &message) {
     } else if (message.equals("smclear") || message.equals("SMCLEAR")) {
         clearAllSerialMonitorMappings();
         return;
-    } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
-        // Format: ?SBIx1 or ?SBIx0 to enable/disable broadcast INPUT from port x
-        if (message.length() < 5) {
-            Serial.println("Invalid format. Use ?SBIx1 or ?SBIx0 (x=1-5)");
-            return;
-        }
-        int port = message.substring(3, 4).toInt();
-        int state = message.substring(4, 5).toInt();
-        if (debugEnabled) {
-            Serial.printf("SBI command: port=%d, state=%d\n", port, state);
-        }
-        if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
-            // INVERTED LOGIC: state=1 means ALLOW (false=not blocked), state=0 means BLOCK (true=blocked)
-            blockBroadcastFrom[port - 1] = (state == 0);  // ← Changed from (state == 1)
-            saveBroadcastBlockSettings();
-            Serial.printf("Serial%d broadcast input %s\n", port, state ? "ENABLED" : "DISABLED");
-        } else {
-            Serial.printf("Invalid values. Use ?SBIx1 or ?SBIx0 (x=1-5)\n");
-        }
+     } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
+        updateBroadcastInputSetting(message);
         return;
     } else if (message.startsWith("sbo") || message.startsWith("SBO")) {
-        // Format: ?SBOx1 or ?SBOx0 to enable/disable broadcast OUTPUT to port x
-        if (message.length() < 5) {
-            Serial.println("Invalid format. Use ?SBOx1 or ?SBOx0 (x=1-5)");
-            return;
-        }
-        int port = message.substring(3, 4).toInt();
-        int state = message.substring(4, 5).toInt();
-        if (debugEnabled) {
-            Serial.printf("SBO command: port=%d, state=%d\n", port, state);
-        }
-        if (port >= 1 && port <= 5 && (state == 0 || state == 1)) {
-            serialBroadcastEnabled[port - 1] = (state == 1);
-            saveBroadcastSettingsToPreferences();
-            Serial.printf("Serial%d broadcast output %s\n", port, state ? "ENABLED" : "DISABLED");
-        } else {
-            Serial.printf("Invalid values. Use ?SBOx1 or ?SBOx0 (x=1-5)\n");
-        }
+        updateBroadcastOutputSetting(message);
         return;
     } else if (message.startsWith("sm") || message.startsWith("SM")) {
       addSerialMonitorMapping(message.substring(2));
@@ -1093,10 +1061,33 @@ void processLocalCommand(const String &message) {
       addPWMMapping(message);
       return;
     } else if (message.startsWith("prs") || message.startsWith("PRS")) {
-        String portStr = message.substring(3);
-        int port = portStr.toInt();
-        removePWMMapping(port);
-        return;
+      String portStr = message.substring(3);
+      int port = portStr.toInt();
+      
+      // Try to remove PWM mapping first
+      bool hadMapping = false;
+      for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+          if (pwmMappings[i].active && pwmMappings[i].inputPort == port) {
+              hadMapping = true;
+              break;
+          }
+      }
+      
+      if (hadMapping) {
+          removePWMMapping(port);  // This already exists
+      }
+      
+      // Try to remove PWM output designation
+      if (isSerialPortPWMOutput(port)) {
+          removePWMOutputPort(port);  // This already exists
+      }
+      
+      // If neither existed, inform user
+      if (!hadMapping && !isSerialPortPWMOutput(port)) {
+          Serial.printf("Serial%d has no PWM function to remove\n", port);
+      }
+      
+      return;
     } else if (message.equals("plist") || message.equals("PLIST")) {
         listPWMMappings();
         return;
@@ -1104,14 +1095,10 @@ void processLocalCommand(const String &message) {
       
         clearAllPWMMappings();
       return;
-    } else if (message.startsWith("po") || message.startsWith("PO")) {
-      int port = message.substring(2).toInt();
+    } else if (message.startsWith("pos") || message.startsWith("POS")) {
+      int port = message.substring(3).toInt();
       addPWMOutputPort(port);
       return;
-    } else if (message.startsWith("px") || message.startsWith("PX")) {
-        int port = message.substring(2).toInt();
-        removePWMOutputPort(port);
-        return;
     } else {
         Serial.println("Invalid Local Command");
     }
@@ -1197,21 +1184,30 @@ void updateWCBQuantity(const String &message){
 }
 
 void updateSerialLabel(const String &message) {
-    // Format: ?SLx,label text
-    if (message.length() < 3) {
-        Serial.println("Invalid format. Use: ?SLx,label where x=1-5");
+    // Format: ?SLSx,label text
+    if (message.length() < 4) {
+        Serial.println("Invalid format. Use: ?SLSx,label where x=1-5");
         return;
     }
     
-    int port = message.substring(2, 3).toInt();
-    if (port < 1 || port > 5) {
-        Serial.println("Invalid port. Must be 1-5");
+    // Check for 'S' prefix after SL
+    if (!message.startsWith("S") && !message.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SLSx,label where x=1-5");
         return;
     }
     
     int commaPos = message.indexOf(',');
     if (commaPos == -1) {
-        Serial.println("Invalid format. Use: ?SLx,label");
+        Serial.println("Invalid format. Use: ?SLSx,label");
+        return;
+    }
+    
+    // Extract port number (between 'S' and ',')
+    String portStr = message.substring(3, commaPos);  // Skip "SLS"
+    int port = portStr.toInt();
+    
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port. Must be 1-5");
         return;
     }
     
@@ -1227,19 +1223,133 @@ void updateSerialLabel(const String &message) {
 }
 
 void clearSerialLabelCommand(const String &message) {
-    // Format: ?SLCx where x=1-5
+    // Format: ?SLCSx where x=1-5
     if (message.length() < 4) {
-        Serial.println("Invalid format. Use: ?SLCx where x=1-5");
+        Serial.println("Invalid format. Use: ?SLCSx where x=1-5");
         return;
     }
     
-    int port = message.substring(3, 4).toInt();
+    // Check for 'S' prefix after SLC
+    String portSection = message.substring(3);  // Everything after "SLC"
+    if (!portSection.startsWith("S") && !portSection.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SLCSx where x=1-5");
+        return;
+    }
+    
+    int port = portSection.substring(1).toInt();  // Skip the 'S'
     if (port < 1 || port > 5) {
         Serial.println("Invalid port. Must be 1-5");
         return;
     }
     
     clearSerialLabel(port);
+}
+
+void updateBroadcastInputSetting(const String &message) {
+    // Format: ?SBISxON or ?SBISxOFF where x=1-5
+    if (message.length() < 6) {
+        Serial.println("Invalid format. Use: ?SBISxON or ?SBISxOFF where x=1-5");
+        return;
+    }
+    
+    // Extract everything after "SBI"
+    String portSection = message.substring(3);
+    
+    if (!portSection.startsWith("S") && !portSection.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SBISxON or ?SBISxOFF where x=1-5");
+        return;
+    }
+    
+    // Find where ON/OFF starts
+    String upperSection = portSection;
+    upperSection.toUpperCase();
+    int onPos = upperSection.indexOf("ON");
+    int offPos = upperSection.indexOf("OFF");
+    
+    if (onPos == -1 && offPos == -1) {
+        Serial.println("Invalid format. Must end with ON or OFF");
+        return;
+    }
+    
+    // Extract port number and state
+    String portStr;
+    bool enable;
+    
+    if (offPos != -1 && (onPos == -1 || offPos < onPos)) {
+        // OFF comes first or ON doesn't exist
+        portStr = portSection.substring(1, offPos);
+        enable = false;
+    } else {
+        // ON comes first
+        portStr = portSection.substring(1, onPos);
+        enable = true;
+    }
+    
+    int port = portStr.toInt();
+    
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port number. Must be 1-5");
+        return;
+    }
+    
+    // INVERTED LOGIC: enable=true means ALLOW (false=not blocked), enable=false means BLOCK (true=blocked)
+    blockBroadcastFrom[port - 1] = !enable;
+    saveBroadcastBlockSettings();
+    
+    Serial.printf("Serial%d broadcast input: %s\n", port, enable ? "ENABLED" : "DISABLED");
+}
+
+void updateBroadcastOutputSetting(const String &message) {
+    // Format: ?SBOSxON or ?SBOSxOFF where x=1-5
+    if (message.length() < 6) {
+        Serial.println("Invalid format. Use: ?SBOSxON or ?SBOSxOFF where x=1-5");
+        return;
+    }
+    
+    // Extract everything after "SBO"
+    String portSection = message.substring(3);
+    
+    if (!portSection.startsWith("S") && !portSection.startsWith("s")) {
+        Serial.println("Invalid format. Use: ?SBOSxON or ?SBOSxOFF where x=1-5");
+        return;
+    }
+    
+    // Find where ON/OFF starts
+    String upperSection = portSection;
+    upperSection.toUpperCase();
+    int onPos = upperSection.indexOf("ON");
+    int offPos = upperSection.indexOf("OFF");
+    
+    if (onPos == -1 && offPos == -1) {
+        Serial.println("Invalid format. Must end with ON or OFF");
+        return;
+    }
+    
+    // Extract port number and state
+    String portStr;
+    bool enable;
+    
+    if (offPos != -1 && (onPos == -1 || offPos < onPos)) {
+        // OFF comes first or ON doesn't exist
+        portStr = portSection.substring(1, offPos);
+        enable = false;
+    } else {
+        // ON comes first
+        portStr = portSection.substring(1, onPos);
+        enable = true;
+    }
+    
+    int port = portStr.toInt();
+    
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port number. Must be 1-5");
+        return;
+    }
+    
+    serialBroadcastEnabled[port - 1] = enable;
+    saveBroadcastSettingsToPreferences();
+    
+    Serial.printf("Serial%d broadcast output: %s\n", port, enable ? "ENABLED" : "DISABLED");
 }
 
 void updateSerialSettings(const String &message){
@@ -1410,23 +1520,21 @@ void updateHWVersion(const String &message) {
         }
     }
 
-  // Serial Port Broadcast OUTPUT Settings
-for (int i = 0; i < 5; i++) {
-    cmd = "?SBO" + String(i + 1) + String(serialBroadcastEnabled[i] ? 1 : 0);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
-}
+      // Serial Port Broadcast OUTPUT Settings
+      for (int i = 0; i < 5; i++) {
+          cmd = "?SBOS" + String(i + 1) + (serialBroadcastEnabled[i] ? "ON" : "OFF");
+          Serial.println(cmd);
+          chainedConfig += String(commandDelimiter) + cmd;
+          chainedConfigDefault += "^" + cmd;
+      }
 
-// Broadcast INPUT Blocking Settings
-for (int i = 0; i < 5; i++) {
-    if (blockBroadcastFrom[i]) {
-        cmd = "?SBI" + String(i + 1) + "0";
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
-    }
-}
+      // Broadcast INPUT Settings
+      for (int i = 0; i < 5; i++) {
+          cmd = "?SBIS" + String(i + 1) + (blockBroadcastFrom[i] ? "OFF" : "ON");
+          Serial.println(cmd);
+          chainedConfig += String(commandDelimiter) + cmd;
+          chainedConfigDefault += "^" + cmd;
+      }
 
     // Kyber Settings
     if (Kyber_Local) {
@@ -1443,7 +1551,7 @@ for (int i = 0; i < 5; i++) {
     // Serial Port Labels
     for (int i = 0; i < 5; i++) {
         if (serialPortLabels[i].length() > 0) {
-            cmd = "?SL" + String(i + 1) + "," + serialPortLabels[i];
+            cmd = "?SLS" + String(i + 1) + "," + serialPortLabels[i];
             Serial.println(cmd);
             chainedConfig += String(commandDelimiter) + cmd;
             chainedConfigDefault += "^" + cmd;
