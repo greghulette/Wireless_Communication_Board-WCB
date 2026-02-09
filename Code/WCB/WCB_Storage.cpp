@@ -743,6 +743,16 @@ void saveBroadcastBlockSettings() {
     preferences.end();
 }
 
+bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uint8_t serialPort) {
+    for (int i = 0; i < mapping->outputCount; i++) {
+        if (mapping->outputs[i].wcbNumber == wcbNum && 
+            mapping->outputs[i].serialPort == serialPort) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void addSerialMonitorMapping(const String &message) {
     // Format: ?SMSxR,dest1,dest2  or ?SMSx,dest1R,dest2
     // Where R indicates raw binary mode for that port
@@ -856,9 +866,18 @@ void addSerialMonitorMapping(const String &message) {
                 continue;
             }
 
-            if (wcbNum > 9 || serialPort < 1 || serialPort > 5) {
+            if (wcbNum > 9 || serialPort < 0 || serialPort > 5) {
                 Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
                 continue;
+            }
+
+            // Check for duplicate before adding
+            if (mappingDestinationExists(mapping, wcbNum, serialPort)) {
+                Serial.printf("Mapping already exists: Serial%d -> %s%d - skipping duplicate\n",
+                             inputPort,
+                             wcbNum == 0 ? "S" : ("W" + String(wcbNum) + "S").c_str(),
+                             serialPort);
+                continue;  // Skip this destination
             }
 
             // Add output
@@ -888,10 +907,10 @@ void addSerialMonitorMapping(const String &message) {
 
     if (outputsAdded > 0) {
         saveSerialMonitorMappings();
-        Serial.printf("Serial mapping created: Serial%d%s -> %d destination(s)\n",
-                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded);
+        Serial.printf("Serial mapping updated: Serial%d%s -> %d destination(s) (total: %d)\n",
+                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded, mapping->outputCount);
     } else {
-        Serial.println("No valid outputs added");
+        Serial.println("No new destinations added (all were duplicates or invalid)");
     }
 }
 
@@ -1071,7 +1090,7 @@ void clearAllSerialMonitorMappings() {
 void listSerialMonitorMappings() {
     bool hasAny = false;
     
-    Serial.println("\n--- Serial Monitor Mappings ---");
+    Serial.println("\n--- Serial Mappings ---");
     
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active) {
@@ -1103,3 +1122,5 @@ void listSerialMonitorMappings() {
     
     Serial.println("--- End of Mappings ---");
 }
+
+
