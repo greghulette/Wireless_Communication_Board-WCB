@@ -1,3 +1,5 @@
+
+/*
 ____    __    ____  __  .______       _______  __       _______      _______.     _______.                                           
 \   \  /  \  /   / |  | |   _  \     |   ____||  |     |   ____|    /       |    /       |                                           
  \   \/    \/   /  |  | |  |_)  |    |  |__   |  |     |  |__      |   (----`   |   (----`                                           
@@ -19,12 +21,12 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 |  |_)  | |  `--'  |  /  _____  \  |  |\  \----.|  '--'  |      |  |    \    /\    /    |  `----.|  |_)  |  |  |                     
 |______/   \______/  /__/     \__\ | _| `._____||_______/       |  |     \__/  \__/      \______||______/   |  |                     
                                                                  \__\                                      /__/                                                  
-                                                                                                                
+*/                                                                                                 
                                                                                                                 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 5.5_091311RFEB2026                                    *****////
+///*****                                          Version 6.0_021246RFEB2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -549,6 +551,7 @@ void printConfigInfo() {
   listStoredCommands(); // List stored commands
   // Print PWM mappings
   listPWMMappings();  // Print PWM mappings
+  printMaestroSettings();  // Show configured Maestros
 
   Serial.println("--- End of Configuration Info ---\n");
 }
@@ -704,6 +707,46 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         offset += chunkSize;
     }
 }
+
+void sendESPNowRawToPort(const uint8_t *data, size_t len, uint8_t targetWCB, uint8_t targetPort) {
+  size_t offset = 0;
+  while (offset < len) {
+    size_t chunkSize = len - offset;
+    if (chunkSize > 180) chunkSize = 180;
+
+    espnow_struct_message msg;
+    memset(&msg, 0, sizeof(msg));
+
+    strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+    msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
+    
+    snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+    
+    // Target ID encodes: K for Kyber with port info
+    snprintf(msg.structTargetID, sizeof(msg.structTargetID), "K");
+
+    msg.structCommandIncluded = true;
+
+    // Store: [target_wcb][target_port][chunk_len_low][chunk_len_high][data...]
+    msg.structCommand[0] = targetWCB;
+    msg.structCommand[1] = targetPort;
+    msg.structCommand[2] = (uint8_t)(chunkSize & 0xFF);
+    msg.structCommand[3] = (uint8_t)((chunkSize >> 8) & 0xFF);
+
+    memcpy(msg.structCommand + 4, data + offset, chunkSize);
+
+    // Send to specific WCB
+    esp_err_t result = esp_now_send(WCBMacAddresses[targetWCB - 1], 
+                                    (uint8_t*)&msg, sizeof(msg));
+    
+    if (debugEnabled && result != ESP_OK) {
+      Serial.printf("Kyber targeted send to WCB%d failed\n", targetWCB);
+    }
+
+    offset += chunkSize;
+  }
+}
+
 void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uint8_t targetPort) {
     size_t offset = 0;
     while (offset < len) {
@@ -778,6 +821,27 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         if (debugEnabled){Serial.println("Received message from an unrelated WCB group, ignoring."); } 
         return;
     }
+    // Check for Kyber targeted data
+    if (received.structTargetID[0] == 'K') {
+      // Kyber targeted forwarding
+      uint8_t destWCB = received.structCommand[0];
+      uint8_t destPort = received.structCommand[1];
+      size_t chunkLen = (uint8_t)received.structCommand[2] | 
+                        ((uint8_t)received.structCommand[3] << 8);
+
+      // Only process if this WCB is the target
+      if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
+        Stream &targetSerial = getSerialStream(destPort);
+        targetSerial.write((uint8_t*)(received.structCommand + 4), chunkLen);
+        targetSerial.flush();
+        
+        if (debugEnabled) {
+          Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
+        }
+      }
+      return;
+    }
+
     if (targetWCB == 9) {
         // Extract chunk length from first 2 bytes of structCommand
         size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
@@ -867,7 +931,7 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
 /// Kyber Serial Forwarding Commands
 //*******************************
 void forwardDataFromKyber() {
-  static uint8_t espnowBurst[64];   // tune if you want
+  static uint8_t espnowBurst[64];
   static size_t  burstLen = 0;
 
   bool gotAny = false;
@@ -881,14 +945,25 @@ void forwardDataFromKyber() {
 
     // Debug (hex)
     if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
-    
 
     // Accumulate for ESP-NOW
     if (burstLen < sizeof(espnowBurst)) {
       espnowBurst[burstLen++] = (uint8_t)b;
     } else {
       // buffer full -> flush now
-      sendESPNowRaw(espnowBurst, burstLen);
+      if (kyberUseTargeting) {
+        // TARGETED FORWARDING
+        for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+          if (kyberTargets[i].enabled) {
+            sendESPNowRawToPort(espnowBurst, burstLen, 
+                               kyberTargets[i].targetWCB, 
+                               kyberTargets[i].targetPort);
+          }
+        }
+      } else {
+        // DEFAULT BROADCAST
+        sendESPNowRaw(espnowBurst, burstLen);
+      }
       burstLen = 0;
       espnowBurst[burstLen++] = (uint8_t)b;
     }
@@ -898,14 +973,25 @@ void forwardDataFromKyber() {
 
   Serial1.flush();
 
-  // If this call consumed a burst and UART is now idle, flush once to ESP-NOW
+  // If this call consumed a burst and UART is now idle, flush to ESP-NOW
   if (gotAny && burstLen > 0 && Serial2.available() == 0) {
-    sendESPNowRaw(espnowBurst, burstLen);
+    if (kyberUseTargeting) {
+      // TARGETED FORWARDING
+      for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+        if (kyberTargets[i].enabled) {
+          sendESPNowRawToPort(espnowBurst, burstLen, 
+                             kyberTargets[i].targetWCB, 
+                             kyberTargets[i].targetPort);
+        }
+      }
+    } else {
+      // DEFAULT BROADCAST
+      sendESPNowRaw(espnowBurst, burstLen);
+    }
     burstLen = 0;
-    if (debugKyber) Serial.println();  // Format: newline after hex dump for readability
+    if (debugKyber) Serial.println();
   }
 }
-
 void forwardMaestroDataToLocalKyber() {
   static uint8_t buffer[64];
 
@@ -958,14 +1044,42 @@ void handleSingleCommand(String cmd, int sourceID) {
 /// Processing Local Function Identifier 
 //*******************************
 void processLocalCommand(const String &message) {
-   if (message.equals("kyber_local") || message.equals("KYBER_LOCAL")){
+   if (message.startsWith("kyber_local") || message.startsWith("KYBER_LOCAL")){
+    // Extract everything after "kyber_local" (could be empty or ",M1,W2S1,M2,W3S1")
+    String params = "";
+    if (message.length() > 11) {  // "kyber_local" is 11 chars
+        params = message.substring(11);  // Get everything after
+        if (params.startsWith(",")) {
+            params = params.substring(1);  // Remove leading comma
+        }
+    }
+    
+    if (params.length() > 0) {
+        storeKyberSettings("local," + params);
+    } else {
         storeKyberSettings("local");
+    }
+    printKyberSettings();
+    return;
+    
+    } else if (message.startsWith("kyber_remote") || message.startsWith("KYBER_REMOTE")){
+        // Extract everything after "kyber_remote" (could be empty or ",M1,W2S1")
+        String params = "";
+        if (message.length() > 12) {  // "kyber_remote" is 12 chars
+            params = message.substring(12);  // Get everything after
+            if (params.startsWith(",")) {
+                params = params.substring(1);  // Remove leading comma
+            }
+        }
+        
+        if (params.length() > 0) {
+            storeKyberSettings("remote," + params);
+        } else {
+            storeKyberSettings("remote");
+        }
         printKyberSettings();
         return;
-    } else if (message.equals("kyber_remote") || message.equals("KYBER_REMOTE")){
-        storeKyberSettings("remote");
-        printKyberSettings();
-        return;
+        
     } else if (message.equals("kyber_clear") || message.equals("KYBER_CLEAR")){
         storeKyberSettings("clear");
         printKyberSettings();
@@ -1090,6 +1204,18 @@ void processLocalCommand(const String &message) {
         return;
     } else if (message == "reset_broadcast" || message == "RESET_BROADCAST") {
         resetBroadcastSettingsNamespace();
+        return;
+    } else if (message.startsWith("maestro,") || message.startsWith("MAESTRO,")) {
+       configureMaestro(message);
+        return;
+    } else if (message.startsWith("maestro_clear,") || message.startsWith("MAESTRO_CLEAR,")) {
+        clearMaestroByID(message);
+        return;
+    } else if (message.equals("maestro_default") || message.equals("MAESTRO_DEFAULT")) {
+        clearAllMaestroConfigs();
+        return;
+    } else if (message.equals("maestro_list") || message.equals("MAESTRO_LIST")) {
+        printMaestroSettings();
         return;
     } else if (message.startsWith("maestro_enable") || message.startsWith("MAESTRO_ENABLE")) {
         enableMaestroSerialBaudRate();
@@ -1890,6 +2016,23 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
             continue;
         }
+        
+        // **ADDITIONAL CHECK: Skip if Maestro is on this port - NEW CODE**
+        bool isMaestroPort = false;
+        for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
+            if (maestroConfigs[m].configured && 
+                maestroConfigs[m].serialPort == i) {
+                isMaestroPort = true;
+                break;
+            }
+        }
+        if (isMaestroPort) {
+            if (debugEnabled) {
+                Serial.printf("Skipping S%d (Maestro port)\n", i);
+            }
+            continue;
+        }
+        // **END NEW CODE**
 
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
@@ -1903,6 +2046,26 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 void processIncomingSerial(Stream &serial, int sourceID) {
   if (!serial.available()) return;
 
+  // **CHECK IF THIS IS A MAESTRO PORT - NEW CODE**
+  if (sourceID >= 1 && sourceID <= 5) {
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+      if (maestroConfigs[i].configured && 
+          maestroConfigs[i].serialPort == sourceID) {
+        // This is a Maestro port - don't process as commands
+        if (debugEnabled) {
+          Serial.printf("S%d: Maestro port - ignoring input\n", sourceID);
+        }
+        // Flush the data (Maestro responses, not commands)
+        while (serial.available()) {
+          serial.read();
+        }
+        return;
+      }
+    }
+  }
+  // **END NEW CODE**
+
+  // Rest of your existing code unchanged
   static String serialBuffers[6];
   String &serialBuffer = serialBuffers[sourceID];
   
@@ -2173,7 +2336,9 @@ void setup() {
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
   loadHWversion();
+  loadMaestroSettings();  // Load Maestro configurations from NVS
   loadKyberSettings();
+  loadKyberTargets();
   printResetReason();  // Show the exact cause of reset
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();

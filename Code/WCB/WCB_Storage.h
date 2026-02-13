@@ -58,7 +58,18 @@ struct SerialMonitorMapping {
     bool rawMode;  // ← ADD THIS
 };
 
+// Kyber target structure
+struct KyberTarget {
+  uint8_t maestroID;    // Which Maestro (for reference/documentation)
+  uint8_t targetWCB;    // Which WCB to send to (0 = broadcast to all)
+  uint8_t targetPort;   // Which serial port on that WCB (0 = S1 default)
+  bool enabled;         // Is this target active
+};
 
+#define MAX_KYBER_TARGETS 9  // Can target up to 9 Maestros
+
+extern KyberTarget kyberTargets[MAX_KYBER_TARGETS];
+extern bool kyberUseTargeting;  // True = use targets, False = broadcast to all S1
 
 extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
@@ -93,6 +104,9 @@ void clearAllStoredCommands();
 void storeKyberSettings(const String &message);
 void loadKyberSettings();
 void printKyberSettings();
+void saveKyberTargets();
+void loadKyberTargets();
+
 
 void saveBroadcastSettingsToPreferences();
 void loadBroadcastSettingsFromPreferences();
@@ -138,5 +152,10 @@ bool isSerialPortMonitored(int port);
 
 bool isSerialPortRawMapped(int port);
 void setSerialMappingRawMode(int inputPort, bool raw);
+
+// Maestro configuration storage
+void saveMaestroSettings();
+void loadMaestroSettings();
+void printMaestroSettings();
 
 #endif
