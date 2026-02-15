@@ -2043,49 +2043,30 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
 // processIncomingSerial for each serial port
+// processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-  if (!serial.available()) return;
+  if (!serial.available()) return;  // Exit if no data available
 
-  // **CHECK IF THIS IS A MAESTRO PORT - NEW CODE**
-  if (sourceID >= 1 && sourceID <= 5) {
-    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
-      if (maestroConfigs[i].configured && 
-          maestroConfigs[i].serialPort == sourceID) {
-        // This is a Maestro port - don't process as commands
-        if (debugEnabled) {
-          Serial.printf("S%d: Maestro port - ignoring input\n", sourceID);
-        }
-        // Flush the data (Maestro responses, not commands)
-        while (serial.available()) {
-          serial.read();
-        }
-        return;
-      }
-    }
-  }
-  // **END NEW CODE**
-
-  // Rest of your existing code unchanged
-  static String serialBuffers[6];
+  static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
-  
   while (serial.available()) {
     char c = serial.read();
-    
-    // Simple command processing - accumulate until terminator
-    if (c == '\r' || c == '\n') {
+    if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
-          serialBuffer.trim();
-          if (debugEnabled){
-              Serial.printf("Processing input from %s: %s\n", getSerialLabel(sourceID).c_str(), serialBuffer.c_str());
-          }
+          serialBuffer.trim();  // Remove leading/trailing spaces
+          if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
 
+          // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
+
+          // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
+
+            // Clear buffer for next command
           serialBuffer = "";
       }
     } else {
-      serialBuffer += c;
+      serialBuffer += c;  // Append new characters to buffer
     }
   }
 }
