@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_021246RFEB2026                                    *****////
+///*****                                          Version 6.0_141952RFEB2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_021246RFEB2026";
+String SoftwareVersion = "6.0_141952RFEB2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -363,6 +363,7 @@ void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
+void processIncomingSerial(Stream &serial, int sourceID); 
 
 
 // String getSerialLabel(int port);
@@ -707,6 +708,42 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         offset += chunkSize;
     }
 }
+esp_err_t sendESPNowRawToSpecificWCB(const uint8_t *data, size_t len, uint8_t targetWCB) {
+  size_t offset = 0;
+  esp_err_t lastResult = ESP_OK;
+  
+  while (offset < len) {
+    size_t chunkSize = len - offset;
+    if (chunkSize > 180) chunkSize = 180;
+
+    espnow_struct_message msg;
+    memset(&msg, 0, sizeof(msg));
+
+    strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+    msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
+    
+    snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+    snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", targetWCB);
+
+    msg.structCommandIncluded = true;
+
+    // Store chunk length in first 2 bytes
+    msg.structCommand[0] = (uint8_t)(chunkSize & 0xFF);
+    msg.structCommand[1] = (uint8_t)((chunkSize >> 8) & 0xFF);
+
+    // Copy chunk
+    memcpy(msg.structCommand + 2, data + offset, chunkSize);
+
+    // Send to specific WCB (not broadcast)
+    uint8_t *mac = WCBMacAddresses[targetWCB - 1];
+
+    lastResult = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
+    
+    offset += chunkSize;
+  }
+  
+  return lastResult;
+}
 
 void sendESPNowRawToPort(const uint8_t *data, size_t len, uint8_t targetWCB, uint8_t targetPort) {
   size_t offset = 0;
@@ -822,63 +859,76 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         return;
     }
     // Check for Kyber targeted data
-    if (received.structTargetID[0] == 'K') {
-      // Kyber targeted forwarding
-      uint8_t destWCB = received.structCommand[0];
-      uint8_t destPort = received.structCommand[1];
-      size_t chunkLen = (uint8_t)received.structCommand[2] | 
-                        ((uint8_t)received.structCommand[3] << 8);
+    // Check for Kyber targeted data
+if (received.structTargetID[0] == 'K') {
+    // Kyber targeted forwarding
+    uint8_t destWCB = received.structCommand[0];
+    uint8_t destPort = received.structCommand[1];
+    size_t chunkLen = (uint8_t)received.structCommand[2] | 
+                      ((uint8_t)received.structCommand[3] << 8);
 
-      // Only process if this WCB is the target
-      if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
+    // Debug output BEFORE forwarding
+    if (debugKyber) {
+        uint8_t* dataPtr = (uint8_t*)(received.structCommand + 4);
+        Serial.printf("Kyber targeted to W%dS%d - chunk (hex): ", destWCB, destPort);
+        for (int i = 0; i < chunkLen; i++) {
+            if (dataPtr[i] < 0x10) Serial.print("0");
+            Serial.print(dataPtr[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+    }
+
+    // Only process if this WCB is the target
+    if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
         Stream &targetSerial = getSerialStream(destPort);
         targetSerial.write((uint8_t*)(received.structCommand + 4), chunkLen);
         targetSerial.flush();
         
         if (debugEnabled) {
-          Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
+            Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
         }
-      }
-      return;
     }
-
+    return;
+}
     if (targetWCB == 9) {
-        // Extract chunk length from first 2 bytes of structCommand
-        size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
+    // Extract chunk length from first 2 bytes of structCommand
+    size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
 
-        // Safety check to prevent invalid length
-        if (chunkLen > 180 || chunkLen == 0) {
-            if (debugEnabled) {
-                Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
-            }
-            return;
-        }
-
-        // Forward valid chunk data to Serial1
-        if (Kyber_Local){ 
-          Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
-          Serial2.write((uint8_t*)(received.structCommand + 2), chunkLen); 
-          }  
-        else if (Kyber_Remote) {
-          Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
-          uint8_t* dataPtr = (uint8_t*)(received.structCommand + 2);
-
-        if (debugKyber){
-          Serial.print("Chunk (hex): ");
-          for (int i = 0; i < chunkLen; i++) {
-            if (dataPtr[i] < 0x10) Serial.print("0"); // leading zero
-            Serial.print(dataPtr[i], HEX);
-            Serial.print(" ");
-          }
-          Serial.println();
-        } 
-      }      
-
+    // Safety check to prevent invalid length
+    if (chunkLen > 180 || chunkLen == 0) {
         if (debugEnabled) {
-            // Serial.printf("Bridging chunk of %d bytes received from WCB%s\n", (int)chunkLen, received.structSenderID);
+            Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
         }
         return;
     }
+
+    // Debug output BEFORE forwarding (works on all boards regardless of mode)
+    if (debugKyber) {
+        uint8_t* dataPtr = (uint8_t*)(received.structCommand + 2);
+        Serial.print("Kyber chunk (hex): ");
+        for (int i = 0; i < chunkLen; i++) {
+            if (dataPtr[i] < 0x10) Serial.print("0");
+            Serial.print(dataPtr[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+    }
+
+    // THIS IS BROADCAST MODE - only used when Kyber targeting is NOT enabled
+    // If targeting is enabled, Kyber should use target ID 'K' (handled separately above)
+    
+    // Forward to local Maestro(s) based on configuration
+    if (Kyber_Local) { 
+        Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
+        Serial2.write((uint8_t*)(received.structCommand + 2), chunkLen); 
+    }  
+    else if (Kyber_Remote) {
+        Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
+    }
+
+    return;
+}
     if (targetWCB == 8) {
         // Raw serial mapping data
         uint8_t targetPort = (uint8_t)received.structCommand[0];
@@ -931,65 +981,53 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
 /// Kyber Serial Forwarding Commands
 //*******************************
 void forwardDataFromKyber() {
-  static uint8_t espnowBurst[64];
-  static size_t  burstLen = 0;
+  static uint8_t buffer[64];
 
-  bool gotAny = false;
+  // Check if Serial2 has data
+  if (Serial2.available() > 0) {
+    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
 
-  while (Serial2.available()) {
-    int b = Serial2.read();
-    if (b < 0) break;
-
-    // Forward immediately to Serial1
-    Serial1.write((uint8_t)b);
-
-    // Debug (hex)
-    if(debugKyber){Serial.printf("%02X ", (uint8_t)b);}
-
-    // Accumulate for ESP-NOW
-    if (burstLen < sizeof(espnowBurst)) {
-      espnowBurst[burstLen++] = (uint8_t)b;
-    } else {
-      // buffer full -> flush now
-      if (kyberUseTargeting) {
-        // TARGETED FORWARDING
-        for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
-          if (kyberTargets[i].enabled) {
-            sendESPNowRawToPort(espnowBurst, burstLen, 
-                               kyberTargets[i].targetWCB, 
-                               kyberTargets[i].targetPort);
-          }
-        }
-      } else {
-        // DEFAULT BROADCAST
-        sendESPNowRaw(espnowBurst, burstLen);
-      }
-      burstLen = 0;
-      espnowBurst[burstLen++] = (uint8_t)b;
-    }
-
-    gotAny = true;
-  }
-
-  Serial1.flush();
-
-  // If this call consumed a burst and UART is now idle, flush to ESP-NOW
-  if (gotAny && burstLen > 0 && Serial2.available() == 0) {
+    // If targeting is enabled, send to specific targets
     if (kyberUseTargeting) {
-      // TARGETED FORWARDING
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
         if (kyberTargets[i].enabled) {
-          sendESPNowRawToPort(espnowBurst, burstLen, 
-                             kyberTargets[i].targetWCB, 
-                             kyberTargets[i].targetPort);
+          int targetWCB = kyberTargets[i].targetWCB;
+          int targetPort = kyberTargets[i].targetPort;
+          
+          // If local to this WCB, write to serial port
+          if (targetWCB == WCB_Number) {
+            Stream &targetSerial = getSerialStream(targetPort);
+            targetSerial.write(buffer, len);
+            targetSerial.flush();
+            if (debugKyber) {
+              Serial.printf("Kyber: Forwarded %d bytes to local S%d\n", len, targetPort);
+            }
+          } 
+          // If remote, send via ESP-NOW to specific WCB/port using 'K' target
+          else {
+            sendESPNowRawToPort(buffer, len, targetWCB, targetPort);
+            if (debugKyber) {
+              Serial.printf("Kyber: Sent %d bytes to WCB%d S%d\n", len, targetWCB, targetPort);
+            }
+          }
         }
       }
-    } else {
-      // DEFAULT BROADCAST
-      sendESPNowRaw(espnowBurst, burstLen);
+    } 
+    // Broadcast mode - send to all WCBs
+    else {
+      // Forward to local Serial1 if Maestro is local
+      if (Kyber_Local) {
+        Serial1.write(buffer, len);
+        Serial1.flush();
+      }
+      
+      // Broadcast to all remote WCBs
+      sendESPNowRaw(buffer, len);
+      
+      if (debugKyber) {
+        Serial.printf("Kyber: Broadcast %d bytes\n", len);
+      }
     }
-    burstLen = 0;
-    if (debugKyber) Serial.println();
   }
 }
 void forwardMaestroDataToLocalKyber() {
@@ -1949,6 +1987,9 @@ void processPWMOutput(const String &message) {
 //*******************************
 /// Processing Broadcast Function
 //*******************************
+//*******************************
+/// Processing Broadcast Function
+//*******************************
 void processBroadcastCommand(const String &cmd, int sourceID) {
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
@@ -2017,7 +2058,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             continue;
         }
         
-        // **ADDITIONAL CHECK: Skip if Maestro is on this port - NEW CODE**
+        // Skip if Maestro is on this port
         bool isMaestroPort = false;
         for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
             if (maestroConfigs[m].configured && 
@@ -2032,17 +2073,16 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             }
             continue;
         }
-        // **END NEW CODE**
 
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
     }
 
-    // Always send via ESP-NOW broadcast (only when NOT using serial mapping)
+    // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage)
     sendESPNowMessage(0, cmd.c_str());
     if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
-// processIncomingSerial for each serial port
+
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
   if (!serial.available()) return;  // Exit if no data available
@@ -2066,11 +2106,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
           serialBuffer = "";
       }
     } else {
-      serialBuffer += c;  // Append new characters to buffer
+      serialBuffer += c;
     }
   }
 }
-
 
 // Helper function to process serial commands
 void processSerialCommandHelper(String &data, int sourceID) {
