@@ -1489,18 +1489,18 @@ void printMaestroSettings() {
       
       if (maestroConfigs[i].serialPort > 0) {
         // Local Maestro
-        chainedCommands += String(LocalFunctionIdentifier) + "MAESTRO," + 
+        chainedCommands += String(LocalFunctionIdentifier) + "MAESTRO,M" + 
                           String(maestroConfigs[i].maestroID) + 
-                          ",W" + String(WCB_Number) + 
+                          ":W" + String(WCB_Number) + 
                           "S" + String(maestroConfigs[i].serialPort) + 
-                          "," + String(baudRates[maestroConfigs[i].serialPort - 1]);
+                          ":" + String(baudRates[maestroConfigs[i].serialPort - 1]);
         localCount++;
       } else if (maestroConfigs[i].remoteWCB > 0) {
         // Remote Maestro
-        chainedCommands += String(LocalFunctionIdentifier) + "MAESTRO," + 
+        chainedCommands += String(LocalFunctionIdentifier) + "MAESTRO,M" + 
                           String(maestroConfigs[i].maestroID) + 
-                          ",W" + String(maestroConfigs[i].remoteWCB) + 
-                          "S1,57600";  // Default placeholder
+                          ":W" + String(maestroConfigs[i].remoteWCB) + 
+                          "S1:57600";  // Default placeholder
         remoteCount++;
       }
     }
