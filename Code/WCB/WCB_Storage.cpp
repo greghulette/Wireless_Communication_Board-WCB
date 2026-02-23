@@ -607,18 +607,16 @@ void eraseNVSFlash() {
 }
 
 void storeKyberSettings(const String &message) {
-  // Parse: local,S2,M1:W2S1:115200,M2:W3S1:115200,M3:W4S1:57600
-  
   int firstComma = message.indexOf(',');
   String baseCommand;
   String params = "";
   int kyberPort = 0;
   
   if (firstComma == -1) {
-    // Simple local/remote/clear
     baseCommand = message;
     baseCommand.toLowerCase();
     kyberUseTargeting = false;
+    kyberPort = 2;
     
     for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
       kyberTargets[i].enabled = false;
@@ -631,7 +629,6 @@ void storeKyberSettings(const String &message) {
     baseCommand.toLowerCase();
     params = message.substring(firstComma + 1);
     
-    // Extract Kyber port (Sx,...)
     int secondComma = params.indexOf(',');
     if (secondComma != -1 && (params.startsWith("S") || params.startsWith("s"))) {
       String portStr = params.substring(1, secondComma);
@@ -644,22 +641,31 @@ void storeKyberSettings(const String &message) {
     }
   }
   
-  if (baseCommand.equals("local") && (kyberPort < 1 || kyberPort > 5)) {
+  if (baseCommand.equals("local") && kyberUseTargeting && (kyberPort < 1 || kyberPort > 5)) {
     Serial.println("Invalid Kyber port. Must be S1-S5");
     return;
   }
   
-  // Set Kyber location
   if (baseCommand.equals("local")) {
     Kyber_Local = true;
     Kyber_Remote = false;
     Kyber_Location = "local";
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
     
-    // Auto-set Kyber port to 115200 baud
     if (kyberPort > 0 && kyberPort <= 5) {
       updateBaudRate(kyberPort, 115200);
       Serial.printf("Set Serial%d to 115200 baud (Kyber standard)\n", kyberPort);
+
+      if (serialBroadcastEnabled[kyberPort - 1]) {
+        serialBroadcastEnabled[kyberPort - 1] = false;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("✓ Disabled broadcast output on S%d (Kyber port)\n", kyberPort);
+      }
+      if (!blockBroadcastFrom[kyberPort - 1]) {
+        blockBroadcastFrom[kyberPort - 1] = true;
+        saveBroadcastBlockSettings();
+        Serial.printf("✓ Disabled broadcast input on S%d (Kyber port)\n", kyberPort);
+      }
     }
     
   } else if (baseCommand.equals("remote")) {
@@ -674,13 +680,28 @@ void storeKyberSettings(const String &message) {
     Kyber_Remote = false;
     kyberUseTargeting = false;
     
+    if (kyberPort > 0) {
+      updateBaudRate(kyberPort, 9600);
+      Serial.printf("✓ Reset S%d baud rate to 9600 (Kyber port)\n", kyberPort);
+    }
+    
     preferences.begin("kyber_settings", false);
     preferences.putString("K_Location", Kyber_Location);
     preferences.end();
-    
+
+    if (!serialBroadcastEnabled[kyberPort - 1]) {
+      serialBroadcastEnabled[kyberPort - 1] = true;
+      saveBroadcastSettingsToPreferences();
+      Serial.printf("✓ Re-enabled broadcast output on S%d\n", kyberPort);
+    }
+    if (blockBroadcastFrom[kyberPort - 1]) {
+      blockBroadcastFrom[kyberPort - 1] = false;
+      saveBroadcastBlockSettings();
+      Serial.printf("✓ Re-enabled broadcast input on S%d\n", kyberPort);
+    }
     saveKyberTargets();
-    Serial.println("Kyber cleared");
-    return;
+    Serial.println("Kyber cleared. Run ?MAESTRO_DEFAULT to clear Maestro configs.");
+    return; 
   }
   
   // Parse Maestro targets
@@ -691,11 +712,6 @@ void storeKyberSettings(const String &message) {
       kyberTargets[i].enabled = false;
     }
     
-    // Track which WCBs need configuration
-    bool wcbNeedsKyberRemote[10] = {false};  // WCBs 1-9
-    bool wcbHasMaestro[10] = {false};
-    
-    // Split by comma to get each target: M1:W2S1:115200
     int startIdx = 0;
     
     while (startIdx < params.length() && targetIndex < MAX_KYBER_TARGETS) {
@@ -706,7 +722,6 @@ void storeKyberSettings(const String &message) {
       targetStr.trim();
       targetStr.toUpperCase();
       
-      // Parse M1:W2S1:115200
       int firstColon = targetStr.indexOf(':');
       int secondColon = targetStr.indexOf(':', firstColon + 1);
       
@@ -715,7 +730,6 @@ void storeKyberSettings(const String &message) {
         String wcbPortStr = targetStr.substring(firstColon + 1, secondColon);
         int baudRate = targetStr.substring(secondColon + 1).toInt();
         
-        // Parse W2S1
         int wIdx = wcbPortStr.indexOf('W');
         int sIdx = wcbPortStr.indexOf('S');
         
@@ -737,12 +751,6 @@ void storeKyberSettings(const String &message) {
             Serial.printf("Kyber target %d: Maestro %d → WCB%d S%d (%d baud)\n",
                           targetIndex + 1, maestroID, wcbNum, portNum, baudRate);
             
-            // Track which WCBs are involved
-            if (wcbNum != WCB_Number) {
-              wcbNeedsKyberRemote[wcbNum] = true;
-            }
-            wcbHasMaestro[wcbNum] = true;
-            
             // Auto-configure Maestro
             int8_t maestroSlot = findSlotByMaestroID(maestroID);
             if (maestroSlot < 0) {
@@ -754,7 +762,6 @@ void storeKyberSettings(const String &message) {
               maestroConfigs[maestroSlot].configured = true;
               
               if (wcbNum == WCB_Number) {
-                // LOCAL Maestro
                 maestroConfigs[maestroSlot].serialPort = portNum;
                 maestroConfigs[maestroSlot].remoteWCB = 0;
                 
@@ -763,20 +770,20 @@ void storeKyberSettings(const String &message) {
                 if (serialBroadcastEnabled[portNum - 1]) {
                   serialBroadcastEnabled[portNum - 1] = false;
                   saveBroadcastSettingsToPreferences();
+                  Serial.printf("⚠️  Disabled broadcast output on S%d (Maestro port)\n", portNum);
                 }
                 if (!blockBroadcastFrom[portNum - 1]) {
                   blockBroadcastFrom[portNum - 1] = true;
                   saveBroadcastBlockSettings();
+                  Serial.printf("⚠️  Disabled broadcast input on S%d (Maestro port)\n", portNum);
                 }
                 
-                Serial.printf("  → Auto-configured Maestro %d: Local S%d at %d baud\n", 
-                              maestroID, portNum, baudRate);
+                Serial.printf("✓ Maestro %d: Local S%d at %d baud (slot %d)\n", 
+                              maestroID, portNum, baudRate, maestroSlot + 1);
               } else {
-                // REMOTE Maestro
                 maestroConfigs[maestroSlot].serialPort = 0;
                 maestroConfigs[maestroSlot].remoteWCB = wcbNum;
-                Serial.printf("  → Auto-configured Maestro %d: Remote on WCB%d\n", 
-                              maestroID, wcbNum);
+                Serial.printf("✓ Maestro %d: Remote on WCB%d\n", maestroID, wcbNum);
               }
             }
             
@@ -785,31 +792,41 @@ void storeKyberSettings(const String &message) {
         }
       }
       
-      startIdx = nextComma + 1;  // CRITICAL: Advance to next target
+      startIdx = nextComma + 1;
     }
     
     saveMaestroSettings();
     
-    // **GENERATE COPY-PASTE COMMANDS FOR OTHER WCBs**
+    // Generate copy-paste commands for other WCBs
     if (baseCommand.equals("local")) {
       Serial.println("\n─────────────────────────────────────────────────────");
       Serial.println("📋 COPY-PASTE SETUP COMMANDS FOR OTHER WCBs:");
       Serial.println("─────────────────────────────────────────────────────\n");
       
       for (int wcb = 1; wcb <= Default_WCB_Quantity; wcb++) {
-        if (wcb == WCB_Number) continue;  // Skip this WCB
-        if (!wcbHasMaestro[wcb]) continue;  // Skip if no Maestros on this WCB
+        if (wcb == WCB_Number) continue;
         
-        String command = "";
-        
-        // Add KYBER_REMOTE if this WCB has Maestros
-        if (wcbNeedsKyberRemote[wcb]) {
-          command += "?KYBER_REMOTE^";
+        // Only add KYBER_REMOTE if this WCB has Maestro ID 1 or 2 physically on it
+        bool needsKyberRemote = false;
+        for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+          if (kyberTargets[i].enabled && 
+              kyberTargets[i].targetWCB == wcb &&
+              kyberTargets[i].maestroID <= 2) {
+            needsKyberRemote = true;
+            break;
+          }
         }
         
-        // Build single MAESTRO command with all mappings
-        command += "?MAESTRO";
+        String command = "";
+        if (needsKyberRemote) {
+          command += "?" + String("KYBER_REMOTE^?");
+        } else {
+          command += "?";
+        }
         
+        command += "MAESTRO";
+        
+        // Add all Maestro mappings
         int cmdStartIdx = 0;
         while (cmdStartIdx < params.length()) {
           int cmdNextComma = params.indexOf(',', cmdStartIdx);
@@ -827,14 +844,13 @@ void storeKyberSettings(const String &message) {
             String cmdWcbPortStr = cmdTargetStr.substring(cmdFirstColon + 1, cmdSecondColon);
             int cmdBaudRate = cmdTargetStr.substring(cmdSecondColon + 1).toInt();
             
-            // Add to single MAESTRO command: ,M1:W2S1:115200
             command += ",M" + String(cmdMaestroID) + ":" + cmdWcbPortStr + ":" + String(cmdBaudRate);
           }
           
           cmdStartIdx = cmdNextComma + 1;
         }
         
-        // **ADD LABEL COMMANDS FOR LOCAL MAESTROS**
+        // Add label commands only for Maestros local to this WCB
         cmdStartIdx = 0;
         while (cmdStartIdx < params.length()) {
           int cmdNextComma = params.indexOf(',', cmdStartIdx);
@@ -851,7 +867,6 @@ void storeKyberSettings(const String &message) {
             int cmdMaestroID = cmdTargetStr.substring(1, cmdFirstColon).toInt();
             String cmdWcbPortStr = cmdTargetStr.substring(cmdFirstColon + 1, cmdSecondColon);
             
-            // Parse W2S1
             int wIdx = cmdWcbPortStr.indexOf('W');
             int sIdx = cmdWcbPortStr.indexOf('S');
             
@@ -859,9 +874,8 @@ void storeKyberSettings(const String &message) {
               int targetWCB = cmdWcbPortStr.substring(wIdx + 1, sIdx).toInt();
               int targetPort = cmdWcbPortStr.substring(sIdx + 1).toInt();
               
-              // Only add label if this Maestro is LOCAL to this WCB
               if (targetWCB == wcb) {
-                command += "^?SL" + String(targetPort) + ",Maestro " + String(cmdMaestroID);
+                command += "^?" + String("SLS") + String(targetPort) + ",Maestro " + String(cmdMaestroID);
               }
             }
           }
@@ -870,7 +884,6 @@ void storeKyberSettings(const String &message) {
         }
         
         command += "^?REBOOT";
-        
         Serial.printf("WCB%d - Run this command:\n%s\n\n", wcb, command.c_str());
       }
       
@@ -878,7 +891,6 @@ void storeKyberSettings(const String &message) {
     }
   }
   
-  // Save to NVS
   preferences.begin("kyber_settings", false);
   preferences.putString("K_Location", Kyber_Location);
   preferences.end();
@@ -944,7 +956,7 @@ void printKyberSettings() {
         Serial.println("  (No targets configured)");
       }
     } else {
-      Serial.println("Kyber targeting mode: Disabled (broadcast to all Serial1)");
+      Serial.println("Kyber targeting mode: Disabled (Broadcast Mode)");
     }
   }
 }
@@ -1494,6 +1506,13 @@ void printMaestroSettings() {
                           ":W" + String(WCB_Number) + 
                           "S" + String(maestroConfigs[i].serialPort) + 
                           ":" + String(baudRates[maestroConfigs[i].serialPort - 1]);
+        // Add label if set
+        String portLabel = serialPortLabels[maestroConfigs[i].serialPort - 1];
+        if (portLabel.length() > 0) {
+          chainedCommands += String(commandDelimiter) + 
+                             String(LocalFunctionIdentifier) + "SLS" + 
+                             String(maestroConfigs[i].serialPort) + "," + portLabel;
+        }
         localCount++;
       } else if (maestroConfigs[i].remoteWCB > 0) {
         // Remote Maestro
@@ -1523,10 +1542,12 @@ void printMaestroSettings() {
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (maestroConfigs[i].configured) {
         if (maestroConfigs[i].serialPort > 0) {
-        Serial.printf("  Maestro %d: Local S%d at %lu baud", 
+        String portLabel = serialPortLabels[maestroConfigs[i].serialPort - 1];
+        Serial.printf("  Maestro %d: Local S%d at %lu baud%s", 
                         maestroConfigs[i].maestroID,
                         maestroConfigs[i].serialPort,
-                        baudRates[maestroConfigs[i].serialPort - 1]);
+                        baudRates[maestroConfigs[i].serialPort - 1],
+                        portLabel.length() > 0 ? (" (" + portLabel + ")").c_str() : "");
         
         // **SHOW BROADCAST STATUS**
         bool outputDisabled = !serialBroadcastEnabled[maestroConfigs[i].serialPort - 1];
@@ -1595,4 +1616,99 @@ void loadKyberTargets() {
   
   preferences.end();
 }
+void printKyberList() {
+  Serial.println("\n--- Kyber Configuration ---");
 
+  if (Kyber_Location != "local" && Kyber_Location != "remote") {
+    Serial.println("Kyber is not configured.");
+    Serial.println("-----------------------------\n");
+    return;
+  }
+
+  Serial.printf("Kyber is %s\n", Kyber_Location == "local" ? "Local" : "Remote");
+  Serial.printf("Targeting mode: %s\n", kyberUseTargeting ? "Enabled" : "Disabled (Broadcast Mode)");
+
+  if (kyberUseTargeting) {
+    Serial.println("\nKyber Targets:");
+    for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+      if (kyberTargets[i].enabled) {
+        Serial.printf("  Maestro %d → WCB%d S%d\n",
+                      kyberTargets[i].maestroID,
+                      kyberTargets[i].targetWCB,
+                      kyberTargets[i].targetPort);
+      }
+    }
+  }
+
+  if (Kyber_Location == "local" && kyberUseTargeting) {
+    Serial.println("\n─────────────────────────────────────────────────────");
+    Serial.println("📋 COPY-PASTE SETUP COMMANDS:");
+    Serial.println("─────────────────────────────────────────────────────");
+
+    // This WCB's command
+    preferences.begin("kyber_settings", true);
+    int storedPort = preferences.getInt("K_Port", 2);
+    preferences.end();
+    
+    String thisCmd = "?" + String("KYBER_LOCAL,S") + String(storedPort);
+    for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+      if (kyberTargets[i].enabled) {
+        thisCmd += ",M" + String(kyberTargets[i].maestroID) +
+                   ":W" + String(kyberTargets[i].targetWCB) +
+                   "S" + String(kyberTargets[i].targetPort) +
+                   ":" + String(baudRates[kyberTargets[i].targetPort - 1]);
+      }
+    }
+    Serial.printf("\nWCB%d (this board):\n%s\n\n", WCB_Number, thisCmd.c_str());
+
+    // Other WCBs
+    for (int wcb = 1; wcb <= Default_WCB_Quantity; wcb++) {
+      if (wcb == WCB_Number) continue;
+
+      // Only add KYBER_REMOTE if this WCB has Maestro ID 1 or 2 physically on it
+      bool needsKyberRemote = false;
+      for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+        if (kyberTargets[i].enabled && 
+            kyberTargets[i].targetWCB == wcb &&
+            kyberTargets[i].maestroID <= 2) {
+          needsKyberRemote = true;
+          break;
+        }
+      }
+
+      String cmd = "";
+      if (needsKyberRemote) {
+        cmd += "?" + String("KYBER_REMOTE^?");
+      } else {
+        cmd += "?";
+      }
+      cmd += "MAESTRO";
+
+      // Add all Maestro mappings
+      for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+        if (kyberTargets[i].enabled) {
+          cmd += ",M" + String(kyberTargets[i].maestroID) +
+                 ":W" + String(kyberTargets[i].targetWCB) +
+                 "S" + String(kyberTargets[i].targetPort) +
+                 ":" + String(baudRates[kyberTargets[i].targetPort - 1]);
+        }
+      }
+
+      // Add label commands only for Maestros local to this WCB
+      for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+        if (kyberTargets[i].enabled && kyberTargets[i].targetWCB == wcb) {
+          String label = serialPortLabels[kyberTargets[i].targetPort - 1];
+          if (label.length() > 0) {
+            cmd += "^?" + String("SLS") + String(kyberTargets[i].targetPort) + "," + label;
+          }
+        }
+      }
+
+      cmd += "^?REBOOT";
+      Serial.printf("WCB%d:\n%s\n\n", wcb, cmd.c_str());
+    }
+    Serial.println("─────────────────────────────────────────────────────\n");
+  }
+
+  Serial.println("-----------------------------\n");
+}

@@ -67,8 +67,8 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
       
       // ALWAYS show unicast sends
-      Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n", 
-                    maestroID, config.remoteWCB, scriptNumber);
+      if (debugEnabled) {Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n", 
+                    maestroID, config.remoteWCB, scriptNumber);}
       return;
     }
     
@@ -101,7 +101,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     sendESPNowMessage(0, espnowMsg.c_str());
     
     // ALWAYS show broadcast
-    Serial.printf("→ Maestro Broadcast: Script %d\n", scriptNumber);
+    if (debugEnabled){Serial.printf("→ Maestro Broadcast: Script %d\n", scriptNumber);}
     return;
   }
   
@@ -122,8 +122,8 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     sendESPNowMessage(maestroID, espnowMsg.c_str());
     
     // ALWAYS show fallback unicast
-    Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
-                  maestroID, maestroID, scriptNumber);
+    if (debugEnabled) {Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
+                  maestroID, maestroID, scriptNumber);}
   } else {
     String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
     sendESPNowMessage(0, espnowMsg.c_str());
@@ -352,7 +352,12 @@ void clearMaestroByID(const String &message) {
       saveBroadcastBlockSettings();
       Serial.printf("✓ Re-enabled broadcast input on S%d\n", freedPort);
     }
-}
+  }
+  // **RESET BAUD RATE TO 9600 ON FREED PORT**
+  if (freedPort > 0) {
+      updateBaudRate(freedPort, 9600);
+      Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
+  }
 }
 void clearAllMaestroConfigs() {
   // Format: ?MAESTRO_DEFAULT
@@ -394,6 +399,14 @@ void clearAllMaestroConfigs() {
         blockBroadcastFrom[i] = false;
         Serial.printf("  ✓ S%d input enabled\n", i + 1);
       }
+    }
+    // **RESET BAUD RATES ON ALL FREED PORTS**
+    Serial.println("Resetting baud rates on freed ports:");
+    for (int i = 0; i < 5; i++) {
+        if (portsUsed[i]) {
+            updateBaudRate(i + 1, 9600);
+            Serial.printf("  ✓ S%d baud rate reset to 9600\n", i + 1);
+        }
     }
   }
   

@@ -106,6 +106,7 @@ void loadKyberSettings();
 void printKyberSettings();
 void saveKyberTargets();
 void loadKyberTargets();
+void printKyberList();
 
 
 void saveBroadcastSettingsToPreferences();

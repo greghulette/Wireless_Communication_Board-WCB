@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_141952RFEB2026                                    *****////
+///*****                                          Version 6.0_231524RFEB2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_141952RFEB2026";
+String SoftwareVersion = "6.0_231524RFEB2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1100,6 +1100,9 @@ void processLocalCommand(const String &message) {
     printKyberSettings();
     return;
     
+    } else if (message.equals("kyber_list") || message.equals("KYBER_LIST")) {
+    printKyberList();
+    return;
     } else if (message.startsWith("kyber_remote") || message.startsWith("KYBER_REMOTE")){
         // Extract everything after "kyber_remote" (could be empty or ",M1,W2S1")
         String params = "";
@@ -1237,6 +1240,9 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("sm") || message.startsWith("SM")) {
       addSerialMonitorMapping(message.substring(2));
       return;
+    } else if (message.startsWith("baud") || message.startsWith("BAUD")) {
+        updateSerialBaudRate(message.substring(4));
+        return;
     } else if (message.startsWith("s") || message.startsWith("S")) {
         updateSerialSettings(message);
         return;
@@ -1570,13 +1576,42 @@ void updateSerialSettings(const String &message){
       Serial.printf("Serial%d broadcast %s and stored in NVS\n",
           port, serialBroadcastEnabled[port - 1] ? "Enabled" : "Disabled");
     }
+  } else if (message.startsWith("baud") || message.startsWith("BAUD")) {
+    updateSerialBaudRate(message.substring(4));
+    return;
   } else {
     int baud = message.substring(2).toInt();
     if (port >= 1 && port <= 5) {
+      Serial.println("⚠️  Command is being deprecated: Use ?BAUDSx,yyyyy instead (e.g., ?BAUDS1,57600).  This command will still function for now but may be removed in future versions.");
       updateBaudRate(port, baud);
       Serial.printf("Updated Serial%d baud rate to %d and stored in NVS\n", port, baud);
     }
   }
+}
+
+void updateSerialBaudRate(const String &message) {
+  // Format: Sx,yyyyy  (e.g., S1,57600)
+  if (!message.startsWith("S") && !message.startsWith("s")) {
+    Serial.println("Invalid format. Use ?BAUDSx,yyyyy (e.g., ?BAUDS1,57600)");
+    return;
+  }
+
+  int commaIndex = message.indexOf(',');
+  if (commaIndex == -1) {
+    Serial.println("Invalid format. Use ?BAUDSx,yyyyy (e.g., ?BAUDS1,57600)");
+    return;
+  }
+
+  int port = message.substring(1, commaIndex).toInt();
+  int baud = message.substring(commaIndex + 1).toInt();
+
+  if (port < 1 || port > 5) {
+    Serial.println("Invalid serial port. Must be S1-S5");
+    return;
+  }
+
+  updateBaudRate(port, baud);
+  Serial.printf("Updated Serial%d baud rate to %d and stored in NVS\n", port, baud);
 }
 
 void updateWCBNumber(const String &message){
@@ -1698,8 +1733,8 @@ void updateHWVersion(const String &message) {
     
     // Serial Port Settings
     for (int i = 0; i < 5; i++) {
-        cmd = "?S" + String(i + 1) + String(baudRates[i]);
-        Serial.println(cmd);
+    cmd = "?BAUDS" + String(i + 1) + "," + String(baudRates[i]);        
+    Serial.println(cmd);
         chainedConfig += String(commandDelimiter) + cmd;
         chainedConfigDefault += "^" + cmd;
         
@@ -1958,10 +1993,11 @@ void processMaestroCommand(const String &message){
 
 void processPWMOutput(const String &message) {
     // Format: ;Pxnnnn where x=port, nnnn=pulse width in microseconds
+    
     int port = message.substring(1, 2).toInt();
     unsigned long pulseWidth = message.substring(2).toInt();
     
-    if (port < 1 || port > 5 || pulseWidth < 800 || pulseWidth > 2200) {
+    if (port < 1 || port > 5 || pulseWidth < 500 || pulseWidth > 2500) {
         if (debugPWMEnabled) Serial.println("Invalid PWM output command");
         return;
     }
@@ -1981,6 +2017,8 @@ void processPWMOutput(const String &message) {
         delayMicroseconds(pulseWidth);
         digitalWrite(txPin, LOW);
     }
+    // Serial.printf("processPWMOutput: port=%d pulse=%lu txPin=%d\n", port, pulseWidth, SERIAL5_TX_PIN);
+
 }
 
 
