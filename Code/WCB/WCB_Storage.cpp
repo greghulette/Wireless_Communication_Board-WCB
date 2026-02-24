@@ -31,6 +31,15 @@ extern int SERIAL5_TX_PIN;	     //  // Serial 5 Tx Pin
 extern int SERIAL5_RX_PIN;	     //  // Serial 5 Rx Pin
 extern int ONBOARD_LED;       //  // ESP32 Status NeoPixel Pin
 extern int STATUS_LED_PIN;       //  // Not used on this board but defining it to match version 2.1 board
+
+extern bool etmEnabled;
+extern int etmBootHeartbeatSec;
+extern int etmHeartbeatSec;
+extern int etmMissedHeartbeats;
+extern int etmTimeoutMs;
+extern int etmCharMessageCount;
+extern int etmCharDelayMs;
+
 SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
 KyberTarget kyberTargets[MAX_KYBER_TARGETS];
@@ -596,6 +605,10 @@ void eraseNVSFlash() {
     preferences.end();
 
     preferences.begin("maestro_cfg", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("etm_config", false);
     preferences.clear();
     preferences.end();
     
@@ -1711,4 +1724,31 @@ void printKyberList() {
   }
 
   Serial.println("-----------------------------\n");
+}
+
+void saveETMSettings() {
+    preferences.begin("etm_config", false);
+    preferences.putBool("etmEnabled", etmEnabled);
+    preferences.putInt("etmBoot", etmBootHeartbeatSec);
+    preferences.putInt("etmHB", etmHeartbeatSec);
+    preferences.putInt("etmMiss", etmMissedHeartbeats);
+    preferences.putInt("etmTimeout", etmTimeoutMs);
+    preferences.putInt("etmCharCount", etmCharMessageCount);
+    preferences.putInt("etmCharDelay", etmCharDelayMs);
+    preferences.end();
+}
+
+void loadETMSettings() {
+    preferences.begin("etm_config", true);
+    etmEnabled          = preferences.getBool("etmEnabled", false);
+    etmBootHeartbeatSec = preferences.getInt("etmBoot", 2);
+    etmHeartbeatSec     = preferences.getInt("etmHB", 10);
+    etmMissedHeartbeats = preferences.getInt("etmMiss", 3);
+    etmTimeoutMs        = preferences.getInt("etmTimeout", 500);
+    etmCharMessageCount = preferences.getInt("etmCharCount", 20);
+    etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);
+    preferences.end();
+    if (etmEnabled) {
+        Serial.println("ETM: ENABLED ⚠️  Ensure all boards match firmware!");
+    }
 }

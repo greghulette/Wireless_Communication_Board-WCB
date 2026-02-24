@@ -30,6 +30,16 @@ extern String serialPortLabels[5];
 String getSerialLabel(int port);
 extern bool blockBroadcastFrom[5];
 extern bool serialMonitorEnabled[5];
+
+// ETM Settings
+extern bool etmEnabled;
+extern int etmBootHeartbeatSec;
+extern int etmHeartbeatSec;
+extern int etmMissedHeartbeats;
+extern int etmTimeoutMs;
+extern int etmCharMessageCount;
+extern int etmCharDelayMs;
+
 // For stored commands
 #define MAX_STORED_COMMANDS 80
 #define MAX_SERIAL_MONITOR_MAPPINGS 5  // One per input port
@@ -158,5 +168,7 @@ void setSerialMappingRawMode(int inputPort, bool raw);
 void saveMaestroSettings();
 void loadMaestroSettings();
 void printMaestroSettings();
+void saveETMSettings();
+void loadETMSettings();
 
 #endif

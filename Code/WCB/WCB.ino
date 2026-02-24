@@ -153,6 +153,97 @@ unsigned long espnowPWMFailed = 0;
 unsigned long espnowRawAttempts = 0;
 unsigned long espnowRawSuccess = 0;
 unsigned long espnowRawFailed = 0;
+// ============================= ETM - Ensured Transmission Mode =============================
+// ETM Structs
+typedef struct __attribute__((packed)) {
+  char structPassword[40];
+  char structSenderID[4];
+  char structTargetID[4];
+  uint8_t structCommandIncluded;
+  char structCommand[200];
+  uint8_t structPacketType;
+  uint16_t structSequenceNumber;
+} espnow_struct_message_etm;
+
+// ETM Packet Types
+#define PACKET_TYPE_COMMAND   0
+#define PACKET_TYPE_ACK       1
+#define PACKET_TYPE_HEARTBEAT 2
+
+// ETM Settings (NVS stored)
+bool debugETM = false;
+bool etmEnabled = false;
+int etmBootHeartbeatSec = 2;
+int etmHeartbeatSec = 10;
+int etmMissedHeartbeats = 3;
+int etmTimeoutMs = 500;
+int etmCharMessageCount = 20;
+int etmCharDelayMs = 100;
+
+// ETM Board Status Table
+struct BoardStatus {
+  bool online;
+  unsigned long lastSeenMs;
+  unsigned long messagesSent;
+  unsigned long messagesAckd;
+  unsigned long totalRetries;
+  unsigned long totalFailed;
+};
+BoardStatus boardTable[9];  // sized to max, we only use [0..Default_WCB_Quantity-1]
+
+// ETM Heartbeat timing
+unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
+bool etmBootHeartbeatSent = false;
+uint16_t etmSequenceNumber = 0;        // global sequence counter, Layer 3 uses this
+
+// ETM - Pending Message Table
+#define ETM_PENDING_MAX 10
+struct PendingMessage {
+  uint16_t sequenceNumber;
+  char command[200];
+  bool expectAckFrom[9];
+  bool receivedAckFrom[9];
+  uint8_t retryCount[9];
+  unsigned long lastSentMs;
+  bool active;
+};
+PendingMessage etmPendingTable[ETM_PENDING_MAX];
+
+// ETM - Sequence counter
+uint16_t etmSequenceCounter = 0;
+
+// ETM - Per-board stats (boardTable already has online/lastSeen from Layer 2)
+unsigned long etmStatsSent[9]    = {0};
+unsigned long etmStatsAckd[9]    = {0};
+unsigned long etmStatsRetries[9] = {0};
+unsigned long etmStatsFailed[9]  = {0};
+
+// ETM Characterization state
+bool etmCharRunning = false;
+int etmCharPhase = 0;
+int etmCharTargetWCB = 0;  // 0 = not set
+
+// Per-phase, per-board tracking
+struct ETMCharBoardResult {
+    int sent;
+    int acked;
+    unsigned long latencyMin;
+    unsigned long latencyMax;
+    unsigned long latencyAccum;
+};
+
+// [phase 0-2][board index 0-7]
+ETMCharBoardResult etmCharBoardResults[3][8];
+unsigned long etmCharPhaseSentTimes[200];  // timestamps when each message was sent (max 200 msgs)
+int etmCharPhaseMessageIndex = 0;
+unsigned long etmCharPhaseStartTime = 0;
+unsigned long etmCharLastSendTime = 0;
+
+// ETM Load test (phase 3 - received ETMLOAD command)
+bool etmLoadRunning = false;
+unsigned long etmLoadStartTime = 0;
+unsigned long etmLoadLastSendTime = 0;
+int etmLoadRoundRobinIndex = 0;
 
 // Delivery confirmation tracking
 unsigned long espnowCommandDelivered = 0;
@@ -356,7 +447,7 @@ static QueueHandle_t commandQueue = nullptr;
 
 // ============================= Forward Declarations =============================
 void writeSerialString(Stream &serialPort, String stringData);
-void sendESPNowMessage(uint8_t target, const char *message);
+void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 void enqueueCommand(const String &cmd, int sourceID);
 void processPWMPassthrough();
 void addPWMOutputPort(int port);
@@ -364,6 +455,504 @@ void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
 void processIncomingSerial(Stream &serial, int sourceID); 
+void etmSendAck(int senderWCB, uint16_t seqNum);
+void etmProcessAck(int senderWCB, uint16_t seqNum);
+int etmAddToPendingTable(uint16_t seqNum, const char* cmd);
+
+
+
+
+void sendETMHeartbeat() {
+  espnow_struct_message_etm hb;
+  memset(&hb, 0, sizeof(hb));
+  strncpy(hb.structPassword, espnowPassword, sizeof(hb.structPassword) - 1);
+  snprintf(hb.structSenderID, sizeof(hb.structSenderID), "%d", WCB_Number);
+  snprintf(hb.structTargetID, sizeof(hb.structTargetID), "0");  // broadcast
+  hb.structCommandIncluded = false;
+  hb.structPacketType = PACKET_TYPE_HEARTBEAT;
+  hb.structSequenceNumber = 0;
+
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&hb, sizeof(hb));
+  if (debugETM) {
+    Serial.printf("[ETM] Heartbeat sent (WCB%d)\n", WCB_Number);
+  }
+}
+
+void scheduleNextHeartbeat(bool isBoot) {
+  unsigned long intervalMs;
+  if (isBoot) {
+    // Random 1000ms to etmBootHeartbeatSec*1000ms at millisecond resolution
+    intervalMs = (unsigned long)random(1000, etmBootHeartbeatSec * 1000UL);
+  } else {
+    // Random (etmHeartbeatSec-1)*1000 to (etmHeartbeatSec+1)*1000 at millisecond resolution
+    intervalMs = (unsigned long)random((etmHeartbeatSec - 1) * 1000UL, (etmHeartbeatSec + 1) * 1000UL);
+  }
+  etmNextHeartbeatMs = millis() + intervalMs;
+  if (debugETM) {
+    Serial.printf("[ETM] Next heartbeat in %lums\n", intervalMs);
+  }
+}
+
+void processETMHeartbeats() {
+  if (!etmEnabled) return;
+
+  // Send heartbeat when timer fires
+  if (millis() >= etmNextHeartbeatMs) {
+    sendETMHeartbeat();
+    scheduleNextHeartbeat(false);
+  }
+
+  // Check for boards that have gone offline
+  unsigned long offlineThresholdMs = (unsigned long)(etmHeartbeatSec + 1) * etmMissedHeartbeats * 1000UL;
+  for (int i = 0; i < Default_WCB_Quantity; i++) {
+    if (i + 1 == WCB_Number) continue;  // skip ourselves
+    if (boardTable[i].online) {
+      if (millis() - boardTable[i].lastSeenMs > offlineThresholdMs) {
+        boardTable[i].online = false;
+        Serial.printf("[ETM] WCB%d went OFFLINE (no heartbeat for %lus)\n",
+                      i + 1, offlineThresholdMs / 1000UL);
+      }
+    }
+  }
+}
+
+
+void etmInitPendingTable() {
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    etmPendingTable[i].active = false;
+  }
+}
+
+int etmAddToPendingTable(uint16_t seqNum, const char* cmd) {
+  // Find oldest active slot if full
+  int slot = -1;
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    if (!etmPendingTable[i].active) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == -1) {
+    // Table full - evict oldest (slot 0), log failure
+    if (debugETM) Serial.println("[ETM] Pending table full, evicting oldest entry");
+    slot = 0;
+    // Log evicted entry as failed
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      if (etmPendingTable[slot].expectAckFrom[b] && !etmPendingTable[slot].receivedAckFrom[b]) {
+        etmStatsFailed[b]++;
+      }
+    }
+    // Shift table up
+    for (int i = 0; i < ETM_PENDING_MAX - 1; i++) {
+      etmPendingTable[i] = etmPendingTable[i + 1];
+    }
+    etmPendingTable[ETM_PENDING_MAX - 1].active = false;
+    slot = ETM_PENDING_MAX - 1;
+  }
+
+  PendingMessage &entry = etmPendingTable[slot];
+  entry.sequenceNumber = seqNum;
+  strncpy(entry.command, cmd, sizeof(entry.command) - 1);
+  entry.command[sizeof(entry.command) - 1] = '\0';
+  entry.lastSentMs = millis();
+  entry.active = true;
+
+  for (int b = 0; b < 9; b++) {
+    entry.expectAckFrom[b]   = false;
+    entry.receivedAckFrom[b] = false;
+    entry.retryCount[b]      = 0;
+  }
+
+  // Populate expectAckFrom based on online board table (skip self)
+  for (int b = 0; b < Default_WCB_Quantity; b++) {
+    int wcbNum = b + 1;
+    if (wcbNum == WCB_Number) continue;
+    if (boardTable[b].online) {
+      entry.expectAckFrom[b] = true;
+      etmStatsSent[b]++;
+    }
+  }
+
+  return slot;
+}
+
+void etmProcessAck(int senderWCB, uint16_t seqNum) {
+  int boardIdx = senderWCB - 1;
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    if (!etmPendingTable[i].active) continue;
+    if (etmPendingTable[i].sequenceNumber != seqNum) continue;
+
+    if (!etmPendingTable[i].receivedAckFrom[boardIdx]) {
+      etmPendingTable[i].receivedAckFrom[boardIdx] = true;
+      etmStatsAckd[boardIdx]++;
+      if (debugETM) {
+        Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
+      }
+    }
+
+    // Check if all expected ACKs received
+    bool allDone = true;
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      if (etmPendingTable[i].expectAckFrom[b] && !etmPendingTable[i].receivedAckFrom[b]) {
+        allDone = false;
+        break;
+      }
+    }
+    if (allDone) {
+      etmPendingTable[i].active = false;
+      if (debugETM) Serial.printf("[ETM] Seq %d fully acknowledged\n", seqNum);
+    }
+    return;
+  }
+  if (debugETM) Serial.printf("[ETM] ACK for unknown seq %d from WCB%d (already cleared?)\n", seqNum, senderWCB);
+}
+
+void processETMAcksAndRetries() {
+  if (!etmEnabled) return;
+
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    if (!etmPendingTable[i].active) continue;
+
+    PendingMessage &entry = etmPendingTable[i];
+    if (millis() - entry.lastSentMs < (unsigned long)etmTimeoutMs) continue;
+
+    bool anyStillPending = false;
+
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      if (!entry.expectAckFrom[b]) continue;
+      if (entry.receivedAckFrom[b]) continue;
+
+      // This board hasn't ACKd yet
+      if (entry.retryCount[b] < 3) {
+        // Send unicast retry
+        int wcbNum = b + 1;
+        espnow_struct_message_etm retry;
+        memset(&retry, 0, sizeof(retry));
+
+        strncpy(retry.structPassword, espnowPassword, sizeof(retry.structPassword) - 1);
+        snprintf(retry.structSenderID, sizeof(retry.structSenderID), "%d", WCB_Number);
+        snprintf(retry.structTargetID, sizeof(retry.structTargetID), "%d", wcbNum);
+        retry.structCommandIncluded = 1;
+        strncpy(retry.structCommand, entry.command, sizeof(retry.structCommand) - 1);
+        retry.structPacketType = PACKET_TYPE_COMMAND;
+        retry.structSequenceNumber = entry.sequenceNumber;
+
+        uint8_t *mac = WCBMacAddresses[b];
+        esp_now_send(mac, (uint8_t *)&retry, sizeof(retry));
+
+        entry.retryCount[b]++;
+        etmStatsRetries[b]++;
+        anyStillPending = true;
+
+        if (debugETM) {
+          Serial.printf("[ETM] Retry %d to WCB%d for seq %d: %s\n",
+                        entry.retryCount[b], wcbNum, entry.sequenceNumber, entry.command);
+        }
+      } else {
+        // Exhausted retries for this board
+        etmStatsFailed[b]++;
+        entry.expectAckFrom[b] = false; // stop retrying this board
+        Serial.printf("[ETM] WCB%d failed to ACK seq %d after 3 retries: %s\n",
+                      b + 1, entry.sequenceNumber, entry.command);
+      }
+    }
+
+    entry.lastSentMs = millis(); // reset timer for next retry window
+
+    // Check if all resolved
+    bool allResolved = true;
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      if (entry.expectAckFrom[b] && !entry.receivedAckFrom[b]) {
+        allResolved = false;
+        break;
+      }
+    }
+    if (allResolved) {
+      entry.active = false;
+      if (debugETM) Serial.printf("[ETM] Seq %d resolved\n", entry.sequenceNumber);
+    }
+  }
+}
+
+void etmSendAck(int senderWCB, uint16_t seqNum) {
+  espnow_struct_message_etm ack;
+  memset(&ack, 0, sizeof(ack));
+
+  strncpy(ack.structPassword, espnowPassword, sizeof(ack.structPassword) - 1);
+  snprintf(ack.structSenderID, sizeof(ack.structSenderID), "%d", WCB_Number);
+  snprintf(ack.structTargetID, sizeof(ack.structTargetID), "%d", senderWCB);
+  ack.structCommandIncluded = 0;
+  ack.structPacketType = PACKET_TYPE_ACK;
+  ack.structSequenceNumber = seqNum;
+
+  uint8_t *mac = WCBMacAddresses[senderWCB - 1];
+  esp_err_t result = esp_now_send(mac, (uint8_t *)&ack, sizeof(ack));
+  if (debugETM) {
+    Serial.printf("[ETM] Sent ACK seq %d to WCB%d, result: %d\n", seqNum, senderWCB, result);
+  }
+}
+
+
+
+void startETMChar() {
+    if (!etmEnabled) {
+        Serial.println("ETM is not enabled. Use ?ETMON first.");
+        return;
+    }
+    if (Default_WCB_Quantity < 2) {
+        Serial.println("ETM Char requires at least 2 WCBs in the network (?WCBQ).");
+        return;
+    }
+
+    etmCharRunning = true;
+    etmCharPhase = 1;
+    etmCharPhaseMessageIndex = 0;
+    etmCharPhaseStartTime = millis();
+    etmCharLastSendTime = 0;
+    memset(etmCharBoardResults, 0, sizeof(etmCharBoardResults));
+
+    // Init min latency to large value so first real reading wins
+    for (int p = 0; p < 3; p++)
+        for (int b = 0; b < 8; b++)
+            etmCharBoardResults[p][b].latencyMin = 999999;
+
+    Serial.println("\n---------- ETM Network Characterization ----------");
+    Serial.printf("Messages per board per phase: %d\n", etmCharMessageCount);
+    Serial.printf("Phase 1 - Individual Baseline (unicast, no load)...\n");
+}
+
+void processETMChar() {
+    if (!etmCharRunning) return;
+
+    unsigned long now = millis();
+
+    // Build list of peer WCB numbers
+    int peers[8];
+    int peerCount = 0;
+    for (int i = 1; i <= Default_WCB_Quantity; i++) {
+        if (i != WCB_Number) peers[peerCount++] = i;
+    }
+    if (peerCount == 0) { etmCharRunning = false; return; }
+
+    // Total messages this phase = etmCharMessageCount per peer
+    int totalMessages = etmCharMessageCount * peerCount;
+
+    // Phase 1 and 2 send unicast to each peer in round-robin
+    // Phase 3 sends unicast + broadcast mix AND triggers load on peers
+    if (etmCharPhase == 1 || etmCharPhase == 2) {
+        unsigned long interDelay = (etmCharPhase == 1) ? 0 : (unsigned long)etmCharDelayMs;
+
+        if (etmCharPhaseMessageIndex < totalMessages) {
+            if (now - etmCharLastSendTime >= interDelay) {
+                int peerIdx = etmCharPhaseMessageIndex % peerCount;
+                int targetWCB = peers[peerIdx];
+                int boardIdx = targetWCB - 1;
+
+                // Build test payload (5-30 chars)
+                String payload = "ETMCHAR_P" + String(etmCharPhase) + 
+                                 "_M" + String(etmCharPhaseMessageIndex);
+
+                etmCharPhaseSentTimes[etmCharPhaseMessageIndex] = now;
+                etmCharBoardResults[etmCharPhase - 1][boardIdx].sent++;
+
+                sendESPNowMessage(targetWCB, payload.c_str(), true);
+                etmCharPhaseMessageIndex++;
+                etmCharLastSendTime = now;
+            }
+        }
+
+        // Check phase complete — all acked or timeout
+        int totalAcked = 0;
+        for (int b = 0; b < 8; b++)
+            totalAcked += etmCharBoardResults[etmCharPhase - 1][b].acked;
+
+        unsigned long phaseTimeout = (unsigned long)totalMessages *
+                                     (max((unsigned long)etmCharDelayMs, 20UL) + etmTimeoutMs) + 3000;
+        bool allDone = (etmCharPhaseMessageIndex >= totalMessages && totalAcked >= totalMessages);
+        bool timedOut = (now - etmCharPhaseStartTime > phaseTimeout);
+
+        if (allDone || timedOut) {
+            advanceETMCharPhase(peers, peerCount);
+        }
+
+    } else if (etmCharPhase == 3) {
+        // Phase 3: mix of unicast and broadcast
+        if (etmCharPhaseMessageIndex == 0) {
+            // First entry into phase 3 — trigger load on all peers
+            Serial.println("Triggering network load on all peers...");
+            sendESPNowMessage(0, "ETMLOAD", false);  // broadcast, not ETM tracked
+        }
+
+        if (etmCharPhaseMessageIndex < totalMessages) {
+            if (now - etmCharLastSendTime >= (unsigned long)etmCharDelayMs) {
+                int msgIdx = etmCharPhaseMessageIndex;
+                bool sendBroadcast = (msgIdx % 3 == 2);  // every 3rd message is broadcast
+
+                String payload = "ETMCHAR_P3_M" + String(msgIdx);
+
+                if (sendBroadcast) {
+                    // Broadcast — track against all peers
+                    etmCharPhaseSentTimes[msgIdx] = now;
+                    for (int b = 0; b < peerCount; b++)
+                        etmCharBoardResults[2][peers[b] - 1].sent++;
+                    sendESPNowMessage(0, payload.c_str(), true);
+                } else {
+                    // Unicast round-robin
+                    int peerIdx = msgIdx % peerCount;
+                    int targetWCB = peers[peerIdx];
+                    etmCharPhaseSentTimes[msgIdx] = now;
+                    etmCharBoardResults[2][targetWCB - 1].sent++;
+                    sendESPNowMessage(targetWCB, payload.c_str(), true);
+                }
+
+                etmCharPhaseMessageIndex++;
+                etmCharLastSendTime = now;
+            }
+        }
+
+        // Check phase complete
+        int totalSent = 0, totalAcked = 0;
+        for (int b = 0; b < 8; b++) {
+            totalSent += etmCharBoardResults[2][b].sent;
+            totalAcked += etmCharBoardResults[2][b].acked;
+        }
+
+        unsigned long phaseTimeout = (unsigned long)totalMessages *
+                                     ((unsigned long)etmCharDelayMs + etmTimeoutMs) + 5000;
+        bool allDone = (etmCharPhaseMessageIndex >= totalMessages && totalAcked >= totalSent);
+        bool timedOut = (now - etmCharPhaseStartTime > phaseTimeout);
+
+        if (allDone || timedOut) {
+            etmCharRunning = false;
+            printETMCharResults(peers, peerCount);
+        }
+    }
+}
+
+void advanceETMCharPhase(int* peers, int peerCount) {
+    etmCharPhase++;
+    etmCharPhaseMessageIndex = 0;
+    etmCharPhaseStartTime = millis();
+    etmCharLastSendTime = 0;
+
+    if (etmCharPhase == 2) {
+        Serial.printf("Phase 2 - Broadcast (no load)...\n");
+        // Phase 2 is actually broadcast to all — re-init results for phase 2
+        // We'll send to broadcast but track per-board via ACKs
+    } else if (etmCharPhase == 3) {
+        Serial.printf("Phase 3 - Loaded Network (all boards transmitting)...\n");
+    }
+}
+
+void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long sentTime) {
+    if (!etmCharRunning) return;
+    if (!originalCmd.startsWith("ETMCHAR_")) return;
+
+    int boardIdx = senderWCB - 1;
+    if (boardIdx < 0 || boardIdx > 7) return;
+
+    // Determine which phase this ACK belongs to
+    int phase = -1;
+    if (originalCmd.startsWith("ETMCHAR_P1")) phase = 0;
+    else if (originalCmd.startsWith("ETMCHAR_P2")) phase = 1;
+    else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
+    if (phase < 0) return;
+
+    unsigned long latency = millis() - sentTime;
+    ETMCharBoardResult &r = etmCharBoardResults[phase][boardIdx];
+    r.acked++;
+    r.latencyAccum += latency;
+    if (latency < r.latencyMin) r.latencyMin = latency;
+    if (latency > r.latencyMax) r.latencyMax = latency;
+}
+
+void processETMLoad() {
+    if (!etmLoadRunning) return;
+
+    unsigned long now = millis();
+
+    // Run for 10 seconds
+    if (now - etmLoadStartTime > 10000) {
+        etmLoadRunning = false;
+        if (debugEnabled) Serial.println("ETM load test complete.");
+        return;
+    }
+
+    if (now - etmLoadLastSendTime >= (unsigned long)etmCharDelayMs) {
+        // Alternate broadcast and unicast round-robin
+        static int loadMsgCount = 0;
+        bool sendBcast = (loadMsgCount % 3 == 2);
+
+        // Random-ish test payloads of varying length
+        const char* payloads[] = {
+            "LOAD_TEST_SHORT",
+            "LOAD_TEST_MEDIUM_PAYLOAD",
+            "LOAD_TEST_THIS_IS_A_LONGER_MESSAGE",
+            "LOAD_SHORT2",
+            "LOAD_MED_SIZE_MSG",
+            "LOAD_TEST_FILLER_DATA_123"
+        };
+        String payload = payloads[loadMsgCount % 6];
+
+        if (sendBcast) {
+            sendESPNowMessage(0, payload.c_str(), false);  // broadcast, not ETM
+        } else {
+            // Round-robin unicast to peers
+            int target = etmLoadRoundRobinIndex + 1;
+            if (target == WCB_Number) target++;  // skip self
+            if (target > Default_WCB_Quantity) target = 1;
+            if (target == WCB_Number) target++;  // skip self again if WCB1
+            etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % Default_WCB_Quantity;
+            sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+        }
+
+        loadMsgCount++;
+        etmLoadLastSendTime = now;
+    }
+}
+
+void printETMCharResults(int* peers, int peerCount) {
+    const char* phaseNames[] = {
+        "Individual Baseline (unicast, no load)",
+        "Broadcast (no load)",
+        "Loaded Network (all boards transmitting)"
+    };
+
+    Serial.println("\n--------------- ETM Network Characterization ---------------");
+
+    unsigned long worstMaxLatency = 0;
+    float worstMissedPct = 0.0f;
+
+    for (int p = 0; p < 3; p++) {
+        Serial.printf(" Phase %d - %s:\n", p + 1, phaseNames[p]);
+        for (int i = 0; i < peerCount; i++) {
+            int b = peers[i] - 1;
+            ETMCharBoardResult &r = etmCharBoardResults[p][b];
+            if (r.sent == 0) continue;
+
+            unsigned long avgLatency = (r.acked > 0) ? r.latencyAccum / r.acked : 0;
+            float missedPct = (float)(r.sent - r.acked) / r.sent * 100.0f;
+            unsigned long minLat = (r.acked > 0) ? r.latencyMin : 0;
+
+            Serial.printf("   WCB%d: Min: %lums, Max: %lums, Avg: %lums, Missed: %.0f%%\n",
+                peers[i], minLat, r.latencyMax, avgLatency, missedPct);
+
+            if (r.latencyMax > worstMaxLatency) worstMaxLatency = r.latencyMax;
+            if (missedPct > worstMissedPct) worstMissedPct = missedPct;
+        }
+    }
+
+    // Recommend timeout = worst max latency * 2.5, rounded to nearest 50ms, floor 150ms
+    unsigned long recommendedTimeout = ((worstMaxLatency * 5 / 2) / 50 + 1) * 50;
+    if (recommendedTimeout < 150) recommendedTimeout = 150;
+
+    Serial.printf("\n Recommended ETM timeout: %lums\n", recommendedTimeout);
+    Serial.printf(" Apply with: ?ETMTOUT%lu\n", recommendedTimeout);
+    if (worstMissedPct > 5.0f) {
+        Serial.println(" Warning: >5% packet loss detected. Check RF environment.");
+    }
+    Serial.println("------------------------------------------------------------\n");
+}
 
 
 // String getSerialLabel(int port);
@@ -553,34 +1142,84 @@ void printConfigInfo() {
   // Print PWM mappings
   listPWMMappings();  // Print PWM mappings
   printMaestroSettings();  // Show configured Maestros
+ if (etmEnabled) {
+    Serial.println("--------------- Online WCBs ---------------");
+    for (int i = 0; i < Default_WCB_Quantity; i++) {
+      if (i + 1 == WCB_Number) {
+        Serial.printf("  WCB%d: This board\n", i + 1);
+      } else if (boardTable[i].online) {
+        unsigned long secsAgo = (millis() - boardTable[i].lastSeenMs) / 1000UL;
+        Serial.printf("  WCB%d: Online  (last seen %lus ago)\n", i + 1, secsAgo);
+      } else {
+        Serial.printf("  WCB%d: OFFLINE\n", i + 1);
+      }
+    }
+}
+
+    Serial.println("--------------- ETM Settings ----------------------");
+  Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED ⚠️  All boards must match!" : "Disabled");
+  if (etmEnabled) {
+    Serial.printf("  Boot heartbeat: 1-%d sec\n", etmBootHeartbeatSec);
+    Serial.printf("  Heartbeat interval: %d sec (+/- 1)\n", etmHeartbeatSec);
+    Serial.printf("  Offline after: %d missed (%d sec max)\n", etmMissedHeartbeats, (etmHeartbeatSec+1)*etmMissedHeartbeats);
+    Serial.printf("  Retry timeout: %d ms\n", etmTimeoutMs);
+    Serial.printf("  Char message count: %d, delay: %d ms\n", etmCharMessageCount, etmCharDelayMs);
+  }
 
   Serial.println("--- End of Configuration Info ---\n");
 }
 
 void printESPNowStats() {
   Serial.println("\n--- ESP-NOW Statistics (Since Last Reboot) ---");
-  
+
   if (trackCommandDelivery) {
-    // Show delivery tracking stats
     Serial.println("Unicast Command Messages:");
-    Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n", 
+    Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
                   espnowCommandAttempts, espnowCommandDelivered, espnowCommandFailed);
     if (espnowCommandAttempts > 0) {
-      Serial.printf("  Delivery Success Rate: %.2f%%\n", 
+      Serial.printf("  Delivery Success Rate: %.2f%%\n",
                     (float)espnowCommandDelivered / espnowCommandAttempts * 100.0);
     }
   } else {
-    // Tracking is off - show basic transmission stats
-    Serial.println("Unicast Command Messages:");
-    Serial.printf("  Transmission Attempts: %lu, Success: %lu, Failed: %lu\n", 
+    Serial.println("Command Messages:");
+    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n",
                   espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
     if (espnowCommandAttempts > 0) {
-      Serial.printf("  Transmission Success Rate: %.2f%%\n", 
+      Serial.printf("  Success Rate: %.2f%%\n",
                     (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
     }
     Serial.println("  (Delivery tracking: OFF - Enable with ?TRACK_CMD_ON)");
   }
-  
+
+  if (espnowPWMAttempts > 0) {
+    Serial.println("PWM Passthrough:");
+    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n",
+                  espnowPWMAttempts, espnowPWMSuccess, espnowPWMFailed);
+  }
+
+  if (espnowRawAttempts > 0) {
+    Serial.println("Raw Data (Kyber Bridging):");
+    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n",
+                  espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
+  }
+
+  if (etmEnabled) {
+    Serial.println("\n--------------- ETM Per-Board Statistics ---------------");
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      int wcbNum = b + 1;
+      if (wcbNum == WCB_Number) continue;
+      unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
+      Serial.printf("WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, %s\n",
+                    wcbNum,
+                    etmStatsSent[b], etmStatsAckd[b],
+                    etmStatsRetries[b], etmStatsFailed[b],
+                    boardTable[b].online
+                      ? ("Online (last seen " + String(ago) + "s ago)").c_str()
+                      : "OFFLINE");
+    }
+    Serial.println("--------------------------------------------------------");
+  }
+
   Serial.println("--- End of ESP-NOW Statistics ---\n");
 }
 
@@ -589,78 +1228,91 @@ void printESPNowStats() {
 /// ESP-NOW Functions
 //*******************************
 // Send an ESP-NOW message (unicast or broadcast)
-void sendESPNowMessage(uint8_t target, const char *message) {
-    // Skip broadcast if last was from ESP-NOW
-    if (target == 0 && lastReceivedViaESPNOW) {
-            if (debugEnabled) {Serial.printf("Skipping ESPNOW broadcast to avoid loops\n");};
-        return;
-    }
-      // turnOnLEDESPNOW();
+void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
+  // Skip broadcast if last was from ESP-NOW
+  if (target == 0 && lastReceivedViaESPNOW) {
+    if (debugEnabled) { Serial.printf("Skipping ESPNOW broadcast to avoid loops\n"); }
+    return;
+  }
 
-    // Prepare the struct
-    espnow_struct_message msg;
-    memset(&msg, 0, sizeof(msg));
-
-    // Fill struct fields
-    strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
-    msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
-
-    // Send only the **WCB number** instead of "WCBx"
-    snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
-
-    if (target == 0) {
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0"); // Use "0" for broadcast
-    } else {
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", target);
-    }
-
-    msg.structCommandIncluded = true;
-    strncpy(msg.structCommand, message, sizeof(msg.structCommand) - 1);
-    msg.structCommand[sizeof(msg.structCommand) - 1] = '\0';
-
-    // Select MAC address
-    uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
-
-    // Debug Output
-    // Serial.printf("Sending ESP-NOW message to MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-    //               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    // Serial.printf("Sender ID: WCB%s, Target ID: WCB%s, Message: %s\n",
-    //               msg.structSenderID, msg.structTargetID, msg.structCommand);
-
-    // Send ESP-NOW message
-    // Check if this is a PWM message (starts with ";P") - MUST BE FIRST
+  // Check if this is a PWM message (starts with ";P") - MUST BE FIRST
   bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
 
-  // Track attempts by type
+  // ---- ETM SEND PATH ----
+  if (etmEnabled && useETM && !isPWMMessage) {
+    espnow_struct_message_etm etmMsg;
+    memset(&etmMsg, 0, sizeof(etmMsg));
+
+    strncpy(etmMsg.structPassword, espnowPassword, sizeof(etmMsg.structPassword) - 1);
+    snprintf(etmMsg.structSenderID, sizeof(etmMsg.structSenderID), "%d", WCB_Number);
+    if (target == 0) {
+      snprintf(etmMsg.structTargetID, sizeof(etmMsg.structTargetID), "0");
+    } else {
+      snprintf(etmMsg.structTargetID, sizeof(etmMsg.structTargetID), "%d", target);
+    }
+    etmMsg.structCommandIncluded = 1;
+    strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
+    etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = '\0';
+    etmMsg.structPacketType = PACKET_TYPE_COMMAND;
+    etmMsg.structSequenceNumber = ++etmSequenceCounter;
+
+    etmAddToPendingTable(etmMsg.structSequenceNumber, message);
+
+    uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
+
+    espnowCommandAttempts++;
+    esp_err_t result = esp_now_send(mac, (uint8_t *)&etmMsg, sizeof(etmMsg));
+    if (result == ESP_OK) {
+      espnowCommandSuccess++;
+      if (debugETM) Serial.printf("[ETM] Sent seq %d: %s\n", etmMsg.structSequenceNumber, message);
+    } else {
+      espnowCommandFailed++;
+      Serial.printf("[ETM] Send failed seq %d, error: %d\n", etmMsg.structSequenceNumber, result);
+    }
+    return;
+  }
+  // ---- END ETM SEND PATH ----
+
+  // ---- NORMAL SEND PATH ----
+  espnow_struct_message msg;
+  memset(&msg, 0, sizeof(msg));
+
+  strncpy(msg.structPassword, espnowPassword, sizeof(msg.structPassword) - 1);
+  msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
+  snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
+  if (target == 0) {
+    snprintf(msg.structTargetID, sizeof(msg.structTargetID), "0");
+  } else {
+    snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", target);
+  }
+  msg.structCommandIncluded = true;
+  strncpy(msg.structCommand, message, sizeof(msg.structCommand) - 1);
+  msg.structCommand[sizeof(msg.structCommand) - 1] = '\0';
+
+  uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
+
   if (isPWMMessage) {
-      espnowPWMAttempts++;
+    espnowPWMAttempts++;
   } else {
-      espnowCommandAttempts++;
+    espnowCommandAttempts++;
   }
 
-  // Send ESP-NOW message
   esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
-
-  // Track success/failure by type
   if (result == ESP_OK) {
-      if (isPWMMessage) {
-          espnowPWMSuccess++;
-      } else {
-          espnowCommandSuccess++;
-      }
-      // Only print success if debug is on AND it's not a PWM message
-      if (debugEnabled && !isPWMMessage) {
-          Serial.println("ESP-NOW message sent successfully!");
-      }
+    if (isPWMMessage) {
+      espnowPWMSuccess++;
+    } else {
+      espnowCommandSuccess++;
+      if (debugEnabled) Serial.println("ESP-NOW message sent successfully!");
+    }
   } else {
-      if (isPWMMessage) {
-          espnowPWMFailed++;
-      } else {
-          espnowCommandFailed++;
-      }
-      Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
+    if (isPWMMessage) {
+      espnowPWMFailed++;
+    } else {
+      espnowCommandFailed++;
+    }
+    Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
   }
-    // turnOffLED();
 }
 
 void sendESPNowRaw(const uint8_t *data, size_t len) {
@@ -822,148 +1474,192 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
 
-  if (len != sizeof(espnow_struct_message)) {
-      // Serial.printf("Received unexpected size: %d (expected %d)\n", len, (int)sizeof(espnow_struct_message));
-      return;
+  // Handle both normal and ETM struct sizes
+  bool isETMPacket = false;
+  if (len == sizeof(espnow_struct_message_etm)) {
+    isETMPacket = true;
+  } else if (len != sizeof(espnow_struct_message)) {
+    return; // Unknown size - ignore
   }
 
+  // ETM/non-ETM mismatch guards
+  if (isETMPacket && !etmEnabled) {
+    if (debugETM) Serial.println("[ETM] Received ETM packet but ETM disabled locally, ignoring.");
+    return;
+  }
+  if (!isETMPacket && etmEnabled) {
+    if (debugETM) Serial.println("[ETM] Received normal packet but ETM enabled locally, ignoring.");
+    return;
+  }
+
+  // ---- ETM RECEIVE PATH ----
+  if (isETMPacket) {
+    espnow_struct_message_etm etmReceived;
+    memcpy(&etmReceived, incomingData, sizeof(etmReceived));
+    etmReceived.structPassword[sizeof(etmReceived.structPassword) - 1] = '\0';
+
+    if (String(etmReceived.structPassword) != String(espnowPassword)) return;
+    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
+
+    int senderWCB = atoi(etmReceived.structSenderID);
+    int targetWCB = atoi(etmReceived.structTargetID);
+
+    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
+      int senderIdx = senderWCB - 1;
+      if (senderIdx >= 0 && senderIdx < Default_WCB_Quantity && senderWCB != WCB_Number) {
+        bool wasOffline = !boardTable[senderIdx].online;
+        boardTable[senderIdx].online = true;
+        boardTable[senderIdx].lastSeenMs = millis();
+        if (wasOffline) {
+          Serial.printf("[ETM] WCB%d came ONLINE\n", senderWCB);
+        } else if (debugETM) {
+          Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
+        }
+      }
+      return;
+    }
+
+    if (etmReceived.structPacketType == PACKET_TYPE_ACK) {
+      if (targetWCB == WCB_Number) {
+        etmProcessAck(senderWCB, etmReceived.structSequenceNumber);
+      }
+      return;
+    }
+
+    if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
+      if (targetWCB != 0 && targetWCB != WCB_Number) return;
+
+      lastReceivedViaESPNOW = true;
+      colorWipeStatus("ES", green, 200);
+
+      if (debugETM) {
+        Serial.printf("[ETM] Received seq %d from WCB%d: %s\n",
+                      etmReceived.structSequenceNumber, senderWCB, etmReceived.structCommand);
+      }
+
+      etmSendAck(senderWCB, etmReceived.structSequenceNumber);
+      enqueueCommand(String(etmReceived.structCommand), 0);
+      colorWipeStatus("ES", blue, 10);
+    }
+    return;
+  }
+  // ---- END ETM RECEIVE PATH ----
+
+  // ---- NORMAL RECEIVE PATH ----
   espnow_struct_message received;
   memcpy(&received, incomingData, sizeof(received));
   received.structPassword[sizeof(received.structPassword) - 1] = '\0';
 
-  // memcpy(&received, incomingData, len);
-  String temp_espnowpassword = String(received.structPassword);
-  if (temp_espnowpassword == espnowPassword){
-    // Serial.printf("Received ESP-NOW Message from MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-    //             info->src_addr[0], info->src_addr[1], info->src_addr[2],
-    //             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+  if (String(received.structPassword) != String(espnowPassword)) return;
 
-    // if (debugEnabled){.printf("Received Command: %s\n", received.structCommand);}
+  int senderWCB = atoi(received.structSenderID);
+  int targetWCB = atoi(received.structTargetID);
 
-    // Convert sender and target ID to integers
-    int senderWCB = atoi(received.structSenderID);
-    int targetWCB = atoi(received.structTargetID);
+  bool isPWMCommand = (received.structCommand[0] == ';' &&
+                       (received.structCommand[1] == 'P' || received.structCommand[1] == 'p'));
 
-    // Check if this is a PWM command (starts with ";P" or ";p")
-      bool isPWMCommand = (received.structCommand[0] == ';' && 
-                          (received.structCommand[1] == 'P' || received.structCommand[1] == 'p'));
-
-      // Only print debug if it's not Target 9 (Kyber) AND not a PWM command
-      if (debugEnabled && targetWCB != 9 && !isPWMCommand) { 
-          Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB); 
-      }
-
-    // Ensure message is from a WCB in the same group
-    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
-        if (debugEnabled){Serial.println("Received message from an unrelated WCB group, ignoring."); } 
-        return;
-    }
-    // Check for Kyber targeted data
-    // Check for Kyber targeted data
-if (received.structTargetID[0] == 'K') {
-    // Kyber targeted forwarding
-    uint8_t destWCB = received.structCommand[0];
-    uint8_t destPort = received.structCommand[1];
-    size_t chunkLen = (uint8_t)received.structCommand[2] | 
-                      ((uint8_t)received.structCommand[3] << 8);
-
-    // Debug output BEFORE forwarding
-    if (debugKyber) {
-        uint8_t* dataPtr = (uint8_t*)(received.structCommand + 4);
-        Serial.printf("Kyber targeted to W%dS%d - chunk (hex): ", destWCB, destPort);
-        for (int i = 0; i < chunkLen; i++) {
-            if (dataPtr[i] < 0x10) Serial.print("0");
-            Serial.print(dataPtr[i], HEX);
-            Serial.print(" ");
-        }
-        Serial.println();
-    }
-
-    // Only process if this WCB is the target
-    if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
-        Stream &targetSerial = getSerialStream(destPort);
-        targetSerial.write((uint8_t*)(received.structCommand + 4), chunkLen);
-        targetSerial.flush();
-        
-        if (debugEnabled) {
-            Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
-        }
-    }
-    return;
-}
-    if (targetWCB == 9) {
-    // Extract chunk length from first 2 bytes of structCommand
-    size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
-
-    // Safety check to prevent invalid length
-    if (chunkLen > 180 || chunkLen == 0) {
-        if (debugEnabled) {
-            Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
-        }
-        return;
-    }
-
-    // Debug output BEFORE forwarding (works on all boards regardless of mode)
-    if (debugKyber) {
-        uint8_t* dataPtr = (uint8_t*)(received.structCommand + 2);
-        Serial.print("Kyber chunk (hex): ");
-        for (int i = 0; i < chunkLen; i++) {
-            if (dataPtr[i] < 0x10) Serial.print("0");
-            Serial.print(dataPtr[i], HEX);
-            Serial.print(" ");
-        }
-        Serial.println();
-    }
-
-    // THIS IS BROADCAST MODE - only used when Kyber targeting is NOT enabled
-    // If targeting is enabled, Kyber should use target ID 'K' (handled separately above)
-    
-    // Forward to local Maestro(s) based on configuration
-    if (Kyber_Local) { 
-        Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
-        Serial2.write((uint8_t*)(received.structCommand + 2), chunkLen); 
-    }  
-    else if (Kyber_Remote) {
-        Serial1.write((uint8_t*)(received.structCommand + 2), chunkLen);
-    }
-
-    return;
-}
-    if (targetWCB == 8) {
-        // Raw serial mapping data
-        uint8_t targetPort = (uint8_t)received.structCommand[0];
-        size_t chunkLen = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
-        if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
-            if (debugEnabled) {
-                Serial.printf("Invalid raw serial chunk: port=%d, len=%d\n", targetPort, (int)chunkLen);
-            }
-            return;
-        }
-
-        // Forward to target serial port
-        Stream &targetSerial = getSerialStream(targetPort);
-        targetSerial.write((uint8_t*)(received.structCommand + 3), chunkLen);
-        targetSerial.flush();
-
-        if (debugEnabled) {
-            Serial.printf("Raw serial: %d bytes -> Serial%d\n", (int)chunkLen, targetPort);
-        }
-        return;
-    }
-     lastReceivedViaESPNOW = true; // Prevent loopback issues
-      colorWipeStatus("ES", green, 200);
-    // Check if this message is meant for this WCB
-    if (targetWCB != 0 && targetWCB != WCB_Number ) {
-        if (debugEnabled) { Serial.println("Message not for this WCB, ignoring."); }
-        return;
-    }
-
-    // If valid, enqueue the command
-    enqueueCommand(String(received.structCommand), 0);
-  } else {
-    // Serial.println("ESPNOW password does not match local password!");
+  if (debugEnabled && targetWCB != 9 && !isPWMCommand) {
+    Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
   }
+
+  if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
+    if (debugEnabled) { Serial.println("Received message from an unrelated WCB group, ignoring."); }
+    return;
+  }
+
+  // Kyber targeted forwarding
+  if (received.structTargetID[0] == 'K') {
+    uint8_t destWCB  = received.structCommand[0];
+    uint8_t destPort = received.structCommand[1];
+    size_t chunkLen  = (uint8_t)received.structCommand[2] | ((uint8_t)received.structCommand[3] << 8);
+
+    if (debugKyber) {
+      uint8_t *dataPtr = (uint8_t *)(received.structCommand + 4);
+      Serial.printf("Kyber targeted to W%dS%d - chunk (hex): ", destWCB, destPort);
+      for (int i = 0; i < (int)chunkLen; i++) {
+        if (dataPtr[i] < 0x10) Serial.print("0");
+        Serial.print(dataPtr[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+    }
+
+    if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
+      Stream &targetSerial = getSerialStream(destPort);
+      targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
+      targetSerial.flush();
+      if (debugEnabled) Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
+    }
+    return;
+  }
+
+  // Kyber broadcast (target 9)
+  if (targetWCB == 9) {
+    size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
+    if (chunkLen > 180 || chunkLen == 0) {
+      if (debugEnabled) Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
+      return;
+    }
+
+    if (debugKyber) {
+      uint8_t *dataPtr = (uint8_t *)(received.structCommand + 2);
+      Serial.print("Kyber chunk (hex): ");
+      for (int i = 0; i < (int)chunkLen; i++) {
+        if (dataPtr[i] < 0x10) Serial.print("0");
+        Serial.print(dataPtr[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+    }
+
+    if (Kyber_Local) {
+      Serial1.write((uint8_t *)(received.structCommand + 2), chunkLen);
+      Serial2.write((uint8_t *)(received.structCommand + 2), chunkLen);
+    } else if (Kyber_Remote) {
+      Serial1.write((uint8_t *)(received.structCommand + 2), chunkLen);
+    }
+    return;
+  }
+
+  // Raw serial mapping (target 8)
+  if (targetWCB == 8) {
+    uint8_t targetPort = (uint8_t)received.structCommand[0];
+    size_t chunkLen    = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
+    if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
+      if (debugEnabled) Serial.printf("Invalid raw serial chunk: port=%d, len=%d\n", targetPort, (int)chunkLen);
+      return;
+    }
+    Stream &targetSerial = getSerialStream(targetPort);
+    targetSerial.write((uint8_t *)(received.structCommand + 3), chunkLen);
+    targetSerial.flush();
+    if (debugEnabled) Serial.printf("Raw serial: %d bytes -> Serial%d\n", (int)chunkLen, targetPort);
+    return;
+    }
+
+  // Normal command for this board
+  lastReceivedViaESPNOW = true;
+  colorWipeStatus("ES", green, 200);
+
+  if (targetWCB != 0 && targetWCB != WCB_Number) {
+    if (debugEnabled) Serial.println("Message not for this WCB, ignoring.");
     colorWipeStatus("ES", blue, 10);
+    return;
+  }
+String receivedCmd = String(received.structCommand);
+
+if (receivedCmd.startsWith("ETMLOAD")) {
+    etmLoadRunning = true;
+    etmLoadStartTime = millis();
+    etmLoadLastSendTime = 0;
+    etmLoadRoundRobinIndex = 0;
+    if (debugEnabled) Serial.println("ETM load test started by remote board.");
+    return;
+}
+if (receivedCmd.startsWith("ETMCHAR_")) {
+    return;  // ACK handled in ETM layer, don't execute as a command
+}
+  enqueueCommand(String(received.structCommand), 0);
+  colorWipeStatus("ES", blue, 10);
 }
 
 void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
@@ -1150,6 +1846,14 @@ void processLocalCommand(const String &message) {
         debugPWMPassthrough = false;
         Serial.println("PWM Passthrough Debugging disabled");
         return;
+    } else if (message == "detmon" || message == "DETMON") {
+        debugETM = true;
+        Serial.println("ETM debugging enabled");
+        return;
+    } else if (message == "detmoff" || message == "DETMOFF") {
+        debugETM = false;
+        Serial.println("ETM debugging disabled");
+        return;
     } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
         return;
@@ -1312,6 +2016,68 @@ void processLocalCommand(const String &message) {
       int port = message.substring(3).toInt();
       addPWMOutputPort(port);
       return;
+    } else if (message.equals("etmon") || message.equals("ETMON")) {
+        etmEnabled = true;
+        saveETMSettings();
+        Serial.println("ETM: Enabled. Ensure ALL boards are updated before use.");
+        return;
+    } else if (message.equals("etmoff") || message.equals("ETMOFF")) {
+        etmEnabled = false;
+        saveETMSettings();
+        Serial.println("ETM: Disabled.");
+        return;
+    } else if (message.startsWith("etmboot") || message.startsWith("ETMBOOT")) {
+        etmBootHeartbeatSec = message.substring(7).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Boot heartbeat max: %d seconds\n", etmBootHeartbeatSec);
+        return;
+    } else if (message.startsWith("etmhb") || message.startsWith("ETMHB")) {
+        etmHeartbeatSec = message.substring(5).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Heartbeat interval: %d seconds (+/- 1)\n", etmHeartbeatSec);
+        return;
+    } else if (message.startsWith("etmmiss") || message.startsWith("ETMMISS")) {
+        etmMissedHeartbeats = message.substring(7).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Missed heartbeats before offline: %d\n", etmMissedHeartbeats);
+        return;
+    } else if (message.startsWith("etmtimeout") || message.startsWith("ETMTIMEOUT")) {
+        etmTimeoutMs = message.substring(10).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Retry timeout: %d ms\n", etmTimeoutMs);
+        return;
+    } else if (message.startsWith("etmcharcount") || message.startsWith("ETMCHARCOUNT")) {
+        etmCharMessageCount = message.substring(12).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Characterization message count: %d\n", etmCharMessageCount);
+        return;
+    } else if (message.startsWith("etmchardelay") || message.startsWith("ETMCHARDELAY")) {
+        etmCharDelayMs = message.substring(12).toInt();
+        saveETMSettings();
+        Serial.printf("ETM Characterization delay: %d ms\n", etmCharDelayMs);
+        return;
+    } else if (message == "statsreset" || message == "STATSRESET") {
+        memset(etmStatsSent,    0, sizeof(etmStatsSent));
+        memset(etmStatsAckd,    0, sizeof(etmStatsAckd));
+        memset(etmStatsRetries, 0, sizeof(etmStatsRetries));
+        memset(etmStatsFailed,  0, sizeof(etmStatsFailed));
+        Serial.println("ETM statistics reset.");
+        return;
+    } else if (message.equalsIgnoreCase("etmchar")) {
+        startETMChar();
+        return;
+    } else if (message.startsWith("etmcount") || message.startsWith("ETMCOUNT")) {
+        etmCharMessageCount = message.substring(8).toInt();
+        etmCharMessageCount = constrain(etmCharMessageCount, 10, 200);
+        saveETMSettings();
+        Serial.printf("ETM char message count set to: %d\n", etmCharMessageCount);
+        return;
+    } else if (message.startsWith("etmdelay") || message.startsWith("ETMDELAY")) {
+        etmCharDelayMs = message.substring(8).toInt();
+        etmCharDelayMs = constrain(etmCharDelayMs, 5, 500);
+        saveETMSettings();
+        Serial.printf("ETM char inter-message delay set to: %d ms\n", etmCharDelayMs);
+        return;
     } else {
         Serial.println("Invalid Local Command");
     }
@@ -2620,7 +3386,16 @@ if (hasMonitoring || hasBlocking) {
   // Load additional config
   loadCommandDelimiter();
   loadLocalFunctionIdentifierAndCommandCharacter();
- 
+  loadETMSettings();
+
+  // Initialize ETM heartbeat timing
+  if (etmEnabled) {
+    memset(boardTable, 0, sizeof(boardTable));
+    scheduleNextHeartbeat(true);  // randomized boot heartbeat
+    etmInitPendingTable();
+    Serial.printf("[ETM] Heartbeat scheduled (boot window)\n");
+  }
+
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);
@@ -2666,6 +3441,10 @@ if (hasMonitoring || hasBlocking) {
 
 void loop() {
   processCommandGroups();
+  processETMHeartbeats();
+  processETMAcksAndRetries();
+  processETMChar();
+  processETMLoad();
   // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;

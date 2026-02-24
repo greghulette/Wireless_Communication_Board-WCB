@@ -8,7 +8,7 @@ extern bool lastReceivedViaESPNOW;
 extern bool debugEnabled;
 extern char LocalFunctionIdentifier;
 extern unsigned long baudRates[5];
-extern void sendESPNowMessage(uint8_t target, const char *message);
+extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 extern Stream &getSerialStream(int port);
 extern void updateBaudRate(int port, int baud);
 

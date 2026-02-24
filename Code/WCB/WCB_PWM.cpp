@@ -5,7 +5,7 @@
 
 extern Preferences preferences;
 extern int WCB_Number;
-extern void sendESPNowMessage(uint8_t target, const char *message);
+extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = false);
 extern bool debugEnabled;
 extern bool Kyber_Local;
 extern bool Kyber_Remote;
