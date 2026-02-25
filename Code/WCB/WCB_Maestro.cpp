@@ -138,16 +138,13 @@ void configureMaestro(const String &message) {
   // Example: ?MAESTRO,M2:W2S1:57600
   // Chained: ?MAESTRO,M1:W1S2:115200,M2:W2S1:57600,M3:W3S3:115200
   
-  // Check if chained (multiple Maestros)
-  int firstComma = message.indexOf(',');
-  if (firstComma == -1) {
+String remaining = message;
+  remaining.trim();
+  if (remaining.isEmpty() || !remaining.startsWith("M") && !remaining.startsWith("m")) {
     Serial.printf("Invalid format. Use: %cMAESTRO,M<maestroID>:W<wcb>S<port>:<baud>\n", LocalFunctionIdentifier);
     Serial.printf("Example: %cMAESTRO,M2:W2S1:57600\n", LocalFunctionIdentifier);
     return;
   }
-  
-  String remaining = message.substring(firstComma + 1);
-  remaining.trim();
   
   // Process each Maestro config (split by comma)
   int startIdx = 0;
@@ -279,6 +276,7 @@ void configureMaestro(const String &message) {
       maestroConfigs[slot].serialPort = serialPort;
       maestroConfigs[slot].remoteWCB = 0;
       maestroConfigs[slot].configured = true;
+      maestroConfigs[slot].baudRate = baudRate;
       
       saveMaestroSettings();
       Serial.printf("✓ Maestro %d: Local S%d at %d baud (slot %d)\n", 
@@ -290,6 +288,7 @@ void configureMaestro(const String &message) {
       maestroConfigs[slot].serialPort = 0;
       maestroConfigs[slot].remoteWCB = targetWCB;
       maestroConfigs[slot].configured = true;
+      maestroConfigs[slot].baudRate = baudRate;
       
       saveMaestroSettings();
       Serial.printf("✓ Maestro %d: Remote on WCB%d (unicast, slot %d)\n", 
@@ -411,4 +410,37 @@ void clearAllMaestroConfigs() {
   saveBroadcastSettingsToPreferences();
   saveBroadcastBlockSettings();
 }
+
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter) {
+    bool anyActive = false;
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+        if (maestroConfigs[i].configured) {
+            anyActive = true;
+            break;
+        }
+    }
+    if (!anyActive) return;
+
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+        if (!maestroConfigs[i].configured) continue;
+
+        String cmd = "?MAESTRO,M" + String(maestroConfigs[i].maestroID);
+
+        if (maestroConfigs[i].serialPort > 0) {
+            cmd += ":W" + String(WCB_Number) +
+                   "S" + String(maestroConfigs[i].serialPort) +
+                   ":" + String(maestroConfigs[i].baudRate);
+        } else {
+            cmd += ":W" + String(maestroConfigs[i].remoteWCB) +
+                   "S1:" + String(maestroConfigs[i].baudRate);
+        }
+
+        Serial.println(cmd);
+        chainedConfig += String(delimiter) + cmd;
+        chainedConfigDefault += "^" + cmd;
+    }
+}
+
+
+
 

@@ -271,7 +271,7 @@ void addPWMMapping(const String &config, bool autoReboot) {
             if (mapping.outputs[i].wcbNumber != 0) {
                 char remoteCmd[32];
                 snprintf(remoteCmd, sizeof(remoteCmd), "?PO%d", mapping.outputs[i].serialPort);
-                sendESPNowMessage(mapping.outputs[i].wcbNumber, remoteCmd);
+                sendESPNowMessage(mapping.outputs[i].wcbNumber, remoteCmd, true);
                 delay(50);
                 if (debugEnabled) {
                     Serial.printf("Sent PWM output config to WCB%d: %s\n", mapping.outputs[i].wcbNumber, remoteCmd);
@@ -281,7 +281,7 @@ void addPWMMapping(const String &config, bool autoReboot) {
         delay(100);
         for (int i = 0; i < mapping.outputCount; i++) {
             if (mapping.outputs[i].wcbNumber != 0) {
-                sendESPNowMessage(mapping.outputs[i].wcbNumber, "?REBOOT");
+                sendESPNowMessage(mapping.outputs[i].wcbNumber, "?REBOOT", true);
                 if (debugEnabled) {
                     Serial.printf("Sent reboot command to WCB%d\n", mapping.outputs[i].wcbNumber);
                 }

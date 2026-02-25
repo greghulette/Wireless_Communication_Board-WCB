@@ -1463,15 +1463,17 @@ void saveMaestroSettings() {
   preferences.begin("maestro_cfg", false);
   
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
-    String keyID = "m" + String(i) + "_id";
+    String keyID   = "m" + String(i) + "_id";
     String keyPort = "m" + String(i) + "_port";
-    String keyWCB = "m" + String(i) + "_wcb";
-    String keyEn = "m" + String(i) + "_en";
+    String keyWCB  = "m" + String(i) + "_wcb";
+    String keyEn   = "m" + String(i) + "_en";
+    String keyBaud = "m" + String(i) + "_baud";
     
-    preferences.putUChar(keyID.c_str(), maestroConfigs[i].maestroID);
+    preferences.putUChar(keyID.c_str(),   maestroConfigs[i].maestroID);
     preferences.putUChar(keyPort.c_str(), maestroConfigs[i].serialPort);
-    preferences.putUChar(keyWCB.c_str(), maestroConfigs[i].remoteWCB);
-    preferences.putBool(keyEn.c_str(), maestroConfigs[i].configured);
+    preferences.putUChar(keyWCB.c_str(),  maestroConfigs[i].remoteWCB);
+    preferences.putBool(keyEn.c_str(),    maestroConfigs[i].configured);
+    preferences.putUInt(keyBaud.c_str(),  maestroConfigs[i].baudRate);
   }
   
   preferences.end();
@@ -1481,15 +1483,17 @@ void loadMaestroSettings() {
   preferences.begin("maestro_cfg", true);
   
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
-    String keyID = "m" + String(i) + "_id";
+    String keyID   = "m" + String(i) + "_id";
     String keyPort = "m" + String(i) + "_port";
-    String keyWCB = "m" + String(i) + "_wcb";
-    String keyEn = "m" + String(i) + "_en";
+    String keyWCB  = "m" + String(i) + "_wcb";
+    String keyEn   = "m" + String(i) + "_en";
+    String keyBaud = "m" + String(i) + "_baud";
     
-    maestroConfigs[i].maestroID = preferences.getUChar(keyID.c_str(), 0);
+    maestroConfigs[i].maestroID  = preferences.getUChar(keyID.c_str(),   0);
     maestroConfigs[i].serialPort = preferences.getUChar(keyPort.c_str(), 0);
-    maestroConfigs[i].remoteWCB = preferences.getUChar(keyWCB.c_str(), 0);
-    maestroConfigs[i].configured = preferences.getBool(keyEn.c_str(), false);
+    maestroConfigs[i].remoteWCB  = preferences.getUChar(keyWCB.c_str(),  0);
+    maestroConfigs[i].configured = preferences.getBool(keyEn.c_str(),    false);
+    maestroConfigs[i].baudRate   = preferences.getUInt(keyBaud.c_str(),  9600);
   }
   
   preferences.end();
@@ -1518,7 +1522,7 @@ void printMaestroSettings() {
                           String(maestroConfigs[i].maestroID) + 
                           ":W" + String(WCB_Number) + 
                           "S" + String(maestroConfigs[i].serialPort) + 
-                          ":" + String(baudRates[maestroConfigs[i].serialPort - 1]);
+                          ":" + String(maestroConfigs[i].baudRate);
         // Add label if set
         String portLabel = serialPortLabels[maestroConfigs[i].serialPort - 1];
         if (portLabel.length() > 0) {
@@ -1532,7 +1536,7 @@ void printMaestroSettings() {
         chainedCommands += String(LocalFunctionIdentifier) + "MAESTRO,M" + 
                           String(maestroConfigs[i].maestroID) + 
                           ":W" + String(maestroConfigs[i].remoteWCB) + 
-                          "S1:57600";  // Default placeholder
+                          "S1:" + String(maestroConfigs[i].baudRate);
         remoteCount++;
       }
     }

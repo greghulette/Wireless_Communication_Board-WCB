@@ -4,10 +4,11 @@
 
 // Maestro configuration structure
 struct MaestroConfig {
-  uint8_t maestroID;      // The ID of this Maestro (1-9, 0 = unused slot)
-  uint8_t serialPort;     // Local serial port (1-5, 0 = not local)
-  uint8_t remoteWCB;      // Remote WCB number (1-9, 0 = local only)
-  bool configured;        // TRUE = in use, FALSE = unused
+  uint8_t maestroID;
+  uint8_t serialPort;
+  uint8_t remoteWCB;
+  bool configured;
+  uint32_t baudRate;    // ADD THIS
 };
 
 #define MAX_MAESTROS_PER_WCB 9  // Can track all 9 Maestros in the system
@@ -28,5 +29,5 @@ void clearAllMaestroConfigs();
 int8_t findSlotByMaestroID(uint8_t maestroID);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
-
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter);
 #endif
