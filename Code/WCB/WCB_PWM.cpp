@@ -643,13 +643,13 @@ void processPWMPassthrough() {
         
         if (pulseWidth < 500 || pulseWidth > 2500) continue;
         
-        // Check stability before transmitting
         if (!shouldTransmitPWM_Port(portIdx, pulseWidth)) {
             continue;
         }
         
         if (debugPWMPassthrough) {
-            Serial.printf("PWM: %s -> %lu μs\n", getSerialLabel(pwmMappings[i].inputPort).c_str(), pulseWidth);
+            Serial.printf("[PWM] Input S%d: %lu μs -> %d output(s)\n", 
+                         pwmMappings[i].inputPort, pulseWidth, pwmMappings[i].outputCount);
         }
         
         for (int j = 0; j < pwmMappings[i].outputCount; j++) {
@@ -669,16 +669,21 @@ void processPWMPassthrough() {
                     digitalWrite(txPin, HIGH);
                     delayMicroseconds(pulseWidth);
                     digitalWrite(txPin, LOW);
+                    if (debugPWMPassthrough) {
+                        Serial.printf("[PWM] Local output -> S%d pin %d: %lu μs\n", targetPort, txPin, pulseWidth);
+                    }
                 }
             } else {
                 char msg[32];
                 snprintf(msg, sizeof(msg), ";P%d%lu", targetPort, pulseWidth);
-                sendESPNowMessage(targetWCB, msg);
+                sendESPNowMessage(targetWCB, msg, false);  // false = bypass ETM for PWM
+                if (debugPWMPassthrough) {
+                    Serial.printf("[PWM] Remote output -> WCB%d S%d: %s\n", targetWCB, targetPort, msg);
+                }
             }
         }
     }
 }
-
 bool isSerialPortUsedForPWMInput(int port) {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active && pwmMappings[i].inputPort == port) {

@@ -42,7 +42,6 @@ bool isMaestroConfigured(uint8_t maestroID) {
 
 void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   
-  // ========== STEP 1: Check if configured ==========
   int8_t slot = findSlotByMaestroID(maestroID);
   
   if (slot >= 0) {
@@ -54,8 +53,6 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       Stream &targetSerial = getSerialStream(config.serialPort);
       targetSerial.write(command, sizeof(command));
       targetSerial.flush();
-      
-      // ALWAYS show local sends
       Serial.printf("→ Maestro %d: Local S%d, Script %d\n", 
                     maestroID, config.serialPort, scriptNumber);
       return;
@@ -63,23 +60,23 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     
     // REMOTE Maestro
     if (config.remoteWCB > 0) {
-      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
-      
-      // ALWAYS show unicast sends
-      if (debugEnabled) {Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n", 
-                    maestroID, config.remoteWCB, scriptNumber);}
+      if (!lastReceivedViaESPNOW) {
+        String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+        sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
+        if (debugEnabled) {
+          Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n", 
+                        maestroID, config.remoteWCB, scriptNumber);
+        }
+      }
       return;
     }
     
-    // No destination
     Serial.printf("⚠️  Maestro %d configured but has no destination\n", maestroID);
     return;
   }
   
-  // ========== STEP 2: Broadcast (maestroID == 0) ==========
+  // Broadcast (maestroID == 0)
   if (maestroID == 0) {
-    // Send to all LOCAL Maestros
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
       if (maestroConfigs[i].configured && maestroConfigs[i].serialPort > 0) {
         uint8_t command[] = {0xAA, maestroConfigs[i].maestroID, 0x27, scriptNumber};
@@ -89,48 +86,49 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       }
     }
     
-    // LEGACY fallback
     if (!isMaestroConfigured(WCB_Number)) {
       uint8_t command[] = {0xAA, WCB_Number, 0x27, scriptNumber};
       Serial1.write(command, sizeof(command));
       Serial1.flush();
     }
     
-    // Broadcast via ESP-NOW
-    String espnowMsg = ";M0" + String(scriptNumber);
-    sendESPNowMessage(0, espnowMsg.c_str());
+    if (!lastReceivedViaESPNOW) {
+      String espnowMsg = ";M0" + String(scriptNumber);
+      sendESPNowMessage(0, espnowMsg.c_str());
+    }
     
-    // ALWAYS show broadcast
-    if (debugEnabled){Serial.printf("→ Maestro Broadcast: Script %d\n", scriptNumber);}
+    if (debugEnabled) {
+      Serial.printf("→ Maestro Broadcast: Script %d\n", scriptNumber);
+    }
     return;
   }
   
-  // ========== STEP 3: Legacy Behavior ==========
+  // Legacy behavior
   if (maestroID == WCB_Number || maestroID == 9) {
     uint8_t command[] = {0xAA, (maestroID == 9) ? WCB_Number : maestroID, 0x27, scriptNumber};
     Serial1.write(command, sizeof(command));
     Serial1.flush();
-    
-    // ALWAYS show legacy sends
     Serial.printf("→ Maestro %d: Legacy S1, Script %d\n", maestroID, scriptNumber);
     return;
   }
   
-  // ========== STEP 4: Unconfigured Fallback ==========
+  // Unconfigured fallback
   if (maestroID >= 1 && maestroID <= Default_WCB_Quantity) {
-    String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
-    sendESPNowMessage(maestroID, espnowMsg.c_str());
-    
-    // ALWAYS show fallback unicast
-    if (debugEnabled) {Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
-                  maestroID, maestroID, scriptNumber);}
+    if (!lastReceivedViaESPNOW) {
+      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      sendESPNowMessage(maestroID, espnowMsg.c_str());
+      if (debugEnabled) {
+        Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
+                      maestroID, maestroID, scriptNumber);
+      }
+    }
   } else {
-    String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
-    sendESPNowMessage(0, espnowMsg.c_str());
-    
-    // ALWAYS show fallback broadcast
-    Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n", 
-                  maestroID, scriptNumber);
+    if (!lastReceivedViaESPNOW) {
+      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      sendESPNowMessage(0, espnowMsg.c_str());
+      Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n", 
+                    maestroID, scriptNumber);
+    }
   }
 }
 

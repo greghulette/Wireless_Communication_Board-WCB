@@ -199,13 +199,14 @@ uint16_t etmSequenceNumber = 0;        // global sequence counter, Layer 3 uses 
 // ETM - Pending Message Table
 #define ETM_PENDING_MAX 10
 struct PendingMessage {
+  bool active;
   uint16_t sequenceNumber;
   char command[200];
+  unsigned long lastSentMs;
+  int targetWCB;  // ADD THIS - 0 = broadcast, 1-9 = unicast target
   bool expectAckFrom[9];
   bool receivedAckFrom[9];
   uint8_t retryCount[9];
-  unsigned long lastSentMs;
-  bool active;
 };
 PendingMessage etmPendingTable[ETM_PENDING_MAX];
 
@@ -234,7 +235,7 @@ struct ETMCharBoardResult {
 
 // [phase 0-2][board index 0-7]
 ETMCharBoardResult etmCharBoardResults[3][8];
-unsigned long etmCharPhaseSentTimes[200];  // timestamps when each message was sent (max 200 msgs)
+unsigned long etmCharPhaseSentTimes[3][200];  // [phase][msgIndex]
 int etmCharPhaseMessageIndex = 0;
 unsigned long etmCharPhaseStartTime = 0;
 unsigned long etmCharLastSendTime = 0;
@@ -523,7 +524,7 @@ void etmInitPendingTable() {
   }
 }
 
-int etmAddToPendingTable(uint16_t seqNum, const char* cmd) {
+int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   // Find oldest active slot if full
   int slot = -1;
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
@@ -533,16 +534,13 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd) {
     }
   }
   if (slot == -1) {
-    // Table full - evict oldest (slot 0), log failure
     if (debugETM) Serial.println("[ETM] Pending table full, evicting oldest entry");
     slot = 0;
-    // Log evicted entry as failed
     for (int b = 0; b < Default_WCB_Quantity; b++) {
       if (etmPendingTable[slot].expectAckFrom[b] && !etmPendingTable[slot].receivedAckFrom[b]) {
         etmStatsFailed[b]++;
       }
     }
-    // Shift table up
     for (int i = 0; i < ETM_PENDING_MAX - 1; i++) {
       etmPendingTable[i] = etmPendingTable[i + 1];
     }
@@ -556,6 +554,7 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd) {
   entry.command[sizeof(entry.command) - 1] = '\0';
   entry.lastSentMs = millis();
   entry.active = true;
+  entry.targetWCB = targetWCB;  // store target for retry logic
 
   for (int b = 0; b < 9; b++) {
     entry.expectAckFrom[b]   = false;
@@ -563,18 +562,21 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd) {
     entry.retryCount[b]      = 0;
   }
 
-  // Populate expectAckFrom based on online board table (skip self)
   for (int b = 0; b < Default_WCB_Quantity; b++) {
     int wcbNum = b + 1;
     if (wcbNum == WCB_Number) continue;
-    if (boardTable[b].online) {
-      entry.expectAckFrom[b] = true;
-      etmStatsSent[b]++;
-    }
+    if (!boardTable[b].online) continue;
+
+    // For unicast, only expect ACK from the target board
+    if (targetWCB != 0 && wcbNum != targetWCB) continue;
+
+    entry.expectAckFrom[b] = true;
+    etmStatsSent[b]++;
   }
 
   return slot;
 }
+
 
 void etmProcessAck(int senderWCB, uint16_t seqNum) {
   int boardIdx = senderWCB - 1;
@@ -587,6 +589,25 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
       etmStatsAckd[boardIdx]++;
       if (debugETM) {
         Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
+      }
+      if (debugETM) {
+        Serial.printf("[ETM DEBUG] etmProcessAck called: senderWCB=%d, seqNum=%d\n", senderWCB, seqNum);
+      }
+
+      // Notify characterization layer if running
+      if (etmCharRunning) {
+        String originalCmd = String(etmPendingTable[i].command);
+        if (originalCmd.startsWith("ETMCHAR_")) {
+          int phase = -1;
+          if (originalCmd.startsWith("ETMCHAR_P1")) phase = 0;
+          else if (originalCmd.startsWith("ETMCHAR_P2")) phase = 1;
+          else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
+
+          int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
+          if (phase >= 0 && mIdx >= 0 && mIdx < 200) {
+            processETMCharAck(senderWCB, originalCmd, etmCharPhaseSentTimes[phase][mIdx]);
+          }
+        }
       }
     }
 
@@ -726,7 +747,6 @@ void processETMChar() {
 
     unsigned long now = millis();
 
-    // Build list of peer WCB numbers
     int peers[8];
     int peerCount = 0;
     for (int i = 1; i <= Default_WCB_Quantity; i++) {
@@ -734,13 +754,10 @@ void processETMChar() {
     }
     if (peerCount == 0) { etmCharRunning = false; return; }
 
-    // Total messages this phase = etmCharMessageCount per peer
     int totalMessages = etmCharMessageCount * peerCount;
 
-    // Phase 1 and 2 send unicast to each peer in round-robin
-    // Phase 3 sends unicast + broadcast mix AND triggers load on peers
     if (etmCharPhase == 1 || etmCharPhase == 2) {
-        unsigned long interDelay = (etmCharPhase == 1) ? 0 : (unsigned long)etmCharDelayMs;
+        unsigned long interDelay = (etmCharPhase == 1) ? 20UL : (unsigned long)etmCharDelayMs;
 
         if (etmCharPhaseMessageIndex < totalMessages) {
             if (now - etmCharLastSendTime >= interDelay) {
@@ -748,11 +765,10 @@ void processETMChar() {
                 int targetWCB = peers[peerIdx];
                 int boardIdx = targetWCB - 1;
 
-                // Build test payload (5-30 chars)
                 String payload = "ETMCHAR_P" + String(etmCharPhase) + 
                                  "_M" + String(etmCharPhaseMessageIndex);
 
-                etmCharPhaseSentTimes[etmCharPhaseMessageIndex] = now;
+                etmCharPhaseSentTimes[etmCharPhase - 1][etmCharPhaseMessageIndex] = now;
                 etmCharBoardResults[etmCharPhase - 1][boardIdx].sent++;
 
                 sendESPNowMessage(targetWCB, payload.c_str(), true);
@@ -761,7 +777,6 @@ void processETMChar() {
             }
         }
 
-        // Check phase complete — all acked or timeout
         int totalAcked = 0;
         for (int b = 0; b < 8; b++)
             totalAcked += etmCharBoardResults[etmCharPhase - 1][b].acked;
@@ -776,31 +791,27 @@ void processETMChar() {
         }
 
     } else if (etmCharPhase == 3) {
-        // Phase 3: mix of unicast and broadcast
         if (etmCharPhaseMessageIndex == 0) {
-            // First entry into phase 3 — trigger load on all peers
             Serial.println("Triggering network load on all peers...");
-            sendESPNowMessage(0, "ETMLOAD", false);  // broadcast, not ETM tracked
+            sendESPNowMessage(0, "ETMLOAD", false);
         }
 
         if (etmCharPhaseMessageIndex < totalMessages) {
             if (now - etmCharLastSendTime >= (unsigned long)etmCharDelayMs) {
                 int msgIdx = etmCharPhaseMessageIndex;
-                bool sendBroadcast = (msgIdx % 3 == 2);  // every 3rd message is broadcast
+                bool sendBroadcast = (msgIdx % 3 == 2);
 
                 String payload = "ETMCHAR_P3_M" + String(msgIdx);
 
                 if (sendBroadcast) {
-                    // Broadcast — track against all peers
-                    etmCharPhaseSentTimes[msgIdx] = now;
+                    etmCharPhaseSentTimes[2][msgIdx] = now;
                     for (int b = 0; b < peerCount; b++)
                         etmCharBoardResults[2][peers[b] - 1].sent++;
                     sendESPNowMessage(0, payload.c_str(), true);
                 } else {
-                    // Unicast round-robin
                     int peerIdx = msgIdx % peerCount;
                     int targetWCB = peers[peerIdx];
-                    etmCharPhaseSentTimes[msgIdx] = now;
+                    etmCharPhaseSentTimes[2][msgIdx] = now;
                     etmCharBoardResults[2][targetWCB - 1].sent++;
                     sendESPNowMessage(targetWCB, payload.c_str(), true);
                 }
@@ -810,7 +821,6 @@ void processETMChar() {
             }
         }
 
-        // Check phase complete
         int totalSent = 0, totalAcked = 0;
         for (int b = 0; b < 8; b++) {
             totalSent += etmCharBoardResults[2][b].sent;
@@ -828,7 +838,6 @@ void processETMChar() {
         }
     }
 }
-
 void advanceETMCharPhase(int* peers, int peerCount) {
     etmCharPhase++;
     etmCharPhaseMessageIndex = 0;
@@ -851,7 +860,6 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     int boardIdx = senderWCB - 1;
     if (boardIdx < 0 || boardIdx > 7) return;
 
-    // Determine which phase this ACK belongs to
     int phase = -1;
     if (originalCmd.startsWith("ETMCHAR_P1")) phase = 0;
     else if (originalCmd.startsWith("ETMCHAR_P2")) phase = 1;
@@ -859,6 +867,11 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     if (phase < 0) return;
 
     unsigned long latency = millis() - sentTime;
+    
+    // TEMP DEBUG
+    Serial.printf("[CHAR DEBUG] ACK: cmd=%s phase=%d board=%d latency=%lums sentTime=%lu now=%lu\n",
+                  originalCmd.c_str(), phase, senderWCB, latency, sentTime, millis());
+
     ETMCharBoardResult &r = etmCharBoardResults[phase][boardIdx];
     r.acked++;
     r.latencyAccum += latency;
@@ -921,6 +934,7 @@ void printETMCharResults(int* peers, int peerCount) {
     Serial.println("\n--------------- ETM Network Characterization ---------------");
 
     unsigned long worstMaxLatency = 0;
+    unsigned long worstAvgLatency = 0;
     float worstMissedPct = 0.0f;
 
     for (int p = 0; p < 3; p++) {
@@ -930,24 +944,30 @@ void printETMCharResults(int* peers, int peerCount) {
             ETMCharBoardResult &r = etmCharBoardResults[p][b];
             if (r.sent == 0) continue;
 
-            unsigned long avgLatency = (r.acked > 0) ? r.latencyAccum / r.acked : 0;
-            float missedPct = (float)(r.sent - r.acked) / r.sent * 100.0f;
-            unsigned long minLat = (r.acked > 0) ? r.latencyMin : 0;
+            int effectiveAcked = min(r.acked, r.sent);
+            float missedPct = (float)(r.sent - effectiveAcked) / r.sent * 100.0f;
+            unsigned long avgLatency = (effectiveAcked > 0) ? r.latencyAccum / effectiveAcked : 0;
+            unsigned long minLat = (effectiveAcked > 0) ? r.latencyMin : 0;
+            bool hadRetries = r.latencyMax > (unsigned long)(etmTimeoutMs * 0.9);
 
-            Serial.printf("   WCB%d: Min: %lums, Max: %lums, Avg: %lums, Missed: %.0f%%\n",
-                peers[i], minLat, r.latencyMax, avgLatency, missedPct);
+            Serial.printf("   WCB%d: Min: %lums, Max: %lums, Avg: %lums, Missed: %.0f%%%s\n",
+                peers[i], minLat, r.latencyMax, avgLatency, missedPct,
+                hadRetries ? " (retries detected)" : "");
 
             if (r.latencyMax > worstMaxLatency) worstMaxLatency = r.latencyMax;
+            if (avgLatency > worstAvgLatency) worstAvgLatency = avgLatency;
             if (missedPct > worstMissedPct) worstMissedPct = missedPct;
         }
     }
 
-    // Recommend timeout = worst max latency * 2.5, rounded to nearest 50ms, floor 150ms
-    unsigned long recommendedTimeout = ((worstMaxLatency * 5 / 2) / 50 + 1) * 50;
+    // Base recommendation on worst average * 5, rounded up to nearest 50ms, floor 150ms
+    unsigned long recommendedTimeout = ((worstAvgLatency * 5) / 50 + 1) * 50;
     if (recommendedTimeout < 150) recommendedTimeout = 150;
 
     Serial.printf("\n Recommended ETM timeout: %lums\n", recommendedTimeout);
     Serial.printf(" Apply with: ?ETMTOUT%lu\n", recommendedTimeout);
+    Serial.printf(" (Based on worst avg latency: %lums, worst max: %lums)\n", 
+                  worstAvgLatency, worstMaxLatency);
     if (worstMissedPct > 5.0f) {
         Serial.println(" Warning: >5% packet loss detected. Check RF environment.");
     }
@@ -1256,7 +1276,7 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     etmMsg.structPacketType = PACKET_TYPE_COMMAND;
     etmMsg.structSequenceNumber = ++etmSequenceCounter;
 
-    etmAddToPendingTable(etmMsg.structSequenceNumber, message);
+    etmAddToPendingTable(etmMsg.structSequenceNumber, message, target);
 
     uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
 
@@ -1488,8 +1508,18 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
   if (!isETMPacket && etmEnabled) {
-    if (debugETM) Serial.println("[ETM] Received normal packet but ETM enabled locally, ignoring.");
-    return;
+    espnow_struct_message peek;
+    memcpy(&peek, incomingData, sizeof(peek));
+    int peekTarget = atoi(peek.structTargetID);
+    bool isRawPacket = (peekTarget == 8 || peekTarget == 9 || peek.structTargetID[0] == 'K');
+    bool isPWMPacket = (peek.structCommand[0] == ';' && 
+                       (peek.structCommand[1] == 'P' || peek.structCommand[1] == 'p'));
+    
+    if (!isRawPacket && !isPWMPacket) {
+      if (debugETM) Serial.println("[ETM] Received normal packet but ETM enabled locally, ignoring.");
+      return;
+    }
+    // Fall through to normal receive path for raw and PWM packets
   }
 
   // ---- ETM RECEIVE PATH ----
@@ -1538,7 +1568,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
 
       etmSendAck(senderWCB, etmReceived.structSequenceNumber);
-      enqueueCommand(String(etmReceived.structCommand), 0);
+      Serial.printf("[ETM DEBUG] Sent ACK for seq %d back to WCB%d\n", 
+                    etmReceived.structSequenceNumber, senderWCB);
+
+      String etmCmd = String(etmReceived.structCommand);
+      if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
+        lastReceivedViaESPNOW = true;
+        enqueueCommand(etmCmd, 0);
+      }
       colorWipeStatus("ES", blue, 10);
     }
     return;
@@ -1558,7 +1595,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   bool isPWMCommand = (received.structCommand[0] == ';' &&
                        (received.structCommand[1] == 'P' || received.structCommand[1] == 'p'));
 
-  if (debugEnabled && targetWCB != 9 && !isPWMCommand) {
+  if (debugEnabled && targetWCB != 9 && !isPWMCommand && received.structTargetID[0] != 'K' && targetWCB != 8) {
     Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
   }
 
@@ -1588,7 +1625,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Stream &targetSerial = getSerialStream(destPort);
       targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
       targetSerial.flush();
-      if (debugEnabled) Serial.printf("Kyber: Received %d bytes for S%d\n", (int)chunkLen, destPort);
     }
     return;
   }
@@ -1634,7 +1670,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     targetSerial.flush();
     if (debugEnabled) Serial.printf("Raw serial: %d bytes -> Serial%d\n", (int)chunkLen, targetPort);
     return;
-    }
+  }
 
   // Normal command for this board
   lastReceivedViaESPNOW = true;
@@ -1645,32 +1681,36 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     colorWipeStatus("ES", blue, 10);
     return;
   }
-String receivedCmd = String(received.structCommand);
 
-if (receivedCmd.startsWith("ETMLOAD")) {
+  String receivedCmd = String(received.structCommand);
+
+  if (receivedCmd.startsWith("ETMLOAD")) {
     etmLoadRunning = true;
     etmLoadStartTime = millis();
     etmLoadLastSendTime = 0;
     etmLoadRoundRobinIndex = 0;
     if (debugEnabled) Serial.println("ETM load test started by remote board.");
     return;
-}
-if (receivedCmd.startsWith("ETMCHAR_")) {
-    return;  // ACK handled in ETM layer, don't execute as a command
-}
+  }
+  if (receivedCmd.startsWith("ETMCHAR_")) {
+    return;
+  }
+
   enqueueCommand(String(received.structCommand), 0);
   colorWipeStatus("ES", blue, 10);
 }
-
 void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     if (status == ESP_NOW_SEND_SUCCESS) {
-        // Message was ACKed by receiver - actual delivery confirmed
-        if ( trackCommandDelivery) {
+        if (trackCommandDelivery) {
             espnowCommandDelivered++;
         }
+    } else {
+        if (debugETM || debugEnabled) {
+            Serial.printf("[SEND CB] MAC-layer FAILED to: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                tx_info->des_addr[0], tx_info->des_addr[1], tx_info->des_addr[2],
+                tx_info->des_addr[3], tx_info->des_addr[4], tx_info->des_addr[5]);
+        }
     }
-    // Reset flags
-
 }
 
 //*******************************
