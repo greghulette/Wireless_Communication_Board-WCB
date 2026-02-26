@@ -219,6 +219,9 @@ unsigned long etmStatsAckd[9]    = {0};
 unsigned long etmStatsRetries[9] = {0};
 unsigned long etmStatsFailed[9]  = {0};
 
+// ETM - Duplicate detection (last received seq per board)
+uint16_t etmLastReceivedSeq[9] = {0};
+bool etmLastReceivedSeqValid[9] = {false};
 // ETM Characterization state
 bool etmCharRunning = false;
 int etmCharPhase = 0;
@@ -1563,29 +1566,43 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     }
 
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
-      if (targetWCB != 0 && targetWCB != WCB_Number) return;
+        if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-      lastReceivedViaESPNOW = true;
-      colorWipeStatus("ES", green, 200);
+        // Always ACK - even duplicates (so sender stops retrying)
+        etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
-      if (debugETM) {
-        Serial.printf("[ETM] Received seq %d from WCB%d: %s\n",
-                      etmReceived.structSequenceNumber, senderWCB, etmReceived.structCommand);
-      }
+        // Duplicate detection
+        int senderIdx = senderWCB - 1;
+        bool isDuplicate = false;
+        if (etmLastReceivedSeqValid[senderIdx] &&
+            etmLastReceivedSeq[senderIdx] == etmReceived.structSequenceNumber) {
+            isDuplicate = true;
+        }
+        etmLastReceivedSeq[senderIdx] = etmReceived.structSequenceNumber;
+        etmLastReceivedSeqValid[senderIdx] = true;
 
-      etmSendAck(senderWCB, etmReceived.structSequenceNumber);
-      
-      if (debugETM) {
-        Serial.printf("[ETM DEBUG] Sent ACK for seq %d back to WCB%d\n", 
-                    etmReceived.structSequenceNumber, senderWCB);
-      }
+        if (isDuplicate) {
+            if (debugETM) {
+                Serial.printf("[ETM] Duplicate seq %d from WCB%d - ACKd but not executed\n",
+                            etmReceived.structSequenceNumber, senderWCB);
+            }
+            colorWipeStatus("ES", blue, 10);
+            return;
+        }
 
-      String etmCmd = String(etmReceived.structCommand);
-      if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
         lastReceivedViaESPNOW = true;
-        enqueueCommand(etmCmd, 0);
-      }
-      colorWipeStatus("ES", blue, 10);
+        colorWipeStatus("ES", green, 200);
+
+        if (debugETM) {
+            Serial.printf("[ETM] Received seq %d from WCB%d: %s\n",
+                        etmReceived.structSequenceNumber, senderWCB, etmReceived.structCommand);
+        }
+
+        String etmCmd = String(etmReceived.structCommand);
+        if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
+            enqueueCommand(etmCmd, 0);
+        }
+        colorWipeStatus("ES", blue, 10);
     }
     return;
   }

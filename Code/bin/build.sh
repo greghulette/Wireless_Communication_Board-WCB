@@ -38,6 +38,7 @@ mkdir -p "$OUTPUT_DIR"
 
 PASS=0
 FAIL=0
+rm -f "$OUTPUT_DIR"/*.bin
 
 # ----------------------------------------
 # Build 1 - ESP32 (v1.0, v2.1, v2.3, v2.4)
