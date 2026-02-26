@@ -1,0 +1,45 @@
+name: Build WCB Firmware
+
+on:
+  push:
+    branches: [ '**' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install ESP32 platform
+        run: |
+          arduino-cli core update-index \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.4 \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "EspSoftwareSerial@8.1.0"
+          arduino-cli lib install "Adafruit NeoPixel@1.12.5"
+
+      - name: Run build script
+        run: |
+          chmod +x Code/bin/build.sh
+          Code/bin/build.sh
+
+      - name: Commit bin files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Code/bin/
+          git diff --staged --quiet || git commit -m "Auto-build: update firmware binaries [skip ci]"
+          git push
