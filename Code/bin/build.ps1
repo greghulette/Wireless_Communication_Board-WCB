@@ -21,8 +21,8 @@ $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SketchPath = Join-Path $ScriptDir "..\WCB"
 $OutputDir  = $ScriptDir
 
-# Get version string from WCB.ino
-$VersionLine = Select-String -Path "$SketchPath\WCB.ino" -Pattern 'SoftwareVersion'
+# Get version string from WCB.ino - only match the variable declaration line
+$VersionLine = (Select-String -Path "$SketchPath\WCB.ino" -Pattern 'String SoftwareVersion =' | Select-Object -First 1).Line
 $Version = [regex]::Match($VersionLine, '"([^"]*)"').Groups[1].Value
 
 # Get current git branch

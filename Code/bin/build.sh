@@ -22,7 +22,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKETCH_PATH="$SCRIPT_DIR/../WCB"
 OUTPUT_DIR="$SCRIPT_DIR"
-VERSION=$(grep 'SoftwareVersion' "$SKETCH_PATH/WCB.ino" | grep -o '"[^"]*"' | tr -d '"')
+VERSION=$(grep 'String SoftwareVersion =' "$SKETCH_PATH/WCB.ino" | head -1 | grep -o '"[^"]*"' | head -1 | tr -d '"')
 BRANCH=$(git -C "$SKETCH_PATH" rev-parse --abbrev-ref HEAD)
 
 echo ""
