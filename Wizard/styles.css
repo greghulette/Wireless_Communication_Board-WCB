@@ -480,6 +480,14 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .toast.success { border-color: var(--green2); }
 .toast.error   { border-color: var(--red2); }
 .toast.info    { border-color: var(--accent2); }
+.toast-msg     { flex: 1; }
+.toast-btn {
+  flex-shrink: 0; background: none; border: none; cursor: pointer;
+  color: var(--text3); padding: 2px 4px; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1; transition: color 0.15s, background 0.15s;
+}
+.toast-btn:hover { color: var(--text1); background: var(--bg4); }
 @keyframes slideIn {
   from { transform: translateX(120%); opacity: 0; }
   to   { transform: translateX(0);    opacity: 1; }

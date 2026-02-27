@@ -168,6 +168,21 @@ function parseBackupString(rawOutput) {
   // The factory reset format always uses ^ and ? so we can split safely
   const tokens = commandString.split('^');
 
+  // Pre-pass: extract WCB number before the main parse loop so that MAESTRO
+  // token routing (wcb === config.wcbNumber) works correctly even when ?MAESTRO
+  // appears before ?WCB in the firmware backup output.
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed || !trimmed.startsWith('?')) continue;
+    const body  = trimmed.substring(1);
+    const upper = body.toUpperCase();
+    const uParts = upper.split(',');
+    if (uParts[0] === 'WCB' && uParts[1] && !uParts[1].startsWith('Q')) {
+      config.wcbNumber = parseInt(body.split(',')[1]) || 1;
+      break;
+    }
+  }
+
   for (const token of tokens) {
     const trimmed = token.trim();
     if (!trimmed || !trimmed.startsWith('?')) continue;

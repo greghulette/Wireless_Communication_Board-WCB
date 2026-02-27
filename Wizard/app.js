@@ -1001,8 +1001,12 @@ async function boardPull(n) {
     updateBoardStatusBadge(n, 'connected');
     showToast(`Config pulled from WCB ${n}`, 'success');
   } catch (e) {
-    showToast(`Pull failed: ${e.message}`, 'error');
-    termLog(n, `Pull error: ${e.message}`, 'err');
+    const isTimeout = /timeout/i.test(e.message);
+    const msg = isTimeout
+      ? `Pull timed out — board may have no firmware loaded. Try Flash mode first.`
+      : `Pull failed: ${e.message}`;
+    showToast(msg, 'error');
+    termLog(n, msg, 'err');
   }
 
   if (btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
@@ -1020,7 +1024,65 @@ async function boardGo(n) {
   btn.textContent = isFlash ? 'Flashing…' : 'Pushing…';
 
   if (isFlash) {
-    showToast('Flash integration coming in Phase 2 — use Configure Only for now', 'info');
+    // ── Validate HW version ──────────────────────────────────────
+    const hwVersion = boardConfigs[n]?.hwVersion;
+    if (!hwVersion) {
+      showToast('Select a hardware version before flashing', 'error');
+      btn.disabled = false;
+      btn.textContent = '▶ Go';
+      return;
+    }
+
+    // ── Save port ref, then close normal connection ───────────────
+    // closeForReconnect cancels the reader (unblocks hangs) and closes
+    // the port, but keeps conn.port so esptool-js can reopen it.
+    const savedPort = conn.port;
+    await conn.closeForReconnect();
+    updateConnectionUI(n, false);
+
+    btn.textContent = 'Flashing…';
+    setFlashUI(n, true);
+
+    let flashOk = false;
+    try {
+      await flashFirmware(savedPort, hwVersion, {
+        onProgress: (written, total) => updateFlashBar(n, written, total),
+        onLog:      (msg)            => termLog(n, msg, 'sys'),
+        onStatus:   (msg)            => setFlashStatus(n, msg),
+      });
+      flashOk = true;
+      showToast(`WCB ${n} firmware flashed!`, 'success');
+    } catch (e) {
+      showToast(`Flash failed: ${e.message.split('\n')[0]}`, 'error');
+      termLog(n, `Flash error: ${e.message}`, 'err');
+    }
+
+    setFlashUI(n, false);
+
+    // ── After flash: reconnect, then push config ──────────────────
+    if (flashOk) {
+      termLog(n, 'Reconnecting after flash…', 'sys');
+      // No baseline → boardGo will do a full push when called after reconnect
+      boardBaselines[n] = null;
+      const reconnected = await conn.reconnect(12, 2000);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected — pushing config in 4s…', 'sys');
+        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+        // Switch to configure-only so the next boardGo doesn't re-flash
+        const configRadio = document.querySelector(`input[name="b${n}-mode"][value="configure"]`);
+        if (configRadio) configRadio.checked = true;
+        setTimeout(() => boardGo(n), 4000);
+      } else {
+        termLog(n, 'Reconnect failed — connect manually, then push config', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually, then push config`, 'error');
+      }
+    } else {
+      // Flash failed — try to reconnect so user isn't left disconnected
+      const recovered = await conn.reconnect(5, 1500);
+      if (recovered) updateConnectionUI(n, true);
+    }
+
     btn.disabled = false;
     btn.textContent = '▶ Go';
     return;
@@ -1340,9 +1402,11 @@ function appendKyberTargetRow(n, target, readOnly = false) {
     `<option value="${v}" ${v === target.wcb ? 'selected' : ''}>WCB ${v}</option>`
   ).join('');
 
-  const portOptions = [1,2,3,4,5].map(v =>
-    `<option value="${v}" ${v === target.port ? 'selected' : ''}>S${v}</option>`
-  ).join('');
+  const kyberPort = boardConfigs[n]?.kyber?.port;
+  const portOptions = [1,2,3,4,5]
+    .filter(v => v !== kyberPort)
+    .map(v => `<option value="${v}" ${v === target.port ? 'selected' : ''}>S${v}</option>`)
+    .join('');
 
   const baudOptions = BAUD_RATES.map(b =>
     `<option value="${b}" ${b === target.baud ? 'selected' : ''}>${b.toLocaleString()}</option>`
@@ -1408,6 +1472,33 @@ function populateKyberTargetsFromConfig(n, config) {
 }
 
 
+// ─── Flash Progress UI ────────────────────────────────────────────
+function setFlashUI(n, visible) {
+  const wrap = document.getElementById(`b${n}-flash-wrap`);
+  if (!wrap) return;
+  wrap.style.display = visible ? '' : 'none';
+  if (visible) {
+    const bar = document.getElementById(`b${n}-flash-bar`);
+    if (bar) bar.style.width = '0%';
+    const pct = document.getElementById(`b${n}-flash-pct`);
+    if (pct) pct.textContent = '';
+  }
+}
+
+function setFlashStatus(n, msg) {
+  const el = document.getElementById(`b${n}-flash-status`);
+  if (el) el.textContent = msg;
+}
+
+function updateFlashBar(n, written, total) {
+  const pct = total > 0 ? Math.round(written / total * 100) : 0;
+  const bar = document.getElementById(`b${n}-flash-bar`);
+  if (bar) bar.style.width = `${pct}%`;
+  const pctEl = document.getElementById(`b${n}-flash-pct`);
+  if (pctEl) pctEl.textContent = total > 0 ? `${pct}%` : '';
+  setFlashStatus(n, `Flashing… ${pct}%`);
+}
+
 // ─── NVS Erase ────────────────────────────────────────────────────
 async function boardEraseNVS(n) {
   const conn = boardConnections[n];
@@ -1462,9 +1553,29 @@ function showToast(message, type = 'info', duration = 3500) {
   const toast     = document.createElement('div');
   toast.className = `toast ${type}`;
   const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ';
-  toast.innerHTML = `<span>${icon}</span><span>${escHtml(message)}</span>`;
+
+  // Error toasts stay longer; all toasts get copy + dismiss buttons
+  const effectiveDuration = type === 'error' ? Math.max(duration, 12000) : duration;
+
+  const copySvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2H3.5A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>`;
+
+  toast.innerHTML = `
+    <span>${icon}</span>
+    <span class="toast-msg">${escHtml(message)}</span>
+    <button class="toast-btn toast-copy" title="Copy message">${copySvg}</button>
+    <button class="toast-btn toast-dismiss" title="Dismiss">✕</button>`;
+
+  toast.querySelector('.toast-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText(message).catch(() => {});
+    const btn = toast.querySelector('.toast-copy');
+    btn.textContent = '✓';
+    btn.style.color = 'var(--green2)';
+    setTimeout(() => { btn.innerHTML = copySvg; btn.style.color = ''; }, 1500);
+  });
+  toast.querySelector('.toast-dismiss').addEventListener('click', () => toast.remove());
+
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), duration);
+  setTimeout(() => toast.remove(), effectiveDuration);
 }
 
 // ─── Utilities ────────────────────────────────────────────────────

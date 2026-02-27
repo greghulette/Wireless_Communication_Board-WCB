@@ -191,6 +191,17 @@
         </div>
       </div>
 
+      <!-- Flash Progress (hidden until flashing) -->
+      <div id="b{N}-flash-wrap" style="display:none;padding:10px 0 4px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span id="b{N}-flash-status" style="font-size:12px;color:var(--text2)">Preparing…</span>
+          <span id="b{N}-flash-pct" style="font-size:12px;font-family:var(--mono);color:var(--text3)"></span>
+        </div>
+        <div style="background:var(--bg4);border-radius:999px;height:5px;overflow:hidden">
+          <div id="b{N}-flash-bar" style="height:100%;background:var(--accent);width:0%;transition:width 0.15s ease"></div>
+        </div>
+      </div>
+
       <!-- Board Identity -->
       <div class="subsection-title">Board Identity</div>
       <div class="field-group">
@@ -331,6 +342,7 @@
 
 <!-- ─── Scripts ──────────────────────────────────────────────────── -->
 <script src="parser.js"></script>
+<script src="flasher.js"></script>
 <script src="app.js"></script>
 
 </body>
