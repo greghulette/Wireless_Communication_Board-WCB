@@ -309,13 +309,29 @@ function parseToken(body, config) {
 
     // ── Kyber ──
     case 'KYBER': {
-      // ?KYBER,LOCAL  or  ?KYBER,REMOTE  or  ?KYBER,CLEAR
-      // ?KYBER,LOCAL,S1  (local includes port)
+      // ?KYBER,LOCAL,S<port>                              (no targets)
+      // ?KYBER,LOCAL,S<port>,M<id>:W<wcb>S<port>:<baud>  (with targets)
+      // ?KYBER,REMOTE  or  ?KYBER,CLEAR
       const mode = upperParts[1];
       if (mode === 'LOCAL') {
         config.kyber.mode = 'local';
-        if (upperParts[2]) {
-          config.kyber.port = parseInt(upperParts[2].replace('S', '')) || null;
+        // Parse remaining parts: S<n> = port, M<id>:W<wcb>S<port>:<baud> = target
+        for (let i = 2; i < upperParts.length; i++) {
+          const p = upperParts[i];
+          if (/^S\d+$/.test(p)) {
+            config.kyber.port = parseInt(p.slice(1)) || null;
+          } else {
+            const mMatch = p.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
+            if (mMatch) {
+              if (!config.kyber.targets) config.kyber.targets = [];
+              config.kyber.targets.push({
+                id:   parseInt(mMatch[1]),
+                wcb:  parseInt(mMatch[2]),
+                port: parseInt(mMatch[3]),
+                baud: parseInt(mMatch[4])
+              });
+            }
+          }
         }
       } else if (mode === 'REMOTE') {
         config.kyber.mode = 'remote';
@@ -328,27 +344,32 @@ function parseToken(body, config) {
     }
 
     // ── Maestro ──
-case 'MAESTRO': {
-  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
-  // Chained: ?MAESTRO,M1:W1S2:57600,M2:W2S1:57600
-  // Skip control subcommands
-  const sub = upperParts[1];
-  if (sub === 'LIST' || sub === 'CLEAR' || sub === 'ENABLE' || sub === 'DISABLE') break;
+    case 'MAESTRO': {
+      // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
+      // Chained: ?MAESTRO,M1:W1S2:57600,M2:W2S1:57600
+      // Skip control subcommands
+      const sub = upperParts[1];
+      if (sub === 'LIST' || sub === 'CLEAR' || sub === 'ENABLE' || sub === 'DISABLE') break;
 
-  // Parse all M<id>:W<wcb>S<port>:<baud> entries (parts[1], parts[2], ...)
-  for (let i = 1; i < parts.length; i++) {
-    const entry = parts[i].toUpperCase();
-    const mMatch = entry.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
-    if (mMatch) {
-      config.maestros.push({
-        id:   parseInt(mMatch[1]),
-        port: parseInt(mMatch[3]),
-        baud: parseInt(mMatch[4])
-      });
+      // W == this board's wcbNumber → local maestro; W != → kyber target on this board
+      for (let i = 1; i < parts.length; i++) {
+        const entry = parts[i].toUpperCase();
+        const mMatch = entry.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
+        if (mMatch) {
+          const id   = parseInt(mMatch[1]);
+          const wcb  = parseInt(mMatch[2]);
+          const port = parseInt(mMatch[3]);
+          const baud = parseInt(mMatch[4]);
+          if (wcb === config.wcbNumber) {
+            config.maestros.push({ id, port, baud });
+          } else {
+            if (!config.kyber.targets) config.kyber.targets = [];
+            config.kyber.targets.push({ id, wcb, port, baud });
+          }
+        }
+      }
+      break;
     }
-  }
-  break;
-}
 
     // ── ETM ──
     case 'ETM': {
@@ -714,31 +735,40 @@ function buildCommandString(config, baseline = null, fullPush = false) {
   }
 
   // ── Kyber ──
+  // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
   const kyberChanged = fullPush || !baseline ||
     baseline.kyber.mode !== config.kyber.mode ||
-    baseline.kyber.port !== config.kyber.port;
+    baseline.kyber.port !== config.kyber.port ||
+    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
 
   if (kyberChanged) {
-    if (config.kyber.mode === 'local')
-      add(`KYBER,LOCAL,S${config.kyber.port || 2}`);
-    else if (config.kyber.mode === 'remote')
+    if (config.kyber.mode === 'local') {
+      let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
+      if (config.kyber.targets?.length > 0)
+        cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
+      add(cmd);
+    } else if (config.kyber.mode === 'remote') {
       add('KYBER,REMOTE');
-    else
+    } else {
       add('KYBER,CLEAR');
+    }
   }
 
   // ── Maestros ──
-  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>,M<id>:W<wcb>S<port>:<baud>,...
+  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>  (this board's local maestros only)
+  // Kyber targets are embedded in the KYBER command above
   const maestrosChanged = fullPush || !baseline ||
     JSON.stringify(baseline.maestros) !== JSON.stringify(config.maestros);
 
-  if (maestrosChanged && config.maestros.length > 0) {
-    const chain = config.maestros
-      .map(m => `M${m.id}:W${config.wcbNumber}S${m.port}:${m.baud}`)
-      .join(',');
-    add(`MAESTRO,${chain}`);
-  } else if (maestrosChanged && config.maestros.length === 0 && baseline?.maestros?.length > 0) {
-    add('MAESTRO,CLEAR,ALL');
+  if (maestrosChanged) {
+    if (config.maestros.length > 0) {
+      const chain = config.maestros
+        .map(m => `M${m.id}:W${config.wcbNumber}S${m.port}:${m.baud}`)
+        .join(',');
+      add(`MAESTRO,${chain}`);
+    } else if (baseline?.maestros?.length > 0) {
+      add('MAESTRO,CLEAR,ALL');
+    }
   }
 
   // ── ETM ──

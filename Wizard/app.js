@@ -182,8 +182,10 @@ function updatePortClaimUI(n) {
 // ─── Kyber ────────────────────────────────────────────────────────
 function onKyberChange(n) {
   const mode     = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
-  const portWrap = document.getElementById(`b${n}-kyber-port-wrap`);
+  const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
+  const targetsWrap = document.getElementById(`b${n}-kyber-targets-wrap`);
   portWrap.style.display = mode === 'local' ? '' : 'none';
+  if (targetsWrap) targetsWrap.style.display = mode === 'local' ? '' : 'none';
 
   const config = boardConfigs[n];
   if (!config) return;
@@ -366,10 +368,15 @@ function populateUIFromConfig(n, config) {
   if (kyberInput) {
     kyberInput.checked = true;
     document.getElementById(`b${n}-kyber-port-wrap`).style.display = config.kyber.mode === 'local' ? '' : 'none';
+    const tw = document.getElementById(`b${n}-kyber-targets-wrap`);
+    if (tw) tw.style.display = config.kyber.mode === 'local' ? '' : 'none';
     updateKyberPortDropdown(n);
     if (config.kyber.mode === 'local' && config.kyber.port) {
       const portSel = document.getElementById(`b${n}-kyber-port`);
       if (portSel) portSel.value = config.kyber.port;
+    }
+    if (config.kyber.mode === 'local') {
+      populateKyberTargetsFromConfig(n, config);
     }
   }
 
@@ -408,14 +415,17 @@ function addMaestroRow(n) {
   appendMaestroRow(n, { id: 1, port: null, baud: 57600 });
 }
 
-function appendMaestroRow(n, maestro) {
+function appendMaestroRow(n, maestro, readOnly = false) {
   const tbody = document.getElementById(`b${n}-maestro-tbody`);
   if (!tbody) return;
 
-  const rowNum = tbody.rows.length + 1;
-  const rowId  = `maestro-row-${n}-${Date.now()}`;
+  const rowNum   = tbody.rows.length + 1;
+  const rowId    = `maestro-row-${n}-${Date.now()}`;
+  const dis      = readOnly ? 'disabled' : '';
+  const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
-  const idOptions = [1,2,3,4,5,6,7,8].map(v =>
+  const maestroQty  = parseInt(document.getElementById('g-wcbq')?.value) || 8;
+  const idOptions = Array.from({length: maestroQty}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === maestro.id ? 'selected' : ''}>${v}</option>`
   ).join('');
 
@@ -423,20 +433,25 @@ function appendMaestroRow(n, maestro) {
     `<option value="${b}" ${b === maestro.baud ? 'selected' : ''}>${b.toLocaleString()}</option>`
   ).join('');
 
+  const kyberBoard = findKyberLocalBoard();
+  const deleteBtn = readOnly
+    ? `<span class="kyber-lock" title="Managed by Kyber targets on WCB ${kyberBoard}" style="opacity:0.4;font-size:18px;padding:0 8px">&#128274;</span>`
+    : `<button class="btn btn-danger btn-sm btn-icon" onclick="removeMaestroRow(${n},'${rowId}')">&#128465;</button>`;
+
   const tr = document.createElement('tr');
   tr.id = rowId;
+  tr.setAttribute('data-readonly', readOnly ? '1' : '0');
   tr.innerHTML = `
-    <td style="color:var(--text3)">${rowNum}</td>
-    <td><select id="${rowId}-id" onchange="onMaestroChange(${n})">${idOptions}</select></td>
-    <td><select id="${rowId}-port" onchange="onMaestroChange(${n})">
-      <option value="">— Select —</option>
+    <td style="color:var(--text3)" ${dimStyle}>${rowNum}</td>
+    <td ${dimStyle}><select id="${rowId}-id" ${dis} onchange="onMaestroChange(${n})">${idOptions}</select></td>
+    <td><select id="${rowId}-port" ${dis} onchange="onMaestroChange(${n})">
+      <option value="">&#8212; Select &#8212;</option>
     </select></td>
-    <td><select id="${rowId}-baud" onchange="onMaestroChange(${n})">${baudOptions}</select></td>
-    <td><button class="btn btn-danger btn-sm btn-icon" onclick="removeMaestroRow(${n},'${rowId}')">🗑</button></td>
+    <td ${dimStyle}><select id="${rowId}-baud" ${dis} onchange="onMaestroChange(${n})">${baudOptions}</select></td>
+    <td>${deleteBtn}</td>
   `;
   tbody.appendChild(tr);
 
-  // Populate port dropdown with available ports
   refreshMaestroPortDropdown(n, rowId, maestro.port);
 }
 
@@ -471,6 +486,11 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
 function onMaestroChange(n) {
   syncMaestrosToConfig(n);
   onBoardFieldChange(n);
+  // Warn if another board has Kyber Local — it will need a re-push
+  const kyberBoard = findKyberLocalBoard();
+  if (kyberBoard !== null && kyberBoard !== n) {
+    showKyberRepushWarning(kyberBoard);
+  }
 }
 
 function syncMaestrosToConfig(n) {
@@ -523,7 +543,14 @@ function populateMaestrosFromConfig(n, config) {
   const tbody = document.getElementById(`b${n}-maestro-tbody`);
   if (!tbody) return;
   tbody.innerHTML = '';
-  for (const m of config.maestros) appendMaestroRow(n, m);
+  // Grey out any maestro IDs that are already managed by the kyber-local board's targets
+  const kyberBoard = findKyberLocalBoard();
+  const kyberIds = new Set(
+    (boardConfigs[kyberBoard]?.kyber?.targets || []).map(t => t.id)
+  );
+  for (const m of config.maestros) {
+    appendMaestroRow(n, m, kyberIds.has(m.id));
+  }
 }
 
 // ─── Mappings ─────────────────────────────────────────────────────
@@ -788,9 +815,20 @@ class BoardConnection {
     this._startReading();
   }
 
+  // Tear down the active connection without nulling this.port, so reconnect() can reopen it.
+  // Cancels any pending reader.read() (unblocks hangs), sets _connected=false so
+  // _startReading exits without trying its own reconnect.
+  async closeForReconnect() {
+    this._connected = false;
+    try { if (this.reader) await this.reader.cancel(); } catch (_) {}
+    try { if (this.port)   await this.port.close();   } catch (_) {}
+  }
+
   // After a reboot, attempt to reopen the same port
   async reconnect(maxAttempts = 10, delayMs = 1500) {
     if (!this.port) return false;
+    // Close first — after a device reboot Chrome may still consider the port "open"
+    try { await this.port.close(); } catch (_) {}
     for (let i = 0; i < maxAttempts; i++) {
       await sleep(delayMs);
       try {
@@ -858,17 +896,17 @@ class BoardConnection {
   onData(callback) { this._dataCallbacks.push(callback); }
 
   async _startReading() {
-    while (this._connected && this.port?.readable) {
+    outer: while (this._connected && this.port?.readable) {
       try {
         this.reader = this.port.readable.getReader();
       } catch (e) {
         // Port no longer readable — board disconnected/rebooted
-        break;
+        break outer;
       }
       try {
         while (this._connected) {
           const { value, done } = await this.reader.read();
-          if (done) break;
+          if (done) break outer;  // stream ended cleanly — treat as disconnect
           this._readBuffer += new TextDecoder().decode(value);
           let nl;
           while ((nl = this._readBuffer.indexOf('\n')) !== -1) {
@@ -881,13 +919,14 @@ class BoardConnection {
           }
         }
       } catch (e) {
-        // Board disconnected mid-read (e.g. reboot) — exit cleanly
+        // Board disconnected mid-read (e.g. reboot) — exit outer loop to trigger reconnect
         termLog(this.boardIndex, `Port closed: ${e.message}`, 'sys');
+        break outer;
       } finally {
         try { this.reader?.releaseLock(); } catch (_) {}
         this.reader = null;
       }
-      break; // Don't loop — one clean read session per connect
+      if (!this._connected) break outer;
     }
     // Clean up if we exited due to board reboot rather than user disconnect
     if (this._connected) {
@@ -900,7 +939,8 @@ class BoardConnection {
         updateConnectionUI(this.boardIndex, true);
         termLog(this.boardIndex, 'Reconnected after reboot', 'sys');
         showToast(`WCB ${this.boardIndex} reconnected`, 'success');
-        setTimeout(() => boardPull(this.boardIndex), 1000);
+        termLog(this.boardIndex, 'Auto-pulling config…', 'sys');
+        setTimeout(() => boardPull(this.boardIndex), 3000);
       } else {
         termLog(this.boardIndex, 'Could not reconnect — board may need manual reconnect', 'err');
         showToast(`WCB ${this.boardIndex} did not come back — reconnect manually`, 'error');
@@ -943,8 +983,7 @@ async function boardPull(n) {
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   const btn = document.getElementById(`b${n}-btn-pull`);
-  btn.disabled = true;
-  btn.textContent = 'Pulling…';
+  if (btn) { btn.disabled = true; btn.textContent = 'Pulling…'; }
   termLog(n, '?backup', 'in');
 
   try {
@@ -966,8 +1005,7 @@ async function boardPull(n) {
     termLog(n, `Pull error: ${e.message}`, 'err');
   }
 
-  btn.textContent = 'Pull Config';
-  btn.disabled = false;
+  if (btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
 }
 
 async function boardGo(n) {
@@ -993,6 +1031,7 @@ async function boardGo(n) {
     syncSerialUIToConfig(n);
     syncMaestrosToConfig(n);   // ← was missing
     syncKyberToConfig(n);      // ← was missing
+    syncKyberTargetsToConfig(n);   // ← add this
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
@@ -1029,9 +1068,29 @@ async function boardGo(n) {
     termLog(n, '?reboot', 'in');
 
     updateBoardStatusBadge(n, 'configured');
-    showToast(`WCB ${n} configured — rebooting, will reconnect…`, 'success');
-    // Don't manually disconnect — let _startReading detect the reboot
-    // and auto-reconnect via the reconnect() method
+    showToast(`WCB ${n} configured — rebooting…`, 'success');
+
+    // Close our side immediately — this cancels any pending reader.read() so
+    // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
+    // Then we manage the reconnect ourselves in the background.
+    await conn.closeForReconnect();
+    updateConnectionUI(n, false);
+    termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+
+    // Fire-and-forget reconnect so the Go button re-enables right away
+    (async () => {
+      const reconnected = await conn.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected after reboot', 'sys');
+        showToast(`WCB ${n} reconnected`, 'success');
+        termLog(n, 'Auto-pulling config…', 'sys');
+        setTimeout(() => boardPull(n), 3000);
+      } else {
+        termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+      }
+    })();
 
   } catch (e) {
     showToast(`Push failed: ${e.message}`, 'error');
@@ -1046,11 +1105,13 @@ function updateConnectionUI(n, connected) {
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
-  const pullBtn = document.getElementById(`b${n}-btn-pull`);
-  const goBtn   = document.getElementById(`b${n}-btn-go`);
-  const connBtn = document.getElementById(`b${n}-btn-connect`);
-  if (pullBtn) pullBtn.disabled = !connected;
-  if (goBtn)   goBtn.disabled   = !connected;
+  const pullBtn  = document.getElementById(`b${n}-btn-pull`);
+  const goBtn    = document.getElementById(`b${n}-btn-go`);
+  const connBtn  = document.getElementById(`b${n}-btn-connect`);
+  const eraseBtn = document.getElementById(`b${n}-btn-erase`);
+  if (pullBtn)  pullBtn.disabled  = !connected;
+  if (goBtn)    goBtn.disabled    = !connected;
+  if (eraseBtn) eraseBtn.disabled = !connected;
   if (connBtn) connBtn.textContent = connected ? 'Disconnect' : 'Connect';
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
@@ -1232,6 +1293,167 @@ async function sendTerminalCommand() {
   termLog(conn.boardIndex, cmd, 'in');
   try { await conn.send(cmd + '\r'); }
   catch (e) { termLog(0, `Send error: ${e.message}`, 'err'); }
+}
+
+
+// ─── Kyber Board Helpers ──────────────────────────────────────────
+function findKyberLocalBoard() {
+  for (const [bn, config] of Object.entries(boardConfigs)) {
+    if (config?.kyber?.mode === 'local') return parseInt(bn);
+  }
+  return null;
+}
+
+let _kyberWarnedBoards = new Set();
+function showKyberRepushWarning(kyberBoardNum) {
+  if (_kyberWarnedBoards.has(kyberBoardNum)) return;
+  _kyberWarnedBoards.add(kyberBoardNum);
+  showToast(
+    `WCB ${kyberBoardNum} has Kyber Local — re-push WCB ${kyberBoardNum} after finishing all board configurations`,
+    'info',
+    7000
+  );
+  setTimeout(() => _kyberWarnedBoards.delete(kyberBoardNum), 30000);
+}
+
+// ─── Kyber Targets ────────────────────────────────────────────────
+function addKyberTargetRow(n) {
+  appendKyberTargetRow(n, { id: 1, wcb: n, port: 1, baud: 57600 });
+  syncKyberTargetsToConfig(n);
+  onBoardFieldChange(n);
+}
+
+function appendKyberTargetRow(n, target, readOnly = false) {
+  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
+  if (!tbody) return;
+
+  const rowNum   = tbody.rows.length + 1;
+  const rowId    = `kyber-target-row-${n}-${Date.now()}`;
+  const dis      = readOnly ? 'disabled' : '';
+  const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
+
+  const wcbMax = parseInt(document.getElementById('g-wcbq')?.value) || 8;
+  const idOptions = Array.from({length: wcbMax}, (_, i) => i + 1).map(v =>
+    `<option value="${v}" ${v === target.id ? 'selected' : ''}>${v}</option>`
+  ).join('');
+  const wcbOptions = Array.from({length: wcbMax}, (_, i) => i + 1).map(v =>
+    `<option value="${v}" ${v === target.wcb ? 'selected' : ''}>WCB ${v}</option>`
+  ).join('');
+
+  const portOptions = [1,2,3,4,5].map(v =>
+    `<option value="${v}" ${v === target.port ? 'selected' : ''}>S${v}</option>`
+  ).join('');
+
+  const baudOptions = BAUD_RATES.map(b =>
+    `<option value="${b}" ${b === target.baud ? 'selected' : ''}>${b.toLocaleString()}</option>`
+  ).join('');
+
+  const deleteBtn = readOnly
+    ? `<span title="From board backup" style="opacity:0.4;font-size:18px;padding:0 8px">&#128274;</span>`
+    : `<button class="btn btn-danger btn-sm btn-icon" onclick="removeKyberTargetRow(${n},'${rowId}')">&#128465;</button>`;
+
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.setAttribute('data-readonly', readOnly ? '1' : '0');
+  tr.innerHTML = `
+    <td style="color:var(--text3)" ${dimStyle}>${rowNum}</td>
+    <td ${dimStyle}><select id="${rowId}-id" ${dis} onchange="onKyberTargetsChange(${n})">${idOptions}</select></td>
+    <td ${dimStyle}><select id="${rowId}-wcb" ${dis} onchange="onKyberTargetsChange(${n})">${wcbOptions}</select></td>
+    <td ${dimStyle}><select id="${rowId}-port" ${dis} onchange="onKyberTargetsChange(${n})">${portOptions}</select></td>
+    <td ${dimStyle}><select id="${rowId}-baud" ${dis} onchange="onKyberTargetsChange(${n})">${baudOptions}</select></td>
+    <td>${deleteBtn}</td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function removeKyberTargetRow(n, rowId) {
+  document.getElementById(rowId)?.remove();
+  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
+  tbody?.querySelectorAll('tr').forEach((row, i) => {
+    row.cells[0].textContent = i + 1;
+  });
+  syncKyberTargetsToConfig(n);
+  onBoardFieldChange(n);
+}
+
+function onKyberTargetsChange(n) {
+  syncKyberTargetsToConfig(n);
+  onBoardFieldChange(n);
+}
+
+function syncKyberTargetsToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  if (!config.kyber) config.kyber = {};
+  config.kyber.targets = [];
+  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
+  if (!tbody) return;
+  tbody.querySelectorAll('tr').forEach(row => {
+    const id   = parseInt(row.querySelector('[id$="-id"]')?.value);
+    const wcb  = parseInt(row.querySelector('[id$="-wcb"]')?.value);
+    const port = parseInt(row.querySelector('[id$="-port"]')?.value);
+    const baud = parseInt(row.querySelector('[id$="-baud"]')?.value) || 57600;
+    if (id && wcb && port) config.kyber.targets.push({ id, wcb, port, baud });
+  });
+}
+
+function populateKyberTargetsFromConfig(n, config) {
+  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!config.kyber?.targets?.length) return;
+  for (const t of config.kyber.targets) {
+    appendKyberTargetRow(n, t, false);
+  }
+}
+
+
+// ─── NVS Erase ────────────────────────────────────────────────────
+async function boardEraseNVS(n) {
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+
+  const confirmed = confirm(
+    `⚠️ ERASE ALL NVS DATA ON WCB ${n}?\n\n` +
+    `This will wipe ALL stored settings including:\n` +
+    `  • Baud rates & broadcast settings\n` +
+    `  • MAC address octets\n` +
+    `  • ESP-NOW password\n` +
+    `  • WCB number & quantity\n` +
+    `  • Hardware version\n` +
+    `  • Stored sequences & commands\n` +
+    `  • Kyber settings\n\n` +
+    `The board will reboot after erasing.\n\nAre you sure?`
+  );
+  if (!confirmed) return;
+
+  termLog(n, '?wcb_erase', 'in');
+  try {
+    await conn.send('?wcb_erase\r');
+    termLog(n, 'NVS erased — board rebooting…', 'sys');
+    showToast(`WCB ${n} NVS erased — rebooting…`, 'warning', 4000);
+    updateBoardStatusBadge(n, 'default');
+
+    await conn.closeForReconnect();
+    updateConnectionUI(n, false);
+    termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+
+    (async () => {
+      const reconnected = await conn.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected after erase', 'sys');
+        showToast(`WCB ${n} reconnected`, 'success');
+        termLog(n, 'Auto-pulling config…', 'sys');
+        setTimeout(() => boardPull(n), 3000);
+      } else {
+        termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+      }
+    })();
+  } catch (e) {
+    showToast(`Erase failed: ${e.message}`, 'error');
+  }
 }
 
 // ─── Toast Notifications ──────────────────────────────────────────
