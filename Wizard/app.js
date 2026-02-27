@@ -424,8 +424,7 @@ function appendMaestroRow(n, maestro, readOnly = false) {
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
-  const maestroQty  = parseInt(document.getElementById('g-wcbq')?.value) || 8;
-  const idOptions = Array.from({length: maestroQty}, (_, i) => i + 1).map(v =>
+  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === maestro.id ? 'selected' : ''}>${v}</option>`
   ).join('');
 
@@ -704,12 +703,11 @@ function appendMappingDestination(rowId, n, dest) {
   if (!container) return;
 
   const destId = `map-dest-${rowId}-${Date.now()}`;
-  const wcbQty = parseInt(document.getElementById('g-wcbq')?.value) || 8;
   const mapType = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
   const isSerial = mapType === 'Serial';
 
   const wcbOptions = `<option value="0">Local</option>` +
-    Array.from({length: wcbQty}, (_,i) =>
+    Array.from({length: 9}, (_,i) =>
       `<option value="${i+1}" ${dest.wcbNumber===i+1?'selected':''}>WCB ${i+1}</option>`
     ).join('');
 
@@ -1016,14 +1014,15 @@ async function boardGo(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
-  const mode    = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
-  const isFlash = mode === 'flash';
-  const btn     = document.getElementById(`b${n}-btn-go`);
+  const mode     = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
+  const isFlash  = mode === 'flash';
+  const isUpdate = mode === 'update';
+  const btn      = document.getElementById(`b${n}-btn-go`);
 
   btn.disabled = true;
-  btn.textContent = isFlash ? 'Flashing…' : 'Pushing…';
+  btn.textContent = (isFlash || isUpdate) ? 'Flashing…' : 'Pushing…';
 
-  if (isFlash) {
+  if (isFlash || isUpdate) {
     // ── Validate HW version ──────────────────────────────────────
     const hwVersion = boardConfigs[n]?.hwVersion;
     if (!hwVersion) {
@@ -1034,8 +1033,6 @@ async function boardGo(n) {
     }
 
     // ── Save port ref, then close normal connection ───────────────
-    // closeForReconnect cancels the reader (unblocks hangs) and closes
-    // the port, but keeps conn.port so esptool-js can reopen it.
     const savedPort = conn.port;
     await conn.closeForReconnect();
     updateConnectionUI(n, false);
@@ -1049,9 +1046,10 @@ async function boardGo(n) {
         onProgress: (written, total) => updateFlashBar(n, written, total),
         onLog:      (msg)            => termLog(n, msg, 'sys'),
         onStatus:   (msg)            => setFlashStatus(n, msg),
+        appOnly:    isUpdate,   // Update FW mode: always app-only, never touches NVS
       });
       flashOk = true;
-      showToast(`WCB ${n} firmware flashed!`, 'success');
+      showToast(`WCB ${n} firmware ${isUpdate ? 'updated' : 'flashed'}!`, 'success');
     } catch (e) {
       showToast(`Flash failed: ${e.message.split('\n')[0]}`, 'error');
       termLog(n, `Flash error: ${e.message}`, 'err');
@@ -1059,26 +1057,32 @@ async function boardGo(n) {
 
     setFlashUI(n, false);
 
-    // ── After flash: reconnect, then push config ──────────────────
     if (flashOk) {
       termLog(n, 'Reconnecting after flash…', 'sys');
-      // No baseline → boardGo will do a full push when called after reconnect
-      boardBaselines[n] = null;
       const reconnected = await conn.reconnect(12, 2000);
       if (reconnected) {
         updateConnectionUI(n, true);
-        termLog(n, 'Reconnected — pushing config in 4s…', 'sys');
-        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
-        // Switch to configure-only so the next boardGo doesn't re-flash
+        // Switch back to configure mode regardless
         const configRadio = document.querySelector(`input[name="b${n}-mode"][value="configure"]`);
         if (configRadio) configRadio.checked = true;
-        setTimeout(() => boardGo(n), 4000);
+
+        if (isUpdate) {
+          // App-only update: NVS is intact, just pull to verify config survived
+          termLog(n, 'Reconnected — pulling config to verify NVS…', 'sys');
+          showToast(`WCB ${n} updated — verifying config…`, 'success');
+          setTimeout(() => boardPull(n), 4000);
+        } else {
+          // Full flash: NVS was cleared, push config
+          boardBaselines[n] = null;
+          termLog(n, 'Reconnected — pushing config in 4s…', 'sys');
+          showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+          setTimeout(() => boardGo(n), 4000);
+        }
       } else {
-        termLog(n, 'Reconnect failed — connect manually, then push config', 'err');
-        showToast(`WCB ${n} did not come back — reconnect manually, then push config`, 'error');
+        termLog(n, 'Reconnect failed — connect manually', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
       }
     } else {
-      // Flash failed — try to reconnect so user isn't left disconnected
       const recovered = await conn.reconnect(5, 1500);
       if (recovered) updateConnectionUI(n, true);
     }
@@ -1394,11 +1398,10 @@ function appendKyberTargetRow(n, target, readOnly = false) {
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
-  const wcbMax = parseInt(document.getElementById('g-wcbq')?.value) || 8;
-  const idOptions = Array.from({length: wcbMax}, (_, i) => i + 1).map(v =>
+  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === target.id ? 'selected' : ''}>${v}</option>`
   ).join('');
-  const wcbOptions = Array.from({length: wcbMax}, (_, i) => i + 1).map(v =>
+  const wcbOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === target.wcb ? 'selected' : ''}>WCB ${v}</option>`
   ).join('');
 

@@ -152,7 +152,8 @@ function bufToLatin1(buf) {
 // callbacks  — { onProgress(written, total), onLog(msg), onStatus(msg) }
 //
 // Throws on error (caller is responsible for UI cleanup).
-async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus }) {
+// appOnly — if true, skip blank-board detection and always flash app at 0x10000 only
+async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, appOnly = false }) {
 
   // ── Step 1: Load CDN dependencies ──────────────────────────────
   onStatus('Loading flash tool…');
@@ -218,40 +219,43 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus }) {
     );
   }
 
-  // ── Step 3b: Detect blank vs. programmed board ─────────────────
-  // Read 4 bytes at the bootloader address; 0xFFFFFFFF = erased flash (blank board).
-  // On a programmed board the bootloader starts with 0xE9 (ESP image magic).
-  // If already programmed, skip bootloader+partitions to preserve NVS.
-  const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
-  let isBlankBoard = false;
-  try {
-    const readFlashFn = loader.readFlash ?? loader.read_flash;
-    if (typeof readFlashFn === 'function') {
-      const sample = await readFlashFn.call(loader, bootAddr, 4);
-      const view   = new DataView(sample.buffer ?? sample);
-      const magic  = view.getUint8(0);
-      // 0xFF = blank, 0xE9 = valid ESP image — anything else means bricked/corrupted
-      const needsFullFlash = (magic === 0xFF || magic !== 0xE9);
-      isBlankBoard = needsFullFlash;
-      if (magic === 0xFF) {
-        onLog('Blank board detected — will flash bootloader + partitions + app');
-      } else if (magic === 0xE9) {
-        onLog('Existing firmware detected — will flash app only (NVS preserved)');
+  // ── Step 3b: Decide what to flash ──────────────────────────────
+  let imagesToFlash;
+
+  if (appOnly) {
+    // Explicit app-only update: skip detection, never touch bootloader/NVS
+    imagesToFlash = flashImages.filter(img => img.address === 0x10000);
+    onLog('App-only update — bootloader, partitions, and NVS will not be touched');
+  } else {
+    // Auto-detect: read bootloader magic to decide blank vs. programmed vs. bricked
+    const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
+    let isBlankBoard = false;
+    try {
+      const readFlashFn = loader.readFlash ?? loader.read_flash;
+      if (typeof readFlashFn === 'function') {
+        const sample = await readFlashFn.call(loader, bootAddr, 4);
+        const view   = new DataView(sample.buffer ?? sample);
+        const magic  = view.getUint8(0);
+        // 0xFF = blank, 0xE9 = valid ESP image — anything else means bricked/corrupted
+        isBlankBoard = (magic === 0xFF || magic !== 0xE9);
+        if (magic === 0xFF) {
+          onLog('Blank board detected — will flash bootloader + partitions + app');
+        } else if (magic === 0xE9) {
+          onLog('Existing firmware detected — will flash app only (NVS preserved)');
+        } else {
+          onLog(`Corrupted bootloader detected (0x${magic.toString(16).padStart(2,'0')}) — will flash full image to recover`);
+        }
       } else {
-        onLog(`Corrupted bootloader detected (0x${magic.toString(16).padStart(2,'0')}) — will flash full image to recover`);
+        onLog('Cannot read flash — assuming existing firmware, flashing app only');
       }
-    } else {
-      // Can't read flash — assume programmed board to be safe
-      onLog('Cannot read flash — assuming existing firmware, flashing app only');
+    } catch (_) {
+      onLog('Flash read check failed — assuming existing firmware, flashing app only');
     }
-  } catch (_) {
-    onLog('Flash read check failed — assuming existing firmware, flashing app only');
+    imagesToFlash = isBlankBoard
+      ? flashImages
+      : flashImages.filter(img => img.address === 0x10000);
   }
 
-  // Filter images: blank board gets all three; programmed board gets app only
-  const imagesToFlash = isBlankBoard
-    ? flashImages
-    : flashImages.filter(img => img.address === 0x10000);
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);
 
   // ── Step 4: Flash ──────────────────────────────────────────────
