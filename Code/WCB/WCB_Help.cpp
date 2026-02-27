@@ -267,6 +267,12 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  CHAR              Run network characterization test"));
         Serial.println(F("                      Tests 3 phases: baseline, broadcast, loaded"));
         Serial.println(F("                      Outputs recommended TIMEOUT value when done"));
+        Serial.println(F("                      ETM debug is auto-disabled during test for"));
+        Serial.println(F("                      accurate timing and restored when complete"));
+        Serial.println(F("  CHKSM,ON/OFF      Enable/disable CRC32 checksum on ETM packets"));
+        Serial.println(F("                      Detects corrupted packets before execution"));
+        Serial.println(F("                      Default: OFF"));
+        Serial.println(F("                      ALL boards must match or packets are rejected"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?ETM,ON"));
         Serial.println(F("  ?ETM,TIMEOUT,300"));
@@ -280,6 +286,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Boards not yet seen via heartbeat will still receive commands"));
         Serial.println(F("  - Run ?ETM,CHAR before setting TIMEOUT for best results"));
         Serial.println(F("  - Settings saved to NVS and persist across reboots"));
+        Serial.println(F("  - CHKSM adds 12 bytes overhead, reducing max command to 188 chars"));
+        Serial.println(F("  - CHKSM must match across all boards or all packets are rejected"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?ETMON / ?ETMOFF"));
         Serial.println(F("  ?ETMTIMEOUTms      (e.g. ?ETMTIMEOUT300)"));
@@ -675,3 +683,4 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("============================================================\n"));
     }
 }
+

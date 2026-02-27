@@ -30,6 +30,7 @@ extern String serialPortLabels[5];
 String getSerialLabel(int port);
 extern bool blockBroadcastFrom[5];
 extern bool serialMonitorEnabled[5];
+extern bool etmChecksumEnabled;
 
 // ETM Settings
 extern bool etmEnabled;

@@ -300,30 +300,29 @@ String remaining = message;
 }
 
 void clearMaestroByID(const String &message) {
-  // Format: ?MAESTRO_CLEAR,<maestroID>
-  int commaIndex = message.indexOf(',');
+  // Format: called with "M5" or "5" after caller strips "CLEAR,"
+  // Example: ?MAESTRO,CLEAR,M5  → caller passes "M5"
+  //          ?MAESTRO,CLEAR,5   → caller passes "5"
+
+  String idStr = message;
+  idStr.trim();
+  if (idStr.startsWith("M") || idStr.startsWith("m")) idStr = idStr.substring(1);
   
-  if (commaIndex == -1) {
-    Serial.printf("Invalid format. Use: %cMAESTRO_CLEAR,<maestroID>\n", LocalFunctionIdentifier);
-    Serial.printf("Example: %cMAESTRO_CLEAR,5\n", LocalFunctionIdentifier);
-    return;
-  }
-  
-  int maestroID = message.substring(commaIndex + 1).toInt();
-  
+  int maestroID = idStr.toInt();
+
   if (maestroID < 1 || maestroID > 9) {
-    Serial.println("Invalid Maestro ID. Must be 1-9");
+    Serial.printf("Invalid Maestro ID. Must be M1-M9\n");
     return;
   }
-  
+
   int8_t slot = findSlotByMaestroID(maestroID);
-  
+
   if (slot < 0) {
     Serial.printf("Maestro ID %d is not configured\n", maestroID);
     return;
   }
-  
-  // **SAVE THE PORT BEFORE CLEARING**
+
+  // Save the port before clearing
   uint8_t freedPort = maestroConfigs[slot].serialPort;
 
   maestroConfigs[slot].configured = false;
@@ -334,28 +333,24 @@ void clearMaestroByID(const String &message) {
   saveMaestroSettings();
   Serial.printf("Cleared Maestro ID %d (freed slot %d)\n", maestroID, slot + 1);
 
-  // **AUTO RE-ENABLE BROADCAST ON FREED PORT**
+  // Auto re-enable broadcast on freed port
   if (freedPort > 0) {
-    // Re-enable output
     if (!serialBroadcastEnabled[freedPort - 1]) {
       serialBroadcastEnabled[freedPort - 1] = true;
       saveBroadcastSettingsToPreferences();
       Serial.printf("✓ Re-enabled broadcast output on S%d\n", freedPort);
     }
-    
-    // Re-enable input
     if (blockBroadcastFrom[freedPort - 1]) {
       blockBroadcastFrom[freedPort - 1] = false;
       saveBroadcastBlockSettings();
       Serial.printf("✓ Re-enabled broadcast input on S%d\n", freedPort);
     }
-  }
-  // **RESET BAUD RATE TO 9600 ON FREED PORT**
-  if (freedPort > 0) {
-      updateBaudRate(freedPort, 9600);
-      Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
+    updateBaudRate(freedPort, 9600);
+    Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
   }
 }
+
+
 void clearAllMaestroConfigs() {
   // Format: ?MAESTRO_DEFAULT
   

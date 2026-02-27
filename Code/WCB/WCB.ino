@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_260926RFEB2026                                    *****////
+///*****                                          Version 6.0_271032RFEB2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_260926RFEB2026";
+String SoftwareVersion = "6.0_271032RFEB2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -179,7 +179,8 @@ int etmMissedHeartbeats = 3;
 int etmTimeoutMs = 500;
 int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
-
+bool etmChecksumEnabled = false;   // ETM packet checksum verification (off by default)
+bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
 // ETM Board Status Table
 struct BoardStatus {
   bool online;
@@ -395,7 +396,7 @@ void turnOffLED(){
   }
 }
 
-// CRC32 calculation for backup verification
+// CRC32 calculation for verification
 uint32_t calculateCRC32(const String &data) {
     const uint8_t *bytes = (const uint8_t *)data.c_str();
     size_t length = data.length();
@@ -594,10 +595,7 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
       if (debugETM) {
         Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
       }
-      if (debugETM) {
-        Serial.printf("[ETM DEBUG] etmProcessAck called: senderWCB=%d, seqNum=%d\n", senderWCB, seqNum);
-      }
-
+      
       // Notify characterization layer if running
       if (etmCharRunning) {
         String originalCmd = String(etmPendingTable[i].command);
@@ -658,7 +656,15 @@ void processETMAcksAndRetries() {
         snprintf(retry.structSenderID, sizeof(retry.structSenderID), "%d", WCB_Number);
         snprintf(retry.structTargetID, sizeof(retry.structTargetID), "%d", wcbNum);
         retry.structCommandIncluded = 1;
-        strncpy(retry.structCommand, entry.command, sizeof(retry.structCommand) - 1);
+        if (etmChecksumEnabled) {
+            uint32_t crc = calculateCRC32(String(entry.command));
+            char withCRC[210];
+            snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", entry.command, crc);
+            strncpy(retry.structCommand, withCRC, sizeof(retry.structCommand) - 1);
+        } else {
+            strncpy(retry.structCommand, entry.command, sizeof(retry.structCommand) - 1);
+        }
+        retry.structCommand[sizeof(retry.structCommand) - 1] = '\0';        
         retry.structPacketType = PACKET_TYPE_COMMAND;
         retry.structSequenceNumber = entry.sequenceNumber;
 
@@ -728,6 +734,14 @@ void startETMChar() {
         Serial.println("ETM Char requires at least 2 WCBs in the network (?WCBQ).");
         return;
     }
+
+    // Save and suppress ETM debug for accurate timing
+    // Save and suppress ETM debug for accurate timing
+    etmCharDebugWasSaved = debugETM;      // ← GLOBAL variable, persists across loop() calls
+    if (debugETM) {                       
+        debugETM = false;                 
+        Serial.println("[ETM CHAR] Temporarily disabling ETM debug for accurate timing measurements.");  
+    }  
 
     etmCharRunning = true;
     etmCharPhase = 1;
@@ -976,6 +990,13 @@ void printETMCharResults(int* peers, int peerCount) {
         Serial.println(" Warning: >5% packet loss detected. Check RF environment.");
     }
     Serial.println("------------------------------------------------------------\n");
+
+    // Restore ETM debug state
+    if (etmCharDebugWasSaved) {
+        debugETM = true;
+        Serial.println("[ETM CHAR] ETM debug re-enabled.");
+    }
+    etmCharDebugWasSaved = false;
 }
 
 
@@ -1140,23 +1161,55 @@ void printConfigInfo() {
   Serial.printf("Hostname: %s\n", hostname.c_str());
   printHWversion();
   Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
+  Serial.printf("Number of WCBs in system: %d\n", Default_WCB_Quantity);
   loadBaudRatesFromPreferences();
   loadBroadcastBlockSettings();
   // loadBroadcastSettingsFromPreferences();
   Serial.println("--------------- Serial Settings ----------------------");
   printBaudRates();  // Print baud rates
   listSerialMonitorMappings();
+  Serial.println();
 
-  Serial.println("--------------- ESPNOW Settings ----------------------");
-  // Print ESP-NOW password
+Serial.println("--------------- ESPNOW Settings ----------------------");
   Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
-  // Print MAC address used for ESP-NOW (station MAC)
+
   uint8_t baseMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, baseMac);
-  Serial.printf("ESP-NOW (STA) MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+  
+  Serial.printf("This board MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 
-  Serial.println("--------------- ESP Command Settings ----------------------");
+  Serial.println("--------------- ESP-NOW Peers ---------------");
+  for (int i = 0; i < Default_WCB_Quantity; i++) {
+    if (i + 1 == WCB_Number) {
+      Serial.printf("  WCB%d : %02X:%02X:%02X:%02X:%02X:%02X   (this board)\n",
+                    i + 1,
+                    WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
+                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
+    } else if (etmEnabled && boardTable[i].online) {
+      unsigned long secsAgo = (millis() - boardTable[i].lastSeenMs) / 1000UL;
+      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  Online (last seen %lus ago)\n",
+                    i + 1,
+                    WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
+                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5],
+                    secsAgo);
+    } else if (etmEnabled) {
+      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  Not yet seen\n",
+                    i + 1,
+                    WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
+                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
+    } else {
+      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    i + 1,
+                    WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
+                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
+    }
+  }
+  Serial.printf("  Broadcast: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2],
+                broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
+  Serial.println();
+  Serial.println("--------------- WCB Command Settings ----------------------");
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);
@@ -1164,21 +1217,10 @@ void printConfigInfo() {
   // Print all stored commands
   listStoredCommands(); // List stored commands
   // Print PWM mappings
+  Serial.println();
   listPWMMappings();  // Print PWM mappings
   printMaestroSettings();  // Show configured Maestros
- if (etmEnabled) {
-    Serial.println("--------------- Online WCBs ---------------");
-    for (int i = 0; i < Default_WCB_Quantity; i++) {
-      if (i + 1 == WCB_Number) {
-        Serial.printf("  WCB%d: This board\n", i + 1);
-      } else if (boardTable[i].online) {
-        unsigned long secsAgo = (millis() - boardTable[i].lastSeenMs) / 1000UL;
-        Serial.printf("  WCB%d: Online  (last seen %lus ago)\n", i + 1, secsAgo);
-      } else {
-        Serial.printf("  WCB%d: OFFLINE\n", i + 1);
-      }
-    }
-}
+
 
     Serial.println("--------------- ETM Settings ----------------------");
   Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED ⚠️  All boards must match!" : "Disabled");
@@ -1188,8 +1230,11 @@ void printConfigInfo() {
     Serial.printf("  Offline after: %d missed (%d sec max)\n", etmMissedHeartbeats, (etmHeartbeatSec+1)*etmMissedHeartbeats);
     Serial.printf("  Retry timeout: %d ms\n", etmTimeoutMs);
     Serial.printf("  Char message count: %d, delay: %d ms\n", etmCharMessageCount, etmCharDelayMs);
+    if (etmEnabled) {
+    Serial.printf("  Checksum Verification: %s\n", etmChecksumEnabled ? "Enabled" : "Disabled");
+}
   }
-
+Serial.println();
   Serial.println("--- End of Configuration Info ---\n");
 }
 
@@ -1280,7 +1325,15 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
       snprintf(etmMsg.structTargetID, sizeof(etmMsg.structTargetID), "%d", target);
     }
     etmMsg.structCommandIncluded = 1;
-    strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
+    // Build command string, optionally appending CRC
+    if (etmChecksumEnabled) {
+        uint32_t crc = calculateCRC32(String(message));
+        char withCRC[210];
+        snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", message, crc);
+        strncpy(etmMsg.structCommand, withCRC, sizeof(etmMsg.structCommand) - 1);
+    } else {
+        strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
+    }
     etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = '\0';
     etmMsg.structPacketType = PACKET_TYPE_COMMAND;
     etmMsg.structSequenceNumber = ++etmSequenceCounter;
@@ -1600,6 +1653,28 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
 
         String etmCmd = String(etmReceived.structCommand);
+
+        // CRC verification if enabled
+        if (etmChecksumEnabled) {
+            int crcIdx = etmCmd.lastIndexOf("|CRC");
+            if (crcIdx == -1) {
+                if (debugETM) Serial.printf("[ETM] seq %d rejected: missing CRC\n", 
+                                            etmReceived.structSequenceNumber);
+                colorWipeStatus("ES", blue, 10);
+                return;
+            }
+            String payload    = etmCmd.substring(0, crcIdx);
+            String crcStr     = etmCmd.substring(crcIdx + 4);
+            uint32_t rxCRC    = strtoul(crcStr.c_str(), NULL, 16);
+            uint32_t calcCRC  = calculateCRC32(payload);
+            if (rxCRC != calcCRC) {
+                if (debugETM) Serial.printf("[ETM] seq %d rejected: CRC mismatch (rx %08X calc %08X)\n",
+                                            etmReceived.structSequenceNumber, rxCRC, calcCRC);
+                colorWipeStatus("ES", blue, 10);
+                return;
+            }
+            etmCmd = payload;  // strip CRC suffix before executing
+        }
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
             enqueueCommand(etmCmd, 0);
         }
@@ -2114,6 +2189,20 @@ void processLocalCommand(const String &message) {
             Serial.printf("ETM char delay set to %d ms\n", etmCharDelayMs);
         } else if (etmCmdUpper == "CHAR") {
             startETMChar();
+        } else if (etmCmdUpper == "CHKSM") {
+            String valUpper = etmVal;
+            valUpper.toUpperCase();
+            if (valUpper == "ON") {
+                etmChecksumEnabled = true;
+                saveETMSettings();
+                Serial.println("ETM checksum verification enabled");
+            } else if (valUpper == "OFF") {
+                etmChecksumEnabled = false;
+                saveETMSettings();
+                Serial.println("ETM checksum verification disabled");
+            } else {
+                Serial.println("Use: ?ETM,CHKSM,ON or ?ETM,CHKSM,OFF");
+            }
         } else {
             Serial.println("Invalid ETM command. Use: ?ETM ?");
         }
@@ -2188,9 +2277,7 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "CLEAR,ALL") {
             clearAllMaestroConfigs();
         } else if (argsUpper.startsWith("CLEAR,")) {
-            int maestroID = args.substring(args.indexOf(',') + 1).toInt();
-            clearAllMaestroConfigs();  // use clearAllMaestroConfigs since no per-ID version exists
-            Serial.printf("Cleared Maestro config (ID requested: %d)\n", maestroID);
+            clearMaestroByID(args.substring(args.indexOf(',') + 1));
         } else {
             configureMaestro(args);
         }
@@ -2848,112 +2935,126 @@ void updateHWVersion(const String &message) {
     Serial.println(commentDelimiter + " Copy and paste these commands to restore");
     Serial.println(commentDelimiter + " ========================================\n");
 
-    String chainedConfig = "";
+    String chainedConfig        = "";
     String chainedConfigDefault = "";
+    String defaultSep  = "^";                      // factory reset separator, flips after ?DELIM
+    String defaultFunc = "?";                      // factory reset func identifier, flips after ?FUNCCHAR
+    String lfi         = String(LocalFunctionIdentifier);  // shorthand for configured string
     String cmd;
     char hexBuffer[3];
 
     // ---- Hardware Version ----
-    String hwCmd = "";
-    if      (wcb_hw_version == 1)  hwCmd = "?HW,1";
-    else if (wcb_hw_version == 21) hwCmd = "?HW,21";
-    else if (wcb_hw_version == 23) hwCmd = "?HW,23";
-    else if (wcb_hw_version == 24) hwCmd = "?HW,24";
-    else if (wcb_hw_version == 31) hwCmd = "?HW,31";
-    else if (wcb_hw_version == 32) hwCmd = "?HW,32";
+    String hwSuffix = "";
+    if      (wcb_hw_version == 1)  hwSuffix = "1";
+    else if (wcb_hw_version == 21) hwSuffix = "21";
+    else if (wcb_hw_version == 23) hwSuffix = "23";
+    else if (wcb_hw_version == 24) hwSuffix = "24";
+    else if (wcb_hw_version == 31) hwSuffix = "31";
+    else if (wcb_hw_version == 32) hwSuffix = "32";
     else {
         Serial.println("WARNING: Hardware version not set! Use ?HW,xx to set version before backup.");
-        hwCmd = "?HW,0  *** HARDWARE VERSION NOT SET - SET BEFORE RESTORING! ***";
+        hwSuffix = "0  *** HARDWARE VERSION NOT SET - SET BEFORE RESTORING! ***";
     }
-    Serial.println(hwCmd);
-    chainedConfig += hwCmd;
-    chainedConfigDefault += hwCmd;
+    Serial.println(lfi + "HW," + hwSuffix);
+    chainedConfig        = lfi + "HW," + hwSuffix;
+    chainedConfigDefault = "?HW,"     + hwSuffix;   // factory reset always uses ? prefix
 
     // ---- Network Identity ----
     sprintf(hexBuffer, "%02X", umac_oct2);
-    cmd = "?MAC,2," + String(hexBuffer);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "MAC,2," + String(hexBuffer);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     sprintf(hexBuffer, "%02X", umac_oct3);
-    cmd = "?MAC,3," + String(hexBuffer);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "MAC,3," + String(hexBuffer);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?WCB," + String(WCB_Number);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "WCB," + String(WCB_Number);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?WCBQ," + String(Default_WCB_Quantity);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "WCBQ," + String(Default_WCB_Quantity);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?EPASS," + String(espnowPassword);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "EPASS," + String(espnowPassword);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     // ---- Command Characters ----
-    cmd = "?DELIM," + String(commandDelimiter);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
+    // DELIM:
+    //   Configured string: skip entirely - board already uses correct delimiter throughout
+    //   Factory reset string: include only if non-default, then switch defaultSep
     if (commandDelimiter != '^') {
-        chainedConfigDefault += "^" + cmd;
+        cmd = "DELIM," + String(commandDelimiter);
+        Serial.println(lfi + cmd);
+        // configured string: intentionally skipped
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+        defaultSep = String(commandDelimiter);  // all subsequent factory reset commands use new delimiter
     }
 
-    cmd = "?FUNCCHAR," + String(LocalFunctionIdentifier);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    // FUNCCHAR:
+    //   Configured string: skip entirely - board already uses correct func identifier throughout
+    //   Factory reset string: include only if non-default, then switch defaultFunc
+    if (LocalFunctionIdentifier != '?') {
+        cmd = "FUNCCHAR," + String(LocalFunctionIdentifier);
+        Serial.println(lfi + cmd);
+        // configured string: intentionally skipped
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+        defaultFunc = String(LocalFunctionIdentifier);  // all subsequent factory reset commands use new func identifier
+    }
 
-    cmd = "?CMDCHAR," + String(CommandCharacter);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    // CMDCHAR: always include for reference, no switching needed (; not used in backup commands)
+    cmd = "CMDCHAR," + String(CommandCharacter);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     // ---- Serial Port Baud Rates ----
     for (int i = 0; i < 5; i++) {
-        cmd = "?BAUD,S" + String(i + 1) + "," + String(baudRates[i]);
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        cmd = "BAUD,S" + String(i + 1) + "," + String(baudRates[i]);
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
     }
 
     // ---- Serial Port Labels ----
     for (int i = 0; i < 5; i++) {
         if (serialPortLabels[i].length() > 0) {
-            cmd = "?LABEL,S" + String(i + 1) + "," + serialPortLabels[i];
-            Serial.println(cmd);
-            chainedConfig += String(commandDelimiter) + cmd;
-            chainedConfigDefault += "^" + cmd;
+            cmd = "LABEL,S" + String(i + 1) + "," + serialPortLabels[i];
+            Serial.println(lfi + cmd);
+            chainedConfig        += String(commandDelimiter) + lfi + cmd;
+            chainedConfigDefault += defaultSep + defaultFunc + cmd;
         }
     }
 
     // ---- Broadcast Output Settings ----
     for (int i = 0; i < 5; i++) {
-        cmd = "?BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF");
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        cmd = "BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF");
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
     }
 
     // ---- Broadcast Input Settings ----
     for (int i = 0; i < 5; i++) {
-        cmd = "?BCAST,IN,S" + String(i + 1) + "," + (blockBroadcastFrom[i] ? "OFF" : "ON");
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        cmd = "BCAST,IN,S" + String(i + 1) + "," + (blockBroadcastFrom[i] ? "OFF" : "ON");
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
     }
 
     // ---- Serial Monitor Mappings ----
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active) {
             bool isRaw = serialMonitorMappings[i].rawMode;
-            cmd = "?MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
+            cmd = "MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
             if (isRaw) cmd += ",R";
             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                 cmd += ",";
@@ -2964,58 +3065,58 @@ void updateHWVersion(const String &message) {
                            "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
                 }
             }
-            Serial.println(cmd);
-            chainedConfig += String(commandDelimiter) + cmd;
-            chainedConfigDefault += "^" + cmd;
+            Serial.println(lfi + cmd);
+            chainedConfig        += String(commandDelimiter) + lfi + cmd;
+            chainedConfigDefault += defaultSep + defaultFunc + cmd;
         }
     }
 
     // ---- Kyber Settings ----
-    if (Kyber_Local)       cmd = "?KYBER,LOCAL";
-    else if (Kyber_Remote) cmd = "?KYBER,REMOTE";
-    else                   cmd = "?KYBER,CLEAR";
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    if (Kyber_Local)       cmd = "KYBER,LOCAL";
+    else if (Kyber_Remote) cmd = "KYBER,REMOTE";
+    else                   cmd = "KYBER,CLEAR";
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     // ---- Maestro Settings ----
     printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter);
 
     // ---- ETM Settings ----
-    cmd = etmEnabled ? "?ETM,ON" : "?ETM,OFF";
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,TIMEOUT," + String(etmTimeoutMs);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,TIMEOUT," + String(etmTimeoutMs);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,HB," + String(etmHeartbeatSec);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,HB," + String(etmHeartbeatSec);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,MISS," + String(etmMissedHeartbeats);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,MISS," + String(etmMissedHeartbeats);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,BOOT," + String(etmBootHeartbeatSec);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,BOOT," + String(etmBootHeartbeatSec);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,COUNT," + String(etmCharMessageCount);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,COUNT," + String(etmCharMessageCount);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    cmd = "?ETM,DELAY," + String(etmCharDelayMs);
-    Serial.println(cmd);
-    chainedConfig += String(commandDelimiter) + cmd;
-    chainedConfigDefault += "^" + cmd;
+    cmd = "ETM,DELAY," + String(etmCharDelayMs);
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     // ---- Stored Sequences ----
     preferences.begin("stored_cmds", true);
@@ -3033,10 +3134,10 @@ void updateHWVersion(const String &message) {
                 preferences.begin("stored_cmds", true);
                 String value = preferences.getString(key.c_str(), "");
                 preferences.end();
-                cmd = "?SEQ,SAVE," + key + "," + value;
-                Serial.println(cmd);
-                chainedConfig += String(commandDelimiter) + cmd;
-                chainedConfigDefault += "^" + cmd;
+                cmd = "SEQ,SAVE," + key + "," + value;
+                Serial.println(lfi + cmd);
+                chainedConfig        += String(commandDelimiter) + lfi + cmd;
+                chainedConfigDefault += defaultSep + defaultFunc + cmd;
             }
             startIdx = commaIndex + 1;
         }
@@ -3044,16 +3145,16 @@ void updateHWVersion(const String &message) {
 
     // ---- PWM Output Ports (before mappings) ----
     for (int i = 0; i < pwmOutputCount; i++) {
-        cmd = "?MAP,PWM,OUT,S" + String(pwmOutputPorts[i]);
-        Serial.println(cmd);
-        chainedConfig += String(commandDelimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        cmd = "MAP,PWM,OUT,S" + String(pwmOutputPorts[i]);
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
     }
 
     // ---- PWM Mappings (LAST - triggers reboot) ----
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
-            cmd = "?MAP,PWM,S" + String(pwmMappings[i].inputPort);
+            cmd = "MAP,PWM,S" + String(pwmMappings[i].inputPort);
             for (int j = 0; j < pwmMappings[i].outputCount; j++) {
                 cmd += ",";
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
@@ -3063,23 +3164,23 @@ void updateHWVersion(const String &message) {
                            "S" + String(pwmMappings[i].outputs[j].serialPort);
                 }
             }
-            Serial.println(cmd);
-            chainedConfig += String(commandDelimiter) + cmd;
-            chainedConfigDefault += "^" + cmd;
+            Serial.println(lfi + cmd);
+            chainedConfig        += String(commandDelimiter) + lfi + cmd;
+            chainedConfigDefault += defaultSep + defaultFunc + cmd;
         }
     }
 
     // ---- Checksums ----
     uint32_t checksum = calculateCRC32(chainedConfig);
-    String checksumCmd = "?CHK" + String(checksum, HEX);
+    String checksumCmd = lfi + "CHK" + String(checksum, HEX);
     checksumCmd.toUpperCase();
 
     uint32_t checksumDefault = calculateCRC32(chainedConfigDefault);
-    String checksumCmdDefault = "?CHK" + String(checksumDefault, HEX);
+    String checksumCmdDefault = "?CHK" + String(checksumDefault, HEX);  // factory reset always uses ?
     checksumCmdDefault.toUpperCase();
 
-    String chainedWithChecksum = chainedConfig + String(commandDelimiter) + checksumCmd;
-    String chainedWithChecksumDefault = chainedConfigDefault + "^" + checksumCmdDefault;
+    String chainedWithChecksum        = chainedConfig        + String(commandDelimiter) + checksumCmd;
+    String chainedWithChecksumDefault = chainedConfigDefault + defaultSep               + checksumCmdDefault;
 
     Serial.println("\n" + commentDelimiter + " === For Configured Boards (Current Delimiter: '" + String(commandDelimiter) + "') ===");
     Serial.println(chainedWithChecksum);
@@ -3104,7 +3205,7 @@ void verifyBackupChecksum(const String &message) {
     // Note: The actual verification happens during restore processing
     // This command just acknowledges receipt
 }
-//*******************************
+
 /// Processing Command Character
 //*******************************
 void processCommandCharcter(const String &message, int sourceID) {
@@ -3249,6 +3350,16 @@ void processPWMOutput(const String &message) {
 
 }
 
+void printPinSettings() {
+    Serial.println("--------------- Pin Settings ----------------------");
+    Serial.printf("  S1:  TX=%d  RX=%d\n", SERIAL1_TX_PIN, SERIAL1_RX_PIN);
+    Serial.printf("  S2:  TX=%d  RX=%d\n", SERIAL2_TX_PIN, SERIAL2_RX_PIN);
+    Serial.printf("  S3:  TX=%d  RX=%d\n", SERIAL3_TX_PIN, SERIAL3_RX_PIN);
+    Serial.printf("  S4:  TX=%d  RX=%d\n", SERIAL4_TX_PIN, SERIAL4_RX_PIN);
+    Serial.printf("  S5:  TX=%d  RX=%d\n", SERIAL5_TX_PIN, SERIAL5_RX_PIN);
+    Serial.printf("  Status LED: %d\n", STATUS_LED_PIN);
+    Serial.printf("  Onboard LED: %d\n", ONBOARD_LED);
+}
 
 //*******************************
 /// Processing Broadcast Function

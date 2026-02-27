@@ -187,59 +187,62 @@ void saveBaudRatesToPreferences() {
 void printBaudRates() {
     Serial.println("Serial Baud Rates and Broadcast Settings:");
     for (int i = 0; i < 5; i++) {
+        int txPin, rxPin;
+        switch (i + 1) {
+            case 1: txPin = SERIAL1_TX_PIN; rxPin = SERIAL1_RX_PIN; break;
+            case 2: txPin = SERIAL2_TX_PIN; rxPin = SERIAL2_RX_PIN; break;
+            case 3: txPin = SERIAL3_TX_PIN; rxPin = SERIAL3_RX_PIN; break;
+            case 4: txPin = SERIAL4_TX_PIN; rxPin = SERIAL4_RX_PIN; break;
+            case 5: txPin = SERIAL5_TX_PIN; rxPin = SERIAL5_RX_PIN; break;
+            default: txPin = 0; rxPin = 0; break;
+        }
+
         // Check if port is reserved for PWM output
         if (isSerialPortPWMOutput(i + 1)) {
-            Serial.printf(" Serial%d: Reserved for PWM Output", i + 1);
-            // Add label if it exists
+            Serial.printf("  Serial%d: Reserved for PWM Output  Pins: Tx:%d Rx:%d", i + 1, txPin, rxPin);
             if (serialPortLabels[i].length() > 0) {
                 Serial.printf(" (%s)", serialPortLabels[i].c_str());
             }
             Serial.println();
             continue;
         }
-        
+
         // Check if port is reserved for PWM input
         if (isSerialPortUsedForPWMInput(i + 1)) {
-            Serial.printf(" Serial%d: Reserved for PWM Input", i + 1);
-            // Add label if it exists
+            Serial.printf("  Serial%d: Reserved for PWM Input  Pins: Tx:%d Rx:%d", i + 1, txPin, rxPin);
             if (serialPortLabels[i].length() > 0) {
                 Serial.printf(" (%s)", serialPortLabels[i].c_str());
             }
             Serial.println();
             continue;
         }
-        
-        // Normal serial port - show baud and broadcast settings
-        // Determine broadcast input status (blocked or enabled)
-        String inputStatus = blockBroadcastFrom[i] ? "Disabled" : "Enabled";
 
-        // Determine broadcast output status
-        String outputStatus = serialBroadcastEnabled[i] ? "Enabled" : "Disabled";
-        
-        Serial.printf(" Serial%d Baud Rate: %lu, Broadcast Input: %s, Broadcast Output: %s",
-                      i + 1, baudRates[i], inputStatus.c_str(), outputStatus.c_str());
-        
-        // Add label if it exists
+        // Normal serial port
+        String inputStatus  = blockBroadcastFrom[i]    ? "Disabled" : "Enabled";
+        String outputStatus = serialBroadcastEnabled[i] ? "Enabled"  : "Disabled";
+
+        Serial.printf("  Serial%d Baud: %lu, Broadcast Input: %s, Broadcast Output: %s  Pins: Tx:%d Rx:%d",
+                      i + 1, baudRates[i], inputStatus.c_str(), outputStatus.c_str(), txPin, rxPin);
+
+        // Label: user-defined takes priority
         if (serialPortLabels[i].length() > 0) {
             Serial.printf(" (%s)", serialPortLabels[i].c_str());
         }
-        // Add auto-detected labels for Kyber/Maestro
+        // Auto-detected labels for Kyber/Maestro if no user label
         else if (i == 0 && (Kyber_Local || Kyber_Remote)) {
-        // Only show Maestro label if there's actually a LOCAL Maestro on S1
-        bool hasMaestroOnS1 = false;
-        for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
-            if (maestroConfigs[m].configured && maestroConfigs[m].serialPort == 1) {
-            hasMaestroOnS1 = true;
-            break;
+            bool hasMaestroOnS1 = false;
+            for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
+                if (maestroConfigs[m].configured && maestroConfigs[m].serialPort == 1) {
+                    hasMaestroOnS1 = true;
+                    break;
+                }
             }
+            if (hasMaestroOnS1) Serial.print(" (Maestro)");
         }
-        if (hasMaestroOnS1) {
-            Serial.print(" (Maestro)");
+        else if (i == 1 && Kyber_Local) {
+            Serial.print(" (Kyber)");
         }
-        } else if (i == 1 && Kyber_Local) {
-        Serial.print(" (Kyber)");
-        }
-        
+
         Serial.println();
     }
 }
@@ -1739,6 +1742,7 @@ void saveETMSettings() {
     preferences.putInt("etmTimeout", etmTimeoutMs);
     preferences.putInt("etmCharCount", etmCharMessageCount);
     preferences.putInt("etmCharDelay", etmCharDelayMs);
+    preferences.putBool("etmChksm", etmChecksumEnabled);
     preferences.end();
 }
 
@@ -1751,6 +1755,7 @@ void loadETMSettings() {
     etmTimeoutMs        = preferences.getInt("etmTimeout", 500);
     etmCharMessageCount = preferences.getInt("etmCharCount", 20);
     etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);
+    etmChecksumEnabled = preferences.getBool("etmChksm", false);
     preferences.end();
     if (etmEnabled) {
         Serial.println("ETM: ENABLED ⚠️  Ensure all boards match firmware!");

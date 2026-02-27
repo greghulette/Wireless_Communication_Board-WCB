@@ -73,6 +73,8 @@ void printCommandHelp(const String &cmd);
 //   ?ETM,COUNT,n             Characterization message count per phase (10-200, default: 20)
 //   ?ETM,DELAY,ms            Characterization inter-message delay (default: 100ms)
 //   ?ETM,CHAR                Run network characterization test
+//   ?ETM,CHKSM,ON            Enable Checksum on commands
+//   ?ETM/CHKSM,OFF           Disable Cecksum on commands
 //
 // DEBUG
 //   ?DEBUG,ON                Enable main debug output
@@ -110,6 +112,7 @@ void printCommandHelp(const String &cmd);
 //   ;Sx,message              Send message to local serial port x (1-5)
 //   ;Wx,message              Send message to WCB x via ESP-NOW unicast
 //   ;Ckey                    Run stored sequence named key
+//   ;SEQkey                    Run stored sequence named key
 //   ;Mx,script               Trigger Maestro x script number
 //   ;Tms,command             Wait ms milliseconds then execute command
 //                              Used standalone or chained in sequences
