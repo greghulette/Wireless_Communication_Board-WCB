@@ -772,7 +772,7 @@ function playSequence(n, rowId) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
-  const cmd = `${cmdChar}SEQ,${key}`;
+  const cmd = `${cmdChar}SEQ${key}`;
   conn.send(cmd + '\r');
   termLog(n, cmd, 'in');
   showToast(`Sent: ${cmd}`, 'info');
