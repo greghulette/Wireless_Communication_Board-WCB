@@ -328,17 +328,27 @@ function parseToken(body, config) {
     }
 
     // ── Maestro ──
-    case 'MAESTRO': {
-      // ?MAESTRO,ID,Sx,BAUD  e.g. ?MAESTRO,1,S1,57600
-      const maestroId   = parseInt(parts[1]);
-      const portStr     = upperParts[2];
-      const maestroPort = parseInt(portStr?.replace('S', '')) || null;
-      const maestroBaud = parseInt(parts[3]) || 57600;
-      if (maestroId && maestroPort) {
-        config.maestros.push({ id: maestroId, port: maestroPort, baud: maestroBaud });
-      }
-      break;
+case 'MAESTRO': {
+  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
+  // Chained: ?MAESTRO,M1:W1S2:57600,M2:W2S1:57600
+  // Skip control subcommands
+  const sub = upperParts[1];
+  if (sub === 'LIST' || sub === 'CLEAR' || sub === 'ENABLE' || sub === 'DISABLE') break;
+
+  // Parse all M<id>:W<wcb>S<port>:<baud> entries (parts[1], parts[2], ...)
+  for (let i = 1; i < parts.length; i++) {
+    const entry = parts[i].toUpperCase();
+    const mMatch = entry.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
+    if (mMatch) {
+      config.maestros.push({
+        id:   parseInt(mMatch[1]),
+        port: parseInt(mMatch[3]),
+        baud: parseInt(mMatch[4])
+      });
     }
+  }
+  break;
+}
 
     // ── ETM ──
     case 'ETM': {
@@ -710,7 +720,7 @@ function buildCommandString(config, baseline = null, fullPush = false) {
 
   if (kyberChanged) {
     if (config.kyber.mode === 'local')
-      add(`KYBER,LOCAL,S${config.kyber.port}`);
+      add(`KYBER,LOCAL,S${config.kyber.port || 2}`);
     else if (config.kyber.mode === 'remote')
       add('KYBER,REMOTE');
     else
@@ -718,14 +728,17 @@ function buildCommandString(config, baseline = null, fullPush = false) {
   }
 
   // ── Maestros ──
-  // Always push all maestros on full push; on diff push, compare arrays
+  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>,M<id>:W<wcb>S<port>:<baud>,...
   const maestrosChanged = fullPush || !baseline ||
     JSON.stringify(baseline.maestros) !== JSON.stringify(config.maestros);
 
-  if (maestrosChanged) {
-    for (const m of config.maestros) {
-      add(`MAESTRO,${m.id},S${m.port},${m.baud}`);
-    }
+  if (maestrosChanged && config.maestros.length > 0) {
+    const chain = config.maestros
+      .map(m => `M${m.id}:W${config.wcbNumber}S${m.port}:${m.baud}`)
+      .join(',');
+    add(`MAESTRO,${chain}`);
+  } else if (maestrosChanged && config.maestros.length === 0 && baseline?.maestros?.length > 0) {
+    add('MAESTRO,CLEAR,ALL');
   }
 
   // ── ETM ──

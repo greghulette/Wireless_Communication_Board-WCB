@@ -776,12 +776,34 @@ class BoardConnection {
 
   isConnected() { return this._connected; }
 
-  async connect() {
+  async connect(existingPort = null) {
     if (!('serial' in navigator)) throw new Error('WebSerial not supported in this browser');
-    this.port = await navigator.serial.requestPort();
+    if (existingPort) {
+      this.port = existingPort;
+    } else {
+      this.port = await navigator.serial.requestPort();
+    }
     await this.port.open({ baudRate: 115200 });
     this._connected = true;
     this._startReading();
+  }
+
+  // After a reboot, attempt to reopen the same port
+  async reconnect(maxAttempts = 10, delayMs = 1500) {
+    if (!this.port) return false;
+    for (let i = 0; i < maxAttempts; i++) {
+      await sleep(delayMs);
+      try {
+        await this.port.open({ baudRate: 115200 });
+        this._connected = true;
+        this._readBuffer = '';
+        this._startReading();
+        return true;
+      } catch (_) {
+        // Port not ready yet — keep trying
+      }
+    }
+    return false;
   }
 
   async disconnect() {
@@ -871,7 +893,18 @@ class BoardConnection {
     if (this._connected) {
       this._connected = false;
       updateConnectionUI(this.boardIndex, false);
-      termLog(this.boardIndex, 'Board disconnected (reboot?)', 'sys');
+      termLog(this.boardIndex, 'Board disconnected — attempting reconnect…', 'sys');
+      // Try to reconnect to the same port (board rebooting)
+      const reconnected = await this.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(this.boardIndex, true);
+        termLog(this.boardIndex, 'Reconnected after reboot', 'sys');
+        showToast(`WCB ${this.boardIndex} reconnected`, 'success');
+        setTimeout(() => boardPull(this.boardIndex), 1000);
+      } else {
+        termLog(this.boardIndex, 'Could not reconnect — board may need manual reconnect', 'err');
+        showToast(`WCB ${this.boardIndex} did not come back — reconnect manually`, 'error');
+      }
     }
   }
 }
@@ -996,12 +1029,9 @@ async function boardGo(n) {
     termLog(n, '?reboot', 'in');
 
     updateBoardStatusBadge(n, 'configured');
-    showToast(`WCB ${n} configured — rebooting`, 'success');
-
-    setTimeout(async () => {
-      await boardConnections[n]?.disconnect();
-      updateConnectionUI(n, false);
-    }, 2500);
+    showToast(`WCB ${n} configured — rebooting, will reconnect…`, 'success');
+    // Don't manually disconnect — let _startReading detect the reboot
+    // and auto-reconnect via the reconnect() method
 
   } catch (e) {
     showToast(`Push failed: ${e.message}`, 'error');
@@ -1024,6 +1054,16 @@ function updateConnectionUI(n, connected) {
   if (connBtn) connBtn.textContent = connected ? 'Disconnect' : 'Connect';
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
+
+  // Update terminal header to show which board is active
+  const termLabel = document.getElementById('terminal-board-label');
+  if (termLabel) {
+    const connectedBoards = Object.entries(boardConnections)
+      .filter(([, c]) => c.isConnected())
+      .map(([i]) => `WCB ${i}`)
+      .join(', ');
+    termLabel.textContent = connectedBoards || 'No board connected';
+  }
 }
 
 function syncGeneralFromConfig(config) {

@@ -646,20 +646,52 @@ void storeKyberSettings(const String &message) {
     params = message.substring(firstComma + 1);
     
     int secondComma = params.indexOf(',');
-    if (secondComma != -1 && (params.startsWith("S") || params.startsWith("s"))) {
-      String portStr = params.substring(1, secondComma);
-      kyberPort = portStr.toInt();
-      params = params.substring(secondComma + 1);
-      kyberUseTargeting = true;
-    } else {
-      Serial.println("Invalid format. Use: ?KYBER_LOCAL,Sx,M1:W1S1:115200,...");
-      return;
-    }
+if (params.startsWith("S") || params.startsWith("s")) {
+  String portStr;
+  if (secondComma != -1) {
+    portStr = params.substring(1, secondComma);
+    params = params.substring(secondComma + 1);
+  } else {
+    portStr = params.substring(1);  // port only, no maestro targets
+    params = "";
   }
-  
+  kyberPort = portStr.toInt();
+  kyberUseTargeting = true;
+} else {
+  Serial.println("Invalid format. Use: ?KYBER,LOCAL,Sx or ?KYBER,LOCAL,Sx,M1:W1S1:57600");
+  return;
+}
+  } 
   if (baseCommand.equals("local") && kyberUseTargeting && (kyberPort < 1 || kyberPort > 5)) {
     Serial.println("Invalid Kyber port. Must be S1-S5");
     return;
+  }
+  
+   // If port specified but no targets provided, auto-populate from existing maestro configs
+  if (kyberUseTargeting && params.length() == 0) {
+      int targetIndex = 0;
+      for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+          kyberTargets[i].enabled = false;
+      }
+      for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+          if (maestroConfigs[i].configured && targetIndex < MAX_KYBER_TARGETS) {
+              kyberTargets[targetIndex].maestroID  = maestroConfigs[i].maestroID;
+              kyberTargets[targetIndex].targetWCB  = maestroConfigs[i].remoteWCB > 0 
+                                                     ? maestroConfigs[i].remoteWCB 
+                                                     : WCB_Number;
+              kyberTargets[targetIndex].targetPort = maestroConfigs[i].serialPort > 0
+                                                     ? maestroConfigs[i].serialPort
+                                                     : 1;
+              kyberTargets[targetIndex].enabled    = true;
+              targetIndex++;
+          }
+      }
+      if (targetIndex > 0) {
+          Serial.printf("Auto-populated %d Kyber targets from existing Maestro configs\n", targetIndex);
+      } else {
+          Serial.println("Warning: No Maestro configs found to auto-populate Kyber targets");
+          Serial.println("Configure Maestros first with ?MAESTRO,M<id>:W<wcb>S<port>:<baud>");
+      }
   }
   
   if (baseCommand.equals("local")) {
