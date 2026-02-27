@@ -152,22 +152,6 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .browser-warning.hidden { display: none; }
 
-/* ─── Drop Zone ──────────────────────────────────────────────── */
-.drop-zone {
-  margin: 16px 24px;
-  border: 2px dashed var(--border2);
-  border-radius: var(--radius2);
-  padding: 20px; text-align: center;
-  color: var(--text3); font-size: 12px;
-  cursor: pointer; transition: all var(--transition);
-  background: var(--bg2);
-}
-.drop-zone:hover, .drop-zone.drag-over {
-  border-color: var(--accent); color: var(--accent);
-  background: rgba(0, 212, 255, 0.05);
-}
-.drop-zone span { display: block; margin-top: 4px; color: var(--text3); font-size: 11px; }
-
 /* ─── Main Content ───────────────────────────────────────────── */
 .main {
   padding: 0 24px 120px;
@@ -432,8 +416,28 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   position: fixed; bottom: 0; left: 0; right: 0;
   background: var(--bg2); border-top: 1px solid var(--border);
   z-index: 200; display: none; flex-direction: column; height: 260px;
+  min-height: 120px; max-height: 80vh;
 }
 .terminal-drawer.open { display: flex; }
+
+.terminal-resize-handle {
+  height: 6px; cursor: ns-resize; flex-shrink: 0;
+  background: var(--border);
+  transition: background var(--transition);
+  position: relative;
+}
+.terminal-resize-handle:hover,
+.terminal-resize-handle.dragging { background: var(--accent); }
+.terminal-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px; height: 2px;
+  border-radius: 1px;
+  background: var(--text3);
+  box-shadow: 0 -3px 0 var(--text3), 0 3px 0 var(--text3);
+}
 .terminal-header {
   display: flex; align-items: center; gap: 10px; padding: 8px 16px;
   border-bottom: 1px solid var(--border); background: var(--bg3); flex-shrink: 0;

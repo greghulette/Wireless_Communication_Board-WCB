@@ -19,9 +19,9 @@ let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled f
 document.addEventListener('DOMContentLoaded', () => {
   checkBrowserCompat();
   loadThemePreference();
-  initSystemConfig();    // creates boards first
-  loadModePreference();  // then apply mode (so advanced-only in boards is found)
-  setupDropZone();
+  initSystemConfig();
+  loadModePreference();
+  initTerminalResize();
 });
 
 function checkBrowserCompat() {
@@ -325,6 +325,18 @@ function onHWVersionChange(n) {
   onBoardFieldChange(n);
 }
 
+function syncKyberToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  const mode = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
+  config.kyber.mode = mode;
+  if (mode === 'local') {
+    config.kyber.port = parseInt(document.getElementById(`b${n}-kyber-port`)?.value) || null;
+  } else {
+    config.kyber.port = null;
+  }
+}
+
 function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
@@ -433,18 +445,26 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
   if (!portSel) return;
   const config = boardConfigs[n];
 
+  // Find which ports are claimed by OTHER maestro rows (not this one)
+  const otherClaims = new Set();
+  document.getElementById(`b${n}-maestro-tbody`)?.querySelectorAll('tr').forEach(row => {
+    if (row.id === rowId) return; // skip self
+    const p = parseInt(row.querySelector('[id$="-port"]')?.value);
+    if (p) otherClaims.add(p);
+  });
+
   portSel.innerHTML = '<option value="">— Select —</option>';
   for (let p = 1; p <= 5; p++) {
+    // Exclude ports claimed by kyber or other maestro rows
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    // Available = unclaimed OR currently claimed by this maestro row's own assignment
-    const currentlyMine = claim?.type === 'maestro' && portSel.dataset.lastPort == p;
-    if (!claim || currentlyMine) {
-      const opt = document.createElement('option');
-      opt.value = p;
-      opt.textContent = `Serial ${p}`;
-      if (p === selectedPort) opt.selected = true;
-      portSel.appendChild(opt);
-    }
+    const claimedByKyber = claim?.type === 'kyber';
+    if (claimedByKyber || otherClaims.has(p)) continue;
+
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = `Serial ${p}`;
+    if (p === selectedPort) opt.selected = true;
+    portSel.appendChild(opt);
   }
 }
 
@@ -765,12 +785,19 @@ class BoardConnection {
   }
 
   async disconnect() {
-    try {
-      if (this.reader) { await this.reader.cancel(); this.reader = null; }
-      if (this.port?.readable?.locked === false) await this.port.close();
-    } catch (_) {}
     this._connected = false;
-    this.port = null;
+    try {
+      if (this.reader) {
+        await this.reader.cancel();
+        this.reader = null;
+      }
+    } catch (_) {}
+    try {
+      if (this.port) {
+        await this.port.close();
+        this.port = null;
+      }
+    } catch (_) {}
   }
 
   async send(data) {
@@ -809,10 +836,15 @@ class BoardConnection {
   onData(callback) { this._dataCallbacks.push(callback); }
 
   async _startReading() {
-    while (this.port?.readable) {
-      this.reader = this.port.readable.getReader();
+    while (this._connected && this.port?.readable) {
       try {
-        while (true) {
+        this.reader = this.port.readable.getReader();
+      } catch (e) {
+        // Port no longer readable — board disconnected/rebooted
+        break;
+      }
+      try {
+        while (this._connected) {
           const { value, done } = await this.reader.read();
           if (done) break;
           this._readBuffer += new TextDecoder().decode(value);
@@ -827,15 +859,19 @@ class BoardConnection {
           }
         }
       } catch (e) {
-        if (e.name !== 'CancelledError') {
-          this._connected = false;
-          updateConnectionUI(this.boardIndex, false);
-          termLog(this.boardIndex, `Disconnected: ${e.message}`, 'err');
-        }
+        // Board disconnected mid-read (e.g. reboot) — exit cleanly
+        termLog(this.boardIndex, `Port closed: ${e.message}`, 'sys');
       } finally {
         try { this.reader?.releaseLock(); } catch (_) {}
         this.reader = null;
       }
+      break; // Don't loop — one clean read session per connect
+    }
+    // Clean up if we exited due to board reboot rather than user disconnect
+    if (this._connected) {
+      this._connected = false;
+      updateConnectionUI(this.boardIndex, false);
+      termLog(this.boardIndex, 'Board disconnected (reboot?)', 'sys');
     }
   }
 }
@@ -859,7 +895,9 @@ async function boardConnect(n) {
     await conn.connect();
     boardConnections[n] = conn;
     updateConnectionUI(n, true);
-    showToast(`Connected to WCB ${n}`, 'success');
+    showToast(`Connected to WCB ${n} — pulling config…`, 'success');
+    // Auto-pull after short delay to let board settle
+    setTimeout(() => boardPull(n), 500);
   } catch (e) {
     if (e.name !== 'NotFoundError') showToast(`Connection failed: ${e.message}`, 'error');
     btn.textContent = 'Connect';
@@ -920,6 +958,8 @@ async function boardGo(n) {
   try {
     // Collect current UI state into config
     syncSerialUIToConfig(n);
+    syncMaestrosToConfig(n);   // ← was missing
+    syncKyberToConfig(n);      // ← was missing
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
@@ -1010,17 +1050,6 @@ function syncGeneralFromConfig(config) {
 }
 
 // ─── File Import ──────────────────────────────────────────────────
-function setupDropZone() {
-  const zone = document.getElementById('drop-zone');
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-  zone.addEventListener('drop', e => {
-    e.preventDefault();
-    zone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) readFile(file);
-  });
-}
 
 function loadFileFromInput(event) {
   const file = event.target.files[0];
@@ -1099,6 +1128,35 @@ function exportSystemFile() {
 }
 
 // ─── Terminal ─────────────────────────────────────────────────────
+function initTerminalResize() {
+  const handle  = document.getElementById('terminal-resize-handle');
+  const drawer  = document.getElementById('terminal-drawer');
+  if (!handle || !drawer) return;
+
+  let startY, startH;
+
+  handle.addEventListener('mousedown', e => {
+    startY = e.clientY;
+    startH = drawer.offsetHeight;
+    handle.classList.add('dragging');
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('mouseup', stopDrag);
+    e.preventDefault();
+  });
+
+  function onDrag(e) {
+    const delta  = startY - e.clientY; // drag up = increase height
+    const newH   = Math.min(Math.max(startH + delta, 120), window.innerHeight * 0.8);
+    drawer.style.height = newH + 'px';
+  }
+
+  function stopDrag() {
+    handle.classList.remove('dragging');
+    document.removeEventListener('mousemove', onDrag);
+    document.removeEventListener('mouseup', stopDrag);
+  }
+}
+
 function toggleTerminal() {
   document.getElementById('terminal-drawer').classList.toggle('open');
 }
