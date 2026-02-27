@@ -27,6 +27,42 @@
   --transition: 150ms ease;
 }
 
+:root.light {
+  --bg:         #f0f2f5;
+  --bg2:        #ffffff;
+  --bg3:        #f5f7fa;
+  --bg4:        #eaecf0;
+  --border:     #d0d5dd;
+  --border2:    #b8bfcc;
+  --text:       #111827;
+  --text2:      #4b5563;
+  --text3:      #9ca3af;
+  --accent:     #0099cc;
+  --accent2:    #007aa3;
+  --green:      #059669;
+  --green2:     #047857;
+  --yellow:     #d97706;
+  --yellow2:    #b45309;
+  --red:        #dc2626;
+  --red2:       #b91c1c;
+  --orange:     #ea580c;
+}
+
+/* Theme toggle button */
+.theme-toggle {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text2);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 5px 9px;
+  cursor: pointer;
+  transition: all var(--transition);
+  line-height: 1;
+}
+.theme-toggle:hover { background: var(--bg4); color: var(--text); }
+
 html { scroll-behavior: smooth; }
 body {
   font-family: var(--mono);
@@ -159,6 +195,55 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .section-body { padding: 18px; display: none; }
 .section.open .section-body { display: block; }
+
+/* ─── Board Color Stripes ─────────────────────────────────────── */
+/* Left border stripe + subtle header tint per board */
+.board-stripe { width: 4px; height: 32px; border-radius: 2px; flex-shrink: 0; }
+
+.board-color-1 { --bc: #00d4ff; --bc-dim: rgba(0,212,255,0.07); }
+.board-color-2 { --bc: #a78bfa; --bc-dim: rgba(167,139,250,0.07); }
+.board-color-3 { --bc: #34d399; --bc-dim: rgba(52,211,153,0.07); }
+.board-color-4 { --bc: #fb923c; --bc-dim: rgba(251,146,60,0.07); }
+.board-color-5 { --bc: #f472b6; --bc-dim: rgba(244,114,182,0.07); }
+.board-color-6 { --bc: #facc15; --bc-dim: rgba(250,204,21,0.07); }
+.board-color-7 { --bc: #4ade80; --bc-dim: rgba(74,222,128,0.07); }
+.board-color-8 { --bc: #60a5fa; --bc-dim: rgba(96,165,250,0.07); }
+
+/* Apply the stripe color to the section border-left */
+.section[class*="board-color-"] {
+  border-left: 3px solid var(--bc);
+}
+
+/* Tint the header background */
+.section[class*="board-color-"] .section-header {
+  background: var(--bc-dim);
+}
+.section[class*="board-color-"] .section-header:hover {
+  background: color-mix(in srgb, var(--bc) 12%, var(--bg3));
+}
+
+/* Board number pill in header */
+.board-num-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  background: var(--bc);
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 13px;
+  color: #0d0f12;
+  flex-shrink: 0;
+}
+
+/* Light mode adjustments for board colors */
+:root.light .board-color-1 { --bc-dim: rgba(0,153,204,0.06); }
+:root.light .board-color-2 { --bc-dim: rgba(124,58,237,0.06); }
+:root.light .board-color-3 { --bc-dim: rgba(5,150,105,0.06); }
+:root.light .board-color-4 { --bc-dim: rgba(234,88,12,0.06); }
+:root.light .board-color-5 { --bc-dim: rgba(219,39,119,0.06); }
+:root.light .board-color-6 { --bc-dim: rgba(180,83,9,0.06); }
+:root.light .board-color-7 { --bc-dim: rgba(22,163,74,0.06); }
+:root.light .board-color-8 { --bc-dim: rgba(37,99,235,0.06); }
 
 /* ─── Status Badge ───────────────────────────────────────────── */
 .badge {

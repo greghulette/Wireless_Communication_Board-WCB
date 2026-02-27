@@ -18,6 +18,7 @@ let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled f
 // ─── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   checkBrowserCompat();
+  loadThemePreference();
   initSystemConfig();    // creates boards first
   loadModePreference();  // then apply mode (so advanced-only in boards is found)
   setupDropZone();
@@ -37,6 +38,21 @@ function loadModePreference() {
 function initSystemConfig() {
   systemConfig = WCBParser.createDefaultSystemConfig();
   renderBoards(1);
+}
+
+// ─── Theme ────────────────────────────────────────────────────────
+function toggleTheme() {
+  const isLight = document.documentElement.classList.toggle('light');
+  localStorage.setItem('wcb-theme', isLight ? 'light' : 'dark');
+  document.getElementById('theme-toggle').textContent = isLight ? '☀️' : '🌙';
+}
+
+function loadThemePreference() {
+  const saved = localStorage.getItem('wcb-theme');
+  if (saved === 'light') {
+    document.documentElement.classList.add('light');
+    document.getElementById('theme-toggle').textContent = '☀️';
+  }
 }
 
 // ─── Mode Toggle ──────────────────────────────────────────────────
@@ -87,7 +103,9 @@ function addBoardSection(n) {
   const html     = template.innerHTML.replace(/\{N\}/g, n);
   const temp     = document.createElement('div');
   temp.innerHTML = html;
-  document.getElementById('boards-container').appendChild(temp.firstElementChild);
+  const section  = temp.firstElementChild;
+  section.classList.add(`board-color-${((n - 1) % 8) + 1}`);
+  document.getElementById('boards-container').appendChild(section);
 
   renderSerialTable(n);
   boardConfigs[n] = WCBParser.createDefaultBoardConfig();
@@ -562,6 +580,22 @@ function onMappingTypeChange(rowId, n) {
   const type    = document.getElementById(`${rowId}-type`)?.value;
   const rawWrap = document.getElementById(`${rowId}-raw-wrap`);
   if (rawWrap) rawWrap.style.display = type === 'Serial' ? '' : 'none';
+
+  // Rebuild destination port dropdowns to add/remove S0 (USB)
+  const container = document.getElementById(`${rowId}-destinations`);
+  if (container) {
+    container.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
+      const portSel  = destRow.querySelector('[id$="-port"]');
+      const curPort  = parseInt(portSel?.value) ?? null;
+      const isSerial = type === 'Serial';
+      const portOptions = (isSerial ? [{ v:0, l:'S0 (USB)' }] : [])
+        .concat([1,2,3,4,5].map(p => ({ v:p, l:`S${p}` })))
+        .map(({ v, l }) => `<option value="${v}" ${curPort===v?'selected':''}>${l}</option>`)
+        .join('');
+      if (portSel) portSel.innerHTML = portOptions;
+    });
+  }
+
   onMappingChange(rowId, n);
 }
 
@@ -624,15 +658,19 @@ function appendMappingDestination(rowId, n, dest) {
 
   const destId = `map-dest-${rowId}-${Date.now()}`;
   const wcbQty = parseInt(document.getElementById('g-wcbq')?.value) || 8;
+  const mapType = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
+  const isSerial = mapType === 'Serial';
 
   const wcbOptions = `<option value="0">Local</option>` +
     Array.from({length: wcbQty}, (_,i) =>
       `<option value="${i+1}" ${dest.wcbNumber===i+1?'selected':''}>WCB ${i+1}</option>`
     ).join('');
 
-  const portOptions = [1,2,3,4,5].map(p =>
-    `<option value="${p}" ${dest.port===p?'selected':''}>S${p}</option>`
-  ).join('');
+  // S0 = USB Serial, only valid for Serial type mappings
+  const portOptions = (isSerial ? [{ v:0, l:'S0 (USB)' }] : [])
+    .concat([1,2,3,4,5].map(p => ({ v:p, l:`S${p}` })))
+    .map(({ v, l }) => `<option value="${v}" ${dest.port===v?'selected':''}>${l}</option>`)
+    .join('');
 
   const div = document.createElement('div');
   div.id    = destId;

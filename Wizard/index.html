@@ -30,6 +30,7 @@
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('file-input').click()">⬆ Load File</button>
       <button class="btn btn-ghost btn-sm" onclick="exportSystemFile()">⬇ Export</button>
       <button id="btn-terminal" class="btn btn-ghost btn-sm advanced-only hidden" onclick="toggleTerminal()">⌨ Terminal</button>
+      <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
     </div>
   </header>
 
@@ -165,6 +166,7 @@
   <div class="section open" id="section-board-{N}">
     <div class="section-header" onclick="toggleSection('section-board-{N}')">
       <span class="section-chevron">▶</span>
+      <span class="board-num-pill">{N}</span>
       <div class="section-title"><h2>WCB {N}</h2></div>
       <div class="section-meta">
         <span class="fw-version" id="b{N}-fw-version"></span>
