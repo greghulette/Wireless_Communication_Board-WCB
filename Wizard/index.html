@@ -40,11 +40,6 @@
     Please use <strong>Chrome 89+</strong> or <strong>Edge 89+</strong> to connect to boards.
   </div>
 
-  <!-- ─── Drop Zone ───────────────────────────────────────────────── -->
-  <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
-    📂 Drag &amp; drop your <strong>WCB_system.txt</strong> here, or click to load
-    <span>Supports single-board and multi-board system config files</span>
-  </div>
   <input type="file" id="file-input" accept=".txt" style="display:none" onchange="loadFileFromInput(event)">
 
   <!-- ─── Main Content ────────────────────────────────────────────── -->
@@ -90,10 +85,10 @@
           </div>
         </div>
 
-        <hr class="divider">
+        <hr class="divider advanced-only hidden">
 
-        <div class="subsection-title">Command Characters <span class="text-muted">— must match across all boards</span></div>
-        <div class="field-group">
+        <div class="subsection-title advanced-only hidden">Command Characters <span class="text-muted">— must match across all boards</span></div>
+        <div class="field-group advanced-only hidden">
           <div class="field">
             <label>Command Delimiter</label>
             <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
@@ -111,10 +106,10 @@
           </div>
         </div>
 
-        <hr class="divider">
+        <hr class="divider advanced-only hidden">
 
-        <div class="subsection-title">Event Tracking Module (ETM)</div>
-        <div class="toggle-wrap mb-12">
+        <div class="subsection-title advanced-only hidden">Event Tracking Module (ETM)</div>
+        <div class="toggle-wrap mb-12 advanced-only hidden">
           <label class="toggle">
             <input type="checkbox" id="g-etm-enabled" onchange="onETMToggle()">
             <span class="toggle-track"></span>
