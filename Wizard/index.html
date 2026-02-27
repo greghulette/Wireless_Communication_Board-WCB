@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WCB Configuration Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ─── Header ─────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="logo-mark">W</div>
+      <div class="header-title">
+        <h1>WCB Config Tool</h1>
+        <span>Wireless Communication Board</span>
+      </div>
+    </div>
+    <div class="header-spacer"></div>
+    <div class="header-actions">
+      <div class="mode-toggle">
+        <button id="btn-simple" class="active" onclick="setMode('simple')">Simple</button>
+        <button id="btn-advanced" onclick="setMode('advanced')">Advanced</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('file-input').click()">⬆ Load File</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportSystemFile()">⬇ Export</button>
+      <button id="btn-terminal" class="btn btn-ghost btn-sm advanced-only hidden" onclick="toggleTerminal()">⌨ Terminal</button>
+    </div>
+  </header>
+
+  <!-- ─── Browser Warning ─────────────────────────────────────────── -->
+  <div id="browser-warning" class="browser-warning hidden">
+    ⚠ WebSerial is not supported in this browser.
+    Please use <strong>Chrome 89+</strong> or <strong>Edge 89+</strong> to connect to boards.
+  </div>
+
+  <!-- ─── Drop Zone ───────────────────────────────────────────────── -->
+  <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+    📂 Drag &amp; drop your <strong>WCB_system.txt</strong> here, or click to load
+    <span>Supports single-board and multi-board system config files</span>
+  </div>
+  <input type="file" id="file-input" accept=".txt" style="display:none" onchange="loadFileFromInput(event)">
+
+  <!-- ─── Main Content ────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- ═══ GENERAL SECTION ════════════════════════════════════════ -->
+    <div class="section open" id="section-general">
+      <div class="section-header" onclick="toggleSection('section-general')">
+        <span class="section-chevron">▶</span>
+        <div class="section-title"><h2>General Settings</h2></div>
+        <div class="section-meta">
+          <span class="badge badge-default" id="badge-general">System-Wide</span>
+        </div>
+      </div>
+      <div class="section-body">
+
+        <div class="subsection-title">Network Identity</div>
+        <div class="field-group">
+          <div class="field">
+            <label>Total WCB Quantity</label>
+            <select id="g-wcbq" onchange="onWCBQuantityChange()">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>ESP-NOW Password</label>
+            <input type="text" id="g-password" placeholder="change_me_or_risk_takeover" maxlength="39"
+              oninput="onGeneralPasswordChange()" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>MAC Octet 2 (hex)</label>
+            <input type="text" id="g-mac2" placeholder="00" maxlength="2"
+              oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
+              style="text-transform:uppercase" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>MAC Octet 3 (hex)</label>
+            <input type="text" id="g-mac3" placeholder="00" maxlength="2"
+              oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
+              style="text-transform:uppercase" spellcheck="false">
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <div class="subsection-title">Command Characters <span class="text-muted">— must match across all boards</span></div>
+        <div class="field-group">
+          <div class="field">
+            <label>Command Delimiter</label>
+            <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+          <div class="field">
+            <label>Local Function Identifier</label>
+            <input type="text" id="g-funcchar" value="?" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+          <div class="field">
+            <label>Command Character</label>
+            <input type="text" id="g-cmdchar" value=";" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <div class="subsection-title">Event Tracking Module (ETM)</div>
+        <div class="toggle-wrap mb-12">
+          <label class="toggle">
+            <input type="checkbox" id="g-etm-enabled" onchange="onETMToggle()">
+            <span class="toggle-track"></span>
+            <span class="toggle-label">ETM Enabled</span>
+          </label>
+        </div>
+        <div class="etm-detail" id="etm-detail">
+          <div class="field-group">
+            <div class="field"><label>Timeout (ms)</label><input type="number" id="g-etm-timeout" value="30000"></div>
+            <div class="field"><label>Heartbeat Interval (sec)</label><input type="number" id="g-etm-hb" value="10"></div>
+            <div class="field"><label>Missed Heartbeats</label><input type="number" id="g-etm-miss" value="3"></div>
+            <div class="field"><label>Boot Heartbeat (sec)</label><input type="number" id="g-etm-boot" value="30"></div>
+            <div class="field"><label>Message Count</label><input type="number" id="g-etm-count" value="3"></div>
+            <div class="field"><label>Message Delay (ms)</label><input type="number" id="g-etm-delay" value="100"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ═══ BOARD SECTIONS (dynamically generated) ═════════════════ -->
+    <div id="boards-container"></div>
+
+  </main>
+</div>
+
+<!-- ─── Terminal Drawer ──────────────────────────────────────────── -->
+<div class="terminal-drawer" id="terminal-drawer">
+  <div class="terminal-header">
+    <h3>⌨ TERMINAL</h3>
+    <span class="text-muted" id="terminal-board-label">No board connected</span>
+    <div style="flex:1"></div>
+    <button class="btn btn-ghost btn-sm" onclick="clearTerminal()">✕ Clear</button>
+    <button class="btn btn-ghost btn-sm" onclick="toggleTerminal()">▼ Close</button>
+  </div>
+  <div class="terminal-output" id="terminal-output"></div>
+  <div class="terminal-input-row">
+    <input class="terminal-input" id="terminal-input" type="text" placeholder="Send command…"
+      onkeydown="onTerminalKeydown(event)" spellcheck="false" autocomplete="off">
+    <button class="btn btn-ghost btn-sm" onclick="sendTerminalCommand()">Send ↵</button>
+  </div>
+</div>
+
+<!-- ─── Toast Container ──────────────────────────────────────────── -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- ─── Board Section Template ───────────────────────────────────── -->
+<template id="board-template">
+  <div class="section open" id="section-board-{N}">
+    <div class="section-header" onclick="toggleSection('section-board-{N}')">
+      <span class="section-chevron">▶</span>
+      <div class="section-title"><h2>WCB {N}</h2></div>
+      <div class="section-meta">
+        <span class="fw-version" id="b{N}-fw-version"></span>
+        <span class="badge badge-default" id="b{N}-status-badge">Not Configured</span>
+      </div>
+    </div>
+    <div class="section-body">
+
+      <!-- Action Bar -->
+      <div class="board-action-bar">
+        <div class="action-bar-left">
+          <div class="flash-mode">
+            <label><input type="radio" name="b{N}-mode" value="configure" checked><span>Configure Only</span></label>
+            <label><input type="radio" name="b{N}-mode" value="flash"><span>Flash &amp; Configure</span></label>
+          </div>
+          <div class="connection-status">
+            <span class="status-dot" id="b{N}-dot"></span>
+            <span id="b{N}-conn-label">Not connected</span>
+          </div>
+        </div>
+        <div class="action-bar-right">
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="boardConnect({N})">Connect</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
+          <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>▶ Go</button>
+        </div>
+      </div>
+
+      <!-- Board Identity -->
+      <div class="subsection-title">Board Identity</div>
+      <div class="field-group">
+        <div class="field">
+          <label>Hardware Version</label>
+          <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
+            <option value="0">— Select —</option>
+            <option value="1">1.0  (LilyGo T7 V1.5)</option>
+            <option value="21">2.1  (Custom Board)</option>
+            <option value="23">2.3  (Custom Board)</option>
+            <option value="24">2.4  (Custom Board)</option>
+            <option value="31">3.1  (ESP32-S3)</option>
+            <option value="32">3.2  (ESP32-S3)</option>
+          </select>
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Serial Ports -->
+      <div class="subsection-title">Serial Ports</div>
+      <table class="serial-table" id="b{N}-serial-table">
+        <thead>
+          <tr>
+            <th>Port</th>
+            <th>Baud Rate</th>
+            <th>Bcast IN</th>
+            <th>Bcast OUT</th>
+            <th>Label</th>
+            <th style="min-width:140px">Status</th>
+          </tr>
+        </thead>
+        <tbody id="b{N}-serial-tbody"></tbody>
+      </table>
+
+      <hr class="divider">
+
+      <!-- Kyber -->
+      <div class="subsection-title">Kyber</div>
+      <div class="field-group">
+        <div class="field">
+          <label>Kyber Mode</label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
+            <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
+            <label><input type="radio" name="b{N}-kyber" value="remote" onchange="onKyberChange({N})"><span>Remote</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
+          <label>Kyber Port</label>
+          <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})"></select>
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Maestro -->
+      <div>
+        <div class="flex items-center gap-8 mb-12">
+          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Maestro</div>
+          <button class="btn btn-ghost btn-sm" onclick="addMaestroRow({N})">+ Add</button>
+        </div>
+        <table class="serial-table" id="b{N}-maestro-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>Maestro ID</th>
+              <th>Port</th>
+              <th>Baud</th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="b{N}-maestro-tbody"></tbody>
+        </table>
+        <p class="text-muted mt-8">IDs do not need to be unique — same ID on multiple boards triggers simultaneously.</p>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Mappings (Advanced Only) -->
+      <div class="advanced-only hidden">
+        <div class="flex items-center gap-8 mb-12">
+          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Mappings</div>
+          <button class="btn btn-ghost btn-sm" onclick="addMappingRow({N})">+ Add Mapping</button>
+        </div>
+        <div id="b{N}-mappings-container"></div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Stored Sequences -->
+      <div class="flex items-center gap-8 mb-12">
+        <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
+        <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+      </div>
+      <table class="seq-table">
+        <thead>
+          <tr>
+            <th style="width:140px">Key</th>
+            <th>Command Value</th>
+            <th style="width:80px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="b{N}-seq-tbody"></tbody>
+      </table>
+
+    </div>
+  </div>
+</template>
+
+<!-- ─── Scripts ──────────────────────────────────────────────────── -->
+<script src="parser.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
