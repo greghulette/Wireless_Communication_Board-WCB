@@ -110,6 +110,8 @@ function addBoardSection(n) {
   renderSerialTable(n);
   boardConfigs[n] = WCBParser.createDefaultBoardConfig();
   boardConfigs[n].wcbNumber = n;
+  const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
+  if (wcbNumSel) wcbNumSel.value = n;
 }
 
 // ─── Serial Table ─────────────────────────────────────────────────
@@ -315,6 +317,12 @@ function onSerialFieldChange(n) {
   onBoardFieldChange(n);
 }
 
+function onWCBNumberChange(n) {
+  const val = parseInt(document.getElementById(`b${n}-wcb-number`)?.value);
+  if (boardConfigs[n] && val >= 1 && val <= 8) boardConfigs[n].wcbNumber = val;
+  onBoardFieldChange(n);
+}
+
 function onHWVersionChange(n) {
   const hwVal = parseInt(document.getElementById(`b${n}-hw-version`)?.value);
   if (boardConfigs[n]) boardConfigs[n].hwVersion = hwVal;
@@ -351,6 +359,9 @@ function syncSerialUIToConfig(n) {
 }
 
 function populateUIFromConfig(n, config) {
+  const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
+  if (wcbNumSel) wcbNumSel.value = config.wcbNumber || n;
+
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
 
@@ -801,12 +812,16 @@ class BoardConnection {
 
   isConnected() { return this._connected; }
 
-  async connect(existingPort = null) {
+  async connect(existingPort = null, usedPorts = new Set()) {
     if (!('serial' in navigator)) throw new Error('WebSerial not supported in this browser');
     if (existingPort) {
       this.port = existingPort;
     } else {
       this.port = await navigator.serial.requestPort();
+      if (usedPorts.has(this.port)) {
+        this.port = null;
+        throw new Error('That port is already connected to another WCB. Please select a different port.');
+      }
     }
     await this.port.open({ baudRate: 115200 });
     this._connected = true;
@@ -962,8 +977,13 @@ async function boardConnect(n) {
     }
 
     btn.textContent = 'Connecting…';
+    const usedPorts = new Set(
+      Object.entries(boardConnections)
+        .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
+        .map(([, c]) => c.port)
+    );
     const conn = new BoardConnection(n);
-    await conn.connect();
+    await conn.connect(null, usedPorts);
     boardConnections[n] = conn;
     updateConnectionUI(n, true);
     showToast(`Connected to WCB ${n} — pulling config…`, 'success');
@@ -976,6 +996,148 @@ async function boardConnect(n) {
   btn.disabled = false;
 }
 
+// ─── Listen for Reset & Auto-Connect ─────────────────────────────
+const _listenCancels = {}; // n → cancel function
+
+async function boardListen(n) {
+  // If already listening for this slot, cancel
+  if (_listenCancels[n]) { _listenCancels[n](); return; }
+
+  // If already connected, nothing to do
+  if (boardConnections[n]?.isConnected()) {
+    showToast(`WCB ${n} is already connected`, 'info'); return;
+  }
+
+  const knownPorts = await navigator.serial.getPorts();
+  if (knownPorts.length === 0) {
+    showToast(
+      'No paired boards found. Use Connect to pair a board once, then Listen will work.',
+      'warning', 10000
+    );
+    return;
+  }
+
+  // Ports already owned by other active slots
+  const usedPorts = new Set(
+    Object.entries(boardConnections)
+      .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
+      .map(([, c]) => c.port)
+  );
+  const availablePorts = knownPorts.filter(p => !usedPorts.has(p));
+  if (availablePorts.length === 0) {
+    showToast('All known boards are already connected to other slots.', 'warning'); return;
+  }
+
+  const btn    = document.getElementById(`b${n}-btn-listen`);
+  const connBtn= document.getElementById(`b${n}-btn-connect`);
+  btn.textContent = '⊙ Listening…';
+  btn.classList.add('btn-listening');
+  if (connBtn) connBtn.disabled = true;
+  showToast(`WCB ${n}: press the reset button on the board…`, 'info', 45000);
+
+  // ── Shared state ──────────────────────────────────────────────
+  let triggered = false;
+  const openReaders = new Map(); // port → reader
+
+  // Release everything and reset button UI
+  async function cleanup(winningPort) {
+    clearTimeout(timeoutId);
+    navigator.serial.removeEventListener('connect', onNativeConnect);
+    delete _listenCancels[n];
+
+    for (const [port, reader] of openReaders) {
+      try { await reader.cancel(); } catch (_) {}
+      try { reader.releaseLock(); } catch (_) {}
+      if (port !== winningPort) { try { await port.close(); } catch (_) {} }
+    }
+    openReaders.clear();
+
+    const b  = document.getElementById(`b${n}-btn-listen`);
+    const cb = document.getElementById(`b${n}-btn-connect`);
+    if (b)  { b.textContent = 'Listen'; b.classList.remove('btn-listening'); b.disabled = false; }
+    if (cb) cb.disabled = false;
+  }
+
+  // Open the winning port via BoardConnection and pull config
+  async function autoConnect(port, portAlreadyClosedByCleanup) {
+    btn.textContent = 'Connecting…';
+    btn.disabled = true;
+
+    if (!portAlreadyClosedByCleanup) {
+      // We kept it open during cleanup — close it so connect() can reopen it
+      try { await port.close(); } catch (_) {}
+    }
+
+    try {
+      const conn = new BoardConnection(n);
+      await conn.connect(port);
+      boardConnections[n] = conn;
+      updateConnectionUI(n, true);
+      showToast(`WCB ${n}: board detected — waiting for boot…`, 'success');
+      // Board was caught mid-reset — wait for it to fully boot before pulling.
+      // 500ms is enough for an already-running board (normal connect), but
+      // after a reset the ESP32 needs 2-4 s to init before it can respond.
+      setTimeout(() => boardPull(n), 3500);
+    } catch (err) {
+      showToast(`Auto-connect failed: ${err.message}`, 'error');
+      btn.textContent = 'Listen';
+      btn.disabled = false;
+    }
+  }
+
+  // ── Path 1: native-USB boards (ESP32-S3) that fully disconnect on reset ──
+  const onNativeConnect = async (e) => {
+    if (triggered || usedPorts.has(e.target)) return;
+    triggered = true;
+    await cleanup(null); // port wasn't opened by us
+    await autoConnect(e.target, true);
+  };
+  navigator.serial.addEventListener('connect', onNativeConnect);
+
+  // ── Path 2: CH340/CP2102 boards — open each port and watch for data ──
+  // When the board soft-resets, it outputs boot messages at 115200 baud.
+  // We detect that data arriving and treat it as the reset signal.
+  async function monitorPort(port) {
+    try { await port.open({ baudRate: 115200 }); } catch (_) { return; }
+
+    const reader = port.readable.getReader();
+    openReaders.set(port, reader);
+
+    try {
+      while (!triggered) {
+        const { value, done } = await reader.read();
+        if (done || triggered) break;
+        if (value?.length > 0) {
+          if (triggered) break; // another port won the race
+          triggered = true;
+          await cleanup(port); // close all others, keep this port open
+          await autoConnect(port, false);
+          break;
+        }
+      }
+    } catch (_) {
+      // Reader was cancelled (cleanup) — normal exit
+    }
+  }
+
+  // ── Timeout ───────────────────────────────────────────────────
+  const timeoutId = setTimeout(async () => {
+    if (triggered) return;
+    triggered = true;
+    await cleanup(null);
+    showToast(`WCB ${n}: nothing detected — listen cancelled`, 'info');
+  }, 45000);
+
+  _listenCancels[n] = async () => {
+    if (triggered) return;
+    triggered = true;
+    await cleanup(null);
+  };
+
+  // Start monitoring all available authorized ports simultaneously
+  for (const port of availablePorts) monitorPort(port);
+}
+
 async function boardPull(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
@@ -984,20 +1146,56 @@ async function boardPull(n) {
   if (btn) { btn.disabled = true; btn.textContent = 'Pulling…'; }
   termLog(n, '?backup', 'in');
 
+  let migrated = false;
   try {
     const raw    = await conn.sendAndCollect('?backup', 8000);
     const config = WCBParser.parseBackupString(raw);
 
-    boardConfigs[n]   = config;
-    boardBaselines[n] = JSON.parse(JSON.stringify(config));
-    populateUIFromConfig(n, config);
-
-    // Sync general fields from first board pull
+    // Sync global fields + render all board sections first so any target slot exists in the DOM
     syncGeneralFromConfig(config);
     if (config.wcbQuantity > 1) renderBoards(config.wcbQuantity);
 
-    updateBoardStatusBadge(n, 'connected');
-    showToast(`Config pulled from WCB ${n}`, 'success');
+    const detected = config.wcbNumber;
+
+    if (detected !== n && detected >= 2 && detected <= 8) {
+      // ── Board self-identifies as a different slot ─────────────────
+      if (boardConnections[detected]?.isConnected()) {
+        // Conflict: target slot already occupied → keep in current slot with a warning
+        showToast(
+          `WCB ${detected} detected in slot ${n} — slot ${detected} is already connected, keeping here`,
+          'warning', 8000
+        );
+        boardConfigs[n]   = config;
+        boardBaselines[n] = JSON.parse(JSON.stringify(config));
+        populateUIFromConfig(n, config);
+        updateBoardStatusBadge(n, 'connected');
+      } else {
+        // Migrate: move connection + config from slot n → slot detected
+        conn.boardIndex          = detected;
+        boardConnections[detected] = conn;
+        delete boardConnections[n];
+
+        boardConfigs[detected]   = config;
+        boardBaselines[detected] = JSON.parse(JSON.stringify(config));
+        delete boardConfigs[n];
+        delete boardBaselines[n];
+
+        populateUIFromConfig(detected, config);
+        updateConnectionUI(n, false);        // clear vacated slot
+        updateConnectionUI(detected, true);  // activate correct slot
+
+        termLog(detected, `↑ Auto-migrated from slot ${n} — this board is WCB ${detected}`, 'sys');
+        showToast(`WCB ${detected} detected — moved from slot ${n} → slot ${detected}`, 'info', 6000);
+        migrated = true;
+      }
+    } else {
+      // ── Board number matches slot (normal path) ───────────────────
+      boardConfigs[n]   = config;
+      boardBaselines[n] = JSON.parse(JSON.stringify(config));
+      populateUIFromConfig(n, config);
+      updateBoardStatusBadge(n, 'connected');
+      showToast(`Config pulled from WCB ${n}`, 'success');
+    }
   } catch (e) {
     const isTimeout = /timeout/i.test(e.message);
     const msg = isTimeout
@@ -1007,7 +1205,9 @@ async function boardPull(n) {
     termLog(n, msg, 'err');
   }
 
-  if (btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
+  // Only restore slot-n's pull button if we didn't migrate away from it
+  // (migration calls updateConnectionUI(n, false) which already disables it)
+  if (!migrated && btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
 }
 
 async function boardGo(n) {
@@ -1171,26 +1371,27 @@ function updateConnectionUI(n, connected) {
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
-  const pullBtn  = document.getElementById(`b${n}-btn-pull`);
-  const goBtn    = document.getElementById(`b${n}-btn-go`);
-  const connBtn  = document.getElementById(`b${n}-btn-connect`);
-  const eraseBtn = document.getElementById(`b${n}-btn-erase`);
-  if (pullBtn)  pullBtn.disabled  = !connected;
+  const pullBtn   = document.getElementById(`b${n}-btn-pull`);
+  const goBtn     = document.getElementById(`b${n}-btn-go`);
+  const connBtn   = document.getElementById(`b${n}-btn-connect`);
+  const eraseBtn  = document.getElementById(`b${n}-btn-erase`);
+  const listenBtn = document.getElementById(`b${n}-btn-listen`);
+  if (pullBtn)  { pullBtn.disabled = !connected; if (!connected) pullBtn.textContent = 'Pull Config'; }
   if (goBtn)    goBtn.disabled    = !connected;
   if (eraseBtn) eraseBtn.disabled = !connected;
-  if (connBtn) connBtn.textContent = connected ? 'Disconnect' : 'Connect';
+  if (connBtn)  connBtn.textContent = connected ? 'Disconnect' : 'Connect';
+  if (listenBtn) {
+    listenBtn.disabled = connected; // no point listening when already connected
+    if (!connected) { listenBtn.textContent = 'Listen'; listenBtn.classList.remove('btn-listening'); }
+  }
+  // Cancel any active listen session when a connection is established another way
+  if (connected && _listenCancels[n]) _listenCancels[n]();
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
 
-  // Update terminal header to show which board is active
-  const termLabel = document.getElementById('terminal-board-label');
-  if (termLabel) {
-    const connectedBoards = Object.entries(boardConnections)
-      .filter(([, c]) => c.isConnected())
-      .map(([i]) => `WCB ${i}`)
-      .join(', ');
-    termLabel.textContent = connectedBoards || 'No board connected';
-  }
+  // Create pane on first connect; update dot/input state on any connect/disconnect
+  if (connected) ensureTerminalPane(n);
+  updateTerminalPaneDot(n, connected);
 }
 
 function syncGeneralFromConfig(config) {
@@ -1328,37 +1529,97 @@ function toggleTerminal() {
   document.getElementById('terminal-drawer').classList.toggle('open');
 }
 
-function clearTerminal() {
-  document.getElementById('terminal-output').innerHTML = '';
+// ─── Multi-pane Terminal ──────────────────────────────────────────
+function ensureTerminalPane(n) {
+  if (document.getElementById(`term-pane-${n}`)) return; // already exists
+
+  // Hide the empty-state placeholder
+  const noBoards = document.getElementById('terminal-no-boards');
+  if (noBoards) noBoards.style.display = 'none';
+
+  const pane = document.createElement('div');
+  pane.className = 'terminal-pane';
+  pane.id = `term-pane-${n}`;
+  pane.innerHTML = `
+    <div class="terminal-pane-header" id="term-pane-header-${n}">
+      <span class="term-status-dot" id="term-dot-${n}"></span>
+      <span class="term-pane-label">WCB ${n}</span>
+      <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px"
+        onclick="clearTerminalPane(${n})">Clear</button>
+    </div>
+    <div class="terminal-pane-output" id="term-pane-output-${n}"></div>
+    <div class="terminal-input-row">
+      <input class="terminal-input" id="term-pane-input-${n}" type="text"
+        placeholder="Send to WCB ${n}…"
+        onkeydown="onTerminalKeydown(event,${n})"
+        spellcheck="false" autocomplete="off">
+      <button class="btn btn-ghost btn-sm" onclick="sendTerminalCommandTo(${n})">Send ↵</button>
+    </div>`;
+  document.getElementById('terminal-panes').appendChild(pane);
+}
+
+function updateTerminalPaneDot(n, connected) {
+  const dot    = document.getElementById(`term-dot-${n}`);
+  const header = document.getElementById(`term-pane-header-${n}`);
+  const input  = document.getElementById(`term-pane-input-${n}`);
+  if (dot)    dot.classList.toggle('connected', connected);
+  if (header) header.classList.toggle('disconnected', !connected);
+  if (input) {
+    input.disabled     = !connected;
+    input.placeholder  = connected ? `Send to WCB ${n}…` : 'Board disconnected';
+  }
+}
+
+function clearTerminalPane(n) {
+  const out = document.getElementById(`term-pane-output-${n}`);
+  if (out) out.innerHTML = '';
+}
+
+function clearAllTerminals() {
+  document.querySelectorAll('[id^="term-pane-output-"]').forEach(el => el.innerHTML = '');
 }
 
 function termLog(boardIndex, text, type = 'out') {
-  const output = document.getElementById('terminal-output');
-  if (!output) return;
-  const line = document.createElement('div');
-  line.className = `terminal-line-${type}`;
-  line.textContent = (boardIndex > 0 ? `[WCB${boardIndex}] ` : '') + text;
-  output.appendChild(line);
-  output.scrollTop = output.scrollHeight;
+  // If a specific pane exists for this board, use it; otherwise create one on the fly
+  if (boardIndex > 0) {
+    ensureTerminalPane(boardIndex);
+    const output = document.getElementById(`term-pane-output-${boardIndex}`);
+    if (output) {
+      const line = document.createElement('div');
+      line.className = `terminal-line-${type}`;
+      line.textContent = text;
+      output.appendChild(line);
+      output.scrollTop = output.scrollHeight;
+      return;
+    }
+  }
+  // boardIndex 0 (system) → log to first available pane, or ignore
+  const anyOutput = document.querySelector('[id^="term-pane-output-"]');
+  if (anyOutput) {
+    const line = document.createElement('div');
+    line.className = `terminal-line-${type}`;
+    line.textContent = text;
+    anyOutput.appendChild(line);
+    anyOutput.scrollTop = anyOutput.scrollHeight;
+  }
 }
 
-function onTerminalKeydown(e) {
-  if (e.key === 'Enter') sendTerminalCommand();
+function onTerminalKeydown(e, n) {
+  if (e.key === 'Enter') sendTerminalCommandTo(n);
 }
 
-async function sendTerminalCommand() {
-  const input = document.getElementById('terminal-input');
-  const cmd   = input.value.trim();
+async function sendTerminalCommandTo(n) {
+  const input = document.getElementById(`term-pane-input-${n}`);
+  const cmd   = input?.value?.trim();
   if (!cmd) return;
   input.value = '';
 
-  // Find first connected board
-  const conn = Object.values(boardConnections).find(c => c.isConnected());
-  if (!conn) { termLog(0, 'No board connected', 'err'); return; }
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { termLog(n, 'Board not connected', 'err'); return; }
 
-  termLog(conn.boardIndex, cmd, 'in');
+  termLog(n, cmd, 'in');
   try { await conn.send(cmd + '\r'); }
-  catch (e) { termLog(0, `Send error: ${e.message}`, 'err'); }
+  catch (e) { termLog(n, `Send error: ${e.message}`, 'err'); }
 }
 
 

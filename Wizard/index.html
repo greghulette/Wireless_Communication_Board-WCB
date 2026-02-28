@@ -141,16 +141,11 @@
   <div class="terminal-resize-handle" id="terminal-resize-handle" title="Drag to resize"></div>
   <div class="terminal-header">
     <h3>⌨ TERMINAL</h3>
-    <span class="text-muted" id="terminal-board-label">No board connected</span>
-    <div style="flex:1"></div>
-    <button class="btn btn-ghost btn-sm" onclick="clearTerminal()">✕ Clear</button>
+    <button class="btn btn-ghost btn-sm" onclick="clearAllTerminals()">✕ Clear All</button>
     <button class="btn btn-ghost btn-sm" onclick="toggleTerminal()">▼ Close</button>
   </div>
-  <div class="terminal-output" id="terminal-output"></div>
-  <div class="terminal-input-row">
-    <input class="terminal-input" id="terminal-input" type="text" placeholder="Send command…"
-      onkeydown="onTerminalKeydown(event)" spellcheck="false" autocomplete="off">
-    <button class="btn btn-ghost btn-sm" onclick="sendTerminalCommand()">Send ↵</button>
+  <div class="terminal-panes" id="terminal-panes">
+    <div class="terminal-no-boards" id="terminal-no-boards">No board connected</div>
   </div>
 </div>
 
@@ -186,6 +181,7 @@
         </div>
         <div class="action-bar-right">
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="boardConnect({N})">Connect</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-listen" onclick="boardListen({N})" title="Wait for this board to reboot and auto-connect">Listen</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>&#9654; Go</button>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardEraseNVS({N})" disabled title="Wipe all NVS settings and reboot">&#9888; Erase NVS</button>
@@ -206,6 +202,19 @@
       <!-- Board Identity -->
       <div class="subsection-title">Board Identity</div>
       <div class="field-group">
+        <div class="field">
+          <label>WCB Number</label>
+          <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+          </select>
+        </div>
         <div class="field">
           <label>Hardware Version</label>
           <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
