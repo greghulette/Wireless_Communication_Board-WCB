@@ -47,6 +47,7 @@ function createDefaultBoardConfig() {
     kyber: {
       mode: 'none',   // 'none' | 'local' | 'remote'
       port: null,     // 1-5, only relevant for 'local'
+      baud: 115200,   // baud rate of the Kyber serial port (mirrors serialPorts[port-1].baud)
     },
 
     // Maestros — array of { id, port, baud }
@@ -726,8 +727,14 @@ function buildCommandString(config, baseline = null, fullPush = false) {
   if (fullPush || !baseline || baseline.delimiter !== config.delimiter)
     add(`DELIM,${config.delimiter}`);
 
-  if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
-    add(`FUNCCHAR,${config.funcChar}`);
+  // Note: never send ?FUNCCHAR,? — the trailing '?' is treated as a second
+  // function-character invocation by the firmware, so the command is unparseable.
+  // Since '?' is the factory default the board already uses it; only send when
+  // the user has chosen a different character.
+  if (config.funcChar !== '?') {
+    if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
+      add(`FUNCCHAR,${config.funcChar}`);
+  }
 
   if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
     add(`CMDCHAR,${config.cmdChar}`);
@@ -779,8 +786,13 @@ function buildCommandString(config, baseline = null, fullPush = false) {
   }
 
   // ── Maestros ──
-  // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>  (this board's local maestros only)
-  // Kyber targets are embedded in the KYBER command above
+  // The ?KYBER,LOCAL command embeds Maestro targets and configures the serial port
+  // baud rate at runtime, but the firmware maintains a separate Maestro registry that
+  // stores each Maestro's baud independently.  The ?MAESTRO command is what updates
+  // that registry — if we skip it the registry retains the default (9600), the backup
+  // then contains ?MAESTRO,M1:W1S1:9600, and boardPull repopulates the UI with the
+  // wrong baud, corrupting every subsequent push.  Always send ?MAESTRO for local
+  // Maestros regardless of Kyber mode.
   const maestrosChanged = fullPush || !baseline ||
     JSON.stringify(baseline.maestros) !== JSON.stringify(config.maestros);
 

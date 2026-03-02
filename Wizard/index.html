@@ -27,6 +27,7 @@
         <button id="btn-simple" class="active" onclick="setMode('simple')">Simple</button>
         <button id="btn-advanced" onclick="setMode('advanced')">Advanced</button>
       </div>
+      <button class="btn btn-primary btn-sm" onclick="openWizard()">✦ Wizard</button>
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('file-input').click()">⬆ Load File</button>
       <button class="btn btn-ghost btn-sm" onclick="exportSystemFile()">⬇ Export</button>
       <button class="btn btn-success btn-sm" id="btn-push-all" onclick="boardGoAll()">▶▶ Push All</button>
@@ -182,6 +183,23 @@
   </div>
 </div>
 
+<!-- ─── Setup Wizard Modal ───────────────────────────────────────── -->
+<div class="modal-overlay" id="wizard-modal" onclick="closeWizard(event)">
+  <div class="modal-dialog wizard-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="wizard-modal-title">Setup Wizard</span>
+      <div class="wizard-step-indicator" id="wizard-step-indicator"></div>
+      <button class="modal-close" onclick="closeWizard()">✕</button>
+    </div>
+    <div class="wizard-body" id="wizard-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="wizard-back-btn" onclick="wizardBack()">← Back</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-primary btn-sm" id="wizard-next-btn" onclick="wizardNext()">Next →</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── General Conflict Modal ───────────────────────────────────── -->
 <div class="modal-overlay" id="general-conflict-modal" onclick="closeGeneralConflictModal(event)">
   <div class="modal-dialog" style="width:520px;max-width:94vw">
@@ -207,9 +225,14 @@
       <span class="section-chevron">▶</span>
       <span class="board-num-pill">{N}</span>
       <div class="section-title"><h2>WCB {N}</h2></div>
-      <div class="section-meta">
+      <div class="section-status">
         <span class="fw-version" id="b{N}-fw-version"></span>
-        <span class="badge badge-default" id="b{N}-status-badge">Not Configured</span>
+        <span class="badge badge-default" id="b{N}-status-badge">Not Connected</span>
+        <span class="badge badge-yellow" id="b{N}-unsaved-badge" style="display:none">⚠ Unsaved</span>
+      </div>
+      <div class="section-meta">
+        <button class="btn btn-ghost btn-sm" id="b{N}-btn-identify" onclick="event.stopPropagation();boardIdentify({N})" disabled title="Blink board LED red/green for 5 seconds to identify it" style="padding:2px 8px;font-size:11px">Identify</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="event.stopPropagation();boardConnect({N})" style="padding:2px 8px;font-size:11px">Connect</button>
       </div>
     </div>
     <div class="section-body">
@@ -218,17 +241,19 @@
       <div class="board-action-bar">
         <div class="action-bar-left">
           <div class="flash-mode">
-            <label><input type="radio" name="b{N}-mode" value="configure" checked><span>Configure Only</span></label>
-            <label><input type="radio" name="b{N}-mode" value="update"><span>Update FW</span></label>
-            <label><input type="radio" name="b{N}-mode" value="flash"><span>Flash &amp; Configure</span></label>
+            <label><input type="radio" name="b{N}-mode" value="configure" checked onchange="onBoardModeChange({N})"><span>Configure Only</span></label>
+            <label><input type="radio" name="b{N}-mode" value="update" onchange="onBoardModeChange({N})"><span>Update FW</span></label>
+            <label><input type="radio" name="b{N}-mode" value="flash" onchange="onBoardModeChange({N})"><span>Flash &amp; Configure</span></label>
+            <label><input type="radio" name="b{N}-mode" value="factory" onchange="onBoardModeChange({N})"><span>Factory Reset</span></label>
           </div>
-          <div class="connection-status">
-            <span class="status-dot" id="b{N}-dot"></span>
-            <span id="b{N}-conn-label">Not connected</span>
+          <div id="b{N}-wipe-nvs-wrap" style="display:none;margin-top:6px">
+            <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2);cursor:pointer">
+              <input type="checkbox" id="b{N}-wipe-nvs" style="cursor:pointer">
+              <span>Overwrite board memory first</span>
+            </label>
           </div>
         </div>
         <div class="action-bar-right">
-          <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="boardConnect({N})">Connect</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>&#9654; Go</button>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardEraseNVS({N})" disabled title="Wipe all NVS settings and reboot">&#9888; Erase NVS</button>
@@ -317,28 +342,23 @@
             <option value="5">Serial 5</option>
           </select>
         </div>
+        <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
+          <label>Kyber Baud</label>
+          <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
+            <option value="9600">9,600</option>
+            <option value="38400">38,400</option>
+            <option value="57600">57,600</option>
+            <option value="115200" selected>115,200</option>
+          </select>
+        </div>
       </div>
 
-      <!-- Kyber Targets (only shown when Local) -->
+      <!-- Kyber Targets (auto-computed from Maestros — shown when LOCAL) -->
       <div id="b{N}-kyber-targets-wrap" style="display:none;margin-top:14px">
-        <div class="flex items-center gap-8 mb-12">
-          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Kyber Targets</div>
-          <button class="btn btn-ghost btn-sm" onclick="addKyberTargetRow({N})">+ Add</button>
+        <div class="subsection-title" style="margin-bottom:6px;border:none;padding:0">Kyber Targets</div>
+        <div id="b{N}-kyber-targets-info" class="text-muted" style="font-size:12px;line-height:1.6">
+          Auto-computed from Maestros on all boards — configure Maestros on each board first, then push.
         </div>
-        <table class="serial-table" id="b{N}-kyber-target-table">
-          <thead>
-            <tr>
-              <th style="width:40px">#</th>
-              <th>Maestro ID</th>
-              <th>WCB</th>
-              <th>Port</th>
-              <th>Baud</th>
-              <th style="width:50px"></th>
-            </tr>
-          </thead>
-          <tbody id="b{N}-kyber-target-tbody"></tbody>
-        </table>
-        <p class="text-muted mt-8">All Maestros this Kyber board routes to. Configure other boards first, then re-push this board.</p>
       </div>
 
       <hr class="divider">

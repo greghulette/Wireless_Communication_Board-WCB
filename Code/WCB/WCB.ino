@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_020958RMAR2026                                    *****////
+///*****                                          Version 6.0_021441RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_020958RMAR2026";
+String SoftwareVersion = "6.0_021441RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -279,6 +279,8 @@ int SERIAL5_TX_PIN;	        //  // Serial 5 Tx Pin
 int SERIAL5_RX_PIN;	        //  // Serial 5 Rx Pin
 int ONBOARD_LED;            //  // Pin for the onboard LED on version 1.0
 int STATUS_LED_PIN;         //  // Pin for the onboard NeoPixel LED on version 2.x boards
+
+TaskHandle_t identifyTaskHandle = NULL;  // Prevents overlapping ?IDENTIFY runs
   
 // Default baud rates
 
@@ -392,8 +394,30 @@ void turnOffLED(){
     digitalWrite(ONBOARD_LED, LOW);   // Turns off the onboard Green LED
    }else if (wcb_hw_version == 21 ||  wcb_hw_version == 23 || wcb_hw_version == 24 || wcb_hw_version == 32 || wcb_hw_version ==31){
     colorWipeStatus("ES", blue, 10);
-    
+
   }
+}
+
+// Blinks red/green (NeoPixel) or on/off (v1 onboard LED) for 5 s so a board can
+// be physically identified.  Runs as a short-lived FreeRTOS task so it is
+// non-blocking.  identifyTaskHandle is cleared on exit to allow re-triggering.
+void identifyTask(void *parameter) {
+  const unsigned long DURATION_MS = 5000;
+  const int           INTERVAL_MS = 500;
+  unsigned long startTime = millis();
+  bool phase = false;
+  while (millis() - startTime < DURATION_MS) {
+    if (wcb_hw_version == 1) {
+      digitalWrite(ONBOARD_LED, phase ? HIGH : LOW);
+    } else if (statusLED != nullptr) {
+      colorWipeStatus("ES", phase ? red : green, 50);
+    }
+    phase = !phase;
+    vTaskDelay(INTERVAL_MS / portTICK_PERIOD_MS);
+  }
+  turnOffLED();
+  identifyTaskHandle = NULL;
+  vTaskDelete(NULL);
 }
 
 // CRC32 calculation for verification
@@ -2409,6 +2433,17 @@ void processLocalCommand(const String &message) {
             eraseNVSFlash();
         } else {
             Serial.println("Invalid format. Use: ?ERASE,NVS");
+        }
+        return;
+    }
+
+    // --- ?IDENTIFY ---
+    if (rootUpper == "IDENTIFY") {
+        if (identifyTaskHandle == NULL) {
+            Serial.println("Identifying board for 5 seconds (red/green blink)...");
+            xTaskCreatePinnedToCore(identifyTask, "Identify Task", 2048, NULL, 1, &identifyTaskHandle, 1);
+        } else {
+            Serial.println("Identify already running");
         }
         return;
     }

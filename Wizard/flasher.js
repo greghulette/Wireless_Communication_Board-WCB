@@ -152,8 +152,10 @@ function bufToLatin1(buf) {
 // callbacks  — { onProgress(written, total), onLog(msg), onStatus(msg) }
 //
 // Throws on error (caller is responsible for UI cleanup).
-// appOnly — if true, skip blank-board detection and always flash app at 0x10000 only
-async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, appOnly = false }) {
+// appOnly  — if true, skip blank-board detection and always flash app at 0x10000 only
+// eraseNvs — if true, prepend a blank (0xFF) image at the NVS partition address
+//            (0x9000, 24 KB) so esptool erases+rewrites it, producing a factory-fresh NVS
+async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, appOnly = false, eraseNvs = false }) {
 
   // ── Step 1: Load CDN dependencies ──────────────────────────────
   onStatus('Loading flash tool…');
@@ -254,6 +256,18 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     imagesToFlash = isBlankBoard
       ? flashImages
       : flashImages.filter(img => img.address === 0x10000);
+  }
+
+  // ── Step 3c: Optionally prepend NVS-erase image ────────────────
+  // NVS lives at 0x9000 and is 24 KB (0x6000 bytes) in the standard WCB partition table.
+  // Writing a buffer of 0xFF causes esptool to erase then rewrite those sectors,
+  // leaving the NVS partition in a factory-fresh blank state.
+  if (eraseNvs) {
+    const nvsBlank = new ArrayBuffer(0x6000);                    // 24 KB of 0x00
+    new Uint8Array(nvsBlank).fill(0xFF);                         // fill with 0xFF (erased)
+    // Insert before app so flash regions remain in ascending address order
+    imagesToFlash = [{ buf: nvsBlank, address: 0x9000 }, ...imagesToFlash];
+    onLog('Factory reset — NVS partition (0x9000, 24 KB) will be erased');
   }
 
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);

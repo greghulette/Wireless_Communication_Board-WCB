@@ -128,7 +128,8 @@ function renderSerialTable(n) {
   tbody.innerHTML = '';
 
   for (let p = 1; p <= 5; p++) {
-    const baudOptions = BAUD_RATES.map(b =>
+    const maxBaud = p >= 3 ? 57600 : Infinity;
+    const baudOptions = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
       `<option value="${b}" ${b === 9600 ? 'selected' : ''}>${b.toLocaleString()}</option>`
     ).join('');
 
@@ -192,8 +193,10 @@ function updatePortClaimUI(n) {
 function onKyberChange(n) {
   const mode     = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
   const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
+  const baudWrap    = document.getElementById(`b${n}-kyber-baud-wrap`);
   const targetsWrap = document.getElementById(`b${n}-kyber-targets-wrap`);
   portWrap.style.display = mode === 'local' ? '' : 'none';
+  if (baudWrap)    baudWrap.style.display    = mode === 'local' ? '' : 'none';
   if (targetsWrap) targetsWrap.style.display = mode === 'local' ? '' : 'none';
 
   const config = boardConfigs[n];
@@ -213,6 +216,10 @@ function onKyberChange(n) {
     if (portVal >= 1 && portVal <= 5) {
       config.kyber.port = portVal;
       config.serialPorts[portVal - 1].claimedBy = { type: 'kyber' };
+      // Sync kyber baud dropdown to the selected port's current baud
+      const kyberBaud = config.serialPorts[portVal - 1].baud ?? config.kyber.baud ?? 115200;
+      const baudSel = document.getElementById(`b${n}-kyber-baud`);
+      if (baudSel) baudSel.value = kyberBaud;
     }
   }
 
@@ -233,11 +240,30 @@ function onKyberPortChange(n) {
   if (portVal >= 1 && portVal <= 5) {
     config.kyber.port = portVal;
     config.serialPorts[portVal - 1].claimedBy = { type: 'kyber' };
+    // Sync kyber baud dropdown to the new port's current baud
+    const kyberBaud = config.serialPorts[portVal - 1].baud ?? config.kyber.baud ?? 115200;
+    const baudSel = document.getElementById(`b${n}-kyber-baud`);
+    if (baudSel) baudSel.value = kyberBaud;
   }
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
+}
+
+function onKyberBaudChange(n) {
+  const config  = boardConfigs[n];
+  if (!config) return;
+  const baud    = parseInt(document.getElementById(`b${n}-kyber-baud`)?.value) || 115200;
+  const portVal = config.kyber.port;
+  config.kyber.baud = baud;
+  if (portVal >= 1 && portVal <= 5) {
+    // Mirror the baud into the serial port so ?BAUD,S<port>,<baud> is generated correctly
+    config.serialPorts[portVal - 1].baud = baud;
+    const serialBaudEl = document.getElementById(`b${n}-s${portVal}-baud`);
+    if (serialBaudEl) serialBaudEl.value = baud;
+  }
+  onBoardFieldChange(n);
 }
 
 function updateKyberPortDropdown(n) {
@@ -356,6 +382,18 @@ function onBoardFieldChange(n) {
   updateBoardStatusBadge(n, 'unsaved');
 }
 
+function onBoardModeChange(n) {
+  const mode = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
+  const wipeWrap = document.getElementById(`b${n}-wipe-nvs-wrap`);
+  if (wipeWrap) {
+    wipeWrap.style.display = mode === 'configure' ? '' : 'none';
+    if (mode !== 'configure') {
+      const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
+      if (wipeEl) wipeEl.checked = false;
+    }
+  }
+}
+
 function onSerialFieldChange(n) {
   syncSerialUIToConfig(n);
   onBoardFieldChange(n);
@@ -385,7 +423,14 @@ function syncKyberToConfig(n) {
   const mode = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
   config.kyber.mode = mode;
   if (mode === 'local') {
-    config.kyber.port = parseInt(document.getElementById(`b${n}-kyber-port`)?.value) || null;
+    const portVal = parseInt(document.getElementById(`b${n}-kyber-port`)?.value) || null;
+    config.kyber.port = portVal;
+    const baud = parseInt(document.getElementById(`b${n}-kyber-baud`)?.value) || 115200;
+    config.kyber.baud = baud;
+    if (portVal >= 1 && portVal <= 5) {
+      // Keep serial port baud in sync so the ?BAUD command is generated correctly
+      config.serialPorts[portVal - 1].baud = baud;
+    }
   } else {
     config.kyber.port = null;
   }
@@ -422,15 +467,24 @@ function populateUIFromConfig(n, config) {
   const kyberInput = document.querySelector(`input[name="b${n}-kyber"][value="${config.kyber.mode}"]`);
   if (kyberInput) {
     kyberInput.checked = true;
-    document.getElementById(`b${n}-kyber-port-wrap`).style.display = config.kyber.mode === 'local' ? '' : 'none';
+    const isLocal = config.kyber.mode === 'local';
+    document.getElementById(`b${n}-kyber-port-wrap`).style.display = isLocal ? '' : 'none';
     const tw = document.getElementById(`b${n}-kyber-targets-wrap`);
-    if (tw) tw.style.display = config.kyber.mode === 'local' ? '' : 'none';
+    if (tw) tw.style.display = isLocal ? '' : 'none';
+    const bw = document.getElementById(`b${n}-kyber-baud-wrap`);
+    if (bw) bw.style.display = isLocal ? '' : 'none';
     updateKyberPortDropdown(n);
-    if (config.kyber.mode === 'local' && config.kyber.port) {
+    if (isLocal && config.kyber.port) {
       const portSel = document.getElementById(`b${n}-kyber-port`);
       if (portSel) portSel.value = config.kyber.port;
+      // Derive kyber baud from the serial port baud (populated from ?BAUD commands in backup)
+      const kyberBaud = config.serialPorts[config.kyber.port - 1]?.baud
+                     ?? config.kyber.baud
+                     ?? 115200;
+      const baudSel = document.getElementById(`b${n}-kyber-baud`);
+      if (baudSel) baudSel.value = kyberBaud;
     }
-    if (config.kyber.mode === 'local') {
+    if (isLocal) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
@@ -450,15 +504,21 @@ function populateUIFromConfig(n, config) {
 }
 
 function updateBoardStatusBadge(n, state) {
+  const unsavedBadge = document.getElementById(`b${n}-unsaved-badge`);
+  if (state === 'unsaved') {
+    if (unsavedBadge) unsavedBadge.style.display = '';
+    return;  // leave the connection badge alone
+  }
+  if (unsavedBadge) unsavedBadge.style.display = 'none';
+
   const badge = document.getElementById(`b${n}-status-badge`);
   if (!badge) return;
   badge.className = 'badge';
   const states = {
     configured: ['badge-green',  '✅ Configured'],
-    unsaved:    ['badge-yellow', '⚠ Unsaved'],
     connected:  ['badge-accent', '● Connected'],
     error:      ['badge-red',    '✕ Error'],
-    default:    ['badge-default','Not Configured'],
+    default:    ['badge-default','Not Connected'],
   };
   const [cls, text] = states[state] ?? states.default;
   badge.classList.add(cls);
@@ -483,8 +543,11 @@ function appendMaestroRow(n, maestro, readOnly = false) {
     `<option value="${v}" ${v === maestro.id ? 'selected' : ''}>${v}</option>`
   ).join('');
 
-  const baudOptions = BAUD_RATES.map(b =>
-    `<option value="${b}" ${b === maestro.baud ? 'selected' : ''}>${b.toLocaleString()}</option>`
+  // Baud options filtered by port (ports 3-5 cap at 57600)
+  const maxBaud = (maestro.port >= 3) ? 57600 : Infinity;
+  const safeBaud = Math.min(maestro.baud, maxBaud);
+  const baudOptions = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
+    `<option value="${b}" ${b === safeBaud ? 'selected' : ''}>${b.toLocaleString()}</option>`
   ).join('');
 
   const kyberBoard = findKyberLocalBoard();
@@ -498,7 +561,7 @@ function appendMaestroRow(n, maestro, readOnly = false) {
   tr.innerHTML = `
     <td style="color:var(--text3)" ${dimStyle}>${rowNum}</td>
     <td ${dimStyle}><select id="${rowId}-id" ${dis} onchange="onMaestroChange(${n})">${idOptions}</select></td>
-    <td><select id="${rowId}-port" ${dis} onchange="onMaestroChange(${n})">
+    <td><select id="${rowId}-port" ${dis} onchange="onMaestroPortChange(${n},'${rowId}')">
       <option value="">&#8212; Select &#8212;</option>
     </select></td>
     <td ${dimStyle}><select id="${rowId}-baud" ${dis} onchange="onMaestroChange(${n})">${baudOptions}</select></td>
@@ -537,13 +600,34 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
   }
 }
 
+function onMaestroPortChange(n, rowId) {
+  const portSel = document.getElementById(`${rowId}-port`);
+  const baudSel = document.getElementById(`${rowId}-baud`);
+  if (portSel && baudSel) {
+    const port    = parseInt(portSel.value) || 0;
+    const maxBaud = port >= 3 ? 57600 : Infinity;
+
+    // Auto-fill baud from the serial port's configured value so the user
+    // doesn't have to manually match them.  Falls back to current selection.
+    const portBaud = port ? (boardConfigs[n]?.serialPorts?.[port - 1]?.baud ?? null) : null;
+    const curBaud  = portBaud ?? parseInt(baudSel.value) ?? 57600;
+
+    baudSel.innerHTML = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
+      `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`
+    ).join('');
+  }
+  onMaestroChange(n);
+}
+
 function onMaestroChange(n) {
   syncMaestrosToConfig(n);
   onBoardFieldChange(n);
-  // Warn if another board has Kyber Local — it will need a re-push
+  // Refresh the auto-computed Kyber targets display on the LOCAL board
   const kyberBoard = findKyberLocalBoard();
-  if (kyberBoard !== null && kyberBoard !== n) {
-    showKyberRepushWarning(kyberBoard);
+  if (kyberBoard !== null) {
+    populateKyberTargetsFromConfig(kyberBoard, boardConfigs[kyberBoard]);
+    // Warn if it's a different board — it will need a re-push to pick up the change
+    if (kyberBoard !== n) showKyberRepushWarning(kyberBoard);
   }
 }
 
@@ -597,13 +681,12 @@ function populateMaestrosFromConfig(n, config) {
   const tbody = document.getElementById(`b${n}-maestro-tbody`);
   if (!tbody) return;
   tbody.innerHTML = '';
-  // Grey out any maestro IDs that are already managed by the kyber-local board's targets
-  const kyberBoard = findKyberLocalBoard();
-  const kyberIds = new Set(
-    (boardConfigs[kyberBoard]?.kyber?.targets || []).map(t => t.id)
-  );
+  // Each board's local maestros are always editable — never grey them out.
+  // (A maestro may also appear in the Kyber-local board's target list, but that
+  // reflects how the Kyber LOCAL command reaches it via ESP-NOW; it doesn't make
+  // the local row read-only on its own board.)
   for (const m of config.maestros) {
-    appendMaestroRow(n, m, kyberIds.has(m.id));
+    appendMaestroRow(n, m);
   }
 }
 
@@ -865,7 +948,7 @@ function appendSequenceRow(n, key, value) {
       <div class="seq-char-count" id="${rowId}-val-count">${valLen}</div>
     </td>
     <td class="seq-action-cell">
-      <button class="btn btn-ghost btn-sm" title="Test"
+      <button class="btn btn-primary btn-sm" title="Test"
               onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
       <button class="btn btn-primary btn-sm" title="Update"
               onclick="updateSequence(${n},'${rowId}')" id="${rowId}-update">UPDATE</button>
@@ -1517,15 +1600,16 @@ async function boardGo(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
-  const mode     = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
-  const isFlash  = mode === 'flash';
-  const isUpdate = mode === 'update';
-  const btn      = document.getElementById(`b${n}-btn-go`);
+  const mode      = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
+  const isFlash   = mode === 'flash';
+  const isUpdate  = mode === 'update';
+  const isFactory = mode === 'factory';
+  const btn       = document.getElementById(`b${n}-btn-go`);
 
   btn.disabled = true;
-  btn.textContent = (isFlash || isUpdate) ? 'Flashing…' : 'Pushing…';
+  btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : 'Pushing…';
 
-  if (isFlash || isUpdate) {
+  if (isFlash || isUpdate || isFactory) {
     // ── Validate HW version ──────────────────────────────────────
     const hwVersion = boardConfigs[n]?.hwVersion;
     if (!hwVersion) {
@@ -1549,10 +1633,12 @@ async function boardGo(n) {
         onProgress: (written, total) => updateFlashBar(n, written, total),
         onLog:      (msg)            => termLog(n, msg, 'sys'),
         onStatus:   (msg)            => setFlashStatus(n, msg),
-        appOnly:    isUpdate,   // Update FW mode: always app-only, never touches NVS
+        appOnly:    isUpdate,         // Update FW: app-only, NVS preserved
+        eraseNvs:   isFactory,        // Factory Reset: wipe NVS before flashing
       });
       flashOk = true;
-      showToast(`WCB ${n} firmware ${isUpdate ? 'updated' : 'flashed'}!`, 'success');
+      const label = isUpdate ? 'updated' : isFactory ? 'factory reset' : 'flashed';
+      showToast(`WCB ${n} firmware ${label}!`, 'success');
     } catch (e) {
       showToast(`Flash failed: ${e.message.split('\n')[0]}`, 'error');
       termLog(n, `Flash error: ${e.message}`, 'err');
@@ -1575,11 +1661,26 @@ async function boardGo(n) {
           showToast(`WCB ${n} updated — verifying config…`, 'success');
           setTimeout(() => boardPull(n), 4000);
         } else {
-          // Full flash: NVS was cleared, push config
+          // Flash or Factory Reset: NVS is blank, push full config.
+          // Snapshot the wizard config right now — boardPull can still fire
+          // (e.g. from the initial connect handler) and overwrite boardConfigs[n]
+          // plus the shared general DOM fields before the 4 s push window expires.
+          const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+          const generalSnapshot = captureGeneralDOMSnapshot();
           boardBaselines[n] = null;
-          termLog(n, 'Reconnected — pushing config in 4s…', 'sys');
+          const resetLabel = isFactory ? 'factory reset' : 'flashed';
+          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
           showToast(`WCB ${n} reconnected — pushing config…`, 'success');
-          setTimeout(() => boardGo(n), 4000);
+          setTimeout(() => {
+            // Restore wizard config in case boardPull overwrote it during the window
+            if (configSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
+              boardBaselines[n] = null;
+              populateUIFromConfig(n, boardConfigs[n]);
+            }
+            restoreGeneralDOMSnapshot(generalSnapshot);
+            boardGo(n);
+          }, 4000);
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -1595,12 +1696,66 @@ async function boardGo(n) {
     return;
   }
 
+  // ── Wipe NVS before configure if checkbox is checked ─────────────
+  // This erases all NVS memory, reboots the board, then re-calls boardGo
+  // to push the config to a fresh board — same result as factory reset
+  // but without reflashing the firmware.
+  const wipeFirst = document.getElementById(`b${n}-wipe-nvs`)?.checked;
+  if (wipeFirst) {
+    const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+    const generalSnapshot = captureGeneralDOMSnapshot();
+    boardBaselines[n] = null;
+    try {
+      termLog(n, '?ERASE,NVS', 'in');
+      await conn.send('?ERASE,NVS\r');
+      // Firmware counts down ~3 s before erasing and rebooting.
+      // Closing the serial port immediately causes a USB-disconnect reset that
+      // fires BEFORE the erase runs — wait 4 s to let it finish.
+      termLog(n, 'Waiting for firmware erase countdown…', 'sys');
+      showToast(`WCB ${n} erasing — do not disconnect…`, 'warning', 5000);
+      await sleep(4000);
+      termLog(n, 'NVS erased — board rebooting…', 'sys');
+
+      await conn.closeForReconnect();
+      updateConnectionUI(n, false);
+      termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+
+      const reconnected = await conn.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected after erase — pushing config in 4s…', 'sys');
+        // Uncheck the wipe box so the re-call doesn't erase again
+        const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
+        if (wipeEl) wipeEl.checked = false;
+        setTimeout(() => {
+          // Restore config in case boardPull fired during reconnect window
+          if (configSnapshot) {
+            boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
+            boardBaselines[n] = null;
+            populateUIFromConfig(n, boardConfigs[n]);
+          }
+          restoreGeneralDOMSnapshot(generalSnapshot);
+          boardGo(n);
+        }, 4000);
+      } else {
+        termLog(n, 'Reconnect failed — connect manually', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+      }
+    } catch (e) {
+      showToast(`Erase failed: ${e.message}`, 'error');
+      termLog(n, `Erase error: ${e.message}`, 'err');
+    }
+    btn.disabled = false;
+    btn.textContent = '▶ Go';
+    return;
+  }
+
   try {
     // Collect current UI state into config
     syncSerialUIToConfig(n);
-    syncMaestrosToConfig(n);   // ← was missing
-    syncKyberToConfig(n);      // ← was missing
-    syncKyberTargetsToConfig(n);   // ← add this
+    syncMaestrosToConfig(n);
+    syncKyberToConfig(n);
+    autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
@@ -1686,13 +1841,15 @@ function updateConnectionUI(n, connected) {
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
-  const pullBtn  = document.getElementById(`b${n}-btn-pull`);
-  const goBtn    = document.getElementById(`b${n}-btn-go`);
-  const connBtn  = document.getElementById(`b${n}-btn-connect`);
-  const eraseBtn = document.getElementById(`b${n}-btn-erase`);
-  if (pullBtn)  { pullBtn.disabled = !connected; if (!connected) pullBtn.textContent = 'Pull Config'; }
-  if (goBtn)    goBtn.disabled    = !connected;
-  if (eraseBtn) eraseBtn.disabled = !connected;
+  const pullBtn     = document.getElementById(`b${n}-btn-pull`);
+  const goBtn       = document.getElementById(`b${n}-btn-go`);
+  const connBtn     = document.getElementById(`b${n}-btn-connect`);
+  const eraseBtn    = document.getElementById(`b${n}-btn-erase`);
+  const identifyBtn = document.getElementById(`b${n}-btn-identify`);
+  if (pullBtn)     { pullBtn.disabled = !connected; if (!connected) pullBtn.textContent = 'Pull Config'; }
+  if (goBtn)       goBtn.disabled       = !connected;
+  if (eraseBtn)    eraseBtn.disabled    = !connected;
+  if (identifyBtn) identifyBtn.disabled = !connected;
   if (connBtn) {
     connBtn.textContent = connected ? 'Disconnect' : 'Connect';
     if (!connected) connBtn.classList.remove('btn-detecting');
@@ -1732,6 +1889,39 @@ function syncGeneralFromConfig(config) {
     set('g-etm-delay',   config.etm.messageDelayMs);
     if (appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   }
+}
+
+// ─── General DOM Snapshot ─────────────────────────────────────────
+// Capture / restore the shared general-network DOM fields so that a
+// boardPull() triggered on connect cannot clobber the wizard-applied
+// values before the config push fires.
+
+function captureGeneralDOMSnapshot() {
+  const g = (id) => document.getElementById(id)?.value ?? '';
+  return {
+    password:  g('g-password'),
+    mac2:      g('g-mac2'),
+    mac3:      g('g-mac3'),
+    wcbq:      g('g-wcbq'),
+    delimiter: g('g-delimiter'),
+    funcchar:  g('g-funcchar'),
+    cmdchar:   g('g-cmdchar'),
+  };
+}
+
+function restoreGeneralDOMSnapshot(snap) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  set('g-password',  snap.password);
+  set('g-mac2',      snap.mac2);
+  set('g-mac3',      snap.mac3);
+  set('g-wcbq',      snap.wcbq);
+  set('g-delimiter', snap.delimiter);
+  set('g-funcchar',  snap.funcchar);
+  set('g-cmdchar',   snap.cmdchar);
+  // Keep systemConfig.general in sync (mirrors what syncGeneralFromConfig does)
+  onGeneralPasswordChange();
+  onGeneralMacChange();
+  onGeneralCmdCharChange();
 }
 
 // ─── Reboot Detection ─────────────────────────────────────────────
@@ -2217,13 +2407,38 @@ function syncKyberTargetsToConfig(n) {
   });
 }
 
-function populateKyberTargetsFromConfig(n, config) {
-  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
-  if (!tbody) return;
-  tbody.innerHTML = '';
-  if (!config.kyber?.targets?.length) return;
-  for (const t of config.kyber.targets) {
-    appendKyberTargetRow(n, t, false);
+function populateKyberTargetsFromConfig(n, _config) {
+  // The Kyber targets info div is auto-computed from all boards' Maestros.
+  // _config is unused — we always scan boardConfigs[] for live accuracy.
+  const info = document.getElementById(`b${n}-kyber-targets-info`);
+  if (!info) return;
+  const parts = [];
+  for (let b = 1; b <= 9; b++) {
+    const bc = boardConfigs[b];
+    if (!bc?.maestros?.length) continue;
+    const wcbNum = bc.wcbNumber || b;
+    for (const m of bc.maestros) {
+      parts.push(`M${m.id} · WCB${wcbNum} S${m.port} · ${m.baud.toLocaleString()} baud`);
+    }
+  }
+  info.innerHTML = parts.length > 0
+    ? '<strong>Will target:</strong> ' + parts.join(' &nbsp;&nbsp;|&nbsp;&nbsp; ')
+    : 'No Maestros configured yet — add Maestros to each board first, then push.';
+}
+
+// Scan all boardConfigs to build Kyber LOCAL targets automatically so the user
+// never has to maintain a separate targets table.
+function autoComputeKyberTargets(n) {
+  const config = boardConfigs[n];
+  if (!config || config.kyber.mode !== 'local') return;
+  config.kyber.targets = [];
+  for (let b = 1; b <= 9; b++) {
+    const bc = boardConfigs[b];
+    if (!bc?.maestros?.length) continue;
+    const wcbNum = bc.wcbNumber || b;
+    for (const m of bc.maestros) {
+      config.kyber.targets.push({ id: m.id, wcb: wcbNum, port: m.port, baud: m.baud });
+    }
   }
 }
 
@@ -2255,6 +2470,19 @@ function updateFlashBar(n, written, total) {
   setFlashStatus(n, `Flashing… ${pct}%`);
 }
 
+// ─── Identify ─────────────────────────────────────────────────────
+async function boardIdentify(n) {
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+  try {
+    await conn.send('?IDENTIFY\r');
+    termLog(n, '?IDENTIFY', 'in');
+    showToast(`WCB ${n} identifying — watch the LED`, 'info', 5500);
+  } catch (e) {
+    showToast(`Identify failed: ${e.message}`, 'error');
+  }
+}
+
 // ─── NVS Erase ────────────────────────────────────────────────────
 async function boardEraseNVS(n) {
   const conn = boardConnections[n];
@@ -2274,11 +2502,16 @@ async function boardEraseNVS(n) {
   );
   if (!confirmed) return;
 
-  termLog(n, '?wcb_erase', 'in');
+  termLog(n, '?ERASE,NVS', 'in');
   try {
-    await conn.send('?wcb_erase\r');
+    await conn.send('?ERASE,NVS\r');
+    // Firmware counts down ~3 s before erasing and rebooting.
+    // Closing the serial port immediately causes a USB-disconnect reset that
+    // fires BEFORE the erase runs — so we wait 4 s to let the firmware finish.
+    termLog(n, 'Waiting for firmware erase countdown…', 'sys');
+    showToast(`WCB ${n} erasing — do not disconnect…`, 'warning', 5000);
+    await sleep(4000);
     termLog(n, 'NVS erased — board rebooting…', 'sys');
-    showToast(`WCB ${n} NVS erased — rebooting…`, 'warning', 4000);
     updateBoardStatusBadge(n, 'default');
 
     await conn.closeForReconnect();
@@ -2333,6 +2566,1069 @@ function showToast(message, type = 'info', duration = 3500) {
   container.appendChild(toast);
   setTimeout(() => toast.remove(), effectiveDuration);
   return toast;
+}
+
+// ─── Setup Wizard ─────────────────────────────────────────────────
+
+// ── State ──────────────────────────────────────────────────────────
+let wizardState = null;
+
+function wizardDefaultState() {
+  return {
+    currentIdx:    0,
+    steps:         [],
+    quantity:      1,
+    password:      '',
+    mac2:          '00',
+    mac3:          '00',
+    delimiter:     '^',
+    funcChar:      '?',
+    cmdChar:       ';',
+    boards:        [wizardDefaultBoard(1)],
+    kyberEnabled:  false,
+    kyberBoard:    1,
+    kyberPort:     2,
+    kyberBaud:     115200,
+    kyberTargets:  [],
+    maestroEnabled: false,
+    maestros:      [],            // [{ boardSlot, id, port, baud }]
+    etmEnabled:    false,
+    etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
+                     bootHeartbeatSec:30, messageCount:3, messageDelayMs:100 },
+    needsFirmware: false,
+    eraseNvs:      false,
+    activeBoardTab: 0,
+  };
+}
+
+function wizardDefaultBoard(slotIndex) {
+  return {
+    wcbNumber:   slotIndex,
+    hwVersion:   0,
+    serialPorts: Array.from({length: 5}, () => ({ baud: 9600, label: '' })),
+  };
+}
+
+function wizardInitBoards(qty) {
+  const prev = wizardState.boards;
+  wizardState.boards = Array.from({length: qty}, (_, i) =>
+    prev[i] ?? wizardDefaultBoard(i + 1)
+  );
+  if (wizardState.kyberBoard > qty) wizardState.kyberBoard = 1;
+}
+
+// ── Step list ──────────────────────────────────────────────────────
+function buildWizardSteps() {
+  // Kyber and Maestro come before Serial so claimed ports are visible when labelling
+  const steps = ['welcome','quantity','network','identity','kyber'];
+  if (wizardState.kyberEnabled) steps.push('kyber-config');
+  steps.push('maestro');
+  if (wizardState.maestroEnabled) steps.push('maestro-config');
+  steps.push('serial','etm','review','firmware','connect');
+  return steps;
+}
+
+// ── Open / Close ───────────────────────────────────────────────────
+function openWizard() {
+  wizardState = wizardDefaultState();
+  wizardState.password = wizardGenPassword();
+  wizardState.mac2     = wizardGenMacOctet();
+  wizardState.mac3     = wizardGenMacOctet();
+  wizardState.steps    = buildWizardSteps();
+  document.getElementById('wizard-modal').classList.add('open');
+  wizardRenderStep();
+}
+
+function closeWizard(event) {
+  if (event && event.target !== document.getElementById('wizard-modal')) return;
+  document.getElementById('wizard-modal').classList.remove('open');
+}
+
+// ── Navigation ─────────────────────────────────────────────────────
+function wizardNext() {
+  const key = wizardState.steps[wizardState.currentIdx];
+
+  // Validate before saving
+  const err = wizardValidateStep(key);
+  if (err) { showToast(err, 'error'); return; }
+
+  wizardSaveStep(key);
+
+  // Rebuild steps in case yes/no answers changed
+  const wasKyber   = wizardState.kyberEnabled;
+  const wasMaestro = wizardState.maestroEnabled;
+  wizardState.steps = buildWizardSteps();
+
+  // If we're on the last step trigger apply + connect
+  if (key === 'review') {
+    wizardApplyConfig();
+    wizardState.currentIdx++;
+    wizardRenderStep();
+    return;
+  }
+
+  // After firmware choice is made, stamp the board mode radios on the config page
+  if (key === 'firmware') {
+    const modeVal = !wizardState.needsFirmware ? 'configure'
+                  : wizardState.eraseNvs       ? 'factory'
+                  :                              'update';
+    wizardState.boards.forEach((b, i) => {
+      const n = i + 1;
+      const radio = document.querySelector(`input[name="b${n}-mode"][value="${modeVal}"]`);
+      if (radio) radio.checked = true;
+      // Show/hide the wipe-nvs wrap based on the stamped mode
+      onBoardModeChange(n);
+      // If configure-only with erase, pre-check the per-board wipe checkbox
+      if (!wizardState.needsFirmware && wizardState.eraseNvs) {
+        const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
+        if (wipeEl) wipeEl.checked = true;
+      }
+    });
+  }
+
+  if (wizardState.currentIdx < wizardState.steps.length - 1) {
+    wizardState.currentIdx++;
+    wizardRenderStep();
+  }
+}
+
+function wizardBack() {
+  if (wizardState.currentIdx > 0) {
+    wizardSaveStep(wizardState.steps[wizardState.currentIdx]);
+    wizardState.currentIdx--;
+    wizardRenderStep();
+  }
+}
+
+// ── Render shell ───────────────────────────────────────────────────
+function wizardRenderStep() {
+  const steps = wizardState.steps;
+  const idx   = wizardState.currentIdx;
+  const key   = steps[idx];
+
+  // Title
+  const titles = {
+    'welcome':      'Setup Wizard',
+    'quantity':     'Step 1 — System Size',
+    'network':      'Step 2 — Network',
+    'identity':     'Step 3 — Board Identity',
+    'serial':       'Step 4 — Serial Ports',
+    'kyber':        'Step 5 — Kyber Controller',
+    'kyber-config': 'Step 5b — Kyber Setup',
+    'maestro':      'Step 6 — Maestro Controller',
+    'maestro-config':'Step 6b — Maestro Setup',
+    'etm':          'Step 7 — Event Tracking (ETM)',
+    'review':       'Review — Almost Done!',
+    'firmware':     'Step 8 — Firmware',
+    'connect':      'Connect & Push',
+  };
+  document.getElementById('wizard-modal-title').textContent = titles[key] ?? 'Setup Wizard';
+
+  // Dots
+  const dotWrap = document.getElementById('wizard-step-indicator');
+  dotWrap.innerHTML = steps.map((s, i) => {
+    const cls = i < idx ? 'wizard-dot done' : i === idx ? 'wizard-dot active' : 'wizard-dot';
+    return `<span class="${cls}"></span>`;
+  }).join('');
+
+  // Nav buttons
+  document.getElementById('wizard-back-btn').style.visibility = idx === 0 ? 'hidden' : '';
+  const nextBtn = document.getElementById('wizard-next-btn');
+  if (key === 'connect') {
+    nextBtn.textContent = '✓ Done';
+    nextBtn.onclick = () => closeWizard();
+  } else if (key === 'review') {
+    nextBtn.textContent = 'Apply & Connect →';
+    nextBtn.onclick = wizardNext;
+  } else {
+    nextBtn.textContent = 'Next →';
+    nextBtn.onclick = wizardNext;
+  }
+
+  // Body
+  const body = document.getElementById('wizard-body');
+  body.innerHTML = wizardBuildStepHTML(key);
+
+  // Post-render hooks
+  if (key === 'connect') wizardStartConnectWatchers();
+}
+
+// ── Per-step HTML builders ─────────────────────────────────────────
+function wizardBuildStepHTML(key) {
+  switch (key) {
+    case 'welcome':      return wizardHTMLWelcome();
+    case 'quantity':     return wizardHTMLQuantity();
+    case 'network':      return wizardHTMLNetwork();
+    case 'identity':     return wizardHTMLIdentity();
+    case 'serial':       return wizardHTMLSerial();
+    case 'kyber':        return wizardHTMLKyber();
+    case 'kyber-config': return wizardHTMLKyberConfig();
+    case 'maestro':      return wizardHTMLMaestro();
+    case 'maestro-config': return wizardHTMLMaestroConfig();
+    case 'etm':          return wizardHTMLEtm();
+    case 'review':       return wizardHTMLReview();
+    case 'firmware':     return wizardHTMLFirmware();
+    case 'connect':      return wizardHTMLConnect();
+    default: return '';
+  }
+}
+
+function wizardHTMLWelcome() {
+  return `
+    <div class="wizard-hero">
+      <div class="wizard-hero-icon">📡</div>
+      <div class="wizard-hero-title">Welcome to the WCB Setup Wizard</div>
+      <div class="wizard-hero-desc">
+        This wizard will walk you through configuring your Wireless Communication Board system
+        step by step. No technical knowledge required — just answer the questions and we'll
+        handle the rest. At the end we'll connect to each board and push the configuration
+        automatically.
+      </div>
+    </div>
+    <div class="modal-option" style="cursor:default">
+      <span class="modal-option-icon">ℹ</span>
+      <div class="modal-option-text">
+        <div class="modal-option-title">What you'll need</div>
+        <div class="modal-option-desc">
+          Your WCB boards plugged in via USB · Chrome or Edge browser ·
+          About 5 minutes
+        </div>
+      </div>
+    </div>`;
+}
+
+function wizardHTMLQuantity() {
+  const q = wizardState.quantity;
+  const btns = Array.from({length: 8}, (_, i) => {
+    const n = i + 1;
+    return `<button class="wizard-qty-btn ${n === q ? 'selected' : ''}"
+              onclick="wizardSelectQty(${n})">${n}</button>`;
+  }).join('');
+  return `
+    <div class="wizard-section-title">How many WCBs are in your system?</div>
+    <div class="wizard-section-desc">Each board is one WCB unit connected via USB or ESP-NOW.</div>
+    <div class="wizard-qty-grid">${btns}</div>`;
+}
+
+function wizardHTMLNetwork() {
+  const { password, mac2, mac3, delimiter, funcChar, cmdChar } = wizardState;
+  return `
+    <div class="wizard-section-title">Network Configuration</div>
+    <div class="wizard-section-desc">All boards in the same system must share these settings. We've suggested random secure values — feel free to change them.</div>
+    <div class="wizard-field-row">
+      <label>ESP-NOW Password</label>
+      <input id="wiz-password" type="text" value="${escHtml(password)}" spellcheck="false">
+      <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-password','password')">🎲</button>
+    </div>
+    <div class="wizard-field-row">
+      <label>MAC Octet 2</label>
+      <input id="wiz-mac2" type="text" maxlength="2" value="${escHtml(mac2)}"
+             style="text-transform:uppercase;max-width:80px" spellcheck="false">
+      <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-mac2','mac')">🎲</button>
+    </div>
+    <div class="wizard-field-row">
+      <label>MAC Octet 3</label>
+      <input id="wiz-mac3" type="text" maxlength="2" value="${escHtml(mac3)}"
+             style="text-transform:uppercase;max-width:80px" spellcheck="false">
+      <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-mac3','mac')">🎲</button>
+    </div>
+
+    <div class="wizard-section-title" style="margin-top:18px">Command Characters</div>
+    <div class="wizard-section-desc">Advanced — only change these if your system requires non-default characters. All boards must share the same values.</div>
+    <div class="wizard-field-row">
+      <label>Delimiter</label>
+      <input id="wiz-delim" type="text" maxlength="1" value="${escHtml(delimiter)}"
+             style="max-width:60px;font-family:monospace" spellcheck="false">
+      <span class="wizard-hint">Separates commands&nbsp;(default: <code>^</code>)</span>
+    </div>
+    <div class="wizard-field-row">
+      <label>Function Char</label>
+      <input id="wiz-funcchar" type="text" maxlength="1" value="${escHtml(funcChar)}"
+             style="max-width:60px;font-family:monospace" spellcheck="false">
+      <span class="wizard-hint">Prefixes board commands&nbsp;(default: <code>?</code>)</span>
+    </div>
+    <div class="wizard-field-row">
+      <label>Command Char</label>
+      <input id="wiz-cmdchar" type="text" maxlength="1" value="${escHtml(cmdChar)}"
+             style="max-width:60px;font-family:monospace" spellcheck="false">
+      <span class="wizard-hint">Prefixes routing commands&nbsp;(default: <code>;</code>)</span>
+    </div>`;
+}
+
+function wizardHTMLIdentity() {
+  const tabs   = wizardBoardTabs('identity');
+  const panels = wizardState.boards.map((b, i) => {
+    const hwOpts = Object.entries(WCBParser.HW_VERSION_MAP).map(([val, info]) =>
+      `<option value="${val}" ${b.hwVersion == val ? 'selected' : ''}>${info.display}</option>`
+    ).join('');
+    return `
+      <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-identity-${i}">
+        <div class="wizard-field-row">
+          <label>WCB Number</label>
+          <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}" style="max-width:80px">
+        </div>
+        <div class="wizard-field-row">
+          <label>Hardware Version</label>
+          <select id="wiz-b${i}-hwver">
+            <option value="0">— Select version —</option>
+            ${hwOpts}
+          </select>
+        </div>
+      </div>`;
+  }).join('');
+  return `
+    <div class="wizard-section-title">Board Identity</div>
+    <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
+    ${tabs}${panels}`;
+}
+
+function wizardHTMLSerial() {
+  const tabs   = wizardBoardTabs('serial');
+  const panels = wizardState.boards.map((b, i) => {
+    const boardSlot = i + 1;
+
+    // Build a claim map: portNum (1-based) → { owner, baud }
+    // Kyber claims its port at 115200; each Maestro claims its port at its configured baud
+    const claims = {};
+    if (wizardState.kyberEnabled && wizardState.kyberBoard === boardSlot) {
+      claims[wizardState.kyberPort] = { owner: 'Kyber', baud: wizardState.kyberBaud };
+    }
+    for (const m of wizardState.maestros) {
+      if (m.boardSlot === boardSlot) {
+        claims[m.port] = { owner: `Maestro ID ${m.id}`, baud: m.baud };
+      }
+    }
+
+    const rows = b.serialPorts.map((sp, p) => {
+      const portNum  = p + 1;
+      const claim    = claims[portNum];
+
+      if (claim) {
+        // Claimed port — baud locked, label pre-filled (user can still customise it)
+        const displayLabel = sp.label || claim.owner;
+        return `<tr style="background:var(--card-bg2,rgba(0,0,0,0.08))">
+          <td>Serial ${portNum}</td>
+          <td>
+            <span style="font-family:var(--mono);font-size:12px">${claim.baud.toLocaleString()}</span>
+            <span style="font-size:10px;color:var(--text3);margin-left:4px">(locked)</span>
+            <input type="hidden" id="wiz-b${i}-s${p}-baud" value="${claim.baud}">
+          </td>
+          <td style="display:flex;align-items:center;gap:6px">
+            <input type="text" id="wiz-b${i}-s${p}-label" value="${escHtml(displayLabel)}"
+                   style="min-width:100px" placeholder="label">
+            <span style="font-size:10px;color:var(--text3);white-space:nowrap">🔒 ${claim.owner}</span>
+          </td>
+        </tr>`;
+      }
+
+      // Normal editable port
+      const maxBaud  = p >= 2 ? 57600 : Infinity;
+      const safeBaud = Math.min(sp.baud, maxBaud);
+      const baudOpts = BAUD_RATES.filter(r => r <= maxBaud).map(r =>
+        `<option value="${r}" ${r === safeBaud ? 'selected' : ''}>${r.toLocaleString()}</option>`
+      ).join('');
+      return `<tr>
+        <td>Serial ${portNum}</td>
+        <td><select id="wiz-b${i}-s${p}-baud">${baudOpts}</select></td>
+        <td><input type="text" id="wiz-b${i}-s${p}-label" value="${escHtml(sp.label)}"
+                   placeholder="optional label" style="min-width:100px"></td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-serial-${i}">
+        <table class="wizard-serial-table">
+          <thead><tr><th>Port</th><th>Baud Rate</th><th>Label</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="wizard-section-title">Serial Port Configuration</div>
+    <div class="wizard-section-desc">Set the baud rate for each serial port and add an optional label.
+      Ports already claimed by Kyber or Maestro are shown with a locked baud rate and a pre-filled label — you can still rename them.</div>
+    ${tabs}${panels}`;
+}
+
+function wizardHTMLKyber() {
+  const yes = wizardState.kyberEnabled === true;
+  const no  = wizardState.kyberEnabled === false && wizardState.kyberEnabled !== null;
+  return `
+    <div class="wizard-section-title">Kyber Sound Controller</div>
+    <div class="wizard-section-desc">Are any of your WCBs connected to a Kyber sound board?</div>
+    <div class="wizard-choice-grid">
+      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('kyberEnabled',true,this)">
+        <span class="wizard-choice-icon">🔊</span>
+        <span class="wizard-choice-label">Yes, I use Kyber</span>
+        <span class="wizard-choice-desc">One WCB will control the Kyber board via serial</span>
+      </button>
+      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}" onclick="wizardSetChoice('kyberEnabled',false,this)">
+        <span class="wizard-choice-icon">✕</span>
+        <span class="wizard-choice-label">No Kyber</span>
+        <span class="wizard-choice-desc">Skip Kyber configuration</span>
+      </button>
+    </div>`;
+}
+
+function wizardHTMLKyberConfig() {
+  const { kyberBoard, kyberPort, kyberBaud, quantity } = wizardState;
+  const boardOpts = Array.from({length: quantity}, (_, i) =>
+    `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
+  ).join('');
+  const portOpts = Array.from({length: 5}, (_, p) =>
+    `<option value="${p+1}" ${(p+1) === kyberPort ? 'selected' : ''}>Serial ${p+1}</option>`
+  ).join('');
+  const kyberBaudRates = [9600, 38400, 57600, 115200];
+  const baudOpts = kyberBaudRates.map(r =>
+    `<option value="${r}" ${r === kyberBaud ? 'selected' : ''}>${r.toLocaleString()}</option>`
+  ).join('');
+  return `
+    <div class="wizard-section-title">Kyber Setup</div>
+    <div class="wizard-section-desc">Select which board and serial port the Kyber sound controller is connected to. Maestro targets can be added on the next screen and in the config page.</div>
+    <div class="wizard-field-row">
+      <label>Local Kyber Board</label>
+      <select id="wiz-kyber-board">${boardOpts}</select>
+    </div>
+    <div class="wizard-field-row">
+      <label>Serial Port</label>
+      <select id="wiz-kyber-port">${portOpts}</select>
+    </div>
+    <div class="wizard-field-row">
+      <label>Baud Rate</label>
+      <select id="wiz-kyber-baud">${baudOpts}</select>
+      <span style="font-size:11px;color:var(--text3);margin-left:8px">115,200 for current Kyber · 57,600 for older versions</span>
+    </div>`;
+}
+
+function wizardHTMLMaestro() {
+  const yes = wizardState.maestroEnabled === true;
+  return `
+    <div class="wizard-section-title">Maestro Servo Controller</div>
+    <div class="wizard-section-desc">Are any of your WCBs connected to a Pololu Maestro servo controller?</div>
+    <div class="wizard-choice-grid">
+      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('maestroEnabled',true,this)">
+        <span class="wizard-choice-icon">⚙</span>
+        <span class="wizard-choice-label">Yes, I use Maestro</span>
+        <span class="wizard-choice-desc">One or more WCBs control Maestro boards via serial</span>
+      </button>
+      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}" onclick="wizardSetChoice('maestroEnabled',false,this)">
+        <span class="wizard-choice-icon">✕</span>
+        <span class="wizard-choice-label">No Maestro</span>
+        <span class="wizard-choice-desc">Skip Maestro configuration</span>
+      </button>
+    </div>`;
+}
+
+function wizardHTMLMaestroConfig() {
+  const { maestros, quantity } = wizardState;
+  const boardOpts = (sel) => Array.from({length: quantity}, (_, i) =>
+    `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
+  ).join('');
+  const rows = maestros.map((m, mi) => {
+    // Baud capped by port (ports 3-5 max 57600)
+    const maxBaud = m.port >= 3 ? 57600 : Infinity;
+    const safeBaud = Math.min(m.baud, maxBaud);
+    const baudOpts = BAUD_RATES.filter(r => r <= maxBaud).map(r =>
+      `<option value="${r}" ${r === safeBaud ? 'selected' : ''}>${r.toLocaleString()}</option>`
+    ).join('');
+    // Exclude the Kyber port if this maestro is on the Kyber board
+    const kyberPortForBoard = (wizardState.kyberEnabled && m.boardSlot === wizardState.kyberBoard)
+      ? wizardState.kyberPort : null;
+    const portOpts = Array.from({length: 5}, (_, p) => {
+      const portNum = p + 1;
+      if (portNum === kyberPortForBoard) return '';
+      return `<option value="${portNum}" ${portNum === m.port ? 'selected' : ''}>Serial ${portNum}</option>`;
+    }).join('');
+    const idOpts = Array.from({length: 9}, (_, i) =>
+      `<option value="${i+1}" ${(i+1) === m.id ? 'selected' : ''}>${i+1}</option>`
+    ).join('');
+    // Column order: ID → Board → Port → Baud
+    return `<tr id="wiz-maestro-row-${mi}">
+      <td style="color:var(--text3);font-size:11px">${mi+1}</td>
+      <td><select id="wiz-m${mi}-id">${idOpts}</select></td>
+      <td><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
+      <td><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
+      <td><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
+      <td><button class="btn btn-danger btn-sm btn-icon" onclick="wizardRemoveMaestro(${mi})">🗑</button></td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="wizard-section-title">Maestro Setup</div>
+    <div class="wizard-section-desc">Add one row per Maestro. Select its ID, which board it's on, and which serial port it uses.</div>
+    <table class="wizard-serial-table" style="margin-bottom:4px">
+      <thead><tr><th>#</th><th>ID</th><th>Board</th><th>Port</th><th>Baud</th><th></th></tr></thead>
+      <tbody id="wiz-maestro-tbody">${rows}</tbody>
+    </table>
+    <button class="btn btn-ghost btn-sm" onclick="wizardAddMaestro()">+ Add Maestro</button>`;
+}
+
+function wizardHTMLEtm() {
+  const { etmEnabled, etmConfig } = wizardState;
+  const detailDisplay = etmEnabled ? '' : 'display:none';
+  return `
+    <div class="wizard-section-title">Ensure Transmission Mode (ETM)</div>
+    <div class="wizard-section-desc">ETM improves message reliability by tracking receipt of each transmission and automatically retransmitting if delivery is not acknowledged — so commands always get through.</div>
+    <div class="wizard-etm-toggle">
+      <input type="checkbox" id="wiz-etm-enabled" ${etmEnabled ? 'checked' : ''}
+             onchange="wizardToggleEtmDetail(this.checked)">
+      <label for="wiz-etm-enabled">Enable ETM on all boards</label>
+    </div>
+    <div class="wizard-etm-fields" id="wiz-etm-fields" style="${detailDisplay}">
+      <div class="wizard-field-row">
+        <label>Timeout (ms)</label>
+        <input id="wiz-etm-timeout" type="number" value="${etmConfig.timeoutMs}">
+      </div>
+      <div class="wizard-field-row">
+        <label>Heartbeat (sec)</label>
+        <input id="wiz-etm-hb" type="number" value="${etmConfig.heartbeatSec}">
+      </div>
+      <div class="wizard-field-row">
+        <label>Missed before action</label>
+        <input id="wiz-etm-miss" type="number" value="${etmConfig.missedHeartbeats}">
+      </div>
+      <div class="wizard-field-row">
+        <label>Boot heartbeat (sec)</label>
+        <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
+      </div>
+    </div>`;
+}
+
+function wizardHTMLReview() {
+  const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards } = wizardState;
+  const boardRows = boards.map((b, i) => {
+    const hwLabel = WCBParser.HW_VERSION_MAP[b.hwVersion]?.display ?? 'Not set';
+    return `<div class="wizard-review-row">
+      <span class="wizard-review-label">Board ${i+1}</span>
+      <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}</span>
+    </div>`;
+  }).join('');
+  return `
+    <div class="wizard-section-title">Everything looks good!</div>
+    <div class="wizard-section-desc">Review your settings below. Click "Apply & Connect" to write these to the config page and start connecting your boards.</div>
+
+    <div class="wizard-review-section">
+      <div class="wizard-review-heading">System</div>
+      <div class="wizard-review-row"><span class="wizard-review-label">Number of WCBs</span><span class="wizard-review-value">${quantity}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">ESP-NOW Password</span><span class="wizard-review-value">${escHtml(password)}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">MAC Octets</span><span class="wizard-review-value">XX:XX:${mac2.toUpperCase()}:${mac3.toUpperCase()}:XX:XX</span></div>
+    </div>
+    <div class="wizard-review-section">
+      <div class="wizard-review-heading">Boards</div>
+      ${boardRows}
+    </div>
+    <div class="wizard-review-section">
+      <div class="wizard-review-heading">Optional Features</div>
+      <div class="wizard-review-row"><span class="wizard-review-label">Kyber</span><span class="wizard-review-value">${kyberEnabled ? '✅ Enabled' : '—'}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">Maestro</span><span class="wizard-review-value">${maestroEnabled ? '✅ Enabled' : '—'}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">ETM</span><span class="wizard-review-value">${etmEnabled ? '✅ Enabled' : '—'}</span></div>
+    </div>`;
+}
+
+function wizardHTMLFirmware() {
+  const yes = wizardState.needsFirmware === true;
+  const eraseDesc = yes
+    ? 'Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.'
+    : 'Erases all saved settings before pushing config — boards will reboot to a clean slate before receiving new configuration.';
+  return `
+    <div class="wizard-section-title">Firmware Upload</div>
+    <div class="wizard-section-desc">Does WCB firmware need to be uploaded to these boards? Choose "Yes" if the boards are brand new or have never had WCB firmware installed.</div>
+    <div class="wizard-choice-grid">
+      <button class="wizard-choice-btn ${yes ? 'selected' : ''}"
+              onclick="wizardFirmwareChoice(true,this)">
+        <span class="wizard-choice-icon">💾</span>
+        <span class="wizard-choice-label">Yes, upload firmware</span>
+        <span class="wizard-choice-desc">Brand new boards or boards without WCB firmware yet</span>
+      </button>
+      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}"
+              onclick="wizardFirmwareChoice(false,this)">
+        <span class="wizard-choice-icon">✓</span>
+        <span class="wizard-choice-label">No, already installed</span>
+        <span class="wizard-choice-desc">Firmware is already on the boards — just push configuration</span>
+      </button>
+    </div>
+    <div style="margin-top:12px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+        <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
+        <div>
+          <div style="font-weight:600;font-size:13px">Overwrite existing board memory</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
+        </div>
+      </label>
+    </div>`;
+}
+
+function wizardFirmwareChoice(val, btn) {
+  wizardState.needsFirmware = val;
+  // Re-render to update the checkbox description text
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('firmware');
+}
+
+function wizardHTMLConnect() {
+  const rows = wizardState.boards.map((b, i) => {
+    const n   = i + 1;
+    const fwBadge = !wizardState.needsFirmware ? ''
+      : wizardState.eraseNvs
+        ? `<span class="badge badge-red"    style="font-size:9px;padding:2px 6px">Factory Reset</span>`
+        : `<span class="badge badge-yellow" style="font-size:9px;padding:2px 6px">Upload FW</span>`;
+    return `<div class="wizard-connect-row" id="wiz-connect-row-${n}">
+      <span class="wizard-connect-label">
+        WCB ${n} ${fwBadge}
+        <span style="color:var(--text3);font-weight:400;font-size:11px;display:block">Board #${b.wcbNumber}</span>
+      </span>
+      <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
+        <span id="wiz-connect-btns-${n}" style="display:flex;gap:6px">
+          <button class="btn btn-primary btn-sm" id="wiz-detect-btn-${n}"
+                  onclick="wizardAutoDetect(${n})">⊙ Auto-Detect</button>
+          <button class="btn btn-ghost btn-sm"   id="wiz-manual-btn-${n}"
+                  onclick="wizardManualConnect(${n})">🔌 Manual</button>
+        </span>
+        <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
+                style="display:none" onclick="wizardCancelConnect(${n})">✕ Cancel</button>
+      </div>
+      <span class="wizard-connect-status" id="wiz-connect-status-${n}">Waiting…</span>
+    </div>`;
+  }).join('');
+  return `
+    <div class="wizard-section-title">Connect &amp; Push</div>
+    <div class="wizard-section-desc">
+      For each board: click <strong>Auto-Detect</strong> (then press the reset button on the board),
+      or <strong>Manual</strong> to pick a COM port. The config will push automatically after connecting.
+    </div>
+    ${rows}`;
+}
+
+// ── Interactive helpers used in step HTML ──────────────────────────
+function wizardSelectQty(n) {
+  wizardState.quantity = n;
+  wizardInitBoards(n);
+  document.querySelectorAll('.wizard-qty-btn').forEach(btn => {
+    btn.classList.toggle('selected', parseInt(btn.textContent) === n);
+  });
+}
+
+function wizardSetChoice(field, value, btn) {
+  wizardState[field] = value;
+  const parent = btn.closest('.wizard-choice-grid');
+  parent.querySelectorAll('.wizard-choice-btn').forEach(b => {
+    b.classList.remove('selected','selected-no');
+  });
+  btn.classList.add(value ? 'selected' : 'selected-no');
+}
+
+function wizardFillGen(inputId, type) {
+  const val = type === 'password' ? wizardGenPassword() : wizardGenMacOctet();
+  const el  = document.getElementById(inputId);
+  if (el) el.value = val;
+}
+
+function wizardSwitchBoardTab(step, i) {
+  wizardSaveStep(step); // save current tab first
+  wizardState.activeBoardTab = i;
+  document.querySelectorAll(`.wizard-board-tab`).forEach((t, ti) =>
+    t.classList.toggle('active', ti === i));
+  document.querySelectorAll(`[id^="wiz-panel-${step}-"]`).forEach((p, pi) =>
+    p.classList.toggle('active', pi === i));
+}
+
+function wizardBoardTabs(step) {
+  return `<div class="wizard-board-tabs">
+    ${wizardState.boards.map((b, i) =>
+      `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
+               onclick="wizardSwitchBoardTab('${step}',${i})">
+        WCB&nbsp;${b.wcbNumber}
+      </button>`
+    ).join('')}
+  </div>`;
+}
+
+function wizardToggleEtmDetail(on) {
+  wizardState.etmEnabled = on;
+  const el = document.getElementById('wiz-etm-fields');
+  if (el) el.style.display = on ? '' : 'none';
+}
+
+function wizardAddKyberTarget() {
+  wizardState.kyberTargets.push({ id: wizardState.kyberTargets.length + 1, wcbNumber: 1, port: 1, baud: 57600 });
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('kyber-config');
+}
+function wizardRemoveKyberTarget(ti) {
+  wizardSaveStep('kyber-config');
+  wizardState.kyberTargets.splice(ti, 1);
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('kyber-config');
+}
+function wizardMaestroPortChange(mi) {
+  const portSel = document.getElementById(`wiz-m${mi}-port`);
+  const baudSel = document.getElementById(`wiz-m${mi}-baud`);
+  if (!portSel || !baudSel) return;
+  const port    = parseInt(portSel.value) || 1;
+  const maxBaud = port >= 3 ? 57600 : Infinity;
+  const curBaud = parseInt(baudSel.value) || 57600;
+  baudSel.innerHTML = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
+    `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`
+  ).join('');
+}
+
+function wizardMaestroBoardChange(mi) {
+  // When the board for a maestro changes, rebuild the port dropdown so the
+  // Kyber-port exclusion is applied only for the Kyber board, not others.
+  const boardSel = document.getElementById(`wiz-m${mi}-board`);
+  const portSel  = document.getElementById(`wiz-m${mi}-port`);
+  if (!boardSel || !portSel) return;
+
+  const newBoardSlot = parseInt(boardSel.value) || 1;
+  const curPort      = parseInt(portSel.value)  || 1;
+
+  // Exclude Kyber port only when this maestro is on the Kyber board
+  const kyberPortForBoard = (wizardState.kyberEnabled && newBoardSlot === wizardState.kyberBoard)
+    ? wizardState.kyberPort : null;
+
+  portSel.innerHTML = Array.from({length: 5}, (_, p) => {
+    const portNum = p + 1;
+    if (portNum === kyberPortForBoard) return '';
+    return `<option value="${portNum}" ${portNum === curPort ? 'selected' : ''}>Serial ${portNum}</option>`;
+  }).join('');
+
+  // If the currently selected port was the excluded Kyber port, bump to first available
+  if (curPort === kyberPortForBoard) {
+    const firstAvail = portSel.querySelector('option');
+    if (firstAvail) portSel.value = firstAvail.value;
+  }
+
+  wizardMaestroPortChange(mi); // refresh baud options for the newly selected port
+}
+
+function wizardAddMaestro() {
+  wizardSaveStep('maestro-config'); // preserve existing rows before adding
+  wizardState.maestros.push({ boardSlot: 1, id: wizardState.maestros.length + 1, port: 1, baud: 57600 });
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('maestro-config');
+}
+function wizardRemoveMaestro(mi) {
+  wizardSaveStep('maestro-config');
+  wizardState.maestros.splice(mi, 1);
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('maestro-config');
+}
+
+// ── Save step values into state ────────────────────────────────────
+function wizardSaveStep(key) {
+  const get = (id) => document.getElementById(id);
+  switch (key) {
+    case 'network':
+      if (get('wiz-password')) wizardState.password = get('wiz-password').value.trim();
+      if (get('wiz-mac2')) wizardState.mac2 = get('wiz-mac2').value.trim().toUpperCase().padStart(2,'0');
+      if (get('wiz-mac3')) wizardState.mac3 = get('wiz-mac3').value.trim().toUpperCase().padStart(2,'0');
+      wizardState.delimiter = get('wiz-delim')?.value.trim().charAt(0)    || '^';
+      wizardState.funcChar  = get('wiz-funcchar')?.value.trim().charAt(0) || '?';
+      wizardState.cmdChar   = get('wiz-cmdchar')?.value.trim().charAt(0)  || ';';
+      break;
+    case 'identity':
+      wizardState.boards.forEach((b, i) => {
+        const num = parseInt(get(`wiz-b${i}-wcbnum`)?.value);
+        const hw  = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
+        if (!isNaN(num)) b.wcbNumber = num;
+        if (!isNaN(hw))  b.hwVersion = hw;
+      });
+      break;
+    case 'serial':
+      wizardState.boards.forEach((b, i) => {
+        b.serialPorts.forEach((sp, p) => {
+          const baud = parseInt(get(`wiz-b${i}-s${p}-baud`)?.value);
+          const lbl  = get(`wiz-b${i}-s${p}-label`)?.value ?? '';
+          if (!isNaN(baud)) sp.baud = baud;
+          sp.label = lbl;
+        });
+      });
+      break;
+    case 'kyber-config':
+      wizardState.kyberBoard = parseInt(get('wiz-kyber-board')?.value ?? 1);
+      wizardState.kyberPort  = parseInt(get('wiz-kyber-port')?.value  ?? 2);
+      wizardState.kyberBaud  = parseInt(get('wiz-kyber-baud')?.value  ?? 115200);
+      break;
+    case 'firmware':
+      // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox for eraseNvs
+      wizardState.eraseNvs = document.getElementById('wiz-erase-nvs')?.checked ?? false;
+      break;
+    case 'maestro-config':
+      wizardState.maestros = wizardState.maestros.map((m, mi) => ({
+        boardSlot: parseInt(get(`wiz-m${mi}-board`)?.value ?? m.boardSlot),
+        id:        parseInt(get(`wiz-m${mi}-id`)?.value    ?? m.id),
+        port:      parseInt(get(`wiz-m${mi}-port`)?.value  ?? m.port),
+        baud:      parseInt(get(`wiz-m${mi}-baud`)?.value  ?? m.baud),
+      }));
+      break;
+    case 'etm':
+      if (get('wiz-etm-enabled')) wizardState.etmEnabled = get('wiz-etm-enabled').checked;
+      if (wizardState.etmEnabled) {
+        wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 30000);
+        wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value      ?? 10);
+        wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 3);
+        wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 30);
+      }
+      break;
+  }
+}
+
+// ── Validation ─────────────────────────────────────────────────────
+function wizardValidateStep(key) {
+  switch (key) {
+    case 'network': {
+      const pw = document.getElementById('wiz-password')?.value?.trim() ?? '';
+      if (pw.length < 8) return 'Password must be at least 8 characters.';
+      const m2 = document.getElementById('wiz-mac2')?.value?.trim() ?? '';
+      const m3 = document.getElementById('wiz-mac3')?.value?.trim() ?? '';
+      if (!/^[0-9A-Fa-f]{2}$/.test(m2)) return 'MAC Octet 2 must be two hex digits (00–FF).';
+      if (!/^[0-9A-Fa-f]{2}$/.test(m3)) return 'MAC Octet 3 must be two hex digits (00–FF).';
+      break;
+    }
+    case 'identity': {
+      const nums = wizardState.boards.map((_, i) =>
+        parseInt(document.getElementById(`wiz-b${i}-wcbnum`)?.value ?? 0)
+      );
+      if (nums.some(n => n < 1 || n > 99)) return 'WCB numbers must be between 1 and 99.';
+      if (new Set(nums).size !== nums.length) return 'Each board must have a unique WCB number.';
+      const hvs = wizardState.boards.map((_, i) =>
+        parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0)
+      );
+      if (hvs.some(h => h === 0)) return 'Please select a hardware version for every board.';
+      break;
+    }
+    case 'maestro-config': {
+      if (wizardState.kyberEnabled) {
+        for (const m of wizardState.maestros) {
+          if (m.boardSlot === wizardState.kyberBoard && m.port === wizardState.kyberPort) {
+            return `Maestro ID ${m.id} uses Serial ${m.port}, which is already claimed by Kyber on Board ${wizardState.kyberBoard}. Choose a different port.`;
+          }
+        }
+      }
+      break;
+    }
+  }
+  return null;
+}
+
+// ── Random generators ──────────────────────────────────────────────
+function wizardGenPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from({length: 14}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
+function wizardGenMacOctet() {
+  return Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase();
+}
+
+// ── Apply config to the main config page ──────────────────────────
+function wizardApplyConfig() {
+  const ws = wizardState;
+
+  // Quantity → render board sections
+  const qtyEl = document.getElementById('g-wcbq');
+  if (qtyEl) qtyEl.value = ws.quantity;
+  renderBoards(ws.quantity);
+  systemConfig.general.wcbQuantity = ws.quantity;
+
+  // General network fields
+  const setEl = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  setEl('g-password', ws.password);
+  setEl('g-mac2', ws.mac2);
+  setEl('g-mac3', ws.mac3);
+  setEl('g-delimiter', ws.delimiter);
+  setEl('g-funcchar',  ws.funcChar);
+  setEl('g-cmdchar',   ws.cmdChar);
+  onGeneralPasswordChange();
+  onGeneralMacChange();
+  onGeneralCmdCharChange();
+
+  // Per-board fields
+  ws.boards.forEach((b, i) => {
+    const n = i + 1;
+    const cfg = WCBParser.createDefaultBoardConfig();
+    cfg.wcbNumber  = b.wcbNumber;
+    cfg.hwVersion  = b.hwVersion;
+    cfg.espnowPassword = ws.password;
+    cfg.macOctet2  = ws.mac2;
+    cfg.macOctet3  = ws.mac3;
+    cfg.delimiter  = ws.delimiter;
+    cfg.funcChar   = ws.funcChar;
+    cfg.cmdChar    = ws.cmdChar;
+
+    b.serialPorts.forEach((sp, p) => {
+      cfg.serialPorts[p].baud  = sp.baud;
+      cfg.serialPorts[p].label = sp.label;
+    });
+
+    // Kyber
+    if (ws.kyberEnabled) {
+      if ((i + 1) === ws.kyberBoard) {
+        cfg.kyber.mode = 'local';
+        cfg.kyber.port = ws.kyberPort;
+        cfg.kyber.baud = ws.kyberBaud;
+        // Mirror kyber baud into the serial port so ?BAUD is generated correctly
+        cfg.serialPorts[ws.kyberPort - 1].baud = ws.kyberBaud;
+        // Include ALL maestros (local and remote) as Kyber targets so the firmware
+        // knows every Maestro it must forward commands to — both those on this same
+        // board (via local serial) and those on remote boards (via ESP-NOW).
+        // The 'wcb' property name must match what parser.js buildCommandString
+        // uses when building M<id>:W<wcb>S<port>:<baud> target strings.
+        cfg.kyber.targets = ws.maestros
+          .map(m => ({
+            id:   m.id,
+            wcb:  m.boardSlot,
+            port: m.port,
+            baud: m.baud,
+          }));
+      } else {
+        // Any non-kyber board that has a Maestro with ID 1 or 2 must be
+        // configured as KYBER_REMOTE so it receives Kyber commands via ESP-NOW
+        const hasPrimaryMaestro = ws.maestros.some(
+          m => m.boardSlot === (i + 1) && (m.id === 1 || m.id === 2)
+        );
+        if (hasPrimaryMaestro) {
+          cfg.kyber.mode = 'remote';
+        }
+      }
+    }
+
+    // Maestro
+    const myMaestros = ws.maestros.filter(m => m.boardSlot === (i + 1));
+    cfg.maestros = myMaestros.map(m => ({ id: m.id, port: m.port, baud: m.baud }));
+
+    // ETM
+    if (ws.etmEnabled) {
+      cfg.etm = { enabled: true, ...ws.etmConfig };
+    }
+
+    boardConfigs[n] = cfg;
+    populateUIFromConfig(n, cfg);
+    onBoardFieldChange(n);
+
+    // Note: firmware mode radios are stamped in wizardNext when leaving the firmware step
+  });
+
+  // ETM global toggle
+  if (ws.etmEnabled) {
+    const etmEl = document.getElementById('g-etm-enabled');
+    if (etmEl) { etmEl.checked = true; onETMToggle(); }
+    setEl('g-etm-timeout', ws.etmConfig.timeoutMs);
+    setEl('g-etm-hb',      ws.etmConfig.heartbeatSec);
+    setEl('g-etm-miss',    ws.etmConfig.missedHeartbeats);
+    setEl('g-etm-boot',    ws.etmConfig.bootHeartbeatSec);
+    setEl('g-etm-count',   ws.etmConfig.messageCount);
+    setEl('g-etm-delay',   ws.etmConfig.messageDelayMs);
+    systemConfig.general.etm = { enabled: true, ...ws.etmConfig };
+  }
+
+  showToast('Config page updated from wizard', 'success');
+}
+
+// ── Connect & push each board ──────────────────────────────────────
+const wizardConnectWatchers = {};   // interval IDs keyed by board slot
+
+function wizardDisableConnectBtns(n) {
+  const grp = document.getElementById(`wiz-connect-btns-${n}`);
+  if (grp) grp.style.display = 'none';
+  const cancel = document.getElementById(`wiz-cancel-btn-${n}`);
+  if (cancel) cancel.style.display = '';
+}
+function wizardEnableConnectBtns(n) {
+  const grp = document.getElementById(`wiz-connect-btns-${n}`);
+  if (grp) grp.style.display = 'flex';
+  const cancel = document.getElementById(`wiz-cancel-btn-${n}`);
+  if (cancel) cancel.style.display = 'none';
+}
+
+async function wizardCancelConnect(n) {
+  // Stop the watch-for-connect interval
+  if (wizardConnectWatchers[n]) {
+    clearInterval(wizardConnectWatchers[n]);
+    delete wizardConnectWatchers[n];
+  }
+  // Stop auto-detect if it's still running
+  _detecting[n] = false;
+  // Drop any partial connection
+  try { await boardConnections[n]?.disconnect(); } catch (_) {}
+  delete boardConnections[n];
+  // Reset UI back to the initial waiting state
+  wizardEnableConnectBtns(n);
+  wizardSetConnectStatus(n, '', 'Waiting…');
+}
+
+function wizardAutoDetect(n) {
+  wizardDisableConnectBtns(n);
+  wizardSetConnectStatus(n, 'busy', 'Detecting… (press reset)');
+  boardAutoDetect(n);
+  wizardWatchForConnect(n);
+}
+
+async function wizardManualConnect(n) {
+  wizardDisableConnectBtns(n);
+  wizardSetConnectStatus(n, 'busy', 'Select port…');
+  try {
+    await boardManualConnect(n);
+    wizardWatchForConnect(n);
+  } catch(e) {
+    wizardEnableConnectBtns(n);
+    wizardSetConnectStatus(n, '', 'Waiting…');
+  }
+}
+
+function wizardWatchForConnect(n) {
+  // Snapshot the wizard-applied config now, before the boardPull that fires
+  // ~500 ms after the board connects can overwrite boardConfigs[n] and the
+  // shared general DOM fields (g-password, g-wcbq, etc.).
+  const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+  const generalSnapshot = captureGeneralDOMSnapshot();
+
+  let attempts = 0;
+  const iv = setInterval(async () => {
+    attempts++;
+    if (boardConnections[n]?.isConnected()) {
+      clearInterval(iv);
+      delete wizardConnectWatchers[n];
+      wizardEnableConnectBtns(n);           // hide Cancel, restore Auto/Manual
+      wizardSetConnectStatus(n, 'busy', 'Pushing…');
+
+      // Restore wizard config — the initial boardPull may have overwritten it.
+      if (configSnapshot) {
+        boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
+        boardBaselines[n] = null;   // force a full push (NVS is blank after flash)
+        populateUIFromConfig(n, boardConfigs[n]);
+      }
+      restoreGeneralDOMSnapshot(generalSnapshot);
+
+      try {
+        await boardGo(n);
+        wizardSetConnectStatus(n, 'ok', '✓ Done');
+      } catch(e) {
+        wizardSetConnectStatus(n, 'err', '✕ Push failed');
+      }
+    } else if (attempts > 180) { // 90s timeout
+      clearInterval(iv);
+      delete wizardConnectWatchers[n];
+      wizardEnableConnectBtns(n);
+      wizardSetConnectStatus(n, 'err', '✕ Timed out');
+    }
+  }, 500);
+  wizardConnectWatchers[n] = iv;    // store so Cancel can clear it
+}
+
+function wizardSetConnectStatus(n, type, text) {
+  const el = document.getElementById(`wiz-connect-status-${n}`);
+  if (!el) return;
+  el.className = `wizard-connect-status ${type}`;
+  el.textContent = text;
+}
+
+function wizardStartConnectWatchers() {
+  // Auto-start push for already-connected boards
+  for (let i = 0; i < wizardState.quantity; i++) {
+    const n = i + 1;
+    if (boardConnections[n]?.isConnected()) {
+      wizardDisableConnectBtns(n);
+      wizardSetConnectStatus(n, 'busy', 'Pushing…');
+      boardGo(n)
+        .then(() => { wizardEnableConnectBtns(n); wizardSetConnectStatus(n, 'ok', '✓ Done'); })
+        .catch(() => { wizardEnableConnectBtns(n); wizardSetConnectStatus(n, 'err', '✕ Push failed'); });
+    }
+  }
 }
 
 // ─── Utilities ────────────────────────────────────────────────────

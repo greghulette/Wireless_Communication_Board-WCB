@@ -168,7 +168,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section-header {
   display: flex; align-items: center; gap: 12px; padding: 14px 18px;
   cursor: pointer; user-select: none; transition: background var(--transition);
-  border-bottom: 1px solid transparent;
+  border-bottom: 1px solid transparent; position: relative;
 }
 .section-header:hover { background: var(--bg3); }
 .section.open .section-header { border-bottom-color: var(--border); }
@@ -176,7 +176,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section.open .section-chevron { transform: rotate(90deg); }
 .section-title { flex: 1; }
 .section-title h2 { font-size: 13px; letter-spacing: 0.5px; }
-.section-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.section-status {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; pointer-events: none;
+}
+.section-meta   { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .section-body { padding: 18px; display: none; }
 .section.open .section-body { display: block; }
 
@@ -483,6 +487,133 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   color: var(--text); display: flex; align-items: center; gap: 6px;
 }
 .modal-option-desc { font-size: 11px; color: var(--text2); line-height: 1.5; }
+
+/* ─── Setup Wizard ───────────────────────────────────────────── */
+.wizard-dialog { width: 600px; max-width: 96vw; }
+.wizard-body {
+  padding: 20px; display: flex; flex-direction: column; gap: 14px;
+  max-height: 60vh; overflow-y: auto;
+}
+
+/* Progress dots */
+.wizard-step-indicator { display: flex; gap: 5px; align-items: center; flex: 1; justify-content: center; padding: 0 8px; }
+.wizard-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border2); transition: all var(--transition); flex-shrink: 0; }
+.wizard-dot.active { background: var(--accent); transform: scale(1.4); }
+.wizard-dot.done   { background: var(--green2); }
+
+/* Welcome hero */
+.wizard-hero { text-align: center; padding: 8px 0 4px; }
+.wizard-hero-icon  { font-size: 44px; margin-bottom: 10px; line-height: 1; }
+.wizard-hero-title { font-family: var(--sans); font-size: 19px; font-weight: 800; margin-bottom: 8px; }
+.wizard-hero-desc  { color: var(--text2); font-size: 12px; line-height: 1.7; max-width: 420px; margin: 0 auto; }
+
+/* Section heading inside wizard body */
+.wizard-section-title {
+  font-family: var(--sans); font-size: 14px; font-weight: 700; margin-bottom: 2px;
+}
+.wizard-section-desc { font-size: 11px; color: var(--text2); margin-bottom: 4px; line-height: 1.5; }
+
+/* Quantity picker */
+.wizard-qty-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.wizard-qty-btn {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text2); font-family: var(--sans); font-size: 22px; font-weight: 800;
+  padding: 14px 0; cursor: pointer; transition: all var(--transition); text-align: center;
+}
+.wizard-qty-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.05); }
+.wizard-qty-btn.selected { border-color: var(--accent); background: rgba(0,212,255,0.12); color: var(--accent); }
+
+/* Yes/No choice cards */
+.wizard-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.wizard-choice-btn {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 20px 16px; cursor: pointer;
+  transition: all var(--transition); text-align: center;
+}
+.wizard-choice-btn:hover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+.wizard-choice-btn.selected { border-color: var(--accent); background: rgba(0,212,255,0.12); }
+.wizard-choice-btn.selected-no { border-color: var(--text3); background: var(--bg4); }
+.wizard-choice-icon { font-size: 28px; line-height: 1; }
+.wizard-choice-label { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--text); }
+.wizard-choice-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
+
+/* Field rows (label + input [+ button]) */
+.wizard-field-row { display: flex; align-items: center; gap: 8px; }
+.wizard-field-row label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+  text-transform: uppercase; color: var(--text2); font-family: var(--sans);
+  width: 120px; flex-shrink: 0;
+}
+.wizard-field-row input, .wizard-field-row select {
+  flex: 1; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-family: var(--mono); font-size: 13px; padding: 6px 10px; outline: none;
+  transition: border-color var(--transition);
+}
+.wizard-field-row input:focus, .wizard-field-row select:focus { border-color: var(--accent); }
+.wizard-field-row select option { background: var(--bg3); }
+.wizard-gen-btn {
+  background: none; border: 1px solid var(--border2); border-radius: var(--radius);
+  color: var(--text2); font-size: 15px; padding: 5px 9px; cursor: pointer;
+  flex-shrink: 0; transition: all var(--transition); line-height: 1;
+}
+.wizard-gen-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Per-board tab bar */
+.wizard-board-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.wizard-board-tab {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px 13px;
+  font-size: 11px; font-family: var(--sans); font-weight: 600;
+  cursor: pointer; color: var(--text2); transition: all var(--transition);
+}
+.wizard-board-tab.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.wizard-tab-panel { display: none; }
+.wizard-tab-panel.active { display: flex; flex-direction: column; gap: 8px; }
+
+/* Serial port mini-table */
+.wizard-serial-table { width: 100%; border-collapse: collapse; }
+.wizard-serial-table th {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+  text-transform: uppercase; color: var(--text3); font-family: var(--sans);
+  padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border);
+}
+.wizard-serial-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); }
+.wizard-serial-table tr:last-child td { border-bottom: none; }
+.wizard-serial-table td:first-child { color: var(--text3); font-size: 11px; width: 70px; }
+.wizard-serial-table select, .wizard-serial-table input[type="text"] {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-family: var(--mono); font-size: 12px; padding: 4px 7px; outline: none;
+  transition: border-color var(--transition); width: 100%;
+}
+.wizard-serial-table select:focus, .wizard-serial-table input:focus { border-color: var(--accent); }
+
+/* ETM toggle row */
+.wizard-etm-toggle { display: flex; align-items: center; gap: 10px; }
+.wizard-etm-toggle input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.wizard-etm-toggle label { font-size: 13px; color: var(--text); cursor: pointer; }
+.wizard-etm-fields { display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); }
+
+/* Review summary */
+.wizard-review-section { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.wizard-review-heading { font-family: var(--sans); font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text3); margin-bottom: 8px; }
+.wizard-review-row { display: flex; gap: 8px; font-size: 12px; padding: 2px 0; }
+.wizard-review-label { color: var(--text3); width: 160px; flex-shrink: 0; }
+.wizard-review-value { color: var(--text); font-family: var(--mono); }
+
+/* Connect step board rows */
+.wizard-connect-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 16px;
+}
+.wizard-connect-label { flex: 1; font-family: var(--sans); font-size: 13px; font-weight: 700; }
+.wizard-connect-status { font-size: 11px; color: var(--text3); min-width: 90px; text-align: right; }
+.wizard-connect-status.ok  { color: var(--green); }
+.wizard-connect-status.err { color: var(--red); }
+.wizard-connect-status.busy { color: var(--yellow); }
 
 /* ─── Terminal Drawer ────────────────────────────────────────── */
 /* ── Detect button (pulsing while auto-detect is active) ─────── */
