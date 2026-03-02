@@ -15,6 +15,13 @@ let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
 
+// ─── Connect Modal State ───────────────────────────────────────────
+let _connectModalSlot = null;   // which board slot the modal is open for
+const _detecting = {};          // { [n]: true/false } — auto-detect active per slot
+
+// ─── General Settings Baseline ────────────────────────────────────
+let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
+
 // ─── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   checkBrowserCompat();
@@ -264,6 +271,7 @@ function onGeneralPasswordChange() {
   const val = document.getElementById('g-password').value;
   systemConfig.general.espnowPassword = val;
   for (const n in boardConfigs) boardConfigs[n].espnowPassword = val;
+  updateGeneralBaseline();
 }
 
 function onGeneralMacChange() {
@@ -272,6 +280,7 @@ function onGeneralMacChange() {
   systemConfig.general.macOctet2 = m2;
   systemConfig.general.macOctet3 = m3;
   for (const n in boardConfigs) { boardConfigs[n].macOctet2 = m2; boardConfigs[n].macOctet3 = m3; }
+  updateGeneralBaseline();
 }
 
 function validateMacOctet(input) {
@@ -296,6 +305,14 @@ function onGeneralCmdCharChange() {
     boardConfigs[n].funcChar  = systemConfig.general.funcChar;
     boardConfigs[n].cmdChar   = systemConfig.general.cmdChar;
   }
+  updateGeneralBaseline();
+}
+
+// Keep generalBaseline in sync whenever the user edits general fields in the UI,
+// so a subsequent board-reboot + auto-pull doesn't falsely report a mismatch.
+function updateGeneralBaseline() {
+  if (!generalBaseline) return;
+  generalBaseline.fields = extractGeneralFields(systemConfig.general);
 }
 
 function onETMToggle() {
@@ -305,6 +322,33 @@ function onETMToggle() {
   if (appMode === 'advanced' && enabled) etmDetail.classList.add('visible');
   else etmDetail.classList.remove('visible');
   for (const n in boardConfigs) boardConfigs[n].etm.enabled = enabled;
+}
+
+// ─── General Settings Conflict Helpers ────────────────────────────
+const GENERAL_FIELD_LABELS = {
+  espnowPassword: 'ESP-NOW Password',
+  macOctet2:      'MAC Octet 2',
+  macOctet3:      'MAC Octet 3',
+  delimiter:      'Command Delimiter',
+  funcChar:       'Local Function ID',
+  cmdChar:        'Command Character',
+};
+
+function extractGeneralFields(config) {
+  return {
+    espnowPassword: config.espnowPassword ?? '',
+    macOctet2:      config.macOctet2      ?? '00',
+    macOctet3:      config.macOctet3      ?? '00',
+    delimiter:      config.delimiter      ?? '^',
+    funcChar:       config.funcChar       ?? '?',
+    cmdChar:        config.cmdChar        ?? ';',
+  };
+}
+
+function getGeneralMismatches(a, b) {
+  return Object.keys(GENERAL_FIELD_LABELS)
+    .filter(k => String(a[k]) !== String(b[k]))
+    .map(k => ({ key: k, label: GENERAL_FIELD_LABELS[k], aVal: a[k], bVal: b[k] }));
 }
 
 // ─── Board Field Handlers ─────────────────────────────────────────
@@ -748,29 +792,106 @@ function populateMappingsFromConfig(n, config) {
 }
 
 // ─── Sequences ────────────────────────────────────────────────────
+
+// Convert textarea lines → stored value string (delimiter-separated)
+// Strips any whitespace between the command and an inline *** comment.
+function seqTextareaToValue(text, delim) {
+  return text.split('\n')
+    .map(l => l.trim().replace(/\s+(\*\*\*)/, '$1'))
+    .filter(Boolean)
+    .join(delim);
+}
+
+// Convert stored value string → textarea lines (one command per line)
+// Normalises inline *** comments to exactly one space: "CMD*** note" → "CMD *** note"
+function seqValueToLines(value, delim) {
+  if (!value) return '';
+  return value.split(delim)
+    .map(l => l.trim().replace(/(\S)\s*(\*\*\*)/, '$1 $2'))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function autoResizeTextarea(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = ta.scrollHeight + 'px';
+}
+
+function updateSeqKeyCount(rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const key = row.querySelector('.seq-key-input')?.value ?? '';
+  const el = document.getElementById(`${rowId}-key-count`);
+  if (el) el.textContent = `${key.length}/15`;
+}
+
+function updateSeqValCount(rowId, n) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const ta = row.querySelector('.seq-val-textarea');
+  const el = document.getElementById(`${rowId}-val-count`);
+  if (el && ta) {
+    const delim = boardConfigs[n]?.delimiter ?? '^';
+    el.textContent = seqTextareaToValue(ta.value, delim).length;
+  }
+}
+
 function addSequenceRow(n) { appendSequenceRow(n, '', ''); }
 
 function appendSequenceRow(n, key, value) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (!tbody) return;
   const rowId = `seq-row-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+
+  // Convert stored delimiter-separated value → one-command-per-line for display
+  const delim = boardConfigs[n]?.delimiter ?? '^';
+  const lines = seqValueToLines(value, delim);
+  const keyLen  = key.length;
+  const valLen  = value.length;
+
   const tr = document.createElement('tr');
   tr.id = rowId;
   tr.innerHTML = `
-    <td><input class="seq-key-input" type="text" value="${escHtml(key)}" placeholder="KeyName" spellcheck="false"></td>
-    <td><input class="seq-val-input" type="text" value="${escHtml(value)}" placeholder="Command string…" spellcheck="false"></td>
-    <td style="white-space:nowrap">
-      <button class="btn btn-ghost btn-sm btn-icon" title="Play" onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">▶</button>
-      <button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="document.getElementById('${rowId}').remove()">🗑</button>
+    <td class="seq-key-cell">
+      <input class="seq-key-input" type="text" value="${escHtml(key)}"
+             placeholder="KeyName" spellcheck="false" maxlength="15"
+             oninput="updateSeqKeyCount('${rowId}')">
+      <div class="seq-char-count" id="${rowId}-key-count">${keyLen}/15</div>
+    </td>
+    <td class="seq-val-cell">
+      <textarea class="seq-val-textarea" placeholder="One command per line…" spellcheck="false"
+                oninput="autoResizeTextarea(this); updateSeqValCount('${rowId}',${n})"
+                >${escHtml(lines)}</textarea>
+      <div class="seq-char-count" id="${rowId}-val-count">${valLen}</div>
+    </td>
+    <td class="seq-action-cell">
+      <button class="btn btn-ghost btn-sm" title="Test"
+              onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
+      <button class="btn btn-primary btn-sm" title="Update"
+              onclick="updateSequence(${n},'${rowId}')" id="${rowId}-update">UPDATE</button>
+      <button class="btn btn-danger btn-sm" title="Remove"
+              onclick="removeSequenceRow('${rowId}')">REMOVE</button>
     </td>
   `;
   tbody.appendChild(tr);
+
+  // Auto-size the textarea to its initial content
+  const ta = tr.querySelector('.seq-val-textarea');
+  if (ta) requestAnimationFrame(() => autoResizeTextarea(ta));
+
   updateSequencePlayButtons(n);
+}
+
+function removeSequenceRow(rowId) {
+  document.getElementById(rowId)?.remove();
 }
 
 function updateSequencePlayButtons(n) {
   const connected = boardConnections[n]?.isConnected() ?? false;
-  document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Play"]`).forEach(btn => {
+  document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Test"]`).forEach(btn => {
+    btn.disabled = !connected;
+  });
+  document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Update"]`).forEach(btn => {
     btn.disabled = !connected;
   });
 }
@@ -789,11 +910,51 @@ function playSequence(n, rowId) {
   showToast(`Sent: ${cmd}`, 'info');
 }
 
+async function updateSequence(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const key = row.querySelector('.seq-key-input')?.value?.trim();
+  if (!key) { showToast('Sequence key is empty', 'error'); return; }
+  const ta = row.querySelector('.seq-val-textarea');
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+
+  const delim    = boardConfigs[n]?.delimiter ?? '^';
+  const funcChar = boardConfigs[n]?.funcChar  ?? '?';
+  const value    = seqTextareaToValue(ta?.value ?? '', delim);
+  if (!value) { showToast('Sequence value is empty', 'error'); return; }
+
+  const btn = document.getElementById(`${rowId}-update`);
+  if (btn) btn.disabled = true;
+
+  try {
+    const cmd = `${funcChar}SEQ,SAVE,${key},${value}`;
+    await conn.send(cmd + '\r');
+    termLog(n, cmd, 'in');
+    showToast(`Sequence "${key}" updated on WCB ${n}`, 'success');
+
+    // Patch the in-memory config and baseline so delta pushes stay accurate
+    for (const store of [boardConfigs[n], boardBaselines[n]]) {
+      if (!store) continue;
+      const idx = store.sequences.findIndex(s => s.key === key);
+      if (idx >= 0) store.sequences[idx].value = value;
+      else store.sequences.push({ key, value });
+    }
+  } catch (e) {
+    showToast(`Update failed: ${e.message}`, 'error');
+    termLog(n, `Sequence update error: ${e.message}`, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function getSequencesFromUI(n) {
   const sequences = [];
+  const delim = boardConfigs[n]?.delimiter ?? '^';
   document.getElementById(`b${n}-seq-tbody`)?.querySelectorAll('tr').forEach(row => {
     const key = row.querySelector('.seq-key-input')?.value?.trim();
-    const val = row.querySelector('.seq-val-input')?.value?.trim();
+    const ta  = row.querySelector('.seq-val-textarea');
+    const val = ta ? seqTextareaToValue(ta.value, delim) : '';
     if (key && val) sequences.push({ key, value: val });
   });
   return sequences;
@@ -963,20 +1124,130 @@ class BoardConnection {
 }
 
 // ─── Board Actions ────────────────────────────────────────────────
-async function boardConnect(n) {
+// ─── Connect Modal ────────────────────────────────────────────────
+function openConnectModal(n) {
+  _connectModalSlot = n;
+  // Title reflects whether auto-detect is already running
+  document.getElementById('connect-modal-title').textContent =
+    _detecting[n] ? `WCB ${n}: Auto-Detecting…` : `Connect WCB ${n}`;
+  document.getElementById('connect-modal').classList.add('open');
+}
+
+function closeConnectModal(event) {
+  if (event && event.target !== document.getElementById('connect-modal')) return;
+  // Any dismissal (X, overlay, Cancel) stops auto-detect if it was running
+  const n = _connectModalSlot;
+  if (n !== null) _detecting[n] = false;
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+}
+
+async function modalAutoDetect() {
+  const n = _connectModalSlot;
+  const alreadyDetecting = !!_detecting[n];
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+  // If already detecting, just close the modal — auto-detect keeps running
+  if (n !== null && !alreadyDetecting) await boardAutoDetect(n);
+}
+
+async function modalManualSelect() {
+  const n = _connectModalSlot;
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+  if (n !== null) {
+    _detecting[n] = false; // cancel auto-detect if it was running
+    await boardManualConnect(n);
+  }
+}
+
+// ─── General Settings Conflict Modal ──────────────────────────────
+function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFields, mismatches) {
+  const srcLabel = typeof baselineBoard === 'number' ? `WCB ${baselineBoard}` : 'loaded file';
+  const newLabel = `WCB ${newBoard}`;
+
+  document.getElementById('general-conflict-body').innerHTML = `
+    <p style="margin-bottom:12px;font-size:12px;color:var(--text2)">
+      <strong style="color:var(--yellow)">${newLabel}</strong> reports different network settings
+      than <strong style="color:var(--text)">${srcLabel}</strong>.
+      These must match across all boards — choose which values to keep:
+    </p>
+    <table class="serial-table">
+      <thead><tr>
+        <th>Field</th>
+        <th>${srcLabel} <span style="color:var(--text3);font-weight:400">(current)</span></th>
+        <th>${newLabel} <span style="color:var(--text3);font-weight:400">(incoming)</span></th>
+      </tr></thead>
+      <tbody>${mismatches.map(m => `<tr>
+        <td style="color:var(--text2)">${m.label}</td>
+        <td style="color:var(--yellow);font-family:var(--mono);font-size:12px">${escHtml(String(m.aVal))}</td>
+        <td style="color:var(--accent);font-family:var(--mono);font-size:12px">${escHtml(String(m.bVal))}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+
+  // Clone buttons to clear any stale listeners from previous invocations
+  ['general-conflict-keep', 'general-conflict-use'].forEach(id => {
+    const old = document.getElementById(id);
+    const fresh = old.cloneNode(true);
+    old.parentNode.replaceChild(fresh, old);
+  });
+
+  document.getElementById('general-conflict-keep').textContent = `Keep ${srcLabel} values`;
+  document.getElementById('general-conflict-keep').addEventListener('click', () => {
+    document.getElementById('general-conflict-modal').classList.remove('open');
+    showToast(`Kept ${srcLabel} general settings`, 'info');
+  });
+
+  document.getElementById('general-conflict-use').textContent = `Use ${newLabel} values`;
+  document.getElementById('general-conflict-use').addEventListener('click', () => {
+    generalBaseline = { sourceBoard: newBoard, fields: newFields };
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+    set('g-password',  newFields.espnowPassword);
+    set('g-mac2',      newFields.macOctet2);
+    set('g-mac3',      newFields.macOctet3);
+    set('g-delimiter', newFields.delimiter);
+    set('g-funcchar',  newFields.funcChar);
+    set('g-cmdchar',   newFields.cmdChar);
+    onGeneralPasswordChange();
+    onGeneralMacChange();
+    onGeneralCmdCharChange();
+    document.getElementById('general-conflict-modal').classList.remove('open');
+    showToast(`General settings updated to match ${newLabel}`, 'success');
+  });
+
+  document.getElementById('general-conflict-modal').classList.add('open');
+}
+
+function closeGeneralConflictModal(event) {
+  if (event && event.target !== document.getElementById('general-conflict-modal')) return;
+  document.getElementById('general-conflict-modal').classList.remove('open');
+}
+
+// Single entry point:
+//   Not connected, not detecting → open modal AND start auto-detect simultaneously
+//   Detecting (clicked again)    → open modal (continue / switch to manual / cancel)
+//   Connected                    → disconnect
+function boardConnect(n) {
+  if (boardConnections[n]?.isConnected()) { boardDisconnect(n); return; }
+  if (_detecting[n]) { openConnectModal(n); return; } // options menu while detecting
+  openConnectModal(n);        // show modal immediately
+  boardAutoDetect(n);         // start detecting in parallel — intentionally not awaited
+}
+
+async function boardDisconnect(n) {
   const btn = document.getElementById(`b${n}-btn-connect`);
-  btn.disabled = true;
+  if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
+  try { await boardConnections[n]?.disconnect(); } catch (_) {}
+  delete boardConnections[n];
+  updateConnectionUI(n, false);
+  if (btn) btn.disabled = false;
+}
 
+// ─── Manual connect (port picker) ─────────────────────────────────
+async function boardManualConnect(n) {
+  const btn = document.getElementById(`b${n}-btn-connect`);
+  if (btn) { btn.textContent = 'Connecting…'; btn.disabled = true; }
   try {
-    if (boardConnections[n]?.isConnected()) {
-      await boardConnections[n].disconnect();
-      updateConnectionUI(n, false);
-      btn.textContent = 'Connect';
-      btn.disabled = false;
-      return;
-    }
-
-    btn.textContent = 'Connecting…';
     const usedPorts = new Set(
       Object.entries(boardConnections)
         .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
@@ -987,155 +1258,175 @@ async function boardConnect(n) {
     boardConnections[n] = conn;
     updateConnectionUI(n, true);
     showToast(`Connected to WCB ${n} — pulling config…`, 'success');
-    // Auto-pull after short delay to let board settle
     setTimeout(() => boardPull(n), 500);
   } catch (e) {
     if (e.name !== 'NotFoundError') showToast(`Connection failed: ${e.message}`, 'error');
-    btn.textContent = 'Connect';
   }
-  btn.disabled = false;
+  if (btn) btn.disabled = false; // text already set correctly by updateConnectionUI
 }
 
-// ─── Listen for Reset & Auto-Connect ─────────────────────────────
-const _listenCancels = {}; // n → cancel function
+// ─── Auto-detect: monitor ports for reset, connect the one that resets ─
+// Known USB-UART vendor IDs used on WCB hardware
+const WCB_VENDOR_IDS = [
+  0x10C4, // Silicon Labs (CP2102, CP2102N, CP2104)
+  0x1A86, // QinHeng (CH340, CH341)
+  0x0403, // FTDI (FT232R)
+];
 
-async function boardListen(n) {
-  // If already listening for this slot, cancel
-  if (_listenCancels[n]) { _listenCancels[n](); return; }
+async function boardAutoDetect(n) {
+  const btn = document.getElementById(`b${n}-btn-connect`);
 
-  // If already connected, nothing to do
-  if (boardConnections[n]?.isConnected()) {
-    showToast(`WCB ${n} is already connected`, 'info'); return;
+  function setDetecting(yes) {
+    if (btn) {
+      if (yes) {
+        btn.textContent = '⊙ Detecting… (cancel)';
+      } else if (!boardConnections[n]?.isConnected()) {
+        btn.textContent = 'Connect'; // only reset if we didn't end up connected
+      }
+      btn.classList.toggle('btn-detecting', yes);
+      btn.disabled = false; // always keep clickable so user can cancel
+    }
   }
 
-  const knownPorts = await navigator.serial.getPorts();
-  if (knownPorts.length === 0) {
-    showToast(
-      'No paired boards found. Use Connect to pair a board once, then Listen will work.',
-      'warning', 10000
-    );
-    return;
+  _detecting[n] = true;
+  setDetecting(true);
+
+  // ── Step 1: get all already-authorized ports ──────────────────
+  let knownPorts = await navigator.serial.getPorts();
+  const firstTime = knownPorts.length === 0;
+
+  if (firstTime) {
+    showToast('No paired boards — select your WCB boards in the picker to authorize them.', 'info', 7000);
+    try {
+      const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
+      await navigator.serial.requestPort({ filters });
+      knownPorts = await navigator.serial.getPorts();
+    } catch {
+      _detecting[n] = false; setDetecting(false); return;
+    }
   }
 
-  // Ports already owned by other active slots
+  if (!_detecting[n]) { setDetecting(false); return; } // cancelled during picker
+
+  // Filter to WCB-type ports not already in use
   const usedPorts = new Set(
-    Object.entries(boardConnections)
-      .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
-      .map(([, c]) => c.port)
+    Object.values(boardConnections).filter(c => c?.isConnected() && c.port).map(c => c.port)
   );
-  const availablePorts = knownPorts.filter(p => !usedPorts.has(p));
-  if (availablePorts.length === 0) {
-    showToast('All known boards are already connected to other slots.', 'warning'); return;
+  const available = knownPorts.filter(p => {
+    if (usedPorts.has(p)) return false;
+    const { usbVendorId } = p.getInfo();
+    return WCB_VENDOR_IDS.includes(usbVendorId);
+  });
+
+  // ── First-time: connect ALL authorized boards immediately ─────
+  if (firstTime) {
+    if (available.length === 0) {
+      showToast('No WCB boards found to connect.', 'info');
+      _detecting[n] = false; setDetecting(false); return;
+    }
+    const freeSlots = [];
+    for (let s = 1; s <= 8; s++) {
+      if (!boardConnections[s]?.isConnected()) freeSlots.push(s);
+    }
+    let busy = 0;
+    await Promise.all(available.slice(0, freeSlots.length).map(async (port, i) => {
+      const slot = freeSlots[i];
+      try {
+        const conn = new BoardConnection(slot);
+        await conn.connect(port);
+        boardConnections[slot] = conn;
+        updateConnectionUI(slot, true);
+        setTimeout(() => boardPull(slot), 500);
+      } catch (err) {
+        if (/open|use|busy|access/i.test(err.message)) busy++;
+      }
+    }));
+    if (busy > 0)
+      showToast(`${busy} port${busy > 1 ? 's' : ''} skipped — already open in another application`, 'warning', 8000);
+    _detecting[n] = false; setDetecting(false); return;
   }
 
-  const btn    = document.getElementById(`b${n}-btn-listen`);
-  const connBtn= document.getElementById(`b${n}-btn-connect`);
-  btn.textContent = '⊙ Listening…';
-  btn.classList.add('btn-listening');
-  if (connBtn) connBtn.disabled = true;
-  showToast(`WCB ${n}: press the reset button on the board…`, 'info', 45000);
+  if (available.length === 0) {
+    showToast('All known WCB boards are already connected.', 'info');
+    _detecting[n] = false; setDetecting(false); return;
+  }
 
-  // ── Shared state ──────────────────────────────────────────────
+  const resetToast = showToast(`WCB ${n}: press the reset button on the board you want here…`, 'info', 45000);
+
+  // ── Monitor all available ports for reset (boot data) ─────────
   let triggered = false;
-  const openReaders = new Map(); // port → reader
+  const openReaders = new Map();
 
-  // Release everything and reset button UI
   async function cleanup(winningPort) {
     clearTimeout(timeoutId);
-    navigator.serial.removeEventListener('connect', onNativeConnect);
-    delete _listenCancels[n];
-
     for (const [port, reader] of openReaders) {
       try { await reader.cancel(); } catch (_) {}
       try { reader.releaseLock(); } catch (_) {}
       if (port !== winningPort) { try { await port.close(); } catch (_) {} }
     }
     openReaders.clear();
-
-    const b  = document.getElementById(`b${n}-btn-listen`);
-    const cb = document.getElementById(`b${n}-btn-connect`);
-    if (b)  { b.textContent = 'Listen'; b.classList.remove('btn-listening'); b.disabled = false; }
-    if (cb) cb.disabled = false;
   }
 
-  // Open the winning port via BoardConnection and pull config
-  async function autoConnect(port, portAlreadyClosedByCleanup) {
-    btn.textContent = 'Connecting…';
-    btn.disabled = true;
-
-    if (!portAlreadyClosedByCleanup) {
-      // We kept it open during cleanup — close it so connect() can reopen it
-      try { await port.close(); } catch (_) {}
-    }
-
+  async function onReset(port) {
+    triggered = true;
+    await cleanup(port);
+    resetToast?.remove(); // dismiss the "press reset" prompt immediately
+    try { await port.close(); } catch (_) {}
     try {
       const conn = new BoardConnection(n);
       await conn.connect(port);
       boardConnections[n] = conn;
       updateConnectionUI(n, true);
+      // Auto-close the connect modal if it's still open for this slot
+      if (_connectModalSlot === n) {
+        document.getElementById('connect-modal').classList.remove('open');
+        _connectModalSlot = null;
+      }
       showToast(`WCB ${n}: board detected — waiting for boot…`, 'success');
-      // Board was caught mid-reset — wait for it to fully boot before pulling.
-      // 500ms is enough for an already-running board (normal connect), but
-      // after a reset the ESP32 needs 2-4 s to init before it can respond.
       setTimeout(() => boardPull(n), 3500);
     } catch (err) {
       showToast(`Auto-connect failed: ${err.message}`, 'error');
-      btn.textContent = 'Listen';
-      btn.disabled = false;
     }
+    _detecting[n] = false; setDetecting(false);
   }
 
-  // ── Path 1: native-USB boards (ESP32-S3) that fully disconnect on reset ──
-  const onNativeConnect = async (e) => {
-    if (triggered || usedPorts.has(e.target)) return;
-    triggered = true;
-    await cleanup(null); // port wasn't opened by us
-    await autoConnect(e.target, true);
-  };
-  navigator.serial.addEventListener('connect', onNativeConnect);
-
-  // ── Path 2: CH340/CP2102 boards — open each port and watch for data ──
-  // When the board soft-resets, it outputs boot messages at 115200 baud.
-  // We detect that data arriving and treat it as the reset signal.
   async function monitorPort(port) {
-    try { await port.open({ baudRate: 115200 }); } catch (_) { return; }
-
+    try { await port.open({ baudRate: 115200 }); } catch {
+      showToast('One port skipped — already open in another application', 'warning', 6000);
+      return;
+    }
     const reader = port.readable.getReader();
     openReaders.set(port, reader);
-
     try {
-      while (!triggered) {
+      while (!triggered && _detecting[n]) {
         const { value, done } = await reader.read();
-        if (done || triggered) break;
-        if (value?.length > 0) {
-          if (triggered) break; // another port won the race
-          triggered = true;
-          await cleanup(port); // close all others, keep this port open
-          await autoConnect(port, false);
-          break;
-        }
+        if (done || triggered || !_detecting[n]) break;
+        if (value?.length > 0 && !triggered) { await onReset(port); break; }
       }
-    } catch (_) {
-      // Reader was cancelled (cleanup) — normal exit
-    }
+    } catch (_) { /* cancelled by cleanup */ }
   }
 
-  // ── Timeout ───────────────────────────────────────────────────
+  // Poll for cancel via Connect button click
+  const cancelCheck = setInterval(async () => {
+    if (!_detecting[n] && !triggered) {
+      triggered = true;
+      await cleanup(null);
+      setDetecting(false);
+      clearInterval(cancelCheck);
+      showToast(`WCB ${n}: auto-detect cancelled`, 'info');
+    }
+    if (triggered) clearInterval(cancelCheck);
+  }, 300);
+
   const timeoutId = setTimeout(async () => {
     if (triggered) return;
-    triggered = true;
+    triggered = true; _detecting[n] = false;
     await cleanup(null);
-    showToast(`WCB ${n}: nothing detected — listen cancelled`, 'info');
+    setDetecting(false);
+    showToast(`WCB ${n}: nothing detected — auto-detect timed out`, 'info');
   }, 45000);
 
-  _listenCancels[n] = async () => {
-    if (triggered) return;
-    triggered = true;
-    await cleanup(null);
-  };
-
-  // Start monitoring all available authorized ports simultaneously
-  for (const port of availablePorts) monitorPort(port);
+  for (const port of available) monitorPort(port);
 }
 
 async function boardPull(n) {
@@ -1151,8 +1442,20 @@ async function boardPull(n) {
     const raw    = await conn.sendAndCollect('?backup', 8000);
     const config = WCBParser.parseBackupString(raw);
 
-    // Sync global fields + render all board sections first so any target slot exists in the DOM
-    syncGeneralFromConfig(config);
+    // ── General settings: establish baseline on first pull, detect mismatches after ──
+    const incomingGeneral = extractGeneralFields(config);
+    if (!generalBaseline) {
+      syncGeneralFromConfig(config);
+      generalBaseline = { sourceBoard: config.wcbNumber || n, fields: incomingGeneral };
+    } else {
+      const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
+      if (mismatches.length > 0) {
+        setTimeout(() => showGeneralMismatchModal(
+          generalBaseline.sourceBoard, generalBaseline.fields,
+          config.wcbNumber || n, incomingGeneral, mismatches
+        ), 200);
+      }
+    }
     if (config.wcbQuantity > 1) renderBoards(config.wcbQuantity);
 
     const detected = config.wcbNumber;
@@ -1328,35 +1631,47 @@ async function boardGo(n) {
       await sleep(80);
     }
 
-    // Reboot
-    await sleep(300);
-    await conn.send('?reboot\r');
-    termLog(n, '?reboot', 'in');
+    if (commandStringNeedsReboot(cmdString)) {
+      // ── Reboot path ───────────────────────────────────────────
+      await sleep(300);
+      await conn.send('?reboot\r');
+      termLog(n, '?reboot', 'in');
 
-    updateBoardStatusBadge(n, 'configured');
-    showToast(`WCB ${n} configured — rebooting…`, 'success');
+      updateBoardStatusBadge(n, 'configured');
+      showToast(`WCB ${n} configured — rebooting…`, 'success');
 
-    // Close our side immediately — this cancels any pending reader.read() so
-    // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
-    // Then we manage the reconnect ourselves in the background.
-    await conn.closeForReconnect();
-    updateConnectionUI(n, false);
-    termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+      // Close our side immediately — this cancels any pending reader.read() so
+      // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
+      // Then we manage the reconnect ourselves in the background.
+      await conn.closeForReconnect();
+      updateConnectionUI(n, false);
+      termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
 
-    // Fire-and-forget reconnect so the Go button re-enables right away
-    (async () => {
-      const reconnected = await conn.reconnect(10, 1500);
-      if (reconnected) {
-        updateConnectionUI(n, true);
-        termLog(n, 'Reconnected after reboot', 'sys');
-        showToast(`WCB ${n} reconnected`, 'success');
-        termLog(n, 'Auto-pulling config…', 'sys');
-        setTimeout(() => boardPull(n), 3000);
-      } else {
-        termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
-        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
-      }
-    })();
+      // Fire-and-forget reconnect so the Go button re-enables right away
+      (async () => {
+        const reconnected = await conn.reconnect(10, 1500);
+        if (reconnected) {
+          updateConnectionUI(n, true);
+          termLog(n, 'Reconnected after reboot', 'sys');
+          showToast(`WCB ${n} reconnected`, 'success');
+          termLog(n, 'Auto-pulling config…', 'sys');
+          setTimeout(() => boardPull(n), 3000);
+        } else {
+          termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+          showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+        }
+      })();
+
+    } else {
+      // ── No-reboot path ────────────────────────────────────────
+      // All sent commands take effect immediately; connection stays open.
+      // Update the baseline optimistically, then pull to verify.
+      boardBaselines[n] = JSON.parse(JSON.stringify(config));
+      updateBoardStatusBadge(n, 'configured');
+      termLog(n, 'Config applied (no reboot needed) — verifying…', 'sys');
+      showToast(`WCB ${n} configured`, 'success');
+      setTimeout(() => boardPull(n), 800);
+    }
 
   } catch (e) {
     showToast(`Push failed: ${e.message}`, 'error');
@@ -1371,21 +1686,17 @@ function updateConnectionUI(n, connected) {
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
-  const pullBtn   = document.getElementById(`b${n}-btn-pull`);
-  const goBtn     = document.getElementById(`b${n}-btn-go`);
-  const connBtn   = document.getElementById(`b${n}-btn-connect`);
-  const eraseBtn  = document.getElementById(`b${n}-btn-erase`);
-  const listenBtn = document.getElementById(`b${n}-btn-listen`);
+  const pullBtn  = document.getElementById(`b${n}-btn-pull`);
+  const goBtn    = document.getElementById(`b${n}-btn-go`);
+  const connBtn  = document.getElementById(`b${n}-btn-connect`);
+  const eraseBtn = document.getElementById(`b${n}-btn-erase`);
   if (pullBtn)  { pullBtn.disabled = !connected; if (!connected) pullBtn.textContent = 'Pull Config'; }
   if (goBtn)    goBtn.disabled    = !connected;
   if (eraseBtn) eraseBtn.disabled = !connected;
-  if (connBtn)  connBtn.textContent = connected ? 'Disconnect' : 'Connect';
-  if (listenBtn) {
-    listenBtn.disabled = connected; // no point listening when already connected
-    if (!connected) { listenBtn.textContent = 'Listen'; listenBtn.classList.remove('btn-listening'); }
+  if (connBtn) {
+    connBtn.textContent = connected ? 'Disconnect' : 'Connect';
+    if (!connected) connBtn.classList.remove('btn-detecting');
   }
-  // Cancel any active listen session when a connection is established another way
-  if (connected && _listenCancels[n]) _listenCancels[n]();
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
 
@@ -1404,6 +1715,12 @@ function syncGeneralFromConfig(config) {
   set('g-funcchar',  config.funcChar);
   set('g-cmdchar',   config.cmdChar);
 
+  // Keep systemConfig.general in sync — el.value assignments above don't fire
+  // oninput/onchange, so systemConfig.general would otherwise stay at its defaults.
+  onGeneralPasswordChange();
+  onGeneralMacChange();
+  onGeneralCmdCharChange();
+
   const etmEl = document.getElementById('g-etm-enabled');
   if (etmEl) etmEl.checked = config.etm.enabled;
   if (config.etm.enabled) {
@@ -1415,6 +1732,40 @@ function syncGeneralFromConfig(config) {
     set('g-etm-delay',   config.etm.messageDelayMs);
     if (appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   }
+}
+
+// ─── Reboot Detection ─────────────────────────────────────────────
+// Returns true if any command in the built string requires a board reboot
+// to take effect, based on WCB firmware documentation and source code.
+//
+// Reboot-required:  HW, WCB/WCBQ, MAC, KYBER, MAP PWM input (not OUT)
+// Immediate effect: EPASS, DELIM, FUNCCHAR, CMDCHAR, BAUD, LABEL, BCAST,
+//                   MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ
+function commandStringNeedsReboot(cmdString) {
+  const u = cmdString.toUpperCase();
+  if (u.includes('HW,'))    return true;   // Hardware version — pin map changes
+  if (u.includes('WCB,'))   return true;   // Board number or quantity (WCBQ also matches)
+  if (u.includes('MAC,'))   return true;   // MAC octets — ESP-NOW identity
+  if (u.includes('KYBER,')) return true;   // Kyber mode — serial port reservation
+  // PWM INPUT mapping (MAP,PWM,Sx,...) — firmware auto-reboots, but we signal it too
+  // PWM OUTPUT declaration (MAP,PWM,OUT,Sx) does NOT need a reboot
+  if (/MAP,PWM,S\d/i.test(cmdString)) return true;
+  return false;
+}
+
+// ─── Push All ─────────────────────────────────────────────────────
+async function boardGoAll() {
+  const slots = Object.keys(boardConnections)
+    .filter(n => boardConnections[n]?.isConnected())
+    .map(Number);
+
+  if (slots.length === 0) {
+    showToast('No boards connected', 'error');
+    return;
+  }
+
+  showToast(`Pushing to ${slots.length} board${slots.length > 1 ? 's' : ''}…`, 'info', 4000);
+  for (const n of slots) await boardGo(n);
 }
 
 // ─── File Import ──────────────────────────────────────────────────
@@ -1435,6 +1786,19 @@ function loadSystemFileContent(content) {
   try {
     const system = WCBParser.parseSystemFile(content);
     systemConfig = system;
+
+    // File load establishes a new general baseline
+    generalBaseline = {
+      sourceBoard: 'file',
+      fields: extractGeneralFields({
+        espnowPassword: system.general.espnowPassword,
+        macOctet2:      system.general.macOctet2,
+        macOctet3:      system.general.macOctet3,
+        delimiter:      system.general.delimiter,
+        funcChar:       system.general.funcChar,
+        cmdChar:        system.general.cmdChar,
+      }),
+    };
 
     syncGeneralFromConfig(Object.assign(WCBParser.createDefaultBoardConfig(), {
       wcbQuantity: system.general.wcbQuantity,
@@ -1516,26 +1880,124 @@ function initTerminalResize() {
     const delta  = startY - e.clientY; // drag up = increase height
     const newH   = Math.min(Math.max(startH + delta, 120), window.innerHeight * 0.8);
     drawer.style.height = newH + 'px';
+    syncMainPadding(); // keep page content above the terminal while resizing
   }
 
   function stopDrag() {
     handle.classList.remove('dragging');
     document.removeEventListener('mousemove', onDrag);
     document.removeEventListener('mouseup', stopDrag);
+    syncMainPadding(); // final sync after drag ends
   }
+}
+
+function syncMainPadding() {
+  const drawer = document.getElementById('terminal-drawer');
+  const main   = document.querySelector('.main');
+  if (!drawer || !main) return;
+  // When the terminal is open, push the page content above it so nothing is hidden behind it.
+  // When closed, clear the inline style so the CSS default (120 px) takes over.
+  main.style.paddingBottom = drawer.classList.contains('open')
+    ? (drawer.offsetHeight + 24) + 'px'
+    : '';
 }
 
 function toggleTerminal() {
   document.getElementById('terminal-drawer').classList.toggle('open');
+  syncMainPadding();
 }
 
 // ─── Multi-pane Terminal ──────────────────────────────────────────
+
+// Per-board terminal state (debug flags reset on reboot; timestamp/scroll are UI-only)
+const boardDebugStates = {};
+const boardTimestamp   = {};   // false = off (default)
+const boardAutoScroll  = {};   // true  = on  (default)
+
+const DEBUG_MODES = [
+  { key: 'main',  label: 'COMMANDS', cmd: 'DEBUG'       },
+  { key: 'kyber', label: 'KYBER',    cmd: 'DEBUG,KYBER' },
+  { key: 'pwm',   label: 'PWM',      cmd: 'DEBUG,PWM'   },
+  { key: 'etm',   label: 'ETM',      cmd: 'DEBUG,ETM'   },
+];
+
+function ensureDebugState(n) {
+  if (!boardDebugStates[n])
+    boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false };
+  return boardDebugStates[n];
+}
+
+// Master refresh — call whenever connection state or toggle state changes
+function updateTerminalControls(n) {
+  const state     = boardDebugStates[n] ?? {};
+  const connected = boardConnections[n]?.isConnected() ?? false;
+
+  // Debug buttons
+  for (const { key } of DEBUG_MODES) {
+    const btn = document.getElementById(`dbg-btn-${n}-${key}`);
+    if (!btn) continue;
+    btn.disabled = !connected;
+    btn.classList.toggle('debug-on', !!state[key]);
+  }
+
+  // Timestamp button (always enabled — it's a display preference, not board-dependent)
+  const tsBtn = document.getElementById(`term-ts-btn-${n}`);
+  if (tsBtn) tsBtn.classList.toggle('debug-on', !!boardTimestamp[n]);
+
+  // Auto-scroll button
+  const scrollBtn = document.getElementById(`term-scroll-btn-${n}`);
+  if (scrollBtn) {
+    const on = boardAutoScroll[n] !== false;
+    scrollBtn.classList.toggle('debug-on',       on);
+    scrollBtn.classList.toggle('scroll-paused', !on);
+    scrollBtn.title = on ? 'Auto-scroll ON — click to pause' : 'Auto-scroll PAUSED — click to resume';
+  }
+}
+
+async function toggleDebug(n, modeKey) {
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) return;
+
+  const state    = ensureDebugState(n);
+  state[modeKey] = !state[modeKey];
+  const onOff    = state[modeKey] ? 'ON' : 'OFF';
+
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const modeInfo = DEBUG_MODES.find(m => m.key === modeKey);
+  if (!modeInfo) return;
+
+  const cmd = `${funcChar}${modeInfo.cmd},${onOff}`;
+  await conn.send(cmd + '\r');
+  termLog(n, cmd, 'in');
+  updateTerminalControls(n);
+}
+
+function toggleTimestamp(n) {
+  boardTimestamp[n] = !boardTimestamp[n];
+  updateTerminalControls(n);
+}
+
+function toggleAutoScroll(n) {
+  boardAutoScroll[n] = boardAutoScroll[n] === false; // toggle (default is true)
+  // If re-enabling, jump to bottom immediately
+  if (boardAutoScroll[n] !== false) {
+    const out = document.getElementById(`term-pane-output-${n}`);
+    if (out) out.scrollTop = out.scrollHeight;
+  }
+  updateTerminalControls(n);
+}
+
 function ensureTerminalPane(n) {
   if (document.getElementById(`term-pane-${n}`)) return; // already exists
 
   // Hide the empty-state placeholder
   const noBoards = document.getElementById('terminal-no-boards');
   if (noBoards) noBoards.style.display = 'none';
+
+  const debugBtns = DEBUG_MODES.map(({ key, label }) =>
+    `<button class="btn btn-ghost btn-sm debug-btn" id="dbg-btn-${n}-${key}"
+             onclick="toggleDebug(${n},'${key}')" disabled title="${label} debug">${label}</button>`
+  ).join('');
 
   const pane = document.createElement('div');
   pane.className = 'terminal-pane';
@@ -1544,8 +2006,17 @@ function ensureTerminalPane(n) {
     <div class="terminal-pane-header" id="term-pane-header-${n}">
       <span class="term-status-dot" id="term-dot-${n}"></span>
       <span class="term-pane-label">WCB ${n}</span>
-      <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10px"
-        onclick="clearTerminalPane(${n})">Clear</button>
+      <span class="term-btn-divider"></span>
+      <span class="debug-bar-label">DEBUG:</span>
+      ${debugBtns}
+      <span class="term-btn-divider"></span>
+      <button class="btn btn-ghost btn-sm debug-btn debug-on" id="term-scroll-btn-${n}"
+              onclick="toggleAutoScroll(${n})" title="Auto-scroll ON — click to pause">⇩</button>
+      <button class="btn btn-ghost btn-sm debug-btn" id="term-ts-btn-${n}"
+              onclick="toggleTimestamp(${n})" title="Toggle timestamps">⏱</button>
+      <span class="term-btn-divider"></span>
+      <button class="btn btn-ghost btn-sm debug-btn"
+              onclick="clearTerminalPane(${n})" title="Clear output">✕</button>
     </div>
     <div class="terminal-pane-output" id="term-pane-output-${n}"></div>
     <div class="terminal-input-row">
@@ -1556,6 +2027,17 @@ function ensureTerminalPane(n) {
       <button class="btn btn-ghost btn-sm" onclick="sendTerminalCommandTo(${n})">Send ↵</button>
     </div>`;
   document.getElementById('terminal-panes').appendChild(pane);
+
+  // Auto-scroll intelligence: pause when user scrolls up, resume when at bottom
+  const output = pane.querySelector('.terminal-pane-output');
+  output.addEventListener('scroll', () => {
+    const atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 10;
+    const wasOn    = boardAutoScroll[n] !== false;
+    if (atBottom !== wasOn) {
+      boardAutoScroll[n] = atBottom;
+      updateTerminalControls(n);
+    }
+  });
 }
 
 function updateTerminalPaneDot(n, connected) {
@@ -1565,9 +2047,13 @@ function updateTerminalPaneDot(n, connected) {
   if (dot)    dot.classList.toggle('connected', connected);
   if (header) header.classList.toggle('disconnected', !connected);
   if (input) {
-    input.disabled     = !connected;
-    input.placeholder  = connected ? `Send to WCB ${n}…` : 'Board disconnected';
+    input.disabled    = !connected;
+    input.placeholder = connected ? `Send to WCB ${n}…` : 'Board disconnected';
   }
+  // Reset debug flags on disconnect — board loses them on every reboot
+  if (!connected) boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false };
+  // Timestamp and auto-scroll are UI preferences — keep them across reconnects
+  updateTerminalControls(n);
 }
 
 function clearTerminalPane(n) {
@@ -1580,27 +2066,33 @@ function clearAllTerminals() {
 }
 
 function termLog(boardIndex, text, type = 'out') {
+  const addLine = (output, idx) => {
+    const line = document.createElement('div');
+    line.className = `terminal-line-${type}`;
+    // Prepend timestamp if enabled for this board
+    if (boardTimestamp[idx]) {
+      const now = new Date();
+      const ts  = now.toTimeString().slice(0, 8); // HH:MM:SS
+      line.textContent = `[${ts}] ${text}`;
+    } else {
+      line.textContent = text;
+    }
+    output.appendChild(line);
+    // Auto-scroll unless the user has scrolled up to review history
+    if (boardAutoScroll[idx] !== false) output.scrollTop = output.scrollHeight;
+  };
+
   // If a specific pane exists for this board, use it; otherwise create one on the fly
   if (boardIndex > 0) {
     ensureTerminalPane(boardIndex);
     const output = document.getElementById(`term-pane-output-${boardIndex}`);
-    if (output) {
-      const line = document.createElement('div');
-      line.className = `terminal-line-${type}`;
-      line.textContent = text;
-      output.appendChild(line);
-      output.scrollTop = output.scrollHeight;
-      return;
-    }
+    if (output) { addLine(output, boardIndex); return; }
   }
   // boardIndex 0 (system) → log to first available pane, or ignore
   const anyOutput = document.querySelector('[id^="term-pane-output-"]');
   if (anyOutput) {
-    const line = document.createElement('div');
-    line.className = `terminal-line-${type}`;
-    line.textContent = text;
-    anyOutput.appendChild(line);
-    anyOutput.scrollTop = anyOutput.scrollHeight;
+    const idx = parseInt(anyOutput.id.replace('term-pane-output-', '')) || 0;
+    addLine(anyOutput, idx);
   }
 }
 
@@ -1840,6 +2332,7 @@ function showToast(message, type = 'info', duration = 3500) {
 
   container.appendChild(toast);
   setTimeout(() => toast.remove(), effectiveDuration);
+  return toast;
 }
 
 // ─── Utilities ────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ extern bool serialBroadcastEnabled[5];
 extern char LocalFunctionIdentifier;
 extern char CommandCharacter;
 extern char commandDelimiter;
+extern String commentDelimiter;
 extern int Default_WCB_Quantity;
 extern int WCB_Number;
 extern uint8_t umac_oct2;
@@ -411,13 +412,40 @@ void recallCommandSlot(const String &key, int sourceID) {
 
     Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
 
+    // Strip inline comments (everything from commentDelimiter onward in each
+    // delimiter-separated part) so stored annotations are not executed.
+    String stripped = "";
+    String remaining = recalledCommand;
+    while (remaining.length() > 0) {
+        int delimPos = remaining.indexOf(commandDelimiter);
+        String part;
+        if (delimPos == -1) {
+            part = remaining;
+            remaining = "";
+        } else {
+            part = remaining.substring(0, delimPos);
+            remaining = remaining.substring(delimPos + 1);
+        }
+        int commentPos = part.indexOf(commentDelimiter);
+        if (commentPos >= 0) part = part.substring(0, commentPos);
+        part.trim();
+        if (part.length() > 0) {
+            if (stripped.length() > 0) stripped += commandDelimiter;
+            stripped += part;
+        }
+    }
+
+    if (stripped.isEmpty()) {
+        Serial.println("Sequence contained only comments — nothing to execute.");
+        return;
+    }
+
     // Enqueue for execution
-    // parseCommandsAndEnqueue(recalledCommand, sourceID);
-    if (isTimerCommand(recalledCommand)) {
-  parseCommandGroups(recalledCommand);
-} else {
-  parseCommandsAndEnqueue(recalledCommand, sourceID);
-}
+    if (isTimerCommand(stripped)) {
+        parseCommandGroups(stripped);
+    } else {
+        parseCommandsAndEnqueue(stripped, sourceID);
+    }
 
 }
 

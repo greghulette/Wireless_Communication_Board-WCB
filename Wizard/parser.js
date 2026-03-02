@@ -165,8 +165,17 @@ function parseBackupString(rawOutput) {
     return config;
   }
 
-  // The factory reset format always uses ^ and ? so we can split safely
-  const tokens = commandString.split('^');
+  // Split on "^?" boundaries rather than every "^".
+  // ?SEQ,SAVE values use "^" internally to chain device commands, so a naive
+  // split('^') would tear the value apart.  Every real WCB command boundary is
+  // "^?" (delimiter + funcChar), while the in-sequence "^" chars are followed
+  // by device commands that never start with "?".
+  const rawParts = commandString.split('^?');
+  const tokens   = rawParts.map((part, i) => {
+    const trimmed = part.trim();
+    if (!trimmed) return null;
+    return i === 0 ? trimmed : '?' + trimmed; // restore the '?' stripped by the split
+  }).filter(Boolean);
 
   // Pre-pass: extract WCB number before the main parse loop so that MAESTRO
   // token routing (wcb === config.wcbNumber) works correctly even when ?MAESTRO

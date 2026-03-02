@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_271328RFEB2026                                    *****////
+///*****                                          Version 6.0_020958RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_271328RFEB2026";
+String SoftwareVersion = "6.0_020958RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1122,7 +1122,38 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       continue;
     }
     
-    // Normal command processing (not ?CS)
+    // Special handling for ?SEQ,SAVE: the value uses the delimiter internally to
+    // chain device commands, so we must NOT split on bare delimiters within it.
+    // Find the next real WCB-command boundary instead (delimiter + function/cmd char).
+    {
+      String restUpper = restOfString;
+      restUpper.toUpperCase();
+      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "SEQ,SAVE,")) {
+        // Next genuine WCB command starts with ^? or ^; — use that as the boundary.
+        String nextFuncBoundary = String(commandDelimiter) + String(LocalFunctionIdentifier);
+        String nextCmdBoundary  = String(commandDelimiter) + String(CommandCharacter);
+
+        int nextFuncPos = data.indexOf(nextFuncBoundary, startIdx + 1);
+        int nextCmdPos  = data.indexOf(nextCmdBoundary,  startIdx + 1);
+
+        int endPos = (int)data.length();
+        if (nextFuncPos != -1 && nextFuncPos < endPos) endPos = nextFuncPos;
+        if (nextCmdPos  != -1 && nextCmdPos  < endPos) endPos = nextCmdPos;
+
+        String seqSaveCmd = data.substring(startIdx, endPos);
+        seqSaveCmd.trim();
+        if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
+          enqueueCommand(seqSaveCmd, sourceID);
+        }
+        startIdx = endPos;
+        if (startIdx < (int)data.length() && data.charAt(startIdx) == commandDelimiter) {
+          startIdx++;
+        }
+        continue;
+      }
+    }
+
+    // Normal command processing (not ?CS or ?SEQ,SAVE)
     int delimPos = data.indexOf(commandDelimiter, startIdx);
     if (delimPos == -1) {
       String singleCmd = data.substring(startIdx);

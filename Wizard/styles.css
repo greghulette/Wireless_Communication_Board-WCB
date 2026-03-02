@@ -394,8 +394,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   font-family: var(--sans); padding: 6px 10px;
   text-align: left; border-bottom: 1px solid var(--border);
 }
-.seq-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.seq-table td { padding: 8px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .seq-table tr:last-child td { border-bottom: none; }
+
+/* Key cell */
+.seq-key-cell { width: 150px; }
 .seq-key-input {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); color: var(--accent);
@@ -403,24 +406,94 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   outline: none; transition: border-color var(--transition); width: 100%;
 }
 .seq-key-input:focus { border-color: var(--accent); }
-.seq-val-input {
-  background: var(--bg3); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text);
-  font-family: var(--mono); font-size: 12px; padding: 5px 8px;
-  outline: none; transition: border-color var(--transition); width: 100%;
+.seq-char-count {
+  font-size: 10px; color: var(--text3); text-align: right;
+  margin-top: 4px; font-family: var(--mono);
 }
-.seq-val-input:focus { border-color: var(--accent); }
+
+/* Value cell */
+.seq-val-cell { }
+.seq-val-textarea {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--green);
+  font-family: var(--mono); font-size: 12px; padding: 6px 8px;
+  outline: none; transition: border-color var(--transition); width: 100%;
+  resize: none; overflow: hidden; min-height: 32px; line-height: 1.6;
+  display: block;
+}
+.seq-val-textarea:focus { border-color: var(--accent); }
+.seq-val-textarea::placeholder { color: var(--text3); }
+
+/* Actions cell */
+.seq-action-cell { width: 80px; white-space: nowrap; }
+.seq-action-cell { display: table-cell; }
+.seq-action-cell .btn { display: block; width: 100%; margin-bottom: 4px; text-align: center; }
+.seq-action-cell .btn:last-child { margin-bottom: 0; }
+
+/* ─── Connect Modal ──────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 500;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 200ms ease;
+}
+.modal-overlay.open { opacity: 1; pointer-events: all; }
+
+.modal-dialog {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius2); width: 420px; max-width: 92vw;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  pointer-events: none; /* prevents invisible dialog intercepting clicks when closed */
+  transition: transform 200ms ease;
+  transform: scale(0.96);
+}
+.modal-overlay.open .modal-dialog { pointer-events: auto; transform: scale(1); }
+
+.modal-header {
+  display: flex; align-items: center; padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { flex: 1; font-family: var(--sans); font-weight: 700; font-size: 14px; }
+.modal-close {
+  background: none; border: none; cursor: pointer;
+  color: var(--text3); font-size: 14px; padding: 2px 6px;
+  border-radius: var(--radius); transition: all var(--transition);
+}
+.modal-close:hover { color: var(--text); background: var(--bg3); }
+
+.modal-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.modal-footer {
+  display: flex; justify-content: flex-end; padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.modal-option {
+  display: flex; align-items: flex-start; gap: 14px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px;
+  cursor: pointer; text-align: left; width: 100%;
+  transition: all var(--transition);
+}
+.modal-option:hover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+.modal-option-icon { font-size: 22px; flex-shrink: 0; line-height: 1; margin-top: 2px; }
+.modal-option-text { display: flex; flex-direction: column; gap: 4px; }
+.modal-option-title {
+  font-family: var(--sans); font-weight: 600; font-size: 13px;
+  color: var(--text); display: flex; align-items: center; gap: 6px;
+}
+.modal-option-desc { font-size: 11px; color: var(--text2); line-height: 1.5; }
 
 /* ─── Terminal Drawer ────────────────────────────────────────── */
-/* ── Listen button ───────────────────────────────────────────── */
-@keyframes listen-pulse {
+/* ── Detect button (pulsing while auto-detect is active) ─────── */
+@keyframes detect-pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.5; }
 }
-.btn-listening {
+.btn-detecting {
   color: var(--accent) !important;
   border-color: var(--accent) !important;
-  animation: listen-pulse 1.2s ease-in-out infinite;
+  animation: detect-pulse 1.2s ease-in-out infinite;
 }
 
 .terminal-drawer {
@@ -470,17 +543,49 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .terminal-pane:last-child { border-right: none; }
 .terminal-pane-header {
-  display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+  display: flex; align-items: center; gap: 4px; padding: 4px 8px;
   background: var(--bg3); border-bottom: 1px solid var(--border);
-  flex-shrink: 0; font-size: 11px; font-weight: 600;
+  flex-shrink: 0; font-size: 11px; font-weight: 600; flex-wrap: nowrap;
 }
-.terminal-pane-header .term-pane-label { flex: 1; color: var(--text2); }
+.terminal-pane-header .term-pane-label { flex: 1; color: var(--text2); min-width: 0; }
 .terminal-pane-header.disconnected .term-pane-label { color: var(--text3); }
 .term-status-dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--text3); flex-shrink: 0;
 }
 .term-status-dot.connected { background: var(--green); }
+
+/* ── Terminal pane toolbar buttons (debug, time, scroll, clear) ── */
+.debug-btn {
+  padding: 1px 6px !important; font-size: 9px !important;
+  letter-spacing: 0.4px; border-color: var(--border) !important;
+  color: var(--text3) !important; background: transparent !important;
+  transition: all var(--transition); flex-shrink: 0;
+  line-height: 1.4;
+}
+.debug-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.debug-btn.debug-on {
+  color: var(--green) !important;
+  border-color: var(--green2) !important;
+  background: rgba(0,232,122,0.08) !important;
+}
+.debug-btn.scroll-paused {
+  color: var(--yellow) !important;
+  border-color: var(--yellow2) !important;
+  background: rgba(255,208,32,0.08) !important;
+}
+/* thin divider between button groups in the header */
+.term-btn-divider {
+  width: 1px; height: 12px; background: var(--border2);
+  flex-shrink: 0; margin: 0 2px;
+}
+/* "DEBUG:" label in the terminal pane header */
+.debug-bar-label {
+  font-size: 9px; font-weight: 600; letter-spacing: 0.8px;
+  text-transform: uppercase; color: var(--text3);
+  font-family: var(--sans); flex-shrink: 0;
+}
+
 .terminal-pane-output {
   flex: 1; overflow-y: auto; padding: 6px 10px;
   font-size: 12px; line-height: 1.7; background: var(--bg);

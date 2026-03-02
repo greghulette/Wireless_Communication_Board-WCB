@@ -29,7 +29,8 @@
       </div>
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('file-input').click()">⬆ Load File</button>
       <button class="btn btn-ghost btn-sm" onclick="exportSystemFile()">⬇ Export</button>
-      <button id="btn-terminal" class="btn btn-ghost btn-sm advanced-only hidden" onclick="toggleTerminal()">⌨ Terminal</button>
+      <button class="btn btn-success btn-sm" id="btn-push-all" onclick="boardGoAll()">▶▶ Push All</button>
+      <button id="btn-terminal" class="btn btn-ghost btn-sm" onclick="toggleTerminal()">⌨ Terminal</button>
       <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
     </div>
   </header>
@@ -149,6 +150,53 @@
   </div>
 </div>
 
+<!-- ─── Connect Modal ────────────────────────────────────────────── -->
+<div class="modal-overlay" id="connect-modal" onclick="closeConnectModal(event)">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="connect-modal-title">Connect WCB</span>
+      <button class="modal-close" onclick="closeConnectModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="modal-option" onclick="modalAutoDetect()">
+        <span class="modal-option-icon">⊙</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">
+            Auto-Detect
+            <span class="badge badge-accent" style="font-size:9px;padding:2px 6px">Recommended</span>
+          </div>
+          <div class="modal-option-desc">Press the reset button on your board and it will connect automatically. First time? You'll pick your boards once from a list.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="modalManualSelect()">
+        <span class="modal-option-icon">🔌</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Select Port Manually</div>
+          <div class="modal-option-desc">Choose a specific COM port from a list.</div>
+        </div>
+      </button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeConnectModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── General Conflict Modal ───────────────────────────────────── -->
+<div class="modal-overlay" id="general-conflict-modal" onclick="closeGeneralConflictModal(event)">
+  <div class="modal-dialog" style="width:520px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ General Settings Mismatch</span>
+      <button class="modal-close" onclick="closeGeneralConflictModal()">✕</button>
+    </div>
+    <div class="modal-body" id="general-conflict-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="general-conflict-keep">Keep current</button>
+      <button class="btn btn-primary btn-sm" id="general-conflict-use">Use incoming</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── Toast Container ──────────────────────────────────────────── -->
 <div class="toast-container" id="toast-container"></div>
 
@@ -181,7 +229,6 @@
         </div>
         <div class="action-bar-right">
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="boardConnect({N})">Connect</button>
-          <button class="btn btn-ghost btn-sm" id="b{N}-btn-listen" onclick="boardListen({N})" title="Wait for this board to reboot and auto-connect">Listen</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>&#9654; Go</button>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardEraseNVS({N})" disabled title="Wipe all NVS settings and reboot">&#9888; Erase NVS</button>
@@ -338,8 +385,8 @@
       <table class="seq-table">
         <thead>
           <tr>
-            <th style="width:140px">Key</th>
-            <th>Command Value</th>
+            <th style="width:150px">Key</th>
+            <th>Value</th>
             <th style="width:80px">Actions</th>
           </tr>
         </thead>
