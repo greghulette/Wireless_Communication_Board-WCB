@@ -56,11 +56,73 @@ async function fetchLatestFirmwareVersion() {
     const m = appFile.name.match(/WCB_([\d.]+_\w+)_/);
     if (!m) return;
     latestFirmwareVersion = `v${m[1]}`;
-    // Populate any board sw-version spans that still show '—'
-    document.querySelectorAll('[id$="-sw-version"]').forEach(el => {
-      if (el.textContent.trim() === '—') el.textContent = latestFirmwareVersion;
-    });
+    // Re-evaluate version display for any boards that already have a version from the board
+    for (let n = 1; n <= 8; n++) {
+      if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
+    }
   } catch (_) { /* offline or rate-limited — ignore */ }
+}
+
+// Parse the build timestamp embedded in a WCB version string.
+// Format: "6.0_DDHHMM R MMMYYYY"  e.g. "6.0_031250RMAR2026" → March 3 2026 12:50
+// Returns a Date for comparison, or null if the format is unrecognised.
+function parseWCBVersion(ver) {
+  const s = ver.startsWith('v') ? ver.slice(1) : ver;
+  const m = s.match(/^[\d.]+_(\d{2})(\d{2})(\d{2})R([A-Z]{3})(\d{4})$/);
+  if (!m) return null;
+  const [, dd, hh, mm, mon, yyyy] = m;
+  const MONTHS = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
+  const month = MONTHS[mon];
+  if (month === undefined) return null;
+  return new Date(parseInt(yyyy), month, parseInt(dd), parseInt(hh), parseInt(mm));
+}
+
+// Shows the board's installed version and compares it against the latest GitHub version.
+// Green  ✓      = up to date (or GitHub unavailable)
+// Cyan   (dev)  = board is AHEAD of GitHub (local dev build)
+// Yellow ↑      = board is BEHIND GitHub (update available)
+function updateBoardSwVersionDisplay(n) {
+  const el = document.getElementById(`b${n}-sw-version`);
+  if (!el) return;
+  const boardVer = boardConfigs[n]?.fwVersion;
+  if (!boardVer) {
+    el.textContent = '—';
+    el.style.color = 'var(--text3)';
+    el.title = '';
+    return;
+  }
+  const display = boardVer.startsWith('v') ? boardVer : `v${boardVer}`;
+  const latest  = latestFirmwareVersion;   // e.g. 'v6.0_031250RMAR2026', or null if offline
+
+  if (!latest || display === latest) {
+    el.textContent = `${display} ✓`;
+    el.style.color  = 'var(--green)';
+    el.title = latest ? 'Up to date' : 'Installed on board (GitHub version unavailable)';
+    return;
+  }
+
+  // Versions differ — parse timestamps to determine direction
+  const boardDate  = parseWCBVersion(display);
+  const latestDate = parseWCBVersion(latest);
+
+  if (boardDate && latestDate) {
+    if (boardDate > latestDate) {
+      // Board is ahead of GitHub — local dev build
+      el.textContent = `${display} (dev)`;
+      el.style.color  = 'var(--accent)';
+      el.title = `Dev build — ahead of GitHub (GitHub: ${latest})`;
+    } else {
+      // Board is behind GitHub — update available
+      el.textContent = `${display} ↑`;
+      el.style.color  = 'var(--yellow)';
+      el.title = `Update available: ${latest}`;
+    }
+  } else {
+    // Timestamps unrecognisable — flag the mismatch without assuming direction
+    el.textContent = `${display} ≠`;
+    el.style.color  = 'var(--yellow)';
+    el.title = `Version differs from GitHub (${latest})`;
+  }
 }
 
 function setBoardSwVersion(n, ver, installed = false) {
@@ -502,9 +564,8 @@ function populateUIFromConfig(n, config) {
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
 
-  // Software version — show what we know (tracked after flashing, or latest from GitHub)
-  if (config.fwVersion) setBoardSwVersion(n, config.fwVersion, true);
-  else if (latestFirmwareVersion) setBoardSwVersion(n, latestFirmwareVersion, false);
+  // Software version — show board version with update check, or '—' if not yet known
+  updateBoardSwVersionDisplay(n);
 
   for (let p = 1; p <= 5; p++) {
     const sp = config.serialPorts[p - 1];
@@ -1826,7 +1887,7 @@ async function fetchBoardVersion(n) {
     if (match) {
       const ver = match[1].trim();
       if (boardConfigs[n]) boardConfigs[n].fwVersion = ver;
-      setBoardSwVersion(n, `v${ver}`, true);
+      updateBoardSwVersionDisplay(n);
     }
   } catch (_) { /* version fetch is optional — ignore timeouts/errors */ }
 }
@@ -1877,8 +1938,10 @@ async function boardGo(n, opts = {}) {
       });
       flashOk = true;
       // Track flashed version so we can display it in the board section
-      if (latestFirmwareVersion && boardConfigs[n]) boardConfigs[n].fwVersion = latestFirmwareVersion;
-      setBoardSwVersion(n, latestFirmwareVersion ?? '(flashed)', true);
+      if (latestFirmwareVersion && boardConfigs[n])
+        boardConfigs[n].fwVersion = latestFirmwareVersion.replace(/^v/, '');
+      if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
+      else setBoardSwVersion(n, '(flashed)', true);
       const label = isUpdate ? 'updated' : isFactory ? 'factory reset' : 'flashed';
       showToast(`WCB ${n} firmware ${label}!`, 'success');
     } catch (e) {
