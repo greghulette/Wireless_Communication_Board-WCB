@@ -106,15 +106,36 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 .header-logo { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 
+/* Fallback text mark — kept for any place still using .logo-mark in HTML */
 .logo-mark {
-  width: 32px; height: 32px;
+  width: 36px; height: 36px;
   background: var(--accent);
-  border-radius: 6px;
+  border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
   font-family: var(--sans);
   font-weight: 800;
   font-size: 14px;
   color: var(--bg);
+  flex-shrink: 0;
+}
+
+/* Actual logo image — header */
+.header-logo-img {
+  height: 38px; width: 38px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #fff;
+  padding: 3px;
+  flex-shrink: 0;
+}
+
+/* Actual logo image — splash modal header */
+.splash-logo-img {
+  height: 30px; width: 30px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fff;
+  padding: 2px;
   flex-shrink: 0;
 }
 
@@ -805,4 +826,34 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   .main   { padding: 0 12px 160px; }
   .drop-zone, .browser-warning { margin: 10px 12px; }
   .field-group { grid-template-columns: 1fr; }
+}
+
+/* ─── Splash Screen ──────────────────────────────────────────── */
+/* Inherits all modal-overlay / modal-dialog styles — just needs a
+   higher z-index so it sits above any other open modals on load.  */
+.splash-overlay { z-index: 600; }
+
+/* ─── Wizard HW Label Illustration ──────────────────────────── */
+.wizard-hw-label-hint {
+  margin: 10px 0 16px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.wizard-hw-label-caption {
+  font-size: 12px; color: var(--text2); line-height: 1.5;
+}
+.wizard-hw-label-svg {
+  display: block; width: 100%; max-width: 500px; height: auto;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.wizard-hw-label-note {
+  font-size: 11px; color: var(--text2); line-height: 1.6;
+  border-top: 1px solid var(--border); padding-top: 10px;
+}
+.wizard-hw-label-note code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--bg4); padding: 1px 5px; border-radius: 3px;
+  color: var(--accent);
 }

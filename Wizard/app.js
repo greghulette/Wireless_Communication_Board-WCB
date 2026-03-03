@@ -35,12 +35,27 @@ document.addEventListener('DOMContentLoaded', () => {
   initSystemConfig();
   loadModePreference();
   initTerminalResize();
+  showSplash();
 });
 
 function checkBrowserCompat() {
   if (!('serial' in navigator)) {
     document.getElementById('browser-warning').classList.remove('hidden');
   }
+}
+
+// ─── Splash ───────────────────────────────────────────────────────
+function showSplash() {
+  document.getElementById('splash-overlay').classList.add('open');
+}
+
+function splashGoWizard() {
+  document.getElementById('splash-overlay').classList.remove('open');
+  openWizard();
+}
+
+function splashGoConfig() {
+  document.getElementById('splash-overlay').classList.remove('open');
 }
 
 function loadModePreference() {
@@ -3132,7 +3147,7 @@ function wizardDefaultState() {
     kyberTargets:  [],
     maestroEnabled: false,
     maestros:      [],            // [{ boardSlot, id, port, baud }]
-    etmEnabled:    false,
+    etmEnabled:    true,
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
                      bootHeartbeatSec:30, messageCount:3, messageDelayMs:100 },
     needsFirmware: false,
@@ -3329,9 +3344,16 @@ function wizardHTMLWelcome() {
       <span class="modal-option-icon">ℹ</span>
       <div class="modal-option-text">
         <div class="modal-option-title">What you'll need</div>
+        <div class="modal-option-desc">Chrome or Edge browser · About 5 minutes</div>
+      </div>
+    </div>
+    <div class="modal-option" style="cursor:default">
+      <span class="modal-option-icon">🔌</span>
+      <div class="modal-option-text">
+        <div class="modal-option-title">Connecting your boards</div>
         <div class="modal-option-desc">
-          Your WCB boards plugged in via USB · Chrome or Edge browser ·
-          About 5 minutes
+          <strong>Preferred:</strong> Connect all boards via their own USB cable simultaneously — the wizard will push to each one automatically.<br><br>
+          <strong>Alternatively:</strong> Connect and configure one board at a time, repeating the connect &amp; push step for each board.
         </div>
       </div>
     </div>`;
@@ -3416,9 +3438,56 @@ function wizardHTMLIdentity() {
         </div>
       </div>`;
   }).join('');
+  // PCB silkscreen recreation — based on actual WCB board markings.
+  // The version number is printed directly on the PCB (not a sticker).
+  // Callout is horizontal (right of VER:) so no extra vertical space is needed.
+  const labelSVG = `
+    <div class="wizard-hw-label-hint">
+      <div class="wizard-hw-label-caption">The version number is silkscreened directly onto the PCB. Look for <strong>VER:</strong> in the top area of the board:</div>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 118" class="wizard-hw-label-svg" role="img" aria-label="WCB PCB showing silkscreen version label location">
+        <defs>
+          <marker id="wiz-arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+            <polygon points="0 0, 9 3.5, 0 7" fill="#ef4444"/>
+          </marker>
+          <linearGradient id="pcb-sheen" x1="0%" y1="0%" x2="60%" y2="100%">
+            <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.06"/>
+            <stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>
+          </linearGradient>
+        </defs>
+
+        <!-- PCB board body -->
+        <rect width="500" height="118" rx="9" fill="#1c3d72"/>
+        <rect width="500" height="118" rx="9" fill="url(#pcb-sheen)"/>
+
+        <!-- Mounting holes -->
+        <circle cx="18" cy="15" r="11" fill="#0d2244"/><circle cx="18"  cy="15"  r="5.5" fill="#b8893a"/>
+        <circle cx="482" cy="15" r="11" fill="#0d2244"/><circle cx="482" cy="15"  r="5.5" fill="#b8893a"/>
+        <circle cx="18" cy="103" r="11" fill="#0d2244"/><circle cx="18"  cy="103" r="5.5" fill="#b8893a"/>
+        <circle cx="482" cy="103" r="11" fill="#0d2244"/><circle cx="482" cy="103" r="5.5" fill="#b8893a"/>
+
+        <!-- Silkscreen text — Star Jedi font, all-caps, matches real board -->
+        <text x="290" y="40"  text-anchor="middle" font-family="'Star Jedi',Impact,Arial,sans-serif" font-size="14" fill="white" letter-spacing="2">WIRELESS COMMUNICATION BOARD</text>
+        <text x="115" y="70"  text-anchor="middle" font-family="'Star Jedi',Impact,Arial,sans-serif" font-size="14" fill="white" letter-spacing="1">VER:2.4</text>
+        <text x="395" y="70"  text-anchor="middle" font-family="'Star Jedi',Impact,Arial,sans-serif" font-size="13" fill="white" letter-spacing="1">DATE: 20 JULY 24</text>
+        <text x="290" y="98"  text-anchor="middle" font-family="'Star Jedi',Impact,Arial,sans-serif" font-size="12" fill="white" letter-spacing="1">CREATED BY:GREG MULETTE</text>
+
+        <!-- Red highlight box around VER:X.X -->
+        <rect x="63" y="55" width="104" height="22" rx="4" fill="rgba(239,68,68,0.18)" stroke="#ef4444" stroke-width="2.5"/>
+
+        <!-- Horizontal callout arrow — fits in gap between VER and DATE text -->
+        <line x1="169" y1="66" x2="218" y2="66" stroke="#ef4444" stroke-width="2" stroke-dasharray="4,2.5" marker-end="url(#wiz-arrow)"/>
+
+        <!-- Callout pill — sits between VER box and DATE text -->
+        <rect x="222" y="54" width="92" height="22" rx="5" fill="#ef4444"/>
+        <text x="268" y="69" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="white">your version</text>
+      </svg>
+      <div class="wizard-hw-label-note">Every WCB hardware version has this text printed on the board. The number after <code>VER:</code> is what you need — e.g. <code>VER:2.4</code> → select <strong>2.4</strong>.</div>
+    </div>`;
+
   return `
     <div class="wizard-section-title">Board Identity</div>
     <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
+    ${labelSVG}
     ${tabs}${panels}`;
 }
 

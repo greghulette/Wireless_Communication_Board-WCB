@@ -1808,7 +1808,7 @@ void saveETMSettings() {
 
 void loadETMSettings() {
     preferences.begin("etm_config", true);
-    etmEnabled          = preferences.getBool("etmEnabled", false);
+    etmEnabled          = preferences.getBool("etmEnabled", true);
     etmBootHeartbeatSec = preferences.getInt("etmBoot", 2);
     etmHeartbeatSec     = preferences.getInt("etmHB", 10);
     etmMissedHeartbeats = preferences.getInt("etmMiss", 3);

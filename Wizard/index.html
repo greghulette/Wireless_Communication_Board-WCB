@@ -6,6 +6,7 @@
   <title>WCB Configuration Tool</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.cdnfonts.com/css/star-jedi" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -15,7 +16,7 @@
   <!-- ─── Header ─────────────────────────────────────────────────── -->
   <header class="header">
     <div class="header-logo">
-      <div class="logo-mark">W</div>
+      <img src="../Images/r2logo.png" class="header-logo-img" alt="Logo">
       <div class="header-title">
         <h1>WCB Config Tool</h1>
         <span>Wireless Communication Board</span>
@@ -113,7 +114,7 @@
         <div class="subsection-title advanced-only hidden">Event Tracking Module (ETM)</div>
         <div class="toggle-wrap mb-12 advanced-only hidden">
           <label class="toggle">
-            <input type="checkbox" id="g-etm-enabled" onchange="onETMToggle()">
+            <input type="checkbox" id="g-etm-enabled" checked onchange="onETMToggle()">
             <span class="toggle-track"></span>
             <span class="toggle-label">ETM Enabled</span>
           </label>
@@ -434,6 +435,35 @@
     </div>
   </div>
 </template>
+
+<!-- ─── Splash Screen ────────────────────────────────────────────── -->
+<div class="modal-overlay splash-overlay" id="splash-overlay">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <img src="../Images/r2logo.png" class="splash-logo-img" alt="Logo">
+      <span class="modal-title">WCB Configuration Tool</span>
+    </div>
+    <div class="modal-body">
+      <button class="modal-option" onclick="splashGoWizard()">
+        <span class="modal-option-icon">✦</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">
+            Setup Wizard
+            <span class="badge badge-accent" style="font-size:9px;padding:2px 6px">Recommended</span>
+          </div>
+          <div class="modal-option-desc">Step-by-step guided setup. Perfect if you're new to WCB or setting up a new system from scratch.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="splashGoConfig()">
+        <span class="modal-option-icon">⚡</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Config Tool</div>
+          <div class="modal-option-desc">Jump straight to the configuration panel. Best for updating an existing system or experienced users.</div>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
 
 <!-- ─── Scripts ──────────────────────────────────────────────────── -->
 <script src="parser.js"></script>

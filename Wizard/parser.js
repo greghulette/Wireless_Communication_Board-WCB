@@ -58,7 +58,7 @@ function createDefaultBoardConfig() {
 
     // ETM
     etm: {
-      enabled:          false,
+      enabled:          true,
       timeoutMs:        30000,
       heartbeatSec:     10,
       missedHeartbeats: 3,
@@ -100,7 +100,7 @@ function createDefaultSystemConfig() {
       funcChar:       '?',
       cmdChar:        ';',
       etm: {
-        enabled:          false,
+        enabled:          true,
         timeoutMs:        30000,
         heartbeatSec:     10,
         missedHeartbeats: 3,
