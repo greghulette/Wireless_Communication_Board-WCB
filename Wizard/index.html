@@ -250,7 +250,8 @@
       </div>
       <div class="section-meta">
         <button class="btn btn-ghost btn-sm" id="b{N}-btn-identify" onclick="event.stopPropagation();boardIdentify({N})" disabled title="Blink board LED red/green for 5 seconds to identify it" style="padding:2px 8px;font-size:11px">Identify</button>
-        <button class="btn btn-ghost btn-sm" id="b{N}-btn-connect" onclick="event.stopPropagation();boardConnect({N})" style="padding:2px 8px;font-size:11px">Connect</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-btn-retry" onclick="event.stopPropagation();boardRetryPull({N})" title="Retry config pull" style="display:none">↺ Retry</button>
+        <button class="btn btn-primary btn-sm" id="b{N}-btn-connect" onclick="event.stopPropagation();boardConnect({N})">Connect</button>
       </div>
     </div>
     <div class="section-body">
@@ -316,6 +317,13 @@
             <option value="31">3.1  (ESP32-S3)</option>
             <option value="32">3.2  (ESP32-S3)</option>
           </select>
+        </div>
+        <div class="field">
+          <label>Software Version</label>
+          <span id="b{N}-sw-version"
+                style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
+                       border:1px solid var(--border);border-radius:var(--radius);
+                       color:var(--text3);font-family:var(--mono);font-size:12px;min-height:36px">—</span>
         </div>
       </div>
 

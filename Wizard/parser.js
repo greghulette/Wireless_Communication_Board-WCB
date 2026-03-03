@@ -793,16 +793,20 @@ function buildCommandString(config, baseline = null, fullPush = false) {
   // then contains ?MAESTRO,M1:W1S1:9600, and boardPull repopulates the UI with the
   // wrong baud, corrupting every subsequent push.  Always send ?MAESTRO for local
   // Maestros regardless of Kyber mode.
+  // maestroTable (set by wizard) carries the full multi-board routing table.
+  // Fall back to local maestros (with this board's WCB number) for normal edits.
+  const effectiveTable  = config.maestroTable   ?? config.maestros.map(m => ({ ...m, wcb: config.wcbNumber }));
+  const baselineTable   = baseline?.maestroTable ?? baseline?.maestros?.map(m => ({ ...m, wcb: config.wcbNumber }));
   const maestrosChanged = fullPush || !baseline ||
-    JSON.stringify(baseline.maestros) !== JSON.stringify(config.maestros);
+    JSON.stringify(baselineTable) !== JSON.stringify(effectiveTable);
 
   if (maestrosChanged) {
-    if (config.maestros.length > 0) {
-      const chain = config.maestros
-        .map(m => `M${m.id}:W${config.wcbNumber}S${m.port}:${m.baud}`)
+    if (effectiveTable.length > 0) {
+      const chain = effectiveTable
+        .map(m => `M${m.id}:W${m.wcb}S${m.port}:${m.baud}`)
         .join(',');
       add(`MAESTRO,${chain}`);
-    } else if (baseline?.maestros?.length > 0) {
+    } else if ((baselineTable ?? []).length > 0) {
       add('MAESTRO,CLEAR,ALL');
     }
   }

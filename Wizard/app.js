@@ -28,6 +28,10 @@ const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to for
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
 
+// ─── Wizard / Firmware Version ────────────────────────────────────
+let _wizardOpen = false;             // suppress mismatch modals while wizard is open
+let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
+
 // ─── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   checkBrowserCompat();
@@ -36,7 +40,35 @@ document.addEventListener('DOMContentLoaded', () => {
   loadModePreference();
   initTerminalResize();
   showSplash();
+  fetchLatestFirmwareVersion();  // silent, best-effort
 });
+
+// ─── Firmware Version (fetched from GitHub) ───────────────────────
+async function fetchLatestFirmwareVersion() {
+  try {
+    const r = await fetch(
+      'https://api.github.com/repos/greghulette/Wireless_Communication_Board-WCB/contents/Code/bin?ref=multi_maestro'
+    );
+    if (!r.ok) return;
+    const files = await r.json();
+    const appFile = files.find(f => f.type === 'file' && f.name.endsWith('_ESP32.bin'));
+    if (!appFile) return;
+    const m = appFile.name.match(/WCB_(\d+\.\d+)_/);
+    if (!m) return;
+    latestFirmwareVersion = `v${m[1]}`;
+    // Populate any board sw-version spans that still show '—'
+    document.querySelectorAll('[id$="-sw-version"]').forEach(el => {
+      if (el.textContent.trim() === '—') el.textContent = latestFirmwareVersion;
+    });
+  } catch (_) { /* offline or rate-limited — ignore */ }
+}
+
+function setBoardSwVersion(n, ver, installed = false) {
+  const el = document.getElementById(`b${n}-sw-version`);
+  if (!el) return;
+  el.textContent = installed ? `${ver} ✓` : ver;
+  el.style.color = installed ? 'var(--green)' : 'var(--text3)';
+}
 
 function checkBrowserCompat() {
   if (!('serial' in navigator)) {
@@ -475,6 +507,10 @@ function populateUIFromConfig(n, config) {
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
 
+  // Software version — show what we know (tracked after flashing, or latest from GitHub)
+  if (config.fwVersion) setBoardSwVersion(n, config.fwVersion, true);
+  else if (latestFirmwareVersion) setBoardSwVersion(n, latestFirmwareVersion, false);
+
   for (let p = 1; p <= 5; p++) {
     const sp = config.serialPorts[p - 1];
     const el = (id) => document.getElementById(`b${n}-s${p}-${id}`);
@@ -537,14 +573,19 @@ function updateBoardStatusBadge(n, state) {
   badge.className = 'badge';
   const states = {
     configured: ['badge-green',  '✅ Configured'],
-    connected:  ['badge-accent', '● Connected'],
-    remote:     ['badge-accent', '📡 Remote'],
-    error:      ['badge-red',    '✕ Error'],
+    connected:  ['badge-green',  '● Connected'],
+    remote:     ['badge-green',  '📡 Remote'],
+    retrying:   ['badge-yellow', '↻ Retrying…'],
+    error:      ['badge-red',    '✕ Pull Failed'],
     default:    ['badge-default','Not Connected'],
   };
   const [cls, text] = states[state] ?? states.default;
   badge.classList.add(cls);
   badge.textContent = text;
+
+  // Show retry button only when pull failed on a remote board
+  const retryBtn = document.getElementById(`b${n}-btn-retry`);
+  if (retryBtn) retryBtn.style.display = (state === 'error' && remoteRelayForBoard[n]) ? '' : 'none';
 }
 
 // ─── Maestro ──────────────────────────────────────────────────────
@@ -1385,7 +1426,7 @@ function setRemoteConnected(n, relayN) {
   const goBtn       = document.getElementById(`b${n}-btn-go`);
   const eraseBtn    = document.getElementById(`b${n}-btn-erase`);
   const identifyBtn = document.getElementById(`b${n}-btn-identify`);
-  if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting'); }
+  if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting', 'btn-primary'); connBtn.classList.add('btn-danger'); }
   if (pullBtn)     { pullBtn.disabled = false; pullBtn.textContent = 'Pull Config'; }
   if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
   if (eraseBtn)    eraseBtn.disabled = true;    // erase not available via relay
@@ -1489,8 +1530,7 @@ function boardConnect(n) {
   if (boardConnections[n]?.isConnected()) { boardDisconnect(n); return; }
   if (remoteRelayForBoard[n]) { clearRemoteConnected(n); return; }
   if (_detecting[n]) { openConnectModal(n); return; } // options menu while detecting
-  openConnectModal(n);        // show modal immediately
-  boardAutoDetect(n);         // start detecting in parallel — intentionally not awaited
+  openConnectModal(n);        // show modal; user picks Auto-Detect / Manual / Remote
 }
 
 async function boardDisconnect(n) {
@@ -1712,7 +1752,7 @@ async function boardPull(n) {
       generalBaseline = { sourceBoard: config.wcbNumber || n, fields: incomingGeneral };
     } else {
       const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
-      if (mismatches.length > 0) {
+      if (mismatches.length > 0 && !_wizardOpen) {
         setTimeout(() => showGeneralMismatchModal(
           generalBaseline.sourceBoard, generalBaseline.fields,
           config.wcbNumber || n, incomingGeneral, mismatches
@@ -1821,6 +1861,9 @@ async function boardGo(n, opts = {}) {
         eraseNvs:   isFactory,        // Factory Reset: wipe NVS before flashing
       });
       flashOk = true;
+      // Track flashed version so we can display it in the board section
+      if (latestFirmwareVersion && boardConfigs[n]) boardConfigs[n].fwVersion = latestFirmwareVersion;
+      setBoardSwVersion(n, latestFirmwareVersion ?? '(flashed)', true);
       const label = isUpdate ? 'updated' : isFactory ? 'factory reset' : 'flashed';
       showToast(`WCB ${n} firmware ${label}!`, 'success');
     } catch (e) {
@@ -2057,6 +2100,8 @@ function updateConnectionUI(n, connected) {
   if (identifyBtn) identifyBtn.disabled = !connected;
   if (connBtn) {
     connBtn.textContent = connected ? 'Disconnect' : 'Connect';
+    connBtn.classList.toggle('btn-primary', !connected);
+    connBtn.classList.toggle('btn-danger',   connected);
     if (!connected) connBtn.classList.remove('btn-detecting');
   }
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
@@ -2084,12 +2129,22 @@ function installEtmListener(relayN) {
       const bn = parseInt(onlineMatch[1]);
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.add('connected');
+        // Board announced itself — pull fresh config to confirm reachability and update state
+        updateBoardStatusBadge(bn, 'remote');
+        remoteBoardPull(relayN, bn);
       }
     } else if (offlineMatch) {
       const bn = parseInt(offlineMatch[1]);
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.remove('connected');
-        showToast(`⚠️ WCB ${bn}: ETM timeout — board may be offline`, 'warning', 6000);
+        // Guard: don't stack pulls if a verification is already running
+        const badge = document.getElementById(`b${bn}-status-badge`);
+        const alreadyVerifying = badge?.classList.contains('badge-yellow');
+        if (!alreadyVerifying) {
+          showToast(`⚠️ WCB ${bn}: ETM timeout — verifying reachability…`, 'warning', 4000);
+          updateBoardStatusBadge(bn, 'retrying');
+          remoteBoardPull(relayN, bn);
+        }
       }
     }
   };
@@ -2214,12 +2269,16 @@ async function boardGoRemote(n, opts = {}) {
 
 // Pull config from a remote board via the relay's CONFIG_REQ/CONFIG_FRAG protocol.
 // Sends ?MGMT,PULL,<targetN> to the relay; waits up to 15 s for [MGMT:CONFIG,<targetN>].
-async function remoteBoardPull(relayN, targetN) {
+// Auto-retries up to MAX_PULL_ATTEMPTS times (10 s apart) before marking error.
+const MAX_PULL_ATTEMPTS = 3;
+async function remoteBoardPull(relayN, targetN, attempt = 1) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
 
-  termLog(relayN, `[Remote] Requesting config from WCB${targetN}…`, 'sys');
-  showToast(`Pulling config from WCB${targetN} via WCB${relayN}…`, 'info');
+  termLog(relayN, `[Remote] Requesting config from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'sys');
+  showToast(attempt === 1
+    ? `Pulling config from WCB${targetN} via WCB${relayN}…`
+    : `Retrying pull from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'info');
 
   const prefix = `[MGMT:CONFIG,${targetN}]`;
   let done = false;
@@ -2246,19 +2305,26 @@ async function remoteBoardPull(relayN, targetN) {
 
     const configStr = line.slice(prefix.length).trim();
     if (!configStr) {
+      updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: empty config response`, 'error');
       termLog(relayN, `[Remote] WCB${targetN} returned empty config`, 'err');
       return;
     }
 
-    const config = WCBParser.parseBackupString(configStr);
-    boardConfigs[targetN]   = config;
-    boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
-    populateUIFromConfig(targetN, config);
-    // Preserve remote badge and connection label (setRemoteConnected may have run before us)
-    updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
-    showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
-    termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
+    try {
+      const config = WCBParser.parseBackupString(configStr);
+      boardConfigs[targetN]   = config;
+      boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
+      populateUIFromConfig(targetN, config);
+      // Preserve remote badge and connection label (setRemoteConnected may have run before us)
+      updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
+      showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
+      termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
+    } catch (e) {
+      updateBoardStatusBadge(targetN, 'error');
+      showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
+      termLog(relayN, `[Remote] Config parse error for WCB${targetN}: ${e.message}`, 'err');
+    }
   };
 
   relayConn._dataCallbacks.push(onLine);
@@ -2266,8 +2332,15 @@ async function remoteBoardPull(relayN, targetN) {
     if (done) return;
     done = true;
     cleanup();
-    showToast(`WCB${targetN}: config pull timed out`, 'error');
-    termLog(relayN, `[Remote] Config pull from WCB${targetN} timed out`, 'err');
+    if (attempt < MAX_PULL_ATTEMPTS) {
+      updateBoardStatusBadge(targetN, 'retrying');
+      termLog(relayN, `[Remote] Pull attempt ${attempt}/${MAX_PULL_ATTEMPTS} timed out — retrying in 10s…`, 'sys');
+      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1), 10000);
+    } else {
+      updateBoardStatusBadge(targetN, 'error');
+      showToast(`WCB${targetN}: config pull failed after ${MAX_PULL_ATTEMPTS} attempts`, 'error');
+      termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${MAX_PULL_ATTEMPTS} attempts`, 'err');
+    }
   }, 15000);
 
   await relayConn.send(`?MGMT,PULL,${targetN}\r`);
@@ -2278,6 +2351,14 @@ function boardPullRemote(n) {
   const relayN = remoteRelayForBoard[n];
   if (!relayN) { showToast('No relay board set for this board', 'error'); return; }
   if (relayN === n) { showToast(`WCB${n} is the relay — connect directly`, 'error'); return; }
+  remoteBoardPull(relayN, n);
+}
+
+// Manual retry after a failed remote pull — resets badge and starts a fresh attempt cycle
+function boardRetryPull(n) {
+  const relayN = remoteRelayForBoard[n];
+  if (!relayN) { showToast('Board is no longer set as remote', 'error'); return; }
+  updateBoardStatusBadge(n, 'remote');
   remoteBoardPull(relayN, n);
 }
 
@@ -3140,11 +3221,12 @@ function wizardDefaultState() {
     funcChar:      '?',
     cmdChar:       ';',
     boards:        [wizardDefaultBoard(1)],
-    kyberEnabled:  false,
-    kyberBoard:    1,
-    kyberPort:     2,
-    kyberBaud:     115200,
-    kyberTargets:  [],
+    kyberEnabled:        false,
+    kyberBoard:          1,
+    kyberPort:           2,
+    kyberBaud:           115200,
+    kyberMarcduinoPort:  null,
+    kyberTargets:        [],
     maestroEnabled: false,
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
@@ -3153,6 +3235,8 @@ function wizardDefaultState() {
     needsFirmware: false,
     eraseNvs:      false,
     activeBoardTab: 0,
+    connectMode:   null,   // null = not chosen yet, 'all', 'seq'
+    connectSeqN:   1,      // current board slot in sequential connect mode
   };
 }
 
@@ -3185,6 +3269,7 @@ function buildWizardSteps() {
 
 // ── Open / Close ───────────────────────────────────────────────────
 function openWizard() {
+  _wizardOpen = true;
   wizardState = wizardDefaultState();
   wizardState.password = wizardGenPassword();
   wizardState.mac2     = wizardGenMacOctet();
@@ -3196,6 +3281,7 @@ function openWizard() {
 
 function closeWizard(event) {
   if (event && event.target !== document.getElementById('wizard-modal')) return;
+  _wizardOpen = false;
   document.getElementById('wizard-modal').classList.remove('open');
 }
 
@@ -3308,6 +3394,9 @@ function wizardRenderStep() {
   if (key === 'connect') wizardStartConnectWatchers();
 }
 
+// ── Tooltip helper — renders a ⓘ icon that shows a hint on hover ──
+const wizHint = (tip) => `<span class="wiz-hint" data-tip="${tip}">ⓘ</span>`;
+
 // ── Per-step HTML builders ─────────────────────────────────────────
 function wizardBuildStepHTML(key) {
   switch (key) {
@@ -3315,7 +3404,7 @@ function wizardBuildStepHTML(key) {
     case 'quantity':     return wizardHTMLQuantity();
     case 'network':      return wizardHTMLNetwork();
     case 'identity':     return wizardHTMLIdentity();
-    case 'serial':       return wizardHTMLSerial();
+    case 'serial':       wizardState.activeBoardTab = 0; return wizardHTMLSerial();
     case 'kyber':        return wizardHTMLKyber();
     case 'kyber-config': return wizardHTMLKyberConfig();
     case 'maestro':      return wizardHTMLMaestro();
@@ -3340,19 +3429,20 @@ function wizardHTMLWelcome() {
         automatically.
       </div>
     </div>
-    <div class="modal-option" style="cursor:default">
-      <span class="modal-option-icon">ℹ</span>
-      <div class="modal-option-text">
-        <div class="modal-option-title">What you'll need</div>
-        <div class="modal-option-desc">Chrome or Edge browser · About 5 minutes</div>
+    <div class="wizard-info-block">
+      <div class="wizard-info-row">
+        <span class="wizard-info-icon">ℹ</span>
+        <div>
+          <strong>What you'll need</strong><br>
+          Chrome or Edge browser · About 5 minutes
+        </div>
       </div>
-    </div>
-    <div class="modal-option" style="cursor:default">
-      <span class="modal-option-icon">🔌</span>
-      <div class="modal-option-text">
-        <div class="modal-option-title">Connecting your boards</div>
-        <div class="modal-option-desc">
-          <strong>Preferred:</strong> Connect all boards via their own USB cable simultaneously — the wizard will push to each one automatically.<br><br>
+      <div class="wizard-info-divider"></div>
+      <div class="wizard-info-row">
+        <span class="wizard-info-icon">🔌</span>
+        <div>
+          <strong>Connecting your boards</strong><br>
+          <strong>Preferred:</strong> Connect all boards via their own USB cable simultaneously — the wizard will push to each one automatically.<br>
           <strong>Alternatively:</strong> Connect and configure one board at a time, repeating the connect &amp; push step for each board.
         </div>
       </div>
@@ -3378,18 +3468,18 @@ function wizardHTMLNetwork() {
     <div class="wizard-section-title">Network Configuration</div>
     <div class="wizard-section-desc">All boards in the same system must share these settings. We've suggested random secure values — feel free to change them.</div>
     <div class="wizard-field-row">
-      <label>ESP-NOW Password</label>
+      <label>ESP-NOW Password ${wizHint('Shared password for all boards on this network. Every board must use the same password to communicate with each other.')}</label>
       <input id="wiz-password" type="text" value="${escHtml(password)}" spellcheck="false">
       <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-password','password')">🎲</button>
     </div>
     <div class="wizard-field-row">
-      <label>MAC Octet 2</label>
+      <label>MAC Octet 2 ${wizHint('Second byte of the custom MAC address. All boards on the same network must share identical octets — this is what separates your network from others nearby. Use 🎲 to randomize if the one presented does not work.')}</label>
       <input id="wiz-mac2" type="text" maxlength="2" value="${escHtml(mac2)}"
              style="text-transform:uppercase;max-width:80px" spellcheck="false">
       <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-mac2','mac')">🎲</button>
     </div>
     <div class="wizard-field-row">
-      <label>MAC Octet 3</label>
+      <label>MAC Octet 3 ${wizHint('Third byte of the broadcast MAC address. Together with Octet 2, this uniquely identifies your network group. Use 🎲 to randomize if the one presented does not work.')}</label>
       <input id="wiz-mac3" type="text" maxlength="2" value="${escHtml(mac3)}"
              style="text-transform:uppercase;max-width:80px" spellcheck="false">
       <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-mac3','mac')">🎲</button>
@@ -3398,22 +3488,22 @@ function wizardHTMLNetwork() {
     <div class="wizard-section-title" style="margin-top:18px">Command Characters</div>
     <div class="wizard-section-desc">Advanced — only change these if your system requires non-default characters. All boards must share the same values.</div>
     <div class="wizard-field-row">
-      <label>Delimiter</label>
+      <label>Delimiter ${wizHint('Character that separates multiple commands in a single message. Default is ^. All boards must share the same value.')}</label>
       <input id="wiz-delim" type="text" maxlength="1" value="${escHtml(delimiter)}"
              style="max-width:60px;font-family:monospace" spellcheck="false">
-      <span class="wizard-hint">Separates commands&nbsp;(default: <code>^</code>)</span>
+      <span class="wizard-hint">default: <code>^</code></span>
     </div>
     <div class="wizard-field-row">
-      <label>Function Char</label>
+      <label>Function Char ${wizHint('Prefix character that marks a WCB board Configuration command (e.g. ?reboot, ?IDENTIFY). Default is ?. All boards must share the same value.')}</label>
       <input id="wiz-funcchar" type="text" maxlength="1" value="${escHtml(funcChar)}"
              style="max-width:60px;font-family:monospace" spellcheck="false">
-      <span class="wizard-hint">Prefixes board commands&nbsp;(default: <code>?</code>)</span>
+      <span class="wizard-hint">default: <code>?</code></span>
     </div>
     <div class="wizard-field-row">
-      <label>Command Char</label>
+      <label>Command Char ${wizHint('Prefix character for routing commands to connected peripherals (e.g. Kyber, Maestro). Default is ;. All boards must share the same value.')}</label>
       <input id="wiz-cmdchar" type="text" maxlength="1" value="${escHtml(cmdChar)}"
              style="max-width:60px;font-family:monospace" spellcheck="false">
-      <span class="wizard-hint">Prefixes routing commands&nbsp;(default: <code>;</code>)</span>
+      <span class="wizard-hint">default: <code>;</code></span>
     </div>`;
 }
 
@@ -3426,11 +3516,11 @@ function wizardHTMLIdentity() {
     return `
       <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-identity-${i}">
         <div class="wizard-field-row">
-          <label>WCB Number</label>
+          <label>WCB Number ${wizHint('Unique ID for this board (1–8). Each board in your system must have a different number — this is how they identify themselves on the network.')}</label>
           <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}" style="max-width:80px">
         </div>
         <div class="wizard-field-row">
-          <label>Hardware Version</label>
+          <label>Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below. Different versions have different pin assignments and must be set correctly.')}</label>
           <select id="wiz-b${i}-hwver">
             <option value="0">— Select version —</option>
             ${hwOpts}
@@ -3442,15 +3532,15 @@ function wizardHTMLIdentity() {
   const labelSVG = `
     <div class="wizard-hw-label-hint">
       <div class="wizard-hw-label-caption">The version number is silkscreened directly onto the PCB. Look for <strong>VER:</strong> on the board label:</div>
-      <img src="../Images/21cropped.jpg" class="wizard-hw-label-svg" alt="WCB PCB label showing version number location">
+      <img src="../Images/LabelOnly.jpg" class="wizard-hw-label-svg" alt="WCB PCB label showing version number location">
       <div class="wizard-hw-label-note">Every WCB hardware version has this text printed on the board. The number after <code>VER:</code> is what you need — e.g. <code>VER:2.4</code> → select <strong>2.4</strong>.</div>
     </div>`;
 
   return `
     <div class="wizard-section-title">Board Identity</div>
     <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
-    ${labelSVG}
-    ${tabs}${panels}`;
+    ${tabs}${panels}
+    ${labelSVG}`;
 }
 
 function wizardHTMLSerial() {
@@ -3462,7 +3552,10 @@ function wizardHTMLSerial() {
     // Kyber claims its port at 115200; each Maestro claims its port at its configured baud
     const claims = {};
     if (wizardState.kyberEnabled && wizardState.kyberBoard === boardSlot) {
-      claims[wizardState.kyberPort] = { owner: 'Kyber', baud: wizardState.kyberBaud };
+      claims[wizardState.kyberPort] = { owner: 'Kyber Maestro', baud: wizardState.kyberBaud };
+      if (wizardState.kyberMarcduinoPort) {
+        claims[wizardState.kyberMarcduinoPort] = { owner: 'Kyber Marcduino', baud: 9600 };
+      }
     }
     for (const m of wizardState.maestros) {
       if (m.boardSlot === boardSlot) {
@@ -3509,7 +3602,7 @@ function wizardHTMLSerial() {
     return `
       <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-serial-${i}">
         <table class="wizard-serial-table">
-          <thead><tr><th>Port</th><th>Baud Rate</th><th>Label</th></tr></thead>
+          <thead><tr><th>Port</th><th>Baud Rate ${wizHint('Communication speed for this serial port. Must match the baud rate of the device connected to it.')}</th><th>Label ${wizHint('Optional name for this port to remind you what is connected (e.g. Kyber, Maestro, GPS). Useful for troubleshooting.')}</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
@@ -3543,32 +3636,49 @@ function wizardHTMLKyber() {
 }
 
 function wizardHTMLKyberConfig() {
-  const { kyberBoard, kyberPort, kyberBaud, quantity } = wizardState;
+  const { kyberBoard, kyberPort, kyberBaud, kyberMarcduinoPort, quantity } = wizardState;
   const boardOpts = Array.from({length: quantity}, (_, i) =>
     `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
   ).join('');
-  const portOpts = Array.from({length: 5}, (_, p) =>
+  const maestroPortOpts = Array.from({length: 5}, (_, p) =>
     `<option value="${p+1}" ${(p+1) === kyberPort ? 'selected' : ''}>Serial ${p+1}</option>`
   ).join('');
   const kyberBaudRates = [9600, 38400, 57600, 115200];
   const baudOpts = kyberBaudRates.map(r =>
     `<option value="${r}" ${r === kyberBaud ? 'selected' : ''}>${r.toLocaleString()}</option>`
   ).join('');
+  // Marcduino port excludes the Maestro port
+  const marcPortOpts = `<option value="0">— None —</option>` +
+    Array.from({length: 5}, (_, p) => {
+      const pn = p + 1;
+      if (pn === kyberPort) return '';
+      return `<option value="${pn}" ${pn === kyberMarcduinoPort ? 'selected' : ''}>Serial ${pn}</option>`;
+    }).join('');
   return `
     <div class="wizard-section-title">Kyber Setup</div>
-    <div class="wizard-section-desc">Select which board and serial port the Kyber sound controller is connected to. Maestro targets can be added on the next screen and in the config page.</div>
+    <div class="wizard-section-desc">Select which board and serial ports the Kyber sound controller is connected to. Maestro targets can be added on the next screen and in the config page.</div>
+
     <div class="wizard-field-row">
-      <label>Local Kyber Board</label>
+      <label>Local Kyber Board ${wizHint('Which WCB is physically connected to the Kyber via serial cable.')}</label>
       <select id="wiz-kyber-board">${boardOpts}</select>
     </div>
+
+    <div class="wizard-subsection-title">Kyber&#39;s Maestro Port</div>
     <div class="wizard-field-row">
-      <label>Serial Port</label>
-      <select id="wiz-kyber-port">${portOpts}</select>
+      <label>Serial Port ${wizHint('Which serial port on that board the Kyber TX/RX wires are connected to from the Maestro port on the Kyber.')}</label>
+      <select id="wiz-kyber-port">${maestroPortOpts}</select>
     </div>
     <div class="wizard-field-row">
-      <label>Baud Rate</label>
+      <label>Baud Rate ${wizHint('Communication speed for the Kyber Maestro port. Use 115,200 for current Kyber firmware or 57,600 for older versions.')}</label>
       <select id="wiz-kyber-baud">${baudOpts}</select>
-      <span style="font-size:11px;color:var(--text3);margin-left:8px">115,200 for current Kyber · 57,600 for older versions</span>
+      <span style="font-size:11px;color:var(--text3);margin-left:8px">115,200 current · 57,600 older</span>
+    </div>
+
+    <div class="wizard-subsection-title" style="margin-top:14px">Kyber&#39;s Marcduino Port</div>
+    <div class="wizard-section-desc" style="margin-bottom:8px">The Marcduino port lets Kyber receive broadcast commands. Baud is always 9,600 and broadcasts are enabled automatically.</div>
+    <div class="wizard-field-row">
+      <label>Serial Port ${wizHint('Which serial port on that board the Kyber Marcduino TX/RX wires are connected to. Broadcasts will be enabled on this port automatically.')}</label>
+      <select id="wiz-kyber-marcduino-port">${marcPortOpts}</select>
     </div>`;
 }
 
@@ -3603,12 +3713,13 @@ function wizardHTMLMaestroConfig() {
     const baudOpts = BAUD_RATES.filter(r => r <= maxBaud).map(r =>
       `<option value="${r}" ${r === safeBaud ? 'selected' : ''}>${r.toLocaleString()}</option>`
     ).join('');
-    // Exclude the Kyber port if this maestro is on the Kyber board
-    const kyberPortForBoard = (wizardState.kyberEnabled && m.boardSlot === wizardState.kyberBoard)
-      ? wizardState.kyberPort : null;
+    // Exclude the Kyber ports if this maestro is on the Kyber board
+    const isKyberBoard = wizardState.kyberEnabled && m.boardSlot === wizardState.kyberBoard;
+    const kyberPortForBoard = isKyberBoard ? wizardState.kyberPort : null;
+    const marcPortForBoard  = isKyberBoard ? wizardState.kyberMarcduinoPort : null;
     const portOpts = Array.from({length: 5}, (_, p) => {
       const portNum = p + 1;
-      if (portNum === kyberPortForBoard) return '';
+      if (portNum === kyberPortForBoard || portNum === marcPortForBoard) return '';
       return `<option value="${portNum}" ${portNum === m.port ? 'selected' : ''}>Serial ${portNum}</option>`;
     }).join('');
     const idOpts = Array.from({length: 9}, (_, i) =>
@@ -3620,7 +3731,7 @@ function wizardHTMLMaestroConfig() {
       <td><select id="wiz-m${mi}-id">${idOpts}</select></td>
       <td><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
       <td><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
-      <td><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
+      <td style="min-width:95px"><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
       <td><button class="btn btn-danger btn-sm btn-icon" onclick="wizardRemoveMaestro(${mi})">🗑</button></td>
     </tr>`;
   }).join('');
@@ -3628,7 +3739,7 @@ function wizardHTMLMaestroConfig() {
     <div class="wizard-section-title">Maestro Setup</div>
     <div class="wizard-section-desc">Add one row per Maestro. Select its ID, which board it's on, and which serial port it uses.</div>
     <table class="wizard-serial-table" style="margin-bottom:4px">
-      <thead><tr><th>#</th><th>ID</th><th>Board</th><th>Port</th><th>Baud</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>ID ${wizHint('Maestro controller ID — set this in the Pololu Maestro Control Center under Device Settings > Serial Settings.')}</th><th>Board ${wizHint('Which WCB is physically connected to this Maestro via serial cable.')}</th><th>Port ${wizHint('Which serial port on that WCB the Maestro TX/RX wires are connected to.')}</th><th>Baud ${wizHint('Communication speed — must match the baud rate configured in the Pololu Maestro Control Center.')}</th><th></th></tr></thead>
       <tbody id="wiz-maestro-tbody">${rows}</tbody>
     </table>
     <button class="btn btn-ghost btn-sm" onclick="wizardAddMaestro()">+ Add Maestro</button>`;
@@ -3639,27 +3750,27 @@ function wizardHTMLEtm() {
   const detailDisplay = etmEnabled ? '' : 'display:none';
   return `
     <div class="wizard-section-title">Ensure Transmission Mode (ETM)</div>
-    <div class="wizard-section-desc">ETM improves message reliability by tracking receipt of each transmission and automatically retransmitting if delivery is not acknowledged — so commands always get through.</div>
+    <div class="wizard-section-desc">ETM improves message reliability by tracking receipt of each transmission and automatically retransmitting if delivery is not acknowledged — so commands always get through. ETM is <strong>enabled by default</strong> and is required for remote management of WCBs over ESP-NOW.</div>
     <div class="wizard-etm-toggle">
       <input type="checkbox" id="wiz-etm-enabled" ${etmEnabled ? 'checked' : ''}
              onchange="wizardToggleEtmDetail(this.checked)">
-      <label for="wiz-etm-enabled">Enable ETM on all boards</label>
+      <label for="wiz-etm-enabled">Enable ETM on all boards ${wizHint('Ensure Transmission Mode monitors board-to-board communication and automatically marks boards as offline when they stop responding.')}</label>
     </div>
     <div class="wizard-etm-fields" id="wiz-etm-fields" style="${detailDisplay}">
       <div class="wizard-field-row">
-        <label>Timeout (ms)</label>
+        <label>Timeout (ms) ${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 250 ms.')}</label>
         <input id="wiz-etm-timeout" type="number" value="${etmConfig.timeoutMs}">
       </div>
       <div class="wizard-field-row">
-        <label>Heartbeat (sec)</label>
+        <label>Heartbeat (sec) ${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 5 sec.')}</label>
         <input id="wiz-etm-hb" type="number" value="${etmConfig.heartbeatSec}">
       </div>
       <div class="wizard-field-row">
-        <label>Missed before action</label>
+        <label>Missed before action ${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 3.')}</label>
         <input id="wiz-etm-miss" type="number" value="${etmConfig.missedHeartbeats}">
       </div>
       <div class="wizard-field-row">
-        <label>Boot heartbeat (sec)</label>
+        <label>Boot heartbeat (sec) ${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}</label>
         <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
       </div>
     </div>`;
@@ -3722,7 +3833,7 @@ function wizardHTMLFirmware() {
       <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
         <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
         <div>
-          <div style="font-weight:600;font-size:13px">Overwrite existing board memory</div>
+          <div style="font-weight:600;font-size:13px">Overwrite existing board memory ${wizHint('Erases all NVS (non-volatile storage) on the board before applying config. Use this for a complete clean slate — any previously saved passwords, sequences, or port settings will be wiped.')}</div>
           <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
         </div>
       </label>
@@ -3736,37 +3847,117 @@ function wizardFirmwareChoice(val, btn) {
 }
 
 function wizardHTMLConnect() {
-  const rows = wizardState.boards.map((b, i) => {
-    const n   = i + 1;
-    const fwBadge = !wizardState.needsFirmware ? ''
-      : wizardState.eraseNvs
+  const { connectMode, connectSeqN, boards, needsFirmware, eraseNvs } = wizardState;
+
+  // ── Step 0: Mode picker ─────────────────────────────────────────
+  if (!connectMode) {
+    return `
+      <div class="wizard-section-title">Connect &amp; Push</div>
+      <div class="wizard-section-desc">How are you connecting boards to your computer?</div>
+      <div class="wizard-choice-grid">
+        <button class="wizard-choice-btn" onclick="wizardSelectConnectMode('all')">
+          <span class="wizard-choice-icon">🔌</span>
+          <span class="wizard-choice-label">All at once</span>
+          <span class="wizard-choice-desc">All boards connected via USB hub — configure them simultaneously</span>
+        </button>
+        <button class="wizard-choice-btn selected" onclick="wizardSelectConnectMode('seq')">
+          <span class="wizard-choice-icon">↕</span>
+          <span class="wizard-choice-label">One at a time <span style="font-size:10px;color:var(--text3)">(recommended)</span></span>
+          <span class="wizard-choice-desc">Move the USB cable between boards — you'll be guided exactly when to plug in, reset, and unplug each board</span>
+        </button>
+      </div>`;
+  }
+
+  // ── Step 1+: Board rows ─────────────────────────────────────────
+  const rows = boards.map((b, i) => {
+    const n = i + 1;
+    const isSeq    = connectMode === 'seq';
+    const isActive = !isSeq || n === connectSeqN;
+    const isDimmed = isSeq && n > connectSeqN;
+    const fwBadge = !needsFirmware ? ''
+      : eraseNvs
         ? `<span class="badge badge-red"    style="font-size:9px;padding:2px 6px">Factory Reset</span>`
         : `<span class="badge badge-yellow" style="font-size:9px;padding:2px 6px">Upload FW</span>`;
-    return `<div class="wizard-connect-row" id="wiz-connect-row-${n}">
-      <span class="wizard-connect-label">
-        WCB ${n} ${fwBadge}
-        <span style="color:var(--text3);font-weight:400;font-size:11px;display:block">Board #${b.wcbNumber}</span>
-      </span>
-      <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-        <span id="wiz-connect-btns-${n}" style="display:flex;gap:6px">
-          <button class="btn btn-primary btn-sm" id="wiz-detect-btn-${n}"
-                  onclick="wizardAutoDetect(${n})">⊙ Auto-Detect</button>
-          <button class="btn btn-ghost btn-sm"   id="wiz-manual-btn-${n}"
-                  onclick="wizardManualConnect(${n})">🔌 Manual</button>
+    return `
+      <div class="wizard-connect-row ${isDimmed ? 'wiz-connect-dimmed' : ''}" id="wiz-connect-row-${n}">
+        <span class="wizard-connect-label">
+          WCB ${n} ${fwBadge}
+          <span style="color:var(--text3);font-weight:400;font-size:11px;display:block">Board #${b.wcbNumber}</span>
         </span>
-        <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
-                style="display:none" onclick="wizardCancelConnect(${n})">✕ Cancel</button>
-      </div>
-      <span class="wizard-connect-status" id="wiz-connect-status-${n}">Waiting…</span>
-    </div>`;
+        <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
+          <span id="wiz-connect-btns-${n}" style="display:${isActive ? 'flex' : 'none'};gap:6px">
+            <button class="btn btn-primary btn-sm" id="wiz-detect-btn-${n}"
+                    onclick="wizardAutoDetect(${n})">⊙ Auto-Detect</button>
+            <button class="btn btn-ghost btn-sm"   id="wiz-manual-btn-${n}"
+                    onclick="wizardManualConnect(${n})">🔌 Manual</button>
+          </span>
+          <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
+                  style="display:none" onclick="wizardCancelConnect(${n})">✕ Cancel</button>
+          <span id="wiz-connect-pending-${n}" style="${isDimmed ? '' : 'display:none'};color:var(--text3);font-size:11px">↓ Up next</span>
+        </div>
+        <span class="wizard-connect-status" id="wiz-connect-status-${n}">${isDimmed ? '' : 'Waiting…'}</span>
+      </div>`;
   }).join('');
+
+  const bannerHtml = wizardConnectBannerText();
+  const banner = bannerHtml
+    ? `<div class="wizard-connect-banner" id="wiz-connect-banner">${bannerHtml}</div>`
+    : `<div id="wiz-connect-banner" style="display:none"></div>`;
+  const changeBtn = `<button class="btn btn-ghost btn-sm" style="margin-bottom:10px;font-size:11px"
+      onclick="wizardSelectConnectMode(null)">← Change connection method</button>`;
+
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
-    <div class="wizard-section-desc">
-      For each board: click <strong>Auto-Detect</strong> (then press the reset button on the board),
-      or <strong>Manual</strong> to pick a COM port. The config will push automatically after connecting.
-    </div>
+    ${changeBtn}
+    ${banner}
     ${rows}`;
+}
+
+function wizardConnectBannerText() {
+  const { connectMode, connectSeqN, boards } = wizardState;
+  if (connectMode !== 'seq') return '';
+  if (connectSeqN > boards.length) return '✅ All boards configured!';
+  const b = boards[connectSeqN - 1];
+  if (connectSeqN === 1) {
+    return `📌 Plug <strong>WCB ${b.wcbNumber}</strong> into USB now, then click <strong>⊙ Auto-Detect</strong> and press the reset button, or click <strong>🔌 Manual</strong> to select the port.`;
+  }
+  return `✓ Done! Unplug the previous board. Now plug in <strong>WCB ${b.wcbNumber}</strong>, then click <strong>⊙ Auto-Detect</strong> or <strong>🔌 Manual</strong> below.`;
+}
+
+function wizardSelectConnectMode(mode) {
+  wizardState.connectMode = mode;
+  wizardState.connectSeqN = 1;
+  document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
+  if (mode) wizardStartConnectWatchers();
+}
+
+function wizardSeqAdvance(completedSlot) {
+  if (wizardState.connectMode !== 'seq') return;
+  const nextSlot = completedSlot + 1;
+  const bannerEl = document.getElementById('wiz-connect-banner');
+
+  if (nextSlot > wizardState.quantity) {
+    // All done — update banner
+    if (bannerEl) { bannerEl.innerHTML = '✅ All boards configured!'; bannerEl.style.display = ''; }
+    return;
+  }
+  wizardState.connectSeqN = nextSlot;
+
+  // Activate next board
+  const pendingEl = document.getElementById(`wiz-connect-pending-${nextSlot}`);
+  if (pendingEl) pendingEl.style.display = 'none';
+  const btnsEl = document.getElementById(`wiz-connect-btns-${nextSlot}`);
+  if (btnsEl) btnsEl.style.display = 'flex';
+  const statusEl = document.getElementById(`wiz-connect-status-${nextSlot}`);
+  if (statusEl) statusEl.textContent = 'Waiting…';
+  const rowEl = document.getElementById(`wiz-connect-row-${nextSlot}`);
+  if (rowEl) rowEl.classList.remove('wiz-connect-dimmed');
+
+  // Update banner
+  if (bannerEl) { bannerEl.innerHTML = wizardConnectBannerText(); bannerEl.style.display = ''; }
+
+  // Scroll next row into view
+  if (rowEl) rowEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ── Interactive helpers used in step HTML ──────────────────────────
@@ -3850,18 +4041,19 @@ function wizardMaestroBoardChange(mi) {
   const newBoardSlot = parseInt(boardSel.value) || 1;
   const curPort      = parseInt(portSel.value)  || 1;
 
-  // Exclude Kyber port only when this maestro is on the Kyber board
-  const kyberPortForBoard = (wizardState.kyberEnabled && newBoardSlot === wizardState.kyberBoard)
-    ? wizardState.kyberPort : null;
+  // Exclude Kyber ports only when this maestro is on the Kyber board
+  const isKyberBoard = wizardState.kyberEnabled && newBoardSlot === wizardState.kyberBoard;
+  const kyberPortForBoard = isKyberBoard ? wizardState.kyberPort : null;
+  const marcPortForBoard  = isKyberBoard ? wizardState.kyberMarcduinoPort : null;
 
   portSel.innerHTML = Array.from({length: 5}, (_, p) => {
     const portNum = p + 1;
-    if (portNum === kyberPortForBoard) return '';
+    if (portNum === kyberPortForBoard || portNum === marcPortForBoard) return '';
     return `<option value="${portNum}" ${portNum === curPort ? 'selected' : ''}>Serial ${portNum}</option>`;
   }).join('');
 
-  // If the currently selected port was the excluded Kyber port, bump to first available
-  if (curPort === kyberPortForBoard) {
+  // If the currently selected port was an excluded port, bump to first available
+  if (curPort === kyberPortForBoard || curPort === marcPortForBoard) {
     const firstAvail = portSel.querySelector('option');
     if (firstAvail) portSel.value = firstAvail.value;
   }
@@ -3911,9 +4103,10 @@ function wizardSaveStep(key) {
       });
       break;
     case 'kyber-config':
-      wizardState.kyberBoard = parseInt(get('wiz-kyber-board')?.value ?? 1);
-      wizardState.kyberPort  = parseInt(get('wiz-kyber-port')?.value  ?? 2);
-      wizardState.kyberBaud  = parseInt(get('wiz-kyber-baud')?.value  ?? 115200);
+      wizardState.kyberBoard         = parseInt(get('wiz-kyber-board')?.value ?? 1);
+      wizardState.kyberPort          = parseInt(get('wiz-kyber-port')?.value  ?? 2);
+      wizardState.kyberBaud          = parseInt(get('wiz-kyber-baud')?.value  ?? 115200);
+      wizardState.kyberMarcduinoPort = parseInt(get('wiz-kyber-marcduino-port')?.value) || null;
       break;
     case 'firmware':
       // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox for eraseNvs
@@ -3967,7 +4160,11 @@ function wizardValidateStep(key) {
       if (wizardState.kyberEnabled) {
         for (const m of wizardState.maestros) {
           if (m.boardSlot === wizardState.kyberBoard && m.port === wizardState.kyberPort) {
-            return `Maestro ID ${m.id} uses Serial ${m.port}, which is already claimed by Kyber on Board ${wizardState.kyberBoard}. Choose a different port.`;
+            return `Maestro ID ${m.id} uses Serial ${m.port}, which is already claimed by Kyber's Maestro port on Board ${wizardState.kyberBoard}. Choose a different port.`;
+          }
+          if (wizardState.kyberMarcduinoPort &&
+              m.boardSlot === wizardState.kyberBoard && m.port === wizardState.kyberMarcduinoPort) {
+            return `Maestro ID ${m.id} uses Serial ${m.port}, which is already claimed by Kyber's Marcduino port on Board ${wizardState.kyberBoard}. Choose a different port.`;
           }
         }
       }
@@ -4033,7 +4230,16 @@ function wizardApplyConfig() {
         cfg.kyber.port = ws.kyberPort;
         cfg.kyber.baud = ws.kyberBaud;
         // Mirror kyber baud into the serial port so ?BAUD is generated correctly
-        cfg.serialPorts[ws.kyberPort - 1].baud = ws.kyberBaud;
+        cfg.serialPorts[ws.kyberPort - 1].baud  = ws.kyberBaud;
+        cfg.serialPorts[ws.kyberPort - 1].label = cfg.serialPorts[ws.kyberPort - 1].label || 'Kyber Maestro';
+        // Marcduino port — always 9600, broadcasts enabled
+        if (ws.kyberMarcduinoPort) {
+          const marcIdx = ws.kyberMarcduinoPort - 1;
+          cfg.serialPorts[marcIdx].baud         = 9600;
+          cfg.serialPorts[marcIdx].label        = cfg.serialPorts[marcIdx].label || 'Kyber Marcduino';
+          cfg.serialPorts[marcIdx].broadcastIn  = true;
+          cfg.serialPorts[marcIdx].broadcastOut = true;
+        }
         // Include ALL maestros (local and remote) as Kyber targets so the firmware
         // knows every Maestro it must forward commands to — both those on this same
         // board (via local serial) and those on remote boards (via ESP-NOW).
@@ -4058,9 +4264,20 @@ function wizardApplyConfig() {
       }
     }
 
-    // Maestro
+    // Maestro — local entries only (for port claiming, UI display, etc.)
     const myMaestros = ws.maestros.filter(m => m.boardSlot === (i + 1));
     cfg.maestros = myMaestros.map(m => ({ id: m.id, port: m.port, baud: m.baud }));
+    // Full routing table — all maestros across all boards, with correct WCB numbers.
+    // Used by buildCommandString to emit the complete ?MAESTRO routing table so that
+    // every board knows where to route commands for remote maestros (via ESP-NOW).
+    if (ws.maestros.length > 0) {
+      cfg.maestroTable = ws.maestros.map(m => ({
+        id:   m.id,
+        wcb:  ws.boards[m.boardSlot - 1].wcbNumber,
+        port: m.port,
+        baud: m.baud,
+      }));
+    }
 
     // ETM
     if (ws.etmEnabled) {
@@ -4166,7 +4383,13 @@ function wizardWatchForConnect(n) {
       restoreGeneralDOMSnapshot(generalSnapshot);
 
       try {
+        wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
         await boardGo(n);
+        if (boardConnections[n]?.isConnected()) {
+          wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
+          await sleep(800);
+          await boardPull(n);
+        }
         wizardSetConnectStatus(n, 'ok', '✓ Done');
       } catch(e) {
         wizardSetConnectStatus(n, 'err', '✕ Push failed');
@@ -4186,6 +4409,27 @@ function wizardSetConnectStatus(n, type, text) {
   if (!el) return;
   el.className = `wizard-connect-status ${type}`;
   el.textContent = text;
+  if (type === 'ok' || type === 'err') {
+    wizardCheckAllDone();
+    if (type === 'ok') wizardSeqAdvance(n);
+  }
+}
+
+function wizardCheckAllDone() {
+  let anyBusy    = false;
+  let anyWaiting = false;
+  let anyOk      = false;
+  for (let n = 1; n <= wizardState.quantity; n++) {
+    const el = document.getElementById(`wiz-connect-status-${n}`);
+    if (!el) continue;
+    if (el.classList.contains('busy'))               { anyBusy = true; break; }
+    if (el.classList.contains('ok'))                   anyOk = true;
+    else if (!el.classList.contains('err'))            anyWaiting = true; // still at initial state
+  }
+  // Only close when every board is resolved (ok or err) — don't close while any are still waiting
+  if (!anyBusy && !anyWaiting && anyOk) {
+    setTimeout(() => closeWizard(), 2500);
+  }
 }
 
 function wizardStartConnectWatchers() {
@@ -4194,10 +4438,22 @@ function wizardStartConnectWatchers() {
     const n = i + 1;
     if (boardConnections[n]?.isConnected()) {
       wizardDisableConnectBtns(n);
-      wizardSetConnectStatus(n, 'busy', 'Pushing…');
-      boardGo(n)
-        .then(() => { wizardEnableConnectBtns(n); wizardSetConnectStatus(n, 'ok', '✓ Done'); })
-        .catch(() => { wizardEnableConnectBtns(n); wizardSetConnectStatus(n, 'err', '✕ Push failed'); });
+      wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
+      (async () => {
+        try {
+          await boardGo(n);
+          if (boardConnections[n]?.isConnected()) {
+            wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
+            await sleep(800);
+            await boardPull(n);
+          }
+          wizardEnableConnectBtns(n);
+          wizardSetConnectStatus(n, 'ok', '✓ Done');
+        } catch(e) {
+          wizardEnableConnectBtns(n);
+          wizardSetConnectStatus(n, 'err', '✕ Push failed');
+        }
+      })();
     }
   }
 }

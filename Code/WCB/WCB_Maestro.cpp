@@ -430,7 +430,6 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, cha
                    "S1:" + String(maestroConfigs[i].baudRate);
         }
 
-        Serial.println(cmd);
         chainedConfig += String(delimiter) + cmd;
         chainedConfigDefault += "^" + cmd;
     }
