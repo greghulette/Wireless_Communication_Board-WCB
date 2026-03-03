@@ -19,6 +19,12 @@ let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled f
 let _connectModalSlot = null;   // which board slot the modal is open for
 const _detecting = {};          // { [n]: true/false } — auto-detect active per slot
 
+// ─── Remote Management State ───────────────────────────────────────
+let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
+const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
+const MGMT_CHUNK_SIZE  = 180;   // max payload chars per ESP-NOW packet
+const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
+
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
 
@@ -517,6 +523,7 @@ function updateBoardStatusBadge(n, state) {
   const states = {
     configured: ['badge-green',  '✅ Configured'],
     connected:  ['badge-accent', '● Connected'],
+    remote:     ['badge-accent', '📡 Remote'],
     error:      ['badge-red',    '✕ Error'],
     default:    ['badge-default','Not Connected'],
   };
@@ -953,7 +960,7 @@ function appendSequenceRow(n, key, value) {
       <button class="btn btn-primary btn-sm" title="Update"
               onclick="updateSequence(${n},'${rowId}')" id="${rowId}-update">UPDATE</button>
       <button class="btn btn-danger btn-sm" title="Remove"
-              onclick="removeSequenceRow('${rowId}')">REMOVE</button>
+              onclick="removeSequenceRow(${n},'${rowId}')">REMOVE</button>
     </td>
   `;
   tbody.appendChild(tr);
@@ -965,32 +972,88 @@ function appendSequenceRow(n, key, value) {
   updateSequencePlayButtons(n);
 }
 
-function removeSequenceRow(rowId) {
-  document.getElementById(rowId)?.remove();
+async function removeSequenceRow(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const key = row.querySelector('.seq-key-input')?.value?.trim();
+
+  // Remove from DOM immediately
+  row.remove();
+
+  // Patch in-memory config and baseline so the key doesn't resurface on next push
+  for (const store of [boardConfigs[n], boardBaselines[n]]) {
+    if (!store?.sequences) continue;
+    const idx = store.sequences.findIndex(s => s.key === key);
+    if (idx >= 0) store.sequences.splice(idx, 1);
+  }
+
+  if (!key) return;   // no key — nothing to tell the board
+
+  // Send ?SEQ,CLEAR,key immediately so the board doesn't wait for a full push
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const cmd = `${funcChar}SEQ,CLEAR,${key}`;
+  const relayN = remoteRelayForBoard[n];
+
+  try {
+    if (relayN) {
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) return;   // relay gone — push will handle it later
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+      await relayConn.send(mgmtCmd + '\r');
+      termLog(relayN, mgmtCmd, 'in');
+      showToast(`Sequence "${key}" removed from WCB ${n} (remote)`, 'info');
+    } else {
+      const conn = boardConnections[n];
+      if (!conn?.isConnected()) return;         // not connected — push will handle it later
+      await conn.send(cmd + '\r');
+      termLog(n, cmd, 'in');
+      showToast(`Sequence "${key}" removed from WCB ${n}`, 'info');
+    }
+  } catch (e) {
+    termLog(relayN ?? n, `SEQ,CLEAR error: ${e.message}`, 'err');
+  }
 }
 
 function updateSequencePlayButtons(n) {
-  const connected = boardConnections[n]?.isConnected() ?? false;
+  const directConnected = boardConnections[n]?.isConnected() ?? false;
+  const remoteConnected = remoteRelayForBoard[n] !== undefined;
+  const anyConnected = directConnected || remoteConnected;
+  // Both TEST and UPDATE work for direct and remote boards.
+  // Remote path sends via MGMT FRAG through the relay.
   document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Test"]`).forEach(btn => {
-    btn.disabled = !connected;
+    btn.disabled = !anyConnected;
   });
   document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Update"]`).forEach(btn => {
-    btn.disabled = !connected;
+    btn.disabled = !anyConnected;
   });
 }
 
-function playSequence(n, rowId) {
+async function playSequence(n, rowId) {
   const row = document.getElementById(rowId);
   if (!row) return;
   const key = row.querySelector('.seq-key-input')?.value?.trim();
   if (!key) { showToast('Sequence key is empty', 'error'); return; }
-  const conn = boardConnections[n];
-  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
   const cmd = `${cmdChar}SEQ${key}`;
-  conn.send(cmd + '\r');
-  termLog(n, cmd, 'in');
-  showToast(`Sent: ${cmd}`, 'info');
+
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    // Remote board — deliver via MGMT FRAG through the relay
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+    await relayConn.send(mgmtCmd + '\r');
+    termLog(relayN, mgmtCmd, 'in');
+    showToast(`Sent: ${cmd} (remote)`, 'info');
+  } else {
+    const conn = boardConnections[n];
+    if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+    conn.send(cmd + '\r');
+    termLog(n, cmd, 'in');
+    showToast(`Sent: ${cmd}`, 'info');
+  }
 }
 
 async function updateSequence(n, rowId) {
@@ -999,8 +1062,6 @@ async function updateSequence(n, rowId) {
   const key = row.querySelector('.seq-key-input')?.value?.trim();
   if (!key) { showToast('Sequence key is empty', 'error'); return; }
   const ta = row.querySelector('.seq-val-textarea');
-  const conn = boardConnections[n];
-  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   const delim    = boardConfigs[n]?.delimiter ?? '^';
   const funcChar = boardConfigs[n]?.funcChar  ?? '?';
@@ -1010,11 +1071,30 @@ async function updateSequence(n, rowId) {
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;
 
+  const relayN = remoteRelayForBoard[n];
+  let logTarget = n;
+
   try {
     const cmd = `${funcChar}SEQ,SAVE,${key},${value}`;
-    await conn.send(cmd + '\r');
-    termLog(n, cmd, 'in');
-    showToast(`Sequence "${key}" updated on WCB ${n}`, 'success');
+
+    if (relayN) {
+      // Remote board — send via MGMT FRAG through the relay
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+      await relayConn.send(mgmtCmd + '\r');
+      logTarget = relayN;
+      termLog(relayN, mgmtCmd, 'in');
+      showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
+    } else {
+      // Direct connection
+      const conn = boardConnections[n];
+      if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+      await conn.send(cmd + '\r');
+      termLog(n, cmd, 'in');
+      showToast(`Sequence "${key}" updated on WCB ${n}`, 'success');
+    }
 
     // Patch the in-memory config and baseline so delta pushes stay accurate
     for (const store of [boardConfigs[n], boardBaselines[n]]) {
@@ -1025,7 +1105,7 @@ async function updateSequence(n, rowId) {
     }
   } catch (e) {
     showToast(`Update failed: ${e.message}`, 'error');
-    termLog(n, `Sequence update error: ${e.message}`, 'err');
+    termLog(logTarget, `Sequence update error: ${e.message}`, 'err');
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1052,6 +1132,7 @@ class BoardConnection {
     this._connected = false;
     this._readBuffer = '';
     this._dataCallbacks = [];
+    this._lineTransform = null;  // optional (line) => displayLine | null — filters terminal output
   }
 
   isConnected() { return this._connected; }
@@ -1171,7 +1252,8 @@ class BoardConnection {
             this._readBuffer = this._readBuffer.slice(nl + 1);
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
-              termLog(this.boardIndex, line, 'out');
+              const displayed = this._lineTransform ? this._lineTransform(line) : line;
+              if (displayed !== null) termLog(this.boardIndex, displayed, 'out');
             }
           }
         }
@@ -1213,6 +1295,31 @@ function openConnectModal(n) {
   // Title reflects whether auto-detect is already running
   document.getElementById('connect-modal-title').textContent =
     _detecting[n] ? `WCB ${n}: Auto-Detecting…` : `Connect WCB ${n}`;
+
+  // Populate remote relay options — boards already connected via USB that can relay
+  const remoteSection = document.getElementById('connect-modal-remote-section');
+  const relays = Object.entries(boardConnections)
+    .filter(([k, c]) => parseInt(k) !== n && c?.isConnected())
+    .map(([k]) => parseInt(k));
+
+  if (relays.length > 0) {
+    remoteSection.innerHTML =
+      `<div class="modal-divider-label">or connect wirelessly</div>` +
+      relays.map(r =>
+        `<button class="modal-option" onclick="modalRemoteConnect(${r})">
+          <span class="modal-option-icon">📡</span>
+          <div class="modal-option-text">
+            <div class="modal-option-title">Remote via WCB ${r}</div>
+            <div class="modal-option-desc">Pull and push config wirelessly using WCB ${r} as relay over ESP-NOW.</div>
+          </div>
+        </button>`
+      ).join('');
+    remoteSection.style.display = 'flex';
+  } else {
+    remoteSection.innerHTML = '';
+    remoteSection.style.display = 'none';
+  }
+
   document.getElementById('connect-modal').classList.add('open');
 }
 
@@ -1242,6 +1349,59 @@ async function modalManualSelect() {
     _detecting[n] = false; // cancel auto-detect if it was running
     await boardManualConnect(n);
   }
+}
+
+function modalRemoteConnect(relayN) {
+  const n = _connectModalSlot;
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+  if (n === null) return;
+  _detecting[n] = false;
+  setRemoteConnected(n, relayN);
+  remoteBoardPull(relayN, n);
+}
+
+function setRemoteConnected(n, relayN) {
+  remoteRelayForBoard[n] = relayN;
+  const label = document.getElementById(`b${n}-conn-label`);
+  if (label) label.textContent = `Remote via WCB ${relayN}`;
+  const connBtn     = document.getElementById(`b${n}-btn-connect`);
+  const pullBtn     = document.getElementById(`b${n}-btn-pull`);
+  const goBtn       = document.getElementById(`b${n}-btn-go`);
+  const eraseBtn    = document.getElementById(`b${n}-btn-erase`);
+  const identifyBtn = document.getElementById(`b${n}-btn-identify`);
+  if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting'); }
+  if (pullBtn)     { pullBtn.disabled = false; pullBtn.textContent = 'Pull Config'; }
+  if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
+  if (eraseBtn)    eraseBtn.disabled = true;    // erase not available via relay
+  if (identifyBtn) identifyBtn.disabled = false; // identify works via MGMT channel
+  // Disable flash/update/factory modes — remote boards can only be configured via relay
+  ['flash', 'update', 'factory'].forEach(mode => {
+    const radio = document.querySelector(`input[name="b${n}-mode"][value="${mode}"]`);
+    if (radio) radio.disabled = true;
+  });
+  const configRadio = document.querySelector(`input[name="b${n}-mode"][value="configure"]`);
+  if (configRadio) configRadio.checked = true;
+  updateBoardStatusBadge(n, 'remote');
+  ensureTerminalPane(relayN);          // remote traffic shows in relay's terminal
+  updateTerminalPaneDot(n, true);
+  updateSequencePlayButtons(n);        // enable UPDATE/TEST buttons for remote boards
+  installEtmListener(relayN);         // track live/offline state via relay's ETM output
+}
+
+function clearRemoteConnected(n) {
+  const relayN = remoteRelayForBoard[n];
+  delete remoteRelayForBoard[n];
+  // Re-enable flash/update/factory mode radios that setRemoteConnected disabled
+  ['flash', 'update', 'factory'].forEach(mode => {
+    const radio = document.querySelector(`input[name="b${n}-mode"][value="${mode}"]`);
+    if (radio) radio.disabled = false;
+  });
+  // Remove the ETM listener from the relay if no other boards still use it
+  if (relayN && !Object.values(remoteRelayForBoard).includes(relayN)) {
+    removeEtmListener(relayN);
+  }
+  updateConnectionUI(n, false);        // resets buttons and badge to disconnected state
 }
 
 // ─── General Settings Conflict Modal ──────────────────────────────
@@ -1312,6 +1472,7 @@ function closeGeneralConflictModal(event) {
 //   Connected                    → disconnect
 function boardConnect(n) {
   if (boardConnections[n]?.isConnected()) { boardDisconnect(n); return; }
+  if (remoteRelayForBoard[n]) { clearRemoteConnected(n); return; }
   if (_detecting[n]) { openConnectModal(n); return; } // options menu while detecting
   openConnectModal(n);        // show modal immediately
   boardAutoDetect(n);         // start detecting in parallel — intentionally not awaited
@@ -1322,6 +1483,7 @@ async function boardDisconnect(n) {
   if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
   try { await boardConnections[n]?.disconnect(); } catch (_) {}
   delete boardConnections[n];
+  delete remoteRelayForBoard[n];
   updateConnectionUI(n, false);
   if (btn) btn.disabled = false;
 }
@@ -1363,8 +1525,8 @@ async function boardAutoDetect(n) {
     if (btn) {
       if (yes) {
         btn.textContent = '⊙ Detecting… (cancel)';
-      } else if (!boardConnections[n]?.isConnected()) {
-        btn.textContent = 'Connect'; // only reset if we didn't end up connected
+      } else if (!boardConnections[n]?.isConnected() && remoteRelayForBoard[n] === undefined) {
+        btn.textContent = 'Connect'; // only reset if we didn't end up connected (direct or remote)
       }
       btn.classList.toggle('btn-detecting', yes);
       btn.disabled = false; // always keep clickable so user can cancel
@@ -1513,6 +1675,9 @@ async function boardAutoDetect(n) {
 }
 
 async function boardPull(n) {
+  // Delegate to remote pull if this board is reached via relay
+  if (remoteRelayForBoard[n]) { boardPullRemote(n); return; }
+
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
@@ -1596,7 +1761,11 @@ async function boardPull(n) {
   if (!migrated && btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
 }
 
-async function boardGo(n) {
+async function boardGo(n, opts = {}) {
+  // Delegate to the remote push path when this board is reached via relay
+  if (remoteRelayForBoard[n]) return boardGoRemote(n, opts);
+  const skipReboot = opts.skipReboot ?? false;
+
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
@@ -1615,7 +1784,7 @@ async function boardGo(n) {
     if (!hwVersion) {
       showToast('Select a hardware version before flashing', 'error');
       btn.disabled = false;
-      btn.textContent = '▶ Go';
+      btn.textContent = 'Push Config';
       return;
     }
 
@@ -1692,7 +1861,7 @@ async function boardGo(n) {
     }
 
     btn.disabled = false;
-    btn.textContent = '▶ Go';
+    btn.textContent = 'Push Config';
     return;
   }
 
@@ -1746,10 +1915,11 @@ async function boardGo(n) {
       termLog(n, `Erase error: ${e.message}`, 'err');
     }
     btn.disabled = false;
-    btn.textContent = '▶ Go';
+    btn.textContent = 'Push Config';
     return;
   }
 
+  let _needsReboot = false;
   try {
     // Collect current UI state into config
     syncSerialUIToConfig(n);
@@ -1772,50 +1942,65 @@ async function boardGo(n) {
     if (!cmdString) {
       showToast('No changes to push', 'info');
       btn.disabled = false;
-      btn.textContent = '▶ Go';
+      btn.textContent = 'Push Config';
       return;
     }
 
-    // Send each command individually with small gap
-    const commands = cmdString.split(config.delimiter).filter(c => c.trim());
+    // Split on delimiter+funcChar boundary (e.g. "^?") rather than every "^",
+    // so that sequence values containing "^" (chained device commands) are not torn
+    // apart.  Each split piece after the first needs the funcChar re-prepended.
+    const funcChar = config.funcChar || '?';
+    const delim    = config.delimiter || '^';
+    const rawParts = cmdString.split(delim + funcChar);
+    const commands = rawParts.map((p, i) => (i === 0 ? p : funcChar + p).trim()).filter(Boolean);
     for (const cmd of commands) {
-      const t = cmd.trim();
-      if (!t) continue;
-      await conn.send(t + '\r');
-      termLog(n, t, 'in');
+      await conn.send(cmd + '\r');
+      termLog(n, cmd, 'in');
       await sleep(80);
     }
 
-    if (commandStringNeedsReboot(cmdString)) {
-      // ── Reboot path ───────────────────────────────────────────
-      await sleep(300);
-      await conn.send('?reboot\r');
-      termLog(n, '?reboot', 'in');
+    _needsReboot = commandStringNeedsReboot(cmdString);
+    if (_needsReboot) {
+      if (!skipReboot) {
+        // ── Reboot path ─────────────────────────────────────────────────
+        await sleep(300);
+        await conn.send('?reboot\r');
+        termLog(n, '?reboot', 'in');
 
-      updateBoardStatusBadge(n, 'configured');
-      showToast(`WCB ${n} configured — rebooting…`, 'success');
+        updateBoardStatusBadge(n, 'configured');
+        showToast(`WCB ${n} configured — rebooting…`, 'success');
 
-      // Close our side immediately — this cancels any pending reader.read() so
-      // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
-      // Then we manage the reconnect ourselves in the background.
-      await conn.closeForReconnect();
-      updateConnectionUI(n, false);
-      termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+        // Close our side immediately — this cancels any pending reader.read() so
+        // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
+        // Then we manage the reconnect ourselves in the background.
+        await conn.closeForReconnect();
+        updateConnectionUI(n, false);
+        termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
 
-      // Fire-and-forget reconnect so the Go button re-enables right away
-      (async () => {
-        const reconnected = await conn.reconnect(10, 1500);
-        if (reconnected) {
-          updateConnectionUI(n, true);
-          termLog(n, 'Reconnected after reboot', 'sys');
-          showToast(`WCB ${n} reconnected`, 'success');
-          termLog(n, 'Auto-pulling config…', 'sys');
-          setTimeout(() => boardPull(n), 3000);
-        } else {
-          termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
-          showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
-        }
-      })();
+        // Fire-and-forget reconnect so the Go button re-enables right away
+        (async () => {
+          const reconnected = await conn.reconnect(10, 1500);
+          if (reconnected) {
+            updateConnectionUI(n, true);
+            termLog(n, 'Reconnected after reboot', 'sys');
+            showToast(`WCB ${n} reconnected`, 'success');
+            termLog(n, 'Auto-pulling config…', 'sys');
+            setTimeout(() => boardPull(n), 3000);
+          } else {
+            termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+            showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+          }
+        })();
+
+      } else {
+        // ── Deferred-reboot path — boardGoAll sends the reboot explicitly ──
+        // Config is applied; connection stays open so the relay can forward
+        // MGMT reboot commands to remote boards before it goes down itself.
+        boardBaselines[n] = JSON.parse(JSON.stringify(config));
+        updateBoardStatusBadge(n, 'configured');
+        termLog(n, 'Config applied — reboot queued by Push All…', 'sys');
+        showToast(`WCB ${n} configured`, 'info');
+      }
 
     } else {
       // ── No-reboot path ────────────────────────────────────────
@@ -1834,10 +2019,15 @@ async function boardGo(n) {
   }
 
   btn.disabled = false;
-  btn.textContent = '▶ Go';
+  btn.textContent = 'Push Config';
+  return _needsReboot;
 }
 
 function updateConnectionUI(n, connected) {
+  // Don't clobber a remote connection's UI with a spurious direct-disconnect event.
+  // clearRemoteConnected() always deletes remoteRelayForBoard[n] first, so this
+  // guard only fires for unintended callers (e.g. boardAutoDetect timing out).
+  if (!connected && remoteRelayForBoard[n] !== undefined) return;
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
@@ -1860,6 +2050,220 @@ function updateConnectionUI(n, connected) {
   // Create pane on first connect; update dot/input state on any connect/disconnect
   if (connected) ensureTerminalPane(n);
   updateTerminalPaneDot(n, connected);
+}
+
+// ─── Remote Management ────────────────────────────────────────────
+
+// Install a persistent ETM listener on a relay board's serial stream.
+// Parses "[ETM] WCBn came ONLINE" / "[ETM] WCBn went OFFLINE" and drives
+// the connected dot for whichever remote boards are behind that relay.
+function installEtmListener(relayN) {
+  if (_etmCallbacks[relayN]) return;            // already registered
+  const relayConn = boardConnections[relayN];
+  if (!relayConn) return;
+
+  const cb = (line) => {
+    const onlineMatch  = line.match(/\[ETM\] WCB(\d+) came ONLINE/);
+    const offlineMatch = line.match(/\[ETM\] WCB(\d+) went OFFLINE/);
+    if (onlineMatch) {
+      const bn = parseInt(onlineMatch[1]);
+      if (remoteRelayForBoard[bn] === relayN) {
+        document.getElementById(`b${bn}-dot`)?.classList.add('connected');
+      }
+    } else if (offlineMatch) {
+      const bn = parseInt(offlineMatch[1]);
+      if (remoteRelayForBoard[bn] === relayN) {
+        document.getElementById(`b${bn}-dot`)?.classList.remove('connected');
+        showToast(`⚠️ WCB ${bn}: ETM timeout — board may be offline`, 'warning', 6000);
+      }
+    }
+  };
+
+  relayConn.onData(cb);
+  _etmCallbacks[relayN] = cb;
+}
+
+function removeEtmListener(relayN) {
+  const cb = _etmCallbacks[relayN];
+  if (!cb) return;
+  const relayConn = boardConnections[relayN];
+  if (relayConn) {
+    relayConn._dataCallbacks = relayConn._dataCallbacks.filter(c => c !== cb);
+  }
+  delete _etmCallbacks[relayN];
+}
+
+function fragmentString(str, chunkSize) {
+  const chunks = [];
+  for (let i = 0; i < str.length; i += chunkSize) {
+    chunks.push(str.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+async function boardGoRemote(n, opts = {}) {
+  const skipReboot  = opts.skipReboot  ?? false;
+  const skipConfirm = opts.skipConfirm ?? false;
+  const btn = document.getElementById(`b${n}-btn-go`);
+
+  const relayN = remoteRelayForBoard[n];
+  if (!relayN) { showToast('No relay board set for this board', 'error'); return; }
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) { showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
+
+  // Sync all UI state into the config object
+  syncSerialUIToConfig(n);
+  syncMaestrosToConfig(n);
+  syncKyberToConfig(n);
+  syncKyberTargetsToConfig(n);
+  const config = boardConfigs[n];
+  if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
+
+  config.sequences      = getSequencesFromUI(n);
+  config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
+  config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
+  config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
+  config.delimiter      = document.getElementById('g-delimiter').value || '^';
+  config.funcChar       = document.getElementById('g-funcchar').value  || '?';
+  config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
+  config.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
+
+  // Diff-based push: only send commands that differ from the pulled baseline
+  const fullPush  = !boardBaselines[n];
+  const cmdString = WCBParser.buildCommandString(config, boardBaselines[n] ?? null, fullPush);
+  if (!cmdString) { showToast('Nothing to push — no changes detected', 'info'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
+
+  // ── Network-group change guard ─────────────────────────────────────
+  // MAC octets and password define the ESP-NOW network group.  After our
+  // firmware fix, a board with mismatched octets can no longer communicate
+  // with the relay at all — so pushing these changes to a single remote board
+  // will silently brick that board's wireless connection until all other boards
+  // are updated too.  Require an explicit click-through before proceeding.
+  if (!skipConfirm && commandStringChangesNetworkGroup(cmdString)) {
+    const confirmed = await confirmNetworkGroupChange(n, cmdString);
+    if (!confirmed) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+      return;
+    }
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+
+  const changeCount = cmdString.split('^').filter(Boolean).length;
+  const changeLabel = fullPush ? 'full push' : `${changeCount} change${changeCount !== 1 ? 's' : ''}`;
+
+  const needsReboot = commandStringNeedsReboot(cmdString);
+
+  // Embed ?reboot atomically at the end of the MGMT session payload when needed.
+  // A MAC change (e.g. ?MAC,3,07) updates umac_oct2/3 in memory immediately on
+  // the target board; any subsequent ESP-NOW packet arriving with the relay's old
+  // src_addr is silently dropped by the firmware's MAC filter — making a separate
+  // MGMT reboot session unreachable.  Appending the reboot to the same session
+  // ensures the sequence is: config change → reboot, all inside one session
+  // execution, with no ESP-NOW exchange in between.
+  let cmdToSend = cmdString;
+  if (needsReboot && !skipReboot) {
+    const funcChar = config.funcChar || '?';
+    const delim    = config.delimiter || '^';
+    cmdToSend = cmdString + delim + funcChar + 'reboot';
+    showToast(`⚠️ WCB ${n}: board will reboot after push — remote connection may be lost`, 'warning', 6000);
+  }
+
+  // Generate a random 4-char hex session ID
+  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const chunks = fragmentString(cmdToSend, MGMT_CHUNK_SIZE);
+  const total  = chunks.length;
+
+  termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s), session ${sessionId}`, 'sys');
+
+  let pushSucceeded = false;
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const cmd = `?MGMT,FRAG,${n},${sessionId},${i},${total},${chunks[i]}\r`;
+      termLog(relayN, cmd.trim(), 'in');
+      await relayConn.send(cmd);
+      if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
+    }
+    showToast(`WCB ${n}: ${changeLabel} sent via WCB ${relayN}`, 'success');
+    termLog(relayN, `[Remote] All chunks sent for WCB ${n}`, 'sys');
+    // Update baseline so the next push is diff-based against this state
+    boardBaselines[n] = JSON.parse(JSON.stringify(config));
+    pushSucceeded = true;
+  } catch (e) {
+    showToast(`Remote push failed: ${e.message}`, 'error');
+    termLog(relayN, `[Remote] Error: ${e.message}`, 'err');
+  }
+
+  return pushSucceeded && needsReboot;
+}
+
+// Pull config from a remote board via the relay's CONFIG_REQ/CONFIG_FRAG protocol.
+// Sends ?MGMT,PULL,<targetN> to the relay; waits up to 15 s for [MGMT:CONFIG,<targetN>].
+async function remoteBoardPull(relayN, targetN) {
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
+
+  termLog(relayN, `[Remote] Requesting config from WCB${targetN}…`, 'sys');
+  showToast(`Pulling config from WCB${targetN} via WCB${relayN}…`, 'info');
+
+  const prefix = `[MGMT:CONFIG,${targetN}]`;
+  let done = false;
+  let timer;
+
+  // Replace the raw config blob in the terminal with a char-count summary
+  relayConn._lineTransform = (line) => {
+    if (line.startsWith(prefix)) {
+      return `${prefix} <${line.length - prefix.length} chars received>`;
+    }
+    return line;
+  };
+
+  const cleanup = () => {
+    relayConn._lineTransform = null;
+    relayConn._dataCallbacks = relayConn._dataCallbacks.filter(cb => cb !== onLine);
+  };
+
+  const onLine = (line) => {
+    if (done || !line.startsWith(prefix)) return;
+    done = true;
+    clearTimeout(timer);
+    cleanup();
+
+    const configStr = line.slice(prefix.length).trim();
+    if (!configStr) {
+      showToast(`WCB${targetN}: empty config response`, 'error');
+      termLog(relayN, `[Remote] WCB${targetN} returned empty config`, 'err');
+      return;
+    }
+
+    const config = WCBParser.parseBackupString(configStr);
+    boardConfigs[targetN]   = config;
+    boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
+    populateUIFromConfig(targetN, config);
+    // Preserve remote badge and connection label (setRemoteConnected may have run before us)
+    updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
+    showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
+    termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
+  };
+
+  relayConn._dataCallbacks.push(onLine);
+  timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    cleanup();
+    showToast(`WCB${targetN}: config pull timed out`, 'error');
+    termLog(relayN, `[Remote] Config pull from WCB${targetN} timed out`, 'err');
+  }, 15000);
+
+  await relayConn.send(`?MGMT,PULL,${targetN}\r`);
+}
+
+// Convenience wrapper — uses the relay tracked for this board
+function boardPullRemote(n) {
+  const relayN = remoteRelayForBoard[n];
+  if (!relayN) { showToast('No relay board set for this board', 'error'); return; }
+  if (relayN === n) { showToast(`WCB${n} is the relay — connect directly`, 'error'); return; }
+  remoteBoardPull(relayN, n);
 }
 
 function syncGeneralFromConfig(config) {
@@ -1943,19 +2347,136 @@ function commandStringNeedsReboot(cmdString) {
   return false;
 }
 
+// Returns true if the command string changes any field that defines the ESP-NOW
+// network group — MAC octets or the shared password.  Pushing these to a remote
+// board breaks the relay↔remote link the moment the board reboots, because the
+// relay still has the old values and the MAC-group check in the firmware will
+// reject all packets from the now-mismatched board.
+function commandStringChangesNetworkGroup(cmdString) {
+  const u = cmdString.toUpperCase();
+  if (u.includes('MAC,2,') || u.includes('MAC,3,')) return true;
+  if (u.includes('EPASS,')) return true;
+  return false;
+}
+
+// Shows a blocking confirmation modal and returns a Promise that resolves true
+// (user confirmed) or false (user cancelled).  Called by boardGoRemote() when
+// commandStringChangesNetworkGroup() is true.
+function confirmNetworkGroupChange(n, cmdString) {
+  return new Promise((resolve) => {
+    const u = cmdString.toUpperCase();
+    const changes = [];
+    if (u.includes('MAC,2,') || u.includes('MAC,3,')) changes.push('MAC octets — ESP-NOW network group address');
+    if (u.includes('EPASS,')) changes.push('ESP-NOW password');
+
+    const list = changes.map(c => `<li style="margin-bottom:4px">${c}</li>`).join('');
+    document.getElementById('network-group-change-body').innerHTML = `
+      <p>This push to <strong>WCB ${n}</strong> (remote) changes:</p>
+      <ul style="margin:8px 0 12px 20px">${list}</ul>
+      <p>After the board reboots, the relay will no longer share the same network
+      group settings — <strong>the remote connection will be lost</strong> until
+      every board is updated and rebooted with matching values.</p>
+      <p style="margin-top:10px;color:var(--warn)">
+        ⚠ Use <strong>Push All</strong> to update every board at the same time
+        and avoid losing connectivity mid-push.
+      </p>
+    `;
+
+    const modal      = document.getElementById('network-group-change-modal');
+    const confirmBtn = document.getElementById('network-group-change-confirm');
+    const cancelBtn  = document.getElementById('network-group-change-cancel');
+
+    const cleanup = () => {
+      modal.classList.remove('open');
+      confirmBtn.onclick = null;
+      cancelBtn.onclick  = null;
+    };
+
+    confirmBtn.onclick = () => { cleanup(); resolve(true);  };
+    cancelBtn.onclick  = () => { cleanup(); resolve(false); };
+
+    modal.classList.add('open');
+  });
+}
+
 // ─── Push All ─────────────────────────────────────────────────────
 async function boardGoAll() {
-  const slots = Object.keys(boardConnections)
+  const directSlots = Object.keys(boardConnections)
     .filter(n => boardConnections[n]?.isConnected())
     .map(Number);
+  // Remote boards that aren't also directly connected
+  const remoteSlots = Object.keys(remoteRelayForBoard)
+    .map(Number)
+    .filter(n => !boardConnections[n]?.isConnected());
 
-  if (slots.length === 0) {
+  const total = directSlots.length + remoteSlots.length;
+  if (total === 0) {
     showToast('No boards connected', 'error');
     return;
   }
 
-  showToast(`Pushing to ${slots.length} board${slots.length > 1 ? 's' : ''}…`, 'info', 4000);
-  for (const n of slots) await boardGo(n);
+  // Push All uses a four-stage approach so that every board that needs a
+  // reboot (MAC, HW, WCB#, KYBER, PWM map) actually gets one, in the right order:
+  //
+  //  1. Push configs to remote boards — reboot is embedded atomically in the same
+  //     MGMT session payload (see boardGoRemote).  This avoids the MAC-filter race:
+  //     after a ?MAC change the target immediately starts rejecting ESP-NOW packets
+  //     with the relay's old src_addr, so a separate MGMT reboot would never arrive.
+  //  2. Push configs to non-relay direct boards — their reboots don't affect anyone else.
+  //  3. Push configs to relay boards — skipReboot so the relay stays alive for step 4.
+  //  4. Reboot relay boards last — relay goes down after all remotes are done.
+  //
+  // This guarantees the relay never reboots before its remote boards have received
+  // and executed both their config and their reboot command.
+  const relayBoardSet   = new Set(Object.values(remoteRelayForBoard).map(Number));
+  const directRelays    = directSlots.filter(n =>  relayBoardSet.has(n));
+  const directNonRelays = directSlots.filter(n => !relayBoardSet.has(n));
+
+  showToast(`Pushing to ${total} board${total > 1 ? 's' : ''}…`, 'info', 4000);
+
+  const relayRebootList = [];   // relay board numbers that need a reboot
+
+  // ── Stage 1: remote configs + embedded reboot (atomic, no race) ──────────
+  // skipConfirm: true — boardGoAll skips per-board network-group modals since
+  // we're updating every board at the same time (the whole point of Push All).
+  for (const n of remoteSlots) {
+    await boardGoRemote(n, { skipConfirm: true });
+  }
+
+  // ── Stage 2: non-relay direct boards (handle their own reboots normally) ──
+  for (const n of directNonRelays) await boardGo(n);
+
+  // ── Stage 3: relay configs (no reboot yet — relay must stay alive) ────────
+  for (const n of directRelays) {
+    const needsReboot = await boardGo(n, { skipReboot: true });
+    if (needsReboot) relayRebootList.push(n);
+  }
+
+  // ── Stage 4: reboot relay boards last ────────────────────────────────────
+  for (const n of relayRebootList) {
+    const conn = boardConnections[n];
+    if (!conn?.isConnected()) continue;
+    await sleep(300);
+    await conn.send('?reboot\r');
+    termLog(n, '?reboot', 'in');
+    showToast(`WCB ${n} rebooting…`, 'success');
+    updateBoardStatusBadge(n, 'configured');
+    await conn.closeForReconnect();
+    updateConnectionUI(n, false);
+    termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+    (async () => {
+      const reconnected = await conn.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected after reboot', 'sys');
+        showToast(`WCB ${n} reconnected`, 'success');
+        setTimeout(() => boardPull(n), 3000);
+      } else {
+        termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+      }
+    })();
+  }
 }
 
 // ─── File Import ──────────────────────────────────────────────────
@@ -2109,11 +2630,12 @@ const DEBUG_MODES = [
   { key: 'kyber', label: 'KYBER',    cmd: 'DEBUG,KYBER' },
   { key: 'pwm',   label: 'PWM',      cmd: 'DEBUG,PWM'   },
   { key: 'etm',   label: 'ETM',      cmd: 'DEBUG,ETM'   },
+  { key: 'mgmt',  label: 'MGMT',     cmd: 'DEBUG,MGMT'  },
 ];
 
 function ensureDebugState(n) {
   if (!boardDebugStates[n])
-    boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false };
+    boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false, mgmt: false };
   return boardDebugStates[n];
 }
 
@@ -2472,6 +2994,24 @@ function updateFlashBar(n, written, total) {
 
 // ─── Identify ─────────────────────────────────────────────────────
 async function boardIdentify(n) {
+  // Remote board — send ?IDENTIFY via the relay's MGMT channel
+  if (remoteRelayForBoard[n]) {
+    const relayN    = remoteRelayForBoard[n];
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) { showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
+    try {
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const cmd = `?MGMT,FRAG,${n},${sessionId},0,1,?IDENTIFY`;
+      termLog(relayN, cmd, 'in');
+      await relayConn.send(cmd + '\r');
+      showToast(`WCB ${n} identifying — watch the LED`, 'info', 5500);
+    } catch (e) {
+      showToast(`Identify failed: ${e.message}`, 'error');
+    }
+    return;
+  }
+
+  // Direct board — send straight over the serial connection
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
   try {

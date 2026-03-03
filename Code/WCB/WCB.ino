@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_021441RMAR2026                                    *****////
+///*****                                          Version 6.0_031250RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_021441RMAR2026";
+String SoftwareVersion = "6.0_031250RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -169,6 +169,17 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_COMMAND   0
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
+// Remote Management Packet Types
+#define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target
+#define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
+#define PACKET_TYPE_CONFIG_REQ  5   // relay → target: request current config
+#define PACKET_TYPE_CONFIG_FRAG 6   // target → relay: config response fragment
+
+#define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
+#define CONFIG_SESSION_TIMEOUT_MS 10000
+
+
+bool debugMGMT = false;         // remote management protocol — off by default
 
 // ETM Settings (NVS stored)
 bool debugETM = false;
@@ -454,6 +465,64 @@ typedef struct __attribute__((packed)) {
   char structCommand[200];
 } espnow_struct_message;
 
+// Remote Management push struct (226 bytes — distinct size from normal 249 and ETM 252)
+typedef struct __attribute__((packed)) {
+  char     structPassword[40];
+  uint8_t  packetType;    // PACKET_TYPE_MGMT_FRAG or PACKET_TYPE_MGMT_ACK
+  uint8_t  targetWCB;     // board this packet is addressed to
+  uint16_t sessionId;     // random ID that ties all chunks of one push together
+  uint8_t  chunkIdx;      // 0-based chunk index
+  uint8_t  totalChunks;   // total chunks in this session
+  char     payload[180];  // config command string fragment
+} espnow_struct_mgmt;
+
+// Config pull request: relay → target (43 bytes)
+typedef struct __attribute__((packed)) {
+  char    structPassword[40];
+  uint8_t packetType;      // PACKET_TYPE_CONFIG_REQ
+  uint8_t targetWCB;       // which WCB to pull config from
+  uint8_t requesterWCB;    // which WCB is asking (relay)
+} espnow_struct_config_req;
+
+// Config pull response fragment: target → relay (230 bytes)
+typedef struct __attribute__((packed)) {
+  char     structPassword[40];
+  uint8_t  packetType;      // PACKET_TYPE_CONFIG_FRAG
+  uint8_t  sourceWCB;       // which WCB is sending (target)
+  uint8_t  requesterWCB;    // which WCB to deliver to (relay)
+  uint16_t sessionId;
+  uint8_t  chunkIdx;
+  uint8_t  totalChunks;
+  char     payload[CONFIG_PAYLOAD_SIZE];
+} espnow_struct_config_frag;
+
+// Remote Management reassembly state (one session at a time)
+#define MGMT_MAX_CHUNKS         16
+#define MGMT_PAYLOAD_SIZE       180
+#define MGMT_SESSION_TIMEOUT_MS 15000
+
+struct MgmtSession {
+  bool     active;
+  uint16_t sessionId;
+  uint8_t  totalChunks;
+  uint16_t receivedMask;    // bitmask — bit N set when chunk N received
+  char     chunks[MGMT_MAX_CHUNKS][MGMT_PAYLOAD_SIZE + 1];
+  unsigned long lastActivityMs;
+};
+MgmtSession mgmtSession = {};
+
+// Config pull reassembly state on relay (incoming from target)
+struct ConfigPullSession {
+  bool     active;
+  uint8_t  sourceWCB;
+  uint16_t sessionId;
+  uint8_t  totalChunks;
+  uint16_t receivedMask;
+  char     chunks[MGMT_MAX_CHUNKS][CONFIG_PAYLOAD_SIZE + 1];
+  unsigned long lastActivityMs;
+};
+ConfigPullSession pullSession = {};
+
 // ESP-NOW messages
 espnow_struct_message commandsToSend[10]; // Includes 1-9 and broadcast
 espnow_struct_message commandsToReceive[10];
@@ -479,6 +548,8 @@ static QueueHandle_t commandQueue = nullptr;
 void writeSerialString(Stream &serialPort, String stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 void enqueueCommand(const String &cmd, int sourceID);
+void checkConfigPullTimeout();
+String buildConfigString();
 void processPWMPassthrough();
 void addPWMOutputPort(int port);
 void removePWMOutputPort(int port);
@@ -1146,23 +1217,25 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       continue;
     }
     
-    // Special handling for ?SEQ,SAVE: the value uses the delimiter internally to
-    // chain device commands, so we must NOT split on bare delimiters within it.
-    // Find the next real WCB-command boundary instead (delimiter + function/cmd char).
+    // Special handling for ?SEQ,SAVE: the sequence VALUE uses the delimiter
+    // internally to chain device commands (both broadcast "^word" and unicast
+    // "^;portcmd" forms), so we must NOT split on bare "^" or "^;" within it.
+    // The only real config-chain boundary after a ?SEQ,SAVE command is
+    // delimiter+funcChar (e.g. "^?"), which begins the NEXT config-level command.
+    // "^;" belongs to the sequence value itself — do NOT treat it as a boundary.
     {
       String restUpper = restOfString;
       restUpper.toUpperCase();
       if (restUpper.startsWith(String(LocalFunctionIdentifier) + "SEQ,SAVE,")) {
-        // Next genuine WCB command starts with ^? or ^; — use that as the boundary.
+        // Only split at delimiter+funcChar (e.g. "^?") — the start of the next
+        // config command.  "^;" inside the value is a unicast command prefix and
+        // must be preserved as part of the stored sequence.
         String nextFuncBoundary = String(commandDelimiter) + String(LocalFunctionIdentifier);
-        String nextCmdBoundary  = String(commandDelimiter) + String(CommandCharacter);
 
         int nextFuncPos = data.indexOf(nextFuncBoundary, startIdx + 1);
-        int nextCmdPos  = data.indexOf(nextCmdBoundary,  startIdx + 1);
 
         int endPos = (int)data.length();
         if (nextFuncPos != -1 && nextFuncPos < endPos) endPos = nextFuncPos;
-        if (nextCmdPos  != -1 && nextCmdPos  < endPos) endPos = nextCmdPos;
 
         String seqSaveCmd = data.substring(startIdx, endPos);
         seqSaveCmd.trim();
@@ -1177,7 +1250,22 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       }
     }
 
-    // Normal command processing (not ?CS or ?SEQ,SAVE)
+    // Special handling for ?MGMT,...: always the final command in the line and
+    // must NOT be split on ^ (FRAG payloads contain ^ as config delimiters).
+    {
+      String restUpper = restOfString;
+      restUpper.toUpperCase();
+      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "MGMT,")) {
+        String mgmtCmd = data.substring(startIdx);
+        mgmtCmd.trim();
+        if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
+          enqueueCommand(mgmtCmd, sourceID);
+        }
+        break;  // ?MGMT,... is always the final command in a serial line
+      }
+    }
+
+    // Normal command processing (not ?CS, ?SEQ,SAVE, or ?MGMT,...)
     int delimPos = data.indexOf(commandDelimiter, startIdx);
     if (delimPos == -1) {
       String singleCmd = data.substring(startIdx);
@@ -1610,9 +1698,407 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
     }
 }
 
+// ─── Remote Management ────────────────────────────────────────────
+
+// Called on relay board: parse ?MGMT,FRAG,... and forward via ESP-NOW
+void handleMgmtForward(const String &args) {
+  // args = "FRAG,<targetWCB>,<sessionId hex>,<chunkIdx>,<totalChunks>,<payload...>"
+  int c1 = args.indexOf(',');
+  if (c1 < 0) { if (debugMGMT) Serial.println("[MGMT] Invalid format"); return; }
+  String type = args.substring(0, c1); type.toUpperCase();
+  if (type == "PULL") {
+    handleMgmtPullRequest(args.substring(c1 + 1));
+    return;
+  }
+  if (type != "FRAG") { if (debugMGMT) Serial.println("[MGMT] Unknown MGMT subcommand"); return; }
+
+  int c2 = args.indexOf(',', c1 + 1);
+  int c3 = args.indexOf(',', c2 + 1);
+  int c4 = args.indexOf(',', c3 + 1);
+  int c5 = args.indexOf(',', c4 + 1);
+  if (c2 < 0 || c3 < 0 || c4 < 0 || c5 < 0) {
+    if (debugMGMT) Serial.println("[MGMT] Malformed FRAG — expected FRAG,target,sessionId,chunkIdx,total,payload");
+    return;
+  }
+
+  uint8_t  targetWCB   = (uint8_t)args.substring(c1 + 1, c2).toInt();
+  uint16_t sessionId   = (uint16_t)strtoul(args.substring(c2 + 1, c3).c_str(), NULL, 16);
+  uint8_t  chunkIdx    = (uint8_t)args.substring(c3 + 1, c4).toInt();
+  uint8_t  totalChunks = (uint8_t)args.substring(c4 + 1, c5).toInt();
+  String   payload     = args.substring(c5 + 1);
+
+  if (targetWCB < 1 || targetWCB > 8 || totalChunks == 0 || totalChunks > MGMT_MAX_CHUNKS) {
+    if (debugMGMT) Serial.println("[MGMT] Invalid parameters");
+    return;
+  }
+
+  espnow_struct_mgmt pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_MGMT_FRAG;
+  pkt.targetWCB    = targetWCB;
+  pkt.sessionId    = sessionId;
+  pkt.chunkIdx     = chunkIdx;
+  pkt.totalChunks  = totalChunks;
+  strncpy(pkt.payload, payload.c_str(), sizeof(pkt.payload) - 1);
+  pkt.payload[sizeof(pkt.payload) - 1] = '\0';
+
+  esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  if (debugMGMT) {
+    if (result == ESP_OK)
+      Serial.printf("[MGMT] Forwarded chunk %d/%d for WCB%d session %04X\n",
+                    chunkIdx + 1, totalChunks, targetWCB, sessionId);
+    else
+      Serial.printf("[MGMT] Forward failed, error: %d\n", result);
+  }
+}
+
+// Called on target board: receive and reassemble config chunks, execute when complete
+void handleMgmtPacket(const uint8_t *data) {
+  espnow_struct_mgmt pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+
+  // Start a new session if needed
+  if (!mgmtSession.active || mgmtSession.sessionId != pkt.sessionId) {
+    memset(&mgmtSession, 0, sizeof(mgmtSession));
+    mgmtSession.sessionId      = pkt.sessionId;
+    mgmtSession.totalChunks    = pkt.totalChunks;
+    mgmtSession.lastActivityMs = millis();   // stamp BEFORE active=true so checkMgmtTimeout() never sees active+zero timestamp
+    mgmtSession.active         = true;       // "go live" flag — set last
+    if (debugMGMT) Serial.printf("[MGMT] New session %04X — expecting %d chunk(s)\n",
+                                 pkt.sessionId, pkt.totalChunks);
+  }
+
+  // Store chunk if not already received
+  if (!(mgmtSession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(mgmtSession.chunks[pkt.chunkIdx], pkt.payload, MGMT_PAYLOAD_SIZE);
+    mgmtSession.chunks[pkt.chunkIdx][MGMT_PAYLOAD_SIZE] = '\0';
+    mgmtSession.receivedMask |= (1 << pkt.chunkIdx);
+    if (debugMGMT) Serial.printf("[MGMT] Chunk %d/%d received (session %04X)\n",
+                                 pkt.chunkIdx + 1, pkt.totalChunks, pkt.sessionId);
+  }
+  mgmtSession.lastActivityMs = millis();
+
+  // Check if all chunks are in
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (mgmtSession.receivedMask == expectedMask) {
+    // Reassemble
+    String fullCmd = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullCmd += String(mgmtSession.chunks[i]);
+    if (debugMGMT) Serial.printf("[MGMT] Session %04X complete — executing %d chars\n",
+                                 pkt.sessionId, fullCmd.length());
+    memset(&mgmtSession, 0, sizeof(mgmtSession));   // clear before executing (reboot-safe)
+    // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
+    // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
+    // commands.  enqueueCommand would hand the whole string to processLocalCommand,
+    // which only parses the first command and silently drops everything after it.
+    parseCommandsAndEnqueue(fullCmd, 0);
+  }
+}
+
+// Call from loop() to discard incomplete sessions that stall
+void checkMgmtTimeout() {
+  if (mgmtSession.active &&
+      (millis() - mgmtSession.lastActivityMs > MGMT_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Session %04X timed out — discarding\n", mgmtSession.sessionId);
+    memset(&mgmtSession, 0, sizeof(mgmtSession));
+  }
+}
+
+// ─── Config Pull ──────────────────────────────────────────────────────────────
+
+// Build a complete config string in the standard '?'^' format, suitable for
+// transmission to the webpage via the config pull mechanism.
+String buildConfigString() {
+  String out = "";
+  String cmd;
+  char   hexBuffer[3];
+
+  auto append = [&](const String &c) {
+    out += (out.isEmpty() ? "?" : "^?") + c;
+  };
+
+  // Hardware version
+  String hwSuffix;
+  if      (wcb_hw_version == 1)  hwSuffix = "1";
+  else if (wcb_hw_version == 21) hwSuffix = "21";
+  else if (wcb_hw_version == 23) hwSuffix = "23";
+  else if (wcb_hw_version == 24) hwSuffix = "24";
+  else if (wcb_hw_version == 31) hwSuffix = "31";
+  else if (wcb_hw_version == 32) hwSuffix = "32";
+  else                            hwSuffix = "0";
+  append("HW," + hwSuffix);
+
+  // Network identity
+  sprintf(hexBuffer, "%02X", umac_oct2); append("MAC,2," + String(hexBuffer));
+  sprintf(hexBuffer, "%02X", umac_oct3); append("MAC,3," + String(hexBuffer));
+  append("WCB,"  + String(WCB_Number));
+  append("WCBQ," + String(Default_WCB_Quantity));
+  append("EPASS," + String(espnowPassword));
+
+  // Command characters
+  if (commandDelimiter != '^')       append("DELIM,"   + String(commandDelimiter));
+  if (LocalFunctionIdentifier != '?') append("FUNCCHAR," + String(LocalFunctionIdentifier));
+  append("CMDCHAR," + String(CommandCharacter));
+
+  // Baud rates and labels
+  for (int i = 0; i < 5; i++) append("BAUD,S" + String(i + 1) + "," + String(baudRates[i]));
+  for (int i = 0; i < 5; i++)
+    if (serialPortLabels[i].length() > 0)
+      append("LABEL,S" + String(i + 1) + "," + serialPortLabels[i]);
+
+  // Broadcast settings
+  for (int i = 0; i < 5; i++)
+    append("BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF"));
+  for (int i = 0; i < 5; i++)
+    append("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"));
+
+  // Serial mappings
+  for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+    if (!serialMonitorMappings[i].active) continue;
+    cmd = "MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
+    if (serialMonitorMappings[i].rawMode) cmd += ",R";
+    for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
+      cmd += ",";
+      if (serialMonitorMappings[i].outputs[j].wcbNumber == 0)
+        cmd += "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
+      else
+        cmd += "W" + String(serialMonitorMappings[i].outputs[j].wcbNumber) +
+               "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
+    }
+    append(cmd);
+  }
+
+  // Kyber
+  if (Kyber_Local) {
+    preferences.begin("kyber_settings", true);
+    int kPort = preferences.getInt("K_Port", 2);
+    preferences.end();
+    append("KYBER,LOCAL,S" + String(kPort));
+  } else if (Kyber_Remote) {
+    append("KYBER,REMOTE");
+  } else {
+    append("KYBER,CLEAR");
+  }
+
+  // Maestro settings (appends to out using same ^? format)
+  { String dummy; printMaestroBackup(dummy, out, '^'); }
+
+  // ETM settings
+  append(etmEnabled ? "ETM,ON" : "ETM,OFF");
+  append("ETM,TIMEOUT," + String(etmTimeoutMs));
+  append("ETM,HB,"      + String(etmHeartbeatSec));
+  append("ETM,MISS,"    + String(etmMissedHeartbeats));
+  append("ETM,BOOT,"    + String(etmBootHeartbeatSec));
+  append("ETM,COUNT,"   + String(etmCharMessageCount));
+  append("ETM,DELAY,"   + String(etmCharDelayMs));
+
+  // Stored sequences
+  preferences.begin("stored_cmds", true);
+  String keyList = preferences.getString("key_list", "");
+  preferences.end();
+  if (keyList.length() > 0) {
+    int startIdx = 0;
+    while (startIdx < (int)keyList.length()) {
+      int ci = keyList.indexOf(',', startIdx);
+      if (ci == -1) ci = keyList.length();
+      String key = keyList.substring(startIdx, ci);
+      key.trim();
+      if (key.length() > 0) {
+        preferences.begin("stored_cmds", true);
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+        append("SEQ,SAVE," + key + "," + value);
+      }
+      startIdx = ci + 1;
+    }
+  }
+
+  // PWM output ports and mappings
+  for (int i = 0; i < pwmOutputCount; i++)
+    append("MAP,PWM,OUT,S" + String(pwmOutputPorts[i]));
+  for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+    if (!pwmMappings[i].active) continue;
+    cmd = "MAP,PWM,S" + String(pwmMappings[i].inputPort);
+    for (int j = 0; j < pwmMappings[i].outputCount; j++) {
+      cmd += ",";
+      if (pwmMappings[i].outputs[j].wcbNumber == 0)
+        cmd += "S" + String(pwmMappings[i].outputs[j].serialPort);
+      else
+        cmd += "W" + String(pwmMappings[i].outputs[j].wcbNumber) +
+               "S" + String(pwmMappings[i].outputs[j].serialPort);
+    }
+    append(cmd);
+  }
+
+  // Checksum
+  uint32_t checksum = calculateCRC32(out);
+  String chkCmd = "?CHK" + String(checksum, HEX);
+  chkCmd.toUpperCase();
+  out += "^" + chkCmd;
+
+  return out;
+}
+
+// Target side: received a CONFIG_REQ — generate config and send it back in fragments
+void handleConfigReqPacket(const uint8_t *data) {
+  espnow_struct_config_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+
+  if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d\n", pkt.requesterWCB);
+
+  String configStr = buildConfigString();
+  int totalLen    = configStr.length();
+  // Use CONFIG_PAYLOAD_SIZE-1 bytes per chunk so the 183rd byte is always
+  // available as a null terminator.  The original code used all 183 bytes
+  // and then forcibly set [182] = '\0', silently dropping one character from
+  // every full chunk — causing bytes at positions 182, 364, … to be lost.
+  // With a 1-byte gap sequence chars that fell at those positions (e.g. the
+  // comma in "SEQ,SAVE,key,value") were stripped, corrupting the parsed config.
+  const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
+  int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
+  if (totalChunks > MGMT_MAX_CHUNKS) {
+    if (debugMGMT) Serial.printf("[MGMT] Config too large (%d chars) — cannot send\n", totalLen);
+    return;
+  }
+
+  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+
+  for (int i = 0; i < totalChunks; i++) {
+    espnow_struct_config_frag frag;
+    memset(&frag, 0, sizeof(frag));
+    strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+    frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
+    frag.sourceWCB    = WCB_Number;
+    frag.requesterWCB = pkt.requesterWCB;
+    frag.sessionId    = sessionId;
+    frag.chunkIdx     = (uint8_t)i;
+    frag.totalChunks  = (uint8_t)totalChunks;
+
+    int start = i * chunkStride;
+    int end   = min(start + chunkStride, totalLen);
+    String chunk = configStr.substring(start, end);
+    // memset already zeroed the struct — payload[chunk.length()] is '\0'
+    memcpy(frag.payload, chunk.c_str(), chunk.length());
+
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+    if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X\n",
+                                 i + 1, totalChunks, sessionId);
+    delay(20);
+  }
+}
+
+// Relay side: received a CONFIG_FRAG — reassemble and output to serial when complete
+void handleConfigFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+
+  // Start or continue pull session
+  if (!pullSession.active || pullSession.sessionId != pkt.sessionId) {
+    memset(&pullSession, 0, sizeof(pullSession));
+    pullSession.sourceWCB      = pkt.sourceWCB;
+    pullSession.sessionId      = pkt.sessionId;
+    pullSession.totalChunks    = pkt.totalChunks;
+    pullSession.lastActivityMs = millis();
+    pullSession.active         = true;
+    if (debugMGMT) Serial.printf("[MGMT] Config pull session %04X from WCB%d (%d chunks)\n",
+                                 pkt.sessionId, pkt.sourceWCB, pkt.totalChunks);
+  }
+
+  if (!(pullSession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(pullSession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    pullSession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    pullSession.receivedMask |= (1 << pkt.chunkIdx);
+    if (debugMGMT) Serial.printf("[MGMT] Config frag %d/%d received (session %04X)\n",
+                                 pkt.chunkIdx + 1, pkt.totalChunks, pkt.sessionId);
+  }
+  pullSession.lastActivityMs = millis();
+
+  // Reassemble and deliver when all chunks are in
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (pullSession.receivedMask == expectedMask) {
+    String fullConfig = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullConfig += String(pullSession.chunks[i]);
+    uint8_t srcWCB = pullSession.sourceWCB;
+    memset(&pullSession, 0, sizeof(pullSession));
+    // Deliver to webpage — always printed regardless of debugMGMT
+    Serial.printf("[MGMT:CONFIG,%d]%s\n", srcWCB, fullConfig.c_str());
+    if (debugMGMT) Serial.printf("[MGMT] Config pull complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullConfig.length());
+  }
+}
+
+// Relay side: handle ?MGMT,PULL,<targetWCB> — send a config pull request
+void handleMgmtPullRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > 8) {
+    if (debugMGMT) Serial.println("[MGMT] PULL: invalid targetWCB");
+    return;
+  }
+
+  espnow_struct_config_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_CONFIG_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+
+  esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  if (debugMGMT) {
+    if (result == ESP_OK)
+      Serial.printf("[MGMT] Config pull request sent for WCB%d\n", targetWCB);
+    else
+      Serial.printf("[MGMT] Config pull request failed, error: %d\n", result);
+  }
+}
+
+// Discard stalled pull sessions
+void checkConfigPullTimeout() {
+  if (pullSession.active &&
+      (millis() - pullSession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Config pull session %04X timed out\n", pullSession.sessionId);
+    memset(&pullSession, 0, sizeof(pullSession));
+  }
+}
+
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
 
-  // Handle both normal and ETM struct sizes
+  // Reject packets from boards outside this MAC group (octets 2 & 3 must match).
+  // This applies to ALL packet types — MGMT, CONFIG, ETM, and normal forwarding.
+  // Previously MGMT/CONFIG packets skipped this check, allowing boards with
+  // mismatched MAC octets (i.e. from a different installation) to send commands
+  // as long as they knew the password.  Consistent enforcement here means the
+  // MAC octets and the password together gate ALL communication, not just the
+  // data plane.
+  if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
+
+  // Handle known packet sizes
+  if (len == sizeof(espnow_struct_mgmt)) {
+    handleMgmtPacket(incomingData);
+    return;
+  }
+  if (len == sizeof(espnow_struct_config_req)) {
+    handleConfigReqPacket(incomingData);
+    return;
+  }
+  if (len == sizeof(espnow_struct_config_frag)) {
+    handleConfigFragPacket(incomingData);
+    return;
+  }
   bool isETMPacket = false;
   if (len == sizeof(espnow_struct_message_etm)) {
     isETMPacket = true;
@@ -2022,6 +2508,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "ETM,OFF") {
             debugETM = false;
             Serial.println("ETM debugging disabled");
+        } else if (argsUpper == "MGMT,ON") {
+            debugMGMT = true;
+            Serial.println("MGMT debugging enabled");
+        } else if (argsUpper == "MGMT,OFF") {
+            debugMGMT = false;
+            Serial.println("MGMT debugging disabled");
         } else {
             Serial.println("Invalid DEBUG command. Use: ?DEBUG ?");
         }
@@ -2445,6 +2937,12 @@ void processLocalCommand(const String &message) {
         } else {
             Serial.println("Identify already running");
         }
+        return;
+    }
+
+    // --- ?MGMT,FRAG,<targetWCB>,<sessionId>,<chunkIdx>,<totalChunks>,<payload> ---
+    if (rootUpper == "MGMT") {
+        handleMgmtForward(args);
         return;
     }
 
@@ -3609,8 +4107,10 @@ void processSerialCommandHelper(String &data, int sourceID) {
             }
             return;
         } else {
-            // No checksum - just process the command as-is
-            enqueueCommand(data, sourceID);
+            // No checksum — parse and enqueue normally so that chained strings
+            // like "?CMDCHAR,;^?SEQ,SAVE,key,val^..." split into separate commands
+            // instead of being swallowed whole by processLocalCommand.
+            parseCommandsAndEnqueue(data, sourceID);
             return;
         }
     }
@@ -4093,6 +4593,8 @@ void loop() {
   processETMAcksAndRetries();
   processETMChar();
   processETMLoad();
+  checkMgmtTimeout();
+  checkConfigPullTimeout();
   // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;

@@ -176,6 +176,8 @@
           <div class="modal-option-desc">Choose a specific COM port from a list.</div>
         </div>
       </button>
+      <!-- Remote relay options — populated dynamically by openConnectModal() -->
+      <div id="connect-modal-remote-section" style="display:none;flex-direction:column;gap:8px"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="closeConnectModal()">Cancel</button>
@@ -211,6 +213,22 @@
     <div class="modal-footer" style="gap:8px">
       <button class="btn btn-ghost btn-sm" id="general-conflict-keep">Keep current</button>
       <button class="btn btn-primary btn-sm" id="general-conflict-use">Use incoming</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Remote Network-Group Change Confirmation Modal ───────────── -->
+<!-- Shown when a remote push contains MAC-octet or password changes. -->
+<!-- The push is held until the user explicitly clicks "Push anyway". -->
+<div class="modal-overlay" id="network-group-change-modal">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ Network Group Change — Remote Board</span>
+    </div>
+    <div class="modal-body" id="network-group-change-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="network-group-change-cancel">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="network-group-change-confirm">I understand — push anyway</button>
     </div>
   </div>
 </div>
@@ -255,7 +273,7 @@
         </div>
         <div class="action-bar-right">
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
-          <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>&#9654; Go</button>
+          <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>Push Config</button>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardEraseNVS({N})" disabled title="Wipe all NVS settings and reboot">&#9888; Erase NVS</button>
         </div>
       </div>

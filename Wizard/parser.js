@@ -846,12 +846,19 @@ function buildCommandString(config, baseline = null, fullPush = false) {
     }
   }
 
-  // ── Stored Sequences ──
-  const seqChanged = fullPush || !baseline ||
-    JSON.stringify(baseline.sequences) !== JSON.stringify(config.sequences);
-  if (seqChanged) {
-    for (const seq of config.sequences) {
+  // ── Stored Sequences (per-key diff) ──
+  // Compare key-by-key so that a single UPDATE doesn't re-push every sequence.
+  // Also send SEQ,CLEAR for any keys removed since the baseline.
+  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
+  for (const seq of config.sequences) {
+    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
       add(`SEQ,SAVE,${seq.key},${seq.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [key] of baseSeqMap) {
+      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
     }
   }
 

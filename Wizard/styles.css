@@ -366,6 +366,16 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .btn-sm { padding: 4px 10px; font-size: 11px; }
 .btn-icon { padding: 6px 8px; }
 
+/* ─── Remote Management Panel ───────────────────────────────── */
+.remote-panel {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 8px 14px; margin-bottom: 8px;
+  font-size: 12px;
+}
+.remote-panel-label { font-weight: 600; color: var(--text2); white-space: nowrap; }
+.remote-panel-status { font-size: 11px; color: var(--text3); }
+
 /* ─── Board Action Bar ───────────────────────────────────────── */
 .board-action-bar {
   background: var(--bg3); border: 1px solid var(--border);
@@ -487,6 +497,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   color: var(--text); display: flex; align-items: center; gap: 6px;
 }
 .modal-option-desc { font-size: 11px; color: var(--text2); line-height: 1.5; }
+.modal-divider-label {
+  font-size: 10px; font-family: var(--mono); text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text3);
+  padding: 4px 0 2px; border-top: 1px solid var(--border); margin-top: 2px;
+}
 
 /* ─── Setup Wizard ───────────────────────────────────────────── */
 .wizard-dialog { width: 600px; max-width: 96vw; }
