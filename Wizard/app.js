@@ -53,7 +53,7 @@ async function fetchLatestFirmwareVersion() {
     const files = await r.json();
     const appFile = files.find(f => f.type === 'file' && f.name.endsWith('_ESP32.bin'));
     if (!appFile) return;
-    const m = appFile.name.match(/WCB_(\d+\.\d+)_/);
+    const m = appFile.name.match(/WCB_([\d.]+_\w+)_/);
     if (!m) return;
     latestFirmwareVersion = `v${m[1]}`;
     // Populate any board sw-version spans that still show '—'
@@ -462,11 +462,6 @@ function onHWVersionChange(n) {
   const hwVal = parseInt(document.getElementById(`b${n}-hw-version`)?.value);
   if (boardConfigs[n]) boardConfigs[n].hwVersion = hwVal;
 
-  const fwEl = document.getElementById(`b${n}-fw-version`);
-  if (fwEl && hwVal > 0) {
-    const info = WCBParser.HW_VERSION_MAP[hwVal];
-    fwEl.textContent = info ? `${info.binary} binary` : '';
-  }
   onBoardFieldChange(n);
 }
 
@@ -1775,6 +1770,7 @@ async function boardPull(n) {
         boardBaselines[n] = JSON.parse(JSON.stringify(config));
         populateUIFromConfig(n, config);
         updateBoardStatusBadge(n, 'connected');
+        fetchBoardVersion(n);
       } else {
         // Migrate: move connection + config from slot n → slot detected
         conn.boardIndex          = detected;
@@ -1793,6 +1789,7 @@ async function boardPull(n) {
         termLog(detected, `↑ Auto-migrated from slot ${n} — this board is WCB ${detected}`, 'sys');
         showToast(`WCB ${detected} detected — moved from slot ${n} → slot ${detected}`, 'info', 6000);
         migrated = true;
+        fetchBoardVersion(detected);
       }
     } else {
       // ── Board number matches slot (normal path) ───────────────────
@@ -1801,6 +1798,7 @@ async function boardPull(n) {
       populateUIFromConfig(n, config);
       updateBoardStatusBadge(n, 'connected');
       showToast(`Config pulled from WCB ${n}`, 'success');
+      fetchBoardVersion(n);
     }
   } catch (e) {
     const isTimeout = /timeout/i.test(e.message);
@@ -1814,6 +1812,23 @@ async function boardPull(n) {
   // Only restore slot-n's pull button if we didn't migrate away from it
   // (migration calls updateConnectionUI(n, false) which already disables it)
   if (!migrated && btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
+}
+
+// Fetch the firmware version string directly from the board and display it.
+// Sends ?version and parses "Software Version: <ver>" from the response.
+// Updates the SOFTWARE VERSION field in the board panel with the full version string.
+async function fetchBoardVersion(n) {
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) return;
+  try {
+    const raw   = await conn.sendAndCollect('?version', 3000, 'End of Version');
+    const match = raw.match(/Software Version:\s*(\S+)/i);
+    if (match) {
+      const ver = match[1].trim();
+      if (boardConfigs[n]) boardConfigs[n].fwVersion = ver;
+      setBoardSwVersion(n, `v${ver}`, true);
+    }
+  } catch (_) { /* version fetch is optional — ignore timeouts/errors */ }
 }
 
 async function boardGo(n, opts = {}) {

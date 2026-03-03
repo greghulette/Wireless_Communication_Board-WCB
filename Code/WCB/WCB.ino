@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_031250RMAR2026                                    *****////
+///*****                                          Version 6.0_031535RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -132,7 +132,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_031250RMAR2026";
+String SoftwareVersion = "6.0_031535RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2998,6 +2998,9 @@ void processLocalCommand(const String &message) {
         printConfigInfo();
     } else if (message == "backup" || message == "BACKUP") {
         printBackupConfig();
+    } else if (message == "version" || message == "VERSION") {
+        Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
+        Serial.println("End of Version");
     } else if (message.startsWith("d") || message.startsWith("D")) {
         updateCommandDelimiter(message);
     } else if (message.startsWith("m2") || message.startsWith("M2")) {
