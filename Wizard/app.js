@@ -4530,23 +4530,28 @@ async function wizardCancelConnect(n) {
 }
 
 async function wizardManualConnect(n) {
+  // Snapshot wizard config NOW — before boardManualConnect triggers boardPull,
+  // which could overwrite boardConfigs[n] before wizardWatchForConnect runs.
+  const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+  const generalSnapshot = captureGeneralDOMSnapshot();
+
   wizardDisableConnectBtns(n);
   wizardSetConnectStatus(n, 'busy', 'Select port…');
   try {
     await boardManualConnect(n);
-    wizardWatchForConnect(n);
+    wizardWatchForConnect(n, configSnapshot, generalSnapshot);
   } catch(e) {
     wizardEnableConnectBtns(n);
     wizardSetConnectStatus(n, '', 'Waiting…');
   }
 }
 
-function wizardWatchForConnect(n) {
-  // Snapshot the wizard-applied config now, before the boardPull that fires
-  // ~500 ms after the board connects can overwrite boardConfigs[n] and the
-  // shared general DOM fields (g-password, g-wcbq, etc.).
-  const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
-  const generalSnapshot = captureGeneralDOMSnapshot();
+function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {
+  // Use pre-taken snapshots if provided (from wizardManualConnect, taken before
+  // the board connects so boardPull cannot overwrite the wizard config first).
+  // Fall back to snapshotting now for callers that connect before calling us.
+  const configSnapshot  = preConfigSnapshot  ?? (boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null);
+  const generalSnapshot = preGeneralSnapshot ?? captureGeneralDOMSnapshot();
 
   let attempts = 0;
   const iv = setInterval(async () => {
@@ -4620,10 +4625,21 @@ function wizardStartConnectWatchers() {
   for (let i = 0; i < wizardState.quantity; i++) {
     const n = i + 1;
     if (boardConnections[n]?.isConnected()) {
+      // Snapshot wizard config now (wizardApplyConfig just ran).
+      // Also force a full push by clearing the baseline — boardPull may have
+      // set a baseline from the board's current NVS, causing an empty delta.
+      const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+      const generalSnapshot = captureGeneralDOMSnapshot();
       wizardDisableConnectBtns(n);
       wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
       (async () => {
         try {
+          if (configSnapshot) {
+            boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
+            boardBaselines[n] = null;   // force full push — ignore any prior pulled baseline
+            populateUIFromConfig(n, boardConfigs[n]);
+          }
+          restoreGeneralDOMSnapshot(generalSnapshot);
           await boardGo(n);
           if (boardConnections[n]?.isConnected()) {
             wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
