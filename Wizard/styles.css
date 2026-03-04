@@ -710,12 +710,28 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   display: flex; align-items: center; gap: 10px; padding: 8px 16px;
   border-bottom: 1px solid var(--border); background: var(--bg3); flex-shrink: 0;
 }
-.terminal-header h3 { font-size: 11px; color: var(--accent); flex: 1; }
+.terminal-header h3 { font-size: 11px; color: var(--accent); }
+
+/* ── Per-board visibility toggles in the terminal header ─────── */
+.term-vis-toggles {
+  display: flex; align-items: center; gap: 6px; flex: 1;
+}
+.term-vis-chip {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 600; color: var(--text2);
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 7px; cursor: pointer;
+  user-select: none; transition: border-color var(--transition), color var(--transition);
+  white-space: nowrap;
+}
+.term-vis-chip input[type="checkbox"] { margin: 0; cursor: pointer; accent-color: var(--accent); }
+.term-vis-chip:has(input:checked) { border-color: var(--accent); color: var(--text); }
+.term-vis-chip:has(input:not(:checked)) { opacity: 0.5; }
 
 /* ── Multi-pane terminal ─────────────────────────────────────── */
 .terminal-panes {
   flex: 1; display: flex; flex-direction: row;
-  overflow: hidden; gap: 0;
+  overflow-x: auto; overflow-y: hidden; gap: 0;
 }
 .terminal-no-boards {
   flex: 1; display: flex; align-items: center; justify-content: center;

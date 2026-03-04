@@ -53,7 +53,7 @@ async function fetchLatestFirmwareVersion() {
     const files = await r.json();
     const appFile = files.find(f => f.type === 'file' && f.name.endsWith('_ESP32.bin'));
     if (!appFile) return;
-    const m = appFile.name.match(/WCB_([\d.]+_\w+)_/);
+    const m = appFile.name.match(/WCB_([\d.]+_\d{6}R[A-Z]{3}\d{4})_/);
     if (!m) return;
     latestFirmwareVersion = `v${m[1]}`;
     // Re-evaluate version display for any boards that already have a version from the board
@@ -1364,8 +1364,15 @@ class BoardConnection {
             this._readBuffer = this._readBuffer.slice(nl + 1);
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
-              const displayed = this._lineTransform ? this._lineTransform(line) : line;
-              if (displayed !== null) termLog(this.boardIndex, displayed, 'out');
+              // Route [TERM:N]<text> lines to the remote board's terminal pane
+              // instead of the relay's own pane.
+              const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
+              if (termMatch) {
+                termLog(parseInt(termMatch[1]), termMatch[2], 'out');
+              } else {
+                const displayed = this._lineTransform ? this._lineTransform(line) : line;
+                if (displayed !== null) termLog(this.boardIndex, displayed, 'out');
+              }
             }
           }
         }
@@ -1383,6 +1390,7 @@ class BoardConnection {
     if (this._connected) {
       this._connected = false;
       updateConnectionUI(this.boardIndex, false);
+      clearRemoteBoardsForRelay(this.boardIndex);   // drop any remote boards using this as relay
       termLog(this.boardIndex, 'Board disconnected — attempting reconnect…', 'sys');
       // Try to reconnect to the same port (board rebooting)
       const reconnected = await this.reconnect(10, 1500);
@@ -1501,8 +1509,21 @@ function setRemoteConnected(n, relayN) {
   installEtmListener(relayN);         // track live/offline state via relay's ETM output
 }
 
+// When a relay board goes offline, disconnect every remote board that relied on it.
+function clearRemoteBoardsForRelay(relayN) {
+  Object.keys(remoteRelayForBoard)
+    .map(Number)
+    .filter(n => remoteRelayForBoard[n] === relayN)
+    .forEach(n => {
+      termLog(relayN, `[Remote] WCB${n} disconnected — relay WCB${relayN} went offline`, 'sys');
+      clearRemoteConnected(n);
+    });
+}
+
 function clearRemoteConnected(n) {
   const relayN = remoteRelayForBoard[n];
+  // Best-effort: tell the target board to stop forwarding terminal output
+  if (relayN) stopRemoteTermSession(relayN, n);
   delete remoteRelayForBoard[n];
   // Re-enable flash/update/factory mode radios that setRemoteConnected disabled
   ['flash', 'update', 'factory'].forEach(mode => {
@@ -1514,6 +1535,29 @@ function clearRemoteConnected(n) {
     removeEtmListener(relayN);
   }
   updateConnectionUI(n, false);        // resets buttons and badge to disconnected state
+}
+
+// ─── Remote Terminal Session Management ───────────────────────────
+// Starts a remote terminal session on board targetN by sending
+// ?RTERM,START,<relayN> via MGMT (single-chunk push).
+async function startRemoteTermSession(relayN, targetN) {
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) return;
+  try {
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    await relayConn.send(`?MGMT,FRAG,${targetN},${sessionId},0,1,?RTERM,START,${relayN}\r`);
+    termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
+  } catch (_) {}
+}
+
+// Stops the remote terminal session on board targetN.
+async function stopRemoteTermSession(relayN, targetN) {
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) return;
+  try {
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    await relayConn.send(`?MGMT,FRAG,${targetN},${sessionId},0,1,?RTERM,STOP\r`);
+  } catch (_) {}
 }
 
 // ─── General Settings Conflict Modal ──────────────────────────────
@@ -1592,6 +1636,7 @@ function boardConnect(n) {
 async function boardDisconnect(n) {
   const btn = document.getElementById(`b${n}-btn-connect`);
   if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
+  clearRemoteBoardsForRelay(n);              // drop remote boards that relay through this one
   try { await boardConnections[n]?.disconnect(); } catch (_) {}
   delete boardConnections[n];
   delete remoteRelayForBoard[n];
@@ -2188,6 +2233,7 @@ function updateConnectionUI(n, connected) {
   // Create pane on first connect; update dot/input state on any connect/disconnect
   if (connected) ensureTerminalPane(n);
   updateTerminalPaneDot(n, connected);
+  if (connected) updatePaneVisibilityChip(n);
 }
 
 // ─── Remote Management ────────────────────────────────────────────
@@ -2381,7 +2427,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     clearTimeout(timer);
     cleanup();
 
-    const configStr = line.slice(prefix.length).trim();
+    let configStr = line.slice(prefix.length).trim();
     if (!configStr) {
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: empty config response`, 'error');
@@ -2389,15 +2435,35 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
       return;
     }
 
+    // Extract [VER:<version>] prefix added by buildConfigString() and strip it
+    // before handing the command string to the parser.
+    let remoteFwVersion = null;
+    const verMatch = configStr.match(/^\[VER:([^\]]+)\]/);
+    if (verMatch) {
+      remoteFwVersion = verMatch[1].trim();
+      configStr = configStr.slice(verMatch[0].length);
+    }
+
     try {
       const config = WCBParser.parseBackupString(configStr);
       boardConfigs[targetN]   = config;
       boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
+      // Store the firmware version from the VER prefix (if present) and update display
+      if (remoteFwVersion) {
+        boardConfigs[targetN].fwVersion = remoteFwVersion;
+        updateBoardSwVersionDisplay(targetN);
+      }
       populateUIFromConfig(targetN, config);
       // Preserve remote badge and connection label (setRemoteConnected may have run before us)
       updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
       showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
       termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
+      // Enable the terminal input and debug buttons for this remote board
+      ensureTerminalPane(targetN);
+      updateTerminalPaneDot(targetN, true);
+      updatePaneVisibilityChip(targetN);   // refresh label in case board switched USB→remote
+      // Start the remote terminal session so WCB${targetN}'s Serial output is mirrored here
+      startRemoteTermSession(relayN, targetN);
     } catch (e) {
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
@@ -2799,6 +2865,10 @@ const boardDebugStates = {};
 const boardTimestamp   = {};   // false = off (default)
 const boardAutoScroll  = {};   // true  = on  (default)
 
+// Per-board command history (persists for the session; index -1 = typing new command)
+const boardCmdHistory  = {};   // { [n]: string[] }  oldest → newest
+const boardHistoryIdx  = {};   // { [n]: number }    current recall position
+
 const DEBUG_MODES = [
   { key: 'main',  label: 'COMMANDS', cmd: 'DEBUG'       },
   { key: 'kyber', label: 'KYBER',    cmd: 'DEBUG,KYBER' },
@@ -2816,13 +2886,16 @@ function ensureDebugState(n) {
 // Master refresh — call whenever connection state or toggle state changes
 function updateTerminalControls(n) {
   const state     = boardDebugStates[n] ?? {};
+  // Board is reachable if directly connected OR accessible via a relay
   const connected = boardConnections[n]?.isConnected() ?? false;
+  const reachable = connected || (remoteRelayForBoard[n] !== undefined &&
+                    boardConnections[remoteRelayForBoard[n]]?.isConnected());
 
   // Debug buttons
   for (const { key } of DEBUG_MODES) {
     const btn = document.getElementById(`dbg-btn-${n}-${key}`);
     if (!btn) continue;
-    btn.disabled = !connected;
+    btn.disabled = !reachable;
     btn.classList.toggle('debug-on', !!state[key]);
   }
 
@@ -2841,9 +2914,6 @@ function updateTerminalControls(n) {
 }
 
 async function toggleDebug(n, modeKey) {
-  const conn = boardConnections[n];
-  if (!conn?.isConnected()) return;
-
   const state    = ensureDebugState(n);
   state[modeKey] = !state[modeKey];
   const onOff    = state[modeKey] ? 'ON' : 'OFF';
@@ -2853,6 +2923,24 @@ async function toggleDebug(n, modeKey) {
   if (!modeInfo) return;
 
   const cmd = `${funcChar}${modeInfo.cmd},${onOff}`;
+
+  // Remote board — forward through the relay via MGMT
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) { state[modeKey] = !state[modeKey]; return; } // revert
+    termLog(n, cmd, 'in');
+    try {
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      await relayConn.send(`?MGMT,FRAG,${n},${sessionId},0,1,${cmd}\r`);
+    } catch (_) { state[modeKey] = !state[modeKey]; } // revert on error
+    updateTerminalControls(n);
+    return;
+  }
+
+  // Direct board
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { state[modeKey] = !state[modeKey]; return; } // revert
   await conn.send(cmd + '\r');
   termLog(n, cmd, 'in');
   updateTerminalControls(n);
@@ -2873,12 +2961,40 @@ function toggleAutoScroll(n) {
   updateTerminalControls(n);
 }
 
+// Update the chip label to reflect how the board is connected
+function updatePaneVisibilityChip(n) {
+  const label = document.getElementById(`term-vis-label-${n}`);
+  if (!label) return;
+  const relayN = remoteRelayForBoard[n];
+  label.textContent = relayN ? `WCB ${n} (via WCB ${relayN})` : `WCB ${n} (USB)`;
+}
+
+function togglePaneVisibility(n) {
+  const cb   = document.getElementById(`term-vis-cb-${n}`);
+  const pane = document.getElementById(`term-pane-${n}`);
+  if (!pane) return;
+  pane.style.display = cb?.checked ? '' : 'none';
+}
+
 function ensureTerminalPane(n) {
   if (document.getElementById(`term-pane-${n}`)) return; // already exists
 
   // Hide the empty-state placeholder
   const noBoards = document.getElementById('terminal-no-boards');
   if (noBoards) noBoards.style.display = 'none';
+
+  // Add a visibility toggle chip to the terminal header
+  const toggleBar = document.getElementById('terminal-visibility-toggles');
+  if (toggleBar && !document.getElementById(`term-vis-cb-${n}`)) {
+    const chip = document.createElement('label');
+    chip.className = 'term-vis-chip';
+    chip.id = `term-vis-chip-${n}`;
+    chip.innerHTML =
+      `<input type="checkbox" id="term-vis-cb-${n}" checked onchange="togglePaneVisibility(${n})">` +
+      `<span id="term-vis-label-${n}">WCB ${n}</span>`;
+    toggleBar.appendChild(chip);
+  }
+  updatePaneVisibilityChip(n);
 
   const debugBtns = DEBUG_MODES.map(({ key, label }) =>
     `<button class="btn btn-ghost btn-sm debug-btn" id="dbg-btn-${n}-${key}"
@@ -2983,7 +3099,31 @@ function termLog(boardIndex, text, type = 'out') {
 }
 
 function onTerminalKeydown(e, n) {
-  if (e.key === 'Enter') sendTerminalCommandTo(n);
+  if (e.key === 'Enter') {
+    sendTerminalCommandTo(n);
+    return;
+  }
+
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    const history = boardCmdHistory[n];
+    if (!history?.length) return;
+    e.preventDefault();   // don't move the text-cursor
+
+    let idx = boardHistoryIdx[n] ?? -1;
+
+    if (e.key === 'ArrowUp') {
+      idx = Math.min(idx + 1, history.length - 1);
+    } else {
+      idx = Math.max(idx - 1, -1);
+    }
+    boardHistoryIdx[n] = idx;
+
+    const input = document.getElementById(`term-pane-input-${n}`);
+    if (!input) return;
+    input.value = idx === -1 ? '' : history[history.length - 1 - idx];
+    // Move cursor to end of recalled text
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
 }
 
 async function sendTerminalCommandTo(n) {
@@ -2992,6 +3132,26 @@ async function sendTerminalCommandTo(n) {
   if (!cmd) return;
   input.value = '';
 
+  // Push to per-board history (skip duplicates of the last entry)
+  if (!boardCmdHistory[n]) boardCmdHistory[n] = [];
+  const hist = boardCmdHistory[n];
+  if (hist[hist.length - 1] !== cmd) hist.push(cmd);
+  boardHistoryIdx[n] = -1;   // reset to "typing new command"
+
+  // Remote board — forward through the relay via MGMT (single-chunk push)
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) { termLog(n, `Relay WCB${relayN} not connected`, 'err'); return; }
+    termLog(n, cmd, 'in');
+    try {
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      await relayConn.send(`?MGMT,FRAG,${n},${sessionId},0,1,${cmd}\r`);
+    } catch (e) { termLog(n, `Send error: ${e.message}`, 'err'); }
+    return;
+  }
+
+  // Direct board — send straight over the USB serial connection
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { termLog(n, 'Board not connected', 'err'); return; }
 

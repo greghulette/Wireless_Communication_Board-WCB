@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_031535RMAR2026                                    *****////
+///*****                                          Version 6.0_041212RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -67,6 +67,10 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 */
 
 // ============================= Librarires  =============================
+// WCB_RemoteTerm.h MUST be first: it redefines Serial → WCBDebugSerial
+// so every subsequent header and source file sees the redirection.
+#include "WCB_RemoteTerm.h"
+
 //You must install these into your Arduino IDE
 #include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
 #include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.15.3
@@ -132,7 +136,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_031535RMAR2026";
+String SoftwareVersion = "6.0_041212RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1446,11 +1450,8 @@ void printESPNowStats() {
 //*******************************
 // Send an ESP-NOW message (unicast or broadcast)
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
-  // Skip broadcast if last was from ESP-NOW
-  if (target == 0 && lastReceivedViaESPNOW) {
-    if (debugEnabled) { Serial.printf("Skipping ESPNOW broadcast to avoid loops\n"); }
-    return;
-  }
+  // Skip broadcast if last was from ESP-NOW (loop prevention)
+  if (target == 0 && lastReceivedViaESPNOW) return;
 
   // Check if this is a PWM message (starts with ";P") - MUST BE FIRST
   bool isPWMMessage = (message[0] == ';' && (message[1] == 'P' || message[1] == 'p'));
@@ -1793,6 +1794,9 @@ void handleMgmtPacket(const uint8_t *data) {
     if (debugMGMT) Serial.printf("[MGMT] Session %04X complete — executing %d chars\n",
                                  pkt.sessionId, fullCmd.length());
     memset(&mgmtSession, 0, sizeof(mgmtSession));   // clear before executing (reboot-safe)
+    // MGMT commands originate from the wizard, not from an ESP-NOW forwarding loop.
+    // Reset the loop-avoidance flag so the command can broadcast via ESP-NOW normally.
+    lastReceivedViaESPNOW = false;
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
@@ -1942,7 +1946,9 @@ String buildConfigString() {
   chkCmd.toUpperCase();
   out += "^" + chkCmd;
 
-  return out;
+  // Prepend software version so the Wizard can read it from remote (MGMT) pulls.
+  // The [VER:...] prefix is stripped by the Wizard before command parsing.
+  return "[VER:" + SoftwareVersion + "]" + out;
 }
 
 // Target side: received a CONFIG_REQ — generate config and send it back in fragments
@@ -2097,6 +2103,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   }
   if (len == sizeof(espnow_struct_config_frag)) {
     handleConfigFragPacket(incomingData);
+    return;
+  }
+  // Remote terminal output from a target board → print [TERM:N] to USB
+  if (len == sizeof(espnow_struct_remote_term)) {
+    rtermRelayHandlePacket(incomingData);
     return;
   }
   bool isETMPacket = false;
@@ -2943,6 +2954,28 @@ void processLocalCommand(const String &message) {
     // --- ?MGMT,FRAG,<targetWCB>,<sessionId>,<chunkIdx>,<totalChunks>,<payload> ---
     if (rootUpper == "MGMT") {
         handleMgmtForward(args);
+        return;
+    }
+
+    // --- ?RTERM,START,<relayWCB>  /  ?RTERM,STOP ---
+    // Sent by the wizard (via MGMT push) to the target board.
+    // START activates Serial output mirroring to the named relay via ESP-NOW.
+    // STOP  deactivates mirroring and flushes any pending line buffer.
+    if (rootUpper == "RTERM") {
+        String rtermCmd = args;
+        rtermCmd.toUpperCase();
+        if (rtermCmd.startsWith("START,")) {
+            uint8_t relayWCB = (uint8_t)args.substring(6).toInt();
+            if (relayWCB >= 1 && relayWCB <= 8) {
+                WCBDebugSerial.startSession(relayWCB);
+            } else {
+                Serial.println("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..8");
+            }
+        } else if (rtermCmd == "STOP") {
+            WCBDebugSerial.stopSession();
+        } else {
+            Serial.println("[RTERM] Unknown sub-command. Use: ?RTERM,START,<n> or ?RTERM,STOP");
+        }
         return;
     }
 
@@ -4031,7 +4064,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
     // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage)
     sendESPNowMessage(0, cmd.c_str());
-    if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    if (debugEnabled && !lastReceivedViaESPNOW) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
 
 // processIncomingSerial for each serial port
@@ -4045,7 +4078,11 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
-          if (debugEnabled){Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());} 
+          // MGMT commands are internal relay traffic — gate under debugMGMT, not debugEnabled
+          bool _isMgmt = serialBuffer.startsWith(String(LocalFunctionIdentifier) + "MGMT");
+          if ((_isMgmt && debugMGMT) || (!_isMgmt && debugEnabled)) {
+              Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());
+          }
 
           // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
