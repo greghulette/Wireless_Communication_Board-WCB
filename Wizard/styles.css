@@ -667,6 +667,12 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   font-size: 12px; line-height: 1.6; color: var(--text);
   margin-bottom: 2px;
 }
+.wizard-connect-tip {
+  background: rgba(255,200,0,0.07); border: 1px solid rgba(255,200,0,0.3);
+  border-radius: var(--radius); padding: 9px 14px;
+  font-size: 12px; line-height: 1.6; color: var(--text2);
+  margin-bottom: 10px;
+}
 
 /* ─── Terminal Drawer ────────────────────────────────────────── */
 /* ── Detect button (pulsing while auto-detect is active) ─────── */

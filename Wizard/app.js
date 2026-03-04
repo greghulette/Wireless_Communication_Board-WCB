@@ -4124,10 +4124,8 @@ function wizardHTMLConnect() {
         </span>
         <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
           <span id="wiz-connect-btns-${n}" style="display:${isActive ? 'flex' : 'none'};gap:6px">
-            <button class="btn btn-primary btn-sm" id="wiz-detect-btn-${n}"
-                    onclick="wizardAutoDetect(${n})">⊙ Auto-Detect</button>
-            <button class="btn btn-ghost btn-sm"   id="wiz-manual-btn-${n}"
-                    onclick="wizardManualConnect(${n})">🔌 Manual</button>
+            <button class="btn btn-primary btn-sm" id="wiz-manual-btn-${n}"
+                    onclick="wizardManualConnect(${n})">🔌 Connect</button>
           </span>
           <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
                   style="display:none" onclick="wizardCancelConnect(${n})">✕ Cancel</button>
@@ -4144,9 +4142,16 @@ function wizardHTMLConnect() {
   const changeBtn = `<button class="btn btn-ghost btn-sm" style="margin-bottom:10px;font-size:11px"
       onclick="wizardSelectConnectMode(null)">← Change connection method</button>`;
 
+  const tipHtml = `
+    <div class="wizard-connect-tip">
+      <strong>Tip:</strong> Unplug all boards first, then plug them in one at a time.
+      When the port picker appears, the newly-added port is your board — select it to assign it to the correct slot.
+    </div>`;
+
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
     ${changeBtn}
+    ${tipHtml}
     ${banner}
     ${rows}`;
 }
@@ -4567,21 +4572,12 @@ async function wizardCancelConnect(n) {
     clearInterval(wizardConnectWatchers[n]);
     delete wizardConnectWatchers[n];
   }
-  // Stop auto-detect if it's still running
-  _detecting[n] = false;
   // Drop any partial connection
   try { await boardConnections[n]?.disconnect(); } catch (_) {}
   delete boardConnections[n];
   // Reset UI back to the initial waiting state
   wizardEnableConnectBtns(n);
   wizardSetConnectStatus(n, '', 'Waiting…');
-}
-
-function wizardAutoDetect(n) {
-  wizardDisableConnectBtns(n);
-  wizardSetConnectStatus(n, 'busy', 'Detecting… (press reset)');
-  boardAutoDetect(n);
-  wizardWatchForConnect(n);
 }
 
 async function wizardManualConnect(n) {
