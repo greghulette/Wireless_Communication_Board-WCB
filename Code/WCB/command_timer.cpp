@@ -1,3 +1,4 @@
+#include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_Storage.h" // Or wherever your commandDelimiter and parseCommandsAndEnqueue are
 #include "command_timer_queue.h"
 

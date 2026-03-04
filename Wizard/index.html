@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WCB Configuration Tool</title>
+  <link rel="icon" type="image/png" href="favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
@@ -259,24 +260,10 @@
 
       <!-- Action Bar -->
       <div class="board-action-bar">
-        <div class="action-bar-left">
-          <div class="flash-mode">
-            <label><input type="radio" name="b{N}-mode" value="configure" checked onchange="onBoardModeChange({N})"><span>Configure Only</span></label>
-            <label><input type="radio" name="b{N}-mode" value="update" onchange="onBoardModeChange({N})"><span>Update FW</span></label>
-            <label><input type="radio" name="b{N}-mode" value="flash" onchange="onBoardModeChange({N})"><span>Flash &amp; Configure</span></label>
-            <label><input type="radio" name="b{N}-mode" value="factory" onchange="onBoardModeChange({N})"><span>Factory Reset</span></label>
-          </div>
-          <div id="b{N}-wipe-nvs-wrap" style="display:none;margin-top:6px">
-            <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2);cursor:pointer">
-              <input type="checkbox" id="b{N}-wipe-nvs" style="cursor:pointer">
-              <span>Overwrite board memory first</span>
-            </label>
-          </div>
-        </div>
-        <div class="action-bar-right">
+        <div class="action-bar-right" style="margin-left:auto">
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>Push Config</button>
-          <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardEraseNVS({N})" disabled title="Wipe all NVS settings and reboot">&#9888; Erase NVS</button>
+          <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardFactoryReset({N})" disabled title="Erase all settings and reboot — optionally re-flash firmware">🏭 Factory Reset</button>
         </div>
       </div>
 
@@ -321,10 +308,14 @@
         </div>
         <div class="field">
           <label>Software Version</label>
-          <span id="b{N}-sw-version"
-                style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
-                       border:1px solid var(--border);border-radius:var(--radius);
-                       color:var(--text3);font-family:var(--mono);font-size:12px;min-height:36px">—</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="b{N}-sw-version"
+                  style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
+                         border:1px solid var(--border);border-radius:var(--radius);
+                         color:var(--text3);font-family:var(--mono);font-size:12px;min-height:36px">—</span>
+            <button class="btn btn-warning btn-sm" id="b{N}-btn-update-fw"
+                    onclick="boardUpdateFW({N})" style="display:none" title="A newer firmware version is available">⬆ Update FW</button>
+          </div>
         </div>
       </div>
 

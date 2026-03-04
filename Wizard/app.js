@@ -14,6 +14,7 @@ let systemConfig   = null;
 let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
+let boardFlashMode   = {};      // { boardIndex: 'configure'|'update'|'flash'|'factory' }
 
 // ─── Connect Modal State ───────────────────────────────────────────
 let _connectModalSlot = null;   // which board slot the modal is open for
@@ -80,15 +81,20 @@ function parseWCBVersion(ver) {
 // Shows the board's installed version and compares it against the latest GitHub version.
 // Green  ✓      = up to date (or GitHub unavailable)
 // Cyan   (dev)  = board is AHEAD of GitHub (local dev build)
-// Yellow ↑      = board is BEHIND GitHub (update available)
+// Yellow ↑      = board is BEHIND GitHub (update available) — also shows Update FW button
 function updateBoardSwVersionDisplay(n) {
-  const el = document.getElementById(`b${n}-sw-version`);
+  const el        = document.getElementById(`b${n}-sw-version`);
+  const updateBtn = document.getElementById(`b${n}-btn-update-fw`);
   if (!el) return;
+
+  const _setUpdateBtn = (show) => { if (updateBtn) updateBtn.style.display = show ? '' : 'none'; };
+
   const boardVer = boardConfigs[n]?.fwVersion;
   if (!boardVer) {
     el.textContent = '—';
     el.style.color = 'var(--text3)';
     el.title = '';
+    _setUpdateBtn(false);
     return;
   }
   const display = boardVer.startsWith('v') ? boardVer : `v${boardVer}`;
@@ -98,6 +104,7 @@ function updateBoardSwVersionDisplay(n) {
     el.textContent = `${display} ✓`;
     el.style.color  = 'var(--green)';
     el.title = latest ? 'Up to date' : 'Installed on board (GitHub version unavailable)';
+    _setUpdateBtn(false);
     return;
   }
 
@@ -111,17 +118,20 @@ function updateBoardSwVersionDisplay(n) {
       el.textContent = `${display} (dev)`;
       el.style.color  = 'var(--accent)';
       el.title = `Dev build — ahead of GitHub (GitHub: ${latest})`;
+      _setUpdateBtn(false);
     } else {
       // Board is behind GitHub — update available
       el.textContent = `${display} ↑`;
       el.style.color  = 'var(--yellow)';
       el.title = `Update available: ${latest}`;
+      _setUpdateBtn(true);
     }
   } else {
     // Timestamps unrecognisable — flag the mismatch without assuming direction
     el.textContent = `${display} ≠`;
     el.style.color  = 'var(--yellow)';
     el.title = `Version differs from GitHub (${latest})`;
+    _setUpdateBtn(true);
   }
 }
 
@@ -497,16 +507,8 @@ function onBoardFieldChange(n) {
   updateBoardStatusBadge(n, 'unsaved');
 }
 
-function onBoardModeChange(n) {
-  const mode = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
-  const wipeWrap = document.getElementById(`b${n}-wipe-nvs-wrap`);
-  if (wipeWrap) {
-    wipeWrap.style.display = mode === 'configure' ? '' : 'none';
-    if (mode !== 'configure') {
-      const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
-      if (wipeEl) wipeEl.checked = false;
-    }
-  }
+function boardUpdateFW(n) {
+  boardGo(n, { mode: 'update' });
 }
 
 function onSerialFieldChange(n) {
@@ -1945,7 +1947,7 @@ async function boardGo(n, opts = {}) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
-  const mode      = document.querySelector(`input[name="b${n}-mode"]:checked`)?.value;
+  const mode      = opts.mode ?? boardFlashMode[n] ?? 'configure';
   const isFlash   = mode === 'flash';
   const isUpdate  = mode === 'update';
   const isFactory = mode === 'factory';
@@ -2001,9 +2003,7 @@ async function boardGo(n, opts = {}) {
       const reconnected = await conn.reconnect(12, 2000);
       if (reconnected) {
         updateConnectionUI(n, true);
-        // Switch back to configure mode regardless
-        const configRadio = document.querySelector(`input[name="b${n}-mode"][value="configure"]`);
-        if (configRadio) configRadio.checked = true;
+        boardFlashMode[n] = 'configure';   // reset mode after flash
 
         if (isUpdate) {
           // App-only update: NVS is intact, just pull to verify config survived
@@ -2041,60 +2041,6 @@ async function boardGo(n, opts = {}) {
       if (recovered) updateConnectionUI(n, true);
     }
 
-    btn.disabled = false;
-    btn.textContent = 'Push Config';
-    return;
-  }
-
-  // ── Wipe NVS before configure if checkbox is checked ─────────────
-  // This erases all NVS memory, reboots the board, then re-calls boardGo
-  // to push the config to a fresh board — same result as factory reset
-  // but without reflashing the firmware.
-  const wipeFirst = document.getElementById(`b${n}-wipe-nvs`)?.checked;
-  if (wipeFirst) {
-    const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
-    const generalSnapshot = captureGeneralDOMSnapshot();
-    boardBaselines[n] = null;
-    try {
-      termLog(n, '?ERASE,NVS', 'in');
-      await conn.send('?ERASE,NVS\r');
-      // Firmware counts down ~3 s before erasing and rebooting.
-      // Closing the serial port immediately causes a USB-disconnect reset that
-      // fires BEFORE the erase runs — wait 4 s to let it finish.
-      termLog(n, 'Waiting for firmware erase countdown…', 'sys');
-      showToast(`WCB ${n} erasing — do not disconnect…`, 'warning', 5000);
-      await sleep(4000);
-      termLog(n, 'NVS erased — board rebooting…', 'sys');
-
-      await conn.closeForReconnect();
-      updateConnectionUI(n, false);
-      termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
-
-      const reconnected = await conn.reconnect(10, 1500);
-      if (reconnected) {
-        updateConnectionUI(n, true);
-        termLog(n, 'Reconnected after erase — pushing config in 4s…', 'sys');
-        // Uncheck the wipe box so the re-call doesn't erase again
-        const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
-        if (wipeEl) wipeEl.checked = false;
-        setTimeout(() => {
-          // Restore config in case boardPull fired during reconnect window
-          if (configSnapshot) {
-            boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
-            boardBaselines[n] = null;
-            populateUIFromConfig(n, boardConfigs[n]);
-          }
-          restoreGeneralDOMSnapshot(generalSnapshot);
-          boardGo(n);
-        }, 4000);
-      } else {
-        termLog(n, 'Reconnect failed — connect manually', 'err');
-        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
-      }
-    } catch (e) {
-      showToast(`Erase failed: ${e.message}`, 'error');
-      termLog(n, `Erase error: ${e.message}`, 'err');
-    }
     btn.disabled = false;
     btn.textContent = 'Push Config';
     return;
@@ -3357,14 +3303,14 @@ async function boardIdentify(n) {
   }
 }
 
-// ─── NVS Erase ────────────────────────────────────────────────────
-async function boardEraseNVS(n) {
+// ─── Factory Reset ────────────────────────────────────────────────
+async function boardFactoryReset(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   const confirmed = confirm(
-    `⚠️ ERASE ALL NVS DATA ON WCB ${n}?\n\n` +
-    `This will wipe ALL stored settings including:\n` +
+    `⚠️ FACTORY RESET WCB ${n}?\n\n` +
+    `This will erase ALL stored settings including:\n` +
     `  • Baud rates & broadcast settings\n` +
     `  • MAC address octets\n` +
     `  • ESP-NOW password\n` +
@@ -3376,6 +3322,20 @@ async function boardEraseNVS(n) {
   );
   if (!confirmed) return;
 
+  // Offer to also re-flash firmware
+  const alsoFlash = confirm(
+    `Re-flash firmware after reset?\n\n` +
+    `Click OK to erase settings AND re-flash the latest firmware onto WCB ${n}.\n` +
+    `Click Cancel to erase settings only and reboot.`
+  );
+
+  if (alsoFlash) {
+    // Delegate to boardGo with factory mode — handles erase + flash + reconnect
+    boardGo(n, { mode: 'factory' });
+    return;
+  }
+
+  // ── Erase-only path ──────────────────────────────────────────────
   termLog(n, '?ERASE,NVS', 'in');
   try {
     await conn.send('?ERASE,NVS\r');
@@ -3396,7 +3356,7 @@ async function boardEraseNVS(n) {
       const reconnected = await conn.reconnect(10, 1500);
       if (reconnected) {
         updateConnectionUI(n, true);
-        termLog(n, 'Reconnected after erase', 'sys');
+        termLog(n, 'Reconnected after factory reset', 'sys');
         showToast(`WCB ${n} reconnected`, 'success');
         termLog(n, 'Auto-pulling config…', 'sys');
         setTimeout(() => boardPull(n), 3000);
@@ -3406,7 +3366,7 @@ async function boardEraseNVS(n) {
       }
     })();
   } catch (e) {
-    showToast(`Erase failed: ${e.message}`, 'error');
+    showToast(`Factory reset failed: ${e.message}`, 'error');
   }
 }
 
@@ -3546,23 +3506,12 @@ function wizardNext() {
     return;
   }
 
-  // After firmware choice is made, stamp the board mode radios on the config page
+  // After firmware choice is made, record the flash mode for each board
   if (key === 'firmware') {
     const modeVal = !wizardState.needsFirmware ? 'configure'
                   : wizardState.eraseNvs       ? 'factory'
                   :                              'update';
-    wizardState.boards.forEach((b, i) => {
-      const n = i + 1;
-      const radio = document.querySelector(`input[name="b${n}-mode"][value="${modeVal}"]`);
-      if (radio) radio.checked = true;
-      // Show/hide the wipe-nvs wrap based on the stamped mode
-      onBoardModeChange(n);
-      // If configure-only with erase, pre-check the per-board wipe checkbox
-      if (!wizardState.needsFirmware && wizardState.eraseNvs) {
-        const wipeEl = document.getElementById(`b${n}-wipe-nvs`);
-        if (wipeEl) wipeEl.checked = true;
-      }
-    });
+    wizardState.boards.forEach((b, i) => { boardFlashMode[i + 1] = modeVal; });
   }
 
   if (wizardState.currentIdx < wizardState.steps.length - 1) {
@@ -4047,9 +3996,17 @@ function wizardHTMLReview() {
 
 function wizardHTMLFirmware() {
   const yes = wizardState.needsFirmware === true;
-  const eraseDesc = yes
-    ? 'Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.'
-    : 'Erases all saved settings before pushing config — boards will reboot to a clean slate before receiving new configuration.';
+  // The erase-NVS checkbox only applies when uploading firmware
+  const eraseBlock = yes ? `
+    <div style="margin-top:12px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+        <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
+        <div>
+          <div style="font-weight:600;font-size:13px">Erase board memory before flashing ${wizHint('Erases all NVS (non-volatile storage) on the board before flashing — use for a true factory reset. Any previously saved passwords, sequences, or port settings will be wiped.')}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.</div>
+        </div>
+      </label>
+    </div>` : '';
   return `
     <div class="wizard-section-title">Firmware Upload</div>
     <div class="wizard-section-desc">Does WCB firmware need to be uploaded to these boards? Choose "Yes" if the boards are brand new or have never had WCB firmware installed.</div>
@@ -4067,15 +4024,7 @@ function wizardHTMLFirmware() {
         <span class="wizard-choice-desc">Firmware is already on the boards — just push configuration</span>
       </button>
     </div>
-    <div style="margin-top:12px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
-      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
-        <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
-        <div>
-          <div style="font-weight:600;font-size:13px">Overwrite existing board memory ${wizHint('Erases all NVS (non-volatile storage) on the board before applying config. Use this for a complete clean slate — any previously saved passwords, sequences, or port settings will be wiped.')}</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
-        </div>
-      </label>
-    </div>`;
+    ${eraseBlock}`;
 }
 
 function wizardFirmwareChoice(val, btn) {
