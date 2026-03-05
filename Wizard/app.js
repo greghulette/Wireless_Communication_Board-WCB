@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 14:37';
+const UI_VERSION = '2026.03.05 14:50';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -1304,6 +1304,8 @@ async function saveMappingRow(rowId, n) {
       termLog(n, cmd, 'in');
     }
     showToast(`Mapping saved to WCB ${config.wcbNumber || n}`, 'success');
+    // Sync the mapping into the baseline so Push Config won't re-send it as a diff
+    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
 
     // Bidir: add reverse mapping to each remote destination board's config
     if (bidir && type === 'Serial') {
@@ -2781,6 +2783,10 @@ async function boardGoRemote(n, opts = {}) {
     showToast(`Remote push failed: ${e.message}`, 'error');
     termLog(relayN, `[Remote] Error: ${e.message}`, 'err');
   }
+
+  // Always restore the button — boardGoRemote has no other reset path
+  if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+  if (pushSucceeded) updateBoardStatusBadge(n, 'configured');
 
   return pushSucceeded && needsReboot;
 }
