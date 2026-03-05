@@ -62,7 +62,7 @@
         <div class="subsection-title">Network Identity</div>
         <div class="field-group">
           <div class="field">
-            <label>Total WCB Quantity</label>
+            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options.">i</span></label>
             <select id="g-wcbq" onchange="onWCBQuantityChange()">
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
@@ -70,18 +70,18 @@
             </select>
           </div>
           <div class="field">
-            <label>ESP-NOW Password</label>
+            <label>ESP-NOW Password <span class="wiz-hint" data-tip="Shared passphrase for the ESP-NOW wireless mesh. Every board in the system must use the same password to communicate.">i</span></label>
             <input type="text" id="g-password" placeholder="change_me_or_risk_takeover" maxlength="39"
               oninput="onGeneralPasswordChange()" autocomplete="off" spellcheck="false">
           </div>
           <div class="field">
-            <label>MAC Octet 2 (hex)</label>
+            <label>MAC Octet 2 (hex) <span class="wiz-hint" data-tip="Second byte of the ESP-NOW broadcast MAC address (00-FF hex). Must match on all boards in the system.">i</span></label>
             <input type="text" id="g-mac2" placeholder="00" maxlength="2"
               oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
               style="text-transform:uppercase" spellcheck="false">
           </div>
           <div class="field">
-            <label>MAC Octet 3 (hex)</label>
+            <label>MAC Octet 3 (hex) <span class="wiz-hint tip-left" data-tip="Third byte of the ESP-NOW broadcast MAC address (00-FF hex). Must match on all boards in the system.">i</span></label>
             <input type="text" id="g-mac3" placeholder="00" maxlength="2"
               oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
               style="text-transform:uppercase" spellcheck="false">
@@ -93,17 +93,17 @@
         <div class="subsection-title advanced-only hidden">Command Characters <span class="text-muted">— must match across all boards</span></div>
         <div class="field-group advanced-only hidden">
           <div class="field">
-            <label>Command Delimiter</label>
+            <label>Command Delimiter <span class="wiz-hint" data-tip="Character that separates commands in a batch string. Default is ^. Must be identical on every board.">i</span></label>
             <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
               oninput="onGeneralCmdCharChange()">
           </div>
           <div class="field">
-            <label>Local Function Identifier</label>
+            <label>Local Function Identifier <span class="wiz-hint" data-tip="Prefix character for commands processed only by this board and not relayed to others. Default is ?.">i</span></label>
             <input type="text" id="g-funcchar" value="?" maxlength="1" spellcheck="false"
               oninput="onGeneralCmdCharChange()">
           </div>
           <div class="field">
-            <label>Command Character</label>
+            <label>Command Character <span class="wiz-hint" data-tip="Character that identifies a command string on the serial line. Default is ;. Must match across all boards.">i</span></label>
             <input type="text" id="g-cmdchar" value=";" maxlength="1" spellcheck="false"
               oninput="onGeneralCmdCharChange()">
           </div>
@@ -116,23 +116,23 @@
           <label class="toggle">
             <input type="checkbox" id="g-etm-enabled" checked onchange="onETMToggle()">
             <span class="toggle-track"></span>
-            <span class="toggle-label">ETM Enabled</span>
+            <span class="toggle-label">ETM Enabled <span class="wiz-hint" data-tip="ETM (Ensured Transmission Mode): retransmits dropped commands to guarantee all packets are delivered and acted upon by the target board.">i</span></span>
           </label>
         </div>
         <div class="etm-detail" id="etm-detail">
           <div class="field-group">
-            <div class="field"><label>Timeout (ms)</label><input type="number" id="g-etm-timeout" value="30000"></div>
-            <div class="field"><label>Heartbeat Interval (sec)</label><input type="number" id="g-etm-hb" value="10"></div>
-            <div class="field"><label>Missed Heartbeats</label><input type="number" id="g-etm-miss" value="3"></div>
-            <div class="field"><label>Boot Heartbeat (sec)</label><input type="number" id="g-etm-boot" value="30"></div>
-            <div class="field"><label>Message Count</label><input type="number" id="g-etm-count" value="3"></div>
-            <div class="field"><label>Message Delay (ms)</label><input type="number" id="g-etm-delay" value="100"></div>
+            <div class="field"><label>Timeout (ms) <span class="wiz-hint" data-tip="Milliseconds to wait before declaring a board unresponsive after it misses too many heartbeats.">i</span></label><input type="number" id="g-etm-timeout" value="30000"></div>
+            <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10"></div>
+            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3"></div>
+            <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="30"></div>
+            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="How many times to repeat the offline alert message when a board is detected as unresponsive.">i</span></label><input type="number" id="g-etm-count" value="3"></div>
+            <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100"></div>
           </div>
           <div class="toggle-wrap mt-8">
             <label class="toggle">
               <input type="checkbox" id="g-etm-chksm" checked onchange="onETMChecksumToggle()">
               <span class="toggle-track"></span>
-              <span class="toggle-label">Packet Checksum Verification</span>
+              <span class="toggle-label">Packet Checksum Verification <span class="wiz-hint" data-tip="Validates incoming packet integrity. Disable only if boards drop valid messages due to false checksum errors.">i</span></span>
             </label>
           </div>
         </div>
@@ -276,6 +276,23 @@
   </div>
 </div>
 
+<!-- ─── ETM Char / ESP-NOW Stats Modal ──────────────────────────── -->
+<div class="modal-overlay" id="stats-modal" onclick="closeStatsModal(event)">
+  <div class="modal-dialog stats-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="stats-modal-title">Stats</span>
+      <button class="modal-close" onclick="closeStatsModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:16px">
+      <pre class="stats-modal-output" id="stats-modal-output">Fetching…</pre>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="refreshStatsModal()">↺ Refresh</button>
+      <button class="btn btn-primary btn-sm" onclick="closeStatsModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── Toast Container ──────────────────────────────────────────── -->
 <div class="toast-container" id="toast-container"></div>
 
@@ -302,6 +319,8 @@
       <!-- Action Bar -->
       <div class="board-action-bar">
         <div class="action-bar-right" style="margin-left:auto">
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-etm-char" onclick="openStatsModal({N},'etm')" disabled title="Run ETM characterization on this board">ETM Char</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-stats" onclick="openStatsModal({N},'stats')" disabled title="View ESP-NOW statistics for this board">ESP-NOW Stats</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>Push Config</button>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardFactoryReset({N})" disabled title="Erase all settings and reboot — optionally re-flash firmware">🏭 Factory Reset</button>
@@ -323,7 +342,7 @@
       <div class="subsection-title">Board Identity</div>
       <div class="field-group">
         <div class="field">
-          <label>WCB Number</label>
+          <label>WCB Number <span class="wiz-hint" data-tip="This board's unique ID in the system (1-8).">i</span></label>
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
             <option value="1">1</option>
             <option value="2">2</option>
@@ -336,7 +355,7 @@
           </select>
         </div>
         <div class="field">
-          <label>Hardware Version</label>
+          <label>Hardware Version <span class="wiz-hint" data-tip="Physical board revision. Determines which pins the serial ports and LED utilize.">i</span></label>
           <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
             <option value="0">— Select —</option>
             <option value="1">1.0  (LilyGo T7 V1.5)</option>
@@ -348,7 +367,7 @@
           </select>
         </div>
         <div class="field">
-          <label>Software Version</label>
+          <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
           <div style="display:flex;align-items:center;gap:8px">
             <span id="b{N}-sw-version"
                   style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
@@ -368,10 +387,10 @@
         <thead>
           <tr>
             <th>Port</th>
-            <th>Baud Rate</th>
-            <th>Bcast IN</th>
-            <th>Bcast OUT</th>
-            <th>Label</th>
+            <th>Baud Rate <span class="wiz-hint" data-tip="Serial communication speed for this port. Must match the baud rate of the device connected to it.">i</span></th>
+            <th>Bcast IN <span class="wiz-hint" data-tip="Determines if data received on this serial port is broadcast over ESP-NOW to all other boards in the system.">i</span></th>
+            <th>Bcast OUT <span class="wiz-hint" data-tip="Determines if broadcast messages from other WCB boards are forwarded out this serial port to the connected device.">i</span></th>
+            <th>Label <span class="wiz-hint" data-tip="Friendly name for this port (e.g. Dome, Body). Used for display only — does not affect behavior.">i</span></th>
             <th style="min-width:140px">Status</th>
           </tr>
         </thead>
@@ -384,7 +403,7 @@
       <div class="subsection-title">Kyber</div>
       <div class="field-group">
         <div class="field">
-          <label>Kyber Mode</label>
+          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board. Remote: Kyber is on another WCB.">i</span></label>
           <div class="radio-group">
             <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
@@ -392,7 +411,7 @@
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
-          <label>Kyber Maestro Port</label>
+          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to.">i</span></label>
           <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2" selected>Serial 2</option>
@@ -402,7 +421,7 @@
           </select>
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
-          <label>Kyber Maestro Baud</label>
+          <label>Kyber Maestro Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with the Kyber Maestro Port.">i</span></label>
           <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
             <option value="9600">9,600</option>
             <option value="38400">38,400</option>
@@ -411,7 +430,7 @@
           </select>
         </div>
         <div class="field" id="b{N}-kyber-marc-port-wrap" style="display:none">
-          <label>Kyber Marcuino Port</label>
+          <label>Kyber Marcuino Port <span class="wiz-hint tip-left" data-tip="Optional port connected to a Marcuino board for routing Kyber serial commands. (Baudrate is automatically set to 9600)">i</span></label>
           <select id="b{N}-kyber-marc-port" onchange="onKyberMarcPortChange({N})">
             <option value="0">— None —</option>
             <option value="1">Serial 1</option>
@@ -443,9 +462,9 @@
           <thead>
             <tr>
               <th style="width:60px">#</th>
-              <th>Maestro ID</th>
-              <th>Port</th>
-              <th>Baud</th>
+              <th>Maestro ID <span class="wiz-hint" data-tip="Numeric ID for this Maestro controller. Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
+              <th>Port <span class="wiz-hint" data-tip="Serial port this Maestro is connected to on this board.">i</span></th>
+              <th>Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with this Maestro controller.">i</span></th>
               <th style="width:60px"></th>
             </tr>
           </thead>
@@ -456,17 +475,17 @@
 
       <hr class="divider">
 
-      <!-- Mappings (Advanced Only) -->
-      <div class="advanced-only hidden">
+      <!-- Mappings -->
+      <div>
         <div class="flex items-center gap-8 mb-12">
           <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Mappings</div>
           <button class="btn btn-ghost btn-sm" onclick="addMappingRow({N})">+ Add Mapping</button>
         </div>
         <div class="mapping-col-headers" id="b{N}-mapping-headers" style="display:none">
-          <span class="mc-type">Type</span>
-          <span class="mc-src">Source Port</span>
-          <span class="mc-raw">Raw</span>
-          <span class="mc-bidir">Bidir</span>
+          <span class="mc-type">Type <span class="wiz-hint" data-tip="Mapping protocol: Serial (TTL serial data) or PWM (RC-style servo signal).">i</span></span>
+          <span class="mc-src">Source Port <span class="wiz-hint" data-tip="The local port whose incoming data will be forwarded to the configured destination(s).">i</span></span>
+          <span class="mc-raw">Raw <span class="wiz-hint" data-tip="Forward data byte-for-byte without command parsing. Use for devices that do not utilize \r or \n at the end of their commands/packets.">i</span></span>
+          <span class="mc-bidir">Bidir <span class="wiz-hint" data-tip="Bidirectional: automatically creates a return mapping on the remote board so data flows both ways.">i</span></span>
           <span class="mc-spacer"></span>
         </div>
         <div id="b{N}-mappings-container"></div>
@@ -482,8 +501,8 @@
       <table class="seq-table">
         <thead>
           <tr>
-            <th style="width:150px">Key</th>
-            <th>Value</th>
+            <th style="width:150px">Key <span class="wiz-hint" data-tip="Short name used to trigger this sequence with a ;SEQ command (e.g. ;SEQSTARTUP).">i</span></th>
+            <th>Value <span class="wiz-hint tip-left" data-tip="The command string that executes when this sequence is triggered. Each line is a separate command that gets combined when pushed to the board. Can add comments after each command by using ***comment">i</span></th>
             <th style="width:80px">Actions</th>
           </tr>
         </thead>

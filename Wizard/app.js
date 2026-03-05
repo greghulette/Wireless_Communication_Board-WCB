@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 15:37';
+const UI_VERSION = '2026.03.05 17:40';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -247,7 +247,7 @@ function addBoardSection(n) {
   section.classList.add(`board-color-${((n - 1) % 8) + 1}`);
   document.getElementById('boards-container').appendChild(section);
 
-  // If already in advanced mode, unhide advanced-only elements in the new section
+  // Apply current app mode to any remaining advanced-only elements in the new section
   if (appMode === 'advanced') {
     section.querySelectorAll('.advanced-only').forEach(el => el.classList.remove('hidden'));
   }
@@ -1240,23 +1240,28 @@ function detectBidirMappings(n) {
   container.querySelectorAll('[id^="map-row-"]').forEach(row => {
     if (row.dataset.bidirFrom) return; // skip auto-generated rows
     const rowId = row.id;
-    const type  = document.getElementById(`${rowId}-type`)?.value;
-    const src   = parseInt(document.getElementById(`${rowId}-src`)?.value);
-    if (type !== 'Serial' || !src) return;
+    const src = parseInt(document.getElementById(`${rowId}-src`)?.value);
+    if (!src) return;
 
-    let allBidir = true;
+    // Read destinations from config data (more reliable than DOM selects)
+    const mapping = config.mappings.find(m =>
+      m.type.toUpperCase() === 'SERIAL' && m.sourcePort === src
+    );
+    if (!mapping) return;
+
     let hasRemoteDest = false;
-    document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(dr => {
-      const wcb  = parseInt(dr.querySelector('[id$="-wcb"]')?.value) || 0;
-      const port = parseInt(dr.querySelector('[id$="-port"]')?.value);
-      if (!wcb || !boardConfigs[wcb]) { allBidir = false; return; }
+    let allBidir = true;
+
+    for (const dest of mapping.destinations) {
+      if (!dest.wcbNumber || !boardConfigs[dest.wcbNumber]) { allBidir = false; continue; }
       hasRemoteDest = true;
-      const hasReverse = boardConfigs[wcb].mappings.some(m =>
-        m.type === 'Serial' && m.sourcePort === port &&
+      const hasReverse = boardConfigs[dest.wcbNumber].mappings.some(m =>
+        m.type.toUpperCase() === 'SERIAL' &&
+        m.sourcePort === dest.port &&
         m.destinations.some(d => d.wcbNumber === localWCB && d.port === src)
       );
       if (!hasReverse) allBidir = false;
-    });
+    }
 
     const cb = document.getElementById(`${rowId}-bidir`);
     if (cb) cb.checked = hasRemoteDest && allBidir;
@@ -1880,9 +1885,13 @@ function setRemoteConnected(n, relayN) {
   const goBtn       = document.getElementById(`b${n}-btn-go`);
   const eraseBtn    = document.getElementById(`b${n}-btn-erase`);
   const identifyBtn = document.getElementById(`b${n}-btn-identify`);
+  const etmCharBtn  = document.getElementById(`b${n}-btn-etm-char`);
+  const statsBtn    = document.getElementById(`b${n}-btn-stats`);
   if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting', 'btn-primary'); connBtn.classList.add('btn-danger'); }
   if (pullBtn)     { pullBtn.disabled = false; pullBtn.textContent = 'Pull Config'; }
   if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
+  if (etmCharBtn)  etmCharBtn.disabled = false;
+  if (statsBtn)    statsBtn.disabled   = false;
   // Dim the Factory Reset button but keep it clickable so the user gets a toast explanation
   if (eraseBtn) {
     eraseBtn.disabled      = false;   // must explicitly enable — button starts as disabled in HTML
@@ -2653,9 +2662,13 @@ function updateConnectionUI(n, connected) {
   const connBtn     = document.getElementById(`b${n}-btn-connect`);
   const eraseBtn    = document.getElementById(`b${n}-btn-erase`);
   const identifyBtn = document.getElementById(`b${n}-btn-identify`);
+  const etmCharBtn  = document.getElementById(`b${n}-btn-etm-char`);
+  const statsBtn    = document.getElementById(`b${n}-btn-stats`);
   if (pullBtn)     { pullBtn.disabled = !connected; if (!connected) pullBtn.textContent = 'Pull Config'; }
   if (goBtn)       goBtn.disabled       = !connected;
   if (eraseBtn)    eraseBtn.disabled    = !connected;
+  if (etmCharBtn)  etmCharBtn.disabled  = !connected;
+  if (statsBtn)    statsBtn.disabled    = !connected;
   if (identifyBtn) identifyBtn.disabled = !connected;
   if (connBtn) {
     connBtn.textContent = connected ? 'Disconnect' : 'Connect';
@@ -5362,6 +5375,113 @@ function wizardStartConnectWatchers() {
         }
       }, 500);
     }
+  }
+}
+
+// ─── ETM Char / ESP-NOW Stats Modal ───────────────────────────────
+let _statsBoardN = null;
+let _statsType   = null;   // 'etm' | 'stats'
+
+function openStatsModal(n, type) {
+  _statsBoardN = n;
+  _statsType   = type;
+  const titles = {
+    etm:   `ETM Characterization — WCB ${n}`,
+    stats: `ESP-NOW Stats — WCB ${n}`,
+  };
+  document.getElementById('stats-modal-title').textContent = titles[type] || `Stats — WCB ${n}`;
+  document.getElementById('stats-modal-output').textContent = 'Fetching…';
+  document.getElementById('stats-modal').classList.add('open');
+  fetchStatsData();
+}
+
+function closeStatsModal(event) {
+  if (event && event.target !== document.getElementById('stats-modal')) return;
+  document.getElementById('stats-modal').classList.remove('open');
+  _statsBoardN = null;
+  _statsType   = null;
+}
+
+function refreshStatsModal() { fetchStatsData(); }
+
+async function fetchStatsData() {
+  const n    = _statsBoardN;
+  const type = _statsType;
+  if (n == null || !type) return;
+
+  const isEtm  = type === 'etm';
+  const config = boardConfigs[n];
+  const lfi    = config?.funcChar || '?';
+  const cmd    = isEtm ? `${lfi}ETM,CHAR` : `${lfi}STATS`;
+  const output = document.getElementById('stats-modal-output');
+  if (!output) return;
+
+  // ETM characterization runs 3 phases — warn the user it takes time
+  output.textContent = isEtm ? 'Running characterization — this takes about 10 seconds…' : 'Fetching…';
+
+  const relayN  = remoteRelayForBoard[n];
+  const timeout = isEtm ? 30000 : 3000;
+  try {
+    let result = '';
+    if (relayN) {
+      // ── Relay path: snapshot terminal, send via MGMT, wait, collect new lines ──
+      const termEl    = document.getElementById(`term-pane-output-${relayN}`);
+      const before    = termEl ? termEl.children.length : 0;
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) { output.textContent = 'Relay board not connected.'; return; }
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const mgmtCmd   = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+      await relayConn.send(mgmtCmd + '\r');
+      termLog(relayN, mgmtCmd, 'in');
+      await new Promise(r => setTimeout(r, isEtm ? 15000 : 2500));
+      if (termEl) {
+        const lines = [];
+        for (let i = before; i < termEl.children.length; i++) {
+          lines.push(termEl.children[i].textContent);
+        }
+        result = lines.join('\n') || '(no response received)';
+      } else {
+        result = '(check terminal for output)';
+      }
+    } else {
+      // ── Direct path: use sendAndCollect ──
+      // Sentinel is the last meaningful line of the ETM output; for ?STATS use a
+      // string that will never appear so the timeout acts as the stop condition.
+      const sentinel = isEtm ? 'Based on worst' : 'NOMATCH_STATS_DONE_XYZ';
+      const conn = boardConnections[n];
+      if (!conn?.isConnected()) { output.textContent = 'Board not connected.'; return; }
+      termLog(n, cmd, 'in');
+      result = await conn.sendAndCollect(cmd, timeout, sentinel);
+      result = result.trim() || '(no response received)';
+    }
+
+    // ETM: extract only the summary block. The output has TWO headers matching the same
+    // pattern — the opening banner at the top and the results banner at the end. We want
+    // the LAST occurrence, which is the results summary. findIndex returns the first, so
+    // we search backwards instead.
+    if (isEtm) {
+      const lines = result.split('\n');
+      let summaryIdx = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (/^-{3,}.*ETM Network Characterization.*-{3,}/.test(lines[i].trim())) {
+          summaryIdx = i;
+          break;
+        }
+      }
+      if (summaryIdx >= 0) {
+        result = lines.slice(summaryIdx).join('\n').trim();
+      } else {
+        // Summary banner not found — strip noise lines and show what we have
+        result = lines
+          .filter(l => !l.includes('[CHAR DEBUG]') && !l.startsWith('[ETM]'))
+          .join('\n')
+          .trim();
+      }
+    }
+
+    output.textContent = result || '(no response received)';
+  } catch (e) {
+    output.textContent = `Error: ${e.message}`;
   }
 }
 
