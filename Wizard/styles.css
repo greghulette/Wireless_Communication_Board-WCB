@@ -387,6 +387,8 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .btn-danger:hover { background: rgba(255,68,102,0.1); }
 .btn-warning { background: transparent; color: var(--yellow); border-color: rgba(255,204,0,0.3); }
 .btn-warning:hover { background: rgba(255,204,0,0.1); }
+.btn-pending { background: var(--yellow); color: #000; border-color: var(--yellow); }
+.btn-pending:hover { background: var(--yellow2); border-color: var(--yellow2); }
 .btn-sm { padding: 4px 10px; font-size: 11px; }
 .btn-icon { padding: 6px 8px; }
 
@@ -489,7 +491,15 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .mapping-card-main {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
-.mapping-card-main select  { font-family: var(--mono); font-size: 12px; }
+.mapping-card-main select {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  padding: 6px 8px; outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.mapping-card-main select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,212,255,0.1); }
+.mapping-card-main select option { background: var(--bg3); color: var(--text); }
 .mapping-card-main select.mc-type { width: 110px; flex-shrink: 0; }
 .mapping-card-main select.mc-src  { width: 140px; flex-shrink: 0; }
 .mapping-card-main .mc-toggle     { width: 68px;  flex-shrink: 0; display: flex; align-items: center; }

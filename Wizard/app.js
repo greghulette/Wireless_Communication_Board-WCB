@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 14:21';
+const UI_VERSION = '2026.03.05 14:37';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -748,15 +748,37 @@ function populateUIFromConfig(n, config) {
   updateKyberMarcPortDropdown(n);
   populateMaestrosFromConfig(n, config);
   populateMappingsFromConfig(n, config);
+  // Detect and mark bidirectional pairs once all board configs are available
+  detectBidirMappings(n);
+  // Also re-check other boards whose mappings point to this board
+  for (let bn = 1; bn <= 9; bn++) { if (bn !== n && boardConfigs[bn]) detectBidirMappings(bn); }
+}
+
+function updatePushAllButton() {
+  const btn = document.getElementById('btn-push-all');
+  if (!btn) return;
+  // Amber if any visible board section has an unsaved badge showing
+  const anyUnsaved = !!document.querySelector('[id$="-unsaved-badge"]:not([style*="none"])');
+  btn.classList.toggle('btn-success', !anyUnsaved);
+  btn.classList.toggle('btn-pending', anyUnsaved);
 }
 
 function updateBoardStatusBadge(n, state) {
   const unsavedBadge = document.getElementById(`b${n}-unsaved-badge`);
+  const goBtn        = document.getElementById(`b${n}-btn-go`);
   if (state === 'unsaved') {
     if (unsavedBadge) unsavedBadge.style.display = '';
+    // Amber Push Config button when there are pending changes
+    if (goBtn && !goBtn.disabled) {
+      goBtn.classList.remove('btn-success'); goBtn.classList.add('btn-pending');
+    }
+    updatePushAllButton();
     return;  // leave the connection badge alone
   }
   if (unsavedBadge) unsavedBadge.style.display = 'none';
+  // Restore Push Config button to green
+  if (goBtn) { goBtn.classList.remove('btn-pending'); goBtn.classList.add('btn-success'); }
+  updatePushAllButton();
 
   const badge = document.getElementById(`b${n}-status-badge`);
   if (!badge) return;
@@ -948,7 +970,7 @@ function addMappingRow(n) {
   appendMappingRow(n, { type: 'Serial', sourcePort: null, rawMode: false, destinations: [] });
 }
 
-function appendMappingRow(n, mapping) {
+function appendMappingRow(n, mapping, { bidirFrom = null } = {}) {
   const container = document.getElementById(`b${n}-mappings-container`);
   if (!container) return;
 
@@ -961,6 +983,7 @@ function appendMappingRow(n, mapping) {
   const div      = document.createElement('div');
   div.id         = rowId;
   div.className  = 'mapping-card';
+  if (bidirFrom) div.dataset.bidirFrom = bidirFrom;
 
   div.innerHTML = `
     <div class="mapping-card-main">
@@ -977,9 +1000,9 @@ function appendMappingRow(n, mapping) {
           <span class="toggle-track"></span>
         </label>
       </span>
-      <span class="mc-toggle" id="${rowId}-bidir-wrap" style="visibility:${isSerial?'visible':'hidden'}" title="Add reverse mapping on the destination board when saved">
+      <span class="mc-toggle" id="${rowId}-bidir-wrap" style="visibility:${isSerial?'visible':'hidden'}" title="Mirror this mapping on the destination board automatically">
         <label class="toggle">
-          <input type="checkbox" id="${rowId}-bidir" ${mapping.bidir?'checked':''} onchange="onMappingChange('${rowId}',${n})">
+          <input type="checkbox" id="${rowId}-bidir" ${mapping.bidir?'checked':''} onchange="onBidirChange('${rowId}',${n})">
           <span class="toggle-track"></span>
         </label>
       </span>
@@ -1045,6 +1068,14 @@ function onMappingTypeChange(rowId, n) {
 function onMappingChange(rowId, n) {
   syncMappingsToConfig(n);
   onBoardFieldChange(n);
+  // If bidir is active, refresh reverse mappings whenever source/dest changes
+  if (document.getElementById(`${rowId}-bidir`)?.checked) applyBidirMapping(rowId, n);
+}
+
+function onBidirChange(rowId, n) {
+  syncMappingsToConfig(n);
+  onBoardFieldChange(n);
+  applyBidirMapping(rowId, n);
 }
 
 function syncMappingsToConfig(n) {
@@ -1088,12 +1119,112 @@ function syncMappingsToConfig(n) {
 }
 
 function removeMappingRow(rowId, n) {
+  // Remove any bidir reverse-mapping rows that were created by this row
+  _removeBidirRows(rowId);
   document.getElementById(rowId)?.remove();
-  // Hide column headers if no rows remain
   const container = document.getElementById(`b${n}-mappings-container`);
   const headers   = document.getElementById(`b${n}-mapping-headers`);
   if (headers && container && container.children.length === 0) headers.style.display = 'none';
   syncMappingsToConfig(n);
+}
+
+function _removeBidirRows(sourceRowId) {
+  for (let bn = 1; bn <= 9; bn++) {
+    const container = document.getElementById(`b${bn}-mappings-container`);
+    if (!container) continue;
+    const toRemove = [...container.querySelectorAll(`[data-bidir-from="${sourceRowId}"]`)];
+    if (!toRemove.length) continue;
+    toRemove.forEach(el => el.remove());
+    const headers = document.getElementById(`b${bn}-mapping-headers`);
+    if (headers && container.children.length === 0) headers.style.display = 'none';
+    syncMappingsToConfig(bn);
+  }
+}
+
+// Apply (or remove) auto-generated reverse mappings for a bidir mapping row.
+// Called when the bidir checkbox changes or when source/dest fields change while bidir is on.
+function applyBidirMapping(rowId, n) {
+  // Always clear previous auto-rows for this source first
+  _removeBidirRows(rowId);
+
+  const bidir = document.getElementById(`${rowId}-bidir`)?.checked ?? false;
+  if (!bidir) return;
+
+  const type = document.getElementById(`${rowId}-type`)?.value;
+  const src  = parseInt(document.getElementById(`${rowId}-src`)?.value);
+  const raw  = document.getElementById(`${rowId}-raw`)?.checked ?? false;
+  if (type !== 'Serial' || !src) return;
+
+  const localWCB = boardConfigs[n]?.wcbNumber || n;
+
+  document.getElementById(`${rowId}-destinations`)
+    ?.querySelectorAll('[id^="map-dest-"]')
+    .forEach(destRow => {
+      const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value) || 0;
+      const port = parseInt(destRow.querySelector('[id$="-port"]')?.value);
+      if (!wcb || isNaN(port) || !boardConfigs[wcb]) return;
+
+      const destCfg = boardConfigs[wcb];
+      // Skip if a manually-configured (non-bidir) reverse already exists
+      const destContainer = document.getElementById(`b${wcb}-mappings-container`);
+      const manualExists  = destContainer && [...destContainer.querySelectorAll('[id^="map-row-"]')]
+        .filter(r => !r.dataset.bidirFrom)
+        .some(r => {
+          const rSrc = parseInt(document.getElementById(`${r.id}-src`)?.value);
+          const dests = [...(document.getElementById(`${r.id}-destinations`)?.querySelectorAll('[id^="map-dest-"]') ?? [])];
+          return rSrc === port && dests.some(d => {
+            return parseInt(d.querySelector('[id$="-wcb"]')?.value) === localWCB &&
+                   parseInt(d.querySelector('[id$="-port"]')?.value) === src;
+          });
+        });
+      if (manualExists) return;
+
+      // Add reverse mapping to dest config
+      const reverseMapping = { type: 'Serial', sourcePort: port, rawMode: raw, bidir: false, destinations: [{ wcbNumber: localWCB, port: src }] };
+      destCfg.mappings.push(reverseMapping);
+
+      // Add row to dest board UI, tagged as auto-generated from this source row
+      const destHeaders = document.getElementById(`b${wcb}-mapping-headers`);
+      if (destHeaders) destHeaders.style.display = '';
+      appendMappingRow(wcb, reverseMapping, { bidirFrom: rowId });
+      syncMappingsToConfig(wcb);
+      updateBoardStatusBadge(wcb, 'unsaved');
+    });
+}
+
+// After a board pull, detect mapping pairs that are already bidirectional and
+// check the bidir checkbox on both sides automatically.
+function detectBidirMappings(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  const container = document.getElementById(`b${n}-mappings-container`);
+  if (!container) return;
+  const localWCB = config.wcbNumber || n;
+
+  container.querySelectorAll('[id^="map-row-"]').forEach(row => {
+    if (row.dataset.bidirFrom) return; // skip auto-generated rows
+    const rowId = row.id;
+    const type  = document.getElementById(`${rowId}-type`)?.value;
+    const src   = parseInt(document.getElementById(`${rowId}-src`)?.value);
+    if (type !== 'Serial' || !src) return;
+
+    let allBidir = true;
+    let hasRemoteDest = false;
+    document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(dr => {
+      const wcb  = parseInt(dr.querySelector('[id$="-wcb"]')?.value) || 0;
+      const port = parseInt(dr.querySelector('[id$="-port"]')?.value);
+      if (!wcb || !boardConfigs[wcb]) { allBidir = false; return; }
+      hasRemoteDest = true;
+      const hasReverse = boardConfigs[wcb].mappings.some(m =>
+        m.type === 'Serial' && m.sourcePort === port &&
+        m.destinations.some(d => d.wcbNumber === localWCB && d.port === src)
+      );
+      if (!hasReverse) allBidir = false;
+    });
+
+    const cb = document.getElementById(`${rowId}-bidir`);
+    if (cb) cb.checked = hasRemoteDest && allBidir;
+  });
 }
 
 function addMappingDestination(rowId, n) {
