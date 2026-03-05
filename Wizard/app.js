@@ -30,6 +30,11 @@ const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to for
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
 
+// ─── UI Version ───────────────────────────────────────────────────
+// Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
+// Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
+const UI_VERSION = '2026.03.05 14:08';
+
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
 let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
@@ -43,6 +48,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initTerminalResize();
   showSplash();
   fetchLatestFirmwareVersion();  // silent, best-effort
+  const footerVer = document.getElementById('footer-ui-version');
+  if (footerVer) footerVer.textContent = UI_VERSION;
 });
 
 // ─── Firmware Version (fetched from GitHub) ───────────────────────
@@ -273,7 +280,7 @@ function renderSerialTable(n) {
         <span class="toggle-track"></span>
       </label></td>
       <td><input type="text" id="b${n}-s${p}-label" placeholder="Label…" maxlength="20"
-        oninput="onSerialFieldChange(${n})" spellcheck="false"></td>
+        onchange="onSerialFieldChange(${n})" spellcheck="false"></td>
       <td><span class="claimed-note" id="b${n}-s${p}-claim"></span></td>
     `;
     tbody.appendChild(row);
@@ -499,6 +506,25 @@ function onKyberMarcPortChange(n) {
   onBoardFieldChange(n);
 }
 
+// ─── Change Reminder Toasts ────────────────────────────────────────
+// Show a push reminder on the first change to a board or general settings,
+// but not on every keystroke — suppress once shown until the next pull/push.
+const _boardChangedToastShown = {};  // { n: boolean }
+let _generalChangedToastShown = false;
+
+function _notifyBoardChanged(n) {
+  if (_boardChangedToastShown[n]) return;
+  _boardChangedToastShown[n] = true;
+  const wcbNum = boardConfigs[n]?.wcbNumber || n;
+  showToast(`Changes pending — push to WCB ${wcbNum} to apply`, 'info', 3000);
+}
+
+function _notifyGeneralChanged() {
+  if (_generalChangedToastShown) return;
+  _generalChangedToastShown = true;
+  showToast('Changes pending — push to all boards to apply', 'info', 3000);
+}
+
 // ─── General Field Handlers ────────────────────────────────────────
 function onWCBQuantityChange() {
   const qty = parseInt(document.getElementById('g-wcbq').value) || 1;
@@ -511,6 +537,7 @@ function onGeneralPasswordChange() {
   systemConfig.general.espnowPassword = val;
   for (const n in boardConfigs) boardConfigs[n].espnowPassword = val;
   updateGeneralBaseline();
+  _notifyGeneralChanged();
 }
 
 function onGeneralMacChange() {
@@ -520,6 +547,7 @@ function onGeneralMacChange() {
   systemConfig.general.macOctet3 = m3;
   for (const n in boardConfigs) { boardConfigs[n].macOctet2 = m2; boardConfigs[n].macOctet3 = m3; }
   updateGeneralBaseline();
+  _notifyGeneralChanged();
 }
 
 function validateMacOctet(input) {
@@ -545,6 +573,7 @@ function onGeneralCmdCharChange() {
     boardConfigs[n].cmdChar   = systemConfig.general.cmdChar;
   }
   updateGeneralBaseline();
+  _notifyGeneralChanged();
 }
 
 // Keep generalBaseline in sync whenever the user edits general fields in the UI,
@@ -561,12 +590,14 @@ function onETMToggle() {
   if (appMode === 'advanced' && enabled) etmDetail.classList.add('visible');
   else etmDetail.classList.remove('visible');
   for (const n in boardConfigs) boardConfigs[n].etm.enabled = enabled;
+  _notifyGeneralChanged();
 }
 
 function onETMChecksumToggle() {
   const enabled = document.getElementById('g-etm-chksm')?.checked ?? true;
   systemConfig.general.etm.checksumEnabled = enabled;
   for (const n in boardConfigs) boardConfigs[n].etm.checksumEnabled = enabled;
+  _notifyGeneralChanged();
 }
 
 // ─── General Settings Conflict Helpers ────────────────────────────
@@ -598,6 +629,7 @@ function getGeneralMismatches(a, b) {
 
 // ─── Board Field Handlers ─────────────────────────────────────────
 function onBoardFieldChange(n) {
+  _notifyBoardChanged(n);
   updateBoardStatusBadge(n, 'unsaved');
 }
 
@@ -732,6 +764,11 @@ function updateBoardStatusBadge(n, state) {
     return;  // leave the connection badge alone
   }
   if (unsavedBadge) unsavedBadge.style.display = 'none';
+  // Reset toast flags so the reminder fires again after the next round of edits.
+  if (state === 'connected' || state === 'configured') {
+    _boardChangedToastShown[n] = false;
+    _generalChangedToastShown = false;
+  }
 
   const badge = document.getElementById(`b${n}-status-badge`);
   if (!badge) return;
