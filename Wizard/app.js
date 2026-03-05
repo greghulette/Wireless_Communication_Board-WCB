@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 14:50';
+const UI_VERSION = '2026.03.05 14:57';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open

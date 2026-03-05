@@ -461,7 +461,7 @@ function parseToken(body, config) {
 
       } else if (mapType === 'SERIAL') {
         // ?MAP,SERIAL,S1  or  ?MAP,SERIAL,S1,R,S2,W2S3  — serial mapping
-        parseMappingToken('SERIAL', parts, upperParts, config);
+        parseMappingToken('Serial', parts, upperParts, config);
       }
       break;
     }
@@ -861,8 +861,8 @@ function buildCommandString(config, baseline = null, fullPush = false) {
     JSON.stringify(baseline.mappings) !== JSON.stringify(config.mappings);
   if (mappingsChanged) {
     for (const m of config.mappings) {
-      let cmd = `MAP,${m.type},S${m.sourcePort}`;
-      if (m.type === 'SERIAL' && m.rawMode) cmd += ',R';
+      let cmd = `MAP,${m.type.toUpperCase()},S${m.sourcePort}`;
+      if (m.type.toUpperCase() === 'SERIAL' && m.rawMode) cmd += ',R';
       for (const dest of m.destinations) {
         cmd += dest.wcbNumber === 0
           ? `,S${dest.port}`
