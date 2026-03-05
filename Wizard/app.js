@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 14:59';
+const UI_VERSION = '2026.03.05 15:03';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -1118,7 +1118,11 @@ function syncMappingsToConfig(n) {
   updatePortClaimUI(n);
 }
 
-function removeMappingRow(rowId, n) {
+async function removeMappingRow(rowId, n) {
+  // Capture mapping info before removing from DOM
+  const type = document.getElementById(`${rowId}-type`)?.value;
+  const src  = parseInt(document.getElementById(`${rowId}-src`)?.value);
+
   // Remove any bidir reverse-mapping rows that were created by this row
   _removeBidirRows(rowId);
   document.getElementById(rowId)?.remove();
@@ -1126,6 +1130,33 @@ function removeMappingRow(rowId, n) {
   const headers   = document.getElementById(`b${n}-mapping-headers`);
   if (headers && container && container.children.length === 0) headers.style.display = 'none';
   syncMappingsToConfig(n);
+
+  // Send clear command to the board
+  if (!type || !src) return;
+  const config = boardConfigs[n];
+  const lfi    = config?.funcChar || '?';
+  const cmd    = `${lfi}MAP,${type.toUpperCase()},CLEAR,S${src}`;
+  const relayN = remoteRelayForBoard[n];
+  try {
+    if (relayN) {
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return; }
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+      await relayConn.send(mgmtCmd + '\r');
+      termLog(relayN, mgmtCmd, 'in');
+    } else {
+      const conn = boardConnections[n];
+      if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return; }
+      await conn.send(cmd + '\r');
+      termLog(n, cmd, 'in');
+    }
+    showToast(`Mapping cleared on WCB ${config?.wcbNumber || n}`, 'success');
+    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config?.mappings || []));
+  } catch (err) {
+    console.error('[removeMappingRow] send failed:', err);
+    showToast('Failed to clear mapping on board', 'error');
+  }
 }
 
 function _removeBidirRows(sourceRowId) {
