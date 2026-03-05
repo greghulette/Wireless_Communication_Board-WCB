@@ -499,7 +499,7 @@ function parseMappingToken(type, parts, upperParts, config) {
   let rawMode    = false;
   let destStart  = 3;
 
-  if (type === 'SERIAL' && upperParts[3] === 'R') {
+  if (type.toUpperCase() === 'SERIAL' && upperParts[3] === 'R') {
     rawMode   = true;
     destStart = 4;
   }
