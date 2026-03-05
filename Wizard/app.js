@@ -301,7 +301,10 @@ function updatePortClaimUI(n) {
       claimNote.textContent = '';
       baudSel.disabled = false; bcin.disabled = false; bcout.disabled = false; label.disabled = false;
     } else if (claim.type === 'kyber') {
-      claimNote.textContent = 'Managed by Kyber';
+      claimNote.textContent = 'Managed by Kyber (Maestro port)';
+      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
+    } else if (claim.type === 'kyber-marc') {
+      claimNote.textContent = 'Managed by Kyber (Marcuino port)';
       baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
     } else if (claim.type === 'maestro') {
       claimNote.textContent = `Managed by Maestro ID ${claim.id}`;
@@ -316,25 +319,32 @@ function updatePortClaimUI(n) {
 
 // ─── Kyber ────────────────────────────────────────────────────────
 function onKyberChange(n) {
-  const mode     = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
+  const mode        = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
   const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
   const baudWrap    = document.getElementById(`b${n}-kyber-baud-wrap`);
+  const marcWrap    = document.getElementById(`b${n}-kyber-marc-port-wrap`);
   const targetsWrap = document.getElementById(`b${n}-kyber-targets-wrap`);
   portWrap.style.display = mode === 'local' ? '' : 'none';
   if (baudWrap)    baudWrap.style.display    = mode === 'local' ? '' : 'none';
+  if (marcWrap)    marcWrap.style.display    = mode === 'local' ? '' : 'none';
   if (targetsWrap) targetsWrap.style.display = mode === 'local' ? '' : 'none';
 
   const config = boardConfigs[n];
   if (!config) return;
 
   for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'kyber') port.claimedBy = null;
+    if (port.claimedBy?.type === 'kyber' || port.claimedBy?.type === 'kyber-marc')
+      port.claimedBy = null;
   }
 
   config.kyber.mode = mode;
-  if (mode !== 'local') config.kyber.port = null;
+  if (mode !== 'local') {
+    config.kyber.port = null;
+    config.kyber.marcduinoPort = null;
+  }
 
   updateKyberPortDropdown(n);
+  updateKyberMarcPortDropdown(n);
 
   if (mode === 'local') {
     const portVal = parseInt(document.getElementById(`b${n}-kyber-port`)?.value);
@@ -346,11 +356,20 @@ function onKyberChange(n) {
       const baudSel = document.getElementById(`b${n}-kyber-baud`);
       if (baudSel) baudSel.value = kyberBaud;
     }
+    const marcVal = parseInt(document.getElementById(`b${n}-kyber-marc-port`)?.value) || 0;
+    if (marcVal >= 1 && marcVal <= 5) {
+      config.kyber.marcduinoPort = marcVal;
+      config.serialPorts[marcVal - 1].claimedBy  = { type: 'kyber-marc' };
+      config.serialPorts[marcVal - 1].baud        = 9600;
+      config.serialPorts[marcVal - 1].broadcastIn  = true;
+      config.serialPorts[marcVal - 1].broadcastOut = true;
+    }
   }
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
+  updateKyberMarcPortDropdown(n);
 }
 
 function onKyberPortChange(n) {
@@ -374,6 +393,7 @@ function onKyberPortChange(n) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
+  updateKyberMarcPortDropdown(n);  // maestro port changed — re-filter marc dropdown
 }
 
 function onKyberBaudChange(n) {
@@ -401,6 +421,7 @@ function updateKyberPortDropdown(n) {
   portSel.innerHTML = '';
   for (let p = 1; p <= 5; p++) {
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    // Exclude ports claimed by anything except the Kyber Maestro port itself
     if (!claim || claim.type === 'kyber') {
       const opt = document.createElement('option');
       opt.value = p;
@@ -409,6 +430,72 @@ function updateKyberPortDropdown(n) {
       portSel.appendChild(opt);
     }
   }
+}
+
+function updateKyberMarcPortDropdown(n) {
+  const marcSel = document.getElementById(`b${n}-kyber-marc-port`);
+  if (!marcSel) return;
+
+  const config      = boardConfigs[n];
+  const currentPort = config?.kyber?.marcduinoPort;
+
+  marcSel.innerHTML = '<option value="0">— None —</option>';
+  for (let p = 1; p <= 5; p++) {
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    // Exclude ports claimed by anything except the Kyber Marcuino port itself
+    if (!claim || claim.type === 'kyber-marc') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      marcSel.appendChild(opt);
+    }
+  }
+}
+
+function onKyberMarcPortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  // Clear any existing Kyber Marcuino claim and its label
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    if (config.serialPorts[i].claimedBy?.type === 'kyber-marc') {
+      config.serialPorts[i].claimedBy = null;
+      if (config.serialPorts[i].label === 'Kyber Marcuino') {
+        config.serialPorts[i].label = '';
+        const labelEl = document.getElementById(`b${n}-s${i + 1}-label`);
+        if (labelEl) labelEl.value = '';
+      }
+    }
+  }
+
+  const marcVal = parseInt(document.getElementById(`b${n}-kyber-marc-port`)?.value) || 0;
+  config.kyber.marcduinoPort = marcVal >= 1 && marcVal <= 5 ? marcVal : null;
+
+  if (config.kyber.marcduinoPort) {
+    const idx = config.kyber.marcduinoPort - 1;
+    const p   = config.kyber.marcduinoPort;
+    config.serialPorts[idx].claimedBy    = { type: 'kyber-marc' };
+    config.serialPorts[idx].baud         = 9600;
+    config.serialPorts[idx].broadcastIn  = true;
+    config.serialPorts[idx].broadcastOut = true;
+    config.serialPorts[idx].label        = 'Kyber Marcuino';   // used to recover marcduinoPort after boardPull
+    // Reflect into the serial port UI fields so the display matches
+    const baudEl  = document.getElementById(`b${n}-s${p}-baud`);
+    const bcinEl  = document.getElementById(`b${n}-s${p}-bcin`);
+    const bcoutEl = document.getElementById(`b${n}-s${p}-bcout`);
+    const labelEl = document.getElementById(`b${n}-s${p}-label`);
+    if (baudEl)  baudEl.value    = 9600;
+    if (bcinEl)  bcinEl.checked  = true;
+    if (bcoutEl) bcoutEl.checked = true;
+    if (labelEl) labelEl.value   = 'Kyber Marcuino';
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateKyberPortDropdown(n);
+  updateKyberMarcPortDropdown(n);
+  onBoardFieldChange(n);
 }
 
 // ─── General Field Handlers ────────────────────────────────────────
@@ -543,8 +630,11 @@ function syncKyberToConfig(n) {
       // Keep serial port baud in sync so the ?BAUD command is generated correctly
       config.serialPorts[portVal - 1].baud = baud;
     }
+    const marcVal = parseInt(document.getElementById(`b${n}-kyber-marc-port`)?.value) || 0;
+    config.kyber.marcduinoPort = marcVal >= 1 && marcVal <= 5 ? marcVal : null;
   } else {
     config.kyber.port = null;
+    config.kyber.marcduinoPort = null;
   }
 }
 
@@ -588,7 +678,10 @@ function populateUIFromConfig(n, config) {
     if (tw) tw.style.display = isLocal ? '' : 'none';
     const bw = document.getElementById(`b${n}-kyber-baud-wrap`);
     if (bw) bw.style.display = isLocal ? '' : 'none';
+    const mw = document.getElementById(`b${n}-kyber-marc-port-wrap`);
+    if (mw) mw.style.display = isLocal ? '' : 'none';
     updateKyberPortDropdown(n);
+    updateKyberMarcPortDropdown(n);
     if (isLocal && config.kyber.port) {
       const portSel = document.getElementById(`b${n}-kyber-port`);
       if (portSel) portSel.value = config.kyber.port;
@@ -600,6 +693,8 @@ function populateUIFromConfig(n, config) {
       if (baudSel) baudSel.value = kyberBaud;
     }
     if (isLocal) {
+      const marcSel = document.getElementById(`b${n}-kyber-marc-port`);
+      if (marcSel) marcSel.value = config.kyber.marcduinoPort ?? 0;
       populateKyberTargetsFromConfig(n, config);
     }
   }
@@ -708,9 +803,9 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
 
   portSel.innerHTML = '<option value="">— Select —</option>';
   for (let p = 1; p <= 5; p++) {
-    // Exclude ports claimed by kyber or other maestro rows
+    // Exclude ports claimed by kyber (either port) or other maestro rows
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    const claimedByKyber = claim?.type === 'kyber';
+    const claimedByKyber = claim?.type === 'kyber' || claim?.type === 'kyber-marc';
     if (claimedByKyber || otherClaims.has(p)) continue;
 
     const opt = document.createElement('option');
@@ -1659,6 +1754,7 @@ async function boardManualConnect(n) {
     const conn = new BoardConnection(n);
     await conn.connect(null, usedPorts);
     boardConnections[n] = conn;
+    delete remoteRelayForBoard[n];   // direct USB connection — not routed via relay
     updateConnectionUI(n, true);
     showToast(`Connected to WCB ${n} — pulling config…`, 'success');
     setTimeout(() => boardPull(n), 500);
@@ -2090,7 +2186,7 @@ async function boardGo(n, opts = {}) {
     if (_needsReboot) {
       if (!skipReboot) {
         // ── Reboot path ─────────────────────────────────────────────────
-        await sleep(300);
+        await sleep(1500);   // allow board time to finish all NVS writes before rebooting
         await conn.send('?reboot\r');
         termLog(n, '?reboot', 'in');
 
@@ -2255,7 +2351,7 @@ async function boardGoRemote(n, opts = {}) {
   syncSerialUIToConfig(n);
   syncMaestrosToConfig(n);
   syncKyberToConfig(n);
-  syncKyberTargetsToConfig(n);
+  autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
@@ -3233,13 +3329,29 @@ function populateKyberTargetsFromConfig(n, _config) {
 function autoComputeKyberTargets(n) {
   const config = boardConfigs[n];
   if (!config || config.kyber.mode !== 'local') return;
+
+  // Preserve the existing target list (populated from the last ?backup) so that
+  // remote maestros on boards that haven't connected yet are still included.
+  // Connected boards always win — their live boardConfigs[b].maestros take priority.
+  const prevTargets = config.kyber.targets ?? [];
+
   config.kyber.targets = [];
+  const foundIds = new Set();
+
   for (let b = 1; b <= 9; b++) {
     const bc = boardConfigs[b];
     if (!bc?.maestros?.length) continue;
     const wcbNum = bc.wcbNumber || b;
     for (const m of bc.maestros) {
       config.kyber.targets.push({ id: m.id, wcb: wcbNum, port: m.port, baud: m.baud });
+      foundIds.add(m.id);
+    }
+  }
+
+  // Fall back to previously-known targets for maestros whose board isn't connected yet.
+  for (const t of prevTargets) {
+    if (!foundIds.has(t.id)) {
+      config.kyber.targets.push(t);
     }
   }
 }
@@ -3429,7 +3541,7 @@ function wizardDefaultState() {
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
-                     bootHeartbeatSec:30, messageCount:3, messageDelayMs:100 },
+                     bootHeartbeatSec:30, messageCount:20, messageDelayMs:100 },
     needsFirmware: false,
     eraseNvs:      false,
     activeBoardTab: 0,
@@ -4474,6 +4586,8 @@ function wizardApplyConfig() {
     // ETM
     if (ws.etmEnabled) {
       cfg.etm = { enabled: true, ...ws.etmConfig };
+    } else {
+      cfg.etm.enabled = false;
     }
 
     boardConfigs[n] = cfg;
@@ -4484,8 +4598,8 @@ function wizardApplyConfig() {
   });
 
   // ETM global toggle
+  const etmEl = document.getElementById('g-etm-enabled');
   if (ws.etmEnabled) {
-    const etmEl = document.getElementById('g-etm-enabled');
     if (etmEl) { etmEl.checked = true; onETMToggle(); }
     setEl('g-etm-timeout', ws.etmConfig.timeoutMs);
     setEl('g-etm-hb',      ws.etmConfig.heartbeatSec);
@@ -4494,6 +4608,9 @@ function wizardApplyConfig() {
     setEl('g-etm-count',   ws.etmConfig.messageCount);
     setEl('g-etm-delay',   ws.etmConfig.messageDelayMs);
     systemConfig.general.etm = { enabled: true, ...ws.etmConfig };
+  } else {
+    if (etmEl) { etmEl.checked = false; onETMToggle(); }
+    systemConfig.general.etm = { ...systemConfig.general.etm, enabled: false };
   }
 
   showToast('Config page updated from wizard', 'success');
@@ -4556,16 +4673,21 @@ function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {
   let attempts = 0;
   const iv = setInterval(async () => {
     attempts++;
-    if (boardConnections[n]?.isConnected()) {
+    // Wait until the board is connected AND the initial ?backup has completed.
+    // boardBaselines[n] being non-null means boardPull finished — the board is
+    // fully booted and responsive, so it's safe to push the full config.
+    if (boardConnections[n]?.isConnected() && boardBaselines[n]) {
       clearInterval(iv);
       delete wizardConnectWatchers[n];
       wizardEnableConnectBtns(n);           // hide Cancel, restore Auto/Manual
       wizardSetConnectStatus(n, 'busy', 'Pushing…');
 
-      // Restore wizard config — the initial boardPull may have overwritten it.
+      // Restore wizard config — boardPull will have overwritten boardConfigs[n]
+      // and the general DOM fields with the board's current values.  Put the
+      // wizard's intended config back before pushing.
       if (configSnapshot) {
         boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
-        boardBaselines[n] = null;   // force a full push (NVS is blank after flash)
+        boardBaselines[n] = null;   // force a full push
         populateUIFromConfig(n, boardConfigs[n]);
       }
       restoreGeneralDOMSnapshot(generalSnapshot);
@@ -4621,38 +4743,58 @@ function wizardCheckAllDone() {
 }
 
 function wizardStartConnectWatchers() {
-  // Auto-start push for already-connected boards
+  // For boards already connected when the wizard reaches the connect step,
+  // trigger a fresh ?backup first (same as wizardWatchForConnect does for
+  // newly-connected boards) so we confirm the board is booted and responsive
+  // before pushing.
   for (let i = 0; i < wizardState.quantity; i++) {
     const n = i + 1;
     if (boardConnections[n]?.isConnected()) {
-      // Snapshot wizard config now (wizardApplyConfig just ran).
-      // Also force a full push by clearing the baseline — boardPull may have
-      // set a baseline from the board's current NVS, causing an empty delta.
       const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
       const generalSnapshot = captureGeneralDOMSnapshot();
+
       wizardDisableConnectBtns(n);
-      wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
-      (async () => {
-        try {
+      wizardSetConnectStatus(n, 'busy', '🔍 Pulling…');
+
+      // Clear the baseline so we can detect when the fresh pull completes.
+      boardBaselines[n] = null;
+      boardPull(n);   // async — fires ?backup, sets boardBaselines[n] when done
+
+      let attempts = 0;
+      const iv = setInterval(async () => {
+        attempts++;
+        if (boardBaselines[n]) {
+          // boardPull finished — board is booted and responsive.
+          clearInterval(iv);
+          wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
+
+          // Restore the wizard's intended config (boardPull overwrites boardConfigs[n]).
           if (configSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
-            boardBaselines[n] = null;   // force full push — ignore any prior pulled baseline
+            boardBaselines[n] = null;   // force full push
             populateUIFromConfig(n, boardConfigs[n]);
           }
           restoreGeneralDOMSnapshot(generalSnapshot);
-          await boardGo(n);
-          if (boardConnections[n]?.isConnected()) {
-            wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
-            await sleep(800);
-            await boardPull(n);
+
+          try {
+            await boardGo(n);
+            if (boardConnections[n]?.isConnected()) {
+              wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
+              await sleep(800);
+              await boardPull(n);
+            }
+            wizardEnableConnectBtns(n);
+            wizardSetConnectStatus(n, 'ok', '✓ Done');
+          } catch(e) {
+            wizardEnableConnectBtns(n);
+            wizardSetConnectStatus(n, 'err', '✕ Push failed');
           }
+        } else if (attempts > 60) { // 30s timeout for pull
+          clearInterval(iv);
           wizardEnableConnectBtns(n);
-          wizardSetConnectStatus(n, 'ok', '✓ Done');
-        } catch(e) {
-          wizardEnableConnectBtns(n);
-          wizardSetConnectStatus(n, 'err', '✕ Push failed');
+          wizardSetConnectStatus(n, 'err', '✕ Pull timed out');
         }
-      })();
+      }, 500);
     }
   }
 }

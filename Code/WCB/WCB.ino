@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_041540RMAR2026                                    *****////
+///*****                                          Version 6.0_042207RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -136,7 +136,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_041540RMAR2026";
+String SoftwareVersion = "6.0_042207RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1883,7 +1883,25 @@ String buildConfigString() {
     preferences.begin("kyber_settings", true);
     int kPort = preferences.getInt("K_Port", 2);
     preferences.end();
-    append("KYBER,LOCAL,S" + String(kPort));
+    String kyberCmd = "KYBER,LOCAL,S" + String(kPort);
+    // Append all enabled Kyber targets so the backup fully restores the routing table
+    for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+      if (!kyberTargets[i].enabled) continue;
+      // Look up baud from maestro config; fall back to the port's current baud rate
+      uint32_t baud = 9600;
+      int8_t slot = findSlotByMaestroID(kyberTargets[i].maestroID);
+      if (slot >= 0 && maestroConfigs[slot].baudRate > 0) {
+        baud = maestroConfigs[slot].baudRate;
+      } else if (kyberTargets[i].targetWCB == (uint8_t)WCB_Number &&
+                 kyberTargets[i].targetPort >= 1 && kyberTargets[i].targetPort <= 5) {
+        baud = baudRates[kyberTargets[i].targetPort - 1];
+      }
+      kyberCmd += ",M" + String(kyberTargets[i].maestroID) +
+                  ":W" + String(kyberTargets[i].targetWCB) +
+                  "S" + String(kyberTargets[i].targetPort) +
+                  ":" + String(baud);
+    }
+    append(kyberCmd);
   } else if (Kyber_Remote) {
     append("KYBER,REMOTE");
   } else {

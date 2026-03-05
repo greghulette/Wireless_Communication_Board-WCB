@@ -351,7 +351,7 @@
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
-          <label>Kyber Port</label>
+          <label>Kyber Maestro Port</label>
           <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2" selected>Serial 2</option>
@@ -361,12 +361,23 @@
           </select>
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
-          <label>Kyber Baud</label>
+          <label>Kyber Maestro Baud</label>
           <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
             <option value="9600">9,600</option>
             <option value="38400">38,400</option>
             <option value="57600">57,600</option>
             <option value="115200" selected>115,200</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-kyber-marc-port-wrap" style="display:none">
+          <label>Kyber Marcuino Port</label>
+          <select id="b{N}-kyber-marc-port" onchange="onKyberMarcPortChange({N})">
+            <option value="0">— None —</option>
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
           </select>
         </div>
       </div>

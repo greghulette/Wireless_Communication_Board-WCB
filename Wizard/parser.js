@@ -45,9 +45,10 @@ function createDefaultBoardConfig() {
 
     // Kyber
     kyber: {
-      mode: 'none',   // 'none' | 'local' | 'remote'
-      port: null,     // 1-5, only relevant for 'local'
-      baud: 115200,   // baud rate of the Kyber serial port (mirrors serialPorts[port-1].baud)
+      mode:          'none',  // 'none' | 'local' | 'remote'
+      port:          null,    // 1-5 — Maestro port, only relevant for 'local'
+      baud:          115200,  // baud rate of the Kyber Maestro serial port
+      marcduinoPort: null,    // 1-5 — Marcuino port (9600, broadcasts), or null
     },
 
     // Maestros — array of { id, port, baud }
@@ -63,7 +64,7 @@ function createDefaultBoardConfig() {
       heartbeatSec:     10,
       missedHeartbeats: 3,
       bootHeartbeatSec: 30,
-      messageCount:     3,
+      messageCount:     20,
       messageDelayMs:   100,
     },
 
@@ -200,6 +201,17 @@ function parseBackupString(rawOutput) {
     // Strip leading ? to get the command body
     const body = trimmed.substring(1);
     parseToken(body, config);
+  }
+
+  // After parsing, infer the Kyber Marcuino port from the serial port label so
+  // the UI can restore it after a boardPull.  The label 'Kyber Marcuino' is
+  // written to the board during the push; it comes back in the backup as
+  // ?LABEL,S<n>,Kyber Marcuino which the LABEL parser case stores on the port.
+  if (config.kyber.mode === 'local') {
+    const marcIdx = config.serialPorts.findIndex(
+      p => p.label?.toLowerCase() === 'kyber marcuino'
+    );
+    config.kyber.marcduinoPort = marcIdx >= 0 ? marcIdx + 1 : null;
   }
 
   // After parsing, evaluate port claims
@@ -542,11 +554,17 @@ function evaluatePortClaims(config) {
     port.claimedBy = null;
   }
 
-  // Kyber claims its port (local mode only)
-  if (config.kyber.mode === 'local' && config.kyber.port) {
-    const idx = config.kyber.port - 1;
-    if (idx >= 0 && idx < 5) {
-      config.serialPorts[idx].claimedBy = { type: 'kyber' };
+  // Kyber claims its ports (local mode only)
+  if (config.kyber.mode === 'local') {
+    if (config.kyber.port) {
+      const idx = config.kyber.port - 1;
+      if (idx >= 0 && idx < 5)
+        config.serialPorts[idx].claimedBy = { type: 'kyber' };
+    }
+    if (config.kyber.marcduinoPort) {
+      const idx = config.kyber.marcduinoPort - 1;
+      if (idx >= 0 && idx < 5)
+        config.serialPorts[idx].claimedBy = { type: 'kyber-marc' };
     }
   }
 
