@@ -128,6 +128,13 @@
             <div class="field"><label>Message Count</label><input type="number" id="g-etm-count" value="3"></div>
             <div class="field"><label>Message Delay (ms)</label><input type="number" id="g-etm-delay" value="100"></div>
           </div>
+          <div class="toggle-wrap mt-8">
+            <label class="toggle">
+              <input type="checkbox" id="g-etm-chksm" checked onchange="onETMChecksumToggle()">
+              <span class="toggle-track"></span>
+              <span class="toggle-label">Packet Checksum Verification</span>
+            </label>
+          </div>
         </div>
 
       </div>
@@ -231,6 +238,40 @@
     <div class="modal-footer" style="gap:8px">
       <button class="btn btn-ghost btn-sm" id="network-group-change-cancel">Cancel</button>
       <button class="btn btn-danger btn-sm" id="network-group-change-confirm">I understand — push anyway</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Factory Reset Modal ──────────────────────────────────────── -->
+<div class="modal-overlay" id="factory-reset-modal" onclick="closeFactoryResetModal(event)">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title" id="factory-reset-modal-title">🏭 Factory Reset WCB</span>
+      <button class="modal-close" onclick="closeFactoryResetModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin:0 0 14px;color:var(--text2);font-size:13px;line-height:1.5">
+        This will erase <strong>all stored settings</strong> including baud rates, MAC octets,
+        ESP-NOW password, WCB number, hardware version, sequences, and Kyber config.
+        Choose how to proceed:
+      </p>
+      <button class="modal-option" onclick="doFactoryResetWithFw()">
+        <span class="modal-option-icon">💾</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Erase NVS + Load Fresh Firmware</div>
+          <div class="modal-option-desc">Erase all settings and re-flash the latest firmware. Complete clean slate — use for a true fresh start.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="doFactoryResetEraseOnly()">
+        <span class="modal-option-icon">🗑</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Erase NVS Only</div>
+          <div class="modal-option-desc">Erase all settings but keep the existing firmware. The board will reboot with factory defaults.</div>
+        </div>
+      </button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeFactoryResetModal()">Cancel</button>
     </div>
   </div>
 </div>

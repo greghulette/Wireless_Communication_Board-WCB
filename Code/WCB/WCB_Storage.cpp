@@ -148,7 +148,10 @@ void saveWCBNumberToPreferences(int wcb_number_f) {
     preferences.begin("wcb_config", false);
     preferences.putInt("WCB_Number", wcb_number_f);
     preferences.end();
-    Serial.printf("Changed WCB Number to: %d\nPlease reboot to take effect\n", wcb_number_f);
+    WCB_Number = wcb_number_f;   // take effect immediately so MAESTRO/KYBER commands
+                                  // processed in the same push use the correct WCB number;
+                                  // full network re-init (peers, MAC, ETM) still requires reboot
+    Serial.printf("Changed WCB Number to: %d\nPlease reboot to take full effect\n", wcb_number_f);
 }
 
 // Load baud rates from preferences
@@ -1816,7 +1819,7 @@ void loadETMSettings() {
     etmTimeoutMs        = preferences.getInt("etmTimeout", 500);
     etmCharMessageCount = preferences.getInt("etmCharCount", 20);
     etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);
-    etmChecksumEnabled = preferences.getBool("etmChksm", false);
+    etmChecksumEnabled = preferences.getBool("etmChksm", true);
     preferences.end();
     if (etmEnabled) {
         Serial.println("ETM: ENABLED ⚠️  Ensure all boards match firmware!");

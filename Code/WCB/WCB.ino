@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_042207RMAR2026                                    *****////
+///*****                                          Version 6.0_051107RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -136,7 +136,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_042207RMAR2026";
+String SoftwareVersion = "6.0_051107RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -194,7 +194,7 @@ int etmMissedHeartbeats = 3;
 int etmTimeoutMs = 500;
 int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
-bool etmChecksumEnabled = false;   // ETM packet checksum verification (off by default)
+bool etmChecksumEnabled = true;    // ETM packet checksum verification (on by default)
 bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
 // ETM Board Status Table
 struct BoardStatus {
@@ -1919,6 +1919,7 @@ String buildConfigString() {
   append("ETM,BOOT,"    + String(etmBootHeartbeatSec));
   append("ETM,COUNT,"   + String(etmCharMessageCount));
   append("ETM,DELAY,"   + String(etmCharDelayMs));
+  append("ETM,CHKSM,"   + String(etmChecksumEnabled ? "ON" : "OFF"));
 
   // Stored sequences
   preferences.begin("stored_cmds", true);

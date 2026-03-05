@@ -66,6 +66,7 @@ function createDefaultBoardConfig() {
       bootHeartbeatSec: 30,
       messageCount:     20,
       messageDelayMs:   100,
+      checksumEnabled:  true,
     },
 
     // Stored Sequences — array of { key, value }
@@ -108,6 +109,7 @@ function createDefaultSystemConfig() {
         bootHeartbeatSec: 30,
         messageCount:     3,
         messageDelayMs:   100,
+        checksumEnabled:  true,
       },
     },
 
@@ -420,6 +422,7 @@ function parseToken(body, config) {
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 30;     break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 3;      break;
         case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
+        case 'CHKSM':   config.etm.checksumEnabled   = (parts[2]?.toUpperCase() === 'ON'); break;
       }
       break;
     }
@@ -841,6 +844,7 @@ function buildCommandString(config, baseline = null, fullPush = false) {
     if (fullPush || !betm || betm.bootHeartbeatSec  !== etm.bootHeartbeatSec)  add(`ETM,BOOT,${etm.bootHeartbeatSec}`);
     if (fullPush || !betm || betm.messageCount      !== etm.messageCount)      add(`ETM,COUNT,${etm.messageCount}`);
     if (fullPush || !betm || betm.messageDelayMs    !== etm.messageDelayMs)    add(`ETM,DELAY,${etm.messageDelayMs}`);
+    if (fullPush || !betm || betm.checksumEnabled   !== etm.checksumEnabled)   add(`ETM,CHKSM,${etm.checksumEnabled ? 'ON' : 'OFF'}`);
   }
 
   // ── PWM Output Ports ──

@@ -15,6 +15,7 @@ let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
 let boardFlashMode   = {};      // { boardIndex: 'configure'|'update'|'flash'|'factory' }
+let postFlashGeneralSnapshot = {};  // { boardIndex: generalSnapshot } — saved before flash, restored on next push
 
 // ─── Connect Modal State ───────────────────────────────────────────
 let _connectModalSlot = null;   // which board slot the modal is open for
@@ -562,6 +563,12 @@ function onETMToggle() {
   for (const n in boardConfigs) boardConfigs[n].etm.enabled = enabled;
 }
 
+function onETMChecksumToggle() {
+  const enabled = document.getElementById('g-etm-chksm')?.checked ?? true;
+  systemConfig.general.etm.checksumEnabled = enabled;
+  for (const n in boardConfigs) boardConfigs[n].etm.checksumEnabled = enabled;
+}
+
 // ─── General Settings Conflict Helpers ────────────────────────────
 const GENERAL_FIELD_LABELS = {
   espnowPassword: 'ESP-NOW Password',
@@ -709,6 +716,7 @@ function populateUIFromConfig(n, config) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
+  updateKyberMarcPortDropdown(n);
   populateMaestrosFromConfig(n, config);
   populateMappingsFromConfig(n, config);
 }
@@ -743,7 +751,7 @@ function updateBoardStatusBadge(n, state) {
 
 // ─── Maestro ──────────────────────────────────────────────────────
 function addMaestroRow(n) {
-  appendMaestroRow(n, { id: 1, port: null, baud: 57600 });
+  appendMaestroRow(n, { id: 1, port: null, baud: 115200 });
 }
 
 function appendMaestroRow(n, maestro, readOnly = false) {
@@ -2047,10 +2055,11 @@ async function boardGo(n, opts = {}) {
   const isFlash   = mode === 'flash';
   const isUpdate  = mode === 'update';
   const isFactory = mode === 'factory';
+  const isErase   = mode === 'erase';
   const btn       = document.getElementById(`b${n}-btn-go`);
 
   btn.disabled = true;
-  btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : 'Pushing…';
+  btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : isErase ? 'Erasing…' : 'Pushing…';
 
   if (isFlash || isUpdate || isFactory) {
     // ── Validate HW version ──────────────────────────────────────
@@ -2061,6 +2070,13 @@ async function boardGo(n, opts = {}) {
       btn.textContent = 'Push Config';
       return;
     }
+
+    // ── Snapshot config and DOM NOW — before the flash starts ────────────
+    // The flash takes 30–60 s; during that window other boardPulls can
+    // overwrite boardConfigs[n] and the shared general DOM fields (password,
+    // MACs, WCBQ), so we must capture here while everything is still correct.
+    const preFlashConfigSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+    const preFlashGeneralSnapshot = captureGeneralDOMSnapshot();
 
     // ── Save port ref, then close normal connection ───────────────
     const savedPort = conn.port;
@@ -2107,26 +2123,22 @@ async function boardGo(n, opts = {}) {
           showToast(`WCB ${n} updated — verifying config…`, 'success');
           setTimeout(() => boardPull(n), 4000);
         } else {
-          // Flash or Factory Reset: NVS is blank, push full config.
-          // Snapshot the wizard config right now — boardPull can still fire
-          // (e.g. from the initial connect handler) and overwrite boardConfigs[n]
-          // plus the shared general DOM fields before the 4 s push window expires.
-          const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
-          const generalSnapshot = captureGeneralDOMSnapshot();
-          boardBaselines[n] = null;
+          // Flash or Factory Reset: NVS is blank.
+          // Restore the pre-flash config snapshot so boardConfigs[n] is ready,
+          // then offer the user a Push Config button rather than auto-pushing.
+          // This lets them verify the config is correct before it's sent.
+          if (preFlashConfigSnapshot) {
+            boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+            boardBaselines[n] = null;   // force full push
+            populateUIFromConfig(n, boardConfigs[n]);
+          }
+          // Store the pre-flash general snapshot so boardGo can restore it
+          // just before reading the DOM (DOM may have drifted while flashing).
+          postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
+
           const resetLabel = isFactory ? 'factory reset' : 'flashed';
-          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
-          showToast(`WCB ${n} reconnected — pushing config…`, 'success');
-          setTimeout(() => {
-            // Restore wizard config in case boardPull overwrote it during the window
-            if (configSnapshot) {
-              boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
-              boardBaselines[n] = null;
-              populateUIFromConfig(n, boardConfigs[n]);
-            }
-            restoreGeneralDOMSnapshot(generalSnapshot);
-            boardGo(n);
-          }, 4000);
+          termLog(n, `Reconnected after ${resetLabel} — click Push Config to send the configuration`, 'sys');
+          showPostFlashPrompt(n, resetLabel);
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -2142,8 +2154,78 @@ async function boardGo(n, opts = {}) {
     return;
   }
 
+  // ── Erase-only path (already installed, erase NVS then push config) ─────
+  if (isErase) {
+    // Snapshot the full wizard config NOW before any erase/reconnect happens.
+    // After the board comes back, something (auto-detect, startup handler) may
+    // trigger a boardPull that overwrites boardConfigs[n] with factory defaults.
+    // We restore this snapshot inside the setTimeout callback — right before
+    // calling boardGo — so the full push always uses the intended wizard config
+    // regardless of any intervening pulls.
+    const preEraseConfigSnapshot = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+
+    termLog(n, '?ERASE,NVS', 'in');
+    try {
+      await conn.send('?ERASE,NVS\r');
+      // Firmware counts down ~3 s before erasing and rebooting.
+      // Closing the serial port immediately causes a USB-disconnect reset that
+      // fires BEFORE the erase runs — so we wait 4 s to let the firmware finish.
+      termLog(n, 'Waiting for firmware erase countdown…', 'sys');
+      showToast(`WCB ${n} erasing — do not disconnect…`, 'warning', 5000);
+      await sleep(4000);
+      termLog(n, 'NVS erased — board rebooting…', 'sys');
+      updateBoardStatusBadge(n, 'default');
+
+      await conn.closeForReconnect();
+      updateConnectionUI(n, false);
+      boardFlashMode[n] = 'configure';   // reset so follow-up push is a normal configure
+      termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+
+      const reconnected = await conn.reconnect(10, 1500);
+      if (reconnected) {
+        updateConnectionUI(n, true);
+        termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
+        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+        // NVS is blank; wait a moment for the board to fully boot, then restore
+        // the pre-erase config snapshot and force a full push (baseline=null).
+        // Restoring inside the callback guards against any boardPull that may
+        // have fired during the wait and overwritten boardConfigs[n].
+        // We also re-populate the UI from the snapshot so that syncKyberToConfig /
+        // syncSerialUIToConfig / syncMaestrosToConfig read the correct DOM state —
+        // without this, a pull during the wait would have reset the radio buttons and
+        // dropdowns to factory defaults, causing buildCommandString to emit KYBER,CLEAR
+        // instead of the intended KYBER,LOCAL configuration.
+        setTimeout(() => {
+          if (preEraseConfigSnapshot) {
+            boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
+            boardBaselines[n] = null;   // force full push — board NVS is blank
+            populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+          }
+          boardGo(n, { mode: 'configure' });
+        }, 3000);
+      } else {
+        termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
+        showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
+      }
+    } catch (e) {
+      showToast(`Erase failed: ${e.message}`, 'error');
+      termLog(n, `Erase error: ${e.message}`, 'err');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Push Config';
+    return;
+  }
+
   let _needsReboot = false;
   try {
+    // If this push follows a flash/factory reset, restore the pre-flash general DOM
+    // snapshot now so the correct network settings (password, MACs, WCBQ) are used.
+    // The DOM may have drifted during the long flash operation.
+    if (postFlashGeneralSnapshot[n]) {
+      restoreGeneralDOMSnapshot(postFlashGeneralSnapshot[n]);
+      delete postFlashGeneralSnapshot[n];
+    }
+
     // Collect current UI state into config
     syncSerialUIToConfig(n);
     syncMaestrosToConfig(n);
@@ -2575,6 +2657,8 @@ function syncGeneralFromConfig(config) {
     set('g-etm-delay',   config.etm.messageDelayMs);
     if (appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   }
+  const chksmEl = document.getElementById('g-etm-chksm');
+  if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
 }
 
 // ─── General DOM Snapshot ─────────────────────────────────────────
@@ -2829,7 +2913,8 @@ function exportSystemFile() {
   systemConfig.general.delimiter      = document.getElementById('g-delimiter').value || '^';
   systemConfig.general.funcChar       = document.getElementById('g-funcchar').value  || '?';
   systemConfig.general.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
-  systemConfig.general.etm.enabled    = document.getElementById('g-etm-enabled').checked;
+  systemConfig.general.etm.enabled         = document.getElementById('g-etm-enabled').checked;
+  systemConfig.general.etm.checksumEnabled = document.getElementById('g-etm-chksm')?.checked ?? true;
 
   systemConfig.boards = [];
   const qty = systemConfig.general.wcbQuantity;
@@ -3416,36 +3501,40 @@ async function boardIdentify(n) {
 }
 
 // ─── Factory Reset ────────────────────────────────────────────────
-async function boardFactoryReset(n) {
+let _factoryResetSlot = null;   // board slot the factory-reset modal is open for
+
+function boardFactoryReset(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
-  const confirmed = confirm(
-    `⚠️ FACTORY RESET WCB ${n}?\n\n` +
-    `This will erase ALL stored settings including:\n` +
-    `  • Baud rates & broadcast settings\n` +
-    `  • MAC address octets\n` +
-    `  • ESP-NOW password\n` +
-    `  • WCB number & quantity\n` +
-    `  • Hardware version\n` +
-    `  • Stored sequences & commands\n` +
-    `  • Kyber settings\n\n` +
-    `The board will reboot after erasing.\n\nAre you sure?`
-  );
-  if (!confirmed) return;
+  _factoryResetSlot = n;
+  document.getElementById('factory-reset-modal-title').textContent = `🏭 Factory Reset WCB ${n}`;
+  document.getElementById('factory-reset-modal').classList.add('open');
+}
 
-  // Offer to also re-flash firmware
-  const alsoFlash = confirm(
-    `Re-flash firmware after reset?\n\n` +
-    `Click OK to erase settings AND re-flash the latest firmware onto WCB ${n}.\n` +
-    `Click Cancel to erase settings only and reboot.`
-  );
+function closeFactoryResetModal(event) {
+  if (event && event.target !== document.getElementById('factory-reset-modal')) return;
+  document.getElementById('factory-reset-modal').classList.remove('open');
+  _factoryResetSlot = null;
+}
 
-  if (alsoFlash) {
-    // Delegate to boardGo with factory mode — handles erase + flash + reconnect
-    boardGo(n, { mode: 'factory' });
-    return;
-  }
+function doFactoryResetWithFw() {
+  const n = _factoryResetSlot;
+  document.getElementById('factory-reset-modal').classList.remove('open');
+  _factoryResetSlot = null;
+  if (!n) return;
+  // Delegate to boardGo with factory mode — handles erase + flash + reconnect + push prompt
+  boardGo(n, { mode: 'factory' });
+}
+
+async function doFactoryResetEraseOnly() {
+  const n = _factoryResetSlot;
+  document.getElementById('factory-reset-modal').classList.remove('open');
+  _factoryResetSlot = null;
+  if (!n) return;
+
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   // ── Erase-only path ──────────────────────────────────────────────
   termLog(n, '?ERASE,NVS', 'in');
@@ -3468,7 +3557,7 @@ async function boardFactoryReset(n) {
       const reconnected = await conn.reconnect(10, 1500);
       if (reconnected) {
         updateConnectionUI(n, true);
-        termLog(n, 'Reconnected after factory reset', 'sys');
+        termLog(n, 'Reconnected after NVS erase', 'sys');
         showToast(`WCB ${n} reconnected`, 'success');
         termLog(n, 'Auto-pulling config…', 'sys');
         setTimeout(() => boardPull(n), 3000);
@@ -3478,7 +3567,7 @@ async function boardFactoryReset(n) {
       }
     })();
   } catch (e) {
-    showToast(`Factory reset failed: ${e.message}`, 'error');
+    showToast(`Erase failed: ${e.message}`, 'error');
   }
 }
 
@@ -3514,6 +3603,40 @@ function showToast(message, type = 'info', duration = 3500) {
   return toast;
 }
 
+// Shows a persistent action prompt after a flash/factory reset reconnect.
+// Gives the user the chance to verify the config before pushing instead
+// of auto-pushing with potentially stale DOM state.
+function showPostFlashPrompt(n, resetLabel) {
+  // Remove any previous prompt for this board
+  document.getElementById(`post-flash-prompt-${n}`)?.remove();
+
+  const container = document.getElementById('toast-container');
+  const toast     = document.createElement('div');
+  toast.id        = `post-flash-prompt-${n}`;
+  toast.className = 'toast info';
+  toast.innerHTML = `
+    <span>⚡</span>
+    <span class="toast-msg">WCB ${n} ${resetLabel} &amp; reconnected — push config to finish setup</span>
+    <button class="toast-btn" id="post-flash-push-${n}"
+            style="background:var(--accent);color:#fff;border:none;border-radius:4px;
+                   padding:2px 10px;cursor:pointer;font-size:11px;white-space:nowrap">
+      Push Config
+    </button>
+    <button class="toast-btn toast-dismiss" title="Dismiss">✕</button>`;
+
+  toast.querySelector(`#post-flash-push-${n}`).addEventListener('click', () => {
+    toast.remove();
+    boardGo(n);
+  });
+  toast.querySelector('.toast-dismiss').addEventListener('click', () => {
+    toast.remove();
+    delete postFlashGeneralSnapshot[n];   // discard snapshot if user dismisses
+  });
+
+  container.appendChild(toast);
+  // No auto-dismiss — stays until the user pushes or dismisses
+}
+
 // ─── Setup Wizard ─────────────────────────────────────────────────
 
 // ── State ──────────────────────────────────────────────────────────
@@ -3535,13 +3658,14 @@ function wizardDefaultState() {
     kyberBoard:          1,
     kyberPort:           2,
     kyberBaud:           115200,
-    kyberMarcduinoPort:  null,
+    kyberMarcduinoPort:  3,
     kyberTargets:        [],
     maestroEnabled: false,
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
-                     bootHeartbeatSec:30, messageCount:20, messageDelayMs:100 },
+                     bootHeartbeatSec:30, messageCount:20, messageDelayMs:100,
+                     checksumEnabled:true },
     needsFirmware: false,
     eraseNvs:      false,
     activeBoardTab: 0,
@@ -3620,7 +3744,7 @@ function wizardNext() {
 
   // After firmware choice is made, record the flash mode for each board
   if (key === 'firmware') {
-    const modeVal = !wizardState.needsFirmware ? 'configure'
+    const modeVal = !wizardState.needsFirmware ? (wizardState.eraseNvs ? 'erase' : 'configure')
                   : wizardState.eraseNvs       ? 'factory'
                   :                              'update';
     wizardState.boards.forEach((b, i) => { boardFlashMode[i + 1] = modeVal; });
@@ -4072,6 +4196,10 @@ function wizardHTMLEtm() {
         <label>Boot heartbeat (sec) ${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}</label>
         <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
       </div>
+      <div class="wizard-field-row">
+        <label>Packet Checksum Verification ${wizHint('Adds a checksum to ETM packets so boards can detect and discard corrupted messages. Recommended — leave enabled unless debugging specific issues.')}</label>
+        <input type="checkbox" id="wiz-etm-chksm" ${(etmConfig.checksumEnabled ?? true) ? 'checked' : ''}>
+      </div>
     </div>`;
 }
 
@@ -4108,17 +4236,26 @@ function wizardHTMLReview() {
 
 function wizardHTMLFirmware() {
   const yes = wizardState.needsFirmware === true;
-  // The erase-NVS checkbox only applies when uploading firmware
-  const eraseBlock = yes ? `
+  // Erase checkbox is shown for both paths, but description text differs
+  const eraseHint  = yes
+    ? wizHint('Erases all NVS (non-volatile storage) on the board before flashing — use for a true factory reset. Any previously saved passwords, sequences, or port settings will be wiped.')
+    : wizHint('Sends ?ERASE,NVS to the board, waits for it to reboot, then pushes the configuration — use when you want a clean slate without re-flashing firmware. All saved settings will be cleared.');
+  const eraseTitle = yes
+    ? 'Erase board memory before flashing'
+    : 'Erase board memory (NVS only — no firmware re-flash)';
+  const eraseDesc  = yes
+    ? 'Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.'
+    : 'Clears all saved settings on the board, then pushes configuration — no firmware re-flash required.';
+  const eraseBlock = `
     <div style="margin-top:12px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
       <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
         <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
         <div>
-          <div style="font-weight:600;font-size:13px">Erase board memory before flashing ${wizHint('Erases all NVS (non-volatile storage) on the board before flashing — use for a true factory reset. Any previously saved passwords, sequences, or port settings will be wiped.')}</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:2px">Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.</div>
+          <div style="font-weight:600;font-size:13px">${eraseTitle} ${eraseHint}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
         </div>
       </label>
-    </div>` : '';
+    </div>`;
   return `
     <div class="wizard-section-title">Firmware Upload</div>
     <div class="wizard-section-desc">Does WCB firmware need to be uploaded to these boards? Choose "Yes" if the boards are brand new or have never had WCB firmware installed.</div>
@@ -4173,10 +4310,10 @@ function wizardHTMLConnect() {
     const isSeq    = connectMode === 'seq';
     const isActive = !isSeq || n === connectSeqN;
     const isDimmed = isSeq && n > connectSeqN;
-    const fwBadge = !needsFirmware ? ''
-      : eraseNvs
-        ? `<span class="badge badge-red"    style="font-size:9px;padding:2px 6px">Factory Reset</span>`
-        : `<span class="badge badge-yellow" style="font-size:9px;padding:2px 6px">Upload FW</span>`;
+    const fwBadge = !needsFirmware && !eraseNvs ? ''
+      : needsFirmware && eraseNvs  ? `<span class="badge badge-red"    style="font-size:9px;padding:2px 6px">Factory Reset</span>`
+      : needsFirmware              ? `<span class="badge badge-yellow" style="font-size:9px;padding:2px 6px">Upload FW</span>`
+      :                              `<span class="badge badge-orange" style="font-size:9px;padding:2px 6px">Erase NVS</span>`;
     return `
       <div class="wizard-connect-row ${isDimmed ? 'wiz-connect-dimmed' : ''}" id="wiz-connect-row-${n}">
         <span class="wizard-connect-label">
@@ -4367,7 +4504,7 @@ function wizardMaestroBoardChange(mi) {
 
 function wizardAddMaestro() {
   wizardSaveStep('maestro-config'); // preserve existing rows before adding
-  wizardState.maestros.push({ boardSlot: 1, id: wizardState.maestros.length + 1, port: 1, baud: 57600 });
+  wizardState.maestros.push({ boardSlot: 1, id: wizardState.maestros.length + 1, port: 1, baud: 115200 });
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('maestro-config');
 }
 function wizardRemoveMaestro(mi) {
@@ -4432,6 +4569,7 @@ function wizardSaveStep(key) {
         wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 3);
         wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 30);
       }
+      wizardState.etmConfig.checksumEnabled = get('wiz-etm-chksm')?.checked ?? true;
       break;
   }
 }
@@ -4539,20 +4677,21 @@ function wizardApplyConfig() {
         // Marcduino port — always 9600, broadcasts enabled
         if (ws.kyberMarcduinoPort) {
           const marcIdx = ws.kyberMarcduinoPort - 1;
+          cfg.kyber.marcduinoPort               = ws.kyberMarcduinoPort;
           cfg.serialPorts[marcIdx].baud         = 9600;
-          cfg.serialPorts[marcIdx].label        = cfg.serialPorts[marcIdx].label || 'Kyber Marcduino';
+          cfg.serialPorts[marcIdx].label        = 'Kyber Marcuino';
           cfg.serialPorts[marcIdx].broadcastIn  = true;
           cfg.serialPorts[marcIdx].broadcastOut = true;
         }
         // Include ALL maestros (local and remote) as Kyber targets so the firmware
         // knows every Maestro it must forward commands to — both those on this same
         // board (via local serial) and those on remote boards (via ESP-NOW).
-        // The 'wcb' property name must match what parser.js buildCommandString
-        // uses when building M<id>:W<wcb>S<port>:<baud> target strings.
+        // Use wcbNumber (not boardSlot) so the WCB numbers in the KYBER,LOCAL
+        // command match those in the MAESTRO routing table.
         cfg.kyber.targets = ws.maestros
           .map(m => ({
             id:   m.id,
-            wcb:  m.boardSlot,
+            wcb:  ws.boards[m.boardSlot - 1].wcbNumber,
             port: m.port,
             baud: m.baud,
           }));
@@ -4607,6 +4746,8 @@ function wizardApplyConfig() {
     setEl('g-etm-boot',    ws.etmConfig.bootHeartbeatSec);
     setEl('g-etm-count',   ws.etmConfig.messageCount);
     setEl('g-etm-delay',   ws.etmConfig.messageDelayMs);
+    const chksmEl = document.getElementById('g-etm-chksm');
+    if (chksmEl) chksmEl.checked = ws.etmConfig.checksumEnabled ?? true;
     systemConfig.general.etm = { enabled: true, ...ws.etmConfig };
   } else {
     if (etmEl) { etmEl.checked = false; onETMToggle(); }
