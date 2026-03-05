@@ -602,6 +602,10 @@ function onBoardFieldChange(n) {
 }
 
 function boardUpdateFW(n) {
+  if (remoteRelayForBoard[n]) {
+    showToast('🔌 Connect via USB to update firmware — not available over wireless relay', 'warning');
+    return;
+  }
   boardGo(n, { mode: 'update' });
 }
 
@@ -1598,7 +1602,13 @@ function setRemoteConnected(n, relayN) {
   if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting', 'btn-primary'); connBtn.classList.add('btn-danger'); }
   if (pullBtn)     { pullBtn.disabled = false; pullBtn.textContent = 'Pull Config'; }
   if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
-  if (eraseBtn)    eraseBtn.disabled = true;    // erase not available via relay
+  // Dim the Factory Reset button but keep it clickable so the user gets a toast explanation
+  if (eraseBtn) {
+    eraseBtn.disabled      = false;   // must explicitly enable — button starts as disabled in HTML
+    eraseBtn.style.opacity = '0.45';
+    eraseBtn.style.cursor  = 'not-allowed';
+    eraseBtn.title = 'Connect via USB to factory reset — not available over wireless relay';
+  }
   if (identifyBtn) identifyBtn.disabled = false; // identify works via MGMT channel
   // Disable flash/update/factory modes — remote boards can only be configured via relay
   ['flash', 'update', 'factory'].forEach(mode => {
@@ -1607,6 +1617,13 @@ function setRemoteConnected(n, relayN) {
   });
   const configRadio = document.querySelector(`input[name="b${n}-mode"][value="configure"]`);
   if (configRadio) configRadio.checked = true;
+  // Dim the Update FW button (but keep it clickable so the user gets a toast explanation)
+  const updateFwBtn = document.getElementById(`b${n}-btn-update-fw`);
+  if (updateFwBtn) {
+    updateFwBtn.style.opacity = '0.45';
+    updateFwBtn.style.cursor  = 'not-allowed';
+    updateFwBtn.title = 'Connect via USB to update firmware — not available over wireless relay';
+  }
   updateBoardStatusBadge(n, 'remote');
   ensureTerminalPane(relayN);          // remote traffic shows in relay's terminal
   updateTerminalPaneDot(n, true);
@@ -1635,6 +1652,20 @@ function clearRemoteConnected(n) {
     const radio = document.querySelector(`input[name="b${n}-mode"][value="${mode}"]`);
     if (radio) radio.disabled = false;
   });
+  // Restore the Update FW button to its normal clickable state
+  const updateFwBtn = document.getElementById(`b${n}-btn-update-fw`);
+  if (updateFwBtn) {
+    updateFwBtn.style.opacity = '';
+    updateFwBtn.style.cursor  = '';
+    updateFwBtn.title = 'A newer firmware version is available';
+  }
+  // Restore the Factory Reset button dim styles (updateConnectionUI will handle disabled state)
+  const eraseBtn = document.getElementById(`b${n}-btn-erase`);
+  if (eraseBtn) {
+    eraseBtn.style.opacity = '';
+    eraseBtn.style.cursor  = '';
+    eraseBtn.title = 'Erase all settings and reboot — optionally re-flash firmware';
+  }
   // Remove the ETM listener from the relay if no other boards still use it
   if (relayN && !Object.values(remoteRelayForBoard).includes(relayN)) {
     removeEtmListener(relayN);
@@ -3504,6 +3535,10 @@ async function boardIdentify(n) {
 let _factoryResetSlot = null;   // board slot the factory-reset modal is open for
 
 function boardFactoryReset(n) {
+  if (remoteRelayForBoard[n]) {
+    showToast('🔌 Connect via USB to factory reset — not available over wireless relay', 'warning');
+    return;
+  }
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
