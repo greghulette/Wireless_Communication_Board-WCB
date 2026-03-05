@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 15:03';
+const UI_VERSION = '2026.03.05 15:37';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -246,6 +246,11 @@ function addBoardSection(n) {
   const section  = temp.firstElementChild;
   section.classList.add(`board-color-${((n - 1) % 8) + 1}`);
   document.getElementById('boards-container').appendChild(section);
+
+  // If already in advanced mode, unhide advanced-only elements in the new section
+  if (appMode === 'advanced') {
+    section.querySelectorAll('.advanced-only').forEach(el => el.classList.remove('hidden'));
+  }
 
   renderSerialTable(n);
   boardConfigs[n] = WCBParser.createDefaultBoardConfig();
@@ -1270,10 +1275,13 @@ function appendMappingDestination(rowId, n, dest) {
   const mapType  = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
   const isSerial = mapType === 'Serial';
 
-  const wcbOptions = `<option value="0">Local</option>` +
-    Array.from({length: 9}, (_,i) =>
-      `<option value="${i+1}" ${dest.wcbNumber===i+1?'selected':''}>WCB ${i+1}</option>`
-    ).join('');
+  const wcbQty    = parseInt(document.getElementById('g-wcbq')?.value) || systemConfig?.general?.wcbQuantity || 1;
+  const localWCB  = boardConfigs[n]?.wcbNumber || n;
+  const wcbOptions = Array.from({length: wcbQty}, (_,i) => {
+    const num = i + 1;
+    if (num === localWCB) return `<option value="0" ${dest.wcbNumber===0?'selected':''}>Local</option>`;
+    return `<option value="${num}" ${dest.wcbNumber===num?'selected':''}>WCB ${num}</option>`;
+  }).join('');
 
   // S0 = USB Serial, only valid for Serial type mappings
   const portOptions = (isSerial ? [{ v:0, l:'S0 (USB)' }] : [])
@@ -1337,6 +1345,7 @@ async function saveMappingRow(rowId, n) {
     showToast(`Mapping saved to WCB ${config.wcbNumber || n}`, 'success');
     // Sync the mapping into the baseline so Push Config won't re-send it as a diff
     if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
+    updateBoardStatusBadge(n, 'configured');
 
     // Bidir: add reverse mapping to each remote destination board's config
     if (bidir && type === 'Serial') {
@@ -4045,9 +4054,8 @@ function wizardNext() {
   const wasMaestro = wizardState.maestroEnabled;
   wizardState.steps = buildWizardSteps();
 
-  // If we're on the last step trigger apply + connect
+  // If we're on the last step, just advance to the connect step (don't apply yet)
   if (key === 'review') {
-    wizardApplyConfig();
     wizardState.currentIdx++;
     wizardRenderStep();
     return;
@@ -4109,6 +4117,22 @@ function wizardRenderStep() {
   // Nav buttons
   document.getElementById('wizard-back-btn').style.visibility = idx === 0 ? 'hidden' : '';
   const nextBtn = document.getElementById('wizard-next-btn');
+
+  // Export button — only shown on the review step, inserted just before Next
+  let exportBtn = document.getElementById('wizard-export-btn');
+  if (key === 'review') {
+    if (!exportBtn) {
+      exportBtn = document.createElement('button');
+      exportBtn.id        = 'wizard-export-btn';
+      exportBtn.className = 'btn btn-ghost btn-sm';
+      exportBtn.textContent = '💾 Export Config';
+      exportBtn.onclick   = wizardExportConfig;
+      nextBtn.parentNode.insertBefore(exportBtn, nextBtn);
+    }
+  } else if (exportBtn) {
+    exportBtn.remove();
+  }
+
   if (key === 'connect') {
     nextBtn.textContent = '✓ Done';
     nextBtn.onclick = () => closeWizard();
@@ -4679,6 +4703,8 @@ function wizardConnectBannerText() {
 function wizardSelectConnectMode(mode) {
   wizardState.connectMode = mode;
   wizardState.connectSeqN = 1;
+  // Apply config to the main page only when the user commits to a connection mode
+  if (mode) wizardApplyConfig();
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
   if (mode) wizardStartConnectWatchers();
 }
@@ -5066,6 +5092,94 @@ function wizardApplyConfig() {
   }
 
   showToast('Config page updated from wizard', 'success');
+}
+
+// ── Export config file from wizard state without touching the main page ──
+function wizardExportConfig() {
+  const ws = wizardState;
+
+  const tmpGeneral = {
+    wcbQuantity:    ws.quantity,
+    espnowPassword: ws.password,
+    macOctet2:      ws.mac2,
+    macOctet3:      ws.mac3,
+    delimiter:      ws.delimiter || '^',
+    funcChar:       ws.funcChar  || '?',
+    cmdChar:        ws.cmdChar   || ';',
+    etm: ws.etmEnabled
+      ? { enabled: true, ...ws.etmConfig }
+      : { enabled: false },
+  };
+
+  const tmpBoards = ws.boards.map((b, i) => {
+    const cfg = WCBParser.createDefaultBoardConfig();
+    cfg.wcbNumber      = b.wcbNumber;
+    cfg.wcbQuantity    = ws.quantity;
+    cfg.hwVersion      = b.hwVersion;
+    cfg.espnowPassword = ws.password;
+    cfg.macOctet2      = ws.mac2;
+    cfg.macOctet3      = ws.mac3;
+    cfg.delimiter      = ws.delimiter || '^';
+    cfg.funcChar       = ws.funcChar  || '?';
+    cfg.cmdChar        = ws.cmdChar   || ';';
+
+    b.serialPorts.forEach((sp, p) => {
+      cfg.serialPorts[p].baud  = sp.baud;
+      cfg.serialPorts[p].label = sp.label;
+    });
+
+    if (ws.kyberEnabled) {
+      if ((i + 1) === ws.kyberBoard) {
+        cfg.kyber.mode = 'local';
+        cfg.kyber.port = ws.kyberPort;
+        cfg.kyber.baud = ws.kyberBaud;
+        cfg.serialPorts[ws.kyberPort - 1].baud  = ws.kyberBaud;
+        cfg.serialPorts[ws.kyberPort - 1].label = cfg.serialPorts[ws.kyberPort - 1].label || 'Kyber Maestro';
+        if (ws.kyberMarcduinoPort) {
+          const marcIdx = ws.kyberMarcduinoPort - 1;
+          cfg.kyber.marcduinoPort               = ws.kyberMarcduinoPort;
+          cfg.serialPorts[marcIdx].baud         = 9600;
+          cfg.serialPorts[marcIdx].label        = 'Kyber Marcuino';
+          cfg.serialPorts[marcIdx].broadcastIn  = true;
+          cfg.serialPorts[marcIdx].broadcastOut = true;
+        }
+        cfg.kyber.targets = ws.maestros.map(m => ({
+          id:   m.id,
+          wcb:  ws.boards[m.boardSlot - 1].wcbNumber,
+          port: m.port,
+          baud: m.baud,
+        }));
+      } else {
+        const hasPrimaryMaestro = ws.maestros.some(m => m.boardSlot === (i + 1) && (m.id === 1 || m.id === 2));
+        if (hasPrimaryMaestro) cfg.kyber.mode = 'remote';
+      }
+    }
+
+    const myMaestros = ws.maestros.filter(m => m.boardSlot === (i + 1));
+    cfg.maestros = myMaestros.map(m => ({ id: m.id, port: m.port, baud: m.baud }));
+    if (ws.maestros.length > 0) {
+      cfg.maestroTable = ws.maestros.map(m => ({
+        id:   m.id,
+        wcb:  ws.boards[m.boardSlot - 1].wcbNumber,
+        port: m.port,
+        baud: m.baud,
+      }));
+    }
+
+    cfg.etm = ws.etmEnabled ? { enabled: true, ...ws.etmConfig } : { ...cfg.etm, enabled: false };
+    return cfg;
+  });
+
+  const tmpSystem = { general: tmpGeneral, boards: tmpBoards };
+  const content   = WCBParser.buildSystemFile(tmpSystem);
+  const blob      = new Blob([content], { type: 'text/plain' });
+  const url       = URL.createObjectURL(blob);
+  const a         = document.createElement('a');
+  a.href          = url;
+  a.download      = `WCB_system_${new Date().toISOString().slice(0,10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Config file exported', 'success');
 }
 
 // ── Connect & push each board ──────────────────────────────────────

@@ -917,7 +917,8 @@ function buildSystemFile(system) {
 
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
-    lines.push(buildCommandString(board, null, true));
+    const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
+    lines.push(buildCommandString(boardWithQty, null, true));
     lines.push('');
   }
 
