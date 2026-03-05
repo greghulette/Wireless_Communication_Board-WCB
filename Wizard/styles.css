@@ -468,6 +468,43 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .seq-action-cell .btn { display: block; width: 100%; margin-bottom: 4px; text-align: center; }
 .seq-action-cell .btn:last-child { margin-bottom: 0; }
 
+/* ─── Mappings ───────────────────────────────────────────────────── */
+.mapping-col-headers {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 0 6px; border-bottom: 1px solid var(--border); margin-bottom: 8px;
+}
+.mapping-col-headers span {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+  text-transform: uppercase; color: var(--text3); font-family: var(--sans);
+}
+.mapping-col-headers span.mc-type   { width: 110px; flex-shrink: 0; }
+.mapping-col-headers span.mc-src    { width: 140px; flex-shrink: 0; }
+.mapping-col-headers span.mc-raw    { width: 68px;  flex-shrink: 0; }
+.mapping-col-headers span.mc-bidir  { width: 68px;  flex-shrink: 0; }
+.mapping-col-headers span.mc-spacer { flex: 1; }
+.mapping-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.mapping-card-main {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.mapping-card-main select  { font-family: var(--mono); font-size: 12px; }
+.mapping-card-main select.mc-type { width: 110px; flex-shrink: 0; }
+.mapping-card-main select.mc-src  { width: 140px; flex-shrink: 0; }
+.mapping-card-main .mc-toggle     { width: 68px;  flex-shrink: 0; display: flex; align-items: center; }
+.mapping-destinations {
+  margin-top: 8px; padding-left: 22px; border-left: 2px solid var(--border);
+}
+.mapping-destinations .map-dest-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.mapping-destinations select {
+  background: var(--bg4); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-family: var(--mono); font-size: 12px; padding: 4px 8px;
+}
+
 /* ─── Connect Modal ──────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 500;

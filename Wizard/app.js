@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 14:08';
+const UI_VERSION = '2026.03.05 14:21';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -507,21 +507,14 @@ function onKyberMarcPortChange(n) {
 }
 
 // ─── Change Reminder Toasts ────────────────────────────────────────
-// Show a push reminder on the first change to a board or general settings,
-// but not on every keystroke — suppress once shown until the next pull/push.
-const _boardChangedToastShown = {};  // { n: boolean }
-let _generalChangedToastShown = false;
-
+// Fire on every completed change (text fields use onchange so keystrokes
+// don't trigger this — only blur/Enter does).
 function _notifyBoardChanged(n) {
-  if (_boardChangedToastShown[n]) return;
-  _boardChangedToastShown[n] = true;
   const wcbNum = boardConfigs[n]?.wcbNumber || n;
   showToast(`Changes pending — push to WCB ${wcbNum} to apply`, 'info', 3000);
 }
 
 function _notifyGeneralChanged() {
-  if (_generalChangedToastShown) return;
-  _generalChangedToastShown = true;
   showToast('Changes pending — push to all boards to apply', 'info', 3000);
 }
 
@@ -764,11 +757,6 @@ function updateBoardStatusBadge(n, state) {
     return;  // leave the connection badge alone
   }
   if (unsavedBadge) unsavedBadge.style.display = 'none';
-  // Reset toast flags so the reminder fires again after the next round of edits.
-  if (state === 'connected' || state === 'configured') {
-    _boardChangedToastShown[n] = false;
-    _generalChangedToastShown = false;
-  }
 
   const badge = document.getElementById(`b${n}-status-badge`);
   if (!badge) return;
@@ -964,39 +952,43 @@ function appendMappingRow(n, mapping) {
   const container = document.getElementById(`b${n}-mappings-container`);
   if (!container) return;
 
-  const rowId = `map-row-${n}-${Date.now()}`;
-  const div   = document.createElement('div');
-  div.id      = rowId;
-  div.style.cssText = 'background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:10px;';
+  // Show column headers once there's at least one mapping
+  const headers = document.getElementById(`b${n}-mapping-headers`);
+  if (headers) headers.style.display = '';
+
+  const rowId    = `map-row-${n}-${Date.now()}`;
+  const isSerial = mapping.type !== 'PWM';
+  const div      = document.createElement('div');
+  div.id         = rowId;
+  div.className  = 'mapping-card';
 
   div.innerHTML = `
-    <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
-      <div class="field" style="min-width:120px;margin-bottom:0">
-        <label>Type</label>
-        <select id="${rowId}-type" onchange="onMappingTypeChange('${rowId}',${n})">
-          <option value="Serial" ${mapping.type==='Serial'?'selected':''}>Serial</option>
-          <option value="PWM"    ${mapping.type==='PWM'   ?'selected':''}>PWM</option>
-        </select>
-      </div>
-      <div class="field" style="min-width:140px;margin-bottom:0">
-        <label>Source Port</label>
-        <select id="${rowId}-src" onchange="onMappingChange('${rowId}',${n})">
-          <option value="">— Select —</option>
-        </select>
-      </div>
-      <div class="field" id="${rowId}-raw-wrap" style="min-width:100px;margin-bottom:0;${mapping.type==='Serial'?'':'display:none'}">
-        <label>Raw Mode</label>
-        <label class="toggle" style="margin-top:4px">
+    <div class="mapping-card-main">
+      <select id="${rowId}-type" class="mc-type" onchange="onMappingTypeChange('${rowId}',${n})">
+        <option value="Serial" ${mapping.type==='Serial'?'selected':''}>Serial</option>
+        <option value="PWM"    ${mapping.type==='PWM'   ?'selected':''}>PWM</option>
+      </select>
+      <select id="${rowId}-src" class="mc-src" onchange="onMappingChange('${rowId}',${n})">
+        <option value="">— Select —</option>
+      </select>
+      <span class="mc-toggle" id="${rowId}-raw-wrap" style="visibility:${isSerial?'visible':'hidden'}">
+        <label class="toggle">
           <input type="checkbox" id="${rowId}-raw" ${mapping.rawMode?'checked':''} onchange="onMappingChange('${rowId}',${n})">
           <span class="toggle-track"></span>
-          <span class="toggle-label">Raw</span>
         </label>
-      </div>
+      </span>
+      <span class="mc-toggle" id="${rowId}-bidir-wrap" style="visibility:${isSerial?'visible':'hidden'}" title="Add reverse mapping on the destination board when saved">
+        <label class="toggle">
+          <input type="checkbox" id="${rowId}-bidir" ${mapping.bidir?'checked':''} onchange="onMappingChange('${rowId}',${n})">
+          <span class="toggle-track"></span>
+        </label>
+      </span>
       <div style="flex:1"></div>
-      <button class="btn btn-danger btn-sm" onclick="removeMappingRow('${rowId}',${n})">🗑 Remove</button>
+      <button class="btn btn-primary btn-sm" onclick="saveMappingRow('${rowId}',${n})">Save</button>
+      <button class="btn btn-danger btn-sm btn-icon" onclick="removeMappingRow('${rowId}',${n})">🗑</button>
     </div>
-    <div id="${rowId}-destinations" style="padding-left:8px;border-left:2px solid var(--border)"></div>
-    <button class="btn btn-ghost btn-sm mt-8" onclick="addMappingDestination('${rowId}',${n})">+ Add Destination</button>
+    <div id="${rowId}-destinations" class="mapping-destinations"></div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="addMappingDestination('${rowId}',${n})">+ Add Destination</button>
   `;
   container.appendChild(div);
 
@@ -1026,9 +1018,12 @@ function refreshMappingSourceDropdown(n, rowId, selectedPort) {
 }
 
 function onMappingTypeChange(rowId, n) {
-  const type    = document.getElementById(`${rowId}-type`)?.value;
-  const rawWrap = document.getElementById(`${rowId}-raw-wrap`);
-  if (rawWrap) rawWrap.style.display = type === 'Serial' ? '' : 'none';
+  const type      = document.getElementById(`${rowId}-type`)?.value;
+  const isSerial  = type === 'Serial';
+  const rawWrap   = document.getElementById(`${rowId}-raw-wrap`);
+  const bidirWrap = document.getElementById(`${rowId}-bidir-wrap`);
+  if (rawWrap)   rawWrap.style.visibility   = isSerial ? 'visible' : 'hidden';
+  if (bidirWrap) bidirWrap.style.visibility = isSerial ? 'visible' : 'hidden';
 
   // Rebuild destination port dropdowns to add/remove S0 (USB)
   const container = document.getElementById(`${rowId}-destinations`);
@@ -1036,7 +1031,6 @@ function onMappingTypeChange(rowId, n) {
     container.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
       const portSel  = destRow.querySelector('[id$="-port"]');
       const curPort  = parseInt(portSel?.value) ?? null;
-      const isSerial = type === 'Serial';
       const portOptions = (isSerial ? [{ v:0, l:'S0 (USB)' }] : [])
         .concat([1,2,3,4,5].map(p => ({ v:p, l:`S${p}` })))
         .map(({ v, l }) => `<option value="${v}" ${curPort===v?'selected':''}>${l}</option>`)
@@ -1054,7 +1048,7 @@ function onMappingChange(rowId, n) {
 }
 
 function syncMappingsToConfig(n) {
-  const config    = boardConfigs[n];
+  const config = boardConfigs[n];
   if (!config) return;
 
   // Release pwm claims
@@ -1062,7 +1056,7 @@ function syncMappingsToConfig(n) {
     if (sp.claimedBy?.type === 'pwm') sp.claimedBy = null;
   }
 
-  config.mappings      = [];
+  config.mappings       = [];
   config.pwmOutputPorts = [];
 
   const container = document.getElementById(`b${n}-mappings-container`);
@@ -1072,17 +1066,18 @@ function syncMappingsToConfig(n) {
     const rowId = row.id;
     const type  = document.getElementById(`${rowId}-type`)?.value;
     const src   = parseInt(document.getElementById(`${rowId}-src`)?.value);
-    const raw   = document.getElementById(`${rowId}-raw`)?.checked ?? false;
+    const raw   = document.getElementById(`${rowId}-raw`)?.checked   ?? false;
+    const bidir = document.getElementById(`${rowId}-bidir`)?.checked ?? false;
     if (!type || !src) return;
 
     const destinations = [];
     row.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
-      const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value) ?? 0;
+      const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value)  || 0;
       const port = parseInt(destRow.querySelector('[id$="-port"]')?.value);
-      if (port) destinations.push({ wcbNumber: wcb || 0, port });
+      if (port || port === 0) destinations.push({ wcbNumber: wcb, port });
     });
 
-    config.mappings.push({ type, sourcePort: src, rawMode: raw, destinations });
+    config.mappings.push({ type, sourcePort: src, rawMode: raw, bidir, destinations });
     if (src >= 1 && src <= 5 && !config.serialPorts[src-1].claimedBy) {
       config.serialPorts[src - 1].claimedBy = { type: 'pwm' };
     }
@@ -1094,6 +1089,10 @@ function syncMappingsToConfig(n) {
 
 function removeMappingRow(rowId, n) {
   document.getElementById(rowId)?.remove();
+  // Hide column headers if no rows remain
+  const container = document.getElementById(`b${n}-mappings-container`);
+  const headers   = document.getElementById(`b${n}-mapping-headers`);
+  if (headers && container && container.children.length === 0) headers.style.display = 'none';
   syncMappingsToConfig(n);
 }
 
@@ -1105,8 +1104,8 @@ function appendMappingDestination(rowId, n, dest) {
   const container = document.getElementById(`${rowId}-destinations`);
   if (!container) return;
 
-  const destId = `map-dest-${rowId}-${Date.now()}`;
-  const mapType = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
+  const destId   = `map-dest-${rowId}-${Date.now()}`;
+  const mapType  = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
   const isSerial = mapType === 'Serial';
 
   const wcbOptions = `<option value="0">Local</option>` +
@@ -1122,20 +1121,92 @@ function appendMappingDestination(rowId, n, dest) {
 
   const div = document.createElement('div');
   div.id    = destId;
-  div.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;';
+  div.className = 'map-dest-row';
   div.innerHTML = `
     <span class="text-muted" style="min-width:16px">→</span>
-    <select id="${destId}-wcb" onchange="onMappingChange('${rowId}',${n})" style="background:var(--bg4);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--mono);font-size:12px;padding:4px 8px">${wcbOptions}</select>
-    <select id="${destId}-port" onchange="onMappingChange('${rowId}',${n})" style="background:var(--bg4);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--mono);font-size:12px;padding:4px 8px">${portOptions}</select>
+    <select id="${destId}-wcb"  onchange="onMappingChange('${rowId}',${n})">${wcbOptions}</select>
+    <select id="${destId}-port" onchange="onMappingChange('${rowId}',${n})">${portOptions}</select>
     <button class="btn btn-danger btn-sm btn-icon" onclick="document.getElementById('${destId}').remove();onMappingChange('${rowId}',${n})">🗑</button>
   `;
   container.appendChild(div);
+}
+
+async function saveMappingRow(rowId, n) {
+  syncMappingsToConfig(n);
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  const type  = document.getElementById(`${rowId}-type`)?.value;
+  const src   = parseInt(document.getElementById(`${rowId}-src`)?.value);
+  const raw   = document.getElementById(`${rowId}-raw`)?.checked   ?? false;
+  const bidir = document.getElementById(`${rowId}-bidir`)?.checked ?? false;
+
+  if (!type || !src) { showToast('Select a source port first', 'warning'); return; }
+
+  const destinations = [];
+  document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
+    const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value)  || 0;
+    const port = parseInt(destRow.querySelector('[id$="-port"]')?.value);
+    if (port || port === 0) destinations.push({ wcbNumber: wcb, port });
+  });
+
+  const lfi = config.funcChar || '?';
+  let cmd = `${lfi}MAP,${type.toUpperCase()},S${src}`;
+  if (type === 'Serial' && raw) cmd += ',R';
+  for (const dest of destinations) {
+    cmd += dest.wcbNumber === 0 ? `,S${dest.port}` : `,W${dest.wcbNumber}S${dest.port}`;
+  }
+
+  const relayN = remoteRelayForBoard[n];
+  try {
+    if (relayN) {
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) { showToast('Relay not connected', 'error'); return; }
+      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
+      await relayConn.send(mgmtCmd + '\r');
+      termLog(relayN, mgmtCmd, 'in');
+    } else {
+      const conn = boardConnections[n];
+      if (!conn?.isConnected()) { showToast('Board not connected — mapping saved locally, push to apply', 'info'); return; }
+      await conn.send(cmd + '\r');
+      termLog(n, cmd, 'in');
+    }
+    showToast(`Mapping saved to WCB ${config.wcbNumber || n}`, 'success');
+
+    // Bidir: add reverse mapping to each remote destination board's config
+    if (bidir && type === 'Serial') {
+      for (const dest of destinations) {
+        if (dest.wcbNumber > 0 && boardConfigs[dest.wcbNumber]) {
+          const destCfg = boardConfigs[dest.wcbNumber];
+          const alreadyExists = destCfg.mappings.some(m =>
+            m.type === 'Serial' && m.sourcePort === dest.port &&
+            m.destinations.some(d => d.wcbNumber === (config.wcbNumber || n) && d.port === src)
+          );
+          if (!alreadyExists) {
+            destCfg.mappings.push({
+              type: 'Serial', sourcePort: dest.port, rawMode: raw, bidir: false,
+              destinations: [{ wcbNumber: config.wcbNumber || n, port: src }]
+            });
+            populateMappingsFromConfig(dest.wcbNumber, destCfg);
+            updateBoardStatusBadge(dest.wcbNumber, 'unsaved');
+            showToast(`Reverse mapping added to WCB ${dest.wcbNumber} — push to apply`, 'info', 4000);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    showToast(`Save failed: ${e.message}`, 'error');
+    termLog(relayN ?? n, `MAP save error: ${e.message}`, 'err');
+  }
 }
 
 function populateMappingsFromConfig(n, config) {
   const container = document.getElementById(`b${n}-mappings-container`);
   if (!container) return;
   container.innerHTML = '';
+  const headers = document.getElementById(`b${n}-mapping-headers`);
+  if (headers) headers.style.display = config.mappings.length > 0 ? '' : 'none';
   for (const m of config.mappings) appendMappingRow(n, m);
 }
 
