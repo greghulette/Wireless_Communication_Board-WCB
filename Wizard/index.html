@@ -121,12 +121,12 @@
         </div>
         <div class="etm-detail" id="etm-detail">
           <div class="field-group">
-            <div class="field"><label>Timeout (ms) <span class="wiz-hint" data-tip="Milliseconds to wait before declaring a board unresponsive after it misses too many heartbeats.">i</span></label><input type="number" id="g-etm-timeout" value="30000"></div>
-            <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10"></div>
-            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3"></div>
-            <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="30"></div>
-            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="How many times to repeat the offline alert message when a board is detected as unresponsive.">i</span></label><input type="number" id="g-etm-count" value="3"></div>
-            <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100"></div>
+            <div class="field"><label>Timeout (ms) <span class="wiz-hint" data-tip="Milliseconds to wait before declaring a board unresponsive after it misses too many heartbeats.">i</span></label><input type="number" id="g-etm-timeout" value="30000" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="30" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="How many times to repeat the offline alert message when a board is detected as unresponsive.">i</span></label><input type="number" id="g-etm-count" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100" oninput="onGeneralETMChange()"></div>
           </div>
           <div class="toggle-wrap mt-8">
             <label class="toggle">

@@ -14,7 +14,8 @@ let systemConfig   = null;
 let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
-let boardFlashMode   = {};      // { boardIndex: 'configure'|'update'|'flash'|'factory' }
+let boardFlashMode          = {};   // { boardIndex: 'configure'|'update'|'flash'|'factory' }
+let boardAutoPushAfterFlash = {};   // { boardIndex: bool } — wizard opt-in: push config after factory reset/erase
 let postFlashGeneralSnapshot = {};  // { boardIndex: generalSnapshot } — saved before flash, restored on next push
 
 // ─── Connect Modal State ───────────────────────────────────────────
@@ -29,11 +30,12 @@ const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to for
 
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
+let generalSettingsDirty = false; // true when general settings have been changed but not yet pushed
 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.06 10:35';
+const UI_VERSION = '2026.03.06 12:09';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -520,6 +522,8 @@ function _notifyBoardChanged(n) {
 }
 
 function _notifyGeneralChanged() {
+  generalSettingsDirty = true;
+  updatePushAllButton();
   showToast('Changes pending — push to all boards to apply', 'info', 3000);
 }
 
@@ -588,6 +592,7 @@ function onETMToggle() {
   if (appMode === 'advanced' && enabled) etmDetail.classList.add('visible');
   else etmDetail.classList.remove('visible');
   for (const n in boardConfigs) boardConfigs[n].etm.enabled = enabled;
+  updateGeneralBaseline();
   _notifyGeneralChanged();
 }
 
@@ -595,6 +600,34 @@ function onETMChecksumToggle() {
   const enabled = document.getElementById('g-etm-chksm')?.checked ?? true;
   systemConfig.general.etm.checksumEnabled = enabled;
   for (const n in boardConfigs) boardConfigs[n].etm.checksumEnabled = enabled;
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+function onGeneralETMChange() {
+  const timeout = parseInt(document.getElementById('g-etm-timeout')?.value) || 30000;
+  const hb      = parseInt(document.getElementById('g-etm-hb')?.value)      || 10;
+  const miss    = parseInt(document.getElementById('g-etm-miss')?.value)     || 3;
+  const boot    = parseInt(document.getElementById('g-etm-boot')?.value)     || 30;
+  const count   = parseInt(document.getElementById('g-etm-count')?.value)    || 3;
+  const delay   = parseInt(document.getElementById('g-etm-delay')?.value)    || 100;
+
+  systemConfig.general.etm.timeoutMs        = timeout;
+  systemConfig.general.etm.heartbeatSec     = hb;
+  systemConfig.general.etm.missedHeartbeats = miss;
+  systemConfig.general.etm.bootHeartbeatSec = boot;
+  systemConfig.general.etm.messageCount     = count;
+  systemConfig.general.etm.messageDelayMs   = delay;
+
+  for (const n in boardConfigs) {
+    boardConfigs[n].etm.timeoutMs        = timeout;
+    boardConfigs[n].etm.heartbeatSec     = hb;
+    boardConfigs[n].etm.missedHeartbeats = miss;
+    boardConfigs[n].etm.bootHeartbeatSec = boot;
+    boardConfigs[n].etm.messageCount     = count;
+    boardConfigs[n].etm.messageDelayMs   = delay;
+  }
+  updateGeneralBaseline();
   _notifyGeneralChanged();
 }
 
@@ -606,16 +639,32 @@ const GENERAL_FIELD_LABELS = {
   delimiter:      'Command Delimiter',
   funcChar:       'Local Function ID',
   cmdChar:        'Command Character',
+  etmEnabled:     'ETM Enabled',
+  etmTimeout:     'ETM Timeout (ms)',
+  etmHb:          'ETM Heartbeat Interval (sec)',
+  etmMiss:        'ETM Missed Heartbeats',
+  etmBoot:        'ETM Boot Heartbeat (sec)',
+  etmCount:       'ETM Message Count',
+  etmDelay:       'ETM Message Delay (ms)',
+  etmChecksum:    'ETM Checksum',
 };
 
 function extractGeneralFields(config) {
   return {
-    espnowPassword: config.espnowPassword ?? '',
-    macOctet2:      config.macOctet2      ?? '00',
-    macOctet3:      config.macOctet3      ?? '00',
-    delimiter:      config.delimiter      ?? '^',
-    funcChar:       config.funcChar       ?? '?',
-    cmdChar:        config.cmdChar        ?? ';',
+    espnowPassword: config.espnowPassword          ?? '',
+    macOctet2:      config.macOctet2               ?? '00',
+    macOctet3:      config.macOctet3               ?? '00',
+    delimiter:      config.delimiter               ?? '^',
+    funcChar:       config.funcChar                ?? '?',
+    cmdChar:        config.cmdChar                 ?? ';',
+    etmEnabled:     config.etm?.enabled            ?? false,
+    etmTimeout:     config.etm?.timeoutMs          ?? 30000,
+    etmHb:          config.etm?.heartbeatSec       ?? 10,
+    etmMiss:        config.etm?.missedHeartbeats   ?? 3,
+    etmBoot:        config.etm?.bootHeartbeatSec   ?? 30,
+    etmCount:       config.etm?.messageCount       ?? 3,
+    etmDelay:       config.etm?.messageDelayMs     ?? 100,
+    etmChecksum:    config.etm?.checksumEnabled    ?? true,
   };
 }
 
@@ -623,6 +672,29 @@ function getGeneralMismatches(a, b) {
   return Object.keys(GENERAL_FIELD_LABELS)
     .filter(k => String(a[k]) !== String(b[k]))
     .map(k => ({ key: k, label: GENERAL_FIELD_LABELS[k], aVal: a[k], bVal: b[k] }));
+}
+
+// Write a set of extracted general fields back into a board's config object so
+// the diff engine will see it as unsaved and allow a push to sync the board.
+function applyGeneralFieldsToBoardConfig(n, fields) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  cfg.espnowPassword = fields.espnowPassword;
+  cfg.macOctet2      = fields.macOctet2;
+  cfg.macOctet3      = fields.macOctet3;
+  cfg.delimiter      = fields.delimiter;
+  cfg.funcChar       = fields.funcChar;
+  cfg.cmdChar        = fields.cmdChar;
+  if (cfg.etm) {
+    cfg.etm.enabled          = fields.etmEnabled;
+    cfg.etm.timeoutMs        = fields.etmTimeout;
+    cfg.etm.heartbeatSec     = fields.etmHb;
+    cfg.etm.missedHeartbeats = fields.etmMiss;
+    cfg.etm.bootHeartbeatSec = fields.etmBoot;
+    cfg.etm.messageCount     = fields.etmCount;
+    cfg.etm.messageDelayMs   = fields.etmDelay;
+    cfg.etm.checksumEnabled  = fields.etmChecksum;
+  }
 }
 
 // ─── Board Field Handlers ─────────────────────────────────────────
@@ -762,8 +834,8 @@ function populateUIFromConfig(n, config) {
 function updatePushAllButton() {
   const btn = document.getElementById('btn-push-all');
   if (!btn) return;
-  // Amber if any visible board section has an unsaved badge showing
-  const anyUnsaved = !!document.querySelector('[id$="-unsaved-badge"]:not([style*="none"])');
+  // Amber if any visible board section has an unsaved badge showing, or general settings are dirty
+  const anyUnsaved = generalSettingsDirty || !!document.querySelector('[id$="-unsaved-badge"]:not([style*="none"])');
   btn.classList.toggle('btn-success', !anyUnsaved);
   btn.classList.toggle('btn-pending', anyUnsaved);
 }
@@ -2019,23 +2091,47 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
 
   document.getElementById('general-conflict-keep').textContent = `Keep ${srcLabel} values`;
   document.getElementById('general-conflict-keep').addEventListener('click', () => {
+    // Write the correct (baseline) values into the mismatching board's config so
+    // the diff engine sees a real difference and the Push Config button goes amber.
+    if (boardConfigs[newBoard]) {
+      applyGeneralFieldsToBoardConfig(newBoard, srcFields);
+      updateBoardStatusBadge(newBoard, 'unsaved');
+    }
     document.getElementById('general-conflict-modal').classList.remove('open');
-    showToast(`Kept ${srcLabel} general settings`, 'info');
+    showToast(`Kept ${srcLabel} general settings — push to WCB${newBoard} to apply`, 'info');
   });
 
   document.getElementById('general-conflict-use').textContent = `Use ${newLabel} values`;
   document.getElementById('general-conflict-use').addEventListener('click', () => {
     generalBaseline = { sourceBoard: newBoard, fields: newFields };
-    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+    const set    = (id, val) => { const el = document.getElementById(id); if (el) el.value   = val; };
+    const setChk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = val; };
     set('g-password',  newFields.espnowPassword);
     set('g-mac2',      newFields.macOctet2);
     set('g-mac3',      newFields.macOctet3);
     set('g-delimiter', newFields.delimiter);
     set('g-funcchar',  newFields.funcChar);
     set('g-cmdchar',   newFields.cmdChar);
+    setChk('g-etm-enabled', newFields.etmEnabled);
+    setChk('g-etm-chksm',   newFields.etmChecksum);
+    set('g-etm-timeout', newFields.etmTimeout);
+    set('g-etm-hb',      newFields.etmHb);
+    set('g-etm-miss',    newFields.etmMiss);
+    set('g-etm-boot',    newFields.etmBoot);
+    set('g-etm-count',   newFields.etmCount);
+    set('g-etm-delay',   newFields.etmDelay);
     onGeneralPasswordChange();
     onGeneralMacChange();
     onGeneralCmdCharChange();
+    onETMToggle();
+    onETMChecksumToggle();
+    onGeneralETMChange();
+    // Amber Push Config on every board except newBoard — their boards still have
+    // the old values and need a push. newBoard is already in sync (its board has
+    // the new values and its baseline was set from the same pulled config).
+    for (const n in boardConfigs) {
+      if (parseInt(n) !== newBoard) updateBoardStatusBadge(parseInt(n), 'unsaved');
+    }
     document.getElementById('general-conflict-modal').classList.remove('open');
     showToast(`General settings updated to match ${newLabel}`, 'success');
   });
@@ -2445,26 +2541,36 @@ async function boardGo(n, opts = {}) {
           setTimeout(() => boardPull(n), 4000);
         } else {
           // Flash or Factory Reset: NVS is blank.
-          // boardPull may fire during the reconnect/wait window and overwrite
-          // boardConfigs[n] and DOM state with factory defaults.  Restore the
-          // snapshot INSIDE the setTimeout — right before boardGo — to ensure
-          // the correct config is pushed regardless of any intervening pulls.
-          // postFlashGeneralSnapshot is set now so boardGo can restore the
-          // general DOM (password, MACs, delimiters) when it runs.
+          const resetLabel = isFactory ? 'factory reset' : 'flashed';
+          const doPush     = boardAutoPushAfterFlash[n] ?? false;
+          delete boardAutoPushAfterFlash[n];
+
           postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
 
-          const resetLabel = isFactory ? 'factory reset' : 'flashed';
-          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
-          showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
-
-          setTimeout(() => {
+          if (doPush) {
+            // Auto-push: restore snapshot INSIDE the setTimeout so any boardPull
+            // that fires during the wait doesn't overwrite boardConfigs[n].
+            termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
+            showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
+            setTimeout(() => {
+              if (preFlashConfigSnapshot) {
+                boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+                boardBaselines[n] = null;
+                populateUIFromConfig(n, boardConfigs[n]);
+              }
+              boardGo(n, { mode: 'configure' });
+            }, 4000);
+          } else {
+            // Manual: restore snapshot now so the board card UI reflects the
+            // wizard config, but let the user decide when to push.
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
-              boardBaselines[n] = null;   // force full push — board NVS is blank
-              populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+              boardBaselines[n] = null;
+              populateUIFromConfig(n, boardConfigs[n]);
             }
-            boardGo(n, { mode: 'configure' });
-          }, 4000);
+            termLog(n, `Reconnected after ${resetLabel} — click Push Config to send configuration`, 'sys');
+            showPostFlashPrompt(n, resetLabel);
+          }
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -2488,7 +2594,8 @@ async function boardGo(n, opts = {}) {
     // We restore this snapshot inside the setTimeout callback — right before
     // calling boardGo — so the full push always uses the intended wizard config
     // regardless of any intervening pulls.
-    const preEraseConfigSnapshot = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+    const preEraseConfigSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
+    const preEraseGeneralSnapshot = captureGeneralDOMSnapshot();
 
     termLog(n, '?ERASE,NVS', 'in');
     try {
@@ -2510,25 +2617,36 @@ async function boardGo(n, opts = {}) {
       const reconnected = await conn.reconnect(10, 1500);
       if (reconnected) {
         updateConnectionUI(n, true);
-        termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
-        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
-        // NVS is blank; wait a moment for the board to fully boot, then restore
-        // the pre-erase config snapshot and force a full push (baseline=null).
-        // Restoring inside the callback guards against any boardPull that may
-        // have fired during the wait and overwritten boardConfigs[n].
-        // We also re-populate the UI from the snapshot so that syncKyberToConfig /
-        // syncSerialUIToConfig / syncMaestrosToConfig read the correct DOM state —
-        // without this, a pull during the wait would have reset the radio buttons and
-        // dropdowns to factory defaults, causing buildCommandString to emit KYBER,CLEAR
-        // instead of the intended KYBER,LOCAL configuration.
-        setTimeout(() => {
+        const doPush = boardAutoPushAfterFlash[n] ?? false;
+        delete boardAutoPushAfterFlash[n];
+
+        if (doPush) {
+          termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
+          showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+          // NVS is blank; wait a moment for the board to fully boot, then restore
+          // the pre-erase config snapshot and force a full push (baseline=null).
+          // Restoring inside the callback guards against any boardPull that may
+          // have fired during the wait and overwritten boardConfigs[n].
+          setTimeout(() => {
+            if (preEraseConfigSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
+              boardBaselines[n] = null;   // force full push — board NVS is blank
+              populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+            }
+            boardGo(n, { mode: 'configure' });
+          }, 3000);
+        } else {
+          // Clean slate — restore config snapshot for the board card UI, but let
+          // the user decide when (or whether) to push.
           if (preEraseConfigSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
-            boardBaselines[n] = null;   // force full push — board NVS is blank
-            populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+            boardBaselines[n] = null;
+            populateUIFromConfig(n, boardConfigs[n]);
           }
-          boardGo(n, { mode: 'configure' });
-        }, 3000);
+          postFlashGeneralSnapshot[n] = preEraseGeneralSnapshot;
+          termLog(n, 'Reconnected after NVS erase — click Push Config to send configuration', 'sys');
+          showPostFlashPrompt(n, 'erased');
+        }
       } else {
         termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
         showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
@@ -2904,6 +3022,22 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
 
     try {
       const config = WCBParser.parseBackupString(configStr);
+
+      // ── General settings: establish baseline on first pull, detect mismatches after ──
+      const incomingGeneral = extractGeneralFields(config);
+      if (!generalBaseline) {
+        syncGeneralFromConfig(config);
+        generalBaseline = { sourceBoard: config.wcbNumber || targetN, fields: incomingGeneral };
+      } else {
+        const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
+        if (mismatches.length > 0 && !_wizardOpen) {
+          setTimeout(() => showGeneralMismatchModal(
+            generalBaseline.sourceBoard, generalBaseline.fields,
+            config.wcbNumber || targetN, incomingGeneral, mismatches
+          ), 200);
+        }
+      }
+
       boardConfigs[targetN]   = config;
       boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
       // Store the firmware version from the VER prefix (if present) and update display
@@ -3177,6 +3311,10 @@ async function boardGoAll() {
       }
     })();
   }
+
+  // General settings have been pushed to all boards — clear the dirty flag
+  generalSettingsDirty = false;
+  updatePushAllButton();
 }
 
 // ─── File Import ──────────────────────────────────────────────────
@@ -4004,8 +4142,9 @@ function wizardDefaultState() {
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
                      bootHeartbeatSec:30, messageCount:20, messageDelayMs:100,
                      checksumEnabled:true },
-    needsFirmware: false,
-    eraseNvs:      true,
+    needsFirmware:    false,
+    eraseNvs:         true,
+    pushAfterFlash:   false,   // if true, auto-push wizard config after flash/erase
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
@@ -4084,7 +4223,10 @@ function wizardNext() {
     const modeVal = !wizardState.needsFirmware ? (wizardState.eraseNvs ? 'erase' : 'configure')
                   : wizardState.eraseNvs       ? 'factory'
                   :                              'update';
-    wizardState.boards.forEach((b, i) => { boardFlashMode[i + 1] = modeVal; });
+    wizardState.boards.forEach((b, i) => {
+      boardFlashMode[i + 1]          = modeVal;
+      boardAutoPushAfterFlash[i + 1] = wizardState.pushAfterFlash;
+    });
   }
 
   if (wizardState.currentIdx < wizardState.steps.length - 1) {
@@ -4608,6 +4750,15 @@ function wizardHTMLFirmware() {
           <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
         </div>
       </label>
+    </div>
+    <div style="margin-top:8px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+        <input type="checkbox" id="wiz-push-after-flash" style="margin-top:2px;cursor:pointer" ${wizardState.pushAfterFlash ? 'checked' : ''}>
+        <div>
+          <div style="font-weight:600;font-size:13px">Apply wizard configuration after reset ${wizHint('When checked, the wizard will automatically push your configuration to each board after it reboots. Leave unchecked to get a clean factory-default board — you can push manually later from the board card.')}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">Automatically send all settings to each board right after the flash or erase completes. Uncheck for a true clean slate.</div>
+        </div>
+      </label>
     </div>`;
   return `
     <div class="wizard-section-title">Firmware Upload</div>
@@ -4888,16 +5039,37 @@ function wizardSaveStep(key) {
         if (!isNaN(hw))  b.hwVersion = hw;
       });
       break;
-    case 'serial':
+    case 'serial': {
+      // Rebuild the claim map so we can distinguish user-typed labels from
+      // the auto-generated claim-owner text (e.g. "Kyber Maestro").
+      // If a claimed port's label still matches the auto-fill default, save ''
+      // instead — this way, if the user later moves Kyber/Maestro to a different
+      // port and comes back, the freed port doesn't retain the stale owner name.
       wizardState.boards.forEach((b, i) => {
+        const boardSlot = i + 1;
+        const claims = {};
+        if (wizardState.kyberEnabled && wizardState.kyberBoard === boardSlot) {
+          claims[wizardState.kyberPort] = { owner: 'Kyber Maestro' };
+          if (wizardState.kyberMarcduinoPort)
+            claims[wizardState.kyberMarcduinoPort] = { owner: 'Kyber Marcduino' };
+        }
+        for (const m of wizardState.maestros) {
+          if (m.boardSlot === boardSlot)
+            claims[m.port] = { owner: `Maestro ID ${m.id}` };
+        }
         b.serialPorts.forEach((sp, p) => {
           const baud = parseInt(get(`wiz-b${i}-s${p}-baud`)?.value);
           const lbl  = get(`wiz-b${i}-s${p}-label`)?.value ?? '';
           if (!isNaN(baud)) sp.baud = baud;
-          sp.label = lbl;
+          const claim = claims[p + 1];
+          // Only preserve the label if the user actually customised it.
+          // If it still matches the auto-generated owner name, treat it as
+          // unset ('') so future renders derive the name from the current claims.
+          sp.label = (claim && lbl === claim.owner) ? '' : lbl;
         });
       });
       break;
+    }
     case 'kyber-config':
       wizardState.kyberBoard         = parseInt(get('wiz-kyber-board')?.value ?? 1);
       wizardState.kyberPort          = parseInt(get('wiz-kyber-port')?.value  ?? 2);
@@ -4905,8 +5077,9 @@ function wizardSaveStep(key) {
       wizardState.kyberMarcduinoPort = parseInt(get('wiz-kyber-marcduino-port')?.value) || null;
       break;
     case 'firmware':
-      // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox for eraseNvs
-      wizardState.eraseNvs = document.getElementById('wiz-erase-nvs')?.checked ?? false;
+      // needsFirmware is set by wizardFirmwareChoice(); always read the checkboxes
+      wizardState.eraseNvs       = document.getElementById('wiz-erase-nvs')?.checked       ?? false;
+      wizardState.pushAfterFlash = document.getElementById('wiz-push-after-flash')?.checked ?? false;
       break;
     case 'maestro-config':
       wizardState.maestros = wizardState.maestros.map((m, mi) => ({
@@ -4954,8 +5127,28 @@ function wizardValidateStep(key) {
       break;
     }
     case 'maestro-config': {
+      // Read live DOM values — validation runs before wizardSaveStep, so
+      // wizardState.maestros may not reflect the user's latest edits yet.
+      const liveMaestros = wizardState.maestros.map((m, mi) => ({
+        boardSlot: parseInt(document.getElementById(`wiz-m${mi}-board`)?.value) || m.boardSlot,
+        id:        parseInt(document.getElementById(`wiz-m${mi}-id`)?.value)    || m.id,
+        port:      parseInt(document.getElementById(`wiz-m${mi}-port`)?.value)  || m.port,
+      }));
+
+      // Duplicate board+port check: each Maestro row must be unique by board+port
+      for (let a = 0; a < liveMaestros.length; a++) {
+        for (let b = a + 1; b < liveMaestros.length; b++) {
+          if (liveMaestros[a].boardSlot === liveMaestros[b].boardSlot &&
+              liveMaestros[a].port      === liveMaestros[b].port) {
+            return `Two Maestros are both assigned to Board ${liveMaestros[a].boardSlot}, ` +
+                   `Serial ${liveMaestros[a].port}. Each Maestro must use a unique port.`;
+          }
+        }
+      }
+
+      // Kyber conflict checks
       if (wizardState.kyberEnabled) {
-        for (const m of wizardState.maestros) {
+        for (const m of liveMaestros) {
           if (m.boardSlot === wizardState.kyberBoard && m.port === wizardState.kyberPort) {
             return `Maestro ID ${m.id} uses Serial ${m.port}, which is already claimed by Kyber's Maestro port on Board ${wizardState.kyberBoard}. Choose a different port.`;
           }
