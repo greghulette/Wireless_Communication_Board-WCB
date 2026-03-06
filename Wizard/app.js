@@ -33,7 +33,7 @@ let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — 
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.05 17:40';
+const UI_VERSION = '2026.03.06 10:35';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -2445,21 +2445,26 @@ async function boardGo(n, opts = {}) {
           setTimeout(() => boardPull(n), 4000);
         } else {
           // Flash or Factory Reset: NVS is blank.
-          // Restore the pre-flash config snapshot so boardConfigs[n] is ready,
-          // then offer the user a Push Config button rather than auto-pushing.
-          // This lets them verify the config is correct before it's sent.
-          if (preFlashConfigSnapshot) {
-            boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
-            boardBaselines[n] = null;   // force full push
-            populateUIFromConfig(n, boardConfigs[n]);
-          }
-          // Store the pre-flash general snapshot so boardGo can restore it
-          // just before reading the DOM (DOM may have drifted while flashing).
+          // boardPull may fire during the reconnect/wait window and overwrite
+          // boardConfigs[n] and DOM state with factory defaults.  Restore the
+          // snapshot INSIDE the setTimeout — right before boardGo — to ensure
+          // the correct config is pushed regardless of any intervening pulls.
+          // postFlashGeneralSnapshot is set now so boardGo can restore the
+          // general DOM (password, MACs, delimiters) when it runs.
           postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
 
           const resetLabel = isFactory ? 'factory reset' : 'flashed';
-          termLog(n, `Reconnected after ${resetLabel} — click Push Config to send the configuration`, 'sys');
-          showPostFlashPrompt(n, resetLabel);
+          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
+          showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
+
+          setTimeout(() => {
+            if (preFlashConfigSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+              boardBaselines[n] = null;   // force full push — board NVS is blank
+              populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+            }
+            boardGo(n, { mode: 'configure' });
+          }, 4000);
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -4000,7 +4005,7 @@ function wizardDefaultState() {
                      bootHeartbeatSec:30, messageCount:20, messageDelayMs:100,
                      checksumEnabled:true },
     needsFirmware: false,
-    eraseNvs:      false,
+    eraseNvs:      true,
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
