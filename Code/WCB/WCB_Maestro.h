@@ -29,5 +29,5 @@ void clearAllMaestroConfigs();
 int8_t findSlotByMaestroID(uint8_t maestroID);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter);
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial = false);
 #endif

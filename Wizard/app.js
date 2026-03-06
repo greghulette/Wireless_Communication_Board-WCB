@@ -8,6 +8,11 @@ const BAUD_RATES = [110,300,600,1200,2400,9600,14400,19200,38400,57600,115200,12
 
 // HW_VERSION_MAP is defined in parser.js — use WCBParser.HW_VERSION_MAP
 
+// Monotonically increasing counter for generating unique DOM row IDs.
+// Date.now() is NOT safe here — rows created in the same millisecond get
+// identical IDs, causing document.getElementById() to target the wrong element.
+let _rowIdCounter = 0;
+
 // ─── App State ────────────────────────────────────────────────────
 let appMode        = 'simple';  // 'simple' | 'advanced'
 let systemConfig   = null;
@@ -15,7 +20,7 @@ let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
 let boardFlashMode          = {};   // { boardIndex: 'configure'|'update'|'flash'|'factory' }
-let boardAutoPushAfterFlash = {};   // { boardIndex: bool } — wizard opt-in: push config after factory reset/erase
+let boardAutoPushAfterFlash = {};   // always true — kept for compatibility, always auto-push after flash/erase
 let postFlashGeneralSnapshot = {};  // { boardIndex: generalSnapshot } — saved before flash, restored on next push
 
 // ─── Connect Modal State ───────────────────────────────────────────
@@ -35,7 +40,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.06 12:09';
+const UI_VERSION = '2026.03.06 15:09';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -887,7 +892,7 @@ function appendMaestroRow(n, maestro, readOnly = false) {
   if (!tbody) return;
 
   const rowNum   = tbody.rows.length + 1;
-  const rowId    = `maestro-row-${n}-${Date.now()}`;
+  const rowId    = `maestro-row-${n}-${++_rowIdCounter}`;
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
@@ -1055,7 +1060,7 @@ function appendMappingRow(n, mapping, { bidirFrom = null } = {}) {
   const headers = document.getElementById(`b${n}-mapping-headers`);
   if (headers) headers.style.display = '';
 
-  const rowId    = `map-row-${n}-${Date.now()}`;
+  const rowId    = `map-row-${n}-${++_rowIdCounter}`;
   const isSerial = mapping.type !== 'PWM';
   const div      = document.createElement('div');
   div.id         = rowId;
@@ -1348,7 +1353,7 @@ function appendMappingDestination(rowId, n, dest) {
   const container = document.getElementById(`${rowId}-destinations`);
   if (!container) return;
 
-  const destId   = `map-dest-${rowId}-${Date.now()}`;
+  const destId   = `map-dest-${rowId}-${++_rowIdCounter}`;
   const mapType  = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
   const isSerial = mapType === 'Serial';
 
@@ -1510,7 +1515,7 @@ function addSequenceRow(n) { appendSequenceRow(n, '', ''); }
 function appendSequenceRow(n, key, value) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (!tbody) return;
-  const rowId = `seq-row-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+  const rowId = `seq-row-${n}-${++_rowIdCounter}`;
 
   // Convert stored delimiter-separated value → one-command-per-line for display
   const delim = boardConfigs[n]?.delimiter ?? '^';
@@ -2182,7 +2187,7 @@ async function boardManualConnect(n) {
     delete remoteRelayForBoard[n];   // direct USB connection — not routed via relay
     updateConnectionUI(n, true);
     showToast(`Connected to WCB ${n} — pulling config…`, 'success');
-    setTimeout(() => boardPull(n), 500);
+    setTimeout(() => boardPull(n), 3000);
   } catch (e) {
     if (e.name !== 'NotFoundError') showToast(`Connection failed: ${e.message}`, 'error');
   }
@@ -2260,7 +2265,7 @@ async function boardAutoDetect(n) {
         await conn.connect(port);
         boardConnections[slot] = conn;
         updateConnectionUI(slot, true);
-        setTimeout(() => boardPull(slot), 500);
+        setTimeout(() => boardPull(slot), 3000);
       } catch (err) {
         if (/open|use|busy|access/i.test(err.message)) busy++;
       }
@@ -2542,35 +2547,22 @@ async function boardGo(n, opts = {}) {
         } else {
           // Flash or Factory Reset: NVS is blank.
           const resetLabel = isFactory ? 'factory reset' : 'flashed';
-          const doPush     = boardAutoPushAfterFlash[n] ?? false;
           delete boardAutoPushAfterFlash[n];
 
           postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
 
-          if (doPush) {
-            // Auto-push: restore snapshot INSIDE the setTimeout so any boardPull
-            // that fires during the wait doesn't overwrite boardConfigs[n].
-            termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
-            showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
-            setTimeout(() => {
-              if (preFlashConfigSnapshot) {
-                boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
-                boardBaselines[n] = null;
-                populateUIFromConfig(n, boardConfigs[n]);
-              }
-              boardGo(n, { mode: 'configure' });
-            }, 4000);
-          } else {
-            // Manual: restore snapshot now so the board card UI reflects the
-            // wizard config, but let the user decide when to push.
+          // Always auto-push: restore snapshot INSIDE the setTimeout so any boardPull
+          // that fires during the wait doesn't overwrite boardConfigs[n].
+          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
+          showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
+          setTimeout(() => {
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
               boardBaselines[n] = null;
               populateUIFromConfig(n, boardConfigs[n]);
             }
-            termLog(n, `Reconnected after ${resetLabel} — click Push Config to send configuration`, 'sys');
-            showPostFlashPrompt(n, resetLabel);
-          }
+            boardGo(n, { mode: 'configure' });
+          }, 4000);
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -2617,36 +2609,21 @@ async function boardGo(n, opts = {}) {
       const reconnected = await conn.reconnect(10, 1500);
       if (reconnected) {
         updateConnectionUI(n, true);
-        const doPush = boardAutoPushAfterFlash[n] ?? false;
         delete boardAutoPushAfterFlash[n];
 
-        if (doPush) {
-          termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
-          showToast(`WCB ${n} reconnected — pushing config…`, 'success');
-          // NVS is blank; wait a moment for the board to fully boot, then restore
-          // the pre-erase config snapshot and force a full push (baseline=null).
-          // Restoring inside the callback guards against any boardPull that may
-          // have fired during the wait and overwritten boardConfigs[n].
-          setTimeout(() => {
-            if (preEraseConfigSnapshot) {
-              boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
-              boardBaselines[n] = null;   // force full push — board NVS is blank
-              populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
-            }
-            boardGo(n, { mode: 'configure' });
-          }, 3000);
-        } else {
-          // Clean slate — restore config snapshot for the board card UI, but let
-          // the user decide when (or whether) to push.
+        // Always auto-push: restore the pre-erase config snapshot and force a full push.
+        // Restoring inside the callback guards against any boardPull that may
+        // have fired during the wait and overwritten boardConfigs[n].
+        termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
+        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+        setTimeout(() => {
           if (preEraseConfigSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
-            boardBaselines[n] = null;
-            populateUIFromConfig(n, boardConfigs[n]);
+            boardBaselines[n] = null;   // force full push — board NVS is blank
+            populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
           }
-          postFlashGeneralSnapshot[n] = preEraseGeneralSnapshot;
-          termLog(n, 'Reconnected after NVS erase — click Push Config to send configuration', 'sys');
-          showPostFlashPrompt(n, 'erased');
-        }
+          boardGo(n, { mode: 'configure' });
+        }, 3000);
       } else {
         termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
         showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
@@ -3792,7 +3769,7 @@ function appendKyberTargetRow(n, target, readOnly = false) {
   if (!tbody) return;
 
   const rowNum   = tbody.rows.length + 1;
-  const rowId    = `kyber-target-row-${n}-${Date.now()}`;
+  const rowId    = `kyber-target-row-${n}-${++_rowIdCounter}`;
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
@@ -4080,38 +4057,6 @@ function showToast(message, type = 'info', duration = 3500) {
 }
 
 // Shows a persistent action prompt after a flash/factory reset reconnect.
-// Gives the user the chance to verify the config before pushing instead
-// of auto-pushing with potentially stale DOM state.
-function showPostFlashPrompt(n, resetLabel) {
-  // Remove any previous prompt for this board
-  document.getElementById(`post-flash-prompt-${n}`)?.remove();
-
-  const container = document.getElementById('toast-container');
-  const toast     = document.createElement('div');
-  toast.id        = `post-flash-prompt-${n}`;
-  toast.className = 'toast info';
-  toast.innerHTML = `
-    <span>⚡</span>
-    <span class="toast-msg">WCB ${n} ${resetLabel} &amp; reconnected — push config to finish setup</span>
-    <button class="toast-btn" id="post-flash-push-${n}"
-            style="background:var(--accent);color:#fff;border:none;border-radius:4px;
-                   padding:2px 10px;cursor:pointer;font-size:11px;white-space:nowrap">
-      Push Config
-    </button>
-    <button class="toast-btn toast-dismiss" title="Dismiss">✕</button>`;
-
-  toast.querySelector(`#post-flash-push-${n}`).addEventListener('click', () => {
-    toast.remove();
-    boardGo(n);
-  });
-  toast.querySelector('.toast-dismiss').addEventListener('click', () => {
-    toast.remove();
-    delete postFlashGeneralSnapshot[n];   // discard snapshot if user dismisses
-  });
-
-  container.appendChild(toast);
-  // No auto-dismiss — stays until the user pushes or dismisses
-}
 
 // ─── Setup Wizard ─────────────────────────────────────────────────
 
@@ -4144,7 +4089,6 @@ function wizardDefaultState() {
                      checksumEnabled:true },
     needsFirmware:    false,
     eraseNvs:         true,
-    pushAfterFlash:   false,   // if true, auto-push wizard config after flash/erase
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
@@ -4225,7 +4169,7 @@ function wizardNext() {
                   :                              'update';
     wizardState.boards.forEach((b, i) => {
       boardFlashMode[i + 1]          = modeVal;
-      boardAutoPushAfterFlash[i + 1] = wizardState.pushAfterFlash;
+      boardAutoPushAfterFlash[i + 1] = true;
     });
   }
 
@@ -4751,15 +4695,7 @@ function wizardHTMLFirmware() {
         </div>
       </label>
     </div>
-    <div style="margin-top:8px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
-      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
-        <input type="checkbox" id="wiz-push-after-flash" style="margin-top:2px;cursor:pointer" ${wizardState.pushAfterFlash ? 'checked' : ''}>
-        <div>
-          <div style="font-weight:600;font-size:13px">Apply wizard configuration after reset ${wizHint('When checked, the wizard will automatically push your configuration to each board after it reboots. Leave unchecked to get a clean factory-default board — you can push manually later from the board card.')}</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:2px">Automatically send all settings to each board right after the flash or erase completes. Uncheck for a true clean slate.</div>
-        </div>
-      </label>
-    </div>`;
+    `;
   return `
     <div class="wizard-section-title">Firmware Upload</div>
     <div class="wizard-section-desc">Does WCB firmware need to be uploaded to these boards? Choose "Yes" if the boards are brand new or have never had WCB firmware installed.</div>
@@ -5077,9 +5013,8 @@ function wizardSaveStep(key) {
       wizardState.kyberMarcduinoPort = parseInt(get('wiz-kyber-marcduino-port')?.value) || null;
       break;
     case 'firmware':
-      // needsFirmware is set by wizardFirmwareChoice(); always read the checkboxes
-      wizardState.eraseNvs       = document.getElementById('wiz-erase-nvs')?.checked       ?? false;
-      wizardState.pushAfterFlash = document.getElementById('wiz-push-after-flash')?.checked ?? false;
+      // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox
+      wizardState.eraseNvs = document.getElementById('wiz-erase-nvs')?.checked ?? false;
       break;
     case 'maestro-config':
       wizardState.maestros = wizardState.maestros.map((m, mi) => ({

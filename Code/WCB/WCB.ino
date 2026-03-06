@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_061035RMAR2026                                    *****////
+///*****                                          Version 6.0_061509RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -136,7 +136,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_061035RMAR2026";
+String SoftwareVersion = "6.0_061509RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3707,7 +3707,7 @@ void updateHWVersion(const String &message) {
     chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
     // ---- Maestro Settings ----
-    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter);
+    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
 
     // ---- ETM Settings ----
     cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";

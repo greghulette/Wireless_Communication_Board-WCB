@@ -528,6 +528,8 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .modal-dialog {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: var(--radius2); width: 420px; max-width: 92vw;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
   pointer-events: none; /* prevents invisible dialog intercepting clicks when closed */
   transition: transform 200ms ease;
@@ -560,7 +562,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .modal-close:hover { color: var(--text); background: var(--bg3); }
 
-.modal-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.modal-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; overflow-y: auto; }
 .modal-footer {
   display: flex; justify-content: flex-end; padding: 12px 18px;
   border-top: 1px solid var(--border);

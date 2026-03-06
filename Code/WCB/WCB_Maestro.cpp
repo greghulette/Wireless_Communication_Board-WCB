@@ -407,7 +407,7 @@ void clearAllMaestroConfigs() {
   saveBroadcastBlockSettings();
 }
 
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter) {
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial) {
     bool anyActive = false;
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured) {
@@ -431,6 +431,7 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, cha
                    "S1:" + String(maestroConfigs[i].baudRate);
         }
 
+        if (printToSerial) Serial.println(cmd);
         chainedConfig += String(delimiter) + cmd;
         chainedConfigDefault += "^" + cmd;
     }
