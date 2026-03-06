@@ -40,7 +40,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.06 15:09';
+const UI_VERSION = '2026.03.06 15:21';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen = false;             // suppress mismatch modals while wizard is open
@@ -4113,12 +4113,13 @@ function wizardInitBoards(qty) {
 
 // ── Step list ──────────────────────────────────────────────────────
 function buildWizardSteps() {
-  // Kyber and Maestro come before Serial so claimed ports are visible when labelling
-  const steps = ['welcome','quantity','network','identity','kyber'];
+  // Kyber and Maestro come before Serial so claimed ports are visible when labelling.
+  // Network comes after Serial so port labels and claimed ports are set before network entry.
+  const steps = ['welcome','quantity','identity','kyber'];
   if (wizardState.kyberEnabled) steps.push('kyber-config');
   steps.push('maestro');
   if (wizardState.maestroEnabled) steps.push('maestro-config');
-  steps.push('serial','etm','review','firmware','connect');
+  steps.push('serial','network','etm','review','firmware','connect');
   return steps;
 }
 
@@ -4195,19 +4196,19 @@ function wizardRenderStep() {
 
   // Title
   const titles = {
-    'welcome':      'Setup Wizard',
-    'quantity':     'Step 1 — System Size',
-    'network':      'Step 2 — Network',
-    'identity':     'Step 3 — Board Identity',
-    'serial':       'Step 4 — Serial Ports',
-    'kyber':        'Step 5 — Kyber Controller',
-    'kyber-config': 'Step 5b — Kyber Setup',
-    'maestro':      'Step 6 — Maestro Controller',
-    'maestro-config':'Step 6b — Maestro Setup',
-    'etm':          'Step 7 — Event Tracking (ETM)',
-    'review':       'Review — Almost Done!',
-    'firmware':     'Step 8 — Firmware',
-    'connect':      'Connect & Push',
+    'welcome':       'Setup Wizard',
+    'quantity':      'Step 1 — System Size',
+    'identity':      'Step 2 — Board Identity',
+    'kyber':         'Step 3 — Kyber Controller',
+    'kyber-config':  'Step 3b — Kyber Setup',
+    'maestro':       'Step 4 — Maestro Controller',
+    'maestro-config':'Step 4b — Maestro Setup',
+    'serial':        'Step 5 — Serial Ports',
+    'network':       'Step 6 — Network',
+    'etm':           'Step 7 — Event Tracking (ETM)',
+    'review':        'Review — Almost Done!',
+    'firmware':      'Step 8 — Firmware',
+    'connect':       'Connect & Push',
   };
   document.getElementById('wizard-modal-title').textContent = titles[key] ?? 'Setup Wizard';
 
