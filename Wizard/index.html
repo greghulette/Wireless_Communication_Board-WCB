@@ -195,7 +195,7 @@
 </div>
 
 <!-- ─── Setup Wizard Modal ───────────────────────────────────────── -->
-<div class="modal-overlay" id="wizard-modal" onclick="closeWizard(event)">
+<div class="modal-overlay" id="wizard-modal">
   <div class="modal-dialog wizard-dialog">
     <div class="modal-header">
       <span class="modal-title" id="wizard-modal-title">Setup Wizard</span>
@@ -222,6 +222,21 @@
     <div class="modal-footer" style="gap:8px">
       <button class="btn btn-ghost btn-sm" id="general-conflict-keep">Keep current</button>
       <button class="btn btn-primary btn-sm" id="general-conflict-use">Use incoming</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Port Picker Modal ─────────────────────────────────────── -->
+<div class="modal-overlay" id="port-picker-modal" onclick="closePortPickerModal(event)">
+  <div class="modal-dialog" style="width:440px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title" id="port-picker-title">Select Serial Port</span>
+      <button class="modal-close" onclick="closePortPickerModal()">✕</button>
+    </div>
+    <div class="modal-body" id="port-picker-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="closePortPickerModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="port-picker-new-btn">+ Authorize…</button>
     </div>
   </div>
 </div>

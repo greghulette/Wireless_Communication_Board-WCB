@@ -1027,3 +1027,28 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   background: var(--bg4); padding: 1px 5px; border-radius: 3px;
   color: var(--accent);
 }
+
+/* ─── Port Picker Modal ──────────────────────────────────────── */
+.port-picker-list { display: flex; flex-direction: column; gap: 8px; }
+.port-picker-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer; transition: all var(--transition);
+}
+.port-picker-item:not(.port-picker-item--used):hover {
+  border-color: var(--accent); background: rgba(0,212,255,0.05);
+}
+.port-picker-item--used { opacity: 0.5; cursor: default; }
+.port-picker-item-left { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.port-picker-num { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--accent); }
+.port-picker-chip { font-size: 11px; color: var(--text2); }
+.port-picker-arrow { font-size: 14px; color: var(--text3); flex-shrink: 0; }
+.port-picker-item--detected {
+  border-color: var(--green) !important;
+  background: rgba(0,232,122,0.08) !important;
+  animation: portDetectedPulse 0.6s ease;
+}
+@keyframes portDetectedPulse {
+  0%   { background: rgba(0,232,122,0.4); border-color: var(--green); }
+  100% { background: rgba(0,232,122,0.08); border-color: var(--green); }
+}

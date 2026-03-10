@@ -2099,7 +2099,7 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     // Write the correct (baseline) values into the mismatching board's config so
     // the diff engine sees a real difference and the Push Config button goes amber.
     if (boardConfigs[newBoard]) {
-      applyGeneralFieldsToBoardConfig(newBoard, srcFields);
+      applyGeneralFieldsToBoardConfig(newBoard, baselineFields);
       updateBoardStatusBadge(newBoard, 'unsaved');
     }
     document.getElementById('general-conflict-modal').classList.remove('open');
@@ -2171,6 +2171,173 @@ async function boardDisconnect(n) {
   if (btn) btn.disabled = false;
 }
 
+// ─── Port Picker Modal ────────────────────────────────────────
+let _portPickerPorts        = [];
+let _portPickerResolve      = null;
+let _portPickerStopMonitors = null; // async fn that cancels all open port readers
+
+const PORT_VENDOR_NAMES = {
+  0x10C4: 'Silicon Labs CP2102',
+  0x1A86: 'QinHeng CH340',
+  0x0403: 'FTDI FT232R',
+};
+
+function portVendorLabel(info) {
+  const name = PORT_VENDOR_NAMES[info?.usbVendorId];
+  if (name) return name;
+  if (info?.usbVendorId) {
+    const vid = `0x${info.usbVendorId.toString(16).toUpperCase().padStart(4, '0')}`;
+    const pid = info.usbProductId
+      ? ` / PID 0x${info.usbProductId.toString(16).toUpperCase().padStart(4, '0')}`
+      : '';
+    return `USB-Serial VID ${vid}${pid}`;
+  }
+  return 'Serial Device';
+}
+
+function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
+  return new Promise(resolve => {
+    _portPickerPorts    = [...initialPorts];
+    _portPickerResolve  = resolve;
+    _portPickerStopMonitors?.(); // cancel any monitors left over from a previous open
+
+    document.getElementById('port-picker-title').textContent = `Select Port — WCB ${n}`;
+
+    // ── State that persists across re-renders ──────────────────────
+    let monitorActive = true;
+    const openReaders = new Map(); // port → reader  (prevents double-monitoring)
+    const detectedSet = new Set(); // ports that have seen reboot data
+
+    // ── Render the current port list ───────────────────────────────
+    function renderBody() {
+      const pts = _portPickerPorts;
+
+      if (pts.length === 0) {
+        document.getElementById('port-picker-body').innerHTML =
+          `<p style="font-size:12px;color:var(--text2);margin:0 0 8px">
+             No boards authorized yet — click <strong>+ Authorize…</strong> below
+             to let the browser see your WCB.<br>
+             <span style="font-size:11px;color:var(--text3)">
+               You'll see a popup listing USB-serial devices (CP2102, CH340, FT232).
+               Each board only needs to be authorized once per browser.
+             </span>
+           </p>`;
+        return;
+      }
+
+      const items = pts.map((port, i) => {
+        const info     = port.getInfo ? port.getInfo() : {};
+        const chip     = portVendorLabel(info);
+        const claimed  = usedPorts.has(port);
+        const byBoard  = usedByBoard.get(port);
+        const detected = detectedSet.has(port);
+        const right    = claimed
+          ? `<span class="badge badge-yellow" style="font-size:10px;white-space:nowrap">WCB ${byBoard ?? '?'} in use</span>`
+          : detected
+            ? `<span class="badge badge-green"  style="font-size:10px;white-space:nowrap">↩ Rebooted!</span>`
+            : `<span class="port-picker-arrow" id="port-picker-arrow-${i}">→</span>`;
+        return `<div class="port-picker-item${claimed ? ' port-picker-item--used' : ''}${detected ? ' port-picker-item--detected' : ''}"
+                     ${!claimed ? `onclick="portPickerSelect(${i})"` : ''}>
+          <div class="port-picker-item-left">
+            <span class="port-picker-num">Port ${i + 1}</span>
+            <span class="port-picker-chip">${escHtml(chip)}</span>
+          </div>
+          ${right}
+        </div>`;
+      }).join('');
+
+      const hint = `
+        <p style="font-size:11px;color:var(--text3);margin:8px 0 0;line-height:1.6">
+          <strong style="color:var(--text2)">Step 1:</strong> click <strong>+ Authorize…</strong>
+          for each board you want to use (one at a time). They'll appear in the list above.<br>
+          <strong style="color:var(--text2)">Step 2:</strong> press the reset button on a board —
+          its row will flash green. Click that row to assign it to <strong>WCB ${n}</strong>.
+        </p>`;
+
+      document.getElementById('port-picker-body').innerHTML =
+        `<div class="port-picker-list">${items}</div>${hint}`;
+
+      // Start monitors for any newly-added unclaimed ports
+      for (let i = 0; i < pts.length; i++) {
+        const port = pts[i];
+        if (!usedPorts.has(port) && !openReaders.has(port) && !detectedSet.has(port)) {
+          monitorPort(port, i);
+        }
+      }
+    }
+
+    // ── Per-port reboot monitor ────────────────────────────────────
+    async function monitorPort(port, index) {
+      try { await port.open({ baudRate: 115200 }); } catch { return; } // skip if busy
+      const reader = port.readable.getReader();
+      openReaders.set(port, reader);
+      try {
+        while (monitorActive) {
+          const { value, done } = await reader.read();
+          if (done || !monitorActive) break;
+          if (value?.length > 0) {
+            detectedSet.add(port);
+            // Re-render to show green highlight (other monitors keep running)
+            renderBody();
+            // Scroll the detected row into view
+            const rows = document.querySelectorAll('#port-picker-body .port-picker-item');
+            rows[index]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            break;
+          }
+        }
+      } catch (_) { /* cancelled by stopMonitors */ }
+      try { reader.releaseLock(); } catch (_) {}
+      try { await port.close(); } catch (_) {}
+      openReaders.delete(port);
+    }
+
+    _portPickerStopMonitors = async () => {
+      monitorActive = false;
+      for (const reader of openReaders.values()) {
+        try { await reader.cancel(); } catch (_) {}
+      }
+      _portPickerStopMonitors = null;
+    };
+
+    // ── "+ Authorize…" — adds a port and refreshes, stays open ────
+    const oldBtn = document.getElementById('port-picker-new-btn');
+    const newBtn = oldBtn.cloneNode(true);
+    oldBtn.parentNode.replaceChild(newBtn, oldBtn);
+    newBtn.textContent = '+ Authorize…';
+    newBtn.addEventListener('click', async () => {
+      try {
+        // Filtered to known WCB USB-serial chips only
+        const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
+        await navigator.serial.requestPort({ filters });
+        // Refresh the full list — the newly-authorized port is now in getPorts()
+        _portPickerPorts = await navigator.serial.getPorts();
+        renderBody(); // re-render with the new port added; starts its monitor
+      } catch {
+        // User cancelled the native dialog — just keep the picker open
+      }
+    });
+
+    // Initial render + start monitors for already-known ports
+    renderBody();
+    document.getElementById('port-picker-modal').classList.add('open');
+  });
+}
+
+function portPickerSelect(index) {
+  _portPickerStopMonitors?.();
+  document.getElementById('port-picker-modal').classList.remove('open');
+  const r = _portPickerResolve; _portPickerResolve = null;
+  r?.(_portPickerPorts[index] ?? null);
+}
+
+function closePortPickerModal(event) {
+  if (event && event.target !== document.getElementById('port-picker-modal')) return;
+  _portPickerStopMonitors?.();
+  document.getElementById('port-picker-modal').classList.remove('open');
+  const r = _portPickerResolve; _portPickerResolve = null;
+  r?.(null);
+}
+
 // ─── Manual connect (port picker) ─────────────────────────────────
 async function boardManualConnect(n) {
   const btn = document.getElementById(`b${n}-btn-connect`);
@@ -2181,8 +2348,26 @@ async function boardManualConnect(n) {
         .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
         .map(([, c]) => c.port)
     );
+    const usedByBoard = new Map(
+      Object.entries(boardConnections)
+        .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
+        .map(([k, c]) => [c.port, parseInt(k)])
+    );
+
+    // Always show the custom picker — even when no ports are yet authorized.
+    // "Authorize…" inside the picker uses a filtered requestPort() (WCB chips
+    // only) and resolves directly with the port, so there is never a second
+    // native dialog and the flow always goes through our UI.
+    const knownPorts  = await navigator.serial.getPorts();
+    const pick        = await showPortPickerModal(n, knownPorts, usedPorts, usedByBoard);
+    if (pick === null) {
+      if (btn) btn.disabled = false;
+      return; // user cancelled or dismissed
+    }
+    const selectedPort = pick; // always a SerialPort object at this point
+
     const conn = new BoardConnection(n);
-    await conn.connect(null, usedPorts);
+    await conn.connect(selectedPort, usedPorts);
     boardConnections[n] = conn;
     delete remoteRelayForBoard[n];   // direct USB connection — not routed via relay
     updateConnectionUI(n, true);
@@ -2553,8 +2738,8 @@ async function boardGo(n, opts = {}) {
 
           // Always auto-push: restore snapshot INSIDE the setTimeout so any boardPull
           // that fires during the wait doesn't overwrite boardConfigs[n].
-          termLog(n, `Reconnected after ${resetLabel} — pushing config in 4s…`, 'sys');
-          showToast(`WCB ${n} ${resetLabel} — pushing config…`, 'success');
+          termLog(n, `Reconnected after ${resetLabel} — pushing config in 8s…`, 'sys');
+          showToast(`WCB ${n} ${resetLabel} — pushing config in 8s…`, 'success');
           setTimeout(() => {
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
@@ -2562,7 +2747,7 @@ async function boardGo(n, opts = {}) {
               populateUIFromConfig(n, boardConfigs[n]);
             }
             boardGo(n, { mode: 'configure' });
-          }, 4000);
+          }, 8000);
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -2614,8 +2799,8 @@ async function boardGo(n, opts = {}) {
         // Always auto-push: restore the pre-erase config snapshot and force a full push.
         // Restoring inside the callback guards against any boardPull that may
         // have fired during the wait and overwritten boardConfigs[n].
-        termLog(n, 'Reconnected after NVS erase — pushing configuration…', 'sys');
-        showToast(`WCB ${n} reconnected — pushing config…`, 'success');
+        termLog(n, 'Reconnected after NVS erase — pushing configuration in 8s…', 'sys');
+        showToast(`WCB ${n} reconnected — pushing config in 8s…`, 'success');
         setTimeout(() => {
           if (preEraseConfigSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
@@ -2623,7 +2808,7 @@ async function boardGo(n, opts = {}) {
             populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
           }
           boardGo(n, { mode: 'configure' });
-        }, 3000);
+        }, 8000);
       } else {
         termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
         showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
@@ -5366,6 +5551,19 @@ async function wizardManualConnect(n) {
   const generalSnapshot = captureGeneralDOMSnapshot();
 
   wizardDisableConnectBtns(n);
+
+  // Always disconnect first so the user explicitly picks the port every time.
+  // This prevents the wizard from silently reusing a stale connection and
+  // ensures each physical board is intentionally assigned to its slot.
+  if (boardConnections[n]?.isConnected()) {
+    wizardSetConnectStatus(n, 'busy', 'Disconnecting…');
+    if (wizardConnectWatchers[n]) {
+      clearInterval(wizardConnectWatchers[n]);
+      delete wizardConnectWatchers[n];
+    }
+    await boardDisconnect(n);
+  }
+
   wizardSetConnectStatus(n, 'busy', 'Select port…');
   try {
     await boardManualConnect(n);
@@ -5456,60 +5654,10 @@ function wizardCheckAllDone() {
 }
 
 function wizardStartConnectWatchers() {
-  // For boards already connected when the wizard reaches the connect step,
-  // trigger a fresh ?backup first (same as wizardWatchForConnect does for
-  // newly-connected boards) so we confirm the board is booted and responsive
-  // before pushing.
-  for (let i = 0; i < wizardState.quantity; i++) {
-    const n = i + 1;
-    if (boardConnections[n]?.isConnected()) {
-      const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
-      const generalSnapshot = captureGeneralDOMSnapshot();
-
-      wizardDisableConnectBtns(n);
-      wizardSetConnectStatus(n, 'busy', '🔍 Pulling…');
-
-      // Clear the baseline so we can detect when the fresh pull completes.
-      boardBaselines[n] = null;
-      boardPull(n);   // async — fires ?backup, sets boardBaselines[n] when done
-
-      let attempts = 0;
-      const iv = setInterval(async () => {
-        attempts++;
-        if (boardBaselines[n]) {
-          // boardPull finished — board is booted and responsive.
-          clearInterval(iv);
-          wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
-
-          // Restore the wizard's intended config (boardPull overwrites boardConfigs[n]).
-          if (configSnapshot) {
-            boardConfigs[n]   = JSON.parse(JSON.stringify(configSnapshot));
-            boardBaselines[n] = null;   // force full push
-            populateUIFromConfig(n, boardConfigs[n]);
-          }
-          restoreGeneralDOMSnapshot(generalSnapshot);
-
-          try {
-            await boardGo(n);
-            if (boardConnections[n]?.isConnected()) {
-              wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
-              await sleep(800);
-              await boardPull(n);
-            }
-            wizardEnableConnectBtns(n);
-            wizardSetConnectStatus(n, 'ok', '✓ Done');
-          } catch(e) {
-            wizardEnableConnectBtns(n);
-            wizardSetConnectStatus(n, 'err', '✕ Push failed');
-          }
-        } else if (attempts > 60) { // 30s timeout for pull
-          clearInterval(iv);
-          wizardEnableConnectBtns(n);
-          wizardSetConnectStatus(n, 'err', '✕ Pull timed out');
-        }
-      }, 500);
-    }
-  }
+  // Intentionally does nothing for already-connected boards.
+  // The user must always click "Connect" for each slot so they explicitly
+  // confirm which physical board maps to which slot. wizardManualConnect()
+  // handles disconnecting any stale connection before showing the port picker.
 }
 
 // ─── ETM Char / ESP-NOW Stats Modal ───────────────────────────────
