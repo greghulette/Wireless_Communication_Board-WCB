@@ -40,10 +40,11 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.06 15:21';
+const UI_VERSION = '2026.03.11 14:03';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
-let _wizardOpen = false;             // suppress mismatch modals while wizard is open
+let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
+let _wizardSessionId = 0;            // incremented on each openWizard(); guards stale close timers
 let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
 
 // ─── Init ─────────────────────────────────────────────────────────
@@ -252,6 +253,7 @@ function addBoardSection(n) {
   temp.innerHTML = html;
   const section  = temp.firstElementChild;
   section.classList.add(`board-color-${((n - 1) % 8) + 1}`);
+  section.classList.add('status-disconnected'); // red right bar until board connects
   document.getElementById('boards-container').appendChild(section);
 
   // Apply current app mode to any remaining advanced-only elements in the new section
@@ -876,6 +878,16 @@ function updateBoardStatusBadge(n, state) {
   const [cls, text] = states[state] ?? states.default;
   badge.classList.add(cls);
   badge.textContent = text;
+
+  // Keep the right-side status bar in sync with the badge colour
+  const section = document.getElementById(`section-board-${n}`);
+  if (section) {
+    section.classList.remove('status-connected', 'status-retrying', 'status-error', 'status-disconnected');
+    if      (cls === 'badge-green')  section.classList.add('status-connected');
+    else if (cls === 'badge-yellow') section.classList.add('status-retrying');
+    else if (cls === 'badge-red')    section.classList.add('status-error');
+    else                             section.classList.add('status-disconnected'); // not connected → red
+  }
 
   // Show retry button only when pull failed on a remote board
   const retryBtn = document.getElementById(`b${n}-btn-retry`);
@@ -2205,8 +2217,9 @@ function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
 
     // ── State that persists across re-renders ──────────────────────
     let monitorActive = true;
-    const openReaders = new Map(); // port → reader  (prevents double-monitoring)
-    const detectedSet = new Set(); // ports that have seen reboot data
+    const openReaders    = new Map(); // port → reader  (prevents double-monitoring)
+    const monitorPromises = new Map(); // port → Promise  (so stopMonitors can await them)
+    const detectedSet    = new Set(); // ports that have seen reboot data
 
     // ── Render the current port list ───────────────────────────────
     function renderBody() {
@@ -2252,16 +2265,17 @@ function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
           for each board you want to use (one at a time). They'll appear in the list above.<br>
           <strong style="color:var(--text2)">Step 2:</strong> press the reset button on a board —
           its row will flash green. Click that row to assign it to <strong>WCB ${n}</strong>.
+          Or use <strong>Select by COM#…</strong> to pick by Windows device name.
         </p>`;
 
       document.getElementById('port-picker-body').innerHTML =
         `<div class="port-picker-list">${items}</div>${hint}`;
 
-      // Start monitors for any newly-added unclaimed ports
+      // Start monitors for every unclaimed port not already being watched.
       for (let i = 0; i < pts.length; i++) {
         const port = pts[i];
         if (!usedPorts.has(port) && !openReaders.has(port) && !detectedSet.has(port)) {
-          monitorPort(port, i);
+          monitorPromises.set(port, monitorPort(port, i));
         }
       }
     }
@@ -2269,33 +2283,62 @@ function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
     // ── Per-port reboot monitor ────────────────────────────────────
     async function monitorPort(port, index) {
       try { await port.open({ baudRate: 115200 }); } catch { return; } // skip if busy
+      // Immediately deassert DTR & RTS so opening the port doesn't trigger an
+      // ESP32 EN-pin reset via the CP210x / CH340 RC circuit.
+      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
       const reader = port.readable.getReader();
       openReaders.set(port, reader);
+      // Drain for 2 s: discards any data buffered before the picker opened OR
+      // from a DTR-triggered boot so we don't false-positive on running boards.
+      // After the drain we ONLY trigger on genuine ESP32 boot-log signatures —
+      // routine ETM firmware heartbeat output will never match these strings.
+      let settled = false;
+      const drainTimer = setTimeout(() => { settled = true; }, 2000);
+      const BOOT_RE = /rst:0x|ets Jun|ets Jul|configsip:|cpu_start:|ESP-ROM:|Brownout/;
+      const dec = new TextDecoder();
+      let buf = '';
       try {
         while (monitorActive) {
           const { value, done } = await reader.read();
           if (done || !monitorActive) break;
+          if (!settled) continue;                        // discard during drain window
           if (value?.length > 0) {
-            detectedSet.add(port);
-            // Re-render to show green highlight (other monitors keep running)
-            renderBody();
-            // Scroll the detected row into view
-            const rows = document.querySelectorAll('#port-picker-body .port-picker-item');
-            rows[index]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            break;
+            buf += dec.decode(value, { stream: true });
+            if (buf.length > 256) buf = buf.slice(-256); // keep buffer bounded
+            if (BOOT_RE.test(buf)) {
+              detectedSet.add(port);
+              // Re-render to show green highlight (other monitors keep running)
+              renderBody();
+              // Scroll the detected row into view
+              const rows = document.querySelectorAll('#port-picker-body .port-picker-item');
+              rows[index]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              break;
+            }
           }
         }
       } catch (_) { /* cancelled by stopMonitors */ }
-      try { reader.releaseLock(); } catch (_) {}
-      try { await port.close(); } catch (_) {}
-      openReaders.delete(port);
+      clearTimeout(drainTimer);
+      // stopMonitors may have already released + closed — guard against double-close
+      if (openReaders.has(port)) {
+        try { reader.releaseLock(); } catch (_) {}
+        try { await port.close(); }    catch (_) {}
+        openReaders.delete(port);
+      }
     }
 
     _portPickerStopMonitors = async () => {
       monitorActive = false;
+      // Signal every reader to stop — monitorPort's own catch block then
+      // releases the lock and closes the port.
       for (const reader of openReaders.values()) {
         try { await reader.cancel(); } catch (_) {}
       }
+      // Wait for every monitorPort call to fully finish its cleanup
+      // (releaseLock + port.close).  Only once all of those awaits resolve
+      // are the ports truly free for boardManualConnect to reopen.
+      await Promise.allSettled(monitorPromises.values());
+      monitorPromises.clear();
+      openReaders.clear(); // belt-and-suspenders — should already be empty
       _portPickerStopMonitors = null;
     };
 
@@ -2317,22 +2360,42 @@ function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
       }
     });
 
+    // ── "Select by COM#…" — opens Chrome's unfiltered native picker ──
+    // The native dialog shows OS-level port names (e.g. COM13) so the user
+    // can cross-reference Windows Device Manager when board order is unclear.
+    const oldComBtn = document.getElementById('port-picker-com-btn');
+    const newComBtn = oldComBtn.cloneNode(true);
+    oldComBtn.parentNode.replaceChild(newComBtn, oldComBtn);
+    newComBtn.addEventListener('click', async () => {
+      try {
+        const port = await navigator.serial.requestPort(); // no filter — shows COM#
+        if (port) {
+          await _portPickerStopMonitors?.(); // wait for monitored ports to close
+          document.getElementById('port-picker-modal').classList.remove('open');
+          const r = _portPickerResolve; _portPickerResolve = null;
+          r?.(port);
+        }
+      } catch {
+        // User cancelled — keep picker open
+      }
+    });
+
     // Initial render + start monitors for already-known ports
     renderBody();
     document.getElementById('port-picker-modal').classList.add('open');
   });
 }
 
-function portPickerSelect(index) {
-  _portPickerStopMonitors?.();
+async function portPickerSelect(index) {
+  await _portPickerStopMonitors?.(); // wait for all monitored ports to fully close
   document.getElementById('port-picker-modal').classList.remove('open');
   const r = _portPickerResolve; _portPickerResolve = null;
   r?.(_portPickerPorts[index] ?? null);
 }
 
-function closePortPickerModal(event) {
+async function closePortPickerModal(event) {
   if (event && event.target !== document.getElementById('port-picker-modal')) return;
-  _portPickerStopMonitors?.();
+  await _portPickerStopMonitors?.(); // wait for all monitored ports to fully close
   document.getElementById('port-picker-modal').classList.remove('open');
   const r = _portPickerResolve; _portPickerResolve = null;
   r?.(null);
@@ -2725,10 +2788,21 @@ async function boardGo(n, opts = {}) {
         boardFlashMode[n] = 'configure';   // reset mode after flash
 
         if (isUpdate) {
-          // App-only update: NVS is intact, just pull to verify config survived
+          // App-only update: NVS is intact — verify and/or push wizard config
           termLog(n, 'Reconnected — pulling config to verify NVS…', 'sys');
           showToast(`WCB ${n} updated — verifying config…`, 'success');
-          setTimeout(() => boardPull(n), 4000);
+          if (_wizardOpen) {
+            // Wizard context: await so wizardCheckAllDone fires only after push completes
+            await sleep(4000);
+            if (preFlashConfigSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+              boardBaselines[n] = null;
+              populateUIFromConfig(n, boardConfigs[n]);
+            }
+            await boardGo(n, { mode: 'configure' });
+          } else {
+            setTimeout(() => boardPull(n), 4000);
+          }
         } else {
           // Flash or Factory Reset: NVS is blank.
           const resetLabel = isFactory ? 'factory reset' : 'flashed';
@@ -2736,18 +2810,29 @@ async function boardGo(n, opts = {}) {
 
           postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
 
-          // Always auto-push: restore snapshot INSIDE the setTimeout so any boardPull
-          // that fires during the wait doesn't overwrite boardConfigs[n].
+          // Restore snapshot right before pushing so any boardPull that fired during
+          // the wait doesn't overwrite boardConfigs[n] with factory defaults.
           termLog(n, `Reconnected after ${resetLabel} — pushing config in 8s…`, 'sys');
           showToast(`WCB ${n} ${resetLabel} — pushing config in 8s…`, 'success');
-          setTimeout(() => {
+          if (_wizardOpen) {
+            // Wizard context: await so wizardCheckAllDone fires only after push completes
+            await sleep(8000);
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
               boardBaselines[n] = null;
               populateUIFromConfig(n, boardConfigs[n]);
             }
-            boardGo(n, { mode: 'configure' });
-          }, 8000);
+            await boardGo(n, { mode: 'configure' });  // postFlashGeneralSnapshot restored inside
+          } else {
+            setTimeout(() => {
+              if (preFlashConfigSnapshot) {
+                boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+                boardBaselines[n] = null;
+                populateUIFromConfig(n, boardConfigs[n]);
+              }
+              boardGo(n, { mode: 'configure' });
+            }, 8000);
+          }
         }
       } else {
         termLog(n, 'Reconnect failed — connect manually', 'err');
@@ -2796,19 +2881,30 @@ async function boardGo(n, opts = {}) {
         updateConnectionUI(n, true);
         delete boardAutoPushAfterFlash[n];
 
-        // Always auto-push: restore the pre-erase config snapshot and force a full push.
-        // Restoring inside the callback guards against any boardPull that may
-        // have fired during the wait and overwritten boardConfigs[n].
+        // Restore the pre-erase config snapshot right before pushing so any boardPull
+        // that fired during the wait doesn't overwrite boardConfigs[n].
         termLog(n, 'Reconnected after NVS erase — pushing configuration in 8s…', 'sys');
         showToast(`WCB ${n} reconnected — pushing config in 8s…`, 'success');
-        setTimeout(() => {
+        if (_wizardOpen) {
+          // Wizard context: await so wizardCheckAllDone fires only after push completes
+          await sleep(8000);
           if (preEraseConfigSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
             boardBaselines[n] = null;   // force full push — board NVS is blank
             populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
           }
-          boardGo(n, { mode: 'configure' });
-        }, 8000);
+          restoreGeneralDOMSnapshot(preEraseGeneralSnapshot);
+          await boardGo(n, { mode: 'configure' });
+        } else {
+          setTimeout(() => {
+            if (preEraseConfigSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
+              boardBaselines[n] = null;   // force full push — board NVS is blank
+              populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
+            }
+            boardGo(n, { mode: 'configure' });
+          }, 8000);
+        }
       } else {
         termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
         showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
@@ -2888,15 +2984,21 @@ async function boardGo(n, opts = {}) {
         updateConnectionUI(n, false);
         termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
 
-        // Fire-and-forget reconnect so the Go button re-enables right away
+        // Fire-and-forget reconnect so the Go button re-enables right away.
+        // In wizard context, wizardWatchForConnect polls isConnected() and
+        // waits for this background reconnect to finish before marking ✓ Done.
         (async () => {
           const reconnected = await conn.reconnect(10, 1500);
           if (reconnected) {
             updateConnectionUI(n, true);
             termLog(n, 'Reconnected after reboot', 'sys');
             showToast(`WCB ${n} reconnected`, 'success');
-            termLog(n, 'Auto-pulling config…', 'sys');
-            setTimeout(() => boardPull(n), 3000);
+            if (!_wizardOpen) {
+              // Wizard path: wizardWatchForConnect does its own verify pull.
+              // Only auto-pull when wizard is not in control.
+              termLog(n, 'Auto-pulling config…', 'sys');
+              setTimeout(() => boardPull(n), 3000);
+            }
           } else {
             termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
             showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
@@ -4266,7 +4368,7 @@ function wizardDefaultState() {
     kyberBaud:           115200,
     kyberMarcduinoPort:  3,
     kyberTargets:        [],
-    maestroEnabled: false,
+    maestroEnabled: null,   // null = not yet chosen; true/false = explicit Yes/No
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
@@ -4309,8 +4411,17 @@ function buildWizardSteps() {
 }
 
 // ── Open / Close ───────────────────────────────────────────────────
+function _wizardClearAllWatchers() {
+  Object.keys(wizardConnectWatchers).forEach(n => {
+    clearInterval(wizardConnectWatchers[n]);
+    delete wizardConnectWatchers[n];
+  });
+}
+
 function openWizard() {
   _wizardOpen = true;
+  _wizardSessionId++;           // invalidate any stale close timers from prior sessions
+  _wizardClearAllWatchers();    // clear any lingering connect watchers
   wizardState = wizardDefaultState();
   wizardState.password = wizardGenPassword();
   wizardState.mac2     = wizardGenMacOctet();
@@ -4323,6 +4434,7 @@ function openWizard() {
 function closeWizard(event) {
   if (event && event.target !== document.getElementById('wizard-modal')) return;
   _wizardOpen = false;
+  _wizardClearAllWatchers();    // stop all board connect watchers when wizard closes
   document.getElementById('wizard-modal').classList.remove('open');
 }
 
@@ -4424,13 +4536,25 @@ function wizardRenderStep() {
   }
 
   if (key === 'connect') {
-    nextBtn.textContent = '✓ Done';
-    nextBtn.onclick = () => closeWizard();
+    if (wizardState.connectMode) {
+      // Board rows are visible — hide the button; wizardCheckAllDone shows it when done
+      nextBtn.style.display = 'none';
+    } else {
+      // Mode picker is visible — button advances to board rows with the default (seq) mode
+      nextBtn.textContent = 'One at a time →';
+      nextBtn.disabled = false;
+      nextBtn.style.display = '';
+      nextBtn.onclick = () => wizardSelectConnectMode('seq');
+    }
   } else if (key === 'review') {
     nextBtn.textContent = 'Apply & Connect →';
+    nextBtn.disabled = false;
+    nextBtn.style.display = '';
     nextBtn.onclick = wizardNext;
   } else {
     nextBtn.textContent = 'Next →';
+    nextBtn.disabled = false;
+    nextBtn.style.display = '';
     nextBtn.onclick = wizardNext;
   }
 
@@ -4731,7 +4855,13 @@ function wizardHTMLKyberConfig() {
 }
 
 function wizardHTMLMaestro() {
+  // Auto-select Yes when Kyber is enabled and user hasn't explicitly declined.
+  // Kyber requires a Maestro, so if the user said Yes to Kyber, Maestro is implied.
+  if (wizardState.kyberEnabled && wizardState.maestroEnabled !== false) {
+    wizardState.maestroEnabled = true;
+  }
   const yes = wizardState.maestroEnabled === true;
+  const no  = wizardState.maestroEnabled === false;
   return `
     <div class="wizard-section-title">Maestro Servo Controller</div>
     <div class="wizard-section-desc">Are any of your WCBs connected to a Pololu Maestro servo controller?</div>
@@ -4741,7 +4871,7 @@ function wizardHTMLMaestro() {
         <span class="wizard-choice-label">Yes, I use Maestro</span>
         <span class="wizard-choice-desc">One or more WCBs control Maestro boards via serial</span>
       </button>
-      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}" onclick="wizardSetChoice('maestroEnabled',false,this)">
+      <button class="wizard-choice-btn ${no ? 'selected-no' : ''}" onclick="wizardSetChoice('maestroEnabled',false,this)">
         <span class="wizard-choice-icon">✕</span>
         <span class="wizard-choice-label">No Maestro</span>
         <span class="wizard-choice-desc">Skip Maestro configuration</span>
@@ -4750,6 +4880,10 @@ function wizardHTMLMaestro() {
 }
 
 function wizardHTMLMaestroConfig() {
+  // Always start with at least one Maestro row — the user chose Maestro, so there's at least one.
+  if (wizardState.maestros.length === 0) {
+    wizardState.maestros.push({ boardSlot: 1, id: 1, port: 1, baud: 115200 });
+  }
   const { maestros, quantity } = wizardState;
   const boardOpts = (sel) => Array.from({length: quantity}, (_, i) =>
     `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
@@ -4790,7 +4924,7 @@ function wizardHTMLMaestroConfig() {
       <thead><tr><th>#</th><th>ID ${wizHint('Maestro controller ID — set this in the Pololu Maestro Control Center under Device Settings > Serial Settings.')}</th><th>Board ${wizHint('Which WCB is physically connected to this Maestro via serial cable.')}</th><th>Port ${wizHint('Which serial port on that WCB the Maestro TX/RX wires are connected to.')}</th><th>Baud ${wizHint('Communication speed — must match the baud rate configured in the Pololu Maestro Control Center.')}</th><th></th></tr></thead>
       <tbody id="wiz-maestro-tbody">${rows}</tbody>
     </table>
-    <button class="btn btn-ghost btn-sm" onclick="wizardAddMaestro()">+ Add Maestro</button>`;
+    <button class="btn btn-primary btn-sm" onclick="wizardAddMaestro()">+ Add Maestro</button>`;
 }
 
 function wizardHTMLEtm() {
@@ -4910,7 +5044,6 @@ function wizardFirmwareChoice(val, btn) {
 
 function wizardHTMLConnect() {
   const { connectMode, connectSeqN, boards, needsFirmware, eraseNvs } = wizardState;
-
   // ── Step 0: Mode picker ─────────────────────────────────────────
   if (!connectMode) {
     return `
@@ -4997,7 +5130,20 @@ function wizardSelectConnectMode(mode) {
   // Apply config to the main page only when the user commits to a connection mode
   if (mode) wizardApplyConfig();
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
-  if (mode) wizardStartConnectWatchers();
+  const nextBtn = document.getElementById('wizard-next-btn');
+  if (mode) {
+    // Board rows now visible — hide the forward button
+    if (nextBtn) nextBtn.style.display = 'none';
+    wizardStartConnectWatchers();
+  } else {
+    // Reset to mode picker — restore the forward button
+    if (nextBtn) {
+      nextBtn.textContent = 'One at a time →';
+      nextBtn.disabled = false;
+      nextBtn.style.display = '';
+      nextBtn.onclick = () => wizardSelectConnectMode('seq');
+    }
+  }
 }
 
 function wizardSeqAdvance(completedSlot) {
@@ -5606,6 +5752,14 @@ function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {
       try {
         wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
         await boardGo(n);
+        // If boardGo kicked off a reboot (configure path), the reconnect is
+        // fire-and-forget. Poll here until the board comes back (up to 15 s).
+        if (!boardConnections[n]?.isConnected()) {
+          wizardSetConnectStatus(n, 'busy', '⏳ Reconnecting…');
+          for (let i = 0; i < 30 && !boardConnections[n]?.isConnected(); i++) {
+            await sleep(500);
+          }
+        }
         if (boardConnections[n]?.isConnected()) {
           wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
           await sleep(800);
@@ -5647,9 +5801,21 @@ function wizardCheckAllDone() {
     if (el.classList.contains('ok'))                   anyOk = true;
     else if (!el.classList.contains('err'))            anyWaiting = true; // still at initial state
   }
-  // Only close when every board is resolved (ok or err) — don't close while any are still waiting
+  // Once all boards are resolved show a manual ✓ Close button (covers error cases
+  // where auto-close won't fire because anyOk is false).
+  if (!anyBusy && !anyWaiting) {
+    const closeBtn = document.getElementById('wizard-next-btn');
+    if (closeBtn) {
+      closeBtn.textContent = '✓ Close';
+      closeBtn.disabled = false;
+      closeBtn.style.display = '';
+      closeBtn.onclick = () => closeWizard();
+    }
+  }
+  // Auto-close when every board is resolved and at least one succeeded
   if (!anyBusy && !anyWaiting && anyOk) {
-    setTimeout(() => closeWizard(), 2500);
+    const sessionAtClose = _wizardSessionId;
+    setTimeout(() => { if (_wizardSessionId === sessionAtClose) closeWizard(); }, 2500);
   }
 }
 

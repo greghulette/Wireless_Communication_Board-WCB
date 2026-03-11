@@ -212,11 +212,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 .board-color-1 { --bc: #00d4ff; --bc-dim: rgba(0,212,255,0.07); }
 .board-color-2 { --bc: #a78bfa; --bc-dim: rgba(167,139,250,0.07); }
-.board-color-3 { --bc: #34d399; --bc-dim: rgba(52,211,153,0.07); }
+.board-color-3 { --bc: #f87171; --bc-dim: rgba(248,113,113,0.07); }
 .board-color-4 { --bc: #fb923c; --bc-dim: rgba(251,146,60,0.07); }
 .board-color-5 { --bc: #f472b6; --bc-dim: rgba(244,114,182,0.07); }
 .board-color-6 { --bc: #facc15; --bc-dim: rgba(250,204,21,0.07); }
-.board-color-7 { --bc: #4ade80; --bc-dim: rgba(74,222,128,0.07); }
+.board-color-7 { --bc: #818cf8; --bc-dim: rgba(129,140,248,0.07); }
 .board-color-8 { --bc: #60a5fa; --bc-dim: rgba(96,165,250,0.07); }
 
 /* Apply the stripe color to the section border-left */
@@ -231,6 +231,12 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section[class*="board-color-"] .section-header:hover {
   background: color-mix(in srgb, var(--bc) 12%, var(--bg3));
 }
+
+/* Right-side connection-status bar — mirrors the board-color bar on the left */
+.section.status-connected    { border-right: 3px solid var(--green); }
+.section.status-retrying     { border-right: 3px solid var(--yellow); }
+.section.status-error        { border-right: 3px solid var(--red); }
+.section.status-disconnected { border-right: 3px solid var(--red); }
 
 /* Board number pill in header */
 .board-num-pill {
@@ -248,11 +254,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 /* Light mode adjustments for board colors */
 :root.light .board-color-1 { --bc-dim: rgba(0,153,204,0.06); }
 :root.light .board-color-2 { --bc-dim: rgba(124,58,237,0.06); }
-:root.light .board-color-3 { --bc-dim: rgba(5,150,105,0.06); }
+:root.light .board-color-3 { --bc-dim: rgba(220,38,38,0.06); }
 :root.light .board-color-4 { --bc-dim: rgba(234,88,12,0.06); }
 :root.light .board-color-5 { --bc-dim: rgba(219,39,119,0.06); }
 :root.light .board-color-6 { --bc-dim: rgba(180,83,9,0.06); }
-:root.light .board-color-7 { --bc-dim: rgba(22,163,74,0.06); }
+:root.light .board-color-7 { --bc-dim: rgba(99,102,241,0.06); }
 :root.light .board-color-8 { --bc-dim: rgba(37,99,235,0.06); }
 
 /* ─── Status Badge ───────────────────────────────────────────── */
@@ -747,6 +753,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   50%       { opacity: 0.5; }
 }
 .btn-detecting {
+  background: transparent !important;   /* btn-primary has solid cyan bg — make it outline so text is visible */
   color: var(--accent) !important;
   border-color: var(--accent) !important;
   animation: detect-pulse 1.2s ease-in-out infinite;

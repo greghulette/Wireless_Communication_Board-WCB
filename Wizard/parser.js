@@ -63,7 +63,7 @@ function createDefaultBoardConfig() {
       timeoutMs:        30000,
       heartbeatSec:     10,
       missedHeartbeats: 3,
-      bootHeartbeatSec: 30,
+      bootHeartbeatSec: 2,
       messageCount:     20,
       messageDelayMs:   100,
       checksumEnabled:  true,
@@ -106,7 +106,7 @@ function createDefaultSystemConfig() {
         timeoutMs:        30000,
         heartbeatSec:     10,
         missedHeartbeats: 3,
-        bootHeartbeatSec: 30,
+        bootHeartbeatSec: 2,
         messageCount:     3,
         messageDelayMs:   100,
         checksumEnabled:  true,
@@ -419,7 +419,7 @@ function parseToken(body, config) {
         case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 30000;  break;
         case 'HB':      config.etm.heartbeatSec      = parseInt(parts[2]) || 10;     break;
         case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 3;      break;
-        case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 30;     break;
+        case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 3;      break;
         case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
         case 'CHKSM':   config.etm.checksumEnabled   = (parts[2]?.toUpperCase() === 'ON'); break;
