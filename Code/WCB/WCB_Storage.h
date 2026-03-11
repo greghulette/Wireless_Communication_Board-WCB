@@ -136,6 +136,7 @@ void eraseNVSFlash();
 
 extern bool isSerialPortUsedForPWMInput(int port);
 extern bool isSerialPortPWMOutput(int port);
+extern bool isSerialPortUsedForMP3(int port);
 
 void loadSerialLabelsFromPreferences();
 void saveSerialLabelToPreferences(int port, const String &label);

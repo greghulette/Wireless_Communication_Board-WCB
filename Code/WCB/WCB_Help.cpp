@@ -436,6 +436,58 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?MAESTROconfig    (e.g. ?MAESTROM1:W1S1:57600)"));
 
     // ================================================================
+    } else if (c == "MP3") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?MP3,<command>[,options]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Configures and controls a SparkFun MP3 Trigger v2.x connected to"));
+        Serial.println(F("  a local serial port. One MP3 Trigger per WCB board. Any free serial"));
+        Serial.println(F("  port (S1-S5) can be used. Audio commands are sent via ;A,..."));
+        Serial.println(F("  Callbacks let you trigger WCB sequences when a track finishes."));
+        Serial.println(F("\nConfiguration Commands:"));
+        Serial.println(F("  S<port>:<baud>        Configure MP3 Trigger on serial port"));
+        Serial.println(F("                          port: 1-5 (any free port)"));
+        Serial.println(F("                          baud: 9600 or 38400 (38400 requires S1/S2)"));
+        Serial.println(F("  LIST                  Show current configuration"));
+        Serial.println(F("  CLEAR                 Remove configuration, free the port"));
+        Serial.println(F("  ONFIN,<key>           Run stored command <key> when track finishes"));
+        Serial.println(F("  ONFIN,CLEAR           Remove track-finished callback"));
+        Serial.println(F("  ONERR,<key>           Run stored command <key> on device error"));
+        Serial.println(F("  ONERR,CLEAR           Remove error callback"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?MP3,S2:9600                  - MP3 Trigger on S2 at 9600 baud"));
+        Serial.println(F("  ?MP3,LIST                     - Show configuration"));
+        Serial.println(F("  ?MP3,CLEAR                    - Remove configuration"));
+        Serial.println(F("  ?MP3,ONFIN,nextscene          - Run ;CnextScene when track ends"));
+        Serial.println(F("  ?MP3,ONERR,CLEAR              - Remove error callback"));
+        Serial.println(F("\nAudio Playback Commands (use ;A,...):"));
+        Serial.println(F("  ;A,PLAY,<n>           Play track number n (1-255, by filename order)"));
+        Serial.println(F("  ;A,PLAYFS,<n>         Play track n (0-255, by SD filesystem order)"));
+        Serial.println(F("  ;A,STOP               Start/Stop toggle"));
+        Serial.println(F("  ;A,NEXT               Skip to next track"));
+        Serial.println(F("  ;A,PREV               Skip to previous track"));
+        Serial.println(F("  ;A,VOL,<n>            Set volume: 0=max loud, 255=silent"));
+        Serial.println(F("  ;A,VOLUP              Increase volume (louder) by 5 steps"));
+        Serial.println(F("  ;A,VOLDN              Decrease volume (quieter) by 5 steps"));
+        Serial.println(F("  ;A,COUNT              Request total track count (prints to USB)"));
+        Serial.println(F("  ;A,VER                Request firmware version (prints to USB)"));
+        Serial.println(F("\nStatus Responses (printed to USB serial):"));
+        Serial.println(F("  [MP3] Track finished  - Received 'X' — track completed normally"));
+        Serial.println(F("  [MP3] Track cancelled - Received 'x' — stopped during playback"));
+        Serial.println(F("  [MP3] Error: ...      - Received 'E' — track not found or fault"));
+        Serial.println(F("  [MP3] Status: ...     - Received '=' string (version / track count)"));
+        Serial.println(F("\nMulti-WCB Usage:"));
+        Serial.println(F("  Each WCB has its own MP3 Trigger on its own serial port."));
+        Serial.println(F("  To trigger audio on another WCB, use the ;W routing:"));
+        Serial.println(F("    ;W2,;A,PLAY,5       Play track 5 on the MP3 Trigger on WCB2"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on the MP3 port"));
+        Serial.println(F("  - Volume is remembered in NVS across reboots"));
+        Serial.println(F("  - ONFIN/ONERR callbacks use stored command keys (see ?SEQ)"));
+        Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
     } else if (c == "SEQ") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -655,6 +707,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\n  DEVICES:"));
         Serial.println(F("    ?KYBER          Configure Kyber RC integration"));
         Serial.println(F("    ?MAESTRO        Configure Maestro servo controller(s)"));
+        Serial.println(F("    ?MP3            Configure SparkFun MP3 Trigger v2.x"));
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
@@ -666,6 +719,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ;Sx,msg         Send msg to serial port x"));
         Serial.println(F("    ;Wx,msg         Send msg to WCB x via ESP-NOW"));
         Serial.println(F("    ;Mx,script      Trigger Maestro x script number"));
+        Serial.println(F("    ;A,PLAY,n       Play track n on this board's MP3 Trigger"));
         Serial.println(F("    ;Ckey           Run stored sequence named key"));
         Serial.println(F("    msg             Broadcast msg to all ports and ESP-NOW"));
         Serial.println(F("\n  DEBUG:"));
