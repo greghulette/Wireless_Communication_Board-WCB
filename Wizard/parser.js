@@ -51,6 +51,15 @@ function createDefaultBoardConfig() {
       marcduinoPort: null,    // 1-5 — Marcuino port (9600, broadcasts), or null
     },
 
+    // MP3 Trigger
+    mp3: {
+      enabled: false,
+      port:    null,   // 1-5 — serial port the MP3 Trigger is wired to
+      baud:    9600,
+      volume:  0,      // 0 = loudest, 64 = inaudible
+      onError: '',     // stored sequence key to run on error (optional)
+    },
+
     // Maestros — array of { id, port, baud }
     maestros: [],
 
@@ -382,6 +391,27 @@ function parseToken(body, config) {
       break;
     }
 
+    // ── MP3 Trigger ──
+    case 'MP3': {
+      const sub = upperParts[1];
+      if (sub && /^S\d/.test(sub)) {
+        // ?MP3,S2:9600:V0
+        const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
+        if (m) {
+          config.mp3.enabled = true;
+          config.mp3.port    = parseInt(m[1]);
+          config.mp3.baud    = parseInt(m[2]);
+          config.mp3.volume  = parseInt(m[3]);
+        }
+      } else if (sub === 'ONERR') {
+        config.mp3.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'CLEAR') {
+        config.mp3.enabled = false;
+        config.mp3.port    = null;
+      }
+      break;
+    }
+
     // ── Maestro ──
     case 'MAESTRO': {
       // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
@@ -569,6 +599,13 @@ function evaluatePortClaims(config) {
       if (idx >= 0 && idx < 5)
         config.serialPorts[idx].claimedBy = { type: 'kyber-marc' };
     }
+  }
+
+  // MP3 Trigger claims its port
+  if (config.mp3.enabled && config.mp3.port) {
+    const idx = config.mp3.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'mp3' };
   }
 
   // Maestros claim their ports
@@ -806,6 +843,18 @@ function buildCommandString(config, baseline = null, fullPush = false) {
     }
   }
 
+  // ── MP3 Trigger ──
+  const mp3Changed = fullPush || !baseline ||
+    JSON.stringify(baseline.mp3) !== JSON.stringify(config.mp3);
+  if (mp3Changed) {
+    if (config.mp3.enabled && config.mp3.port) {
+      add(`MP3,S${config.mp3.port}:${config.mp3.baud}:V${config.mp3.volume}`);
+      if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
+    } else {
+      add('MP3,CLEAR');
+    }
+  }
+
   // ── Maestros ──
   // The ?KYBER,LOCAL command embeds Maestro targets and configures the serial port
   // baud rate at runtime, but the firmware maintains a separate Maestro registry that
@@ -950,6 +999,7 @@ function diffConfigs(configA, configB) {
   check('funcChar',       configA.funcChar,        configB.funcChar);
   check('cmdChar',        configA.cmdChar,         configB.cmdChar);
   check('kyber',          configA.kyber,           configB.kyber);
+  check('mp3',            configA.mp3,             configB.mp3);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
   check('mappings',       configA.mappings,        configB.mappings);

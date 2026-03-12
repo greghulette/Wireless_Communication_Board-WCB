@@ -40,7 +40,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.11 14:03';
+const UI_VERSION = '2026.03.12 15:16';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -335,6 +335,9 @@ function updatePortClaimUI(n) {
       claimNote.textContent = 'Managed by PWM';
       baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true;
       label.disabled = false; // PWM: label still editable
+    } else if (claim.type === 'mp3') {
+      claimNote.textContent = 'Managed by MP3 Trigger';
+      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
     }
   }
 }
@@ -772,6 +775,144 @@ function syncKyberToConfig(n) {
   }
 }
 
+// ─── MP3 Trigger ──────────────────────────────────────────────────
+function onMP3Change(n) {
+  const mode    = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
+  const isLocal = mode === 'local';
+  ['port', 'baud', 'vol', 'onerr'].forEach(id => {
+    const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
+    if (el) el.style.display = isLocal ? '' : 'none';
+  });
+
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  // Clear any existing MP3 port claim
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'mp3') port.claimedBy = null;
+  }
+
+  config.mp3.enabled = isLocal;
+  if (!isLocal) {
+    config.mp3.port = null;
+  }
+
+  updateMP3PortDropdown(n);
+
+  if (isLocal) {
+    const portVal = parseInt(document.getElementById(`b${n}-mp3-port`)?.value);
+    if (portVal >= 1 && portVal <= 5) {
+      config.mp3.port = portVal;
+      config.serialPorts[portVal - 1].claimedBy = { type: 'mp3' };
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateMP3PortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onMP3PortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  // Clear previous MP3 claim
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'mp3') port.claimedBy = null;
+  }
+
+  const portVal = parseInt(document.getElementById(`b${n}-mp3-port`)?.value);
+  if (portVal >= 1 && portVal <= 5) {
+    config.mp3.port = portVal;
+    config.serialPorts[portVal - 1].claimedBy = { type: 'mp3' };
+
+    // Cap baud at 57600 for software serial ports (S3–S5)
+    const baudSel = document.getElementById(`b${n}-mp3-baud`);
+    if (baudSel) {
+      const isSoftSerial = portVal >= 3;
+      // Show/hide options above 57600
+      for (const opt of baudSel.options) {
+        opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
+      }
+      // If current selection is now hidden, clamp to 57600
+      if (isSoftSerial && parseInt(baudSel.value) > 57600) {
+        baudSel.value = '57600';
+        config.mp3.baud = 57600;
+      }
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateMP3PortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onMP3BaudChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.mp3.baud = parseInt(document.getElementById(`b${n}-mp3-baud`)?.value) || 9600;
+  onBoardFieldChange(n);
+}
+
+function onMP3VolChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  let v = parseInt(document.getElementById(`b${n}-mp3-vol`)?.value);
+  if (isNaN(v)) v = 0;
+  v = Math.max(0, Math.min(64, v));
+  config.mp3.volume = v;
+  onBoardFieldChange(n);
+}
+
+function onMP3OnErrChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.mp3.onError = document.getElementById(`b${n}-mp3-onerr`)?.value?.trim() ?? '';
+  onBoardFieldChange(n);
+}
+
+function updateMP3PortDropdown(n) {
+  const portSel = document.getElementById(`b${n}-mp3-port`);
+  if (!portSel) return;
+
+  const config      = boardConfigs[n];
+  const currentPort = config?.mp3?.port;
+
+  portSel.innerHTML = '';
+  for (let p = 1; p <= 5; p++) {
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    // Show unclaimed ports, or the port already claimed by MP3
+    if (!claim || claim.type === 'mp3') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      portSel.appendChild(opt);
+    }
+  }
+}
+
+function syncMP3ToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  const mode = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
+  config.mp3.enabled = mode === 'local';
+  if (config.mp3.enabled) {
+    config.mp3.port    = parseInt(document.getElementById(`b${n}-mp3-port`)?.value) || null;
+    config.mp3.baud    = parseInt(document.getElementById(`b${n}-mp3-baud`)?.value) || 9600;
+    config.mp3.volume  = parseInt(document.getElementById(`b${n}-mp3-vol`)?.value) ?? 0;
+    config.mp3.onError = document.getElementById(`b${n}-mp3-onerr`)?.value?.trim() ?? '';
+    // Keep serial port baud in sync so ?BAUD is generated correctly
+    if (config.mp3.port >= 1 && config.mp3.port <= 5) {
+      config.serialPorts[config.mp3.port - 1].baud = config.mp3.baud;
+    }
+  } else {
+    config.mp3.port = null;
+  }
+}
+
 function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
@@ -838,6 +979,35 @@ function populateUIFromConfig(n, config) {
   if (tbody) {
     tbody.innerHTML = '';
     for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
+  }
+
+  // MP3 Trigger
+  const mp3Input = document.querySelector(`input[name="b${n}-mp3"][value="${config.mp3.enabled ? 'local' : 'none'}"]`);
+  if (mp3Input) {
+    mp3Input.checked = true;
+    const isLocal = config.mp3.enabled;
+    ['port', 'baud', 'vol', 'onerr'].forEach(id => {
+      const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
+      if (el) el.style.display = isLocal ? '' : 'none';
+    });
+    updateMP3PortDropdown(n);
+    if (isLocal && config.mp3.port) {
+      const portSel = document.getElementById(`b${n}-mp3-port`);
+      if (portSel) portSel.value = config.mp3.port;
+      // Apply S3-S5 baud cap in the dropdown
+      const baudSel = document.getElementById(`b${n}-mp3-baud`);
+      if (baudSel) {
+        const isSoftSerial = config.mp3.port >= 3;
+        for (const opt of baudSel.options) {
+          opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
+        }
+        baudSel.value = config.mp3.baud ?? 9600;
+      }
+      const volEl = document.getElementById(`b${n}-mp3-vol`);
+      if (volEl) volEl.value = config.mp3.volume ?? 0;
+      const onErrEl = document.getElementById(`b${n}-mp3-onerr`);
+      if (onErrEl) onErrEl.value = config.mp3.onError ?? '';
+    }
   }
 
   WCBParser.evaluatePortClaims(config);
@@ -3186,6 +3356,7 @@ async function boardGo(n, opts = {}) {
     syncSerialUIToConfig(n);
     syncMaestrosToConfig(n);
     syncKyberToConfig(n);
+    syncMP3ToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
@@ -3404,6 +3575,7 @@ async function boardGoRemote(n, opts = {}) {
   syncSerialUIToConfig(n);
   syncMaestrosToConfig(n);
   syncKyberToConfig(n);
+  syncMP3ToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }

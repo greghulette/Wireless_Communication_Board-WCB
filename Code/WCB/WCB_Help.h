@@ -63,6 +63,19 @@ void printCommandHelp(const String &cmd);
 //   ?MAESTRO,ENABLE          Set S1 baud to 57600 for Maestro use
 //   ?MAESTRO,DISABLE         Restore S1 to original baud rate
 //
+// MP3 TRIGGER
+//   Only needed for DIRECT control of the MP3 Trigger by the WCB itself.
+//   If another controller (e.g. Marcduino) is sending MP3 commands through
+//   the WCB via broadcast or serial mapping, do NOT use these commands --
+//   just configure the serial port baud rate normally with ?BAUD.
+//
+//   ?MP3,Sx:<baud>:V<vol>    Configure SparkFun MP3 Trigger on serial port x
+//                              Sx=serial port (S1-S5), baud=baud rate, vol=0-64
+//                              0=loudest, 64=inaudible. S3-S5 max 57600 baud
+//                              Example: ?MP3,S2:9600:V0
+//   ?MP3,ONERR,key           Set stored sequence key to run on MP3 error response
+//   ?MP3,CLEAR               Remove MP3 Trigger config and restore port to normal
+//
 // NETWORK - ETM
 //   ?ETM,ON                  Enable Ensured Transmission Mode
 //   ?ETM,OFF                 Disable ETM (all boards must match)
@@ -74,7 +87,7 @@ void printCommandHelp(const String &cmd);
 //   ?ETM,DELAY,ms            Characterization inter-message delay (default: 100ms)
 //   ?ETM,CHAR                Run network characterization test
 //   ?ETM,CHKSM,ON            Enable Checksum on commands
-//   ?ETM/CHKSM,OFF           Disable Cecksum on commands
+//   ?ETM,CHKSM,OFF           Disable Checksum on commands
 //
 // DEBUG
 //   ?DEBUG,ON                Enable main debug output

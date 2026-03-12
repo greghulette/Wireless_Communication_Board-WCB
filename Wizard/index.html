@@ -531,6 +531,56 @@
         <tbody id="b{N}-seq-tbody"></tbody>
       </table>
 
+      <hr class="divider">
+
+      <!-- MP3 Trigger -->
+      <div class="subsection-title">MP3 Trigger</div>
+      <div class="field-group">
+        <div class="field">
+          <label>MP3 Trigger <span class="wiz-hint" data-tip="Only use this if the WCB itself is sending play/stop commands directly to the MP3 Trigger. If another controller (e.g. Marcduino) is driving the MP3 Trigger through the WCB via broadcast or serial mapping, leave this None and just set the baud rate with the Serial Ports table.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-mp3" value="none" checked onchange="onMP3Change({N})"><span>None</span></label>
+            <label><input type="radio" name="b{N}-mp3" value="local" onchange="onMP3Change({N})"><span>Enabled</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-mp3-port-wrap" style="display:none">
+          <label>MP3 Port <span class="wiz-hint" data-tip="Serial port the MP3 Trigger is wired to on this board. Reserved exclusively — will not broadcast.">i</span></label>
+          <select id="b{N}-mp3-port" onchange="onMP3PortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
+          <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
+          <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
+            <option value="110">110</option>
+            <option value="300">300</option>
+            <option value="600">600</option>
+            <option value="1200">1,200</option>
+            <option value="2400">2,400</option>
+            <option value="9600" selected>9,600</option>
+            <option value="14400">14,400</option>
+            <option value="19200">19,200</option>
+            <option value="38400">38,400</option>
+            <option value="57600">57,600</option>
+            <option value="115200">115,200</option>
+            <option value="128000">128,000</option>
+            <option value="256000">256,000</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-mp3-vol-wrap" style="display:none">
+          <label>Default Volume <span class="wiz-hint tip-left" data-tip="0 = loudest, 64 = inaudible. Applied before every PLAY command. The MP3 Trigger boots at full volume (0) — this ensures consistent playback volume.">i</span></label>
+          <input type="number" id="b{N}-mp3-vol" min="0" max="64" value="0" onchange="onMP3VolChange({N})">
+        </div>
+        <div class="field" id="b{N}-mp3-onerr-wrap" style="display:none">
+          <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the MP3 Trigger reports an error. Leave blank to disable. Example: errhandler">i</span></label>
+          <input type="text" id="b{N}-mp3-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onMP3OnErrChange({N})">
+        </div>
+      </div>
+
     </div>
   </div>
 </template>
