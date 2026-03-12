@@ -615,7 +615,7 @@ function onGeneralETMChange() {
   const timeout = parseInt(document.getElementById('g-etm-timeout')?.value) || 30000;
   const hb      = parseInt(document.getElementById('g-etm-hb')?.value)      || 10;
   const miss    = parseInt(document.getElementById('g-etm-miss')?.value)     || 3;
-  const boot    = parseInt(document.getElementById('g-etm-boot')?.value)     || 30;
+  const boot    = parseInt(document.getElementById('g-etm-boot')?.value)     || 2;
   const count   = parseInt(document.getElementById('g-etm-count')?.value)    || 3;
   const delay   = parseInt(document.getElementById('g-etm-delay')?.value)    || 100;
 
@@ -668,7 +668,7 @@ function extractGeneralFields(config) {
     etmTimeout:     config.etm?.timeoutMs          ?? 30000,
     etmHb:          config.etm?.heartbeatSec       ?? 10,
     etmMiss:        config.etm?.missedHeartbeats   ?? 3,
-    etmBoot:        config.etm?.bootHeartbeatSec   ?? 30,
+    etmBoot:        config.etm?.bootHeartbeatSec   ?? 2,
     etmCount:       config.etm?.messageCount       ?? 3,
     etmDelay:       config.etm?.messageDelayMs     ?? 100,
     etmChecksum:    config.etm?.checksumEnabled    ?? true,
@@ -679,6 +679,20 @@ function getGeneralMismatches(a, b) {
   return Object.keys(GENERAL_FIELD_LABELS)
     .filter(k => String(a[k]) !== String(b[k]))
     .map(k => ({ key: k, label: GENERAL_FIELD_LABELS[k], aVal: a[k], bVal: b[k] }));
+}
+
+// Returns true when a freshly-flashed (factory-default) board sends back its
+// default network credentials.  These will always differ from a configured
+// generalBaseline, but there's no real conflict — the board just hasn't had its
+// settings pushed yet.  Suppressing the mismatch modal for these values avoids
+// a spurious warning after every flash/erase cycle.
+//
+// Detection strategy: factory firmware always ships with MAC octets 00:00.
+// That is the reliable marker — the factory ESP-NOW password is the non-blank
+// string "change_me_or_risk_takeover", so we cannot use a blank-password check.
+function isDefaultNetworkSettings(fields) {
+  const blankish = v => !v || v === '0' || v === '00' || v === 0;
+  return blankish(fields.macOctet2) && blankish(fields.macOctet3);
 }
 
 // Write a set of extracted general fields back into a board's config object so
@@ -1729,6 +1743,9 @@ class BoardConnection {
     this._readBuffer = '';
     this._dataCallbacks = [];
     this._lineTransform = null;  // optional (line) => displayLine | null — filters terminal output
+    // Set true before ?reboot when boardGo is managing the reconnect itself.
+    // Prevents _startReading's auto-reconnect from racing with the fire-and-forget.
+    this._rebootManaged = false;
   }
 
   isConnected() { return this._connected; }
@@ -1745,6 +1762,9 @@ class BoardConnection {
       }
     }
     await this.port.open({ baudRate: 115200 });
+    // De-assert DTR & RTS so Chrome's default signal state doesn't inadvertently
+    // hold the ESP32 EN pin low (reset) via the CH9102 / CP210x RC circuit.
+    try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
     this._connected = true;
     this._startReading();
   }
@@ -1754,27 +1774,93 @@ class BoardConnection {
   // _startReading exits without trying its own reconnect.
   async closeForReconnect() {
     this._connected = false;
+    this._rebootManaged = false; // clear flag — fire-and-forget reconnect takes over from here
     try { if (this.reader) await this.reader.cancel(); } catch (_) {}
     try { if (this.port)   await this.port.close();   } catch (_) {}
   }
 
-  // After a reboot, attempt to reopen the same port
+  // After a reboot, attempt to reopen the same port.
+  // Mac Chrome can "detach" a SerialPort object after USB re-enumeration, causing
+  // port.open() to fail permanently on the stale reference.  When that happens we
+  // fall back to navigator.serial.getPorts() to get a fresh handle.
   async reconnect(maxAttempts = 10, delayMs = 1500) {
     if (!this.port) return false;
     // Close first — after a device reboot Chrome may still consider the port "open"
     try { await this.port.close(); } catch (_) {}
+
+    // Capture the VID of this port once so we can match a fresh handle later.
+    const portInfo = this.port.getInfo?.() ?? {};
+
     for (let i = 0; i < maxAttempts; i++) {
       await sleep(delayMs);
+
+      // ── Try the current port reference ───────────────────────────────────
       try {
         await this.port.open({ baudRate: 115200 });
+        // De-assert DTR & RTS immediately after open — Chrome may assert DTR on
+        // port open, which the CH9102 / CP210x translates into pulling the ESP32
+        // EN pin low, keeping the board in reset and unable to respond.
+        try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
         this._connected = true;
         this._readBuffer = '';
         this._startReading();
         return true;
-      } catch (_) {
-        // Port not ready yet — keep trying
+      } catch (e) {
+        termLog(this.boardIndex, `Reconnect attempt ${i + 1}/${maxAttempts}: ${e?.message ?? e}`, 'sys');
+      }
+
+      // ── Mac fallback: look for a fresh SerialPort handle ─────────────────
+      // Chrome on Mac creates a NEW SerialPort object for a USB device after
+      // re-enumeration. The old reference stays permanently broken, but
+      // getPorts() returns the new one.
+      if (navigator.serial?.getPorts) {
+        try {
+          // Ports currently held open by OTHER board connections (skip those).
+          const activePorts = Object.values(boardConnections)
+            .filter(c => c !== this && c.port)
+            .map(c => c.port);
+
+          const available = await navigator.serial.getPorts();
+          // Diagnostic: log what getPorts() returned so Mac reconnect issues are visible
+          const portSummary = available.map(p => {
+            const info = p.getInfo?.() ?? {};
+            return `VID=${info.usbVendorId ?? '?'} PID=${info.usbProductId ?? '?'} same=${p === this.port}`;
+          }).join(' | ') || '(none)';
+          termLog(this.boardIndex, `getPorts [${available.length}]: ${portSummary}`, 'sys');
+
+          const fresh = available.find(p => {
+            if (p === this.port) return false;          // same stale reference
+            if (activePorts.includes(p)) return false;  // claimed by another board
+            if (!portInfo.usbVendorId) return true;     // no VID to compare — try first unclaimed
+            const info = p.getInfo?.() ?? {};
+            return info.usbVendorId === portInfo.usbVendorId;
+          });
+
+          if (fresh) {
+            termLog(this.boardIndex, 'Found fresh port handle — trying…', 'sys');
+            try { await fresh.close(); } catch (_) {}
+            try {
+              await fresh.open({ baudRate: 115200 });
+              // Same DTR/RTS de-assert as above — fresh handle, same EN-pin risk.
+              try { await fresh.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+              this.port = fresh;   // keep the new reference for future reconnects
+              this._connected = true;
+              this._readBuffer = '';
+              this._startReading();
+              return true;
+            } catch (e2) {
+              termLog(this.boardIndex, `Fresh port not ready yet: ${e2?.message ?? e2}`, 'sys');
+            }
+          } else {
+            termLog(this.boardIndex, `No fresh port found (our VID=${portInfo.usbVendorId ?? '?'})`, 'sys');
+          }
+        } catch (gpe) {
+          termLog(this.boardIndex, `getPorts() failed: ${gpe?.message ?? gpe}`, 'sys');
+        }
       }
     }
+
+    termLog(this.boardIndex, `Reconnect gave up after ${maxAttempts} attempts`, 'err');
     return false;
   }
 
@@ -1870,8 +1956,12 @@ class BoardConnection {
       }
       if (!this._connected) break outer;
     }
-    // Clean up if we exited due to board reboot rather than user disconnect
-    if (this._connected) {
+    // Clean up if we exited due to board reboot rather than user disconnect.
+    // Skip the auto-reconnect if _rebootManaged is set — that means boardGo
+    // already sent ?reboot and is managing the reconnect via fire-and-forget.
+    // Running two concurrent reconnect attempts on the same port causes the
+    // double-?backup race that breaks the wizard on Mac.
+    if (this._connected && !this._rebootManaged) {
       this._connected = false;
       updateConnectionUI(this.boardIndex, false);
       clearRemoteBoardsForRelay(this.boardIndex);   // drop any remote boards using this as relay
@@ -1882,8 +1972,13 @@ class BoardConnection {
         updateConnectionUI(this.boardIndex, true);
         termLog(this.boardIndex, 'Reconnected after reboot', 'sys');
         showToast(`WCB ${this.boardIndex} reconnected`, 'success');
-        termLog(this.boardIndex, 'Auto-pulling config…', 'sys');
-        setTimeout(() => boardPull(this.boardIndex), 3000);
+        // In wizard mode wizardWatchForConnect handles the verify pull itself.
+        // Auto-pulling here would race with that pull and potentially clobber
+        // boardConfigs[n] with factory defaults before the wizard pushes config.
+        if (!_wizardOpen) {
+          termLog(this.boardIndex, 'Auto-pulling config…', 'sys');
+          setTimeout(() => boardPull(this.boardIndex), 3000);
+        }
       } else {
         termLog(this.boardIndex, 'Could not reconnect — board may need manual reconnect', 'err');
         showToast(`WCB ${this.boardIndex} did not come back — reconnect manually`, 'error');
@@ -2606,6 +2701,75 @@ async function boardAutoDetect(n) {
   for (const port of available) monitorPort(port);
 }
 
+// Wait for the board's firmware to boot and respond to ?backup.
+//
+// WHY a persistent listener instead of sendAndCollect():
+//  After a factory-reset flash the ESP32 takes 60+ s to boot (WiFi init,
+//  ESP-NOW init, loading NVS defaults).  sendAndCollect() removes its callback
+//  after its own timeout fires — so the ?backup response that arrives 60 s
+//  later has nobody listening.  Instead we register ONE persistent listener on
+//  _dataCallbacks (which survives USB disconnect/reconnect because it is never
+//  cleared on reconnect) and re-send ?backup every 10 s until the board
+//  answers.  The moment "End of Backup" arrives in any received line the
+//  listener resolves immediately.
+async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs = 5000 } = {}) {
+  termLog(n, '⏳ Waiting for firmware to boot…', 'sys');
+  if (preDelayMs > 0) await sleep(preDelayMs);
+
+  return new Promise(resolve => {
+    let done      = false;
+    let tickTimer = null;
+    const startedAt = Date.now();
+    let sendAttempt = 0;
+
+    // ── Persistent listener ───────────────────────────────────────────────
+    // Registered once; _startReading dispatches every incoming line here.
+    // Survives USB drops because _dataCallbacks is never cleared on reconnect.
+    const onLine = (line) => {
+      if (done) return;
+      if (line.includes('End of Backup')) {
+        done = true;
+        clearTimeout(tickTimer);
+        conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine);
+        termLog(n, '✓ Firmware ready', 'sys');
+        resolve(true);
+      }
+    };
+    conn._dataCallbacks.push(onLine);
+
+    // ── Periodic sender ───────────────────────────────────────────────────
+    // Re-sends ?backup every 10 s so the command handler (whenever it becomes
+    // active) has a fresh command to answer.  The persistent listener above
+    // will catch the response regardless of when it arrives.
+    const tick = async () => {
+      if (done) return;
+      sendAttempt++;
+      const elapsed   = Math.round((Date.now() - startedAt) / 1000);
+      const connected = conn.isConnected();
+      const hasReader = conn.reader !== null;
+
+      if (Date.now() - startedAt >= totalTimeoutMs) {
+        done = true;
+        conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine);
+        termLog(n, `✕ Timed out after ${elapsed}s — board did not respond`, 'sys');
+        resolve(false);
+        return;
+      }
+
+      termLog(n, `⏳ Still waiting… (${elapsed}s, probe ${sendAttempt}) connected=${connected} reader=${hasReader}`, 'sys');
+
+      if (connected && hasReader) {
+        try { await conn.send('?backup\r'); } catch (_) {}
+      }
+
+      tickTimer = setTimeout(tick, 10000);
+    };
+
+    // Fire first tick immediately
+    tickTimer = setTimeout(tick, 0);
+  });
+}
+
 async function boardPull(n) {
   // Delegate to remote pull if this board is reached via relay
   if (remoteRelayForBoard[n]) { boardPullRemote(n); return; }
@@ -2629,7 +2793,7 @@ async function boardPull(n) {
       generalBaseline = { sourceBoard: config.wcbNumber || n, fields: incomingGeneral };
     } else {
       const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
-      if (mismatches.length > 0 && !_wizardOpen) {
+      if (mismatches.length > 0 && !_wizardOpen && !isDefaultNetworkSettings(incomingGeneral)) {
         setTimeout(() => showGeneralMismatchModal(
           generalBaseline.sourceBoard, generalBaseline.fields,
           config.wcbNumber || n, incomingGeneral, mismatches
@@ -2789,11 +2953,16 @@ async function boardGo(n, opts = {}) {
 
         if (isUpdate) {
           // App-only update: NVS is intact — verify and/or push wizard config
-          termLog(n, 'Reconnected — pulling config to verify NVS…', 'sys');
+          termLog(n, 'Reconnected — waiting for firmware to be ready…', 'sys');
           showToast(`WCB ${n} updated — verifying config…`, 'success');
           if (_wizardOpen) {
             // Wizard context: await so wizardCheckAllDone fires only after push completes
-            await sleep(4000);
+            const ready = await waitForBoardReady(n, conn);
+            if (!ready) {
+              termLog(n, '✕ Board did not respond after update — cannot push config', 'err');
+              showToast(`WCB ${n} did not respond after update`, 'error');
+              return;
+            }
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
               boardBaselines[n] = null;
@@ -2801,7 +2970,12 @@ async function boardGo(n, opts = {}) {
             }
             await boardGo(n, { mode: 'configure' });
           } else {
-            setTimeout(() => boardPull(n), 4000);
+            // Non-wizard update path: wait for firmware to be running before pulling
+            (async () => {
+              const ready = await waitForBoardReady(n, conn);
+              if (ready) boardPull(n);
+              else termLog(n, '✕ Board did not respond after update — pull manually', 'err');
+            })();
           }
         } else {
           // Flash or Factory Reset: NVS is blank.
@@ -2810,13 +2984,19 @@ async function boardGo(n, opts = {}) {
 
           postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
 
-          // Restore snapshot right before pushing so any boardPull that fired during
-          // the wait doesn't overwrite boardConfigs[n] with factory defaults.
-          termLog(n, `Reconnected after ${resetLabel} — pushing config in 8s…`, 'sys');
-          showToast(`WCB ${n} ${resetLabel} — pushing config in 8s…`, 'success');
+          // Wait until the board's firmware is actually running before pushing
+          // config — avoids the old fixed 8 s blind wait that was too short on Mac.
+          termLog(n, `Reconnected after ${resetLabel} — waiting for firmware…`, 'sys');
+          showToast(`WCB ${n} ${resetLabel} — waiting for firmware…`, 'success');
           if (_wizardOpen) {
             // Wizard context: await so wizardCheckAllDone fires only after push completes
-            await sleep(8000);
+            const ready = await waitForBoardReady(n, conn);
+            if (!ready) {
+              termLog(n, '✕ Board did not respond after flash — cannot push config', 'err');
+              showToast(`WCB ${n} did not respond after flash`, 'error');
+              return;
+            }
+            termLog(n, 'Firmware confirmed — pushing config…', 'sys');
             if (preFlashConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
               boardBaselines[n] = null;
@@ -2824,14 +3004,22 @@ async function boardGo(n, opts = {}) {
             }
             await boardGo(n, { mode: 'configure' });  // postFlashGeneralSnapshot restored inside
           } else {
-            setTimeout(() => {
+            // Non-wizard: use waitForBoardReady instead of blind 8 s sleep
+            // so Mac isn't penalised when the board needs longer than 8 s.
+            (async () => {
+              const ready = await waitForBoardReady(n, conn);
+              if (!ready) {
+                termLog(n, '✕ Board did not respond after flash — connect manually', 'err');
+                showToast(`WCB ${n} did not respond after flash`, 'error');
+                return;
+              }
               if (preFlashConfigSnapshot) {
                 boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
                 boardBaselines[n] = null;
                 populateUIFromConfig(n, boardConfigs[n]);
               }
               boardGo(n, { mode: 'configure' });
-            }, 8000);
+            })();
           }
         }
       } else {
@@ -2839,8 +3027,61 @@ async function boardGo(n, opts = {}) {
         showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
       }
     } else {
+      // ── Flash failed ─────────────────────────────────────────────────────
+      // The error toast was already shown above.  Reconnect the board so the
+      // UI doesn't stay in a disconnected state, then check whether we can
+      // still complete the wizard without a successful flash.
+      termLog(n, 'Flash failed — attempting reconnect…', 'sys');
       const recovered = await conn.reconnect(5, 1500);
-      if (recovered) updateConnectionUI(n, true);
+      if (recovered) {
+        updateConnectionUI(n, true);
+        boardFlashMode[n] = 'configure';
+
+        if (isFactory) {
+          // A factory reset MUST erase NVS before we configure — we cannot
+          // safely fall through because nothing was written.  User must retry.
+          termLog(n, '✕ Factory reset incomplete — NVS not erased. Retry to complete.', 'err');
+          showToast(`WCB ${n}: factory reset incomplete — retry required`, 'error');
+
+        } else if (_wizardOpen && latestFirmwareVersion) {
+          // Wizard path: "Bootloader connection failed" means esptool never
+          // synced — nothing was written, board is intact on its existing
+          // firmware.  If that version already matches the target we can skip
+          // the flash and go straight to config push.
+          const boardVer  = (preFlashConfigSnapshot?.fwVersion ?? boardConfigs[n]?.fwVersion ?? '').trim();
+          const targetVer = latestFirmwareVersion.replace(/^v/, '').trim();
+
+          if (boardVer && boardVer === targetVer) {
+            termLog(n, `✓ Board already on firmware ${boardVer} — skipping flash, pushing config…`, 'sys');
+            showToast(`WCB ${n}: already on firmware ${boardVer} — pushing config…`, 'success');
+
+            // Restore the intended config snapshot (same as the normal flash path does).
+            if (preFlashConfigSnapshot) {
+              boardConfigs[n]   = JSON.parse(JSON.stringify(preFlashConfigSnapshot));
+              boardBaselines[n] = null;
+              populateUIFromConfig(n, boardConfigs[n]);
+            }
+            // Stash the general snapshot so boardGo(configure) restores it.
+            postFlashGeneralSnapshot[n] = preFlashGeneralSnapshot;
+
+            // Confirm firmware is actually responding before we push.
+            const ready = await waitForBoardReady(n, conn);
+            if (ready) {
+              await boardGo(n, { mode: 'configure' });
+            } else {
+              termLog(n, '✕ Board did not respond — push config manually', 'err');
+              showToast(`WCB ${n}: did not respond — push config manually`, 'error');
+            }
+
+          } else {
+            const have = boardVer || '(unknown)';
+            termLog(n, `✕ Board has firmware ${have}, needs ${targetVer} — retry flash`, 'err');
+            showToast(`WCB ${n}: needs firmware ${targetVer} — retry flash`, 'error');
+          }
+
+        }
+        // Non-wizard / version-unknown: board is reconnected, user can proceed manually.
+      }
     }
 
     btn.disabled = false;
@@ -2883,11 +3124,17 @@ async function boardGo(n, opts = {}) {
 
         // Restore the pre-erase config snapshot right before pushing so any boardPull
         // that fired during the wait doesn't overwrite boardConfigs[n].
-        termLog(n, 'Reconnected after NVS erase — pushing configuration in 8s…', 'sys');
-        showToast(`WCB ${n} reconnected — pushing config in 8s…`, 'success');
+        termLog(n, 'Reconnected after NVS erase — waiting for firmware…', 'sys');
+        showToast(`WCB ${n} reconnected — waiting for firmware…`, 'success');
         if (_wizardOpen) {
           // Wizard context: await so wizardCheckAllDone fires only after push completes
-          await sleep(8000);
+          const ready = await waitForBoardReady(n, conn);
+          if (!ready) {
+            termLog(n, '✕ Board did not respond after erase — cannot push config', 'err');
+            showToast(`WCB ${n} did not respond after erase`, 'error');
+            return;
+          }
+          termLog(n, 'Firmware confirmed — pushing config…', 'sys');
           if (preEraseConfigSnapshot) {
             boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
             boardBaselines[n] = null;   // force full push — board NVS is blank
@@ -2896,14 +3143,21 @@ async function boardGo(n, opts = {}) {
           restoreGeneralDOMSnapshot(preEraseGeneralSnapshot);
           await boardGo(n, { mode: 'configure' });
         } else {
-          setTimeout(() => {
+          // Non-wizard: use waitForBoardReady instead of blind 8 s sleep
+          (async () => {
+            const ready = await waitForBoardReady(n, conn);
+            if (!ready) {
+              termLog(n, '✕ Board did not respond after erase — connect manually', 'err');
+              showToast(`WCB ${n} did not respond after erase`, 'error');
+              return;
+            }
             if (preEraseConfigSnapshot) {
               boardConfigs[n]   = JSON.parse(JSON.stringify(preEraseConfigSnapshot));
               boardBaselines[n] = null;   // force full push — board NVS is blank
               populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
             }
             boardGo(n, { mode: 'configure' });
-          }, 8000);
+          })();
         }
       } else {
         termLog(n, 'Could not auto-reconnect — reconnect manually, then push config', 'err');
@@ -2971,6 +3225,9 @@ async function boardGo(n, opts = {}) {
       if (!skipReboot) {
         // ── Reboot path ─────────────────────────────────────────────────
         await sleep(1500);   // allow board time to finish all NVS writes before rebooting
+        // Flag before sending — prevents _startReading from racing if the board
+        // disconnects before closeForReconnect() can set _connected=false.
+        conn._rebootManaged = true;
         await conn.send('?reboot\r');
         termLog(n, '?reboot', 'in');
 
@@ -2987,8 +3244,10 @@ async function boardGo(n, opts = {}) {
         // Fire-and-forget reconnect so the Go button re-enables right away.
         // In wizard context, wizardWatchForConnect polls isConnected() and
         // waits for this background reconnect to finish before marking ✓ Done.
+        // Use 15 attempts × 2 s = up to 30 s — Mac USB re-enumeration can be
+        // significantly slower than Windows for CH340/CP2102 adapters.
         (async () => {
-          const reconnected = await conn.reconnect(10, 1500);
+          const reconnected = await conn.reconnect(15, 2000);
           if (reconnected) {
             updateConnectionUI(n, true);
             termLog(n, 'Reconnected after reboot', 'sys');
@@ -3294,7 +3553,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
         generalBaseline = { sourceBoard: config.wcbNumber || targetN, fields: incomingGeneral };
       } else {
         const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
-        if (mismatches.length > 0 && !_wizardOpen) {
+        if (mismatches.length > 0 && !_wizardOpen && !isDefaultNetworkSettings(incomingGeneral)) {
           setTimeout(() => showGeneralMismatchModal(
             generalBaseline.sourceBoard, generalBaseline.fields,
             config.wcbNumber || targetN, incomingGeneral, mismatches
@@ -3555,6 +3814,7 @@ async function boardGoAll() {
     const conn = boardConnections[n];
     if (!conn?.isConnected()) continue;
     await sleep(300);
+    conn._rebootManaged = true;   // prevent _startReading race on fast USB disconnect
     await conn.send('?reboot\r');
     termLog(n, '?reboot', 'in');
     showToast(`WCB ${n} rebooting…`, 'success');
@@ -4372,7 +4632,7 @@ function wizardDefaultState() {
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
     etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
-                     bootHeartbeatSec:30, messageCount:20, messageDelayMs:100,
+                     bootHeartbeatSec:2, messageCount:20, messageDelayMs:100,
                      checksumEnabled:true },
     needsFirmware:    false,
     eraseNvs:         true,
@@ -5362,7 +5622,7 @@ function wizardSaveStep(key) {
         wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 30000);
         wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value      ?? 10);
         wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 3);
-        wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 30);
+        wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 2);
       }
       wizardState.etmConfig.checksumEnabled = get('wiz-etm-chksm')?.checked ?? true;
       break;
@@ -5753,17 +6013,32 @@ function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {
         wizardSetConnectStatus(n, 'busy', '📤 Pushing…');
         await boardGo(n);
         // If boardGo kicked off a reboot (configure path), the reconnect is
-        // fire-and-forget. Poll here until the board comes back (up to 15 s).
+        // fire-and-forget. Poll here until the board comes back (up to 30 s —
+        // matches the 15-attempt × 2 s window in the fire-and-forget reconnect).
         if (!boardConnections[n]?.isConnected()) {
           wizardSetConnectStatus(n, 'busy', '⏳ Reconnecting…');
-          for (let i = 0; i < 30 && !boardConnections[n]?.isConnected(); i++) {
+          for (let i = 0; i < 60 && !boardConnections[n]?.isConnected(); i++) {
             await sleep(500);
           }
         }
         if (boardConnections[n]?.isConnected()) {
           wizardSetConnectStatus(n, 'busy', '🔍 Verifying…');
-          await sleep(800);
+          // Wait for the board to finish booting before sending ?backup.
+          // Mac USB re-enumeration + CH340 driver settle time can easily exceed
+          // 4 s after the port opens, so give 8 s here.
+          await sleep(8000);
           await boardPull(n);
+          // Retry up to twice more if the board hasn't responded yet.
+          if (boardConnections[n]?.isConnected() && !boardBaselines[n]) {
+            wizardSetConnectStatus(n, 'busy', '🔍 Retrying verify…');
+            await sleep(5000);
+            await boardPull(n);
+          }
+          if (boardConnections[n]?.isConnected() && !boardBaselines[n]) {
+            wizardSetConnectStatus(n, 'busy', '🔍 Final verify attempt…');
+            await sleep(5000);
+            await boardPull(n);
+          }
         }
         wizardSetConnectStatus(n, 'ok', '✓ Done');
       } catch(e) {

@@ -228,6 +228,13 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     // Explicit app-only update: skip detection, never touch bootloader/NVS
     imagesToFlash = flashImages.filter(img => img.address === 0x10000);
     onLog('App-only update — bootloader, partitions, and NVS will not be touched');
+  } else if (eraseNvs) {
+    // Factory reset: always write the full image (bootloader + partition table + app).
+    // The auto-detect below would see the existing valid bootloader (magic 0xE9) and
+    // fall back to app-only, but a factory reset must guarantee a completely fresh
+    // firmware install — no stale partition table, no stale bootloader.
+    imagesToFlash = flashImages;
+    onLog('Factory reset — flashing full image (bootloader + partitions + app)');
   } else {
     // Auto-detect: read bootloader magic to decide blank vs. programmed vs. bricked
     const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
