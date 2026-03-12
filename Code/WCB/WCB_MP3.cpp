@@ -20,12 +20,15 @@ extern void         recallCommandSlot(const String &key, int sourceID);
 
 // ---- Module globals -----------------------------------------------------
 MP3Config mp3Config = {};
-uint8_t   mp3Volume = 20;   // initial shadow — matches test-sketch default
+uint8_t   mp3Volume = 20;   // current tracked volume shadow
+
+// Per-play callback — runtime only, not persisted
+static String _mp3PendingCallback = "";
 
 // Response accumulation state (persistent across loop() calls)
-static String _mp3RespBuf  = "";
-static bool   _mp3InStatus = false;  // true while accumulating a '=' status string
-static bool   _mp3InTrigger = false; // true while accumulating 'M' + 3-byte trigger report
+static String  _mp3RespBuf   = "";
+static bool    _mp3InStatus  = false;  // accumulating a '=' status string
+static bool    _mp3InTrigger = false;  // accumulating 'M' + 3-byte trigger report
 static uint8_t _mp3TriggerBytes = 0;
 
 // ==================== Port-conflict Query ================================
@@ -38,7 +41,7 @@ bool isSerialPortUsedForMP3(int port) {
 
 void sendMP3Raw(uint8_t byte1, int8_t byte2) {
   if (!mp3Config.configured || mp3Config.serialPort == 0) {
-    Serial.printf("[MP3] Not configured — use %cMP3,S<port>:<baud>\n",
+    Serial.printf("[MP3] Not configured — use %cMP3,S<port>:<baud>:V<vol>\n",
                   LocalFunctionIdentifier);
     return;
   }
@@ -52,18 +55,7 @@ void sendMP3Raw(uint8_t byte1, int8_t byte2) {
 
 void processMP3AudioCommand(const String &message) {
   // `message` starts with 'A' (the CommandCharacter prefix is already stripped).
-  // Expected formats after stripping 'A':
-  //   ,PLAY,5   ,PLAYFS,3   ,STOP   ,NEXT   ,PREV
-  //   ,VOL,20   ,VOLUP      ,VOLDN
-  //   ,COUNT    ,VER
-
-  if (!mp3Config.configured) {
-    Serial.printf("[MP3] Not configured — use %cMP3,S<port>:<baud>\n",
-                  LocalFunctionIdentifier);
-    return;
-  }
-
-  // Strip leading 'A' and optional following comma
+  // Strip leading 'A' and optional following comma.
   String rest = message.substring(1);
   rest.trim();
   if (rest.startsWith(",")) rest = rest.substring(1);
@@ -71,27 +63,99 @@ void processMP3AudioCommand(const String &message) {
   String restUpper = rest;
   restUpper.toUpperCase();
 
-  // ---- PLAY,n  (by track name order, 1-255) ----------------------------
-  if (restUpper.startsWith("PLAY,")) {
-    int n = rest.substring(5).toInt();
-    if (n < 1 || n > 255) {
-      Serial.println("[MP3] PLAY: track number must be 1-255");
-      return;
-    }
-    sendMP3Raw('t', (int8_t)n);
-    if (debugEnabled) Serial.printf("[MP3] Play track %d\n", n);
+  if (!mp3Config.configured) {
+    Serial.printf("[MP3] Not configured — use %cMP3,S<port>:<baud>:V<vol>\n",
+                  LocalFunctionIdentifier);
     return;
   }
 
-  // ---- PLAYFS,n  (by filesystem / SD card order, 0-255) ---------------
+  // ---- PLAY,n[,ONFIN,key]  or  PLAY,n[,key]  --------------------------
+  // ---- (sends volume first, then play command) -------------------------
+  if (restUpper.startsWith("PLAY,")) {
+    String playArgs = rest.substring(5);  // everything after "PLAY,"
+
+    // Split track number from optional callback
+    int commaIdx = playArgs.indexOf(',');
+    int trackNum;
+    String callbackKey = "";
+
+    if (commaIdx == -1) {
+      // No callback — just a track number
+      trackNum = playArgs.toInt();
+    } else {
+      trackNum = playArgs.substring(0, commaIdx).toInt();
+      String afterTrack = playArgs.substring(commaIdx + 1);  // "ONFIN,key" or "key"
+      String afterUpper = afterTrack;
+      afterUpper.toUpperCase();
+
+      if (afterUpper.startsWith("ONFIN,")) {
+        callbackKey = afterTrack.substring(6);  // explicit: strip "ONFIN,"
+      } else {
+        callbackKey = afterTrack;               // implicit: the whole thing is the key
+      }
+      callbackKey.trim();
+    }
+
+    if (trackNum < 1 || trackNum > 255) {
+      Serial.println("[MP3] PLAY: track number must be 1-255");
+      return;
+    }
+
+    // Store callback (overwrites any previous pending callback)
+    _mp3PendingCallback = callbackKey;
+
+    // Send volume first, then play
+    sendMP3Raw('v', (int8_t)mp3Volume);
+    sendMP3Raw('t', (int8_t)trackNum);
+
+    if (debugEnabled) {
+      Serial.printf("[MP3] Play track %d  vol=%d", trackNum, mp3Volume);
+      if (callbackKey.length() > 0) Serial.printf("  → callback: %s", callbackKey.c_str());
+      Serial.println();
+    }
+    return;
+  }
+
+  // ---- PLAYFS,n[,ONFIN,key]  or  PLAYFS,n[,key]  ----------------------
   if (restUpper.startsWith("PLAYFS,")) {
-    int n = rest.substring(7).toInt();
-    if (n < 0 || n > 255) {
+    String playArgs = rest.substring(7);  // everything after "PLAYFS,"
+
+    int commaIdx = playArgs.indexOf(',');
+    int trackIdx;
+    String callbackKey = "";
+
+    if (commaIdx == -1) {
+      trackIdx = playArgs.toInt();
+    } else {
+      trackIdx = playArgs.substring(0, commaIdx).toInt();
+      String afterTrack = playArgs.substring(commaIdx + 1);
+      String afterUpper = afterTrack;
+      afterUpper.toUpperCase();
+
+      if (afterUpper.startsWith("ONFIN,")) {
+        callbackKey = afterTrack.substring(6);
+      } else {
+        callbackKey = afterTrack;
+      }
+      callbackKey.trim();
+    }
+
+    if (trackIdx < 0 || trackIdx > 255) {
       Serial.println("[MP3] PLAYFS: index must be 0-255");
       return;
     }
-    sendMP3Raw('p', (int8_t)n);
-    if (debugEnabled) Serial.printf("[MP3] Play filesystem index %d\n", n);
+
+    _mp3PendingCallback = callbackKey;
+
+    // Send volume first, then play
+    sendMP3Raw('v', (int8_t)mp3Volume);
+    sendMP3Raw('p', (int8_t)trackIdx);
+
+    if (debugEnabled) {
+      Serial.printf("[MP3] Play FS index %d  vol=%d", trackIdx, mp3Volume);
+      if (callbackKey.length() > 0) Serial.printf("  → callback: %s", callbackKey.c_str());
+      Serial.println();
+    }
     return;
   }
 
@@ -116,21 +180,21 @@ void processMP3AudioCommand(const String &message) {
     return;
   }
 
-  // ---- VOL,n  (absolute volume: 0=max loud, 255=silent) ---------------
+  // ---- VOL,n  (0=loudest, 64=inaudible ceiling) ------------------------
   if (restUpper.startsWith("VOL,")) {
     int n = rest.substring(4).toInt();
-    if (n < 0 || n > 255) {
-      Serial.println("[MP3] VOL: value must be 0-255 (0=loudest)");
+    if (n < 0 || n > 64) {
+      Serial.println("[MP3] VOL: value must be 0-64 (0=loudest, 64=inaudible)");
       return;
     }
     mp3Volume = (uint8_t)n;
     sendMP3Raw('v', (int8_t)mp3Volume);
-    saveMP3Settings();  // persist volume shadow to NVS
+    saveMP3Settings();
     if (debugEnabled) Serial.printf("[MP3] Volume set to %d\n", mp3Volume);
     return;
   }
 
-  // ---- VOLUP  (louder — decrease byte value by 5, floor 0) ------------
+  // ---- VOLUP  (louder — decrease value, floor 0) -----------------------
   if (restUpper == "VOLUP") {
     mp3Volume = (mp3Volume <= 5) ? 0 : mp3Volume - 5;
     sendMP3Raw('v', (int8_t)mp3Volume);
@@ -139,9 +203,9 @@ void processMP3AudioCommand(const String &message) {
     return;
   }
 
-  // ---- VOLDN  (quieter — increase byte value by 5, ceiling 255) -------
+  // ---- VOLDN  (quieter — increase value, ceiling 64) -------------------
   if (restUpper == "VOLDN") {
-    mp3Volume = (mp3Volume >= 250) ? 255 : mp3Volume + 5;
+    mp3Volume = (mp3Volume >= 59) ? 64 : mp3Volume + 5;
     sendMP3Raw('v', (int8_t)mp3Volume);
     saveMP3Settings();
     Serial.printf("[MP3] Volume down → %d\n", mp3Volume);
@@ -164,14 +228,14 @@ void processMP3AudioCommand(const String &message) {
 
   // ---- Unknown ---------------------------------------------------------
   Serial.printf("[MP3] Unknown audio command: %s\n", rest.c_str());
-  Serial.println("  Valid commands: PLAY,n  PLAYFS,n  STOP  NEXT  PREV");
-  Serial.println("                  VOL,n   VOLUP     VOLDN");
-  Serial.println("                  COUNT   VER");
+  Serial.println("  Valid: PLAY,n[,ONFIN,key]  PLAY,n[,key]  PLAYFS,n[,ONFIN,key]");
+  Serial.println("         STOP  NEXT  PREV");
+  Serial.println("         VOL,n (0-64)  VOLUP  VOLDN");
+  Serial.println("         COUNT  VER");
 }
 
 // ==================== Response Reader ====================================
-// Call once per loop() tick.  Reads any bytes the MP3 Trigger has sent
-// back and interprets them per the SparkFun v2.4 serial protocol.
+// Non-blocking. Call once per loop() tick.
 // The serial task is told to skip this port (isSerialPortUsedForMP3),
 // so these bytes are exclusively consumed here.
 
@@ -183,18 +247,17 @@ void processMP3Responses() {
   while (s.available()) {
     uint8_t b = s.read();
 
-    // ---- 'M' + 3 bytes: trigger report in quiet mode -------------------
-    // Accumulate and discard — quiet mode is not used by default.
+    // ---- 'M' + 3 bytes: quiet-mode trigger report — silently discard ---
     if (_mp3InTrigger) {
       _mp3TriggerBytes++;
       if (_mp3TriggerBytes >= 3) {
-        _mp3InTrigger   = false;
+        _mp3InTrigger    = false;
         _mp3TriggerBytes = 0;
       }
       continue;
     }
 
-    // ---- '=' + ASCII string + CR: status response ----------------------
+    // ---- '=' + ASCII + CR: status response (version / track count) -----
     if (_mp3InStatus) {
       if (b == '\r' || b == '\n') {
         Serial.printf("[MP3] Status: %s\n", _mp3RespBuf.c_str());
@@ -206,24 +269,27 @@ void processMP3Responses() {
       continue;
     }
 
-    // ---- Dispatch single-byte responses --------------------------------
+    // ---- Single-byte responses -----------------------------------------
     switch (b) {
 
       case 'X':   // Track finished normally
         Serial.println("[MP3] Track finished");
-        _mp3RespBuf = "";
-        if (strlen(mp3Config.onFinCmd) > 0) {
-          recallCommandSlot(String(mp3Config.onFinCmd), 0);
+        if (_mp3PendingCallback.length() > 0) {
+          recallCommandSlot(_mp3PendingCallback, 0);
+          _mp3PendingCallback = "";
         }
+        _mp3RespBuf = "";
         break;
 
       case 'x':   // Track cancelled (stop during playback)
         Serial.println("[MP3] Track cancelled");
+        _mp3PendingCallback = "";  // clear — don't fire on cancel
         _mp3RespBuf = "";
         break;
 
       case 'E':   // Error — track not found or device fault
         Serial.println("[MP3] Error: track not found or device error");
+        _mp3PendingCallback = "";  // clear — don't fire ONFIN on error
         _mp3RespBuf = "";
         if (strlen(mp3Config.onErrCmd) > 0) {
           recallCommandSlot(String(mp3Config.onErrCmd), 0);
@@ -236,7 +302,7 @@ void processMP3Responses() {
         break;
 
       case 'M':   // Start of quiet-mode trigger report (M + 3 bytes)
-        _mp3InTrigger   = true;
+        _mp3InTrigger    = true;
         _mp3TriggerBytes = 0;
         break;
 
@@ -254,38 +320,35 @@ void clearMP3Config() {
   memset(&mp3Config, 0, sizeof(mp3Config));
   mp3Config.configured = false;
   mp3Config.baudRate   = 9600;
+  mp3Config.volume     = 20;
   mp3Volume            = 20;
+  _mp3PendingCallback  = "";
 
   saveMP3Settings();
   Serial.println("[MP3] Configuration cleared");
 
   if (freedPort > 0) {
-    // Re-enable broadcast output on the freed port
     if (!serialBroadcastEnabled[freedPort - 1]) {
       serialBroadcastEnabled[freedPort - 1] = true;
       saveBroadcastSettingsToPreferences();
       Serial.printf("  ✓ Re-enabled broadcast output on S%d\n", freedPort);
     }
-    // Re-enable broadcast input on the freed port
     if (blockBroadcastFrom[freedPort - 1]) {
       blockBroadcastFrom[freedPort - 1] = false;
       saveBroadcastBlockSettings();
       Serial.printf("  ✓ Re-enabled broadcast input on S%d\n", freedPort);
     }
-    // Reset baud rate
     updateBaudRate(freedPort, 9600);
     Serial.printf("  ✓ Reset S%d baud rate to 9600\n", freedPort);
   }
 }
 
 void configureMP3(const String &args) {
-  // ?MP3,S<port>:<baud>       — configure on this WCB
-  // ?MP3,LIST                 — show current configuration
-  // ?MP3,CLEAR                — remove configuration
-  // ?MP3,ONFIN,<key>          — set track-finished callback (stored-cmd key)
-  // ?MP3,ONFIN,CLEAR          — remove track-finished callback
-  // ?MP3,ONERR,<key>          — set error callback (stored-cmd key)
-  // ?MP3,ONERR,CLEAR          — remove error callback
+  // ?MP3,S<port>:<baud>:V<vol>   — configure on this WCB (volume required)
+  // ?MP3,LIST                    — show current configuration
+  // ?MP3,CLEAR                   — remove configuration
+  // ?MP3,ONERR,<key>             — set error callback (stored-cmd key)
+  // ?MP3,ONERR,CLEAR             — remove error callback
 
   String a = args;
   a.trim();
@@ -301,25 +364,6 @@ void configureMP3(const String &args) {
   // ---- CLEAR ------------------------------------------------------
   if (aUpper == "CLEAR") {
     clearMP3Config();
-    return;
-  }
-
-  // ---- ONFIN,... --------------------------------------------------
-  if (aUpper.startsWith("ONFIN,")) {
-    String key = args.substring(6);   // preserve original case
-    key.trim();
-    if (key.equalsIgnoreCase("CLEAR")) {
-      memset(mp3Config.onFinCmd, 0, sizeof(mp3Config.onFinCmd));
-      saveMP3Settings();
-      Serial.println("[MP3] Track-finished callback cleared");
-    } else if (key.length() == 0 || key.length() > 23) {
-      Serial.println("[MP3] ONFIN: key must be 1-23 characters");
-    } else {
-      strncpy(mp3Config.onFinCmd, key.c_str(), sizeof(mp3Config.onFinCmd) - 1);
-      mp3Config.onFinCmd[sizeof(mp3Config.onFinCmd) - 1] = '\0';
-      saveMP3Settings();
-      Serial.printf("[MP3] Track-finished callback → ;C%s\n", mp3Config.onFinCmd);
-    }
     return;
   }
 
@@ -342,24 +386,35 @@ void configureMP3(const String &args) {
     return;
   }
 
-  // ---- S<port>:<baud>  (main configuration) -----------------------
+  // ---- S<port>:<baud>:V<vol>  (main configuration) ----------------
   if (!aUpper.startsWith("S")) {
-    Serial.printf("[MP3] Invalid format. Use: %cMP3,S<port>:<baud>\n",
+    Serial.printf("[MP3] Invalid format. Use: %cMP3,S<port>:<baud>:V<vol>\n",
                   LocalFunctionIdentifier);
-    Serial.printf("  Example: %cMP3,S2:9600\n", LocalFunctionIdentifier);
+    Serial.printf("  Example: %cMP3,S2:9600:V25\n", LocalFunctionIdentifier);
     return;
   }
 
-  int colonIdx = a.indexOf(':');
-  if (colonIdx == -1) {
-    Serial.printf("[MP3] Missing baud rate. Use: %cMP3,S<port>:<baud>\n",
+  int firstColon  = a.indexOf(':');
+  int secondColon = (firstColon != -1) ? a.indexOf(':', firstColon + 1) : -1;
+
+  if (firstColon == -1 || secondColon == -1) {
+    Serial.printf("[MP3] Incomplete config. Use: %cMP3,S<port>:<baud>:V<vol>\n",
                   LocalFunctionIdentifier);
+    Serial.printf("  Example: %cMP3,S2:9600:V25\n", LocalFunctionIdentifier);
     return;
   }
 
-  int serialPort = a.substring(1, colonIdx).toInt();
-  int baudRate   = a.substring(colonIdx + 1).toInt();
+  int    serialPort = a.substring(1, firstColon).toInt();
+  int    baudRate   = a.substring(firstColon + 1, secondColon).toInt();
+  String volStr     = a.substring(secondColon + 1);  // "V25"
 
+  if (!volStr.startsWith("V") && !volStr.startsWith("v")) {
+    Serial.println("[MP3] Volume required. Use :V<0-64> at the end (e.g. :V25)");
+    return;
+  }
+  int volume = volStr.substring(1).toInt();
+
+  // ---- Validate ---------------------------------------------------
   if (serialPort < 1 || serialPort > 5) {
     Serial.println("[MP3] Invalid serial port. Must be S1-S5");
     return;
@@ -370,34 +425,35 @@ void configureMP3(const String &args) {
     return;
   }
 
-  // Software serial ports (S3-S5) can't reliably do 38400
   if (serialPort >= 3 && baudRate > 9600) {
     Serial.println("\n⚠️  =============== WARNING ===============");
     Serial.printf("S%d is SOFTWARE SERIAL\n", serialPort);
     Serial.println("Software serial is unreliable above 9600 baud");
     Serial.println("❌ CONFIGURATION BLOCKED!");
-    Serial.println("Options:");
-    Serial.printf("  1. Use hardware serial (S1 or S2): %cMP3,S1:%d\n",
-                  LocalFunctionIdentifier, baudRate);
-    Serial.printf("  2. Use 9600 baud:                  %cMP3,S%d:9600\n",
-                  LocalFunctionIdentifier, serialPort);
+    Serial.printf("  Use hardware serial (S1 or S2): %cMP3,S1:%d:V%d\n",
+                  LocalFunctionIdentifier, baudRate, volume);
+    Serial.printf("  Or use 9600 baud:               %cMP3,S%d:9600:V%d\n",
+                  LocalFunctionIdentifier, serialPort, volume);
     Serial.println("=========================================\n");
     return;
   }
 
-  // Update baud rate if it has changed
+  if (volume < 0 || volume > 64) {
+    Serial.println("[MP3] Volume must be 0-64 (0=loudest, 64=inaudible)");
+    return;
+  }
+
+  // ---- Apply ------------------------------------------------------
   if ((uint32_t)baudRate != baudRates[serialPort - 1]) {
     updateBaudRate(serialPort, baudRate);
   }
 
-  // Disable broadcast output on this port (like Maestro)
   if (serialBroadcastEnabled[serialPort - 1]) {
     serialBroadcastEnabled[serialPort - 1] = false;
     saveBroadcastSettingsToPreferences();
     Serial.printf("  ⚠️  Disabled broadcast output on S%d (MP3 Trigger port)\n", serialPort);
   }
 
-  // Disable broadcast input on this port (we own the RX exclusively)
   if (!blockBroadcastFrom[serialPort - 1]) {
     blockBroadcastFrom[serialPort - 1] = true;
     saveBroadcastBlockSettings();
@@ -406,33 +462,35 @@ void configureMP3(const String &args) {
 
   mp3Config.serialPort = (uint8_t)serialPort;
   mp3Config.baudRate   = (uint32_t)baudRate;
+  mp3Config.volume     = (uint8_t)volume;
   mp3Config.configured = true;
+  mp3Volume            = (uint8_t)volume;
 
   saveMP3Settings();
 
-  Serial.printf("[MP3] Configured: S%d at %d baud\n", serialPort, baudRate);
-  if (strlen(mp3Config.onFinCmd) > 0)
-    Serial.printf("  On track finish → ;C%s\n", mp3Config.onFinCmd);
+  Serial.printf("[MP3] Configured: S%d at %d baud  default volume=%d\n",
+                serialPort, baudRate, volume);
   if (strlen(mp3Config.onErrCmd) > 0)
-    Serial.printf("  On error        → ;C%s\n", mp3Config.onErrCmd);
+    Serial.printf("  On error → ;C%s\n", mp3Config.onErrCmd);
 }
 
 void printMP3Settings() {
   Serial.println("\n--- MP3 Trigger Configuration ---");
   if (!mp3Config.configured) {
     Serial.println("  Not configured.");
-    Serial.printf("  Use: %cMP3,S<port>:<baud>  (e.g. %cMP3,S2:9600)\n",
+    Serial.printf("  Use: %cMP3,S<port>:<baud>:V<vol>  (e.g. %cMP3,S2:9600:V25)\n",
                   LocalFunctionIdentifier, LocalFunctionIdentifier);
     Serial.println("---------------------------------");
     return;
   }
-  Serial.printf("  Port      : S%d\n",   mp3Config.serialPort);
-  Serial.printf("  Baud      : %lu\n",   (unsigned long)mp3Config.baudRate);
-  Serial.printf("  Volume    : %d  (0=loudest, 255=silent)\n", mp3Volume);
-  Serial.printf("  On Finish : %s\n",
-                strlen(mp3Config.onFinCmd) ? mp3Config.onFinCmd : "(none)");
-  Serial.printf("  On Error  : %s\n",
+  Serial.printf("  Port          : S%d\n",  mp3Config.serialPort);
+  Serial.printf("  Baud          : %lu\n",  (unsigned long)mp3Config.baudRate);
+  Serial.printf("  Default Volume: %d  (0=loudest, 64=inaudible ceiling)\n", mp3Config.volume);
+  Serial.printf("  Current Volume: %d\n",   mp3Volume);
+  Serial.printf("  On Error      : %s\n",
                 strlen(mp3Config.onErrCmd) ? mp3Config.onErrCmd : "(none)");
+  if (_mp3PendingCallback.length() > 0)
+    Serial.printf("  Pending ONFIN : %s\n", _mp3PendingCallback.c_str());
   Serial.println("---------------------------------");
 }
 
@@ -440,24 +498,16 @@ void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
                     char delimiter, bool printToSerial) {
   if (!mp3Config.configured) return;
 
-  // ---- Port / baud config ----
+  // Main config line — includes volume
   String cmdSuffix = "MP3,S" + String(mp3Config.serialPort) +
-                     ":" + String(mp3Config.baudRate);
+                     ":" + String(mp3Config.baudRate) +
+                     ":V" + String(mp3Config.volume);
   String cmd = String(LocalFunctionIdentifier) + cmdSuffix;
   if (printToSerial) Serial.println(cmd);
   chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += "^?" + cmdSuffix;   // factory reset always uses ^?
+  chainedConfigDefault += "^?" + cmdSuffix;
 
-  // ---- Track-finished callback ----
-  if (strlen(mp3Config.onFinCmd) > 0) {
-    cmdSuffix = "MP3,ONFIN," + String(mp3Config.onFinCmd);
-    cmd = String(LocalFunctionIdentifier) + cmdSuffix;
-    if (printToSerial) Serial.println(cmd);
-    chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += "^?" + cmdSuffix;
-  }
-
-  // ---- Error callback ----
+  // Error callback
   if (strlen(mp3Config.onErrCmd) > 0) {
     cmdSuffix = "MP3,ONERR," + String(mp3Config.onErrCmd);
     cmd = String(LocalFunctionIdentifier) + cmdSuffix;
@@ -471,34 +521,33 @@ void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
 
 void saveMP3Settings() {
   preferences.begin("mp3_cfg", false);
-  preferences.putUChar ("port",  mp3Config.serialPort);
-  preferences.putUInt  ("baud",  mp3Config.baudRate);
-  preferences.putBool  ("en",    mp3Config.configured);
-  preferences.putUChar ("vol",   mp3Volume);
-  preferences.putString("onFin", mp3Config.onFinCmd);
-  preferences.putString("onErr", mp3Config.onErrCmd);
+  preferences.putUChar ("port",   mp3Config.serialPort);
+  preferences.putUInt  ("baud",   mp3Config.baudRate);
+  preferences.putBool  ("en",     mp3Config.configured);
+  preferences.putUChar ("vol",    mp3Volume);           // save current tracked volume
+  preferences.putUChar ("defvol", mp3Config.volume);    // save configured default
+  preferences.putString("onErr",  mp3Config.onErrCmd);
   preferences.end();
 }
 
 void loadMP3Settings() {
   preferences.begin("mp3_cfg", true);
-  mp3Config.serialPort = preferences.getUChar ("port",  0);
-  mp3Config.baudRate   = preferences.getUInt  ("baud",  9600);
-  mp3Config.configured = preferences.getBool  ("en",    false);
-  mp3Volume            = preferences.getUChar ("vol",   20);
-  String fin           = preferences.getString("onFin", "");
-  String err           = preferences.getString("onErr", "");
+  mp3Config.serialPort = preferences.getUChar ("port",   0);
+  mp3Config.baudRate   = preferences.getUInt  ("baud",   9600);
+  mp3Config.configured = preferences.getBool  ("en",     false);
+  mp3Config.volume     = preferences.getUChar ("defvol", 20);
+  mp3Volume            = preferences.getUChar ("vol",    20);
+  String err           = preferences.getString("onErr",  "");
   preferences.end();
 
-  strncpy(mp3Config.onFinCmd, fin.c_str(), sizeof(mp3Config.onFinCmd) - 1);
-  mp3Config.onFinCmd[sizeof(mp3Config.onFinCmd) - 1] = '\0';
   strncpy(mp3Config.onErrCmd, err.c_str(), sizeof(mp3Config.onErrCmd) - 1);
   mp3Config.onErrCmd[sizeof(mp3Config.onErrCmd) - 1] = '\0';
 
   if (mp3Config.configured) {
-    Serial.printf("[MP3] Loaded: S%d at %lu baud  vol=%d\n",
+    Serial.printf("[MP3] Loaded: S%d at %lu baud  default vol=%d  current vol=%d\n",
                   mp3Config.serialPort,
                   (unsigned long)mp3Config.baudRate,
+                  mp3Config.volume,
                   mp3Volume);
   }
 }
