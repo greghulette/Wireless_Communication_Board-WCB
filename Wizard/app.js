@@ -6,6 +6,17 @@
 
 const BAUD_RATES = [110,300,600,1200,2400,9600,14400,19200,38400,57600,115200,128000,256000];
 
+// Detect host OS — used to apply Windows-specific Web Serial workarounds.
+// userAgentData.platform is preferred (returns "Windows", "macOS", "Linux");
+// fall back to the legacy userAgent string which is always available.
+const _isWindows = (() => {
+  try {
+    const p = navigator.userAgentData?.platform ?? '';
+    if (p) return p.toLowerCase().includes('win');
+  } catch (_) {}
+  return /windows/i.test(navigator.userAgent ?? '');
+})();
+
 // HW_VERSION_MAP is defined in parser.js — use WCBParser.HW_VERSION_MAP
 
 // Monotonically increasing counter for generating unique DOM row IDs.
@@ -40,7 +51,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.12 15:16';
+const UI_VERSION = '2026.03.13 15:08';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1945,21 +1956,61 @@ class BoardConnection {
   async closeForReconnect() {
     this._connected = false;
     this._rebootManaged = false; // clear flag — fire-and-forget reconnect takes over from here
-    try { if (this.reader) await this.reader.cancel(); } catch (_) {}
-    try { if (this.port)   await this.port.close();   } catch (_) {}
+    if (this.reader) {
+      // Cancel unblocks any pending reader.read(), then explicitly release the
+      // lock before closing the port.  Without the explicit releaseLock() there
+      // is a microtask gap between cancel() resolving and _startReading's finally
+      // block calling releaseLock(), during which port.close() (and a subsequent
+      // flash's getReader()) can fail with "ReadableStream is locked to a reader".
+      try { await this.reader.cancel(); } catch (_) {}
+      try { this.reader.releaseLock(); }  catch (_) {}
+      this.reader = null;
+    }
+    try { if (this.port) await this.port.close(); } catch (_) {}
   }
 
   // After a reboot, attempt to reopen the same port.
   // Mac Chrome can "detach" a SerialPort object after USB re-enumeration, causing
   // port.open() to fail permanently on the stale reference.  When that happens we
   // fall back to navigator.serial.getPorts() to get a fresh handle.
-  async reconnect(maxAttempts = 10, delayMs = 1500) {
+  async reconnect(maxAttempts = 10, delayMs = 1500, { skipFreshPortSearch = false } = {}) {
     if (!this.port) return false;
-    // Close first — after a device reboot Chrome may still consider the port "open"
-    try { await this.port.close(); } catch (_) {}
+
+    // ── Initial close ──────────────────────────────────────────────────────
+    // On Windows, esptool-js transport.disconnect() sometimes fails silently,
+    // leaving the COM handle stuck "open".  Retry a few times with short waits.
+    // On Mac one close is sufficient — the port object may be stale but opens fine.
+    if (_isWindows) {
+      for (let ci = 0; ci < 4; ci++) {
+        try { await this.port.close(); break; } catch (_) { if (ci < 3) await sleep(300); }
+      }
+    } else {
+      try { await this.port.close(); } catch (_) {}
+    }
 
     // Capture the VID of this port once so we can match a fresh handle later.
     const portInfo = this.port.getInfo?.() ?? {};
+
+    // ── Windows: listen for USB reconnect events ───────────────────────────
+    // navigator.serial 'connect' fires when a USB serial device re-enumerates.
+    // On Windows the board may briefly drop USB during the hard-reset cycle;
+    // this event lets us grab the new port handle the moment it appears.
+    // Mac doesn't need this — getPorts() already returns a fresh handle.
+    let _freshFromEvent = null;
+    const _onSerialConnect = _isWindows ? (evt) => {
+      const p = evt.port;
+      if (!p) return;
+      const info = p.getInfo?.() ?? {};
+      if (!portInfo.usbVendorId || info.usbVendorId === portInfo.usbVendorId)
+        _freshFromEvent = p;
+    } : null;
+    if (_onSerialConnect)
+      try { navigator.serial?.addEventListener?.('connect', _onSerialConnect); } catch (_) {}
+
+    const _cleanup = () => {
+      if (_onSerialConnect)
+        try { navigator.serial?.removeEventListener?.('connect', _onSerialConnect); } catch (_) {}
+    };
 
     for (let i = 0; i < maxAttempts; i++) {
       await sleep(delayMs);
@@ -1974,16 +2025,69 @@ class BoardConnection {
         this._connected = true;
         this._readBuffer = '';
         this._startReading();
+        _cleanup();
         return true;
       } catch (e) {
-        termLog(this.boardIndex, `Reconnect attempt ${i + 1}/${maxAttempts}: ${e?.message ?? e}`, 'sys');
+        const msg = e?.message ?? String(e);
+
+        // ── Windows only: port stuck open from esptool session ───────────
+        // If port.open() says "already open" but readable is still available
+        // and unlocked, the port never actually closed after the flash.
+        // Reconfigure to 115200 and resume reading — no reopen needed.
+        if (_isWindows) {
+          const isAlreadyOpen = msg.includes('already open') || msg.includes('already been opened');
+          if (isAlreadyOpen && this.port.readable && !this.port.readable.locked) {
+            termLog(this.boardIndex, 'Port still open from flash — reconfiguring to 115200…', 'sys');
+            try {
+              if (typeof this.port.reconfigure === 'function')
+                await this.port.reconfigure({ baudRate: 115200 });
+              try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+              this._connected = true;
+              this._readBuffer = '';
+              this._startReading();
+              _cleanup();
+              return true;
+            } catch (re) {
+              termLog(this.boardIndex, `Reconfigure failed (${re?.message ?? re}) — retrying close…`, 'sys');
+              try { await this.port.close(); } catch (_) {}
+            }
+          }
+        }
+
+        termLog(this.boardIndex, `Reconnect attempt ${i + 1}/${maxAttempts}: ${msg}`, 'sys');
       }
 
-      // ── Mac fallback: look for a fresh SerialPort handle ─────────────────
+      // ── Windows only: event-based fresh port ─────────────────────────────
+      // If the board's USB chip briefly disconnected and reconnected, the
+      // 'connect' event will have fired with a new port handle.
+      if (_isWindows && _freshFromEvent && _freshFromEvent !== this.port) {
+        const evtPort = _freshFromEvent;
+        _freshFromEvent = null;
+        termLog(this.boardIndex, 'USB connect event — trying reconnected port handle…', 'sys');
+        try { await evtPort.close(); } catch (_) {}
+        try {
+          await evtPort.open({ baudRate: 115200 });
+          try { await evtPort.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+          this.port = evtPort;
+          this._connected = true;
+          this._readBuffer = '';
+          this._startReading();
+          _cleanup();
+          return true;
+        } catch (e3) {
+          termLog(this.boardIndex, `Event port open failed: ${e3?.message ?? e3}`, 'sys');
+        }
+      }
+
+      // ── Mac/fresh-handle fallback ─────────────────────────────────────────
       // Chrome on Mac creates a NEW SerialPort object for a USB device after
       // re-enumeration. The old reference stays permanently broken, but
-      // getPorts() returns the new one.
-      if (navigator.serial?.getPorts) {
+      // getPorts() returns the new one.  On Windows, Chrome reuses the same
+      // object (same=true), so this path is primarily for Mac.
+      // Skipped when skipFreshPortSearch is true (flash-failure recovery):
+      // in that case we only want to retry the exact same port, never touch
+      // another board's port that might appear unclaimed in getPorts().
+      if (!skipFreshPortSearch && navigator.serial?.getPorts) {
         try {
           // Ports currently held open by OTHER board connections (skip those).
           const activePorts = Object.values(boardConnections)
@@ -1991,7 +2095,7 @@ class BoardConnection {
             .map(c => c.port);
 
           const available = await navigator.serial.getPorts();
-          // Diagnostic: log what getPorts() returned so Mac reconnect issues are visible
+          // Diagnostic: log what getPorts() returned so reconnect issues are visible
           const portSummary = available.map(p => {
             const info = p.getInfo?.() ?? {};
             return `VID=${info.usbVendorId ?? '?'} PID=${info.usbProductId ?? '?'} same=${p === this.port}`;
@@ -2017,12 +2121,27 @@ class BoardConnection {
               this._connected = true;
               this._readBuffer = '';
               this._startReading();
+              _cleanup();
               return true;
             } catch (e2) {
               termLog(this.boardIndex, `Fresh port not ready yet: ${e2?.message ?? e2}`, 'sys');
             }
           } else {
-            termLog(this.boardIndex, `No fresh port found (our VID=${portInfo.usbVendorId ?? '?'})`, 'sys');
+            if (_isWindows) {
+              // Windows: Chrome reuses the same SerialPort object (same=true expected).
+              // The main port.open() retry above is the correct path — just log status.
+              const hasMatchingUnclaimed = available.some(p =>
+                !activePorts.includes(p) &&
+                (portInfo.usbVendorId ? (p.getInfo?.() ?? {}).usbVendorId === portInfo.usbVendorId : true)
+              );
+              termLog(this.boardIndex,
+                hasMatchingUnclaimed
+                  ? `Port visible (waiting for re-enumeration)…`
+                  : `No fresh port found (our VID=${portInfo.usbVendorId ?? '?'})`,
+                'sys');
+            } else {
+              termLog(this.boardIndex, `No fresh port found (our VID=${portInfo.usbVendorId ?? '?'})`, 'sys');
+            }
           }
         } catch (gpe) {
           termLog(this.boardIndex, `getPorts() failed: ${gpe?.message ?? gpe}`, 'sys');
@@ -2030,6 +2149,7 @@ class BoardConnection {
       }
     }
 
+    _cleanup();
     termLog(this.boardIndex, `Reconnect gave up after ${maxAttempts} attempts`, 'err');
     return false;
   }
@@ -2472,21 +2592,39 @@ function portVendorLabel(info) {
   return 'Serial Device';
 }
 
-function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
+// Module-level hooks so portPickerDetect() / portPickerCancelDetect() can
+// reach into the active picker's closure.
+let _portPickerDetectFn = null;
+let _portPickerCancelDetectFn = null;
+
+function portPickerDetect(index) { _portPickerDetectFn?.(index); }
+function portPickerCancelDetect() { _portPickerCancelDetectFn?.(); }
+
+async function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
+  // Await the previous picker's cleanup BEFORE setting up new state.
+  // If this is not awaited, the old _portPickerStopMonitors async continuation
+  // runs after the new picker has set _portPickerDetectFn and nulls it out,
+  // making every Detect button click a no-op.
+  await _portPickerStopMonitors?.();
+
   return new Promise(resolve => {
-    _portPickerPorts    = [...initialPorts];
-    _portPickerResolve  = resolve;
-    _portPickerStopMonitors?.(); // cancel any monitors left over from a previous open
+    _portPickerPorts   = [...initialPorts];
+    _portPickerResolve = resolve;
 
     document.getElementById('port-picker-title').textContent = `Select Port — WCB ${n}`;
 
-    // ── State that persists across re-renders ──────────────────────
-    let monitorActive = true;
-    const openReaders    = new Map(); // port → reader  (prevents double-monitoring)
-    const monitorPromises = new Map(); // port → Promise  (so stopMonitors can await them)
-    const detectedSet    = new Set(); // ports that have seen reboot data
+    // ── One active detect job at a time ───────────────────────────
+    // detectJob = { port, cancel, done } while a detect is running; null otherwise.
+    let detectJob = null;
 
-    // ── Render the current port list ───────────────────────────────
+    async function stopDetect() {
+      if (!detectJob) return;
+      detectJob.cancel();
+      await detectJob.done;
+      detectJob = null;
+    }
+
+    // ── Render ────────────────────────────────────────────────────
     function renderBody() {
       const pts = _portPickerPorts;
 
@@ -2504,148 +2642,176 @@ function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
       }
 
       const items = pts.map((port, i) => {
-        const info     = port.getInfo ? port.getInfo() : {};
-        const chip     = portVendorLabel(info);
-        const claimed  = usedPorts.has(port);
-        const byBoard  = usedByBoard.get(port);
-        const detected = detectedSet.has(port);
-        const right    = claimed
-          ? `<span class="badge badge-yellow" style="font-size:10px;white-space:nowrap">WCB ${byBoard ?? '?'} in use</span>`
-          : detected
-            ? `<span class="badge badge-green"  style="font-size:10px;white-space:nowrap">↩ Rebooted!</span>`
-            : `<span class="port-picker-arrow" id="port-picker-arrow-${i}">→</span>`;
-        return `<div class="port-picker-item${claimed ? ' port-picker-item--used' : ''}${detected ? ' port-picker-item--detected' : ''}"
+        const info       = port.getInfo ? port.getInfo() : {};
+        const chip       = portVendorLabel(info);
+        const claimed    = usedPorts.has(port);
+        const byBoard    = usedByBoard.get(port);
+        const detecting  = detectJob?.port === port;
+
+        let right;
+        if (claimed) {
+          right = `<span class="badge badge-yellow" style="font-size:10px;white-space:nowrap">WCB ${byBoard ?? '?'} in use</span>`;
+        } else if (detecting) {
+          right = `<span style="font-size:11px;color:var(--text2);margin-right:6px">⊙ Press reset…</span>
+                   <button class="btn btn-ghost btn-sm" style="padding:2px 7px;font-size:11px"
+                           onclick="event.stopPropagation();portPickerCancelDetect()">✕</button>`;
+        } else {
+          right = `<button class="btn btn-ghost btn-sm" style="padding:2px 7px;font-size:11px;margin-right:4px"
+                           onclick="event.stopPropagation();portPickerDetect(${i})" title="Open this port and wait for a reset press">🔍 Detect</button>
+                   <span class="port-picker-arrow">→</span>`;
+        }
+
+        return `<div class="port-picker-item${claimed ? ' port-picker-item--used' : ''}"
                      ${!claimed ? `onclick="portPickerSelect(${i})"` : ''}>
           <div class="port-picker-item-left">
             <span class="port-picker-num">Port ${i + 1}</span>
             <span class="port-picker-chip">${escHtml(chip)}</span>
           </div>
-          ${right}
+          <div style="display:flex;align-items:center;gap:2px">${right}</div>
         </div>`;
       }).join('');
 
       const hint = `
         <p style="font-size:11px;color:var(--text3);margin:8px 0 0;line-height:1.6">
-          <strong style="color:var(--text2)">Step 1:</strong> click <strong>+ Authorize…</strong>
-          for each board you want to use (one at a time). They'll appear in the list above.<br>
-          <strong style="color:var(--text2)">Step 2:</strong> press the reset button on a board —
-          its row will flash green. Click that row to assign it to <strong>WCB ${n}</strong>.
-          Or use <strong>Select by COM#…</strong> to pick by Windows device name.
+          <strong style="color:var(--text2)">Know which port?</strong> Click its row to select it directly.<br>
+          <strong style="color:var(--text2)">Not sure?</strong> Click <strong>🔍 Detect</strong> on a row,
+          then press the reset button on that board — it will auto-select when it reboots.
         </p>`;
 
       document.getElementById('port-picker-body').innerHTML =
         `<div class="port-picker-list">${items}</div>${hint}`;
-
-      // Start monitors for every unclaimed port not already being watched.
-      for (let i = 0; i < pts.length; i++) {
-        const port = pts[i];
-        if (!usedPorts.has(port) && !openReaders.has(port) && !detectedSet.has(port)) {
-          monitorPromises.set(port, monitorPort(port, i));
-        }
-      }
     }
 
-    // ── Per-port reboot monitor ────────────────────────────────────
-    async function monitorPort(port, index) {
-      try { await port.open({ baudRate: 115200 }); } catch { return; } // skip if busy
-      // Immediately deassert DTR & RTS so opening the port doesn't trigger an
-      // ESP32 EN-pin reset via the CP210x / CH340 RC circuit.
-      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
-      const reader = port.readable.getReader();
-      openReaders.set(port, reader);
-      // Drain for 2 s: discards any data buffered before the picker opened OR
-      // from a DTR-triggered boot so we don't false-positive on running boards.
-      // After the drain we ONLY trigger on genuine ESP32 boot-log signatures —
-      // routine ETM firmware heartbeat output will never match these strings.
-      let settled = false;
-      const drainTimer = setTimeout(() => { settled = true; }, 2000);
-      const BOOT_RE = /rst:0x|ets Jun|ets Jul|configsip:|cpu_start:|ESP-ROM:|Brownout/;
-      const dec = new TextDecoder();
-      let buf = '';
-      try {
-        while (monitorActive) {
-          const { value, done } = await reader.read();
-          if (done || !monitorActive) break;
-          if (!settled) continue;                        // discard during drain window
-          if (value?.length > 0) {
-            buf += dec.decode(value, { stream: true });
-            if (buf.length > 256) buf = buf.slice(-256); // keep buffer bounded
-            if (BOOT_RE.test(buf)) {
-              detectedSet.add(port);
-              // Re-render to show green highlight (other monitors keep running)
-              renderBody();
-              // Scroll the detected row into view
-              const rows = document.querySelectorAll('#port-picker-body .port-picker-item');
-              rows[index]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-              break;
+    // ── Per-port detect job ────────────────────────────────────────
+    // Opens ONE port, deasserts DTR/RTS, drains briefly, then waits for the
+    // ESP32 boot-log signature that means the user pressed the reset button.
+    // Auto-selects on match.  Only one detect runs at a time so there is no
+    // cross-port interference and no cascading power-sag resets.
+    async function startDetect(index) {
+      await stopDetect(); // cancel any previous job first
+
+      const port = _portPickerPorts[index];
+      if (!port || usedPorts.has(port)) return;
+
+      let cancelled = false;
+      let resolveDone;
+      const donePromise = new Promise(r => { resolveDone = r; });
+
+      detectJob = { port, cancel: () => { cancelled = true; }, done: donePromise };
+      renderBody(); // show "⊙ Press reset…" on this row
+
+      (async () => {
+        let reader     = null;
+        let openedByUs = false;
+        let drainTimer = null;
+        let timeoutTimer = null;
+        try {
+          try {
+            await port.open({ baudRate: 115200 });
+            openedByUs = true;
+          } catch (e) {
+            // On Windows a post-flash port can be stuck open — use it as-is.
+            if (_isWindows) {
+              const msg = e?.message ?? '';
+              if ((msg.includes('already open') || msg.includes('already been opened'))
+                  && port.readable && !port.readable.locked) {
+                // fall through — don't close on exit
+              } else { return; }
+            } else { return; }
+          }
+
+          // Deassert DTR/RTS to minimise the EN-pin reset that port.open() triggers.
+          try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+
+          reader = port.readable.getReader();
+
+          // Short drain: absorbs the DTR-triggered auto-reset from opening this
+          // one port.  2 s is enough because only this board was opened.
+          const DRAIN_MS = 2000;
+          const BOOT_RE  = /rst:0x|ets Jun|ets Jul|configsip:|cpu_start:|ESP-ROM:|Brownout/;
+          const dec = new TextDecoder();
+          let buf = '';
+          let settled = false;
+          drainTimer   = setTimeout(() => { settled = true; },  DRAIN_MS);
+          timeoutTimer = setTimeout(() => { cancelled = true; }, 20000); // 20 s to press reset
+
+          while (!cancelled) {
+            const { value, done } = await reader.read();
+            if (done || cancelled) break;
+            if (!settled) continue;
+            if (value?.length > 0) {
+              buf += dec.decode(value, { stream: true });
+              if (buf.length > 256) buf = buf.slice(-256);
+              if (BOOT_RE.test(buf)) {
+                // Board rebooted — auto-select it and close the modal.
+                clearTimeout(drainTimer);  drainTimer = null;
+                clearTimeout(timeoutTimer); timeoutTimer = null;
+                try { reader.releaseLock(); } catch (_) {}  reader = null;
+                if (openedByUs) { try { await port.close(); } catch (_) {} }
+                openedByUs = false;
+
+                if (detectJob?.port === port) {
+                  detectJob = null;
+                  document.getElementById('port-picker-modal').classList.remove('open');
+                  const r = _portPickerResolve; _portPickerResolve = null;
+                  r?.(port);
+                }
+                return; // done — skip the finally cleanup for port (already closed)
+              }
             }
           }
+        } catch (_) { /* reader cancelled */ }
+        finally {
+          clearTimeout(drainTimer);
+          clearTimeout(timeoutTimer);
+          if (reader)     { try { reader.releaseLock(); } catch (_) {} }
+          if (openedByUs) { try { await port.close();   } catch (_) {} }
+          if (detectJob?.port === port) { detectJob = null; renderBody(); }
+          resolveDone();
         }
-      } catch (_) { /* cancelled by stopMonitors */ }
-      clearTimeout(drainTimer);
-      // stopMonitors may have already released + closed — guard against double-close
-      if (openReaders.has(port)) {
-        try { reader.releaseLock(); } catch (_) {}
-        try { await port.close(); }    catch (_) {}
-        openReaders.delete(port);
-      }
+      })();
     }
 
+    _portPickerDetectFn       = startDetect;
+    _portPickerCancelDetectFn = () => stopDetect().then(renderBody);
+
     _portPickerStopMonitors = async () => {
-      monitorActive = false;
-      // Signal every reader to stop — monitorPort's own catch block then
-      // releases the lock and closes the port.
-      for (const reader of openReaders.values()) {
-        try { await reader.cancel(); } catch (_) {}
-      }
-      // Wait for every monitorPort call to fully finish its cleanup
-      // (releaseLock + port.close).  Only once all of those awaits resolve
-      // are the ports truly free for boardManualConnect to reopen.
-      await Promise.allSettled(monitorPromises.values());
-      monitorPromises.clear();
-      openReaders.clear(); // belt-and-suspenders — should already be empty
-      _portPickerStopMonitors = null;
+      await stopDetect();
+      _portPickerDetectFn       = null;
+      _portPickerCancelDetectFn = null;
+      _portPickerStopMonitors   = null;
     };
 
-    // ── "+ Authorize…" — adds a port and refreshes, stays open ────
+    // ── "+ Authorize…" ────────────────────────────────────────────
     const oldBtn = document.getElementById('port-picker-new-btn');
     const newBtn = oldBtn.cloneNode(true);
     oldBtn.parentNode.replaceChild(newBtn, oldBtn);
     newBtn.textContent = '+ Authorize…';
     newBtn.addEventListener('click', async () => {
       try {
-        // Filtered to known WCB USB-serial chips only
         const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
         await navigator.serial.requestPort({ filters });
-        // Refresh the full list — the newly-authorized port is now in getPorts()
         _portPickerPorts = await navigator.serial.getPorts();
-        renderBody(); // re-render with the new port added; starts its monitor
-      } catch {
-        // User cancelled the native dialog — just keep the picker open
-      }
+        renderBody();
+      } catch { /* user cancelled */ }
     });
 
-    // ── "Select by COM#…" — opens Chrome's unfiltered native picker ──
-    // The native dialog shows OS-level port names (e.g. COM13) so the user
-    // can cross-reference Windows Device Manager when board order is unclear.
+    // ── "Select by COM#…" ─────────────────────────────────────────
     const oldComBtn = document.getElementById('port-picker-com-btn');
     const newComBtn = oldComBtn.cloneNode(true);
     oldComBtn.parentNode.replaceChild(newComBtn, oldComBtn);
     newComBtn.addEventListener('click', async () => {
       try {
-        const port = await navigator.serial.requestPort(); // no filter — shows COM#
+        const port = await navigator.serial.requestPort();
         if (port) {
-          await _portPickerStopMonitors?.(); // wait for monitored ports to close
+          await _portPickerStopMonitors?.();
           document.getElementById('port-picker-modal').classList.remove('open');
           const r = _portPickerResolve; _portPickerResolve = null;
           r?.(port);
         }
-      } catch {
-        // User cancelled — keep picker open
-      }
+      } catch { /* user cancelled */ }
     });
 
-    // Initial render + start monitors for already-known ports
     renderBody();
     document.getElementById('port-picker-modal').classList.add('open');
   });
@@ -3115,8 +3281,19 @@ async function boardGo(n, opts = {}) {
     setFlashUI(n, false);
 
     if (flashOk) {
+      if (_isWindows) {
+        // Windows: esptool-js transport.disconnect() can fail silently, leaving
+        // the COM port handle open.  Give the driver a moment, then attempt
+        // several explicit closes before handing off to reconnect().
+        await sleep(1500);
+        for (let ci = 0; ci < 6; ci++) {
+          try { await conn.port.close(); break; } catch (_) { if (ci < 5) await sleep(300); }
+        }
+      }
       termLog(n, 'Reconnecting after flash…', 'sys');
-      const reconnected = await conn.reconnect(12, 2000);
+      // Windows gets more attempts (14 × 2 s = 28 s) to account for driver delays;
+      // Mac keeps the original 12 × 2 s = 24 s which has always been sufficient.
+      const reconnected = await conn.reconnect(_isWindows ? 14 : 12, 2000);
       if (reconnected) {
         updateConnectionUI(n, true);
         boardFlashMode[n] = 'configure';   // reset mode after flash
@@ -3202,7 +3379,20 @@ async function boardGo(n, opts = {}) {
       // UI doesn't stay in a disconnected state, then check whether we can
       // still complete the wizard without a successful flash.
       termLog(n, 'Flash failed — attempting reconnect…', 'sys');
-      const recovered = await conn.reconnect(5, 1500);
+      // On Windows esptool-js transport.disconnect() can fail silently after a
+      // write error, leaving the COM handle stuck open.  Same pre-close as the
+      // success path: give the driver a moment then retry port.close() several
+      // times before conn.reconnect() tries to reopen it.
+      if (_isWindows) {
+        await sleep(1500);
+        for (let ci = 0; ci < 6; ci++) {
+          try { await conn.port.close(); break; } catch (_) { if (ci < 5) await sleep(300); }
+        }
+      }
+      // Skip fresh-port search: after a flash failure the port is simply stuck
+      // open on the same handle.  Searching getPorts risks accidentally matching
+      // another board's port if its connection briefly dropped during the flash.
+      const recovered = await conn.reconnect(5, 1500, { skipFreshPortSearch: true });
       if (recovered) {
         updateConnectionUI(n, true);
         boardFlashMode[n] = 'configure';
@@ -4848,6 +5038,12 @@ function _wizardClearAllWatchers() {
     clearInterval(wizardConnectWatchers[n]);
     delete wizardConnectWatchers[n];
   });
+  // Cancel any in-progress detect jobs (don't await — fire-and-forget on close)
+  Object.keys(_wizPortDetectJobs).forEach(n => {
+    _wizPortDetectJobs[n]?.cancel();
+    delete _wizPortDetectJobs[n];
+  });
+  Object.keys(_wizPortConfigSnaps).forEach(n => delete _wizPortConfigSnaps[n]);
 }
 
 function openWizard() {
@@ -4968,15 +5164,11 @@ function wizardRenderStep() {
   }
 
   if (key === 'connect') {
-    if (wizardState.connectMode) {
-      // Board rows are visible — hide the button; wizardCheckAllDone shows it when done
-      nextBtn.style.display = 'none';
-    } else {
-      // Mode picker is visible — button advances to board rows with the default (seq) mode
-      nextBtn.textContent = 'One at a time →';
-      nextBtn.disabled = false;
-      nextBtn.style.display = '';
-      nextBtn.onclick = () => wizardSelectConnectMode('seq');
+    // Always hide the next button during the connect step — wizardCheckAllDone
+    // re-shows it when every board is done.  Auto-select sequential mode if not set.
+    nextBtn.style.display = 'none';
+    if (!wizardState.connectMode) {
+      setTimeout(() => wizardSelectConnectMode('seq'), 0);
     }
   } else if (key === 'review') {
     nextBtn.textContent = 'Apply & Connect →';
@@ -5476,23 +5668,11 @@ function wizardFirmwareChoice(val, btn) {
 
 function wizardHTMLConnect() {
   const { connectMode, connectSeqN, boards, needsFirmware, eraseNvs } = wizardState;
-  // ── Step 0: Mode picker ─────────────────────────────────────────
+  // ── Auto-select sequential mode — skip the picker entirely ───────
   if (!connectMode) {
-    return `
-      <div class="wizard-section-title">Connect &amp; Push</div>
-      <div class="wizard-section-desc">How are you connecting boards to your computer?</div>
-      <div class="wizard-choice-grid">
-        <button class="wizard-choice-btn" onclick="wizardSelectConnectMode('all')">
-          <span class="wizard-choice-icon">🔌</span>
-          <span class="wizard-choice-label">All at once</span>
-          <span class="wizard-choice-desc">All boards connected via USB hub — configure them simultaneously</span>
-        </button>
-        <button class="wizard-choice-btn selected" onclick="wizardSelectConnectMode('seq')">
-          <span class="wizard-choice-icon">↕</span>
-          <span class="wizard-choice-label">One at a time <span style="font-size:10px;color:var(--text3)">(recommended)</span></span>
-          <span class="wizard-choice-desc">Move the USB cable between boards — you'll be guided exactly when to plug in, reset, and unplug each board</span>
-        </button>
-      </div>`;
+    // Don't render anything — wizardRender will call wizardSelectConnectMode('seq')
+    // which re-renders. Return empty string as a safety fallback.
+    return '';
   }
 
   // ── Step 1+: Board rows ─────────────────────────────────────────
@@ -5506,21 +5686,28 @@ function wizardHTMLConnect() {
       : needsFirmware              ? `<span class="badge badge-yellow" style="font-size:9px;padding:2px 6px">Upload FW</span>`
       :                              `<span class="badge badge-orange" style="font-size:9px;padding:2px 6px">Erase NVS</span>`;
     return `
-      <div class="wizard-connect-row ${isDimmed ? 'wiz-connect-dimmed' : ''}" id="wiz-connect-row-${n}">
-        <span class="wizard-connect-label">
-          WCB ${n} ${fwBadge}
-          <span style="color:var(--text3);font-weight:400;font-size:11px;display:block">Board #${b.wcbNumber}</span>
-        </span>
-        <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-          <span id="wiz-connect-btns-${n}" style="display:${isActive ? 'flex' : 'none'};gap:6px">
-            <button class="btn btn-primary btn-sm" id="wiz-manual-btn-${n}"
-                    onclick="wizardManualConnect(${n})">🔌 Connect</button>
+      <div class="wizard-connect-row ${isDimmed ? 'wiz-connect-dimmed' : ''}" id="wiz-connect-row-${n}"
+           style="flex-direction:column;align-items:stretch;gap:0">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span class="wizard-connect-label">
+            WCB ${n} ${fwBadge}
+            <span style="color:var(--text3);font-weight:400;font-size:11px;display:block">Board #${b.wcbNumber}</span>
           </span>
-          <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
-                  style="display:none" onclick="wizardCancelConnect(${n})">✕ Cancel</button>
-          <span id="wiz-connect-pending-${n}" style="${isDimmed ? '' : 'display:none'};color:var(--text3);font-size:11px">↓ Up next</span>
+          <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
+            <!-- Reconnect button — only shown after Cancel or after Done -->
+            <span id="wiz-connect-btns-${n}" style="display:none;gap:6px">
+              <button class="btn btn-ghost btn-sm" id="wiz-manual-btn-${n}"
+                      onclick="wizardManualConnect(${n})">🔌 Reconnect</button>
+            </span>
+            <button class="btn btn-ghost btn-sm" id="wiz-cancel-btn-${n}"
+                    style="${isActive ? '' : 'display:none'}" onclick="wizardCancelConnect(${n})">✕</button>
+            <span id="wiz-connect-pending-${n}" style="${isDimmed ? '' : 'display:none'};color:var(--text3);font-size:11px">↓ Up next</span>
+          </div>
+          <span class="wizard-connect-status" id="wiz-connect-status-${n}">${isActive ? 'Select port…' : isDimmed ? '' : 'Waiting…'}</span>
         </div>
-        <span class="wizard-connect-status" id="wiz-connect-status-${n}">${isDimmed ? '' : 'Waiting…'}</span>
+        <div id="wiz-port-panel-${n}" style="${isActive ? '' : 'display:none'};margin-top:10px">
+          ${isActive ? '<span style="font-size:11px;color:var(--text3)">Loading ports…</span>' : ''}
+        </div>
       </div>`;
   }).join('');
 
@@ -5533,8 +5720,8 @@ function wizardHTMLConnect() {
 
   const tipHtml = `
     <div class="wizard-connect-tip">
-      <strong>Tip:</strong> Unplug all boards first, then plug them in one at a time.
-      When the port picker appears, the newly-added port is your board — select it to assign it to the correct slot.
+      <strong>Tip:</strong> Plug in each board one at a time. Click <strong>🔍 Detect</strong> on its row,
+      then press the reset button on that board — it will auto-select. Or click <strong>Use →</strong> to pick a port directly.
     </div>`;
 
   return `
@@ -5551,9 +5738,9 @@ function wizardConnectBannerText() {
   if (connectSeqN > boards.length) return '✅ All boards configured!';
   const b = boards[connectSeqN - 1];
   if (connectSeqN === 1) {
-    return `📌 Plug <strong>WCB ${b.wcbNumber}</strong> into USB now, then click <strong>⊙ Auto-Detect</strong> and press the reset button, or click <strong>🔌 Manual</strong> to select the port.`;
+    return `📌 Plug <strong>WCB ${b.wcbNumber}</strong> into USB now, then click <strong>🔌 Connect</strong> to select its port.`;
   }
-  return `✓ Done! Unplug the previous board. Now plug in <strong>WCB ${b.wcbNumber}</strong>, then click <strong>⊙ Auto-Detect</strong> or <strong>🔌 Manual</strong> below.`;
+  return `✓ Done! Unplug the previous board. Now plug in <strong>WCB ${b.wcbNumber}</strong>, then click <strong>🔌 Connect</strong> below.`;
 }
 
 function wizardSelectConnectMode(mode) {
@@ -5567,6 +5754,15 @@ function wizardSelectConnectMode(mode) {
     // Board rows now visible — hide the forward button
     if (nextBtn) nextBtn.style.display = 'none';
     wizardStartConnectWatchers();
+    // Auto-open port panel(s) — no Connect button click needed
+    if (mode === 'seq') {
+      setTimeout(() => _wizPortOpenPanel(1), 0);
+    } else {
+      // All-at-once: open panels for every slot
+      setTimeout(() => {
+        for (let i = 1; i <= wizardState.quantity; i++) _wizPortOpenPanel(i);
+      }, 0);
+    }
   } else {
     // Reset to mode picker — restore the forward button
     if (nextBtn) {
@@ -5590,21 +5786,18 @@ function wizardSeqAdvance(completedSlot) {
   }
   wizardState.connectSeqN = nextSlot;
 
-  // Activate next board
+  // Activate next board — remove dim, hide pending label
   const pendingEl = document.getElementById(`wiz-connect-pending-${nextSlot}`);
   if (pendingEl) pendingEl.style.display = 'none';
-  const btnsEl = document.getElementById(`wiz-connect-btns-${nextSlot}`);
-  if (btnsEl) btnsEl.style.display = 'flex';
-  const statusEl = document.getElementById(`wiz-connect-status-${nextSlot}`);
-  if (statusEl) statusEl.textContent = 'Waiting…';
   const rowEl = document.getElementById(`wiz-connect-row-${nextSlot}`);
   if (rowEl) rowEl.classList.remove('wiz-connect-dimmed');
 
   // Update banner
   if (bannerEl) { bannerEl.innerHTML = wizardConnectBannerText(); bannerEl.style.display = ''; }
 
-  // Scroll next row into view
+  // Scroll next row into view, then auto-open its port panel
   if (rowEl) rowEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  setTimeout(() => _wizPortOpenPanel(nextSlot), 50);
 }
 
 // ── Interactive helpers used in step HTML ──────────────────────────
@@ -6095,6 +6288,250 @@ function wizardExportConfig() {
 // ── Connect & push each board ──────────────────────────────────────
 const wizardConnectWatchers = {};   // interval IDs keyed by board slot
 
+// ── Inline port panel (replaces the modal inside the wizard) ───────
+const _wizPortDetectJobs  = {};  // n → { port, cancel, done } | null
+const _wizPortConfigSnaps = {};  // n → { configSnapshot, generalSnapshot }
+
+// Returns the set of ports already claimed by other slots.
+function _wizPortUsedByOthers(excludeSlot) {
+  const used = new Set();
+  for (let s = 1; s <= (wizardState.quantity ?? 3); s++) {
+    if (s === excludeSlot) continue;
+    const p = boardConnections[s]?.port;
+    if (p) used.add(p);
+  }
+  return used;
+}
+
+async function wizPortRenderPanel(n) {
+  const panelEl = document.getElementById(`wiz-port-panel-${n}`);
+  if (!panelEl) return;
+
+  const job       = _wizPortDetectJobs[n] ?? null;
+  const detecting = !!job;
+  const ready     = job?.ready ?? false;    // true after drain period completes
+
+  let inner;
+  if (detecting && !ready) {
+    // Drain phase — opening ports, absorbing DTR resets. Don't press yet.
+    inner = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+               <span style="font-size:12px;color:var(--text2)">⏳ Preparing… please wait</span>
+               <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px"
+                       onclick="wizPortCancelDetect(${n})">✕ Cancel</button>
+             </div>`;
+  } else if (detecting && ready) {
+    // Drain done — safe to press reset now
+    inner = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+               <span style="font-size:12px;color:var(--accent);font-weight:600">👆 Press the reset button on WCB ${n} now!</span>
+               <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px"
+                       onclick="wizPortCancelDetect(${n})">✕ Cancel</button>
+             </div>`;
+  } else {
+    inner = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+               <button class="btn btn-primary btn-sm" onclick="wizPortDetect(${n})">🔍 Detect</button>
+               <button class="btn btn-ghost btn-sm" onclick="wizPortAuthorize(${n})">+ Authorize…</button>
+               <button class="btn btn-ghost btn-sm" onclick="wizPortComPicker(${n})">Select by COM#…</button>
+             </div>`;
+  }
+  panelEl.innerHTML = inner;
+}
+
+async function wizPortStopDetect(n) {
+  const job = _wizPortDetectJobs[n];
+  if (!job) return;
+  job.cancel(); // sets cancelled flag and cancels all active readers
+  await job.done;
+  _wizPortDetectJobs[n] = null;
+}
+
+// One Detect button handles ALL authorized ports simultaneously.
+// After a 3s drain (to absorb DTR-triggered resets on port open),
+// only rst:0x1 (POWERON_RESET) matches — which is a physical button press.
+// The boot-loop SW resets (rst:0x3) are silently ignored.
+async function wizPortDetect(n) {
+  await wizPortStopDetect(n);
+
+  const allPorts     = await navigator.serial.getPorts();
+  const usedByOthers = _wizPortUsedByOthers(n);
+  const ports        = allPorts.filter(p => !usedByOthers.has(p));
+
+  if (ports.length === 0) { await wizPortRenderPanel(n); return; }
+
+  let cancelled = false;
+  let detected  = false;
+  let resolveDone;
+  const done = new Promise(r => { resolveDone = r; });
+
+  // Shared cancel — sets flag and cancels all open readers
+  const activeReaders = new Set();
+  const cancelAll = () => {
+    cancelled = true;
+    activeReaders.forEach(r => { try { r.cancel(); } catch (_) {} });
+  };
+
+  _wizPortDetectJobs[n] = { cancel: cancelAll, done, ready: false };
+  await wizPortRenderPanel(n); // show "⏳ Preparing…"
+
+  const DRAIN_MS   = 3000;   // absorb DTR-triggered rst:0x1 on port open
+  // After drain, flip to "ready" and re-render to show "Press reset now!"
+  setTimeout(() => {
+    const job = _wizPortDetectJobs[n];
+    if (job && !job.ready) {
+      job.ready = true;
+      wizPortRenderPanel(n);
+    }
+  }, DRAIN_MS);
+  const TIMEOUT_MS = 30000;
+  // Only match physical reset (rst:0x1 POWERON_RESET).
+  // Boot-loop SW resets (rst:0x3) are excluded, preventing false positives
+  // on boards stuck in a boot-loop with no firmware.
+  const DETECT_RE  = /rst:0x1 \(POWERON_RESET\)/;
+
+  const timeoutId = setTimeout(() => cancelAll(), TIMEOUT_MS);
+
+  const workers = ports.map(port => (async () => {
+    let reader = null, openedByUs = false, drainTimer = null;
+    try {
+      try {
+        await port.open({ baudRate: 115200 });
+        openedByUs = true;
+      } catch (e) {
+        if (_isWindows) {
+          const msg = e?.message ?? '';
+          if ((msg.includes('already open') || msg.includes('already been opened'))
+              && port.readable && !port.readable.locked) {
+            // fall through — usable as-is
+          } else return;
+        } else return;
+      }
+      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+
+      reader = port.readable.getReader();
+      activeReaders.add(reader);
+
+      const dec = new TextDecoder();
+      let buf = '', settled = false;
+      drainTimer = setTimeout(() => { settled = true; }, DRAIN_MS);
+
+      while (!cancelled) {
+        const { value, done: rdone } = await reader.read();
+        if (rdone || cancelled) break;
+        if (!settled) continue;
+        if (value?.length > 0) {
+          buf += dec.decode(value, { stream: true });
+          if (buf.length > 256) buf = buf.slice(-256);
+          if (!detected && DETECT_RE.test(buf)) {
+            detected = true;
+            // Stop everything else
+            clearTimeout(drainTimer); drainTimer = null;
+            clearTimeout(timeoutId);
+            activeReaders.delete(reader);
+            try { reader.releaseLock(); } catch (_) {} reader = null;
+            if (openedByUs) { try { await port.close(); } catch (_) {} } openedByUs = false;
+            cancelAll(); // cancel remaining port readers
+            if (_wizPortDetectJobs[n]) {
+              _wizPortDetectJobs[n] = null;
+              wizPortComplete(n, port);
+            }
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+    finally {
+      clearTimeout(drainTimer);
+      if (reader) { activeReaders.delete(reader); try { reader.releaseLock(); } catch (_) {} }
+      if (openedByUs) { try { await port.close(); } catch (_) {} }
+    }
+  })());
+
+  Promise.all(workers).then(() => {
+    clearTimeout(timeoutId);
+    if (_wizPortDetectJobs[n]) {
+      _wizPortDetectJobs[n] = null;
+      wizPortRenderPanel(n); // timed out or cancelled — restore Detect button
+    }
+    resolveDone();
+  });
+}
+
+async function wizPortCancelDetect(n) {
+  await wizPortStopDetect(n);
+  await wizPortRenderPanel(n);
+}
+
+async function wizPortUse(n, portIdx) {
+  await wizPortStopDetect(n);
+  const ports = await navigator.serial.getPorts();
+  const port  = ports[portIdx];
+  if (!port) return;
+  await wizPortComplete(n, port);
+}
+
+async function wizPortAuthorize(n) {
+  try {
+    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
+    await navigator.serial.requestPort({ filters });
+  } catch { /* user cancelled */ }
+  await wizPortRenderPanel(n);
+}
+
+async function wizPortComPicker(n) {
+  try {
+    const port = await navigator.serial.requestPort();
+    if (port) {
+      await wizPortStopDetect(n);
+      await wizPortComplete(n, port);
+    }
+  } catch { /* user cancelled */ }
+}
+
+// Open (or re-open) the inline port panel for slot n.
+// Takes a config snapshot and renders the port list.
+async function _wizPortOpenPanel(n) {
+  _wizPortConfigSnaps[n] = {
+    configSnapshot:  boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null,
+    generalSnapshot: captureGeneralDOMSnapshot(),
+  };
+  // Ensure panel is visible, cancel shown, reconnect button hidden
+  const panelEl  = document.getElementById(`wiz-port-panel-${n}`);
+  const cancelEl = document.getElementById(`wiz-cancel-btn-${n}`);
+  const btnsEl   = document.getElementById(`wiz-connect-btns-${n}`);
+  if (panelEl)  panelEl.style.display  = '';
+  if (cancelEl) cancelEl.style.display = '';
+  if (btnsEl)   btnsEl.style.display   = 'none';
+  wizardSetConnectStatus(n, '', 'Select port…');
+  await wizPortRenderPanel(n);
+}
+
+async function wizPortComplete(n, port) {
+  // Collapse the panel and show connecting status
+  const panelEl = document.getElementById(`wiz-port-panel-${n}`);
+  if (panelEl) panelEl.style.display = 'none';
+  wizardSetConnectStatus(n, 'busy', 'Connecting…');
+
+  const snap = _wizPortConfigSnaps[n] ?? {};
+  delete _wizPortConfigSnaps[n];
+
+  const usedPorts = _wizPortUsedByOthers(n);
+  try {
+    if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
+    const conn = new BoardConnection(n);
+    await conn.connect(port, usedPorts);
+    boardConnections[n] = conn;
+    delete remoteRelayForBoard[n];
+    updateConnectionUI(n, true);
+    showToast(`WCB ${n} connected — pulling config…`, 'success');
+    setTimeout(() => boardPull(n), 3000);
+    wizardWatchForConnect(n, snap.configSnapshot ?? null, snap.generalSnapshot ?? null);
+  } catch (e) {
+    wizardSetConnectStatus(n, 'err', '✕ Connect failed');
+    // Re-show panel so user can try again
+    if (panelEl) { panelEl.style.display = ''; await wizPortRenderPanel(n); }
+    wizardEnableConnectBtns(n);
+  }
+}
+
 function wizardDisableConnectBtns(n) {
   const grp = document.getElementById(`wiz-connect-btns-${n}`);
   if (grp) grp.style.display = 'none';
@@ -6109,30 +6546,27 @@ function wizardEnableConnectBtns(n) {
 }
 
 async function wizardCancelConnect(n) {
-  // Stop the watch-for-connect interval
+  // Stop any active detect job and hide the inline panel
+  await wizPortStopDetect(n);
+  delete _wizPortConfigSnaps[n];
+  const panelEl  = document.getElementById(`wiz-port-panel-${n}`);
+  const cancelEl = document.getElementById(`wiz-cancel-btn-${n}`);
+  if (panelEl)  panelEl.style.display  = 'none';
+  if (cancelEl) cancelEl.style.display = 'none';
+
   if (wizardConnectWatchers[n]) {
     clearInterval(wizardConnectWatchers[n]);
     delete wizardConnectWatchers[n];
   }
-  // Drop any partial connection
   try { await boardConnections[n]?.disconnect(); } catch (_) {}
   delete boardConnections[n];
-  // Reset UI back to the initial waiting state
+  // Show the Reconnect button so user can re-open the panel
   wizardEnableConnectBtns(n);
-  wizardSetConnectStatus(n, '', 'Waiting…');
+  wizardSetConnectStatus(n, '', 'Cancelled');
 }
 
 async function wizardManualConnect(n) {
-  // Snapshot wizard config NOW — before boardManualConnect triggers boardPull,
-  // which could overwrite boardConfigs[n] before wizardWatchForConnect runs.
-  const configSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
-  const generalSnapshot = captureGeneralDOMSnapshot();
-
-  wizardDisableConnectBtns(n);
-
-  // Always disconnect first so the user explicitly picks the port every time.
-  // This prevents the wizard from silently reusing a stale connection and
-  // ensures each physical board is intentionally assigned to its slot.
+  // Disconnect any stale connection first (e.g. user clicked Reconnect after Done)
   if (boardConnections[n]?.isConnected()) {
     wizardSetConnectStatus(n, 'busy', 'Disconnecting…');
     if (wizardConnectWatchers[n]) {
@@ -6141,15 +6575,7 @@ async function wizardManualConnect(n) {
     }
     await boardDisconnect(n);
   }
-
-  wizardSetConnectStatus(n, 'busy', 'Select port…');
-  try {
-    await boardManualConnect(n);
-    wizardWatchForConnect(n, configSnapshot, generalSnapshot);
-  } catch(e) {
-    wizardEnableConnectBtns(n);
-    wizardSetConnectStatus(n, '', 'Waiting…');
-  }
+  await _wizPortOpenPanel(n);
 }
 
 function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {

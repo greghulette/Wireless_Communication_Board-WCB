@@ -203,7 +203,12 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   const transport = new Transport(port, false);
   const loader    = new ESPLoader({
     transport,
-    baudrate:    460800,   // upload baud (esptool-js auto-syncs at 115200 first)
+    // On Windows, the CP210x driver doesn't fully release the readable-stream
+    // lock during the 115200→460800 baud-rate change, causing a mid-write
+    // "ReadableStreamDefaultReader already locked" failure.  Keep 115200 on
+    // Windows to skip the baud-rate-change step entirely (4× slower but
+    // reliable).  Mac/Linux can still use 460800 for fast uploads.
+    baudrate: (typeof _isWindows !== 'undefined' && _isWindows) ? 115200 : 460800,
     romBaudrate: 115200,
     enableTracing: false,
     terminal,
@@ -265,16 +270,30 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       : flashImages.filter(img => img.address === 0x10000);
   }
 
-  // ── Step 3c: Optionally prepend NVS-erase image ────────────────
-  // NVS lives at 0x9000 and is 24 KB (0x6000 bytes) in the standard WCB partition table.
-  // Writing a buffer of 0xFF causes esptool to erase then rewrite those sectors,
-  // leaving the NVS partition in a factory-fresh blank state.
+  // ── Step 3c: Optionally prepend NVS + otadata erase images ────
+  // Standard WCB partition layout (PartitionScheme=default):
+  //   nvs     @ 0x9000, size 0x5000 (20 KB)
+  //   otadata @ 0xE000, size 0x2000  (8 KB — two 4 KB flash sectors)
+  //   ota_0   @ 0x10000
+  //   ota_1   @ 0x150000
+  //
+  // Writing 0xFF buffers causes esptool to erase then rewrite those sectors.
+  // Both otadata sectors MUST be erased: if either sector still holds a valid
+  // OTA state pointing to ota_1 (e.g. from a previous OTA update), the
+  // bootloader will try to boot ota_1, fail (nothing there after a flash to
+  // ota_0), and the OTA rollback watchdog fires — causing an endless reboot loop.
   if (eraseNvs) {
-    const nvsBlank = new ArrayBuffer(0x6000);                    // 24 KB of 0x00
-    new Uint8Array(nvsBlank).fill(0xFF);                         // fill with 0xFF (erased)
-    // Insert before app so flash regions remain in ascending address order
-    imagesToFlash = [{ buf: nvsBlank, address: 0x9000 }, ...imagesToFlash];
-    onLog('Factory reset — NVS partition (0x9000, 24 KB) will be erased');
+    const nvsBlank     = new ArrayBuffer(0x5000);  // NVS: 20 KB @ 0x9000
+    const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000
+    new Uint8Array(nvsBlank).fill(0xFF);
+    new Uint8Array(otadataBlank).fill(0xFF);
+    // Insert in ascending address order, before the app images
+    imagesToFlash = [
+      { buf: nvsBlank,     address: 0x9000 },  // erase NVS
+      { buf: otadataBlank, address: 0xE000 },  // erase OTA data → bootloader defaults to ota_0
+      ...imagesToFlash,
+    ];
+    onLog('Factory reset — NVS (0x9000, 20 KB) and OTA data (0xE000, 8 KB) will be erased');
   }
 
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);
