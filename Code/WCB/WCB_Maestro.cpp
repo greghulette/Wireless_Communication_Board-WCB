@@ -26,6 +26,21 @@ int8_t findSlotByMaestroID(uint8_t maestroID) {
   return -1;  // Not found
 }
 
+// Find a slot matching BOTH maestroID and target (remoteWCB == 0 means local).
+// Used during configuration so that two entries with the same ID but different
+// targets (e.g. M2:W2 local and M2:W3 remote) each get their own slot rather
+// than the second overwriting the first.
+int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB) {
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (maestroConfigs[i].configured &&
+        maestroConfigs[i].maestroID == maestroID &&
+        maestroConfigs[i].remoteWCB == remoteWCB) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 int8_t findEmptySlot() {
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured) {
@@ -42,40 +57,40 @@ bool isMaestroConfigured(uint8_t maestroID) {
 // ==================== Command Sending ====================
 
 void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
-  
-  int8_t slot = findSlotByMaestroID(maestroID);
-  
-  if (slot >= 0) {
-    MaestroConfig &config = maestroConfigs[slot];
-    
+
+  // Iterate ALL slots with this ID — the same maestroID can appear on multiple
+  // targets (e.g. M2 local on this board AND M2 remote on WCB3), and every
+  // matching slot must receive the command.
+  bool handled = false;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured || maestroConfigs[i].maestroID != maestroID) continue;
+    MaestroConfig &config = maestroConfigs[i];
+
     // LOCAL Maestro
     if (config.serialPort > 0) {
       uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
       Stream &targetSerial = getSerialStream(config.serialPort);
       targetSerial.write(command, sizeof(command));
       targetSerial.flush();
-      Serial.printf("→ Maestro %d: Local S%d, Script %d\n", 
+      Serial.printf("→ Maestro %d: Local S%d, Script %d\n",
                     maestroID, config.serialPort, scriptNumber);
-      return;
+      handled = true;
     }
-    
+
     // REMOTE Maestro
-    if (config.remoteWCB > 0) {
-      if (!lastReceivedViaESPNOW) {
-        String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
-        sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
-        if (debugEnabled) {
-          Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n", 
-                        maestroID, config.remoteWCB, scriptNumber);
-        }
+    if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
+      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
+      if (debugEnabled) {
+        Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
+                      maestroID, config.remoteWCB, scriptNumber);
       }
-      return;
+      handled = true;
     }
-    
-    Serial.printf("⚠️  Maestro %d configured but has no destination\n", maestroID);
-    return;
   }
-  
+
+  if (handled) return;
+
   // Broadcast (maestroID == 0)
   if (maestroID == 0) {
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
@@ -223,8 +238,11 @@ String remaining = message;
       continue;
     }
     
-    // Find or create slot
-    int8_t slot = findSlotByMaestroID(maestroID);
+    // Find or create slot — keyed on (maestroID, targetWCB) so that two entries
+    // with the same ID but different targets (e.g. M2 local on this board AND
+    // M2 remote on WCB3) each occupy their own slot instead of overwriting.
+    uint8_t effectiveRemoteWCB = (targetWCB == WCB_Number) ? 0 : targetWCB;
+    int8_t slot = findSlotByMaestroIDAndTarget(maestroID, effectiveRemoteWCB);
     if (slot < 0) {
       slot = findEmptySlot();
       if (slot < 0) {

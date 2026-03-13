@@ -27,6 +27,7 @@ void clearAllMaestroConfigs();
 
 // Helper functions
 int8_t findSlotByMaestroID(uint8_t maestroID);
+int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
 void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial = false);

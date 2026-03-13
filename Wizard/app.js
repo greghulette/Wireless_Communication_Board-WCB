@@ -51,7 +51,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.13 15:08';
+const UI_VERSION = '2026.03.13 15:36';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6153,6 +6153,8 @@ function wizardApplyConfig() {
     // Full routing table — all maestros across all boards, with correct WCB numbers.
     // Used by buildCommandString to emit the complete ?MAESTRO routing table so that
     // every board knows where to route commands for remote maestros (via ESP-NOW).
+    // De-duplicate by ID: if two wizard rows share the same Maestro ID, prefer the
+    // entry that belongs to THIS board (local wins); otherwise keep the first seen.
     if (ws.maestros.length > 0) {
       cfg.maestroTable = ws.maestros.map(m => ({
         id:   m.id,
