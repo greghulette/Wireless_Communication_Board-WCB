@@ -758,6 +758,14 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   border-color: var(--accent) !important;
   animation: detect-pulse 1.2s ease-in-out infinite;
 }
+.btn-flashing {
+  background: transparent !important;
+  color: var(--orange) !important;
+  border-color: var(--orange) !important;
+  opacity: 1 !important;
+  pointer-events: none !important;
+  cursor: not-allowed !important;
+}
 
 .terminal-drawer {
   position: fixed; bottom: 0; left: 0; right: 0;

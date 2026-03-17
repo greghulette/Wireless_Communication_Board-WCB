@@ -31,6 +31,7 @@ let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
 let boardFlashMode          = {};   // { boardIndex: 'configure'|'update'|'flash'|'factory' }
+const _boardFlashing        = {};   // { boardIndex: true } — set while esptool flash is in progress
 let boardAutoPushAfterFlash = {};   // always true — kept for compatibility, always auto-push after flash/erase
 let postFlashGeneralSnapshot = {};  // { boardIndex: generalSnapshot } — saved before flash, restored on next push
 
@@ -51,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.13 15:36';
+const UI_VERSION = '2026.03.17 11:47';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -683,7 +684,7 @@ function extractGeneralFields(config) {
     etmHb:          config.etm?.heartbeatSec       ?? 10,
     etmMiss:        config.etm?.missedHeartbeats   ?? 3,
     etmBoot:        config.etm?.bootHeartbeatSec   ?? 2,
-    etmCount:       config.etm?.messageCount       ?? 3,
+    etmCount:       config.etm?.messageCount       ?? 20,
     etmDelay:       config.etm?.messageDelayMs     ?? 100,
     etmChecksum:    config.etm?.checksumEnabled    ?? true,
   };
@@ -3221,11 +3222,12 @@ async function boardGo(n, opts = {}) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
-  const mode      = opts.mode ?? boardFlashMode[n] ?? 'configure';
-  const isFlash   = mode === 'flash';
-  const isUpdate  = mode === 'update';
-  const isFactory = mode === 'factory';
-  const isErase   = mode === 'erase';
+  const mode       = opts.mode ?? boardFlashMode[n] ?? 'configure';
+  const isFlash    = mode === 'flash';
+  const isUpdate   = mode === 'update';
+  const isFactory  = mode === 'factory';
+  const isErase    = mode === 'erase';
+  const pushConfig = opts.pushConfig ?? true;  // false = skip auto-push after factory reset
   const btn       = document.getElementById(`b${n}-btn-go`);
 
   btn.disabled = true;
@@ -3250,8 +3252,20 @@ async function boardGo(n, opts = {}) {
 
     // ── Save port ref, then close normal connection ───────────────
     const savedPort = conn.port;
+    _boardFlashing[n] = true;      // suppress "Not connected" UI during flash
     await conn.closeForReconnect();
-    updateConnectionUI(n, false);
+    updateConnectionUI(n, false);  // guard shows "Flashing…" instead of "Not connected"
+
+    // Belt-and-suspenders: force connect button to "Flashing…" in case any
+    // subsequent updateConnectionUI call overwrites the guard's text change.
+    const connBtn   = document.getElementById(`b${n}-btn-connect`);
+    const connLabel = document.getElementById(`b${n}-conn-label`);
+    if (connBtn) {
+      connBtn.textContent = 'Flashing…';
+      connBtn.classList.remove('btn-primary', 'btn-danger', 'btn-detecting');
+      connBtn.classList.add('btn-flashing');
+    }
+    if (connLabel) connLabel.textContent = 'Flashing…';
 
     btn.textContent = 'Flashing…';
     setFlashUI(n, true);
@@ -3279,6 +3293,7 @@ async function boardGo(n, opts = {}) {
     }
 
     setFlashUI(n, false);
+    delete _boardFlashing[n];      // reconnect (or failure) can now update UI normally
 
     if (flashOk) {
       if (_isWindows) {
@@ -3335,7 +3350,15 @@ async function boardGo(n, opts = {}) {
           // config — avoids the old fixed 8 s blind wait that was too short on Mac.
           termLog(n, `Reconnected after ${resetLabel} — waiting for firmware…`, 'sys');
           showToast(`WCB ${n} ${resetLabel} — waiting for firmware…`, 'success');
-          if (_wizardOpen) {
+          if (!pushConfig) {
+            // Checkbox unchecked — just pull the fresh defaults, no push.
+            termLog(n, 'Skipping config push (unchecked) — auto-pulling after boot…', 'sys');
+            (async () => {
+              const ready = await waitForBoardReady(n, conn);
+              if (ready) boardPull(n);
+              else termLog(n, '✕ Board did not respond after flash — pull manually', 'err');
+            })();
+          } else if (_wizardOpen) {
             // Wizard context: await so wizardCheckAllDone fires only after push completes
             const ready = await waitForBoardReady(n, conn);
             if (!ready) {
@@ -3661,6 +3684,17 @@ function updateConnectionUI(n, connected) {
   // clearRemoteConnected() always deletes remoteRelayForBoard[n] first, so this
   // guard only fires for unintended callers (e.g. boardAutoDetect timing out).
   if (!connected && remoteRelayForBoard[n] !== undefined) return;
+
+  // While a flash is in progress, suppress the "Not connected / Connect" state —
+  // show "Flashing…" instead so the header doesn't look broken mid-update.
+  if (!connected && _boardFlashing[n]) {
+    const label   = document.getElementById(`b${n}-conn-label`);
+    const connBtn = document.getElementById(`b${n}-btn-connect`);
+    if (label)   label.textContent   = 'Flashing…';
+    if (connBtn) { connBtn.textContent = 'Flashing…'; connBtn.classList.remove('btn-primary', 'btn-danger', 'btn-detecting'); connBtn.classList.add('btn-flashing'); }
+    return;
+  }
+
   document.getElementById(`b${n}-dot`)?.classList.toggle('connected', connected);
   const label = document.getElementById(`b${n}-conn-label`);
   if (label) label.textContent = connected ? 'Connected' : 'Not connected';
@@ -3678,6 +3712,8 @@ function updateConnectionUI(n, connected) {
   if (statsBtn)    statsBtn.disabled    = !connected;
   if (identifyBtn) identifyBtn.disabled = !connected;
   if (connBtn) {
+    connBtn.disabled = false;
+    connBtn.classList.remove('btn-flashing');
     connBtn.textContent = connected ? 'Disconnect' : 'Connect';
     connBtn.classList.toggle('btn-primary', !connected);
     connBtn.classList.toggle('btn-danger',   connected);
@@ -4882,11 +4918,12 @@ function closeFactoryResetModal(event) {
 
 function doFactoryResetWithFw() {
   const n = _factoryResetSlot;
+  const pushConfig = document.getElementById('factory-reset-push-config').checked;
   document.getElementById('factory-reset-modal').classList.remove('open');
   _factoryResetSlot = null;
   if (!n) return;
   // Delegate to boardGo with factory mode — handles erase + flash + reconnect + push prompt
-  boardGo(n, { mode: 'factory' });
+  boardGo(n, { mode: 'factory', pushConfig });
 }
 
 async function doFactoryResetEraseOnly() {
@@ -6357,7 +6394,11 @@ async function wizPortDetect(n) {
   const usedByOthers = _wizPortUsedByOthers(n);
   const ports        = allPorts.filter(p => !usedByOthers.has(p));
 
-  if (ports.length === 0) { await wizPortRenderPanel(n); return; }
+  if (ports.length === 0) {
+    showToast('No authorized ports — click "+ Authorize…" to let the browser see your board', 'warning', 5000);
+    await wizPortRenderPanel(n);
+    return;
+  }
 
   let cancelled = false;
   let detected  = false;
