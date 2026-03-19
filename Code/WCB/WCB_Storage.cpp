@@ -321,6 +321,10 @@ void loadWCBQuantitiesFromPreferences() {
 
 // Save the WCB quantity to preferences
 void saveWCBQuantityPreferences(int quantity) {
+    if (quantity < 1 || quantity > MAX_WCB_COUNT) {
+        Serial.printf("Invalid WCB quantity %d. Valid range: 1-%d.\n", quantity, MAX_WCB_COUNT);
+        return;
+    }
     preferences.begin("wcb_config", false);
     preferences.putInt("wcb_quantity", quantity);
     preferences.end();

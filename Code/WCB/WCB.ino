@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_131536RMAR2026                                    *****////
+///*****                                          Version 6.0_191451RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -102,10 +102,24 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 
 
 
+// ============================= WCB System Constants =============================
+// Defined here and also in WCB_Storage.h (with #ifndef guard) for .cpp file visibility
+#ifndef MAX_WCB_COUNT
+#define MAX_WCB_COUNT        20   // Maximum number of WCB peers (limited by ESP-NOW unicast peer count)
+#define WCB_TARGET_BROADCAST  0   // Target ID: broadcast to all WCBs
+#define WCB_TARGET_RAW_SERIAL 97  // Target ID: raw serial port mapping packets (formerly 8)
+#define WCB_TARGET_KYBER      98  // Target ID: Kyber bridge packets (formerly 9)
+#define WCB_SPECIAL_PEER_ID   20  // Reserved peer ID for future special peer use
+#endif
+
 // ============================= Global Variables =============================
 // Number of WCB boards in the system
 int WCB_Number = 1;                                                 // Default to WCB1.  Change to match your setup here or via command line
 int Default_WCB_Quantity = 1;                                       // Default setting.  Change to match your setup here or via command line
+
+// Special peer: when enabled, WCB_SPECIAL_PEER_ID is always registered as a peer
+// regardless of Default_WCB_Quantity (for future use)
+bool specialPeerEnabled = false;
 
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
@@ -137,7 +151,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_131536RMAR2026";
+String SoftwareVersion = "6.0_191451RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -206,7 +220,7 @@ struct BoardStatus {
   unsigned long totalRetries;
   unsigned long totalFailed;
 };
-BoardStatus boardTable[9];  // sized to max, we only use [0..Default_WCB_Quantity-1]
+BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, we only use [0..Default_WCB_Quantity-1]
 
 // ETM Heartbeat timing
 unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
@@ -220,10 +234,10 @@ struct PendingMessage {
   uint16_t sequenceNumber;
   char command[200];
   unsigned long lastSentMs;
-  int targetWCB;  // ADD THIS - 0 = broadcast, 1-9 = unicast target
-  bool expectAckFrom[9];
-  bool receivedAckFrom[9];
-  uint8_t retryCount[9];
+  int targetWCB;  // 0 = broadcast, 1-MAX_WCB_COUNT = unicast target
+  bool expectAckFrom[MAX_WCB_COUNT];
+  bool receivedAckFrom[MAX_WCB_COUNT];
+  uint8_t retryCount[MAX_WCB_COUNT];
 };
 PendingMessage etmPendingTable[ETM_PENDING_MAX];
 
@@ -231,14 +245,14 @@ PendingMessage etmPendingTable[ETM_PENDING_MAX];
 uint16_t etmSequenceCounter = 0;
 
 // ETM - Per-board stats (boardTable already has online/lastSeen from Layer 2)
-unsigned long etmStatsSent[9]    = {0};
-unsigned long etmStatsAckd[9]    = {0};
-unsigned long etmStatsRetries[9] = {0};
-unsigned long etmStatsFailed[9]  = {0};
+unsigned long etmStatsSent[MAX_WCB_COUNT]    = {0};
+unsigned long etmStatsAckd[MAX_WCB_COUNT]    = {0};
+unsigned long etmStatsRetries[MAX_WCB_COUNT] = {0};
+unsigned long etmStatsFailed[MAX_WCB_COUNT]  = {0};
 
 // ETM - Duplicate detection (last received seq per board)
-uint16_t etmLastReceivedSeq[9] = {0};
-bool etmLastReceivedSeqValid[9] = {false};
+uint16_t etmLastReceivedSeq[MAX_WCB_COUNT] = {0};
+bool etmLastReceivedSeqValid[MAX_WCB_COUNT] = {false};
 // ETM Characterization state
 bool etmCharRunning = false;
 int etmCharPhase = 0;
@@ -254,7 +268,7 @@ struct ETMCharBoardResult {
 };
 
 // [phase 0-2][board index 0-7]
-ETMCharBoardResult etmCharBoardResults[3][8];
+ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
 unsigned long etmCharPhaseSentTimes[3][200];  // [phase][msgIndex]
 int etmCharPhaseMessageIndex = 0;
 unsigned long etmCharPhaseStartTime = 0;
@@ -458,7 +472,7 @@ void reboot(){
 }
 
 // Define WCB MAC addresses
-uint8_t WCBMacAddresses[9][6];
+uint8_t WCBMacAddresses[MAX_WCB_COUNT][6];
 uint8_t broadcastMACAddress[1][6]; // Will be updated dynamically
 
 // ESP-NOW message struct
@@ -661,7 +675,7 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   entry.active = true;
   entry.targetWCB = targetWCB;  // store target for retry logic
 
-  for (int b = 0; b < 9; b++) {
+  for (int b = 0; b < MAX_WCB_COUNT; b++) {
     entry.expectAckFrom[b]   = false;
     entry.receivedAckFrom[b] = false;
     entry.retryCount[b]      = 0;
@@ -745,7 +759,15 @@ void processETMAcksAndRetries() {
       if (!entry.expectAckFrom[b]) continue;
       if (entry.receivedAckFrom[b]) continue;
 
-      // This board hasn't ACKd yet
+      // This board hasn't ACKd yet — cancel immediately if it went offline
+      if (!boardTable[b].online) {
+        etmStatsFailed[b]++;
+        entry.expectAckFrom[b] = false;
+        Serial.printf("[ETM] WCB%d offline, canceling retry for seq %d\n",
+                      b + 1, entry.sequenceNumber);
+        continue;
+      }
+
       if (entry.retryCount[b] < 3) {
         // Send unicast retry
         int wcbNum = b + 1;
@@ -852,7 +874,7 @@ void startETMChar() {
 
     // Init min latency to large value so first real reading wins
     for (int p = 0; p < 3; p++)
-        for (int b = 0; b < 8; b++)
+        for (int b = 0; b < MAX_WCB_COUNT; b++)
             etmCharBoardResults[p][b].latencyMin = 999999;
 
     Serial.println("\n---------- ETM Network Characterization ----------");
@@ -865,12 +887,16 @@ void processETMChar() {
 
     unsigned long now = millis();
 
-    int peers[8];
+    int peers[MAX_WCB_COUNT];
     int peerCount = 0;
     for (int i = 1; i <= Default_WCB_Quantity; i++) {
-        if (i != WCB_Number) peers[peerCount++] = i;
+        if (i != WCB_Number && boardTable[i - 1].online) peers[peerCount++] = i;
     }
-    if (peerCount == 0) { etmCharRunning = false; return; }
+    if (peerCount == 0) {
+        Serial.println("[ETM] Characterization aborted: no online peers.");
+        etmCharRunning = false;
+        return;
+    }
 
     int totalMessages = etmCharMessageCount * peerCount;
 
@@ -896,7 +922,7 @@ void processETMChar() {
         }
 
         int totalAcked = 0;
-        for (int b = 0; b < 8; b++)
+        for (int b = 0; b < MAX_WCB_COUNT; b++)
             totalAcked += etmCharBoardResults[etmCharPhase - 1][b].acked;
 
         unsigned long phaseTimeout = (unsigned long)totalMessages *
@@ -940,7 +966,7 @@ void processETMChar() {
         }
 
         int totalSent = 0, totalAcked = 0;
-        for (int b = 0; b < 8; b++) {
+        for (int b = 0; b < MAX_WCB_COUNT; b++) {
             totalSent += etmCharBoardResults[2][b].sent;
             totalAcked += etmCharBoardResults[2][b].acked;
         }
@@ -976,13 +1002,16 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     if (!originalCmd.startsWith("ETMCHAR_")) return;
 
     int boardIdx = senderWCB - 1;
-    if (boardIdx < 0 || boardIdx > 7) return;
+    if (boardIdx < 0 || boardIdx >= MAX_WCB_COUNT) return;
 
     int phase = -1;
     if (originalCmd.startsWith("ETMCHAR_P1")) phase = 0;
     else if (originalCmd.startsWith("ETMCHAR_P2")) phase = 1;
     else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
     if (phase < 0) return;
+
+    int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
+    if (mIdx < 0 || mIdx >= 200) return;  // guard against out-of-bounds sentTime read
 
     unsigned long latency = millis() - sentTime;
     
@@ -1084,7 +1113,7 @@ void printETMCharResults(int* peers, int peerCount) {
     if (recommendedTimeout < 150) recommendedTimeout = 150;
 
     Serial.printf("\n Recommended ETM timeout: %lums\n", recommendedTimeout);
-    Serial.printf(" Apply with: ?ETMTOUT%lu\n", recommendedTimeout);
+    Serial.printf(" Apply with: ?ETM,TIMEOUT,%lu\n", recommendedTimeout);
     Serial.printf(" (Based on worst avg latency: %lums, worst max: %lums)\n", 
                   worstAvgLatency, worstMaxLatency);
     if (worstMissedPct > 5.0f) {
@@ -1560,8 +1589,8 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         // Mark sender ID as this WCB number
         snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
         
-        // Set Target ID to "0" -> Means raw bridging data
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "9");
+        // Set Target ID to WCB_TARGET_KYBER -> Means Kyber bridging data
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", WCB_TARGET_KYBER);
 
         msg.structCommandIncluded = true;
 
@@ -1678,7 +1707,7 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
         msg.structPassword[sizeof(msg.structPassword) - 1] = '\0';
         
         snprintf(msg.structSenderID, sizeof(msg.structSenderID), "%d", WCB_Number);
-        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "8");  // Target ID 8 = raw serial mapping
+        snprintf(msg.structTargetID, sizeof(msg.structTargetID), "%d", WCB_TARGET_RAW_SERIAL);  // Target ID = raw serial mapping
 
         msg.structCommandIncluded = true;
 
@@ -1730,7 +1759,7 @@ void handleMgmtForward(const String &args) {
   uint8_t  totalChunks = (uint8_t)args.substring(c4 + 1, c5).toInt();
   String   payload     = args.substring(c5 + 1);
 
-  if (targetWCB < 1 || targetWCB > 8 || totalChunks == 0 || totalChunks > MGMT_MAX_CHUNKS) {
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT || totalChunks == 0 || totalChunks > MGMT_MAX_CHUNKS) {
     if (debugMGMT) Serial.println("[MGMT] Invalid parameters");
     return;
   }
@@ -2150,7 +2179,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     espnow_struct_message peek;
     memcpy(&peek, incomingData, sizeof(peek));
     int peekTarget = atoi(peek.structTargetID);
-    bool isRawPacket = (peekTarget == 8 || peekTarget == 9 || peek.structTargetID[0] == 'K');
+    bool isRawPacket = (peekTarget == WCB_TARGET_RAW_SERIAL || peekTarget == WCB_TARGET_KYBER || peek.structTargetID[0] == 'K');
     bool isPWMPacket = (peek.structCommand[0] == ';' && 
                        (peek.structCommand[1] == 'P' || peek.structCommand[1] == 'p'));
     
@@ -2180,7 +2209,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         boardTable[senderIdx].online = true;
         boardTable[senderIdx].lastSeenMs = millis();
         if (wasOffline) {
-          Serial.printf("[ETM] WCB%d came ONLINE\n", senderWCB);
+          Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
+                        senderWCB,
+                        info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                        info->src_addr[3], info->src_addr[4], info->src_addr[5]);
         } else if (debugETM) {
           Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
         }
@@ -2273,7 +2305,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   bool isPWMCommand = (received.structCommand[0] == ';' &&
                        (received.structCommand[1] == 'P' || received.structCommand[1] == 'p'));
 
-  if (debugEnabled && targetWCB != 9 && !isPWMCommand && received.structTargetID[0] != 'K' && targetWCB != 8) {
+  if (debugEnabled && targetWCB != WCB_TARGET_KYBER && !isPWMCommand && received.structTargetID[0] != 'K' && targetWCB != WCB_TARGET_RAW_SERIAL) {
     Serial.printf("Sender ID: WCB%d, Target ID: WCB%d\n", senderWCB, targetWCB);
   }
 
@@ -2307,8 +2339,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  // Kyber broadcast (target 9)
-  if (targetWCB == 9) {
+  // Kyber broadcast
+  if (targetWCB == WCB_TARGET_KYBER) {
     size_t chunkLen = (uint8_t)received.structCommand[0] | ((uint8_t)received.structCommand[1] << 8);
     if (chunkLen > 180 || chunkLen == 0) {
       if (debugEnabled) Serial.printf("Invalid bridging chunk length: %d, Ignoring.\n", (int)chunkLen);
@@ -2335,8 +2367,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  // Raw serial mapping (target 8)
-  if (targetWCB == 8) {
+  // Raw serial mapping
+  if (targetWCB == WCB_TARGET_RAW_SERIAL) {
     uint8_t targetPort = (uint8_t)received.structCommand[0];
     size_t chunkLen    = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
     if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
@@ -2833,10 +2865,10 @@ void processLocalCommand(const String &message) {
     // --- ?WCB,x ---
     if (rootUpper == "WCB") {
         int newWCB = args.toInt();
-        if (newWCB >= 1 && newWCB <= 9) {
+        if (newWCB >= 1 && newWCB <= MAX_WCB_COUNT) {
             saveWCBNumberToPreferences(newWCB);
         } else {
-            Serial.println("Invalid WCB number. Must be 1-9");
+            Serial.printf("Invalid WCB number %d. Valid range: 1-%d.\n", newWCB, MAX_WCB_COUNT);
         }
         return;
     }
@@ -3213,7 +3245,7 @@ void resetESPNowStats() {
     espnowRawAttempts = 0;
     espnowRawSuccess = 0;
     espnowRawFailed = 0;
-    for (int b = 0; b < 9; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
         etmStatsSent[b] = 0;
         etmStatsAckd[b] = 0;
         etmStatsRetries[b] = 0;
@@ -3527,8 +3559,10 @@ void updateSerialBaudRate(const String &message) {
 
 void updateWCBNumber(const String &message){
   int newWCB = message.substring(3).toInt();
-  if (newWCB >= 1 && newWCB <= 9) {
+  if (newWCB >= 1 && newWCB <= MAX_WCB_COUNT) {
     saveWCBNumberToPreferences(newWCB);
+  } else {
+    Serial.printf("Invalid WCB number %d. Valid range: 1-%d.\n", newWCB, MAX_WCB_COUNT);
   }
 }
 
@@ -3906,29 +3940,44 @@ void processSerialMessage(const String &message) {
     }
 }
 void processWCBMessage(const String &message){
-  int targetWCB = message.substring(1, 2).toInt();
-  String espnow_message = message.substring(2);
-  
+  int targetWCB;
+  String espnow_message;
+
+  // New format: comma present after the WCB number → greedy digit parse
+  // e.g. ;w1,RA  or  ;w13,RA
+  // Old format: no comma → single digit assumed (backward compatible)
+  // e.g. ;w1RA
+  int commaPos = message.indexOf(',');
+  if (commaPos > 1) {
+    // New format: digits between position 1 and comma
+    targetWCB = message.substring(1, commaPos).toInt();
+    espnow_message = message.substring(commaPos + 1);
+  } else {
+    // Old format: single digit at position 1, command starts at position 2
+    targetWCB = message.substring(1, 2).toInt();
+    espnow_message = message.substring(2);
+  }
+
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
       if (debugEnabled) {
-          Serial.printf("Target WCB%d is local - processing command directly: %s\n", 
+          Serial.printf("Target WCB%d is local - processing command directly: %s\n",
                        targetWCB, espnow_message.c_str());
       }
       // Process the command locally instead of sending via ESP-NOW
       enqueueCommand(espnow_message, 0);
       return;
   }
-  
+
   // Remote target - send via ESP-NOW
   if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
       if (debugEnabled) {
-          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n", 
+          Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n",
                        targetWCB, espnow_message.c_str());
       }
       sendESPNowMessage(targetWCB, espnow_message.c_str());
   } else {
-      Serial.println("Invalid WCB number for unicast.");
+      Serial.printf("Invalid WCB target %d (valid range: 1-%d).\n", targetWCB, Default_WCB_Quantity);
   }
 }
 
@@ -4562,7 +4611,7 @@ if (hasMonitoring || hasBlocking) {
   WiFi.mode(WIFI_STA);
 
   // Dynamically update MAC addresses based on stored umac_oct2 & umac_oct3
-  for (int i = 0; i < 9; i++) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
     WCBMacAddresses[i][0] = 0x02;
     WCBMacAddresses[i][1] = umac_oct2;
     WCBMacAddresses[i][2] = umac_oct3;
@@ -4609,6 +4658,27 @@ if (hasMonitoring || hasBlocking) {
                     WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
     } else {
       Serial.printf("Failed to add peer %d\n", i + 1);
+    }
+  }
+
+  // Special peer: always register WCB_SPECIAL_PEER_ID as a peer when enabled,
+  // even if it falls outside Default_WCB_Quantity (for future dedicated-role boards).
+  if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+    int spIdx = WCB_SPECIAL_PEER_ID - 1;
+    // Only add if not already registered by the normal loop above
+    if (WCB_SPECIAL_PEER_ID > Default_WCB_Quantity) {
+      esp_now_peer_info_t specialPeer = {};
+      memcpy(specialPeer.peer_addr, WCBMacAddresses[spIdx], 6);
+      specialPeer.channel = 0;
+      specialPeer.encrypt = false;
+      if (esp_now_add_peer(&specialPeer) == ESP_OK) {
+        Serial.printf("Added ESP-NOW special peer WCB%d: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      WCB_SPECIAL_PEER_ID,
+                      WCBMacAddresses[spIdx][0], WCBMacAddresses[spIdx][1], WCBMacAddresses[spIdx][2],
+                      WCBMacAddresses[spIdx][3], WCBMacAddresses[spIdx][4], WCBMacAddresses[spIdx][5]);
+      } else {
+        Serial.printf("Failed to add special peer WCB%d\n", WCB_SPECIAL_PEER_ID);
+      }
     }
   }
 

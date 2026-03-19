@@ -6,6 +6,16 @@
 #include <Preferences.h>
 #include "command_timer_queue.h"
 
+// =============== WCB System Constants ===============
+// Guard allows WCB.ino to also define these without conflict
+#ifndef MAX_WCB_COUNT
+#define MAX_WCB_COUNT        20
+#define WCB_TARGET_BROADCAST  0
+#define WCB_TARGET_RAW_SERIAL 97
+#define WCB_TARGET_KYBER      98
+#define WCB_SPECIAL_PEER_ID   20
+#endif
+
 // =============== Global Variables ===============
 extern Preferences preferences;
 
