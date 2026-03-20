@@ -45,6 +45,9 @@
 
   <input type="file" id="file-input" accept=".txt" style="display:none" onchange="loadFileFromInput(event)">
 
+  <!-- ─── WCB Jump Nav ───────────────────────────────────────────── -->
+  <div id="wcb-nav" class="wcb-nav" style="display:none"></div>
+
   <!-- ─── Main Content ────────────────────────────────────────────── -->
   <main class="main">
 
@@ -66,7 +69,7 @@
             <select id="g-wcbq" onchange="onWCBQuantityChange()">
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
-              <option value="7">7</option><option value="8">8</option>
+              <option value="_more">More…</option>
             </select>
           </div>
           <div class="field">
@@ -364,16 +367,9 @@
       <div class="subsection-title">Board Identity</div>
       <div class="field-group">
         <div class="field">
-          <label>WCB Number <span class="wiz-hint" data-tip="This board's unique ID in the system (1-8).">i</span></label>
+          <label>WCB Number <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-            <option value="5">5</option>
-            <option value="6">6</option>
-            <option value="7">7</option>
-            <option value="8">8</option>
+            <!-- populated dynamically by populateWCBNumberDropdown() -->
           </select>
         </div>
         <div class="field">

@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.17 11:47';
+const UI_VERSION = '2026.03.20 09:30';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -242,6 +242,59 @@ function toggleSection(id) {
   document.getElementById(id).classList.toggle('open');
 }
 
+// ─── WCB Jump Nav ─────────────────────────────────────────────────
+const BOARD_COLORS = ['#00d4ff','#a78bfa','#f87171','#fb923c','#f472b6','#facc15','#818cf8','#60a5fa'];
+let _navBoardCount = 0;
+let _navScrollRaf  = null;
+
+function updateWCBNav(count) {
+  const nav = document.getElementById('wcb-nav');
+  if (!nav) return;
+  _navBoardCount = count;
+  nav.innerHTML = '';
+  nav.style.display = count > 0 ? 'flex' : 'none';
+  for (let n = 1; n <= count; n++) {
+    const color = BOARD_COLORS[(n - 1) % 8];
+    const btn   = document.createElement('button');
+    btn.className   = 'wcb-nav-btn';
+    btn.id          = `wcb-nav-btn-${n}`;
+    btn.textContent = `WCB ${n}`;
+    btn.style.setProperty('--bc', color);
+    btn.onclick = () => {
+      const navHeight = nav.offsetHeight + 60; // header + nav
+      const section   = document.getElementById(`section-board-${n}`);
+      if (!section) return;
+      const top = section.getBoundingClientRect().top + window.scrollY - navHeight - 8;
+      window.scrollTo({ top, behavior: 'smooth' });
+    };
+    nav.appendChild(btn);
+  }
+}
+
+function _updateActiveNavBtn() {
+  if (_navBoardCount === 0) return;
+  const navEl       = document.getElementById('wcb-nav');
+  const offsetTop   = (navEl?.offsetHeight || 0) + 60;
+  const viewH       = window.innerHeight;
+  let bestN = null, bestPx = 0;
+  for (let n = 1; n <= _navBoardCount; n++) {
+    const sec = document.getElementById(`section-board-${n}`);
+    if (!sec) continue;
+    const r   = sec.getBoundingClientRect();
+    const vis = Math.min(r.bottom, viewH) - Math.max(r.top, offsetTop);
+    if (vis > bestPx) { bestPx = vis; bestN = n; }
+  }
+  document.querySelectorAll('.wcb-nav-btn').forEach(b => b.classList.remove('active'));
+  if (bestN && bestPx > 20) {
+    document.getElementById(`wcb-nav-btn-${bestN}`)?.classList.add('active');
+  }
+}
+
+window.addEventListener('scroll', () => {
+  if (_navScrollRaf) return;
+  _navScrollRaf = requestAnimationFrame(() => { _updateActiveNavBtn(); _navScrollRaf = null; });
+}, { passive: true });
+
 // ─── Render Boards ────────────────────────────────────────────────
 function renderBoards(count) {
   const container = document.getElementById('boards-container');
@@ -256,6 +309,7 @@ function renderBoards(count) {
       delete boardConfigs[i];
     }
   }
+  updateWCBNav(count);
 }
 
 function addBoardSection(n) {
@@ -277,7 +331,8 @@ function addBoardSection(n) {
   boardConfigs[n] = WCBParser.createDefaultBoardConfig();
   boardConfigs[n].wcbNumber = n;
   const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
-  if (wcbNumSel) wcbNumSel.value = n;
+  const qty = systemConfig?.general?.wcbQuantity || n;
+  if (wcbNumSel) populateWCBDropdown(wcbNumSel, qty, n, true);
 }
 
 // ─── Serial Table ─────────────────────────────────────────────────
@@ -549,11 +604,61 @@ function _notifyGeneralChanged() {
   showToast('Changes pending — push to all boards to apply', 'info', 3000);
 }
 
+// ─── WCB Dropdown Helpers ──────────────────────────────────────────
+const WCB_SHOW_COLLAPSED = 6;   // options visible before "More…"
+const WCB_MAX            = 20;  // absolute hardware ceiling
+
+// Populate a <select> with WCB numbers 1..max.
+// If max > WCB_SHOW_COLLAPSED the list starts collapsed (1-6 + "More…")
+// unless forceExpand is true.  selectedVal is preserved when re-populating.
+function populateWCBDropdown(sel, max, selectedVal, forceExpand) {
+  if (!sel) return;
+  const expanded = forceExpand || max <= WCB_SHOW_COLLAPSED;
+  const limit    = expanded ? max : WCB_SHOW_COLLAPSED;
+  let html = '';
+  for (let v = 1; v <= limit; v++) {
+    html += `<option value="${v}" ${v === selectedVal ? 'selected' : ''}>${v}</option>`;
+  }
+  if (!expanded) {
+    html += `<option value="_more">More…</option>`;
+  }
+  sel.innerHTML = html;
+  // Restore selection — if selectedVal is in the collapsed range it stays,
+  // otherwise the "More…" hint shows.
+  if (selectedVal && selectedVal <= limit) sel.value = selectedVal;
+}
+
+// Expand a quantity or WCB-number dropdown from collapsed to full range.
+// Called when user picks "More…".  Returns the value to use (the previous
+// selection is passed in so we don't lose it).
+function expandWCBDropdown(sel, max, previousVal) {
+  populateWCBDropdown(sel, max, previousVal, true);
+  sel.value = previousVal || 1;
+  // Re-open the dropdown immediately so the user doesn't have to click again
+  setTimeout(() => {
+    try { sel.showPicker(); } catch(e) { sel.focus(); }
+  }, 0);
+}
+
 // ─── General Field Handlers ────────────────────────────────────────
 function onWCBQuantityChange() {
-  const qty = parseInt(document.getElementById('g-wcbq').value) || 1;
+  const sel = document.getElementById('g-wcbq');
+  if (sel.value === '_more') {
+    const prev = systemConfig.general.wcbQuantity || 1;
+    expandWCBDropdown(sel, WCB_MAX, prev);
+    return; // wait for the user to pick a real value
+  }
+  const qty = parseInt(sel.value) || 1;
   systemConfig.general.wcbQuantity = qty;
   renderBoards(qty);
+  // Update all existing board WCB-number dropdowns to reflect new range
+  for (let n = 1; n <= qty; n++) {
+    const numSel = document.getElementById(`b${n}-wcb-number`);
+    if (numSel) {
+      const cur = parseInt(numSel.value) || n;
+      populateWCBDropdown(numSel, qty, Math.min(cur, qty), true);
+    }
+  }
 }
 
 function onGeneralPasswordChange() {
@@ -753,8 +858,11 @@ function onSerialFieldChange(n) {
 }
 
 function onWCBNumberChange(n) {
-  const val = parseInt(document.getElementById(`b${n}-wcb-number`)?.value);
-  if (boardConfigs[n] && val >= 1 && val <= 8) boardConfigs[n].wcbNumber = val;
+  const sel = document.getElementById(`b${n}-wcb-number`);
+  if (!sel) return;
+  const val = parseInt(sel.value);
+  const qty = systemConfig?.general?.wcbQuantity || WCB_MAX;
+  if (boardConfigs[n] && val >= 1 && val <= qty) boardConfigs[n].wcbNumber = val;
   onBoardFieldChange(n);
 }
 
@@ -1031,7 +1139,7 @@ function populateUIFromConfig(n, config) {
   // Detect and mark bidirectional pairs once all board configs are available
   detectBidirMappings(n);
   // Also re-check other boards whose mappings point to this board
-  for (let bn = 1; bn <= 9; bn++) { if (bn !== n && boardConfigs[bn]) detectBidirMappings(bn); }
+  for (let bn = 1; bn <= 20; bn++) { if (bn !== n && boardConfigs[bn]) detectBidirMappings(bn); }
 }
 
 function updatePushAllButton() {
@@ -1450,7 +1558,7 @@ async function removeMappingRow(rowId, n) {
 }
 
 function _removeBidirRows(sourceRowId) {
-  for (let bn = 1; bn <= 9; bn++) {
+  for (let bn = 1; bn <= 20; bn++) {
     const container = document.getElementById(`b${bn}-mappings-container`);
     if (!container) continue;
     const toRemove = [...container.querySelectorAll(`[data-bidir-from="${sourceRowId}"]`)];
@@ -4721,7 +4829,7 @@ function appendKyberTargetRow(n, target, readOnly = false) {
   const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === target.id ? 'selected' : ''}>${v}</option>`
   ).join('');
-  const wcbOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
+  const wcbOptions = Array.from({length: 20}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === target.wcb ? 'selected' : ''}>WCB ${v}</option>`
   ).join('');
 
@@ -4790,7 +4898,7 @@ function populateKyberTargetsFromConfig(n, _config) {
   const info = document.getElementById(`b${n}-kyber-targets-info`);
   if (!info) return;
   const parts = [];
-  for (let b = 1; b <= 9; b++) {
+  for (let b = 1; b <= 20; b++) {
     const bc = boardConfigs[b];
     if (!bc?.maestros?.length) continue;
     const wcbNum = bc.wcbNumber || b;
@@ -4817,7 +4925,7 @@ function autoComputeKyberTargets(n) {
   config.kyber.targets = [];
   const foundIds = new Set();
 
-  for (let b = 1; b <= 9; b++) {
+  for (let b = 1; b <= 20; b++) {
     const bc = boardConfigs[b];
     if (!bc?.maestros?.length) continue;
     const wcbNum = bc.wcbNumber || b;
@@ -5283,16 +5391,41 @@ function wizardHTMLWelcome() {
 }
 
 function wizardHTMLQuantity() {
-  const q = wizardState.quantity;
-  const btns = Array.from({length: 8}, (_, i) => {
+  const q            = wizardState.quantity;
+  const showExpanded = q > 8;
+
+  const primaryBtns = Array.from({length: 8}, (_, i) => {
     const n = i + 1;
     return `<button class="wizard-qty-btn ${n === q ? 'selected' : ''}"
               onclick="wizardSelectQty(${n})">${n}</button>`;
   }).join('');
+
+  const expandedBtns = Array.from({length: 12}, (_, i) => {
+    const n = i + 9;
+    return `<button class="wizard-qty-btn ${n === q ? 'selected' : ''}"
+              onclick="wizardSelectQty(${n})">${n}</button>`;
+  }).join('');
+
   return `
     <div class="wizard-section-title">How many WCBs are in your system?</div>
     <div class="wizard-section-desc">Each board is one WCB unit connected via USB or ESP-NOW.</div>
-    <div class="wizard-qty-grid">${btns}</div>`;
+    <div class="wizard-qty-grid">
+      ${primaryBtns}
+      <button id="wiz-qty-more-btn" class="wizard-qty-btn wizard-qty-more"
+              style="grid-column:1/-1${showExpanded ? ';display:none' : ''}"
+              onclick="wizardExpandQty()">More…</button>
+    </div>
+    <div id="wiz-qty-expanded" class="wizard-qty-grid"
+         style="margin-top:8px${showExpanded ? '' : ';display:none'}">
+      ${expandedBtns}
+    </div>`;
+}
+
+function wizardExpandQty() {
+  const moreBtn = document.getElementById('wiz-qty-more-btn');
+  const expanded = document.getElementById('wiz-qty-expanded');
+  if (moreBtn)  moreBtn.style.display  = 'none';
+  if (expanded) expanded.style.display = 'grid';
 }
 
 function wizardHTMLNetwork() {
