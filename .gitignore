@@ -6,3 +6,6 @@ PCB\Wireless Communication Board (WCB)V2.4\Wireless Communication Board (WCB)V2.
 /PCB/Wireless Communication Board (WCB)V3.2/Wireless Communication Board (WCB)V3.2-backups
 # Claude Code worktrees — temporary working copies, never commit
 Code/WCB/.claude/
+
+# WCBClient Arduino library — not ready for public release yet
+Library/

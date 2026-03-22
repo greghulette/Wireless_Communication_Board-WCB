@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_191451RMAR2026                                    *****////
+///*****                                          Version 6.0_221140RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -119,7 +119,7 @@ int Default_WCB_Quantity = 1;                                       // Default s
 
 // Special peer: when enabled, WCB_SPECIAL_PEER_ID is always registered as a peer
 // regardless of Default_WCB_Quantity (for future use)
-bool specialPeerEnabled = false;
+bool specialPeerEnabled = false;  // Controlled via ?SPECIAL,ON/OFF — saved to preferences
 
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
@@ -151,7 +151,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_191451RMAR2026";
+String SoftwareVersion = "6.0_221140RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -631,6 +631,18 @@ void processETMHeartbeats() {
         boardTable[i].online = false;
         Serial.printf("[ETM] WCB%d went OFFLINE (no heartbeat for %lus)\n",
                       i + 1, offlineThresholdMs / 1000UL);
+      }
+    }
+  }
+
+  // Also track the special peer (ID 20) when enabled
+  if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+    int spIdx = WCB_SPECIAL_PEER_ID - 1;
+    if (boardTable[spIdx].online) {
+      if (millis() - boardTable[spIdx].lastSeenMs > offlineThresholdMs) {
+        boardTable[spIdx].online = false;
+        Serial.printf("[ETM] WCB%d (special peer) went OFFLINE (no heartbeat for %lus)\n",
+                      WCB_SPECIAL_PEER_ID, offlineThresholdMs / 1000UL);
       }
     }
   }
@@ -1428,6 +1440,13 @@ void printESPNowStats() {
       totalRetries += etmStatsRetries[b];
       totalFailed  += etmStatsFailed[b];
     }
+    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+      int spIdx = WCB_SPECIAL_PEER_ID - 1;
+      totalSent    += etmStatsSent[spIdx];
+      totalAckd    += etmStatsAckd[spIdx];
+      totalRetries += etmStatsRetries[spIdx];
+      totalFailed  += etmStatsFailed[spIdx];
+    }
     Serial.println("Unicast Command Messages:");
     Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
                   totalSent, totalAckd, totalFailed);
@@ -1468,6 +1487,17 @@ void printESPNowStats() {
                     etmStatsSent[b], etmStatsAckd[b],
                     etmStatsRetries[b], etmStatsFailed[b],
                     boardTable[b].online
+                      ? ("Online (last seen " + String(ago) + "s ago)").c_str()
+                      : "OFFLINE");
+    }
+    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+      int spIdx    = WCB_SPECIAL_PEER_ID - 1;
+      unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000;
+      Serial.printf("WCB%d (special): Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, %s\n",
+                    WCB_SPECIAL_PEER_ID,
+                    etmStatsSent[spIdx], etmStatsAckd[spIdx],
+                    etmStatsRetries[spIdx], etmStatsFailed[spIdx],
+                    boardTable[spIdx].online
                       ? ("Online (last seen " + String(ago) + "s ago)").c_str()
                       : "OFFLINE");
     }
@@ -2204,7 +2234,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 
     if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
       int senderIdx = senderWCB - 1;
-      if (senderIdx >= 0 && senderIdx < Default_WCB_Quantity && senderWCB != WCB_Number) {
+      if (senderIdx >= 0 && senderWCB != WCB_Number &&
+          (senderIdx < Default_WCB_Quantity ||
+           (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID))) {
         bool wasOffline = !boardTable[senderIdx].online;
         boardTable[senderIdx].online = true;
         boardTable[senderIdx].lastSeenMs = millis();
@@ -2877,6 +2909,25 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "WCBQ") {
         int qty = args.toInt();
         saveWCBQuantityPreferences(qty);
+        return;
+    }
+
+    // --- ?SPECIAL,ON/OFF ---
+    // Enables or disables tracking and communication with the special peer (ID 20).
+    // When ON: ID 20 is registered as an ESP-NOW peer, its heartbeats are tracked,
+    // and it appears in ETM stats. Reboot required to apply peer registration.
+    // When OFF: ID 20 is treated as unknown and ignored.
+    if (rootUpper == "SPECIAL") {
+        if (argsUpper == "ON") {
+            saveSpecialPeerPreferences(true);
+        } else if (argsUpper == "OFF") {
+            saveSpecialPeerPreferences(false);
+        } else {
+            Serial.printf("Special peer (ID %d) is currently %s.\n"
+                          "Use ?SPECIAL,ON or ?SPECIAL,OFF\n",
+                          WCB_SPECIAL_PEER_ID,
+                          specialPeerEnabled ? "ENABLED" : "DISABLED");
+        }
         return;
     }
 
@@ -3970,14 +4021,18 @@ void processWCBMessage(const String &message){
   }
 
   // Remote target - send via ESP-NOW
-  if (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) {
+  bool isValidTarget = (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) ||
+                       (specialPeerEnabled && targetWCB == WCB_SPECIAL_PEER_ID);
+  if (isValidTarget) {
       if (debugEnabled) {
           Serial.printf("Sending Unicast ESP-NOW message to WCB%d: %s\n",
                        targetWCB, espnow_message.c_str());
       }
       sendESPNowMessage(targetWCB, espnow_message.c_str());
   } else {
-      Serial.printf("Invalid WCB target %d (valid range: 1-%d).\n", targetWCB, Default_WCB_Quantity);
+      Serial.printf("Invalid WCB target %d (valid range: 1-%d%s).\n",
+                    targetWCB, Default_WCB_Quantity,
+                    specialPeerEnabled ? ", or 20" : "");
   }
 }
 
@@ -4457,6 +4512,7 @@ void setup() {
   printResetReason();  // Show the exact cause of reset
   loadWCBNumberFromPreferences();
   loadWCBQuantitiesFromPreferences();
+  loadSpecialPeerPreferences();
   loadMACPreferences();
 
   // Initialize the NeoPixel status LED

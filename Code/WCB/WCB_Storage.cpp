@@ -14,6 +14,7 @@ extern char commandDelimiter;
 extern String commentDelimiter;
 extern int Default_WCB_Quantity;
 extern int WCB_Number;
+extern bool specialPeerEnabled;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern char espnowPassword[40];
@@ -317,6 +318,24 @@ void loadWCBQuantitiesFromPreferences() {
     preferences.begin("wcb_config", true);
     Default_WCB_Quantity = preferences.getInt("wcb_quantity", Default_WCB_Quantity);
     preferences.end();
+}
+
+// Load special peer (ID 20) enabled state from preferences
+void loadSpecialPeerPreferences() {
+    preferences.begin("wcb_config", true);
+    specialPeerEnabled = preferences.getBool("special_peer", false);
+    preferences.end();
+}
+
+// Save special peer (ID 20) enabled state to preferences.
+// Takes effect after reboot (peer registration runs during setup).
+void saveSpecialPeerPreferences(bool enabled) {
+    preferences.begin("wcb_config", false);
+    preferences.putBool("special_peer", enabled);
+    preferences.end();
+    specialPeerEnabled = enabled;
+    Serial.printf("Special peer (ID %d) %s. Reboot to apply peer registration.\n",
+                  WCB_SPECIAL_PEER_ID, enabled ? "ENABLED" : "DISABLED");
 }
 
 // Save the WCB quantity to preferences

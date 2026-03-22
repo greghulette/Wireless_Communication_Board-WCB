@@ -24,6 +24,7 @@ extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
 extern int Default_WCB_Quantity;
+extern bool specialPeerEnabled;
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
@@ -105,6 +106,8 @@ void loadWCBNumberFromPreferences();
 void saveWCBNumberToPreferences(int wcb_number_f);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
+void loadSpecialPeerPreferences();
+void saveSpecialPeerPreferences(bool enabled);
 
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();
