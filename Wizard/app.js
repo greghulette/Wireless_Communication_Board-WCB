@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.23 11:42';
+const UI_VERSION = '2026.03.23 15:41';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2662,8 +2662,16 @@ function closeGeneralConflictModal(event) {
 function boardConnect(n) {
   if (boardConnections[n]?.isConnected()) { boardDisconnect(n); return; }
   if (remoteRelayForBoard[n]) { clearRemoteConnected(n); return; }
-  if (_detecting[n]) { openConnectModal(n); return; } // options menu while detecting
-  openConnectModal(n);        // show modal; user picks Auto-Detect / Manual / Remote
+  // Show the inline connect strip, then run the same panel-open flow the wizard uses
+  const strip = document.getElementById(`b${n}-connect-strip`);
+  if (strip) strip.style.display = '';
+  _wizPortOpenPanel(n);
+}
+
+async function boardConnectCancel(n) {
+  await wizPortStopDetect(n);
+  const strip = document.getElementById(`b${n}-connect-strip`);
+  if (strip) strip.style.display = 'none';
 }
 
 async function boardDisconnect(n) {
@@ -6467,7 +6475,8 @@ const _wizPortConfigSnaps = {};  // n → { configSnapshot, generalSnapshot }
 // Returns the set of ports already claimed by other slots.
 function _wizPortUsedByOthers(excludeSlot) {
   const used = new Set();
-  for (let s = 1; s <= (wizardState.quantity ?? 3); s++) {
+  const max = wizardState?.quantity ?? Math.max(...Object.keys(boardConnections).map(Number), 0);
+  for (let s = 1; s <= max; s++) {
     if (s === excludeSlot) continue;
     const p = boardConnections[s]?.port;
     if (p) used.add(p);
@@ -6475,9 +6484,14 @@ function _wizPortUsedByOthers(excludeSlot) {
   return used;
 }
 
-async function wizPortRenderPanel(n) {
-  const panelEl = document.getElementById(`wiz-port-panel-${n}`);
-  if (!panelEl) return;
+async function wizPortRenderPanel(n, { noPortsHint = false } = {}) {
+  // Render to the wizard's panel AND/OR the tool page's inline connect strip panel,
+  // whichever currently exists in the DOM.
+  const panels = [
+    document.getElementById(`wiz-port-panel-${n}`),
+    document.getElementById(`b${n}-strip-panel`),
+  ].filter(Boolean);
+  if (!panels.length) return;
 
   const job       = _wizPortDetectJobs[n] ?? null;
   const detecting = !!job;
@@ -6498,6 +6512,13 @@ async function wizPortRenderPanel(n) {
                <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px"
                        onclick="wizPortCancelDetect(${n})">✕ Cancel</button>
              </div>`;
+  } else if (noPortsHint) {
+    // No authorized ports available — prompt user to authorize one first
+    inner = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+               <span style="font-size:12px;color:var(--text3)">No authorized ports.</span>
+               <button class="btn btn-ghost btn-sm" onclick="wizPortAuthorize(${n})">+ Authorize…</button>
+               <button class="btn btn-ghost btn-sm" onclick="wizPortComPicker(${n})">Select by COM#…</button>
+             </div>`;
   } else {
     inner = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                <button class="btn btn-primary btn-sm" onclick="wizPortDetect(${n})">🔍 Detect</button>
@@ -6505,7 +6526,7 @@ async function wizPortRenderPanel(n) {
                <button class="btn btn-ghost btn-sm" onclick="wizPortComPicker(${n})">Select by COM#…</button>
              </div>`;
   }
-  panelEl.innerHTML = inner;
+  panels.forEach(p => p.innerHTML = inner);
 }
 
 async function wizPortStopDetect(n) {
@@ -6521,6 +6542,11 @@ async function wizPortStopDetect(n) {
 // only rst:0x1 (POWERON_RESET) matches — which is a physical button press.
 // The boot-loop SW resets (rst:0x3) are silently ignored.
 async function wizPortDetect(n) {
+  // Update strip status synchronously before any async work — if this doesn't
+  // appear when Detect is clicked, the onclick handler is not reaching this function.
+  const _diagStatus = document.getElementById(`b${n}-strip-status`);
+  if (_diagStatus) _diagStatus.textContent = 'Scanning…';
+
   await wizPortStopDetect(n);
 
   const allPorts     = await navigator.serial.getPorts();
@@ -6528,8 +6554,7 @@ async function wizPortDetect(n) {
   const ports        = allPorts.filter(p => !usedByOthers.has(p));
 
   if (ports.length === 0) {
-    showToast('No authorized ports — click "+ Authorize…" to let the browser see your board', 'warning', 5000);
-    await wizPortRenderPanel(n);
+    await wizPortRenderPanel(n, { noPortsHint: true });
     return;
   }
 
@@ -6577,7 +6602,11 @@ async function wizPortDetect(n) {
           if ((msg.includes('already open') || msg.includes('already been opened'))
               && port.readable && !port.readable.locked) {
             // fall through — usable as-is
-          } else return;
+          } else {
+            const _s = document.getElementById(`b${n}-strip-status`);
+            if (_s) _s.textContent = `Port error: ${msg || e}`;
+            return;
+          }
         } else return;
       }
       try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
@@ -6627,6 +6656,9 @@ async function wizPortDetect(n) {
       _wizPortDetectJobs[n] = null;
       wizPortRenderPanel(n); // timed out or cancelled — restore Detect button
     }
+    // Reset status if it's still showing the scanning message
+    const _s = document.getElementById(`b${n}-strip-status`);
+    if (_s && _s.textContent === 'Scanning…') _s.textContent = 'Select port…';
     resolveDone();
   });
 }
@@ -6681,30 +6713,55 @@ async function _wizPortOpenPanel(n) {
 }
 
 async function wizPortComplete(n, port) {
-  // Collapse the panel and show connecting status
-  const panelEl = document.getElementById(`wiz-port-panel-${n}`);
-  if (panelEl) panelEl.style.display = 'none';
-  wizardSetConnectStatus(n, 'busy', 'Connecting…');
+  const inWizard = document.getElementById('wizard-modal')?.classList.contains('open');
 
-  const snap = _wizPortConfigSnaps[n] ?? {};
-  delete _wizPortConfigSnaps[n];
+  if (inWizard) {
+    // ── Wizard context ────────────────────────────────────────────────────────
+    const panelEl = document.getElementById(`wiz-port-panel-${n}`);
+    if (panelEl) panelEl.style.display = 'none';
+    wizardSetConnectStatus(n, 'busy', 'Connecting…');
 
-  const usedPorts = _wizPortUsedByOthers(n);
-  try {
-    if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
-    const conn = new BoardConnection(n);
-    await conn.connect(port, usedPorts);
-    boardConnections[n] = conn;
-    delete remoteRelayForBoard[n];
-    updateConnectionUI(n, true);
-    showToast(`WCB ${n} connected — pulling config…`, 'success');
-    setTimeout(() => boardPull(n), 3000);
-    wizardWatchForConnect(n, snap.configSnapshot ?? null, snap.generalSnapshot ?? null);
-  } catch (e) {
-    wizardSetConnectStatus(n, 'err', '✕ Connect failed');
-    // Re-show panel so user can try again
-    if (panelEl) { panelEl.style.display = ''; await wizPortRenderPanel(n); }
-    wizardEnableConnectBtns(n);
+    const snap = _wizPortConfigSnaps[n] ?? {};
+    delete _wizPortConfigSnaps[n];
+
+    const usedPorts = _wizPortUsedByOthers(n);
+    try {
+      if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
+      const conn = new BoardConnection(n);
+      await conn.connect(port, usedPorts);
+      boardConnections[n] = conn;
+      delete remoteRelayForBoard[n];
+      updateConnectionUI(n, true);
+      showToast(`WCB ${n} connected — pulling config…`, 'success');
+      setTimeout(() => boardPull(n), 3000);
+      wizardWatchForConnect(n, snap.configSnapshot ?? null, snap.generalSnapshot ?? null);
+    } catch (e) {
+      wizardSetConnectStatus(n, 'err', '✕ Connect failed');
+      if (panelEl) { panelEl.style.display = ''; await wizPortRenderPanel(n); }
+      wizardEnableConnectBtns(n);
+    }
+
+  } else {
+    // ── Tool page context — inline connect strip ───────────────────────────────
+    const strip   = document.getElementById(`b${n}-connect-strip`);
+    const statusEl = document.getElementById(`b${n}-strip-status`);
+    if (statusEl) statusEl.textContent = 'Connecting…';
+
+    const usedPorts = _wizPortUsedByOthers(n);
+    try {
+      if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
+      const conn = new BoardConnection(n);
+      await conn.connect(port, usedPorts);
+      boardConnections[n] = conn;
+      delete remoteRelayForBoard[n];
+      if (strip) strip.style.display = 'none';
+      updateConnectionUI(n, true);
+      showToast(`WCB ${n} connected — pulling config…`, 'success');
+      setTimeout(() => boardPull(n), 3000);
+    } catch (e) {
+      if (statusEl) statusEl.textContent = '✕ Connect failed';
+      await wizPortRenderPanel(n);  // re-show the Detect/Authorize buttons
+    }
   }
 }
 

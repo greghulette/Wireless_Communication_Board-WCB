@@ -339,6 +339,24 @@
         <button class="btn btn-primary btn-sm" id="b{N}-btn-connect" onclick="event.stopPropagation();boardConnect({N})">Connect</button>
       </div>
     </div>
+
+    <!-- ─── Inline connect strip ─────────────────────────────────── -->
+    <!-- Shown instead of a modal when the Connect button is clicked  -->
+    <div class="board-connect-strip" id="b{N}-connect-strip"
+         style="display:none" onclick="event.stopPropagation()">
+      <div class="board-connect-strip-header">
+        <div class="board-connect-strip-label">
+          WCB {N}
+          <span class="board-connect-strip-sub">Board #{N}</span>
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px"
+                onclick="event.stopPropagation();boardConnectCancel({N})">✕</button>
+        <span class="board-connect-strip-status" id="b{N}-strip-status">Select port…</span>
+      </div>
+      <div class="board-connect-strip-panel" id="b{N}-strip-panel"></div>
+    </div>
+
     <div class="section-body">
 
       <!-- Action Bar -->

@@ -788,6 +788,27 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   margin-bottom: 10px;
 }
 
+/* ─── Board Inline Connect Strip ────────────────────────────── */
+.board-connect-strip {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+}
+.board-connect-strip-header {
+  display: flex; align-items: center; gap: 10px;
+}
+.board-connect-strip-label {
+  font-size: 13px; font-weight: 700; font-family: var(--sans);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.board-connect-strip-sub {
+  font-size: 11px; font-weight: 400; color: var(--text3);
+}
+.board-connect-strip-status {
+  font-size: 11px; color: var(--text3); min-width: 80px; text-align: right;
+}
+.board-connect-strip-panel { margin-top: 8px; }
+
 /* ─── Terminal Drawer ────────────────────────────────────────── */
 /* ── Detect button (pulsing while auto-detect is active) ─────── */
 @keyframes detect-pulse {
