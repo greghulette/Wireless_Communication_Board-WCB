@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.20 09:30';
+const UI_VERSION = '2026.03.23 11:42';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4500,7 +4500,7 @@ const boardHistoryIdx  = {};   // { [n]: number }    current recall position
 
 const DEBUG_MODES = [
   { key: 'main',  label: 'COMMANDS', cmd: 'DEBUG'       },
-  { key: 'kyber', label: 'KYBER',    cmd: 'DEBUG,KYBER' },
+  { key: 'maestro', label: 'MAESTRO', cmd: 'DEBUG,MAESTRO' },
   { key: 'pwm',   label: 'PWM',      cmd: 'DEBUG,PWM'   },
   { key: 'etm',   label: 'ETM',      cmd: 'DEBUG,ETM'   },
   { key: 'mgmt',  label: 'MGMT',     cmd: 'DEBUG,MGMT'  },
@@ -4508,7 +4508,7 @@ const DEBUG_MODES = [
 
 function ensureDebugState(n) {
   if (!boardDebugStates[n])
-    boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false, mgmt: false };
+    boardDebugStates[n] = { main: false, maestro: false, pwm: false, etm: false, mgmt: false };
   return boardDebugStates[n];
 }
 
@@ -4682,7 +4682,7 @@ function updateTerminalPaneDot(n, connected) {
     input.placeholder = connected ? `Send to WCB ${n}…` : 'Board disconnected';
   }
   // Reset debug flags on disconnect — board loses them on every reboot
-  if (!connected) boardDebugStates[n] = { main: false, kyber: false, pwm: false, etm: false };
+  if (!connected) boardDebugStates[n] = { main: false, maestro: false, pwm: false, etm: false };
   // Timestamp and auto-scroll are UI preferences — keep them across reconnects
   updateTerminalControls(n);
 }

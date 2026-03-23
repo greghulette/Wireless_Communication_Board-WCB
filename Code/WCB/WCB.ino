@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_221140RMAR2026                                    *****////
+///*****                                          Version 6.0_231142RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -146,12 +146,12 @@ bool lastReceivedViaESPNOW = false;
  
 // Debugging flag (default: off)
 bool debugEnabled = false; 
-bool debugKyber = false;
+bool debugMaestro = false;
 bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_221140RMAR2026";
+String SoftwareVersion = "6.0_231142RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -199,6 +199,7 @@ typedef struct __attribute__((packed)) {
 
 
 bool debugMGMT = false;         // remote management protocol — off by default
+// debugRaw consolidated into debugMaestro
 
 // ETM Settings (NVS stored)
 bool debugETM = false;
@@ -2352,13 +2353,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t destPort = received.structCommand[1];
     size_t chunkLen  = (uint8_t)received.structCommand[2] | ((uint8_t)received.structCommand[3] << 8);
 
-    if (debugKyber) {
+    if (debugMaestro) {
       uint8_t *dataPtr = (uint8_t *)(received.structCommand + 4);
-      Serial.printf("Kyber targeted to W%dS%d - chunk (hex): ", destWCB, destPort);
+      Serial.printf("[MAESTRO] WCB%d → WCB%d Serial%d  %d byte%s: ",
+                    senderWCB, destWCB, destPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
       for (int i = 0; i < (int)chunkLen; i++) {
-        if (dataPtr[i] < 0x10) Serial.print("0");
-        Serial.print(dataPtr[i], HEX);
-        Serial.print(" ");
+        Serial.printf("%02X ", dataPtr[i]);
       }
       Serial.println();
     }
@@ -2379,13 +2379,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       return;
     }
 
-    if (debugKyber) {
+    if (debugMaestro) {
       uint8_t *dataPtr = (uint8_t *)(received.structCommand + 2);
-      Serial.print("Kyber chunk (hex): ");
+      Serial.printf("[MAESTRO] WCB%d broadcast  %d byte%s: ",
+                    senderWCB, (int)chunkLen, chunkLen == 1 ? "" : "s");
       for (int i = 0; i < (int)chunkLen; i++) {
-        if (dataPtr[i] < 0x10) Serial.print("0");
-        Serial.print(dataPtr[i], HEX);
-        Serial.print(" ");
+        Serial.printf("%02X ", dataPtr[i]);
       }
       Serial.println();
     }
@@ -2404,13 +2403,25 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t targetPort = (uint8_t)received.structCommand[0];
     size_t chunkLen    = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
     if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
-      if (debugEnabled) Serial.printf("Invalid raw serial chunk: port=%d, len=%d\n", targetPort, (int)chunkLen);
+      if (debugMaestro)
+        Serial.printf("[MAESTRO] Invalid chunk from WCB%d: port=%d, len=%d — rejected\n",
+                      senderWCB, targetPort, (int)chunkLen);
       return;
     }
     Stream &targetSerial = getSerialStream(targetPort);
     targetSerial.write((uint8_t *)(received.structCommand + 3), chunkLen);
     targetSerial.flush();
-    if (debugEnabled) Serial.printf("Raw serial: %d bytes -> Serial%d\n", (int)chunkLen, targetPort);
+    if (debugMaestro) {
+      Serial.printf("[MAESTRO] WCB%d → Serial%d  %d byte%s: ",
+                    senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
+      const uint8_t* dataPtr = (const uint8_t*)(received.structCommand + 3);
+      for (size_t i = 0; i < chunkLen; i++) {
+        if (dataPtr[i] < 0x10) Serial.print("0");
+        Serial.print(dataPtr[i], HEX);
+        if (i < chunkLen - 1) Serial.print(" ");
+      }
+      Serial.println();
+    }
     return;
   }
 
@@ -2473,15 +2484,15 @@ void forwardDataFromKyber() {
             Stream &targetSerial = getSerialStream(targetPort);
             targetSerial.write(buffer, len);
             targetSerial.flush();
-            if (debugKyber) {
-              Serial.printf("Kyber: Forwarded %d bytes to local S%d\n", len, targetPort);
+            if (debugMaestro) {
+              Serial.printf("[MAESTRO] Forwarded %d bytes to local Serial%d\n", len, targetPort);
             }
           } 
           // If remote, send via ESP-NOW to specific WCB/port using 'K' target
           else {
             sendESPNowRawToPort(buffer, len, targetWCB, targetPort);
-            if (debugKyber) {
-              Serial.printf("Kyber: Sent %d bytes to WCB%d S%d\n", len, targetWCB, targetPort);
+            if (debugMaestro) {
+              Serial.printf("[MAESTRO] Routed %d bytes to WCB%d Serial%d\n", len, targetWCB, targetPort);
             }
           }
         }
@@ -2498,8 +2509,8 @@ void forwardDataFromKyber() {
       // Broadcast to all remote WCBs
       sendESPNowRaw(buffer, len);
       
-      if (debugKyber) {
-        Serial.printf("Kyber: Broadcast %d bytes\n", len);
+      if (debugMaestro) {
+        Serial.printf("[MAESTRO] Broadcast %d bytes\n", len);
       }
     }
   }
@@ -2589,12 +2600,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "OFF") {
             debugEnabled = false;
             Serial.println("Debugging disabled");
-        } else if (argsUpper == "KYBER,ON") {
-            debugKyber = true;
-            Serial.println("Kyber debugging enabled");
-        } else if (argsUpper == "KYBER,OFF") {
-            debugKyber = false;
-            Serial.println("Kyber debugging disabled");
+        } else if (argsUpper == "MAESTRO,ON" || argsUpper == "KYBER,ON") {
+            debugMaestro = true;
+            Serial.println("Maestro debugging enabled");
+        } else if (argsUpper == "MAESTRO,OFF" || argsUpper == "KYBER,OFF") {
+            debugMaestro = false;
+            Serial.println("Maestro debugging disabled");
         } else if (argsUpper == "PWM,ON") {
             debugPWMPassthrough = true;
             Serial.println("PWM debugging enabled");
@@ -3109,12 +3120,14 @@ void processLocalCommand(const String &message) {
     } else if (message == "doff" || message == "DOFF") {
         debugEnabled = false;
         Serial.println("Debugging disabled");
-    } else if (message.startsWith("dkoff") || message.startsWith("DKOFF")) {
-        debugKyber = false;
-        Serial.println("Kyber debugging disabled");
-    } else if (message.startsWith("dkon") || message.startsWith("DKON")) {
-        debugKyber = true;
-        Serial.println("Kyber debugging enabled");
+    } else if (message.startsWith("dmoff") || message.startsWith("DMOFF") ||
+               message.startsWith("dkoff") || message.startsWith("DKOFF")) {
+        debugMaestro = false;
+        Serial.println("Maestro debugging disabled");
+    } else if (message.startsWith("dmon") || message.startsWith("DMON") ||
+               message.startsWith("dkon") || message.startsWith("DKON")) {
+        debugMaestro = true;
+        Serial.println("Maestro debugging enabled");
     } else if (message.startsWith("dpwmoff") || message.startsWith("DPWMOFF")) {
         debugPWMPassthrough = false;
         Serial.println("PWM debugging disabled");

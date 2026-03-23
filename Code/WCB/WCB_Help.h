@@ -94,7 +94,7 @@ void printCommandHelp(const String &cmd);
 //   ?DEBUG,OFF               Disable main debug output
 //   ?DEBUG,ETM,ON/OFF        Enable/disable ETM packet debug
 //   ?DEBUG,PWM,ON/OFF        Enable/disable PWM passthrough debug
-//   ?DEBUG,KYBER,ON/OFF      Enable/disable Kyber serial debug
+//   ?DEBUG,MAESTRO,ON/OFF    Enable/disable Maestro/Pololu serial debug
 //
 // STATISTICS
 //   ?STATS                   Show ESP-NOW transmission statistics

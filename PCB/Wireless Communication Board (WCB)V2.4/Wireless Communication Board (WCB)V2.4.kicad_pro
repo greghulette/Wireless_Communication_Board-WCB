@@ -521,7 +521,7 @@
       "idf": "",
       "netlist": "",
       "plot": "",
-      "pos_files": "",
+      "pos_files": "production/",
       "specctra_dsn": "",
       "step": "Remote_Kill_Switch-18Sep23.step",
       "svg": "",

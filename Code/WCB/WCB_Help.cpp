@@ -737,7 +737,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?DEBUG,ON/OFF   Enable/disable debug output"));
         Serial.println(F("    ?DEBUG,ETM      ETM packet/ACK/retry debug"));
         Serial.println(F("    ?DEBUG,PWM      PWM passthrough debug"));
-        Serial.println(F("    ?DEBUG,KYBER    Kyber serial forwarding debug"));
+        Serial.println(F("    ?DEBUG,MAESTRO  Maestro/Pololu serial packet debug (hex)"));
         Serial.println(F("\n  SYSTEM:"));
         Serial.println(F("    ?config         Print full configuration"));
         Serial.println(F("    ?backup         Print backup/restore commands"));
