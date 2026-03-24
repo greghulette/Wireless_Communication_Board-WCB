@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.23 15:41';
+const UI_VERSION = '2026.03.24 17:53';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1046,7 +1046,13 @@ function syncSerialUIToConfig(n) {
 
 function populateUIFromConfig(n, config) {
   const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
-  if (wcbNumSel) wcbNumSel.value = config.wcbNumber || n;
+  if (wcbNumSel) {
+    const qty = systemConfig?.general?.wcbQuantity
+             || parseInt(document.getElementById('g-wcbq')?.value)
+             || config.wcbQuantity
+             || n;
+    populateWCBDropdown(wcbNumSel, qty, config.wcbNumber || n, true);
+  }
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
@@ -2051,10 +2057,27 @@ class BoardConnection {
         throw new Error('That port is already connected to another WCB. Please select a different port.');
       }
     }
-    await this.port.open({ baudRate: 115200 });
-    // De-assert DTR & RTS so Chrome's default signal state doesn't inadvertently
-    // hold the ESP32 EN pin low (reset) via the CH9102 / CP210x RC circuit.
-    try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+    try {
+      await this.port.open({ baudRate: 115200 });
+    } catch (e) {
+      // If the port is already open (e.g. detect left it open) and the readable
+      // stream is free, use it as-is rather than failing the connection.
+      const msg = e?.message ?? '';
+      if ((msg.includes('already open') || msg.includes('already been opened'))
+          && this.port.readable && !this.port.readable.locked) {
+        // Port is open and usable — proceed
+      } else {
+        throw e;
+      }
+    }
+    // Explicitly assert DTR=true.  On CDC devices (CH9102F/"USB Single Serial")
+    // this enables UART→USB data forwarding.  The RC differentiator fires a
+    // one-shot reset (not a continuous EN-pin hold), so the board boots normally
+    // and stays running with DTR=true — identical to the Arduino Serial Monitor.
+    // This also recovers from cases where a previous session (e.g. esptool-js)
+    // left DTR=false and would otherwise permanently gate incoming data.
+    // RTS is intentionally left unchanged to avoid disturbing IO0/BOOT mode.
+    try { await this.port.setSignals({ dataTerminalReady: true }); } catch (_) {}
     this._connected = true;
     this._startReading();
   }
@@ -2127,12 +2150,18 @@ class BoardConnection {
       // ── Try the current port reference ───────────────────────────────────
       try {
         await this.port.open({ baudRate: 115200 });
-        // De-assert DTR & RTS immediately after open — Chrome may assert DTR on
-        // port open, which the CH9102 / CP210x translates into pulling the ESP32
-        // EN pin low, keeping the board in reset and unable to respond.
-        try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+        // Pulse DTR false→true to guarantee the CH9102F/"USB Single Serial" driver
+        // processes a state transition. After esptool operations the driver may have
+        // DTR=1 cached — a plain setSignals(DTR=true) would be a no-op (no 0→1 edge)
+        // and UART→USB data forwarding would remain gated. The false→true edge also
+        // triggers the RC differentiator, giving the board a clean reset at 115200.
+        try { await this.port.setSignals({ dataTerminalReady: false }); } catch (_) {}
+        await new Promise(r => setTimeout(r, 150));
+        try { await this.port.setSignals({ dataTerminalReady: true }); }
+        catch (e) { termLog(this.boardIndex, `⚠ reconnect DTR=true failed: ${e?.message ?? e}`, 'sys'); }
         this._connected = true;
         this._readBuffer = '';
+        this._srDataSeen = false;
         this._startReading();
         _cleanup();
         return true;
@@ -2150,7 +2179,7 @@ class BoardConnection {
             try {
               if (typeof this.port.reconfigure === 'function')
                 await this.port.reconfigure({ baudRate: 115200 });
-              try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+              try { await this.port.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
               this._connected = true;
               this._readBuffer = '';
               this._startReading();
@@ -2176,7 +2205,7 @@ class BoardConnection {
         try { await evtPort.close(); } catch (_) {}
         try {
           await evtPort.open({ baudRate: 115200 });
-          try { await evtPort.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+          try { await evtPort.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
           this.port = evtPort;
           this._connected = true;
           this._readBuffer = '';
@@ -2224,8 +2253,7 @@ class BoardConnection {
             try { await fresh.close(); } catch (_) {}
             try {
               await fresh.open({ baudRate: 115200 });
-              // Same DTR/RTS de-assert as above — fresh handle, same EN-pin risk.
-              try { await fresh.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+              try { await fresh.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
               this.port = fresh;   // keep the new reference for future reconnects
               this._connected = true;
               this._readBuffer = '';
@@ -2315,17 +2343,21 @@ class BoardConnection {
   onData(callback) { this._dataCallbacks.push(callback); }
 
   async _startReading() {
+    termLog(this.boardIndex, `[sr] start: connected=${this._connected} readable=${!!this.port?.readable}`, 'sys');
     outer: while (this._connected && this.port?.readable) {
       try {
         this.reader = this.port.readable.getReader();
+        termLog(this.boardIndex, '[sr] reader acquired', 'sys');
       } catch (e) {
         // Port no longer readable — board disconnected/rebooted
+        termLog(this.boardIndex, `[sr] getReader failed: ${e?.message}`, 'sys');
         break outer;
       }
       try {
         while (this._connected) {
           const { value, done } = await this.reader.read();
-          if (done) break outer;  // stream ended cleanly — treat as disconnect
+          if (done) { termLog(this.boardIndex, '[sr] reader done', 'sys'); break outer; }
+          if (value?.length > 0 && !this._srDataSeen) { this._srDataSeen = true; termLog(this.boardIndex, `[sr] first data: ${value.length} bytes`, 'sys'); }
           this._readBuffer += new TextDecoder().decode(value);
           let nl;
           while ((nl = this._readBuffer.indexOf('\n')) !== -1) {
@@ -2837,8 +2869,7 @@ async function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
             } else { return; }
           }
 
-          // Deassert DTR/RTS to minimise the EN-pin reset that port.open() triggers.
-          try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+          try { await port.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see BoardConnection.connect() comment
 
           reader = port.readable.getReader();
 
@@ -3180,6 +3211,7 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
     // Survives USB drops because _dataCallbacks is never cleared on reconnect.
     const onLine = (line) => {
       if (done) return;
+      termLog(n, `[wait] ${line.substring(0, 80)}`, 'sys');
       if (line.includes('End of Backup')) {
         done = true;
         clearTimeout(tickTimer);
@@ -3212,7 +3244,8 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
       termLog(n, `⏳ Still waiting… (${elapsed}s, probe ${sendAttempt}) connected=${connected} reader=${hasReader}`, 'sys');
 
       if (connected && hasReader) {
-        try { await conn.send('?backup\r'); } catch (_) {}
+        try { await conn.send('?backup\r'); }
+        catch (e) { termLog(n, `⚠ ?backup send failed: ${e?.message ?? e}`, 'sys'); }
       }
 
       tickTimer = setTimeout(tick, 10000);
@@ -3412,14 +3445,14 @@ async function boardGo(n, opts = {}) {
     delete _boardFlashing[n];      // reconnect (or failure) can now update UI normally
 
     if (flashOk) {
-      if (_isWindows) {
-        // Windows: esptool-js transport.disconnect() can fail silently, leaving
-        // the COM port handle open.  Give the driver a moment, then attempt
-        // several explicit closes before handing off to reconnect().
-        await sleep(1500);
-        for (let ci = 0; ci < 6; ci++) {
-          try { await conn.port.close(); break; } catch (_) { if (ci < 5) await sleep(300); }
-        }
+      // Always close the port after flash — esptool-js transport.disconnect() can
+      // fail silently on any platform, leaving the handle open with DTR in whatever
+      // state esptool left it (typically false after its hard-reset exit sequence).
+      // Explicitly closing forces reconnect() to call port.open() fresh, which lets
+      // Chrome re-assert DTR=true (CDC default) and unblocks CH9102F data flow.
+      await sleep(1500);
+      for (let ci = 0; ci < 6; ci++) {
+        try { await conn.port.close(); break; } catch (_) { if (ci < 5) await sleep(300); }
       }
       termLog(n, 'Reconnecting after flash…', 'sys');
       // Windows gets more attempts (14 × 2 s = 28 s) to account for driver delays;
@@ -4147,6 +4180,7 @@ function syncGeneralFromConfig(config) {
 
   // Keep systemConfig.general in sync — el.value assignments above don't fire
   // oninput/onchange, so systemConfig.general would otherwise stay at its defaults.
+  if (systemConfig?.general) systemConfig.general.wcbQuantity = config.wcbQuantity;
   onGeneralPasswordChange();
   onGeneralMacChange();
   onGeneralCmdCharChange();
@@ -6549,6 +6583,17 @@ async function wizPortDetect(n) {
 
   await wizPortStopDetect(n);
 
+  // ── Release any existing reader lock on slot n's port ─────────────────────
+  // _startReading() holds a ReadableStream lock; port.open() / getReader() will
+  // both fail with "port is already open / locked" while that lock is held.
+  // closeForReconnect() cancels the reader, releases the lock, and closes the
+  // port — making it available for the detect workers below.  We do NOT call
+  // boardDisconnect() here because wizPortComplete() handles the full reconnect
+  // (including updateConnectionUI) when detection succeeds.
+  if (boardConnections[n]) {
+    try { await boardConnections[n].closeForReconnect(); } catch (_) {}
+  }
+
   const allPorts     = await navigator.serial.getPorts();
   const usedByOthers = _wizPortUsedByOthers(n);
   const ports        = allPorts.filter(p => !usedByOthers.has(p));
@@ -6566,6 +6611,7 @@ async function wizPortDetect(n) {
   // Shared cancel — sets flag and cancels all open readers
   const activeReaders = new Set();
   const cancelAll = () => {
+    console.trace(`[detect] cancelAll() called — cancelled was ${cancelled}`);
     cancelled = true;
     activeReaders.forEach(r => { try { r.cancel(); } catch (_) {} });
   };
@@ -6583,70 +6629,220 @@ async function wizPortDetect(n) {
     }
   }, DRAIN_MS);
   const TIMEOUT_MS = 30000;
-  // Only match physical reset (rst:0x1 POWERON_RESET).
-  // Boot-loop SW resets (rst:0x3) are excluded, preventing false positives
-  // on boards stuck in a boot-loop with no firmware.
-  const DETECT_RE  = /rst:0x1 \(POWERON_RESET\)/;
+  // Primary:   rst:0x1 (POWERON_RESET) — standard ESP32 reset output.
+  // Secondary: Reset reason: — WCB firmware boot line, catches v1.x boards whose
+  //            RTCWDT two-stage boot may cause rst:0x1 to arrive before the drain
+  //            settles or be swallowed by a brief port disconnect during the bounce.
+  //            Safe post-drain because the board is already running by then — any
+  //            new "Reset reason:" means the user just pressed reset.
+  const DETECT_RE = /rst:0x1 \(POWERON_RESET\)|Reset reason:/;
 
   const timeoutId = setTimeout(() => cancelAll(), TIMEOUT_MS);
 
   const workers = ports.map(port => (async () => {
-    let reader = null, openedByUs = false, drainTimer = null;
-    try {
+    const portLabel = (() => { try { const i = port.getInfo(); return `VID=${i.usbVendorId} PID=${i.usbProductId}`; } catch(_){return '?';} })();
+    console.log(`[detect] worker starting for port: ${portLabel}`);
+
+    // One reconnect attempt — handles boards (e.g. v1.x) whose RTCWDT bounce
+    // briefly drops the serial connection during the drain period.
+    let retriesLeft = 1;
+
+    const tryOpen = async () => {
       try {
         await port.open({ baudRate: 115200 });
-        openedByUs = true;
+        console.log(`[detect] port opened: ${portLabel}`);
+        return true;
       } catch (e) {
-        if (_isWindows) {
-          const msg = e?.message ?? '';
-          if ((msg.includes('already open') || msg.includes('already been opened'))
-              && port.readable && !port.readable.locked) {
-            // fall through — usable as-is
-          } else {
-            const _s = document.getElementById(`b${n}-strip-status`);
-            if (_s) _s.textContent = `Port error: ${msg || e}`;
-            return;
-          }
-        } else return;
+        const msg = e?.message ?? '';
+        console.warn(`[detect] port open failed: ${msg || e} (isWindows=${_isWindows}, readable=${port.readable ? 'yes' : 'null'}, locked=${port.readable?.locked})`);
+        // On Windows: if the port reports "already open" but readable is unlocked, use it.
+        // Also handles the generic "USB Single Serial" driver which may report differently.
+        if (port.readable && !port.readable.locked) {
+          console.log(`[detect] port readable+unlocked, using as-is: ${portLabel}`);
+          return true;
+        }
+        const _s = document.getElementById(`b${n}-strip-status`);
+        if (_s) _s.textContent = `Port error: ${msg || e}`;
+        return false;
       }
-      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+    };
+
+    let reader = null, openedByUs = false, drainTimer = null;
+    try {
+      openedByUs = await tryOpen();
+      if (!openedByUs && !(port.readable && !port.readable.locked)) {
+        console.warn(`[detect] could not open port, worker exiting: ${portLabel}`);
+        return;
+      }
+
+      // Do NOT change DTR or RTS here.  Chrome's CDC default (DTR=true) is already
+      // correct: it enables data flow on the CH9102F/"USB Single Serial" driver AND
+      // triggers a one-shot reset via the RC differentiator on LilyGO v1.x boards.
+      // Explicitly setting DTR=false would gate UART data and leave boards stuck in
+      // download mode; setting RTS would pull IO0 low and force download-boot mode.
+      // We behave like the Arduino Serial Monitor: stay connected, let the drain
+      // window absorb the initial boot, then detect the user's manual reset.
 
       reader = port.readable.getReader();
       activeReaders.add(reader);
+      console.log(`[detect] reader started, drain=${DRAIN_MS}ms`);
 
       const dec = new TextDecoder();
-      let buf = '', settled = false;
-      drainTimer = setTimeout(() => { settled = true; }, DRAIN_MS);
+      let buf = '', drainBuf = '', settled = false, sawRTCWDTDuringDrain = false;
+      drainTimer = setTimeout(async () => {
+        if (sawRTCWDTDuringDrain) {
+          // LilyGO v1.x (CH9102F/"USB Single Serial"): after the initial 3s drain the
+          // board's RTCWDT auto-boot is still in progress (~4s).  Keep settled=false and
+          // flip the UI panel back to "Preparing…" so the user doesn't see "Press reset"
+          // until we're actually ready — otherwise they press during the absorb window,
+          // get no response, and have to press a second time.
+          console.log(`[detect] RTCWDT: absorbing auto-reset boot (~4s)...`);
+          const job = _wizPortDetectJobs[n];
+          if (job) { job.ready = false; wizPortRenderPanel(n); }
+          await new Promise(r => setTimeout(r, 4000));
+          if (cancelled) return;
+          buf = '';
+          settled = true;
+          // Absorb complete — now it's safe.  Show "Press reset" in UI.
+          if (job) { job.ready = true; wizPortRenderPanel(n); }
+          console.log(`[detect] RTCWDT: auto-boot absorbed — press reset button to assign board`);
+        } else {
+          settled = true;
+          console.log(`[detect] drain complete — now listening for reset`);
+        }
+      }, DRAIN_MS);
+
+      // livePort tracks the current port for this worker.  For boards (e.g. LilyGO
+      // v1.x) that cause a USB disconnect/reconnect during their RTCWDT two-stage boot,
+      // Chrome may create a new SerialPort object on reconnect — if so livePort is
+      // updated to the fresh object so the post-reset data actually arrives.
+      let livePort = port;
 
       while (!cancelled) {
-        const { value, done: rdone } = await reader.read();
-        if (rdone || cancelled) break;
-        if (!settled) continue;
+        let value, rdone;
+        try {
+          ({ value, done: rdone } = await reader.read());
+        } catch (e) {
+          console.warn(`[detect] read() threw:`, e);
+          rdone = true; // treat read error as disconnect
+        }
+
+        if (rdone) {
+          console.warn(`[detect] reader done (port disconnected?), retriesLeft=${retriesLeft}`);
+          if (!cancelled && retriesLeft-- > 0) {
+            // Port dropped mid-session — clean up and retry
+            activeReaders.delete(reader);
+            try { reader.releaseLock(); } catch (_) {} reader = null;
+            if (openedByUs) { try { await port.close(); } catch (_) {} openedByUs = false; }
+
+            // RTCWDT boards (e.g. LilyGO v1.x) need extra time for their full boot
+            // cycle.  Chrome may also create a NEW SerialPort object for the
+            // reconnected USB device, leaving the old object stale (no data flows).
+            // Use getPorts() to find the fresh object before reopening.
+            const waitMs = sawRTCWDTDuringDrain ? 4000 : 2500;
+            console.log(`[detect] waiting ${waitMs}ms before retry...`);
+            await new Promise(r => setTimeout(r, waitMs));
+            if (cancelled) break;
+
+            if (sawRTCWDTDuringDrain) {
+              const freshPorts = await navigator.serial.getPorts();
+              const info = (() => { try { return port.getInfo(); } catch(_) { return {}; } })();
+              const usedByOthers = _wizPortUsedByOthers(n);
+              const freshPort = freshPorts.find(p => {
+                if (usedByOthers.has(p)) return false;
+                try {
+                  const i = p.getInfo();
+                  return i.usbVendorId === info.usbVendorId && i.usbProductId === info.usbProductId;
+                } catch { return false; }
+              });
+              if (freshPort) {
+                if (freshPort !== livePort) console.log(`[detect] RTCWDT: switching to fresh port object`);
+                livePort = freshPort;
+              }
+            }
+
+            // Open the (possibly fresh) port
+            try {
+              await livePort.open({ baudRate: 115200 });
+              openedByUs = true;
+            } catch (e) {
+              const msg = e?.message ?? '';
+              if ((msg.includes('already open') || msg.includes('already been opened'))
+                  && livePort.readable && !livePort.readable.locked) {
+                console.log(`[detect] retry: port already open, using as-is`);
+                openedByUs = false;
+              } else {
+                console.warn(`[detect] retry open failed: ${msg}`);
+                break;
+              }
+            }
+            if (sawRTCWDTDuringDrain) {
+              // CDC boards (LilyGO v1.x "USB Single Serial") require DTR=true for data flow.
+              // DTR=true also triggers a controlled reset via the RC differentiator circuit —
+              // we detect the resulting rst:0x1 immediately since settled=true at this point.
+              // RTS is left alone (Chrome CDC default keeps IO0 high → normal flash boot).
+              try { await livePort.setSignals({ dataTerminalReady: true }); } catch (_) {}
+            } else {
+              try { await livePort.setSignals({ dataTerminalReady: false }); } catch (_) {}
+            }
+            reader = livePort.readable.getReader();
+            activeReaders.add(reader);
+            buf = '';
+            console.log(`[detect] retry reader started`);
+            continue;
+          }
+          break;
+        }
+
+        if (cancelled) break;
+        if (!settled) {
+          if (value?.length > 0) {
+            const drainChunk = new TextDecoder().decode(value);
+            drainBuf += drainChunk;
+            console.log(`[detect] (draining) ${JSON.stringify(drainChunk)}`);
+            if (!sawRTCWDTDuringDrain && /rst:0x10 \(RTCWDT/.test(drainBuf)) {
+              sawRTCWDTDuringDrain = true;
+              console.log(`[detect] RTCWDT pattern captured during drain — will use extended retry`);
+            }
+          }
+          continue;
+        }
         if (value?.length > 0) {
-          buf += dec.decode(value, { stream: true });
-          if (buf.length > 256) buf = buf.slice(-256);
+          const chunk = dec.decode(value, { stream: true });
+          console.log(`[detect] chunk (${chunk.length} chars): ${JSON.stringify(chunk)}`);
+          buf += chunk;
+          // Test BEFORE trimming — on slow/buffered systems the entire reset burst
+          // may arrive in one read(); trimming first would discard early patterns
+          // (e.g. rst:0x1) that appear near the top of a large output block.
           if (!detected && DETECT_RE.test(buf)) {
+            console.log(`[detect] MATCHED! buf="${buf.slice(0,120)}..."`);
             detected = true;
             // Stop everything else
             clearTimeout(drainTimer); drainTimer = null;
             clearTimeout(timeoutId);
             activeReaders.delete(reader);
             try { reader.releaseLock(); } catch (_) {} reader = null;
-            if (openedByUs) { try { await port.close(); } catch (_) {} } openedByUs = false;
+            if (openedByUs) { try { await livePort.close(); } catch (_) {} } openedByUs = false;
             cancelAll(); // cancel remaining port readers
             if (_wizPortDetectJobs[n]) {
               _wizPortDetectJobs[n] = null;
-              wizPortComplete(n, port);
+              wizPortComplete(n, livePort);
             }
             return;
           }
+          // Trim after checking so we never miss a pattern at the start of a large burst
+          if (buf.length > 512) buf = buf.slice(-512);
         }
       }
-    } catch (_) {}
+      console.log(`[detect] worker loop ended — cancelled=${cancelled} detected=${detected}`);
+    } catch (e) {
+      console.error(`[detect] worker threw:`, e);
+    }
     finally {
       clearTimeout(drainTimer);
       if (reader) { activeReaders.delete(reader); try { reader.releaseLock(); } catch (_) {} }
       if (openedByUs) { try { await port.close(); } catch (_) {} }
+      console.log(`[detect] worker cleanup done: ${portLabel}`);
     }
   })());
 
@@ -6677,11 +6873,20 @@ async function wizPortUse(n, portIdx) {
 }
 
 async function wizPortAuthorize(n) {
+  const inWizard = document.getElementById('wizard-modal')?.classList.contains('open');
+  let port;
   try {
     const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-    await navigator.serial.requestPort({ filters });
+    port = await navigator.serial.requestPort({ filters });
   } catch { /* user cancelled */ }
-  await wizPortRenderPanel(n);
+  if (!inWizard && port) {
+    // On the main page, the user already knows which board this is — connect immediately.
+    await wizPortStopDetect(n);
+    await wizPortComplete(n, port);
+  } else {
+    // In the wizard, just add the port to the authorized list so Detect can find it.
+    await wizPortRenderPanel(n);
+  }
 }
 
 async function wizPortComPicker(n) {
