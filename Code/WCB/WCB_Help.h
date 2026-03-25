@@ -51,17 +51,18 @@ void printCommandHelp(const String &cmd);
 //
 // DEVICES
 //   ?KYBER,LOCAL             Kyber physically connected to this board (S2)
-//   ?MAESTRO,LOCAL,Sx,Mx:WxSx:baud   Configure a Maestro controller
-//                              Mx=Maestro ID, WxSx=WCB+port, baud=baud rate
-//                              Can chain multiple: M1:W1S1:57600,M2:W2S1:57600
+//   ?MAESTRO,Mx:WxSx:baud    Configure a Maestro controller
+//                              Mx=Maestro ID (1-9), WxSx=target WCB+port, baud=baud rate
+//                              If WxSx matches this board's WCB number, Maestro is LOCAL
+//                              (serial port configured + baud set); otherwise REMOTE
+//                              (command routed via ESP-NOW when ;Mx,script is called)
+//                              Can chain multiple: M1:W2S1:57600,M2:W2S2:57600,M3:W3S1:57600
 //   ?KYBER,REMOTE            Maestro local, Kyber on another board
 //   ?KYBER,CLEAR             Disable Kyber integration
 //   ?KYBER,LIST              Show current Kyber configuration
 //   ?MAESTRO,LIST            List all configured Maestro mappings
 //   ?MAESTRO,CLEAR,x         Clear Maestro config by ID number
 //   ?MAESTRO,CLEAR,ALL       Clear all Maestro configurations
-//   ?MAESTRO,ENABLE          Set S1 baud to 57600 for Maestro use
-//   ?MAESTRO,DISABLE         Restore S1 to original baud rate
 //
 // MP3 TRIGGER
 //   Only needed for DIRECT control of the MP3 Trigger by the WCB itself.
@@ -71,10 +72,33 @@ void printCommandHelp(const String &cmd);
 //
 //   ?MP3,Sx:<baud>:V<vol>    Configure SparkFun MP3 Trigger on serial port x
 //                              Sx=serial port (S1-S5), baud=baud rate, vol=0-64
-//                              0=loudest, 64=inaudible. S3-S5 max 57600 baud
-//                              Example: ?MP3,S2:9600:V0
+//                              0=loudest, 64=inaudible. S3-S5 max 9600 baud
+//                              Example: ?MP3,S5:9600:V0
+//   ?MP3,LIST                Show current MP3 Trigger configuration
 //   ?MP3,ONERR,key           Set stored sequence key to run on MP3 error response
+//   ?MP3,ONERR,CLEAR         Remove error callback
 //   ?MP3,CLEAR               Remove MP3 Trigger config and restore port to normal
+//
+// MP3 TRIGGER - AUDIO COMMANDS (prefix: ;A,)
+//   Sent via the command character prefix + A. Volume is automatically sent
+//   before every PLAY/PLAYFS command. Callbacks refer to stored sequences (?SEQ).
+//
+//   ;A,PLAY,n                Play track n by filename order (1-255)
+//   ;A,PLAY,n,ONFIN,key      Play track n, run stored sequence key when finished
+//   ;A,PLAY,n,key            Same — implicit callback syntax
+//   ;A,PLAYFS,n              Play track n by SD card filesystem order (0-255)
+//   ;A,PLAYFS,n,ONFIN,key    Play by FS order with finish callback
+//   ;A,PLAYFS,n,key          Same — implicit callback syntax
+//   ;A,STOP                  Start/Stop toggle
+//   ;A,NEXT                  Skip to next track
+//   ;A,PREV                  Skip to previous track
+//   ;A,VOL,n                 Set volume: 0=loudest, 64=inaudible (persisted to NVS)
+//   ;A,VOLUP                 Louder by 5 steps (floor: 0)
+//   ;A,VOLDN                 Quieter by 5 steps (ceiling: 64)
+//   ;A,COUNT                 Request total track count (response printed to USB)
+//   ;A,VER                   Request MP3 Trigger firmware version (printed to USB)
+//
+//   Remote usage: ;Wx,;A,PLAY,n  routes audio command to WCB x's MP3 Trigger
 //
 // NETWORK - ETM
 //   ?ETM,ON                  Enable Ensured Transmission Mode
@@ -176,8 +200,6 @@ void printCommandHelp(const String &cmd);
 //   ?KYBER_REMOTE            Kyber remote
 //   ?KYBER_CLEAR             Kyber clear
 //   ?KYBER_LIST              Kyber list
-//   ?MAESTRO_ENABLE          Enable Maestro on S1
-//   ?MAESTRO_DISABLE         Disable Maestro on S1
 //   ?MAESTRO_LIST            List Maestro configs
 //   ?MAESTRO_CLEAR,x         Clear Maestro by ID
 //   ?MAESTRO_DEFAULT         Clear all Maestros

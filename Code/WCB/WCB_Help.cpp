@@ -416,23 +416,19 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  LIST              List all configured Maestro mappings"));
         Serial.println(F("  CLEAR,x           Clear Maestro config by ID number"));
         Serial.println(F("  CLEAR,ALL         Clear all Maestro configurations"));
-        Serial.println(F("  ENABLE            Set S1 baud to 57600 for Maestro use"));
-        Serial.println(F("                      Saves original baud rate for restore"));
-        Serial.println(F("  DISABLE           Restore S1 to original baud rate"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?MAESTRO,M1:W1S1:57600              - Maestro 1 on WCB1 S1"));
         Serial.println(F("  ?MAESTRO,M1:W1S1:57600,M2:W2S1:57600 - Two Maestros"));
         Serial.println(F("  ?MAESTRO,LIST                       - Show all configurations"));
         Serial.println(F("  ?MAESTRO,CLEAR,ALL                  - Remove all configs"));
-        Serial.println(F("  ?MAESTRO,ENABLE                     - Quick S1 setup for Maestro"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Maestro requires 57600 baud on the connected serial port"));
+        Serial.println(F("  - Set baud rate with: ?BAUD,Sx,57600"));
         Serial.println(F("  - Commands are sent as binary Pololu protocol packets"));
         Serial.println(F("  - Use ;Mx,script to trigger a Maestro script (x=ID, script=number)"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
-        Serial.println(F("  ?MAESTRO_ENABLE / ?MAESTRO_DISABLE / ?MAESTRO_LIST"));
-        Serial.println(F("  ?MAESTRO_CLEAR,x / ?MAESTRO_DEFAULT"));
+        Serial.println(F("  ?MAESTRO_LIST / ?MAESTRO_CLEAR,x / ?MAESTRO_DEFAULT"));
         Serial.println(F("  ?MAESTROconfig    (e.g. ?MAESTROM1:W1S1:57600)"));
 
     // ================================================================

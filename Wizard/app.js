@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.24 17:53';
+const UI_VERSION = '2026.03.25 11:26';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -391,20 +391,33 @@ function updatePortClaimUI(n) {
       baudSel.disabled = false; bcin.disabled = false; bcout.disabled = false; label.disabled = false;
     } else if (claim.type === 'kyber') {
       claimNote.textContent = 'Managed by Kyber (Maestro port)';
-      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
+      label.value = config.serialPorts[p - 1]?.label ?? '';
     } else if (claim.type === 'kyber-marc') {
-      claimNote.textContent = 'Managed by Kyber (Marcuino port)';
-      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
+      claimNote.textContent = 'Kyber Marcduino port — baud locked at 9,600';
+      baudSel.disabled = true; bcin.disabled = false; bcout.disabled = false; label.disabled = true;
     } else if (claim.type === 'maestro') {
       claimNote.textContent = `Managed by Maestro ID ${claim.id}`;
-      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
+      label.value = config.serialPorts[p - 1]?.label ?? '';
     } else if (claim.type === 'pwm') {
       claimNote.textContent = 'Managed by PWM';
-      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true;
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
       label.disabled = false; // PWM: label still editable
     } else if (claim.type === 'mp3') {
       claimNote.textContent = 'Managed by MP3 Trigger';
-      baudSel.disabled = true; bcin.disabled = true; bcout.disabled = true; label.disabled = true;
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
     }
   }
 }
@@ -424,9 +437,17 @@ function onKyberChange(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'kyber' || port.claimedBy?.type === 'kyber-marc')
-      port.claimedBy = null;
+  // Clear kyber/kyber-marc claims and their auto-set labels
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    const sp = config.serialPorts[i];
+    if (sp.claimedBy?.type === 'kyber' || sp.claimedBy?.type === 'kyber-marc') {
+      sp.claimedBy = null;
+      if (sp.label === 'Kyber Maestro' || sp.label === 'Kyber Marcuino') {
+        sp.label = '';
+        const labelEl = document.getElementById(`b${n}-s${i + 1}-label`);
+        if (labelEl) labelEl.value = '';
+      }
+    }
   }
 
   config.kyber.mode = mode;
@@ -443,8 +464,12 @@ function onKyberChange(n) {
     if (portVal >= 1 && portVal <= 5) {
       config.kyber.port = portVal;
       config.serialPorts[portVal - 1].claimedBy = { type: 'kyber' };
-      // Sync kyber baud dropdown to the selected port's current baud
-      const kyberBaud = config.serialPorts[portVal - 1].baud ?? config.kyber.baud ?? 115200;
+      // Set the label so the serial-port row shows what has claimed it
+      config.serialPorts[portVal - 1].label = 'Kyber Maestro';
+      const labelEl = document.getElementById(`b${n}-s${portVal}-label`);
+      if (labelEl) labelEl.value = 'Kyber Maestro';
+      // Default kyber baud to 115200; preserve any previously configured value
+      const kyberBaud = config.kyber.baud ?? 115200;
       const baudSel = document.getElementById(`b${n}-kyber-baud`);
       if (baudSel) baudSel.value = kyberBaud;
     }
@@ -468,16 +493,28 @@ function onKyberPortChange(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'kyber') port.claimedBy = null;
+  // Clear old kyber claim and its auto-set label
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    if (config.serialPorts[i].claimedBy?.type === 'kyber') {
+      config.serialPorts[i].claimedBy = null;
+      if (config.serialPorts[i].label === 'Kyber Maestro') {
+        config.serialPorts[i].label = '';
+        const labelEl = document.getElementById(`b${n}-s${i + 1}-label`);
+        if (labelEl) labelEl.value = '';
+      }
+    }
   }
 
   const portVal = parseInt(document.getElementById(`b${n}-kyber-port`)?.value);
   if (portVal >= 1 && portVal <= 5) {
     config.kyber.port = portVal;
     config.serialPorts[portVal - 1].claimedBy = { type: 'kyber' };
-    // Sync kyber baud dropdown to the new port's current baud
-    const kyberBaud = config.serialPorts[portVal - 1].baud ?? config.kyber.baud ?? 115200;
+    // Set the label so the serial-port row shows what has claimed it
+    config.serialPorts[portVal - 1].label = 'Kyber Maestro';
+    const labelEl = document.getElementById(`b${n}-s${portVal}-label`);
+    if (labelEl) labelEl.value = 'Kyber Maestro';
+    // Default kyber baud to 115200; preserve any previously configured value
+    const kyberBaud = config.kyber.baud ?? 115200;
     const baudSel = document.getElementById(`b${n}-kyber-baud`);
     if (baudSel) baudSel.value = kyberBaud;
   }
@@ -732,7 +769,7 @@ function onETMChecksumToggle() {
 }
 
 function onGeneralETMChange() {
-  const timeout = parseInt(document.getElementById('g-etm-timeout')?.value) || 30000;
+  const timeout = parseInt(document.getElementById('g-etm-timeout')?.value) || 500;
   const hb      = parseInt(document.getElementById('g-etm-hb')?.value)      || 10;
   const miss    = parseInt(document.getElementById('g-etm-miss')?.value)     || 3;
   const boot    = parseInt(document.getElementById('g-etm-boot')?.value)     || 2;
@@ -785,7 +822,7 @@ function extractGeneralFields(config) {
     funcChar:       config.funcChar                ?? '?',
     cmdChar:        config.cmdChar                 ?? ';',
     etmEnabled:     config.etm?.enabled            ?? false,
-    etmTimeout:     config.etm?.timeoutMs          ?? 30000,
+    etmTimeout:     config.etm?.timeoutMs          ?? 500,
     etmHb:          config.etm?.heartbeatSec       ?? 10,
     etmMiss:        config.etm?.missedHeartbeats   ?? 3,
     etmBoot:        config.etm?.bootHeartbeatSec   ?? 2,
@@ -1286,10 +1323,10 @@ function onMaestroPortChange(n, rowId) {
     const port    = parseInt(portSel.value) || 0;
     const maxBaud = port >= 3 ? 57600 : Infinity;
 
-    // Auto-fill baud from the serial port's configured value so the user
-    // doesn't have to manually match them.  Falls back to current selection.
-    const portBaud = port ? (boardConfigs[n]?.serialPorts?.[port - 1]?.baud ?? null) : null;
-    const curBaud  = portBaud ?? parseInt(baudSel.value) ?? 57600;
+    // Preserve the current maestro baud — clamp to the new port's max if needed.
+    // Do NOT read from the serial port's stored baud; the maestro baud is authoritative
+    // and syncMaestrosToConfig will push it back to the serial port.
+    const curBaud = parseInt(baudSel.value) || 57600;
 
     baudSel.innerHTML = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
       `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`
@@ -1314,9 +1351,17 @@ function syncMaestrosToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  // Release all maestro claims
-  for (const sp of config.serialPorts) {
-    if (sp.claimedBy?.type === 'maestro') sp.claimedBy = null;
+  // Release all maestro claims and clear their auto-set labels
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    const sp = config.serialPorts[i];
+    if (sp.claimedBy?.type === 'maestro') {
+      sp.claimedBy = null;
+      if (/^Maestro \d+$/.test(sp.label ?? '')) {
+        sp.label = '';
+        const labelEl = document.getElementById(`b${n}-s${i + 1}-label`);
+        if (labelEl) labelEl.value = '';
+      }
+    }
   }
 
   config.maestros = [];
@@ -1330,6 +1375,15 @@ function syncMaestrosToConfig(n) {
     if (id && port) {
       config.maestros.push({ id, port, baud });
       config.serialPorts[port - 1].claimedBy = { type: 'maestro', id };
+      // Set a label so the serial-port row shows what has claimed it
+      config.serialPorts[port - 1].label = `Maestro ${id}`;
+      const maestroLabelEl = document.getElementById(`b${n}-s${port}-label`);
+      if (maestroLabelEl) maestroLabelEl.value = `Maestro ${id}`;
+      // Maestro baud is authoritative — sync it back to the serial port so the
+      // serial interface section and generated ?BAUD command stay consistent.
+      config.serialPorts[port - 1].baud = baud;
+      const serialBaudEl = document.getElementById(`b${n}-s${port}-baud`);
+      if (serialBaudEl) serialBaudEl.value = baud;
     }
   });
 
@@ -5180,7 +5234,7 @@ function wizardDefaultState() {
     maestroEnabled: null,   // null = not yet chosen; true/false = explicit Yes/No
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
-    etmConfig:     { timeoutMs:30000, heartbeatSec:10, missedHeartbeats:3,
+    etmConfig:     { timeoutMs:500, heartbeatSec:10, missedHeartbeats:3,
                      bootHeartbeatSec:2, messageCount:20, messageDelayMs:100,
                      checksumEnabled:true },
     needsFirmware:    false,
@@ -6196,7 +6250,7 @@ function wizardSaveStep(key) {
     case 'etm':
       if (get('wiz-etm-enabled')) wizardState.etmEnabled = get('wiz-etm-enabled').checked;
       if (wizardState.etmEnabled) {
-        wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 30000);
+        wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 500);
         wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value      ?? 10);
         wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 3);
         wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 2);

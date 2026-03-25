@@ -69,7 +69,7 @@ function createDefaultBoardConfig() {
     // ETM
     etm: {
       enabled:          true,
-      timeoutMs:        30000,
+      timeoutMs:        500,
       heartbeatSec:     10,
       missedHeartbeats: 3,
       bootHeartbeatSec: 2,
@@ -112,7 +112,7 @@ function createDefaultSystemConfig() {
       cmdChar:        ';',
       etm: {
         enabled:          true,
-        timeoutMs:        30000,
+        timeoutMs:        500,
         heartbeatSec:     10,
         missedHeartbeats: 3,
         bootHeartbeatSec: 2,
@@ -446,7 +446,7 @@ function parseToken(body, config) {
       switch (subCmd) {
         case 'ON':      config.etm.enabled          = true;                          break;
         case 'OFF':     config.etm.enabled          = false;                         break;
-        case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 30000;  break;
+        case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 500;    break;
         case 'HB':      config.etm.heartbeatSec      = parseInt(parts[2]) || 10;     break;
         case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 3;      break;
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;

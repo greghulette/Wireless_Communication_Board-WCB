@@ -1,0 +1,45 @@
+*** WCB2 — Config 02: Full Feature Setup
+*** Hardware : v2.4  (HW=24)
+*** Test Plan: Phases 5 (Maestro), 9 (PWM passthrough),
+***            11 (backup/restore), 14 (edge cases)
+***
+*** Includes everything in base config PLUS:
+***   - Maestro ID1 LOCAL on S1 (57600 baud)
+***   - Maestro ID2 LOCAL on S2 (57600 baud)
+***   - Maestro ID3 REMOTE on W3S1 (for routing ;M3x from WCB2)
+***   - PWM mapping: S3 input -> S4 local output + W3S5 remote output
+***     NOTE: Configuring Maestro on S1 and S2 disables broadcast I/O
+***           on those ports automatically. This is expected.
+***
+*** HOW TO USE
+***   1. Open WCB2 terminal in the wizard
+***   2. Copy the PASTE LINE below (everything after "PASTE:")
+***   3. Paste into the terminal and press Enter
+***   4. Run ?config and ?MAESTRO,LIST and ?MAP,PWM,LIST to verify
+
+*** --- Annotated commands for reference ---
+***
+*** Identity + ETM + Baud rates + Labels (same as base)
+***   ?HW,24 ... ?BCAST,RESET  (see WCB2_01_base.txt for detail)
+***
+*** Clear existing configs before applying new ones
+***   ?MAP,CLEAR,ALL
+***   ?MAESTRO,CLEAR,ALL
+***
+*** Maestro configuration
+***   ?MAESTRO,M1:W2S1:57600   M1 LOCAL — WCB2 S1, 57600 baud
+***                             Sends binary Pololu protocol to S1
+***   ?MAESTRO,M2:W2S2:57600   M2 LOCAL — WCB2 S2, 57600 baud
+***                             Sends binary Pololu protocol to S2
+***   ?MAESTRO,M3:W3S1:57600   M3 REMOTE — routes ;M3x to WCB3 S1 via ESP-NOW
+***
+*** PWM mapping
+***   ?MAP,PWM,S3,S4,W3S5      S3 is the PWM INPUT (from Maestro ID2 Channel 1)
+***                             S4 is a LOCAL PWM OUTPUT (Servo 3)
+***                             W3S5 is a REMOTE PWM OUTPUT (WCB3 S5, Servo 4)
+***                             WCB2 auto-transmits pulse width changes to WCB3
+***
+*** Print config to verify
+***   ?config
+
+PASTE: ?HW,24^?WCB,2^?WCBQ,3^?MAC,2,D3^?MAC,3,3B^?EPASS,Jq6SECq8dsNRmq^?ETM,ON^?ETM,HB,10^?ETM,MISS,3^?ETM,TIMEOUT,500^?ETM,CHKSM,ON^?BAUD,S1,57600^?BAUD,S2,57600^?BAUD,S3,9600^?BAUD,S4,9600^?BAUD,S5,9600^?LABEL,S1,Maestro ID1^?LABEL,S2,Maestro ID2^?LABEL,S3,PWM Input^?LABEL,S4,Servo 3 PWM Out^?LABEL,S5,Servo Controller^?BCAST,RESET^?MAP,CLEAR,ALL^?MAESTRO,CLEAR,ALL^?MAESTRO,M1:W2S1:57600^?MAESTRO,M2:W2S2:57600^?MAESTRO,M3:W3S1:57600^?MAP,PWM,S3,S4,W3S5^?config

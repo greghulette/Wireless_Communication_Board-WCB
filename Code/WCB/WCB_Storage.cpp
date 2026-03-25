@@ -165,19 +165,6 @@ void loadBaudRatesFromPreferences() {
     preferences.end();
 }
 
-void recallBaudRatefromSerial(int ser){
-  preferences.begin("serial_baud", true);
-  String key = "Serial" + String(ser);
-  storedBaudRate[ser] = preferences.getInt(key.c_str(), storedBaudRate[ser]);
-  preferences.end();
-}
-
-void setBaudRateForSerial(int ser){
-  preferences.begin("serial_baud", false);
-  String key = "Serial" + String(ser);
-  storedBaudRate[ser] = preferences.putInt(key.c_str(), storedBaudRate[ser]);
-  preferences.end();
-}
 
 
 // Save baud rates to preferences

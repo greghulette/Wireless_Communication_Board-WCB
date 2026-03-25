@@ -1,0 +1,48 @@
+*** WCB3 — Config 02: Full Feature Setup
+*** Hardware : v2.3  (HW=23)
+*** Test Plan: Phases 5 (Maestro), 8 (raw serial mapping),
+***            9 (PWM output), 11 (backup/restore), 14 (edge cases)
+***
+*** Includes everything in base config PLUS:
+***   - Maestro ID3 LOCAL on S1 (57600 baud)
+***   - Maestro ID1 REMOTE on W2S1 (for routing ;M1x from WCB3)
+***   - Maestro ID2 REMOTE on W2S2 (for routing ;M2x from WCB3)
+***   - Raw serial mapping: S2 <-> W1S5 (bidirectional)
+***     Marcduino Clone on S2 sends MP3 commands -> raw mapped to WCB1 S5 MP3 Trigger
+***   - PWM output S5 designated (receives PWM from WCB2 via ESP-NOW, outputs to Servo 4)
+***
+*** HOW TO USE
+***   1. Open WCB3 terminal in the wizard
+***   2. Copy the PASTE LINE below (everything after "PASTE:")
+***   3. Paste into the terminal and press Enter
+***   4. Run ?config and ?MAESTRO,LIST and ?MAP,SERIAL,LIST and ?MAP,PWM,LIST to verify
+
+*** --- Annotated commands for reference ---
+***
+*** Identity + ETM + Baud rates + Labels (same as base)
+***   ?HW,23 ... ?BCAST,RESET  (see WCB3_01_base.txt for detail)
+***
+*** Clear existing configs before applying new ones
+***   ?MAP,CLEAR,ALL
+***   ?MAESTRO,CLEAR,ALL
+***
+*** Maestro configuration
+***   ?MAESTRO,M3:W3S1:57600   M3 LOCAL — WCB3 S1, 57600 baud
+***                             Sends binary Pololu protocol to S1
+***   ?MAESTRO,M1:W2S1:57600   M1 REMOTE — routes ;M1x to WCB2 S1 via ESP-NOW
+***   ?MAESTRO,M2:W2S2:57600   M2 REMOTE — routes ;M2x to WCB2 S2 via ESP-NOW
+***
+*** Raw serial mapping S2 <-> W1S5  (bidirectional)
+***   ?MAP,SERIAL,S2,R,W1S5    Data from Marcduino Clone on S2 -> WCB1 S5 (MP3 Trigger)
+***                             Data from WCB1 S5 (MP3 Trigger responses) -> S2
+***   NOTE: RAW mode (R) passes binary bytes unmodified — required for MP3 protocol.
+***
+*** PWM output port
+***   ?MAP,PWM,OUT,S5          Designate S5 as PWM output only.
+***                             WCB3 receives pulse width data from WCB2 via ESP-NOW
+***                             and generates the corresponding PWM pulse on S5 (Servo 4).
+***
+*** Print config to verify
+***   ?config
+
+PASTE: ?HW,23^?WCB,3^?WCBQ,3^?MAC,2,D3^?MAC,3,3B^?EPASS,Jq6SECq8dsNRmq^?ETM,ON^?ETM,HB,10^?ETM,MISS,3^?ETM,TIMEOUT,500^?ETM,CHKSM,ON^?BAUD,S1,57600^?BAUD,S2,9600^?BAUD,S3,9600^?BAUD,S4,9600^?BAUD,S5,9600^?LABEL,S1,Maestro ID3^?LABEL,S2,Marcduino MP3 Source^?LABEL,S3,Marcduino Serial^?LABEL,CLEAR,S4^?LABEL,S5,Servo 4 PWM Out^?BCAST,RESET^?MAP,CLEAR,ALL^?MAESTRO,CLEAR,ALL^?MAESTRO,M3:W3S1:57600^?MAESTRO,M1:W2S1:57600^?MAESTRO,M2:W2S2:57600^?MAP,SERIAL,S2,R,W1S5^?MAP,PWM,OUT,S5^?config

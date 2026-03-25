@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_231142RMAR2026                                    *****////
+///*****                                          Version 6.0_251126RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -151,7 +151,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_231142RMAR2026";
+String SoftwareVersion = "6.0_251126RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -334,14 +334,6 @@ unsigned long baudRates[5] = {
   SERIAL5_DEFAULT_BAUD_RATE
 };
 
-int storedBaudRate[6] = {
-  0,
-  SERIAL1_DEFAULT_BAUD_RATE,
-  SERIAL2_DEFAULT_BAUD_RATE,
-  SERIAL3_DEFAULT_BAUD_RATE,
-  SERIAL4_DEFAULT_BAUD_RATE,
-  SERIAL5_DEFAULT_BAUD_RATE
-};
 
 extern bool serialMonitorEnabled[5];
 
@@ -2946,10 +2938,6 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "MAESTRO") {
         if (argsUpper == "LIST") {
             printMaestroSettings();
-        } else if (argsUpper == "ENABLE") {
-            enableMaestroSerialBaudRate();
-        } else if (argsUpper == "DISABLE") {
-            disableMaestroSerialBaudRate();
         } else if (argsUpper == "CLEAR,ALL") {
             clearAllMaestroConfigs();
         } else if (argsUpper.startsWith("CLEAR,")) {
@@ -3174,10 +3162,6 @@ void processLocalCommand(const String &message) {
         updateWCBNumber(message);
     } else if (message.startsWith("epass") || message.startsWith("EPASS")) {
         updateESPNowPassword(message);
-    } else if (message == "maestro_enable" || message == "MAESTRO_ENABLE") {
-        enableMaestroSerialBaudRate();
-    } else if (message == "maestro_disable" || message == "MAESTRO_DISABLE") {
-        disableMaestroSerialBaudRate();
     } else if (message == "maestro_list" || message == "MAESTRO_LIST") {
         printMaestroSettings();
     } else if (message.startsWith("maestro_clear") || message.startsWith("MAESTRO_CLEAR")) {
@@ -3638,18 +3622,6 @@ void updateESPNowPassword(const String &message){
   } else {
     Serial.println("Invalid ESP-NOW password length. Must be between 1 and 39 characters.");
   }
-}
-
-void enableMaestroSerialBaudRate(){
-    recallBaudRatefromSerial(1);  
-    // Print the saved baud rate and then update to Maestro-compatible baud
-  Serial.printf("Saved original baud rate of %d for Serial 1, updating to 57600 to support Maestro\n", storedBaudRate[1]);
-    updateBaudRate(1, 57600);
-}
-
-void disableMaestroSerialBaudRate(){
-    updateBaudRate(1, storedBaudRate[1]);    
-    Serial.printf("Saved original baud rate of %d for Serial 1\n", storedBaudRate[1]);
 }
 
 void updateHWVersion(const String &message) {
