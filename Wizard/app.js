@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.25 11:26';
+const UI_VERSION = '2026.03.25 17:51';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1805,23 +1805,56 @@ async function saveMappingRow(rowId, n) {
     if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
     updateBoardStatusBadge(n, 'configured');
 
-    // Bidir: add reverse mapping to each remote destination board's config
+    // Bidir: push reverse mapping directly to each remote destination board if online
     if (bidir && type === 'Serial') {
       for (const dest of destinations) {
         if (dest.wcbNumber > 0 && boardConfigs[dest.wcbNumber]) {
-          const destCfg = boardConfigs[dest.wcbNumber];
+          const destCfg  = boardConfigs[dest.wcbNumber];
+          const destWcb  = dest.wcbNumber;
+          const srcWcb   = config.wcbNumber || n;
           const alreadyExists = destCfg.mappings.some(m =>
             m.type === 'Serial' && m.sourcePort === dest.port &&
-            m.destinations.some(d => d.wcbNumber === (config.wcbNumber || n) && d.port === src)
+            m.destinations.some(d => d.wcbNumber === srcWcb && d.port === src)
           );
           if (!alreadyExists) {
             destCfg.mappings.push({
               type: 'Serial', sourcePort: dest.port, rawMode: raw, bidir: false,
-              destinations: [{ wcbNumber: config.wcbNumber || n, port: src }]
+              destinations: [{ wcbNumber: srcWcb, port: src }]
             });
-            populateMappingsFromConfig(dest.wcbNumber, destCfg);
-            updateBoardStatusBadge(dest.wcbNumber, 'unsaved');
-            showToast(`Reverse mapping added to WCB ${dest.wcbNumber} — push to apply`, 'info', 4000);
+            populateMappingsFromConfig(destWcb, destCfg);
+          }
+
+          // Build the reverse command using the destination board's funcChar
+          const destLfi   = destCfg.funcChar || '?';
+          let   reverseCmd = `${destLfi}MAP,SERIAL,S${dest.port}`;
+          if (raw) reverseCmd += ',R';
+          reverseCmd += `,W${srcWcb}S${src}`;
+
+          // Send to the destination board if reachable
+          const destRelayN = remoteRelayForBoard[destWcb];
+          const destConn   = boardConnections[destWcb];
+          try {
+            if (destRelayN && boardConnections[destRelayN]?.isConnected()) {
+              const sid = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+              const mgmt = `?MGMT,FRAG,${destWcb},${sid},0,1,${reverseCmd}`;
+              await boardConnections[destRelayN].send(mgmt + '\r');
+              termLog(destRelayN, mgmt, 'in');
+              if (boardBaselines[destWcb]) boardBaselines[destWcb].mappings = JSON.parse(JSON.stringify(destCfg.mappings));
+              updateBoardStatusBadge(destWcb, 'configured');
+              showToast(`Reverse mapping pushed to WCB ${destWcb}`, 'success');
+            } else if (destConn?.isConnected()) {
+              await destConn.send(reverseCmd + '\r');
+              termLog(destWcb, reverseCmd, 'in');
+              if (boardBaselines[destWcb]) boardBaselines[destWcb].mappings = JSON.parse(JSON.stringify(destCfg.mappings));
+              updateBoardStatusBadge(destWcb, 'configured');
+              showToast(`Reverse mapping pushed to WCB ${destWcb}`, 'success');
+            } else {
+              updateBoardStatusBadge(destWcb, 'unsaved');
+              showToast(`Reverse mapping saved locally for WCB ${destWcb} — push to apply`, 'info', 4000);
+            }
+          } catch (e) {
+            updateBoardStatusBadge(destWcb, 'unsaved');
+            showToast(`Reverse mapping push to WCB ${destWcb} failed: ${e.message}`, 'error');
           }
         }
       }
