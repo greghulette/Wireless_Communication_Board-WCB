@@ -164,31 +164,28 @@ function parseBackupString(rawOutput) {
   const config = createDefaultBoardConfig();
   config.source = 'board';
 
-  // Extract the factory reset command string from the raw output.
-  // It's the line after "=== For Factory Reset/Fresh Boards ===" header.
-  // If we can't find it, try to parse the whole thing as a raw command string.
-  let commandString = extractFactoryResetLine(rawOutput);
-  if (!commandString) {
-    // Maybe caller passed just a raw command string directly
-    commandString = rawOutput.trim();
+  // ── Token extraction strategy ─────────────────────────────────────────────
+  // Board backups (identified by the "WCB Configuration Backup" header) print
+  // each command on its own line ABOVE the chained sections.  Those per-line
+  // commands are trivial to parse regardless of configured funcChar/delimiter.
+  //
+  // The factory-reset chained line is intentionally designed to dynamically
+  // switch its own delimiter/funcChar mid-stream (so pasting it into a
+  // terminal works), which makes static splitting unreliable.
+  //
+  // File imports use the stable ?/^ format produced by buildSystemFile and are
+  // still parsed via the chained-line path.
+  let tokens;
+  if (rawOutput.includes('WCB Configuration Backup')) {
+    tokens = extractIndividualCommandLines(rawOutput);
+  } else {
+    tokens = extractChainedTokens(rawOutput);
   }
 
-  if (!commandString) {
-    console.warn('[WCB Parser] No command string found in backup output');
+  if (!tokens.length) {
+    console.warn('[WCB Parser] No command tokens found in backup output');
     return config;
   }
-
-  // Split on "^?" boundaries rather than every "^".
-  // ?SEQ,SAVE values use "^" internally to chain device commands, so a naive
-  // split('^') would tear the value apart.  Every real WCB command boundary is
-  // "^?" (delimiter + funcChar), while the in-sequence "^" chars are followed
-  // by device commands that never start with "?".
-  const rawParts = commandString.split('^?');
-  const tokens   = rawParts.map((part, i) => {
-    const trimmed = part.trim();
-    if (!trimmed) return null;
-    return i === 0 ? trimmed : '?' + trimmed; // restore the '?' stripped by the split
-  }).filter(Boolean);
 
   // Pre-pass: extract WCB number before the main parse loop so that MAESTRO
   // token routing (wcb === config.wcbNumber) works correctly even when ?MAESTRO
@@ -229,6 +226,75 @@ function parseBackupString(rawOutput) {
   evaluatePortClaims(config);
 
   return config;
+}
+
+// ─────────────────────────────────────────────
+// Board-backup path: parse the per-line commands the firmware prints above the
+// chained sections.  Each line is a single command with any funcChar prefix,
+// so there is no delimiter-switching ambiguity.
+// Returns tokens normalised to '?COMMAND,...' strings.
+// ─────────────────────────────────────────────
+function extractIndividualCommandLines(rawOutput) {
+  const lines    = rawOutput.split(/\r?\n/);
+  const tokens   = [];
+
+  // Detect the board's configured funcChar.
+  // The firmware prints e.g. ".FUNCCHAR,." when funcChar is non-default.
+  // Match: any single character, then "FUNCCHAR,", then the new char.
+  let funcChar = '?';
+  for (const line of lines) {
+    const m = line.trim().match(/^.FUNCCHAR,(.)/i);
+    if (m?.[1]) { funcChar = m[1]; break; }
+  }
+
+  // Collect individual command lines that appear before the chained sections.
+  // The firmware prints one "Serial.println(lfi + cmd)" per command, then the
+  // "=== For Configured Boards ===" header marks the start of the chained block.
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Stop when the chained section begins
+    if (trimmed.includes('=== For Configured') || trimmed.includes('=== For Factory')) break;
+
+    // Skip header/comment/separator lines
+    if (trimmed.startsWith('***')) continue;
+    if (trimmed.startsWith('---')) continue;
+    if (/^[-=*]+$/.test(trimmed)) continue;
+
+    // Accept lines that start with '?' or the detected funcChar
+    let body = null;
+    if (trimmed.startsWith('?'))               body = trimmed.slice(1);
+    else if (trimmed.startsWith(funcChar))     body = trimmed.slice(1);
+
+    // Skip lines that start with a known word (non-command output like "WARNING:",
+    // "Booting", "ETM:", etc.) — they won't have a single-char funcChar prefix
+    if (body !== null && body.length > 0) {
+      tokens.push('?' + body); // normalise prefix to '?' for parseToken
+    }
+  }
+
+  return tokens;
+}
+
+// ─────────────────────────────────────────────
+// File-import path: split the stable ?/^ chained string produced by
+// buildSystemFile (always written with outputFuncChar:'?' / outputDelim:'^').
+// ─────────────────────────────────────────────
+function extractChainedTokens(rawOutput) {
+  let commandString = extractFactoryResetLine(rawOutput);
+  if (!commandString) commandString = rawOutput.trim();
+  if (!commandString) return [];
+
+  // Split on "^?" boundaries.  ?SEQ,SAVE values embed "^" internally to chain
+  // device commands, so we split on the two-char boundary "^?" to avoid tearing
+  // saved-sequence values apart.
+  const rawParts = commandString.split('^?');
+  return rawParts.map((part, i) => {
+    const trimmed = part.trim();
+    if (!trimmed) return null;
+    return i === 0 ? trimmed : '?' + trimmed; // restore '?' consumed by split
+  }).filter(Boolean);
 }
 
 // ─────────────────────────────────────────────

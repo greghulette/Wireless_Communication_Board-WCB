@@ -30,6 +30,8 @@ let systemConfig   = null;
 let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
+let boardBootChars   = {};      // { boardIndex: {funcChar,delimiter,cmdChar} } — sniffed from boot messages
+                                //   before a full pull has succeeded; used as fallback for backup requests
 let boardFlashMode          = {};   // { boardIndex: 'configure'|'update'|'flash'|'factory' }
 const _boardFlashing        = {};   // { boardIndex: true } — set while esptool flash is in progress
 let boardAutoPushAfterFlash = {};   // always true — kept for compatibility, always auto-push after flash/erase
@@ -52,7 +54,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.26 11:28';
+const UI_VERSION = '2026.03.26 15:51';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2452,29 +2454,39 @@ class BoardConnection {
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
 
-              // ── Boot-message char sniffer ─────────────────────────────────
-              // The firmware prints its configured funcChar, delimiter, and
-              // cmdChar during every boot sequence.  Capture those lines so we
-              // can use the correct prefix for ?backup / ?reboot even before a
-              // pull has succeeded — this breaks the chicken-and-egg where
-              // the board ignores ?backup because it uses a non-default funcChar.
+              // ── Boot-message sniffer ──────────────────────────────────────
+              // The firmware prints configured chars and software version during
+              // every boot.  Capture them so we have the correct funcChar for
+              // backup/reboot commands before a full pull has succeeded.
               // Note: firmware has a typo — "Delimeter" (one 'm').
               const n = this.boardIndex;
               let charDetected = false;
               const funcMatch  = line.match(/^Local Function Identifier:\s*(\S)/);
               const delimMatch = line.match(/^Delimeter Character:\s*(\S)/);
               const cmdMatch   = line.match(/^Command Character:\s*(\S)/);
-              if (funcMatch && boardConfigs[n]) {
-                boardConfigs[n].funcChar  = funcMatch[1];
+              const verMatch   = line.match(/^Software Version:\s*(\S+)/);
+              if (funcMatch) {
+                boardBootChars[n] ??= {};
+                boardBootChars[n].funcChar  = funcMatch[1];
+                if (boardConfigs[n]) boardConfigs[n].funcChar  = funcMatch[1];
                 charDetected = true;
               }
-              if (delimMatch && boardConfigs[n]) {
-                boardConfigs[n].delimiter = delimMatch[1];
+              if (delimMatch) {
+                boardBootChars[n] ??= {};
+                boardBootChars[n].delimiter = delimMatch[1];
+                if (boardConfigs[n]) boardConfigs[n].delimiter = delimMatch[1];
                 charDetected = true;
               }
-              if (cmdMatch && boardConfigs[n]) {
-                boardConfigs[n].cmdChar   = cmdMatch[1];
+              if (cmdMatch) {
+                boardBootChars[n] ??= {};
+                boardBootChars[n].cmdChar   = cmdMatch[1];
+                if (boardConfigs[n]) boardConfigs[n].cmdChar   = cmdMatch[1];
                 charDetected = true;
+              }
+              if (verMatch) {
+                const ver = verMatch[1].trim();
+                if (boardConfigs[n]) boardConfigs[n].fwVersion = ver;
+                updateBoardSwVersionDisplay(n);
               }
               if (charDetected) {
                 // Also keep the general DOM fields and systemConfig in sync so
@@ -3372,8 +3384,16 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
       termLog(n, `⏳ Still waiting… (${elapsed}s, probe ${sendAttempt}) connected=${connected} reader=${hasReader}`, 'sys');
 
       if (connected && hasReader) {
-        try { await conn.send('?backup\r'); }
-        catch (e) { termLog(n, `⚠ ?backup send failed: ${e?.message ?? e}`, 'sys'); }
+        // Always try the fixed bootstrap command first — works regardless of the
+        // board's configured funcChar (new firmware).  Then also send the
+        // funcChar-prefixed form as a fallback for pre-bootstrap firmware.
+        const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
+        try {
+          await conn.send('WCB_WEBTOOL_CONFIG_PULL\r');
+          await sleep(200);
+          if (!done) await conn.send(`${pullFuncChar}backup\r`);
+        }
+        catch (e) { termLog(n, `⚠ backup probe send failed: ${e?.message ?? e}`, 'sys'); }
       }
 
       tickTimer = setTimeout(tick, 10000);
@@ -3406,7 +3426,7 @@ async function boardPull(n) {
   termLog(n, BOOTSTRAP_CMD, 'in');
   let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000);
   if (!raw.includes('End of Backup')) {
-    const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || '?';
+    const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
     termLog(n, `${pullFuncChar}backup`, 'in');
     raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
   }
@@ -3496,7 +3516,9 @@ async function fetchBoardVersion(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) return;
   try {
-    const raw   = await conn.sendAndCollect('?version', 3000, 'End of Version');
+    // Use the board's known funcChar — ?version is ignored if funcChar ≠ '?'
+    const fc    = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
+    const raw   = await conn.sendAndCollect(`${fc}version`, 3000, 'End of Version');
     const match = raw.match(/Software Version:\s*(\S+)/i);
     if (match) {
       const ver = match[1].trim();
