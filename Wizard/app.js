@@ -52,7 +52,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.25 17:51';
+const UI_VERSION = '2026.03.26 11:28';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -567,18 +567,17 @@ function updateKyberMarcPortDropdown(n) {
 
   const config      = boardConfigs[n];
   const currentPort = config?.kyber?.marcduinoPort;
+  const kyberPort   = config?.kyber?.port;  // the only port the marc port cannot share
 
   marcSel.innerHTML = '<option value="0">— None —</option>';
   for (let p = 1; p <= 5; p++) {
-    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    // Exclude ports claimed by anything except the Kyber Marcuino port itself
-    if (!claim || claim.type === 'kyber-marc') {
-      const opt = document.createElement('option');
-      opt.value = p;
-      opt.textContent = `Serial ${p}`;
-      if (p === currentPort) opt.selected = true;
-      marcSel.appendChild(opt);
-    }
+    // Only exclude the Kyber Maestro port — any other port is fair game
+    if (p === kyberPort) continue;
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = `Serial ${p}`;
+    if (p === currentPort) opt.selected = true;
+    marcSel.appendChild(opt);
   }
 }
 
@@ -2452,6 +2451,48 @@ class BoardConnection {
             this._readBuffer = this._readBuffer.slice(nl + 1);
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
+
+              // ── Boot-message char sniffer ─────────────────────────────────
+              // The firmware prints its configured funcChar, delimiter, and
+              // cmdChar during every boot sequence.  Capture those lines so we
+              // can use the correct prefix for ?backup / ?reboot even before a
+              // pull has succeeded — this breaks the chicken-and-egg where
+              // the board ignores ?backup because it uses a non-default funcChar.
+              // Note: firmware has a typo — "Delimeter" (one 'm').
+              const n = this.boardIndex;
+              let charDetected = false;
+              const funcMatch  = line.match(/^Local Function Identifier:\s*(\S)/);
+              const delimMatch = line.match(/^Delimeter Character:\s*(\S)/);
+              const cmdMatch   = line.match(/^Command Character:\s*(\S)/);
+              if (funcMatch && boardConfigs[n]) {
+                boardConfigs[n].funcChar  = funcMatch[1];
+                charDetected = true;
+              }
+              if (delimMatch && boardConfigs[n]) {
+                boardConfigs[n].delimiter = delimMatch[1];
+                charDetected = true;
+              }
+              if (cmdMatch && boardConfigs[n]) {
+                boardConfigs[n].cmdChar   = cmdMatch[1];
+                charDetected = true;
+              }
+              if (charDetected) {
+                // Also keep the general DOM fields and systemConfig in sync so
+                // subsequent buildCommandString calls use the right chars.
+                const fc = boardConfigs[n].funcChar;
+                const dl = boardConfigs[n].delimiter;
+                const cc = boardConfigs[n].cmdChar;
+                const gFC = document.getElementById('g-funcchar');
+                const gDL = document.getElementById('g-delimiter');
+                const gCC = document.getElementById('g-cmdchar');
+                let domChanged = false;
+                if (gFC && gFC.value !== fc) { gFC.value = fc; domChanged = true; }
+                if (gDL && gDL.value !== dl) { gDL.value = dl; domChanged = true; }
+                if (gCC && gCC.value !== cc) { gCC.value = cc; domChanged = true; }
+                // Propagate updated DOM values to systemConfig and all boardConfigs
+                if (domChanged) onGeneralCmdCharChange();
+              }
+
               // Route [TERM:N]<text> lines to the remote board's terminal pane
               // instead of the relay's own pane.
               const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
@@ -3352,11 +3393,26 @@ async function boardPull(n) {
 
   const btn = document.getElementById(`b${n}-btn-pull`);
   if (btn) { btn.disabled = true; btn.textContent = 'Pulling…'; }
-  termLog(n, '?backup', 'in');
+
+  // ── Two-tier backup request ───────────────────────────────────────────────
+  // Tier 1: fixed bootstrap command — recognised regardless of configured funcChar.
+  //   Firmware that supports it responds immediately with the full backup.
+  //   This breaks the chicken-and-egg where the board ignores ?backup because
+  //   its funcChar was changed to something non-default.
+  // Tier 2: funcChar-prefixed fallback — for firmware that pre-dates the
+  //   bootstrap command.  Uses the best-known funcChar from the config/baseline,
+  //   falling back to '?' (firmware default) for fresh boards.
+  const BOOTSTRAP_CMD = 'WCB_WEBTOOL_CONFIG_PULL';
+  termLog(n, BOOTSTRAP_CMD, 'in');
+  let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000);
+  if (!raw.includes('End of Backup')) {
+    const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || '?';
+    termLog(n, `${pullFuncChar}backup`, 'in');
+    raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
+  }
 
   let migrated = false;
   try {
-    const raw    = await conn.sendAndCollect('?backup', 8000);
     const config = WCBParser.parseBackupString(raw);
 
     // ── General settings: establish baseline on first pull, detect mismatches after ──
@@ -3827,6 +3883,35 @@ async function boardGo(n, opts = {}) {
       return;
     }
 
+    // ── Bootstrap: char-change commands must use the board's CURRENT funcChar ──
+    // buildCommandString prefixes every command with the TARGET funcChar.  If the
+    // user changed funcChar / delimiter / cmdChar, the board still speaks the OLD
+    // char when the push starts, so the prefixed commands are silently ignored.
+    // Fix: send DELIM / FUNCCHAR / CMDCHAR first using the current (baseline) char
+    // so the board switches over before the rest of the push arrives.
+    const curFuncChar = boardBaselines[n]?.funcChar  ?? '?';
+    const curDelim    = boardBaselines[n]?.delimiter ?? '^';
+    const curCmdChar  = boardBaselines[n]?.cmdChar   ?? ';';
+    if (config.delimiter !== curDelim || config.funcChar !== curFuncChar || config.cmdChar !== curCmdChar) {
+      const bootstrap = [];
+      // DELIM and CMDCHAR first — still use the current funcChar prefix.
+      if (config.delimiter !== curDelim)
+        bootstrap.push(`${curFuncChar}DELIM,${config.delimiter}`);
+      if (config.cmdChar !== curCmdChar)
+        bootstrap.push(`${curFuncChar}CMDCHAR,${config.cmdChar}`);
+      // FUNCCHAR must be LAST — the board switches its parser immediately on receipt,
+      // so any bootstrap command after it would need the NEW prefix, not the current one.
+      // Never send ?FUNCCHAR,? — '?' suffix is re-parsed as a new command invocation.
+      // The default is already '?', so only send when the target is something else.
+      if (config.funcChar !== curFuncChar && config.funcChar !== '?')
+        bootstrap.push(`${curFuncChar}FUNCCHAR,${config.funcChar}`);
+      for (const cmd of bootstrap) {
+        await conn.send(cmd + '\r');
+        termLog(n, cmd, 'in');
+        await sleep(80);
+      }
+    }
+
     // Split on delimiter+funcChar boundary (e.g. "^?") rather than every "^",
     // so that sequence values containing "^" (chained device commands) are not torn
     // apart.  Each split piece after the first needs the funcChar re-prepended.
@@ -3848,8 +3933,8 @@ async function boardGo(n, opts = {}) {
         // Flag before sending — prevents _startReading from racing if the board
         // disconnects before closeForReconnect() can set _connected=false.
         conn._rebootManaged = true;
-        await conn.send('?reboot\r');
-        termLog(n, '?reboot', 'in');
+        await conn.send(`${funcChar}reboot\r`);
+        termLog(n, `${funcChar}reboot`, 'in');
 
         updateBoardStatusBadge(n, 'configured');
         showToast(`WCB ${n} configured — rebooting…`, 'success');
@@ -4449,9 +4534,10 @@ async function boardGoAll() {
     const conn = boardConnections[n];
     if (!conn?.isConnected()) continue;
     await sleep(300);
+    const relayFuncChar = boardConfigs[n]?.funcChar || '?';
     conn._rebootManaged = true;   // prevent _startReading race on fast USB disconnect
-    await conn.send('?reboot\r');
-    termLog(n, '?reboot', 'in');
+    await conn.send(`${relayFuncChar}reboot\r`);
+    termLog(n, `${relayFuncChar}reboot`, 'in');
     showToast(`WCB ${n} rebooting…`, 'success');
     updateBoardStatusBadge(n, 'configured');
     await conn.closeForReconnect();
@@ -5761,7 +5847,7 @@ function wizardHTMLKyberConfig() {
     <div class="wizard-subsection-title">Kyber&#39;s Maestro Port</div>
     <div class="wizard-field-row">
       <label>Serial Port ${wizHint('Which serial port on that board the Kyber TX/RX wires are connected to from the Maestro port on the Kyber.')}</label>
-      <select id="wiz-kyber-port">${maestroPortOpts}</select>
+      <select id="wiz-kyber-port" onchange="onWizKyberPortChange()">${maestroPortOpts}</select>
     </div>
     <div class="wizard-field-row">
       <label>Baud Rate ${wizHint('Communication speed for the Kyber Maestro port. Use 115,200 for current Kyber firmware or 57,600 for older versions.')}</label>
@@ -5775,6 +5861,19 @@ function wizardHTMLKyberConfig() {
       <label>Serial Port ${wizHint('Which serial port on that board the Kyber Marcduino TX/RX wires are connected to. Broadcasts will be enabled on this port automatically.')}</label>
       <select id="wiz-kyber-marcduino-port">${marcPortOpts}</select>
     </div>`;
+}
+
+function onWizKyberPortChange() {
+  const kyberPort = parseInt(document.getElementById('wiz-kyber-port')?.value) || null;
+  const marcSel   = document.getElementById('wiz-kyber-marcduino-port');
+  if (!marcSel) return;
+  const currentMarc = parseInt(marcSel.value) || 0;
+  marcSel.innerHTML = '<option value="0">— None —</option>' +
+    Array.from({length: 5}, (_, p) => {
+      const pn = p + 1;
+      if (pn === kyberPort) return '';
+      return `<option value="${pn}" ${pn === currentMarc ? 'selected' : ''}>Serial ${pn}</option>`;
+    }).join('');
 }
 
 function wizardHTMLMaestro() {
@@ -5824,7 +5923,10 @@ function wizardHTMLMaestroConfig() {
     const marcPortForBoard  = isKyberBoard ? wizardState.kyberMarcduinoPort : null;
     const portOpts = Array.from({length: 5}, (_, p) => {
       const portNum = p + 1;
-      if (portNum === kyberPortForBoard || portNum === marcPortForBoard) return '';
+      if (portNum === kyberPortForBoard)
+        return `<option value="${portNum}" disabled>Serial ${portNum} — Kyber Maestro</option>`;
+      if (portNum === marcPortForBoard)
+        return `<option value="${portNum}" disabled>Serial ${portNum} — Kyber Marcduino</option>`;
       return `<option value="${portNum}" ${portNum === m.port ? 'selected' : ''}>Serial ${portNum}</option>`;
     }).join('');
     const idOpts = Array.from({length: 9}, (_, i) =>
@@ -5863,23 +5965,23 @@ function wizardHTMLEtm() {
     </div>
     <div class="wizard-etm-fields" id="wiz-etm-fields" style="${detailDisplay}">
       <div class="wizard-field-row">
-        <label>Timeout (ms) ${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 250 ms.')}</label>
+        <label>Timeout (ms)</label>${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 250 ms.')}
         <input id="wiz-etm-timeout" type="number" value="${etmConfig.timeoutMs}">
       </div>
       <div class="wizard-field-row">
-        <label>Heartbeat (sec) ${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 5 sec.')}</label>
+        <label>Heartbeat (sec)</label>${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 5 sec.')}
         <input id="wiz-etm-hb" type="number" value="${etmConfig.heartbeatSec}">
       </div>
       <div class="wizard-field-row">
-        <label>Missed before action ${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 3.')}</label>
+        <label>Missed before action</label>${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 3.')}
         <input id="wiz-etm-miss" type="number" value="${etmConfig.missedHeartbeats}">
       </div>
       <div class="wizard-field-row">
-        <label>Boot heartbeat (sec) ${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}</label>
+        <label>Boot heartbeat (sec)</label>${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}
         <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
       </div>
       <div class="wizard-field-row">
-        <label>Packet Checksum Verification ${wizHint('Adds a checksum to ETM packets so boards can detect and discard corrupted messages. Recommended — leave enabled unless debugging specific issues.')}</label>
+        <label>Packet Checksum Verification</label>${wizHint('Adds a checksum to ETM packets so boards can detect and discard corrupted messages. Recommended — leave enabled unless debugging specific issues.')}
         <input type="checkbox" id="wiz-etm-chksm" ${(etmConfig.checksumEnabled ?? true) ? 'checked' : ''}>
       </div>
     </div>`;
@@ -6187,7 +6289,10 @@ function wizardMaestroBoardChange(mi) {
 
   portSel.innerHTML = Array.from({length: 5}, (_, p) => {
     const portNum = p + 1;
-    if (portNum === kyberPortForBoard || portNum === marcPortForBoard) return '';
+    if (portNum === kyberPortForBoard)
+      return `<option value="${portNum}" disabled>Serial ${portNum} — Kyber Maestro</option>`;
+    if (portNum === marcPortForBoard)
+      return `<option value="${portNum}" disabled>Serial ${portNum} — Kyber Marcduino</option>`;
     return `<option value="${portNum}" ${portNum === curPort ? 'selected' : ''}>Serial ${portNum}</option>`;
   }).join('');
 
@@ -6202,7 +6307,15 @@ function wizardMaestroBoardChange(mi) {
 
 function wizardAddMaestro() {
   wizardSaveStep('maestro-config'); // preserve existing rows before adding
-  wizardState.maestros.push({ boardSlot: 1, id: wizardState.maestros.length + 1, port: 1, baud: 115200 });
+  // Default port: first port not reserved by Kyber on board slot 1
+  const isKyberBoard = wizardState.kyberEnabled && (wizardState.kyberBoard === 1);
+  const kyberPort    = isKyberBoard ? (wizardState.kyberPort          || null) : null;
+  const marcPort     = isKyberBoard ? (wizardState.kyberMarcduinoPort || null) : null;
+  let defaultPort = 1;
+  for (let p = 1; p <= 5; p++) {
+    if (p !== kyberPort && p !== marcPort) { defaultPort = p; break; }
+  }
+  wizardState.maestros.push({ boardSlot: 1, id: wizardState.maestros.length + 1, port: defaultPort, baud: 115200 });
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('maestro-config');
 }
 function wizardRemoveMaestro(mi) {

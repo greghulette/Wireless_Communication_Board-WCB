@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_251126RMAR2026                                    *****////
+///*****                                          Version 6.0_261128RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -151,7 +151,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_251126RMAR2026";
+String SoftwareVersion = "6.0_261128RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2541,10 +2541,18 @@ void forwardMaestroDataToRemoteKyber() {
 void handleSingleCommand(String cmd, int sourceID) {
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
 
+    // 0) Fixed webtool bootstrap command — always recognised regardless of
+    //    configured LocalFunctionIdentifier.  Allows the config web tool to
+    //    pull a backup even when it doesn't know the board's current funcChar.
+    if (cmd == "WCB_WEBTOOL_CONFIG_PULL") {
+        printBackupConfig();
+        return;
+    }
+
     // 1) LocalFunctionIdentifier-based commands (e.g., `?commands`)
     if (cmd.startsWith(String(LocalFunctionIdentifier))) {
         processLocalCommand(cmd.substring(1)); // Process local function
-    } 
+    }
     // 2) CommandCharacter-based commands (e.g., `;commands`)
     else if (cmd.startsWith(String(CommandCharacter))) {
         processCommandCharcter(cmd.substring(1), sourceID); // Process serial-specific command

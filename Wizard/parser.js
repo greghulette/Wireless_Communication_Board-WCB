@@ -750,9 +750,14 @@ function applyGeneralToBoard(general, board) {
 // fullPush: if true, include all fields (post-flash)
 //           if false, only include fields that differ from baseline
 // ─────────────────────────────────────────────
-function buildCommandString(config, baseline = null, fullPush = false) {
-  const lfi   = config.funcChar   || '?';
-  const delim = config.delimiter  || '^';
+function buildCommandString(config, baseline = null, fullPush = false, opts = {}) {
+  // opts.outputFuncChar / opts.outputDelim let callers (e.g. buildSystemFile) lock the
+  // output FORMAT to '?' / '^' regardless of the config's actual funcChar/delimiter.
+  // This keeps exported .txt files in the standard format that parseBackupString always
+  // expects, while still capturing the real funcChar/delimiter as ?FUNCCHAR / ?DELIM
+  // command values inside the string.
+  const lfi   = opts.outputFuncChar ?? config.funcChar  ?? '?';
+  const delim = opts.outputDelim    ?? config.delimiter ?? '^';
   const cmds  = [];
 
   function add(cmd) { cmds.push(lfi + cmd); }
@@ -955,10 +960,17 @@ function buildSystemFile(system) {
   lines.push('# Tool: WCB Web Config Tool');
   lines.push('');
 
-  // Build a synthetic board config for the general section
+  // Build a synthetic board config for the general section.
+  // Always write the file with '?' prefix and '^' separator regardless of the
+  // configured funcChar/delimiter — parseBackupString hardcodes those as split
+  // boundaries, so non-default chars would produce an unreadable file.  The
+  // actual funcChar/delimiter/cmdChar settings are still written as command values
+  // (?FUNCCHAR,., ?DELIM,/ etc.) within the standard '?'/'^ ' format.
+  const FILE_OPTS = { outputFuncChar: '?', outputDelim: '^' };
+
   const generalBoard = createDefaultBoardConfig();
   applyGeneralToBoard(system.general, generalBoard);
-  const generalCmd = buildCommandString(generalBoard, null, true);
+  const generalCmd = buildCommandString(generalBoard, null, true, FILE_OPTS);
 
   lines.push('[GENERAL]');
   lines.push(generalCmd);
@@ -967,7 +979,7 @@ function buildSystemFile(system) {
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
     const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
-    lines.push(buildCommandString(boardWithQty, null, true));
+    lines.push(buildCommandString(boardWithQty, null, true, FILE_OPTS));
     lines.push('');
   }
 

@@ -750,6 +750,8 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wizard-etm-toggle input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 .wizard-etm-toggle label { font-size: 13px; color: var(--text); cursor: pointer; }
 .wizard-etm-fields { display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); }
+.wizard-etm-fields .wizard-field-row label { width: 215px; }
+.wizard-etm-fields .wizard-field-row input[type="checkbox"] { flex: none; width: auto; }
 
 /* Review summary */
 .wizard-review-section { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
