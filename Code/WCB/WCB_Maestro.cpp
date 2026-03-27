@@ -71,17 +71,22 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     if (config.serialPort > 0) {
       uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
       Stream &targetSerial = getSerialStream(config.serialPort);
+      // write() queues bytes into the hardware UART TX buffer (256 bytes).
+      // flush() would block ~347–694 µs waiting for the 4 bytes to transmit —
+      // unnecessary and a direct source of jitter. The UART drains asynchronously.
       targetSerial.write(command, sizeof(command));
-      targetSerial.flush();
       Serial.printf("→ Maestro %d: Local S%d, Script %d\n",
                     maestroID, config.serialPort, scriptNumber);
       handled = true;
     }
 
-    // REMOTE Maestro
+    // REMOTE Maestro — fire-and-forget (useETM = false).
+    // Maestro script triggers are time-sensitive; retrying 500 ms later is
+    // meaningless.  If the target board is offline the packet drops silently
+    // with no ETM table churn.
     if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
+      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str(), false);
       if (debugEnabled) {
         Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
                       maestroID, config.remoteWCB, scriptNumber);
@@ -98,15 +103,13 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       if (maestroConfigs[i].configured && maestroConfigs[i].serialPort > 0) {
         uint8_t command[] = {0xAA, maestroConfigs[i].maestroID, 0x27, scriptNumber};
         Stream &targetSerial = getSerialStream(maestroConfigs[i].serialPort);
-        targetSerial.write(command, sizeof(command));
-        targetSerial.flush();
+        targetSerial.write(command, sizeof(command)); // no flush — UART drains async
       }
     }
     
     if (!isMaestroConfigured(WCB_Number)) {
       uint8_t command[] = {0xAA, WCB_Number, 0x27, scriptNumber};
-      Serial1.write(command, sizeof(command));
-      Serial1.flush();
+      Serial1.write(command, sizeof(command)); // no flush — UART drains async
     }
     
     if (!lastReceivedViaESPNOW) {
@@ -123,8 +126,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   // Legacy behavior
   if (maestroID == WCB_Number || maestroID == 9) {
     uint8_t command[] = {0xAA, (maestroID == 9) ? WCB_Number : maestroID, 0x27, scriptNumber};
-    Serial1.write(command, sizeof(command));
-    Serial1.flush();
+    Serial1.write(command, sizeof(command)); // no flush — UART drains async
     Serial.printf("→ Maestro %d: Legacy S1, Script %d\n", maestroID, scriptNumber);
     return;
   }

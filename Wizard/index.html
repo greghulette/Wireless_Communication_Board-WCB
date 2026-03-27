@@ -170,7 +170,8 @@
       <span class="modal-title" id="connect-modal-title">Connect WCB</span>
       <button class="modal-close" onclick="closeConnectModal()">✕</button>
     </div>
-    <div class="modal-body">
+    <!-- Options view -->
+    <div class="modal-body" id="connect-modal-options">
       <button class="modal-option" onclick="modalAutoDetect()">
         <span class="modal-option-icon">⊙</span>
         <div class="modal-option-text">
@@ -178,21 +179,32 @@
             Auto-Detect
             <span class="badge badge-accent" style="font-size:9px;padding:2px 6px">Recommended</span>
           </div>
-          <div class="modal-option-desc">Press the reset button on your board and it will connect automatically. First time? You'll pick your boards once from a list.</div>
+          <div class="modal-option-desc">Press the reset button on your board and it will connect automatically.</div>
         </div>
       </button>
       <button class="modal-option" onclick="modalManualSelect()">
         <span class="modal-option-icon">🔌</span>
         <div class="modal-option-text">
           <div class="modal-option-title">Select Port Manually</div>
-          <div class="modal-option-desc">Choose a specific COM port from a list.</div>
+          <div class="modal-option-desc">Choose a COM port from the browser's native picker.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="modalAuthorize()">
+        <span class="modal-option-icon">🔑</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Authorize New Board</div>
+          <div class="modal-option-desc">First time connecting a board? Grant browser access to its port, then connect.</div>
         </div>
       </button>
       <!-- Remote relay options — populated dynamically by openConnectModal() -->
       <div id="connect-modal-remote-section" style="display:none;flex-direction:column;gap:8px"></div>
     </div>
+    <!-- Detecting view — shown while auto-detect is running -->
+    <div class="modal-body" id="connect-modal-detecting" style="display:none;flex-direction:column;gap:16px">
+      <div id="connect-modal-detect-panel" style="min-height:40px"></div>
+    </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" onclick="closeConnectModal()">Cancel</button>
+      <button class="btn btn-ghost btn-sm" id="connect-modal-cancel-btn" onclick="closeConnectModal()">Cancel</button>
     </div>
   </div>
 </div>

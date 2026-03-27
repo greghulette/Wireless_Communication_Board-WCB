@@ -38,8 +38,9 @@ let boardAutoPushAfterFlash = {};   // always true — kept for compatibility, a
 let postFlashGeneralSnapshot = {};  // { boardIndex: generalSnapshot } — saved before flash, restored on next push
 
 // ─── Connect Modal State ───────────────────────────────────────────
-let _connectModalSlot = null;   // which board slot the modal is open for
-const _detecting = {};          // { [n]: true/false } — auto-detect active per slot
+let _connectModalSlot    = null;  // which board slot the modal is open for
+let _detectingInModal    = null;  // board slot currently running auto-detect inside the modal
+const _detecting = {};            // { [n]: true/false } — auto-detect active per slot
 
 // ─── Remote Management State ───────────────────────────────────────
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
@@ -54,7 +55,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.26 20:48';
+const UI_VERSION = '2026.03.27 13:23';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2598,29 +2599,89 @@ function openConnectModal(n) {
 
 function closeConnectModal(event) {
   if (event && event.target !== document.getElementById('connect-modal')) return;
-  // Any dismissal (X, overlay, Cancel) stops auto-detect if it was running
-  const n = _connectModalSlot;
-  if (n !== null) _detecting[n] = false;
-  document.getElementById('connect-modal').classList.remove('open');
+  // Cancel any in-progress auto-detect
+  const n = _connectModalSlot ?? _detectingInModal;
+  if (n !== null) { _detecting[n] = false; wizPortStopDetect(n); }
+  _detectingInModal = null;
   _connectModalSlot = null;
+  // Reset modal back to options view for next open
+  const opts = document.getElementById('connect-modal-options');
+  const det  = document.getElementById('connect-modal-detecting');
+  if (opts) opts.style.display = '';
+  if (det)  det.style.display  = 'none';
+  document.getElementById('connect-modal').classList.remove('open');
 }
 
-async function modalAutoDetect() {
+function modalAutoDetect() {
   const n = _connectModalSlot;
-  const alreadyDetecting = !!_detecting[n];
-  document.getElementById('connect-modal').classList.remove('open');
+  if (n === null) return;
   _connectModalSlot = null;
-  // If already detecting, just close the modal — auto-detect keeps running
-  if (n !== null && !alreadyDetecting) await boardAutoDetect(n);
+  _detecting[n] = false;
+  // Switch modal to the detecting view — keep modal open as the status UI
+  _detectingInModal = n;
+  document.getElementById('connect-modal-options').style.display  = 'none';
+  document.getElementById('connect-modal-detecting').style.display = '';
+  document.getElementById('connect-modal-title').textContent = `Detecting WCB ${n}…`;
+  document.getElementById('connect-modal-cancel-btn').textContent = 'Cancel';
+  wizPortDetect(n);
 }
 
 async function modalManualSelect() {
   const n = _connectModalSlot;
   document.getElementById('connect-modal').classList.remove('open');
   _connectModalSlot = null;
-  if (n !== null) {
-    _detecting[n] = false; // cancel auto-detect if it was running
-    await boardManualConnect(n);
+  if (n === null) return;
+  _detecting[n] = false;
+  // Open the browser's native WebSerial picker — shows real COM port names
+  try {
+    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
+    let port;
+    try { port = await navigator.serial.requestPort({ filters }); }
+    catch { port = await navigator.serial.requestPort(); }
+    if (port) await _modalDoConnect(n, port);
+  } catch (e) {
+    if (e?.name !== 'NotFoundError') showToast(`Connect failed: ${e.message}`, 'error');
+  }
+}
+
+async function modalAuthorize() {
+  const n = _connectModalSlot;
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+  if (n === null) return;
+  _detecting[n] = false;
+  try {
+    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
+    let port;
+    try { port = await navigator.serial.requestPort({ filters }); }
+    catch { port = await navigator.serial.requestPort(); }
+    if (port) await _modalDoConnect(n, port);
+  } catch (e) {
+    if (e?.name !== 'NotFoundError') showToast(`Connect failed: ${e.message}`, 'error');
+  }
+}
+
+// Shared helper: connect to a port chosen via the modal (manual / authorize paths)
+async function _modalDoConnect(n, port) {
+  const btn = document.getElementById(`b${n}-btn-connect`);
+  if (btn) { btn.textContent = 'Connecting…'; btn.disabled = true; }
+  try {
+    const usedPorts = new Set(
+      Object.entries(boardConnections)
+        .filter(([k, c]) => parseInt(k) !== n && c?.isConnected() && c.port)
+        .map(([, c]) => c.port)
+    );
+    if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
+    const conn = new BoardConnection(n);
+    await conn.connect(port, usedPorts);
+    boardConnections[n] = conn;
+    delete remoteRelayForBoard[n];
+    updateConnectionUI(n, true);
+    showToast(`WCB ${n} connected — pulling config…`, 'success');
+    setTimeout(() => boardPull(n), 3000);
+  } catch (e) {
+    if (btn) { btn.textContent = 'Connect'; btn.disabled = false; }
+    showToast(`Connect failed: ${e.message}`, 'error');
   }
 }
 
@@ -2837,10 +2898,7 @@ function closeGeneralConflictModal(event) {
 function boardConnect(n) {
   if (boardConnections[n]?.isConnected()) { boardDisconnect(n); return; }
   if (remoteRelayForBoard[n]) { clearRemoteConnected(n); return; }
-  // Show the inline connect strip, then run the same panel-open flow the wizard uses
-  const strip = document.getElementById(`b${n}-connect-strip`);
-  if (strip) strip.style.display = '';
-  _wizPortOpenPanel(n);
+  openConnectModal(n);
 }
 
 async function boardConnectCancel(n) {
@@ -3467,7 +3525,7 @@ async function boardPull(n) {
         boardConfigs[n]   = config;
         boardBaselines[n] = JSON.parse(JSON.stringify(config));
         populateUIFromConfig(n, config);
-        updateBoardStatusBadge(n, 'connected');
+        if (boardConnections[n] === conn) updateBoardStatusBadge(n, 'connected');
         fetchBoardVersion(n);
       } else {
         // Migrate: move connection + config from slot n → slot detected
@@ -3494,7 +3552,9 @@ async function boardPull(n) {
       boardConfigs[n]   = config;
       boardBaselines[n] = JSON.parse(JSON.stringify(config));
       populateUIFromConfig(n, config);
-      updateBoardStatusBadge(n, 'connected');
+      // Only update badge if the connection is still the same one that
+      // started this pull — user may have disconnected while we waited.
+      if (boardConnections[n] === conn) updateBoardStatusBadge(n, 'connected');
       showToast(`Config pulled from WCB ${n}`, 'success');
       fetchBoardVersion(n);
     }
@@ -4367,6 +4427,12 @@ function boardRetryPull(n) {
 
 function syncGeneralFromConfig(config) {
   const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  // If the pulled quantity exceeds the collapsed range, expand the dropdown
+  // first so the option exists before we try to select it.
+  const wcbqSel = document.getElementById('g-wcbq');
+  if (wcbqSel && config.wcbQuantity > WCB_SHOW_COLLAPSED) {
+    populateWCBDropdown(wcbqSel, Math.max(config.wcbQuantity, WCB_MAX), config.wcbQuantity, true);
+  }
   set('g-wcbq',      config.wcbQuantity);
   set('g-password',  config.espnowPassword);
   set('g-mac2',      config.macOctet2);
@@ -4723,8 +4789,15 @@ function syncMainPadding() {
 }
 
 function toggleTerminal() {
-  document.getElementById('terminal-drawer').classList.toggle('open');
+  const drawer = document.getElementById('terminal-drawer');
+  drawer.classList.toggle('open');
   syncMainPadding();
+  // On open, scroll every pane to the bottom so the most recent output is visible.
+  if (drawer.classList.contains('open')) {
+    drawer.querySelectorAll('.term-output').forEach(el => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }
 }
 
 // ─── Multi-pane Terminal ──────────────────────────────────────────
@@ -6749,6 +6822,7 @@ async function wizPortRenderPanel(n, { noPortsHint = false } = {}) {
   const panels = [
     document.getElementById(`wiz-port-panel-${n}`),
     document.getElementById(`b${n}-strip-panel`),
+    _detectingInModal === n ? document.getElementById('connect-modal-detect-panel') : null,
   ].filter(Boolean);
   if (!panels.length) return;
 
@@ -7169,6 +7243,31 @@ async function wizPortComplete(n, port) {
       wizardSetConnectStatus(n, 'err', '✕ Connect failed');
       if (panelEl) { panelEl.style.display = ''; await wizPortRenderPanel(n); }
       wizardEnableConnectBtns(n);
+    }
+
+  } else if (_detectingInModal === n) {
+    // ── Connect modal detection context ───────────────────────────────────────
+    _detectingInModal = null;
+    document.getElementById('connect-modal-detect-panel').innerHTML =
+      '<span style="font-size:12px;color:var(--text2)">Connecting…</span>';
+    const usedPorts = _wizPortUsedByOthers(n);
+    try {
+      if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
+      const conn = new BoardConnection(n);
+      await conn.connect(port, usedPorts);
+      boardConnections[n] = conn;
+      delete remoteRelayForBoard[n];
+      // Close modal and reset it to options view
+      document.getElementById('connect-modal-options').style.display  = '';
+      document.getElementById('connect-modal-detecting').style.display = 'none';
+      document.getElementById('connect-modal-title').textContent = `Connect WCB ${n}`;
+      document.getElementById('connect-modal').classList.remove('open');
+      updateConnectionUI(n, true);
+      showToast(`WCB ${n} connected — pulling config…`, 'success');
+      setTimeout(() => boardPull(n), 3000);
+    } catch (e) {
+      document.getElementById('connect-modal-detect-panel').innerHTML =
+        `<span style="font-size:12px;color:var(--error)">✕ Connect failed — ${e.message}</span>`;
     }
 
   } else {
