@@ -8,6 +8,7 @@ extern int Default_WCB_Quantity;
 extern bool lastReceivedViaESPNOW;
 extern bool debugEnabled;
 extern char LocalFunctionIdentifier;
+extern char CommandCharacter;
 extern unsigned long baudRates[5];
 extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 extern Stream &getSerialStream(int port);
@@ -79,7 +80,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
 
     // REMOTE Maestro
     if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
-      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
       sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
       if (debugEnabled) {
         Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
@@ -109,7 +110,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     }
     
     if (!lastReceivedViaESPNOW) {
-      String espnowMsg = ";M0" + String(scriptNumber);
+      String espnowMsg = String(CommandCharacter) + "M0" + String(scriptNumber);
       sendESPNowMessage(0, espnowMsg.c_str());
     }
     
@@ -131,7 +132,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   // Unconfigured fallback
   if (maestroID >= 1 && maestroID <= Default_WCB_Quantity) {
     if (!lastReceivedViaESPNOW) {
-      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
       sendESPNowMessage(maestroID, espnowMsg.c_str());
       if (debugEnabled) {
         Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
@@ -140,7 +141,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     }
   } else {
     if (!lastReceivedViaESPNOW) {
-      String espnowMsg = ";M" + String(maestroID) + String(scriptNumber);
+      String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
       sendESPNowMessage(0, espnowMsg.c_str());
       Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n", 
                     maestroID, scriptNumber);

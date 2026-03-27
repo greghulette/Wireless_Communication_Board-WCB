@@ -828,7 +828,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
           int portNum = wcbPortStr.substring(sIdx + 1).toInt();
           
           if (maestroID >= 1 && maestroID <= 9 &&
-              wcbNum >= 1 && wcbNum <= Default_WCB_Quantity &&
+              wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT &&
               portNum >= 1 && portNum <= 5 &&
               (baudRate == 9600 || baudRate == 14400 || baudRate == 19200 || 
                baudRate == 38400 || baudRate == 57600 || baudRate == 115200)) {
@@ -840,6 +840,10 @@ if (params.startsWith("S") || params.startsWith("s")) {
             
             Serial.printf("Kyber target %d: Maestro %d → WCB%d S%d (%d baud)\n",
                           targetIndex + 1, maestroID, wcbNum, portNum, baudRate);
+            if (wcbNum > Default_WCB_Quantity)
+              Serial.printf("⚠️  Warning: WCB%d is not in your neighbor list (?WCBQ is %d). "
+                            "Run ?WCBQ,%d and reboot to add it, or this target will not be reachable.\n",
+                            wcbNum, Default_WCB_Quantity, wcbNum > Default_WCB_Quantity ? wcbNum : Default_WCB_Quantity);
             
             // Auto-configure Maestro
             int8_t maestroSlot = findSlotByMaestroID(maestroID);
@@ -878,10 +882,20 @@ if (params.startsWith("S") || params.startsWith("s")) {
             }
             
             targetIndex++;
+          } else {
+            // Print a clear reason so the user knows why a target was rejected
+            if (maestroID < 1 || maestroID > 9)
+              Serial.printf("⚠️  Skipping target '%s': Maestro ID must be 1-9\n", targetStr.c_str());
+            else if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT)
+              Serial.printf("⚠️  Skipping target '%s': WCB number out of range (1-%d)\n", targetStr.c_str(), MAX_WCB_COUNT);
+            else if (portNum < 1 || portNum > 5)
+              Serial.printf("⚠️  Skipping target '%s': port must be S1-S5\n", targetStr.c_str());
+            else
+              Serial.printf("⚠️  Skipping target '%s': baud rate must be 9600/14400/19200/38400/57600/115200\n", targetStr.c_str());
           }
         }
       }
-      
+
       startIdx = nextComma + 1;
     }
     

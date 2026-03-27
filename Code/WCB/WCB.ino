@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_261128RMAR2026                                    *****////
+///*****                                          Version 6.0_262048RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -151,7 +151,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_261128RMAR2026";
+String SoftwareVersion = "6.0_262048RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4299,15 +4299,15 @@ void processSerialCommandHelper(String &data, int sourceID) {
         }
     }
 
-    // Timer-aware parsing: if command contains ;T or ;t, use grouped mode.
-    // Skip this for LocalFunctionIdentifier commands (?...) — the ;T or ;t may be
+    // Timer-aware parsing: if command contains <CmdChar>T or <CmdChar>t, use grouped mode.
+    // Skip this for LocalFunctionIdentifier commands — the timer token may be
     // embedded inside a sequence VALUE (e.g. ?SEQ,SAVE,key,;t500,CMD^...) and
-    // must NOT trigger group parsing.  parseCommandGroups splits naively on '^',
-    // which would only save the first step of the sequence and execute the rest
-    // as independent commands.  All ?-prefixed commands go through
+    // must NOT trigger group parsing.  parseCommandGroups splits naively on the
+    // delimiter, which would only save the first step of the sequence and execute
+    // the rest as independent commands.  All ?-prefixed commands go through
     // parseCommandsAndEnqueue which has proper ?SEQ,SAVE boundary logic.
-    if (!data.startsWith(String(LocalFunctionIdentifier)) &&
-        (data.indexOf(";T") != -1 || data.indexOf(";t") != -1)) {
+    // isTimerCommand() uses the live CommandCharacter variable — no hardcoding.
+    if (!data.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(data)) {
         parseCommandGroups(data);
         return;
     }

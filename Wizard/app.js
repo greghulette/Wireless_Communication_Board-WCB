@@ -54,7 +54,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.26 15:51';
+const UI_VERSION = '2026.03.26 20:48';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1085,11 +1085,14 @@ function syncSerialUIToConfig(n) {
 function populateUIFromConfig(n, config) {
   const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
   if (wcbNumSel) {
-    const qty = systemConfig?.general?.wcbQuantity
-             || parseInt(document.getElementById('g-wcbq')?.value)
-             || config.wcbQuantity
-             || n;
-    populateWCBDropdown(wcbNumSel, qty, config.wcbNumber || n, true);
+    const selectedWcb = config.wcbNumber || n;
+    const qty = Math.max(
+      systemConfig?.general?.wcbQuantity || 0,
+      parseInt(document.getElementById('g-wcbq')?.value) || 0,
+      config.wcbQuantity || 0,
+      selectedWcb   // always include the board's self-reported number
+    );
+    populateWCBDropdown(wcbNumSel, qty, selectedWcb, true);
   }
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
