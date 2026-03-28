@@ -35,6 +35,7 @@ extern char LocalFunctionIdentifier;
 extern int wcb_hw_version;
 extern bool Kyber_Remote;
 extern bool Kyber_Local;
+extern int  kyberLocalPort;   // serial port Kyber is physically on (0 = not configured)
 extern String Kyber_Location;
 extern String serialPortLabels[5];
 String getSerialLabel(int port);

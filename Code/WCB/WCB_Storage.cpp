@@ -740,6 +740,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Kyber_Local = true;
     Kyber_Remote = false;
     Kyber_Location = "local";
+    kyberLocalPort = kyberPort;   // store globally so forwarding functions use correct port
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
     
     if (kyberPort > 0 && kyberPort <= 5) {
@@ -768,6 +769,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Kyber_Location = " ";
     Kyber_Local = false;
     Kyber_Remote = false;
+    kyberLocalPort = 0;
     kyberUseTargeting = false;
     
     if (kyberPort > 0) {
@@ -997,8 +999,9 @@ if (params.startsWith("S") || params.startsWith("s")) {
   
   preferences.begin("kyber_settings", false);
   preferences.putString("K_Location", Kyber_Location);
+  preferences.putInt("K_Port", kyberPort);   // persist so kyberLocalPort is correct after reboot
   preferences.end();
-  
+
   saveKyberTargets();
   
   if (kyberUseTargeting) {
@@ -1012,17 +1015,22 @@ if (params.startsWith("S") || params.startsWith("s")) {
 void loadKyberSettings(){
   preferences.begin("kyber_settings", true);
   Kyber_Location = preferences.getString("K_Location", "");
+  int storedPort = preferences.getInt("K_Port", 0);
   preferences.end();
 
   if (Kyber_Location == "local"){
       Kyber_Local = true;
       Kyber_Remote = false;
+      // Fall back to port 2 (legacy default) if K_Port was never saved to NVS
+      kyberLocalPort = (storedPort > 0 && storedPort <= 5) ? storedPort : 2;
   } else if (Kyber_Location == "remote"){
       Kyber_Local = false;
       Kyber_Remote = true;
-  } else if (Kyber_Location == ""){
+      kyberLocalPort = 0;
+  } else {
       Kyber_Local = false;
       Kyber_Remote = false;
+      kyberLocalPort = 0;
   }
 };
 

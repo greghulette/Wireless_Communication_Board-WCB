@@ -80,13 +80,12 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       handled = true;
     }
 
-    // REMOTE Maestro — fire-and-forget (useETM = false).
-    // Maestro script triggers are time-sensitive; retrying 500 ms later is
-    // meaningless.  If the target board is offline the packet drops silently
-    // with no ETM table churn.
+    // REMOTE Maestro — use ETM so the receiving board ACKs the command.
+    // ;m commands are processed commands, not raw passthrough, so delivery
+    // confirmation matters.  Raw Kyber Maestro port bytes bypass this path entirely.
     if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str(), false);
+      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
       if (debugEnabled) {
         Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
                       maestroID, config.remoteWCB, scriptNumber);
@@ -114,7 +113,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M0" + String(scriptNumber);
-      sendESPNowMessage(0, espnowMsg.c_str());
+      sendESPNowMessage(0, espnowMsg.c_str(), false);
     }
     
     if (debugEnabled) {
@@ -135,17 +134,17 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   if (maestroID >= 1 && maestroID <= Default_WCB_Quantity) {
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(maestroID, espnowMsg.c_str());
+      sendESPNowMessage(maestroID, espnowMsg.c_str(), false);
       if (debugEnabled) {
-        Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n", 
+        Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n",
                       maestroID, maestroID, scriptNumber);
       }
     }
   } else {
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(0, espnowMsg.c_str());
-      Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n", 
+      sendESPNowMessage(0, espnowMsg.c_str(), false);
+      Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n",
                     maestroID, scriptNumber);
     }
   }

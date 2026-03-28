@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_271323RMAR2026                                    *****////
+///*****                                          Version 6.0_281759RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -140,6 +140,7 @@ bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
 bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this board directly
 String Kyber_Location;
+int kyberLocalPort = 0;      // serial port number Kyber is physically connected to (0 = not configured)
 
 // Flag to track if last received message was via ESP-NOW
 bool lastReceivedViaESPNOW = false;
@@ -151,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_271323RMAR2026";
+String SoftwareVersion = "6.0_281759RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1745,8 +1746,12 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
         uint8_t *mac = (targetWCB == 0) ? broadcastMACAddress[0] : WCBMacAddresses[targetWCB - 1];
 
         esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
-        if (result != ESP_OK && debugEnabled) {
-            Serial.printf("ESP-NOW raw serial send failed! Error: %d\n", result);
+        if (result != ESP_OK) {
+            if (debugEnabled) Serial.printf("ESP-NOW raw serial send failed! Error: %d\n", result);
+            if (result == ESP_ERR_ESPNOW_NO_MEM) {
+                // Queue full — yield so the WiFi stack can drain it before retrying
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
         }
 
         offset += chunkSize;
@@ -2203,14 +2208,18 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     memcpy(&peek, incomingData, sizeof(peek));
     int peekTarget = atoi(peek.structTargetID);
     bool isRawPacket = (peekTarget == WCB_TARGET_RAW_SERIAL || peekTarget == WCB_TARGET_KYBER || peek.structTargetID[0] == 'K');
-    bool isPWMPacket = (peek.structCommand[0] == ';' && 
-                       (peek.structCommand[1] == 'P' || peek.structCommand[1] == 'p'));
-    
-    if (!isRawPacket && !isPWMPacket) {
-      if (debugETM) Serial.println("[ETM] Received normal packet but ETM enabled locally, ignoring.");
+    bool isPWMPacket     = (peek.structCommand[0] == ';' &&
+                           (peek.structCommand[1] == 'P' || peek.structCommand[1] == 'p'));
+    // Maestro script triggers are intentionally sent without ETM (fire-and-forget).
+    // Allow them through regardless of local ETM mode.
+    bool isMaestroPacket = (peek.structCommand[1] == 'M' || peek.structCommand[1] == 'm');
+
+    if (!isRawPacket && !isPWMPacket && !isMaestroPacket) {
+      if (debugEnabled || debugETM)
+        Serial.println("[ETM] ⚠️  Dropped non-ETM packet — ETM is ON here but sender has ETM OFF. Enable ETM on all boards.");
       return;
     }
-    // Fall through to normal receive path for raw and PWM packets
+    // Fall through to normal receive path for raw, PWM, and Maestro packets
   }
 
   // ---- ETM RECEIVE PATH ----
@@ -2381,11 +2390,29 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Serial.println();
     }
 
+    const uint8_t *dataPtr = (uint8_t *)(received.structCommand + 2);
     if (Kyber_Local) {
-      Serial1.write((uint8_t *)(received.structCommand + 2), chunkLen);
-      Serial2.write((uint8_t *)(received.structCommand + 2), chunkLen);
+      // Write to every locally configured Maestro port
+      for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+        if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
+          getSerialStream(maestroConfigs[i].serialPort).write(dataPtr, chunkLen);
+        }
+      }
+      // Also echo back to the local Kyber port
+      if (kyberLocalPort > 0) getSerialStream(kyberLocalPort).write(dataPtr, chunkLen);
     } else if (Kyber_Remote) {
-      Serial1.write((uint8_t *)(received.structCommand + 2), chunkLen);
+      // Write to every locally configured Maestro port
+      bool wroteAny = false;
+      for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+        if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
+          getSerialStream(maestroConfigs[i].serialPort).write(dataPtr, chunkLen);
+          wroteAny = true;
+        }
+      }
+      // Backward-compat fallback: if no local Maestro configs exist yet,
+      // write to Serial1 (the legacy hardcoded port) so boards that haven't
+      // been reconfigured still work.
+      if (!wroteAny) Serial1.write(dataPtr, chunkLen);
     }
     return;
   }
@@ -2458,79 +2485,85 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
 /// Kyber Serial Forwarding Commands
 //*******************************
 void forwardDataFromKyber() {
-  static uint8_t buffer[64];
+  if (kyberLocalPort == 0) return;  // Kyber port not configured
 
-  // Check if Serial2 has data
-  if (Serial2.available() > 0) {
-    int len = Serial2.readBytes((char*)buffer, sizeof(buffer));
+  // Drain the entire RX buffer in one pass.
+  // Local UART targets get each byte immediately (hardware handles it).
+  // Remote ESP-NOW targets are batched into one packet per call — sending one
+  // ESP-NOW frame per byte would flood the radio queue and stall all comms.
+  static uint8_t remoteBuf[64];
+  int remoteLen = 0;
 
-    // If targeting is enabled, send to specific targets
+  Stream &kyberSerial = getSerialStream(kyberLocalPort);
+  while (kyberSerial.available() > 0) {
+    uint8_t b = (uint8_t)kyberSerial.read();
+
     if (kyberUseTargeting) {
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
-        if (kyberTargets[i].enabled) {
-          int targetWCB = kyberTargets[i].targetWCB;
-          int targetPort = kyberTargets[i].targetPort;
-          
-          // If local to this WCB, write to serial port
-          if (targetWCB == WCB_Number) {
-            Stream &targetSerial = getSerialStream(targetPort);
-            targetSerial.write(buffer, len);
-            targetSerial.flush();
-            if (debugMaestro) {
-              Serial.printf("[MAESTRO] Forwarded %d bytes to local Serial%d\n", len, targetPort);
-            }
-          } 
-          // If remote, send via ESP-NOW to specific WCB/port using 'K' target
-          else {
-            sendESPNowRawToPort(buffer, len, targetWCB, targetPort);
-            if (debugMaestro) {
-              Serial.printf("[MAESTRO] Routed %d bytes to WCB%d Serial%d\n", len, targetWCB, targetPort);
-            }
-          }
+        if (!kyberTargets[i].enabled) continue;
+        if (kyberTargets[i].targetWCB == WCB_Number) {
+          // Local — write immediately, byte by byte
+          getSerialStream(kyberTargets[i].targetPort).write(b);
+        } else {
+          // Remote — accumulate; sent as one packet below
+          if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
         }
       }
-    } 
-    // Broadcast mode - send to all WCBs
-    else {
-      // Forward to local Serial1 if Maestro is local
-      if (Kyber_Local) {
-        Serial1.write(buffer, len);
-        Serial1.flush();
+    } else {
+      // No targeting: write to every locally configured Maestro port
+      for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+        if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
+          getSerialStream(maestroConfigs[i].serialPort).write(b);
+        }
       }
-      
-      // Broadcast to all remote WCBs
-      sendESPNowRaw(buffer, len);
-      
-      if (debugMaestro) {
-        Serial.printf("[MAESTRO] Broadcast %d bytes\n", len);
-      }
+      // Broadcast remote — accumulate
+      if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
     }
   }
-}
-void forwardMaestroDataToLocalKyber() {
-  static uint8_t buffer[64];
 
-  // **Check if Serial2 has data**
-  if (Serial1.available() > 0) {
-    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-
-    // **Forward data to Serial1**
-    Serial2.write(buffer, len);
-    Serial2.flush(); // Ensure immediate transmission
-    // **Forward via ESP-NOW broadcast**
-    if (Kyber_Remote){sendESPNowRaw(buffer, len);}
-
+  // Broadcast all remote bytes in one ESP-NOW packet — one send reaches every
+  // board, no per-target unicast loops, no peer-online checks needed.
+  if (remoteLen > 0) {
+    sendESPNowRaw(remoteBuf, remoteLen);
   }
+}
+
+void forwardMaestroDataToLocalKyber() {
+  if (kyberLocalPort == 0) return;  // Kyber port not configured
+  Stream &kyberSerial = getSerialStream(kyberLocalPort);
+
+  static uint8_t remoteBuf[64];
+  int remoteLen = 0;
+
+  // Read from every locally configured Maestro port and forward to Kyber
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
+    while (maestroSerial.available() > 0) {
+      uint8_t b = (uint8_t)maestroSerial.read();
+      kyberSerial.write(b);
+      if (Kyber_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+    }
+  }
+
+  if (Kyber_Remote && remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
 }
 
 void forwardMaestroDataToRemoteKyber() {
-  static uint8_t buffer[64];
+  static uint8_t remoteBuf[64];
+  int remoteLen = 0;
 
-  // **Check if Serial2 has data**
-  if (Serial1.available() > 0) {
-    int len = Serial1.readBytes((char*)buffer, sizeof(buffer));
-  sendESPNowRaw(buffer, len);
+  // Read from every locally configured Maestro port and batch for ESP-NOW
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
+    while (maestroSerial.available() > 0) {
+      uint8_t b = (uint8_t)maestroSerial.read();
+      if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+    }
   }
+
+  if (remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
 }
 
 
@@ -4340,14 +4373,17 @@ void KyberLocalTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToLocalKyber();
         forwardDataFromKyber();
-        vTaskDelay(pdMS_TO_TICKS(5)); // Reduce CPU usage while maintaining speed
+        // 1 tick (~1 ms) — yield to other tasks but stay as responsive as possible.
+        // The old 5 ms delay caused bytes to pile up in the RX buffer and forward
+        // in bursts, which the Maestro saw as irregular timing and jitter.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void KyberRemoteTask(void *pvParameters) {
     while (true) {
         forwardMaestroDataToRemoteKyber();
-        vTaskDelay(pdMS_TO_TICKS(5)); // Reduce CPU usage while maintaining speed
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -4403,8 +4439,16 @@ void RawSerialForwardingTask(void *pvParameters) {
             }
             
             int inputPort = serialMonitorMappings[i].inputPort;
+
+            // If this board has a local Kyber, skip that specific port — KyberLocalTask
+            // owns it.  Reading here would steal bytes from the Kyber forwarding path
+            // and double-send them.  Note: do NOT use blockBroadcastFrom for this check;
+            // addSerialMonitorMapping sets that flag for every mapped port, so using it
+            // would silently skip all serial mappings.
+            if (Kyber_Local && kyberLocalPort > 0 && inputPort == kyberLocalPort) continue;
+
             Stream &inputSerial = getSerialStream(inputPort);
-            
+
             // Read raw bytes if available - use read() not readBytes()
             if (inputSerial.available() > 0) {
                 int len = 0;
