@@ -7,5 +7,6 @@ PCB\Wireless Communication Board (WCB)V2.4\Wireless Communication Board (WCB)V2.
 # Claude Code worktrees — temporary working copies, never commit
 Code/WCB/.claude/
 
-# WCBClient Arduino library — not ready for public release yet
+# WCBClient Arduino library — kept local, not for public release
 Library/
+
