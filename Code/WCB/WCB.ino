@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_291921RMAR2026                                    *****////
+///*****                                          Version 6.0_292140RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_291921RMAR2026";
+String SoftwareVersion = "6.0_292140RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2499,14 +2499,21 @@ void forwardDataFromKyber() {
     uint8_t b = (uint8_t)kyberSerial.read();
 
     if (kyberUseTargeting) {
+      // Each byte goes to local targets immediately; remote targets share one
+      // broadcast packet, so only queue the byte ONCE regardless of how many
+      // remote targets are configured.
+      bool addedToRemote = false;
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
         if (!kyberTargets[i].enabled) continue;
         if (kyberTargets[i].targetWCB == WCB_Number) {
           // Local — write immediately, byte by byte
           getSerialStream(kyberTargets[i].targetPort).write(b);
         } else {
-          // Remote — accumulate; sent as one packet below
-          if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+          // Remote — accumulate once; broadcast reaches all remote boards
+          if (!addedToRemote && remoteLen < (int)sizeof(remoteBuf)) {
+            remoteBuf[remoteLen++] = b;
+            addedToRemote = true;
+          }
         }
       }
     } else {
@@ -2524,6 +2531,12 @@ void forwardDataFromKyber() {
   // Broadcast all remote bytes in one ESP-NOW packet — one send reaches every
   // board, no per-target unicast loops, no peer-online checks needed.
   if (remoteLen > 0) {
+    if (debugMaestro) {
+      Serial.printf("[MAESTRO] S%d → broadcast  %d byte%s: ",
+                    kyberLocalPort, remoteLen, remoteLen == 1 ? "" : "s");
+      for (int i = 0; i < remoteLen; i++) Serial.printf("%02X ", remoteBuf[i]);
+      Serial.println();
+    }
     sendESPNowRaw(remoteBuf, remoteLen);
   }
 }
