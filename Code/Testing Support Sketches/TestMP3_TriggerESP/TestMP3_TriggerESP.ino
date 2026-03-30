@@ -37,7 +37,8 @@ void setup() {
   
   // WCB Commands on Serial1 (pins 20/7)
   CommandSerial.begin(9600, SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-  
+  CommandSerial.setTimeout(50);   // reduce from 1000ms default — WCB commands don't end with '\n'
+
   delay(1000);
   
   printHelp();
@@ -46,7 +47,7 @@ void setup() {
 void loop() {
   // Check USB Serial for commands
   if (Serial.available()) {
-    String input = Serial.readStringUntil('\n');
+    String input = Serial.readStringUntil('\r');
     input.trim();
     if (input.length() > 0) {
       processCommand(input);
@@ -55,7 +56,7 @@ void loop() {
   
   // Check CommandSerial (Serial1 on pins 20/7) for commands from WCB
   if (CommandSerial.available()) {
-    String input = CommandSerial.readStringUntil('\n');
+    String input = CommandSerial.readStringUntil('\r');
     input.trim();
     if (input.length() > 0) {
       Serial.println("Command from WCB: " + input);

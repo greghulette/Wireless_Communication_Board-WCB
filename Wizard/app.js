@@ -55,7 +55,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.27 13:23';
+const UI_VERSION = '2026.03.30 14:03';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4075,6 +4075,24 @@ async function boardGo(n, opts = {}) {
       setTimeout(() => boardPull(n), 800);
     }
 
+    // If the pushed config contained remote PWM outputs (W<n>S<port>), the
+    // firmware sent ?MAP,PWM,OUT,S<port> to those WCBs via ESP-NOW.  That
+    // command takes effect immediately (no reboot), but we still need to re-
+    // pull those boards so the config tool reflects the updated state.
+    const remoteWcbNums = new Set();
+    for (const m of cmdString.matchAll(/W(\d+)S\d+/gi)) {
+      remoteWcbNums.add(parseInt(m[1], 10));
+    }
+    for (const wcbNum of remoteWcbNums) {
+      const remoteIdx = Object.keys(boardConnections).find(
+        idx => boardConfigs[idx]?.wcbNumber === wcbNum
+      );
+      if (remoteIdx !== undefined && boardConnections[remoteIdx]?.isConnected()) {
+        termLog(n, `Refreshing WCB ${wcbNum} config (remote PWM output updated)…`, 'sys');
+        setTimeout(() => boardPull(remoteIdx), 2500);
+      }
+    }
+
   } catch (e) {
     showToast(`Push failed: ${e.message}`, 'error');
     termLog(n, `Push error: ${e.message}`, 'err');
@@ -6033,7 +6051,7 @@ function wizardHTMLMaestroConfig() {
     // Column order: ID → Board → Port → Baud
     return `<tr id="wiz-maestro-row-${mi}">
       <td style="color:var(--text3);font-size:11px">${mi+1}</td>
-      <td><select id="wiz-m${mi}-id">${idOpts}</select></td>
+      <td style="min-width:60px"><select id="wiz-m${mi}-id">${idOpts}</select></td>
       <td><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
       <td><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
       <td style="min-width:95px"><select id="wiz-m${mi}-baud">${baudOpts}</select></td>

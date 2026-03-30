@@ -279,15 +279,6 @@ void addPWMMapping(const String &config, bool autoReboot) {
                 }
             }
         }
-        delay(100);
-        for (int i = 0; i < mapping.outputCount; i++) {
-            if (mapping.outputs[i].wcbNumber != 0) {
-                sendESPNowMessage(mapping.outputs[i].wcbNumber, "?REBOOT", true);
-                if (debugEnabled) {
-                    Serial.printf("Sent reboot command to WCB%d\n", mapping.outputs[i].wcbNumber);
-                }
-            }
-        }
     }
     
     if (autoReboot) {
