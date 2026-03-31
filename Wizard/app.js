@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.31 14:06';
+const UI_VERSION = '2026.03.31 15:13';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1518,7 +1518,10 @@ function refreshMappingSourceDropdown(n, rowId, selectedPort) {
   sel.innerHTML = '<option value="">— Select —</option>';
   for (let p = 1; p <= 5; p++) {
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    if (!claim || claim.type === 'pwm') {
+    // Allow unclaimed, PWM-claimed, and serial-map-claimed ports in the source dropdown.
+    // serial-map is a soft claim — the port is already a mapping source, so it must remain
+    // selectable (including for its own row when re-populating from config).
+    if (!claim || claim.type === 'pwm' || claim.type === 'serial-map') {
       const opt = document.createElement('option');
       opt.value = p;
       opt.textContent = `Serial ${p}`;
