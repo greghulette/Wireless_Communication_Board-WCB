@@ -340,6 +340,7 @@ void clearMP3Config() {
     }
     updateBaudRate(freedPort, 9600);
     Serial.printf("  ✓ Reset S%d baud rate to 9600\n", freedPort);
+    saveSerialLabelToPreferences(freedPort, "");
   }
 }
 
@@ -443,6 +444,24 @@ void configureMP3(const String &args) {
     return;
   }
 
+  // ---- Release old port if moving to a different one --------------
+  if (mp3Config.configured && mp3Config.serialPort > 0 &&
+      mp3Config.serialPort != (uint8_t)serialPort) {
+    uint8_t oldPort = mp3Config.serialPort;
+    if (!serialBroadcastEnabled[oldPort - 1]) {
+      serialBroadcastEnabled[oldPort - 1] = true;
+      saveBroadcastSettingsToPreferences();
+      Serial.printf("  ✓ Re-enabled broadcast output on S%d (old MP3 port)\n", oldPort);
+    }
+    if (blockBroadcastFrom[oldPort - 1]) {
+      blockBroadcastFrom[oldPort - 1] = false;
+      saveBroadcastBlockSettings();
+      Serial.printf("  ✓ Re-enabled broadcast input on S%d (old MP3 port)\n", oldPort);
+    }
+    saveSerialLabelToPreferences(oldPort, "");
+    Serial.printf("  ✓ Released S%d (old MP3 port)\n", oldPort);
+  }
+
   // ---- Apply ------------------------------------------------------
   if ((uint32_t)baudRate != baudRates[serialPort - 1]) {
     updateBaudRate(serialPort, baudRate);
@@ -467,6 +486,7 @@ void configureMP3(const String &args) {
   mp3Volume            = (uint8_t)volume;
 
   saveMP3Settings();
+  saveSerialLabelToPreferences(serialPort, "MP3 Trigger");
 
   Serial.printf("[MP3] Configured: S%d at %d baud  default volume=%d\n",
                 serialPort, baudRate, volume);

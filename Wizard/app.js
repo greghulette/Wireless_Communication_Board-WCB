@@ -55,7 +55,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.30 14:03';
+const UI_VERSION = '2026.03.31 09:07';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -391,7 +391,9 @@ function updatePortClaimUI(n) {
 
     if (!claim) {
       claimNote.textContent = '';
-      baudSel.disabled = false; bcin.disabled = false; bcout.disabled = false; label.disabled = false;
+      baudSel.disabled = false; label.disabled = false;
+      bcin.disabled  = false;  bcin.checked  = config.serialPorts[p - 1].broadcastIn  ?? true;
+      bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
     } else if (claim.type === 'kyber') {
       claimNote.textContent = 'Managed by Kyber (Maestro port)';
       baudSel.disabled = true;
@@ -976,9 +978,13 @@ function onMP3PortChange(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  // Clear previous MP3 claim
+  // Clear previous MP3 claim and restore its broadcast settings
   for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'mp3') port.claimedBy = null;
+    if (port.claimedBy?.type === 'mp3') {
+      port.claimedBy    = null;
+      port.broadcastIn  = true;
+      port.broadcastOut = true;
+    }
   }
 
   const portVal = parseInt(document.getElementById(`b${n}-mp3-port`)?.value);
@@ -1605,9 +1611,10 @@ async function removeMappingRow(rowId, n) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-      await relayConn.send(mgmtCmd + '\r');
-      termLog(relayN, mgmtCmd, 'in');
+      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const mgmtTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
     } else {
       const conn = boardConnections[n];
       if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return; }
@@ -1765,7 +1772,6 @@ function appendMappingDestination(rowId, n, dest) {
 }
 
 async function saveMappingRow(rowId, n) {
-  syncMappingsToConfig(n);
   const config = boardConfigs[n];
   if (!config) return;
 
@@ -1775,6 +1781,16 @@ async function saveMappingRow(rowId, n) {
   const bidir = document.getElementById(`${rowId}-bidir`)?.checked ?? false;
 
   if (!type || !src) { showToast('Select a source port first', 'warning'); return; }
+
+  // Capture old remote PWM destinations from the BASELINE (last saved firmware state), not the
+  // live config — onMappingChange() calls syncMappingsToConfig() on every UI edit, so by the
+  // time Save is clicked, config.mappings already reflects the deletion and contains nothing to diff.
+  const oldRemotePWMDests = (type === 'PWM')
+    ? (boardBaselines[n]?.mappings?.find(m => m.type === 'PWM' && m.sourcePort === src)?.destinations ?? [])
+        .filter(d => d.wcbNumber !== 0)
+    : [];
+
+  syncMappingsToConfig(n);
 
   const destinations = [];
   document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
@@ -1791,14 +1807,16 @@ async function saveMappingRow(rowId, n) {
   }
 
   const relayN = remoteRelayForBoard[n];
+  // Use the board's actual configured WCB number for MGMT routing (may differ from slot n)
+  const mgmtTargetN = boardConfigs[n]?.wcbNumber || n;
   try {
     if (relayN) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast('Relay not connected', 'error'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-      await relayConn.send(mgmtCmd + '\r');
-      termLog(relayN, mgmtCmd, 'in');
+      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetN},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
     } else {
       const conn = boardConnections[n];
       if (!conn?.isConnected()) { showToast('Board not connected — mapping saved locally, push to apply', 'info'); return; }
@@ -1809,6 +1827,52 @@ async function saveMappingRow(rowId, n) {
     // Sync the mapping into the baseline so Push Config won't re-send it as a diff
     if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
     updateBoardStatusBadge(n, 'configured');
+
+    // PWM: for any remote destinations that were removed, tell that board to clear its output port
+    if (type === 'PWM') {
+      const removedRemoteDests = oldRemotePWMDests.filter(old =>
+        !destinations.some(nd => nd.wcbNumber === old.wcbNumber && nd.port === old.port)
+      );
+      for (const removed of removedRemoteDests) {
+        // remoteRelayForBoard and boardConnections are keyed by board SLOT, not WCB number.
+        // Find the slot whose wcbNumber matches.
+        const removedSlot = parseInt(
+          Object.keys(boardConfigs).find(idx => boardConfigs[idx]?.wcbNumber === removed.wcbNumber)
+          ?? removed.wcbNumber
+        );
+        const removedCfg    = boardConfigs[removedSlot];
+        const removedLfi    = removedCfg?.funcChar || '?';
+        const clearCmd      = `${removedLfi}MAP,PWM,CLEAR,OUT,S${removed.port}`;
+        // Fall back to the source board's relay if the removed board has no own relay/connection —
+        // it's in the same ESP-NOW network so the same relay can reach it.
+        const removedRelayN = remoteRelayForBoard[removedSlot] ?? relayN ?? null;
+        const removedConn   = boardConnections[removedSlot];
+        const removedWCBNum = removedCfg?.wcbNumber || removed.wcbNumber;
+        try {
+          let sentClear = false;
+          if (removedRelayN && boardConnections[removedRelayN]?.isConnected()) {
+            const sid      = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+            const relayFc  = boardConfigs[removedRelayN]?.funcChar || '?';
+            const mgmt = `${relayFc}MGMT,FRAG,${removedWCBNum},${sid},0,1,${clearCmd}`;
+            await sendMgmtReliable(boardConnections[removedRelayN], mgmt, removedRelayN);
+            sentClear = true;
+          } else if (removedConn?.isConnected()) {
+            await removedConn.send(clearCmd + '\r');
+            termLog(removedSlot, clearCmd, 'in');
+            sentClear = true;
+          } else {
+            showToast(`WCB ${removed.wcbNumber} offline — push config to clear S${removed.port} PWM output`, 'warning', 5000);
+          }
+          if (sentClear) {
+            showToast(`PWM output cleared on WCB ${removed.wcbNumber} S${removed.port} — rebooting…`, 'success');
+            // Board reboots ~3 s after receiving the clear then takes ~4-5 s to boot; pull after 10 s.
+            setTimeout(() => boardPull(removedSlot), 10000);
+          }
+        } catch (e) {
+          showToast(`Failed to clear PWM output on WCB ${removed.wcbNumber}: ${e.message}`, 'error');
+        }
+      }
+    }
 
     // Bidir: push reverse mapping directly to each remote destination board if online
     if (bidir && type === 'Serial') {
@@ -1840,10 +1904,11 @@ async function saveMappingRow(rowId, n) {
           const destConn   = boardConnections[destWcb];
           try {
             if (destRelayN && boardConnections[destRelayN]?.isConnected()) {
-              const sid = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-              const mgmt = `?MGMT,FRAG,${destWcb},${sid},0,1,${reverseCmd}`;
-              await boardConnections[destRelayN].send(mgmt + '\r');
-              termLog(destRelayN, mgmt, 'in');
+              const sid         = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+              const destRelayFc = boardConfigs[destRelayN]?.funcChar || '?';
+              const destWCBNum  = boardConfigs[destWcb]?.wcbNumber || destWcb;
+              const mgmt = `${destRelayFc}MGMT,FRAG,${destWCBNum},${sid},0,1,${reverseCmd}`;
+              await sendMgmtReliable(boardConnections[destRelayN], mgmt, destRelayN);
               if (boardBaselines[destWcb]) boardBaselines[destWcb].mappings = JSON.parse(JSON.stringify(destCfg.mappings));
               updateBoardStatusBadge(destWcb, 'configured');
               showToast(`Reverse mapping pushed to WCB ${destWcb}`, 'success');
@@ -1996,10 +2061,11 @@ async function removeSequenceRow(n, rowId) {
     if (relayN) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) return;   // relay gone — push will handle it later
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-      await relayConn.send(mgmtCmd + '\r');
-      termLog(relayN, mgmtCmd, 'in');
+      const sessionId   = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const relayFc     = boardConfigs[relayN]?.funcChar || '?';
+      const seqTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      const mgmtCmd = `${relayFc}MGMT,FRAG,${seqTargetWCB},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
       showToast(`Sequence "${key}" removed from WCB ${n} (remote)`, 'info');
     } else {
       const conn = boardConnections[n];
@@ -2041,9 +2107,10 @@ async function playSequence(n, rowId) {
     const relayConn = boardConnections[relayN];
     if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
     const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-    await relayConn.send(mgmtCmd + '\r');
-    termLog(relayN, mgmtCmd, 'in');
+    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const seqRunTargetWCB = boardConfigs[n]?.wcbNumber || n;
+    const mgmtCmd = `${relayFc}MGMT,FRAG,${seqRunTargetWCB},${sessionId},0,1,${cmd}`;
+    await sendMgmtReliable(relayConn, mgmtCmd, relayN);
     showToast(`Sent: ${cmd} (remote)`, 'info');
   } else {
     const conn = boardConnections[n];
@@ -2080,10 +2147,11 @@ async function updateSequence(n, rowId) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const mgmtCmd = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-      await relayConn.send(mgmtCmd + '\r');
+      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const seqSaveTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      const mgmtCmd = `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`;
       logTarget = relayN;
-      termLog(relayN, mgmtCmd, 'in');
+      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
       showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
     } else {
       // Direct connection
@@ -2789,8 +2857,12 @@ async function startRemoteTermSession(relayN, targetN) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) return;
   try {
-    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    await relayConn.send(`?MGMT,FRAG,${targetN},${sessionId},0,1,?RTERM,START,${relayN}\r`);
+    const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
+    const relayFc    = boardConfigs[relayN]?.funcChar   || '?';
+    const targetFc   = boardConfigs[targetN]?.funcChar  || '?';
+    const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayN}`;
+    await sendMgmtReliable(relayConn, rtermStartCmd, null);
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
   } catch (_) {}
 }
@@ -2800,8 +2872,12 @@ async function stopRemoteTermSession(relayN, targetN) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) return;
   try {
-    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    await relayConn.send(`?MGMT,FRAG,${targetN},${sessionId},0,1,?RTERM,STOP\r`);
+    const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const stopRelayFc  = boardConfigs[relayN]?.funcChar  || '?';
+    const stopTargetFc = boardConfigs[targetN]?.funcChar || '?';
+    const stopWCBNum   = boardConfigs[targetN]?.wcbNumber || targetN;
+    const rtermStopCmd = `${stopRelayFc}MGMT,FRAG,${stopWCBNum},${sessionId},0,1,${stopTargetFc}RTERM,STOP`;
+    await sendMgmtReliable(relayConn, rtermStopCmd, null);
   } catch (_) {}
 }
 
@@ -3860,9 +3936,10 @@ async function boardGo(n, opts = {}) {
     const preEraseConfigSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
     const preEraseGeneralSnapshot = captureGeneralDOMSnapshot();
 
-    termLog(n, '?ERASE,NVS', 'in');
+    const eraseFc = boardConfigs[n]?.funcChar || '?';
+    termLog(n, `${eraseFc}ERASE,NVS`, 'in');
     try {
-      await conn.send('?ERASE,NVS\r');
+      await conn.send(`${eraseFc}ERASE,NVS\r`);
       // Firmware counts down ~3 s before erasing and rebooting.
       // Closing the serial port immediately causes a USB-disconnect reset that
       // fires BEFORE the erase runs — so we wait 4 s to let the firmware finish.
@@ -4154,6 +4231,29 @@ function updateConnectionUI(n, connected) {
 
 // ─── Remote Management ────────────────────────────────────────────
 
+// Sends a MGMT FRAG command to the relay board via USB serial.
+//
+// Single-chunk commands (totalChunks=1, which is every tools-page command)
+// are now routed through ETM on the relay side — the relay's handleMgmtForward()
+// detects totalChunks==1 and calls sendESPNowMessage(target, payload, true),
+// giving unicast + ACK + retry for free.  The `times` parameter is therefore 1.
+//
+// Multi-chunk push config uses the existing broadcast path and is not called
+// through this helper (it has its own send loop).
+//
+//   relayConn  — the relay board's connection object
+//   mgmtCmd    — the full command string WITHOUT the trailing \r
+//   relaySlot  — passed to termLog on the first send; pass null to skip logging
+//   times      — left at 1; ETM handles reliability on the firmware side
+//   gapMs      — milliseconds between sends (unused when times=1)
+async function sendMgmtReliable(relayConn, mgmtCmd, relaySlot, times = 1, gapMs = 300) {
+  for (let i = 0; i < times; i++) {
+    await relayConn.send(mgmtCmd + '\r');
+    if (i === 0 && relaySlot != null) termLog(relaySlot, mgmtCmd, 'in');
+    if (i < times - 1) await new Promise(r => setTimeout(r, gapMs));
+  }
+}
+
 // Install a persistent ETM listener on a relay board's serial stream.
 // Parses "[ETM] WCBn came ONLINE" / "[ETM] WCBn went OFFLINE" and drives
 // the connected dot for whichever remote boards are behind that relay.
@@ -4172,6 +4272,13 @@ function installEtmListener(relayN) {
         // Board announced itself — pull fresh config to confirm reachability and update state
         updateBoardStatusBadge(bn, 'remote');
         remoteBoardPull(relayN, bn);
+        // Re-establish the remote terminal session regardless of whether the
+        // config pull succeeds.  The pull callback also calls this on success,
+        // but if the pull times out (e.g. board still booting) the terminal
+        // would stay silent.  Sending RTERM,START twice is idempotent — the
+        // board just re-sets _relayWCB to the same value.
+        // ETM retry means we don't need to wait for a "fully booted" delay.
+        startRemoteTermSession(relayN, bn);
       }
     } else if (offlineMatch) {
       const bn = parseInt(offlineMatch[1]);
@@ -4290,7 +4397,8 @@ async function boardGoRemote(n, opts = {}) {
   let pushSucceeded = false;
   try {
     for (let i = 0; i < chunks.length; i++) {
-      const cmd = `?MGMT,FRAG,${n},${sessionId},${i},${total},${chunks[i]}\r`;
+      const relayFcPush = boardConfigs[relayN]?.funcChar || '?';
+      const cmd = `${relayFcPush}MGMT,FRAG,${n},${sessionId},${i},${total},${chunks[i]}\r`;
       termLog(relayN, cmd.trim(), 'in');
       await relayConn.send(cmd);
       if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
@@ -4325,14 +4433,16 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     ? `Pulling config from WCB${targetN} via WCB${relayN}…`
     : `Retrying pull from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'info');
 
-  const prefix = `[MGMT:CONFIG,${targetN}]`;
+  // Before the first pull we don't know the board's WCB_Number, so match
+  // [MGMT:CONFIG,<any>] and extract the actual number from the response.
+  const prefixBase = `[MGMT:CONFIG,`;
   let done = false;
   let timer;
 
   // Replace the raw config blob in the terminal with a char-count summary
   relayConn._lineTransform = (line) => {
-    if (line.startsWith(prefix)) {
-      return `${prefix} <${line.length - prefix.length} chars received>`;
+    if (line.startsWith(prefixBase)) {
+      return `${line.slice(0, line.indexOf(']') + 1)} <${line.length - line.indexOf(']') - 1} chars received>`;
     }
     return line;
   };
@@ -4343,12 +4453,15 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
   };
 
   const onLine = (line) => {
-    if (done || !line.startsWith(prefix)) return;
+    if (done || !line.startsWith(prefixBase)) return;
+    const closeIdx = line.indexOf(']', prefixBase.length);
+    if (closeIdx < 0) return;
     done = true;
     clearTimeout(timer);
     cleanup();
 
-    let configStr = line.slice(prefix.length).trim();
+    const prefix = line.slice(0, closeIdx + 1);  // e.g. "[MGMT:CONFIG,3]"
+    let configStr = line.slice(closeIdx + 1).trim();
     if (!configStr) {
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: empty config response`, 'error');
@@ -4424,7 +4537,10 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     }
   }, 15000);
 
-  await relayConn.send(`?MGMT,PULL,${targetN}\r`);
+  // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
+  const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;
+  const pullRelayFc = boardConfigs[relayN]?.funcChar || '?';
+  await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
 }
 
 // Convenience wrapper — uses the relay tracked for this board
@@ -4891,8 +5007,11 @@ async function toggleDebug(n, modeKey) {
     if (!relayConn?.isConnected()) { state[modeKey] = !state[modeKey]; return; } // revert
     termLog(n, cmd, 'in');
     try {
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      await relayConn.send(`?MGMT,FRAG,${n},${sessionId},0,1,${cmd}\r`);
+      const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const stateRelayFc = boardConfigs[relayN]?.funcChar || '?';
+      const stateWCBNum  = boardConfigs[n]?.wcbNumber || n;
+      const stateMgmt    = `${stateRelayFc}MGMT,FRAG,${stateWCBNum},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, stateMgmt, null);
     } catch (_) { state[modeKey] = !state[modeKey]; } // revert on error
     updateTerminalControls(n);
     return;
@@ -5105,8 +5224,11 @@ async function sendTerminalCommandTo(n) {
     if (!relayConn?.isConnected()) { termLog(n, `Relay WCB${relayN} not connected`, 'err'); return; }
     termLog(n, cmd, 'in');
     try {
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      await relayConn.send(`?MGMT,FRAG,${n},${sessionId},0,1,${cmd}\r`);
+      const sessionId   = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const wcbNum      = boardConfigs[n]?.wcbNumber || n;
+      const termRelayFc = boardConfigs[relayN]?.funcChar || '?';
+      const termMgmt    = `${termRelayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, termMgmt, null);
     } catch (e) { termLog(n, `Send error: ${e.message}`, 'err'); }
     return;
   }
@@ -5310,10 +5432,13 @@ async function boardIdentify(n) {
     const relayConn = boardConnections[relayN];
     if (!relayConn?.isConnected()) { showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
     try {
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const cmd = `?MGMT,FRAG,${n},${sessionId},0,1,?IDENTIFY`;
+      const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const idRelayFc    = boardConfigs[relayN]?.funcChar || '?';
+      const idTargetFc   = boardConfigs[n]?.funcChar      || '?';
+      const idTargetWCB  = boardConfigs[n]?.wcbNumber     || n;
+      const cmd = `${idRelayFc}MGMT,FRAG,${idTargetWCB},${sessionId},0,1,${idTargetFc}IDENTIFY`;
       termLog(relayN, cmd, 'in');
-      await relayConn.send(cmd + '\r');
+      await sendMgmtReliable(relayConn, cmd, null);
       showToast(`WCB ${n} identifying — watch the LED`, 'info', 5500);
     } catch (e) {
       showToast(`Identify failed: ${e.message}`, 'error');
@@ -5325,8 +5450,9 @@ async function boardIdentify(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
   try {
-    await conn.send('?IDENTIFY\r');
-    termLog(n, '?IDENTIFY', 'in');
+    const idFc = boardConfigs[n]?.funcChar || '?';
+    await conn.send(`${idFc}IDENTIFY\r`);
+    termLog(n, `${idFc}IDENTIFY`, 'in');
     showToast(`WCB ${n} identifying — watch the LED`, 'info', 5500);
   } catch (e) {
     showToast(`Identify failed: ${e.message}`, 'error');
@@ -5375,9 +5501,10 @@ async function doFactoryResetEraseOnly() {
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   // ── Erase-only path ──────────────────────────────────────────────
-  termLog(n, '?ERASE,NVS', 'in');
+  const eraseOnlyFc = boardConfigs[n]?.funcChar || '?';
+  termLog(n, `${eraseOnlyFc}ERASE,NVS`, 'in');
   try {
-    await conn.send('?ERASE,NVS\r');
+    await conn.send(`${eraseOnlyFc}ERASE,NVS\r`);
     // Firmware counts down ~3 s before erasing and rebooting.
     // Closing the serial port immediately causes a USB-disconnect reset that
     // fires BEFORE the erase runs — so we wait 4 s to let the firmware finish.
@@ -7530,10 +7657,11 @@ async function fetchStatsData() {
       const before    = termEl ? termEl.children.length : 0;
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { output.textContent = 'Relay board not connected.'; return; }
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const mgmtCmd   = `?MGMT,FRAG,${n},${sessionId},0,1,${cmd}`;
-      await relayConn.send(mgmtCmd + '\r');
-      termLog(relayN, mgmtCmd, 'in');
+      const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+      const statsRelayFc = boardConfigs[relayN]?.funcChar || '?';
+      const statsWCBNum  = boardConfigs[n]?.wcbNumber || n;
+      const mgmtCmd   = `${statsRelayFc}MGMT,FRAG,${statsWCBNum},${sessionId},0,1,${cmd}`;
+      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
       await new Promise(r => setTimeout(r, isEtm ? 15000 : 2500));
       if (termEl) {
         const lines = [];

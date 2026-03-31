@@ -447,8 +447,18 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, cha
                    "S" + String(maestroConfigs[i].serialPort) +
                    ":" + String(maestroConfigs[i].baudRate);
         } else {
+            // Remote — look up actual port from kyberTargets
+            int targetPort = 1;  // fallback
+            for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+                if (kyberTargets[j].enabled &&
+                    kyberTargets[j].maestroID == maestroConfigs[i].maestroID) {
+                    targetPort = kyberTargets[j].targetPort;
+                    break;
+                }
+            }
             cmd += ":W" + String(maestroConfigs[i].remoteWCB) +
-                   "S1:" + String(maestroConfigs[i].baudRate);
+                   "S" + String(targetPort) +
+                   ":" + String(maestroConfigs[i].baudRate);
         }
 
         if (printToSerial) Serial.println(cmd);

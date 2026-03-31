@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_301403RMAR2026                                    *****////
+///*****                                          Version 6.0_310907RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_301403RMAR2026";
+String SoftwareVersion = "6.0_310907RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -523,6 +523,16 @@ struct MgmtSession {
   unsigned long lastActivityMs;
 };
 MgmtSession mgmtSession = {};
+
+// Ring buffer of recently-completed MGMT sessionIds.
+// handleMgmtFrag() writes here when a session finishes executing so that
+// retransmitted copies of the same single-fragment command (sent by the
+// tools page to compensate for ESP-NOW broadcast drops) are silently
+// discarded instead of being executed a second or third time.
+#define MGMT_RECENT_COUNT 8
+static uint16_t mgmtRecentIds[MGMT_RECENT_COUNT];
+static uint8_t  mgmtRecentHead = 0;
+static bool     mgmtRecentInit = false;
 
 // Config pull reassembly state on relay (incoming from target)
 struct ConfigPullSession {
@@ -1341,32 +1351,61 @@ String getBoardHostname() {
 // Print all config info
 void printConfigInfo() {
   String hostname = getBoardHostname();
-  Serial.println("\n\n----------- Configuration Info ------------\n");
-  Serial.printf("Hostname: %s\n", hostname.c_str());
+  Serial.println("\n-------------------------------------------------------");
+  Serial.printf("Configuration: %s\n", hostname.c_str());
   printHWversion();
-  Serial.printf("Software Version %s\n", SoftwareVersion.c_str());
-  Serial.printf("Number of WCBs in system: %d\n", Default_WCB_Quantity);
+  Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
+  Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
+
+  // ---- Serial Settings ----
+  Serial.println("-------------------------------------------------------");
   loadBaudRatesFromPreferences();
   loadBroadcastBlockSettings();
-  // loadBroadcastSettingsFromPreferences();
-  Serial.println("--------------- Serial Settings ----------------------");
-  printBaudRates();  // Print baud rates
-  listSerialMonitorMappings();
-  Serial.println();
+  printBaudRates();
 
-Serial.println("--------------- ESPNOW Settings ----------------------");
-  Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
+  // Broadcast blocking & monitoring
+  Serial.println("  Broadcast Blocking:");
+  bool anyBlocking = false;
+  for (int i = 0; i < 5; i++) {
+    if (blockBroadcastFrom[i]) {
+      Serial.printf("    Serial%d input blocked", i + 1);
+      if (serialPortLabels[i].length() > 0) Serial.printf(" (%s)", serialPortLabels[i].c_str());
+      Serial.println();
+      anyBlocking = true;
+    }
+  }
+  if (!anyBlocking) Serial.println("    None");
 
+  Serial.println("  Serial Monitoring:");
+  bool anyMonitoring = false;
+  for (int i = 0; i < 5; i++) {
+    if (serialMonitorEnabled[i]) {
+      Serial.printf("    Serial%d enabled", i + 1);
+      if (serialPortLabels[i].length() > 0) Serial.printf(" (%s)", serialPortLabels[i].c_str());
+      Serial.println();
+      anyMonitoring = true;
+    }
+  }
+  if (!anyMonitoring) Serial.println("    None");
+  if (anyMonitoring) {
+    Serial.printf("    Mirror to USB: %s\n",   mirrorToUSB   ? "Yes" : "No");
+    Serial.printf("    Mirror to Kyber: %s\n", mirrorToKyber ? "Yes" : "No");
+  }
+
+  // ---- ESP-NOW Settings ----
+  Serial.println("------ESP_NOW Settings---------------------------------");
+  Serial.printf("Password: %s\n", espnowPassword);
   uint8_t baseMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, baseMac);
-  
   Serial.printf("This board MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
-
-  Serial.println("--------------- ESP-NOW Peers ---------------");
+  Serial.printf("Broadcast MAC:  %02X:%02X:%02X:%02X:%02X:%02X\n",
+                broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2],
+                broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
+  Serial.println("Peers:");
   for (int i = 0; i < Default_WCB_Quantity; i++) {
     if (i + 1 == WCB_Number) {
-      Serial.printf("  WCB%d : %02X:%02X:%02X:%02X:%02X:%02X   (this board)\n",
+      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  (this board)\n",
                     i + 1,
                     WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
                     WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
@@ -1377,49 +1416,78 @@ Serial.println("--------------- ESPNOW Settings ----------------------");
                     WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
                     WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5],
                     secsAgo);
-    } else if (etmEnabled) {
-      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  Not yet seen\n",
-                    i + 1,
-                    WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
-                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
     } else {
-      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X\n",
+      Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
                     i + 1,
                     WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
-                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
+                    WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5],
+                    etmEnabled ? "Not yet seen" : "");
     }
   }
-  Serial.printf("  Broadcast: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2],
-                broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
-  Serial.println();
-  Serial.println("--------------- WCB Command Settings ----------------------");
-  Serial.printf("Delimeter Character: %c\n", commandDelimiter);
-  Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
-  Serial.printf("Command Character: %c\n", CommandCharacter);
-
-  // Print all stored commands
-  listStoredCommands(); // List stored commands
-  // Print PWM mappings
-  Serial.println();
-  listPWMMappings();  // Print PWM mappings
-  printMaestroSettings();  // Show configured Maestros
-
-
-    Serial.println("--------------- ETM Settings ----------------------");
-  Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED ⚠️  All boards must match!" : "Disabled");
-  if (etmEnabled) {
-    Serial.printf("  Boot heartbeat: 1-%d sec\n", etmBootHeartbeatSec);
-    Serial.printf("  Heartbeat interval: %d sec (+/- 1)\n", etmHeartbeatSec);
-    Serial.printf("  Offline after: %d missed (%d sec max)\n", etmMissedHeartbeats, (etmHeartbeatSec+1)*etmMissedHeartbeats);
-    Serial.printf("  Retry timeout: %d ms\n", etmTimeoutMs);
-    Serial.printf("  Char message count: %d, delay: %d ms\n", etmCharMessageCount, etmCharDelayMs);
-    if (etmEnabled) {
-    Serial.printf("  Checksum Verification: %s\n", etmChecksumEnabled ? "Enabled" : "Disabled");
-}
+  if (specialPeerEnabled) {
+    int spIdx = WCB_SPECIAL_PEER_ID - 1;
+    unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000UL;
+    Serial.printf("  WCB%d (special): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
+                  WCB_SPECIAL_PEER_ID,
+                  WCBMacAddresses[spIdx][0], WCBMacAddresses[spIdx][1], WCBMacAddresses[spIdx][2],
+                  WCBMacAddresses[spIdx][3], WCBMacAddresses[spIdx][4], WCBMacAddresses[spIdx][5],
+                  boardTable[spIdx].online ? ("Online (last seen " + String(ago) + "s ago)").c_str() : "Not yet seen");
   }
-Serial.println();
-  Serial.println("--- End of Configuration Info ---\n");
+
+  // ---- Mappings ----
+  Serial.println("----- Mappings -----------------------------------------");
+  Serial.println("Serial Mappings");
+  listSerialMonitorMappings();
+  listPWMMappings();
+
+  // ---- Command Settings ----
+  Serial.println("------ Command Settings --------------------------------");
+  Serial.printf("Delimiter Character:      %c\n", commandDelimiter);
+  Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
+  Serial.printf("Command Character:         %c\n", CommandCharacter);
+  if (specialPeerEnabled) Serial.printf("Special Peer:              ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
+
+  // Stored sequences
+  preferences.begin("stored_cmds", true);
+  String keyList = preferences.getString("key_list", "");
+  preferences.end();
+  Serial.println("Stored Sequences:");
+  if (keyList.length() == 0) {
+    Serial.println("  None");
+  } else {
+    int startIdx = 0;
+    while (startIdx < keyList.length()) {
+      int commaIdx = keyList.indexOf(',', startIdx);
+      if (commaIdx == -1) commaIdx = keyList.length();
+      String key = keyList.substring(startIdx, commaIdx);
+      key.trim();
+      if (key.length() > 0) {
+        preferences.begin("stored_cmds", true);
+        String val = preferences.getString(key.c_str(), "");
+        preferences.end();
+        Serial.printf("  %s = %s\n", key.c_str(), val.c_str());
+      }
+      startIdx = commaIdx + 1;
+    }
+  }
+
+  // ---- ETM Settings ----
+  Serial.println("------ ETM Settings ------------------------------------");
+  Serial.printf("ETM:                  %s\n", etmEnabled ? "ENABLED" : "Disabled");
+  Serial.printf("Checksum:             %s\n", etmChecksumEnabled ? "ON" : "OFF");
+  if (etmEnabled) {
+    Serial.printf("Heartbeat interval:   %d sec (+/- 1)\n", etmHeartbeatSec);
+    Serial.printf("Boot heartbeat:       1-%d sec\n", etmBootHeartbeatSec);
+    Serial.printf("Offline after:        %d missed heartbeats (%d sec max)\n",
+                  etmMissedHeartbeats, (etmHeartbeatSec + 1) * etmMissedHeartbeats);
+    Serial.printf("Retry timeout:        %d ms\n", etmTimeoutMs);
+    Serial.printf("Char message count:   %d  delay: %d ms\n", etmCharMessageCount, etmCharDelayMs);
+  }
+
+  // ---- Kyber + Maestro ----
+  printKyberSettings();
+
+  Serial.println("-------------------------------------------------------");
 }
 
 void printESPNowStats() {
@@ -1792,6 +1860,21 @@ void handleMgmtForward(const String &args) {
     return;
   }
 
+  // ── Single-chunk commands: deliver via ETM (unicast + ACK/retry) ─────────
+  // ETM structCommand is 200 bytes; single-chunk MGMT payloads are ≤ 180 bytes.
+  // This gives reliable delivery without any app-side retries or ring-buffer
+  // dedup on the target — ETM's built-in ACK/retry handles it transparently.
+  if (totalChunks == 1 && payload.length() <= 200) {
+    sendESPNowMessage(targetWCB, payload.c_str(), true);
+    if (debugMGMT)
+      Serial.printf("[MGMT] Single-chunk cmd → ETM unicast to WCB%d session %04X: %s\n",
+                    targetWCB, sessionId, payload.c_str());
+    return;
+  }
+
+  // ── Multi-chunk commands (push config): broadcast each fragment ───────────
+  // Push config payloads exceed the 200-byte ETM limit and are reassembled
+  // chunk-by-chunk on the target side via handleMgmtPacket().
   espnow_struct_mgmt pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -1806,10 +1889,10 @@ void handleMgmtForward(const String &args) {
   esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
   if (debugMGMT) {
     if (result == ESP_OK)
-      Serial.printf("[MGMT] Forwarded chunk %d/%d for WCB%d session %04X\n",
+      Serial.printf("[MGMT] Broadcast chunk %d/%d for WCB%d session %04X\n",
                     chunkIdx + 1, totalChunks, targetWCB, sessionId);
     else
-      Serial.printf("[MGMT] Forward failed, error: %d\n", result);
+      Serial.printf("[MGMT] Broadcast failed, error: %d\n", result);
   }
 }
 
@@ -1822,6 +1905,24 @@ void handleMgmtPacket(const uint8_t *data) {
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != WCB_Number) return;
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+
+  // Initialise the recent-session ring buffer on first use (avoids false matches
+  // against the zero-initialised array for the rare sessionId of 0x0000).
+  if (!mgmtRecentInit) {
+    memset(mgmtRecentIds, 0xFF, sizeof(mgmtRecentIds));
+    mgmtRecentInit = true;
+  }
+
+  // Reject retransmitted copies of sessions that already completed.
+  // The ring buffer holds the last MGMT_RECENT_COUNT sessionIds that were
+  // fully executed; any incoming packet whose sessionId matches one of them
+  // is a duplicate and can be silently discarded.
+  for (int i = 0; i < MGMT_RECENT_COUNT; i++) {
+    if (mgmtRecentIds[i] == pkt.sessionId) {
+      if (debugMGMT) Serial.printf("[MGMT] Duplicate session %04X — discarding\n", pkt.sessionId);
+      return;
+    }
+  }
 
   // Start a new session if needed
   if (!mgmtSession.active || mgmtSession.sessionId != pkt.sessionId) {
@@ -1852,6 +1953,12 @@ void handleMgmtPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullCmd += String(mgmtSession.chunks[i]);
     if (debugMGMT) Serial.printf("[MGMT] Session %04X complete — executing %d chars\n",
                                  pkt.sessionId, fullCmd.length());
+
+    // Record sessionId in the ring buffer BEFORE clearing the session struct
+    // so that retransmitted copies arriving after teardown are rejected above.
+    mgmtRecentIds[mgmtRecentHead] = pkt.sessionId;
+    mgmtRecentHead = (mgmtRecentHead + 1) % MGMT_RECENT_COUNT;
+
     memset(&mgmtSession, 0, sizeof(mgmtSession));   // clear before executing (reboot-safe)
     // MGMT commands originate from the wizard, not from an ESP-NOW forwarding loop.
     // Reset the loop-avoidance flag so the command can broadcast via ESP-NOW normally.
@@ -2719,6 +2826,15 @@ void processLocalCommand(const String &message) {
                 listPWMMappings();
             } else if (mapArgsUpper == "CLEAR,ALL") {
                 clearAllPWMMappings();
+            } else if (mapArgsUpper.startsWith("CLEAR,OUT,S")) {
+                // Remove a PWM output-only port declaration (e.g. sent by tool page when a remote dest is deleted)
+                String afterClear = mapArgs.substring(mapArgs.indexOf(',') + 1); // "OUT,S5"
+                String portPart   = afterClear.substring(afterClear.indexOf(',') + 1); // "S5"
+                int port = portPart.substring(1).toInt();
+                removePWMOutputPort(port);
+                Serial.println("Rebooting in 3 seconds to apply changes...");
+                delay(3000);
+                ESP.restart();
             } else if (mapArgsUpper.startsWith("CLEAR,S")) {
                 String portPart = mapArgs.substring(mapArgs.indexOf(',') + 1);
                 int port = portPart.substring(1).toInt();
@@ -3830,7 +3946,24 @@ void updateHWVersion(const String &message) {
         preferences.begin("kyber_settings", true);
         int kyberPort = preferences.getInt("K_Port", 2);
         preferences.end();
-        cmd = "KYBER,LOCAL,S" + String(kyberPort);
+        String kyberCmd = "KYBER,LOCAL,S" + String(kyberPort);
+        // Append all enabled Kyber targets so the backup fully restores the routing table
+        for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
+            if (!kyberTargets[i].enabled) continue;
+            uint32_t baud = 9600;
+            int8_t slot = findSlotByMaestroID(kyberTargets[i].maestroID);
+            if (slot >= 0 && maestroConfigs[slot].baudRate > 0) {
+                baud = maestroConfigs[slot].baudRate;
+            } else if (kyberTargets[i].targetWCB == (uint8_t)WCB_Number &&
+                       kyberTargets[i].targetPort >= 1 && kyberTargets[i].targetPort <= 5) {
+                baud = baudRates[kyberTargets[i].targetPort - 1];
+            }
+            kyberCmd += ",M" + String(kyberTargets[i].maestroID) +
+                        ":W" + String(kyberTargets[i].targetWCB) +
+                        "S"  + String(kyberTargets[i].targetPort) +
+                        ":"  + String(baud);
+        }
+        cmd = kyberCmd;
     } else if (Kyber_Remote) {
         cmd = "KYBER,REMOTE";
     } else {
@@ -3881,6 +4014,19 @@ void updateHWVersion(const String &message) {
     Serial.println(lfi + cmd);
     chainedConfig        += String(commandDelimiter) + lfi + cmd;
     chainedConfigDefault += defaultSep + defaultFunc + cmd;
+
+    cmd = "ETM,CHKSM," + String(etmChecksumEnabled ? "ON" : "OFF");
+    Serial.println(lfi + cmd);
+    chainedConfig        += String(commandDelimiter) + lfi + cmd;
+    chainedConfigDefault += defaultSep + defaultFunc + cmd;
+
+    // ---- Special Peer ----
+    if (specialPeerEnabled) {
+        cmd = "SPECIAL,ON";
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+    }
 
     // ---- Stored Sequences ----
     preferences.begin("stored_cmds", true);
@@ -4558,6 +4704,7 @@ void setup() {
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
   loadKyberSettings();
+  initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
   printResetReason();  // Show the exact cause of reset
   loadWCBNumberFromPreferences();
@@ -4605,21 +4752,15 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
   loadBroadcastSettingsFromPreferences(); 
-  initPWM();  // <-- This loads PWM mappings from preferences
-  Serial.println("-------------------------------------------------------");
   printBaudRates();
-  listSerialMonitorMappings();
-  Serial.println("-------------------------------------------------------");
 
   if (Kyber_Local) {
       // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
       Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-      Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
   } else if (Kyber_Remote) {
       // Kyber Remote REQUIRES Serial1 (Maestro only)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-      Serial.println("Initialized Serial1 for Kyber Remote mode");
       // Serial2 available for PWM or normal serial
       if (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2)) {
           Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
@@ -4670,49 +4811,6 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   } else {
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
-  listPWMMappingsBoot();
-  // ADD MONITORING/BLOCKING STATUS
-bool hasMonitoring = false;
-bool hasBlocking = false;
-
-for (int i = 0; i < 5; i++) {
-    if (serialMonitorEnabled[i]) hasMonitoring = true;
-    if (blockBroadcastFrom[i]) hasBlocking = true;
-}
-
-if (hasMonitoring) {
-    Serial.println("Serial Monitoring Active:");
-    for (int i = 0; i < 5; i++) {
-        if (serialMonitorEnabled[i]) {
-            Serial.printf(" Serial%d monitoring enabled", i + 1);
-            if (serialPortLabels[i].length() > 0) {
-                Serial.printf(" (%s)", serialPortLabels[i].c_str());
-            }
-            Serial.println();
-        }
-    }
-    Serial.printf(" Mirror to USB: %s\n", mirrorToUSB ? "YES" : "NO");
-    if (Kyber_Local || Kyber_Remote) {
-        Serial.printf(" Mirror to Kyber: %s\n", mirrorToKyber ? "YES" : "NO");
-    }
-}
-
-if (hasBlocking) {
-    Serial.println("Broadcast Blocking Active:");
-    for (int i = 0; i < 5; i++) {
-        if (blockBroadcastFrom[i]) {
-            Serial.printf(" Serial%d broadcasts blocked", i + 1);
-            if (serialPortLabels[i].length() > 0) {
-                Serial.printf(" (%s)", serialPortLabels[i].c_str());
-            }
-            Serial.println();
-        }
-    }
-}
-
-if (hasMonitoring || hasBlocking) {
-    Serial.println("-------------------------------------------------------");
-}
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
 
@@ -4737,6 +4835,9 @@ if (hasMonitoring || hasBlocking) {
   esp_wifi_set_mac(WIFI_IF_STA, WCBMacAddresses[WCB_Number - 1]);
   
   loadESPNowPasswordFromPreferences();
+
+  Serial.println("------ESP_NOW Settings---------------------------------");
+  Serial.printf("ESP-NOW Password: %s\n", espnowPassword);
 
   // Print final MAC
   uint8_t baseMac[6];
@@ -4800,7 +4901,11 @@ if (hasMonitoring || hasBlocking) {
   } else {
     Serial.println("Failed to add ESP-NOW broadcast peer!");
   }
-  Serial.println("-------------------------------------------------------");
+
+  Serial.println("----- Mappings -----------------------------------------");
+  Serial.println("Serial Mappings");
+  listSerialMonitorMappings();
+  listPWMMappingsBoot();
 
   // Load additional config
   loadCommandDelimiter();
@@ -4812,13 +4917,14 @@ if (hasMonitoring || hasBlocking) {
     memset(boardTable, 0, sizeof(boardTable));
     scheduleNextHeartbeat(true);  // randomized boot heartbeat
     etmInitPendingTable();
-    Serial.printf("[ETM] Heartbeat scheduled (boot window)\n");
   }
 
+  Serial.println("------ General Settings --------------------------------");
   Serial.printf("Delimeter Character: %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character: %c\n", CommandCharacter);
-  Serial.println("-------------------------------------------------------");
+  Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED" : "Disabled");
+  if (etmEnabled) Serial.println("[ETM] Heartbeat scheduled (boot window)");
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
   // Register send callback for delivery tracking

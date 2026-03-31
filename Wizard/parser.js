@@ -682,12 +682,21 @@ function evaluatePortClaims(config) {
     }
   }
 
-  // PWM mappings claim their source ports
+  // PWM mappings claim their source ports AND any local destination ports
   for (const mapping of config.mappings) {
     if (mapping.type === 'PWM') {
       const idx = mapping.sourcePort - 1;
       if (idx >= 0 && idx < 5) {
         config.serialPorts[idx].claimedBy = { type: 'pwm' };
+      }
+      // Also claim local (wcbNumber === 0) destination ports as PWM output
+      for (const dest of mapping.destinations || []) {
+        if (dest.wcbNumber === 0) {
+          const dIdx = dest.port - 1;
+          if (dIdx >= 0 && dIdx < 5 && !config.serialPorts[dIdx].claimedBy) {
+            config.serialPorts[dIdx].claimedBy = { type: 'pwm' };
+          }
+        }
       }
     }
   }
