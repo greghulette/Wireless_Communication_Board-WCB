@@ -708,6 +708,20 @@ function evaluatePortClaims(config) {
       config.serialPorts[idx].claimedBy = { type: 'pwm' };
     }
   }
+
+  // Serial mappings — soft claim: informational only, doesn't lock the port
+  for (const mapping of config.mappings) {
+    if (mapping.type === 'Serial' && mapping.sourcePort >= 1 && mapping.sourcePort <= 5) {
+      const idx = mapping.sourcePort - 1;
+      if (!config.serialPorts[idx].claimedBy) {
+        config.serialPorts[idx].claimedBy = {
+          type: 'serial-map',
+          rawMode: mapping.rawMode ?? false,
+          destinations: mapping.destinations ?? [],
+        };
+      }
+    }
+  }
 }
 
 // ─────────────────────────────────────────────

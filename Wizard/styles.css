@@ -9,8 +9,8 @@
   --border:     #2a2f38;
   --border2:    #353c47;
   --text:       #e2e8f0;
-  --text2:      #8892a4;
-  --text3:      #4a5568;
+  --text2:      #b0bac9;
+  --text3:      #6e7d94;
   --accent:     #00d4ff;
   --accent2:    #0098b8;
   --green:      #00e87a;
@@ -32,11 +32,11 @@
   --bg2:        #ffffff;
   --bg3:        #f5f7fa;
   --bg4:        #eaecf0;
-  --border:     #d0d5dd;
-  --border2:    #b8bfcc;
+  --border:     #9aa3b0;
+  --border2:    #7a8494;
   --text:       #111827;
-  --text2:      #4b5563;
-  --text3:      #9ca3af;
+  --text2:      #111827;
+  --text3:      #1f2937;
   --accent:     #0099cc;
   --accent2:    #007aa3;
   --green:      #059669;
@@ -403,6 +403,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .serial-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .serial-table tr:last-child td { border-bottom: none; }
 .serial-table tr.claimed { opacity: 0.5; }
+:root.light .serial-table tr.claimed { opacity: 0.9; }
 .serial-table td:first-child { font-weight: 600; color: var(--accent); font-size: 12px; width: 70px; }
 .serial-table select, .serial-table input[type="text"] {
   background: var(--bg3); border: 1px solid var(--border);
@@ -412,6 +413,8 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .serial-table select:focus, .serial-table input:focus { border-color: var(--accent); }
 .serial-table select:disabled, .serial-table input:disabled { opacity: 0.35; cursor: not-allowed; }
+:root.light .serial-table select:disabled,
+:root.light .serial-table input:disabled { opacity: 0.8; }
 /* Override browser autofill/history highlight so dark theme is preserved */
 .serial-table input:-webkit-autofill,
 .serial-table input:-webkit-autofill:hover,
@@ -422,7 +425,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   caret-color: var(--text);
   transition: background-color 5000s ease-in-out 0s;
 }
-.claimed-note { font-size: 10px; color: var(--text3); font-style: italic; white-space: nowrap; }
+.claimed-note { font-size: 10px; color: var(--text2); font-style: italic; white-space: nowrap; }
 
 /* ─── Buttons ────────────────────────────────────────────────── */
 .btn {

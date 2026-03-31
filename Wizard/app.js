@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.31 11:18';
+const UI_VERSION = '2026.03.31 14:06';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -424,6 +424,16 @@ function updatePortClaimUI(n) {
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
       label.disabled = true;
+    } else if (claim.type === 'serial-map') {
+      const destStr = (claim.destinations || [])
+        .map(d => d.wcbNumber > 0 ? `W${d.wcbNumber} S${d.port}` : `S${d.port}`)
+        .join(', ');
+      const modeStr = claim.rawMode ? 'Raw serial map' : 'Serial map';
+      claimNote.textContent = destStr ? `${modeStr} → ${destStr}` : modeStr;
+      // Soft claim — leave all controls fully editable, restore actual config values
+      baudSel.disabled = false; label.disabled = false;
+      bcin.disabled  = false;  bcin.checked  = config.serialPorts[p - 1].broadcastIn  ?? true;
+      bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
     }
   }
 }
@@ -1084,10 +1094,13 @@ function syncSerialUIToConfig(n) {
   if (!config) return;
   for (let p = 1; p <= 5; p++) {
     config.serialPorts[p - 1].baud = parseInt(document.getElementById(`b${n}-s${p}-baud`)?.value) || 9600;
-    // Only read broadcast toggles if the port is not claimed — updatePortClaimUI forcibly
-    // sets those checkboxes to false for claimed ports (pwm/kyber/maestro/mp3), so reading
-    // them back here would corrupt the config and generate spurious BCAST,OFF commands.
-    if (!config.serialPorts[p - 1].claimedBy) {
+    // Only read broadcast toggles for unclaimed or soft-claimed (serial-map) ports.
+    // Hard claims (pwm/kyber/maestro/mp3) forcibly uncheck those boxes in updatePortClaimUI,
+    // so reading them back would corrupt the config with spurious BCAST,OFF commands.
+    // serial-map is a soft claim — the toggles remain live and should be synced normally.
+    const claimType = config.serialPorts[p - 1].claimedBy?.type;
+    const hardClaim = claimType && claimType !== 'serial-map';
+    if (!hardClaim) {
       config.serialPorts[p - 1].broadcastIn  = document.getElementById(`b${n}-s${p}-bcin`)?.checked ?? true;
       config.serialPorts[p - 1].broadcastOut = document.getElementById(`b${n}-s${p}-bcout`)?.checked ?? true;
     }
