@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.31 15:13';
+const UI_VERSION = '2026.03.31 18:09';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2135,6 +2135,7 @@ function appendSequenceRow(n, key, value) {
   tr.innerHTML = `
     <td class="seq-key-cell">
       <input class="seq-key-input" type="text" value="${escHtml(key)}"
+             data-original-key="${escHtml(key)}"
              placeholder="KeyName" spellcheck="false" maxlength="15"
              oninput="updateSeqKeyCount('${rowId}')">
       <div class="seq-char-count" id="${rowId}-key-count">${keyLen}/15</div>
@@ -2252,7 +2253,9 @@ async function playSequence(n, rowId) {
 async function updateSequence(n, rowId) {
   const row = document.getElementById(rowId);
   if (!row) return;
-  const key = row.querySelector('.seq-key-input')?.value?.trim();
+  const keyInput   = row.querySelector('.seq-key-input');
+  const key        = keyInput?.value?.trim();
+  const originalKey = keyInput?.dataset?.originalKey ?? key;
   if (!key) { showToast('Sequence key is empty', 'error'); return; }
   const ta = row.querySelector('.seq-val-textarea');
 
@@ -2264,10 +2267,33 @@ async function updateSequence(n, rowId) {
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;
 
-  const relayN = remoteRelayForBoard[n];
-  let logTarget = n;
+  const relayN   = remoteRelayForBoard[n];
+  const renamed  = originalKey && originalKey !== key;
+  let logTarget  = n;
 
   try {
+    // If the key was renamed, delete the old key first
+    if (renamed) {
+      const clearCmd = `${funcChar}SEQ,CLEAR,${originalKey}`;
+      if (relayN) {
+        const relayConn = boardConnections[relayN];
+        if (relayConn?.isConnected()) {
+          const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+          const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+          const targetWCB = boardConfigs[n]?.wcbNumber || n;
+          await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${clearCmd}`, relayN);
+        }
+      } else {
+        const conn = boardConnections[n];
+        if (conn?.isConnected()) { await conn.send(clearCmd + '\r'); termLog(n, clearCmd, 'in'); }
+      }
+      // Remove old key from in-memory stores
+      for (const store of [boardConfigs[n], boardBaselines[n]]) {
+        if (!store) continue;
+        store.sequences = store.sequences.filter(s => s.key !== originalKey);
+      }
+    }
+
     const cmd = `${funcChar}SEQ,SAVE,${key},${value}`;
 
     if (relayN) {
@@ -2297,6 +2323,8 @@ async function updateSequence(n, rowId) {
       if (idx >= 0) store.sequences[idx].value = value;
       else store.sequences.push({ key, value });
     }
+    // Update the original-key marker so a second rename from this key works correctly
+    if (keyInput) keyInput.dataset.originalKey = key;
   } catch (e) {
     showToast(`Update failed: ${e.message}`, 'error');
     termLog(logTarget, `Sequence update error: ${e.message}`, 'err');
@@ -6334,10 +6362,10 @@ function wizardHTMLMaestroConfig() {
     // Column order: ID → Board → Port → Baud
     return `<tr id="wiz-maestro-row-${mi}">
       <td style="color:var(--text3);font-size:11px">${mi+1}</td>
-      <td style="min-width:60px"><select id="wiz-m${mi}-id">${idOpts}</select></td>
-      <td><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
-      <td><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
-      <td style="min-width:95px"><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
+      <td style="min-width:50px"><select id="wiz-m${mi}-id">${idOpts}</select></td>
+      <td style="min-width:160px"><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
+      <td style="min-width:100px"><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
+      <td style="min-width:115px"><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
       <td><button class="btn btn-danger btn-sm btn-icon" onclick="wizardRemoveMaestro(${mi})">🗑</button></td>
     </tr>`;
   }).join('');
@@ -6784,14 +6812,37 @@ function wizardSaveStep(key) {
       // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox
       wizardState.eraseNvs = document.getElementById('wiz-erase-nvs')?.checked ?? false;
       break;
-    case 'maestro-config':
+    case 'maestro-config': {
+      // Snapshot old claims (boardSlot-port → baud) before updating
+      const oldMaestroClaims = {};
+      for (const m of wizardState.maestros) {
+        oldMaestroClaims[`${m.boardSlot}-${m.port}`] = m.baud;
+      }
       wizardState.maestros = wizardState.maestros.map((m, mi) => ({
         boardSlot: parseInt(get(`wiz-m${mi}-board`)?.value ?? m.boardSlot),
         id:        parseInt(get(`wiz-m${mi}-id`)?.value    ?? m.id),
         port:      parseInt(get(`wiz-m${mi}-port`)?.value  ?? m.port),
         baud:      parseInt(get(`wiz-m${mi}-baud`)?.value  ?? m.baud),
       }));
+      // Build new claim set so we can find ports that are no longer claimed
+      const newMaestroClaimed = new Set(wizardState.maestros.map(m => `${m.boardSlot}-${m.port}`));
+      if (wizardState.kyberEnabled) {
+        newMaestroClaimed.add(`${wizardState.kyberBoard}-${wizardState.kyberPort}`);
+        if (wizardState.kyberMarcduinoPort)
+          newMaestroClaimed.add(`${wizardState.kyberBoard}-${wizardState.kyberMarcduinoPort}`);
+      }
+      // Reset baud to 9600 for any port that was claimed but no longer is,
+      // but only if it still holds the baud that the old maestro set (don't
+      // clobber a value the user intentionally changed in the serial step).
+      for (const [claimKey, oldBaud] of Object.entries(oldMaestroClaims)) {
+        if (!newMaestroClaimed.has(claimKey)) {
+          const [bs, pt] = claimKey.split('-').map(Number);
+          const sp = wizardState.boards[bs - 1]?.serialPorts[pt - 1];
+          if (sp && sp.baud === oldBaud) sp.baud = 9600;
+        }
+      }
       break;
+    }
     case 'etm':
       if (get('wiz-etm-enabled')) wizardState.etmEnabled = get('wiz-etm-enabled').checked;
       if (wizardState.etmEnabled) {
