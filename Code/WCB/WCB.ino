@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_311118RMAR2026                                    *****////
+///*****                                          Version 6.0_311438RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_311118RMAR2026";
+String SoftwareVersion = "6.0_311438RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -204,7 +204,7 @@ bool debugMGMT = false;         // remote management protocol — off by default
 
 // ETM Settings (NVS stored)
 bool debugETM = false;
-bool etmEnabled = false;
+bool etmEnabled = true;   // NVS default is also true — overwritten at boot by loadETMSettings()
 int etmBootHeartbeatSec = 2;
 int etmHeartbeatSec = 10;
 int etmMissedHeartbeats = 3;
@@ -3400,6 +3400,19 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("pos") || message.startsWith("POS")) {
         int port = message.substring(3).toInt();
         addPWMOutputPort(port);
+    } else if (message.startsWith("po") || message.startsWith("PO")) {
+        // Legacy alias for ?PO<n> — sent by older firmware to set a remote PWM output port.
+        // Equivalent to the current ?MAP,PWM,OUT,S<n> command.
+        int port = message.substring(2).toInt();
+        addPWMOutputPort(port);
+    } else if (message.startsWith("px") || message.startsWith("PX")) {
+        // Legacy alias for ?PX<n> — sent by older firmware to clear a remote PWM output port.
+        // Equivalent to the current ?MAP,PWM,CLEAR,OUT,S<n> command.
+        int port = message.substring(2).toInt();
+        removePWMOutputPort(port);
+        Serial.println("Rebooting in 3 seconds to apply changes...");
+        delay(3000);
+        ESP.restart();
     } else if (message.startsWith("sls") || message.startsWith("SLS")) {
         updateSerialLabel(message.substring(3));
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
