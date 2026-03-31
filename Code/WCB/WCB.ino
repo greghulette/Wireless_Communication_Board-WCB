@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_310907RMAR2026                                    *****////
+///*****                                          Version 6.0_311118RMAR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_310907RMAR2026";
+String SoftwareVersion = "6.0_311118RMAR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1864,8 +1864,14 @@ void handleMgmtForward(const String &args) {
   // ETM structCommand is 200 bytes; single-chunk MGMT payloads are ≤ 180 bytes.
   // This gives reliable delivery without any app-side retries or ring-buffer
   // dedup on the target — ETM's built-in ACK/retry handles it transparently.
-  if (totalChunks == 1 && payload.length() <= 200) {
-    sendESPNowMessage(targetWCB, payload.c_str(), true);
+  //
+  // '\x01' (SOH) wizard-origin marker is prepended so the target board can
+  // distinguish wizard-relayed commands from board-to-board ETM and reset
+  // lastReceivedViaESPNOW = false, allowing the command to broadcast via
+  // ESP-NOW normally (plain-text commands must be able to propagate to peers).
+  if (totalChunks == 1 && payload.length() <= 198) {  // 198 = 200 - 1 (marker) - 1 (null)
+    String markedPayload = String("\x01") + payload;
+    sendESPNowMessage(targetWCB, markedPayload.c_str(), true);
     if (debugMGMT)
       Serial.printf("[MGMT] Single-chunk cmd → ETM unicast to WCB%d session %04X: %s\n",
                     targetWCB, sessionId, payload.c_str());
@@ -2393,21 +2399,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             return;
         }
 
-        lastReceivedViaESPNOW = true;
-        colorWipeStatus("ES", green, 200);
-
-        if (debugETM) {
-            Serial.printf("[ETM] Received seq %d from WCB%d: %s\n",
-                        etmReceived.structSequenceNumber, senderWCB, etmReceived.structCommand);
-        }
-
         String etmCmd = String(etmReceived.structCommand);
 
-        // CRC verification if enabled
+        // CRC verification if enabled — strip "|CRC<hex>" suffix before further processing
         if (etmChecksumEnabled) {
             int crcIdx = etmCmd.lastIndexOf("|CRC");
             if (crcIdx == -1) {
-                if (debugETM) Serial.printf("[ETM] seq %d rejected: missing CRC\n", 
+                if (debugETM) Serial.printf("[ETM] seq %d rejected: missing CRC\n",
                                             etmReceived.structSequenceNumber);
                 colorWipeStatus("ES", blue, 10);
                 return;
@@ -2424,8 +2422,33 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             }
             etmCmd = payload;  // strip CRC suffix before executing
         }
+
+        // Wizard-origin marker: MGMT relay prepends '\x01' (SOH) to single-chunk payloads
+        // routed via ETM. This tells the target not to set lastReceivedViaESPNOW, so the
+        // command is allowed to broadcast via ESP-NOW (loop prevention must not apply to
+        // wizard-issued commands). Board-to-board ETM never adds this marker, so normal
+        // loop prevention stays intact.
+        bool wizardOrigin = (etmCmd.length() > 0 && (uint8_t)etmCmd[0] == 0x01);
+        if (wizardOrigin) etmCmd = etmCmd.substring(1);  // strip marker before executing
+        lastReceivedViaESPNOW = !wizardOrigin;
+        colorWipeStatus("ES", green, 200);
+
+        if (debugETM) {
+            Serial.printf("[ETM] Received seq %d from WCB%d%s: %s\n",
+                        etmReceived.structSequenceNumber, senderWCB,
+                        wizardOrigin ? " [wizard]" : "", etmCmd.c_str());
+        }
+
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
-            enqueueCommand(etmCmd, 0);
+            // Use parseCommandsAndEnqueue (not enqueueCommand) so that wizard-relayed
+            // payloads containing chained commands (e.g. "?LABEL,S2,x^?BCAST,OUT,S2,OFF^...")
+            // are properly split on the command delimiter before execution.
+            // enqueueCommand would queue the whole string as one item, causing the first
+            // command's value parser to consume the remainder as part of its argument
+            // (e.g. LABEL saves "x^?BCAST,..." verbatim to NVS).
+            // parseCommandsAndEnqueue handles ?CS, ?SEQ,SAVE, and ?MGMT boundaries
+            // correctly, so it is safe to use here for all ETM-delivered payloads.
+            parseCommandsAndEnqueue(etmCmd, 0);
         }
         colorWipeStatus("ES", blue, 10);
     }

@@ -45,6 +45,7 @@ const _detecting = {};            // { [n]: true/false } — auto-detect active 
 // ─── Remote Management State ───────────────────────────────────────
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
 const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
+const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
 const MGMT_CHUNK_SIZE  = 180;   // max payload chars per ESP-NOW packet
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
 
@@ -55,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.31 09:07';
+const UI_VERSION = '2026.03.31 11:18';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -363,7 +364,7 @@ function renderSerialTable(n) {
         <input type="checkbox" id="b${n}-s${p}-bcout" checked onchange="onSerialFieldChange(${n})">
         <span class="toggle-track"></span>
       </label></td>
-      <td><input type="text" id="b${n}-s${p}-label" placeholder="Label…" maxlength="20"
+      <td><input type="text" id="b${n}-s${p}-label" placeholder="Label…" maxlength="30"
         onchange="onSerialFieldChange(${n})" spellcheck="false"></td>
       <td><span class="claimed-note" id="b${n}-s${p}-claim"></span></td>
     `;
@@ -1082,10 +1083,15 @@ function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
   for (let p = 1; p <= 5; p++) {
-    config.serialPorts[p - 1].baud         = parseInt(document.getElementById(`b${n}-s${p}-baud`)?.value) || 9600;
-    config.serialPorts[p - 1].broadcastIn  = document.getElementById(`b${n}-s${p}-bcin`)?.checked ?? true;
-    config.serialPorts[p - 1].broadcastOut = document.getElementById(`b${n}-s${p}-bcout`)?.checked ?? true;
-    config.serialPorts[p - 1].label        = document.getElementById(`b${n}-s${p}-label`)?.value ?? '';
+    config.serialPorts[p - 1].baud = parseInt(document.getElementById(`b${n}-s${p}-baud`)?.value) || 9600;
+    // Only read broadcast toggles if the port is not claimed — updatePortClaimUI forcibly
+    // sets those checkboxes to false for claimed ports (pwm/kyber/maestro/mp3), so reading
+    // them back here would corrupt the config and generate spurious BCAST,OFF commands.
+    if (!config.serialPorts[p - 1].claimedBy) {
+      config.serialPorts[p - 1].broadcastIn  = document.getElementById(`b${n}-s${p}-bcin`)?.checked ?? true;
+      config.serialPorts[p - 1].broadcastOut = document.getElementById(`b${n}-s${p}-bcout`)?.checked ?? true;
+    }
+    config.serialPorts[p - 1].label = document.getElementById(`b${n}-s${p}-label`)?.value ?? '';
   }
 }
 
@@ -1827,6 +1833,24 @@ async function saveMappingRow(rowId, n) {
     // Sync the mapping into the baseline so Push Config won't re-send it as a diff
     if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
     updateBoardStatusBadge(n, 'configured');
+    // Pull config back ~2 s after sending so the tools page reflects the new mapping
+    // (port claim state, PWM output flags, etc.) without requiring a manual pull.
+    setTimeout(() => boardPull(n), 2000);
+
+    // PWM with remote destinations: the firmware on board n sends ?MAP,PWM,OUT,Sx to each
+    // remote destination board automatically via ESP-NOW after processing the MAP command.
+    // Pull those boards' configs too so their tools pages show the newly claimed output port.
+    if (type === 'PWM') {
+      const seenRemote = new Set();
+      for (const dest of destinations) {
+        if (dest.wcbNumber > 0 && !seenRemote.has(dest.wcbNumber)) {
+          seenRemote.add(dest.wcbNumber);
+          // 4 s: W2 processes MAP → sends OUT,Sx to W3 via ESP-NOW → W3 saves it.
+          // Give a bit more runway than the local pull (2 s) to cover the relay hop.
+          setTimeout(() => boardPull(dest.wcbNumber), 4000);
+        }
+      }
+    }
 
     // PWM: for any remote destinations that were removed, tell that board to clear its output port
     if (type === 'PWM') {
@@ -1912,12 +1936,14 @@ async function saveMappingRow(rowId, n) {
               if (boardBaselines[destWcb]) boardBaselines[destWcb].mappings = JSON.parse(JSON.stringify(destCfg.mappings));
               updateBoardStatusBadge(destWcb, 'configured');
               showToast(`Reverse mapping pushed to WCB ${destWcb}`, 'success');
+              setTimeout(() => boardPull(destWcb), 2000);
             } else if (destConn?.isConnected()) {
               await destConn.send(reverseCmd + '\r');
               termLog(destWcb, reverseCmd, 'in');
               if (boardBaselines[destWcb]) boardBaselines[destWcb].mappings = JSON.parse(JSON.stringify(destCfg.mappings));
               updateBoardStatusBadge(destWcb, 'configured');
               showToast(`Reverse mapping pushed to WCB ${destWcb}`, 'success');
+              setTimeout(() => boardPull(destWcb), 2000);
             } else {
               updateBoardStatusBadge(destWcb, 'unsaved');
               showToast(`Reverse mapping saved locally for WCB ${destWcb} — push to apply`, 'info', 4000);
@@ -1935,6 +1961,75 @@ async function saveMappingRow(rowId, n) {
   }
 }
 
+// ─── PWM Output Ghost Rows ────────────────────────────────────────
+// When a board has ports in pwmOutputPorts it means a remote board's PWM mapping
+// is driving those ports.  We show read-only "ghost" rows in the mapping section
+// so it's obvious why a port is claimed and who is responsible for it.
+
+// Scan all loaded boardConfigs and return { sourceWCB, sourcePort } for the
+// board/port that drives targetWCB's output on targetPort, or null if unknown.
+function findPWMOutputSource(targetWCB, targetPort) {
+  for (const [slot, cfg] of Object.entries(boardConfigs)) {
+    if (!cfg?.mappings) continue;
+    for (const m of cfg.mappings) {
+      if (m.type !== 'PWM') continue;
+      for (const dest of m.destinations || []) {
+        if (dest.wcbNumber === targetWCB && dest.port === targetPort) {
+          return { sourceWCB: cfg.wcbNumber || parseInt(slot), sourcePort: m.sourcePort };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// Remove stale ghost rows for board n and re-render them with fresh source info.
+// Called whenever any board's config is pulled, so the description fills in as
+// soon as the source board comes online.
+function refreshPWMGhostRows(n) {
+  const container = document.getElementById(`b${n}-mappings-container`);
+  if (!container) return;
+  container.querySelectorAll('.pwm-output-ghost').forEach(el => el.remove());
+  appendPWMOutputGhostRows(n);
+}
+
+// Append a read-only ghost row for each port in config.pwmOutputPorts.
+function appendPWMOutputGhostRows(n) {
+  const config = boardConfigs[n];
+  if (!config?.pwmOutputPorts?.length) return;
+  const container = document.getElementById(`b${n}-mappings-container`);
+  if (!container) return;
+  const targetWCB = config.wcbNumber || n;
+
+  for (const port of config.pwmOutputPorts) {
+    const src = findPWMOutputSource(targetWCB, port);
+    const desc = src
+      ? `Managed by WCB ${src.sourceWCB} / Source of PWM signal is W${src.sourceWCB} S${src.sourcePort}`
+      : 'Source unknown — waiting for source board to come online';
+
+    const ghost = document.createElement('div');
+    ghost.className = 'mapping-card pwm-output-ghost';
+    ghost.style.cssText = 'opacity:0.75; border-style:dashed; background:var(--bg2)';
+    ghost.innerHTML = `
+      <div class="mapping-card-main" style="gap:10px; flex-wrap:nowrap">
+        <span style="width:110px; flex-shrink:0; font-size:11px; font-weight:700;
+                     font-family:var(--mono); color:var(--yellow);
+                     background:rgba(255,208,32,0.08); border:1px solid var(--yellow2);
+                     border-radius:4px; padding:3px 7px; text-align:center;
+                     letter-spacing:0.5px; white-space:nowrap">PWM Output</span>
+        <span style="width:60px; flex-shrink:0; font-family:var(--mono); font-size:14px;
+                     font-weight:700; color:var(--text)">S${port}</span>
+        <span style="font-size:13px; color:var(--text3); flex-shrink:0">←</span>
+        <span style="flex:1; font-size:12px; color:var(--text2); font-family:var(--mono);
+                     min-width:0; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap" title="${desc}">${desc}</span>
+        <span style="font-size:13px; color:var(--text3); flex-shrink:0"
+              title="This port is managed by a remote board — remove the PWM mapping on the source board to release it">🔒</span>
+      </div>`;
+    container.appendChild(ghost);
+  }
+}
+
 function populateMappingsFromConfig(n, config) {
   const container = document.getElementById(`b${n}-mappings-container`);
   if (!container) return;
@@ -1942,6 +2037,23 @@ function populateMappingsFromConfig(n, config) {
   const headers = document.getElementById(`b${n}-mapping-headers`);
   if (headers) headers.style.display = config.mappings.length > 0 ? '' : 'none';
   for (const m of config.mappings) appendMappingRow(n, m);
+  // Append read-only ghost rows for any PWM output ports on this board
+  appendPWMOutputGhostRows(n);
+
+  // If this board has PWM mappings with remote destinations, refresh those boards'
+  // ghost rows now — they may have been showing "source unknown" while this config
+  // was unloaded, and can now show the full "Managed by WCB n / Source is WnSp" label.
+  for (const m of config.mappings) {
+    if (m.type !== 'PWM') continue;
+    for (const dest of m.destinations || []) {
+      if (dest.wcbNumber <= 0) continue;
+      const destSlot = parseInt(
+        Object.keys(boardConfigs).find(k => boardConfigs[k]?.wcbNumber === dest.wcbNumber)
+        ?? dest.wcbNumber
+      );
+      if (boardConfigs[destSlot]) refreshPWMGhostRows(destSlot);
+    }
+  }
 }
 
 // ─── Sequences ────────────────────────────────────────────────────
@@ -2020,8 +2132,8 @@ function appendSequenceRow(n, key, value) {
     <td class="seq-action-cell">
       <button class="btn btn-primary btn-sm" title="Test"
               onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
-      <button class="btn btn-primary btn-sm" title="Update"
-              onclick="updateSequence(${n},'${rowId}')" id="${rowId}-update">UPDATE</button>
+      <button class="btn btn-primary btn-sm" title="Save/Update"
+              onclick="updateSequence(${n},'${rowId}')" id="${rowId}-update">SAVE/UPDATE</button>
       <button class="btn btn-danger btn-sm" title="Remove"
               onclick="removeSequenceRow(${n},'${rowId}')">REMOVE</button>
     </td>
@@ -2088,7 +2200,7 @@ function updateSequencePlayButtons(n) {
   document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Test"]`).forEach(btn => {
     btn.disabled = !anyConnected;
   });
-  document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Update"]`).forEach(btn => {
+  document.querySelectorAll(`[id^="seq-row-${n}-"] [title="Save/Update"]`).forEach(btn => {
     btn.disabled = !anyConnected;
   });
 }
@@ -2777,8 +2889,19 @@ function setRemoteConnected(n, relayN) {
   if (connBtn)     { connBtn.textContent = 'Disconnect'; connBtn.classList.remove('btn-detecting', 'btn-primary'); connBtn.classList.add('btn-danger'); }
   if (pullBtn)     { pullBtn.disabled = false; pullBtn.textContent = 'Pull Config'; }
   if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
-  if (etmCharBtn)  etmCharBtn.disabled = false;
-  if (statsBtn)    statsBtn.disabled   = false;
+  // Dim ETM/Stats/Factory Reset — keep clickable so title tooltip shows on hover
+  if (etmCharBtn) {
+    etmCharBtn.disabled      = false;
+    etmCharBtn.style.opacity = '0.45';
+    etmCharBtn.style.cursor  = 'not-allowed';
+    etmCharBtn.title = 'Connect via USB to run ETM characterization — output streams over the board\'s own serial port and cannot be relayed wirelessly';
+  }
+  if (statsBtn) {
+    statsBtn.disabled      = false;
+    statsBtn.style.opacity = '0.45';
+    statsBtn.style.cursor  = 'not-allowed';
+    statsBtn.title = 'Connect via USB to view ESP-NOW stats — output streams over the board\'s own serial port and cannot be relayed wirelessly';
+  }
   // Dim the Factory Reset button but keep it clickable so the user gets a toast explanation
   if (eraseBtn) {
     eraseBtn.disabled      = false;   // must explicitly enable — button starts as disabled in HTML
@@ -2836,7 +2959,11 @@ function clearRemoteConnected(n) {
     updateFwBtn.style.cursor  = '';
     updateFwBtn.title = 'A newer firmware version is available';
   }
-  // Restore the Factory Reset button dim styles (updateConnectionUI will handle disabled state)
+  // Restore ETM/Stats/Factory Reset dim styles (updateConnectionUI handles disabled state)
+  const etmCharBtnR = document.getElementById(`b${n}-btn-etm-char`);
+  if (etmCharBtnR) { etmCharBtnR.style.opacity = ''; etmCharBtnR.style.cursor = ''; etmCharBtnR.title = ''; }
+  const statsBtnR = document.getElementById(`b${n}-btn-stats`);
+  if (statsBtnR)   { statsBtnR.style.opacity   = ''; statsBtnR.style.cursor   = ''; statsBtnR.title   = ''; }
   const eraseBtn = document.getElementById(`b${n}-btn-erase`);
   if (eraseBtn) {
     eraseBtn.style.opacity = '';
@@ -4428,6 +4555,15 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
 
+  // Guard against duplicate pulls triggered by the double "[ETM] WCBn came ONLINE" on boot
+  if (attempt === 1) {
+    if (_pullingBoards.has(targetN)) {
+      termLog(relayN, `[Remote] Pull for WCB${targetN} already in progress — skipping duplicate`, 'sys');
+      return;
+    }
+    _pullingBoards.add(targetN);
+  }
+
   termLog(relayN, `[Remote] Requesting config from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'sys');
   showToast(attempt === 1
     ? `Pulling config from WCB${targetN} via WCB${relayN}…`
@@ -4463,6 +4599,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     const prefix = line.slice(0, closeIdx + 1);  // e.g. "[MGMT:CONFIG,3]"
     let configStr = line.slice(closeIdx + 1).trim();
     if (!configStr) {
+      _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: empty config response`, 'error');
       termLog(relayN, `[Remote] WCB${targetN} returned empty config`, 'err');
@@ -4514,7 +4651,9 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
       updatePaneVisibilityChip(targetN);   // refresh label in case board switched USB→remote
       // Start the remote terminal session so WCB${targetN}'s Serial output is mirrored here
       startRemoteTermSession(relayN, targetN);
+      _pullingBoards.delete(targetN);
     } catch (e) {
+      _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
       termLog(relayN, `[Remote] Config parse error for WCB${targetN}: ${e.message}`, 'err');
@@ -4531,6 +4670,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
       termLog(relayN, `[Remote] Pull attempt ${attempt}/${MAX_PULL_ATTEMPTS} timed out — retrying in 10s…`, 'sys');
       setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1), 10000);
     } else {
+      _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config pull failed after ${MAX_PULL_ATTEMPTS} attempts`, 'error');
       termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${MAX_PULL_ATTEMPTS} attempts`, 'err');
@@ -7611,6 +7751,10 @@ let _statsBoardN = null;
 let _statsType   = null;   // 'etm' | 'stats'
 
 function openStatsModal(n, type) {
+  if (remoteRelayForBoard[n]) {
+    // Button is dimmed by updateConnectionUI but may still fire — silently ignore
+    return;
+  }
   _statsBoardN = n;
   _statsType   = type;
   const titles = {
@@ -7652,26 +7796,9 @@ async function fetchStatsData() {
   try {
     let result = '';
     if (relayN) {
-      // ── Relay path: snapshot terminal, send via MGMT, wait, collect new lines ──
-      const termEl    = document.getElementById(`term-pane-output-${relayN}`);
-      const before    = termEl ? termEl.children.length : 0;
-      const relayConn = boardConnections[relayN];
-      if (!relayConn?.isConnected()) { output.textContent = 'Relay board not connected.'; return; }
-      const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const statsRelayFc = boardConfigs[relayN]?.funcChar || '?';
-      const statsWCBNum  = boardConfigs[n]?.wcbNumber || n;
-      const mgmtCmd   = `${statsRelayFc}MGMT,FRAG,${statsWCBNum},${sessionId},0,1,${cmd}`;
-      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
-      await new Promise(r => setTimeout(r, isEtm ? 15000 : 2500));
-      if (termEl) {
-        const lines = [];
-        for (let i = before; i < termEl.children.length; i++) {
-          lines.push(termEl.children[i].textContent);
-        }
-        result = lines.join('\n') || '(no response received)';
-      } else {
-        result = '(check terminal for output)';
-      }
+      // Button should already be dimmed/disabled by updateConnectionUI — this is a fallback guard.
+      showToast(`Connect via USB to WCB ${n} to use this feature — output streams over the board's own serial port and cannot be relayed wirelessly`, 'warning');
+      return;
     } else {
       // ── Direct path: use sendAndCollect ──
       // Sentinel is the last meaningful line of the ETM output; for ?STATS use a

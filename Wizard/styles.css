@@ -412,6 +412,16 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .serial-table select:focus, .serial-table input:focus { border-color: var(--accent); }
 .serial-table select:disabled, .serial-table input:disabled { opacity: 0.35; cursor: not-allowed; }
+/* Override browser autofill/history highlight so dark theme is preserved */
+.serial-table input:-webkit-autofill,
+.serial-table input:-webkit-autofill:hover,
+.serial-table input:-webkit-autofill:focus,
+.serial-table input:autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg3) inset;
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  transition: background-color 5000s ease-in-out 0s;
+}
 .claimed-note { font-size: 10px; color: var(--text3); font-style: italic; white-space: nowrap; }
 
 /* ─── Buttons ────────────────────────────────────────────────── */
