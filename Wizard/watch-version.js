@@ -24,9 +24,10 @@ const SELF = path.resolve(APP_JS);
 let debounceTimer = null;
 
 function formatVersion() {
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  return `${now.getFullYear()}.${pad(now.getMonth() + 1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const now    = new Date();
+  const pad    = n => String(n).padStart(2, '0');
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  return `${pad(now.getDate())}.${pad(now.getHours())}:${pad(now.getMinutes())}.R.${months[now.getMonth()]}.${now.getFullYear()}`;
 }
 
 function stampVersion() {
