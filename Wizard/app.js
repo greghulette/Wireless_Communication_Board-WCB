@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '01.11:18.R.APR.2026';
+const UI_VERSION = '01.18:30.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2935,16 +2935,16 @@ function setRemoteConnected(n, relayN) {
   if (goBtn)       { goBtn.disabled = false; }  // Go now delegates to boardGoRemote for remote boards
   // Dim ETM/Stats/Factory Reset — keep clickable so title tooltip shows on hover
   if (etmCharBtn) {
-    etmCharBtn.disabled      = false;
-    etmCharBtn.style.opacity = '0.45';
-    etmCharBtn.style.cursor  = 'not-allowed';
-    etmCharBtn.title = 'Connect via USB to run ETM characterization — output streams over the board\'s own serial port and cannot be relayed wirelessly';
+    etmCharBtn.disabled = false;
+    etmCharBtn.style.opacity = '';
+    etmCharBtn.style.cursor  = '';
+    etmCharBtn.title = 'Run ETM characterization via wireless relay (~15 seconds)';
   }
   if (statsBtn) {
-    statsBtn.disabled      = false;
-    statsBtn.style.opacity = '0.45';
-    statsBtn.style.cursor  = 'not-allowed';
-    statsBtn.title = 'Connect via USB to view ESP-NOW stats — output streams over the board\'s own serial port and cannot be relayed wirelessly';
+    statsBtn.disabled = false;
+    statsBtn.style.opacity = '';
+    statsBtn.style.cursor  = '';
+    statsBtn.title = 'View ESP-NOW stats via wireless relay';
   }
   // Dim the Factory Reset button but keep it clickable so the user gets a toast explanation
   if (eraseBtn) {
@@ -7795,17 +7795,14 @@ let _statsBoardN = null;
 let _statsType   = null;   // 'etm' | 'stats'
 
 function openStatsModal(n, type) {
-  if (remoteRelayForBoard[n]) {
-    // Button is dimmed by updateConnectionUI but may still fire — silently ignore
-    return;
-  }
   _statsBoardN = n;
   _statsType   = type;
+  const wcbNum = boardConfigs[n]?.wcbNumber || n;
   const titles = {
-    etm:   `ETM Characterization — WCB ${n}`,
-    stats: `ESP-NOW Stats — WCB ${n}`,
+    etm:   `ETM Characterization — WCB ${wcbNum}`,
+    stats: `ESP-NOW Stats — WCB ${wcbNum}`,
   };
-  document.getElementById('stats-modal-title').textContent = titles[type] || `Stats — WCB ${n}`;
+  document.getElementById('stats-modal-title').textContent = titles[type] || `Stats — WCB ${wcbNum}`;
   document.getElementById('stats-modal-output').textContent = 'Fetching…';
   document.getElementById('stats-modal').classList.add('open');
   fetchStatsData();
@@ -7833,16 +7830,76 @@ async function fetchStatsData() {
   if (!output) return;
 
   // ETM characterization runs 3 phases — warn the user it takes time
-  output.textContent = isEtm ? 'Running characterization — this takes about 10 seconds…' : 'Fetching…';
+  const relayN = remoteRelayForBoard[n];
+  output.textContent = isEtm
+    ? (relayN ? `Running characterization on WCB ${n} via WCB ${relayN} — this takes about 15 seconds…`
+              : 'Running characterization — this takes about 10 seconds…')
+    : (relayN ? `Fetching stats from WCB ${n} via WCB ${relayN}…` : 'Fetching…');
 
-  const relayN  = remoteRelayForBoard[n];
-  const timeout = isEtm ? 30000 : 3000;
+  const timeout = isEtm ? 30000 : 5000;
+  const relayTimeout = isEtm ? 60000 : 10000;  // relay needs extra time for ESP-NOW round-trip
   try {
     let result = '';
     if (relayN) {
-      // Button should already be dimmed/disabled by updateConnectionUI — this is a fallback guard.
-      showToast(`Connect via USB to WCB ${n} to use this feature — output streams over the board's own serial port and cannot be relayed wirelessly`, 'warning');
-      return;
+      // ── Relay path: send ?MGMT,STATS/ETM,<n> via relay; collect multiline response ──
+      const relayConn = boardConnections[relayN];
+      if (!relayConn?.isConnected()) { output.textContent = 'Relay board not connected.'; return; }
+      const targetWCBNum = boardConfigs[n]?.wcbNumber || n;
+      const relayFc      = boardConfigs[relayN]?.funcChar || '?';
+      const mgmtCmd      = isEtm ? `${relayFc}MGMT,ETM,CHAR,${targetWCBNum}`
+                                 : `${relayFc}MGMT,STATS,${targetWCBNum}`;
+      console.log('[fetchStatsData] relay path | boardSlot=', n, 'relaySlot=', relayN,
+                  'boardWCBNum=', boardConfigs[n]?.wcbNumber, 'targetWCBNum=', targetWCBNum,
+                  'relayFc=', relayFc, 'cmd=', mgmtCmd);
+      const responsePrefix = isEtm ? `[MGMT:ETM,`    : `[MGMT:STATS,`;
+      // Sentinel = last distinct line of the firmware output
+      const sentinel       = isEtm ? '----------------------------'
+                                   : '--- End of ESP-NOW Statistics ---';
+
+      termLog(relayN, mgmtCmd, 'in');
+      result = await new Promise((resolve, reject) => {
+        let done = false;
+        let collecting = false;
+        const lines = [];
+
+        const finish = () => {
+          done = true;
+          relayConn._dataCallbacks = relayConn._dataCallbacks.filter(cb => cb !== onLine);
+        };
+
+        const timer = setTimeout(() => {
+          if (done) return;
+          finish();
+          // Resolve with whatever we collected — partial data is better than nothing
+          if (lines.length > 0) resolve(lines.join('\n').trim());
+          else reject(new Error(`Timed out waiting for ${isEtm ? 'ETM' : 'stats'} response from WCB ${n}`));
+        }, relayTimeout);
+
+        const onLine = (line) => {
+          if (done) return;
+          if (!collecting) {
+            if (!line.startsWith(responsePrefix)) return;
+            console.log('[fetchStatsData] header line received:', JSON.stringify(line));
+            const closeIdx = line.indexOf(']', responsePrefix.length);
+            if (closeIdx < 0) return;
+            collecting = true;
+            const firstChunk = line.slice(closeIdx + 1);
+            if (firstChunk.trim()) lines.push(firstChunk);
+          } else {
+            lines.push(line);
+          }
+          // Stop when the terminal sentinel line is seen
+          if (collecting && line.includes(sentinel)) {
+            console.log('[fetchStatsData] sentinel reached, lines collected:', lines.length);
+            clearTimeout(timer);
+            finish();
+            resolve(lines.join('\n').trim());
+          }
+        };
+        relayConn._dataCallbacks.push(onLine);
+        relayConn.send(mgmtCmd + '\r');
+      });
+      result = result || '(no response received)';
     } else {
       // ── Direct path: use sendAndCollect ──
       // Sentinel is the last meaningful line of the ETM output; for ?STATS use a

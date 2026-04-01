@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_311438RMAR2026                                    *****////
+///*****                                          Version 6.0_011830RAPR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_311438RMAR2026";
+String SoftwareVersion = "6.0_011830RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -194,6 +194,10 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
 #define PACKET_TYPE_CONFIG_REQ  5   // relay → target: request current config
 #define PACKET_TYPE_CONFIG_FRAG 6   // target → relay: config response fragment
+#define PACKET_TYPE_STATS_REQ   7   // relay → target: request ESP-NOW stats
+#define PACKET_TYPE_ETM_REQ     8   // relay → target: request ETM characterization
+#define PACKET_TYPE_STATS_FRAG  9   // target → relay: ?STATS response fragment
+#define PACKET_TYPE_ETM_FRAG    10  // target → relay: ?ETM,CHAR response fragment
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -544,7 +548,10 @@ struct ConfigPullSession {
   char     chunks[MGMT_MAX_CHUNKS][CONFIG_PAYLOAD_SIZE + 1];
   unsigned long lastActivityMs;
 };
-ConfigPullSession pullSession = {};
+ConfigPullSession pullSession      = {};  // relay-side reassembly for remote config pull
+ConfigPullSession statsRelaySession = {};  // relay-side reassembly for remote ?STATS
+ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?ETM,CHAR
+uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
 
 // ESP-NOW messages
 espnow_struct_message commandsToSend[10]; // Includes 1-9 and broadcast
@@ -1088,54 +1095,138 @@ void processETMLoad() {
     }
 }
 
+// Build ESP-NOW stats as a String (used by printESPNowStats and relay response)
+String buildStatsString() {
+  char buf[192];
+  String out = "\n--- WCB";
+  out += String(WCB_Number);
+  out += " ESP-NOW Statistics (Since Last Reboot) ---\n";
+  if (etmEnabled) {
+    unsigned long totalSent = 0, totalAckd = 0, totalRetries = 0, totalFailed = 0;
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      if (b + 1 == WCB_Number) continue;
+      totalSent    += etmStatsSent[b];    totalAckd    += etmStatsAckd[b];
+      totalRetries += etmStatsRetries[b]; totalFailed  += etmStatsFailed[b];
+    }
+    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+      int spIdx = WCB_SPECIAL_PEER_ID - 1;
+      totalSent    += etmStatsSent[spIdx];    totalAckd    += etmStatsAckd[spIdx];
+      totalRetries += etmStatsRetries[spIdx]; totalFailed  += etmStatsFailed[spIdx];
+    }
+    out += "Unicast Command Messages:\n";
+    snprintf(buf, sizeof(buf), "  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
+             totalSent, totalAckd, totalFailed);
+    out += buf;
+    if (totalSent > 0) {
+      snprintf(buf, sizeof(buf), "  Delivery Success Rate: %.2f%%\n",
+               (float)totalAckd / totalSent * 100.0);
+      out += buf;
+    }
+  } else {
+    out += "Unicast Command Messages:\n";
+    snprintf(buf, sizeof(buf), "  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
+             espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
+    out += buf;
+    if (espnowCommandAttempts > 0) {
+      snprintf(buf, sizeof(buf), "  Delivery Success Rate: %.2f%%\n",
+               (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
+      out += buf;
+    }
+  }
+  if (espnowPWMAttempts > 0) {
+    out += "PWM Passthrough:\n";
+    snprintf(buf, sizeof(buf), "  Attempts: %lu, Success: %lu, Failed: %lu\n",
+             espnowPWMAttempts, espnowPWMSuccess, espnowPWMFailed);
+    out += buf;
+  }
+  if (espnowRawAttempts > 0) {
+    out += "Raw Data (Kyber Bridging):\n";
+    snprintf(buf, sizeof(buf), "  Attempts: %lu, Success: %lu, Failed: %lu\n",
+             espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
+    out += buf;
+  }
+  if (etmEnabled) {
+    out += "\n--------------- ETM Per-Board Statistics ---------------\n";
+    for (int b = 0; b < Default_WCB_Quantity; b++) {
+      int wcbNum = b + 1;
+      if (wcbNum == WCB_Number) continue;
+      unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
+      snprintf(buf, sizeof(buf), "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, ",
+               wcbNum, etmStatsSent[b], etmStatsAckd[b], etmStatsRetries[b], etmStatsFailed[b]);
+      out += buf;
+      out += boardTable[b].online
+        ? ("Online (last seen " + String(ago) + "s ago)\n")
+        : "OFFLINE\n";
+    }
+    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
+      int spIdx = WCB_SPECIAL_PEER_ID - 1;
+      unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000;
+      snprintf(buf, sizeof(buf), "WCB%d (special): Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, ",
+               WCB_SPECIAL_PEER_ID, etmStatsSent[spIdx], etmStatsAckd[spIdx],
+               etmStatsRetries[spIdx], etmStatsFailed[spIdx]);
+      out += buf;
+      out += boardTable[spIdx].online
+        ? ("Online (last seen " + String(ago) + "s ago)\n")
+        : "OFFLINE\n";
+    }
+    out += "--------------------------------------------------------\n";
+  }
+  out += "--- End of ESP-NOW Statistics ---\n";
+  return out;
+}
+
+// Build ETM characterization results as a String (used by printETMCharResults and relay response)
+String buildETMCharResultsString(int* peers, int peerCount) {
+  char buf[256];
+  String out = "\n------------ WCB";
+  out += String(WCB_Number);
+  out += " ETM Network Characterization ------------\n";
+  const char* phaseNames[] = {
+    "Individual Baseline (unicast, no load)",
+    "Broadcast (no load)",
+    "Loaded Network (all boards transmitting)"
+  };
+  unsigned long worstMaxLatency = 0, worstAvgLatency = 0;
+  float worstMissedPct = 0.0f;
+  for (int p = 0; p < 3; p++) {
+    snprintf(buf, sizeof(buf), " Phase %d - %s:\n", p + 1, phaseNames[p]);
+    out += buf;
+    for (int i = 0; i < peerCount; i++) {
+      int b = peers[i] - 1;
+      ETMCharBoardResult &r = etmCharBoardResults[p][b];
+      if (r.sent == 0) continue;
+      int effectiveAcked = min(r.acked, r.sent);
+      float missedPct = (float)(r.sent - effectiveAcked) / r.sent * 100.0f;
+      unsigned long avgLatency = (effectiveAcked > 0) ? r.latencyAccum / effectiveAcked : 0;
+      unsigned long minLat     = (effectiveAcked > 0) ? r.latencyMin : 0;
+      bool hadRetries = r.latencyMax > (unsigned long)(etmTimeoutMs * 0.9);
+      snprintf(buf, sizeof(buf), "   WCB%d: Min: %lums, Max: %lums, Avg: %lums, Missed: %.0f%%%s\n",
+               peers[i], minLat, r.latencyMax, avgLatency, missedPct,
+               hadRetries ? " (retries detected)" : "");
+      out += buf;
+      if (r.latencyMax > worstMaxLatency) worstMaxLatency = r.latencyMax;
+      if (avgLatency > worstAvgLatency)   worstAvgLatency = avgLatency;
+      if (missedPct > worstMissedPct)     worstMissedPct  = missedPct;
+    }
+  }
+  unsigned long recommendedTimeout = ((worstAvgLatency * 5) / 50 + 1) * 50;
+  if (recommendedTimeout < 150) recommendedTimeout = 150;
+  snprintf(buf, sizeof(buf), "\n Recommended ETM timeout: %lums\n", recommendedTimeout);
+  out += buf;
+  snprintf(buf, sizeof(buf), " Apply with: ?ETM,TIMEOUT,%lu\n", recommendedTimeout);
+  out += buf;
+  snprintf(buf, sizeof(buf), " (Based on worst avg latency: %lums, worst max: %lums)\n",
+           worstAvgLatency, worstMaxLatency);
+  out += buf;
+  if (worstMissedPct > 5.0f)
+    out += " Warning: >5% packet loss detected. Check RF environment.\n";
+  out += "------------------------------------------------------------\n";
+  return out;
+}
+
 void printETMCharResults(int* peers, int peerCount) {
-    const char* phaseNames[] = {
-        "Individual Baseline (unicast, no load)",
-        "Broadcast (no load)",
-        "Loaded Network (all boards transmitting)"
-    };
-
-    Serial.println("\n--------------- ETM Network Characterization ---------------");
-
-    unsigned long worstMaxLatency = 0;
-    unsigned long worstAvgLatency = 0;
-    float worstMissedPct = 0.0f;
-
-    for (int p = 0; p < 3; p++) {
-        Serial.printf(" Phase %d - %s:\n", p + 1, phaseNames[p]);
-        for (int i = 0; i < peerCount; i++) {
-            int b = peers[i] - 1;
-            ETMCharBoardResult &r = etmCharBoardResults[p][b];
-            if (r.sent == 0) continue;
-
-            int effectiveAcked = min(r.acked, r.sent);
-            float missedPct = (float)(r.sent - effectiveAcked) / r.sent * 100.0f;
-            unsigned long avgLatency = (effectiveAcked > 0) ? r.latencyAccum / effectiveAcked : 0;
-            unsigned long minLat = (effectiveAcked > 0) ? r.latencyMin : 0;
-            bool hadRetries = r.latencyMax > (unsigned long)(etmTimeoutMs * 0.9);
-
-            Serial.printf("   WCB%d: Min: %lums, Max: %lums, Avg: %lums, Missed: %.0f%%%s\n",
-                peers[i], minLat, r.latencyMax, avgLatency, missedPct,
-                hadRetries ? " (retries detected)" : "");
-
-            if (r.latencyMax > worstMaxLatency) worstMaxLatency = r.latencyMax;
-            if (avgLatency > worstAvgLatency) worstAvgLatency = avgLatency;
-            if (missedPct > worstMissedPct) worstMissedPct = missedPct;
-        }
-    }
-
-    // Base recommendation on worst average * 5, rounded up to nearest 50ms, floor 150ms
-    unsigned long recommendedTimeout = ((worstAvgLatency * 5) / 50 + 1) * 50;
-    if (recommendedTimeout < 150) recommendedTimeout = 150;
-
-    Serial.printf("\n Recommended ETM timeout: %lums\n", recommendedTimeout);
-    Serial.printf(" Apply with: ?ETM,TIMEOUT,%lu\n", recommendedTimeout);
-    Serial.printf(" (Based on worst avg latency: %lums, worst max: %lums)\n", 
-                  worstAvgLatency, worstMaxLatency);
-    if (worstMissedPct > 5.0f) {
-        Serial.println(" Warning: >5% packet loss detected. Check RF environment.");
-    }
-    Serial.println("------------------------------------------------------------\n");
+    String results = buildETMCharResultsString(peers, peerCount);
+    Serial.print(results);
 
     // Restore ETM debug state
     if (etmCharDebugWasSaved) {
@@ -1143,6 +1234,15 @@ void printETMCharResults(int* peers, int peerCount) {
         Serial.println("[ETM CHAR] ETM debug re-enabled.");
     }
     etmCharDebugWasSaved = false;
+
+    // If this run was triggered via relay, send results back via ESP-NOW fragments
+    Serial.printf("[MGMT] printETMCharResults: etmCharRelayRequesterWCB=%d\n", etmCharRelayRequesterWCB);
+    if (etmCharRelayRequesterWCB != 0) {
+        Serial.printf("[MGMT] Sending ETM frags to WCB%d...\n", etmCharRelayRequesterWCB);
+        sendResultFrags(results, etmCharRelayRequesterWCB, PACKET_TYPE_ETM_FRAG);
+        Serial.printf("[MGMT] ETM char results sent to WCB%d via relay\n", etmCharRelayRequesterWCB);
+        etmCharRelayRequesterWCB = 0;
+    }
 }
 
 
@@ -1491,82 +1591,7 @@ void printConfigInfo() {
 }
 
 void printESPNowStats() {
-  Serial.println("\n--- ESP-NOW Statistics (Since Last Reboot) ---");
-
-  if (etmEnabled) {
-    unsigned long totalSent = 0, totalAckd = 0, totalRetries = 0, totalFailed = 0;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
-      if (b + 1 == WCB_Number) continue;
-      totalSent    += etmStatsSent[b];
-      totalAckd    += etmStatsAckd[b];
-      totalRetries += etmStatsRetries[b];
-      totalFailed  += etmStatsFailed[b];
-    }
-    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
-      int spIdx = WCB_SPECIAL_PEER_ID - 1;
-      totalSent    += etmStatsSent[spIdx];
-      totalAckd    += etmStatsAckd[spIdx];
-      totalRetries += etmStatsRetries[spIdx];
-      totalFailed  += etmStatsFailed[spIdx];
-    }
-    Serial.println("Unicast Command Messages:");
-    Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
-                  totalSent, totalAckd, totalFailed);
-    if (totalSent > 0) {
-      Serial.printf("  Delivery Success Rate: %.2f%%\n",
-                    (float)totalAckd / totalSent * 100.0);
-    }
-  } else {
-    Serial.println("Unicast Command Messages:");
-    Serial.printf("  Transmission Attempts: %lu, Delivered: %lu, Failed: %lu\n",
-                  espnowCommandAttempts, espnowCommandSuccess, espnowCommandFailed);
-    if (espnowCommandAttempts > 0) {
-      Serial.printf("  Delivery Success Rate: %.2f%%\n",
-                    (float)espnowCommandSuccess / espnowCommandAttempts * 100.0);
-    }
-  }
-
-  if (espnowPWMAttempts > 0) {
-    Serial.println("PWM Passthrough:");
-    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n",
-                  espnowPWMAttempts, espnowPWMSuccess, espnowPWMFailed);
-  }
-
-  if (espnowRawAttempts > 0) {
-    Serial.println("Raw Data (Kyber Bridging):");
-    Serial.printf("  Attempts: %lu, Success: %lu, Failed: %lu\n",
-                  espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
-  }
-
-  if (etmEnabled) {
-    Serial.println("\n--------------- ETM Per-Board Statistics ---------------");
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
-      int wcbNum = b + 1;
-      if (wcbNum == WCB_Number) continue;
-      unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
-      Serial.printf("WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, %s\n",
-                    wcbNum,
-                    etmStatsSent[b], etmStatsAckd[b],
-                    etmStatsRetries[b], etmStatsFailed[b],
-                    boardTable[b].online
-                      ? ("Online (last seen " + String(ago) + "s ago)").c_str()
-                      : "OFFLINE");
-    }
-    if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
-      int spIdx    = WCB_SPECIAL_PEER_ID - 1;
-      unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000;
-      Serial.printf("WCB%d (special): Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, %s\n",
-                    WCB_SPECIAL_PEER_ID,
-                    etmStatsSent[spIdx], etmStatsAckd[spIdx],
-                    etmStatsRetries[spIdx], etmStatsFailed[spIdx],
-                    boardTable[spIdx].online
-                      ? ("Online (last seen " + String(ago) + "s ago)").c_str()
-                      : "OFFLINE");
-    }
-    Serial.println("--------------------------------------------------------");
-  }
-
-  Serial.println("--- End of ESP-NOW Statistics ---\n");
+  Serial.print(buildStatsString());
 }
 //*******************************
 /// ESP-NOW Functions
@@ -1836,6 +1861,20 @@ void handleMgmtForward(const String &args) {
   String type = args.substring(0, c1); type.toUpperCase();
   if (type == "PULL") {
     handleMgmtPullRequest(args.substring(c1 + 1));
+    return;
+  }
+  if (type == "STATS") {
+    handleMgmtStatsRequest(args.substring(c1 + 1));
+    return;
+  }
+  if (type == "ETM") {
+    // Expect ?MGMT,ETM,CHAR,<targetWCB>
+    String etmArgs = args.substring(c1 + 1);  // "CHAR,3"
+    int c2 = etmArgs.indexOf(',');
+    if (c2 < 0) { if (debugMGMT) Serial.println("[MGMT] ETM: expected ?MGMT,ETM,CHAR,<target>"); return; }
+    String etmSub = etmArgs.substring(0, c2); etmSub.toUpperCase();
+    if (etmSub != "CHAR") { if (debugMGMT) Serial.printf("[MGMT] ETM: unknown subcommand '%s'\n", etmSub.c_str()); return; }
+    handleMgmtETMRequest(etmArgs.substring(c2 + 1));  // "3"
     return;
   }
   if (type != "FRAG") { if (debugMGMT) Serial.println("[MGMT] Unknown MGMT subcommand"); return; }
@@ -2242,6 +2281,161 @@ void handleConfigFragPacket(const uint8_t *data) {
   }
 }
 
+// ── Shared helper: fragment a String result and send back via ESP-NOW ────────
+void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacketType) {
+  const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
+  int totalLen    = data.length();
+  int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
+  if (totalChunks > MGMT_MAX_CHUNKS) {
+    if (debugMGMT) Serial.printf("[MGMT] Result too large (%d chars) — cannot relay\n", totalLen);
+    return;
+  }
+  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+  for (int i = 0; i < totalChunks; i++) {
+    espnow_struct_config_frag frag;
+    memset(&frag, 0, sizeof(frag));
+    strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+    frag.packetType   = fragPacketType;
+    frag.sourceWCB    = WCB_Number;
+    frag.requesterWCB = requesterWCB;
+    frag.sessionId    = sessionId;
+    frag.chunkIdx     = (uint8_t)i;
+    frag.totalChunks  = (uint8_t)totalChunks;
+    int start = i * chunkStride;
+    int end   = min(start + chunkStride, totalLen);
+    String chunk = data.substring(start, end);
+    memcpy(frag.payload, chunk.c_str(), chunk.length());
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+    delay(20);
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sent result frags (%d chunks, type %d) to WCB%d\n",
+                                totalChunks, fragPacketType, requesterWCB);
+}
+
+// ── Target side: handle STATS_REQ → collect ?STATS and send back as frags ────
+void handleStatsReqPacket(const uint8_t *data) {
+  espnow_struct_config_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  if (debugMGMT) Serial.printf("[MGMT] Stats request from WCB%d\n", pkt.requesterWCB);
+  String result = buildStatsString();
+  sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_STATS_FRAG);
+}
+
+// ── Target side: handle ETM_REQ → start ETM char, results sent in printETMCharResults ──
+void handleETMReqPacket(const uint8_t *data) {
+  espnow_struct_config_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  if (debugMGMT) Serial.printf("[MGMT] ETM char request from WCB%d\n", pkt.requesterWCB);
+  if (etmCharRunning) {
+    if (debugMGMT) Serial.println("[MGMT] ETM char already running — ignoring relay request");
+    return;
+  }
+  etmCharRelayRequesterWCB = pkt.requesterWCB;
+  Serial.printf("[MGMT] ETM relay req received: etmCharRelayRequesterWCB set to %d\n", etmCharRelayRequesterWCB);
+  startETMChar();
+}
+
+// ── Relay side: reassemble ?STATS frags and output [MGMT:STATS,N]<data> ──────
+void handleStatsFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!statsRelaySession.active || statsRelaySession.sessionId != pkt.sessionId) {
+    memset(&statsRelaySession, 0, sizeof(statsRelaySession));
+    statsRelaySession.sourceWCB      = pkt.sourceWCB;
+    statsRelaySession.sessionId      = pkt.sessionId;
+    statsRelaySession.totalChunks    = pkt.totalChunks;
+    statsRelaySession.lastActivityMs = millis();
+    statsRelaySession.active         = true;
+  }
+  if (!(statsRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(statsRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    statsRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    statsRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  statsRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (statsRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(statsRelaySession.chunks[i]);
+    uint8_t srcWCB = statsRelaySession.sourceWCB;
+    memset(&statsRelaySession, 0, sizeof(statsRelaySession));
+    Serial.printf("[MGMT:STATS,%d]%s\n", srcWCB, fullResult.c_str());
+    if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: reassemble ?ETM,CHAR frags and output [MGMT:ETM,N]<data> ─────
+void handleETMFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!etmRelaySession.active || etmRelaySession.sessionId != pkt.sessionId) {
+    memset(&etmRelaySession, 0, sizeof(etmRelaySession));
+    etmRelaySession.sourceWCB      = pkt.sourceWCB;
+    etmRelaySession.sessionId      = pkt.sessionId;
+    etmRelaySession.totalChunks    = pkt.totalChunks;
+    etmRelaySession.lastActivityMs = millis();
+    etmRelaySession.active         = true;
+  }
+  if (!(etmRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(etmRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    etmRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    etmRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  etmRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (etmRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(etmRelaySession.chunks[i]);
+    uint8_t srcWCB = etmRelaySession.sourceWCB;
+    memset(&etmRelaySession, 0, sizeof(etmRelaySession));
+    Serial.printf("[MGMT:ETM,%d]%s\n", srcWCB, fullResult.c_str());
+    if (debugMGMT) Serial.printf("[MGMT] ETM relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: handle ?MGMT,STATS,<n> and ?MGMT,ETM,<n> ────────────────────
+void handleMgmtStatsRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > 8) return;
+  espnow_struct_config_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_STATS_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  if (debugMGMT) Serial.printf("[MGMT] Stats request sent to WCB%d\n", targetWCB);
+}
+
+void handleMgmtETMRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > 8) return;
+  espnow_struct_config_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_ETM_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  if (debugMGMT) Serial.printf("[MGMT] ETM char request sent to WCB%d\n", targetWCB);
+}
+
 // Relay side: handle ?MGMT,PULL,<targetWCB> — send a config pull request
 void handleMgmtPullRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
@@ -2292,11 +2486,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
   if (len == sizeof(espnow_struct_config_req)) {
-    handleConfigReqPacket(incomingData);
+    // Dispatch by packetType — STATS_REQ and ETM_REQ share the same struct size
+    uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
+    if      (ptype == PACKET_TYPE_CONFIG_REQ) handleConfigReqPacket(incomingData);
+    else if (ptype == PACKET_TYPE_STATS_REQ)  handleStatsReqPacket(incomingData);
+    else if (ptype == PACKET_TYPE_ETM_REQ)    handleETMReqPacket(incomingData);
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
-    handleConfigFragPacket(incomingData);
+    // Dispatch by packetType — STATS_FRAG and ETM_FRAG share the same struct size
+    uint8_t ptype = ((const espnow_struct_config_frag*)incomingData)->packetType;
+    if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
     return;
   }
   // Remote terminal output from a target board → print [TERM:N] to USB
