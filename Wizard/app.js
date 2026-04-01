@@ -3,7 +3,7 @@
 //  WebSerial logic, BoardConnection class, UI handlers,
 //  file import/export, command builder integration
 // ════════════════════════════════════════════════════════════════
-
+ 
 const BAUD_RATES = [110,300,600,1200,2400,9600,14400,19200,38400,57600,115200,128000,256000];
 
 // Detect host OS — used to apply Windows-specific Web Serial workarounds.
@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.04.01 10:15';
+const UI_VERSION = '01.10:51.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
