@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.04.01 09:25';
+const UI_VERSION = '2026.04.01 09:51';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6076,7 +6076,7 @@ function wizardHTMLNetwork() {
     <div class="wizard-section-title">Network Configuration</div>
     <div class="wizard-section-desc">All boards in the same system must share these settings. We've suggested random secure values — feel free to change them.</div>
     <div class="wizard-field-row">
-      <label>ESP-NOW Password ${wizHint('Shared password for all boards on this network. Every board must use the same password to communicate with each other.')}</label>
+      <label>ESP-NOW Password</label>${wizHint('Shared password for all boards on this network. Every board must use the same password to communicate with each other.')}
       <input id="wiz-password" type="text" value="${escHtml(password)}" spellcheck="false">
       <button class="wizard-gen-btn" title="Generate random" onclick="wizardFillGen('wiz-password','password')">🎲</button>
     </div>
@@ -6128,7 +6128,7 @@ function wizardHTMLIdentity() {
           <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}" style="max-width:80px">
         </div>
         <div class="wizard-field-row">
-          <label>Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below. Different versions have different pin assignments and must be set correctly.')}</label>
+          <label>Hardware Version</label>${wizHint('PCB version printed on the board label as VER:X.X — see the photo below. Different versions have different pin assignments and must be set correctly.')}
           <select id="wiz-b${i}-hwver">
             <option value="0">— Select version —</option>
             ${hwOpts}
@@ -6267,7 +6267,7 @@ function wizardHTMLKyberConfig() {
     <div class="wizard-section-desc">Select which board and serial ports the Kyber sound controller is connected to. Maestro targets can be added on the next screen and in the config page.</div>
 
     <div class="wizard-field-row">
-      <label>Local Kyber Board ${wizHint('Which WCB is physically connected to the Kyber via serial cable.')}</label>
+      <label>Local Kyber Board</label>${wizHint('Which WCB is physically connected to the Kyber via serial cable.')}
       <select id="wiz-kyber-board">${boardOpts}</select>
     </div>
 
@@ -6447,27 +6447,6 @@ function wizardHTMLReview() {
 
 function wizardHTMLFirmware() {
   const yes = wizardState.needsFirmware === true;
-  // Erase checkbox is shown for both paths, but description text differs
-  const eraseHint  = yes
-    ? wizHint('Erases all NVS (non-volatile storage) on the board before flashing — use for a true factory reset. Any previously saved passwords, sequences, or port settings will be wiped.')
-    : wizHint('Sends ?ERASE,NVS to the board, waits for it to reboot, then pushes the configuration — use when you want a clean slate without re-flashing firmware. All saved settings will be cleared.');
-  const eraseTitle = yes
-    ? 'Erase board memory before flashing'
-    : 'Erase board memory (NVS only — no firmware re-flash)';
-  const eraseDesc  = yes
-    ? 'Erases all saved settings (passwords, port config, sequences) before flashing — use for a true factory reset.'
-    : 'Clears all saved settings on the board, then pushes configuration — no firmware re-flash required.';
-  const eraseBlock = `
-    <div style="margin-top:12px;padding:10px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:6px">
-      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
-        <input type="checkbox" id="wiz-erase-nvs" style="margin-top:2px;cursor:pointer" ${wizardState.eraseNvs ? 'checked' : ''}>
-        <div>
-          <div style="font-weight:600;font-size:13px">${eraseTitle} ${eraseHint}</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:2px">${eraseDesc}</div>
-        </div>
-      </label>
-    </div>
-    `;
   return `
     <div class="wizard-section-title">Firmware Upload</div>
     <div class="wizard-section-desc">Does WCB firmware need to be uploaded to these boards? Choose "Yes" if the boards are brand new or have never had WCB firmware installed.</div>
@@ -6484,8 +6463,7 @@ function wizardHTMLFirmware() {
         <span class="wizard-choice-label">No, already installed</span>
         <span class="wizard-choice-desc">Firmware is already on the boards — just push configuration</span>
       </button>
-    </div>
-    ${eraseBlock}`;
+    </div>`;
 }
 
 function wizardFirmwareChoice(val, btn) {
@@ -6543,18 +6521,21 @@ function wizardHTMLConnect() {
   const banner = bannerHtml
     ? `<div class="wizard-connect-banner" id="wiz-connect-banner">${bannerHtml}</div>`
     : `<div id="wiz-connect-banner" style="display:none"></div>`;
-  const changeBtn = `<button class="btn btn-ghost btn-sm" style="margin-bottom:10px;font-size:11px"
-      onclick="wizardSelectConnectMode(null)">← Change connection method</button>`;
 
   const tipHtml = `
-    <div class="wizard-connect-tip">
-      <strong>Tip:</strong> Plug in each board one at a time. Click <strong>🔍 Detect</strong> on its row,
-      then press the reset button on that board — it will auto-select. Or click <strong>Use →</strong> to pick a port directly.
-    </div>`;
+    <details class="wizard-connect-tip-details">
+      <summary>💡 How to connect &amp; authorize ports</summary>
+      <div class="wizard-connect-tip-body">
+        Connect all WCBs via USB before proceeding — this is the preferred method.
+        Click <strong>🔍 Detect</strong> on each row, then press the reset button on that board to auto-select its port.
+        Or click <strong>Use →</strong> to pick a port directly.<br><br>
+        <strong>First time connecting?</strong> Click <strong>+ Authorize…</strong> to grant the browser permission
+        to access each board's USB port. You will need to do this once per WCB you want to configure. So if you are configuring 3 WCBs, click the Authorize button 3 times to grant permissions to the 3 serial ports.
+      </div>
+    </details>`;
 
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
-    ${changeBtn}
     ${tipHtml}
     ${banner}
     ${rows}`;
@@ -6564,11 +6545,7 @@ function wizardConnectBannerText() {
   const { connectMode, connectSeqN, boards } = wizardState;
   if (connectMode !== 'seq') return '';
   if (connectSeqN > boards.length) return '✅ All boards configured!';
-  const b = boards[connectSeqN - 1];
-  if (connectSeqN === 1) {
-    return `📌 Plug <strong>WCB ${b.wcbNumber}</strong> into USB now, then click <strong>🔌 Connect</strong> to select its port.`;
-  }
-  return `✓ Done! Unplug the previous board. Now plug in <strong>WCB ${b.wcbNumber}</strong>, then click <strong>🔌 Connect</strong> below.`;
+  return '';
 }
 
 function wizardSelectConnectMode(mode) {
@@ -6809,8 +6786,8 @@ function wizardSaveStep(key) {
       wizardState.kyberMarcduinoPort = parseInt(get('wiz-kyber-marcduino-port')?.value) || null;
       break;
     case 'firmware':
-      // needsFirmware is set by wizardFirmwareChoice(); always read the checkbox
-      wizardState.eraseNvs = document.getElementById('wiz-erase-nvs')?.checked ?? false;
+      // needsFirmware is set by wizardFirmwareChoice(); eraseNvs is always true in the wizard
+      wizardState.eraseNvs = true;
       break;
     case 'maestro-config': {
       // Snapshot old claims (boardSlot-port → baud) before updating

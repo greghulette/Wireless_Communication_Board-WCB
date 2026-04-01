@@ -796,11 +796,20 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   font-size: 12px; line-height: 1.6; color: var(--text);
   margin-bottom: 2px;
 }
-.wizard-connect-tip {
+.wizard-connect-tip-details {
   background: rgba(255,200,0,0.07); border: 1px solid rgba(255,200,0,0.3);
-  border-radius: var(--radius); padding: 9px 14px;
-  font-size: 12px; line-height: 1.6; color: var(--text2);
-  margin-bottom: 10px;
+  border-radius: var(--radius); margin-bottom: 10px;
+}
+.wizard-connect-tip-details summary {
+  font-size: 12px; font-weight: 600; color: var(--text2);
+  padding: 9px 14px; cursor: pointer; list-style: none; user-select: none;
+}
+.wizard-connect-tip-details summary::-webkit-details-marker { display: none; }
+.wizard-connect-tip-details[open] summary {
+  border-bottom: 1px solid rgba(255,200,0,0.2); margin-bottom: 0;
+}
+.wizard-connect-tip-body {
+  padding: 9px 14px; font-size: 12px; line-height: 1.6; color: var(--text2);
 }
 
 /* ─── Board Inline Connect Strip ────────────────────────────── */
