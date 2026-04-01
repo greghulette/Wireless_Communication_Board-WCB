@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: YYYY.MM.DD HH:MM (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '2026.03.31 18:09';
+const UI_VERSION = '2026.03.31 22:33';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6362,7 +6362,7 @@ function wizardHTMLMaestroConfig() {
     // Column order: ID → Board → Port → Baud
     return `<tr id="wiz-maestro-row-${mi}">
       <td style="color:var(--text3);font-size:11px">${mi+1}</td>
-      <td style="min-width:50px"><select id="wiz-m${mi}-id">${idOpts}</select></td>
+      <td style="min-width:75px"><select id="wiz-m${mi}-id">${idOpts}</select></td>
       <td style="min-width:160px"><select id="wiz-m${mi}-board" onchange="wizardMaestroBoardChange(${mi})">${boardOpts(m.boardSlot)}</select></td>
       <td style="min-width:100px"><select id="wiz-m${mi}-port" onchange="wizardMaestroPortChange(${mi})">${portOpts}</select></td>
       <td style="min-width:115px"><select id="wiz-m${mi}-baud">${baudOpts}</select></td>
