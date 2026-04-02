@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WCB Configuration Tool</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ─── Header ─────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-logo">
+      <img src="../Images/r2logo.png" class="header-logo-img" alt="Logo">
+      <div class="header-title">
+        <h1>WCB Config Tool</h1>
+        <span>Wireless Communication Board</span>
+      </div>
+    </div>
+    <div class="header-spacer"></div>
+    <div class="header-actions">
+      <div class="mode-toggle">
+        <button id="btn-simple" class="active" onclick="setMode('simple')">Simple</button>
+        <button id="btn-advanced" onclick="setMode('advanced')">Advanced</button>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="openWizard()">✦ Wizard</button>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('file-input').click()">⬆ Load File</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportSystemFile()">⬇ Export</button>
+      <button class="btn btn-success btn-sm" id="btn-push-all" onclick="boardGoAll()">▶▶ Push All</button>
+      <button id="btn-terminal" class="btn btn-ghost btn-sm" onclick="toggleTerminal()">⌨ Terminal</button>
+      <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
+    </div>
+  </header>
+
+  <!-- ─── Browser Warning ─────────────────────────────────────────── -->
+  <div id="browser-warning" class="browser-warning hidden">
+    ⚠ WebSerial is not supported in this browser.
+    Please use <strong>Chrome 89+</strong> or <strong>Edge 89+</strong> to connect to boards.
+  </div>
+
+  <input type="file" id="file-input" accept=".txt" style="display:none" onchange="loadFileFromInput(event)">
+
+  <!-- ─── WCB Jump Nav ───────────────────────────────────────────── -->
+  <div id="wcb-nav" class="wcb-nav" style="display:none"></div>
+
+  <!-- ─── Main Content ────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- ═══ GENERAL SECTION ════════════════════════════════════════ -->
+    <div class="section open" id="section-general">
+      <div class="section-header" onclick="toggleSection('section-general')">
+        <span class="section-chevron">▶</span>
+        <div class="section-title"><h2>General Settings</h2></div>
+        <div class="section-meta">
+          <span class="badge badge-default" id="badge-general">System-Wide</span>
+        </div>
+      </div>
+      <div class="section-body">
+
+        <div class="subsection-title">Network Identity</div>
+        <div class="field-group">
+          <div class="field">
+            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options.">i</span></label>
+            <select id="g-wcbq" onchange="onWCBQuantityChange()">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="_more">More…</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>ESP-NOW Password <span class="wiz-hint" data-tip="Shared passphrase for the ESP-NOW wireless mesh. Every board in the system must use the same password to communicate.">i</span></label>
+            <input type="text" id="g-password" placeholder="change_me_or_risk_takeover" maxlength="39"
+              oninput="onGeneralPasswordChange()" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>MAC Octet 2 (hex) <span class="wiz-hint" data-tip="Second byte of the ESP-NOW broadcast MAC address (00-FF hex). Must match on all boards in the system.">i</span></label>
+            <input type="text" id="g-mac2" placeholder="00" maxlength="2"
+              oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
+              style="text-transform:uppercase" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>MAC Octet 3 (hex) <span class="wiz-hint tip-left" data-tip="Third byte of the ESP-NOW broadcast MAC address (00-FF hex). Must match on all boards in the system.">i</span></label>
+            <input type="text" id="g-mac3" placeholder="00" maxlength="2"
+              oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
+              style="text-transform:uppercase" spellcheck="false">
+          </div>
+        </div>
+
+        <hr class="divider advanced-only hidden">
+
+        <div class="subsection-title advanced-only hidden">Command Characters <span class="text-muted">— must match across all boards</span></div>
+        <div class="field-group advanced-only hidden">
+          <div class="field">
+            <label>Command Delimiter <span class="wiz-hint" data-tip="Character that separates commands in a batch string. Default is ^. Must be identical on every board.">i</span></label>
+            <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+          <div class="field">
+            <label>Local Function Identifier <span class="wiz-hint" data-tip="Prefix character for commands processed only by this board and not relayed to others. Default is ?.">i</span></label>
+            <input type="text" id="g-funcchar" value="?" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+          <div class="field">
+            <label>Command Character <span class="wiz-hint" data-tip="Character that identifies a command string on the serial line. Default is ;. Must match across all boards.">i</span></label>
+            <input type="text" id="g-cmdchar" value=";" maxlength="1" spellcheck="false"
+              oninput="onGeneralCmdCharChange()">
+          </div>
+        </div>
+
+        <hr class="divider advanced-only hidden">
+
+        <div class="subsection-title advanced-only hidden">Ensured Transmission Mode (ETM)</div>
+        <div class="toggle-wrap mb-12 advanced-only hidden">
+          <label class="toggle">
+            <input type="checkbox" id="g-etm-enabled" checked onchange="onETMToggle()">
+            <span class="toggle-track"></span>
+            <span class="toggle-label">ETM Enabled <span class="wiz-hint" data-tip="ETM (Ensured Transmission Mode): retransmits dropped commands to guarantee all packets are delivered and acted upon by the target board.">i</span></span>
+          </label>
+        </div>
+        <div class="etm-detail" id="etm-detail">
+          <div class="field-group">
+            <div class="field"><label>Timeout (ms) <span class="wiz-hint" data-tip="Milliseconds to wait before declaring a board unresponsive after it misses too many heartbeats.">i</span></label><input type="number" id="g-etm-timeout" value="500" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="2" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="How many times to repeat the offline alert message when a board is detected as unresponsive.">i</span></label><input type="number" id="g-etm-count" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100" oninput="onGeneralETMChange()"></div>
+          </div>
+          <div class="toggle-wrap mt-8">
+            <label class="toggle">
+              <input type="checkbox" id="g-etm-chksm" checked onchange="onETMChecksumToggle()">
+              <span class="toggle-track"></span>
+              <span class="toggle-label">Packet Checksum Verification <span class="wiz-hint" data-tip="Validates incoming packet integrity. Disable only if boards drop valid messages due to false checksum errors.">i</span></span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ═══ BOARD SECTIONS (dynamically generated) ═════════════════ -->
+    <div id="boards-container"></div>
+
+  </main>
+</div>
+
+<!-- ─── Terminal Drawer ──────────────────────────────────────────── -->
+<div class="terminal-drawer" id="terminal-drawer">
+  <div class="terminal-resize-handle" id="terminal-resize-handle" title="Drag to resize"></div>
+  <div class="terminal-header">
+    <h3>⌨ TERMINAL</h3>
+    <div class="term-vis-toggles" id="terminal-visibility-toggles"></div>
+    <button class="btn btn-ghost btn-sm" onclick="clearAllTerminals()">✕ Clear All</button>
+    <button class="btn btn-ghost btn-sm" onclick="toggleTerminal()">▼ Close</button>
+  </div>
+  <div class="terminal-panes" id="terminal-panes">
+    <div class="terminal-no-boards" id="terminal-no-boards">No board connected</div>
+  </div>
+</div>
+
+<!-- ─── Connect Modal ────────────────────────────────────────────── -->
+<div class="modal-overlay" id="connect-modal" onclick="closeConnectModal(event)">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="connect-modal-title">Connect WCB</span>
+      <button class="modal-close" onclick="closeConnectModal()">✕</button>
+    </div>
+    <!-- Options view -->
+    <div class="modal-body" id="connect-modal-options">
+      <button class="modal-option" onclick="modalAutoDetect()">
+        <span class="modal-option-icon">⊙</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">
+            Auto-Detect
+            <span class="badge badge-accent" style="font-size:9px;padding:2px 6px">Recommended</span>
+          </div>
+          <div class="modal-option-desc">Press the reset button on your board and it will connect automatically.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="modalManualSelect()">
+        <span class="modal-option-icon">🔌</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Select Port Manually</div>
+          <div class="modal-option-desc">Choose a COM port from the browser's native picker.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="modalAuthorize()">
+        <span class="modal-option-icon">🔑</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Authorize New Board</div>
+          <div class="modal-option-desc">First time connecting a board? Grant browser access to its port, then connect.</div>
+        </div>
+      </button>
+      <!-- Remote relay options — populated dynamically by openConnectModal() -->
+      <div id="connect-modal-remote-section" style="display:none;flex-direction:column;gap:8px"></div>
+    </div>
+    <!-- Detecting view — shown while auto-detect is running -->
+    <div class="modal-body" id="connect-modal-detecting" style="display:none;flex-direction:column;gap:16px">
+      <div id="connect-modal-detect-panel" style="min-height:40px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="connect-modal-cancel-btn" onclick="closeConnectModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Setup Wizard Modal ───────────────────────────────────────── -->
+<div class="modal-overlay" id="wizard-modal">
+  <div class="modal-dialog wizard-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="wizard-modal-title">Setup Wizard</span>
+      <div class="wizard-step-indicator" id="wizard-step-indicator"></div>
+      <button class="modal-close" onclick="closeWizard()">✕</button>
+    </div>
+    <div class="wizard-body" id="wizard-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="wizard-back-btn" onclick="wizardBack()">← Back</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-primary btn-sm" id="wizard-next-btn" onclick="wizardNext()">Next →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── General Conflict Modal ───────────────────────────────────── -->
+<div class="modal-overlay" id="general-conflict-modal" onclick="closeGeneralConflictModal(event)">
+  <div class="modal-dialog" style="width:520px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ General Settings Mismatch</span>
+      <button class="modal-close" onclick="closeGeneralConflictModal()">✕</button>
+    </div>
+    <div class="modal-body" id="general-conflict-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="general-conflict-keep">Keep current</button>
+      <button class="btn btn-primary btn-sm" id="general-conflict-use">Use incoming</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Port Picker Modal ─────────────────────────────────────── -->
+<div class="modal-overlay" id="port-picker-modal" onclick="closePortPickerModal(event)">
+  <div class="modal-dialog" style="width:440px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title" id="port-picker-title">Select Serial Port</span>
+      <button class="modal-close" onclick="closePortPickerModal()">✕</button>
+    </div>
+    <div class="modal-body" id="port-picker-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="closePortPickerModal()">Cancel</button>
+      <button class="btn btn-ghost btn-sm" id="port-picker-com-btn" title="Opens Chrome's port list — shows COM port numbers (e.g. COM13)">Select by COM#…</button>
+      <button class="btn btn-primary btn-sm" id="port-picker-new-btn">+ Authorize…</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Remote Network-Group Change Confirmation Modal ───────────── -->
+<!-- Shown when a remote push contains MAC-octet or password changes. -->
+<!-- The push is held until the user explicitly clicks "Push anyway". -->
+<div class="modal-overlay" id="network-group-change-modal">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ Network Group Change — Remote Board</span>
+    </div>
+    <div class="modal-body" id="network-group-change-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="network-group-change-cancel">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="network-group-change-confirm">I understand — push anyway</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Factory Reset Modal ──────────────────────────────────────── -->
+<div class="modal-overlay" id="factory-reset-modal" onclick="closeFactoryResetModal(event)">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title" id="factory-reset-modal-title">🏭 Factory Reset WCB</span>
+      <button class="modal-close" onclick="closeFactoryResetModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin:0 0 14px;color:var(--text2);font-size:13px;line-height:1.5">
+        This will erase <strong>all stored settings</strong> including baud rates, MAC octets,
+        ESP-NOW password, WCB number, hardware version, sequences, and Kyber config.
+        Choose how to proceed:
+      </p>
+      <button class="modal-option" onclick="doFactoryResetWithFw()">
+        <span class="modal-option-icon">💾</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Erase NVS + Load Fresh Firmware</div>
+          <div class="modal-option-desc">Erase all settings and re-flash the latest firmware. Complete clean slate — use for a true fresh start.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="doFactoryResetEraseOnly()">
+        <span class="modal-option-icon">🗑</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Erase NVS Only</div>
+          <div class="modal-option-desc">Erase all settings but keep the existing firmware. The board will reboot with factory defaults.</div>
+        </div>
+      </button>
+      <div style="margin-top:12px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="factory-reset-push-config" style="cursor:pointer">
+          <span style="font-size:12px;color:var(--text2)">Push current configuration after flashing <span style="color:var(--text3)">(firmware flash only)</span></span>
+        </label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeFactoryResetModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── ETM Char / ESP-NOW Stats Modal ──────────────────────────── -->
+<div class="modal-overlay" id="stats-modal" onclick="closeStatsModal(event)">
+  <div class="modal-dialog stats-dialog">
+    <div class="modal-header">
+      <span class="modal-title" id="stats-modal-title">Stats</span>
+      <button class="modal-close" onclick="closeStatsModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:16px">
+      <pre class="stats-modal-output" id="stats-modal-output">Fetching…</pre>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="refreshStatsModal()">↺ Refresh</button>
+      <button class="btn btn-primary btn-sm" onclick="closeStatsModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Toast Container ──────────────────────────────────────────── -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- ─── Board Section Template ───────────────────────────────────── -->
+<template id="board-template">
+  <div class="section open" id="section-board-{N}">
+    <div class="section-header" onclick="toggleSection('section-board-{N}')">
+      <span class="section-chevron">▶</span>
+      <span class="board-num-pill">{N}</span>
+      <div class="section-title"><h2>WCB {N}</h2></div>
+      <div class="section-status">
+        <span class="fw-version" id="b{N}-fw-version"></span>
+        <span class="badge badge-default" id="b{N}-status-badge">Not Connected</span>
+        <span class="badge badge-yellow" id="b{N}-unsaved-badge" style="display:none">⚠ Unsaved</span>
+      </div>
+      <div class="section-meta">
+        <button class="btn btn-ghost btn-sm" id="b{N}-btn-identify" onclick="event.stopPropagation();boardIdentify({N})" disabled title="Blink board LED red/green for 5 seconds to identify it" style="padding:2px 8px;font-size:11px">Identify</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-btn-retry" onclick="event.stopPropagation();boardRetryPull({N})" title="Retry config pull" style="display:none">↺ Retry</button>
+        <button class="btn btn-primary btn-sm" id="b{N}-btn-connect" onclick="event.stopPropagation();boardConnect({N})">Connect</button>
+      </div>
+    </div>
+
+    <!-- ─── Inline connect strip ─────────────────────────────────── -->
+    <!-- Shown instead of a modal when the Connect button is clicked  -->
+    <div class="board-connect-strip" id="b{N}-connect-strip"
+         style="display:none" onclick="event.stopPropagation()">
+      <div class="board-connect-strip-header">
+        <div class="board-connect-strip-label">
+          WCB {N}
+          <span class="board-connect-strip-sub">Board #{N}</span>
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px"
+                onclick="event.stopPropagation();boardConnectCancel({N})">✕</button>
+        <span class="board-connect-strip-status" id="b{N}-strip-status">Select port…</span>
+      </div>
+      <div class="board-connect-strip-panel" id="b{N}-strip-panel"></div>
+    </div>
+
+    <div class="section-body">
+
+      <!-- Action Bar -->
+      <div class="board-action-bar">
+        <div class="action-bar-right" style="margin-left:auto">
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-etm-char" onclick="openStatsModal({N},'etm')" disabled title="Run ETM network characterization on this board">Network Test</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-stats" onclick="openStatsModal({N},'stats')" disabled title="View ESP-NOW statistics for this board">ESP-NOW Stats</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
+          <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>Push Config</button>
+          <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardFactoryReset({N})" disabled title="Erase all settings and reboot — optionally re-flash firmware">🏭 Factory Reset</button>
+        </div>
+      </div>
+
+      <!-- Flash Progress (hidden until flashing) -->
+      <div id="b{N}-flash-wrap" style="display:none;padding:10px 0 4px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span id="b{N}-flash-status" style="font-size:12px;color:var(--text2)">Preparing…</span>
+          <span id="b{N}-flash-pct" style="font-size:12px;font-family:var(--mono);color:var(--text3)"></span>
+        </div>
+        <div style="background:var(--bg4);border-radius:999px;height:5px;overflow:hidden">
+          <div id="b{N}-flash-bar" style="height:100%;background:var(--accent);width:0%;transition:width 0.15s ease"></div>
+        </div>
+      </div>
+
+      <!-- Board Identity -->
+      <div class="subsection-title">Board Identity</div>
+      <div class="field-group">
+        <div class="field">
+          <label>WCB Number <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
+          <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
+            <!-- populated dynamically by populateWCBNumberDropdown() -->
+          </select>
+        </div>
+        <div class="field">
+          <label>Hardware Version <span class="wiz-hint" data-tip="Physical board revision. Determines which pins the serial ports and LED utilize.">i</span></label>
+          <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
+            <option value="0">— Select —</option>
+            <option value="1">1.0  (LilyGo T7 V1.5)</option>
+            <option value="21">2.1  (Custom Board)</option>
+            <option value="23">2.3  (Custom Board)</option>
+            <option value="24">2.4  (Custom Board)</option>
+            <option value="31">3.1  (ESP32-S3)</option>
+            <option value="32">3.2  (ESP32-S3)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="b{N}-sw-version"
+                  style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
+                         border:1px solid var(--border);border-radius:var(--radius);
+                         color:var(--text3);font-family:var(--mono);font-size:12px;min-height:36px">—</span>
+            <button class="btn btn-warning btn-sm" id="b{N}-btn-update-fw"
+                    onclick="boardUpdateFW({N})" style="display:none" title="A newer firmware version is available">⬆ Update FW</button>
+          </div>
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Serial Ports -->
+      <div class="subsection-title">Serial Ports</div>
+      <table class="serial-table" id="b{N}-serial-table">
+        <thead>
+          <tr>
+            <th>Port</th>
+            <th>Baud Rate <span class="wiz-hint" data-tip="Serial communication speed for this port. Must match the baud rate of the device connected to it.">i</span></th>
+            <th>Bcast IN <span class="wiz-hint" data-tip="Determines if data received on this serial port is broadcast over ESP-NOW to all other boards in the system.">i</span></th>
+            <th>Bcast OUT <span class="wiz-hint" data-tip="Determines if broadcast messages from other WCB boards are forwarded out this serial port to the connected device.">i</span></th>
+            <th>Label <span class="wiz-hint" data-tip="Friendly name for this port (e.g. Dome, Body). Used for display only — does not affect behavior.">i</span></th>
+            <th style="min-width:140px">Status</th>
+          </tr>
+        </thead>
+        <tbody id="b{N}-serial-tbody"></tbody>
+      </table>
+
+      <hr class="divider">
+
+      <!-- Kyber -->
+      <div class="subsection-title">Kyber</div>
+      <div class="field-group">
+        <div class="field">
+          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board. Remote: Kyber is on another WCB.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
+            <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
+            <label><input type="radio" name="b{N}-kyber" value="remote" onchange="onKyberChange({N})"><span>Remote</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
+          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to.">i</span></label>
+          <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2" selected>Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
+          <label>Kyber Maestro Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with the Kyber Maestro Port.">i</span></label>
+          <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
+            <option value="9600">9,600</option>
+            <option value="38400">38,400</option>
+            <option value="57600">57,600</option>
+            <option value="115200" selected>115,200</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-kyber-marc-port-wrap" style="display:none">
+          <label>Kyber Marcuino Port <span class="wiz-hint tip-left" data-tip="Optional port connected to a Marcuino board for routing Kyber serial commands. (Baudrate is automatically set to 9600)">i</span></label>
+          <select id="b{N}-kyber-marc-port" onchange="onKyberMarcPortChange({N})">
+            <option value="0">— None —</option>
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Kyber Targets (auto-computed from Maestros — shown when LOCAL) -->
+      <div id="b{N}-kyber-targets-wrap" style="display:none;margin-top:14px">
+        <div class="subsection-title" style="margin-bottom:6px;border:none;padding:0">Kyber Targets</div>
+        <div id="b{N}-kyber-targets-info" class="text-muted" style="font-size:12px;line-height:1.6">
+          Auto-computed from Maestros on all boards — configure Maestros on each board first, then push.
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Maestro -->
+      <div>
+        <div class="flex items-center gap-8 mb-12">
+          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Maestro</div>
+          <button class="btn btn-ghost btn-sm" onclick="addMaestroRow({N})">+ Add</button>
+        </div>
+        <table class="serial-table" id="b{N}-maestro-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>Maestro ID <span class="wiz-hint" data-tip="Numeric ID for this Maestro controller. Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
+              <th>Port <span class="wiz-hint" data-tip="Serial port this Maestro is connected to on this board.">i</span></th>
+              <th>Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with this Maestro controller.">i</span></th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="b{N}-maestro-tbody"></tbody>
+        </table>
+        <p class="text-muted mt-8">IDs do not need to be unique — same ID on multiple boards triggers simultaneously.</p>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Mappings -->
+      <div>
+        <div class="flex items-center gap-8 mb-12">
+          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Mappings</div>
+          <button class="btn btn-ghost btn-sm" onclick="addMappingRow({N})">+ Add Mapping</button>
+        </div>
+        <div class="mapping-col-headers" id="b{N}-mapping-headers" style="display:none">
+          <span class="mc-type">Type <span class="wiz-hint" data-tip="Mapping protocol: Serial (TTL serial data) or PWM (RC-style servo signal).">i</span></span>
+          <span class="mc-src">Source Port <span class="wiz-hint" data-tip="The local port whose incoming data will be forwarded to the configured destination(s).">i</span></span>
+          <span class="mc-raw">Raw <span class="wiz-hint" data-tip="Forward data byte-for-byte without command parsing. Use for devices that do not utilize \r or \n at the end of their commands/packets.">i</span></span>
+          <span class="mc-bidir">Bidir <span class="wiz-hint" data-tip="Bidirectional: automatically creates a return mapping on the remote board so data flows both ways.">i</span></span>
+          <span class="mc-spacer"></span>
+        </div>
+        <div id="b{N}-mappings-container"></div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Stored Sequences -->
+      <div class="flex items-center gap-8 mb-12">
+        <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
+        <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+      </div>
+      <table class="seq-table">
+        <thead>
+          <tr>
+            <th style="width:150px">Key <span class="wiz-hint" data-tip="Short name used to trigger this sequence with a ;SEQ command (e.g. ;SEQSTARTUP).">i</span></th>
+            <th>Value <span class="wiz-hint tip-left" data-tip="The command string that executes when this sequence is triggered. Each line is a separate command that gets combined when pushed to the board. Can add comments after each command by using ***comment">i</span></th>
+            <th style="width:80px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="b{N}-seq-tbody"></tbody>
+      </table>
+
+      <hr class="divider">
+
+      <!-- MP3 Trigger -->
+      <div class="subsection-title">MP3 Trigger</div>
+      <div class="field-group">
+        <div class="field">
+          <label>MP3 Trigger <span class="wiz-hint" data-tip="Only use this if the WCB itself is sending play/stop commands directly to the MP3 Trigger. If another controller (e.g. Marcduino) is driving the MP3 Trigger through the WCB via broadcast or serial mapping, leave this None and just set the baud rate with the Serial Ports table.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-mp3" value="none" checked onchange="onMP3Change({N})"><span>None</span></label>
+            <label><input type="radio" name="b{N}-mp3" value="local" onchange="onMP3Change({N})"><span>Enabled</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-mp3-port-wrap" style="display:none">
+          <label>MP3 Port <span class="wiz-hint" data-tip="Serial port the MP3 Trigger is wired to on this board. Reserved exclusively — will not broadcast.">i</span></label>
+          <select id="b{N}-mp3-port" onchange="onMP3PortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
+          <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
+          <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
+            <option value="110">110</option>
+            <option value="300">300</option>
+            <option value="600">600</option>
+            <option value="1200">1,200</option>
+            <option value="2400">2,400</option>
+            <option value="9600" selected>9,600</option>
+            <option value="14400">14,400</option>
+            <option value="19200">19,200</option>
+            <option value="38400">38,400</option>
+            <option value="57600">57,600</option>
+            <option value="115200">115,200</option>
+            <option value="128000">128,000</option>
+            <option value="256000">256,000</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-mp3-vol-wrap" style="display:none">
+          <label>Default Volume <span class="wiz-hint tip-left" data-tip="0 = loudest, 64 = inaudible. Applied before every PLAY command. The MP3 Trigger boots at full volume (0) — this ensures consistent playback volume.">i</span></label>
+          <input type="number" id="b{N}-mp3-vol" min="0" max="64" value="0" onchange="onMP3VolChange({N})">
+        </div>
+        <div class="field" id="b{N}-mp3-onerr-wrap" style="display:none">
+          <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the MP3 Trigger reports an error. Leave blank to disable. Example: errhandler">i</span></label>
+          <input type="text" id="b{N}-mp3-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onMP3OnErrChange({N})">
+        </div>
+      </div>
+
+    </div>
+  </div>
+</template>
+
+<!-- ─── Splash Screen ────────────────────────────────────────────── -->
+<div class="modal-overlay splash-overlay" id="splash-overlay">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <img src="../Images/r2logo.png" class="splash-logo-img" alt="Logo">
+      <span class="modal-title">WCB Configuration Tool</span>
+    </div>
+    <div class="modal-body">
+      <button class="modal-option" onclick="splashGoWizard()">
+        <span class="modal-option-icon">✦</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">
+            Setup Wizard
+            <span class="badge badge-accent" style="font-size:9px;padding:2px 6px">Recommended</span>
+          </div>
+          <div class="modal-option-desc">Step-by-step guided setup. Perfect if you're new to WCB or setting up a new system from scratch.</div>
+        </div>
+      </button>
+      <button class="modal-option" onclick="splashGoConfig()">
+        <span class="modal-option-icon">⚡</span>
+        <div class="modal-option-text">
+          <div class="modal-option-title">Config Tool</div>
+          <div class="modal-option-desc">Jump straight to the configuration panel. Best for updating an existing system or experienced users.</div>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Support Footer ───────────────────────────────────────────── -->
+<div style="margin-top:48px;border-top:1px solid var(--border);padding:32px 40px 24px;display:flex;align-items:center;justify-content:space-between;gap:32px;flex-wrap:wrap">
+  <div style="display:flex;align-items:center;gap:18px">
+    <a href="https://beacons.ai/greghulette" target="_blank" rel="noopener" title="Scan for all contact links">
+      <img src="../Images/qr-code.png" alt="Contact QR Code"
+           style="width:72px;height:72px;border-radius:5px;display:block;opacity:0.85;transition:opacity 0.15s"
+           onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.85'">
+    </a>
+    <div>
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:3px">Contact &amp; Support</div>
+      <div style="font-size:11px;color:var(--text3);line-height:1.6">
+        Questions or need help? Scan for all contact links<br>or join the community on Discord.
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
+    <a href="https://github.com/greghulette/Wireless_Communication_Board-WCB" target="_blank" rel="noopener"
+       style="display:inline-flex;align-items:center;gap:7px;padding:7px 14px;
+              background:var(--bg3);border:1px solid var(--border);border-radius:6px;text-decoration:none;
+              font-size:12px;font-weight:600;color:var(--text2);letter-spacing:0.3px;
+              transition:border-color 0.15s,color 0.15s"
+       onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--border2)'"
+       onmouseout="this.style.color='var(--text2)';this.style.borderColor='var(--border)'">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+      </svg>
+      GitHub Repo
+    </a>
+    <a href="https://github.com/greghulette/Wireless_Communication_Board-WCB/wiki" target="_blank" rel="noopener"
+       style="display:inline-flex;align-items:center;gap:7px;padding:7px 14px;
+              background:var(--bg3);border:1px solid var(--border);border-radius:6px;text-decoration:none;
+              font-size:12px;font-weight:600;color:var(--text2);letter-spacing:0.3px;
+              transition:border-color 0.15s,color 0.15s"
+       onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--border2)'"
+       onmouseout="this.style.color='var(--text2)';this.style.borderColor='var(--border)'">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+      </svg>
+      Wiki
+    </a>
+    <a href="https://discord.gg/AdJPxc8QvZ" target="_blank" rel="noopener"
+       style="display:inline-flex;align-items:center;gap:8px;padding:7px 14px;
+              background:#5865F2;border-radius:6px;text-decoration:none;
+              font-size:12px;font-weight:600;color:#fff;letter-spacing:0.3px;
+              transition:background 0.15s"
+       onmouseover="this.style.background='#4752c4'" onmouseout="this.style.background='#5865F2'">
+      <svg width="15" height="12" viewBox="0 0 127.14 96.36" fill="#fff" xmlns="http://www.w3.org/2000/svg">
+        <path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/>
+      </svg>
+      Discord
+    </a>
+  </div>
+</div>
+
+<!-- ─── Page Version Footer ───────────────────────────────────────── -->
+<div style="text-align:center;padding:12px 0 16px;font-size:11px;color:var(--text3);font-family:var(--mono);letter-spacing:0.3px">
+  WCB Config Tool &nbsp;·&nbsp; UI Version <span id="footer-ui-version">—</span>
+</div>
+
+<!-- ─── Scripts ──────────────────────────────────────────────────── -->
+<script src="parser.js"></script>
+<script src="flasher.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>

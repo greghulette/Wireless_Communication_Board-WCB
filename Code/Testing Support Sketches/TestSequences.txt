@@ -1,0 +1,14 @@
+Testing
+;M21
+;w3;s3track1 *** plays track 1 through marcduino clone
+;a,play,1 *** plays track 1 via native mp3 trigger
+:PP100:L0:A180:A2
+;t4000
+:D308
+:PL1:P20:W3:H
+
+mp3Finish
+;m31
+
+onError
+;M01

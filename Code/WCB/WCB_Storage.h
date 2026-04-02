@@ -6,6 +6,16 @@
 #include <Preferences.h>
 #include "command_timer_queue.h"
 
+// =============== WCB System Constants ===============
+// Guard allows WCB.ino to also define these without conflict
+#ifndef MAX_WCB_COUNT
+#define MAX_WCB_COUNT        20
+#define WCB_TARGET_BROADCAST  0
+#define WCB_TARGET_RAW_SERIAL 97
+#define WCB_TARGET_KYBER      98
+#define WCB_SPECIAL_PEER_ID   20
+#endif
+
 // =============== Global Variables ===============
 extern Preferences preferences;
 
@@ -14,6 +24,7 @@ extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
 extern int Default_WCB_Quantity;
+extern bool specialPeerEnabled;
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
@@ -22,14 +33,25 @@ extern char CommandCharacter;
 extern char commandDelimiter;
 extern char LocalFunctionIdentifier;
 extern int wcb_hw_version;
-extern int storedBaudRate[6];
 extern bool Kyber_Remote;
 extern bool Kyber_Local;
+extern int  kyberLocalPort;   // serial port Kyber is physically on (0 = not configured)
 extern String Kyber_Location;
 extern String serialPortLabels[5];
 String getSerialLabel(int port);
 extern bool blockBroadcastFrom[5];
 extern bool serialMonitorEnabled[5];
+extern bool etmChecksumEnabled;
+
+// ETM Settings
+extern bool etmEnabled;
+extern int etmBootHeartbeatSec;
+extern int etmHeartbeatSec;
+extern int etmMissedHeartbeats;
+extern int etmTimeoutMs;
+extern int etmCharMessageCount;
+extern int etmCharDelayMs;
+
 // For stored commands
 #define MAX_STORED_COMMANDS 80
 #define MAX_SERIAL_MONITOR_MAPPINGS 5  // One per input port
@@ -58,7 +80,18 @@ struct SerialMonitorMapping {
     bool rawMode;  // ← ADD THIS
 };
 
+// Kyber target structure
+struct KyberTarget {
+  uint8_t maestroID;    // Which Maestro (for reference/documentation)
+  uint8_t targetWCB;    // Which WCB to send to (0 = broadcast to all)
+  uint8_t targetPort;   // Which serial port on that WCB (0 = S1 default)
+  bool enabled;         // Is this target active
+};
 
+#define MAX_KYBER_TARGETS 9  // Can target up to 9 Maestros
+
+extern KyberTarget kyberTargets[MAX_KYBER_TARGETS];
+extern bool kyberUseTargeting;  // True = use targets, False = broadcast to all S1
 
 extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 
@@ -73,13 +106,13 @@ void loadWCBNumberFromPreferences();
 void saveWCBNumberToPreferences(int wcb_number_f);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
+void loadSpecialPeerPreferences();
+void saveSpecialPeerPreferences(bool enabled);
 
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();
 void resetBroadcastSettingsNamespace();
 void printBaudRates();
-void recallBaudRatefromSerial(int ser);
-void setBaudRateForSerial(int ser);
 bool isTimerCommand(const String &input);
 
 void recallCommandSlot(const String &key, int sourceID);
@@ -93,6 +126,10 @@ void clearAllStoredCommands();
 void storeKyberSettings(const String &message);
 void loadKyberSettings();
 void printKyberSettings();
+void saveKyberTargets();
+void loadKyberTargets();
+void printKyberList();
+
 
 void saveBroadcastSettingsToPreferences();
 void loadBroadcastSettingsFromPreferences();
@@ -110,6 +147,7 @@ void eraseNVSFlash();
 
 extern bool isSerialPortUsedForPWMInput(int port);
 extern bool isSerialPortPWMOutput(int port);
+extern bool isSerialPortUsedForMP3(int port);
 
 void loadSerialLabelsFromPreferences();
 void saveSerialLabelToPreferences(int port, const String &label);
@@ -138,5 +176,12 @@ bool isSerialPortMonitored(int port);
 
 bool isSerialPortRawMapped(int port);
 void setSerialMappingRawMode(int inputPort, bool raw);
+
+// Maestro configuration storage
+void saveMaestroSettings();
+void loadMaestroSettings();
+void printMaestroSettings();
+void saveETMSettings();
+void loadETMSettings();
 
 #endif

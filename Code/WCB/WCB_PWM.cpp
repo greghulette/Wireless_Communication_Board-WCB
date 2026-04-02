@@ -1,3 +1,4 @@
+#include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_PWM.h"
 #include "WCB_Storage.h"
 #include "wcb_pin_map.h"
@@ -5,8 +6,13 @@
 
 extern Preferences preferences;
 extern int WCB_Number;
-extern void sendESPNowMessage(uint8_t target, const char *message);
+extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = false);
 extern bool debugEnabled;
+extern char LocalFunctionIdentifier;
+extern bool serialBroadcastEnabled[5];
+extern bool blockBroadcastFrom[5];
+extern void saveBroadcastSettingsToPreferences();
+extern void saveBroadcastBlockSettings();
 extern bool Kyber_Local;
 extern bool Kyber_Remote;
 extern bool debugPWMPassthrough;
@@ -184,12 +190,25 @@ void addPWMMapping(const String &config, bool autoReboot) {
             slot = i;
         }
     }
-    
+
     if (slot == -1) {
         Serial.println("No available PWM mapping slots");
         return;
     }
-    
+
+    // Snapshot existing remote outputs so we can detect removals after the new mapping is built
+    struct { int wcbNumber; int serialPort; } oldRemote[5];
+    int oldRemoteCount = 0;
+    if (pwmMappings[slot].active) {
+        for (int i = 0; i < pwmMappings[slot].outputCount; i++) {
+            if (pwmMappings[slot].outputs[i].wcbNumber != 0) {
+                oldRemote[oldRemoteCount].wcbNumber  = pwmMappings[slot].outputs[i].wcbNumber;
+                oldRemote[oldRemoteCount].serialPort = pwmMappings[slot].outputs[i].serialPort;
+                oldRemoteCount++;
+            }
+        }
+    }
+
     working = working.substring(commaPos + 1);
     PWMMapping &mapping = pwmMappings[slot];
     mapping.inputPort = inputPort;
@@ -263,27 +282,43 @@ void addPWMMapping(const String &config, bool autoReboot) {
 }
     
     savePWMMappingsToPreferences();
-    
-    // Serial.printf("PWM Mapping added: Serial%d -> %d output(s)\n", inputPort, mapping.outputCount);
-        
-    if (hasRemoteOutputs && canSendESPNow()) {
-        for (int i = 0; i < mapping.outputCount; i++) {
-            if (mapping.outputs[i].wcbNumber != 0) {
-                char remoteCmd[32];
-                snprintf(remoteCmd, sizeof(remoteCmd), "?PO%d", mapping.outputs[i].serialPort);
-                sendESPNowMessage(mapping.outputs[i].wcbNumber, remoteCmd);
+
+    // Send CLEAR to any remote outputs that were present before but are no longer in the new mapping
+    if (oldRemoteCount > 0 && canSendESPNow()) {
+        for (int i = 0; i < oldRemoteCount; i++) {
+            bool stillPresent = false;
+            for (int j = 0; j < mapping.outputCount; j++) {
+                if (mapping.outputs[j].wcbNumber  == oldRemote[i].wcbNumber &&
+                    mapping.outputs[j].serialPort == oldRemote[i].serialPort) {
+                    stillPresent = true;
+                    break;
+                }
+            }
+            if (!stillPresent) {
+                char clearCmd[40];
+                snprintf(clearCmd, sizeof(clearCmd), "%cMAP,PWM,CLEAR,OUT,S%d",
+                         LocalFunctionIdentifier, oldRemote[i].serialPort);
+                sendESPNowMessage(oldRemote[i].wcbNumber, clearCmd, true);
                 delay(50);
                 if (debugEnabled) {
-                    Serial.printf("Sent PWM output config to WCB%d: %s\n", mapping.outputs[i].wcbNumber, remoteCmd);
+                    Serial.printf("Sent PWM output clear to WCB%d: %s\n", oldRemote[i].wcbNumber, clearCmd);
                 }
             }
         }
-        delay(100);
+    }
+
+    // Serial.printf("PWM Mapping added: Serial%d -> %d output(s)\n", inputPort, mapping.outputCount);
+
+    if (hasRemoteOutputs && canSendESPNow()) {
         for (int i = 0; i < mapping.outputCount; i++) {
             if (mapping.outputs[i].wcbNumber != 0) {
-                sendESPNowMessage(mapping.outputs[i].wcbNumber, "?REBOOT");
+                char remoteCmd[40];
+                snprintf(remoteCmd, sizeof(remoteCmd), "%cMAP,PWM,OUT,S%d",
+                         LocalFunctionIdentifier, mapping.outputs[i].serialPort);
+                sendESPNowMessage(mapping.outputs[i].wcbNumber, remoteCmd, true);
+                delay(50);
                 if (debugEnabled) {
-                    Serial.printf("Sent reboot command to WCB%d\n", mapping.outputs[i].wcbNumber);
+                    Serial.printf("Sent PWM output config to WCB%d: %s\n", mapping.outputs[i].wcbNumber, remoteCmd);
                 }
             }
         }
@@ -305,11 +340,12 @@ void removePWMMapping(int inputPort) {
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
                     removePWMOutputPort(pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    char remoteCmd[32];
-                    snprintf(remoteCmd, sizeof(remoteCmd), "?PX%d", pwmMappings[i].outputs[j].serialPort);
-                    sendESPNowMessage(pwmMappings[i].outputs[j].wcbNumber, remoteCmd);
+                    char remoteCmd[40];
+                    snprintf(remoteCmd, sizeof(remoteCmd), "%cMAP,PWM,CLEAR,OUT,S%d",
+                             LocalFunctionIdentifier, pwmMappings[i].outputs[j].serialPort);
+                    sendESPNowMessage(pwmMappings[i].outputs[j].wcbNumber, remoteCmd, true);
                     if (debugEnabled) {
-                        Serial.printf("Sent PWM output removal to WCB%d: %s\n", 
+                        Serial.printf("Sent PWM output removal to WCB%d: %s\n",
                                      pwmMappings[i].outputs[j].wcbNumber, remoteCmd);
                     }
                 }
@@ -329,7 +365,7 @@ void removePWMMapping(int inputPort) {
 }
 
 void listPWMMappings() {
-    Serial.println("--------------- PWM Mappings ---------------");
+    Serial.println("PWM Mappings:");
     
     // Show input-to-output mappings
     bool foundMappings = false;
@@ -367,8 +403,7 @@ void listPWMMappings() {
 }
 
 void listPWMMappingsBoot() {
-    Serial.println("-------------------------------------------------------");
-    Serial.println(" PWM Mappings:");
+    Serial.println("PWM Mappings:");
     
     // Show input-to-output mappings
     bool foundMappings = false;
@@ -402,7 +437,6 @@ void listPWMMappingsBoot() {
         // Serial.println("No output-only ports configured");
     }
     
-  Serial.println("-------------------------------------------------------");
 }
 
 void clearAllPWMMappings() {
@@ -643,13 +677,13 @@ void processPWMPassthrough() {
         
         if (pulseWidth < 500 || pulseWidth > 2500) continue;
         
-        // Check stability before transmitting
         if (!shouldTransmitPWM_Port(portIdx, pulseWidth)) {
             continue;
         }
         
         if (debugPWMPassthrough) {
-            Serial.printf("PWM: %s -> %lu μs\n", getSerialLabel(pwmMappings[i].inputPort).c_str(), pulseWidth);
+            Serial.printf("[PWM] Input S%d: %lu μs -> %d output(s)\n", 
+                         pwmMappings[i].inputPort, pulseWidth, pwmMappings[i].outputCount);
         }
         
         for (int j = 0; j < pwmMappings[i].outputCount; j++) {
@@ -669,16 +703,21 @@ void processPWMPassthrough() {
                     digitalWrite(txPin, HIGH);
                     delayMicroseconds(pulseWidth);
                     digitalWrite(txPin, LOW);
+                    if (debugPWMPassthrough) {
+                        Serial.printf("[PWM] Local output -> S%d pin %d: %lu μs\n", targetPort, txPin, pulseWidth);
+                    }
                 }
             } else {
                 char msg[32];
                 snprintf(msg, sizeof(msg), ";P%d%lu", targetPort, pulseWidth);
-                sendESPNowMessage(targetWCB, msg);
+                sendESPNowMessage(targetWCB, msg, false);  // false = bypass ETM for PWM
+                if (debugPWMPassthrough) {
+                    Serial.printf("[PWM] Remote output -> WCB%d S%d: %s\n", targetWCB, targetPort, msg);
+                }
             }
         }
     }
 }
-
 bool isSerialPortUsedForPWMInput(int port) {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active && pwmMappings[i].inputPort == port) {
@@ -774,7 +813,17 @@ void removePWMOutputPort(int port) {
             }
             pwmOutputPorts[--pwmOutputCount] = 0;
             savePWMOutputPortsToPreferences();
-            Serial.printf("Serial%d removed from PWM output ports\n", port);
+            // Re-enable broadcasts for this port — they were suppressed while it was a PWM output.
+            // (If a Push Config was sent while the port was claimed, its NVS broadcast values
+            // were written as OFF/blocked.  Restoring them here ensures the port comes back
+            // fully functional after the reboot that follows this call.)
+            if (port >= 1 && port <= 5) {
+                serialBroadcastEnabled[port - 1] = true;
+                saveBroadcastSettingsToPreferences();
+                blockBroadcastFrom[port - 1] = false;
+                saveBroadcastBlockSettings();
+            }
+            Serial.printf("Serial%d removed from PWM output ports; broadcasts re-enabled\n", port);
             return;
         }
     }

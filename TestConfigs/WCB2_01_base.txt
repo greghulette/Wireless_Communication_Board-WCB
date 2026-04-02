@@ -1,0 +1,62 @@
+*** WCB2 — Config 01: Base Identity + Network
+*** Hardware : v2.4  (HW=24)
+*** Test Plan: Phases 2 (config verify), 3 (ETM), 3B (broadcast filter),
+***            4 (serial commands), 10 (sequences), 12 (debug), 13 (stats)
+***
+*** All device configs (Maestro, mappings) are CLEARED.
+*** Baud rates are set to match connected hardware even without device config.
+*** Run ?config after loading to verify.
+***
+*** HOW TO USE
+***   1. Open WCB2 terminal in the wizard
+***   2. Copy the PASTE LINE below (everything after "PASTE:")
+***   3. Paste into the terminal and press Enter
+***   4. Watch for each command confirmation, ends with ?config output
+***
+*** NETWORK SETTINGS — update if your MAC octets or password differ
+***   MAC group 2 : D3
+***   MAC group 3 : 3B
+***   ESP-NOW pass: Jq6SECq8dsNRmq
+
+*** --- Annotated commands for reference ---
+***
+*** Identity
+***   ?HW,24          Hardware version 2.4
+***   ?WCB,2          This is WCB2
+***   ?WCBQ,3         3 boards in system
+***   ?MAC,2,D3       2nd MAC group octet
+***   ?MAC,3,3B       3rd MAC group octet
+***   ?EPASS,Jq6SECq8dsNRmq   ESP-NOW password
+***
+*** ETM
+***   ?ETM,ON             Enable ETM
+***   ?ETM,HB,10          Heartbeat every 10 seconds
+***   ?ETM,MISS,3         3 missed = board offline
+***   ?ETM,TIMEOUT,500    500ms ACK wait before retry
+***   ?ETM,CHKSM,ON       Checksum enabled
+***
+*** Serial baud rates (hardware-appropriate even without device config)
+***   ?BAUD,S1,57600      S1 Maestro ID1 (Maestro requires 57600)
+***   ?BAUD,S2,57600      S2 Maestro ID2 (Maestro requires 57600)
+***   ?BAUD,S3,9600       S3 PWM Input (baud not used for PWM but set anyway)
+***   ?BAUD,S4,9600       S4 PWM Output Servo 3
+***   ?BAUD,S5,9600       S5 Servo Controller Board
+***
+*** Labels
+***   ?LABEL,S1,Maestro ID1
+***   ?LABEL,S2,Maestro ID2
+***   ?LABEL,S3,PWM Input
+***   ?LABEL,S4,Servo 3 PWM Out
+***   ?LABEL,S5,Servo Controller
+***
+*** Reset broadcast to all-on defaults
+***   ?BCAST,RESET
+***
+*** Clear all device configs and mappings
+***   ?MAP,CLEAR,ALL
+***   ?MAESTRO,CLEAR,ALL
+***
+*** Print config to verify
+***   ?config
+
+PASTE: ?HW,24^?WCB,2^?WCBQ,3^?MAC,2,D3^?MAC,3,3B^?EPASS,Jq6SECq8dsNRmq^?ETM,ON^?ETM,HB,10^?ETM,MISS,3^?ETM,TIMEOUT,500^?ETM,CHKSM,ON^?BAUD,S1,57600^?BAUD,S2,57600^?BAUD,S3,9600^?BAUD,S4,9600^?BAUD,S5,9600^?LABEL,S1,Maestro ID1^?LABEL,S2,Maestro ID2^?LABEL,S3,PWM Input^?LABEL,S4,Servo 3 PWM Out^?LABEL,S5,Servo Controller^?BCAST,RESET^?MAP,CLEAR,ALL^?MAESTRO,CLEAR,ALL^?config

@@ -1,0 +1,52 @@
+*** WCB1 — Config 02: Full Feature Setup
+*** Hardware : LilyGO v2.1  (HW=21)
+*** Test Plan: Phases 5 (Maestro remote), 6 (Kyber), 7 (MP3 Trigger),
+***            8 (raw serial mapping), 11 (backup/restore), 14 (edge cases)
+***
+*** Includes everything in base config PLUS:
+***   - Kyber LOCAL (S2=Maestro port, S3=Marcduino)
+***   - MP3 Trigger on S5 at 9600 baud, volume 0 (loudest)
+***   - Raw serial mapping: S5 <-> W3S2 (bidirectional)
+***   - All Maestro routing entries (M1 on W2S1, M2 on W2S2, M3 on W3S1)
+***     so WCB1 can route Maestro commands to the correct remote board
+***
+*** HOW TO USE
+***   1. Open WCB1 terminal in the wizard
+***   2. Copy the PASTE LINE below (everything after "PASTE:")
+***   3. Paste into the terminal and press Enter
+***   4. Run ?config and ?MP3,LIST and ?MAESTRO,LIST to verify
+
+*** --- Annotated commands for reference ---
+***
+*** Identity + ETM + Baud rates + Labels (same as base)
+***   ?HW,21 ... ?BCAST,RESET  (see WCB1_01_base.txt for detail)
+***
+*** Clear existing configs before applying new ones
+***   ?MAP,CLEAR,ALL
+***   ?MAESTRO,CLEAR,ALL
+***   ?KYBER,CLEAR
+***   ?MP3,CLEAR
+***
+*** Kyber — physically connected to this board on S2/S3
+***   ?KYBER,LOCAL
+***
+*** MP3 Trigger on S5
+***   ?MP3,S5:9600:V0      Port S5, 9600 baud, volume 0 (loudest)
+***   NOTE: This disables broadcast I/O on S5 automatically (MP3 owns that port).
+***         The raw serial mapping below operates independently of broadcast.
+***
+*** Raw serial mapping S5 <-> W3S2  (bidirectional)
+***   ?MAP,SERIAL,S5,R,W3S2    Data from Marcduino on W3S2 arrives at S5 (MP3 Trigger)
+***                             Data from S5 (MP3 responses) forwards to W3S2
+***   NOTE: RAW mode (R) passes binary bytes unmodified — required for MP3 protocol.
+***
+*** Maestro routing — WCB1 is not local to any Maestro, all entries are remote.
+*** When WCB1 sends ;M11 it looks up M1 here, finds W2S1, routes via ESP-NOW.
+***   ?MAESTRO,M1:W2S1:57600   Maestro ID1 is on WCB2 S1
+***   ?MAESTRO,M2:W2S2:57600   Maestro ID2 is on WCB2 S2
+***   ?MAESTRO,M3:W3S1:57600   Maestro ID3 is on WCB3 S1
+***
+*** Print config to verify
+***   ?config
+
+PASTE: ?HW,21^?WCB,1^?WCBQ,3^?MAC,2,D3^?MAC,3,3B^?EPASS,Jq6SECq8dsNRmq^?ETM,ON^?ETM,HB,10^?ETM,MISS,3^?ETM,TIMEOUT,500^?ETM,CHKSM,ON^?BAUD,S1,9600^?BAUD,S2,57600^?BAUD,S3,9600^?BAUD,S4,9600^?BAUD,S5,9600^?LABEL,CLEAR,S1^?LABEL,S2,Kyber Maestro^?LABEL,S3,Kyber Marcduino^?LABEL,CLEAR,S4^?LABEL,S5,MP3 Trigger^?BCAST,RESET^?MAP,CLEAR,ALL^?MAESTRO,CLEAR,ALL^?KYBER,CLEAR^?MP3,CLEAR^?KYBER,LOCAL^?MP3,S5:9600:V0^?MAP,SERIAL,S5,R,W3S2^?MAESTRO,M1:W2S1:57600^?MAESTRO,M2:W2S2:57600^?MAESTRO,M3:W3S1:57600^?config
