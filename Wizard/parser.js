@@ -987,7 +987,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (fullPush || !betm || betm.bootHeartbeatSec  !== etm.bootHeartbeatSec)  add(`ETM,BOOT,${etm.bootHeartbeatSec}`);
     if (fullPush || !betm || betm.messageCount      !== etm.messageCount)      add(`ETM,COUNT,${etm.messageCount}`);
     if (fullPush || !betm || betm.messageDelayMs    !== etm.messageDelayMs)    add(`ETM,DELAY,${etm.messageDelayMs}`);
-    if (fullPush || !betm || betm.checksumEnabled   !== etm.checksumEnabled)   add(`ETM,CHKSM,${etm.checksumEnabled ? 'ON' : 'OFF'}`);
+    // Checksum must always be ON — never push OFF; correct the board if it has it disabled
+    if (fullPush || !betm || betm.checksumEnabled !== true) add('ETM,CHKSM,ON');
   }
 
   // ── PWM Output Ports ──

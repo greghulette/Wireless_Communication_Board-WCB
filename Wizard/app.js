@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '01.18:30.R.APR.2026';
+const UI_VERSION = '01.20:53.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5917,7 +5917,7 @@ function wizardRenderStep() {
     'maestro-config':'Step 4b — Maestro Setup',
     'serial':        'Step 5 — Serial Ports',
     'network':       'Step 6 — Network',
-    'etm':           'Step 7 — Event Tracking (ETM)',
+    'etm':           'Step 7 — Ensured Transmission Mode (ETM)',
     'review':        'Review — Almost Done!',
     'firmware':      'Step 8 — Firmware',
     'connect':       'Connect & Push',
@@ -6383,7 +6383,7 @@ function wizardHTMLEtm() {
   const { etmEnabled, etmConfig } = wizardState;
   const detailDisplay = etmEnabled ? '' : 'display:none';
   return `
-    <div class="wizard-section-title">Ensure Transmission Mode (ETM)</div>
+    <div class="wizard-section-title">Ensured Transmission Mode (ETM)</div>
     <div class="wizard-section-desc">ETM improves message reliability by tracking receipt of each transmission and automatically retransmitting if delivery is not acknowledged — so commands always get through. ETM is <strong>enabled by default</strong> and is required for remote management of WCBs over ESP-NOW.</div>
     <div class="wizard-etm-toggle">
       <input type="checkbox" id="wiz-etm-enabled" ${etmEnabled ? 'checked' : ''}
