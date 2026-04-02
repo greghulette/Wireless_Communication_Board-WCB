@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '01.20:53.R.APR.2026';
+const UI_VERSION = '01.21:13.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7848,9 +7848,6 @@ async function fetchStatsData() {
       const relayFc      = boardConfigs[relayN]?.funcChar || '?';
       const mgmtCmd      = isEtm ? `${relayFc}MGMT,ETM,CHAR,${targetWCBNum}`
                                  : `${relayFc}MGMT,STATS,${targetWCBNum}`;
-      console.log('[fetchStatsData] relay path | boardSlot=', n, 'relaySlot=', relayN,
-                  'boardWCBNum=', boardConfigs[n]?.wcbNumber, 'targetWCBNum=', targetWCBNum,
-                  'relayFc=', relayFc, 'cmd=', mgmtCmd);
       const responsePrefix = isEtm ? `[MGMT:ETM,`    : `[MGMT:STATS,`;
       // Sentinel = last distinct line of the firmware output
       const sentinel       = isEtm ? '----------------------------'
@@ -7879,7 +7876,6 @@ async function fetchStatsData() {
           if (done) return;
           if (!collecting) {
             if (!line.startsWith(responsePrefix)) return;
-            console.log('[fetchStatsData] header line received:', JSON.stringify(line));
             const closeIdx = line.indexOf(']', responsePrefix.length);
             if (closeIdx < 0) return;
             collecting = true;
@@ -7890,7 +7886,6 @@ async function fetchStatsData() {
           }
           // Stop when the terminal sentinel line is seen
           if (collecting && line.includes(sentinel)) {
-            console.log('[fetchStatsData] sentinel reached, lines collected:', lines.length);
             clearTimeout(timer);
             finish();
             resolve(lines.join('\n').trim());
