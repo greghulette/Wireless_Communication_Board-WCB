@@ -4,13 +4,14 @@
 // ════════════════════════════════════════════════════════════════
 
 #include "WCB_RemoteTerm.h"
+#include "WCB_Storage.h"
 #include <string.h>
 
 // ── Globals from WCB.ino ──────────────────────────────────────────
 // These are defined in WCB.ino (the concatenated sketch translation unit).
 // Extern declarations give WCB_RemoteTerm.cpp access without duplication.
 extern char    espnowPassword[];
-extern uint8_t WCBMacAddresses[9][6];
+extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6];
 extern int     WCB_Number;
 
 // ── Global instance ────────────────────────────────────────────────
@@ -62,7 +63,7 @@ void WCBSerial::_flushLine() {
 
 // Build and unicast a REMOTE_TERM packet to the relay board.
 void WCBSerial::_sendPacket(const char *data, uint8_t len) {
-  if (!_relayWCB || _relayWCB > 8) return;
+  if (!_relayWCB || _relayWCB > MAX_WCB_COUNT) return;
 
   espnow_struct_remote_term pkt;
   memset(&pkt, 0, sizeof(pkt));
