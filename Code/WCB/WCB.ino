@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_060917RAPR2026                                    *****////
+///*****                                          Version 6.0_061100RAPR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_060917RAPR2026";
+String SoftwareVersion = "6.0_061100RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -722,6 +722,7 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
 
 
 void etmProcessAck(int senderWCB, uint16_t seqNum) {
+  if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   int boardIdx = senderWCB - 1;
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
     if (!etmPendingTable[i].active) continue;
@@ -852,6 +853,7 @@ void processETMAcksAndRetries() {
 }
 
 void etmSendAck(int senderWCB, uint16_t seqNum) {
+  if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   espnow_struct_message_etm ack;
   memset(&ack, 0, sizeof(ack));
 
@@ -2582,6 +2584,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
         // Duplicate detection
+        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
         int senderIdx = senderWCB - 1;
         bool isDuplicate = false;
         if (etmLastReceivedSeqValid[senderIdx] &&
