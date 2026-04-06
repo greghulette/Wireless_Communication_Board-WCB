@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_061108RAPR2026                                    *****////
+///*****                                          Version 6.0_061123RAPR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_061108RAPR2026";
+String SoftwareVersion = "6.0_061123RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4505,6 +4505,7 @@ void recallStoredCommand(const String &message, int sourceID) {
 void processMaestroCommand(const String &message){
   int message_maestroID = message.substring(1,2).toInt();
   int message_maestroSeq = message.substring(2).toInt();
+  if (message_maestroSeq < 0 || message_maestroSeq > 255) return;
   sendMaestroCommand(message_maestroID,message_maestroSeq);
 }
 
