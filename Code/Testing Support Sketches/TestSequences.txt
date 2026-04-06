@@ -12,3 +12,7 @@ mp3Finish
 
 onError
 ;M01
+
+stpe 7 header wrong
+
+checksum falst?
