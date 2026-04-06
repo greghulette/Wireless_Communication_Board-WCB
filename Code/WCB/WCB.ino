@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_060914RAPR2026                                    *****////
+///*****                                          Version 6.0_060917RAPR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_060914RAPR2026";
+String SoftwareVersion = "6.0_060917RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -204,6 +204,7 @@ typedef struct __attribute__((packed)) {
 
 
 bool debugMGMT = false;         // remote management protocol — off by default
+bool debugRawSerial = false;    // raw serial mapping — logs byte-level traffic in/out
 // debugRaw consolidated into debugMaestro
 
 // ETM Settings (NVS stored)
@@ -2771,6 +2772,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
       Serial.println();
     }
+    if (debugRawSerial) {
+      Serial.printf("[RAW] W%d → S%d (ESP-NOW)  %d byte%s: ",
+                    senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
+      const uint8_t* dataPtr = (const uint8_t*)(received.structCommand + 3);
+      for (size_t i = 0; i < chunkLen; i++) {
+        if (dataPtr[i] < 0x10) Serial.print("0");
+        Serial.print(dataPtr[i], HEX);
+        if (i < chunkLen - 1) Serial.print(" ");
+      }
+      Serial.println();
+    }
     return;
   }
 
@@ -3000,6 +3012,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "MGMT,OFF") {
             debugMGMT = false;
             Serial.println("MGMT debugging disabled");
+        } else if (argsUpper == "RAW,ON") {
+            debugRawSerial = true;
+            Serial.println("Raw serial debugging enabled");
+        } else if (argsUpper == "RAW,OFF") {
+            debugRawSerial = false;
+            Serial.println("Raw serial debugging disabled");
         } else {
             Serial.println("Invalid DEBUG command. Use: ?DEBUG ?");
         }
@@ -4866,14 +4884,34 @@ void RawSerialForwardingTask(void *pvParameters) {
                           Stream &outputSerial = getSerialStream(output.serialPort);
                           outputSerial.write(buffer, len);
                           outputSerial.flush();
-                          
+
                           if (debugEnabled && output.wcbNumber == WCB_Number) {
-                              Serial.printf("Mapping target W%dS%d is local - forwarding directly\n", 
+                              Serial.printf("Mapping target W%dS%d is local - forwarding directly\n",
                                           output.wcbNumber, output.serialPort);
+                          }
+                          if (debugRawSerial) {
+                              Serial.printf("[RAW] S%d → S%d (local)  %d byte%s: ",
+                                          inputPort, output.serialPort, len, len == 1 ? "" : "s");
+                              for (int b = 0; b < len; b++) {
+                                  if (buffer[b] < 0x10) Serial.print("0");
+                                  Serial.print(buffer[b], HEX);
+                                  if (b < len - 1) Serial.print(" ");
+                              }
+                              Serial.println();
                           }
                       } else {
                           // Remote output via ESP-NOW
                           sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                          if (debugRawSerial) {
+                              Serial.printf("[RAW] S%d → W%dS%d (relay)  %d byte%s: ",
+                                          inputPort, output.wcbNumber, output.serialPort, len, len == 1 ? "" : "s");
+                              for (int b = 0; b < len; b++) {
+                                  if (buffer[b] < 0x10) Serial.print("0");
+                                  Serial.print(buffer[b], HEX);
+                                  if (b < len - 1) Serial.print(" ");
+                              }
+                              Serial.println();
+                          }
                       }
                     }
                 }
