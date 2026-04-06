@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_012113RAPR2026                                    *****////
+///*****                                          Version 6.0_060914RAPR2026                                    *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_012113RAPR2026";
+String SoftwareVersion = "6.0_060914RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4787,10 +4787,12 @@ void serialCommandTask(void *pvParameters) {
     while (true) {
         processIncomingSerial(Serial, 0);
         
-        // Process serial ports 3-5 (always safe)
-        processIncomingSerial(Serial3, 3);
-        processIncomingSerial(Serial4, 4);
-        processIncomingSerial(Serial5, 5);
+        // Process serial ports 3-5 only if not raw-mapped
+        // (raw-mapped ports are owned by RawSerialForwardingTask — calling
+        //  processIncomingSerial on them would race for bytes and corrupt binary data)
+        if (!isSerialPortRawMapped(3)) processIncomingSerial(Serial3, 3);
+        if (!isSerialPortRawMapped(4)) processIncomingSerial(Serial4, 4);
+        if (!isSerialPortRawMapped(5)) processIncomingSerial(Serial5, 5);
 
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
