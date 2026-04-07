@@ -21,6 +21,7 @@ function createDefaultBoardConfig() {
   return {
     // Board Identity
     hwVersion:    0,       // 0 = not set, 1=1.0, 21=2.1, 23=2.3, 24=2.4, 31=3.1, 32=3.2
+    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38
     wcbNumber:    1,
     wcbQuantity:  1,
 
@@ -347,6 +348,10 @@ function parseToken(body, config) {
     // ── Board Identity ──
     case 'HW':
       config.hwVersion = parseInt(parts[1]) || 0;
+      break;
+
+    case 'LED':
+      if (upperParts[1] === 'PIN') config.statusLedPin = parseInt(parts[2]) || 38;
       break;
 
     case 'WCB':
@@ -858,6 +863,14 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // ── Board Identity ──
   if (fullPush || !baseline || baseline.hwVersion !== config.hwVersion)
     add(`HW,${config.hwVersion}`);
+
+  // LED pin — only push for HW 3.1/3.2 and only when non-default (not 38)
+  if (config.hwVersion === 31 || config.hwVersion === 32) {
+    const ledPin = config.statusLedPin || 38;
+    const bLedPin = baseline?.statusLedPin || 38;
+    if (fullPush || ledPin !== bLedPin)
+      add(`LED,PIN,${ledPin}`);
+  }
 
   if (fullPush || !baseline || baseline.wcbNumber !== config.wcbNumber)
     add(`WCB,${config.wcbNumber}`);

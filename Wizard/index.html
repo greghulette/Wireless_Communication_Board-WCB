@@ -414,6 +414,19 @@
             <option value="32">3.2  (ESP32-S3)</option>
           </select>
         </div>
+        <div class="field" id="b{N}-led-pin-field" style="display:none">
+          <label>LED Pin <span class="wiz-hint" data-tip="GPIO pin for the onboard NeoPixel LED. Varies by ESP32-S3 module. Default is 38. Use 48 or 47 if your module's LED is on a different pin, or enter a custom value.">i</span></label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="b{N}-led-pin" onchange="onLEDPinChange({N})">
+              <option value="38">38 (default)</option>
+              <option value="48">48</option>
+              <option value="47">47</option>
+              <option value="0">Custom...</option>
+            </select>
+            <input type="number" id="b{N}-led-pin-custom" min="0" max="48" placeholder="GPIO #"
+                   style="display:none;width:80px" onchange="onLEDPinChange({N})">
+          </div>
+        </div>
         <div class="field">
           <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
           <div style="display:flex;align-items:center;gap:8px">

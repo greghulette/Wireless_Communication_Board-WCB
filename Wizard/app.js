@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '01.21:13.R.APR.2026';
+const UI_VERSION = '07.09:13.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -922,6 +922,20 @@ function onHWVersionChange(n) {
   const hwVal = parseInt(document.getElementById(`b${n}-hw-version`)?.value);
   if (boardConfigs[n]) boardConfigs[n].hwVersion = hwVal;
 
+  // Show LED pin selector only for HW 3.1 and 3.2
+  const ledPinField = document.getElementById(`b${n}-led-pin-field`);
+  if (ledPinField) ledPinField.style.display = (hwVal === 31 || hwVal === 32) ? '' : 'none';
+
+  onBoardFieldChange(n);
+}
+
+function onLEDPinChange(n) {
+  const sel         = document.getElementById(`b${n}-led-pin`);
+  const customInput = document.getElementById(`b${n}-led-pin-custom`);
+  const isCustom    = sel?.value === '0';
+  if (customInput) customInput.style.display = isCustom ? '' : 'none';
+  const pin = isCustom ? (parseInt(customInput?.value) || 38) : (parseInt(sel?.value) || 38);
+  if (boardConfigs[n]) boardConfigs[n].statusLedPin = pin;
   onBoardFieldChange(n);
 }
 
@@ -1123,6 +1137,21 @@ function populateUIFromConfig(n, config) {
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
+
+  // LED pin — only visible for HW 3.1/3.2
+  const ledPinSel    = document.getElementById(`b${n}-led-pin`);
+  const ledPinCustom = document.getElementById(`b${n}-led-pin-custom`);
+  if (ledPinSel) {
+    const pin        = config.statusLedPin || 38;
+    const knownPins  = ['38', '48', '47'];
+    if (knownPins.includes(String(pin))) {
+      ledPinSel.value = String(pin);
+      if (ledPinCustom) ledPinCustom.style.display = 'none';
+    } else {
+      ledPinSel.value = '0';
+      if (ledPinCustom) { ledPinCustom.style.display = ''; ledPinCustom.value = pin; }
+    }
+  }
 
   // Software version — show board version with update check, or '—' if not yet known
   updateBoardSwVersionDisplay(n);

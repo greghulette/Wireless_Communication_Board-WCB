@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.1_061125RAPR2026";
+String SoftwareVersion = "6.0.1_070913RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3512,6 +3512,24 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?LED,PIN,x ---
+    if (rootUpper == "LED") {
+        if (argsUpper.startsWith("PIN,")) {
+            int pin = args.substring(4).toInt();
+            if (pin < 0 || pin > 48) {
+                Serial.printf("Invalid LED pin %d. Valid GPIO range: 0-48\n", pin);
+                return;
+            }
+            saveStatusLEDPin(pin);
+            STATUS_LED_PIN = pin;
+            Serial.printf("LED pin changed to GPIO%d. Reinitializing LED...\n", pin);
+            initStatusLEDWithRetry(5, 100);
+            return;
+        }
+        Serial.printf("LED pin: GPIO%d\nUse: ?LED,PIN,<gpio_number>\n", STATUS_LED_PIN);
+        return;
+    }
+
     // ========================================
     // LEGACY FORMAT COMMANDS
     // ========================================
@@ -4085,6 +4103,14 @@ void updateHWVersion(const String &message) {
     Serial.println(lfi + "HW," + hwSuffix);
     chainedConfig        = lfi + "HW," + hwSuffix;
     chainedConfigDefault = "?HW,"     + hwSuffix;   // factory reset always uses ? prefix
+
+    // ---- LED Pin (HW 3.1/3.2 only — only include if non-default) ----
+    if ((wcb_hw_version == 31 || wcb_hw_version == 32) && STATUS_LED_PIN != 38) {
+        cmd = "LED,PIN," + String(STATUS_LED_PIN);
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+    }
 
     // ---- Network Identity ----
     sprintf(hexBuffer, "%02X", umac_oct2);
@@ -4981,6 +5007,7 @@ void setup() {
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 
   loadHWversion();
+  loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
   loadKyberSettings();

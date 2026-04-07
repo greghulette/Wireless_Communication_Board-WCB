@@ -90,6 +90,23 @@ preferences.end();
 updatePinMap();
 }
 
+void saveStatusLEDPin(int pin) {
+    preferences.begin("led_config", false);
+    preferences.putInt("led_pin", pin);
+    preferences.end();
+    Serial.printf("LED pin GPIO%d saved to NVS.\n", pin);
+}
+
+void loadStatusLEDPin() {
+    preferences.begin("led_config", true);
+    int savedPin = preferences.getInt("led_pin", -1);
+    preferences.end();
+    if (savedPin >= 0) {
+        STATUS_LED_PIN = savedPin;
+        Serial.printf("LED pin override from NVS: GPIO%d\n", savedPin);
+    }
+}
+
 void printHWversion(){
 
     if (wcb_hw_version == 1){
