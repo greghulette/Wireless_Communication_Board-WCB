@@ -601,7 +601,74 @@ while (startIdx < keyList.length()) {
 void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
-    preferences.end();   
+    preferences.end();
+}
+
+// One-time migration: recover sequences stored in legacy formats
+// Covers two cases:
+//   1. "stored_commands" namespace  — CMD1..CMDn keys from the oldest firmware
+//   2. "stored_cmds" namespace      — CMD1..CMDn keys written without a key_list entry
+//      (firmware versions that used stored_cmds but hadn't yet added key_list tracking)
+// Runs once per board; a migration flag is stored in "stored_cmds" so it is skipped
+// on every subsequent boot.
+void migrateOldStoredCommands() {
+    // Skip if already done
+    preferences.begin("stored_cmds", true);
+    bool already = preferences.getBool("seq_mig_done", false);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+    if (already) return;
+
+    int recovered = 0;
+
+    // ── Case 1: old "stored_commands" namespace (CMD1..CMDn) ──────────────
+    for (int i = 1; i <= MAX_STORED_COMMANDS; i++) {
+        String key = "CMD" + String(i);
+        preferences.begin("stored_commands", true);
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+        if (value.length() == 0) continue;
+
+        // Register in the current store (saveStoredCommandsToPreferences handles
+        // duplicate-key checks against key_list automatically)
+        saveStoredCommandsToPreferences(key + "," + value);
+        recovered++;
+        Serial.printf("[MIGRATION] Recovered from 'stored_commands': key='%s'\n", key.c_str());
+    }
+
+    // ── Case 2: "stored_cmds" namespace, CMD# keys missing from key_list ──
+    for (int i = 1; i <= MAX_STORED_COMMANDS; i++) {
+        String key = "CMD" + String(i);
+
+        // Check if already in key_list (re-read it in case Case 1 added entries)
+        preferences.begin("stored_cmds", true);
+        keyList = preferences.getString("key_list", "");
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+
+        if (value.length() == 0) continue;
+
+        bool inList = (keyList == key + "," ||
+                       keyList.startsWith(key + ",") ||
+                       keyList.endsWith("," + key + ",") ||
+                       keyList.indexOf("," + key + ",") != -1);
+        if (inList) continue;
+
+        saveStoredCommandsToPreferences(key + "," + value);
+        recovered++;
+        Serial.printf("[MIGRATION] Recovered orphaned key in 'stored_cmds': key='%s'\n", key.c_str());
+    }
+
+    // Mark done so this never runs again
+    preferences.begin("stored_cmds", false);
+    preferences.putBool("seq_mig_done", true);
+    preferences.end();
+
+    if (recovered > 0) {
+        Serial.printf("[MIGRATION] Sequence recovery complete — %d sequence(s) restored.\n", recovered);
+    } else {
+        Serial.println("[MIGRATION] No legacy sequences found — nothing to recover.");
+    }
 }
 
 // Erase all NVS preferences

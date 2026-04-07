@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.1_071454RAPR2026";
+String SoftwareVersion = "6.0.1_071555RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5058,9 +5058,10 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   // Serial.println("PWM Mappings:");
+  migrateOldStoredCommands();       // One-time recovery of pre-key_list sequences
   loadBaudRatesFromPreferences();
-  loadSerialLabelsFromPreferences();  // 
-   loadSerialMonitorSettings(); 
+  loadSerialLabelsFromPreferences();  //
+   loadSerialMonitorSettings();
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
   loadBroadcastSettingsFromPreferences(); 

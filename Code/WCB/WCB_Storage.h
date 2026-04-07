@@ -124,6 +124,7 @@ void listStoredCommands();
 void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();
+void migrateOldStoredCommands();
 
 void storeKyberSettings(const String &message);
 void loadKyberSettings();

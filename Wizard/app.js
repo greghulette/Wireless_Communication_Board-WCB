@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '07.14:54.R.APR.2026';
+const UI_VERSION = '07.15:55.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2128,12 +2128,22 @@ function seqTextareaToValue(text, delim) {
 
 // Convert stored value string → textarea lines (one command per line)
 // Normalises inline *** comments to exactly one space: "CMD*** note" → "CMD *** note"
+// Standalone ***-only segments (stored as separate chained parts) are folded back
+// onto the preceding command line so comments always display inline with their command.
 function seqValueToLines(value, delim) {
   if (!value) return '';
-  return value.split(delim)
-    .map(l => l.trim().replace(/(\S)\s*(\*\*\*)/, '$1 $2'))
-    .filter(Boolean)
-    .join('\n');
+  const parts = value.split(delim).map(l => l.trim()).filter(Boolean);
+  const lines = [];
+  for (const part of parts) {
+    if (part.startsWith('***') && lines.length > 0) {
+      // Fold standalone comment onto the previous command line
+      lines[lines.length - 1] += ' ' + part;
+    } else {
+      // Normalise spacing around inline ***
+      lines.push(part.replace(/(\S)\s*(\*\*\*)/, '$1 $2'));
+    }
+  }
+  return lines.join('\n');
 }
 
 function autoResizeTextarea(ta) {
