@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.1_070913RAPR2026";
+String SoftwareVersion = "6.0.1_071454RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2051,6 +2051,10 @@ String buildConfigString() {
   else                            hwSuffix = "0";
   append("HW," + hwSuffix);
 
+  // LED pin (HW 3.1/3.2 only — always include so config pull captures current value)
+  if (wcb_hw_version == 31 || wcb_hw_version == 32)
+    append("LED,PIN," + String(STATUS_LED_PIN));
+
   // Network identity
   sprintf(hexBuffer, "%02X", umac_oct2); append("MAC,2," + String(hexBuffer));
   sprintf(hexBuffer, "%02X", umac_oct3); append("MAC,3," + String(hexBuffer));
@@ -3524,6 +3528,7 @@ void processLocalCommand(const String &message) {
             STATUS_LED_PIN = pin;
             Serial.printf("LED pin changed to GPIO%d. Reinitializing LED...\n", pin);
             initStatusLEDWithRetry(5, 100);
+            turnOffLED();   // restore idle blue after reinit test-pixel
             return;
         }
         Serial.printf("LED pin: GPIO%d\nUse: ?LED,PIN,<gpio_number>\n", STATUS_LED_PIN);
@@ -4060,7 +4065,7 @@ void updateWCBNumber(const String &message){
 }
 
 void updateESPNowPassword(const String &message){
-  String newPassword = message.substring(5);
+  String newPassword = message.substring(6);
   if (newPassword.length() > 0 && newPassword.length() < sizeof(espnowPassword)) {
     setESPNowPassword(newPassword.c_str());
     Serial.printf("ESP-NOW Password updated to: %s\n", newPassword.c_str());
@@ -4104,8 +4109,8 @@ void updateHWVersion(const String &message) {
     chainedConfig        = lfi + "HW," + hwSuffix;
     chainedConfigDefault = "?HW,"     + hwSuffix;   // factory reset always uses ? prefix
 
-    // ---- LED Pin (HW 3.1/3.2 only — only include if non-default) ----
-    if ((wcb_hw_version == 31 || wcb_hw_version == 32) && STATUS_LED_PIN != 38) {
+    // ---- LED Pin (HW 3.1/3.2 only — always include so restore captures current value) ----
+    if (wcb_hw_version == 31 || wcb_hw_version == 32) {
         cmd = "LED,PIN," + String(STATUS_LED_PIN);
         Serial.println(lfi + cmd);
         chainedConfig        += String(commandDelimiter) + lfi + cmd;
