@@ -6,6 +6,27 @@
 #include "WCB_RemoteTerm.h"
 #include "WCB_Storage.h"
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+
+// ── Relay-side packet queue ───────────────────────────────────────────────────
+// Packets are enqueued from the WiFi-task callback and dequeued in loop().
+// This prevents blocking UART writes inside the ESP-NOW receive callback,
+// which caused the WiFi watchdog to fire and restart the board.
+#define RTERM_QUEUE_DEPTH  16   // max outstanding packets before dropping
+
+struct RtermQueueItem {
+  uint8_t sourceWCB;
+  uint8_t textLen;
+  char    text[RTERM_TEXT_SIZE + 1];
+};
+
+static QueueHandle_t s_rtermQueue = nullptr;
+
+static void ensureQueue() {
+  if (!s_rtermQueue)
+    s_rtermQueue = xQueueCreate(RTERM_QUEUE_DEPTH, sizeof(RtermQueueItem));
+}
 
 // ── Globals from WCB.ino ──────────────────────────────────────────
 // These are defined in WCB.ino (the concatenated sketch translation unit).
@@ -106,33 +127,46 @@ void WCBSerial::stopSession() {
 //  len == sizeof(espnow_struct_remote_term).
 // ════════════════════════════════════════════════════════════════
 
+// Called from the ESP-NOW receive callback (WiFi task context).
+// MUST NOT do blocking serial I/O here — doing so starves the WiFi
+// stack and triggers the watchdog, crashing the board.
+// Instead, copy the relevant fields into the queue; rtermRelayDrain()
+// prints them from the main loop.
 void rtermRelayHandlePacket(const uint8_t *data) {
   espnow_struct_remote_term pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
 
-  // Validate password
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1) != 0) return;
-
   if (pkt.packetType != PACKET_TYPE_REMOTE_TERM) return;
-  if (pkt.textLen == 0 || pkt.textLen > RTERM_TEXT_SIZE)          return;
+  if (pkt.textLen == 0 || pkt.textLen > RTERM_TEXT_SIZE) return;
 
-  // Null-terminate and strip trailing CR/LF so we control the line ending
-  char buf[RTERM_TEXT_SIZE + 1];
-  memcpy(buf, pkt.text, pkt.textLen);
-  buf[pkt.textLen] = '\0';
+  ensureQueue();
 
-  size_t len = pkt.textLen;
-  while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) len--;
-  buf[len] = '\0';
+  RtermQueueItem item;
+  item.sourceWCB = pkt.sourceWCB;
+  item.textLen   = pkt.textLen;
+  memcpy(item.text, pkt.text, pkt.textLen);
+  item.text[pkt.textLen] = '\0';
 
-  if (len > 0) {
-    // Print to relay's USB serial — wizard parses the [TERM:N] prefix
-    // and routes the text to board N's terminal pane.
-    // We call HardwareSerial::printf directly (via WCBDebugSerial's parent)
-    // to avoid triggering our own forwarding loop on the relay
-    // (relay's _relayWCB is always 0, so the loop check is redundant
-    //  but explicit parent-class use documents intent clearly).
-    WCBDebugSerial.printf("[TERM:%d]%s\n", (int)pkt.sourceWCB, buf);
+  // Non-blocking send — drop if queue is full rather than blocking WiFi task
+  xQueueSendFromISR(s_rtermQueue, &item, nullptr);
+}
+
+// Called from loop() on the relay board — safe to do serial I/O here.
+void rtermRelayDrain() {
+  if (!s_rtermQueue) return;
+
+  RtermQueueItem item;
+  while (xQueueReceive(s_rtermQueue, &item, 0) == pdTRUE) {
+    // Strip trailing CR/LF so we control the line ending
+    size_t len = item.textLen;
+    while (len > 0 && (item.text[len - 1] == '\n' || item.text[len - 1] == '\r')) len--;
+    item.text[len] = '\0';
+
+    if (len > 0) {
+      // Use parent-class printf to avoid re-triggering the WCBSerial forwarding path
+      WCBDebugSerial.HardwareSerial::printf("[TERM:%d]%s\n", (int)item.sourceWCB, item.text);
+    }
   }
 }

@@ -106,4 +106,11 @@ extern WCBSerial WCBDebugSerial;
 // ── Relay-side receive ─────────────────────────────────────────────
 // Call from espNowReceiveCallback when:
 //   len == sizeof(espnow_struct_remote_term)
+// Safe to call from WiFi-task context — copies the packet into a
+// FreeRTOS queue; actual serial printing happens in rtermRelayDrain()
+// which must be called from the main loop().
 void rtermRelayHandlePacket(const uint8_t *data);
+
+// Call once per loop() iteration on the relay board.
+// Drains any queued RTERM packets and prints them to USB serial.
+void rtermRelayDrain();

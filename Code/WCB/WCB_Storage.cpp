@@ -604,7 +604,35 @@ void clearAllStoredCommands() {
     preferences.end();
 }
 
-// One-time migration: recover sequences stored in legacy formats
+// Normalise legacy ^*** inline-comment markers in a stored sequence value.
+//
+// DroidNet / 5.0 convention:
+//   ^***text   — inline comment, appended to the preceding command's display line
+//   ^^***text  — standalone comment, displayed on its own line
+//
+// In the current firmware the delimiter before *** is redundant because the recall
+// path already splits on ^ and then strips anything from *** onward in each part.
+// Stripping the leading ^ from ^*** turns it into a true inline comment stored on
+// the same chunk as the preceding command, matching how the wizard now displays and
+// saves sequences.  ^^*** (standalone) is left untouched.
+static String normaliseSeqComments(const String &value) {
+    char   d   = commandDelimiter;          // typically '^'
+    String dl  = String(d);                 // "^"
+    String ddl = dl + dl;                   // "^^"
+    String cmt = "***";
+
+    // Use a non-printable placeholder to protect ^^*** during the replacement.
+    String placeholder = "\x01***";
+
+    String result = value;
+    result.replace(ddl + cmt, placeholder);  // protect ^^***
+    result.replace(dl  + cmt, cmt);          // ^***  →  ***
+    result.replace(placeholder, ddl + cmt);  // restore ^^***
+    return result;
+}
+
+// One-time migration: recover sequences stored in legacy formats and normalise
+// legacy ^*** comment markers.
 // Covers two cases:
 //   1. "stored_commands" namespace  — CMD1..CMDn keys from the oldest firmware
 //   2. "stored_cmds" namespace      — CMD1..CMDn keys written without a key_list entry
@@ -629,6 +657,7 @@ void migrateOldStoredCommands() {
         preferences.end();
         if (value.length() == 0) continue;
 
+        value = normaliseSeqComments(value);
         // Register in the current store (saveStoredCommandsToPreferences handles
         // duplicate-key checks against key_list automatically)
         saveStoredCommandsToPreferences(key + "," + value);
@@ -654,6 +683,7 @@ void migrateOldStoredCommands() {
                        keyList.indexOf("," + key + ",") != -1);
         if (inList) continue;
 
+        value = normaliseSeqComments(value);
         saveStoredCommandsToPreferences(key + "," + value);
         recovered++;
         Serial.printf("[MIGRATION] Recovered orphaned key in 'stored_cmds': key='%s'\n", key.c_str());
