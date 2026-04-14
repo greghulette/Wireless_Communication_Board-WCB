@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '01.21:13.R.APR.2026';
+const UI_VERSION = '09.17:15.R.APR.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -922,7 +922,35 @@ function onHWVersionChange(n) {
   const hwVal = parseInt(document.getElementById(`b${n}-hw-version`)?.value);
   if (boardConfigs[n]) boardConfigs[n].hwVersion = hwVal;
 
+  // Show LED pin group only for HW 3.1 and 3.2
+  const show     = (hwVal === 31 || hwVal === 32);
+  const ledGroup = document.getElementById(`b${n}-led-pin-group`);
+  const ledCustom = document.getElementById(`b${n}-led-pin-custom`);
+  if (ledGroup)  ledGroup.style.display  = show ? 'flex' : 'none';
+  if (ledCustom) ledCustom.style.display = 'none'; // reset custom on HW change
+
   onBoardFieldChange(n);
+}
+
+function onLEDPinChange(n) {
+  const sel    = document.getElementById(`b${n}-led-pin`);
+  const custom = document.getElementById(`b${n}-led-pin-custom`);
+  const isOther = sel?.value === '0';
+  if (custom) custom.style.display = isOther ? '' : 'none';
+  if (!isOther) {
+    const pin = parseInt(sel?.value) || 38;
+    if (boardConfigs[n]) boardConfigs[n].statusLedPin = pin;
+    onBoardFieldChange(n);
+  }
+}
+
+function onLEDPinCustomChange(n) {
+  const custom = document.getElementById(`b${n}-led-pin-custom`);
+  const pin    = parseInt(custom?.value);
+  if (!isNaN(pin) && pin >= 0 && pin <= 48) {
+    if (boardConfigs[n]) boardConfigs[n].statusLedPin = pin;
+    onBoardFieldChange(n);
+  }
 }
 
 function syncKyberToConfig(n) {
@@ -1123,6 +1151,21 @@ function populateUIFromConfig(n, config) {
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
+
+  // LED pin — only visible for HW 3.1/3.2; handle preset vs custom values
+  const ledPinSel    = document.getElementById(`b${n}-led-pin`);
+  const ledPinCustom = document.getElementById(`b${n}-led-pin-custom`);
+  if (ledPinSel) {
+    const pin       = config.statusLedPin || 38;
+    const presets   = ['38', '48', '47'];
+    if (presets.includes(String(pin))) {
+      ledPinSel.value = String(pin);
+      if (ledPinCustom) ledPinCustom.style.display = 'none';
+    } else {
+      ledPinSel.value = '0';                  // "Other…"
+      if (ledPinCustom) { ledPinCustom.value = pin; ledPinCustom.style.display = ''; }
+    }
+  }
 
   // Software version — show board version with update check, or '—' if not yet known
   updateBoardSwVersionDisplay(n);
@@ -2085,12 +2128,44 @@ function seqTextareaToValue(text, delim) {
 
 // Convert stored value string → textarea lines (one command per line)
 // Normalises inline *** comments to exactly one space: "CMD*** note" → "CMD *** note"
+//
+// Handles two legacy ^*** patterns:
+//   ^***text   — inline comment (single delimiter before ***): fold onto the preceding
+//                command line so it displays as "CMD ***text" on one line.
+//   ^^***text  — standalone comment (double delimiter before ***): the empty segment
+//                produced by ^^ signals "own line", so it is kept as a separate line.
+//   CMD***text — already-inline comment (no leading delimiter): normalise spacing only.
 function seqValueToLines(value, delim) {
   if (!value) return '';
-  return value.split(delim)
-    .map(l => l.trim().replace(/(\S)\s*(\*\*\*)/, '$1 $2'))
-    .filter(Boolean)
-    .join('\n');
+  const rawParts = value.split(delim); // keep empty segments — they signal ^^
+  const lines = [];
+  let prevWasEmpty = false;
+
+  for (const raw of rawParts) {
+    const part = raw.trim();
+
+    if (!part) {
+      prevWasEmpty = true;
+      continue;
+    }
+
+    if (part.startsWith('***')) {
+      if (prevWasEmpty || lines.length === 0) {
+        // ^^*** or a leading comment — display on its own line
+        lines.push(part);
+      } else {
+        // ^*** — inline comment; fold onto the preceding command line
+        lines[lines.length - 1] += ' ' + part;
+      }
+    } else {
+      // Normalise spacing around any inline *** already in the command text
+      lines.push(part.replace(/(\S)\s*(\*\*\*)/, '$1 $2'));
+    }
+
+    prevWasEmpty = false;
+  }
+
+  return lines.join('\n');
 }
 
 function autoResizeTextarea(ta) {
@@ -5793,8 +5868,9 @@ function wizardDefaultState() {
 
 function wizardDefaultBoard(slotIndex) {
   return {
-    wcbNumber:   slotIndex,
-    hwVersion:   0,
+    wcbNumber:    slotIndex,
+    hwVersion:    0,
+    statusLedPin: 38,
     serialPorts: Array.from({length: 5}, () => ({ baud: 9600, label: '' })),
   };
 }
@@ -5978,7 +6054,7 @@ function wizardRenderStep() {
 }
 
 // ── Tooltip helper — renders a ⓘ icon that shows a hint on hover ──
-const wizHint = (tip) => `<span class="wiz-hint" data-tip="${tip}">ⓘ</span>`;
+const wizHint = (tip, cls = '') => `<span class="wiz-hint${cls ? ' ' + cls : ''}" data-tip="${tip}">ⓘ</span>`;
 
 // ── Per-step HTML builders ─────────────────────────────────────────
 function wizardBuildStepHTML(key) {
@@ -6121,18 +6197,49 @@ function wizardHTMLIdentity() {
     const hwOpts = Object.entries(WCBParser.HW_VERSION_MAP).map(([val, info]) =>
       `<option value="${val}" ${b.hwVersion == val ? 'selected' : ''}>${info.display}</option>`
     ).join('');
+    const ledPin    = b.statusLedPin || 38;
+    const ledShown  = (b.hwVersion === 31 || b.hwVersion === 32);
+    const isCustom  = ![38, 48, 47].includes(ledPin);
     return `
       <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-identity-${i}">
-        <div class="wizard-field-row">
-          <label>WCB Number ${wizHint('Unique ID for this board (1–8). Each board in your system must have a different number — this is how they identify themselves on the network.')}</label>
-          <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}" style="max-width:80px">
-        </div>
-        <div class="wizard-field-row">
-          <label>Hardware Version</label>${wizHint('PCB version printed on the board label as VER:X.X — see the photo below. Different versions have different pin assignments and must be set correctly.')}
-          <select id="wiz-b${i}-hwver">
-            <option value="0">— Select version —</option>
-            ${hwOpts}
-          </select>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+
+          <!-- WCB # -->
+          <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
+            <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
+            <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+                   class="wizard-ident-input">
+          </div>
+
+          <!-- Hardware Version (fixed width — never resizes) -->
+          <div style="display:flex;flex-direction:column;gap:4px;width:140px;flex-shrink:0">
+            <div class="wizard-ident-label">Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below.')}</div>
+            <select id="wiz-b${i}-hwver" onchange="wizardOnHWVerChange(${i})" class="wizard-ident-input">
+              <option value="0">— Select —</option>
+              ${hwOpts}
+            </select>
+          </div>
+
+          <!-- LED Pin group: label centered above select+optional custom, side by side (HW 3.1/3.2 only) -->
+          <div id="wiz-b${i}-led-row" style="${ledShown?'display:flex':'display:none'};flex-direction:column;gap:4px;flex-shrink:0">
+            <div class="wizard-ident-label" style="text-align:center;justify-content:center">
+              LED Pin ${wizHint('GPIO pin for the NeoPixel LED. Default 38. Alternatives: 48, 47.', 'tip-left')}
+            </div>
+            <div style="display:flex;gap:4px">
+              <select id="wiz-b${i}-ledpin" class="wizard-ident-input" style="width:82px"
+                      onchange="wizardOnLEDPinChange(${i})">
+                <option value="38" ${!isCustom&&ledPin==38?'selected':''}>38</option>
+                <option value="48" ${!isCustom&&ledPin==48?'selected':''}>48</option>
+                <option value="47" ${!isCustom&&ledPin==47?'selected':''}>47</option>
+                <option value="0"  ${isCustom?'selected':''}>Other…</option>
+              </select>
+              <input type="number" id="wiz-b${i}-ledpin-custom" class="wizard-ident-input"
+                     min="0" max="48" placeholder="GPIO #"
+                     value="${isCustom ? ledPin : ''}"
+                     style="display:${isCustom?'':'none'};width:70px">
+            </div>
+          </div>
+
         </div>
       </div>`;
   }).join('');
@@ -6149,6 +6256,18 @@ function wizardHTMLIdentity() {
     <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
     ${tabs}${panels}
     ${labelSVG}`;
+}
+
+function wizardOnHWVerChange(i) {
+  const hwVal  = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
+  const ledRow = document.getElementById(`wiz-b${i}-led-row`);
+  if (ledRow) ledRow.style.display = (hwVal === 31 || hwVal === 32) ? 'flex' : 'none';
+}
+
+function wizardOnLEDPinChange(i) {
+  const sel    = document.getElementById(`wiz-b${i}-ledpin`);
+  const custom = document.getElementById(`wiz-b${i}-ledpin-custom`);
+  if (custom) custom.style.display = sel?.value === '0' ? '' : 'none';
 }
 
 function wizardHTMLSerial() {
@@ -6742,10 +6861,15 @@ function wizardSaveStep(key) {
       break;
     case 'identity':
       wizardState.boards.forEach((b, i) => {
-        const num = parseInt(get(`wiz-b${i}-wcbnum`)?.value);
-        const hw  = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
+        const num        = parseInt(get(`wiz-b${i}-wcbnum`)?.value);
+        const hw         = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
+        const ledSelVal  = get(`wiz-b${i}-ledpin`)?.value ?? '38';
+        const ledPin     = ledSelVal === '0'
+                           ? (parseInt(get(`wiz-b${i}-ledpin-custom`)?.value) || 38)
+                           : (parseInt(ledSelVal) || 38);
         if (!isNaN(num)) b.wcbNumber = num;
         if (!isNaN(hw))  b.hwVersion = hw;
+        b.statusLedPin = ledPin;
       });
       break;
     case 'serial': {
@@ -6930,8 +7054,9 @@ function wizardApplyConfig() {
   ws.boards.forEach((b, i) => {
     const n = i + 1;
     const cfg = WCBParser.createDefaultBoardConfig();
-    cfg.wcbNumber  = b.wcbNumber;
-    cfg.hwVersion  = b.hwVersion;
+    cfg.wcbNumber    = b.wcbNumber;
+    cfg.hwVersion    = b.hwVersion;
+    cfg.statusLedPin = b.statusLedPin ?? 38;
     cfg.espnowPassword = ws.password;
     cfg.macOctet2  = ws.mac2;
     cfg.macOctet3  = ws.mac3;

@@ -118,10 +118,6 @@ void processCommandGroups() {
     return;
   }
 
-  static size_t lastProcessedGroupIndex = -1;
-  if (currentGroupIndex != lastProcessedGroupIndex) {
-    lastProcessedGroupIndex = currentGroupIndex;
-  }
   CommandGroup &group = commandGroups[currentGroupIndex];
 
   if (checkForTimerStopRequest(group.commands[0])) {

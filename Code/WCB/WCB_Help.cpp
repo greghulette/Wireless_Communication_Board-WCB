@@ -661,6 +661,29 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WCB_ERASE"));
 
     // ================================================================
+    } else if (c == "LED") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?LED,PIN,<gpio_number>"));
+        Serial.println(F("       ?LED,PIN"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Overrides the default NeoPixel status LED GPIO pin for this board."));
+        Serial.println(F("  Useful when the onboard LED is on a non-default pin (e.g. custom"));
+        Serial.println(F("  ESP32-S3 modules). The new pin is saved to NVS and persists across"));
+        Serial.println(F("  reboots. If no pin argument is given, reports the current GPIO."));
+        Serial.println(F("\nArguments:"));
+        Serial.println(F("  <gpio_number>  GPIO pin number (0-48)"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?LED,PIN,38    - Set NeoPixel LED to GPIO38 (HW 3.x default)"));
+        Serial.println(F("  ?LED,PIN,48    - Set NeoPixel LED to GPIO48"));
+        Serial.println(F("  ?LED,PIN       - Print the current LED pin"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Primarily intended for HW 3.1/3.2 (DIY ESP32-S3) boards"));
+        Serial.println(F("  - Reinitializes the NeoPixel immediately after saving"));
+        Serial.println(F("  - Saved to NVS and persists across reboots"));
+        Serial.println(F("  - Default is determined by the hardware version (?HW,x)"));
+
+    // ================================================================
     } else if (c == "HW") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -700,6 +723,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("------------------------------------------------------------"));
         Serial.println(F("\n  INITIAL SETUP (do this first on a new board):"));
         Serial.println(F("    ?HW,x           Set hardware version (required before anything else)"));
+        Serial.println(F("    ?LED,PIN,x      Set NeoPixel LED GPIO pin (HW 3.1/3.2, saved to NVS)"));
         Serial.println(F("    ?WCB,x          Set this board's number (1-9)"));
         Serial.println(F("    ?WCBQ,x         Set total boards in system"));
         Serial.println(F("    ?MAC,2,xx       Set 2nd MAC group octet (all boards must match)"));
@@ -734,6 +758,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?DEBUG,ETM      ETM packet/ACK/retry debug"));
         Serial.println(F("    ?DEBUG,PWM      PWM passthrough debug"));
         Serial.println(F("    ?DEBUG,MAESTRO  Maestro/Pololu serial packet debug (hex)"));
+        Serial.println(F("    ?DEBUG,RAW      Raw serial byte-level forwarding debug (hex)"));
         Serial.println(F("\n  SYSTEM:"));
         Serial.println(F("    ?config         Print full configuration"));
         Serial.println(F("    ?backup         Print backup/restore commands"));

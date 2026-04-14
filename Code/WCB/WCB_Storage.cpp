@@ -90,6 +90,23 @@ preferences.end();
 updatePinMap();
 }
 
+void saveStatusLEDPin(int pin) {
+    preferences.begin("led_config", false);
+    preferences.putInt("led_pin", pin);
+    preferences.end();
+    Serial.printf("LED pin GPIO%d saved to NVS.\n", pin);
+}
+
+void loadStatusLEDPin() {
+    preferences.begin("led_config", true);
+    int savedPin = preferences.getInt("led_pin", -1);
+    preferences.end();
+    if (savedPin >= 0) {
+        STATUS_LED_PIN = savedPin;
+        Serial.printf("LED pin override from NVS: GPIO%d\n", savedPin);
+    }
+}
+
 void printHWversion(){
 
     if (wcb_hw_version == 1){
@@ -584,7 +601,104 @@ while (startIdx < keyList.length()) {
 void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
-    preferences.end();   
+    preferences.end();
+}
+
+// Normalise legacy ^*** inline-comment markers in a stored sequence value.
+//
+// DroidNet / 5.0 convention:
+//   ^***text   — inline comment, appended to the preceding command's display line
+//   ^^***text  — standalone comment, displayed on its own line
+//
+// In the current firmware the delimiter before *** is redundant because the recall
+// path already splits on ^ and then strips anything from *** onward in each part.
+// Stripping the leading ^ from ^*** turns it into a true inline comment stored on
+// the same chunk as the preceding command, matching how the wizard now displays and
+// saves sequences.  ^^*** (standalone) is left untouched.
+static String normaliseSeqComments(const String &value) {
+    char   d   = commandDelimiter;          // typically '^'
+    String dl  = String(d);                 // "^"
+    String ddl = dl + dl;                   // "^^"
+    String cmt = "***";
+
+    // Use a non-printable placeholder to protect ^^*** during the replacement.
+    String placeholder = "\x01***";
+
+    String result = value;
+    result.replace(ddl + cmt, placeholder);  // protect ^^***
+    result.replace(dl  + cmt, cmt);          // ^***  →  ***
+    result.replace(placeholder, ddl + cmt);  // restore ^^***
+    return result;
+}
+
+// One-time migration: recover sequences stored in legacy formats and normalise
+// legacy ^*** comment markers.
+// Covers two cases:
+//   1. "stored_commands" namespace  — CMD1..CMDn keys from the oldest firmware
+//   2. "stored_cmds" namespace      — CMD1..CMDn keys written without a key_list entry
+//      (firmware versions that used stored_cmds but hadn't yet added key_list tracking)
+// Runs once per board; a migration flag is stored in "stored_cmds" so it is skipped
+// on every subsequent boot.
+void migrateOldStoredCommands() {
+    // Skip if already done
+    preferences.begin("stored_cmds", true);
+    bool already = preferences.getBool("seq_mig_done", false);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+    if (already) return;
+
+    int recovered = 0;
+
+    // ── Case 1: old "stored_commands" namespace (CMD1..CMDn) ──────────────
+    for (int i = 1; i <= MAX_STORED_COMMANDS; i++) {
+        String key = "CMD" + String(i);
+        preferences.begin("stored_commands", true);
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+        if (value.length() == 0) continue;
+
+        value = normaliseSeqComments(value);
+        // Register in the current store (saveStoredCommandsToPreferences handles
+        // duplicate-key checks against key_list automatically)
+        saveStoredCommandsToPreferences(key + "," + value);
+        recovered++;
+        Serial.printf("[MIGRATION] Recovered from 'stored_commands': key='%s'\n", key.c_str());
+    }
+
+    // ── Case 2: "stored_cmds" namespace, CMD# keys missing from key_list ──
+    for (int i = 1; i <= MAX_STORED_COMMANDS; i++) {
+        String key = "CMD" + String(i);
+
+        // Check if already in key_list (re-read it in case Case 1 added entries)
+        preferences.begin("stored_cmds", true);
+        keyList = preferences.getString("key_list", "");
+        String value = preferences.getString(key.c_str(), "");
+        preferences.end();
+
+        if (value.length() == 0) continue;
+
+        bool inList = (keyList == key + "," ||
+                       keyList.startsWith(key + ",") ||
+                       keyList.endsWith("," + key + ",") ||
+                       keyList.indexOf("," + key + ",") != -1);
+        if (inList) continue;
+
+        value = normaliseSeqComments(value);
+        saveStoredCommandsToPreferences(key + "," + value);
+        recovered++;
+        Serial.printf("[MIGRATION] Recovered orphaned key in 'stored_cmds': key='%s'\n", key.c_str());
+    }
+
+    // Mark done so this never runs again
+    preferences.begin("stored_cmds", false);
+    preferences.putBool("seq_mig_done", true);
+    preferences.end();
+
+    if (recovered > 0) {
+        Serial.printf("[MIGRATION] Sequence recovery complete — %d sequence(s) restored.\n", recovered);
+    } else {
+        Serial.println("[MIGRATION] No legacy sequences found — nothing to recover.");
+    }
 }
 
 // Erase all NVS preferences

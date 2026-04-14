@@ -99,6 +99,8 @@ extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 void saveHWversion(int wcb_hw_version_f);
 void loadHWversion();
 void printHWversion();
+void saveStatusLEDPin(int pin);
+void loadStatusLEDPin();
 void saveMACPreferences();
 void loadMACPreferences();
 
@@ -122,6 +124,7 @@ void listStoredCommands();
 void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();
+void migrateOldStoredCommands();
 
 void storeKyberSettings(const String &message);
 void loadKyberSettings();

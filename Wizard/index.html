@@ -393,16 +393,20 @@
         </div>
       </div>
 
-      <!-- Board Identity -->
+      <!-- Board Identity — flex row so HW version stays fixed width regardless of LED pin visibility -->
       <div class="subsection-title">Board Identity</div>
-      <div class="field-group">
-        <div class="field">
-          <label>WCB Number <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
+      <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px">
+
+        <!-- WCB # (narrow fixed) -->
+        <div class="field" style="width:120px;flex-shrink:0">
+          <label>WCB # <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
-            <!-- populated dynamically by populateWCBNumberDropdown() -->
+            <!-- populated dynamically -->
           </select>
         </div>
-        <div class="field">
+
+        <!-- Hardware Version (fixed width — never resizes) -->
+        <div class="field" style="width:200px;flex-shrink:0">
           <label>Hardware Version <span class="wiz-hint" data-tip="Physical board revision. Determines which pins the serial ports and LED utilize.">i</span></label>
           <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
             <option value="0">— Select —</option>
@@ -414,7 +418,35 @@
             <option value="32">3.2  (ESP32-S3)</option>
           </select>
         </div>
-        <div class="field">
+
+        <!-- LED Pin group: label centered above select + optional custom input (HW 3.1/3.2 only) -->
+        <div id="b{N}-led-pin-group" style="display:none;flex-direction:column;gap:5px;flex-shrink:0">
+          <!-- Use identical styling to .field label so height matches other columns -->
+          <label style="margin:0;display:flex;align-items:center;justify-content:center;gap:4px;
+                        font-size:10px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;
+                        color:var(--text2);font-family:var(--sans);white-space:nowrap">
+            LED Pin <span class="wiz-hint tip-left" data-tip="GPIO pin for the onboard NeoPixel LED. Default 38. Common alternatives: 48, 47.">i</span>
+          </label>
+          <div style="display:flex;gap:6px">
+            <select id="b{N}-led-pin" onchange="onLEDPinChange({N})"
+                    style="width:78px;background:var(--bg3);border:1px solid var(--border);
+                           border-radius:var(--radius);color:var(--text);font-family:var(--mono);
+                           font-size:13px;padding:7px 10px;outline:none">
+              <option value="38">38</option>
+              <option value="48">48</option>
+              <option value="47">47</option>
+              <option value="0">Other…</option>
+            </select>
+            <input type="number" id="b{N}-led-pin-custom" min="0" max="48" placeholder="GPIO #"
+                   oninput="onLEDPinCustomChange({N})"
+                   style="display:none;width:72px;background:var(--bg3);border:1px solid var(--border);
+                          border-radius:var(--radius);color:var(--text);font-family:var(--mono);
+                          font-size:13px;padding:7px 10px;outline:none">
+          </div>
+        </div>
+
+        <!-- Software Version (fills remaining space) -->
+        <div class="field" style="flex:1;min-width:180px">
           <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
           <div style="display:flex;align-items:center;gap:8px">
             <span id="b{N}-sw-version"
@@ -425,6 +457,7 @@
                     onclick="boardUpdateFW({N})" style="display:none" title="A newer firmware version is available">⬆ Update FW</button>
           </div>
         </div>
+
       </div>
 
       <hr class="divider">

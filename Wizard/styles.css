@@ -705,6 +705,21 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wizard-choice-label { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--text); }
 .wizard-choice-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
 
+/* Identity step column labels / inputs (WCB#, HW Version, LED Pin in one flex row) */
+.wizard-ident-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.7px; text-transform: uppercase;
+  color: var(--text2); font-family: var(--sans);
+  display: flex; align-items: center; gap: 4px; white-space: nowrap;
+}
+.wizard-ident-input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-family: var(--mono); font-size: 13px; padding: 6px 8px; outline: none;
+  transition: border-color var(--transition);
+}
+.wizard-ident-input:focus { border-color: var(--accent); }
+.wizard-ident-input option { background: var(--bg3); }
+
 /* Field rows (label + input [+ button]) */
 .wizard-field-row { display: flex; align-items: center; gap: 8px; }
 .wizard-field-row label {

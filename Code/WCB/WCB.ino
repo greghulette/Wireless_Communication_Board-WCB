@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0_012113RAPR2026                                    *****////
+///*****                                          Version 6.0.1_061123RAPR2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0_012113RAPR2026";
+String SoftwareVersion = "6.0.1_091715RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -204,6 +204,7 @@ typedef struct __attribute__((packed)) {
 
 
 bool debugMGMT = false;         // remote management protocol — off by default
+bool debugRawSerial = false;    // raw serial mapping — logs byte-level traffic in/out
 // debugRaw consolidated into debugMaestro
 
 // ETM Settings (NVS stored)
@@ -721,6 +722,7 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
 
 
 void etmProcessAck(int senderWCB, uint16_t seqNum) {
+  if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   int boardIdx = senderWCB - 1;
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
     if (!etmPendingTable[i].active) continue;
@@ -851,6 +853,7 @@ void processETMAcksAndRetries() {
 }
 
 void etmSendAck(int senderWCB, uint16_t seqNum) {
+  if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   espnow_struct_message_etm ack;
   memset(&ack, 0, sizeof(ack));
 
@@ -2048,6 +2051,10 @@ String buildConfigString() {
   else                            hwSuffix = "0";
   append("HW," + hwSuffix);
 
+  // LED pin (HW 3.1/3.2 only — always include so config pull captures current value)
+  if (wcb_hw_version == 31 || wcb_hw_version == 32)
+    append("LED,PIN," + String(STATUS_LED_PIN));
+
   // Network identity
   sprintf(hexBuffer, "%02X", umac_oct2); append("MAC,2," + String(hexBuffer));
   sprintf(hexBuffer, "%02X", umac_oct3); append("MAC,3," + String(hexBuffer));
@@ -2581,6 +2588,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
         // Duplicate detection
+        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
         int senderIdx = senderWCB - 1;
         bool isDuplicate = false;
         if (etmLastReceivedSeqValid[senderIdx] &&
@@ -2762,6 +2770,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     targetSerial.flush();
     if (debugMaestro) {
       Serial.printf("[MAESTRO] WCB%d → Serial%d  %d byte%s: ",
+                    senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
+      const uint8_t* dataPtr = (const uint8_t*)(received.structCommand + 3);
+      for (size_t i = 0; i < chunkLen; i++) {
+        if (dataPtr[i] < 0x10) Serial.print("0");
+        Serial.print(dataPtr[i], HEX);
+        if (i < chunkLen - 1) Serial.print(" ");
+      }
+      Serial.println();
+    }
+    if (debugRawSerial) {
+      Serial.printf("[RAW] W%d → S%d (ESP-NOW)  %d byte%s: ",
                     senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
       const uint8_t* dataPtr = (const uint8_t*)(received.structCommand + 3);
       for (size_t i = 0; i < chunkLen; i++) {
@@ -3000,6 +3019,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "MGMT,OFF") {
             debugMGMT = false;
             Serial.println("MGMT debugging disabled");
+        } else if (argsUpper == "RAW,ON") {
+            debugRawSerial = true;
+            Serial.println("Raw serial debugging enabled");
+        } else if (argsUpper == "RAW,OFF") {
+            debugRawSerial = false;
+            Serial.println("Raw serial debugging disabled");
         } else {
             Serial.println("Invalid DEBUG command. Use: ?DEBUG ?");
         }
@@ -3488,6 +3513,25 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "HW") {
         int temp_hw_version = args.toInt();
         saveHWversion(temp_hw_version);
+        return;
+    }
+
+    // --- ?LED,PIN,x ---
+    if (rootUpper == "LED") {
+        if (argsUpper.startsWith("PIN,")) {
+            int pin = args.substring(4).toInt();
+            if (pin < 0 || pin > 48) {
+                Serial.printf("Invalid LED pin %d. Valid GPIO range: 0-48\n", pin);
+                return;
+            }
+            saveStatusLEDPin(pin);
+            STATUS_LED_PIN = pin;
+            Serial.printf("LED pin changed to GPIO%d. Reinitializing LED...\n", pin);
+            initStatusLEDWithRetry(5, 100);
+            turnOffLED();   // restore idle blue after reinit test-pixel
+            return;
+        }
+        Serial.printf("LED pin: GPIO%d\nUse: ?LED,PIN,<gpio_number>\n", STATUS_LED_PIN);
         return;
     }
 
@@ -4021,7 +4065,7 @@ void updateWCBNumber(const String &message){
 }
 
 void updateESPNowPassword(const String &message){
-  String newPassword = message.substring(5);
+  String newPassword = message.substring(6);
   if (newPassword.length() > 0 && newPassword.length() < sizeof(espnowPassword)) {
     setESPNowPassword(newPassword.c_str());
     Serial.printf("ESP-NOW Password updated to: %s\n", newPassword.c_str());
@@ -4064,6 +4108,14 @@ void updateHWVersion(const String &message) {
     Serial.println(lfi + "HW," + hwSuffix);
     chainedConfig        = lfi + "HW," + hwSuffix;
     chainedConfigDefault = "?HW,"     + hwSuffix;   // factory reset always uses ? prefix
+
+    // ---- LED Pin (HW 3.1/3.2 only — always include so restore captures current value) ----
+    if (wcb_hw_version == 31 || wcb_hw_version == 32) {
+        cmd = "LED,PIN," + String(STATUS_LED_PIN);
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+    }
 
     // ---- Network Identity ----
     sprintf(hexBuffer, "%02X", umac_oct2);
@@ -4484,6 +4536,7 @@ void recallStoredCommand(const String &message, int sourceID) {
 void processMaestroCommand(const String &message){
   int message_maestroID = message.substring(1,2).toInt();
   int message_maestroSeq = message.substring(2).toInt();
+  if (message_maestroSeq < 0 || message_maestroSeq > 255) return;
   sendMaestroCommand(message_maestroID,message_maestroSeq);
 }
 
@@ -4787,10 +4840,12 @@ void serialCommandTask(void *pvParameters) {
     while (true) {
         processIncomingSerial(Serial, 0);
         
-        // Process serial ports 3-5 (always safe)
-        processIncomingSerial(Serial3, 3);
-        processIncomingSerial(Serial4, 4);
-        processIncomingSerial(Serial5, 5);
+        // Process serial ports 3-5 only if not raw-mapped
+        // (raw-mapped ports are owned by RawSerialForwardingTask — calling
+        //  processIncomingSerial on them would race for bytes and corrupt binary data)
+        if (!isSerialPortRawMapped(3)) processIncomingSerial(Serial3, 3);
+        if (!isSerialPortRawMapped(4)) processIncomingSerial(Serial4, 4);
+        if (!isSerialPortRawMapped(5)) processIncomingSerial(Serial5, 5);
 
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
@@ -4864,14 +4919,34 @@ void RawSerialForwardingTask(void *pvParameters) {
                           Stream &outputSerial = getSerialStream(output.serialPort);
                           outputSerial.write(buffer, len);
                           outputSerial.flush();
-                          
+
                           if (debugEnabled && output.wcbNumber == WCB_Number) {
-                              Serial.printf("Mapping target W%dS%d is local - forwarding directly\n", 
+                              Serial.printf("Mapping target W%dS%d is local - forwarding directly\n",
                                           output.wcbNumber, output.serialPort);
+                          }
+                          if (debugRawSerial) {
+                              Serial.printf("[RAW] S%d → S%d (local)  %d byte%s: ",
+                                          inputPort, output.serialPort, len, len == 1 ? "" : "s");
+                              for (int b = 0; b < len; b++) {
+                                  if (buffer[b] < 0x10) Serial.print("0");
+                                  Serial.print(buffer[b], HEX);
+                                  if (b < len - 1) Serial.print(" ");
+                              }
+                              Serial.println();
                           }
                       } else {
                           // Remote output via ESP-NOW
                           sendESPNowRawSerial(buffer, len, output.wcbNumber, output.serialPort);
+                          if (debugRawSerial) {
+                              Serial.printf("[RAW] S%d → W%dS%d (relay)  %d byte%s: ",
+                                          inputPort, output.wcbNumber, output.serialPort, len, len == 1 ? "" : "s");
+                              for (int b = 0; b < len; b++) {
+                                  if (buffer[b] < 0x10) Serial.print("0");
+                                  Serial.print(buffer[b], HEX);
+                                  if (b < len - 1) Serial.print(" ");
+                              }
+                              Serial.println();
+                          }
                       }
                     }
                 }
@@ -4937,6 +5012,7 @@ void setup() {
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 
   loadHWversion();
+  loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
   loadKyberSettings();
@@ -4982,9 +5058,10 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   // Serial.println("PWM Mappings:");
+  migrateOldStoredCommands();       // One-time recovery of pre-key_list sequences
   loadBaudRatesFromPreferences();
-  loadSerialLabelsFromPreferences();  // 
-   loadSerialMonitorSettings(); 
+  loadSerialLabelsFromPreferences();  //
+   loadSerialMonitorSettings();
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
   loadBroadcastSettingsFromPreferences(); 
@@ -5201,6 +5278,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
 }
 
 void loop() {
+  rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
   processCommandGroups();
   processETMHeartbeats();
   processETMAcksAndRetries();
