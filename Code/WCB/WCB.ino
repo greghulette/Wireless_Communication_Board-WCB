@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.1_091715RAPR2026";
+String SoftwareVersion = "6.0.1_270944RAPR2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3585,7 +3585,7 @@ void processLocalCommand(const String &message) {
     } else if (message == "version" || message == "VERSION") {
         Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
         Serial.println("End of Version");
-    } else if (message.startsWith("d") || message.startsWith("D")) {
+    } else if (message.length() == 2 && (message.charAt(0) == 'd' || message.charAt(0) == 'D')) {
         updateCommandDelimiter(message);
     } else if (message.startsWith("m2") || message.startsWith("M2")) {
         update2ndMACOctet(message);
