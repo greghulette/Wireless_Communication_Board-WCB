@@ -21,7 +21,7 @@ const CRYPTOJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/cry
 // Update GITHUB_BRANCH when switching branches.
 const GITHUB_OWNER  = 'greghulette';
 const GITHUB_REPO   = 'Wireless_Communication_Board-WCB';
-const GITHUB_BRANCH = 'multi_maestro';
+const GITHUB_BRANCH = 'main';
 const GITHUB_BIN_PATH = 'Code/bin';
 
 // ─── Script loader ────────────────────────────────────────────────
