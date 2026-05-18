@@ -146,6 +146,14 @@ void updateBaudRate(int port, int baud) {
     // return;
   }
 
+  // Sync the in-memory baud table. Without this, the running config and the
+  // config backup (which read baudRates[]) keep reporting the OLD value until
+  // the next reboot reloads NVS — so the web tool's verify-pull sees the stale
+  // value, never advances its baseline, and re-pushes the same change forever.
+  if (port >= 1 && port <= 5) {
+    baudRates[port - 1] = baud;
+  }
+
   // Save to preferences
   preferences.begin("serial_baud", false);
   String key = String("Serial") + String(port);
@@ -961,8 +969,13 @@ if (params.startsWith("S") || params.startsWith("s")) {
                             "Run ?WCBQ,%d and reboot to add it, or this target will not be reachable.\n",
                             wcbNum, Default_WCB_Quantity, wcbNum > Default_WCB_Quantity ? wcbNum : Default_WCB_Quantity);
             
-            // Auto-configure Maestro
-            int8_t maestroSlot = findSlotByMaestroID(maestroID);
+            // Auto-configure Maestro. Use the SAME slot key as the ?MAESTRO
+            // handler — (maestroID, serialPort, remoteWCB) — so the two config
+            // paths can never disagree and create duplicate slots for the same
+            // physical Maestro. Local: (id, portNum, 0); remote: (id, 0, wcb).
+            uint8_t kKeyRemote = (wcbNum == WCB_Number) ? 0 : (uint8_t)wcbNum;
+            uint8_t kKeyPort   = (wcbNum == WCB_Number) ? (uint8_t)portNum : 0;
+            int8_t maestroSlot = findSlotByMaestroIDPortTarget(maestroID, kKeyPort, kKeyRemote);
             if (maestroSlot < 0) {
               maestroSlot = findEmptySlot();
             }
@@ -974,7 +987,13 @@ if (params.startsWith("S") || params.startsWith("s")) {
               if (wcbNum == WCB_Number) {
                 maestroConfigs[maestroSlot].serialPort = portNum;
                 maestroConfigs[maestroSlot].remoteWCB = 0;
-                
+                // Record the baud on the slot itself. Without this the slot
+                // kept a stale/default baud (e.g. 115200) while the port was
+                // actually set to baudRate — making the config backup emit a
+                // self-contradictory ?MAESTRO line that never matched the UI,
+                // so the web tool re-pushed ?MAESTRO on every single save.
+                maestroConfigs[maestroSlot].baudRate = baudRate;
+
                 updateBaudRate(portNum, baudRate);
                 
                 if (serialBroadcastEnabled[portNum - 1]) {
@@ -993,6 +1012,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
               } else {
                 maestroConfigs[maestroSlot].serialPort = 0;
                 maestroConfigs[maestroSlot].remoteWCB = wcbNum;
+                maestroConfigs[maestroSlot].baudRate = baudRate;  // keep slot baud consistent (matches ?MAESTRO handler)
                 Serial.printf("✓ Maestro %d: Remote on WCB%d\n", maestroID, wcbNum);
               }
             }

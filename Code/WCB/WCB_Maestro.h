@@ -28,6 +28,13 @@ void clearAllMaestroConfigs();
 // Helper functions
 int8_t findSlotByMaestroID(uint8_t maestroID);
 int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB);
+// Slot identity = (maestroID, serialPort, remoteWCB). Baud is a mutable
+// attribute, NOT part of identity: re-configuring the same Maestro on the
+// same port with a different baud updates the existing slot instead of
+// adding a duplicate. Same ID on a different port (or a different target)
+// still gets its own slot. Used by BOTH the ?MAESTRO and ?KYBER config
+// paths so they can never disagree and create duplicate slots.
+int8_t findSlotByMaestroIDPortTarget(uint8_t maestroID, uint8_t serialPort, uint8_t remoteWCB);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
 void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial = false);

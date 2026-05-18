@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.1_270944RAPR2026";
+String SoftwareVersion = "6.0.1_180940RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5007,6 +5007,14 @@ void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt =
 
 void setup() {
 
+  // Enlarge the UART0 RX ring buffer (default 256 B) BEFORE Serial.begin().
+  // Config pushes from the web tool arrive as a rapid burst of commands; each
+  // setting that hits NVS blocks loop() for tens of ms during the flash commit.
+  // With only 256 B of buffer, a burst can overflow while loop() is stalled and
+  // silently drop a command. 2 KB comfortably absorbs a full push burst.
+  // No runtime cost: this is a one-time allocation and only affects Serial
+  // (UART0 / the USB programming port), not the device ports Serial1-5.
+  Serial.setRxBufferSize(2048);
   Serial.begin(115200);
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk

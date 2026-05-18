@@ -443,12 +443,16 @@ function parseToken(body, config) {
             const mMatch = p.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
             if (mMatch) {
               if (!config.kyber.targets) config.kyber.targets = [];
-              config.kyber.targets.push({
-                id:   parseInt(mMatch[1]),
-                wcb:  parseInt(mMatch[2]),
-                port: parseInt(mMatch[3]),
-                baud: parseInt(mMatch[4])
-              });
+              const tId   = parseInt(mMatch[1]);
+              const tWcb  = parseInt(mMatch[2]);
+              const tPort = parseInt(mMatch[3]);
+              const tBaud = parseInt(mMatch[4]);
+              // Upsert by (id, wcb, port) — baud is mutable, not identity —
+              // so a repeated/contradictory target line can't accumulate
+              // phantom duplicates that keep the diff from converging.
+              const ex = config.kyber.targets.find(t => t.id === tId && t.wcb === tWcb && t.port === tPort);
+              if (ex) ex.baud = tBaud;
+              else    config.kyber.targets.push({ id: tId, wcb: tWcb, port: tPort, baud: tBaud });
             }
           }
         }
@@ -501,10 +505,20 @@ function parseToken(body, config) {
           const port = parseInt(mMatch[3]);
           const baud = parseInt(mMatch[4]);
           if (wcb === config.wcbNumber) {
-            config.maestros.push({ id, port, baud });
+            // Upsert by (id, port): a Maestro is identified by its ID and
+            // port; baud is a mutable attribute, not part of identity. A
+            // legacy/polluted board can emit two ?MAESTRO lines for the same
+            // (id, port) with different bauds — de-dupe (last wins) so the
+            // parsed baseline can't carry phantom duplicates that make the
+            // diff fire forever and re-push ?MAESTRO on every save.
+            const ex = config.maestros.find(m => m.id === id && m.port === port);
+            if (ex) ex.baud = baud;
+            else    config.maestros.push({ id, port, baud });
           } else {
             if (!config.kyber.targets) config.kyber.targets = [];
-            config.kyber.targets.push({ id, wcb, port, baud });
+            const ex = config.kyber.targets.find(t => t.id === id && t.wcb === wcb && t.port === port);
+            if (ex) ex.baud = baud;
+            else    config.kyber.targets.push({ id, wcb, port, baud });
           }
         }
       }

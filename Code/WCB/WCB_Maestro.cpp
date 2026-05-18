@@ -42,6 +42,24 @@ int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB) {
   return -1;
 }
 
+// Slot identity = (maestroID, serialPort, remoteWCB). Baud is intentionally
+// excluded: configuring the same Maestro on the same port with only a new
+// baud rate must UPDATE the existing slot, not create a duplicate. Same ID
+// on a different port, or the same ID targeting a different WCB, still gets
+// its own slot. For local maestros serialPort is the S-port and remoteWCB
+// is 0; for remote maestros serialPort is 0 and remoteWCB is the target.
+int8_t findSlotByMaestroIDPortTarget(uint8_t maestroID, uint8_t serialPort, uint8_t remoteWCB) {
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (maestroConfigs[i].configured &&
+        maestroConfigs[i].maestroID  == maestroID &&
+        maestroConfigs[i].serialPort == serialPort &&
+        maestroConfigs[i].remoteWCB  == remoteWCB) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 int8_t findEmptySlot() {
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured) {
@@ -240,11 +258,15 @@ String remaining = message;
       continue;
     }
     
-    // Find or create slot — keyed on (maestroID, targetWCB) so that two entries
-    // with the same ID but different targets (e.g. M2 local on this board AND
-    // M2 remote on WCB3) each occupy their own slot instead of overwriting.
+    // Find or create slot — keyed on (maestroID, serialPort, target). A repeat
+    // config of the same Maestro on the same port (e.g. only the baud rate
+    // changed) updates the existing slot instead of adding a duplicate. Same
+    // ID on a different port, or targeting a different WCB, still gets its own
+    // slot. The slot stores serialPort=0 for remote maestros, so the key uses
+    // 0 for the port in the remote case to match how the slot is written below.
     uint8_t effectiveRemoteWCB = (targetWCB == WCB_Number) ? 0 : targetWCB;
-    int8_t slot = findSlotByMaestroIDAndTarget(maestroID, effectiveRemoteWCB);
+    uint8_t keyPort            = (targetWCB == WCB_Number) ? (uint8_t)serialPort : 0;
+    int8_t slot = findSlotByMaestroIDPortTarget(maestroID, keyPort, effectiveRemoteWCB);
     if (slot < 0) {
       slot = findEmptySlot();
       if (slot < 0) {

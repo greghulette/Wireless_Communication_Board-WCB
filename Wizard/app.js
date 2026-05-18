@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '03.22:10.R.MAY.2026';
+const UI_VERSION = '18.09:40.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2731,6 +2731,47 @@ class BoardConnection {
     });
   }
 
+  // Send a command and wait until the board has responded AND then gone quiet
+  // for `quietMs` — i.e. its handler finished, including any blocking NVS
+  // commit. This replaces blind fixed-delay pacing: it waits exactly as long
+  // as the board actually needs (a slow flash commit keeps emitting/holding
+  // output, which keeps the quiet window from elapsing) and no longer.
+  //
+  // Returns { ok, lines }. ok === false means NO response arrived within
+  // hardTimeoutMs — the command was almost certainly dropped, and the caller
+  // should retry it. Every WCB config command prints at least one response
+  // line, so this is a reliable, command-agnostic acknowledgement.
+  async sendAndAwaitIdle(command, { quietMs = 250, hardTimeoutMs = 4000 } = {}) {
+    return new Promise((resolve) => {
+      const lines = [];
+      let quietTimer = null;
+      let hardTimer  = null;
+      let done = false;
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (quietTimer) clearTimeout(quietTimer);
+        if (hardTimer)  clearTimeout(hardTimer);
+        this._dataCallbacks = this._dataCallbacks.filter(cb => cb !== onLine);
+        resolve({ ok: lines.length > 0, lines });
+      };
+
+      const onLine = (line) => {
+        lines.push(line);
+        // Restart the quiet window on every line so we keep waiting while the
+        // board is still emitting output (e.g. mid-NVS-commit chatter).
+        if (quietTimer) clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, quietMs);
+      };
+
+      this._dataCallbacks.push(onLine);
+      // Hard cap so a fully-dropped command can't hang the push forever.
+      hardTimer = setTimeout(finish, hardTimeoutMs);
+      this.send(command + '\r').catch(finish);
+    });
+  }
+
   onData(callback) { this._dataCallbacks.push(callback); }
 
   async _startReading() {
@@ -4314,9 +4355,15 @@ async function boardGo(n, opts = {}) {
       if (config.funcChar !== curFuncChar && config.funcChar !== '?')
         bootstrap.push(`${curFuncChar}FUNCCHAR,${config.funcChar}`);
       for (const cmd of bootstrap) {
-        await conn.send(cmd + '\r');
         termLog(n, cmd, 'in');
-        await sleep(80);
+        // These char-change commands gate every command that follows, so a
+        // dropped one breaks the whole push. ACK-pace them with one retry.
+        let r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 4000 });
+        if (!r.ok) {
+          termLog(n, `No response to "${cmd}" — retrying`, 'sys');
+          r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 4000 });
+          if (!r.ok) termLog(n, `Still no response to "${cmd}" — board may not have applied it`, 'err');
+        }
       }
     }
 
@@ -4327,10 +4374,22 @@ async function boardGo(n, opts = {}) {
     const delim    = config.delimiter || '^';
     const rawParts = cmdString.split(delim + funcChar);
     const commands = rawParts.map((p, i) => (i === 0 ? p : funcChar + p).trim()).filter(Boolean);
+    // ACK-paced send: wait for the board to respond and go idle (including any
+    // blocking NVS flash commit) before sending the next command, instead of a
+    // blind fixed delay that could overrun the UART RX buffer mid-commit and
+    // silently drop a setting. One retry per command if no response arrives.
+    let _pushFullyAcked = true;
     for (const cmd of commands) {
-      await conn.send(cmd + '\r');
       termLog(n, cmd, 'in');
-      await sleep(80);
+      let r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 5000 });
+      if (!r.ok) {
+        termLog(n, `No response to "${cmd}" — retrying`, 'sys');
+        r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 5000 });
+      }
+      if (!r.ok) {
+        _pushFullyAcked = false;
+        termLog(n, `No response to "${cmd}" after retry — config may be incomplete`, 'err');
+      }
     }
 
     _needsReboot = commandStringNeedsReboot(cmdString);
@@ -4381,7 +4440,11 @@ async function boardGo(n, opts = {}) {
         // ── Deferred-reboot path — boardGoAll sends the reboot explicitly ──
         // Config is applied; connection stays open so the relay can forward
         // MGMT reboot commands to remote boards before it goes down itself.
-        boardBaselines[n] = JSON.parse(JSON.stringify(config));
+        // Do NOT advance boardBaselines optimistically — the post-reboot
+        // reconnect+pull establishes the verified baseline from real NVS
+        // state. If left stale, a re-push only re-sends idempotent diffs
+        // (safe); a falsely-advanced baseline would instead hide an
+        // unapplied setting behind "No changes to push".
         updateBoardStatusBadge(n, 'configured');
         termLog(n, 'Config applied — reboot queued by Push All…', 'sys');
         showToast(`WCB ${n} configured`, 'info');
@@ -4389,13 +4452,21 @@ async function boardGo(n, opts = {}) {
 
     } else {
       // ── No-reboot path ────────────────────────────────────────
-      // All sent commands take effect immediately; connection stays open.
-      // Update the baseline optimistically, then pull to verify.
-      boardBaselines[n] = JSON.parse(JSON.stringify(config));
-      updateBoardStatusBadge(n, 'configured');
-      termLog(n, 'Config applied (no reboot needed) — verifying…', 'sys');
-      showToast(`WCB ${n} configured`, 'success');
-      setTimeout(() => boardPull(n), 800);
+      // All sent commands took effect immediately and were ACK-paced, so the
+      // board has already finished every NVS commit by the time we get here —
+      // the verify pull no longer races in-flight writes. Do NOT advance the
+      // baseline optimistically; let boardPull() set it from the board's real
+      // post-push state so any dropped setting stays a visible pending diff
+      // instead of being masked as "No changes to push".
+      updateBoardStatusBadge(n, _pushFullyAcked ? 'configured' : 'error');
+      if (_pushFullyAcked) {
+        termLog(n, 'Config applied (no reboot needed) — verifying…', 'sys');
+        showToast(`WCB ${n} configured`, 'success');
+      } else {
+        termLog(n, 'Some commands got no response — verifying actual board state…', 'err');
+        showToast(`WCB ${n}: some settings may not have applied — re-pull to check`, 'error');
+      }
+      setTimeout(() => boardPull(n), 300);
     }
 
     // If the pushed config contained remote PWM outputs (W<n>S<port>), the
