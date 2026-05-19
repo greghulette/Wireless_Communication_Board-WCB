@@ -692,7 +692,7 @@
           </select>
         </div>
         <div class="field" id="b{N}-hcr-poll-wrap" style="display:none">
-          <label>Status Poll (sec) <span class="wiz-hint tip-left" data-tip="How often the WCB polls the HCR for status. Default 10. Set 0 to disable automatic polling.">i</span></label>
+          <label>Status Poll (sec) <span class="wiz-hint tip-left" data-tip="How often the WCB polls the HCR for status. Minimum 3 seconds (keeps every serial port safe). Default 10. Set 0 to disable automatic polling.">i</span></label>
           <input type="number" id="b{N}-hcr-poll" min="0" max="3600" value="10" onchange="onHCRPollChange({N})">
         </div>
       </div>

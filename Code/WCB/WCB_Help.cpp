@@ -512,7 +512,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      (S3-S5 software serial: 9600 only)"));
         Serial.println(F("  CLEAR             Release the HCR port"));
         Serial.println(F("  LIST              Show HCR configuration and link status"));
-        Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
+        Serial.println(F("  POLL,<sec>        Auto-poll interval, min 3s (default 10; OFF to stop)"));
         Serial.println(F("  STATUS            Show cached HCR status  [HCR:...]"));
         Serial.println(F("  REFRESH           Poll the HCR immediately"));
         Serial.println(F("  GET,<field>       Query one value (EMOTION,H|S|M|C /"));
@@ -551,7 +551,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;W2,;H,STIM,M,STRONG          - Stimulate WCB2's HCR"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
-        Serial.println(F("  - Prefer a hardware UART (S1/S2) for the HCR port"));
+        Serial.println(F("  - Any serial port works (S3-S5 capped at 9600 = HCR"));
+        Serial.println(F("      default); min 3s poll keeps every port safe"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - RC-Controller raw forward to this port still works"));
         Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));

@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.15:04.R.MAY.2026';
+const UI_VERSION = '19.15:33.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1326,8 +1326,11 @@ function onHCRPollChange(n) {
   if (!config) return;
   let v = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
   if (isNaN(v)) v = 10;
-  v = Math.max(0, Math.min(3600, v));
+  // 0 = off; otherwise minimum 3s (keeps any serial port safe), max 3600.
+  v = (v <= 0) ? 0 : Math.max(3, Math.min(3600, v));
   config.hcr.poll = v;
+  const el = document.getElementById(`b${n}-hcr-poll`);
+  if (el && parseInt(el.value) !== v) el.value = v;   // reflect the clamp
   onBoardFieldChange(n);
 }
 
@@ -1340,7 +1343,7 @@ function syncHCRToConfig(n) {
     config.hcr.port = parseInt(document.getElementById(`b${n}-hcr-port`)?.value) || null;
     config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
     let pv = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
-    config.hcr.poll = isNaN(pv) ? 10 : Math.max(0, Math.min(3600, pv));
+    config.hcr.poll = isNaN(pv) ? 10 : (pv <= 0 ? 0 : Math.max(3, Math.min(3600, pv)));
     // Keep serial port baud in sync so ?BAUD is generated correctly
     if (config.hcr.port >= 1 && config.hcr.port <= 5) {
       config.serialPorts[config.hcr.port - 1].baud = config.hcr.baud;

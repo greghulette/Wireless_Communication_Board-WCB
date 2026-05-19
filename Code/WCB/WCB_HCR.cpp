@@ -545,7 +545,7 @@ void configureHCR(const String &args) {
     if (vU == "OFF" || vU == "0") hcrConfig.pollSec = 0;
     else {
       int s = v.toInt();
-      if (s < 1 || s > 3600) { Serial.println("[HCR] POLL must be 1-3600 s, or OFF"); return; }
+      if (s < 3 || s > 3600) { Serial.println("[HCR] POLL must be 3-3600 s, or OFF (min 3s keeps any serial port safe)"); return; }
       hcrConfig.pollSec = (uint16_t)s;
     }
     saveHCRSettings();
