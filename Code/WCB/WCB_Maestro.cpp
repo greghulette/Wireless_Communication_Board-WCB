@@ -342,55 +342,112 @@ String remaining = message;
   }
 }
 
-void clearMaestroByID(const String &message) {
-  // Format: called with "M5" or "5" after caller strips "CLEAR,"
-  // Example: ?MAESTRO,CLEAR,M5  → caller passes "M5"
-  //          ?MAESTRO,CLEAR,5   → caller passes "5"
+// Clear one slot and do the port housekeeping (broadcast re-enable, baud
+// reset). Does NOT call saveMaestroSettings() — the caller saves once after
+// clearing one or more slots.
+static void _clearMaestroSlot(int8_t slot) {
+  if (slot < 0) return;
 
-  String idStr = message;
-  idStr.trim();
-  if (idStr.startsWith("M") || idStr.startsWith("m")) idStr = idStr.substring(1);
-  
-  int maestroID = idStr.toInt();
-
-  if (maestroID < 1 || maestroID > 9) {
-    Serial.printf("Invalid Maestro ID. Must be M1-M9\n");
-    return;
-  }
-
-  int8_t slot = findSlotByMaestroID(maestroID);
-
-  if (slot < 0) {
-    Serial.printf("Maestro ID %d is not configured\n", maestroID);
-    return;
-  }
-
-  // Save the port before clearing
   uint8_t freedPort = maestroConfigs[slot].serialPort;
 
   maestroConfigs[slot].configured = false;
-  maestroConfigs[slot].maestroID = 0;
+  maestroConfigs[slot].maestroID  = 0;
   maestroConfigs[slot].serialPort = 0;
-  maestroConfigs[slot].remoteWCB = 0;
+  maestroConfigs[slot].remoteWCB  = 0;
+  maestroConfigs[slot].baudRate   = 0;
 
-  saveMaestroSettings();
-  Serial.printf("Cleared Maestro ID %d (freed slot %d)\n", maestroID, slot + 1);
-
-  // Auto re-enable broadcast on freed port
+  // Auto re-enable broadcast on freed port (only if no OTHER slot still uses it)
   if (freedPort > 0) {
-    if (!serialBroadcastEnabled[freedPort - 1]) {
-      serialBroadcastEnabled[freedPort - 1] = true;
-      saveBroadcastSettingsToPreferences();
-      Serial.printf("✓ Re-enabled broadcast output on S%d\n", freedPort);
+    bool portStillUsed = false;
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+      if (maestroConfigs[i].configured && maestroConfigs[i].serialPort == freedPort) {
+        portStillUsed = true;
+        break;
+      }
     }
-    if (blockBroadcastFrom[freedPort - 1]) {
-      blockBroadcastFrom[freedPort - 1] = false;
-      saveBroadcastBlockSettings();
-      Serial.printf("✓ Re-enabled broadcast input on S%d\n", freedPort);
+    if (!portStillUsed) {
+      if (!serialBroadcastEnabled[freedPort - 1]) {
+        serialBroadcastEnabled[freedPort - 1] = true;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("✓ Re-enabled broadcast output on S%d\n", freedPort);
+      }
+      if (blockBroadcastFrom[freedPort - 1]) {
+        blockBroadcastFrom[freedPort - 1] = false;
+        saveBroadcastBlockSettings();
+        Serial.printf("✓ Re-enabled broadcast input on S%d\n", freedPort);
+      }
+      updateBaudRate(freedPort, 9600);
+      Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
     }
-    updateBaudRate(freedPort, 9600);
-    Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
   }
+}
+
+void clearMaestroByID(const String &message) {
+  // Caller strips "CLEAR," and passes the remainder. Accepts:
+  //   "M5" / "5"             → clear ALL slots with that Maestro ID
+  //   "M1:W1S2" / "1:W1S2"   → clear ONLY that specific (id, port, target)
+  //                            slot. Required now that the same ID can occupy
+  //                            multiple slots (e.g. M1 moved S2→S1); a bare-ID
+  //                            clear could otherwise nuke the wrong one.
+
+  String s = message;
+  s.trim();
+  if (s.startsWith("M") || s.startsWith("m")) s = s.substring(1);
+
+  int colon = s.indexOf(':');
+
+  // ---- Bare ID: clear every slot with this ID ----
+  if (colon < 0) {
+    int maestroID = s.toInt();
+    if (maestroID < 1 || maestroID > 9) {
+      Serial.printf("Invalid Maestro ID. Must be M1-M9\n");
+      return;
+    }
+    int cleared = 0;
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+      if (maestroConfigs[i].configured && maestroConfigs[i].maestroID == maestroID) {
+        _clearMaestroSlot(i);
+        cleared++;
+      }
+    }
+    if (cleared == 0) {
+      Serial.printf("Maestro ID %d is not configured\n", maestroID);
+    } else {
+      saveMaestroSettings();
+      Serial.printf("Cleared Maestro ID %d (%d slot%s)\n",
+                    maestroID, cleared, cleared == 1 ? "" : "s");
+    }
+    return;
+  }
+
+  // ---- Targeted: M<id>:W<wcb>S<port> (clear exactly one slot) ----
+  int maestroID = s.substring(0, colon).toInt();
+  String tgt = s.substring(colon + 1);
+  tgt.toUpperCase();
+  int wi = tgt.indexOf('W');
+  int si = tgt.indexOf('S');
+  if (maestroID < 1 || maestroID > 9 || wi < 0 || si < 0 || si <= wi) {
+    Serial.printf("Invalid CLEAR target '%s'. Use M<id>:W<wcb>S<port> or M<id>\n",
+                  message.c_str());
+    return;
+  }
+  int wcb  = tgt.substring(wi + 1, si).toInt();
+  int port = tgt.substring(si + 1).toInt();   // toInt() stops at any trailing ':baud'
+
+  // Mirror how configureMaestro keys slots: local → (id, port, 0);
+  // remote → (id, 0, wcb).
+  uint8_t keyRemote = (wcb == WCB_Number) ? 0 : (uint8_t)wcb;
+  uint8_t keyPort   = (wcb == WCB_Number) ? (uint8_t)port : 0;
+  int8_t slot = findSlotByMaestroIDPortTarget(maestroID, keyPort, keyRemote);
+
+  if (slot < 0) {
+    Serial.printf("Maestro M%d:W%dS%d is not configured\n", maestroID, wcb, port);
+    return;
+  }
+  _clearMaestroSlot(slot);
+  saveMaestroSettings();
+  Serial.printf("Cleared Maestro M%d:W%dS%d (freed slot %d)\n",
+                maestroID, wcb, port, slot + 1);
 }
 
 

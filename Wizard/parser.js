@@ -992,13 +992,25 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     JSON.stringify(baselineTable) !== JSON.stringify(effectiveTable);
 
   if (maestrosChanged) {
-    if (effectiveTable.length > 0) {
+    const bTbl = baselineTable ?? [];
+    if (effectiveTable.length === 0) {
+      // Everything removed — one atomic clear is simplest.
+      if (bTbl.length > 0) add('MAESTRO,CLEAR,ALL');
+    } else {
+      // Targeted clears for Maestros that were in the baseline but removed or
+      // moved in the UI (matched by id+wcb+port — same identity the firmware
+      // slot uses). Without this, sending only the surviving entries below
+      // leaves the removed/old slot lingering in the firmware registry
+      // forever (e.g. moving M1 from S2→S1 orphans the S2 slot).
+      for (const b of bTbl) {
+        const stillPresent = effectiveTable.some(
+          e => e.id === b.id && e.wcb === b.wcb && e.port === b.port);
+        if (!stillPresent) add(`MAESTRO,CLEAR,M${b.id}:W${b.wcb}S${b.port}`);
+      }
       const chain = effectiveTable
         .map(m => `M${m.id}:W${m.wcb}S${m.port}:${m.baud}`)
         .join(',');
       add(`MAESTRO,${chain}`);
-    } else if ((baselineTable ?? []).length > 0) {
-      add('MAESTRO,CLEAR,ALL');
     }
   }
 
