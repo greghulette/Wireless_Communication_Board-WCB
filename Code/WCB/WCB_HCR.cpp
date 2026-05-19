@@ -8,6 +8,7 @@
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
 extern bool          debugEnabled;
+extern bool          debugHCR;     // toggled via ?DEBUG,HCR,ON|OFF or dhcron/dhcroff
 extern char          LocalFunctionIdentifier;
 extern char          commandDelimiter;
 extern unsigned long baudRates[5];
@@ -109,6 +110,21 @@ void processHCRTick() {
   if (!_hcr) return;
   _hcr->update();
   if (hcrConfig.pollSec > 0) _hcrLastRxPollMs = millis();
+
+  // When HCR debug is on, periodically dump the parsed status so the user
+  // can watch what's coming back from the HCR (the library hides per-byte
+  // RX). Throttled to the poll interval (min 2s) to avoid flooding.
+  if (debugHCR) {
+    static unsigned long _dbgNext = 0;
+    unsigned long now = millis();
+    if (now >= _dbgNext) {
+      uint32_t everyMs = (hcrConfig.pollSec > 0 ? hcrConfig.pollSec : 2) * 1000UL;
+      if (everyMs < 2000UL) everyMs = 2000UL;
+      _dbgNext = now + everyMs;
+      Serial.print("[HCR-DBG] status ");
+      printHCRStatus();
+    }
+  }
 }
 
 // ==================== Argument parsing helpers ==========================
@@ -177,6 +193,8 @@ void processHCRRuntimeCommand(const String &message) {
   String verb = hcrField(body, 0);
   String vU   = verb; vU.toUpperCase();
 
+  if (debugHCR) Serial.printf("[HCR-DBG] cmd in: ;H,%s\n", body.c_str());
+
   // ---- RAW: send the remainder verbatim (may contain commas) ----------
   if (vU == "RAW") {
     int firstComma = body.indexOf(',');
@@ -186,7 +204,7 @@ void processHCRRuntimeCommand(const String &message) {
       _hcrPort->print(payload);
       if (!payload.endsWith("\n")) _hcrPort->print('\n');
     }
-    if (debugEnabled) Serial.printf("[HCR] RAW -> %s\n", payload.c_str());
+    if (debugHCR || debugEnabled) Serial.printf("[HCR-DBG] TX raw -> %s\n", payload.c_str());
     return;
   }
 
@@ -209,7 +227,7 @@ void processHCRRuntimeCommand(const String &message) {
       case 17: _hcr->SetVolume(chan, track);                    break;
       default: Serial.printf("[HCR] Unknown fn=%d\n", fn);      return;
     }
-    if (debugEnabled) Serial.printf("[HCR] FN %d,%d,%d\n", fn, chan, track);
+    if (debugHCR || debugEnabled) Serial.printf("[HCR-DBG] FN %d,%d,%d\n", fn, chan, track);
     return;
   }
 

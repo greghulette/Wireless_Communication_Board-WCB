@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_191436RMAY2026                                  *****////
+///*****                                          Version 6.1.0_191453RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -153,7 +153,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_191436RMAY2026";
+String SoftwareVersion = "6.1.0_191453RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -207,6 +207,8 @@ typedef struct __attribute__((packed)) {
 bool debugMGMT = false;         // remote management protocol — off by default
 bool debugRawSerial = false;    // raw serial mapping — logs byte-level traffic in/out
 // debugRaw consolidated into debugMaestro
+
+bool debugHCR = false;          // HCR command/status debug — off by default
 
 // ETM Settings (NVS stored)
 bool debugETM = false;
@@ -3048,6 +3050,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "ETM,OFF") {
             debugETM = false;
             Serial.println("ETM debugging disabled");
+        } else if (argsUpper == "HCR,ON") {
+            debugHCR = true;
+            Serial.println("HCR debugging enabled");
+        } else if (argsUpper == "HCR,OFF") {
+            debugHCR = false;
+            Serial.println("HCR debugging disabled");
         } else if (argsUpper == "MGMT,ON") {
             debugMGMT = true;
             Serial.println("MGMT debugging enabled");
@@ -3606,6 +3614,12 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("detmon") || message.startsWith("DETMON")) {
         debugETM = true;
         Serial.println("ETM debugging enabled");
+    } else if (message.startsWith("dhcroff") || message.startsWith("DHCROFF")) {
+        debugHCR = false;
+        Serial.println("HCR debugging disabled");
+    } else if (message.startsWith("dhcron") || message.startsWith("DHCRON")) {
+        debugHCR = true;
+        Serial.println("HCR debugging enabled");
     } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
     } else if (message.equals("cclear") || message.equals("CCLEAR")) {

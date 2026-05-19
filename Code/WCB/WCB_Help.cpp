@@ -549,6 +549,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Prefer a hardware UART (S1/S2) for the HCR port"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - RC-Controller raw forward to this port still works"));
+        Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
+        Serial.println(F("      periodic received status; ?DEBUG,HCR,OFF / dhcroff"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
