@@ -66,6 +66,105 @@ static WcbHCR  *_hcr     = nullptr;   // live instance (heap; rebuilt on port ch
 static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
 static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
 
+// ---- Volume shadow + per-channel fade state -----------------------------
+// HCR has no native fade; we synthesize a non-blocking ramp per channel,
+// stepped from processHCRTick(). _hcrVol holds the last *settled* volume
+// the WCB commanded for each channel (0=V,1=A,2=B) — used as the fade
+// target / restore point because polled getVolume() can be up to pollSec
+// stale. -1 = unknown (seed from poll, else default 100).
+static int _hcrVol[3] = { -1, -1, -1 };
+
+struct HcrFade {
+  bool     active    = false;
+  int      from      = 0;
+  int      to        = 0;
+  uint32_t startMs   = 0;
+  uint32_t durMs     = 0;
+  uint32_t nextStep  = 0;
+  int      lastSent  = -1;
+  bool     stopAtEnd = false;   // fade-out: StopWAV + restore when done
+  int      restoreTo = 0;
+};
+static HcrFade _fade[3];                       // by channel (0=V,1=A,2=B)
+static const uint16_t HCR_FADE_STEP_MS = 150;  // ramp granularity
+
+// Set a channel volume AND record it as the settled shadow (user intent).
+static void hcrSetVol(int ch, int v) {
+  if (ch < 0 || ch > 2 || !_hcr) return;
+  v = constrain(v, 0, 100);
+  _hcr->SetVolume(ch, v);
+  _hcrVol[ch] = v;
+}
+
+// Best-effort "current" volume: settled shadow, else last poll, else 100.
+static int hcrCurVol(int ch) {
+  if (ch >= 0 && ch <= 2 && _hcrVol[ch] >= 0) return _hcrVol[ch];
+  if (_hcr) { int v = (int)(_hcr->getVolume(ch) + 0.5f);
+              if (v > 0) return constrain(v, 0, 100); }
+  return 100;
+}
+
+static void hcrCancelFade(int ch) {
+  if (ch >= 0 && ch <= 2) _fade[ch].active = false;
+}
+
+// Begin a ramp on ch from->to over durSec. stopAtEnd: on reaching the end,
+// StopWAV(ch) then restore volume to restoreTo (fade-out semantics).
+static void hcrStartFade(int ch, int from, int to, int durSec,
+                         bool stopAtEnd, int restoreTo) {
+  if (ch < 0 || ch > 2 || !_hcr) return;
+  from = constrain(from, 0, 100);
+  to   = constrain(to,   0, 100);
+  HcrFade &f = _fade[ch];
+  f.active = false;                       // supersede any in-flight fade
+  _hcr->SetVolume(ch, from);              // anchor the start point
+  if (durSec <= 0) {                      // instant
+    _hcr->SetVolume(ch, to);
+    if (stopAtEnd) { _hcr->StopWAV(ch); hcrSetVol(ch, restoreTo); }
+    else           { _hcrVol[ch] = to; }
+    return;
+  }
+  f.from = from; f.to = to;
+  f.startMs = millis(); f.durMs = (uint32_t)durSec * 1000UL;
+  f.nextStep = 0; f.lastSent = from;
+  f.stopAtEnd = stopAtEnd; f.restoreTo = restoreTo;
+  f.active = true;
+  if (debugHCR) Serial.printf("[HCR-DBG] fade start ch=%d %d->%d %ds%s\n",
+                              ch, from, to, durSec,
+                              stopAtEnd ? " (stop+restore)" : "");
+}
+
+// Step all active fades — called every loop tick (non-blocking).
+static void hcrStepFades() {
+  if (!_hcr) return;
+  uint32_t now = millis();
+  for (int ch = 0; ch < 3; ch++) {
+    HcrFade &f = _fade[ch];
+    if (!f.active) continue;
+    uint32_t elapsed = now - f.startMs;
+    if (elapsed >= f.durMs) {                 // done
+      _hcr->SetVolume(ch, f.to);
+      if (f.stopAtEnd) {
+        _hcr->StopWAV(ch);
+        _hcr->SetVolume(ch, f.restoreTo);
+        _hcrVol[ch] = f.restoreTo;
+      } else {
+        _hcrVol[ch] = f.to;
+      }
+      f.active = false;
+      if (debugHCR) Serial.printf("[HCR-DBG] fade done ch=%d -> %d%s\n",
+                                  ch, f.stopAtEnd ? f.restoreTo : f.to,
+                                  f.stopAtEnd ? " (stopped+restored)" : "");
+      continue;
+    }
+    if (now < f.nextStep) continue;
+    f.nextStep = now + HCR_FADE_STEP_MS;
+    int v = f.from + (int)((long)(f.to - f.from) * (long)elapsed / (long)f.durMs);
+    v = constrain(v, 0, 100);
+    if (v != f.lastSent) { _hcr->SetVolume(ch, v); f.lastSent = v; }
+  }
+}
+
 // ==================== Port-conflict Query ================================
 
 bool isSerialPortUsedForHCR(int port) {
@@ -109,6 +208,7 @@ void beginHCR() {
 void processHCRTick() {
   if (!_hcr) return;
   _hcr->update();
+  hcrStepFades();                 // non-blocking volume ramps
   if (hcrConfig.pollSec > 0) _hcrLastRxPollMs = millis();
 
   // When HCR debug is on, periodically dump the parsed status so the user
@@ -280,14 +380,26 @@ void processHCRRuntimeCommand(const String &message) {
     int ch = hcrChan(hcrField(body, 1));            // A|B
     int fl = hcrField(body, 2).toInt();
     if ((ch != CH_A && ch != CH_B) || fl < 0 || fl > 9999) {
-      Serial.println("[HCR] Usage: ;H,PLAY,<A|B>,<0-9999>"); return;
+      Serial.println("[HCR] Usage: ;H,PLAY,<A|B>,<0-9999>[,FADEIN,<sec>]"); return;
     }
-    _hcr->PlayWAV(ch, fl); _hcr->update();
+    String opt = hcrField(body, 3); opt.toUpperCase();
+    if (opt == "FADEIN") {
+      int sec    = hcrField(body, 4).toInt();
+      int target = hcrCurVol(ch);                   // capture intended level
+      hcrCancelFade(ch);
+      _hcr->SetVolume(ch, 0);                       // silent BEFORE play (no blip)
+      _hcr->PlayWAV(ch, fl); _hcr->update();
+      hcrStartFade(ch, 0, target, sec, false, 0);   // 0 -> target
+    } else {
+      hcrCancelFade(ch);
+      _hcr->PlayWAV(ch, fl); _hcr->update();
+    }
     return;
   }
   if (vU == "STOPWAV") {
     int ch = hcrChan(hcrField(body, 1));
     if (ch != CH_A && ch != CH_B) { Serial.println("[HCR] Usage: ;H,STOPWAV,<A|B>"); return; }
+    hcrCancelFade(ch);
     _hcr->StopWAV(ch);
     return;
   }
@@ -295,7 +407,38 @@ void processHCRRuntimeCommand(const String &message) {
     int ch = hcrChan(hcrField(body, 1));            // V|A|B
     int v  = hcrField(body, 2).toInt();
     if (ch < 0 || v < 0 || v > 100) { Serial.println("[HCR] Usage: ;H,VOL,<V|A|B>,<0-100>"); return; }
-    _hcr->SetVolume(ch, v);
+    hcrCancelFade(ch);
+    hcrSetVol(ch, v);
+    return;
+  }
+  if (vU == "VOLUP" || vU == "VOLDN" || vU == "VOLDOWN") {
+    int ch = hcrChan(hcrField(body, 1));            // V|A|B
+    if (ch < 0) { Serial.println("[HCR] Usage: ;H,VOLUP|VOLDN,<V|A|B>[,<step>]"); return; }
+    String s = hcrField(body, 2);
+    int step = s.length() ? s.toInt() : 5;
+    if (step <= 0) step = 5;
+    int cur = hcrCurVol(ch);
+    int nv  = (vU == "VOLUP") ? cur + step : cur - step;
+    hcrCancelFade(ch);
+    hcrSetVol(ch, nv);                              // hcrSetVol clamps 0-100
+    if (debugHCR) Serial.printf("[HCR-DBG] %s ch=%d %d->%d\n",
+                                vU.c_str(), ch, cur, constrain(nv,0,100));
+    return;
+  }
+  if (vU == "FADEOUT") {
+    int ch  = hcrChan(hcrField(body, 1));           // A|B
+    int sec = hcrField(body, 2).toInt();
+    if (ch != CH_A && ch != CH_B) { Serial.println("[HCR] Usage: ;H,FADEOUT,<A|B>,<sec>"); return; }
+    int cur = hcrCurVol(ch);
+    hcrStartFade(ch, cur, 0, sec, true, cur);       // ramp->0, StopWAV, restore cur
+    return;
+  }
+  if (vU == "FADEIN") {
+    int ch  = hcrChan(hcrField(body, 1));           // A|B
+    int sec = hcrField(body, 2).toInt();
+    if (ch != CH_A && ch != CH_B) { Serial.println("[HCR] Usage: ;H,FADEIN,<A|B>,<sec>"); return; }
+    int target = hcrCurVol(ch);
+    hcrStartFade(ch, 0, target, sec, false, 0);     // 0 -> captured target
     return;
   }
 

@@ -530,8 +530,13 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;H,MUSE,0|1|TOGGLE  Disable / enable / toggle muse"));
         Serial.println(F("  ;H,MUSE,GAP,min,max Set muse gap range (seconds)"));
         Serial.println(F("  ;H,PLAY,A|B,0-9999  Play a WAV on channel A/B"));
+        Serial.println(F("  ;H,PLAY,A|B,file,FADEIN,sec  Play, ramp 0->current vol"));
         Serial.println(F("  ;H,STOPWAV,A|B      Stop WAV on a channel"));
         Serial.println(F("  ;H,VOL,V|A|B,0-100  Set volume (V=vocalizer, A/B=wav)"));
+        Serial.println(F("  ;H,VOLUP,V|A|B[,step]  Volume up (step default 5)"));
+        Serial.println(F("  ;H,VOLDN,V|A|B[,step]  Volume down (step default 5)"));
+        Serial.println(F("  ;H,FADEIN,A|B,sec   Ramp 0 -> current volume"));
+        Serial.println(F("  ;H,FADEOUT,A|B,sec  Ramp -> 0, StopWAV, restore vol"));
         Serial.println(F("  ;H,STOP             Stop all audio and emotes"));
         Serial.println(F("  ;H,FN,fn,chan,track Numeric dispatch (RC fn/chan/track)"));
         Serial.println(F("  ;H,RAW,<string>     Send a literal HCR string verbatim"));

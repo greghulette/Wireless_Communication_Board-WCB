@@ -12,6 +12,12 @@
 //   Configure : ?HCR,PORT,S<port>:<baud>   ?HCR,POLL,<sec|OFF>   ?HCR,CLEAR
 //   Query     : ?HCR,LIST   ?HCR,STATUS   ?HCR,GET,<field>   ?HCR,REFRESH
 //   Operate   : ;H,STIM,..  ;H,PLAY,..  ;H,VOL,..  ;H,FN,..  ;H,RAW,<str>
+//   Volume/fade (WCB-synthesized, non-blocking, per channel):
+//               ;H,VOLUP|VOLDN,<V|A|B>[,step]   ;H,FADEIN,<A|B>,<sec>
+//               ;H,FADEOUT,<A|B>,<sec>   ;H,PLAY,<A|B>,<file>,FADEIN,<sec>
+//     Fades use a WCB volume shadow as the capture/restore point (poll
+//     status can be stale). FADEOUT ramps->0, StopWAV, restores volume.
+//     Crossfade = FADEOUT one channel while PLAY..FADEIN the other.
 //
 //   Convention mirrors Maestro/MP3:
 //     ?HCR,...  configures & queries (LocalFunctionIdentifier, NVS-persisted)
