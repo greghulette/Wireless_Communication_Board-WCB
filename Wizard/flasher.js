@@ -18,11 +18,25 @@ const CRYPTOJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/cry
 //   WCB_6.0_271328RFEB2026_multi_maestro_ESP32S3.bin
 // The suffix (_ESP32.bin / _ESP32S3.bin) is stable; the prefix changes each build.
 // We use the GitHub Contents API to find the right file, then fetch it.
-// Update GITHUB_BRANCH when switching branches.
+// The branch is resolved at fetch time by getFirmwareBranch() (defaults to
+// 'main'; overridable via the Advanced → Firmware Source selector).
 const GITHUB_OWNER  = 'greghulette';
 const GITHUB_REPO   = 'Wireless_Communication_Board-WCB';
-const GITHUB_BRANCH = 'main';
+const GITHUB_BRANCH_DEFAULT = 'main';
 const GITHUB_BIN_PATH = 'Code/bin';
+
+// Branch the flasher pulls binaries from. Defaults to 'main' (released
+// firmware). The Advanced → Firmware Source selector overrides this via
+// localStorage for testing unreleased branches. Never hard-code anything
+// but 'main' as the default — production must always pull released firmware.
+function getFirmwareBranch() {
+  try {
+    const b = (localStorage.getItem('wcb_fw_branch') || '').trim();
+    return b || GITHUB_BRANCH_DEFAULT;
+  } catch (_) {
+    return GITHUB_BRANCH_DEFAULT;
+  }
+}
 
 // ─── Script loader ────────────────────────────────────────────────
 function loadScript(src) {
@@ -46,9 +60,12 @@ function loadScript(src) {
 //
 // Fallback: file picker returns app-only at 0x10000 (for manual recovery)
 async function getBinaryData(binaryType, onLog) {
+  const GITHUB_BRANCH = getFirmwareBranch();
   const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_BIN_PATH}?ref=${GITHUB_BRANCH}`;
 
   try {
+    if (GITHUB_BRANCH !== GITHUB_BRANCH_DEFAULT)
+      onLog(`⚠ Firmware source branch: ${GITHUB_BRANCH} (NOT released 'main')`);
     onLog(`Scanning ${GITHUB_BIN_PATH}/ on GitHub (${GITHUB_BRANCH})…`);
     const listResp = await fetch(apiUrl);
     if (!listResp.ok) throw new Error(`GitHub API: HTTP ${listResp.status}`);
