@@ -22,6 +22,7 @@ extern String storedCommands[MAX_STORED_COMMANDS];
 extern int wcb_hw_version;
 extern char espnowPassword[40];
 extern void updatePinMap();
+extern void applyLiveBaud(int port, uint32_t baud);  // defined in WCB.ino — live re-init incl. SW serial S3-S5
 extern int SERIAL1_TX_PIN;        //  // Serial 1 Tx Pin
 extern int SERIAL1_RX_PIN;       //  // Serial 1 Rx Pin
 extern int SERIAL2_TX_PIN;       //  // Serial 2 Tx Pin
@@ -136,15 +137,11 @@ void updateBaudRate(int port, int baud) {
     return;
   }
 
-  // Hardware vs Software serial
-  if (port == 1) {
-    Serial1.updateBaudRate(baud);
-  } else if (port == 2) {
-    Serial2.updateBaudRate(baud);
-  } else {
-    // Serial.printf("Invalid serial port: %d\n", port);
-    // return;
-  }
+  // Apply to the live port immediately — no reboot required. S1/S2 reprogram
+  // the UART divisor; S3-S5 (software serial) are torn down and re-begun.
+  // Previously only S1/S2 were handled here, so S3-S5 baud changes silently
+  // did nothing until the next reboot reloaded NVS in setup().
+  applyLiveBaud(port, (uint32_t)baud);
 
   // Sync the in-memory baud table. Without this, the running config and the
   // config backup (which read baudRates[]) keep reporting the OLD value until

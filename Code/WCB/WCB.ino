@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0.2_180947RMAY2026                                  *****////
+///*****                                          Version 6.0.3_190905RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -152,7 +152,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.2_180947RMAY2026";
+String SoftwareVersion = "6.0.3_190905RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1265,6 +1265,37 @@ Stream &getSerialStream(int port) {
     case 4: return Serial4;
     case 5: return Serial5;
     default: return Serial; // fallback
+  }
+}
+
+// Apply a new baud rate to a LIVE serial port without requiring a reboot.
+//   S1/S2 (hardware UART): updateBaudRate() just reprograms the clock divisor.
+//   S3-S5 (EspSoftwareSerial): the software UART must be torn down and
+//   re-begun with the SAME signature setup() uses, otherwise the change only
+//   takes effect on the next boot. PWM-reserved ports are skipped (mirrors
+//   the guards in setup()). Called from updateBaudRate() in WCB_Storage.cpp.
+void applyLiveBaud(int port, uint32_t baud) {
+  switch (port) {
+    case 1: Serial1.updateBaudRate(baud); break;
+    case 2: Serial2.updateBaudRate(baud); break;
+    case 3:
+      if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
+        Serial3.end();
+        Serial3.begin(baud, SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+      }
+      break;
+    case 4:
+      if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
+        Serial4.end();
+        Serial4.begin(baud, SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+      }
+      break;
+    case 5:
+      if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
+        Serial5.end();
+        Serial5.begin(baud, SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+      }
+      break;
   }
 }
 
