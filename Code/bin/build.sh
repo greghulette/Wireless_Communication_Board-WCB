@@ -51,11 +51,23 @@ echo ""
 echo "Building ESP32 binary (v1.0, v2.1, v2.3, v2.4)..."
 
 arduino-cli compile \
-    --fqbn esp32:esp32:esp32:PartitionScheme=default \
+    --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
     --output-dir "/tmp/wcb_esp32" \
     "$SKETCH_PATH"
 
 if [ $? -eq 0 ]; then
+    # PartitionScheme=min_spiffs: 2x ~1.9MB OTA app slots + 128KB spiffs.
+    # The WCB uses no filesystem, so the default scheme's ~1.4MB SPIFFS was
+    # dead space capping the app at 1.25MB. min_spiffs keeps OTA (2 slots)
+    # and raises the app ceiling to ~1.9MB. NVS (0x9000/0x5000) and otadata
+    # (0xe000) offsets are IDENTICAL to the old default scheme, so saved
+    # config survives the transition as long as NVS is not erased.
+    #
+    # NOTE: switching schemes changes the partition TABLE. Boards still on
+    # the old table MUST be full-flashed (boot+part+app) once — an app-only
+    # update would overrun the old 1.25MB slot. The flasher detects a table
+    # mismatch and forces a full (NVS-preserving) flash automatically.
+    #
     # Three separate files flashed at their correct addresses:
     #   bootloader → 0x1000   (recovers blank/bricked boards)
     #   partitions → 0x8000
@@ -83,7 +95,7 @@ echo ""
 echo "Building ESP32-S3 binary (v3.1, v3.2)..."
 
 arduino-cli compile \
-    --fqbn esp32:esp32:esp32s3:PartitionScheme=default \
+    --fqbn esp32:esp32:esp32s3:PartitionScheme=min_spiffs \
     --output-dir "/tmp/wcb_s3" \
     "$SKETCH_PATH"
 

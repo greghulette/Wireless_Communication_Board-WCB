@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_191330RMAY2026                                  *****////
+///*****                                          Version 6.1.0_191436RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -84,6 +84,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
+#include "WCB_HCR.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
 #include "esp_task_wdt.h"
@@ -152,7 +153,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_191330RMAY2026";
+String SoftwareVersion = "6.1.0_191436RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2162,6 +2163,9 @@ String buildConfigString() {
   // MP3 Trigger settings
   { String dummy; printMP3Backup(dummy, out, '^'); }
 
+  // HCR settings
+  { String dummy; printHCRBackup(dummy, out, '^'); }
+
   // ETM settings
   append(etmEnabled ? "ETM,ON" : "ETM,OFF");
   append("ETM,TIMEOUT," + String(etmTimeoutMs));
@@ -3403,6 +3407,12 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?HCR,... (Human-Cyborg Relations config/query) ---
+    if (rootUpper == "HCR") {
+        configureHCR(args);
+        return;
+    }
+
     // --- ?SEQ,... ---
     if (rootUpper == "SEQ") {
         int secondComma = args.indexOf(',');
@@ -4298,6 +4308,9 @@ void updateHWVersion(const String &message) {
     // ---- MP3 Trigger Settings ----
     printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
 
+    // ---- HCR Settings ----
+    printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+
     // ---- ETM Settings ----
     cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
     Serial.println(lfi + cmd);
@@ -4451,6 +4464,8 @@ void processCommandCharcter(const String &message, int sourceID) {
       processPWMOutput(message);
     } else if (message.startsWith("a") || message.startsWith("A")) {
       processMP3AudioCommand(message);
+    } else if (message.startsWith("h") || message.startsWith("H")) {
+      processHCRRuntimeCommand(message);
     } else {
         Serial.println("Invalid Serial Command");
     }
@@ -4710,6 +4725,14 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             continue;
         }
 
+        // Skip if the HCR is on this port (library owns it)
+        if (isSerialPortUsedForHCR(i)) {
+            if (debugEnabled) {
+                Serial.printf("Skipping S%d (HCR port)\n", i);
+            }
+            continue;
+        }
+
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
     }
@@ -4726,6 +4749,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // Skip ports reserved for the MP3 Trigger — responses are consumed
   // exclusively by processMP3Responses() in loop().
   if (isSerialPortUsedForMP3(sourceID)) return;
+
+  // Skip the HCR port — RX is owned exclusively by the HCRVocalizer
+  // library (status parsing) via processHCRTick() in loop().
+  if (isSerialPortUsedForHCR(sourceID)) return;
 
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
@@ -5054,6 +5081,8 @@ void setup() {
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
+  loadHCRSettings();      // Load HCR configuration from NVS
+  beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
@@ -5326,6 +5355,7 @@ void loop() {
   checkMgmtTimeout();
   checkConfigPullTimeout();
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
+  processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;

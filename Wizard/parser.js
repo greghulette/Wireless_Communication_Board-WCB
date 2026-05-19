@@ -61,6 +61,14 @@ function createDefaultBoardConfig() {
       onError: '',     // stored sequence key to run on error (optional)
     },
 
+    // HCR (Human-Cyborg Relations) Vocalizer
+    hcr: {
+      enabled: false,
+      port:    null,   // 1-5 — serial port the HCR is wired to
+      baud:    9600,
+      poll:    10,     // status auto-poll interval (s); 0 = off
+    },
+
     // Maestros — array of { id, port, baud }
     maestros: [],
 
@@ -483,6 +491,25 @@ function parseToken(body, config) {
       } else if (sub === 'CLEAR') {
         config.mp3.enabled = false;
         config.mp3.port    = null;
+      }
+      break;
+    }
+
+    case 'HCR': {
+      const sub = upperParts[1];
+      if (sub === 'PORT') {
+        // ?HCR,PORT,S1:9600
+        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
+        if (m) {
+          config.hcr.enabled = true;
+          config.hcr.port    = parseInt(m[1]);
+          config.hcr.baud    = parseInt(m[2]);
+        }
+      } else if (sub === 'POLL') {
+        config.hcr.poll = parseInt(parts[2]) || 0;
+      } else if (sub === 'CLEAR') {
+        config.hcr.enabled = false;
+        config.hcr.port    = null;
       }
       break;
     }
@@ -973,6 +1000,18 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
       if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
     } else {
       add('MP3,CLEAR');
+    }
+  }
+
+  // ── HCR Vocalizer ──
+  const hcrChanged = fullPush || !baseline ||
+    JSON.stringify(baseline.hcr) !== JSON.stringify(config.hcr);
+  if (hcrChanged) {
+    if (config.hcr.enabled && config.hcr.port) {
+      add(`HCR,PORT,S${config.hcr.port}:${config.hcr.baud}`);
+      add(`HCR,POLL,${config.hcr.poll}`);
+    } else {
+      add('HCR,CLEAR');
     }
   }
 

@@ -495,6 +495,63 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
+    } else if (c == "HCR") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?HCR,<command>[,options]   (config/query)"));
+        Serial.println(F("       ;H,<command>[,options]    (runtime actions)"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Native Human-Cyborg Relations (HCR) Vocalizer integration."));
+        Serial.println(F("  One HCR per WCB on a reserved serial port. The WCB sends"));
+        Serial.println(F("  commands and polls live status. Drive it locally (serial/web),"));
+        Serial.println(F("  remotely (ESP-NOW unicast), or via the RC-Controller raw"));
+        Serial.println(F("  forward - all to the same HCR."));
+        Serial.println(F("\nConfiguration Commands (?HCR,...):"));
+        Serial.println(F("  PORT,Sx:baud      Reserve & configure the HCR port"));
+        Serial.println(F("                      baud: 9600/19200/38400/57600/115200"));
+        Serial.println(F("                      (S3-S5 software serial: 9600 only)"));
+        Serial.println(F("  CLEAR             Release the HCR port"));
+        Serial.println(F("  LIST              Show HCR configuration and link status"));
+        Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
+        Serial.println(F("  STATUS            Show cached HCR status  [HCR:...]"));
+        Serial.println(F("  REFRESH           Poll the HCR immediately"));
+        Serial.println(F("  GET,<field>       Query one value (EMOTION,H|S|M|C /"));
+        Serial.println(F("                      DURATION / OVERRIDE / MUSE / WAVCOUNT /"));
+        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B)"));
+        Serial.println(F("\nRuntime Actions (use ;H,...):"));
+        Serial.println(F("  ;H,STIM,e,lvl       Stimulate  e=H|S|M|C  lvl=MOD|STRONG"));
+        Serial.println(F("  ;H,TRIGGER,e,lvl    Trigger (same payload as STIM)"));
+        Serial.println(F("  ;H,OVERLOAD         Overload vocalization"));
+        Serial.println(F("  ;H,SETEMOTION,e,0-100  Set an emotion level directly"));
+        Serial.println(F("  ;H,RESETEMOTIONS    Reset all emotions to 0"));
+        Serial.println(F("  ;H,OVERRIDE,0|1     Personality-chip emotion override"));
+        Serial.println(F("  ;H,STOPEMOTE        Stop the current emote"));
+        Serial.println(F("  ;H,MUSE             Trigger one muse"));
+        Serial.println(F("  ;H,MUSE,0|1|TOGGLE  Disable / enable / toggle muse"));
+        Serial.println(F("  ;H,MUSE,GAP,min,max Set muse gap range (seconds)"));
+        Serial.println(F("  ;H,PLAY,A|B,0-9999  Play a WAV on channel A/B"));
+        Serial.println(F("  ;H,STOPWAV,A|B      Stop WAV on a channel"));
+        Serial.println(F("  ;H,VOL,V|A|B,0-100  Set volume (V=vocalizer, A/B=wav)"));
+        Serial.println(F("  ;H,STOP             Stop all audio and emotes"));
+        Serial.println(F("  ;H,FN,fn,chan,track Numeric dispatch (RC fn/chan/track)"));
+        Serial.println(F("  ;H,RAW,<string>     Send a literal HCR string verbatim"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?HCR,PORT,S1:9600             - HCR on S1 at 9600 baud"));
+        Serial.println(F("  ?HCR,POLL,5                   - Poll status every 5 s"));
+        Serial.println(F("  ?HCR,STATUS                   - Show cached status"));
+        Serial.println(F("  ;H,STIM,H,STRONG              - Strong happy stimulation"));
+        Serial.println(F("  ;H,PLAY,A,42                  - Play WAV 42 on channel A"));
+        Serial.println(F("  ;H,VOL,V,80                   - Vocalizer volume 80"));
+        Serial.println(F("  ;H,RAW,<MM,QM>                - Literal HCR string"));
+        Serial.println(F("  ;W2,;H,STIM,M,STRONG          - Stimulate WCB2's HCR"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
+        Serial.println(F("  - Prefer a hardware UART (S1/S2) for the HCR port"));
+        Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
+        Serial.println(F("  - RC-Controller raw forward to this port still works"));
+        Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
     } else if (c == "SEQ") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -739,6 +796,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?KYBER          Configure Kyber RC integration"));
         Serial.println(F("    ?MAESTRO        Configure Maestro servo controller(s)"));
         Serial.println(F("    ?MP3            Configure SparkFun MP3 Trigger v2.x"));
+        Serial.println(F("    ?HCR            Configure Human-Cyborg Relations Vocalizer"));
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));

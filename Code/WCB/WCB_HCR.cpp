@@ -1,0 +1,542 @@
+#include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
+#include "WCB_HCR.h"
+#include "WCB_Storage.h"
+#include <Preferences.h>
+#include <SoftwareSerial.h>
+#include <hcr.h>
+
+// ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
+extern int           WCB_Number;
+extern bool          debugEnabled;
+extern char          LocalFunctionIdentifier;
+extern char          commandDelimiter;
+extern unsigned long baudRates[5];
+extern bool          serialBroadcastEnabled[5];
+extern bool          blockBroadcastFrom[5];
+extern Preferences   preferences;
+
+// updateBaudRate / saveBroadcastSettingsToPreferences / saveBroadcastBlockSettings
+// / saveSerialLabelToPreferences are declared by WCB_Storage.h (included above).
+extern Stream      &getSerialStream(int port);
+extern void         applyLiveBaud(int port, uint32_t baud);
+
+// Serial3-5 are EspSoftwareSerial instances defined in WCB.ino.
+// Serial1/Serial2 are the ESP32 core HardwareSerial globals.
+extern SoftwareSerial Serial3;
+extern SoftwareSerial Serial4;
+extern SoftwareSerial Serial5;
+
+// ---------------------------------------------------------------------------
+//  WcbHCR — thin subclass of HCRVocalizer.
+//
+//  We deliberately do NOT call HCRVocalizer::begin(): on ESP32 it re-opens
+//  the UART with DEFAULT pins (clobbering the WCB's custom S1/S2 pin map) and
+//  prints "Begin _serial" junk to the HCR. The WCB already owns/initialises
+//  the port (applyLiveBaud), so we only need to (a) initialise the library's
+//  protected state — the active constructors leave refreshSpeed/emote_*/etc.
+//  indeterminate — and (b) set the poll refresh rate. Both are reachable here
+//  because those members are `protected` in hcr.h.
+// ---------------------------------------------------------------------------
+class WcbHCR : public HCRVocalizer {
+public:
+  WcbHCR(HardwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
+  WcbHCR(SoftwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
+
+  // Set the auto-poll interval (ms) WITHOUT HCRVocalizer::begin()'s serial
+  // re-init. update() auto-sends <QD> every refreshSpeed ms when > 0.
+  void setRefreshMs(uint16_t ms) { refreshSpeed = ms; }
+
+private:
+  void _init() {
+    refreshSpeed   = 0;
+    emote_happy    = emote_sad = emote_mad = emote_scared = 0;
+    state_override = state_musing = state_files = 0;
+    state_duration = 0.0f;
+    state_chv      = state_cha = state_chb = 0;
+    Volume_V       = Volume_A = Volume_B = 0;
+    cmdPos         = 0;
+  }
+};
+
+// ---- Module globals -----------------------------------------------------
+HCRConfig hcrConfig = {};
+
+static WcbHCR  *_hcr     = nullptr;   // live instance (heap; rebuilt on port change)
+static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
+static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
+
+// ==================== Port-conflict Query ================================
+
+bool isSerialPortUsedForHCR(int port) {
+  return hcrConfig.configured && hcrConfig.serialPort == (uint8_t)port;
+}
+
+// ==================== Lifecycle =========================================
+
+void beginHCR() {
+  // Tear down any previous instance.
+  if (_hcr) { delete _hcr; _hcr = nullptr; }
+  _hcrPort = nullptr;
+
+  if (!hcrConfig.configured ||
+      hcrConfig.serialPort < 1 || hcrConfig.serialPort > 5) {
+    return;
+  }
+
+  int baud = (int)hcrConfig.baudRate;
+  switch (hcrConfig.serialPort) {
+    case 1: _hcr = new WcbHCR(&Serial1, baud); _hcrPort = &Serial1; break;
+    case 2: _hcr = new WcbHCR(&Serial2, baud); _hcrPort = &Serial2; break;
+    case 3: _hcr = new WcbHCR(&Serial3, baud); _hcrPort = &Serial3; break;
+    case 4: _hcr = new WcbHCR(&Serial4, baud); _hcrPort = &Serial4; break;
+    case 5: _hcr = new WcbHCR(&Serial5, baud); _hcrPort = &Serial5; break;
+    default: return;
+  }
+  if (_hcr) {
+    // pollSec 0 = off (no auto <QD>); update() still parses incoming RX
+    // (e.g. responses to queries the RC-Controller appends to its strings).
+    _hcr->setRefreshMs((uint16_t)(hcrConfig.pollSec * 1000));
+  }
+  Serial.printf("[HCR] Active on S%d at %lu baud, poll=%us\n",
+                hcrConfig.serialPort,
+                (unsigned long)hcrConfig.baudRate,
+                (unsigned)hcrConfig.pollSec);
+}
+
+// Call once per loop() tick. Non-blocking: HCRVocalizer::update() auto-sends
+// <QD> on the refresh timer and parses one RX byte per call via receive().
+void processHCRTick() {
+  if (!_hcr) return;
+  _hcr->update();
+  if (hcrConfig.pollSec > 0) _hcrLastRxPollMs = millis();
+}
+
+// ==================== Argument parsing helpers ==========================
+
+// Split a comma list, return field idx (0-based), trimmed. "" if absent.
+static String hcrField(const String &s, int idx) {
+  int start = 0;
+  for (int i = 0; i < idx; i++) {
+    int c = s.indexOf(',', start);
+    if (c < 0) return "";
+    start = c + 1;
+  }
+  int end = s.indexOf(',', start);
+  String v = (end < 0) ? s.substring(start) : s.substring(start, end);
+  v.trim();
+  return v;
+}
+
+// Emotion: H/S/M/C or HAPPY/SAD/MAD/SCARED -> 0..3, OVERLOAD -> 4, else -1
+static int hcrEmotion(const String &t) {
+  String u = t; u.trim(); u.toUpperCase();
+  if (u == "H" || u == "HAPPY")    return HAPPY;
+  if (u == "S" || u == "SAD")      return SAD;
+  if (u == "M" || u == "MAD")      return MAD;
+  if (u == "C" || u == "SCARED")   return SCARED;
+  if (u == "O" || u == "OVERLOAD") return OVERLOAD;
+  return -1;
+}
+
+// Level: MOD/MODERATE/0 -> 0, STRONG/1 -> 1, else -1
+static int hcrLevel(const String &t) {
+  String u = t; u.trim(); u.toUpperCase();
+  if (u == "MOD" || u == "MODERATE" || u == "0") return EMOTE_MODERATE;
+  if (u == "STRONG" || u == "1")                 return EMOTE_STRONG;
+  return -1;
+}
+
+// Audio channel: V/A/B -> 0/1/2, else -1
+static int hcrChan(const String &t) {
+  String u = t; u.trim(); u.toUpperCase();
+  if (u == "V") return CH_V;
+  if (u == "A") return CH_A;
+  if (u == "B") return CH_B;
+  return -1;
+}
+
+// ==================== Runtime dispatch (;H,...) =========================
+
+void processHCRRuntimeCommand(const String &message) {
+  // message arrives as "H,<verb>,<args...>" (leading 'H' from ;H routing).
+  if (!_hcr || !hcrConfig.configured) {
+    Serial.println("[HCR] Not configured — use ?HCR,PORT,Sx:baud first");
+    return;
+  }
+
+  // Strip the leading "H" / "H,"
+  String body = message;
+  body.trim();
+  if (body.length() >= 1 && (body[0] == 'H' || body[0] == 'h')) {
+    body = (body.length() >= 2 && body[1] == ',') ? body.substring(2)
+                                                  : body.substring(1);
+  }
+  body.trim();
+  if (body.length() == 0) { Serial.println("[HCR] Empty ;H command"); return; }
+
+  String verb = hcrField(body, 0);
+  String vU   = verb; vU.toUpperCase();
+
+  // ---- RAW: send the remainder verbatim (may contain commas) ----------
+  if (vU == "RAW") {
+    int firstComma = body.indexOf(',');
+    String payload = (firstComma < 0) ? "" : body.substring(firstComma + 1);
+    if (payload.length() == 0) { Serial.println("[HCR] RAW needs a payload"); return; }
+    if (_hcrPort) {
+      _hcrPort->print(payload);
+      if (!payload.endsWith("\n")) _hcrPort->print('\n');
+    }
+    if (debugEnabled) Serial.printf("[HCR] RAW -> %s\n", payload.c_str());
+    return;
+  }
+
+  // ---- FN,fn,chan,track : RC-Controller numeric convention ------------
+  if (vU == "FN") {
+    int fn    = hcrField(body, 1).toInt();
+    int chan  = hcrField(body, 2).toInt();
+    int track = hcrField(body, 3).toInt();
+    switch (fn) {
+      case 2:  _hcr->SetEmotion(chan, track);   _hcr->update(); break;
+      case 3:  _hcr->Trigger(chan, track);                      break;
+      case 4:  _hcr->Stimulate(chan, track);                    break;
+      case 5:  _hcr->Overload();                                break;
+      case 6:  _hcr->Muse();                                    break;
+      case 8:  _hcr->Stop();                                    break;
+      case 9:  _hcr->StopEmote();                               break;
+      case 11: _hcr->ResetEmotions();                           break;
+      case 14: _hcr->PlayWAV(chan, track);      _hcr->update(); break;
+      case 16: _hcr->StopWAV(chan);                             break;
+      case 17: _hcr->SetVolume(chan, track);                    break;
+      default: Serial.printf("[HCR] Unknown fn=%d\n", fn);      return;
+    }
+    if (debugEnabled) Serial.printf("[HCR] FN %d,%d,%d\n", fn, chan, track);
+    return;
+  }
+
+  // ---- Readable verbs --------------------------------------------------
+  if (vU == "STIM" || vU == "STIMULATE" || vU == "TRIGGER") {
+    int e = hcrEmotion(hcrField(body, 1));
+    if (e == OVERLOAD) { _hcr->Overload(); return; }
+    int lv = hcrLevel(hcrField(body, 2));
+    if (e < 0 || lv < 0) { Serial.println("[HCR] Usage: ;H,STIM,<H|S|M|C>,<MOD|STRONG>"); return; }
+    if (vU == "TRIGGER") _hcr->Trigger(e, lv);
+    else                 _hcr->Stimulate(e, lv);
+    return;
+  }
+  if (vU == "OVERLOAD")      { _hcr->Overload();      return; }
+  if (vU == "STOPEMOTE")     { _hcr->StopEmote();     return; }
+  if (vU == "RESETEMOTIONS") { _hcr->ResetEmotions(); return; }
+  if (vU == "STOP")          { _hcr->Stop();          return; }
+
+  if (vU == "SETEMOTION") {
+    int e = hcrEmotion(hcrField(body, 1));
+    int v = hcrField(body, 2).toInt();
+    if (e < 0 || e > SCARED || v < 0 || v > 100) {
+      Serial.println("[HCR] Usage: ;H,SETEMOTION,<H|S|M|C>,<0-100>"); return;
+    }
+    _hcr->SetEmotion(e, v); _hcr->update();
+    return;
+  }
+
+  if (vU == "OVERRIDE") {
+    String a = hcrField(body, 1); a.toUpperCase();
+    _hcr->OverrideEmotions((a == "1" || a == "ON") ? 1 : 0);
+    return;
+  }
+
+  if (vU == "MUSE") {
+    String a = hcrField(body, 1); a.toUpperCase();
+    if (a == "")        { _hcr->Muse(); return; }                  // single muse
+    if (a == "GAP") {
+      int mn = hcrField(body, 2).toInt();
+      int mx = hcrField(body, 3).toInt();
+      _hcr->Muse(mn, mx);
+      return;
+    }
+    if (a == "TOGGLE")  { _hcr->SetMuse(_hcr->GetMuse() ? 0 : 1); return; }
+    _hcr->SetMuse((a == "1" || a == "ON") ? 1 : 0);
+    return;
+  }
+
+  if (vU == "PLAY") {
+    int ch = hcrChan(hcrField(body, 1));            // A|B
+    int fl = hcrField(body, 2).toInt();
+    if ((ch != CH_A && ch != CH_B) || fl < 0 || fl > 9999) {
+      Serial.println("[HCR] Usage: ;H,PLAY,<A|B>,<0-9999>"); return;
+    }
+    _hcr->PlayWAV(ch, fl); _hcr->update();
+    return;
+  }
+  if (vU == "STOPWAV") {
+    int ch = hcrChan(hcrField(body, 1));
+    if (ch != CH_A && ch != CH_B) { Serial.println("[HCR] Usage: ;H,STOPWAV,<A|B>"); return; }
+    _hcr->StopWAV(ch);
+    return;
+  }
+  if (vU == "VOL" || vU == "VOLUME") {
+    int ch = hcrChan(hcrField(body, 1));            // V|A|B
+    int v  = hcrField(body, 2).toInt();
+    if (ch < 0 || v < 0 || v > 100) { Serial.println("[HCR] Usage: ;H,VOL,<V|A|B>,<0-100>"); return; }
+    _hcr->SetVolume(ch, v);
+    return;
+  }
+
+  Serial.printf("[HCR] Unknown ;H command: %s\n", verb.c_str());
+}
+
+// ==================== Configuration (?HCR,...) ==========================
+
+void clearHCRConfig() {
+  uint8_t freedPort = hcrConfig.serialPort;
+
+  if (_hcr) { delete _hcr; _hcr = nullptr; }
+  _hcrPort = nullptr;
+
+  memset(&hcrConfig, 0, sizeof(hcrConfig));
+  hcrConfig.configured = false;
+  hcrConfig.baudRate   = 9600;
+  hcrConfig.pollSec    = 10;
+
+  saveHCRSettings();
+  Serial.println("[HCR] Configuration cleared");
+
+  if (freedPort > 0) {
+    if (!serialBroadcastEnabled[freedPort - 1]) {
+      serialBroadcastEnabled[freedPort - 1] = true;
+      saveBroadcastSettingsToPreferences();
+      Serial.printf("  ✓ Re-enabled broadcast output on S%d\n", freedPort);
+    }
+    if (blockBroadcastFrom[freedPort - 1]) {
+      blockBroadcastFrom[freedPort - 1] = false;
+      saveBroadcastBlockSettings();
+      Serial.printf("  ✓ Re-enabled broadcast input on S%d\n", freedPort);
+    }
+    updateBaudRate(freedPort, 9600);
+    saveSerialLabelToPreferences(freedPort, "");
+    Serial.printf("  ✓ Released S%d (old HCR port)\n", freedPort);
+  }
+}
+
+static void hcrReservePort(int serialPort, int baudRate) {
+  // Release old port if moving.
+  if (hcrConfig.configured && hcrConfig.serialPort > 0 &&
+      hcrConfig.serialPort != (uint8_t)serialPort) {
+    uint8_t oldPort = hcrConfig.serialPort;
+    if (!serialBroadcastEnabled[oldPort - 1]) {
+      serialBroadcastEnabled[oldPort - 1] = true;
+      saveBroadcastSettingsToPreferences();
+    }
+    if (blockBroadcastFrom[oldPort - 1]) {
+      blockBroadcastFrom[oldPort - 1] = false;
+      saveBroadcastBlockSettings();
+    }
+    saveSerialLabelToPreferences(oldPort, "");
+    Serial.printf("  ✓ Released S%d (old HCR port)\n", oldPort);
+  }
+
+  // Apply baud live (handles S1/S2 divisor + S3-5 software re-init).
+  if ((uint32_t)baudRate != baudRates[serialPort - 1]) {
+    updateBaudRate(serialPort, baudRate);
+  } else {
+    applyLiveBaud(serialPort, (uint32_t)baudRate);
+  }
+
+  // Reserve the port: HCRVocalizer owns RX, so disable broadcast both ways.
+  if (serialBroadcastEnabled[serialPort - 1]) {
+    serialBroadcastEnabled[serialPort - 1] = false;
+    saveBroadcastSettingsToPreferences();
+    Serial.printf("  ⚠️  Disabled broadcast output on S%d (HCR port)\n", serialPort);
+  }
+  if (!blockBroadcastFrom[serialPort - 1]) {
+    blockBroadcastFrom[serialPort - 1] = true;
+    saveBroadcastBlockSettings();
+    Serial.printf("  ⚠️  Disabled broadcast input on S%d (HCR port)\n", serialPort);
+  }
+  saveSerialLabelToPreferences(serialPort, "HCR");
+
+  hcrConfig.serialPort = (uint8_t)serialPort;
+  hcrConfig.baudRate   = (uint32_t)baudRate;
+  hcrConfig.configured = true;
+  // pollSec is preserved from NVS/POLL command (default 10, 0 = user set OFF).
+
+  saveHCRSettings();
+  beginHCR();
+  Serial.printf("[HCR] Configured on S%d at %d baud\n", serialPort, baudRate);
+}
+
+void configureHCR(const String &args) {
+  String a = args; a.trim();
+  String aU = a;   aU.toUpperCase();
+
+  if (aU == "LIST")            { printHCRSettings(); return; }
+  if (aU == "CLEAR")           { clearHCRConfig();   return; }
+  if (aU == "STATUS")          { printHCRStatus();   return; }
+  if (aU == "REFRESH")         {
+    if (_hcr) { _hcr->getUpdate(); Serial.println("[HCR] Refresh requested"); }
+    else      Serial.println("[HCR] Not configured");
+    return;
+  }
+
+  // ---- POLL,<sec|OFF> -------------------------------------------------
+  if (aU.startsWith("POLL")) {
+    String v = (a.indexOf(',') >= 0) ? a.substring(a.indexOf(',') + 1) : "";
+    v.trim(); String vU = v; vU.toUpperCase();
+    if (vU == "OFF" || vU == "0") hcrConfig.pollSec = 0;
+    else {
+      int s = v.toInt();
+      if (s < 1 || s > 3600) { Serial.println("[HCR] POLL must be 1-3600 s, or OFF"); return; }
+      hcrConfig.pollSec = (uint16_t)s;
+    }
+    saveHCRSettings();
+    if (_hcr) _hcr->setRefreshMs((uint16_t)(hcrConfig.pollSec * 1000));
+    Serial.printf("[HCR] Poll interval = %us%s\n", (unsigned)hcrConfig.pollSec,
+                  hcrConfig.pollSec ? "" : " (off)");
+    return;
+  }
+
+  // ---- GET,<field> ----------------------------------------------------
+  if (aU.startsWith("GET,")) {
+    if (!_hcr) { Serial.println("[HCR] Not configured"); return; }
+    String f = a.substring(4); f.trim(); String fU = f; fU.toUpperCase();
+    String key = hcrField(fU, 0);
+    if      (key == "EMOTION") { int e = hcrEmotion(hcrField(fU,1));
+                                 Serial.printf("[HCR] EMOTION %s = %d\n", f.c_str(),
+                                               e >= 0 ? _hcr->GetEmotion(e) : -1); }
+    else if (key == "DURATION") Serial.printf("[HCR] DURATION = %.2f\n", _hcr->GetDuration());
+    else if (key == "OVERRIDE") Serial.printf("[HCR] OVERRIDE = %d\n", _hcr->GetOverride());
+    else if (key == "MUSE")     Serial.printf("[HCR] MUSE = %d\n", _hcr->GetMuse());
+    else if (key == "WAVCOUNT") Serial.printf("[HCR] WAVCOUNT = %d\n", _hcr->GetWAVCount());
+    else if (key == "PLAYING")  { int c = hcrChan(hcrField(fU,1));
+                                  Serial.printf("[HCR] PLAYING %s = %d\n", f.c_str(),
+                                                c >= 0 ? _hcr->GetPlayingWAV(c) : -1); }
+    else if (key == "VOL")      { int c = hcrChan(hcrField(fU,1));
+                                  Serial.printf("[HCR] VOL %s = %.0f\n", f.c_str(),
+                                                c >= 0 ? _hcr->getVolume(c) : -1.0f); }
+    else Serial.println("[HCR] GET fields: EMOTION,H|S|M|C / DURATION / OVERRIDE / "
+                        "MUSE / WAVCOUNT / PLAYING,V|A|B / VOL,V|A|B");
+    return;
+  }
+
+  // ---- PORT,S<port>:<baud> -------------------------------------------
+  String spec = a;
+  if (aU.startsWith("PORT,")) spec = a.substring(5);   // tolerate ?HCR,PORT,S1:9600
+  spec.trim();
+  String specU = spec; specU.toUpperCase();
+
+  if (!specU.startsWith("S")) {
+    Serial.printf("[HCR] Invalid. Use: %cHCR,PORT,S<port>:<baud>  (e.g. S1:9600)\n",
+                  LocalFunctionIdentifier);
+    return;
+  }
+  int colon = spec.indexOf(':');
+  if (colon < 0) {
+    Serial.printf("[HCR] Missing baud. Use: %cHCR,PORT,S<port>:<baud>\n",
+                  LocalFunctionIdentifier);
+    return;
+  }
+  int serialPort = spec.substring(1, colon).toInt();
+  int baudRate   = spec.substring(colon + 1).toInt();
+
+  if (serialPort < 1 || serialPort > 5) {
+    Serial.println("[HCR] Invalid serial port. Must be S1-S5"); return;
+  }
+  if (baudRate != 9600 && baudRate != 19200 && baudRate != 38400 &&
+      baudRate != 57600 && baudRate != 115200) {
+    Serial.println("[HCR] Baud must be 9600/19200/38400/57600/115200"); return;
+  }
+  if (serialPort >= 3 && baudRate > 9600) {
+    Serial.println("\n⚠️  =============== WARNING ===============");
+    Serial.printf("S%d is SOFTWARE SERIAL — unreliable above 9600 baud\n", serialPort);
+    Serial.println("❌ CONFIGURATION BLOCKED!");
+    Serial.printf("  Use a hardware port: %cHCR,PORT,S1:%d   or   S%d:9600\n",
+                  LocalFunctionIdentifier, baudRate, serialPort);
+    Serial.println("=========================================\n");
+    return;
+  }
+
+  hcrReservePort(serialPort, baudRate);
+}
+
+// ==================== Status / List =====================================
+
+void printHCRSettings() {
+  Serial.println("---- HCR Configuration ----");
+  if (!hcrConfig.configured) {
+    Serial.println("  Not configured.  Use ?HCR,PORT,S<port>:<baud>");
+    return;
+  }
+  Serial.printf("  Port:  S%d\n", hcrConfig.serialPort);
+  Serial.printf("  Baud:  %lu\n", (unsigned long)hcrConfig.baudRate);
+  Serial.printf("  Poll:  %us%s\n", (unsigned)hcrConfig.pollSec,
+                hcrConfig.pollSec ? "" : " (off)");
+  Serial.printf("  Link:  %s\n", _hcr ? "active" : "inactive");
+}
+
+void printHCRStatus() {
+  if (!hcrConfig.configured || !_hcr) {
+    Serial.println("[HCR:cfg=0]");
+    return;
+  }
+  unsigned long ageMs = millis() - _hcrLastRxPollMs;
+  char line[256];
+  snprintf(line, sizeof(line),
+    "[HCR:cfg=1,port=%d,poll=%u,age=%lu,H=%d,S=%d,M=%d,C=%d,dur=%.2f,"
+    "ovr=%d,muse=%d,wav=%d,pV=%d,pA=%d,pB=%d,vV=%.0f,vA=%.0f,vB=%.0f]",
+    hcrConfig.serialPort,
+    (unsigned)hcrConfig.pollSec,
+    (unsigned long)(ageMs / 1000),
+    _hcr->GetEmotion(HAPPY), _hcr->GetEmotion(SAD),
+    _hcr->GetEmotion(MAD),   _hcr->GetEmotion(SCARED),
+    _hcr->GetDuration(),
+    _hcr->GetOverride(),
+    _hcr->GetMuse(),
+    _hcr->GetWAVCount(),
+    _hcr->GetPlayingWAV(CH_V), _hcr->GetPlayingWAV(CH_A), _hcr->GetPlayingWAV(CH_B),
+    _hcr->getVolume(CH_V), _hcr->getVolume(CH_A), _hcr->getVolume(CH_B));
+  Serial.println(line);
+}
+
+void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
+                    char delimiter, bool printToSerial) {
+  if (!hcrConfig.configured) return;
+
+  String suffix = "HCR,PORT,S" + String(hcrConfig.serialPort) +
+                  ":" + String(hcrConfig.baudRate);
+  String cmd = String(LocalFunctionIdentifier) + suffix;
+  if (printToSerial) Serial.println(cmd);
+  chainedConfig        += String(delimiter) + cmd;
+  chainedConfigDefault += "^?" + suffix;
+
+  suffix = "HCR,POLL," + String(hcrConfig.pollSec);
+  cmd    = String(LocalFunctionIdentifier) + suffix;
+  if (printToSerial) Serial.println(cmd);
+  chainedConfig        += String(delimiter) + cmd;
+  chainedConfigDefault += "^?" + suffix;
+}
+
+// ==================== NVS storage =======================================
+
+void saveHCRSettings() {
+  preferences.begin("hcr_cfg", false);
+  preferences.putUChar("port", hcrConfig.serialPort);
+  preferences.putUInt ("baud", hcrConfig.baudRate);
+  preferences.putBool ("en",   hcrConfig.configured);
+  preferences.putUShort("poll", hcrConfig.pollSec);
+  preferences.end();
+}
+
+void loadHCRSettings() {
+  preferences.begin("hcr_cfg", true);
+  hcrConfig.serialPort = preferences.getUChar ("port", 0);
+  hcrConfig.baudRate   = preferences.getUInt  ("baud", 9600);
+  hcrConfig.configured = preferences.getBool  ("en",   false);
+  hcrConfig.pollSec    = preferences.getUShort("poll", 10);
+  preferences.end();
+
+  if (hcrConfig.configured) {
+    Serial.printf("[HCR] Loaded: S%d at %lu baud, poll=%us\n",
+                  hcrConfig.serialPort,
+                  (unsigned long)hcrConfig.baudRate,
+                  (unsigned)hcrConfig.pollSec);
+  }
+}

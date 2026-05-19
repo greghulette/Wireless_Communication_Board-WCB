@@ -243,7 +243,8 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   } else {
     // Auto-detect: read bootloader magic to decide blank vs. programmed vs. bricked
     const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
-    let isBlankBoard = false;
+    let isBlankBoard  = false;
+    let forceFull     = false;   // partition-table change → must write boot+part+app
     try {
       const readFlashFn = loader.readFlash ?? loader.read_flash;
       if (typeof readFlashFn === 'function') {
@@ -255,27 +256,65 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
         if (magic === 0xFF) {
           onLog('Blank board detected — will flash bootloader + partitions + app');
         } else if (magic === 0xE9) {
-          onLog('Existing firmware detected — will flash app only (NVS preserved)');
+          // Existing firmware. App-only is the fast path — but ONLY if the
+          // on-flash partition TABLE matches the firmware we're about to
+          // write. A partition-scheme change (e.g. default → min_spiffs)
+          // moves app1/spiffs; flashing the new, larger app over the old
+          // 1.25 MB slot would overrun. Compare the table at 0x8000 and, on
+          // any mismatch (or if it can't be read), force a full
+          // bootloader+partition+app flash. NVS (0x9000) is NOT in this
+          // image set and is never erased here, so saved config survives.
+          const partImg = flashImages.find(img => img.address === 0x8000);
+          if (!partImg) {
+            onLog('Existing firmware detected — will flash app only (NVS preserved)');
+          } else {
+            try {
+              const CMP_LEN = 0x200;  // covers all partition entries; before any MD5/padding
+              const want = new Uint8Array(partImg.buf, 0, Math.min(CMP_LEN, partImg.buf.byteLength));
+              const got0 = await readFlashFn.call(loader, 0x8000, want.length);
+              const got  = got0 instanceof Uint8Array ? got0 : new Uint8Array(got0.buffer ?? got0);
+              let same = got.length >= want.length;
+              for (let i = 0; same && i < want.length; i++) if (got[i] !== want[i]) same = false;
+              if (same) {
+                onLog('Existing firmware, partition table matches — flashing app only (NVS preserved)');
+              } else {
+                forceFull = true;
+                onLog('⚠ Partition table changed — full flash required (boot + partitions + app).');
+                onLog('  NVS at 0x9000 is NOT erased — your saved configuration is preserved.');
+                showToast('Partition layout updated — performing a one-time full flash (config preserved)', 'info', 8000);
+              }
+            } catch (_) {
+              // Couldn't verify the table — be safe, not fast: a full
+              // NVS-preserving flash can never brick; app-only on a
+              // mismatched table can. Force full.
+              forceFull = true;
+              onLog('Could not read partition table — forcing a safe full flash (NVS preserved)');
+            }
+          }
         } else {
           onLog(`Corrupted bootloader detected (0x${magic.toString(16).padStart(2,'0')}) — will flash full image to recover`);
         }
       } else {
-        onLog('Cannot read flash — assuming existing firmware, flashing app only');
+        onLog('Cannot read flash — forcing a safe full flash (NVS preserved)');
+        forceFull = true;
       }
     } catch (_) {
-      onLog('Flash read check failed — assuming existing firmware, flashing app only');
+      onLog('Flash read check failed — forcing a safe full flash (NVS preserved)');
+      forceFull = true;
     }
-    imagesToFlash = isBlankBoard
+    imagesToFlash = (isBlankBoard || forceFull)
       ? flashImages
       : flashImages.filter(img => img.address === 0x10000);
   }
 
   // ── Step 3c: Optionally prepend NVS + otadata erase images ────
-  // Standard WCB partition layout (PartitionScheme=default):
-  //   nvs     @ 0x9000, size 0x5000 (20 KB)
-  //   otadata @ 0xE000, size 0x2000  (8 KB — two 4 KB flash sectors)
-  //   ota_0   @ 0x10000
-  //   ota_1   @ 0x150000
+  // WCB partition layout (PartitionScheme=min_spiffs):
+  //   nvs     @ 0x9000,  size 0x5000 (20 KB)
+  //   otadata @ 0xE000,  size 0x2000  (8 KB — two 4 KB flash sectors)
+  //   ota_0   @ 0x10000, size 0x1E0000 (~1.9 MB)
+  //   ota_1   @ 0x1F0000
+  // (nvs & otadata offsets are identical to the old `default` scheme, so the
+  //  erase addresses below are unchanged across the scheme transition.)
   //
   // Writing 0xFF buffers causes esptool to erase then rewrite those sectors.
   // Both otadata sectors MUST be erased: if either sector still holds a valid

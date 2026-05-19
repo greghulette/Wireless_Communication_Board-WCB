@@ -33,6 +33,10 @@ jobs:
         run: |
           arduino-cli lib install "EspSoftwareSerial@8.1.0"
           arduino-cli lib install "Adafruit NeoPixel@1.12.5"
+          # HumanCyborgRelationsAPI (HCRVocalizer) — not in the Library
+          # Manager index, install straight from the upstream repo.
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install --git-url https://github.com/roy86/HumanCyborgRelationsAPI.git
 
       - name: Run build script
         run: |
