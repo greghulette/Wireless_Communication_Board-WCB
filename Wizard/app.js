@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.14:42.R.MAY.2026';
+const UI_VERSION = '19.14:49.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -513,6 +513,12 @@ function updatePortClaimUI(n) {
       label.disabled = false; // PWM: label still editable
     } else if (claim.type === 'mp3') {
       claimNote.textContent = 'Managed by MP3 Trigger';
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
+    } else if (claim.type === 'hcr') {
+      claimNote.textContent = 'Managed by HCR Vocalizer';
       baudSel.disabled = true;
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
@@ -1210,6 +1216,139 @@ function syncMP3ToConfig(n) {
   }
 }
 
+// ─── HCR Vocalizer ────────────────────────────────────────────────
+// Mirrors the MP3 pattern (single device, reserved port). HCR firmware
+// blocks >9600 baud on software serial (S3-S5), so the baud dropdown is
+// capped there. config.hcr round-trips via parser.js (HCR,PORT/POLL).
+function _hcrApplyBaudCap(n) {
+  const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+  const baudSel = document.getElementById(`b${n}-hcr-baud`);
+  if (!baudSel) return;
+  const isSoftSerial = portVal >= 3;          // S3-S5
+  for (const opt of baudSel.options) {
+    opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+  }
+  if (isSoftSerial && parseInt(baudSel.value) > 9600) {
+    baudSel.value = '9600';
+    const config = boardConfigs[n];
+    if (config) config.hcr.baud = 9600;
+  }
+}
+
+function updateHCRPortDropdown(n) {
+  const portSel = document.getElementById(`b${n}-hcr-port`);
+  if (!portSel) return;
+  const config      = boardConfigs[n];
+  const currentPort = config?.hcr?.port;
+  portSel.innerHTML = '';
+  for (let p = 1; p <= 5; p++) {
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    if (!claim || claim.type === 'hcr') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      portSel.appendChild(opt);
+    }
+  }
+}
+
+function onHCRChange(n) {
+  const mode    = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  const isLocal = mode === 'local';
+  ['port', 'baud', 'poll'].forEach(id => {
+    const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
+    if (el) el.style.display = isLocal ? '' : 'none';
+  });
+
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'hcr') port.claimedBy = null;
+  }
+
+  config.hcr.enabled = isLocal;
+  if (!isLocal) config.hcr.port = null;
+
+  updateHCRPortDropdown(n);
+
+  if (isLocal) {
+    const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+    if (portVal >= 1 && portVal <= 5) {
+      config.hcr.port = portVal;
+      config.serialPorts[portVal - 1].claimedBy = { type: 'hcr' };
+      _hcrApplyBaudCap(n);
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateHCRPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onHCRPortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'hcr') {
+      port.claimedBy    = null;
+      port.broadcastIn  = true;
+      port.broadcastOut = true;
+    }
+  }
+
+  const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+  if (portVal >= 1 && portVal <= 5) {
+    config.hcr.port = portVal;
+    config.serialPorts[portVal - 1].claimedBy = { type: 'hcr' };
+    _hcrApplyBaudCap(n);
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateHCRPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onHCRBaudChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
+  onBoardFieldChange(n);
+}
+
+function onHCRPollChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  let v = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
+  if (isNaN(v)) v = 10;
+  v = Math.max(0, Math.min(3600, v));
+  config.hcr.poll = v;
+  onBoardFieldChange(n);
+}
+
+function syncHCRToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  const mode = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  config.hcr.enabled = mode === 'local';
+  if (config.hcr.enabled) {
+    config.hcr.port = parseInt(document.getElementById(`b${n}-hcr-port`)?.value) || null;
+    config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
+    let pv = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
+    config.hcr.poll = isNaN(pv) ? 10 : Math.max(0, Math.min(3600, pv));
+    // Keep serial port baud in sync so ?BAUD is generated correctly
+    if (config.hcr.port >= 1 && config.hcr.port <= 5) {
+      config.serialPorts[config.hcr.port - 1].baud = config.hcr.baud;
+    }
+  } else {
+    config.hcr.port = null;
+  }
+}
+
 function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
@@ -1336,6 +1475,32 @@ function populateUIFromConfig(n, config) {
       if (volEl) volEl.value = config.mp3.volume ?? 0;
       const onErrEl = document.getElementById(`b${n}-mp3-onerr`);
       if (onErrEl) onErrEl.value = config.mp3.onError ?? '';
+    }
+  }
+
+  // HCR Vocalizer
+  const hcrInput = document.querySelector(`input[name="b${n}-hcr"][value="${config.hcr.enabled ? 'local' : 'none'}"]`);
+  if (hcrInput) {
+    hcrInput.checked = true;
+    const isLocal = config.hcr.enabled;
+    ['port', 'baud', 'poll'].forEach(id => {
+      const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
+      if (el) el.style.display = isLocal ? '' : 'none';
+    });
+    updateHCRPortDropdown(n);
+    if (isLocal && config.hcr.port) {
+      const portSel = document.getElementById(`b${n}-hcr-port`);
+      if (portSel) portSel.value = config.hcr.port;
+      const baudSel = document.getElementById(`b${n}-hcr-baud`);
+      if (baudSel) {
+        const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 9600
+        for (const opt of baudSel.options) {
+          opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+        }
+        baudSel.value = config.hcr.baud ?? 9600;
+      }
+      const pollEl = document.getElementById(`b${n}-hcr-poll`);
+      if (pollEl) pollEl.value = config.hcr.poll ?? 10;
     }
   }
 
@@ -4404,6 +4569,7 @@ async function boardGo(n, opts = {}) {
     syncMaestrosToConfig(n);
     syncKyberToConfig(n);
     syncMP3ToConfig(n);
+    syncHCRToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
@@ -4743,6 +4909,7 @@ async function boardGoRemote(n, opts = {}) {
   syncMaestrosToConfig(n);
   syncKyberToConfig(n);
   syncMP3ToConfig(n);
+  syncHCRToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }

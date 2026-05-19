@@ -720,6 +720,13 @@ function evaluatePortClaims(config) {
       config.serialPorts[idx].claimedBy = { type: 'mp3' };
   }
 
+  // HCR Vocalizer claims its port
+  if (config.hcr && config.hcr.enabled && config.hcr.port) {
+    const idx = config.hcr.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'hcr' };
+  }
+
   // Maestros claim their ports
   for (const maestro of config.maestros) {
     const idx = maestro.port - 1;
