@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.14:59.R.MAY.2026';
+const UI_VERSION = '19.15:04.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1285,6 +1285,7 @@ function onHCRChange(n) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateHCRPortDropdown(n);
+  updateHCRStatusBtn(n);
   onBoardFieldChange(n);
 }
 
@@ -1506,6 +1507,7 @@ function populateUIFromConfig(n, config) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
+  updateHCRStatusBtn(n);
   updateKyberPortDropdown(n);
   updateKyberMarcPortDropdown(n);
   populateMaestrosFromConfig(n, config);
@@ -4788,6 +4790,7 @@ function updateConnectionUI(n, connected) {
   if (etmCharBtn)  etmCharBtn.disabled  = !connected;
   if (statsBtn)    statsBtn.disabled    = !connected;
   if (identifyBtn) identifyBtn.disabled = !connected;
+  updateHCRStatusBtn(n);
   if (connBtn) {
     connBtn.disabled = false;
     connBtn.classList.remove('btn-flashing');
@@ -8252,6 +8255,7 @@ let _statsBoardN = null;
 let _statsType   = null;   // 'etm' | 'stats'
 
 function openStatsModal(n, type) {
+  stopHCRStatusPolling();   // never leave the HCR poller running behind another view
   _statsBoardN = n;
   _statsType   = type;
   const wcbNum = boardConfigs[n]?.wcbNumber || n;
@@ -8270,9 +8274,109 @@ function closeStatsModal(event) {
   document.getElementById('stats-modal').classList.remove('open');
   _statsBoardN = null;
   _statsType   = null;
+  stopHCRStatusPolling();
 }
 
-function refreshStatsModal() { fetchStatsData(); }
+function refreshStatsModal() {
+  if (_hcrModalN != null) { fetchHCRStatus(); return; }
+  fetchStatsData();
+}
+
+// ─── HCR Status (on-demand modal — polls only while open) ─────────
+// Reuses the stats-modal DOM. Sends ?HCR,STATUS every 3s ONLY while the
+// modal is open; polling stops the instant it closes (no idle serial
+// traffic). The button is hidden unless HCR is configured on the board.
+let _hcrModalN     = null;
+let _hcrModalTimer = null;
+
+function stopHCRStatusPolling() {
+  if (_hcrModalTimer) { clearInterval(_hcrModalTimer); _hcrModalTimer = null; }
+  _hcrModalN = null;
+}
+
+function openHCRStatusModal(n) {
+  stopHCRStatusPolling();
+  // Switching from an ETM/Stats view? Clear that state too.
+  _statsBoardN = null;
+  _statsType   = null;
+  _hcrModalN   = n;
+  const wcbNum = boardConfigs[n]?.wcbNumber || n;
+  document.getElementById('stats-modal-title').textContent  = `HCR Status — WCB ${wcbNum}`;
+  document.getElementById('stats-modal-output').textContent = 'Fetching HCR status…';
+  document.getElementById('stats-modal').classList.add('open');
+  fetchHCRStatus();
+  _hcrModalTimer = setInterval(fetchHCRStatus, 3000);   // 3s while open
+}
+
+function _renderHCRStatus(line) {
+  // line: [HCR:cfg=1,port=3,poll=10,age=2,H=..,S=..,M=..,C=..,dur=..,
+  //        ovr=..,muse=..,wav=..,pV=..,pA=..,pB=..,vV=..,vA=..,vB=..]
+  const m = line.match(/\[HCR:([^\]]*)\]/);
+  if (!m) return 'No [HCR:...] response (board may not be running HCR firmware).';
+  const kv = {};
+  for (const pair of m[1].split(',')) {
+    const i = pair.indexOf('=');
+    if (i > 0) kv[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+  }
+  if (kv.cfg === '0') return 'HCR is not configured on this board.\n\nSet it up under the board’s “HCR Vocalizer” section, then Push Config.';
+  const playing = ch => (kv[ch] === undefined ? '?' : (kv[ch] === '-1' ? 'idle' : `file ${kv[ch]}`));
+  return [
+    `Port            : S${kv.port ?? '?'}`,
+    `Auto-poll       : ${kv.poll === '0' ? 'off' : (kv.poll ?? '?') + ' s'}`,
+    `Last update     : ${kv.age ?? '?'} s ago`,
+    ``,
+    `Emotions   H:${kv.H ?? '?'}  S:${kv.S ?? '?'}  M:${kv.M ?? '?'}  C:${kv.C ?? '?'}`,
+    `Emote dur. : ${kv.dur ?? '?'} s`,
+    `Override   : ${kv.ovr === '1' ? 'ON' : 'off'}`,
+    `Muse       : ${kv.muse === '1' ? 'ON' : 'off'}`,
+    `WAV files  : ${kv.wav ?? '?'}`,
+    ``,
+    `Playing  Vocalizer:${playing('pV')}  A:${playing('pA')}  B:${playing('pB')}`,
+    `Volume   V:${kv.vV ?? '?'}  A:${kv.vA ?? '?'}  B:${kv.vB ?? '?'}`,
+    ``,
+    `raw: ${line.trim()}`,
+  ].join('\n');
+}
+
+async function fetchHCRStatus() {
+  const n = _hcrModalN;
+  if (n == null) return;
+  const out = document.getElementById('stats-modal-output');
+  if (!out) return;
+
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) {
+    // HCR status is a board-local query; v1 supports the directly-connected
+    // board (the usual case while configuring). Relay support can come later.
+    out.textContent = remoteRelayForBoard[n]
+      ? 'Open HCR Status on the board the HCR is directly connected to (relay not supported yet).'
+      : 'Board not connected.';
+    return;
+  }
+  const fc = boardConfigs[n]?.funcChar || '?';
+  try {
+    const raw  = await conn.sendAndCollect(`${fc}HCR,STATUS`, 2500, '[HCR:');
+    const hcrLine = (raw || '').split('\n').reverse().find(l => l.includes('[HCR:'));
+    out.textContent = hcrLine
+      ? _renderHCRStatus(hcrLine)
+      : 'No HCR status response (timed out). Is HCR configured and the board on HCR firmware?';
+  } catch (e) {
+    out.textContent = `HCR status error: ${e.message || e}`;
+  }
+}
+
+// Show the HCR Status button only when HCR is configured on this board;
+// enable only when the board is reachable.
+function updateHCRStatusBtn(n) {
+  const btn = document.getElementById(`b${n}-btn-hcr-status`);
+  if (!btn) return;
+  const enabled   = !!boardConfigs[n]?.hcr?.enabled;
+  const connected = boardConnections[n]?.isConnected() ?? false;
+  const reachable = connected || (remoteRelayForBoard[n] !== undefined &&
+                    boardConnections[remoteRelayForBoard[n]]?.isConnected());
+  btn.style.display = enabled ? '' : 'none';
+  btn.disabled      = !reachable;
+}
 
 async function fetchStatsData() {
   const n    = _statsBoardN;
