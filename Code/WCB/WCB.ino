@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_191533RMAY2026                                  *****////
+///*****                                          Version 6.1.0_201521RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -153,7 +153,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_191533RMAY2026";
+String SoftwareVersion = "6.1.0_201521RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2685,15 +2685,32 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
 
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
-            // Use parseCommandsAndEnqueue (not enqueueCommand) so that wizard-relayed
-            // payloads containing chained commands (e.g. "?LABEL,S2,x^?BCAST,OUT,S2,OFF^...")
-            // are properly split on the command delimiter before execution.
-            // enqueueCommand would queue the whole string as one item, causing the first
-            // command's value parser to consume the remainder as part of its argument
-            // (e.g. LABEL saves "x^?BCAST,..." verbatim to NVS).
-            // parseCommandsAndEnqueue handles ?CS, ?SEQ,SAVE, and ?MGMT boundaries
-            // correctly, so it is safe to use here for all ETM-delivered payloads.
-            parseCommandsAndEnqueue(etmCmd, 0);
+            // Mirror the local-serial dispatch (WCB.ino:4863) so ETM-received
+            // chains behave identically to locally-typed ones:
+            //   - Timer chains ("...^;t<ms>^..." / "...^;t<ms>,cmd^...") must
+            //     go through parseCommandGroups so ;t segments become inter-
+            //     group delays rather than being enqueued as bogus commands
+            //     (which previously surfaced as "Invalid Serial Command").
+            //     The !startsWith(LFI) guard matches the local-serial path:
+            //     ? config commands are never timer-parsed.
+            //   - Non-timer payloads still go through parseCommandsAndEnqueue,
+            //     which properly splits on the command delimiter and handles
+            //     ?CS / ?SEQ,SAVE / ?MGMT boundaries (the reason this branch
+            //     used parseCommandsAndEnqueue instead of enqueueCommand to
+            //     begin with — see history below).
+            //   Reference: WCB_Storage.cpp:476 SEQ playback uses the same
+            //   gate, and is the canonical pattern.
+            //
+            // Historical: parseCommandsAndEnqueue replaced a raw enqueueCommand
+            // here so wizard-relayed payloads like "?LABEL,S2,x^?BCAST,OUT,S2,OFF^..."
+            // would split on the delimiter (otherwise LABEL saved the whole
+            // tail "x^?BCAST,..." verbatim to NVS). That fix is preserved by
+            // the else branch below.
+            if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
+                parseCommandGroups(etmCmd);
+            } else {
+                parseCommandsAndEnqueue(etmCmd, 0);
+            }
         }
         colorWipeStatus("ES", blue, 10);
     }
@@ -2854,7 +2871,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  enqueueCommand(String(received.structCommand), 0);
+  // Non-ETM fallback path in the same callback. Use the same timer-aware /
+  // delimiter-aware dispatch as the local-serial entry point (WCB.ino:4863)
+  // and the ETM-tracked branch above, so ANY ESP-NOW-delivered payload —
+  // including chained commands and timer chains — behaves identically to a
+  // command typed at the local serial terminal. A raw enqueueCommand here
+  // would queue the whole chain as one item and break ;t<ms> + ^ chains.
+  if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
+    parseCommandGroups(receivedCmd);
+  } else {
+    parseCommandsAndEnqueue(receivedCmd, 0);
+  }
   colorWipeStatus("ES", blue, 10);
 }
 void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
