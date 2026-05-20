@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_201521RMAY2026                                  *****////
+///*****                                          Version 6.1.0_201531RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -153,7 +153,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_201521RMAY2026";
+String SoftwareVersion = "6.1.0_201531RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2685,6 +2685,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
 
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
+            // General-debug visibility: mirror what processIncomingSerial prints
+            // for locally-typed commands, so ?DEBUG,ON shows ETM-received
+            // commands without needing the more verbose ?DEBUG,ETM,ON.
+            if (debugEnabled)
+                Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+
             // Mirror the local-serial dispatch (WCB.ino:4863) so ETM-received
             // chains behave identically to locally-typed ones:
             //   - Timer chains ("...^;t<ms>^..." / "...^;t<ms>,cmd^...") must
@@ -2877,6 +2883,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // including chained commands and timer chains — behaves identically to a
   // command typed at the local serial terminal. A raw enqueueCommand here
   // would queue the whole chain as one item and break ;t<ms> + ^ chains.
+  if (debugEnabled)
+      Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
   if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
     parseCommandGroups(receivedCmd);
   } else {
