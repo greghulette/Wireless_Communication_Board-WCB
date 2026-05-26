@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '25.22:02.R.MAY.2026';
+const UI_VERSION = '26.15:46.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6695,7 +6695,7 @@ function wizardHTMLIdentity() {
              Flipping hides the WCB-specific fields and shows the Client
              fields; it never sends anything to a physical board. -->
         <div style="display:flex;gap:18px;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--border);margin-bottom:12px;font-size:13px">
-          <span style="opacity:0.75;font-weight:500">Slot Type:</span>
+          <span style="opacity:0.75;font-weight:500">Type:</span>
           <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
             <input type="radio" name="wiz-slot-type-${i}" value="wcb" ${wcbChecked}
                    onchange="wizardOnSlotTypeChange(${i})"><span>WCB</span>

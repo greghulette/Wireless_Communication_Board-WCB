@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_252158RMAY2026                                  *****////
+///*****                                          Version 6.1.0_261546RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -154,7 +154,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_252158RMAY2026";
+String SoftwareVersion = "6.1.0_261546RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -222,6 +222,20 @@ int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
 bool etmChecksumEnabled = true;    // ETM packet checksum verification (on by default)
 bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
+
+// ── RC-Controller JSON-relay subscription ────────────────────────────────────
+// rc_telemetry.h on the RC broadcasts JSON heartbeats / channels / triggers
+// over the WCB network.  This bridge forwards them to USB Serial so a
+// browser-side config tool can read them via Web Serial.  But broadcasting
+// to USB unconditionally spams anyone tethered to the bridge for OTHER
+// reasons (Direct USB to a different prop, ?CS configuration, etc).
+//
+// Solution: only relay JSON when a host is actively using this bridge as a
+// WCB transport.  Receiving any ";w<id>,<cmd>" from USB pushes this timer
+// 20 s into the future; the JSON passthrough only fires while now < this
+// deadline.  Config tool's Via-WCB keep-alive PING (every 10 s) keeps it
+// hot; Direct-USB users never send ;w so they never see relay output.
+uint32_t rcJsonRelaySubscribedUntilMs = 0;
 // ETM Board Status Table
 struct BoardStatus {
   bool online;
@@ -2522,15 +2536,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // as long as they knew the password.  Consistent enforcement here means the
   // MAC octets and the password together gate ALL communication, not just the
   // data plane.
-  if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
-    // ── TEMP DBG (RC-Controller bridge): MAC-group rejection ──
-    // Helps diagnose why broadcasts from the RC aren't arriving.
-    Serial.printf("[RCBRG] DROP early: src MAC %02X:%02X:%02X:%02X:%02X:%02X mismatches local oct2/oct3=%02X/%02X\n",
-                  info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                  info->src_addr[3], info->src_addr[4], info->src_addr[5],
-                  umac_oct2, umac_oct3);
-    return;
-  }
+  if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
 
   // Handle known packet sizes
   if (len == sizeof(espnow_struct_mgmt)) {
@@ -2568,8 +2574,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // ETM/non-ETM mismatch guards
   if (isETMPacket && !etmEnabled) {
     if (debugETM) Serial.println("[ETM] Received ETM packet but ETM disabled locally, ignoring.");
-    // ── TEMP DBG (RC-Controller bridge): ETM disabled locally ──
-    Serial.println("[RCBRG] DROP: ETM packet arrived but etmEnabled=false on this bridge");
     return;
   }
   if (!isETMPacket && etmEnabled) {
@@ -2604,26 +2608,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     memcpy(&etmReceived, incomingData, sizeof(etmReceived));
     etmReceived.structPassword[sizeof(etmReceived.structPassword) - 1] = '\0';
 
-    // ── TEMP DBG (RC-Controller bridge): log EVERY ETM packet arrival ──
-    // Fires before password / MAC / type checks so we can see drops at
-    // every gate.  Remove once the bridge is verified working.
-    {
-      int dbgSender = atoi(etmReceived.structSenderID);
-      int dbgTarget = atoi(etmReceived.structTargetID);
-      Serial.printf("[RCBRG] RX ETM len=%d sender=%d target=%d type=%u from %02X:%02X:%02X:%02X:%02X:%02X\n",
-                    len, dbgSender, dbgTarget, etmReceived.structPacketType,
-                    info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                    info->src_addr[3], info->src_addr[4], info->src_addr[5]);
-    }
-
-    if (String(etmReceived.structPassword) != String(espnowPassword)) {
-      Serial.println("[RCBRG] DROP: password mismatch");
-      return;
-    }
-    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) {
-      Serial.println("[RCBRG] DROP: MAC octet mismatch");
-      return;
-    }
+    if (String(etmReceived.structPassword) != String(espnowPassword)) return;
+    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
 
     int senderWCB = atoi(etmReceived.structSenderID);
     int targetWCB = atoi(etmReceived.structTargetID);
@@ -2658,27 +2644,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
         if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-        // ── TEMP DBG (RC-Controller bridge): log every COMMAND arrival ──
-        // Helps diagnose why broadcasts from the RC (rc_hb / rc_ch /
-        // fragmented CONFIG responses) aren't reaching USB Serial.
-        // Remove once the bridge is verified working in the field.
-        {
-          char preview[24] = {0};
-          strncpy(preview, etmReceived.structCommand, 23);
-          Serial.printf("[RCBRG] ETM CMD from W%d target=%d seq=%u preview='%s'\n",
-                        senderWCB, targetWCB,
-                        (unsigned)etmReceived.structSequenceNumber, preview);
-        }
-
         // Always ACK - even duplicates (so sender stops retrying)
         etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
         // Duplicate detection
-        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) {
-          Serial.printf("[RCBRG] DROP: senderWCB %d outside 1..%d\n",
-                        senderWCB, MAX_WCB_COUNT);
-          return;
-        }
+        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
         int senderIdx = senderWCB - 1;
         bool isDuplicate = false;
         if (etmLastReceivedSeqValid[senderIdx] &&
@@ -2693,8 +2663,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 Serial.printf("[ETM] Duplicate seq %d from WCB%d - ACKd but not executed\n",
                             etmReceived.structSequenceNumber, senderWCB);
             }
-            Serial.printf("[RCBRG] DROP: duplicate seq %u from W%d\n",
-                          (unsigned)etmReceived.structSequenceNumber, senderWCB);
             colorWipeStatus("ES", blue, 10);
             return;
         }
@@ -2707,8 +2675,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             if (crcIdx == -1) {
                 if (debugETM) Serial.printf("[ETM] seq %d rejected: missing CRC\n",
                                             etmReceived.structSequenceNumber);
-                Serial.printf("[RCBRG] DROP: missing CRC, etmChecksumEnabled=true, payload='%s'\n",
-                              etmCmd.c_str());
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
@@ -2719,16 +2685,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             if (rxCRC != calcCRC) {
                 if (debugETM) Serial.printf("[ETM] seq %d rejected: CRC mismatch (rx %08X calc %08X)\n",
                                             etmReceived.structSequenceNumber, rxCRC, calcCRC);
-                Serial.printf("[RCBRG] DROP: CRC mismatch rx=%08X calc=%08X payload_len=%u\n",
-                              rxCRC, calcCRC, (unsigned)payload.length());
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
             etmCmd = payload;  // strip CRC suffix before executing
         }
-        // ── TEMP DBG (RC-Controller bridge): passed dup + CRC ──
-        Serial.printf("[RCBRG] PASS CRC seq=%u, dispatching to passthrough\n",
-                      (unsigned)etmReceived.structSequenceNumber);
 
         // Wizard-origin marker: MGMT relay prepends '\x01' (SOH) to single-chunk payloads
         // routed via ETM. This tells the target not to set lastReceivedViaESPNOW, so the
@@ -2746,13 +2707,6 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                         wizardOrigin ? " [wizard]" : "", etmCmd.c_str());
         }
 
-        // ── TEMP DBG (RC-Controller bridge): post-CRC etmCmd state ──
-        Serial.printf("[RCBRG] post-CRC etmCmd len=%u firstChar=0x%02X startsETMCHAR=%d startsETMLOAD=%d\n",
-                      (unsigned)etmCmd.length(),
-                      etmCmd.length() ? (uint8_t)etmCmd[0] : 0,
-                      etmCmd.startsWith("ETMCHAR_") ? 1 : 0,
-                      etmCmd.startsWith("ETMLOAD") ? 1 : 0);
-
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
             // ── RC-Controller bridge (JSON passthrough) ─────────────────────
             // RC-Controller firmware (rc_telemetry.h) broadcasts JSON
@@ -2765,17 +2719,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // (config tool → WCB → RC) rides the existing ;<rcId>,<json>
             // syntax which the standard command path already relays.
             if (etmCmd.length() > 0 && etmCmd[0] == '{') {
-                Serial.printf("[RCBRG] PRINT-JSON about to print %u bytes\n",
-                              (unsigned)etmCmd.length());
-                Serial.println(etmCmd);
-                Serial.println("[RCBRG] PRINT-JSON done");
+                // Only relay if a USB host has been actively using us as a
+                // WCB bridge within the last ~20 s (see rcJsonRelay...
+                // declaration above).  Without this gate, the RC's 0.5 Hz
+                // rc_hb spams the serial port of anyone tethered for any
+                // other reason — confusing and wasteful.  We still consume
+                // the packet (no fall-through to the WCB command parser);
+                // we just don't echo it to USB.
+                if ((int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0) {
+                    Serial.println(etmCmd);
+                }
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
-            // ── TEMP DBG: fell through the JSON gate — log why ──
-            Serial.printf("[RCBRG] NOT JSON: len=%u firstChar=0x%02X\n",
-                          (unsigned)etmCmd.length(),
-                          etmCmd.length() ? (uint8_t)etmCmd[0] : 0);
 
             // General-debug visibility: mirror what processIncomingSerial prints
             // for locally-typed commands, so ?DEBUG,ON shows ETM-received
@@ -2974,9 +2930,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // comment there for rationale.  RC-Controllers emit JSON ({"type":"rc_hb",
   // ...}, {"type":"rc_ch", ...}, etc.); just relay to USB Serial so the
   // config tool's Web Serial reader sees it, bypassing the WCB ;-command
-  // parser which doesn't understand JSON.
+  // parser which doesn't understand JSON.  Gated on
+  // rcJsonRelaySubscribedUntilMs so we only spam USB when a host is
+  // actively using us as a WCB bridge (see declaration near top of file).
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    Serial.println(receivedCmd);
+    if ((int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0) {
+      Serial.println(receivedCmd);
+    }
     colorWipeStatus("ES", blue, 10);
     return;
   }
@@ -4690,6 +4650,17 @@ void processSerialMessage(const String &message) {
 void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
+
+  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
+  // Any ;w<id>,<cmd> arriving via USB means "a host (config tool's Via WCB
+  // mode, or WCB Wizard) is actively talking through this bridge".  Use
+  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
+  // rc_trig / rc_mode) to USB Serial.  Direct-USB users of any OTHER
+  // device on the same WCB network never send ;w commands, so they don't
+  // get spammed by the RC's network heartbeats.  Subscription window is
+  // intentionally longer than the config tool's 10 s keep-alive PING
+  // cadence so a single missed keep-alive doesn't kill the relay.
+  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // New format: comma present after the WCB number → greedy digit parse
   // e.g. ;w1,RA  or  ;w13,RA
