@@ -177,6 +177,30 @@ void saveWCBNumberToPreferences(int wcb_number_f) {
     Serial.printf("Changed WCB Number to: %d\nPlease reboot to take full effect\n", wcb_number_f);
 }
 
+// Per-WCB friendly alias (e.g. "Body" / "Dome"). Stored in the same
+// wcb_config NVS namespace as WCB_Number for simplicity. Capped at 24
+// chars on save; empty string = unset (treated as no alias).
+void loadWCBAlias() {
+    preferences.begin("wcb_config", true);
+    wcb_alias = preferences.getString("alias", "");
+    preferences.end();
+    if (wcb_alias.length() > 0) {
+        Serial.printf("Loaded WCB alias: %s\n", wcb_alias.c_str());
+    }
+}
+
+void saveWCBAlias(const String &alias) {
+    String a = alias;
+    a.trim();
+    if (a.length() > 24) a = a.substring(0, 24);
+    preferences.begin("wcb_config", false);
+    preferences.putString("alias", a);
+    preferences.end();
+    wcb_alias = a;
+    if (a.length() == 0) Serial.println("WCB alias cleared");
+    else                 Serial.printf("WCB alias set to: %s\n", a.c_str());
+}
+
 // Load baud rates from preferences
 void loadBaudRatesFromPreferences() {
     preferences.begin("serial_baud", true);

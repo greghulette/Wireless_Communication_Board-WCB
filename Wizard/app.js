@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.15:33.R.MAY.2026';
+const UI_VERSION = '25.21:58.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1014,6 +1014,97 @@ function onWCBNumberChange(n) {
   const val = parseInt(sel.value);
   const qty = systemConfig?.general?.wcbQuantity || WCB_MAX;
   if (boardConfigs[n] && val >= 1 && val <= qty) boardConfigs[n].wcbNumber = val;
+  updateBoardAliasUI(n);   // header reads "WCB {wcbNumber} (Alias)"
+  onBoardFieldChange(n);
+}
+
+// ─── Alias (per-WCB friendly name) ─────────────────────────────────
+// Round-trips with the firmware ?ALIAS,<text> command (NVS-persisted).
+// Stored in boardConfigs[n].alias, max 24 chars.
+function onAliasChange(n) {
+  const el = document.getElementById(`b${n}-alias`);
+  if (!el || !boardConfigs[n]) return;
+  let v = (el.value || '').slice(0, 24);
+  // Strip the command delimiter — it would corrupt the chained backup line.
+  const delim = boardConfigs[n].delimiter || '^';
+  if (v.includes(delim)) {
+    v = v.split(delim).join('');
+    el.value = v;
+  }
+  boardConfigs[n].alias = v;
+  updateBoardAliasUI(n);
+  onBoardFieldChange(n);
+}
+
+// Reflect the alias / slot type everywhere they appear: the board-card
+// section header and the side-nav button. Safe to call when those
+// elements don't exist yet (early renders / non-board contexts).
+//
+//   WCB slot:    "WCB 1 (Body)"
+//   Client slot: "Client 1 (Dome Sensor)"
+function updateBoardAliasUI(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  const isClient = cfg.type === 'client';
+  const wcbN     = cfg.wcbNumber || n;
+  const alias    = isClient ? (cfg.clientAlias || '').trim()
+                            : (cfg.alias       || '').trim();
+  const prefix   = isClient ? `Client ${wcbN}` : `WCB ${wcbN}`;
+  const full     = alias ? `${prefix} (${alias})` : prefix;
+
+  // Card header: keep the static "WCB {N}" h2 stable; everything dynamic
+  // (including the prefix swap for client slots) lives in the suffix span.
+  // For wcb mode → suffix is "(alias)" or empty; for client mode → suffix
+  // is " · Client (alias)" so the original WCB number stays readable.
+  const label = document.getElementById(`b${n}-alias-label`);
+  if (label) {
+    label.textContent = isClient
+      ? (alias ? `· Client (${alias})` : '· Client')
+      : (alias ? `(${alias})` : '');
+  }
+
+  const navBtn = document.getElementById(`wcb-nav-btn-${n}`);
+  if (navBtn) navBtn.textContent = full;
+}
+
+// ─── Slot Type (Wizard-only: WCB vs WCB_Client) ────────────────────
+// Hides/shows the WCB-only body vs the lightweight Client pane.
+// Never sends anything to the physical board. Flipping back restores
+// the saved WCB config exactly as it was — config is preserved, not
+// deleted.
+function updateSlotTypeUI(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  const isClient = cfg.type === 'client';
+
+  // Radio state
+  const radio = document.querySelector(`input[name="b${n}-slot-type"][value="${isClient ? 'client' : 'wcb'}"]`);
+  if (radio) radio.checked = true;
+
+  // Body vs Client-pane visibility
+  const body   = document.getElementById(`b${n}-section-body`);
+  const cpane  = document.getElementById(`b${n}-client-pane`);
+  if (body)  body.style.display  = isClient ? 'none' : '';
+  if (cpane) cpane.style.display = isClient ? ''     : 'none';
+
+  // Header label format changes with type
+  updateBoardAliasUI(n);
+}
+
+function onSlotTypeChange(n) {
+  if (!boardConfigs[n]) return;
+  const chosen = document.querySelector(`input[name="b${n}-slot-type"]:checked`)?.value;
+  boardConfigs[n].type = (chosen === 'client') ? 'client' : 'wcb';
+  updateSlotTypeUI(n);
+  onBoardFieldChange(n);
+}
+
+function onClientAliasChange(n) {
+  const el = document.getElementById(`b${n}-client-alias`);
+  if (!el || !boardConfigs[n]) return;
+  const v = (el.value || '').slice(0, 24);
+  boardConfigs[n].clientAlias = v;
+  updateBoardAliasUI(n);
   onBoardFieldChange(n);
 }
 
@@ -1384,6 +1475,15 @@ function populateUIFromConfig(n, config) {
     );
     populateWCBDropdown(wcbNumSel, qty, selectedWcb, true);
   }
+
+  // Alias input + header/nav label
+  const aliasEl = document.getElementById(`b${n}-alias`);
+  if (aliasEl) aliasEl.value = (config.alias || '').slice(0, 24);
+
+  // Slot type + Client alias (Wizard-only — never touch the physical board)
+  const cAliasEl = document.getElementById(`b${n}-client-alias`);
+  if (cAliasEl) cAliasEl.value = (config.clientAlias || '').slice(0, 24);
+  updateSlotTypeUI(n);   // sets radio, body/client-pane visibility, header
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
@@ -3060,6 +3160,15 @@ class BoardConnection {
             this._readBuffer = this._readBuffer.slice(nl + 1);
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
+
+              // ── RC-Controller discovery sniffer (Phase 4) ──────────────────
+              // Every serial line on every connected WCB gets fed to the RC
+              // discovery hook.  Fast-paths inside return early for non-JSON
+              // and JSON without a known rc_* type — see _rcDiscoveryHook
+              // at end of app.js for details.
+              if (typeof _rcDiscoveryHook === 'function') {
+                try { _rcDiscoveryHook(line, this.boardIndex); } catch (_) {}
+              }
 
               // ── Boot-message sniffer ──────────────────────────────────────
               // The firmware prints configured chars and software version during
@@ -6201,6 +6310,9 @@ function wizardDefaultState() {
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
+    // ---- Special peer (ID 20, out-of-band client) ----
+    useSpecialPeer: false,
+    specialAlias:   '',
   };
 }
 
@@ -6210,6 +6322,10 @@ function wizardDefaultBoard(slotIndex) {
     hwVersion:    0,
     statusLedPin: 38,
     serialPorts: Array.from({length: 5}, () => ({ baud: 9600, label: '' })),
+    // ---- Slot type metadata (Wizard-only, mirrors Phase B config-tool) ----
+    type:         'wcb',   // 'wcb' | 'client'
+    alias:        '',      // WCB alias (round-trips to firmware via ?ALIAS)
+    clientAlias:  '',      // Client alias (Wizard-only; used when type='client')
   };
 }
 
@@ -6289,12 +6405,15 @@ function wizardNext() {
     return;
   }
 
-  // After firmware choice is made, record the flash mode for each board
+  // After firmware choice is made, record the flash mode for each board.
+  // Skip Client slots entirely — there's no firmware to flash on a client
+  // (it runs its own sketch) and nothing to push to (no WCB at that slot).
   if (key === 'firmware') {
     const modeVal = !wizardState.needsFirmware ? (wizardState.eraseNvs ? 'erase' : 'configure')
                   : wizardState.eraseNvs       ? 'factory'
                   :                              'update';
     wizardState.boards.forEach((b, i) => {
+      if (b.type === 'client') return;
       boardFlashMode[i + 1]          = modeVal;
       boardAutoPushAfterFlash[i + 1] = true;
     });
@@ -6462,9 +6581,13 @@ function wizardHTMLQuantity() {
               onclick="wizardSelectQty(${n})">${n}</button>`;
   }).join('');
 
+  const specChecked = wizardState.useSpecialPeer ? 'checked' : '';
+  const specAlias   = wizardState.specialAlias || '';
+  const specAliasDisplay = wizardState.useSpecialPeer ? '' : 'display:none';
+
   return `
-    <div class="wizard-section-title">How many WCBs are in your system?</div>
-    <div class="wizard-section-desc">Each board is one WCB unit connected via USB or ESP-NOW.</div>
+    <div class="wizard-section-title">How many slots total in your system?</div>
+    <div class="wizard-section-desc">Count <strong>WCBs + WCB_Clients</strong> combined — each occupies one ID slot (they share the same ID/MAC address space).</div>
     <div class="wizard-qty-grid">
       ${primaryBtns}
       <button id="wiz-qty-more-btn" class="wizard-qty-btn wizard-qty-more"
@@ -6474,7 +6597,31 @@ function wizardHTMLQuantity() {
     <div id="wiz-qty-expanded" class="wizard-qty-grid"
          style="margin-top:8px${showExpanded ? '' : ';display:none'}">
       ${expandedBtns}
+    </div>
+
+    <!-- Special peer (ID 20) — out-of-band client slot, opt-in. -->
+    <div style="margin-top:20px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:rgba(0,0,0,0.04)">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+        <input type="checkbox" id="wiz-special-peer" ${specChecked}
+               onchange="wizardOnSpecialPeerToggle()">
+        <span>Also use <strong>ID 20</strong> — special out-of-band slot for an extra client</span>
+        ${wizHint('Reserved peer ID 20 sits outside the normal 1..N range. Useful for an extra client device that does not take a numbered slot. Every WCB in the network will receive ?SPECIAL,ON so their peer tables agree.')}
+      </label>
+      <div id="wiz-special-alias-row" style="${specAliasDisplay};margin-top:10px;display:${wizardState.useSpecialPeer ? 'flex' : 'none'};align-items:center;gap:8px">
+        <label style="font-size:13px;opacity:0.85">ID 20 Alias:</label>
+        <input type="text" id="wiz-special-alias" maxlength="24" placeholder="e.g. Pump Controller"
+               value="${escHtml(specAlias)}"
+               oninput="wizardState.specialAlias = this.value.slice(0,24)"
+               style="flex:1;max-width:240px">
+      </div>
     </div>`;
+}
+
+function wizardOnSpecialPeerToggle() {
+  const cb  = document.getElementById('wiz-special-peer');
+  const row = document.getElementById('wiz-special-alias-row');
+  wizardState.useSpecialPeer = !!cb?.checked;
+  if (row) row.style.display = wizardState.useSpecialPeer ? 'flex' : 'none';
 }
 
 function wizardExpandQty() {
@@ -6538,49 +6685,124 @@ function wizardHTMLIdentity() {
     const ledPin    = b.statusLedPin || 38;
     const ledShown  = (b.hwVersion === 31 || b.hwVersion === 32);
     const isCustom  = ![38, 48, 47].includes(ledPin);
+    const isClient  = b.type === 'client';
+    const wcbChecked    = isClient ? ''        : 'checked';
+    const clientChecked = isClient ? 'checked' : '';
     return `
       <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-identity-${i}">
-        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
 
-          <!-- WCB # -->
-          <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-            <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
-            <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
-                   class="wizard-ident-input">
-          </div>
-
-          <!-- Hardware Version (fixed width — never resizes) -->
-          <div style="display:flex;flex-direction:column;gap:4px;width:140px;flex-shrink:0">
-            <div class="wizard-ident-label">Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below.')}</div>
-            <select id="wiz-b${i}-hwver" onchange="wizardOnHWVerChange(${i})" class="wizard-ident-input">
-              <option value="0">— Select —</option>
-              ${hwOpts}
-            </select>
-          </div>
-
-          <!-- LED Pin group: label centered above select+optional custom, side by side (HW 3.1/3.2 only) -->
-          <div id="wiz-b${i}-led-row" style="${ledShown?'display:flex':'display:none'};flex-direction:column;gap:4px;flex-shrink:0">
-            <div class="wizard-ident-label" style="text-align:center;justify-content:center">
-              LED Pin ${wizHint('GPIO pin for the NeoPixel LED. Default 38. Alternatives: 48, 47.', 'tip-left')}
-            </div>
-            <div style="display:flex;gap:4px">
-              <select id="wiz-b${i}-ledpin" class="wizard-ident-input" style="width:82px"
-                      onchange="wizardOnLEDPinChange(${i})">
-                <option value="38" ${!isCustom&&ledPin==38?'selected':''}>38</option>
-                <option value="48" ${!isCustom&&ledPin==48?'selected':''}>48</option>
-                <option value="47" ${!isCustom&&ledPin==47?'selected':''}>47</option>
-                <option value="0"  ${isCustom?'selected':''}>Other…</option>
-              </select>
-              <input type="number" id="wiz-b${i}-ledpin-custom" class="wizard-ident-input"
-                     min="0" max="48" placeholder="GPIO #"
-                     value="${isCustom ? ledPin : ''}"
-                     style="display:${isCustom?'':'none'};width:70px">
-            </div>
-          </div>
-
+        <!-- Slot Type — WCB vs WCB_Client. Wizard-only metadata.
+             Flipping hides the WCB-specific fields and shows the Client
+             fields; it never sends anything to a physical board. -->
+        <div style="display:flex;gap:18px;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--border);margin-bottom:12px;font-size:13px">
+          <span style="opacity:0.75;font-weight:500">Slot Type:</span>
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+            <input type="radio" name="wiz-slot-type-${i}" value="wcb" ${wcbChecked}
+                   onchange="wizardOnSlotTypeChange(${i})"><span>WCB</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+            <input type="radio" name="wiz-slot-type-${i}" value="client" ${clientChecked}
+                   onchange="wizardOnSlotTypeChange(${i})"><span>WCB_Client</span>
+          </label>
+          ${wizHint('A slot is either a WCB board or a WCB_Client device — they share the same ID/MAC. Clients run their own sketch; the Wizard observes them but cannot flash or configure them.')}
         </div>
+
+        <!-- WCB fields (hidden when type='client') -->
+        <div id="wiz-b${i}-wcb-fields" style="${isClient ? 'display:none' : ''}">
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+
+            <!-- WCB # -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
+              <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
+              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+                     class="wizard-ident-input">
+            </div>
+
+            <!-- Hardware Version -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:140px;flex-shrink:0">
+              <div class="wizard-ident-label">Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below.')}</div>
+              <select id="wiz-b${i}-hwver" onchange="wizardOnHWVerChange(${i})" class="wizard-ident-input">
+                <option value="0">— Select —</option>
+                ${hwOpts}
+              </select>
+            </div>
+
+            <!-- LED Pin (HW 3.1/3.2) -->
+            <div id="wiz-b${i}-led-row" style="${ledShown?'display:flex':'display:none'};flex-direction:column;gap:4px;flex-shrink:0">
+              <div class="wizard-ident-label" style="text-align:center;justify-content:center">
+                LED Pin ${wizHint('GPIO pin for the NeoPixel LED. Default 38. Alternatives: 48, 47.', 'tip-left')}
+              </div>
+              <div style="display:flex;gap:4px">
+                <select id="wiz-b${i}-ledpin" class="wizard-ident-input" style="width:82px"
+                        onchange="wizardOnLEDPinChange(${i})">
+                  <option value="38" ${!isCustom&&ledPin==38?'selected':''}>38</option>
+                  <option value="48" ${!isCustom&&ledPin==48?'selected':''}>48</option>
+                  <option value="47" ${!isCustom&&ledPin==47?'selected':''}>47</option>
+                  <option value="0"  ${isCustom?'selected':''}>Other…</option>
+                </select>
+                <input type="number" id="wiz-b${i}-ledpin-custom" class="wizard-ident-input"
+                       min="0" max="48" placeholder="GPIO #"
+                       value="${isCustom ? ledPin : ''}"
+                       style="display:${isCustom?'':'none'};width:70px">
+              </div>
+            </div>
+
+            <!-- Alias (WCB-side; round-trips via ?ALIAS) -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:180px;flex-shrink:0">
+              <div class="wizard-ident-label">Alias ${wizHint('Friendly name for this WCB (e.g. Body, Dome). ≤24 chars. Saved to the WCB.')}</div>
+              <input id="wiz-b${i}-alias" type="text" maxlength="24" placeholder="e.g. Body"
+                     value="${escHtml(b.alias || '')}" class="wizard-ident-input">
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Client fields (shown when type='client') -->
+        <div id="wiz-b${i}-client-fields" style="${isClient ? '' : 'display:none'}">
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+
+            <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
+              <div class="wizard-ident-label">ID ${wizHint('The device_id this client occupies in your network. Must be unique among all slots.')}</div>
+              <input id="wiz-b${i}-cnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+                     class="wizard-ident-input">
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:4px;width:220px;flex-shrink:0">
+              <div class="wizard-ident-label">Client Alias ${wizHint('Friendly name for this client device. Wizard-only — the client device has no Wizard-config of its own. ≤24 chars.')}</div>
+              <input id="wiz-b${i}-calias" type="text" maxlength="24" placeholder="e.g. Dome Sensor"
+                     value="${escHtml(b.clientAlias || '')}" class="wizard-ident-input">
+            </div>
+
+            <div style="flex:1 1 100%;opacity:0.7;font-size:12px;padding-top:6px">
+              Client devices run their own sketch (using the WCB_Client library).
+              The Wizard does not flash, push to, or pull from a client.
+            </div>
+
+          </div>
+        </div>
+
       </div>`;
   }).join('');
+
+  // ─── Special slot (ID 20) ───────────────────────────────────────────
+  // Renders only when wizardState.useSpecialPeer is set. Always a client
+  // (no WCB lives at ID 20 by design); the alias is Wizard-only.
+  const specialPanel = wizardState.useSpecialPeer ? `
+    <div style="margin-top:20px;padding:14px;border:1px dashed var(--border);border-radius:8px;background:rgba(0,0,0,0.03)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <strong>Special Slot — ID 20</strong>
+        <span style="opacity:0.7;font-size:12px">always a WCB_Client (out-of-band)</span>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:4px;width:220px;flex-shrink:0">
+          <div class="wizard-ident-label">Client Alias ${wizHint('Friendly name for the ID-20 client device. Wizard-only.')}</div>
+          <input id="wiz-special-alias-ident" type="text" maxlength="24" placeholder="e.g. Pump Controller"
+                 value="${escHtml(wizardState.specialAlias || '')}"
+                 oninput="wizardState.specialAlias = this.value.slice(0,24)"
+                 class="wizard-ident-input">
+        </div>
+      </div>
+    </div>` : '';
   // Real board photo — shows the silkscreened label with VER: clearly visible.
   const labelSVG = `
     <div class="wizard-hw-label-hint">
@@ -6590,9 +6812,9 @@ function wizardHTMLIdentity() {
     </div>`;
 
   return `
-    <div class="wizard-section-title">Board Identity</div>
-    <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
-    ${tabs}${panels}
+    <div class="wizard-section-title">Slot Identity</div>
+    <div class="wizard-section-desc">For each slot, choose its type. WCB slots need a hardware version; Client slots only need an alias. Slot order follows the ID — clients keep their assigned ID just like WCBs.</div>
+    ${tabs}${panels}${specialPanel}
     ${labelSVG}`;
 }
 
@@ -6602,6 +6824,25 @@ function wizardOnHWVerChange(i) {
   if (ledRow) ledRow.style.display = (hwVal === 31 || hwVal === 32) ? 'flex' : 'none';
 }
 
+// Flip a slot between WCB and Client. Reveals/hides the per-type field
+// blocks and updates wizardState; doesn't touch boardConfigs or send
+// anything to a board — that happens at the end via wizardApplyConfig.
+function wizardOnSlotTypeChange(i) {
+  const chosen = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+  if (!wizardState.boards[i]) return;
+  const isClient = (chosen === 'client');
+  wizardState.boards[i].type = isClient ? 'client' : 'wcb';
+  const wcbFields    = document.getElementById(`wiz-b${i}-wcb-fields`);
+  const clientFields = document.getElementById(`wiz-b${i}-client-fields`);
+  if (wcbFields)    wcbFields.style.display    = isClient ? 'none' : '';
+  if (clientFields) clientFields.style.display = isClient ? ''     : 'none';
+  // Keep the two ID inputs in sync so flipping back and forth doesn't
+  // surprise the user with a different ID after the toggle.
+  const src = document.getElementById(isClient ? `wiz-b${i}-wcbnum` : `wiz-b${i}-cnum`);
+  const dst = document.getElementById(isClient ? `wiz-b${i}-cnum`   : `wiz-b${i}-wcbnum`);
+  if (src && dst && src.value) dst.value = src.value;
+}
+
 function wizardOnLEDPinChange(i) {
   const sel    = document.getElementById(`wiz-b${i}-ledpin`);
   const custom = document.getElementById(`wiz-b${i}-ledpin-custom`);
@@ -6609,8 +6850,17 @@ function wizardOnLEDPinChange(i) {
 }
 
 function wizardHTMLSerial() {
+  // Snap activeBoardTab off any Client slot before rendering so the
+  // tab strip and panels stay in sync (only WCBs are visible here).
+  if ((wizardState.boards[wizardState.activeBoardTab]?.type || 'wcb') === 'client') {
+    const firstWcb = wizardNextWcbSlot(1);
+    wizardState.activeBoardTab = firstWcb ? firstWcb - 1 : 0;
+  }
   const tabs   = wizardBoardTabs('serial');
   const panels = wizardState.boards.map((b, i) => {
+    // Client slots aren't configurable here — they run their own sketch
+    // with their own serial setup. Render nothing for them.
+    if ((b.type || 'wcb') === 'client') return '';
     const boardSlot = i + 1;
 
     // Build a claim map: portNum (1-based) → { owner, baud }
@@ -6701,10 +6951,18 @@ function wizardHTMLKyber() {
 }
 
 function wizardHTMLKyberConfig() {
+  // Only WCB slots can host a Kyber — Client slots run their own sketch and
+  // don't have the firmware to drive a Kyber. Snap kyberBoard to a WCB slot
+  // first so the dropdown's selected value always points at something valid.
+  const firstWcb = wizardNextWcbSlot(1);
+  if (firstWcb && (wizardState.boards[wizardState.kyberBoard - 1]?.type || 'wcb') === 'client') {
+    wizardState.kyberBoard = firstWcb;
+  }
   const { kyberBoard, kyberPort, kyberBaud, kyberMarcduinoPort, quantity } = wizardState;
-  const boardOpts = Array.from({length: quantity}, (_, i) =>
-    `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
-  ).join('');
+  const boardOpts = Array.from({length: quantity}, (_, i) => {
+    if ((wizardState.boards[i]?.type || 'wcb') === 'client') return '';
+    return `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`;
+  }).filter(Boolean).join('');
   const maestroPortOpts = Array.from({length: 5}, (_, p) =>
     `<option value="${p+1}" ${(p+1) === kyberPort ? 'selected' : ''}>Serial ${p+1}</option>`
   ).join('');
@@ -6786,14 +7044,25 @@ function wizardHTMLMaestro() {
 }
 
 function wizardHTMLMaestroConfig() {
+  // Maestros can only live on WCB slots (Clients run their own sketch and
+  // don't have the WCB firmware to drive a Maestro). Snap any maestro
+  // currently pointing at a Client slot to the first WCB slot.
+  const firstWcb = wizardNextWcbSlot(1) || 1;
+  wizardState.maestros.forEach(m => {
+    if ((wizardState.boards[m.boardSlot - 1]?.type || 'wcb') === 'client') {
+      m.boardSlot = firstWcb;
+    }
+  });
   // Always start with at least one Maestro row — the user chose Maestro, so there's at least one.
   if (wizardState.maestros.length === 0) {
-    wizardState.maestros.push({ boardSlot: 1, id: 1, port: 1, baud: 115200 });
+    wizardState.maestros.push({ boardSlot: firstWcb, id: 1, port: 1, baud: 115200 });
   }
   const { maestros, quantity } = wizardState;
-  const boardOpts = (sel) => Array.from({length: quantity}, (_, i) =>
-    `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
-  ).join('');
+  // Filter out Client slots from the Board dropdown.
+  const boardOpts = (sel) => Array.from({length: quantity}, (_, i) => {
+    if ((wizardState.boards[i]?.type || 'wcb') === 'client') return '';
+    return `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`;
+  }).filter(Boolean).join('');
   const rows = maestros.map((m, mi) => {
     // Baud capped by port (ports 3-5 max 57600)
     const maxBaud = m.port >= 3 ? 57600 : Infinity;
@@ -6872,26 +7141,43 @@ function wizardHTMLEtm() {
 }
 
 function wizardHTMLReview() {
-  const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards } = wizardState;
+  const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards,
+          useSpecialPeer, specialAlias } = wizardState;
+  const wcbCount    = boards.filter(b => b.type !== 'client').length;
+  const clientCount = boards.filter(b => b.type === 'client').length;
   const boardRows = boards.map((b, i) => {
+    if (b.type === 'client') {
+      const al = (b.clientAlias || '').trim();
+      return `<div class="wizard-review-row">
+        <span class="wizard-review-label">Slot ${i+1}</span>
+        <span class="wizard-review-value">Client · ID ${b.wcbNumber}${al ? ` · ${escHtml(al)}` : ''}</span>
+      </div>`;
+    }
     const hwLabel = WCBParser.HW_VERSION_MAP[b.hwVersion]?.display ?? 'Not set';
+    const al      = (b.alias || '').trim();
     return `<div class="wizard-review-row">
-      <span class="wizard-review-label">Board ${i+1}</span>
-      <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}</span>
+      <span class="wizard-review-label">Slot ${i+1}</span>
+      <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}${al ? ` · ${escHtml(al)}` : ''}</span>
     </div>`;
   }).join('');
+  const specialRow = useSpecialPeer ? `
+    <div class="wizard-review-row">
+      <span class="wizard-review-label">Special Peer (ID 20)</span>
+      <span class="wizard-review-value">✅ Enabled${specialAlias ? ` · ${escHtml(specialAlias)}` : ''}</span>
+    </div>` : '';
   return `
     <div class="wizard-section-title">Everything looks good!</div>
     <div class="wizard-section-desc">Review your settings below. Click "Apply & Connect" to write these to the config page and start connecting your boards.</div>
 
     <div class="wizard-review-section">
       <div class="wizard-review-heading">System</div>
-      <div class="wizard-review-row"><span class="wizard-review-label">Number of WCBs</span><span class="wizard-review-value">${quantity}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">Slots total</span><span class="wizard-review-value">${quantity} (${wcbCount} WCB${wcbCount===1?'':'s'}, ${clientCount} Client${clientCount===1?'':'s'})</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">ESP-NOW Password</span><span class="wizard-review-value">${escHtml(password)}</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">MAC Octets</span><span class="wizard-review-value">XX:XX:${mac2.toUpperCase()}:${mac3.toUpperCase()}:XX:XX</span></div>
+      ${specialRow}
     </div>
     <div class="wizard-review-section">
-      <div class="wizard-review-heading">Boards</div>
+      <div class="wizard-review-heading">Slots</div>
       ${boardRows}
     </div>
     <div class="wizard-review-section">
@@ -6939,7 +7225,11 @@ function wizardHTMLConnect() {
   }
 
   // ── Step 1+: Board rows ─────────────────────────────────────────
+  // Skip Client slots — they have no USB port to connect to, no firmware
+  // to flash, and no WCB to push config to. They're rendered as a small
+  // informational footer below the connect rows instead.
   const rows = boards.map((b, i) => {
+    if (b.type === 'client') return '';
     const n = i + 1;
     const isSeq    = connectMode === 'seq';
     const isActive = !isSeq || n === connectSeqN;
@@ -6991,11 +7281,31 @@ function wizardHTMLConnect() {
       </div>
     </details>`;
 
+  // Informational footer: list any Client slots (and ID 20) so the user
+  // knows the Wizard isn't connecting to them by design.
+  const clients = boards
+    .map((b, i) => ({ b, id: b.wcbNumber, alias: b.clientAlias, idx: i }))
+    .filter(c => c.b.type === 'client');
+  const hasSpecial = !!wizardState.useSpecialPeer;
+  const clientFooter = (clients.length > 0 || hasSpecial) ? `
+    <div style="margin-top:18px;padding:12px 14px;border:1px dashed var(--border);border-radius:8px;font-size:13px;opacity:0.85">
+      <div style="font-weight:600;margin-bottom:6px">Client slots — not connected by the Wizard</div>
+      <div style="opacity:0.8;font-size:12px;margin-bottom:8px">
+        Client devices run their own sketch and connect to the network on their own.
+        The Wizard cannot flash or push to them; ${hasSpecial ? '<code>?SPECIAL,ON</code> will be sent to every WCB so they can talk to ID 20. ' : ''}You'll exercise them via the regular boards.
+      </div>
+      <ul style="margin:0;padding-left:18px">
+        ${clients.map(c => `<li>ID ${c.id}${c.alias ? ` — <strong>${escHtml(c.alias)}</strong>` : ''}</li>`).join('')}
+        ${hasSpecial ? `<li>ID 20 (special)${wizardState.specialAlias ? ` — <strong>${escHtml(wizardState.specialAlias)}</strong>` : ''}</li>` : ''}
+      </ul>
+    </div>` : '';
+
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
     ${tipHtml}
     ${banner}
-    ${rows}`;
+    ${rows}
+    ${clientFooter}`;
 }
 
 function wizardConnectBannerText() {
@@ -7005,9 +7315,19 @@ function wizardConnectBannerText() {
   return '';
 }
 
+// Find the first WCB-type slot index (1-based) at or after `start`.
+// Returns 0 if no WCB slot remains (all clients).
+function wizardNextWcbSlot(start) {
+  for (let n = Math.max(1, start); n <= wizardState.quantity; n++) {
+    if ((wizardState.boards[n - 1]?.type || 'wcb') !== 'client') return n;
+  }
+  return 0;
+}
+
 function wizardSelectConnectMode(mode) {
   wizardState.connectMode = mode;
-  wizardState.connectSeqN = 1;
+  // Sequential mode starts at the first WCB slot (skipping any leading clients).
+  wizardState.connectSeqN = wizardNextWcbSlot(1) || 1;
   // Apply config to the main page only when the user commits to a connection mode
   if (mode) wizardApplyConfig();
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
@@ -7016,13 +7336,18 @@ function wizardSelectConnectMode(mode) {
     // Board rows now visible — hide the forward button
     if (nextBtn) nextBtn.style.display = 'none';
     wizardStartConnectWatchers();
-    // Auto-open port panel(s) — no Connect button click needed
+    // Auto-open port panel(s) — no Connect button click needed. Client
+    // slots are skipped (no USB port to open, no firmware to flash).
     if (mode === 'seq') {
-      setTimeout(() => _wizPortOpenPanel(1), 0);
+      const first = wizardNextWcbSlot(1);
+      if (first) setTimeout(() => _wizPortOpenPanel(first), 0);
     } else {
-      // All-at-once: open panels for every slot
+      // All-at-once: open panels for every WCB slot
       setTimeout(() => {
-        for (let i = 1; i <= wizardState.quantity; i++) _wizPortOpenPanel(i);
+        for (let i = 1; i <= wizardState.quantity; i++) {
+          if ((wizardState.boards[i - 1]?.type || 'wcb') === 'client') continue;
+          _wizPortOpenPanel(i);
+        }
       }, 0);
     }
   } else {
@@ -7038,10 +7363,11 @@ function wizardSelectConnectMode(mode) {
 
 function wizardSeqAdvance(completedSlot) {
   if (wizardState.connectMode !== 'seq') return;
-  const nextSlot = completedSlot + 1;
+  // Advance to the next WCB-type slot, skipping any client slots in between.
+  const nextSlot = wizardNextWcbSlot(completedSlot + 1);
   const bannerEl = document.getElementById('wiz-connect-banner');
 
-  if (nextSlot > wizardState.quantity) {
+  if (!nextSlot) {
     // All done — update banner
     if (bannerEl) { bannerEl.innerHTML = '✅ All boards configured!'; bannerEl.style.display = ''; }
     return;
@@ -7096,13 +7422,18 @@ function wizardSwitchBoardTab(step, i) {
 }
 
 function wizardBoardTabs(step) {
+  // The identity step is the one place where Client slots must remain
+  // visible — that's where the user chooses each slot's type. Every other
+  // per-board step (serial, etc.) only applies to WCBs.
+  const includeClients = (step === 'identity');
   return `<div class="wizard-board-tabs">
-    ${wizardState.boards.map((b, i) =>
-      `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
+    ${wizardState.boards.map((b, i) => {
+      if (!includeClients && (b.type || 'wcb') === 'client') return '';
+      return `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
                onclick="wizardSwitchBoardTab('${step}',${i})">
         WCB&nbsp;${b.wcbNumber}
-      </button>`
-    ).join('')}
+      </button>`;
+    }).filter(Boolean).join('')}
   </div>`;
 }
 
@@ -7199,16 +7530,32 @@ function wizardSaveStep(key) {
       break;
     case 'identity':
       wizardState.boards.forEach((b, i) => {
-        const num        = parseInt(get(`wiz-b${i}-wcbnum`)?.value);
-        const hw         = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
-        const ledSelVal  = get(`wiz-b${i}-ledpin`)?.value ?? '38';
-        const ledPin     = ledSelVal === '0'
-                           ? (parseInt(get(`wiz-b${i}-ledpin-custom`)?.value) || 38)
-                           : (parseInt(ledSelVal) || 38);
+        const chosen   = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+        const isClient = (chosen === 'client');
+        b.type = isClient ? 'client' : 'wcb';
+        // ID input lives in the visible block (WCB vs Client share the slot)
+        const numEl   = get(isClient ? `wiz-b${i}-cnum` : `wiz-b${i}-wcbnum`);
+        const num     = parseInt(numEl?.value);
         if (!isNaN(num)) b.wcbNumber = num;
-        if (!isNaN(hw))  b.hwVersion = hw;
-        b.statusLedPin = ledPin;
+        if (isClient) {
+          // Client: only the clientAlias matters; HW/LED stay at their saved
+          // values so flipping back to WCB restores the prior selection.
+          b.clientAlias = (get(`wiz-b${i}-calias`)?.value || '').slice(0, 24);
+        } else {
+          const hw         = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
+          const ledSelVal  = get(`wiz-b${i}-ledpin`)?.value ?? '38';
+          const ledPin     = ledSelVal === '0'
+                             ? (parseInt(get(`wiz-b${i}-ledpin-custom`)?.value) || 38)
+                             : (parseInt(ledSelVal) || 38);
+          if (!isNaN(hw))  b.hwVersion = hw;
+          b.statusLedPin = ledPin;
+          b.alias        = (get(`wiz-b${i}-alias`)?.value || '').slice(0, 24);
+        }
       });
+      // Special peer (ID 20) alias — read the identity-step input if present;
+      // fallback to the quantity-step input.
+      const sAliasEl = get('wiz-special-alias-ident') || get('wiz-special-alias');
+      if (sAliasEl) wizardState.specialAlias = (sAliasEl.value || '').slice(0, 24);
       break;
     case 'serial': {
       // Rebuild the claim map so we can distinguish user-typed labels from
@@ -7217,6 +7564,7 @@ function wizardSaveStep(key) {
       // instead — this way, if the user later moves Kyber/Maestro to a different
       // port and comes back, the freed port doesn't retain the stale owner name.
       wizardState.boards.forEach((b, i) => {
+        if ((b.type || 'wcb') === 'client') return;  // no serial inputs rendered for clients
         const boardSlot = i + 1;
         const claims = {};
         if (wizardState.kyberEnabled && wizardState.kyberBoard === boardSlot) {
@@ -7308,15 +7656,31 @@ function wizardValidateStep(key) {
       break;
     }
     case 'identity': {
-      const nums = wizardState.boards.map((_, i) =>
-        parseInt(document.getElementById(`wiz-b${i}-wcbnum`)?.value ?? 0)
-      );
-      if (nums.some(n => n < 1 || n > 99)) return 'WCB numbers must be between 1 and 99.';
-      if (new Set(nums).size !== nums.length) return 'Each board must have a unique WCB number.';
-      const hvs = wizardState.boards.map((_, i) =>
-        parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0)
-      );
-      if (hvs.some(h => h === 0)) return 'Please select a hardware version for every board.';
+      // Pull the ID from whichever input is visible (WCB or Client side).
+      const slotInfo = wizardState.boards.map((_, i) => {
+        const chosen   = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+        const isClient = (chosen === 'client');
+        const idEl     = document.getElementById(isClient ? `wiz-b${i}-cnum` : `wiz-b${i}-wcbnum`);
+        return {
+          id:       parseInt(idEl?.value ?? 0),
+          isClient,
+        };
+      });
+      const ids = slotInfo.map(s => s.id);
+      if (ids.some(n => n < 1 || n > 99 || isNaN(n)))
+        return 'Each slot must have an ID between 1 and 99.';
+      if (new Set(ids).size !== ids.length)
+        return 'Each slot must have a unique ID (WCBs and Clients share the same address space).';
+      if (wizardState.useSpecialPeer && ids.includes(20))
+        return 'ID 20 is reserved for the special slot — pick a different ID for that slot, or uncheck the special peer option in the previous step.';
+      // HW version required only for WCB-type slots; clients run their own
+      // sketch and don't have a WCB hardware version.
+      const missingHw = slotInfo.some((s, i) => {
+        if (s.isClient) return false;
+        const hw = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
+        return hw === 0;
+      });
+      if (missingHw) return 'Please select a hardware version for every WCB slot.';
       break;
     }
     case 'maestro-config': {
@@ -7401,11 +7765,22 @@ function wizardApplyConfig() {
     cfg.delimiter  = ws.delimiter;
     cfg.funcChar   = ws.funcChar;
     cfg.cmdChar    = ws.cmdChar;
+    // Slot type metadata + aliases. specialPeer is a NETWORK setting
+    // (must be the same on every WCB), so apply ws.useSpecialPeer to
+    // every WCB-type slot — Client slots don't need it (they don't push).
+    cfg.type        = b.type || 'wcb';
+    cfg.alias       = (b.alias       || '').slice(0, 24);
+    cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
+    if (cfg.type !== 'client') cfg.specialPeer = !!ws.useSpecialPeer;
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
       cfg.serialPorts[p].label = sp.label;
     });
+
+    // Kyber / Maestro routing only applies to WCB-type slots — Client slots
+    // run their own sketch and don't have the firmware to drive either.
+    if (cfg.type === 'client') return;
 
     // Kyber
     if (ws.kyberEnabled) {
@@ -7529,11 +7904,20 @@ function wizardExportConfig() {
     cfg.delimiter      = ws.delimiter || '^';
     cfg.funcChar       = ws.funcChar  || '?';
     cfg.cmdChar        = ws.cmdChar   || ';';
+    // Slot type / aliases / special-peer (same metadata as wizardApplyConfig)
+    cfg.type        = b.type || 'wcb';
+    cfg.alias       = (b.alias       || '').slice(0, 24);
+    cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
+    if (cfg.type !== 'client') cfg.specialPeer = !!ws.useSpecialPeer;
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
       cfg.serialPorts[p].label = sp.label;
     });
+
+    // Client slots get only the metadata above — no Kyber/Maestro/ETM
+    // routing (clients run their own sketch).
+    if (cfg.type === 'client') return;
 
     if (ws.kyberEnabled) {
       if ((i + 1) === ws.kyberBoard) {
@@ -8509,3 +8893,138 @@ function escHtml(str) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+// ════════════════════════════════════════════════════════════════════════
+//  RC-Controller discovery (Phase 4 of remote-management bridge)
+//
+//  Every line that any tethered WCB prints to USB Serial passes through
+//  _rcDiscoveryHook() below (wired into BoardConnection._startReading()).
+//  When a JSON line of the form {"type":"rc_hb","id":N,...} arrives, we
+//  record the RC's metadata in _rcOnlineMap and re-render the
+//  #rc-devices-section panel.  Entries auto-expire after 6 s of silence
+//  (heartbeat is 0.5 Hz = 2 s, so 3 missed beats = offline).
+//
+//  The "Open in Config Tool" button on each card launches the RC config
+//  tool in a new tab using the URL the user has saved in localStorage.
+//  Default is the canonical repo-relative path (works when both repos
+//  are sibling clones under one GitHub root); user can override via the
+//  small "edit Config Tool URL" link at the bottom of the panel.
+// ════════════════════════════════════════════════════════════════════════
+
+const _rcOnlineMap   = new Map();   // rcId → { fw, mode, model, up, lastSeenAt, viaBoardIdx }
+const RC_OFFLINE_MS  = 6000;        // 3 missed 2-second heartbeats
+const RC_TOOL_URL_KEY = 'rc_config_tool_url';
+const RC_TOOL_URL_DEFAULT = '../../RC-Controller/config_tool/index.html';
+
+function _rcToolUrl() {
+  try {
+    return localStorage.getItem(RC_TOOL_URL_KEY) || RC_TOOL_URL_DEFAULT;
+  } catch (_) { return RC_TOOL_URL_DEFAULT; }
+}
+
+function _rcDiscoveryHook(line, boardIdx) {
+  // Fast-path: rc_hb lines start with `{"type":"rc_hb"`.  Cheaper than a
+  // full JSON.parse on every serial line (which includes plenty of WCB
+  // chatter).  If the prefix matches we then parse properly.
+  if (!line || line.length < 20 || line[0] !== '{') return;
+  if (line.indexOf('"rc_hb"') === -1 && line.indexOf('"rc_trig"') === -1 &&
+      line.indexOf('"rc_mode"') === -1) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch (_) { return; }
+  if (!msg || typeof msg.id !== 'number') return;
+
+  const id   = msg.id;
+  const now  = Date.now();
+  let entry  = _rcOnlineMap.get(id);
+  if (!entry) entry = { id, viaBoardIdx: boardIdx };
+  entry.lastSeenAt = now;
+  entry.viaBoardIdx = boardIdx;
+  if (msg.type === 'rc_hb') {
+    if (typeof msg.fw    === 'string') entry.fw    = msg.fw;
+    if (typeof msg.mode  === 'number') entry.mode  = msg.mode;
+    if (typeof msg.model === 'number') entry.model = msg.model;
+    if (typeof msg.up    === 'number') entry.up    = msg.up;
+  } else if (msg.type === 'rc_mode' && typeof msg.mode === 'number') {
+    entry.mode = msg.mode;
+  } else if (msg.type === 'rc_trig') {
+    entry.lastTrig = { mode: msg.mode, btn: msg.btn, tap: msg.tap, at: now };
+  }
+  _rcOnlineMap.set(id, entry);
+  _renderRcDevices();
+}
+
+// Friendly TX-model names.  Mirror of TX_MODELS in the RC's config_tool —
+// kept short here since the Wizard just needs the label.
+const _RC_MODEL_NAMES = { 0: 'X18', 1: 'X-Lite', 2: 'X20' };
+
+function _renderRcDevices() {
+  const section = document.getElementById('rc-devices-section');
+  const list    = document.getElementById('rc-devices-list');
+  if (!section || !list) return;
+
+  // Sweep expired.
+  const now = Date.now();
+  for (const [id, e] of _rcOnlineMap) {
+    if (now - e.lastSeenAt > RC_OFFLINE_MS) _rcOnlineMap.delete(id);
+  }
+
+  if (_rcOnlineMap.size === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+
+  const sorted = [..._rcOnlineMap.values()].sort((a, b) => a.id - b.id);
+  list.innerHTML = sorted.map(e => {
+    const age = Math.max(0, Math.round((now - e.lastSeenAt) / 1000));
+    const ageClass = age >= 3 ? 'rc-stale' : '';
+    const modelLbl = _RC_MODEL_NAMES[e.model] || ('model ' + e.model);
+    const modeLbl  = e.mode ? `mode ${e.mode}` : 'mode —';
+    const fwLbl    = e.fw   || '—';
+    const upLbl    = (typeof e.up === 'number')
+      ? `up ${Math.round(e.up)}s`
+      : '';
+    const trigLbl  = e.lastTrig
+      ? `· last trig: m${e.lastTrig.mode}b${e.lastTrig.btn}t${e.lastTrig.tap}`
+      : '';
+    return `
+      <div class="rc-device-card">
+        <div class="rc-id">RC #${e.id}</div>
+        <div class="rc-meta">
+          <div class="rc-meta-line">${escHtml(modelLbl)} · ${escHtml(modeLbl)}</div>
+          <div class="rc-meta-line">fw ${escHtml(fwLbl)} · ${escHtml(upLbl)}</div>
+          <div class="rc-meta-line ${ageClass}">last seen ${age}s ago ${trigLbl}</div>
+        </div>
+        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank"
+           title="Opens the RC config tool in a new tab. Don't forget to flip the 'Via WCB' toggle to manage this RC through this tethered WCB.">
+          Open ↗
+        </a>
+      </div>`;
+  }).join('');
+}
+
+// Periodic re-render so "last seen Ns ago" counters tick and stale entries
+// disappear without needing a new heartbeat to drive the GC sweep.
+setInterval(() => { if (_rcOnlineMap.size > 0) _renderRcDevices(); }, 1000);
+
+// "Edit Config Tool URL" link handler — small prompt to override the
+// default path.  Stored in localStorage so it survives reloads.
+document.addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!t || t.id !== 'rc-tool-url-edit') return;
+  ev.preventDefault();
+  const current = _rcToolUrl();
+  const next    = prompt(
+    'URL to your RC config tool (config_tool/index.html).\n' +
+    'Default (sibling repo clones):\n' + RC_TOOL_URL_DEFAULT,
+    current
+  );
+  if (next === null) return;   // cancelled
+  try {
+    if (next === '' || next === RC_TOOL_URL_DEFAULT) {
+      localStorage.removeItem(RC_TOOL_URL_KEY);
+    } else {
+      localStorage.setItem(RC_TOOL_URL_KEY, next.trim());
+    }
+  } catch (_) {}
+  _renderRcDevices();
+});

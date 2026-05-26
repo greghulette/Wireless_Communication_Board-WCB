@@ -24,6 +24,14 @@ function createDefaultBoardConfig() {
     statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38
     wcbNumber:    1,
     wcbQuantity:  1,
+    alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
+    specialPeer:  false,   // ?SPECIAL,ON enables tracking of ID 20 as a peer
+    // ---- Wizard-only metadata (never sent to firmware) ----------------
+    // Slot type: 'wcb' (default — board card) or 'client' (lightweight
+    // client view). Flipping does NOT alter what's on the physical board.
+    type:         'wcb',
+    clientAlias:  '',      // Friendly name for the client device at this slot
+
 
     // Network
     espnowPassword: 'change_me_or_risk_takeover',
@@ -372,6 +380,30 @@ function parseToken(body, config) {
     case 'WCBQ':
       config.wcbQuantity = parseInt(parts[1]) || 1;
       break;
+
+    case 'SPECIAL': {
+      // ?SPECIAL,ON / ?SPECIAL,OFF — enable/disable tracking of ID 20.
+      const sub = (parts[1] || '').trim().toUpperCase();
+      config.specialPeer = (sub === 'ON' || sub === '1' || sub === 'TRUE');
+      break;
+    }
+
+    case 'ALIAS': {
+      // ?ALIAS,<text>   set
+      // ?ALIAS,CLEAR    clear
+      // ?ALIAS,LIST     (query, ignored on parse)
+      const sub = (parts[1] || '').trim();
+      const subU = sub.toUpperCase();
+      if (subU === 'CLEAR' || sub === '') {
+        config.alias = '';
+      } else if (subU !== 'LIST') {
+        // Preserve original case; join in case the alias contained a comma
+        // (rare — captured for completeness).
+        const raw = parts.slice(1).join(',').trim();
+        config.alias = raw.slice(0, 24);
+      }
+      break;
+    }
 
     // ── Network ──
     case 'EPASS':
@@ -923,8 +955,26 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || !baseline || baseline.wcbNumber !== config.wcbNumber)
     add(`WCB,${config.wcbNumber}`);
 
+  // Alias: emit on diff; clearing (set -> empty) sends ALIAS,CLEAR.
+  const curAlias  = (config.alias  || '').trim().slice(0, 24);
+  const baseAlias = (baseline?.alias || '').trim().slice(0, 24);
+  if (fullPush || !baseline || baseAlias !== curAlias) {
+    if (curAlias.length === 0) {
+      if (baseAlias.length > 0) add('ALIAS,CLEAR');
+    } else {
+      add(`ALIAS,${curAlias}`);
+    }
+  }
+
   if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
     add(`WCBQ,${config.wcbQuantity}`);
+
+  // Special peer (ID 20): emit on diff. Every WCB in the network needs the
+  // same value so peer tables stay consistent.
+  const curSpecial  = !!config.specialPeer;
+  const baseSpecial = !!baseline?.specialPeer;
+  if (fullPush || !baseline || curSpecial !== baseSpecial)
+    add(`SPECIAL,${curSpecial ? 'ON' : 'OFF'}`);
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)

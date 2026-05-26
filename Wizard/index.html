@@ -166,6 +166,21 @@
     <!-- ═══ BOARD SECTIONS (dynamically generated) ═════════════════ -->
     <div id="boards-container"></div>
 
+    <!-- ═══ RC CONTROLLERS (online, discovered via rc_hb broadcasts) ═════
+         Populated by _rcDiscoveryHook() in app.js — every line that any
+         tethered WCB prints to USB gets sniffed; rc_hb JSON broadcasts
+         from RC-Controllers on the network land here.  The "Open in
+         Config Tool" deep-link launches the RC config tool in a new tab
+         with a hint to flip the Via WCB toggle. ════════════════════════ -->
+    <div id="rc-devices-section" class="rc-devices-section" style="display:none">
+      <h2 class="section-title">📻 RC Controllers</h2>
+      <div id="rc-devices-list" class="rc-devices-list"></div>
+      <div class="rc-devices-note">
+        Showing RC-Controllers heartbeating on the WCB network.
+        <a href="#" id="rc-tool-url-edit" style="color:var(--text-secondary)">edit Config Tool URL</a>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -359,7 +374,7 @@
     <div class="section-header" onclick="toggleSection('section-board-{N}')">
       <span class="section-chevron">▶</span>
       <span class="board-num-pill">{N}</span>
-      <div class="section-title"><h2>WCB {N}</h2></div>
+      <div class="section-title"><h2>WCB {N}<span id="b{N}-alias-label" class="board-alias" style="font-weight:normal;opacity:0.75;margin-left:8px;font-size:0.85em"></span></h2></div>
       <div class="section-status">
         <span class="fw-version" id="b{N}-fw-version"></span>
         <span class="badge badge-default" id="b{N}-status-badge">Not Connected</span>
@@ -389,7 +404,41 @@
       <div class="board-connect-strip-panel" id="b{N}-strip-panel"></div>
     </div>
 
-    <div class="section-body">
+    <!-- Slot Type — Wizard-only metadata. Determines whether this slot is a
+         WCB (configurable, full card) or a WCB_Client (lightweight, read-
+         mostly card). Flipping to Client HIDES the WCB body — it does NOT
+         delete any config, and never sends anything to the physical board.
+         Flipping back restores the saved WCB config exactly as it was. -->
+    <div class="board-slot-type" id="b{N}-slot-type-row"
+         style="display:flex;align-items:center;gap:14px;padding:6px 14px 0;font-size:13px">
+      <span style="opacity:0.75">Slot Type:</span>
+      <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="radio" name="b{N}-slot-type" value="wcb" checked
+               onchange="onSlotTypeChange({N})"><span>WCB</span>
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="radio" name="b{N}-slot-type" value="client"
+               onchange="onSlotTypeChange({N})"><span>WCB_Client</span>
+      </label>
+      <span class="wiz-hint" data-tip="A slot is either a WCB board or a WCB_Client device — never both (they share the same ID/MAC). Flipping to Client hides the WCB controls but doesn't change anything on the physical board. Flip back to restore.">i</span>
+    </div>
+
+    <!-- Lightweight Client view (Phase C will add online status & details).
+         Hidden when type='wcb'. -->
+    <div class="section-body" id="b{N}-client-pane" style="display:none">
+      <div class="field-group">
+        <div class="field" style="width:200px;flex-shrink:0">
+          <label>Client Alias <span class="wiz-hint" data-tip="Friendly name for this client device (e.g. Dome Sensor). Wizard-only — the client device has no Wizard-config of its own. ≤24 chars.">i</span></label>
+          <input type="text" id="b{N}-client-alias" maxlength="24" placeholder="e.g. Dome Sensor" oninput="onClientAliasChange({N})">
+        </div>
+        <div class="field" style="flex:1 1 100%;opacity:0.7;font-size:12px;padding-top:6px">
+          This slot is a WCB_Client device — the Wizard observes it but can't
+          configure it. Live status / online indicator coming next.
+        </div>
+      </div>
+    </div>
+
+    <div class="section-body" id="b{N}-section-body">
 
       <!-- Action Bar -->
       <div class="board-action-bar">
@@ -424,6 +473,12 @@
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
             <!-- populated dynamically -->
           </select>
+        </div>
+
+        <!-- Alias (friendly name, e.g. "Body" / "Dome") -->
+        <div class="field" style="width:200px;flex-shrink:0">
+          <label>Alias <span class="wiz-hint" data-tip="Friendly name for this WCB (e.g. Body, Dome). Shown in the header next to the WCB number. ≤24 chars. Leave blank for none.">i</span></label>
+          <input type="text" id="b{N}-alias" maxlength="24" placeholder="e.g. Body" oninput="onAliasChange({N})">
         </div>
 
         <!-- Hardware Version (fixed width — never resizes) -->

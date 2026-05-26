@@ -23,6 +23,7 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
+extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
 extern char espnowPassword[40];
@@ -106,6 +107,8 @@ void loadMACPreferences();
 
 void loadWCBNumberFromPreferences();
 void saveWCBNumberToPreferences(int wcb_number_f);
+void loadWCBAlias();
+void saveWCBAlias(const String &alias);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
 void loadSpecialPeerPreferences();
