@@ -1169,3 +1169,73 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   0%   { background: rgba(0,232,122,0.4); border-color: var(--green); }
   100% { background: rgba(0,232,122,0.08); border-color: var(--green); }
 }
+/* ── RC Controllers section (Phase 4: discovered via rc_hb broadcasts) ──
+   Sits at the bottom of the main content area, hidden until at least one
+   RC-Controller's heartbeat has been heard.  See _rcDiscoveryHook() in
+   app.js for the discovery logic and rc_telemetry.h in the RC-Controller
+   repo for the heartbeat-broadcast source. */
+.rc-devices-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--card-bg, #1a1d28);
+  border: 1px solid var(--border, #2a2f3d);
+  border-radius: 8px;
+}
+.rc-devices-section h2 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e0e0e0);
+  letter-spacing: 0.3px;
+}
+.rc-devices-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.rc-device-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg, #0f1115);
+  border: 1px solid var(--border, #2a2f3d);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.rc-device-card .rc-id {
+  font-weight: 700;
+  color: var(--accent, #4fc3f7);
+  font-size: 14px;
+  min-width: 56px;
+}
+.rc-device-card .rc-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted, #888);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.rc-device-card .rc-meta .rc-meta-line { line-height: 1.4; }
+.rc-device-card .rc-meta .rc-stale { color: var(--yellow, #ffb000); }
+.rc-device-card .rc-open-btn {
+  padding: 6px 10px;
+  background: var(--accent, #4fc3f7);
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rc-device-card .rc-open-btn:hover { filter: brightness(1.1); }
+.rc-devices-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted, #888);
+}
+.rc-devices-note a { text-decoration: underline; cursor: pointer; }
