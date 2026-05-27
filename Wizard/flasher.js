@@ -29,10 +29,21 @@ const GITHUB_BIN_PATH = 'Code/bin';
 // firmware). The Advanced → Firmware Source selector overrides this via
 // localStorage for testing unreleased branches. Never hard-code anything
 // but 'main' as the default — production must always pull released firmware.
+//
+// Whitelist what counts as a valid branch name: alphanumerics, '.', '_',
+// '-', '/'. This is the safe subset of Git ref names AND keeps the value
+// from being able to inject URL operators (?, &, #, =, /../) into the
+// GitHub Contents API request when interpolated. A malformed localStorage
+// value (manually edited, or stuffed by a malicious page hosting this
+// tool in an iframe) is dropped silently and the default is used instead.
+const FW_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
+function isValidFwBranch(b) {
+  return typeof b === 'string' && b.length > 0 && b.length <= 100 && FW_BRANCH_RE.test(b);
+}
 function getFirmwareBranch() {
   try {
     const b = (localStorage.getItem('wcb_fw_branch') || '').trim();
-    return b || GITHUB_BRANCH_DEFAULT;
+    return isValidFwBranch(b) ? b : GITHUB_BRANCH_DEFAULT;
   } catch (_) {
     return GITHUB_BRANCH_DEFAULT;
   }
@@ -268,8 +279,16 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
         const sample = await readFlashFn.call(loader, bootAddr, 4);
         const view   = new DataView(sample.buffer ?? sample);
         const magic  = view.getUint8(0);
-        // 0xFF = blank, 0xE9 = valid ESP image — anything else means bricked/corrupted
-        isBlankBoard = (magic === 0xFF || magic !== 0xE9);
+        // 0xFF = blank, 0xE9 = valid ESP image — anything else means bricked/corrupted.
+        // Three cases:
+        //   0xFF → blank board (no firmware yet)             → full flash, isBlankBoard
+        //   0xE9 → valid image                                → app-only fast path (unless partition mismatch)
+        //   else → corrupted bootloader                       → full flash to recover (forceFull)
+        // The previous `(magic === 0xFF || magic !== 0xE9)` simplified to
+        // `magic !== 0xE9`, making the `=== 0xFF` clause dead. Split into
+        // explicit branches so the corrupted-recovery path is no longer
+        // implicit / accidental.
+        isBlankBoard = (magic === 0xFF);
         if (magic === 0xFF) {
           onLog('Blank board detected — will flash bootloader + partitions + app');
         } else if (magic === 0xE9) {
@@ -309,7 +328,11 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
             }
           }
         } else {
-          onLog(`Corrupted bootloader detected (0x${magic.toString(16).padStart(2,'0')}) — will flash full image to recover`);
+          // Corrupted bootloader — explicitly force full flash so a future
+          // refactor can't accidentally short-circuit recovery via the
+          // app-only fast path.
+          forceFull = true;
+          onLog(`Corrupted bootloader detected (0x${magic.toString(16).padStart(2,'0')}) — forcing full flash to recover`);
         }
       } else {
         onLog('Cannot read flash — forcing a safe full flash (NVS preserved)');
@@ -355,6 +378,19 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);
 
   // ── Step 4: Flash ──────────────────────────────────────────────
+  // CRITICAL warning to the user: between the first byte being written and
+  // the bootloader + partition + app trio all completing successfully, the
+  // chip is in an inconsistent state. A USB disconnect / power loss in this
+  // window leaves the board unbootable (it can be recovered with esptool +
+  // the BOOT button, but it's not a great UX). Make this loud.
+  const willWriteBootOrPart = imagesToFlash.some(
+    img => img.address === 0x0 || img.address === 0x1000 || img.address === 0x8000
+  );
+  if (willWriteBootOrPart) {
+    onLog('⚠️  DO NOT DISCONNECT THE BOARD until flashing completes!');
+    onLog('   Boot loader and partition table are being rewritten — a mid-flash');
+    onLog('   disconnect can leave the board needing manual recovery.');
+  }
   onStatus(`Flashing ${chip}…`);
   onLog(`Writing ${Math.round(totalBytes / 1024)} KB across ${imagesToFlash.length} region(s)…`);
   onProgress(0, totalBytes);
@@ -366,8 +402,12 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     throw new Error('esptool-js: writeFlash method not found — unexpected library version');
   }
 
-  let bytesWritten = 0;
-  try {
+  // One automatic retry on transient failure. USB hiccups, Windows stream
+  // locks, and timing-related glitches are usually one-shot — a single
+  // immediate retry often recovers without bothering the user. After two
+  // failures we give a clear recovery message instead of generic error text.
+  const attemptWrite = async () => {
+    let bytesWritten = 0;
     await writeFlashFn.call(loader, {
       fileArray: imagesToFlash.map(img => ({ data: bufToLatin1(img.buf), address: img.address })),
       flashSize: 'keep',
@@ -383,9 +423,26 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       calculateMD5Hash: (img) =>
         CryptoJS.MD5(CryptoJS.enc.Latin1.parse(img)).toString(),
     });
-  } catch (e) {
-    try { await transport.disconnect(); } catch (_) {}
-    throw new Error(`Flash write failed: ${e.message}`);
+  };
+
+  try {
+    await attemptWrite();
+  } catch (e1) {
+    onLog(`Flash failed once (${e1.message || e1}) — retrying automatically…`);
+    onProgress(0, totalBytes);
+    try {
+      await attemptWrite();
+    } catch (e2) {
+      try { await transport.disconnect(); } catch (_) {}
+      // Surface a recovery message instead of just rethrowing the raw error.
+      const recoveryMsg = willWriteBootOrPart
+        ? `\n\n⚠️  The board may be in an unbootable state. To recover:\n` +
+          `   1. Hold the BOOT button on the ESP32 while pressing RESET\n` +
+          `   2. Reconnect via the Flasher and try again\n` +
+          `   3. If the board still does not flash, contact support.`
+        : '';
+      throw new Error(`Flash write failed after retry: ${e2.message}${recoveryMsg}`);
+    }
   }
 
   // ── Step 5: Reset into firmware ────────────────────────────────

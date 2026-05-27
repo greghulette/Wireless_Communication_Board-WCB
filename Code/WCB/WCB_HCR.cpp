@@ -43,9 +43,10 @@ public:
   WcbHCR(HardwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
   WcbHCR(SoftwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
 
-  // Set the auto-poll interval (ms) WITHOUT HCRVocalizer::begin()'s serial
-  // re-init. update() auto-sends <QD> every refreshSpeed ms when > 0.
-  void setRefreshMs(uint16_t ms) { refreshSpeed = ms; }
+  // We do NOT use the library's built-in refreshSpeed auto-poll because it's
+  // a uint16_t (ms) and overflows for any pollSec >= 66 s. processHCRTick()
+  // schedules getUpdate() on its own millis() timer instead, which natively
+  // supports the documented 3-3600 s range.
 
 private:
   void _init() {
@@ -65,6 +66,7 @@ HCRConfig hcrConfig = {};
 static WcbHCR  *_hcr     = nullptr;   // live instance (heap; rebuilt on port change)
 static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
 static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
+static unsigned long _hcrNextPollMs   = 0;  // next scheduled getUpdate() — own timer
 
 // ---- Volume shadow + per-channel fade state -----------------------------
 // HCR has no native fade; we synthesize a non-blocking ramp per channel,
@@ -117,13 +119,15 @@ static void hcrStartFade(int ch, int from, int to, int durSec,
   to   = constrain(to,   0, 100);
   HcrFade &f = _fade[ch];
   f.active = false;                       // supersede any in-flight fade
-  _hcr->SetVolume(ch, from);              // anchor the start point
-  if (durSec <= 0) {                      // instant
+  if (durSec <= 0) {                      // instant — one write, no anchor
     _hcr->SetVolume(ch, to);
     if (stopAtEnd) { _hcr->StopWAV(ch); hcrSetVol(ch, restoreTo); }
     else           { _hcrVol[ch] = to; }
     return;
   }
+  // Anchor the start point only if it differs from current — avoids an
+  // extra packet when from already matches what's on the wire.
+  if (from != hcrCurVol(ch)) _hcr->SetVolume(ch, from);
   f.from = from; f.to = to;
   f.startMs = millis(); f.durMs = (uint32_t)durSec * 1000UL;
   f.nextStep = 0; f.lastSent = from;
@@ -192,31 +196,38 @@ void beginHCR() {
     case 5: _hcr = new WcbHCR(&Serial5, baud); _hcrPort = &Serial5; break;
     default: return;
   }
-  if (_hcr) {
-    // pollSec 0 = off (no auto <QD>); update() still parses incoming RX
-    // (e.g. responses to queries the RC-Controller appends to its strings).
-    _hcr->setRefreshMs((uint16_t)(hcrConfig.pollSec * 1000));
-  }
+  // Auto-poll is driven by processHCRTick() on its own millis() timer
+  // (handles full 3-3600 s range, unlike library's uint16_t refreshSpeed).
+  // pollSec 0 = off (no auto <QD>). update() still parses incoming RX.
+  _hcrNextPollMs = 0;  // first tick will fire poll immediately if pollSec>0
   Serial.printf("[HCR] Active on S%d at %lu baud, poll=%us\n",
                 hcrConfig.serialPort,
                 (unsigned long)hcrConfig.baudRate,
                 (unsigned)hcrConfig.pollSec);
 }
 
-// Call once per loop() tick. Non-blocking: HCRVocalizer::update() auto-sends
-// <QD> on the refresh timer and parses one RX byte per call via receive().
+// Call once per loop() tick. Non-blocking: HCRVocalizer::update() parses one
+// RX byte per call. We schedule getUpdate() ourselves on a millis() timer so
+// pollSec can be the full documented 3-3600s range (library's refreshSpeed
+// is uint16_t and would overflow at >=66s).
 void processHCRTick() {
   if (!_hcr) return;
   _hcr->update();
   hcrStepFades();                 // non-blocking volume ramps
-  if (hcrConfig.pollSec > 0) _hcrLastRxPollMs = millis();
+
+  // Own-timer auto-poll. pollSec==0 -> off; user can still ?HCR,REFRESH.
+  unsigned long now = millis();
+  if (hcrConfig.pollSec > 0 && (long)(now - _hcrNextPollMs) >= 0) {
+    _hcr->getUpdate();
+    _hcrLastRxPollMs = now;
+    _hcrNextPollMs   = now + (unsigned long)hcrConfig.pollSec * 1000UL;
+  }
 
   // When HCR debug is on, periodically dump the parsed status so the user
   // can watch what's coming back from the HCR (the library hides per-byte
   // RX). Throttled to the poll interval (min 2s) to avoid flooding.
   if (debugHCR) {
     static unsigned long _dbgNext = 0;
-    unsigned long now = millis();
     if (now >= _dbgNext) {
       uint32_t everyMs = (hcrConfig.pollSec > 0 ? hcrConfig.pollSec : 2) * 1000UL;
       if (everyMs < 2000UL) everyMs = 2000UL;
@@ -334,7 +345,11 @@ void processHCRRuntimeCommand(const String &message) {
   // ---- Readable verbs --------------------------------------------------
   if (vU == "STIM" || vU == "STIMULATE" || vU == "TRIGGER") {
     int e = hcrEmotion(hcrField(body, 1));
-    if (e == OVERLOAD) { _hcr->Overload(); return; }
+    // OVERLOAD is its own top-level verb; don't silently rewrite it here.
+    if (e == OVERLOAD) {
+      Serial.printf("[HCR] %s does not take OVERLOAD — use ;H,OVERLOAD\n", vU.c_str());
+      return;
+    }
     int lv = hcrLevel(hcrField(body, 2));
     if (e < 0 || lv < 0) { Serial.println("[HCR] Usage: ;H,STIM,<H|S|M|C>,<MOD|STRONG>"); return; }
     if (vU == "TRIGGER") _hcr->Trigger(e, lv);
@@ -549,7 +564,8 @@ void configureHCR(const String &args) {
       hcrConfig.pollSec = (uint16_t)s;
     }
     saveHCRSettings();
-    if (_hcr) _hcr->setRefreshMs((uint16_t)(hcrConfig.pollSec * 1000));
+    // Reschedule next poll immediately so the new interval takes effect now.
+    _hcrNextPollMs = millis();
     Serial.printf("[HCR] Poll interval = %us%s\n", (unsigned)hcrConfig.pollSec,
                   hcrConfig.pollSec ? "" : " (off)");
     return;
@@ -638,14 +654,18 @@ void printHCRStatus() {
     Serial.println("[HCR:cfg=0]");
     return;
   }
-  unsigned long ageMs = millis() - _hcrLastRxPollMs;
+  // Age only meaningful when we've actually polled. Off / pre-first-poll -> -1.
+  long ageSec = -1;
+  if (hcrConfig.pollSec > 0 && _hcrLastRxPollMs != 0) {
+    ageSec = (long)((millis() - _hcrLastRxPollMs) / 1000UL);
+  }
   char line[256];
   snprintf(line, sizeof(line),
-    "[HCR:cfg=1,port=%d,poll=%u,age=%lu,H=%d,S=%d,M=%d,C=%d,dur=%.2f,"
+    "[HCR:cfg=1,port=%d,poll=%u,age=%ld,H=%d,S=%d,M=%d,C=%d,dur=%.2f,"
     "ovr=%d,muse=%d,wav=%d,pV=%d,pA=%d,pB=%d,vV=%.0f,vA=%.0f,vB=%.0f]",
     hcrConfig.serialPort,
     (unsigned)hcrConfig.pollSec,
-    (unsigned long)(ageMs / 1000),
+    ageSec,
     _hcr->GetEmotion(HAPPY), _hcr->GetEmotion(SAD),
     _hcr->GetEmotion(MAD),   _hcr->GetEmotion(SCARED),
     _hcr->GetDuration(),

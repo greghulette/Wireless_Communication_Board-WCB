@@ -130,6 +130,14 @@ void printHWversion(){
 }
 
 void updateBaudRate(int port, int baud) {
+  // Reject out-of-range ports up front. Without this guard, a parse failure
+  // upstream (e.g. ?BAUD,SX,57600 → port=0) would write a "Serial0" NVS key
+  // into the serial_baud namespace, polluting storage and overlapping with
+  // any future legitimate use of port 0.
+  if (port < 1 || port > 5) {
+    Serial.printf("Invalid serial port %d (must be 1-5)\n", port);
+    return;
+  }
   if (!(baud == 110 || baud == 300 || baud == 600 || baud == 1200 ||
         baud == 2400 || baud == 9600 || baud == 14400 || baud == 19200 || baud == 38400 ||
         baud == 57600 || baud == 115200 || baud == 128000 || baud == 256000)) {
@@ -147,9 +155,7 @@ void updateBaudRate(int port, int baud) {
   // config backup (which read baudRates[]) keep reporting the OLD value until
   // the next reboot reloads NVS — so the web tool's verify-pull sees the stale
   // value, never advances its baseline, and re-pushes the same change forever.
-  if (port >= 1 && port <= 5) {
-    baudRates[port - 1] = baud;
-  }
+  baudRates[port - 1] = baud;
 
   // Save to preferences
   preferences.begin("serial_baud", false);
@@ -192,7 +198,29 @@ void loadWCBAlias() {
 void saveWCBAlias(const String &alias) {
     String a = alias;
     a.trim();
-    if (a.length() > 24) a = a.substring(0, 24);
+    // Strip characters that would corrupt the backup chain on restore:
+    //   ^   delimiter between chained commands
+    //   ,   field separator within a command
+    //   ;   command-character (would be parsed as a runtime verb)
+    //   ?   local-function-identifier (would be parsed as config command)
+    //   \r \n  literal newlines split the chain
+    // Replace with '_' so the user's intent is still readable instead of
+    // silently dropping characters.
+    for (unsigned i = 0; i < a.length(); i++) {
+        char c = a[i];
+        if (c == '^' || c == ',' || c == ';' || c == '?' ||
+            c == '\r' || c == '\n') {
+            a.setCharAt(i, '_');
+        }
+    }
+    // 24-char cap, but clamp on a UTF-8 codepoint boundary so we never split
+    // a multi-byte sequence (would leave invalid UTF-8 in NVS / the banner).
+    if (a.length() > 24) {
+        int cut = 24;
+        // back up while the byte at [cut] is a UTF-8 continuation (10xxxxxx)
+        while (cut > 0 && ((uint8_t)a[cut] & 0xC0) == 0x80) cut--;
+        a = a.substring(0, cut);
+    }
     preferences.begin("wcb_config", false);
     preferences.putString("alias", a);
     preferences.end();

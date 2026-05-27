@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_261546RMAY2026                                  *****////
+///*****                                          Version 6.1.0_271541RMAY2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -154,7 +154,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_261546RMAY2026";
+String SoftwareVersion = "6.1.0_271541RMAY2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -235,7 +235,108 @@ bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
 // 20 s into the future; the JSON passthrough only fires while now < this
 // deadline.  Config tool's Via-WCB keep-alive PING (every 10 s) keeps it
 // hot; Direct-USB users never send ;w so they never see relay output.
+//
+// Sentinel: 0 means "never subscribed".  This matters because of millis()
+// wraparound — if the deadline is left at 0 and millis() exceeds INT32_MAX
+// (24.85 days uptime), the signed-cast comparison below would
+// spuriously flip true and start relaying without a host.  Always guard
+// the comparison with a `!= 0` check.
 uint32_t rcJsonRelaySubscribedUntilMs = 0;
+
+// Helper for the "relay is currently subscribed" check.  Uses the signed-
+// difference trick so it survives millis() wraparound CORRECTLY: while
+// a real subscription is active (`deadline != 0`), the cast-compare
+// detects the negative delta as "deadline still in the future".  When
+// `deadline == 0` we short-circuit to false — see comment above.
+static inline bool rcJsonRelaySubscribed() {
+  if (rcJsonRelaySubscribedUntilMs == 0) return false;
+  return (int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0;
+}
+
+// ── JSON relay queue (cross-core Serial output serialization) ────────────────
+// RC-Controller broadcasts arrive in the ESP-NOW receive callback, which
+// runs on the WiFi task (Core 0).  The main loop on Core 1 also writes to
+// Serial (boot logs, "Sending Unicast..." debug, etc).  ESP32's Serial
+// (HWCDC or UART) is NOT atomic across cores — concurrent writes can
+// interleave at byte granularity, producing garbled JSON that the config
+// tool's web-serial parser can't process.  Observed symptom: occasional
+// `<{"type":"rc_ch"...}Sending Unicast...` concatenated lines.
+//
+// Fix: never call Serial.println(etmCmd) from the WiFi-task callback.
+// Instead, push the JSON line into a FreeRTOS queue, and drain the queue
+// from the main loop (Core 1) where it can write without contention.
+//
+// Sized to handle a 40-fragment GET_CONFIG response in burst.
+// 48 × 220 = ~10.5 KB heap — acceptable on the ESP32.
+constexpr size_t RC_JSON_QUEUE_SLOTS = 48;
+constexpr size_t RC_JSON_MAX_LEN     = 220;
+struct RcJsonRelaySlot {
+  char buf[RC_JSON_MAX_LEN];
+};
+QueueHandle_t rcJsonRelayQueue = nullptr;
+
+// Drains the relay queue to Serial.  Safe to call frequently from the main
+// loop; runs in bounded time (drains whatever fits in one swing, returns
+// immediately if empty).
+static inline void drainRcJsonRelay() {
+  if (!rcJsonRelayQueue) return;
+  RcJsonRelaySlot slot;
+  while (xQueueReceive(rcJsonRelayQueue, &slot, 0) == pdTRUE) {
+    Serial.println(slot.buf);
+  }
+}
+
+// Pushes a JSON line into the relay queue from the ESP-NOW callback.
+// Non-blocking (0 timeout) — if the queue is full, the line is dropped
+// rather than blocking the WiFi task.  Dropping is preferable to blocking
+// because the WiFi task can't service incoming packets while blocked.
+static inline void enqueueRcJsonRelay(const String& jsonLine) {
+  if (!rcJsonRelayQueue) return;
+  RcJsonRelaySlot slot;
+  strncpy(slot.buf, jsonLine.c_str(), sizeof(slot.buf) - 1);
+  slot.buf[sizeof(slot.buf) - 1] = '\0';
+  xQueueSend(rcJsonRelayQueue, &slot, 0);
+}
+
+// ── Pending-timer-chain queue ─────────────────────────────────────────────
+// parseCommandGroups() writes the commandGroups std::vector AND mutates
+// currentGroupIndex / commandTimerModeEnabled / waitingForNextGroup. It
+// must NOT be called from the ESP-NOW WiFi-task callback because loop()
+// concurrently iterates the same vector via processCommandGroups() — a
+// vector resize concurrent with iteration is undefined behavior.
+//
+// Same pattern as rcJsonRelayQueue above: the callback enqueues the raw
+// chain string; loop() drains and calls parseCommandGroups() for each.
+// The local-serial entry point and SEQ playback both run inside loop()
+// already, so they keep calling parseCommandGroups() directly.
+//
+// Slot size 220 covers the 200-byte ESP-NOW structCommand plus any CRC
+// suffix that's already been stripped. 8 slots ≈ 1.76 KB heap.
+constexpr size_t TIMER_CHAIN_QUEUE_SLOTS = 8;
+constexpr size_t TIMER_CHAIN_MAX_LEN     = 220;
+struct PendingTimerChainSlot {
+  char buf[TIMER_CHAIN_MAX_LEN];
+};
+QueueHandle_t pendingTimerChainQueue = nullptr;
+
+// Drain on loop() context only. Each parseCommandGroups() call clobbers
+// the previous chain's state (same as before the queue) — if you want
+// multiple chains in flight you'd need a different scheduler.
+static inline void drainPendingTimerChains() {
+  if (!pendingTimerChainQueue) return;
+  PendingTimerChainSlot slot;
+  while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
+    parseCommandGroups(String(slot.buf));
+  }
+}
+
+static inline void enqueuePendingTimerChain(const String& chain) {
+  if (!pendingTimerChainQueue) return;
+  PendingTimerChainSlot slot;
+  strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
+  slot.buf[sizeof(slot.buf) - 1] = '\0';
+  xQueueSend(pendingTimerChainQueue, &slot, 0);
+}
 // ETM Board Status Table
 struct BoardStatus {
   bool online;
@@ -1364,11 +1465,16 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String providedChecksum = checksumCmd.substring(4); // Skip "?CHK"
       providedChecksum.toUpperCase();
       
-      // Get data without checksum for verification
+      // Get data without checksum for verification.
+      // Format as zero-padded 8 hex chars (%08X) — must match printBackupConfig's
+      // writer (WCB.ino:~4707) and the legacy verifier at WCB.ino:5121.
+      // The old String(x,HEX) form stripped leading zeros, so any CRC with a
+      // leading zero nibble failed verification.
       String dataWithoutChecksum = data.substring(0, chkPos);
       uint32_t calculatedChecksum = calculateCRC32(dataWithoutChecksum);
-      String calculatedChecksumStr = String(calculatedChecksum, HEX);
-      calculatedChecksumStr.toUpperCase();
+      char calcCrcBuf[9];
+      snprintf(calcCrcBuf, sizeof(calcCrcBuf), "%08X", calculatedChecksum);
+      String calculatedChecksumStr = String(calcCrcBuf);
       
       if (providedChecksum.equals(calculatedChecksumStr)) {
         Serial.println("✓ Command checksum VERIFIED - Configuration is intact");
@@ -2232,10 +2338,12 @@ String buildConfigString() {
     append(cmd);
   }
 
-  // Checksum
+  // Checksum (zero-padded %08X to match printBackupConfig and the verifiers
+  // at WCB.ino:~1471 and :~5121 — see fix #6 comment there).
   uint32_t checksum = calculateCRC32(out);
-  String chkCmd = "?CHK" + String(checksum, HEX);
-  chkCmd.toUpperCase();
+  char chkBuf[9];
+  snprintf(chkBuf, sizeof(chkBuf), "%08X", checksum);
+  String chkCmd = "?CHK" + String(chkBuf);
   out += "^" + chkCmd;
 
   // Prepend software version so the Wizard can read it from remote (MGMT) pulls.
@@ -2609,28 +2717,50 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     etmReceived.structPassword[sizeof(etmReceived.structPassword) - 1] = '\0';
 
     if (String(etmReceived.structPassword) != String(espnowPassword)) return;
-    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
+    // MAC-octet check was redundant here — already enforced at the top of
+    // espNowReceiveCallback (line ~2600).  Removed to avoid duplicate work.
 
     int senderWCB = atoi(etmReceived.structSenderID);
     int targetWCB = atoi(etmReceived.structTargetID);
 
-    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
-      int senderIdx = senderWCB - 1;
-      if (senderIdx >= 0 && senderWCB != WCB_Number &&
-          (senderIdx < Default_WCB_Quantity ||
-           (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID))) {
-        bool wasOffline = !boardTable[senderIdx].online;
-        boardTable[senderIdx].online = true;
-        boardTable[senderIdx].lastSeenMs = millis();
-        if (wasOffline) {
-          Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
-                        senderWCB,
-                        info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                        info->src_addr[3], info->src_addr[4], info->src_addr[5]);
-        } else if (debugETM) {
-          Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
-        }
+    // ── Validate sender ONCE for all packet types ────────────────────────
+    // Previously the bounds check only existed in the COMMAND branch (and
+    // ran AFTER etmSendAck), so:
+    //   • ACK path could index pendingAck / etmStats*[] with a noise-/
+    //     attacker-supplied senderWCB
+    //   • COMMAND path sent a spurious ACK to a non-existent peer before
+    //     dropping the packet
+    // Validate up-front so every downstream branch is safe. We allow
+    // WCB_SPECIAL_PEER_ID for HEARTBEAT only; ACK/COMMAND are gated by
+    // their own logic later.
+    bool isSpecialPeer = (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID);
+    int  senderIdx     = senderWCB - 1;
+    bool senderValid   = (senderWCB >= 1 && senderWCB <= MAX_WCB_COUNT &&
+                          senderIdx  >= 0 && senderIdx  <  MAX_WCB_COUNT &&
+                          senderWCB != WCB_Number);
+    if (!senderValid) {
+      if (debugETM) Serial.printf("[ETM] Dropped packet from invalid senderWCB=%d\n", senderWCB);
+      return;
+    }
+
+    // Refresh the sender's online presence on EVERY valid received ETM
+    // packet (not just heartbeats). Otherwise if heartbeats are dropped
+    // but commands flow, etmAddToPendingTable would skip the peer for
+    // ACK-pending tracking, leaving our unicast sends to it un-retried.
+    if (senderIdx < Default_WCB_Quantity || isSpecialPeer) {
+      bool wasOffline = !boardTable[senderIdx].online;
+      boardTable[senderIdx].online     = true;
+      boardTable[senderIdx].lastSeenMs = millis();
+      if (wasOffline) {
+        Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
+                      senderWCB,
+                      info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                      info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
+    }
+
+    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
+      if (debugETM) Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
       return;
     }
 
@@ -2644,12 +2774,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
         if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-        // Always ACK - even duplicates (so sender stops retrying)
+        // Always ACK - even duplicates (so sender stops retrying). Safe now
+        // because senderWCB was validated above.
         etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
-        // Duplicate detection
-        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
-        int senderIdx = senderWCB - 1;
+        // Duplicate detection (senderIdx already validated above).
         bool isDuplicate = false;
         if (etmLastReceivedSeqValid[senderIdx] &&
             etmLastReceivedSeq[senderIdx] == etmReceived.structSequenceNumber) {
@@ -2726,8 +2855,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // other reason — confusing and wasteful.  We still consume
                 // the packet (no fall-through to the WCB command parser);
                 // we just don't echo it to USB.
-                if ((int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0) {
-                    Serial.println(etmCmd);
+                //
+                // Note: we push to the relay queue rather than calling
+                // Serial.println here directly — we're on the WiFi task
+                // (Core 0) and Serial isn't atomic across cores.  The
+                // main loop drains the queue safely on Core 1.
+                if (rcJsonRelaySubscribed()) {
+                    enqueueRcJsonRelay(etmCmd);
                 }
                 colorWipeStatus("ES", blue, 10);
                 return;
@@ -2761,7 +2895,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // tail "x^?BCAST,..." verbatim to NVS). That fix is preserved by
             // the else branch below.
             if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
-                parseCommandGroups(etmCmd);
+                // parseCommandGroups mutates a std::vector iterated by loop();
+                // defer to loop() via the pendingTimerChainQueue (see comment
+                // at the queue's declaration).
+                enqueuePendingTimerChain(etmCmd);
             } else {
                 parseCommandsAndEnqueue(etmCmd, 0);
             }
@@ -2800,6 +2937,25 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t destPort = received.structCommand[1];
     size_t chunkLen  = (uint8_t)received.structCommand[2] | ((uint8_t)received.structCommand[3] << 8);
 
+    // Bounds check the wire-supplied length BEFORE any read/write past
+    // structCommand+4. structCommand is 200 bytes; data starts at +4, so the
+    // max valid chunkLen is 196. The Kyber-broadcast (just below) and
+    // raw-serial paths have their own equivalent guards (180 / 177). Without
+    // this check, a malformed packet with chunkLen >= 197 reads past the
+    // local struct copy into adjacent stack memory.
+    if (chunkLen == 0 || chunkLen > 196) {
+      if (debugMaestro || debugEnabled)
+        Serial.printf("[MAESTRO] Targeted Kyber rejected from WCB%d: bad chunkLen=%u\n",
+                      senderWCB, (unsigned)chunkLen);
+      return;
+    }
+    if (destPort < 1 || destPort > 5) {
+      if (debugMaestro || debugEnabled)
+        Serial.printf("[MAESTRO] Targeted Kyber rejected from WCB%d: bad destPort=%u\n",
+                      senderWCB, (unsigned)destPort);
+      return;
+    }
+
     if (debugMaestro) {
       uint8_t *dataPtr = (uint8_t *)(received.structCommand + 4);
       Serial.printf("[MAESTRO] WCB%d → WCB%d Serial%d  %d byte%s: ",
@@ -2810,7 +2966,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Serial.println();
     }
 
-    if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
+    if (destWCB == WCB_Number) {
       Stream &targetSerial = getSerialStream(destPort);
       targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
       targetSerial.flush();
@@ -2933,9 +3089,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // parser which doesn't understand JSON.  Gated on
   // rcJsonRelaySubscribedUntilMs so we only spam USB when a host is
   // actively using us as a WCB bridge (see declaration near top of file).
+  // Uses the relay queue + main-loop drain pattern for cross-core safety.
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    if ((int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0) {
-      Serial.println(receivedCmd);
+    if (rcJsonRelaySubscribed()) {
+      enqueueRcJsonRelay(receivedCmd);
     }
     colorWipeStatus("ES", blue, 10);
     return;
@@ -2950,7 +3107,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   if (debugEnabled)
       Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
   if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
-    parseCommandGroups(receivedCmd);
+    // Same race-avoidance as the ETM branch above: defer parseCommandGroups
+    // to loop() via the queue (see pendingTimerChainQueue comment).
+    enqueuePendingTimerChain(receivedCmd);
   } else {
     parseCommandsAndEnqueue(receivedCmd, 0);
   }
@@ -4551,13 +4710,18 @@ void updateHWVersion(const String &message) {
     }
 
     // ---- Checksums ----
+    // Format as zero-padded 8 hex chars (%08X) — matches the verifier at
+    // WCB.ino:5121 which always uses sprintf %08X. The previous String(x,HEX)
+    // form stripped leading zeros, so any CRC with a leading zero nibble
+    // (~1/16 chance) failed verification through the ?C* legacy path.
+    char crcStrBuf[9];
     uint32_t checksum = calculateCRC32(chainedConfig);
-    String checksumCmd = lfi + "CHK" + String(checksum, HEX);
-    checksumCmd.toUpperCase();
+    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksum);
+    String checksumCmd = lfi + "CHK" + String(crcStrBuf);
 
     uint32_t checksumDefault = calculateCRC32(chainedConfigDefault);
-    String checksumCmdDefault = "?CHK" + String(checksumDefault, HEX);  // factory reset always uses ?
-    checksumCmdDefault.toUpperCase();
+    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksumDefault);
+    String checksumCmdDefault = "?CHK" + String(crcStrBuf);  // factory reset always uses ?
 
     String chainedWithChecksum        = chainedConfig        + String(commandDelimiter) + checksumCmd;
     String chainedWithChecksumDefault = chainedConfigDefault + defaultSep               + checksumCmdDefault;
@@ -5226,6 +5390,16 @@ void setup() {
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 
+  // Create the RC-Controller JSON relay queue before ESP-NOW starts so the
+  // first incoming broadcast can be safely enqueued.  See enqueueRcJsonRelay
+  // / drainRcJsonRelay comments for the cross-core Serial-output rationale.
+  rcJsonRelayQueue = xQueueCreate(RC_JSON_QUEUE_SLOTS, sizeof(RcJsonRelaySlot));
+
+  // Pending-timer-chain queue — keeps parseCommandGroups() off the WiFi
+  // task (it mutates a std::vector loop() iterates). See queue's declaration
+  // comment for the cross-thread rationale.
+  pendingTimerChainQueue = xQueueCreate(TIMER_CHAIN_QUEUE_SLOTS, sizeof(PendingTimerChainSlot));
+
   loadHWversion();
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
@@ -5262,10 +5436,23 @@ void setup() {
 Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
-  // Create the command queue
+  // Create the command queue. If this fails, every subsequent path that
+  // routes through enqueueCommand / parseCommandsAndEnqueue (i.e. every
+  // command — ETM, serial, MGMT, wizard relay) short-circuits silently
+  // and the board appears alive but accepts no commands. Drive a hard
+  // visible error and reboot rather than continuing as a brick.
   commandQueue = xQueueCreate(200, sizeof(CommandQueueItem));
   if (!commandQueue) {
-    Serial.println("Failed to create command queue!");
+    Serial.println("FATAL: Failed to create command queue!");
+    Serial.println("       The board cannot accept any commands without it.");
+    Serial.println("       Rebooting in 3 seconds...");
+    // Try to give the user a visible LED hint if the status LED is alive.
+    // colorWipeStatus is defined later; statusLED may not be initialized
+    // yet — use a tight blink loop with the on-board GPIO if available.
+    for (int i = 0; i < 6; i++) {
+      delay(250);  // half-second cadence × 6 = 3 s total
+    }
+    ESP.restart();
   }
 
   Serial.println("\n\n-------------------------------------------------------");
@@ -5497,6 +5684,8 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
 
 void loop() {
   rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
+  drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
+  drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();
   processETMHeartbeats();
   processETMAcksAndRetries();

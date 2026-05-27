@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '26.15:46.R.MAY.2026';
+const UI_VERSION = '27.15:41.R.MAY.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -275,7 +275,15 @@ function updateFwBranchWarn() {
 function onFwBranchChange() {
   const sel = document.getElementById('g-fw-branch');
   if (!sel) return;
-  const b = (sel.value || 'main').trim() || 'main';
+  let b = (sel.value || 'main').trim() || 'main';
+  // Whitelist the same character set as flasher.js getFirmwareBranch() reads.
+  // Prevents an unexpected branch name (e.g. one populated from the GitHub
+  // API list with weird characters, or one manually typed by an advanced
+  // user) from being persisted and then interpolated into a URL.
+  if (!/^[A-Za-z0-9._/-]+$/.test(b) || b.length > 100) {
+    showToast(`Branch name "${b}" contains invalid characters — falling back to 'main'`, 'warning', 6000);
+    b = 'main';
+  }
   try {
     if (b === 'main') localStorage.removeItem(FW_BRANCH_KEY);
     else              localStorage.setItem(FW_BRANCH_KEY, b);
@@ -1025,10 +1033,21 @@ function onAliasChange(n) {
   const el = document.getElementById(`b${n}-alias`);
   if (!el || !boardConfigs[n]) return;
   let v = (el.value || '').slice(0, 24);
-  // Strip the command delimiter — it would corrupt the chained backup line.
-  const delim = boardConfigs[n].delimiter || '^';
-  if (v.includes(delim)) {
-    v = v.split(delim).join('');
+  // Mirror the firmware's saveWCBAlias() sanitization: any character that
+  // would corrupt the chained backup ('^', ',', ';', '?') or split it across
+  // lines ('\r', '\n') is replaced with '_' so the user's intent is still
+  // visible. We also strip the *currently configured* delimiter in case the
+  // user has overridden the default '^' (read it live each call so a
+  // delimiter change made just before typing here picks up immediately).
+  // Replacing — not dropping — matches firmware behaviour exactly, so a
+  // typed alias here round-trips identically through ?ALIAS push and pull.
+  const liveDelim = (document.getElementById('g-delimiter')?.value)
+                  || boardConfigs[n].delimiter || '^';
+  const bad = new Set(['^', ',', ';', '?', '\r', '\n', liveDelim]);
+  let cleaned = '';
+  for (const ch of v) cleaned += bad.has(ch) ? '_' : ch;
+  if (cleaned !== v) {
+    v = cleaned;
     el.value = v;
   }
   boardConfigs[n].alias = v;
@@ -1322,7 +1341,17 @@ function _hcrApplyBaudCap(n) {
   if (isSoftSerial && parseInt(baudSel.value) > 9600) {
     baudSel.value = '9600';
     const config = boardConfigs[n];
-    if (config) config.hcr.baud = 9600;
+    if (config) {
+      config.hcr.baud = 9600;
+      // Keep the underlying serial port baud in sync so buildCommandString
+      // doesn't emit a contradictory ?BAUD,S<port>,<high> alongside
+      // ?HCR,PORT,S<port>:9600 on the same push.
+      if (portVal >= 1 && portVal <= 5 && config.serialPorts?.[portVal - 1]) {
+        config.serialPorts[portVal - 1].baud = 9600;
+        const sBaudEl = document.getElementById(`b${n}-s${portVal}-baud`);
+        if (sBaudEl) sBaudEl.value = '9600';
+      }
+    }
   }
 }
 
@@ -4200,12 +4229,33 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
   });
 }
 
+// In-flight guard for direct-connect pulls. Prevents two boardPull(n) calls
+// from racing against each other on the same slot — the function awaits
+// twice (sendAndCollect bootstrap + funcChar fallback) and is called from
+// auto-detect, reconnect-after-reboot timers, and post-save fire-and-forget.
+// Without this guard, two parallel pulls can both call parseBackupString
+// and one writes boardConfigs[n] from a partial buffer, then the other
+// overwrites it — or worse, they interleave and produce a torn config.
+const _boardPullInFlight = new Set();
+
 async function boardPull(n) {
   // Delegate to remote pull if this board is reached via relay
   if (remoteRelayForBoard[n]) { boardPullRemote(n); return; }
 
+  // Drop overlapping pulls on the same slot. The first caller wins; the
+  // second silently returns. Anyone who needs guaranteed freshness can
+  // call again after this one resolves (badge state will reflect it).
+  if (_boardPullInFlight.has(n)) {
+    return;
+  }
+  _boardPullInFlight.add(n);
+
   const conn = boardConnections[n];
-  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+  if (!conn?.isConnected()) {
+    _boardPullInFlight.delete(n);
+    showToast('Board not connected', 'error');
+    return;
+  }
 
   const btn = document.getElementById(`b${n}-btn-pull`);
   if (btn) { btn.disabled = true; btn.textContent = 'Pulling…'; }
@@ -4305,6 +4355,11 @@ async function boardPull(n) {
   // Only restore slot-n's pull button if we didn't migrate away from it
   // (migration calls updateConnectionUI(n, false) which already disables it)
   if (!migrated && btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
+
+  // Release the in-flight guard — pull is complete (success or fail).
+  // On migration we release the original slot only; the new slot was never
+  // in the in-flight set.
+  _boardPullInFlight.delete(n);
 }
 
 // Fetch the firmware version string directly from the board and display it.
@@ -5245,7 +5300,22 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
   // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
   const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;
   const pullRelayFc = boardConfigs[relayN]?.funcChar || '?';
-  await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
+  try {
+    await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
+  } catch (e) {
+    // If the send itself throws (e.g. relay just disconnected), release the
+    // in-flight marker so a subsequent ETM-online event can re-trigger the
+    // pull. Otherwise the slot is permanently locked until the next page
+    // reload. The terminal-state delete calls (success / parse-error /
+    // max-retry) all run after sendAndCollect resolves, so we have to
+    // also cover the failed-send case explicitly.
+    _pullingBoards.delete(targetN);
+    cleanup();
+    if (timer) clearTimeout(timer);
+    termLog(relayN, `[Remote] Send to relay failed: ${e.message}`, 'err');
+    updateBoardStatusBadge(targetN, 'error');
+    throw e;
+  }
 }
 
 // Convenience wrapper — uses the relay tracked for this board
@@ -6335,6 +6405,21 @@ function wizardInitBoards(qty) {
     prev[i] ?? wizardDefaultBoard(i + 1)
   );
   if (wizardState.kyberBoard > qty) wizardState.kyberBoard = 1;
+
+  // When the board count shrinks, any maestros/kybers that referenced a now-
+  // truncated slot would later dereference ws.boards[m.boardSlot-1].wcbNumber
+  // and throw (TypeError: cannot read property 'wcbNumber' of undefined).
+  // Drop those orphaned entries here so identity / kyber / maestro / serial
+  // steps and wizardExportConfig all see a self-consistent state.
+  if (Array.isArray(wizardState.maestros)) {
+    wizardState.maestros = wizardState.maestros.filter(m => m.boardSlot >= 1 && m.boardSlot <= qty);
+  }
+  if (Array.isArray(wizardState.kybers)) {
+    wizardState.kybers = wizardState.kybers.filter(k => k.boardSlot >= 1 && k.boardSlot <= qty);
+  }
+  // If kyberBoard was already valid (<= qty) and pointed at a slot that's
+  // now a Client (post-Phase-B), the kyber/maestro steps will catch and re-
+  // prompt; nothing to truncate here.
 }
 
 // ── Step list ──────────────────────────────────────────────────────
@@ -6955,7 +7040,17 @@ function wizardHTMLKyberConfig() {
   // don't have the firmware to drive a Kyber. Snap kyberBoard to a WCB slot
   // first so the dropdown's selected value always points at something valid.
   const firstWcb = wizardNextWcbSlot(1);
-  if (firstWcb && (wizardState.boards[wizardState.kyberBoard - 1]?.type || 'wcb') === 'client') {
+  if (!firstWcb) {
+    // All Clients — no valid kyber host. Same banner pattern as Maestro.
+    return `
+      <div class="wizard-section-title">Kyber Setup</div>
+      <div class="wizard-warn-banner" style="background:#fffbe8;border:1px solid #e8c850;padding:12px;border-radius:6px;margin-top:10px">
+        ⚠️ No WCB slots are configured — every slot in this system is a WCB_Client.
+        A Kyber sound controller can only be hosted by a WCB (Clients run their own sketch).
+        Go back and change at least one slot's <b>Type</b> to <b>WCB</b>, or skip Kyber.
+      </div>`;
+  }
+  if ((wizardState.boards[wizardState.kyberBoard - 1]?.type || 'wcb') === 'client') {
     wizardState.kyberBoard = firstWcb;
   }
   const { kyberBoard, kyberPort, kyberBaud, kyberMarcduinoPort, quantity } = wizardState;
@@ -7047,7 +7142,21 @@ function wizardHTMLMaestroConfig() {
   // Maestros can only live on WCB slots (Clients run their own sketch and
   // don't have the WCB firmware to drive a Maestro). Snap any maestro
   // currently pointing at a Client slot to the first WCB slot.
-  const firstWcb = wizardNextWcbSlot(1) || 1;
+  const firstWcb = wizardNextWcbSlot(1);
+  if (!firstWcb) {
+    // All slots are Clients — there's no WCB to host a Maestro. Render a
+    // banner explaining this; do NOT seed a maestros[] entry on a Client
+    // slot (would later dereference ws.boards[0].wcbNumber for the WCB
+    // build, even though slot 1 is a Client).
+    wizardState.maestros = [];   // clear any stale entries from before re-type
+    return `
+      <div class="wizard-section-title">Maestro Servo Controller Configuration</div>
+      <div class="wizard-warn-banner" style="background:#fffbe8;border:1px solid #e8c850;padding:12px;border-radius:6px;margin-top:10px">
+        ⚠️ No WCB slots are configured — every slot in this system is a WCB_Client.
+        A Pololu Maestro can only be controlled by a WCB (Clients run their own sketch).
+        Go back and change at least one slot's <b>Type</b> to <b>WCB</b>, or skip Maestro.
+      </div>`;
+  }
   wizardState.maestros.forEach(m => {
     if ((wizardState.boards[m.boardSlot - 1]?.type || 'wcb') === 'client') {
       m.boardSlot = firstWcb;
@@ -7916,8 +8025,10 @@ function wizardExportConfig() {
     });
 
     // Client slots get only the metadata above — no Kyber/Maestro/ETM
-    // routing (clients run their own sketch).
-    if (cfg.type === 'client') return;
+    // routing (clients run their own sketch). Return the metadata-only
+    // cfg so it's still in the exported file (otherwise .map() yields
+    // `undefined` here and buildSystemFile crashes on board.wcbNumber).
+    if (cfg.type === 'client') return cfg;
 
     if (ws.kyberEnabled) {
       if ((i + 1) === ws.kyberBoard) {
@@ -8733,21 +8844,26 @@ async function fetchHCRStatus() {
 
   const conn = boardConnections[n];
   if (!conn?.isConnected()) {
-    // HCR status is a board-local query; v1 supports the directly-connected
-    // board (the usual case while configuring). Relay support can come later.
+    // Pre-await — modal state can't have changed yet; safe to write directly.
     out.textContent = remoteRelayForBoard[n]
       ? 'Open HCR Status on the board the HCR is directly connected to (relay not supported yet).'
       : 'Board not connected.';
     return;
   }
   const fc = boardConfigs[n]?.funcChar || '?';
+  // Helper: drop the result if the user closed the modal or switched to a
+  // different board / a different stats view while sendAndCollect was awaiting.
+  // Otherwise a late HCR response would overwrite the freshly-opened view.
+  const stillCurrent = () => _hcrModalN === n;
   try {
     const raw  = await conn.sendAndCollect(`${fc}HCR,STATUS`, 2500, '[HCR:');
+    if (!stillCurrent()) return;
     const hcrLine = (raw || '').split('\n').reverse().find(l => l.includes('[HCR:'));
     out.textContent = hcrLine
       ? _renderHCRStatus(hcrLine)
       : 'No HCR status response (timed out). Is HCR configured and the board on HCR firmware?';
   } catch (e) {
+    if (!stillCurrent()) return;
     out.textContent = `HCR status error: ${e.message || e}`;
   }
 }

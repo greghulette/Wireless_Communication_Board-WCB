@@ -149,8 +149,12 @@ void rtermRelayHandlePacket(const uint8_t *data) {
   memcpy(item.text, pkt.text, pkt.textLen);
   item.text[pkt.textLen] = '\0';
 
-  // Non-blocking send — drop if queue is full rather than blocking WiFi task
-  xQueueSendFromISR(s_rtermQueue, &item, nullptr);
+  // Non-blocking send — drop if queue is full rather than blocking WiFi task.
+  // This runs in the WiFi-task context (NOT an ISR), so use xQueueSend with a
+  // zero timeout instead of xQueueSendFromISR. The FromISR variant has stricter
+  // calling rules and a different higher-priority-task-woken contract that
+  // doesn't apply outside ISR context.
+  xQueueSend(s_rtermQueue, &item, 0);
 }
 
 // Called from loop() on the relay board — safe to do serial I/O here.
