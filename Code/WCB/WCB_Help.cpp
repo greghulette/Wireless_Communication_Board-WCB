@@ -398,31 +398,6 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WCBQx   (e.g. ?WCBQ2)"));
 
     // ================================================================
-    } else if (c == "ALIAS") {
-        Serial.println(F("---------------------------------------------------"));
-        Serial.println(F("---------------------------------------------------"));
-        Serial.println(F("\nUsage: ?ALIAS,<text>   /   ?ALIAS,CLEAR   /   ?ALIAS,LIST"));
-        Serial.println(F("\nDescription:"));
-        Serial.println(F("  Friendly per-WCB name (e.g. Body / Dome). Saved to NVS,"));
-        Serial.println(F("  included in the config backup, and shown in the Wizard"));
-        Serial.println(F("  header alongside the WCB number. Maximum 24 characters"));
-        Serial.println(F("  (truncated on save)."));
-        Serial.println(F("\nCommands:"));
-        Serial.println(F("  ALIAS,<text>     Set this WCB's alias"));
-        Serial.println(F("  ALIAS,CLEAR      Remove the alias"));
-        Serial.println(F("  ALIAS,LIST       Show the current alias"));
-        Serial.println(F("\nExamples:"));
-        Serial.println(F("  ?ALIAS,Body              - Name this WCB \"Body\""));
-        Serial.println(F("  ?ALIAS,Dome Servos       - Multi-word alias"));
-        Serial.println(F("  ?ALIAS,LIST              - Show current alias"));
-        Serial.println(F("  ?ALIAS,CLEAR             - Remove the alias"));
-        Serial.println(F("\nNotes:"));
-        Serial.println(F("  - Each WCB stores its OWN alias (this command is local-only)"));
-        Serial.println(F("  - Round-trips through the config backup as ?ALIAS,<text>"));
-        Serial.println(F("  - Avoid the command delimiter character in the alias"));
-        Serial.println(F("  - Saved to NVS and persists across reboots"));
-
-    // ================================================================
     } else if (c == "MAESTRO") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -537,7 +512,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      (S3-S5 software serial: 9600 only)"));
         Serial.println(F("  CLEAR             Release the HCR port"));
         Serial.println(F("  LIST              Show HCR configuration and link status"));
-        Serial.println(F("  POLL,<sec>        Auto-poll interval, min 3s (default 10; OFF to stop)"));
+        Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
         Serial.println(F("  STATUS            Show cached HCR status  [HCR:...]"));
         Serial.println(F("  REFRESH           Poll the HCR immediately"));
         Serial.println(F("  GET,<field>       Query one value (EMOTION,H|S|M|C /"));
@@ -576,10 +551,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;W2,;H,STIM,M,STRONG          - Stimulate WCB2's HCR"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
-        Serial.println(F("  - Any serial port works (S3-S5 capped at 9600 = HCR"));
-        Serial.println(F("      default); min 3s poll keeps every port safe"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
-        Serial.println(F("  - RC-Controller raw forward to this port still works"));
         Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
         Serial.println(F("      periodic received status; ?DEBUG,HCR,OFF / dhcroff"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
@@ -816,7 +788,6 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?LED,PIN,x      Set NeoPixel LED GPIO pin (HW 3.1/3.2, saved to NVS)"));
         Serial.println(F("    ?WCB,x          Set this board's number (1-9)"));
         Serial.println(F("    ?WCBQ,x         Set total boards in system"));
-        Serial.println(F("    ?ALIAS,<text>   Friendly name for this WCB (e.g. Body)"));
         Serial.println(F("    ?MAC,2,xx       Set 2nd MAC group octet (all boards must match)"));
         Serial.println(F("    ?MAC,3,xx       Set 3rd MAC group octet (all boards must match)"));
         Serial.println(F("    ?EPASS,pass     Set ESP-NOW password   (all boards must match)"));

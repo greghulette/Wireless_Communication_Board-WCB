@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_271541RMAY2026                                  *****////
+///*****                                          Version 6.1.0_011151RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -154,7 +154,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_271541RMAY2026";
+String SoftwareVersion = "6.1.0_011151RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -241,7 +241,12 @@ bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
 // (24.85 days uptime), the signed-cast comparison below would
 // spuriously flip true and start relaying without a host.  Always guard
 // the comparison with a `!= 0` check.
-uint32_t rcJsonRelaySubscribedUntilMs = 0;
+//
+// volatile: written on Core 1 (processWCBMessage in serialCommandTask) and
+// read on Core 0 (rcJsonRelaySubscribed() in the ESP-NOW receive callback).
+// Aligned 32-bit access is atomic on Xtensa, so volatile (no caching/hoist)
+// is sufficient — no queue/mutex needed for this single scalar.
+volatile uint32_t rcJsonRelaySubscribedUntilMs = 0;
 
 // Helper for the "relay is currently subscribed" check.  Uses the signed-
 // difference trick so it survives millis() wraparound CORRECTLY: while
@@ -266,14 +271,21 @@ static inline bool rcJsonRelaySubscribed() {
 // Instead, push the JSON line into a FreeRTOS queue, and drain the queue
 // from the main loop (Core 1) where it can write without contention.
 //
-// Sized to handle a 40-fragment GET_CONFIG response in burst.
-// 48 × 220 = ~10.5 KB heap — acceptable on the ESP32.
-constexpr size_t RC_JSON_QUEUE_SLOTS = 48;
+// Sized to comfortably exceed a 40-fragment GET_CONFIG burst PLUS the RC's
+// concurrent rc_hb / rc_ch telemetry that may interleave with it.
+// 64 × 220 = ~14 KB heap — acceptable on the ESP32, and the extra headroom
+// over the bare 40-fragment burst is what keeps a config pull from dropping
+// a fragment if loop() stalls briefly (e.g. on an NVS commit).
+constexpr size_t RC_JSON_QUEUE_SLOTS = 64;
 constexpr size_t RC_JSON_MAX_LEN     = 220;
 struct RcJsonRelaySlot {
   char buf[RC_JSON_MAX_LEN];
 };
 QueueHandle_t rcJsonRelayQueue = nullptr;
+// Diagnostic: counts JSON lines dropped because the relay queue was full.
+// A silent drop makes a browser config-pull time out with no explanation;
+// surfacing the count turns that into a diagnosable event.
+volatile uint32_t rcJsonRelayDrops = 0;
 
 // Drains the relay queue to Serial.  Safe to call frequently from the main
 // loop; runs in bounded time (drains whatever fits in one swing, returns
@@ -295,7 +307,16 @@ static inline void enqueueRcJsonRelay(const String& jsonLine) {
   RcJsonRelaySlot slot;
   strncpy(slot.buf, jsonLine.c_str(), sizeof(slot.buf) - 1);
   slot.buf[sizeof(slot.buf) - 1] = '\0';
-  xQueueSend(rcJsonRelayQueue, &slot, 0);
+  // Non-blocking (0 timeout): a full queue drops the line rather than
+  // blocking the WiFi task.  But count + log the drop — a dropped CONFIG
+  // fragment silently fails the browser's reassembly, so we never want this
+  // to be invisible.  (Serial.printf is safe here: drops are rare and this
+  // is the exceptional path, not the per-packet hot path.)
+  if (xQueueSend(rcJsonRelayQueue, &slot, 0) != pdTRUE) {
+    rcJsonRelayDrops++;
+    Serial.printf("[RCBRG] relay queue FULL — dropped a JSON line (total drops=%lu)\n",
+                  (unsigned long)rcJsonRelayDrops);
+  }
 }
 
 // ── Pending-timer-chain queue ─────────────────────────────────────────────
@@ -2862,6 +2883,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // main loop drains the queue safely on Core 1.
                 if (rcJsonRelaySubscribed()) {
                     enqueueRcJsonRelay(etmCmd);
+                    // Keep the subscription hot for the duration of an
+                    // in-flight transfer.  A multi-fragment CONFIG response
+                    // can take >1 s (ETM ACK round-trips + retries); if the
+                    // 20 s window happened to be near its edge, the tail
+                    // fragments would be dropped at the gate.  Relaying a
+                    // fragment is itself proof a host is actively pulling,
+                    // so push the deadline forward.
+                    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
                 }
                 colorWipeStatus("ES", blue, 10);
                 return;
@@ -3093,6 +3122,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
     if (rcJsonRelaySubscribed()) {
       enqueueRcJsonRelay(receivedCmd);
+      // Keep the subscription hot during an in-flight transfer — see the
+      // matching comment in the ETM passthrough path above.
+      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
     }
     colorWipeStatus("ES", blue, 10);
     return;
