@@ -13,7 +13,13 @@
 #endif
 
 
-#include <String.h>
+#include <string.h>   // WCB: was <String.h> (capital S). The Arduino String
+                      // class comes from <Arduino.h> (included above); this is
+                      // the C string header. Capital "String.h" only resolves
+                      // on case-insensitive filesystems (Windows/macOS) and
+                      // breaks the case-sensitive Linux CI build. Lowercased to
+                      // compile everywhere — identical to what Windows/macOS
+                      // already resolve it to.
 #include <SoftwareSerial.h>
 #include <Wire.h>
 
