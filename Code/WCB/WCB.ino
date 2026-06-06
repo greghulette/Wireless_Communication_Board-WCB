@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_041831RJUN2026                                  *****////
+///*****                                          Version 6.1.0_061312RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -155,7 +155,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_041831RJUN2026";
+String SoftwareVersion = "6.1.0_061312RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4859,20 +4859,27 @@ void processWCBMessage(const String &message){
   // cadence so a single missed keep-alive doesn't kill the relay.
   rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
-  // New format: comma present after the WCB number → greedy digit parse
-  // e.g. ;w1,RA  or  ;w13,RA
-  // Old format: no comma → single digit assumed (backward compatible)
-  // e.g. ;w1RA
-  int commaPos = message.indexOf(',');
-  if (commaPos > 1) {
-    // New format: digits between position 1 and comma
-    targetWCB = message.substring(1, commaPos).toInt();
-    espnow_message = message.substring(commaPos + 1);
-  } else {
-    // Old format: single digit at position 1, command starts at position 2
-    targetWCB = message.substring(1, 2).toInt();
-    espnow_message = message.substring(2);
-  }
+  // Parse the target WCB number as the LEADING RUN OF DIGITS after 'w'/'W',
+  // then take everything after it as the command — skipping ONE optional
+  // comma separator (the explicit ;w<id>,<cmd> form).
+  //
+  // We must NOT split on a comma that appears later inside the command
+  // payload. e.g.  ;w2;s4:PP100,50:W42:P  must route the WHOLE
+  // ";s4:PP100,50:W42:P" to WCB2 verbatim. The previous logic split on the
+  // FIRST comma anywhere in the string, so any forwarded command containing a
+  // comma was truncated at that comma (it wrongly sent only "50:W42:P").
+  //
+  // Handles all forms:
+  //   ;w2RA                  -> target 2,  cmd "RA"          (digit, no separator)
+  //   ;w13,RA                -> target 13, cmd "RA"          (multi-digit, comma sep)
+  //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P"  (comma in payload)
+  //   ;w13;s4:cmd,with,commas-> target 13, cmd ";s4:cmd,with,commas"
+  int idx = 1;
+  while (idx < (int)message.length() &&
+         message[idx] >= '0' && message[idx] <= '9') idx++;
+  targetWCB = message.substring(1, idx).toInt();
+  if (idx < (int)message.length() && message[idx] == ',') idx++;  // optional separator
+  espnow_message = message.substring(idx);
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
