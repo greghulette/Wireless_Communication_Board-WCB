@@ -131,7 +131,10 @@ fi
 #   ESP32:   bootloader → 0x1000   partitions → 0x8000   app → 0x10000
 #   ESP32S3: bootloader → 0x0      partitions → 0x8000   app → 0x10000
 # NVS at 0x9000 is never written — preserved on existing boards.
-rm -f "$OUTPUT_DIR"/*.bin
+# Only remove the version-named files THIS script owns (WCB_*_ESP32*.bin) —
+# a bare *.bin wipe would also delete hand-placed bins like the custom
+# short-watchdog bootloader (WCB_S3_custom_bootloader_*.bin).
+rm -f "$OUTPUT_DIR"/WCB_*_ESP32*.bin
 
 cp "$TMP_ESP32/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32.bin"
 cp "$TMP_ESP32/WCB.ino.bootloader.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32_boot.bin"

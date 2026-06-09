@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_061312RJUN2026                                  *****////
+///*****                                          Version 6.1.0_091542RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -86,10 +86,12 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
 #include "WCB_HCR.h"
+#include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
+#include "esp_timer.h"   // one-shot boot-guard timer (cold-boot auto-recovery)
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
@@ -155,7 +157,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_061312RJUN2026";
+String SoftwareVersion = "6.1.0_091542RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2312,6 +2314,9 @@ String buildConfigString() {
   // HCR settings
   { String dummy; printHCRBackup(dummy, out, '^'); }
 
+  // User variables (;V,name,value per variable)
+  { String dummy; printVariablesBackup(dummy, out, '^'); }
+
   // ETM settings
   append(etmEnabled ? "ETM,ON" : "ETM,OFF");
   append("ETM,TIMEOUT," + String(etmTimeoutMs));
@@ -3261,8 +3266,31 @@ void forwardMaestroDataToRemoteKyber() {
 //*******************************
 /// Processing Input Functions
 //*******************************
+// Conditional-execution gate. An IF whose condition is false sets this so the
+// VERY NEXT command is skipped (single-command gate). Reset after each queue
+// drain (see loop()) so a trailing/dangling IF can't leak to the next batch.
+// See VARIABLES_DESIGN.md.
+bool skipNextCommand = false;
+
 void handleSingleCommand(String cmd, int sourceID) {
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
+
+    // ── Conditional gate ────────────────────────────────────────────────
+    // If the previous IF evaluated false, swallow exactly this one command.
+    if (skipNextCommand) {
+        skipNextCommand = false;
+        if (debugEnabled) Serial.printf("[VAR] IF gate: skipped '%s'\n", cmd.c_str());
+        return;
+    }
+    // IF,<conditions> — evaluate against variables; on false, gate the next cmd.
+    {
+        String u = cmd; u.trim();
+        if (u.length() >= 3 &&
+            (u[0] == 'I' || u[0] == 'i') && (u[1] == 'F' || u[1] == 'f') && u[2] == ',') {
+            if (!evaluateIfCondition(u.substring(3))) skipNextCommand = true;
+            return;
+        }
+    }
 
     // 0) Fixed webtool bootstrap command — always recognised regardless of
     //    configured LocalFunctionIdentifier.  Allows the config web tool to
@@ -3727,6 +3755,14 @@ void processLocalCommand(const String &message) {
     // --- ?HCR,... (Human-Cyborg Relations config/query) ---
     if (rootUpper == "HCR") {
         configureHCR(args);
+        return;
+    }
+
+    // --- ?VAR,... (user variable management) ---
+    //   ?VAR,LIST | ?VAR,GET,<name> | ?VAR,CLEAR,<name|ALL>
+    //   (set is the runtime command ;V,<name>,<value>; see VARIABLES_DESIGN.md)
+    if (rootUpper == "VAR") {
+        processVarConfig(args);
         return;
     }
 
@@ -4641,6 +4677,9 @@ void updateHWVersion(const String &message) {
     // ---- HCR Settings ----
     printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
 
+    // ---- User Variables (;V,name,value) ----
+    printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+
     // ---- ETM Settings ----
     cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
     Serial.println(lfi + cmd);
@@ -4801,6 +4840,8 @@ void processCommandCharcter(const String &message, int sourceID) {
       processMP3AudioCommand(message);
     } else if (message.startsWith("h") || message.startsWith("H")) {
       processHCRRuntimeCommand(message);
+    } else if (message.startsWith("v") || message.startsWith("V")) {
+      processSetVariable(message);   // ;V,<name>,<value|TOGGLE|INC[,n]|DEC[,n]|true|false>
     } else {
         Serial.println("Invalid Serial Command");
     }
@@ -5416,7 +5457,52 @@ void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt =
 }
 // ============================= Setup & Loop =============================
 
+// ── Cold-boot auto-recovery (boot guard) ───────────────────────────────────
+// On a cold / marginal power-up the board can stall somewhere in setup() — the
+// RMT/NeoPixel init, the boot delays, or the WiFi/ESP-NOW bring-up current
+// spike on a still-cold rail — and sit dark until someone presses the reset
+// button. The IDF bootloader's own watchdog is disabled right BEFORE setup()
+// runs, so a hang in here has nothing watching it: the board just stays dark.
+//
+// This one-shot esp_timer fires if setup() hasn't completed within
+// BOOT_GUARD_TIMEOUT_MS and forces a restart, so the board AUTO-RETRIES the
+// cold boot (re-trying until the rail/oscillator is stable enough to come all
+// the way up) instead of needing a human to press reset. The callback runs in
+// the esp_timer task — independent of the loop task that runs setup() — so a
+// hung setup() can't stop it from firing. It is cancelled at the end of a
+// successful setup(), so a healthy board never trips it.
+//
+// 10 s is comfortably longer than a normal boot (~3-4 s, even with the LED
+// retry loop) so it never false-triggers. Lower it for snappier cold recovery
+// ONLY after bench-confirming your worst-case normal boot time.
+#define BOOT_GUARD_TIMEOUT_MS 10000
+static esp_timer_handle_t _bootGuardTimer = nullptr;
+static void _bootGuardFired(void*) { ESP.restart(); }
+
+static void bootGuardArm() {
+  esp_timer_create_args_t args = {};
+  args.callback        = &_bootGuardFired;
+  args.arg             = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name            = "bootguard";
+  if (esp_timer_create(&args, &_bootGuardTimer) == ESP_OK) {
+    esp_timer_start_once(_bootGuardTimer, (uint64_t)BOOT_GUARD_TIMEOUT_MS * 1000ULL);
+  }
+}
+
+static void bootGuardDisarm() {
+  if (_bootGuardTimer) {
+    esp_timer_stop(_bootGuardTimer);
+    esp_timer_delete(_bootGuardTimer);
+    _bootGuardTimer = nullptr;
+  }
+}
+
 void setup() {
+  // Arm the boot guard FIRST so it covers the entire setup() (including the
+  // USB-stabilize and RMT delays below). Disarmed at the very end of setup().
+  bootGuardArm();
+
 
   // Enlarge the UART0 RX ring buffer (default 256 B) BEFORE Serial.begin().
   // Config pushes from the web tool arrive as a rapid burst of commands; each
@@ -5445,6 +5531,7 @@ void setup() {
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
   loadHCRSettings();      // Load HCR configuration from NVS
+  loadVariables();        // Build the user-variable RAM mirror from NVS
   beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
@@ -5571,6 +5658,13 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   }
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
+
+  // Trim the radio TX power. Default full power draws the largest current
+  // spike of the whole boot the instant the radio comes up — on a cold /
+  // marginal rail that spike is a prime trigger for a sag-induced stall.
+  // 8.5 dBm is plenty for the short-range WCB mesh and roughly halves that
+  // peak draw. (ESP-NOW range stays fine at close droid distances.)
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
 
   // Dynamically update MAC addresses based on stored umac_oct2 & umac_oct3
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
@@ -5717,8 +5811,13 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   xTaskCreatePinnedToCore(RawSerialForwardingTask, "Raw Serial Task", 4096, NULL, 1, NULL, 1);
   Serial.println("Raw Serial Forwarding Task Created");
   
-  delay(150);     
+  delay(150);
   turnOffLED();
+
+  // setup() reached the end successfully — cancel the boot guard so the
+  // running board can never be reset by it. (loop() only starts after this
+  // returns, so from here on a healthy board is never watched by the guard.)
+  bootGuardDisarm();
   // Serial.println("------------- Setup Complete-----------------");
 }
 
@@ -5738,9 +5837,14 @@ void loop() {
   // Handle queued commands
   if (!commandQueue) return;
   CommandQueueItem inItem;
+  bool drainedAny = false;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
+    drainedAny = true;
     String commandStr(inItem.cmd);
     free(inItem.cmd);
     handleSingleCommand(commandStr, inItem.sourceID);
   }
+  // Safety: a trailing IF (last command in a batch, with nothing after it to
+  // gate) must not leak its skip into the next, unrelated batch.
+  if (drainedAny) skipNextCommand = false;
 }
