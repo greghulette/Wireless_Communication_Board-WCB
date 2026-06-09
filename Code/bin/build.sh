@@ -131,9 +131,37 @@ fi
 #   ESP32:   bootloader → 0x1000   partitions → 0x8000   app → 0x10000
 #   ESP32S3: bootloader → 0x0      partitions → 0x8000   app → 0x10000
 # NVS at 0x9000 is never written — preserved on existing boards.
+
+# ── S3 ships the CUSTOM short-watchdog bootloader ───────────────────────────
+# The S3 _boot.bin artifact is deliberately NOT the stock compiled bootloader:
+# it's the hand-verified custom one (RTC WDT 9000→3000 ms) so every board
+# flashed from the web config tool gets the cold-boot auto-recovery fix.
+# Identical to stock Arduino 3.3.4 otherwise (16MB/QIO-autodetect/80m — see
+# WCB_S3_custom_bootloader_README.md; built from the Arduino sdkconfig).
+# Classic ESP32 (PICO) boards keep the stock compiled bootloader — they don't
+# exhibit the cold-boot stall and the custom bin is S3/16MB-only.
+CUSTOM_S3_BOOT="$OUTPUT_DIR/WCB_S3_custom_bootloader_16MB_wdt3s.bin"
+if [ ! -f "$CUSTOM_S3_BOOT" ]; then
+    echo "✗ ERROR: custom S3 bootloader missing: $CUSTOM_S3_BOOT"
+    echo "  Refusing to publish — S3 releases must carry the short-WDT bootloader."
+    rm -rf "$TMP_ESP32" "$TMP_S3"
+    exit 1
+fi
+# Sanity: ESP image magic (0xE9) + declared flash size 16MB (byte3 hi-nibble 4)
+PY_BIN="$(command -v python3 || command -v python)"
+if ! "$PY_BIN" - "$CUSTOM_S3_BOOT" <<'PYEOF'
+import sys
+h = open(sys.argv[1], "rb").read(4)
+sys.exit(0 if (h[0] == 0xE9 and (h[3] >> 4) == 4) else 1)
+PYEOF
+then
+    echo "✗ ERROR: $CUSTOM_S3_BOOT failed header sanity check (magic/16MB)."
+    rm -rf "$TMP_ESP32" "$TMP_S3"
+    exit 1
+fi
+
 # Only remove the version-named files THIS script owns (WCB_*_ESP32*.bin) —
-# a bare *.bin wipe would also delete hand-placed bins like the custom
-# short-watchdog bootloader (WCB_S3_custom_bootloader_*.bin).
+# a bare *.bin wipe would also delete the custom bootloader above.
 rm -f "$OUTPUT_DIR"/WCB_*_ESP32*.bin
 
 cp "$TMP_ESP32/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32.bin"
@@ -144,11 +172,12 @@ cp "$TMP_ESP32/WCB.ino.bootloader.bin" "$WIZARD_BIN/WCB_ESP32_boot.bin"
 cp "$TMP_ESP32/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32_part.bin"
 
 cp "$TMP_S3/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3.bin"
-cp "$TMP_S3/WCB.ino.bootloader.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
+cp "$CUSTOM_S3_BOOT"                "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
 cp "$TMP_S3/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_part.bin"
 cp "$TMP_S3/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32S3.bin"
-cp "$TMP_S3/WCB.ino.bootloader.bin" "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
+cp "$CUSTOM_S3_BOOT"                "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
 cp "$TMP_S3/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32S3_part.bin"
+echo "✓ S3 _boot artifacts = CUSTOM short-WDT bootloader ($CUSTOM_S3_BOOT)"
 
 rm -rf "$TMP_ESP32" "$TMP_S3"
 
