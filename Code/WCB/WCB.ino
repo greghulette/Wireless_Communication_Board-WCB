@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_091542RJUN2026                                  *****////
+///*****                                          Version 6.1.0_091611RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -92,6 +92,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_timer.h"   // one-shot boot-guard timer (cold-boot auto-recovery)
+#include "esp_ota_ops.h" // esp_ota_get_bootloader_description (boot banner)
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
@@ -157,7 +158,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_091542RJUN2026";
+String SoftwareVersion = "6.1.0_091611RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5268,6 +5269,40 @@ void printResetReason() {
     }
 }
 
+// Report at boot which 2nd-stage bootloader is on the board. Reads the
+// esp_bootloader_desc_t embedded in every IDF 5.2+ bootloader image — no
+// flash dump needed. The CUSTOM short-watchdog bootloader (RTC WDT 9000 →
+// 3000 ms, cold-boot auto-retry) is identified by its unique build
+// timestamp; stock Arduino-core bootloaders carry Espressif's build date
+// (e.g. "Nov 12 2025"). If the custom bootloader is ever REBUILT, add the
+// new build's date_time to the table below (read it from this very banner).
+void printBootloaderInfo() {
+    static const char *CUSTOM_BOOT_DATES[] = {
+        "Jun  8 2026 16:02:21",   // WCB_S3_custom_bootloader_16MB_wdt3s.bin
+    };
+    esp_bootloader_desc_t desc;
+    if (esp_ota_get_bootloader_description(NULL, &desc) == ESP_OK) {
+        bool custom = false;
+        for (size_t i = 0; i < sizeof(CUSTOM_BOOT_DATES) / sizeof(CUSTOM_BOOT_DATES[0]); i++) {
+            if (strncmp(desc.date_time, CUSTOM_BOOT_DATES[i], sizeof(desc.date_time)) == 0) {
+                custom = true;
+                break;
+            }
+        }
+        if (custom) {
+            Serial.printf("Bootloader: CUSTOM short-WDT (cold-boot auto-retry) — built %s\n",
+                          desc.date_time);
+        } else {
+            Serial.printf("Bootloader: stock (IDF %s, built %s)\n",
+                          desc.idf_ver, desc.date_time);
+        }
+    } else {
+        // Pre-IDF-5.2 bootloaders have no description block (older deployed
+        // classic-ESP32 boards) — not an error, just unidentifiable.
+        Serial.println("Bootloader: unknown (no description block — old image)");
+    }
+}
+
 /// Task Definition for multi threading.  Act as separate loops within the main loop.
 void KyberLocalTask(void *pvParameters) {
     while (true) {
@@ -5536,7 +5571,8 @@ void setup() {
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
-  printResetReason();  // Show the exact cause of reset
+  printResetReason();      // Show the exact cause of reset
+  printBootloaderInfo();   // CUSTOM short-WDT bootloader vs stock
   loadWCBNumberFromPreferences();
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
