@@ -45,8 +45,13 @@ void configureHCR(const String &args);
 void clearHCRConfig();
 void printHCRSettings();     // ?HCR,LIST
 void printHCRStatus();       // ?HCR,STATUS  ->  [HCR:...]
+// defSep/defFunc: separator + function-identifier used for the FACTORY chain
+// (chainedConfigDefault). printBackupConfig passes its live defaultSep/
+// defaultFunc, which flip after the chain replays ?DELIM/?FUNCCHAR — never
+// hardcode '^'/'?' inside an emitter or custom-delimiter restores break.
 void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial = false);
+                    char delimiter, bool printToSerial = false,
+                    const String &defSep = "^", const String &defFunc = "?");
 
 // ---- Loop tick — non-blocking update + auto-poll; call once per loop ----
 void processHCRTick();

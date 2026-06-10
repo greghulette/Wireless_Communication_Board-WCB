@@ -112,10 +112,16 @@ async function getBinaryData(binaryType, onLog) {
         { buf: bootBuf, address: bootAddr },
         { buf: partBuf, address: 0x8000  },
       );
-    } catch (_) {
+    } catch (e) {
+      // The _boot.bin/_part.bin files DO exist on GitHub — landing here means
+      // a transient fetch failure (rate limit, network). Without the partition
+      // image we cannot run the partition-table migration check, so make this
+      // loud instead of pretending it's expected.
       hasBootPart = false;
-      onLog('Note: bootloader/partition files not on GitHub yet — flashing app only');
-      showToast('Boot files not found — flashing app only (blank boards may need manual flash)', 'info', 8000);
+      onLog(`⚠️ Could not fetch bootloader/partition files (${e.message}) — flashing app only;`);
+      onLog('   the partition-table migration check was SKIPPED this run. If this persists,');
+      onLog('   wait a minute (GitHub rate limit) and try again.');
+      showToast(`⚠️ Could not fetch bootloader/partition files (${e.message}) — flashing app only; partition-table migration check SKIPPED this run`, 'warning', 10000);
     }
 
     const totalKB = Math.round(images.reduce((s, i) => s + i.buf.byteLength, 0) / 1024);
@@ -171,6 +177,31 @@ function bufToLatin1(buf) {
     s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
   }
   return s;
+}
+
+// ─── Partition-table comparison ──────────────────────────────────
+// Compares the on-board partition table at 0x8000 against the new partition
+// image we're about to flash. Returns:
+//   'match'      — tables identical, app-only flash is safe
+//   'mismatch'   — partition scheme changed (e.g. default → min_spiffs);
+//                  a full bootloader+partitions+app flash is required
+//   'unreadable' — flash read unavailable/failed; caller decides how to react
+//                  (auto-detect mode forces a safe full flash; update mode
+//                  stays conservative and keeps app-only)
+async function comparePartitionTable(loader, partImg) {
+  try {
+    const readFlashFn = loader.readFlash ?? loader.read_flash;
+    if (typeof readFlashFn !== 'function') return 'unreadable';
+    const CMP_LEN = 0x200;  // covers all partition entries; before any MD5/padding
+    const want = new Uint8Array(partImg.buf, 0, Math.min(CMP_LEN, partImg.buf.byteLength));
+    const got0 = await readFlashFn.call(loader, 0x8000, want.length);
+    const got  = got0 instanceof Uint8Array ? got0 : new Uint8Array(got0.buffer ?? got0);
+    let same = got.length >= want.length;
+    for (let i = 0; same && i < want.length; i++) if (got[i] !== want[i]) same = false;
+    return same ? 'match' : 'mismatch';
+  } catch (_) {
+    return 'unreadable';
+  }
 }
 
 // ─── Main flash function ──────────────────────────────────────────
@@ -258,9 +289,38 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   let imagesToFlash;
 
   if (appOnly) {
-    // Explicit app-only update: skip detection, never touch bootloader/NVS
-    imagesToFlash = flashImages.filter(img => img.address === 0x10000);
-    onLog('App-only update — bootloader, partitions, and NVS will not be touched');
+    // Explicit app-only update — but FIRST check for a partition-scheme
+    // migration (default → min_spiffs). Boards that only ever use "Update FW"
+    // would otherwise never migrate to the new table, and once the app
+    // outgrows the old scheme's app slot an app-only write would brick them.
+    // On mismatch, escalate ONCE to the full image set (bootloader +
+    // partitions + app). NVS at 0x9000 is NOT in that set and is never
+    // erased here, so saved configuration survives.
+    let migrate = false;
+    const partImg = flashImages.find(img => img.address === 0x8000);
+    if (partImg) {
+      const cmp = await comparePartitionTable(loader, partImg);
+      if (cmp === 'mismatch') {
+        migrate = true;
+        onLog('⚠ Partition table mismatch — performing one-time full update to migrate to the new layout (settings preserved)');
+        showToast('Partition layout updated — performing a one-time full update (settings preserved)', 'info', 8000);
+      } else if (cmp === 'match') {
+        onLog('Partition table matches — proceeding with app-only update');
+      } else {
+        // Update mode is conservative by contract: a failed read must NOT
+        // force a full flash. Just note that the migration check was skipped.
+        onLog('Could not read on-board partition table — migration check skipped, flashing app only');
+      }
+    } else {
+      onLog('No partition image available — migration check skipped, flashing app only');
+    }
+    if (migrate) {
+      imagesToFlash = flashImages;
+      onLog('Full update — bootloader, partitions, and app will be written (NVS untouched)');
+    } else {
+      imagesToFlash = flashImages.filter(img => img.address === 0x10000);
+      onLog('App-only update — bootloader, partitions, and NVS will not be touched');
+    }
   } else if (eraseNvs) {
     // Factory reset: always write the full image (bootloader + partition table + app).
     // The auto-detect below would see the existing valid bootloader (magic 0xE9) and
@@ -304,22 +364,15 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
           if (!partImg) {
             onLog('Existing firmware detected — will flash app only (NVS preserved)');
           } else {
-            try {
-              const CMP_LEN = 0x200;  // covers all partition entries; before any MD5/padding
-              const want = new Uint8Array(partImg.buf, 0, Math.min(CMP_LEN, partImg.buf.byteLength));
-              const got0 = await readFlashFn.call(loader, 0x8000, want.length);
-              const got  = got0 instanceof Uint8Array ? got0 : new Uint8Array(got0.buffer ?? got0);
-              let same = got.length >= want.length;
-              for (let i = 0; same && i < want.length; i++) if (got[i] !== want[i]) same = false;
-              if (same) {
-                onLog('Existing firmware, partition table matches — flashing app only (NVS preserved)');
-              } else {
-                forceFull = true;
-                onLog('⚠ Partition table changed — full flash required (boot + partitions + app).');
-                onLog('  NVS at 0x9000 is NOT erased — your saved configuration is preserved.');
-                showToast('Partition layout updated — performing a one-time full flash (config preserved)', 'info', 8000);
-              }
-            } catch (_) {
+            const cmp = await comparePartitionTable(loader, partImg);
+            if (cmp === 'match') {
+              onLog('Existing firmware, partition table matches — flashing app only (NVS preserved)');
+            } else if (cmp === 'mismatch') {
+              forceFull = true;
+              onLog('⚠ Partition table changed — full flash required (boot + partitions + app).');
+              onLog('  NVS at 0x9000 is NOT erased — your saved configuration is preserved.');
+              showToast('Partition layout updated — performing a one-time full flash (config preserved)', 'info', 8000);
+            } else {
               // Couldn't verify the table — be safe, not fast: a full
               // NVS-preserving flash can never brick; app-only on a
               // mismatched table can. Force full.

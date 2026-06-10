@@ -136,6 +136,12 @@ bool setVariable(const String &name, int32_t value) {
     vars[idx].name[WCB_VAR_NAME_MAX] = '\0';
     vars[idx].used = true;
     varCount++;
+  } else if (vars[idx].value == value) {
+    // Unchanged — skip the NVS commit entirely. Every save rewrites the whole
+    // variable blob to flash (loop() stalls ms per write + erase-cycle wear on
+    // the 20 KB NVS partition), so repeated identical sets from sequences must
+    // not touch flash. RAM mirror is already correct.
+    return true;
   }
   vars[idx].value = value;
   saveVarsToNVS();
@@ -298,6 +304,15 @@ static bool evalOneCondition(const String &cond) {
   return false;
 }
 
+// True if a TRIMMED token is "IF,<...>" (any case). Used by the two chain
+// splitters to resolve gating at invoke time — see WCB_Variables.h notes.
+bool isIfChainToken(const String &trimmedTok) {
+  return trimmedTok.length() >= 3 &&
+         (trimmedTok[0] == 'I' || trimmedTok[0] == 'i') &&
+         (trimmedTok[1] == 'F' || trimmedTok[1] == 'f') &&
+         trimmedTok[2] == ',';
+}
+
 // Full expression: "<cond>[,AND|OR,<cond> ...]"  (left-to-right, no precedence).
 bool evaluateIfCondition(const String &expr) {
   String e = expr; e.trim();
@@ -340,17 +355,18 @@ bool evaluateIfCondition(const String &expr) {
 
 // ---- Backup -------------------------------------------------------------
 void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
-                          char delimiter, bool printToSerial) {
+                          char delimiter, bool printToSerial,
+                          const String &defSep, const String &defFunc) {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
     if (!vars[i].used) continue;
-    String suffix = "V," + String(vars[i].name) + "," + String((long)vars[i].value);
-    // chainedConfig: this board's command char + the given delimiter.
-    String cmd = String(CommandCharacter) + suffix;
+    // Emit as a CONFIG command (?VAR,SET,name,value), not runtime ";V":
+    //  - flows through the Wizard's '^?' chain grammar and per-line parser
+    //  - restores via processVarConfig exactly like every other ? entry
+    // (";V" remains the runtime set/mutate command; backups are config.)
+    String suffix = "VAR,SET," + String(vars[i].name) + "," + String((long)vars[i].value);
+    String cmd = String(LocalFunctionIdentifier) + suffix;
     if (printToSerial) Serial.println(cmd);
     chainedConfig        += String(delimiter) + cmd;
-    // chainedConfigDefault / remote-pull form: factory defaults ('^' + ';'),
-    // so it restores onto a fresh board and the Wizard parser (which assumes
-    // '^' / ';') reads it. Mirrors printHCRBackup's hardcoded "^?".
-    chainedConfigDefault += "^;" + suffix;
+    chainedConfigDefault += defSep + defFunc + suffix;
   }
 }

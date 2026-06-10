@@ -506,7 +506,9 @@ void clearAllMaestroConfigs() {
   saveBroadcastBlockSettings();
 }
 
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial) {
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
+                        char delimiter, bool printToSerial,
+                        const String &defSep, const String &defFunc) {
     bool anyActive = false;
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured) {
@@ -519,12 +521,14 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, cha
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (!maestroConfigs[i].configured) continue;
 
-        String cmd = "?MAESTRO,M" + String(maestroConfigs[i].maestroID);
+        // Build the suffix WITHOUT a hardcoded '?' so both chains can apply
+        // the correct prefix (live funcChar vs factory-chain func id).
+        String suffix = "MAESTRO,M" + String(maestroConfigs[i].maestroID);
 
         if (maestroConfigs[i].serialPort > 0) {
-            cmd += ":W" + String(WCB_Number) +
-                   "S" + String(maestroConfigs[i].serialPort) +
-                   ":" + String(maestroConfigs[i].baudRate);
+            suffix += ":W" + String(WCB_Number) +
+                      "S" + String(maestroConfigs[i].serialPort) +
+                      ":" + String(maestroConfigs[i].baudRate);
         } else {
             // Remote — look up actual port from kyberTargets
             int targetPort = 1;  // fallback
@@ -535,14 +539,15 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, cha
                     break;
                 }
             }
-            cmd += ":W" + String(maestroConfigs[i].remoteWCB) +
-                   "S" + String(targetPort) +
-                   ":" + String(maestroConfigs[i].baudRate);
+            suffix += ":W" + String(maestroConfigs[i].remoteWCB) +
+                      "S" + String(targetPort) +
+                      ":" + String(maestroConfigs[i].baudRate);
         }
 
+        String cmd = String(LocalFunctionIdentifier) + suffix;
         if (printToSerial) Serial.println(cmd);
         chainedConfig += String(delimiter) + cmd;
-        chainedConfigDefault += "^" + cmd;
+        chainedConfigDefault += defSep + defFunc + suffix;
     }
 }
 

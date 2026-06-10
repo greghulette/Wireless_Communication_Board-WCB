@@ -32,8 +32,10 @@ void processMP3AudioCommand(const String &message);   // dispatch ;A,... command
 void configureMP3(const String &args);
 void clearMP3Config();
 void printMP3Settings();
+// defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
 void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial = false);
+                    char delimiter, bool printToSerial = false,
+                    const String &defSep = "^", const String &defFunc = "?");
 
 // ---- Response reader — call once per loop() tick ------------------------
 void processMP3Responses();

@@ -98,6 +98,9 @@ function createDefaultBoardConfig() {
     // Stored Sequences — array of { key, value }
     sequences: [],
 
+    // Variables — array of { name, value } (persistent named int32s on the board)
+    variables: [],
+
     // PWM Output Ports — array of port numbers that are PWM outputs
     pwmOutputPorts: [],
 
@@ -264,6 +267,15 @@ function extractIndividualCommandLines(rawOutput) {
     if (m?.[1]) { funcChar = m[1]; break; }
   }
 
+  // Detect the board's configured cmdChar the same way (e.g. ".CMDCHAR,/").
+  // Older firmware emitted variables as runtime ";V,name,value" lines using the
+  // cmdChar prefix instead of the funcChar-prefixed ?VAR,SET CONFIG form.
+  let cmdChar = ';';
+  for (const line of lines) {
+    const m = line.trim().match(/^.CMDCHAR,(.)/i);
+    if (m?.[1]) { cmdChar = m[1]; break; }
+  }
+
   // Collect individual command lines that appear before the chained sections.
   // The firmware prints one "Serial.println(lfi + cmd)" per command, then the
   // "=== For Configured Boards ===" header marks the start of the chained block.
@@ -279,10 +291,16 @@ function extractIndividualCommandLines(rawOutput) {
     if (trimmed.startsWith('---')) continue;
     if (/^[-=*]+$/.test(trimmed)) continue;
 
-    // Accept lines that start with '?' or the detected funcChar
+    // Accept lines that start with '?' or the detected funcChar.
+    // Also accept legacy runtime variable lines ";V,name,value" (cmdChar
+    // prefix) — normalise them to the VAR,SET CONFIG form for parseToken.
     let body = null;
     if (trimmed.startsWith('?'))               body = trimmed.slice(1);
     else if (trimmed.startsWith(funcChar))     body = trimmed.slice(1);
+    else if (trimmed.startsWith(cmdChar) &&
+             trimmed.slice(1, 3).toUpperCase() === 'V,') {
+      body = 'VAR,SET,' + trimmed.slice(3);
+    }
 
     // Skip lines that start with a known word (non-command output like "WARNING:",
     // "Booting", "ETM:", etc.) — they won't have a single-char funcChar prefix
@@ -303,15 +321,40 @@ function extractChainedTokens(rawOutput) {
   if (!commandString) commandString = rawOutput.trim();
   if (!commandString) return [];
 
+  // Detect the configured cmdChar (appears as a ?CMDCHAR,<c> token in the
+  // chain) so legacy runtime variable segments can be recognised below.
+  const cmdChar = commandString.match(/\?CMDCHAR,(.)/i)?.[1] ?? ';';
+  const cmdEsc  = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // Older firmware emitted variables as runtime "^;V,name,value" segments which
+  // glue onto the END of the previous token when splitting on "^?".  Strip them
+  // off (otherwise they'd fold into a preceding ?SEQ value and corrupt it) and
+  // re-emit them as normalised ?VAR,SET tokens.
+  const legacyVarRe = new RegExp(`\\^${cmdEsc}V,([A-Za-z0-9_]{1,15}),(-?\\d+)$`);
+
   // Split on "^?" boundaries.  ?SEQ,SAVE values embed "^" internally to chain
   // device commands, so we split on the two-char boundary "^?" to avoid tearing
   // saved-sequence values apart.
   const rawParts = commandString.split('^?');
-  return rawParts.map((part, i) => {
-    const trimmed = part.trim();
-    if (!trimmed) return null;
-    return i === 0 ? trimmed : '?' + trimmed; // restore '?' consumed by split
-  }).filter(Boolean);
+  const tokens     = [];
+  const legacyVars = [];
+  for (let i = 0; i < rawParts.length; i++) {
+    let part = rawParts[i].trim();
+    if (!part) continue;
+
+    // Peel trailing legacy variable segments (may be stacked: "...^;V,a,1^;V,b,2")
+    const partVars = [];
+    let m;
+    while ((m = part.match(legacyVarRe))) {
+      partVars.unshift(`?VAR,SET,${m[1]},${m[2]}`);  // unshift keeps original order
+      part = part.slice(0, part.length - m[0].length).trim();
+    }
+    legacyVars.push(...partVars);
+
+    if (!part) continue;
+    tokens.push(i === 0 ? part : '?' + part); // restore '?' consumed by split
+  }
+  return tokens.concat(legacyVars);
 }
 
 // ─────────────────────────────────────────────
@@ -610,6 +653,29 @@ function parseToken(body, config) {
         const value = parts.slice(3).join(',');
         if (key) {
           config.sequences.push({ key, value });
+        }
+      }
+      break;
+    }
+
+    // ── Variables ──
+    case 'VAR': {
+      // ?VAR,SET,name,value — backups emit one per variable (value is an
+      // absolute int, but tolerate TRUE/FALSE which the firmware also accepts).
+      // Other verbs (GET / CLEAR / LIST) are queries/actions — nothing to store.
+      const subCmd = upperParts[1];
+      if (subCmd === 'SET') {
+        const name   = parts[2];                 // case-sensitive
+        const rawVal = (parts[3] ?? '').trim().toUpperCase();
+        if (name) {
+          const value = rawVal === 'TRUE'  ? 1
+                      : rawVal === 'FALSE' ? 0
+                      : (parseInt(parts[3]) || 0);
+          // Upsert by name so a repeated SET can't accumulate duplicates
+          if (!config.variables) config.variables = [];
+          const ex = config.variables.find(v => v.name === name);
+          if (ex) ex.value = value;
+          else    config.variables.push({ name, value });
         }
       }
       break;
@@ -1072,6 +1138,23 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     }
   }
 
+  // ── Variables (per-name diff) ──
+  // Compare name-by-name so a single change doesn't re-push every variable.
+  // Also send VAR,CLEAR for any names removed since the baseline.
+  const baseVarMap = new Map((baseline?.variables ?? []).map(v => [v.name, v.value]));
+  const curVars    = config.variables ?? [];
+  const curVarMap  = new Map(curVars.map(v => [v.name, v.value]));
+  for (const v of curVars) {
+    if (fullPush || !baseline || baseVarMap.get(v.name) !== v.value) {
+      add(`VAR,SET,${v.name},${v.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [name] of baseVarMap) {
+      if (!curVarMap.has(name)) add(`VAR,CLEAR,${name}`);
+    }
+  }
+
   // ── Maestros ──
   // The ?KYBER,LOCAL command embeds Maestro targets and configures the serial port
   // baud rate at runtime, but the firmware maintains a separate Maestro registry that
@@ -1241,6 +1324,7 @@ function diffConfigs(configA, configB) {
   check('maestros',       configA.maestros,        configB.maestros);
   check('mappings',       configA.mappings,        configB.mappings);
   check('sequences',      configA.sequences,       configB.sequences);
+  check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
 
   for (let i = 0; i < 5; i++) {

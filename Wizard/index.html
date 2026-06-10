@@ -668,6 +668,24 @@
 
       <hr class="divider">
 
+      <!-- Variables -->
+      <div class="flex items-center gap-8 mb-12">
+        <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Variables</div>
+        <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})">+ Add</button>
+      </div>
+      <table class="seq-table">
+        <thead>
+          <tr>
+            <th style="width:150px">Name <span class="wiz-hint" data-tip="Variable name (1-15 chars, letters/digits/underscore, case-sensitive). Reference it with ;V commands or IF conditions inside stored sequences.">i</span></th>
+            <th style="width:150px">Value <span class="wiz-hint" data-tip="Integer value stored persistently on the board — survives reboots.">i</span></th>
+            <th style="width:80px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="b{N}-var-tbody"></tbody>
+      </table>
+
+      <hr class="divider">
+
       <!-- MP3 Trigger -->
       <div class="subsection-title">MP3 Trigger</div>
       <div class="field-group">

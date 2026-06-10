@@ -678,7 +678,8 @@ void printHCRStatus() {
 }
 
 void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial) {
+                    char delimiter, bool printToSerial,
+                    const String &defSep, const String &defFunc) {
   if (!hcrConfig.configured) return;
 
   String suffix = "HCR,PORT,S" + String(hcrConfig.serialPort) +
@@ -686,13 +687,13 @@ void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
   String cmd = String(LocalFunctionIdentifier) + suffix;
   if (printToSerial) Serial.println(cmd);
   chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += "^?" + suffix;
+  chainedConfigDefault += defSep + defFunc + suffix;
 
   suffix = "HCR,POLL," + String(hcrConfig.pollSec);
   cmd    = String(LocalFunctionIdentifier) + suffix;
   if (printToSerial) Serial.println(cmd);
   chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += "^?" + suffix;
+  chainedConfigDefault += defSep + defFunc + suffix;
 }
 
 // ==================== NVS storage =======================================

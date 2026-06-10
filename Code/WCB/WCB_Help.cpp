@@ -587,9 +587,12 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;V,volume,INC,5                - volume += 5"));
         Serial.println(F("  IF,domeanimations=1^;M1,23     - run M1,23 only if flag is 1"));
         Serial.println(F("  IF,mode>2,AND,armed=1^;PP100   - compound condition"));
+        Serial.println(F("  IF,flag=1^;t500^;M1,23         - if flag, wait 500ms, then run"));
         Serial.println(F("\nNotes:"));
-        Serial.println(F("  - Put IF immediately before its one command (no ;t between)."));
-        Serial.println(F("  - For 'a AND b' use compound IF, not nested IFs."));
+        Serial.println(F("  - IF gates its next command; ;t delays between them are fine"));
+        Serial.println(F("    (a false IF skips the delay AND the command)."));
+        Serial.println(F("  - Evaluated when the sequence is invoked, not after delays."));
+        Serial.println(F("  - For 'a AND b' use compound IF; nested IFs are not allowed."));
         Serial.println(F("  - Variables are saved to NVS and included in ?backup."));
 
     // ================================================================

@@ -44,8 +44,21 @@ void processVarConfig(const String &args);
 // On a malformed expression it returns false (fail-safe: skip) and prints why.
 bool evaluateIfCondition(const String &expr);
 
+// True if a TRIMMED chain token is an IF token ("IF," any case). IF gating is
+// resolved at INVOKE time inside the two canonical chain splitters
+// (parseCommandsAndEnqueue / parseCommandGroups) with local walk state — there
+// is deliberately NO global skip flag (cross-source/timer-boundary races).
+// Semantics: IF gates the next actionable command in its own chain; pure
+// delay tokens (;t500) between the IF and the command are dropped with it on
+// false and preserved on true; nested IF is not allowed.
+bool isIfChainToken(const String &trimmedTok);
+
 // ---- Backup -------------------------------------------------------------
+// Emits variables as "?VAR,SET,<name>,<value>" config-altitude commands (NOT
+// runtime ";V" lines) so the Wizard's '^?' grammar and per-line parser see
+// them. defSep/defFunc: factory-chain separator + func id (see WCB_HCR.h).
 void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
-                          char delimiter, bool printToSerial = false);
+                          char delimiter, bool printToSerial = false,
+                          const String &defSep = "^", const String &defFunc = "?");
 
 #endif // WCB_VARIABLES_H

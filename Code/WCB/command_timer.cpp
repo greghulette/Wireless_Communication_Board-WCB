@@ -1,6 +1,7 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_Storage.h" // Or wherever your commandDelimiter and parseCommandsAndEnqueue are
 #include "command_timer_queue.h"
+#include "WCB_Variables.h"   // isIfChainToken / evaluateIfCondition (IF gating)
 
 std::vector<CommandGroup> commandGroups;
 unsigned long lastGroupTime = 0;
@@ -68,8 +69,44 @@ void parseCommandGroups(const String &input) {
   CommandGroup currentGroup;
   currentGroup.delayAfterPrevious = 0;
 
+  // IF gating (chain-local, evaluated NOW at invoke time — not after the
+  // timer delays fire). A false IF consumes: any pure delay tokens (;t500 —
+  // the wait belonged to the gated command) plus the first actionable token,
+  // which may be a ;t500,cmd combo (delay+command in one token). A true IF
+  // just disappears, leaving the timers/commands to run normally.
+  bool ifSkipping = false;
+
   for (const String &token : tokens) {
+    String trimmedTok = token;
+    trimmedTok.trim();
+
+    if (isIfChainToken(trimmedTok)) {
+      if (ifSkipping) {
+        Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", trimmedTok.c_str());
+        continue;  // keep looking for the actionable token to consume
+      }
+      String cond = trimmedTok.substring(3);
+      bool pass = evaluateIfCondition(cond);
+      Serial.printf("[IF] %s -> %s\n", cond.c_str(),
+                    pass ? "true" : "false (skipping next command)");
+      ifSkipping = !pass;
+      continue;
+    }
+
     if (token.startsWith(String(CommandCharacter) + "t") || token.startsWith(String(CommandCharacter) + "T")) {
+      if (ifSkipping) {
+        int gateComma = token.indexOf(',');
+        bool hasInlineCmd = (gateComma != -1) && (gateComma + 1 < (int)token.length());
+        if (hasInlineCmd) {
+          // ;t500,cmd — the gated action lives inside this token: drop both.
+          ifSkipping = false;
+          Serial.printf("[IF] skipped: %s\n", token.c_str());
+        } else {
+          // Pure delay belonging to the gated command — drop it, keep gating.
+          Serial.printf("[IF] skipped delay: %s\n", token.c_str());
+        }
+        continue;
+      }
       if (!currentGroup.commands.empty()) {
         commandGroups.push_back(currentGroup);
         currentGroup = CommandGroup();
@@ -104,6 +141,11 @@ void parseCommandGroups(const String &input) {
         currentGroup.commands.push_back(remaining);
       }
     } else {
+      if (ifSkipping) {
+        ifSkipping = false;
+        Serial.printf("[IF] skipped: %s\n", token.c_str());
+        continue;
+      }
       currentGroup.commands.push_back(token);
     }
   }

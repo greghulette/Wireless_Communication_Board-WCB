@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '27.15:41.R.MAY.2026';
+const UI_VERSION = '10.13:38.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1582,6 +1582,13 @@ function populateUIFromConfig(n, config) {
     for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
   }
 
+  // Variables
+  const varTbody = document.getElementById(`b${n}-var-tbody`);
+  if (varTbody) {
+    varTbody.innerHTML = '';
+    for (const v of (config.variables ?? [])) appendVariableRow(n, v.name, v.value);
+  }
+
   // MP3 Trigger
   const mp3Input = document.querySelector(`input[name="b${n}-mp3"][value="${config.mp3.enabled ? 'local' : 'none'}"]`);
   if (mp3Input) {
@@ -2527,14 +2534,23 @@ function seqTextareaToValue(text, delim) {
 //   ^^***text  — standalone comment (double delimiter before ***): the empty segment
 //                produced by ^^ signals "own line", so it is kept as a separate line.
 //   CMD***text — already-inline comment (no leading delimiter): normalise spacing only.
-function seqValueToLines(value, delim) {
+//
+// IF conditionals gate the NEXT chained command, with optional ;t delay tokens in
+// between (e.g. "IF,flag=1^;t500^;M1,23") — the whole group is kept on ONE line
+// (literal delimiters preserved) so the conditional reads as a unit and saving
+// round-trips the exact same string.
+function seqValueToLines(value, delim, cmdChar = ';') {
   if (!value) return '';
   const rawParts = value.split(delim); // keep empty segments — they signal ^^
   const lines = [];
   let prevWasEmpty = false;
 
-  for (const raw of rawParts) {
-    const part = raw.trim();
+  // Timer tokens (e.g. ";t500") that may sit between an IF and its gated command
+  const cmdEsc  = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const timerRe = new RegExp(`^${cmdEsc}t\\d+$`, 'i');
+
+  for (let i = 0; i < rawParts.length; i++) {
+    const part = rawParts[i].trim();
 
     if (!part) {
       prevWasEmpty = true;
@@ -2549,6 +2565,18 @@ function seqValueToLines(value, delim) {
         // ^*** — inline comment; fold onto the preceding command line
         lines[lines.length - 1] += ' ' + part;
       }
+    } else if (/^IF,/i.test(part)) {
+      // Merge the IF token, any ;t delay tokens, and the first actionable
+      // command into one display line, keeping the delimiters within it.
+      let group = part.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+      while (i + 1 < rawParts.length) {
+        const next = rawParts[i + 1].trim();
+        if (!next || next.startsWith('***')) break;   // ^^ / comment — stop grouping
+        group += delim + next.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+        i++;
+        if (!timerRe.test(next)) break;               // gated command consumed — group complete
+      }
+      lines.push(group);
     } else {
       // Normalise spacing around any inline *** already in the command text
       lines.push(part.replace(/(\S)\s*(\*\*\*)/, '$1 $2'));
@@ -2592,8 +2620,9 @@ function appendSequenceRow(n, key, value) {
   const rowId = `seq-row-${n}-${++_rowIdCounter}`;
 
   // Convert stored delimiter-separated value → one-command-per-line for display
-  const delim = boardConfigs[n]?.delimiter ?? '^';
-  const lines = seqValueToLines(value, delim);
+  const delim   = boardConfigs[n]?.delimiter ?? '^';
+  const cmdChar = boardConfigs[n]?.cmdChar   ?? ';';
+  const lines = seqValueToLines(value, delim, cmdChar);
   const keyLen  = key.length;
   const valLen  = value.length;
 
@@ -2810,6 +2839,163 @@ function getSequencesFromUI(n) {
     if (key && val) sequences.push({ key, value: val });
   });
   return sequences;
+}
+
+// ─── Variables ────────────────────────────────────────────────────
+
+// Variable names: 1-15 chars, letters/digits/underscore, case-sensitive
+const VAR_NAME_RE = /^[A-Za-z0-9_]{1,15}$/;
+
+// Send a single funcChar command to board n — direct, or via relay MGMT FRAG.
+// Returns true if the command was handed to a connection.
+async function sendVariableCommand(n, cmd) {
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) return false;
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const targetWCB = boardConfigs[n]?.wcbNumber || n;
+    await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${cmd}`, relayN);
+    return true;
+  }
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) return false;
+  await conn.send(cmd + '\r');
+  termLog(n, cmd, 'in');
+  return true;
+}
+
+function addVariableRow(n) { appendVariableRow(n, '', 0); }
+
+function appendVariableRow(n, name, value) {
+  const tbody = document.getElementById(`b${n}-var-tbody`);
+  if (!tbody) return;
+  const rowId = `var-row-${n}-${++_rowIdCounter}`;
+
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.innerHTML = `
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-name-input" type="text" value="${escHtml(name)}"
+             data-original-name="${escHtml(name)}"
+             placeholder="VarName" spellcheck="false" maxlength="15">
+    </td>
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-value-input" type="number" step="1" value="${escHtml(String(value))}"
+             placeholder="0" spellcheck="false">
+    </td>
+    <td class="seq-action-cell">
+      <button class="btn btn-primary btn-sm" title="Save/Update Variable"
+              onclick="updateVariable(${n},'${rowId}')" id="${rowId}-update">SAVE/UPDATE</button>
+      <button class="btn btn-danger btn-sm" title="Remove Variable"
+              onclick="removeVariableRow(${n},'${rowId}')">REMOVE</button>
+    </td>
+  `;
+  tbody.appendChild(tr);
+
+  updateVariableButtons(n);
+}
+
+function updateVariableButtons(n) {
+  const directConnected = boardConnections[n]?.isConnected() ?? false;
+  const remoteConnected = remoteRelayForBoard[n] !== undefined;
+  const anyConnected = directConnected || remoteConnected;
+  // SAVE/UPDATE works for direct and remote boards (remote via MGMT FRAG).
+  document.querySelectorAll(`[id^="var-row-${n}-"] [title="Save/Update Variable"]`).forEach(btn => {
+    btn.disabled = !anyConnected;
+  });
+}
+
+async function updateVariable(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const nameInput    = row.querySelector('.var-name-input');
+  const name         = nameInput?.value?.trim();
+  const originalName = nameInput?.dataset?.originalName ?? name;
+  if (!name) { showToast('Variable name is empty', 'error'); return; }
+  if (!VAR_NAME_RE.test(name)) {
+    showToast('Invalid variable name — 1-15 chars, letters/digits/underscore only', 'error');
+    return;
+  }
+  const value = parseInt(row.querySelector('.var-value-input')?.value, 10);
+  if (!Number.isInteger(value)) { showToast('Variable value must be an integer', 'error'); return; }
+
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const renamed  = originalName && originalName !== name;
+  const btn = document.getElementById(`${rowId}-update`);
+  if (btn) btn.disabled = true;
+
+  try {
+    // If the name changed, clear the old variable first
+    if (renamed) {
+      await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${originalName}`);
+      // Remove old name from in-memory stores
+      for (const store of [boardConfigs[n], boardBaselines[n]]) {
+        if (!store?.variables) continue;
+        store.variables = store.variables.filter(v => v.name !== originalName);
+      }
+    }
+
+    const sent = await sendVariableCommand(n, `${funcChar}VAR,SET,${name},${value}`);
+    if (!sent) { showToast('Board not connected', 'error'); return; }
+    showToast(`Variable "${name}" set to ${value} on WCB ${n}`, 'success');
+
+    // Patch the in-memory config and baseline so delta pushes stay accurate
+    for (const store of [boardConfigs[n], boardBaselines[n]]) {
+      if (!store) continue;
+      if (!store.variables) store.variables = [];
+      const ex = store.variables.find(v => v.name === name);
+      if (ex) ex.value = value;
+      else store.variables.push({ name, value });
+    }
+    // Update the original-name marker so a second rename from this name works correctly
+    if (nameInput) nameInput.dataset.originalName = name;
+  } catch (e) {
+    showToast(`Variable update failed: ${e.message}`, 'error');
+    termLog(remoteRelayForBoard[n] ?? n, `VAR,SET error: ${e.message}`, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+    updateVariableButtons(n);
+  }
+}
+
+async function removeVariableRow(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const nameInput = row.querySelector('.var-name-input');
+  const name = (nameInput?.dataset?.originalName || nameInput?.value || '').trim();
+
+  // Remove from DOM immediately
+  row.remove();
+
+  // Patch in-memory config and baseline so the name doesn't resurface on next push
+  for (const store of [boardConfigs[n], boardBaselines[n]]) {
+    if (!store?.variables) continue;
+    const idx = store.variables.findIndex(v => v.name === name);
+    if (idx >= 0) store.variables.splice(idx, 1);
+  }
+
+  if (!name) return;   // never saved — nothing to tell the board
+
+  // Send ?VAR,CLEAR,name immediately so the board doesn't wait for a full push
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  try {
+    const sent = await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${name}`);
+    if (sent) showToast(`Variable "${name}" removed from WCB ${n}`, 'info');
+  } catch (e) {
+    termLog(remoteRelayForBoard[n] ?? n, `VAR,CLEAR error: ${e.message}`, 'err');
+  }
+}
+
+function getVariablesFromUI(n) {
+  const variables = [];
+  document.getElementById(`b${n}-var-tbody`)?.querySelectorAll('tr').forEach(row => {
+    const name = row.querySelector('.var-name-input')?.value?.trim();
+    const val  = parseInt(row.querySelector('.var-value-input')?.value, 10);
+    if (name && VAR_NAME_RE.test(name) && Number.isInteger(val)) variables.push({ name, value: val });
+  });
+  return variables;
 }
 
 // ─── BoardConnection Class ────────────────────────────────────────
@@ -3489,6 +3675,7 @@ function setRemoteConnected(n, relayN) {
   ensureTerminalPane(relayN);          // remote traffic shows in relay's terminal
   updateTerminalPaneDot(n, true);
   updateSequencePlayButtons(n);        // enable UPDATE/TEST buttons for remote boards
+  updateVariableButtons(n);            // enable SAVE/UPDATE buttons for remote boards
   installEtmListener(relayN);         // track live/offline state via relay's ETM output
 }
 
@@ -4443,7 +4630,9 @@ async function boardGo(n, opts = {}) {
         onProgress: (written, total) => updateFlashBar(n, written, total),
         onLog:      (msg)            => termLog(n, msg, 'sys'),
         onStatus:   (msg)            => setFlashStatus(n, msg),
-        appOnly:    isUpdate,         // Update FW: app-only, NVS preserved
+        appOnly:    isUpdate,         // Update FW: app-only, NVS preserved (escalates to a
+                                      // full NVS-preserving flash once if the partition
+                                      // table changed — see flasher.js migration check)
         eraseNvs:   isFactory,        // Factory Reset: wipe NVS before flashing
       });
       flashOk = true;
@@ -4742,6 +4931,7 @@ async function boardGo(n, opts = {}) {
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
+    config.variables     = getVariablesFromUI(n);
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
     config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -4968,6 +5158,7 @@ function updateConnectionUI(n, connected) {
   }
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
+  updateVariableButtons(n);
 
   // Create pane on first connect; update dot/input state on any connect/disconnect
   if (connected) ensureTerminalPane(n);
@@ -5085,6 +5276,7 @@ async function boardGoRemote(n, opts = {}) {
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
   config.sequences      = getSequencesFromUI(n);
+  config.variables      = getVariablesFromUI(n);
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
   config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -5639,6 +5831,7 @@ function exportSystemFile() {
     if (boardConfigs[n]) {
       syncSerialUIToConfig(n);
       boardConfigs[n].sequences = getSequencesFromUI(n);
+      boardConfigs[n].variables = getVariablesFromUI(n);
       systemConfig.boards.push(boardConfigs[n]);
     }
   }

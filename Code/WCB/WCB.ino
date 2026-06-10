@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_091611RJUN2026                                  *****////
+///*****                                          Version 6.1.0_101338RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -158,7 +158,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_091611RJUN2026";
+String SoftwareVersion = "6.1.0_101338RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1489,7 +1489,12 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String checksumCmd = data.substring(chkStart, chkEnd);
       String providedChecksum = checksumCmd.substring(4); // Skip "?CHK"
       providedChecksum.toUpperCase();
-      
+      providedChecksum.trim();
+      // LEGACY COMPAT: backups written by firmware <= 6.0.x used String(crc,HEX),
+      // which strips leading zeros (~1 in 16 backups are shorter than 8 chars).
+      // Left-pad to 8 so those backups still verify against the %08X form below.
+      while (providedChecksum.length() < 8) providedChecksum = "0" + providedChecksum;
+
       // Get data without checksum for verification.
       // Format as zero-padded 8 hex chars (%08X) — must match printBackupConfig's
       // writer (WCB.ino:~4707) and the legacy verifier at WCB.ino:5121.
@@ -1518,7 +1523,16 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     }
   }
   
-  // Normal parsing with special handling for ?CS commands
+  // Normal parsing with special handling for ?CS commands.
+  //
+  // IF gating (chain-local, resolved at invoke time): when a standalone
+  // "IF,<cond>" token evaluates false, the NEXT actionable token in THIS
+  // chain is consumed instead of enqueued. State lives on the stack — it
+  // cannot race across sources, queue drains, or timer groups the way the
+  // old global flag did. Note: IF tokens inside a ?SEQ,SAVE value never
+  // reach this logic (the SEQ,SAVE branch swallows its whole value), so
+  // stored sequences keep their IFs verbatim and evaluate them at recall.
+  bool ifSkipping = false;
   int startIdx = 0;
   while (startIdx < data.length()) {
     // Check if we're at the start of a ?CS command
@@ -1539,9 +1553,14 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       csCommand.trim();
       
       if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
-        enqueueCommand(csCommand, sourceID);
+        if (ifSkipping) {
+          ifSkipping = false;
+          Serial.printf("[IF] skipped: %s\n", csCommand.c_str());
+        } else {
+          enqueueCommand(csCommand, sourceID);
+        }
       }
-      
+
       // Move past this command
       startIdx = endPos;
       if (startIdx < data.length() && data.charAt(startIdx) == commandDelimiter) {
@@ -1573,7 +1592,12 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String seqSaveCmd = data.substring(startIdx, endPos);
         seqSaveCmd.trim();
         if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(seqSaveCmd, sourceID);
+          if (ifSkipping) {
+            ifSkipping = false;
+            Serial.printf("[IF] skipped: %s\n", seqSaveCmd.c_str());
+          } else {
+            enqueueCommand(seqSaveCmd, sourceID);
+          }
         }
         startIdx = endPos;
         if (startIdx < (int)data.length() && data.charAt(startIdx) == commandDelimiter) {
@@ -1592,7 +1616,12 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(mgmtCmd, sourceID);
+          if (ifSkipping) {
+            ifSkipping = false;
+            Serial.printf("[IF] skipped: %s\n", mgmtCmd.c_str());
+          } else {
+            enqueueCommand(mgmtCmd, sourceID);
+          }
         }
         break;  // ?MGMT,... is always the final command in a serial line
       }
@@ -1600,27 +1629,34 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
 
     // Normal command processing (not ?CS, ?SEQ,SAVE, or ?MGMT,...)
     int delimPos = data.indexOf(commandDelimiter, startIdx);
-    if (delimPos == -1) {
-      String singleCmd = data.substring(startIdx);
+    {
+      String singleCmd = (delimPos == -1) ? data.substring(startIdx)
+                                          : data.substring(startIdx, delimPos);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
-        } else {
+        if (singleCmd.startsWith(commentDelimiter)) {
           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+        } else if (isIfChainToken(singleCmd)) {
+          // IF,<cond> — evaluate NOW (invoke time) and gate the next token.
+          if (ifSkipping) {
+            // An IF directly following a false IF: nesting is not allowed.
+            // Consume it and keep looking for the actionable token to skip.
+            Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", singleCmd.c_str());
+          } else {
+            String cond = singleCmd.substring(3);
+            bool pass = evaluateIfCondition(cond);
+            Serial.printf("[IF] %s -> %s\n", cond.c_str(),
+                          pass ? "true" : "false (skipping next command)");
+            ifSkipping = !pass;
+          }
+        } else if (ifSkipping) {
+          ifSkipping = false;
+          Serial.printf("[IF] skipped: %s\n", singleCmd.c_str());
+        } else {
+          enqueueCommand(singleCmd, sourceID);
         }
       }
-      break;
-    } else {
-      String singleCmd = data.substring(startIdx, delimPos);
-      singleCmd.trim();
-      if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
-        } else {
-          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
-        }
-      }
+      if (delimPos == -1) break;
       startIdx = delimPos + 1;
     }
   }
@@ -2315,7 +2351,8 @@ String buildConfigString() {
   // HCR settings
   { String dummy; printHCRBackup(dummy, out, '^'); }
 
-  // User variables (;V,name,value per variable)
+  // User variables (?VAR,SET,name,value per variable — webtool grammar is
+  // always the fixed '^?' form, so the default defSep/defFunc are correct here)
   { String dummy; printVariablesBackup(dummy, out, '^'); }
 
   // ETM settings
@@ -3267,28 +3304,19 @@ void forwardMaestroDataToRemoteKyber() {
 //*******************************
 /// Processing Input Functions
 //*******************************
-// Conditional-execution gate. An IF whose condition is false sets this so the
-// VERY NEXT command is skipped (single-command gate). Reset after each queue
-// drain (see loop()) so a trailing/dangling IF can't leak to the next batch.
-// See VARIABLES_DESIGN.md.
-bool skipNextCommand = false;
-
 void handleSingleCommand(String cmd, int sourceID) {
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
 
-    // ── Conditional gate ────────────────────────────────────────────────
-    // If the previous IF evaluated false, swallow exactly this one command.
-    if (skipNextCommand) {
-        skipNextCommand = false;
-        if (debugEnabled) Serial.printf("[VAR] IF gate: skipped '%s'\n", cmd.c_str());
-        return;
-    }
-    // IF,<conditions> — evaluate against variables; on false, gate the next cmd.
+    // IF gating is resolved at INVOKE time inside the chain splitters
+    // (parseCommandsAndEnqueue / parseCommandGroups) with chain-local state —
+    // there is deliberately no global skip flag here (a global raced across
+    // sources, queue-drain boundaries, and timer groups). If an IF token
+    // still reaches the executor (a direct enqueue path), drop it so the raw
+    // "IF,..." text is never broadcast out the serial ports as data.
     {
         String u = cmd; u.trim();
-        if (u.length() >= 3 &&
-            (u[0] == 'I' || u[0] == 'i') && (u[1] == 'F' || u[1] == 'f') && u[2] == ',') {
-            if (!evaluateIfCondition(u.substring(3))) skipNextCommand = true;
+        if (isIfChainToken(u)) {
+            Serial.printf("[IF] '%s' reached the executor with nothing to gate — dropped\n", u.c_str());
             return;
         }
     }
@@ -4669,17 +4697,17 @@ void updateHWVersion(const String &message) {
     chainedConfig        += String(commandDelimiter) + lfi + cmd;
     chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    // ---- Maestro Settings ----
-    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+    // ---- Maestro / MP3 / HCR / Variables (shared emitters) ----
+    // Pass the LIVE defaultSep/defaultFunc: they flip after the factory chain
+    // replays ?DELIM/?FUNCCHAR above, so entries appended here must use the
+    // post-flip characters or a custom-delimiter board never splits them on
+    // restore. Never hardcode '^'/'?' inside an emitter.
+    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+    printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+    printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
 
-    // ---- MP3 Trigger Settings ----
-    printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
-
-    // ---- HCR Settings ----
-    printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
-
-    // ---- User Variables (;V,name,value) ----
-    printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+    // ---- User Variables (?VAR,SET,name,value) ----
+    printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
 
     // ---- ETM Settings ----
     cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
@@ -4901,27 +4929,38 @@ void processWCBMessage(const String &message){
   // cadence so a single missed keep-alive doesn't kill the relay.
   rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
-  // Parse the target WCB number as the LEADING RUN OF DIGITS after 'w'/'W',
-  // then take everything after it as the command — skipping ONE optional
-  // comma separator (the explicit ;w<id>,<cmd> form).
+  // Parse the target WCB number. RULE (confirmed spec):
+  //   * NO comma after the digits  -> exactly ONE digit is the target (1-9),
+  //     everything from position 2 on is the payload — even if it starts
+  //     with a digit. (Legacy form; ;w2100 = send "100" to WCB2.)
+  //   * Comma right after the digit run -> the WHOLE run is the target,
+  //     enabling two-digit targets:  ;w13,RA  /  ;w20,<cmd>.
   //
   // We must NOT split on a comma that appears later inside the command
   // payload. e.g.  ;w2;s4:PP100,50:W42:P  must route the WHOLE
-  // ";s4:PP100,50:W42:P" to WCB2 verbatim. The previous logic split on the
-  // FIRST comma anywhere in the string, so any forwarded command containing a
-  // comma was truncated at that comma (it wrongly sent only "50:W42:P").
+  // ";s4:PP100,50:W42:P" to WCB2 verbatim. (An earlier version split on the
+  // FIRST comma anywhere, truncating payloads; a later version greedily ate
+  // the whole digit run, breaking legacy digit-leading payloads like ;w2100.)
   //
   // Handles all forms:
-  //   ;w2RA                  -> target 2,  cmd "RA"          (digit, no separator)
-  //   ;w13,RA                -> target 13, cmd "RA"          (multi-digit, comma sep)
-  //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P"  (comma in payload)
-  //   ;w13;s4:cmd,with,commas-> target 13, cmd ";s4:cmd,with,commas"
-  int idx = 1;
-  while (idx < (int)message.length() &&
-         message[idx] >= '0' && message[idx] <= '9') idx++;
-  targetWCB = message.substring(1, idx).toInt();
-  if (idx < (int)message.length() && message[idx] == ',') idx++;  // optional separator
-  espnow_message = message.substring(idx);
+  //   ;w2RA                  -> target 2,  cmd "RA"      (single digit, no comma)
+  //   ;w2100                 -> target 2,  cmd "100"     (legacy digit payload)
+  //   ;w13,RA                -> target 13, cmd "RA"      (multi-digit needs comma)
+  //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P" (comma in payload)
+  //   ;w13,;s4:cmd,with,commas -> target 13, cmd ";s4:cmd,with,commas"
+  int digitEnd = 1;
+  while (digitEnd < (int)message.length() &&
+         message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
+  if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
+      // Comma-separated form: full digit run is the target (supports 10-20).
+      targetWCB = message.substring(1, digitEnd).toInt();
+      espnow_message = message.substring(digitEnd + 1);
+  } else {
+      // Legacy no-comma form: exactly ONE digit is the target; the rest —
+      // including digits — is the payload.
+      targetWCB = message.substring(1, 2).toInt();
+      espnow_message = message.substring(2);
+  }
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
@@ -5208,7 +5247,10 @@ void processSerialCommandHelper(String &data, int sourceID) {
             // Extract checksum (skip delimiter + "?CHK")
             String providedChecksum = data.substring(chkPos + chkPattern.length());
             providedChecksum.toUpperCase();
-            
+            providedChecksum.trim();
+            // LEGACY COMPAT: <=6.0.x wrote checksums unpadded (String(crc,HEX)).
+            while (providedChecksum.length() < 8) providedChecksum = "0" + providedChecksum;
+
             // Calculate checksum for the command WITHOUT the checksum itself
             uint32_t calculatedChecksum = calculateCRC32(cmdWithoutChecksum);
             char calculatedChecksumStr[9];  // 8 hex chars + null terminator
@@ -5694,13 +5736,11 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   }
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
-
-  // Trim the radio TX power. Default full power draws the largest current
-  // spike of the whole boot the instant the radio comes up — on a cold /
-  // marginal rail that spike is a prime trigger for a sag-induced stall.
-  // 8.5 dBm is plenty for the short-range WCB mesh and roughly halves that
-  // peak draw. (ESP-NOW range stays fine at close droid distances.)
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
+  // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
+  // but that silently cut ~11 dB of ESP-NOW link budget for every deployed
+  // installation (remote consoles / cross-room links). Cold-boot recovery is
+  // handled by the boot guard + custom bootloader WDT instead.
 
   // Dynamically update MAC addresses based on stored umac_oct2 & umac_oct3
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
@@ -5870,17 +5910,13 @@ void loop() {
   checkConfigPullTimeout();
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
-  // Handle queued commands
+  // Handle queued commands. (IF gating happens before enqueue, in the chain
+  // splitters — by the time commands reach this queue they are unconditional.)
   if (!commandQueue) return;
   CommandQueueItem inItem;
-  bool drainedAny = false;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
-    drainedAny = true;
     String commandStr(inItem.cmd);
     free(inItem.cmd);
     handleSingleCommand(commandStr, inItem.sourceID);
   }
-  // Safety: a trailing IF (last command in a batch, with nothing after it to
-  // gate) must not leak its skip into the next, unrelated batch.
-  if (drainedAny) skipNextCommand = false;
 }
