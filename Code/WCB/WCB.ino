@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_101338RJUN2026                                  *****////
+///*****                                          Version 6.1.0_111553RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -158,7 +158,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_101338RJUN2026";
+String SoftwareVersion = "6.1.0_111553RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1553,10 +1553,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       csCommand.trim();
       
       if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
-        if (ifSkipping) {
-          ifSkipping = false;
-          Serial.printf("[IF] skipped: %s\n", csCommand.c_str());
-        } else {
+        if (!ifGateConsumeToken(csCommand, ifSkipping)) {
           enqueueCommand(csCommand, sourceID);
         }
       }
@@ -1592,10 +1589,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String seqSaveCmd = data.substring(startIdx, endPos);
         seqSaveCmd.trim();
         if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
-          if (ifSkipping) {
-            ifSkipping = false;
-            Serial.printf("[IF] skipped: %s\n", seqSaveCmd.c_str());
-          } else {
+          if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
             enqueueCommand(seqSaveCmd, sourceID);
           }
         }
@@ -1616,10 +1610,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
-          if (ifSkipping) {
-            ifSkipping = false;
-            Serial.printf("[IF] skipped: %s\n", mgmtCmd.c_str());
-          } else {
+          if (!ifGateConsumeToken(mgmtCmd, ifSkipping)) {
             enqueueCommand(mgmtCmd, sourceID);
           }
         }
@@ -1636,22 +1627,10 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       if (!singleCmd.isEmpty()) {
         if (singleCmd.startsWith(commentDelimiter)) {
           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
-        } else if (isIfChainToken(singleCmd)) {
-          // IF,<cond> — evaluate NOW (invoke time) and gate the next token.
-          if (ifSkipping) {
-            // An IF directly following a false IF: nesting is not allowed.
-            // Consume it and keep looking for the actionable token to skip.
-            Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", singleCmd.c_str());
-          } else {
-            String cond = singleCmd.substring(3);
-            bool pass = evaluateIfCondition(cond);
-            Serial.printf("[IF] %s -> %s\n", cond.c_str(),
-                          pass ? "true" : "false (skipping next command)");
-            ifSkipping = !pass;
-          }
-        } else if (ifSkipping) {
-          ifSkipping = false;
-          Serial.printf("[IF] skipped: %s\n", singleCmd.c_str());
+        } else if (ifGateConsumeToken(singleCmd, ifSkipping)) {
+          // Consumed by the IF gate (the IF itself, a gated command, or a
+          // pure ;t delay belonging to a gated command). Shared semantics
+          // live in ifGateConsumeToken — see WCB_Variables.cpp.
         } else {
           enqueueCommand(singleCmd, sourceID);
         }
@@ -4962,6 +4941,22 @@ void processWCBMessage(const String &message){
       espnow_message = message.substring(2);
   }
 
+  // An IF cannot ride INSIDE a ;w payload: the chain splitter separates
+  // tokens BEFORE routing, so ';w2,IF,cond^cmd' delivers a lone 'IF,cond'
+  // with nothing to gate while 'cmd' executes unconditionally. Gate the
+  // whole routed command instead: IF,cond^;w2,cmd  (works — the IF gates
+  // the entire ;w token in its own chain). Reject loudly.
+  {
+      String payloadCheck = espnow_message;
+      payloadCheck.trim();
+      if (isIfChainToken(payloadCheck)) {
+          Serial.printf("[IF] ERROR: IF cannot be routed inside ;w — put it before "
+                        "the route instead: IF,cond%c;w%d,command. Command ignored.\n",
+                        commandDelimiter, targetWCB);
+          return;
+      }
+  }
+
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
       if (debugEnabled) {
@@ -5320,7 +5315,8 @@ void printResetReason() {
 // new build's date_time to the table below (read it from this very banner).
 void printBootloaderInfo() {
     static const char *CUSTOM_BOOT_DATES[] = {
-        "Jun  8 2026 16:02:21",   // WCB_S3_custom_bootloader_16MB_wdt3s.bin
+        "Jun  8 2026 16:02:21",   // WCB_S3_custom_bootloader_16MB_wdt3s.bin  (3.2, 16MB)
+        "Jun 10 2026 14:36:20",   // WCB_S3_custom_bootloader_8MB_wdt3s.bin   (3.1, 8MB)
     };
     esp_bootloader_desc_t desc;
     if (esp_ota_get_bootloader_description(NULL, &desc) == ESP_OK) {

@@ -64,26 +64,42 @@ Note: there is no separate "declare" step — the first `;V,name,value` **or**
 
 ---
 
-## 3. Execution model (runtime, single-command gate)
+## 3. Execution model (invoke-time, chain-local gate)
 
-A global `skipNextCommand` flag, evaluated inside `handleSingleCommand` (the one
-chokepoint every command flows through — sequences, serial, ESP-NOW):
+> **History:** v1 used a global `skipNextCommand` flag consumed inside
+> `handleSingleCommand`. That design raced across command sources (an
+> unrelated ESP-NOW command could be swallowed by another chain's IF), across
+> queue-drain boundaries, and across timer groups — it was replaced.
+
+IF gating is resolved **when the chain is invoked**, inside the two canonical
+chain splitters with **chain-local** state (no global):
 
 ```
-handleSingleCommand(cmd):
-    if skipNextCommand:  skipNextCommand = false;  return     # gated-out command
-    if cmd matches IF,…:  if !evaluateIf(cmd):  skipNextCommand = true;  return
-    ... normal dispatch (?, ;, broadcast) ...   # ;V handled in the ; dispatcher
-
-after the command queue fully drains:  skipNextCommand = false  # dangling-IF safety
+parseCommandsAndEnqueue / parseCommandGroups, while walking the tokens:
+    bool ifSkipping = false                 # lives on the stack, per chain
+    for each trimmed token:
+        ifGateConsumeToken(token, ifSkipping)   # ONE shared implementation
+            IF,…       -> evaluate NOW; false => start gating
+            comment    -> never consumes the gate
+            ;t500      -> while gating: dropped, gating CONTINUES
+            ;t500,cmd  -> while gating: dropped, gate consumed
+            other      -> while gating: dropped, gate consumed
+        tokens that survive are enqueued / grouped normally
 ```
 
-- The `IF` and its gated command are adjacent `^` segments, enqueued together, so
-  the flag is consumed by the very next command.
-- **Rule:** keep `IF` immediately before its target — do **not** place a
-  `;t<ms>` timer between them (the flag is for the *next* command only; the
-  post-drain reset prevents a trailing `IF` from leaking).
-- Runtime eval means `;V,x,1^IF,x=1^M23` works (set runs before the IF reads it).
+- Shared semantics live in `ifGateConsumeToken()` (WCB_Variables.cpp) so the
+  timer and non-timer walks cannot drift.
+- **Timers between IF and its command work**: `IF,x=1^;t500^cmd` waits then
+  runs when true; skips the delay AND the command when false.
+- **Nested IF is rejected** (use compound `IF,a=1,AND,b=2`).
+- **IF cannot ride inside a `;t` payload** (`;t500,IF,…` → error: write
+  `IF,cond^;t500^cmd`) and **cannot ride inside a `;w` payload**
+  (`;w2,IF,…` → error: gate the whole route — `IF,cond^;w2,cmd`).
+- **Set and test must be separate invocations.** IF evaluates at invoke time,
+  before any command of the same chain has executed — so
+  `;V,x,1^IF,x=1^cmd` reads the OLD value of `x` (stale-by-one). Correct
+  pattern: one sequence sets the flag, another tests it:
+  `?SEQ,SAVE,arm,;V,x,1` … `?SEQ,SAVE,fire,IF,x=1^cmd`.
 
 ---
 
@@ -129,7 +145,8 @@ Relative verbs (`TOGGLE`/`INC`/`DEC`) are never emitted — only absolute values
 
 | File | Change |
 |------|--------|
-| `WCB_Variables.h/.cpp` (new) | RAM+NVS store, `;V` / `?VAR` handlers, `IF` evaluator, name validation, backup emit |
-| `WCB.ino` | `loadVariables()` in setup; `skipNextCommand` + `IF` recognition at top of `handleSingleCommand`; reset after queue drain; `;V` case in the `;` dispatcher; `?VAR` case in `processLocalCommand`; backup emit call |
+| `WCB_Variables.h/.cpp` (new) | RAM+NVS store, `;V` / `?VAR` handlers, `IF` evaluator + `ifGateConsumeToken()` (the ONE shared gate implementation), name validation, backup emit (`?VAR,SET` form) |
+| `WCB.ino` | `loadVariables()` in setup; chain-local IF gating in `parseCommandsAndEnqueue` (via the shared helper); IF-in-`;w`-payload rejection in `processWCBMessage`; bare-IF safety drop in `handleSingleCommand`; `;V` case in the `;` dispatcher; `?VAR` case in `processLocalCommand`; backup emit call |
+| `command_timer.cpp` | chain-local IF gating in `parseCommandGroups` (same shared helper); IF-as-timer-payload rejection; trimmed-token handling |
 | `WCB_Help.cpp` | `?VAR ?`, `;V`, `IF` help blocks + overview lines |
-| Wizard `app.js`/`index.html`/`parser.js` | Tools-page Variables manager; `;V`/`IF` recognized as valid in the sequence editor; `;V` round-trips in backup parse/build |
+| Wizard `app.js`/`index.html`/`parser.js` | Tools-page Variables manager; IF+command grouped on one editor line; `?VAR,SET` (and legacy `;V`) round-trips in backup parse/build |

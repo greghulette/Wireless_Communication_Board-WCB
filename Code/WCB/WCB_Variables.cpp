@@ -313,6 +313,55 @@ bool isIfChainToken(const String &trimmedTok) {
          trimmedTok[2] == ',';
 }
 
+// ── Shared IF-gate token processor ────────────────────────────────────────
+// THE single place that owns IF-gating semantics for one chain token. Both
+// chain walkers (parseCommandsAndEnqueue in WCB.ino and parseCommandGroups in
+// command_timer.cpp) call this with each TRIMMED token before enqueueing /
+// pushing it, so the two walks can never drift apart again (the previous
+// duplicated logic diverged on ;t and comment handling).
+//
+// Returns true  -> token CONSUMED by the gate (IF tokens themselves, and the
+//                  tokens a false IF skips) — the walker must NOT execute it.
+//         false -> process the token normally.
+//
+// Rules (the contract in WCB_Variables.h):
+//   * IF token: evaluate now; true → drop just the IF; false → start gating.
+//     An IF encountered WHILE gating = nested → error, stays gating.
+//   * Comment tokens ("***...") never consume the gate — they're annotations.
+//   * Pure delay tokens (";t500") under a false IF are dropped and gating
+//     CONTINUES (the wait belonged to the gated command).
+//   * ";t500,cmd" carries the gated action inline → dropped, gate consumed.
+//   * Any other token under a false IF → dropped, gate consumed.
+extern String commentDelimiter;
+bool ifGateConsumeToken(const String &trimmedTok, bool &ifSkipping) {
+  if (isIfChainToken(trimmedTok)) {
+    if (ifSkipping) {
+      Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", trimmedTok.c_str());
+      return true;  // consume the inner IF, keep looking for the gated action
+    }
+    String cond = trimmedTok.substring(3);
+    bool pass = evaluateIfCondition(cond);
+    Serial.printf("[IF] %s -> %s\n", cond.c_str(),
+                  pass ? "true" : "false (skipping next command)");
+    ifSkipping = !pass;
+    return true;
+  }
+  if (!ifSkipping) return false;
+  if (trimmedTok.startsWith(commentDelimiter)) return false;  // annotation — walker handles it
+  if (trimmedTok.length() >= 2 && trimmedTok[0] == CommandCharacter &&
+      (trimmedTok[1] == 't' || trimmedTok[1] == 'T')) {
+    int comma = trimmedTok.indexOf(',');
+    bool hasInlineCmd = (comma != -1) && (comma + 1 < (int)trimmedTok.length());
+    if (!hasInlineCmd) {
+      Serial.printf("[IF] skipped delay: %s\n", trimmedTok.c_str());
+      return true;  // pure delay: drop, KEEP gating
+    }
+  }
+  ifSkipping = false;
+  Serial.printf("[IF] skipped: %s\n", trimmedTok.c_str());
+  return true;
+}
+
 // Full expression: "<cond>[,AND|OR,<cond> ...]"  (left-to-right, no precedence).
 bool evaluateIfCondition(const String &expr) {
   String e = expr; e.trim();

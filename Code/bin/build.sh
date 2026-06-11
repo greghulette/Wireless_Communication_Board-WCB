@@ -132,33 +132,48 @@ fi
 #   ESP32S3: bootloader → 0x0      partitions → 0x8000   app → 0x10000
 # NVS at 0x9000 is never written — preserved on existing boards.
 
-# ── S3 ships the CUSTOM short-watchdog bootloader ───────────────────────────
-# The S3 _boot.bin artifact is deliberately NOT the stock compiled bootloader:
-# it's the hand-verified custom one (RTC WDT 9000→3000 ms) so every board
+# ── S3 ships the CUSTOM short-watchdog bootloader, PER FLASH SIZE ───────────
+# The S3 _boot artifacts are deliberately NOT the stock compiled bootloader:
+# they're the hand-verified custom ones (RTC WDT 9000→3000 ms) so every board
 # flashed from the web config tool gets the cold-boot auto-recovery fix.
-# Identical to stock Arduino 3.3.4 otherwise (16MB/QIO-autodetect/80m — see
+# Identical to stock Arduino 3.3.4 otherwise (QIO-autodetect/80m — see
 # WCB_S3_custom_bootloader_README.md; built from the Arduino sdkconfig).
+#
+# TWO variants because S3 boards carry different flash chips (3.1 = 8MB,
+# 3.2 = 8MB or 16MB module): a bootloader whose header declares the WRONG
+# flash size silently corrupts NVS (writes commit, reads come back stale —
+# the documented "4MB trap"). The web flasher detects the chip's REAL flash
+# size at flash time and picks the matching _boot_<size> artifact; it must
+# NEVER write a mismatched one.
 # Classic ESP32 (PICO) boards keep the stock compiled bootloader — they don't
-# exhibit the cold-boot stall and the custom bin is S3/16MB-only.
-CUSTOM_S3_BOOT="$OUTPUT_DIR/WCB_S3_custom_bootloader_16MB_wdt3s.bin"
-if [ ! -f "$CUSTOM_S3_BOOT" ]; then
-    echo "✗ ERROR: custom S3 bootloader missing: $CUSTOM_S3_BOOT"
-    echo "  Refusing to publish — S3 releases must carry the short-WDT bootloader."
-    rm -rf "$TMP_ESP32" "$TMP_S3"
-    exit 1
-fi
-# Sanity: ESP image magic (0xE9) + declared flash size 16MB (byte3 hi-nibble 4)
+# exhibit the cold-boot stall.
+CUSTOM_S3_BOOT_16MB="$OUTPUT_DIR/WCB_S3_custom_bootloader_16MB_wdt3s.bin"
+CUSTOM_S3_BOOT_8MB="$OUTPUT_DIR/WCB_S3_custom_bootloader_8MB_wdt3s.bin"
 PY_BIN="$(command -v python3 || command -v python)"
-if ! "$PY_BIN" - "$CUSTOM_S3_BOOT" <<'PYEOF'
+
+# check_boot <file> <size-nibble> <label>: exists + magic 0xE9 + declared size
+check_boot() {
+    if [ ! -f "$1" ]; then
+        echo "✗ ERROR: custom S3 bootloader missing: $1"
+        echo "  Refusing to publish — S3 releases must carry BOTH short-WDT"
+        echo "  bootloader variants (8MB and 16MB)."
+        rm -rf "$TMP_ESP32" "$TMP_S3"
+        exit 1
+    fi
+    if ! "$PY_BIN" - "$1" "$2" <<'PYEOF'
 import sys
 h = open(sys.argv[1], "rb").read(4)
-sys.exit(0 if (h[0] == 0xE9 and (h[3] >> 4) == 4) else 1)
+sys.exit(0 if (h[0] == 0xE9 and (h[3] >> 4) == int(sys.argv[2])) else 1)
 PYEOF
-then
-    echo "✗ ERROR: $CUSTOM_S3_BOOT failed header sanity check (magic/16MB)."
-    rm -rf "$TMP_ESP32" "$TMP_S3"
-    exit 1
-fi
+    then
+        echo "✗ ERROR: $1 failed header sanity check (magic 0xE9 / $3 size nibble $2)."
+        rm -rf "$TMP_ESP32" "$TMP_S3"
+        exit 1
+    fi
+}
+# ESP image header byte3 hi-nibble: 3 = 8MB, 4 = 16MB
+check_boot "$CUSTOM_S3_BOOT_16MB" 4 "16MB"
+check_boot "$CUSTOM_S3_BOOT_8MB"  3 "8MB"
 
 # Only remove the version-named files THIS script owns (WCB_*_ESP32*.bin) —
 # a bare *.bin wipe would also delete the custom bootloader above.
@@ -172,12 +187,19 @@ cp "$TMP_ESP32/WCB.ino.bootloader.bin" "$WIZARD_BIN/WCB_ESP32_boot.bin"
 cp "$TMP_ESP32/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32_part.bin"
 
 cp "$TMP_S3/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3.bin"
-cp "$CUSTOM_S3_BOOT"                "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
 cp "$TMP_S3/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_part.bin"
 cp "$TMP_S3/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32S3.bin"
-cp "$CUSTOM_S3_BOOT"                "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
 cp "$TMP_S3/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32S3_part.bin"
-echo "✓ S3 _boot artifacts = CUSTOM short-WDT bootloader ($CUSTOM_S3_BOOT)"
+# Per-flash-size bootloaders — the flasher picks by DETECTED chip flash size.
+cp "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_16MB.bin"
+cp "$CUSTOM_S3_BOOT_8MB"  "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_8MB.bin"
+cp "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot_16MB.bin"
+cp "$CUSTOM_S3_BOOT_8MB"  "$WIZARD_BIN/WCB_ESP32S3_boot_8MB.bin"
+# Legacy single-name artifact (16MB) kept so an older cached Wizard / direct
+# downloaders don't 404; the current flasher prefers the sized names.
+cp "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
+cp "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
+echo "✓ S3 _boot artifacts = CUSTOM short-WDT bootloaders (8MB + 16MB variants)"
 
 rm -rf "$TMP_ESP32" "$TMP_S3"
 

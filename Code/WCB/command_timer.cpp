@@ -3,6 +3,9 @@
 #include "command_timer_queue.h"
 #include "WCB_Variables.h"   // isIfChainToken / evaluateIfCondition (IF gating)
 
+// '***' comment marker — defined in WCB.ino (mirrors WCB_Storage.cpp / WCB_Variables.cpp)
+extern String commentDelimiter;
+
 std::vector<CommandGroup> commandGroups;
 unsigned long lastGroupTime = 0;
 size_t currentGroupIndex = 0;
@@ -70,43 +73,25 @@ void parseCommandGroups(const String &input) {
   currentGroup.delayAfterPrevious = 0;
 
   // IF gating (chain-local, evaluated NOW at invoke time — not after the
-  // timer delays fire). A false IF consumes: any pure delay tokens (;t500 —
-  // the wait belonged to the gated command) plus the first actionable token,
-  // which may be a ;t500,cmd combo (delay+command in one token). A true IF
-  // just disappears, leaving the timers/commands to run normally.
+  // timer delays fire). ALL gate semantics live in the shared
+  // ifGateConsumeToken (WCB_Variables.cpp) so this walker can never drift
+  // from parseCommandsAndEnqueue. Locally we only handle the timer-token
+  // mechanics. NOTE: every check below uses the TRIMMED token — user-typed
+  // spaces around '^' must not change classification.
   bool ifSkipping = false;
 
-  for (const String &token : tokens) {
-    String trimmedTok = token;
-    trimmedTok.trim();
+  for (const String &rawToken : tokens) {
+    String token = rawToken;
+    token.trim();
+    if (token.isEmpty()) continue;
 
-    if (isIfChainToken(trimmedTok)) {
-      if (ifSkipping) {
-        Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", trimmedTok.c_str());
-        continue;  // keep looking for the actionable token to consume
-      }
-      String cond = trimmedTok.substring(3);
-      bool pass = evaluateIfCondition(cond);
-      Serial.printf("[IF] %s -> %s\n", cond.c_str(),
-                    pass ? "true" : "false (skipping next command)");
-      ifSkipping = !pass;
-      continue;
-    }
+    // Comments are annotations: never executed, never consume the IF gate
+    // (matches parseCommandsAndEnqueue, which ignores them pre-gate).
+    if (token.startsWith(commentDelimiter)) continue;
+
+    if (ifGateConsumeToken(token, ifSkipping)) continue;
 
     if (token.startsWith(String(CommandCharacter) + "t") || token.startsWith(String(CommandCharacter) + "T")) {
-      if (ifSkipping) {
-        int gateComma = token.indexOf(',');
-        bool hasInlineCmd = (gateComma != -1) && (gateComma + 1 < (int)token.length());
-        if (hasInlineCmd) {
-          // ;t500,cmd — the gated action lives inside this token: drop both.
-          ifSkipping = false;
-          Serial.printf("[IF] skipped: %s\n", token.c_str());
-        } else {
-          // Pure delay belonging to the gated command — drop it, keep gating.
-          Serial.printf("[IF] skipped delay: %s\n", token.c_str());
-        }
-        continue;
-      }
       if (!currentGroup.commands.empty()) {
         commandGroups.push_back(currentGroup);
         currentGroup = CommandGroup();
@@ -117,6 +102,19 @@ void parseCommandGroups(const String &input) {
       if (commaIndex != -1) {
         delayStr = token.substring(2, commaIndex);
         remaining = token.substring(commaIndex + 1);
+        remaining.trim();
+        // An IF cannot ride INSIDE a timer token: at fire time each group
+        // command is dispatched through its own parseCommandsAndEnqueue
+        // call, so the gate state would die with that stack frame and the
+        // next command would run ungated. Reject loudly instead of
+        // silently not gating.
+        if (isIfChainToken(remaining)) {
+          Serial.printf("[IF] ERROR: IF cannot be a timer payload (';t%s,%s') — "
+                        "write it as IF,cond^%ct%s^command instead. Token ignored.\n",
+                        delayStr.c_str(), remaining.c_str(),
+                        CommandCharacter, delayStr.c_str());
+          remaining = "";
+        }
       } else {
         delayStr = token.substring(2);
         remaining = "";
@@ -141,11 +139,6 @@ void parseCommandGroups(const String &input) {
         currentGroup.commands.push_back(remaining);
       }
     } else {
-      if (ifSkipping) {
-        ifSkipping = false;
-        Serial.printf("[IF] skipped: %s\n", token.c_str());
-        continue;
-      }
       currentGroup.commands.push_back(token);
     }
   }

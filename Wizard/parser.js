@@ -249,6 +249,25 @@ function parseBackupString(rawOutput) {
 }
 
 // ─────────────────────────────────────────────
+// Legacy runtime variable segments — shared regex builder.
+// Older firmware emitted variables as runtime "<cmdChar>V,name,value" commands
+// (e.g. ";V,foo,1") instead of the funcChar-prefixed ?VAR,SET CONFIG form.
+// The 'V' verb matches case-INsensitively (";v,foo,1" is the same command —
+// hence the 'i' flag), but variable NAMES remain case-SENSITIVE: the captured
+// name is re-emitted verbatim, and [A-Za-z0-9_] lists both cases explicitly,
+// so the 'i' flag cannot fold distinct names together.
+// `prefix` anchors the segment for the caller's context:
+//   '^'    — a whole trimmed line (extractIndividualCommandLines)
+//   '\\^'  — a segment glued to the end of a chained token (extractChainedTokens)
+// Value accepts an integer or TRUE/FALSE (both accepted by the firmware and
+// by parseToken's VAR,SET case).
+// ─────────────────────────────────────────────
+function buildLegacyVarRe(cmdChar, prefix) {
+  const cmdEsc = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`${prefix}${cmdEsc}V,([A-Za-z0-9_]{1,15}),(-?\\d+|TRUE|FALSE)$`, 'i');
+}
+
+// ─────────────────────────────────────────────
 // Board-backup path: parse the per-line commands the firmware prints above the
 // chained sections.  Each line is a single command with any funcChar prefix,
 // so there is no delimiter-switching ambiguity.
@@ -276,6 +295,10 @@ function extractIndividualCommandLines(rawOutput) {
     if (m?.[1]) { cmdChar = m[1]; break; }
   }
 
+  // Legacy runtime variable line, anchored to the whole line (";V,name,1",
+  // ";v,name,1" — see buildLegacyVarRe).
+  const legacyVarLineRe = buildLegacyVarRe(cmdChar, '^');
+
   // Collect individual command lines that appear before the chained sections.
   // The firmware prints one "Serial.println(lfi + cmd)" per command, then the
   // "=== For Configured Boards ===" header marks the start of the chained block.
@@ -293,13 +316,14 @@ function extractIndividualCommandLines(rawOutput) {
 
     // Accept lines that start with '?' or the detected funcChar.
     // Also accept legacy runtime variable lines ";V,name,value" (cmdChar
-    // prefix) — normalise them to the VAR,SET CONFIG form for parseToken.
+    // prefix, 'V' verb case-insensitive — shared regex with the chained-token
+    // peel loop) — normalise them to the VAR,SET CONFIG form for parseToken.
     let body = null;
     if (trimmed.startsWith('?'))               body = trimmed.slice(1);
     else if (trimmed.startsWith(funcChar))     body = trimmed.slice(1);
-    else if (trimmed.startsWith(cmdChar) &&
-             trimmed.slice(1, 3).toUpperCase() === 'V,') {
-      body = 'VAR,SET,' + trimmed.slice(3);
+    else {
+      const lm = trimmed.match(legacyVarLineRe);
+      if (lm) body = `VAR,SET,${lm[1]},${lm[2]}`;
     }
 
     // Skip lines that start with a known word (non-command output like "WARNING:",
@@ -324,13 +348,13 @@ function extractChainedTokens(rawOutput) {
   // Detect the configured cmdChar (appears as a ?CMDCHAR,<c> token in the
   // chain) so legacy runtime variable segments can be recognised below.
   const cmdChar = commandString.match(/\?CMDCHAR,(.)/i)?.[1] ?? ';';
-  const cmdEsc  = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   // Older firmware emitted variables as runtime "^;V,name,value" segments which
   // glue onto the END of the previous token when splitting on "^?".  Strip them
   // off (otherwise they'd fold into a preceding ?SEQ value and corrupt it) and
-  // re-emit them as normalised ?VAR,SET tokens.
-  const legacyVarRe = new RegExp(`\\^${cmdEsc}V,([A-Za-z0-9_]{1,15}),(-?\\d+)$`);
+  // re-emit them as normalised ?VAR,SET tokens.  Shared case-insensitive regex
+  // with the per-line path — "^;v,name,1" peels identically to "^;V,name,1".
+  const legacyVarRe = buildLegacyVarRe(cmdChar, '\\^');
 
   // Split on "^?" boundaries.  ?SEQ,SAVE values embed "^" internally to chain
   // device commands, so we split on the two-char boundary "^?" to avoid tearing
@@ -663,6 +687,8 @@ function parseToken(body, config) {
       // ?VAR,SET,name,value — backups emit one per variable (value is an
       // absolute int, but tolerate TRUE/FALSE which the firmware also accepts).
       // Other verbs (GET / CLEAR / LIST) are queries/actions — nothing to store.
+      // Verb matching is case-INsensitive (VAR,set / var,SET — cmd and subCmd
+      // come from upperParts); variable NAMES stay case-sensitive (parts[2]).
       const subCmd = upperParts[1];
       if (subCmd === 'SET') {
         const name   = parts[2];                 // case-sensitive

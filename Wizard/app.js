@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.13:38.R.JUN.2026';
+const UI_VERSION = '11.15:53.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2988,13 +2988,29 @@ async function removeVariableRow(n, rowId) {
   }
 }
 
+// Collects the variable rows for a push/export.
+// Guard rails (a dropped row makes buildCommandString's diff emit VAR,CLEAR
+// for a variable that's still live on the board — silent destruction):
+//   - blank / non-integer VALUE → keep the row, treat the value as 0
+//   - INVALID name (fails VAR_NAME_RE) → return null; the caller must abort.
+//     A toast naming the bad row is shown here so every caller reports it.
+//   - completely blank NAME → skipped (a never-saved placeholder row; it has
+//     no on-board counterpart to clear)
+// Returns the variables array, or null when an invalid name must block the push.
 function getVariablesFromUI(n) {
   const variables = [];
+  let badName = null;
   document.getElementById(`b${n}-var-tbody`)?.querySelectorAll('tr').forEach(row => {
     const name = row.querySelector('.var-name-input')?.value?.trim();
-    const val  = parseInt(row.querySelector('.var-value-input')?.value, 10);
-    if (name && VAR_NAME_RE.test(name) && Number.isInteger(val)) variables.push({ name, value: val });
+    if (!name) return;                                    // empty placeholder row
+    if (!VAR_NAME_RE.test(name)) { badName ??= name; return; }
+    const val = parseInt(row.querySelector('.var-value-input')?.value, 10);
+    variables.push({ name, value: Number.isInteger(val) ? val : 0 });
   });
+  if (badName !== null) {
+    showToast(`WCB ${n}: invalid variable name "${badName}" — 1-15 chars, letters/digits/underscore only. Fix or remove that row first.`, 'error');
+    return null;
+  }
   return variables;
 }
 
@@ -4588,13 +4604,15 @@ async function boardGo(n, opts = {}) {
   btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : isErase ? 'Erasing…' : 'Pushing…';
 
   if (isFlash || isUpdate || isFactory) {
-    // ── Validate HW version ──────────────────────────────────────
+    // ── HW version is a hint, not a gate ─────────────────────────
+    // flashFirmware detects the real chip family (and flash size) after the
+    // bootloader handshake and picks the matching binaries itself — the HW
+    // selection only pre-fetches a guess and is overridden (with a log) when
+    // it doesn't match the connected chip. So a missing selection no longer
+    // blocks flashing; it just skips the pre-fetch optimisation.
     const hwVersion = boardConfigs[n]?.hwVersion;
     if (!hwVersion) {
-      showToast('Select a hardware version before flashing', 'error');
-      btn.disabled = false;
-      btn.textContent = 'Push Config';
-      return;
+      termLog(n, 'No hardware version selected — firmware will be chosen by chip auto-detection', 'sys');
     }
 
     // ── Snapshot config and DOM NOW — before the flash starts ────────────
@@ -4931,7 +4949,16 @@ async function boardGo(n, opts = {}) {
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
-    config.variables     = getVariablesFromUI(n);
+    const uiVariables    = getVariablesFromUI(n);
+    if (uiVariables === null) {
+      // Invalid variable name — getVariablesFromUI already showed the toast.
+      // Abort before building the command string so the diff can't emit a
+      // destructive VAR,CLEAR for a row that failed validation.
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
+    config.variables     = uiVariables;
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
     config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -5276,7 +5303,14 @@ async function boardGoRemote(n, opts = {}) {
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
   config.sequences      = getSequencesFromUI(n);
-  config.variables      = getVariablesFromUI(n);
+  const uiVariables     = getVariablesFromUI(n);
+  if (uiVariables === null) {
+    // Invalid variable name — getVariablesFromUI already showed the toast.
+    // Abort before the diff can emit a destructive VAR,CLEAR.
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
+  config.variables      = uiVariables;
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
   config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -5831,7 +5865,14 @@ function exportSystemFile() {
     if (boardConfigs[n]) {
       syncSerialUIToConfig(n);
       boardConfigs[n].sequences = getSequencesFromUI(n);
-      boardConfigs[n].variables = getVariablesFromUI(n);
+      const uiVariables = getVariablesFromUI(n);
+      if (uiVariables === null) {
+        // Invalid variable name — getVariablesFromUI already showed the toast
+        // naming the bad row. Abort so the export can't silently drop it.
+        showToast(`Export aborted — fix the variable name on WCB ${n} first`, 'error');
+        return;
+      }
+      boardConfigs[n].variables = uiVariables;
       systemConfig.boards.push(boardConfigs[n]);
     }
   }

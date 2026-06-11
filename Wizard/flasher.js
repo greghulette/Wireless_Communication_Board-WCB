@@ -62,14 +62,25 @@ function loadScript(src) {
 }
 
 // ─── Binary fetching ──────────────────────────────────────────────
-// Fetches bootloader, partition table, and app from GitHub Contents API.
-// Returns an array of flash images: [{ buf, address }, ...]
+// Fetches bootloader(s), partition table, and app from GitHub Contents API.
+// Returns { images, boot, hasBootPart }:
+//   images — [{ buf, address }, ...]: partition (0x8000, when available) and
+//            app (0x10000). The bootloader is intentionally NOT in this list —
+//            it is selected at flash time, AFTER the real chip and flash size
+//            have been detected (see flashFirmware Step 3a).
+//   boot   — bootloader candidate buffers:
+//              ESP32   → { single: buf|null }                  flashed at 0x1000
+//              ESP32S3 → { '8MB': buf|null, '16MB': buf|null } flashed at 0x0
+//            The S3 bootloader header declares the flash size; writing the
+//            wrong-size variant silently corrupts NVS, so BOTH sizes are
+//            fetched here and the matching one is chosen after detection.
+//            Legacy builds publish only `_ESP32S3_boot.bin`, which IS the
+//            16 MB build — used as the 16MB fallback when the sized name
+//            is missing.
 //
 // Flash map (NVS at 0x9000 is intentionally NOT written):
 //   ESP32:   boot→0x1000  part→0x8000  app→0x10000
 //   ESP32S3: boot→0x0     part→0x8000  app→0x10000
-//
-// Fallback: file picker returns app-only at 0x10000 (for manual recovery)
 async function getBinaryData(binaryType, onLog) {
   const GITHUB_BRANCH = getFirmwareBranch();
   const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_BIN_PATH}?ref=${GITHUB_BRANCH}`;
@@ -94,24 +105,36 @@ async function getBinaryData(binaryType, onLog) {
       return buf;
     }
 
-    // ESP32-S3 bootloader lives at 0x0; classic ESP32 uses 0x1000
-    const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
-
     // Fetch app (required) + bootloader and partitions (optional — may not exist yet
     // on first build after adding multi-file support)
     const appBuf = await fetchBySuffix(`_${binaryType}.bin`);
     const images = [{ buf: appBuf, address: 0x10000 }];
+    const boot   = binaryType === 'ESP32S3'
+      ? { '8MB': null, '16MB': null }
+      : { single: null };
 
     let hasBootPart = true;
     try {
-      const [bootBuf, partBuf] = await Promise.all([
-        fetchBySuffix(`_${binaryType}_boot.bin`),
-        fetchBySuffix(`_${binaryType}_part.bin`),
-      ]);
-      images.unshift(
-        { buf: bootBuf, address: bootAddr },
-        { buf: partBuf, address: 0x8000  },
-      );
+      const partBuf = await fetchBySuffix(`_${binaryType}_part.bin`);
+      if (binaryType === 'ESP32S3') {
+        // 16 MB: prefer the sized name; the legacy unsized bin IS the 16 MB
+        // build (kept published for back-compat).
+        try {
+          boot['16MB'] = await fetchBySuffix(`_${binaryType}_boot_16MB.bin`);
+        } catch (_) {
+          boot['16MB'] = await fetchBySuffix(`_${binaryType}_boot.bin`);
+        }
+        // 8 MB: sized name only. Missing is non-fatal here — the flash-time
+        // guard refuses to write the bootloader on an 8 MB board without it.
+        try {
+          boot['8MB'] = await fetchBySuffix(`_${binaryType}_boot_8MB.bin`);
+        } catch (e8) {
+          onLog(`⚠️ No 8 MB ESP32-S3 bootloader available (${e8.message}) — 8 MB boards cannot receive a bootloader this run`);
+        }
+      } else {
+        boot.single = await fetchBySuffix(`_${binaryType}_boot.bin`);
+      }
+      images.unshift({ buf: partBuf, address: 0x8000 });
     } catch (e) {
       // The _boot.bin/_part.bin files DO exist on GitHub — landing here means
       // a transient fetch failure (rate limit, network). Without the partition
@@ -124,9 +147,10 @@ async function getBinaryData(binaryType, onLog) {
       showToast(`⚠️ Could not fetch bootloader/partition files (${e.message}) — flashing app only; partition-table migration check SKIPPED this run`, 'warning', 10000);
     }
 
-    const totalKB = Math.round(images.reduce((s, i) => s + i.buf.byteLength, 0) / 1024);
+    const bootKB = Object.values(boot).reduce((s, b) => s + (b ? b.byteLength : 0), 0);
+    const totalKB = Math.round((images.reduce((s, i) => s + i.buf.byteLength, 0) + bootKB) / 1024);
     onLog(`Loaded ${totalKB} KB (${hasBootPart ? 'boot + partitions + app' : 'app only'})`);
-    return images;
+    return { images, boot, hasBootPart };
 
   } catch (e) {
     onLog(`GitHub fetch failed: ${e.message}`);
@@ -204,10 +228,40 @@ async function comparePartitionTable(loader, partImg) {
   }
 }
 
+// ─── Flash-size detection ────────────────────────────────────────
+// Asks the connected chip for its real SPI flash size. esptool-js 0.4.7
+// exposes ESPLoader.getFlashSize() (returns KB, mapped from the SPI flash ID
+// via DETECTED_FLASH_SIZES_NUM); readFlashId() is the lower-level fallback —
+// bits 16-23 of the flash ID are log2(size in bytes). Returns the size in
+// whole MB (e.g. 8 or 16), or null if it cannot be determined — callers must
+// treat null as "do NOT write the bootloader" (its header declares the flash
+// size; a mismatch silently corrupts NVS).
+async function detectFlashSizeMB(loader) {
+  try {
+    const getFlashSizeFn = loader.getFlashSize ?? loader.get_flash_size;
+    if (typeof getFlashSizeFn === 'function') {
+      const kb = await getFlashSizeFn.call(loader);
+      if (Number.isFinite(kb) && kb > 0) return kb / 1024;
+    }
+  } catch (_) { /* fall through to raw flash-ID read */ }
+  try {
+    const readFlashIdFn = loader.readFlashId ?? loader.read_flash_id ?? loader.flashId ?? loader.flash_id;
+    if (typeof readFlashIdFn === 'function') {
+      const flashId = await readFlashIdFn.call(loader);
+      const szId = (flashId >> 16) & 0xFF;
+      if (szId >= 0x12 && szId <= 0x19) return (1 << szId) / (1024 * 1024);
+    }
+  } catch (_) { /* undetectable */ }
+  return null;
+}
+
 // ─── Main flash function ──────────────────────────────────────────
 //
 // port       — WebSerial SerialPort, must be CLOSED before calling
-// hwVersion  — numeric HW version (1, 21, 23, 24, 31, 32)
+// hwVersion  — numeric HW version (1, 21, 23, 24, 31, 32). Used only as a
+//              pre-fetch hint for which firmware family to download — the
+//              CONNECTED CHIP is authoritative (Step 3a re-fetches and logs
+//              if the manual selection was wrong).
 // callbacks  — { onProgress(written, total), onLog(msg), onStatus(msg) }
 //
 // Throws on error (caller is responsible for UI cleanup).
@@ -235,14 +289,18 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   }
   onLog('Flash tool loaded');
 
-  // ── Step 2: Get firmware images ─────────────────────────────────
-  const binaryType = WCBParser.HW_VERSION_MAP[String(hwVersion)]?.binary ?? 'ESP32';
-  onLog(`HW${hwVersion} → ${binaryType} binary`);
+  // ── Step 2: Pre-fetch firmware images ───────────────────────────
+  // The hwVersion-derived type is only a pre-fetch GUESS so the download can
+  // happen before the bootloader handshake. Step 3a detects the real chip
+  // family and re-fetches if the manual selection was wrong.
+  let binaryType = WCBParser.HW_VERSION_MAP[String(hwVersion)]?.binary ?? 'ESP32';
+  if (hwVersion) onLog(`HW${hwVersion} → ${binaryType} binary (pre-fetch; chip auto-detection is authoritative)`);
+  else           onLog(`No HW version selected — pre-fetching ${binaryType} binary (chip auto-detection is authoritative)`);
   onStatus(`Loading ${binaryType} firmware…`);
 
-  let flashImages;  // [{ buf: ArrayBuffer, address: number }, ...]
+  let fw;  // { images, boot, hasBootPart } — see getBinaryData
   try {
-    flashImages = await getBinaryData(binaryType, onLog);
+    fw = await getBinaryData(binaryType, onLog);
   } catch (e) {
     throw new Error(e.message);   // 'No file selected' or fetch error
   }
@@ -285,6 +343,61 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     );
   }
 
+  // ── Step 3a: Detect chip family + flash size, select bootloader ──
+  // The connected chip is the ground truth. If the user picked the wrong HW
+  // version (e.g. selected 3.2 but plugged in a classic ESP32 board), flashing
+  // the hwVersion-mapped binary would brick the board — detection overrides.
+  let detectedType = null;
+  const chipName = loader?.chip?.CHIP_NAME ?? String(chip ?? '');
+  if (/ESP32[-_]?S3/i.test(chipName)) detectedType = 'ESP32S3';
+  else if (/ESP32/i.test(chipName))   detectedType = 'ESP32';
+
+  if (detectedType && detectedType !== binaryType) {
+    onLog(`⚠ Detected chip "${chipName}" does not match the selected HW version (${binaryType} firmware)`);
+    onLog(`  → auto-detection overrides the manual selection: flashing ${detectedType} firmware instead`);
+    showToast(`Detected ${detectedType === 'ESP32S3' ? 'an ESP32-S3' : 'a classic ESP32'} chip — flashing ${detectedType} firmware (overrides the selected HW version)`, 'warning', 10000);
+    binaryType = detectedType;
+    onStatus(`Loading ${binaryType} firmware…`);
+    fw = await getBinaryData(binaryType, onLog);   // re-fetch the right family
+  } else if (!detectedType) {
+    onLog(`Could not determine chip family from "${chipName}" — falling back to the HW version selection (${binaryType})`);
+  } else {
+    onLog(`Chip family confirmed: ${detectedType}`);
+  }
+
+  // Real flash size — needed to pick the right S3 bootloader (its header
+  // declares the flash size; a mismatched header silently corrupts NVS).
+  const flashSizeMB = await detectFlashSizeMB(loader);
+  if (flashSizeMB) onLog(`Flash size detected: ${flashSizeMB} MB`);
+  else             onLog('⚠ Could not detect flash size');
+
+  // ESP32-S3 bootloader lives at 0x0; classic ESP32 uses 0x1000
+  const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
+  let bootImage       = null;  // { buf, address } | null — included in the full image set
+  let bootBlockReason = null;  // set → any path that writes the bootloader must ABORT
+  if (binaryType === 'ESP32S3') {
+    const candidate = flashSizeMB === 16 ? fw.boot['16MB']
+                    : flashSizeMB === 8  ? fw.boot['8MB']
+                    : null;
+    if (candidate) {
+      bootImage = { buf: candidate, address: bootAddr };
+      onLog(`Selected the ${flashSizeMB} MB ESP32-S3 bootloader`);
+    } else if (fw.hasBootPart) {
+      bootBlockReason = flashSizeMB
+        ? `No ${flashSizeMB} MB ESP32-S3 bootloader is available`
+        : 'Cannot determine flash size';
+    }
+    // !fw.hasBootPart → transient fetch failure already warned loudly in
+    // getBinaryData; no bootloader exists to write, so nothing to block.
+  } else if (fw.boot.single) {
+    // Classic ESP32: single compiled bootloader (PICO, 8 MB) — unchanged.
+    bootImage = { buf: fw.boot.single, address: bootAddr };
+  }
+
+  // Full image set: bootloader (when selected) + partitions + app.
+  // [{ buf: ArrayBuffer, address: number }, ...]
+  const flashImages = bootImage ? [bootImage, ...fw.images] : fw.images;
+
   // ── Step 3b: Decide what to flash ──────────────────────────────
   let imagesToFlash;
 
@@ -308,7 +421,19 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
         onLog('Partition table matches — proceeding with app-only update');
       } else {
         // Update mode is conservative by contract: a failed read must NOT
-        // force a full flash. Just note that the migration check was skipped.
+        // force a full flash. But that is only safe while the app still fits
+        // the OLD default-scheme ota_0 slot (0x140000) — on an un-migrated
+        // board a larger app would overrun into the next partition. If we
+        // can't verify the layout AND the app no longer fits, refuse.
+        const OLD_OTA0_SIZE = 0x140000;  // default-scheme ota_0 slot size
+        const appImg = flashImages.find(img => img.address === 0x10000);
+        if (appImg && appImg.buf.byteLength > OLD_OTA0_SIZE) {
+          const msg = 'Cannot verify partition layout and the firmware no longer fits the legacy layout — use the full Flash path';
+          onLog(`✕ ${msg}`);
+          showToast(msg, 'error', 10000);
+          try { await transport.disconnect(); } catch (_) {}
+          throw new Error(msg);
+        }
         onLog('Could not read on-board partition table — migration check skipped, flashing app only');
       }
     } else {
@@ -330,7 +455,7 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     onLog('Factory reset — flashing full image (bootloader + partitions + app)');
   } else {
     // Auto-detect: read bootloader magic to decide blank vs. programmed vs. bricked
-    const bootAddr = binaryType === 'ESP32S3' ? 0x0 : 0x1000;
+    // (bootAddr was derived from the DETECTED chip family in Step 3a)
     let isBlankBoard  = false;
     let forceFull     = false;   // partition-table change → must write boot+part+app
     try {
@@ -398,6 +523,23 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     imagesToFlash = (isBlankBoard || forceFull)
       ? flashImages
       : flashImages.filter(img => img.address === 0x10000);
+  }
+
+  // ── Step 3b-guard: NEVER write a mismatched bootloader ─────────
+  // Every path that intends a full flash (blank board, factory reset,
+  // forceFull recovery, partition migration) assigns the full `flashImages`
+  // set, which would write the bootloader region. If no size-matched
+  // bootloader could be selected (flash size undetectable, or no bootloader
+  // built for the detected size), ABORT — a bootloader whose header declares
+  // the wrong flash size silently corrupts NVS. App-only updates filter down
+  // to 0x10000 and never touch the bootloader, so they pass through.
+  if (imagesToFlash === flashImages && bootBlockReason) {
+    const msg = `${bootBlockReason} / no matching bootloader — refusing to write bootloader region`;
+    onLog(`✕ ${msg}`);
+    onLog('  (a bootloader built for the wrong flash size silently corrupts saved settings)');
+    showToast(msg, 'error', 12000);
+    try { await transport.disconnect(); } catch (_) {}
+    throw new Error(msg);
   }
 
   // ── Step 3c: Optionally prepend NVS + otadata erase images ────
