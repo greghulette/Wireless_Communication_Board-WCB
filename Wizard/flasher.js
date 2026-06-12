@@ -347,10 +347,15 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   // The connected chip is the ground truth. If the user picked the wrong HW
   // version (e.g. selected 3.2 but plugged in a classic ESP32 board), flashing
   // the hwVersion-mapped binary would brick the board — detection overrides.
+  // Strict allowlist: only the two families we ship firmware for. Variants
+  // (S2, C3, C6, H2, P4, …) must NOT fall through to the classic ESP32 binary.
   let detectedType = null;
   const chipName = loader?.chip?.CHIP_NAME ?? String(chip ?? '');
-  if (/ESP32[-_]?S3/i.test(chipName)) detectedType = 'ESP32S3';
-  else if (/ESP32/i.test(chipName))   detectedType = 'ESP32';
+  if (/ESP32[-_]?S3/i.test(chipName)) {
+    detectedType = 'ESP32S3';
+  } else if (/^ESP32\b/i.test(chipName) && !/-(S2|S3|C\d|H\d|P\d)/i.test(chipName)) {
+    detectedType = 'ESP32';   // classic ESP32 only (e.g. ESP32-D0WD, ESP32-PICO)
+  }
 
   if (detectedType && detectedType !== binaryType) {
     onLog(`⚠ Detected chip "${chipName}" does not match the selected HW version (${binaryType} firmware)`);
@@ -358,8 +363,23 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     showToast(`Detected ${detectedType === 'ESP32S3' ? 'an ESP32-S3' : 'a classic ESP32'} chip — flashing ${detectedType} firmware (overrides the selected HW version)`, 'warning', 10000);
     binaryType = detectedType;
     onStatus(`Loading ${binaryType} firmware…`);
-    fw = await getBinaryData(binaryType, onLog);   // re-fetch the right family
+    try {
+      fw = await getBinaryData(binaryType, onLog);   // re-fetch the right family
+    } catch (e) {
+      // Release the serial port before bailing — matches the sibling error paths
+      try { await transport.disconnect(); } catch (_) {}
+      throw new Error(`Could not load the ${binaryType} firmware after chip detection: ${e.message}`);
+    }
   } else if (!detectedType) {
+    if (!hwVersion) {
+      // binaryType is only the '?? ESP32' pre-fetch default — with no user
+      // selection AND no recognizable chip, flashing would be a blind guess.
+      const msg = 'Could not identify the chip and no hardware version selected — refusing to flash';
+      onLog(`✕ ${msg} (chip reported: "${chipName}")`);
+      showToast(msg, 'error', 12000);
+      try { await transport.disconnect(); } catch (_) {}
+      throw new Error(msg);
+    }
     onLog(`Could not determine chip family from "${chipName}" — falling back to the HW version selection (${binaryType})`);
   } else {
     onLog(`Chip family confirmed: ${detectedType}`);

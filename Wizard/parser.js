@@ -1033,11 +1033,15 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   }
 
   // ── Board Identity ──
-  if (fullPush || !baseline || baseline.hwVersion !== config.hwVersion)
+  // Only emit HW for known-valid versions (HW_VERSION_MAP keys) — pushing
+  // HW,0 (unset/unknown) used to clobber the board's stored hardware version.
+  const hwValid = HW_VERSION_MAP[String(config.hwVersion)] !== undefined;
+  if (hwValid && (fullPush || !baseline || baseline.hwVersion !== config.hwVersion))
     add(`HW,${config.hwVersion}`);
 
   // LED pin — only push for HW 3.1/3.2 and only when non-default (not 38)
-  if (config.hwVersion === 31 || config.hwVersion === 32) {
+  // (hwValid is implied: 31/32 are always valid HW_VERSION_MAP keys)
+  if (hwValid && (config.hwVersion === 31 || config.hwVersion === 32)) {
     const ledPin = config.statusLedPin || 38;
     const bLedPin = baseline?.statusLedPin || 38;
     if (fullPush || ledPin !== bLedPin)

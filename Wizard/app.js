@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '11.15:53.R.JUN.2026';
+const UI_VERSION = '12.09:06.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2525,6 +2525,21 @@ function seqTextareaToValue(text, delim) {
     .join(delim);
 }
 
+// Firmware rejects IF embedded inside a timer payload (";t500,IF,cond") or a
+// routed payload (";w2,IF,cond"). Catch those forms before TEST/UPDATE so the
+// user gets a clear fix instead of a board-side error. The regexes are
+// anchored to the token heads (",IF," must directly follow ;t<digits> or
+// ;w<digits>) so a payload that merely contains the letters "if" is not
+// false-flagged.
+const SEQ_EMBEDDED_IF_RES = [/;t\d*\s*,\s*if\s*,/i, /;w\d+\s*,\s*if\s*,/i];
+function validateSequenceValue(value) {
+  if (SEQ_EMBEDDED_IF_RES.some(re => re.test(value))) {
+    showToast('IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd', 'error', 10000);
+    return false;
+  }
+  return true;
+}
+
 // Convert stored value string → textarea lines (one command per line)
 // Normalises inline *** comments to exactly one space: "CMD*** note" → "CMD *** note"
 //
@@ -2723,6 +2738,13 @@ async function playSequence(n, rowId) {
   if (!row) return;
   const key = row.querySelector('.seq-key-input')?.value?.trim();
   if (!key) { showToast('Sequence key is empty', 'error'); return; }
+
+  // Validate the editor contents before running — firmware rejects IF
+  // embedded in ;t / ;w payloads (see validateSequenceValue)
+  const ta    = row.querySelector('.seq-val-textarea');
+  const delim = boardConfigs[n]?.delimiter ?? '^';
+  if (!validateSequenceValue(seqTextareaToValue(ta?.value ?? '', delim))) return;
+
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
   const cmd = `${cmdChar}SEQ${key}`;
 
@@ -2759,6 +2781,8 @@ async function updateSequence(n, rowId) {
   const funcChar = boardConfigs[n]?.funcChar  ?? '?';
   const value    = seqTextareaToValue(ta?.value ?? '', delim);
   if (!value) { showToast('Sequence value is empty', 'error'); return; }
+  // Firmware rejects IF embedded in ;t / ;w payloads — abort the save
+  if (!validateSequenceValue(value)) return;
 
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;

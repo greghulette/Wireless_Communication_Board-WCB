@@ -62,6 +62,16 @@ bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uin
 // ==================== Load & Save Functions ====================
 
 void saveHWversion(int wcb_hw_version_f){
+  // Validate BEFORE writing. The old order wrote the value first, so an
+  // invalid ?HW,0 (e.g. a config push from a Wizard with no HW selected)
+  // clobbered a previously-saved hardware version in NVS and the board came
+  // up with no pin map after the next reboot.
+  if (wcb_hw_version_f != 1  && wcb_hw_version_f != 21 && wcb_hw_version_f != 23 &&
+      wcb_hw_version_f != 24 && wcb_hw_version_f != 31 && wcb_hw_version_f != 32) {
+    Serial.printf("No valid HW version identified (%d) — stored HW version unchanged.\n",
+                  wcb_hw_version_f);
+    return;
+  }
   preferences.begin("hw_version", false);
   preferences.putInt("hw_version", wcb_hw_version_f);
   preferences.end();
@@ -77,9 +87,8 @@ void saveHWversion(int wcb_hw_version_f){
     Serial.println("Saved HW Ver: 3.1 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 32){
     Serial.println("Saved HW Ver: 3.2 to NVS.  Reboot to take effect!");
-  } else {
-    Serial.println("No valid HW version identified.");
   }
+  // (invalid values are rejected before the NVS write above)
   // updatePinMap();
 }
 

@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_111553RJUN2026                                  *****////
+///*****                                          Version 6.1.0_120906RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -93,6 +93,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "esp_system.h"
 #include "esp_timer.h"   // one-shot boot-guard timer (cold-boot auto-recovery)
 #include "esp_ota_ops.h" // esp_ota_get_bootloader_description (boot banner)
+#include "rom/rtc.h"     // rtc_get_reset_reason (low-level per-core boot telemetry)
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
@@ -158,7 +159,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_111553RJUN2026";
+String SoftwareVersion = "6.1.0_120906RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -196,8 +197,11 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
 // Remote Management Packet Types
-#define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target
+#define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
+#define PACKET_TYPE_MGMT_FRAG_UNICAST 5  // chunk sent DIRECTLY by a WCB_Client
+                                         // (1.3.1+) — reassembled command keeps
+                                         // unicast semantics (no re-broadcast)
 #define PACKET_TYPE_CONFIG_REQ  5   // relay → target: request current config
 #define PACKET_TYPE_CONFIG_FRAG 6   // target → relay: config response fragment
 #define PACKET_TYPE_STATS_REQ   7   // relay → target: request ESP-NOW stats
@@ -665,6 +669,8 @@ typedef struct __attribute__((packed)) {
 
 struct MgmtSession {
   bool     active;
+  bool     unicastOrigin;   // true = FRAG_UNICAST (WCB_Client): keep the
+                            // reassembled command target-local (no re-broadcast)
   uint16_t sessionId;
   uint8_t  totalChunks;
   uint16_t receivedMask;    // bitmask — bit N set when chunk N received
@@ -2144,8 +2150,16 @@ void handleMgmtPacket(const uint8_t *data) {
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
 
+  // Dispatch by packetType (the size-based router can't): FRAG (3) = wizard-
+  // relay origin, FRAG_UNICAST (5) = WCB_Client direct unicast. Anything else
+  // sharing this struct size (e.g. a future MGMT_ACK) must NOT be consumed as
+  // a chunk — it would clobber an in-progress session.
+  if (pkt.packetType != PACKET_TYPE_MGMT_FRAG &&
+      pkt.packetType != PACKET_TYPE_MGMT_FRAG_UNICAST) return;
+
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
 
   // Initialise the recent-session ring buffer on first use (avoids false matches
@@ -2166,15 +2180,29 @@ void handleMgmtPacket(const uint8_t *data) {
     }
   }
 
-  // Start a new session if needed
+  // Start a new session if needed.
+  // BUSY GUARD: a different sessionId may only take over when the active
+  // session has gone stale (>2 s without a chunk). Without this, two
+  // concurrent fragmented senders (e.g. a WCB_Client sketch + a Wizard push)
+  // memset each other's progress chunk-by-chunk and BOTH commands die
+  // silently. With the guard, the first session completes (chunks arrive ms
+  // apart) and the loser's chunks are rejected with a log.
   if (!mgmtSession.active || mgmtSession.sessionId != pkt.sessionId) {
+    if (mgmtSession.active &&
+        (millis() - mgmtSession.lastActivityMs) < 2000UL) {
+      if (debugMGMT) Serial.printf("[MGMT] Session %04X busy — rejecting chunk from session %04X\n",
+                                   mgmtSession.sessionId, pkt.sessionId);
+      return;
+    }
     memset(&mgmtSession, 0, sizeof(mgmtSession));
     mgmtSession.sessionId      = pkt.sessionId;
     mgmtSession.totalChunks    = pkt.totalChunks;
+    mgmtSession.unicastOrigin  = (pkt.packetType == PACKET_TYPE_MGMT_FRAG_UNICAST);
     mgmtSession.lastActivityMs = millis();   // stamp BEFORE active=true so checkMgmtTimeout() never sees active+zero timestamp
     mgmtSession.active         = true;       // "go live" flag — set last
-    if (debugMGMT) Serial.printf("[MGMT] New session %04X — expecting %d chunk(s)\n",
-                                 pkt.sessionId, pkt.totalChunks);
+    if (debugMGMT) Serial.printf("[MGMT] New session %04X — expecting %d chunk(s)%s\n",
+                                 pkt.sessionId, pkt.totalChunks,
+                                 mgmtSession.unicastOrigin ? " (client unicast)" : "");
   }
 
   // Store chunk if not already received
@@ -2201,10 +2229,17 @@ void handleMgmtPacket(const uint8_t *data) {
     mgmtRecentIds[mgmtRecentHead] = pkt.sessionId;
     mgmtRecentHead = (mgmtRecentHead + 1) % MGMT_RECENT_COUNT;
 
+    bool unicastOrigin = mgmtSession.unicastOrigin;  // capture before the memset
     memset(&mgmtSession, 0, sizeof(mgmtSession));   // clear before executing (reboot-safe)
-    // MGMT commands originate from the wizard, not from an ESP-NOW forwarding loop.
-    // Reset the loop-avoidance flag so the command can broadcast via ESP-NOW normally.
-    lastReceivedViaESPNOW = false;
+    // Origin decides re-broadcast semantics:
+    //  - Wizard-relay sessions (FRAG, type 3): the command originates from the
+    //    config tool, not an ESP-NOW forwarding loop — reset the flag so the
+    //    command can broadcast to peers normally (unchanged behavior).
+    //  - Client unicast sessions (FRAG_UNICAST, type 5): the sender addressed
+    //    THIS board. Keep the flag set so broadcastable tokens stay local —
+    //    otherwise a WCB_Client unicast would silently become a network-wide
+    //    broadcast the moment the command crossed the fragmentation threshold.
+    lastReceivedViaESPNOW = unicastOrigin;
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
@@ -4897,17 +4932,6 @@ void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
 
-  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
-  // Any ;w<id>,<cmd> arriving via USB means "a host (config tool's Via WCB
-  // mode, or WCB Wizard) is actively talking through this bridge".  Use
-  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
-  // rc_trig / rc_mode) to USB Serial.  Direct-USB users of any OTHER
-  // device on the same WCB network never send ;w commands, so they don't
-  // get spammed by the RC's network heartbeats.  Subscription window is
-  // intentionally longer than the config tool's 10 s keep-alive PING
-  // cadence so a single missed keep-alive doesn't kill the relay.
-  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
-
   // Parse the target WCB number. RULE (confirmed spec):
   //   * NO comma after the digits  -> exactly ONE digit is the target (1-9),
   //     everything from position 2 on is the payload — even if it starts
@@ -4956,6 +4980,15 @@ void processWCBMessage(const String &message){
           return;
       }
   }
+
+  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
+  // Any VALID ;w<id>,<cmd> arriving via USB means "a host (config tool's Via
+  // WCB mode, or WCB Wizard) is actively talking through this bridge".  Use
+  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
+  // rc_trig / rc_mode) to USB Serial.  Renewed AFTER the rejection checks so
+  // a rejected command doesn't subscribe the host to 20 s of RC JSON spam.
+  // Window is intentionally longer than the config tool's 10 s keep-alive.
+  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
@@ -5288,6 +5321,17 @@ void processSerialCommandHelper(String &data, int sourceID) {
 }
 
 
+// ── Boot telemetry ──────────────────────────────────────────────────────────
+// Boot-attempt counter in RTC noinit RAM: survives watchdog/software/panic
+// resets (and usually the reset button), is garbage only after true power
+// loss — the magic word detects that and restarts the count. After a "dark
+// board" episode, this banner tells you whether the chip had been silently
+// reset-looping through the app (count climbing), brown-outing (reason 15),
+// or never reached app code at all (count restarts at 1).
+#define BOOT_MAGIC 0xB007C0DEUL
+RTC_NOINIT_ATTR static uint32_t g_bootMagic;
+RTC_NOINIT_ATTR static uint32_t g_bootAttempts;
+
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -5304,6 +5348,19 @@ void printResetReason() {
         case ESP_RST_SDIO: Serial.println("SDIO Reset"); break;
         default: Serial.println("Unknown Reset"); break;
     }
+    // Low-level per-core reset causes (rom/rtc.h). Key S3 codes:
+    //   1 = power-on   15 = RTC-WDT brown-out   16 = RTC-WDT system reset
+    //   (16 = the short-WDT bootloader's 3 s watchdog fired — auto-retry)
+    Serial.printf("RTC reset codes: core0=%d core1=%d\n",
+                  (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
+    if (g_bootMagic != BOOT_MAGIC) {        // true power loss → fresh count
+        g_bootMagic = BOOT_MAGIC;
+        g_bootAttempts = 0;
+    }
+    g_bootAttempts++;
+    Serial.printf("Boot attempts since power applied: %lu%s\n",
+                  (unsigned long)g_bootAttempts,
+                  g_bootAttempts > 1 ? "   <-- board retried/reset before this boot" : "");
 }
 
 // Report at boot which 2nd-stage bootloader is on the board. Reads the

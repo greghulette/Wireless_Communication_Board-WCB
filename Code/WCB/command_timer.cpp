@@ -134,7 +134,11 @@ void parseCommandGroups(const String &input) {
           Serial.printf("⏱️ Delay capped to %i ms : originally requested %s ms\n", parsedDelayLimit, delayStr.c_str());
         }
       }
-      currentGroup.delayAfterPrevious = parsedDelay;
+      // ACCUMULATE (don't overwrite): consecutive delay tokens with no command
+      // between them — ';t500^;t300^cmd' or ';t500^***note^;t300^cmd' (the
+      // comment is dropped above, leaving the group empty) — must wait the SUM.
+      // A fresh group starts at 0, so += is also correct for the normal case.
+      currentGroup.delayAfterPrevious += parsedDelay;
       if (!remaining.isEmpty()) {
         currentGroup.commands.push_back(remaining);
       }
