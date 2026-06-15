@@ -326,7 +326,10 @@ bool isIfChainToken(const String &trimmedTok) {
 //
 // Rules (the contract in WCB_Variables.h):
 //   * IF token: evaluate now; true → drop just the IF; false → start gating.
-//     An IF encountered WHILE gating = nested → error, stays gating.
+//     Consecutive IF tokens AND together: "IF,a=1^IF,b=2^cmd" runs cmd only
+//     when a=1 AND b=2 (each IF gates the rest; equivalent to the compound
+//     "IF,a=1,AND,b=2"). When an earlier IF already failed (we're gating),
+//     a following IF is just one more skipped token.
 //   * Comment tokens ("***...") never consume the gate — they're annotations.
 //   * Pure delay tokens (";t500") under a false IF are dropped and gating
 //     CONTINUES (the wait belonged to the gated command).
@@ -336,8 +339,11 @@ extern String commentDelimiter;
 bool ifGateConsumeToken(const String &trimmedTok, bool &ifSkipping) {
   if (isIfChainToken(trimmedTok)) {
     if (ifSkipping) {
-      Serial.printf("[IF] Nested IF is not allowed — skipped: %s\n", trimmedTok.c_str());
-      return true;  // consume the inner IF, keep looking for the gated action
+      // Already skipping (an earlier condition in this chain was false) — this
+      // chained IF and everything it would gate stay skipped. Net effect: the
+      // conditions AND together.
+      Serial.printf("[IF] skipped (earlier condition false): %s\n", trimmedTok.c_str());
+      return true;
     }
     String cond = trimmedTok.substring(3);
     bool pass = evaluateIfCondition(cond);

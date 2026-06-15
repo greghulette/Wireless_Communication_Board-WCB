@@ -545,14 +545,29 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       : flashImages.filter(img => img.address === 0x10000);
   }
 
+  // ── Step 3b-guard: a full (bootloader-writing) flash must have boot images ──
+  // Every path that intends a full flash (blank board, factory reset, forceFull
+  // recovery, partition migration) assigns the full `flashImages` set by
+  // reference. If a transient GitHub fetch failure earlier dropped the
+  // bootloader/partition images (fw.hasBootPart === false), `flashImages` is
+  // app-only — writing it on a board that NEEDS a bootloader leaves it
+  // non-booting. Refuse loudly and have the operator retry, rather than
+  // silently producing a brick. (Single chokepoint covering all full-flash
+  // paths, and outside the read-probe try/catch so the abort propagates.)
+  if (imagesToFlash === flashImages && !fw.hasBootPart) {
+    const msg = 'A full flash is required (blank / changed / corrupted board) but the bootloader + partition files could not be fetched — refusing to flash app-only, which would not boot. Check your connection and retry.';
+    onLog(`✕ ${msg}`);
+    showToast(msg, 'error', 12000);
+    try { await transport.disconnect(); } catch (_) {}
+    throw new Error(msg);
+  }
+
   // ── Step 3b-guard: NEVER write a mismatched bootloader ─────────
-  // Every path that intends a full flash (blank board, factory reset,
-  // forceFull recovery, partition migration) assigns the full `flashImages`
-  // set, which would write the bootloader region. If no size-matched
-  // bootloader could be selected (flash size undetectable, or no bootloader
-  // built for the detected size), ABORT — a bootloader whose header declares
-  // the wrong flash size silently corrupts NVS. App-only updates filter down
-  // to 0x10000 and never touch the bootloader, so they pass through.
+  // If no size-matched bootloader could be selected (flash size undetectable,
+  // or no bootloader built for the detected size), ABORT — a bootloader whose
+  // header declares the wrong flash size silently corrupts NVS. App-only
+  // updates filter down to 0x10000 and never touch the bootloader, so they
+  // pass through.
   if (imagesToFlash === flashImages && bootBlockReason) {
     const msg = `${bootBlockReason} / no matching bootloader — refusing to write bootloader region`;
     onLog(`✕ ${msg}`);

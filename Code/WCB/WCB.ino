@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_120906RJUN2026                                  *****////
+///*****                                          Version 6.1.0_151212RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -159,7 +159,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_120906RJUN2026";
+String SoftwareVersion = "6.1.0_151212RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3803,7 +3803,7 @@ void processLocalCommand(const String &message) {
 
     // --- ?VAR,... (user variable management) ---
     //   ?VAR,LIST | ?VAR,GET,<name> | ?VAR,CLEAR,<name|ALL>
-    //   (set is the runtime command ;V,<name>,<value>; see VARIABLES_DESIGN.md)
+    //   (set is the runtime command ;V,<name>,<value>; see docs/VARIABLES_DESIGN.md)
     if (rootUpper == "VAR") {
         processVarConfig(args);
         return;
@@ -4598,18 +4598,34 @@ void updateHWVersion(const String &message) {
     // ---- Command Characters ----
     // DELIM:
     //   Configured string: skip entirely - board already uses correct delimiter throughout
-    //   Factory reset string: include only if non-default, then switch defaultSep
+    //   Factory reset string: include only if non-default.
+    //
+    //   IMPORTANT: do NOT switch the factory-chain SEPARATOR after emitting
+    //   ?DELIM. The restore is parsed by parseCommandsAndEnqueue, which splits
+    //   the WHOLE string ONCE up front using the receiving board's current
+    //   delimiter ('^' on a fresh board) — a mid-stream ?DELIM only takes
+    //   effect when it DEQUEUES, long after splitting is done. If the chain
+    //   flipped to the new delimiter here, every entry after ?DELIM (CMDCHAR,
+    //   BAUD, MAESTRO/MP3/HCR/VAR, ETM, and the trailing ?CHK) would collapse
+    //   into one un-split token and silently drop, and the '^?CHK' integrity
+    //   check would be missed. Keeping '^' throughout makes the whole chain
+    //   split correctly; ?DELIM still applies the new delimiter for FUTURE
+    //   input when it executes. (funcChar is different — see FUNCCHAR below.)
     if (commandDelimiter != '^') {
         cmd = "DELIM," + String(commandDelimiter);
         Serial.println(lfi + cmd);
         // configured string: intentionally skipped
         chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        defaultSep = String(commandDelimiter);  // all subsequent factory reset commands use new delimiter
     }
 
     // FUNCCHAR:
     //   Configured string: skip entirely - board already uses correct func identifier throughout
-    //   Factory reset string: include only if non-default, then switch defaultFunc
+    //   Factory reset string: include only if non-default, then switch defaultFunc.
+    //   Unlike the delimiter (above), the func identifier DOES flip here: it
+    //   governs DISPATCH (handleSingleCommand re-checks each token's prefix
+    //   against the live LocalFunctionIdentifier at dequeue time), so once
+    //   ?FUNCCHAR has executed, later already-split tokens must carry the new
+    //   prefix to be recognized as config commands.
     if (LocalFunctionIdentifier != '?') {
         cmd = "FUNCCHAR," + String(LocalFunctionIdentifier);
         Serial.println(lfi + cmd);

@@ -594,7 +594,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Evaluated when the sequence is invoked, not after delays."));
         Serial.println(F("  - Set & test in SEPARATE sequences: ;V,x,1^IF,x=1^cmd reads"));
         Serial.println(F("    the OLD value (the ;V hasn't run yet at evaluate time)."));
-        Serial.println(F("  - For 'a AND b' use compound IF; nested IFs are not allowed."));
+        Serial.println(F("  - Chained IFs AND together (IF,a=1^IF,b=2^cmd); compound IF is clearer."));
         Serial.println(F("  - IF can't ride inside ;t or ;w payloads — gate the whole"));
         Serial.println(F("    token instead: IF,cond^;t500^cmd / IF,cond^;w2,cmd"));
         Serial.println(F("  - Variables are saved to NVS and included in ?backup."));

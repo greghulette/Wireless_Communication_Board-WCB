@@ -91,7 +91,9 @@ parseCommandsAndEnqueue / parseCommandGroups, while walking the tokens:
   timer and non-timer walks cannot drift.
 - **Timers between IF and its command work**: `IF,x=1^;t500^cmd` waits then
   runs when true; skips the delay AND the command when false.
-- **Nested IF is rejected** (use compound `IF,a=1,AND,b=2`).
+- **Consecutive IFs AND together**: `IF,a=1^IF,b=2^cmd` runs `cmd` only when
+  both hold (same result as the compound `IF,a=1,AND,b=2`). Compound is clearer;
+  both work.
 - **IF cannot ride inside a `;t` payload** (`;t500,IF,…` → error: write
   `IF,cond^;t500^cmd`) and **cannot ride inside a `;w` payload**
   (`;w2,IF,…` → error: gate the whole route — `IF,cond^;w2,cmd`).

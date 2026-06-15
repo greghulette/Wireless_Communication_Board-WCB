@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // ---------------------------------------------------------------------------
-// WCB user variables + conditional execution.  See VARIABLES_DESIGN.md.
+// WCB user variables + conditional execution.  See docs/VARIABLES_DESIGN.md.
 //
 //   Set/mutate (runtime):  ;V,<name>,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>
 //   Manage (config):       ?VAR,LIST | ?VAR,GET,<name> | ?VAR,CLEAR,<name|ALL>
@@ -50,10 +50,10 @@ bool evaluateIfCondition(const String &expr);
 // is deliberately NO global skip flag (cross-source/timer-boundary races).
 // Semantics: IF gates the next actionable command in its own chain; pure
 // delay tokens (;t500) between the IF and the command are dropped with it on
-// false and preserved on true; comment tokens never consume the gate; nested
-// IF is not allowed. NOTE: IF evaluates when the chain is INVOKED — a ;V
-// earlier in the SAME chain has not executed yet, so set and test must be
-// separate invocations.
+// false and preserved on true; comment tokens never consume the gate;
+// consecutive IF tokens AND together (IF,a=1^IF,b=2^cmd == IF,a=1,AND,b=2^cmd).
+// NOTE: IF evaluates when the chain is INVOKED — a ;V earlier in the SAME
+// chain has not executed yet, so set and test must be separate invocations.
 bool isIfChainToken(const String &trimmedTok);
 
 // The single shared IF-gate token processor — BOTH walkers must route every
