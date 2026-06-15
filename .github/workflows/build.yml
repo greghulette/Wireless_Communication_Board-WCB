@@ -33,14 +33,11 @@ jobs:
         run: |
           arduino-cli lib install "EspSoftwareSerial@8.1.0"
           arduino-cli lib install "Adafruit NeoPixel@1.12.5"
-          # HumanCyborgRelationsAPI (HCRVocalizer) is VENDORED in-repo at
-          # Code/libraries/HumanCyborgRelationsAPI. We do NOT pull it from
-          # upstream: the upstream library does not compile in the WCB build
-          # (its I2C/TwoWire path), it has no released tags to pin to, and the
-          # WCB needs a serial-only patched copy. Vendoring guarantees CI builds
-          # the exact source validated locally, immune to upstream changes.
-          mkdir -p "$HOME/Arduino/libraries"
-          cp -r "$GITHUB_WORKSPACE/Code/libraries/HumanCyborgRelationsAPI" "$HOME/Arduino/libraries/"
+          # HumanCyborgRelationsAPI (HCRVocalizer) is NOT installed as a library.
+          # The WCB-patched, serial-only copy is bundled directly inside the
+          # sketch at Code/WCB/src/HumanCyborgRelationsAPI and pulled in with a
+          # relative #include, so it compiles with no install step here — and can
+          # never be shadowed by a different copy on the build machine.
           arduino-cli lib list
 
       - name: Run build script

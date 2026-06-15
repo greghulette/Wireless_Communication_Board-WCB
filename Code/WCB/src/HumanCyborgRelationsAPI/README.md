@@ -1,3 +1,24 @@
+> ## ⚠️ WCB vendored + patched copy — do not replace with stock upstream
+>
+> This is the [HumanCyborgRelationsAPI](https://github.com/roy86/HumanCyborgRelationsAPI)
+> by roy86, **vendored directly into the WCB sketch** and patched for the
+> Wireless Communication Board. It lives at `Code/WCB/src/HumanCyborgRelationsAPI/`
+> and is pulled in with a relative `#include "src/HumanCyborgRelationsAPI/hcr.h"`,
+> so **building the WCB firmware needs no library install** — and any HCR library
+> already installed in your IDE is ignored (the bundled copy always wins).
+>
+> **WCB patches vs. upstream:**
+> - **I2C/TwoWire removed** — the WCB drives the HCR over a serial UART only.
+>   `hcr.h` `#define`s `TwoWire_h` before `#include <Wire.h>` (neutering it) and
+>   every I2C constructor / transfer in `hcr.cpp` is commented out.
+> - **`<String.h>` → `<string.h>`** (lowercase) so the build works on
+>   case-sensitive filesystems (Linux CI), not just Windows/macOS.
+>
+> Upstream license is preserved in `LICENSE`. To pull a newer upstream, re-apply
+> the two patches above rather than dropping a stock copy in place.
+
+---
+
 ![Banner](/img/hcr-banner.png?raw=true "Employee Data title")
 
 # Human Cyborg Relations C++ API

@@ -3,7 +3,7 @@
 #include "WCB_Storage.h"
 #include <Preferences.h>
 #include <SoftwareSerial.h>
-#include <hcr.h>
+#include "src/HumanCyborgRelationsAPI/hcr.h"  // WCB-patched HCR, bundled in-sketch (no lib install)
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
