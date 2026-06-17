@@ -14,7 +14,7 @@ extern bool blockBroadcastFrom[5];
 extern void saveBroadcastSettingsToPreferences();
 extern void saveBroadcastBlockSettings();
 extern bool Kyber_Local;
-extern bool Kyber_Remote;
+extern bool Maestro_Remote;
 extern bool debugPWMPassthrough;
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
@@ -49,8 +49,8 @@ bool canSendESPNow() {
 
 // Validation function to prevent PWM conflicts with Kyber
 bool canUsePWMOnPort(int port) {
-    // Serial1 is reserved when Kyber_Local or Kyber_Remote
-    if (port == 1 && (Kyber_Local || Kyber_Remote)) {
+    // Serial1 is reserved when Kyber_Local or Maestro_Remote
+    if (port == 1 && (Kyber_Local || Maestro_Remote)) {
         Serial.println("❌ Cannot use PWM on Serial1 - reserved for Maestro/Kyber");
         return false;
     }

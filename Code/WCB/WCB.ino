@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_162147RJUN2026                                  *****////
+///*****                                          Version 6.1.0_171307RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -149,7 +149,7 @@ char CommandCharacter = ';';                                        // Default s
 
 bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
-bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this board directly
+bool Maestro_Remote = false;  // board hosts a Maestro driven remotely (Kyber/NaviCore elsewhere): accepts Pololu/Maestro packets over the ESP-NOW mesh and relays to the local Maestro. Set by ?MAESTRO,REMOTE (alias: ?KYBER,REMOTE).
 String Kyber_Location;
 int kyberLocalPort = 0;      // serial port number Kyber is physically connected to (0 = not configured)
 
@@ -163,7 +163,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_162147RJUN2026";
+String SoftwareVersion = "6.1.0_171307RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2354,8 +2354,8 @@ String buildConfigString() {
                   ":" + String(baud);
     }
     append(kyberCmd);
-  } else if (Kyber_Remote) {
-    append("KYBER,REMOTE");
+  } else if (Maestro_Remote) {
+    append("MAESTRO,REMOTE");
   } else {
     append("KYBER,CLEAR");
   }
@@ -3093,7 +3093,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
       // Also echo back to the local Kyber port
       if (kyberLocalPort > 0) getSerialStream(kyberLocalPort).write(dataPtr, chunkLen);
-    } else if (Kyber_Remote) {
+    } else if (Maestro_Remote) {
       // Write to every locally configured Maestro port
       bool wroteAny = false;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
@@ -3293,11 +3293,11 @@ void forwardMaestroDataToLocalKyber() {
     while (maestroSerial.available() > 0) {
       uint8_t b = (uint8_t)maestroSerial.read();
       kyberSerial.write(b);
-      if (Kyber_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+      if (Maestro_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
     }
   }
 
-  if (Kyber_Remote && remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
+  if (Maestro_Remote && remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
 }
 
 void forwardMaestroDataToRemoteKyber() {
@@ -3797,6 +3797,12 @@ void processLocalCommand(const String &message) {
             clearAllMaestroConfigs();
         } else if (argsUpper.startsWith("CLEAR,")) {
             clearMaestroByID(args.substring(args.indexOf(',') + 1));
+        } else if (argsUpper == "REMOTE") {
+            // ?MAESTRO,REMOTE — canonical name for "this board's Maestro is driven
+            // remotely (listens for Pololu/Maestro broadcasts over the mesh)".
+            // Same code path as the ?KYBER,REMOTE alias.
+            storeKyberSettings("remote");
+            printKyberSettings();
         } else {
             configureMaestro(args);
         }
@@ -4062,6 +4068,10 @@ void processLocalCommand(const String &message) {
         clearAllMaestroConfigs();
     } else if (message == "maestro_default" || message == "MAESTRO_DEFAULT") {
         clearAllMaestroConfigs();
+    } else if (message.equals("maestro_remote") || message.equals("MAESTRO_REMOTE")) {
+        // Canonical name for the remote-Maestro function (alias: kyber_remote).
+        storeKyberSettings("remote");
+        printKyberSettings();
     } else if (message.startsWith("maestro") || message.startsWith("MAESTRO")) {
         configureMaestro(message.substring(7));
     } else if (message.equals("kyber_local") || message.equals("KYBER_LOCAL") ||
@@ -4732,8 +4742,8 @@ void updateHWVersion(const String &message) {
                         ":"  + String(baud);
         }
         cmd = kyberCmd;
-    } else if (Kyber_Remote) {
-        cmd = "KYBER,REMOTE";
+    } else if (Maestro_Remote) {
+        cmd = "MAESTRO,REMOTE";
     } else {
         cmd = "KYBER,CLEAR";
     }
@@ -5186,7 +5196,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
     // Normal broadcast behavior - send to all serial ports except restricted ones
     for (int i = 1; i <= 5; i++) {
-        if ((i == 1 && Kyber_Remote) || 
+        if ((i == 1 && Maestro_Remote) || 
             (i <= 2 && Kyber_Local) || 
             isSerialPortPWMOutput(i) ||
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
@@ -5462,7 +5472,7 @@ void serialCommandTask(void *pvParameters) {
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
             // Skip Serial1 and Serial2 - handled by Kyber task
-        } else if (Kyber_Remote) {
+        } else if (Maestro_Remote) {
             // Process Serial2 only if not raw-mapped
             if (!isSerialPortRawMapped(2)) {
                 processIncomingSerial(Serial2, 2);
@@ -5765,7 +5775,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
       // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
       Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-  } else if (Kyber_Remote) {
+  } else if (Maestro_Remote) {
       // Kyber Remote REQUIRES Serial1 (Maestro only)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
       // Serial2 available for PWM or normal serial
@@ -5950,9 +5960,9 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
       xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Local Task Created");
   }    
-  if (Kyber_Remote) {
+  if (Maestro_Remote) {
       xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
-      Serial.println("Kyber_Remote Task Created");
+      Serial.println("Maestro_Remote Task Created");
   }
     bool hasPWMMappings = false;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {

@@ -223,17 +223,22 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?KYBER,LOCAL      - This board has Kyber on S2"));
         Serial.println(F("  ?KYBER,LOCAL,S1,M1:W1S2:115200,M2:W2S1:115200,M3:W3S1:57600"));
-        Serial.println(F("  ?KYBER,REMOTE     - This board has Maestro, Kyber elsewhere"));
+        Serial.println(F("  ?MAESTRO,REMOTE   - This board has Maestro, controller elsewhere (canonical)"));
+        Serial.println(F("  ?KYBER,REMOTE     - Alias for ?MAESTRO,REMOTE (same function)"));
         Serial.println(F("  ?KYBER,CLEAR      - Disable Kyber"));
         Serial.println(F("  ?KYBER,LIST       - Show configuration"));
         Serial.println(F("\nNotes:"));
+        Serial.println(F("  - 'REMOTE' = this board hosts a Maestro driven remotely (Kyber OR NaviCore)."));
+        Serial.println(F("    It accepts Pololu/Maestro packets over the mesh. ?MAESTRO,REMOTE is the"));
+        Serial.println(F("    canonical name; ?KYBER,REMOTE remains a working alias."));
         Serial.println(F("  - Kyber LOCAL reserves S1 and S2 - cannot be used for other purposes"));
-        Serial.println(F("  - Kyber REMOTE reserves S1 only"));
+        Serial.println(F("  - REMOTE reserves S1 only (Maestro)"));
         Serial.println(F("  - PWM cannot be mapped to S1 or S2 when Kyber is configured"));
         Serial.println(F("  - Setting is saved to NVS and restored on reboot"));
-        Serial.println(F("  - Reboot required after changing Kyber mode"));
+        Serial.println(F("  - Reboot required after changing mode"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?KYBER_LOCAL / ?KYBER_REMOTE / ?KYBER_CLEAR / ?KYBER_LIST"));
+        Serial.println(F("  ?MAESTRO_REMOTE  (canonical underscore form)"));
 
     // ================================================================
     } else if (c == "ETM") {

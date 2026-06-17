@@ -305,7 +305,7 @@ void printBaudRates() {
             Serial.printf(" (%s)", serialPortLabels[i].c_str());
         }
         // Auto-detected labels for Kyber/Maestro if no user label
-        else if (i == 0 && (Kyber_Local || Kyber_Remote)) {
+        else if (i == 0 && (Kyber_Local || Maestro_Remote)) {
             bool hasMaestroOnS1 = false;
             for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
                 if (maestroConfigs[m].configured && maestroConfigs[m].serialPort == 1) {
@@ -939,7 +939,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
   
   if (baseCommand.equals("local")) {
     Kyber_Local = true;
-    Kyber_Remote = false;
+    Maestro_Remote = false;
     Kyber_Location = "local";
     kyberLocalPort = kyberPort;   // store globally so forwarding functions use correct port
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
@@ -962,14 +962,14 @@ if (params.startsWith("S") || params.startsWith("s")) {
     
   } else if (baseCommand.equals("remote")) {
     Kyber_Local = false;
-    Kyber_Remote = true;
+    Maestro_Remote = true;
     Kyber_Location = "remote";
     Serial.println("Kyber is REMOTE (on another WCB)");
     
   } else if (baseCommand.equals("clear")) {
     Kyber_Location = " ";
     Kyber_Local = false;
-    Kyber_Remote = false;
+    Maestro_Remote = false;
     kyberLocalPort = 0;
     kyberUseTargeting = false;
     
@@ -1125,7 +1125,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
       for (int wcb = 1; wcb <= Default_WCB_Quantity; wcb++) {
         if (wcb == WCB_Number) continue;
         
-        // Only add KYBER_REMOTE if this WCB has Maestro ID 1 or 2 physically on it
+        // Only add MAESTRO_REMOTE (legacy alias: KYBER_REMOTE) if this WCB has Maestro ID 1 or 2 physically on it
         bool needsKyberRemote = false;
         for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
           if (kyberTargets[i].enabled && 
@@ -1138,7 +1138,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
         
         String command = "";
         if (needsKyberRemote) {
-          command += "?" + String("KYBER_REMOTE^?");
+          command += "?" + String("MAESTRO_REMOTE^?");
         } else {
           command += "?";
         }
@@ -1233,16 +1233,16 @@ void loadKyberSettings(){
 
   if (Kyber_Location == "local"){
       Kyber_Local = true;
-      Kyber_Remote = false;
+      Maestro_Remote = false;
       // Fall back to port 2 (legacy default) if K_Port was never saved to NVS
       kyberLocalPort = (storedPort > 0 && storedPort <= 5) ? storedPort : 2;
   } else if (Kyber_Location == "remote"){
       Kyber_Local = false;
-      Kyber_Remote = true;
+      Maestro_Remote = true;
       kyberLocalPort = 0;
   } else {
       Kyber_Local = false;
-      Kyber_Remote = false;
+      Maestro_Remote = false;
       kyberLocalPort = 0;
   }
 };
@@ -1260,7 +1260,7 @@ void printKyberSettings() {
 
   if (Kyber_Local) {
     Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
-  } else if (Kyber_Remote) {
+  } else if (Maestro_Remote) {
     Serial.println("Initialized Serial1 for Kyber Remote mode");
   }
 
@@ -1928,7 +1928,7 @@ void printKyberList() {
 
       String cmd = "";
       if (needsKyberRemote) {
-        cmd += "?" + String("KYBER_REMOTE^?");
+        cmd += "?" + String("MAESTRO_REMOTE^?");
       } else {
         cmd += "?";
       }

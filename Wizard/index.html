@@ -91,6 +91,32 @@
           </div>
         </div>
 
+        <hr class="divider">
+
+        <!-- NaviCore — network-wide special peer (applies to every WCB) -->
+        <div class="subsection-title">NaviCore <span class="wiz-hint" data-tip="NaviCore is a remote astromech animation controller. It runs on the mesh as a special peer and broadcasts Maestro animations to every board set to Kyber → Remote. This is a network-wide setting — it applies to all WCBs.">i</span></div>
+        <div class="toggle-wrap mb-12">
+          <label class="toggle">
+            <input type="checkbox" id="g-navicore-enabled" onchange="onNavicoreToggle()">
+            <span class="toggle-track"></span>
+            <span class="toggle-label">Using NaviCore <span class="wiz-hint" data-tip="Enable if a NaviCore controller is on this network. Sets the special-peer flag on every WCB so they recognize NaviCore.">i</span></span>
+          </label>
+        </div>
+        <div class="field-group" id="g-navicore-detail" style="display:none">
+          <div class="field">
+            <label>NaviCore ID <span class="wiz-hint" data-tip="The reserved peer ID NaviCore communicates on. Defaults to 20. Only change this if your NaviCore is configured for a different ID. Must match on all boards.">i</span></label>
+            <select id="g-navicore-id" onchange="onNavicoreIdChange()">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+              <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+              <option value="13">13</option><option value="14">14</option><option value="15">15</option>
+              <option value="16">16</option><option value="17">17</option><option value="18">18</option>
+              <option value="19">19</option><option value="20" selected>20 — default</option>
+            </select>
+          </div>
+        </div>
+
         <hr class="divider advanced-only hidden">
 
         <div class="subsection-title advanced-only hidden">Command Characters <span class="text-muted">— must match across all boards</span></div>
@@ -560,11 +586,11 @@
       <div class="subsection-title">Kyber</div>
       <div class="field-group">
         <div class="field">
-          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board. Remote: set automatically when NaviCore is enabled — the board listens for Maestro broadcasts.">i</span></label>
+          <label>Kyber Mode <span class="wiz-hint" data-tip="None: disabled. Local: a Kyber sound board is wired to this WCB. Remote: this WCB has no local Kyber but listens for Maestro/Pololu broadcasts (e.g. driven by NaviCore).">i</span></label>
           <div class="radio-group">
             <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
-            <label id="b{N}-kyber-remote-opt" style="display:none" title="Set automatically when NaviCore is enabled — this board listens for Maestro broadcasts"><input type="radio" name="b{N}-kyber" value="remote" disabled><span>Remote · NaviCore</span></label>
+            <label title="This board has no local Kyber but listens for Maestro/Pololu broadcasts (e.g. from NaviCore)."><input type="radio" name="b{N}-kyber" value="remote" onchange="onKyberChange({N})"><span>Remote</span></label>
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
@@ -606,6 +632,12 @@
           Auto-computed from Maestros on all boards — configure Maestros on each board first, then push.
         </div>
       </div>
+
+      <hr class="divider">
+
+      <!-- NaviCore (per-board status) -->
+      <div class="subsection-title">NaviCore <span class="wiz-hint" data-tip="Shows whether this board follows NaviCore. A board in Kyber 'Remote' mode listens for Maestro/Pololu broadcasts from NaviCore. Enable NaviCore network-wide in General Settings.">i</span></div>
+      <div id="b{N}-navicore-status" class="text-muted" style="font-size:13px;line-height:1.6">Not managed by NaviCore.</div>
 
       <hr class="divider">
 

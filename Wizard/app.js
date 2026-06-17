@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '16.23:40.R.JUN.2026';
+const UI_VERSION = '17.13:07.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -559,8 +559,6 @@ function updatePortClaimUI(n) {
 // ─── Kyber ────────────────────────────────────────────────────────
 function onKyberChange(n) {
   const mode        = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
-  const remoteOpt   = document.getElementById(`b${n}-kyber-remote-opt`);
-  if (remoteOpt) remoteOpt.style.display = (mode === 'remote') ? '' : 'none';
   const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
   const baudWrap    = document.getElementById(`b${n}-kyber-baud-wrap`);
   const marcWrap    = document.getElementById(`b${n}-kyber-marc-port-wrap`);
@@ -623,6 +621,7 @@ function onKyberChange(n) {
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
   updateKyberMarcPortDropdown(n);
+  updateNavicoreStatusRow(n);
 }
 
 function onKyberPortChange(n) {
@@ -930,6 +929,40 @@ function onGeneralETMChange() {
   _notifyGeneralChanged();
 }
 
+// ─── NaviCore (network-wide special peer) ─────────────────────────
+// Enabling NaviCore sets the special-peer flag on every WCB so they recognise
+// the remote brain. It's a network setting (same on all boards), so it lives in
+// General Settings and fans out to every board config — mirroring ETM.
+function onNavicoreToggle() {
+  const enabled = document.getElementById('g-navicore-enabled')?.checked ?? false;
+  systemConfig.general.specialPeer = enabled;
+  const detail = document.getElementById('g-navicore-detail');
+  if (detail) detail.style.display = enabled ? '' : 'none';
+  for (const n in boardConfigs) {
+    if (boardConfigs[n].type === 'client') continue;   // clients run their own sketch
+    boardConfigs[n].specialPeer = enabled;
+  }
+  // Parity with the wizard: when NaviCore is turned on, any board that already
+  // has a Maestro starts listening for broadcasts (remote). Turning it off does
+  // NOT auto-clear remote — the user can change that per board.
+  if (enabled) applyNavicoreRemoteAutoset();
+  refreshAllNavicoreStatus();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+function onNavicoreIdChange() {
+  const id = parseInt(document.getElementById('g-navicore-id')?.value) || 20;
+  systemConfig.general.specialPeerId = id;
+  for (const n in boardConfigs) {
+    if (boardConfigs[n].type === 'client') continue;
+    boardConfigs[n].specialPeerId = id;
+  }
+  refreshAllNavicoreStatus();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
 // ─── General Settings Conflict Helpers ────────────────────────────
 const GENERAL_FIELD_LABELS = {
   espnowPassword: 'ESP-NOW Password',
@@ -946,6 +979,8 @@ const GENERAL_FIELD_LABELS = {
   etmCount:       'ETM Message Count',
   etmDelay:       'ETM Message Delay (ms)',
   etmChecksum:    'ETM Checksum',
+  navicoreEnabled:'NaviCore',
+  navicoreId:     'NaviCore ID',
 };
 
 function extractGeneralFields(config) {
@@ -964,6 +999,8 @@ function extractGeneralFields(config) {
     etmCount:       config.etm?.messageCount       ?? 20,
     etmDelay:       config.etm?.messageDelayMs     ?? 100,
     etmChecksum:    config.etm?.checksumEnabled    ?? true,
+    navicoreEnabled:config.specialPeer             ?? false,
+    navicoreId:     config.specialPeerId           ?? 20,
   };
 }
 
@@ -1007,6 +1044,10 @@ function applyGeneralFieldsToBoardConfig(n, fields) {
     cfg.etm.messageCount     = fields.etmCount;
     cfg.etm.messageDelayMs   = fields.etmDelay;
     cfg.etm.checksumEnabled  = fields.etmChecksum;
+  }
+  if (cfg.type !== 'client') {
+    cfg.specialPeer   = fields.navicoreEnabled;
+    cfg.specialPeerId = fields.navicoreId;
   }
 }
 
@@ -1208,6 +1249,54 @@ function syncKyberToConfig(n) {
     config.kyber.port = null;
     config.kyber.marcduinoPort = null;
   }
+}
+
+// ─── NaviCore (per-board status row) ──────────────────────────────
+// NaviCore enable/ID is a network-wide setting (General Settings). Per board,
+// what matters is whether this WCB follows NaviCore — i.e. its Kyber mode is
+// "Remote" (listens for Maestro/Pololu broadcasts). This row reflects that.
+function updateNavicoreStatusRow(n) {
+  const el  = document.getElementById(`b${n}-navicore-status`);
+  const cfg = boardConfigs[n];
+  if (!el || !cfg) return;
+  const remote = cfg.kyber?.mode === 'remote';
+  const id     = cfg.specialPeerId ?? 20;
+  if (remote) {
+    el.innerHTML = `<span style="color:var(--accent);font-weight:600">🛰 Remote</span> — this board listens for Maestro/Pololu broadcasts`
+      + (cfg.specialPeer ? ` from NaviCore (ID ${id}).` : ` (enable NaviCore in <b>General Settings</b> so it has a brain to follow).`);
+  } else if (cfg.specialPeer) {
+    el.innerHTML = `NaviCore is enabled network-wide (ID ${id}). If this board drives a Maestro that should follow NaviCore, set its <b>Kyber → Remote</b> above.`;
+  } else {
+    el.innerHTML = `Not managed by NaviCore. Enable NaviCore in <b>General Settings</b> to broadcast Maestro animations to boards set to Remote.`;
+  }
+}
+
+function refreshAllNavicoreStatus() {
+  for (const n in boardConfigs) updateNavicoreStatusRow(n);
+}
+
+// When NaviCore is on, a board that hosts a Maestro must listen for the remote
+// broadcasts — i.e. its mode is "remote" (MAESTRO,REMOTE). Mirror the wizard's
+// behavior on the tools page. Only SETS (never clears), and never clobbers a
+// deliberate local Kyber. Returns true if it flipped this board.
+function autosetNavicoreRemote(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg || cfg.type === 'client') return false;
+  if (!cfg.specialPeer) return false;                          // NaviCore not enabled
+  if (cfg.kyber.mode === 'local' || cfg.kyber.mode === 'remote') return false;
+  if (!(cfg.maestros && cfg.maestros.length > 0)) return false;  // needs a Maestro
+  const radio = document.querySelector(`input[name="b${n}-kyber"][value="remote"]`);
+  if (radio) { radio.checked = true; onKyberChange(n); }       // runs claim/UI/status side-effects
+  else { cfg.kyber.mode = 'remote'; updateNavicoreStatusRow(n); }
+  onBoardFieldChange(n);                                        // mark unsaved so it pushes
+  return true;
+}
+
+function applyNavicoreRemoteAutoset() {
+  let any = false;
+  for (const n in boardConfigs) if (autosetNavicoreRemote(n)) any = true;
+  if (any) showToast('NaviCore: boards with a Maestro set to Remote (listening for broadcasts)', 'info', 4000);
+  return any;
 }
 
 // ─── MP3 Trigger ──────────────────────────────────────────────────
@@ -1570,13 +1659,10 @@ function populateUIFromConfig(n, config) {
     if (el('label')) el('label').value  = sp.label;
   }
 
-  // Kyber
+  // Kyber — None / Local / Remote are all directly selectable. "Remote" means
+  // this board has no local Kyber but listens for Maestro/Pololu broadcasts
+  // (e.g. driven by NaviCore).
   const kyberInput = document.querySelector(`input[name="b${n}-kyber"][value="${config.kyber.mode}"]`);
-  // "Remote" is a read-only, NaviCore-managed indicator — only revealed when this
-  // board is actually in remote mode. Its hidden radio still lets the config
-  // harvest (syncKyberToConfig) read 'remote' instead of clobbering it to 'none'.
-  const kyberRemoteOpt = document.getElementById(`b${n}-kyber-remote-opt`);
-  if (kyberRemoteOpt) kyberRemoteOpt.style.display = (config.kyber.mode === 'remote') ? '' : 'none';
   if (kyberInput) {
     kyberInput.checked = true;
     const isLocal = config.kyber.mode === 'local';
@@ -1605,6 +1691,7 @@ function populateUIFromConfig(n, config) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
+  updateNavicoreStatusRow(n);
   // Sequences
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (tbody) {
@@ -1840,6 +1927,9 @@ function onMaestroPortChange(n, rowId) {
 function onMaestroChange(n) {
   syncMaestrosToConfig(n);
   onBoardFieldChange(n);
+  // If NaviCore is on, a board that now has a Maestro should listen for the
+  // remote broadcasts (mirror the wizard). No-op if already local/remote.
+  autosetNavicoreRemote(n);
   // Refresh the auto-computed Kyber targets display on the LOCAL board
   const kyberBoard = findKyberLocalBoard();
   if (kyberBoard !== null) {
@@ -5650,6 +5740,19 @@ function syncGeneralFromConfig(config) {
   }
   const chksmEl = document.getElementById('g-etm-chksm');
   if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
+
+  // NaviCore (special peer) — network-wide setting, reflect the pulled value.
+  const naviEl = document.getElementById('g-navicore-enabled');
+  if (naviEl) naviEl.checked = !!config.specialPeer;
+  const naviDetail = document.getElementById('g-navicore-detail');
+  if (naviDetail) naviDetail.style.display = config.specialPeer ? '' : 'none';
+  const naviIdEl = document.getElementById('g-navicore-id');
+  if (naviIdEl) naviIdEl.value = config.specialPeerId ?? 20;
+  if (systemConfig?.general) {
+    systemConfig.general.specialPeer   = !!config.specialPeer;
+    systemConfig.general.specialPeerId = config.specialPeerId ?? 20;
+  }
+  refreshAllNavicoreStatus();
 }
 
 // ─── General DOM Snapshot ─────────────────────────────────────────
@@ -5667,6 +5770,8 @@ function captureGeneralDOMSnapshot() {
     delimiter: g('g-delimiter'),
     funcchar:  g('g-funcchar'),
     cmdchar:   g('g-cmdchar'),
+    naviEnabled: document.getElementById('g-navicore-enabled')?.checked ?? false,
+    naviId:    g('g-navicore-id'),
   };
 }
 
@@ -5679,6 +5784,11 @@ function restoreGeneralDOMSnapshot(snap) {
   set('g-delimiter', snap.delimiter);
   set('g-funcchar',  snap.funcchar);
   set('g-cmdchar',   snap.cmdchar);
+  const naviEl = document.getElementById('g-navicore-enabled');
+  if (naviEl) naviEl.checked = !!snap.naviEnabled;
+  const naviDetail = document.getElementById('g-navicore-detail');
+  if (naviDetail) naviDetail.style.display = snap.naviEnabled ? '' : 'none';
+  if (snap.naviId) set('g-navicore-id', snap.naviId);
   // Keep systemConfig.general in sync (mirrors what syncGeneralFromConfig does)
   onGeneralPasswordChange();
   onGeneralMacChange();
@@ -6695,6 +6805,9 @@ function wizardDefaultState() {
     navicoreId:      20,
     useSpecialPeer:  false,   // set from navicoreEnabled — the firmware ?SPECIAL flag
     specialAlias:    '',
+    // Control-system choice (step 3): 'navicore' | 'kyber' | 'other' | null.
+    // Drives navicoreEnabled / kyberEnabled (mutually exclusive).
+    controlSystem:   null,
   };
 }
 
@@ -6738,14 +6851,14 @@ function wizardInitBoards(qty) {
 function buildWizardSteps() {
   // Kyber and Maestro come before Serial so claimed ports are visible when labelling.
   // Network comes after Serial so port labels and claimed ports are set before network entry.
-  // NaviCore and Kyber are mutually exclusive (Kyber can't run remote). NaviCore
-  // is asked first; saying yes skips the Kyber step entirely, and vice-versa.
-  const steps = ['welcome','quantity','identity','navicore'];
-  if (wizardState.navicoreEnabled) {
+  // Step 3 is a single Control-System choice — NaviCore, Kyber, or Other (they're
+  // mutually exclusive: Kyber can't run remote). The follow-up setup step (3b) is
+  // whichever one was chosen; "Other" has no follow-up.
+  const steps = ['welcome','quantity','identity','control'];
+  if (wizardState.controlSystem === 'navicore') {
     steps.push('navicore-config');
-  } else {
-    steps.push('kyber');
-    if (wizardState.kyberEnabled) steps.push('kyber-config');
+  } else if (wizardState.controlSystem === 'kyber') {
+    steps.push('kyber-config');
   }
   steps.push('maestro');
   if (wizardState.maestroEnabled) steps.push('maestro-config');
@@ -6848,7 +6961,8 @@ function wizardRenderStep() {
     'welcome':       'Setup Wizard',
     'quantity':      'Step 1 — System Size',
     'identity':      'Step 2 — Board Identity',
-    'kyber':         'Step 3 — Kyber Controller',
+    'control':        'Step 3 — Control System',
+    'navicore-config':'Step 3b — NaviCore Setup',
     'kyber-config':  'Step 3b — Kyber Setup',
     'maestro':       'Step 4 — Maestro Controller',
     'maestro-config':'Step 4b — Maestro Setup',
@@ -6925,9 +7039,8 @@ function wizardBuildStepHTML(key) {
     case 'network':      return wizardHTMLNetwork();
     case 'identity':     return wizardHTMLIdentity();
     case 'serial':       wizardState.activeBoardTab = 0; return wizardHTMLSerial();
-    case 'navicore':       return wizardHTMLNavicore();
+    case 'control':      return wizardHTMLControl();
     case 'navicore-config': return wizardHTMLNavicoreConfig();
-    case 'kyber':        return wizardHTMLKyber();
     case 'kyber-config': return wizardHTMLKyberConfig();
     case 'maestro':      return wizardHTMLMaestro();
     case 'maestro-config': return wizardHTMLMaestroConfig();
@@ -7321,23 +7434,27 @@ function wizardHTMLSerial() {
     ${tabs}${panels}`;
 }
 
-function wizardHTMLNavicore() {
-  const yes = wizardState.navicoreEnabled === true;
-  const no  = wizardState.navicoreEnabled === false;
+function wizardHTMLControl() {
+  const cs = wizardState.controlSystem;   // 'navicore' | 'kyber' | 'other' | null
   return `
-    <div class="wizard-section-title">NaviCore</div>
-    <div class="wizard-section-desc">Are you using a <strong>NaviCore</strong> astromech animation controller? It runs remotely on the mesh and broadcasts Maestro animations to every board with a Maestro.</div>
-    <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn navicore-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('navicoreEnabled',true,this)">
+    <div class="wizard-section-title">Control System</div>
+    <div class="wizard-section-desc">How are your animations driven? Pick one — <strong>NaviCore</strong> and <strong>Kyber</strong> can't be used together.</div>
+    <div class="wizard-choice-grid three">
+      <button class="wizard-choice-btn navicore-yes ${cs === 'navicore' ? 'selected' : ''}" onclick="wizardSetControl('navicore',this)">
         <img src="../Images/navicore-icon.png" class="wizard-choice-logo" alt="NaviCore">
-        <span class="wizard-choice-label">Yes, I use <span class="navicore-wordmark">Navi<span>Core</span></span></span>
+        <span class="wizard-choice-label"><span class="navicore-wordmark">Navi<span>Core</span></span></span>
         <span class="navicore-tagline">ASTROMECH ANIMATION CONTROLLER</span>
-        <span class="wizard-choice-desc">Remote brain on ID 20 — broadcasts Maestro commands to all boards</span>
+        <span class="wizard-choice-desc">Remote brain on ID 20 — broadcasts Maestro commands to every board</span>
       </button>
-      <button class="wizard-choice-btn ${no ? 'selected-no' : ''}" onclick="wizardSetChoice('navicoreEnabled',false,this)">
-        <span class="wizard-choice-icon">✕</span>
-        <span class="wizard-choice-label">No NaviCore</span>
-        <span class="wizard-choice-desc">Skip NaviCore configuration</span>
+      <button class="wizard-choice-btn kyber-yes ${cs === 'kyber' ? 'selected' : ''}" onclick="wizardSetControl('kyber',this)">
+        <img src="../Images/kyberLogo.png" class="wizard-choice-banner" alt="Kyber Controls">
+        <span class="wizard-choice-label">Kyber</span>
+        <span class="wizard-choice-desc">One WCB drives a Kyber sound board over serial</span>
+      </button>
+      <button class="wizard-choice-btn ${cs === 'other' ? 'selected-no' : ''}" onclick="wizardSetControl('other',this)">
+        <span class="wizard-choice-icon">🎛️</span>
+        <span class="wizard-choice-label">Other / None</span>
+        <span class="wizard-choice-desc">Neither NaviCore nor Kyber — standard WCB setup</span>
       </button>
     </div>`;
 }
@@ -7352,26 +7469,6 @@ function wizardHTMLNavicoreConfig() {
     <div class="wizard-field-row">
       <label>NaviCore ID ${wizHint('The reserved peer ID NaviCore communicates on. Defaults to 20 (the out-of-band slot). Only change this if your NaviCore is configured for a different ID.')}</label>
       <select id="wiz-navicore-id">${idOpts}</select>
-    </div>`;
-}
-
-function wizardHTMLKyber() {
-  const yes = wizardState.kyberEnabled === true;
-  const no  = wizardState.kyberEnabled === false && wizardState.kyberEnabled !== null;
-  return `
-    <div class="wizard-section-title">Kyber Sound Controller</div>
-    <div class="wizard-section-desc">Are any of your WCBs connected to a Kyber sound board?</div>
-    <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn kyber-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('kyberEnabled',true,this)">
-        <img src="../Images/kyberLogo.png" class="wizard-choice-banner" alt="Kyber Controls">
-        <span class="wizard-choice-label">Yes, I use Kyber</span>
-        <span class="wizard-choice-desc">One WCB will control the Kyber board via serial</span>
-      </button>
-      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}" onclick="wizardSetChoice('kyberEnabled',false,this)">
-        <span class="wizard-choice-icon">✕</span>
-        <span class="wizard-choice-label">No Kyber</span>
-        <span class="wizard-choice-desc">Skip Kyber configuration</span>
-      </button>
     </div>`;
 }
 
@@ -7853,6 +7950,28 @@ function wizardSetChoice(field, value, btn) {
     b.classList.remove('selected','selected-no');
   });
   btn.classList.add(value ? 'selected' : 'selected-no');
+  wizardAdvanceAfterChoice();
+}
+
+// Click-a-card → auto-advance to the next step. Small delay so the user sees
+// the card highlight register before the step transitions away.
+function wizardAdvanceAfterChoice() {
+  setTimeout(() => { if (_wizardOpen) wizardNext(); }, 200);
+}
+
+// Step-3 control-system selection. NaviCore / Kyber are mutually exclusive;
+// "other" means neither. Keeps the derived flags + special-peer state in sync,
+// then auto-advances to the matching setup step (3b) — or straight to Maestro.
+function wizardSetControl(system, btn) {
+  wizardState.controlSystem   = system;
+  wizardState.navicoreEnabled = (system === 'navicore');
+  wizardState.kyberEnabled    = (system === 'kyber');
+  wizardState.useSpecialPeer  = wizardState.navicoreEnabled;
+  if (wizardState.navicoreEnabled && !wizardState.specialAlias) wizardState.specialAlias = 'NaviCore';
+  const parent = btn.closest('.wizard-choice-grid');
+  parent.querySelectorAll('.wizard-choice-btn').forEach(b => b.classList.remove('selected','selected-no'));
+  btn.classList.add(system === 'other' ? 'selected-no' : 'selected');
+  wizardAdvanceAfterChoice();
 }
 
 function wizardFillGen(inputId, type) {
@@ -7969,9 +8088,13 @@ function wizardRemoveMaestro(mi) {
 function wizardSaveStep(key) {
   const get = (id) => document.getElementById(id);
   switch (key) {
-    case 'navicore':
-      // NaviCore IS the special peer — mirror the Yes/No choice onto the flag.
-      wizardState.useSpecialPeer = wizardState.navicoreEnabled === true;
+    case 'control':
+      // Control system is chosen via cards (wizardSetControl). Re-derive the
+      // flags here too so Back/Next always persist a consistent state, and
+      // mirror the special-peer flag (NaviCore IS the special peer).
+      wizardState.navicoreEnabled = (wizardState.controlSystem === 'navicore');
+      wizardState.kyberEnabled    = (wizardState.controlSystem === 'kyber');
+      wizardState.useSpecialPeer  = wizardState.navicoreEnabled;
       if (wizardState.navicoreEnabled && !wizardState.specialAlias) wizardState.specialAlias = 'NaviCore';
       break;
     case 'navicore-config': {
@@ -8105,6 +8228,10 @@ function wizardSaveStep(key) {
 // ── Validation ─────────────────────────────────────────────────────
 function wizardValidateStep(key) {
   switch (key) {
+    case 'control':
+      if (!wizardState.controlSystem)
+        return 'Please choose a control system — NaviCore, Kyber, or Other.';
+      break;
     case 'network': {
       const pw = document.getElementById('wiz-password')?.value?.trim() ?? '';
       if (pw.length < 8) return 'Password must be at least 8 characters.';
@@ -8337,6 +8464,21 @@ function wizardApplyConfig() {
     if (etmEl) { etmEl.checked = false; onETMToggle(); }
     systemConfig.general.etm = { ...systemConfig.general.etm, enabled: false };
   }
+
+  // NaviCore global toggle (network-wide special peer). Board configs already
+  // carry specialPeer/specialPeerId from the per-board loop above; reflect it
+  // into the General Settings UI so the toggle matches the wizard choice.
+  const naviEl = document.getElementById('g-navicore-enabled');
+  if (naviEl) naviEl.checked = !!ws.useSpecialPeer;
+  const naviDetail = document.getElementById('g-navicore-detail');
+  if (naviDetail) naviDetail.style.display = ws.useSpecialPeer ? '' : 'none';
+  const naviIdEl = document.getElementById('g-navicore-id');
+  if (naviIdEl) naviIdEl.value = ws.navicoreId || 20;
+  if (systemConfig?.general) {
+    systemConfig.general.specialPeer   = !!ws.useSpecialPeer;
+    systemConfig.general.specialPeerId = ws.navicoreId || 20;
+  }
+  refreshAllNavicoreStatus();
 
   showToast('Config page updated from wizard', 'success');
 }

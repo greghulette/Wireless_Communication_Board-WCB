@@ -131,6 +131,10 @@ function createDefaultSystemConfig() {
       delimiter:      '^',
       funcChar:       '?',
       cmdChar:        ';',
+      // NaviCore (special peer) — network-wide: same on every WCB. Field names
+      // mirror the per-board config so extractGeneralFields() works uniformly.
+      specialPeer:    false,
+      specialPeerId:  20,
       etm: {
         enabled:          true,
         timeoutMs:        500,
@@ -624,6 +628,14 @@ function parseToken(body, config) {
       // Chained: ?MAESTRO,M1:W1S2:57600,M2:W2S1:57600
       // Skip control subcommands
       const sub = upperParts[1];
+      if (sub === 'REMOTE') {
+        // ?MAESTRO,REMOTE — canonical name for the remote-Maestro function
+        // (this board listens for Pololu/Maestro broadcasts). ?KYBER,REMOTE is
+        // the legacy alias handled in the KYBER case.
+        config.kyber.mode = 'remote';
+        config.kyber.port = null;
+        break;
+      }
       if (sub === 'LIST' || sub === 'CLEAR' || sub === 'ENABLE' || sub === 'DISABLE') break;
 
       // W == this board's wcbNumber → local maestro; W != → kyber target on this board
@@ -1144,7 +1156,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
         cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
       add(cmd);
     } else if (config.kyber.mode === 'remote') {
-      add('KYBER,REMOTE');
+      // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
+      add('MAESTRO,REMOTE');
     } else {
       add('KYBER,CLEAR');
     }
