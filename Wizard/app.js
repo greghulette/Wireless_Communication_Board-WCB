@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '16.21:47.R.JUN.2026';
+const UI_VERSION = '16.23:40.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -559,6 +559,8 @@ function updatePortClaimUI(n) {
 // ─── Kyber ────────────────────────────────────────────────────────
 function onKyberChange(n) {
   const mode        = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
+  const remoteOpt   = document.getElementById(`b${n}-kyber-remote-opt`);
+  if (remoteOpt) remoteOpt.style.display = (mode === 'remote') ? '' : 'none';
   const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
   const baudWrap    = document.getElementById(`b${n}-kyber-baud-wrap`);
   const marcWrap    = document.getElementById(`b${n}-kyber-marc-port-wrap`);
@@ -1570,6 +1572,11 @@ function populateUIFromConfig(n, config) {
 
   // Kyber
   const kyberInput = document.querySelector(`input[name="b${n}-kyber"][value="${config.kyber.mode}"]`);
+  // "Remote" is a read-only, NaviCore-managed indicator — only revealed when this
+  // board is actually in remote mode. Its hidden radio still lets the config
+  // harvest (syncKyberToConfig) read 'remote' instead of clobbering it to 'none'.
+  const kyberRemoteOpt = document.getElementById(`b${n}-kyber-remote-opt`);
+  if (kyberRemoteOpt) kyberRemoteOpt.style.display = (config.kyber.mode === 'remote') ? '' : 'none';
   if (kyberInput) {
     kyberInput.checked = true;
     const isLocal = config.kyber.mode === 'local';

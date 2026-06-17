@@ -560,10 +560,11 @@
       <div class="subsection-title">Kyber</div>
       <div class="field-group">
         <div class="field">
-          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board.">i</span></label>
+          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board. Remote: set automatically when NaviCore is enabled — the board listens for Maestro broadcasts.">i</span></label>
           <div class="radio-group">
             <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
+            <label id="b{N}-kyber-remote-opt" style="display:none" title="Set automatically when NaviCore is enabled — this board listens for Maestro broadcasts"><input type="radio" name="b{N}-kyber" value="remote" disabled><span>Remote · NaviCore</span></label>
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
