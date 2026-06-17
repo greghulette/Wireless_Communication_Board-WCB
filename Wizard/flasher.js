@@ -9,8 +9,16 @@
 //    - esptool-js
 // ════════════════════════════════════════════════════════════════
 
-const ESPTOOL_CDN  = 'https://cdn.jsdelivr.net/npm/esptool-js@0.4.7/+esm';
-const CRYPTOJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js';
+// Flash-tool dependencies are VENDORED locally (Wizard/vendor/) — no external
+// CDN at runtime, so flashing works offline and can't break from a CDN outage.
+// esptool-js is the project's self-contained ESM bundle (pako + every chip's
+// target ROM inlined, zero dynamic import()s). This replaced a CDN load that
+// broke when jsDelivr's "+esm" started returning an infinite redirect loop for
+// esptool-js's per-chip target modules ("Failed to fetch dynamically imported
+// module" at "Connecting to bootloader…"). Paths are relative to the Wizard
+// page so they resolve under the GitHub Pages subpath too. See vendor/README.md.
+const ESPTOOL_SRC  = './vendor/esptool-js/esptool-js-0.4.7.bundle.js';
+const CRYPTOJS_SRC = './vendor/crypto-js/crypto-js-4.2.0.min.js';
 
 // ─── Firmware source config ───────────────────────────────────────
 // Binaries live in Code/bin/ on GitHub with versioned names like:
@@ -270,22 +278,22 @@ async function detectFlashSizeMB(loader) {
 //            (0x9000, 24 KB) so esptool erases+rewrites it, producing a factory-fresh NVS
 async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, appOnly = false, eraseNvs = false }) {
 
-  // ── Step 1: Load CDN dependencies ──────────────────────────────
+  // ── Step 1: Load vendored flash-tool dependencies ──────────────
   onStatus('Loading flash tool…');
 
   onLog('Loading CryptoJS…');
   try {
-    await loadScript(CRYPTOJS_CDN);
+    await loadScript(CRYPTOJS_SRC);
   } catch (e) {
-    throw new Error(`Could not load CryptoJS from CDN — are you online?\n${e.message}`);
+    throw new Error(`Could not load CryptoJS (vendor/crypto-js) — try a hard refresh.\n${e.message}`);
   }
 
   onLog('Loading esptool-js…');
   let ESPLoader, Transport;
   try {
-    ({ ESPLoader, Transport } = await import(ESPTOOL_CDN));
+    ({ ESPLoader, Transport } = await import(ESPTOOL_SRC));
   } catch (e) {
-    throw new Error(`Could not load esptool-js from CDN — are you online?\n${e.message}`);
+    throw new Error(`Could not load esptool-js (vendor/esptool-js) — try a hard refresh.\n${e.message}`);
   }
   onLog('Flash tool loaded');
 

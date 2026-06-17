@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_151540RJUN2026                                  *****////
+///*****                                          Version 6.1.0_162147RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -115,8 +115,12 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #define WCB_TARGET_BROADCAST  0   // Target ID: broadcast to all WCBs
 #define WCB_TARGET_RAW_SERIAL 97  // Target ID: raw serial port mapping packets (formerly 8)
 #define WCB_TARGET_KYBER      98  // Target ID: Kyber bridge packets (formerly 9)
-#define WCB_SPECIAL_PEER_ID   20  // Reserved peer ID for future special peer use
 #endif
+
+// Special peer ID (NaviCore) — runtime-configurable via ?SPECIAL,ON,<id> (default 20).
+// Kept OUTSIDE the #ifndef guard above: that guard is skipped whenever MAX_WCB_COUNT is
+// already defined (via WCB_Storage.h), which would drop this definition and break linking.
+uint8_t WCB_SPECIAL_PEER_ID = 20;
 
 // ============================= Global Variables =============================
 // Number of WCB boards in the system
@@ -159,7 +163,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_151540RJUN2026";
+String SoftwareVersion = "6.1.0_162147RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3762,13 +3766,23 @@ void processLocalCommand(const String &message) {
     // and it appears in ETM stats. Reboot required to apply peer registration.
     // When OFF: ID 20 is treated as unknown and ignored.
     if (rootUpper == "SPECIAL") {
-        if (argsUpper == "ON") {
+        if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
+            // ?SPECIAL,ON  or  ?SPECIAL,ON,<id>  (NaviCore peer ID; default 20)
+            int ci = argsUpper.indexOf(',');
+            if (ci >= 0) {
+                int newId = argsUpper.substring(ci + 1).toInt();
+                if (newId < 1 || newId > 20) {
+                    Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", newId);
+                    return;
+                }
+                saveSpecialPeerIDToPreferences((uint8_t)newId);
+            }
             saveSpecialPeerPreferences(true);
         } else if (argsUpper == "OFF") {
             saveSpecialPeerPreferences(false);
         } else {
             Serial.printf("Special peer (ID %d) is currently %s.\n"
-                          "Use ?SPECIAL,ON or ?SPECIAL,OFF\n",
+                          "Use ?SPECIAL,ON[,<id>] (1-20) or ?SPECIAL,OFF\n",
                           WCB_SPECIAL_PEER_ID,
                           specialPeerEnabled ? "ENABLED" : "DISABLED");
         }
@@ -4782,7 +4796,7 @@ void updateHWVersion(const String &message) {
 
     // ---- Special Peer ----
     if (specialPeerEnabled) {
-        cmd = "SPECIAL,ON";
+        cmd = "SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID);
         Serial.println(lfi + cmd);
         chainedConfig        += String(commandDelimiter) + lfi + cmd;
         chainedConfigDefault += defaultSep + defaultFunc + cmd;
@@ -5688,6 +5702,7 @@ void setup() {
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
   loadSpecialPeerPreferences();
+  loadSpecialPeerIDFromPreferences();
   loadMACPreferences();
 
   // Initialize the NeoPixel status LED

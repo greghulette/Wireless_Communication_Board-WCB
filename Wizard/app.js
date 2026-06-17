@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.12:12.R.JUN.2026';
+const UI_VERSION = '16.21:47.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -64,17 +64,28 @@ let _wizardSessionId = 0;            // incremented on each openWizard(); guards
 let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
 
 // ─── Init ─────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  checkBrowserCompat();
-  loadThemePreference();
-  initSystemConfig();
-  loadModePreference();
-  initTerminalResize();
-  showSplash();
-  fetchLatestFirmwareVersion();  // silent, best-effort
+function runWizardInit() {
+  // Each step runs in isolation: a throw in one init step (e.g. a browser-compat
+  // or layout read that fails in some environment) must NOT abort the rest. The
+  // chain used to run bare, so one early throw silently skipped everything after
+  // it — including initTerminalResize(), which left the terminal un-resizable.
+  const safe = (fn, name) => { try { fn(); } catch (e) { console.error(`[init] ${name} failed:`, e); } };
+  safe(checkBrowserCompat,         'checkBrowserCompat');
+  safe(loadThemePreference,        'loadThemePreference');
+  safe(initSystemConfig,           'initSystemConfig');
+  safe(loadModePreference,         'loadModePreference');
+  safe(initTerminalResize,         'initTerminalResize');
+  safe(showSplash,                 'showSplash');
+  safe(fetchLatestFirmwareVersion, 'fetchLatestFirmwareVersion');  // silent, best-effort
   const footerVer = document.getElementById('footer-ui-version');
   if (footerVer) footerVer.textContent = UI_VERSION;
-});
+}
+// Run now if the DOM is already parsed (script is at end of body), else wait.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', runWizardInit);
+} else {
+  runWizardInit();
+}
 
 // ─── Firmware Version (fetched from GitHub) ───────────────────────
 async function fetchLatestFirmwareVersion() {
@@ -1138,6 +1149,19 @@ function onHWVersionChange(n) {
   if (ledGroup)  ledGroup.style.display  = show ? 'flex' : 'none';
   if (ledCustom) ledCustom.style.display = 'none'; // reset custom on HW change
 
+  // Default the onboard-LED pin to the variant's pin (3.1 → GPIO38, 3.2 → GPIO48)
+  // when switching between the S3 boards, unless a custom pin is already chosen.
+  if (boardConfigs[n]) {
+    const cur = boardConfigs[n].statusLedPin;
+    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
+              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
+    if (def !== null) {
+      boardConfigs[n].statusLedPin = def;
+      const sel = document.getElementById(`b${n}-led-pin`);
+      if (sel) sel.value = String(def);
+    }
+  }
+
   onBoardFieldChange(n);
 }
 
@@ -1574,7 +1598,6 @@ function populateUIFromConfig(n, config) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
-
   // Sequences
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (tbody) {
@@ -5914,34 +5937,54 @@ function exportSystemFile() {
 
 // ─── Terminal ─────────────────────────────────────────────────────
 function initTerminalResize() {
-  const handle  = document.getElementById('terminal-resize-handle');
-  const drawer  = document.getElementById('terminal-drawer');
-  if (!handle || !drawer) return;
+  const drawer = document.getElementById('terminal-drawer');
+  if (!drawer) return;
 
-  let startY, startH;
+  let startY, startH, dragging = false, activeHandle = null;
 
-  handle.addEventListener('mousedown', e => {
+  // Event DELEGATION on document — not a direct listener on the handle. A direct
+  // listener was silently lost because the terminal drawer/handle is re-rendered
+  // after init, leaving the listener on a detached element (resize then did
+  // nothing and the drag became a text-selection). Delegation survives any
+  // re-render: we match the handle with closest() on each pointerdown, then use
+  // pointer capture + a global userSelect lock so the drag can't turn into a
+  // text selection no matter where the cursor travels.
+  document.addEventListener('pointerdown', e => {
+    const handle = e.target?.closest?.('.terminal-resize-handle');
+    if (!handle) return;
+    dragging = true;
+    activeHandle = handle;
     startY = e.clientY;
     startH = drawer.offsetHeight;
     handle.classList.add('dragging');
-    document.addEventListener('mousemove', onDrag);
-    document.addEventListener('mouseup', stopDrag);
+    document.body.style.userSelect = 'none';      // suppress text selection while dragging
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
     e.preventDefault();
   });
 
-  function onDrag(e) {
-    const delta  = startY - e.clientY; // drag up = increase height
-    const newH   = Math.min(Math.max(startH + delta, 120), window.innerHeight * 0.8);
+  document.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const delta = startY - e.clientY;             // drag up = increase height
+    const maxH  = (window.innerHeight || 800) * 0.8;
+    const newH  = Math.min(Math.max(startH + delta, 120), maxH);
     drawer.style.height = newH + 'px';
-    syncMainPadding(); // keep page content above the terminal while resizing
-  }
+    syncMainPadding();                            // keep page content above the terminal
+    e.preventDefault();
+  });
 
-  function stopDrag() {
-    handle.classList.remove('dragging');
-    document.removeEventListener('mousemove', onDrag);
-    document.removeEventListener('mouseup', stopDrag);
-    syncMainPadding(); // final sync after drag ends
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    if (activeHandle) {
+      activeHandle.classList.remove('dragging');
+      try { activeHandle.releasePointerCapture(e.pointerId); } catch (_) {}
+      activeHandle = null;
+    }
+    document.body.style.userSelect = '';
+    syncMainPadding();
   }
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
 }
 
 function syncMainPadding() {
@@ -6638,9 +6681,13 @@ function wizardDefaultState() {
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
-    // ---- Special peer (ID 20, out-of-band client) ----
-    useSpecialPeer: false,
-    specialAlias:   '',
+    // ---- NaviCore (remote astromech brain; IS the special peer) ----
+    // navicoreEnabled drives useSpecialPeer at save time; navicoreId is the
+    // special-peer ID (default 20, changeable).
+    navicoreEnabled: false,
+    navicoreId:      20,
+    useSpecialPeer:  false,   // set from navicoreEnabled — the firmware ?SPECIAL flag
+    specialAlias:    '',
   };
 }
 
@@ -6684,8 +6731,15 @@ function wizardInitBoards(qty) {
 function buildWizardSteps() {
   // Kyber and Maestro come before Serial so claimed ports are visible when labelling.
   // Network comes after Serial so port labels and claimed ports are set before network entry.
-  const steps = ['welcome','quantity','identity','kyber'];
-  if (wizardState.kyberEnabled) steps.push('kyber-config');
+  // NaviCore and Kyber are mutually exclusive (Kyber can't run remote). NaviCore
+  // is asked first; saying yes skips the Kyber step entirely, and vice-versa.
+  const steps = ['welcome','quantity','identity','navicore'];
+  if (wizardState.navicoreEnabled) {
+    steps.push('navicore-config');
+  } else {
+    steps.push('kyber');
+    if (wizardState.kyberEnabled) steps.push('kyber-config');
+  }
   steps.push('maestro');
   if (wizardState.maestroEnabled) steps.push('maestro-config');
   steps.push('serial','network','etm','review','firmware','connect');
@@ -6864,6 +6918,8 @@ function wizardBuildStepHTML(key) {
     case 'network':      return wizardHTMLNetwork();
     case 'identity':     return wizardHTMLIdentity();
     case 'serial':       wizardState.activeBoardTab = 0; return wizardHTMLSerial();
+    case 'navicore':       return wizardHTMLNavicore();
+    case 'navicore-config': return wizardHTMLNavicoreConfig();
     case 'kyber':        return wizardHTMLKyber();
     case 'kyber-config': return wizardHTMLKyberConfig();
     case 'maestro':      return wizardHTMLMaestro();
@@ -6924,10 +6980,6 @@ function wizardHTMLQuantity() {
               onclick="wizardSelectQty(${n})">${n}</button>`;
   }).join('');
 
-  const specChecked = wizardState.useSpecialPeer ? 'checked' : '';
-  const specAlias   = wizardState.specialAlias || '';
-  const specAliasDisplay = wizardState.useSpecialPeer ? '' : 'display:none';
-
   return `
     <div class="wizard-section-title">How many slots total in your system?</div>
     <div class="wizard-section-desc">Count <strong>WCBs + WCB_Clients</strong> combined — each occupies one ID slot (they share the same ID/MAC address space).</div>
@@ -6940,31 +6992,7 @@ function wizardHTMLQuantity() {
     <div id="wiz-qty-expanded" class="wizard-qty-grid"
          style="margin-top:8px${showExpanded ? '' : ';display:none'}">
       ${expandedBtns}
-    </div>
-
-    <!-- Special peer (ID 20) — out-of-band client slot, opt-in. -->
-    <div style="margin-top:20px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:rgba(0,0,0,0.04)">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
-        <input type="checkbox" id="wiz-special-peer" ${specChecked}
-               onchange="wizardOnSpecialPeerToggle()">
-        <span>Also use <strong>ID 20</strong> — special out-of-band slot for an extra client</span>
-        ${wizHint('Reserved peer ID 20 sits outside the normal 1..N range. Useful for an extra client device that does not take a numbered slot. Every WCB in the network will receive ?SPECIAL,ON so their peer tables agree.')}
-      </label>
-      <div id="wiz-special-alias-row" style="${specAliasDisplay};margin-top:10px;display:${wizardState.useSpecialPeer ? 'flex' : 'none'};align-items:center;gap:8px">
-        <label style="font-size:13px;opacity:0.85">ID 20 Alias:</label>
-        <input type="text" id="wiz-special-alias" maxlength="24" placeholder="e.g. Pump Controller"
-               value="${escHtml(specAlias)}"
-               oninput="wizardState.specialAlias = this.value.slice(0,24)"
-               style="flex:1;max-width:240px">
-      </div>
     </div>`;
-}
-
-function wizardOnSpecialPeerToggle() {
-  const cb  = document.getElementById('wiz-special-peer');
-  const row = document.getElementById('wiz-special-alias-row');
-  wizardState.useSpecialPeer = !!cb?.checked;
-  if (row) row.style.display = wizardState.useSpecialPeer ? 'flex' : 'none';
 }
 
 function wizardExpandQty() {
@@ -7165,6 +7193,19 @@ function wizardOnHWVerChange(i) {
   const hwVal  = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
   const ledRow = document.getElementById(`wiz-b${i}-led-row`);
   if (ledRow) ledRow.style.display = (hwVal === 31 || hwVal === 32) ? 'flex' : 'none';
+  // Default the onboard-LED pin to the variant's pin (3.1 → 38, 3.2 → 48) when
+  // switching between the S3 boards, unless a custom pin is already chosen.
+  const b = wizardState.boards[i];
+  if (b) {
+    const cur = b.statusLedPin;
+    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
+              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
+    if (def !== null) {
+      b.statusLedPin = def;
+      const sel = document.getElementById(`wiz-b${i}-ledpin`);
+      if (sel) sel.value = String(def);
+    }
+  }
 }
 
 // Flip a slot between WCB and Client. Reveals/hides the per-type field
@@ -7273,6 +7314,40 @@ function wizardHTMLSerial() {
     ${tabs}${panels}`;
 }
 
+function wizardHTMLNavicore() {
+  const yes = wizardState.navicoreEnabled === true;
+  const no  = wizardState.navicoreEnabled === false;
+  return `
+    <div class="wizard-section-title">NaviCore</div>
+    <div class="wizard-section-desc">Are you using a <strong>NaviCore</strong> astromech animation controller? It runs remotely on the mesh and broadcasts Maestro animations to every board with a Maestro.</div>
+    <div class="wizard-choice-grid">
+      <button class="wizard-choice-btn navicore-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('navicoreEnabled',true,this)">
+        <img src="../Images/navicore-icon.png" class="wizard-choice-logo" alt="NaviCore">
+        <span class="wizard-choice-label">Yes, I use <span class="navicore-wordmark">Navi<span>Core</span></span></span>
+        <span class="navicore-tagline">ASTROMECH ANIMATION CONTROLLER</span>
+        <span class="wizard-choice-desc">Remote brain on ID 20 — broadcasts Maestro commands to all boards</span>
+      </button>
+      <button class="wizard-choice-btn ${no ? 'selected-no' : ''}" onclick="wizardSetChoice('navicoreEnabled',false,this)">
+        <span class="wizard-choice-icon">✕</span>
+        <span class="wizard-choice-label">No NaviCore</span>
+        <span class="wizard-choice-desc">Skip NaviCore configuration</span>
+      </button>
+    </div>`;
+}
+
+function wizardHTMLNavicoreConfig() {
+  const id = wizardState.navicoreId || 20;
+  const idOpts = Array.from({length: 20}, (_, i) => i + 1)
+    .map(n => `<option value="${n}" ${n === id ? 'selected' : ''}>${n}${n === 20 ? ' — default' : ''}</option>`).join('');
+  return `
+    <div class="wizard-section-title">NaviCore Setup</div>
+    <div class="wizard-section-desc">NaviCore runs as a remote peer on its own reserved ID, outside the numbered 1…N boards. It broadcasts Maestro animations over the mesh — every board with a Maestro listens automatically.</div>
+    <div class="wizard-field-row">
+      <label>NaviCore ID ${wizHint('The reserved peer ID NaviCore communicates on. Defaults to 20 (the out-of-band slot). Only change this if your NaviCore is configured for a different ID.')}</label>
+      <select id="wiz-navicore-id">${idOpts}</select>
+    </div>`;
+}
+
 function wizardHTMLKyber() {
   const yes = wizardState.kyberEnabled === true;
   const no  = wizardState.kyberEnabled === false && wizardState.kyberEnabled !== null;
@@ -7280,8 +7355,8 @@ function wizardHTMLKyber() {
     <div class="wizard-section-title">Kyber Sound Controller</div>
     <div class="wizard-section-desc">Are any of your WCBs connected to a Kyber sound board?</div>
     <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('kyberEnabled',true,this)">
-        <span class="wizard-choice-icon">🔊</span>
+      <button class="wizard-choice-btn kyber-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('kyberEnabled',true,this)">
+        <img src="../Images/kyberLogo.png" class="wizard-choice-banner" alt="Kyber Controls">
         <span class="wizard-choice-label">Yes, I use Kyber</span>
         <span class="wizard-choice-desc">One WCB will control the Kyber board via serial</span>
       </button>
@@ -7383,8 +7458,8 @@ function wizardHTMLMaestro() {
     <div class="wizard-section-title">Maestro Servo Controller</div>
     <div class="wizard-section-desc">Are any of your WCBs connected to a Pololu Maestro servo controller?</div>
     <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('maestroEnabled',true,this)">
-        <span class="wizard-choice-icon">⚙</span>
+      <button class="wizard-choice-btn maestro-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('maestroEnabled',true,this)">
+        <img src="../Images/PololuLogo.png" class="wizard-choice-logo" alt="Pololu Maestro">
         <span class="wizard-choice-label">Yes, I use Maestro</span>
         <span class="wizard-choice-desc">One or more WCBs control Maestro boards via serial</span>
       </button>
@@ -7509,7 +7584,7 @@ function wizardHTMLEtm() {
 
 function wizardHTMLReview() {
   const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards,
-          useSpecialPeer, specialAlias } = wizardState;
+          navicoreEnabled, navicoreId } = wizardState;
   const wcbCount    = boards.filter(b => b.type !== 'client').length;
   const clientCount = boards.filter(b => b.type === 'client').length;
   const boardRows = boards.map((b, i) => {
@@ -7527,10 +7602,10 @@ function wizardHTMLReview() {
       <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}${al ? ` · ${escHtml(al)}` : ''}</span>
     </div>`;
   }).join('');
-  const specialRow = useSpecialPeer ? `
+  const navicoreRow = navicoreEnabled ? `
     <div class="wizard-review-row">
-      <span class="wizard-review-label">Special Peer (ID 20)</span>
-      <span class="wizard-review-value">✅ Enabled${specialAlias ? ` · ${escHtml(specialAlias)}` : ''}</span>
+      <span class="wizard-review-label">NaviCore</span>
+      <span class="wizard-review-value">✅ Enabled · peer ID ${navicoreId}</span>
     </div>` : '';
   return `
     <div class="wizard-section-title">Everything looks good!</div>
@@ -7541,7 +7616,7 @@ function wizardHTMLReview() {
       <div class="wizard-review-row"><span class="wizard-review-label">Slots total</span><span class="wizard-review-value">${quantity} (${wcbCount} WCB${wcbCount===1?'':'s'}, ${clientCount} Client${clientCount===1?'':'s'})</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">ESP-NOW Password</span><span class="wizard-review-value">${escHtml(password)}</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">MAC Octets</span><span class="wizard-review-value">XX:XX:${mac2.toUpperCase()}:${mac3.toUpperCase()}:XX:XX</span></div>
-      ${specialRow}
+      ${navicoreRow}
     </div>
     <div class="wizard-review-section">
       <div class="wizard-review-heading">Slots</div>
@@ -7887,6 +7962,16 @@ function wizardRemoveMaestro(mi) {
 function wizardSaveStep(key) {
   const get = (id) => document.getElementById(id);
   switch (key) {
+    case 'navicore':
+      // NaviCore IS the special peer — mirror the Yes/No choice onto the flag.
+      wizardState.useSpecialPeer = wizardState.navicoreEnabled === true;
+      if (wizardState.navicoreEnabled && !wizardState.specialAlias) wizardState.specialAlias = 'NaviCore';
+      break;
+    case 'navicore-config': {
+      const idv = parseInt(get('wiz-navicore-id')?.value);
+      if (!isNaN(idv) && idv >= 1 && idv <= 20) wizardState.navicoreId = idv;
+      break;
+    }
     case 'network':
       if (get('wiz-password')) wizardState.password = get('wiz-password').value.trim();
       if (get('wiz-mac2')) wizardState.mac2 = get('wiz-mac2').value.trim().toUpperCase().padStart(2,'0');
@@ -8138,7 +8223,7 @@ function wizardApplyConfig() {
     cfg.type        = b.type || 'wcb';
     cfg.alias       = (b.alias       || '').slice(0, 24);
     cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
-    if (cfg.type !== 'client') cfg.specialPeer = !!ws.useSpecialPeer;
+    if (cfg.type !== 'client') { cfg.specialPeer = !!ws.useSpecialPeer; cfg.specialPeerId = ws.navicoreId || 20; }
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
@@ -8189,6 +8274,12 @@ function wizardApplyConfig() {
           cfg.kyber.mode = 'remote';
         }
       }
+    }
+
+    // NaviCore: every board with a Maestro listens to NaviCore's Pololu broadcasts
+    // via Kyber "remote" mode (Kyber itself can't run remote, so this reuses that path).
+    if (ws.navicoreEnabled && ws.maestros.some(m => m.boardSlot === (i + 1))) {
+      cfg.kyber.mode = 'remote';
     }
 
     // Maestro — local entries only (for port claiming, UI display, etc.)
@@ -8275,7 +8366,7 @@ function wizardExportConfig() {
     cfg.type        = b.type || 'wcb';
     cfg.alias       = (b.alias       || '').slice(0, 24);
     cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
-    if (cfg.type !== 'client') cfg.specialPeer = !!ws.useSpecialPeer;
+    if (cfg.type !== 'client') { cfg.specialPeer = !!ws.useSpecialPeer; cfg.specialPeerId = ws.navicoreId || 20; }
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
@@ -8313,6 +8404,11 @@ function wizardExportConfig() {
         const hasPrimaryMaestro = ws.maestros.some(m => m.boardSlot === (i + 1) && (m.id === 1 || m.id === 2));
         if (hasPrimaryMaestro) cfg.kyber.mode = 'remote';
       }
+    }
+
+    // NaviCore: Maestro boards listen to NaviCore Pololu broadcasts via remote mode.
+    if (ws.navicoreEnabled && ws.maestros.some(m => m.boardSlot === (i + 1))) {
+      cfg.kyber.mode = 'remote';
     }
 
     const myMaestros = ws.maestros.filter(m => m.boardSlot === (i + 1));

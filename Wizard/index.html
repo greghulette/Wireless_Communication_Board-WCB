@@ -560,11 +560,10 @@
       <div class="subsection-title">Kyber</div>
       <div class="field-group">
         <div class="field">
-          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board. Remote: Kyber is on another WCB.">i</span></label>
+          <label>Kyber Mode <span class="wiz-hint" data-tip="Kyber Configuration. None: disabled. Local: the Kyber is wired to this board.">i</span></label>
           <div class="radio-group">
             <label><input type="radio" name="b{N}-kyber" value="none" checked onchange="onKyberChange({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-kyber" value="local" onchange="onKyberChange({N})"><span>Local</span></label>
-            <label><input type="radio" name="b{N}-kyber" value="remote" onchange="onKyberChange({N})"><span>Remote</span></label>
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">

@@ -441,25 +441,29 @@ void HCRVocalizer::SetMuse(int v) {
     sendCommand(msg);
 }
 
-unsigned long lastPlayWAV = millis();
+// WCB patch: upstream used a single 5000 ms GLOBAL debounce — any PlayWAV within
+// 5 s of the previous one was silently dropped, across ALL channels, which made
+// rapid or independent triggers unusable (send a 2nd play too soon and nothing
+// happened until ~5 s passed). Now a short PER-CHANNEL debounce: each channel
+// (V/A/B) can re-fire ~150 ms after its own last play, and A/B/V no longer block
+// one another. Still guards against runaway double-fires.
+unsigned long lastPlayWAV[3] = {0, 0, 0};   // next-allowed millis() per channel (V/A/B)
 void HCRVocalizer::PlayWAV(int ch,int fileNumber)
 {
-    if (millis() > lastPlayWAV) {
-        String fileName = String(fileNumber, DEC);
-        for (int i = fileName.length(); i < 4; i++) {
-            fileName = "0" + fileName;
-        }
-        PlayWAV(ch,fileName);
+    String fileName = String(fileNumber, DEC);
+    for (int i = fileName.length(); i < 4; i++) {
+        fileName = "0" + fileName;
     }
+    PlayWAV(ch,fileName);
 }
 
 void HCRVocalizer::PlayWAV(int ch,String file) {
-    if (millis() > lastPlayWAV) {
-        lastPlayWAV = millis() + 5000;
-        char channel[] = "VAB";
-        String msg = "C" + ToString((char) channel[ch]) + file + ",QP" + ToString((char) channel[ch]);
-        sendCommand(msg);
-    }
+    if (ch < 0 || ch > 2) return;
+    if (millis() < lastPlayWAV[ch]) return;     // per-channel debounce
+    lastPlayWAV[ch] = millis() + 150;
+    char channel[] = "VAB";
+    String msg = "C" + ToString((char) channel[ch]) + file + ",QP" + ToString((char) channel[ch]);
+    sendCommand(msg);
 }
 
 void HCRVocalizer::StopWAV(int ch) {

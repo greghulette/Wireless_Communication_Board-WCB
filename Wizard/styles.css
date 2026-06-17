@@ -702,6 +702,20 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wizard-choice-btn.selected { border-color: var(--accent); background: rgba(0,212,255,0.12); }
 .wizard-choice-btn.selected-no { border-color: var(--text3); background: var(--bg4); }
 .wizard-choice-icon { font-size: 28px; line-height: 1; }
+/* NaviCore branded choice card */
+.wizard-choice-logo { width: 54px; height: 54px; object-fit: contain; }
+.wizard-choice-btn.navicore-yes:hover { border-color: #4d9fff; background: rgba(77,159,255,0.06); }
+.wizard-choice-btn.navicore-yes.selected { border-color: #4d9fff; background: rgba(77,159,255,0.14); box-shadow: 0 0 0 1px rgba(77,159,255,0.45), 0 4px 18px rgba(77,159,255,0.18); }
+.navicore-wordmark { font-weight: 700; letter-spacing: 0.3px; }
+.navicore-wordmark > span { color: #4d9fff; }
+.navicore-tagline { font-size: 9px; letter-spacing: 2px; color: #4d9fff; opacity: 0.85; font-weight: 600; }
+/* Kyber branded choice card (full "Kyber Controls" lockup) */
+.wizard-choice-banner { width: 100%; max-width: 210px; height: auto; border-radius: 6px; margin: 2px auto; }
+.wizard-choice-btn.kyber-yes:hover { border-color: #e23b3b; background: rgba(226,59,59,0.06); }
+.wizard-choice-btn.kyber-yes.selected { border-color: #e23b3b; background: rgba(226,59,59,0.14); box-shadow: 0 0 0 1px rgba(226,59,59,0.45), 0 4px 18px rgba(226,59,59,0.18); }
+/* Maestro branded choice card (Pololu) */
+.wizard-choice-btn.maestro-yes:hover { border-color: #3a5fd9; background: rgba(58,95,217,0.06); }
+.wizard-choice-btn.maestro-yes.selected { border-color: #3a5fd9; background: rgba(58,95,217,0.14); box-shadow: 0 0 0 1px rgba(58,95,217,0.45), 0 4px 18px rgba(58,95,217,0.18); }
 .wizard-choice-label { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--text); }
 .wizard-choice-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
 
@@ -878,13 +892,23 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .terminal-drawer.open { display: flex; }
 
 .terminal-resize-handle {
-  height: 6px; cursor: ns-resize; flex-shrink: 0;
+  height: 10px; cursor: ns-resize; flex-shrink: 0;
   background: var(--border);
   transition: background var(--transition);
   position: relative;
+  user-select: none; -webkit-user-select: none;  /* never select the handle itself */
+  touch-action: none;                            /* let pointer-drag own the gesture */
 }
 .terminal-resize-handle:hover,
 .terminal-resize-handle.dragging { background: var(--accent); }
+/* Invisible grab zone extending above the thin bar so the terminal's top edge
+   is easy to grab without pixel-hunting (visible 10px → ~18px effective). */
+.terminal-resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: -8px; height: 8px;
+  cursor: ns-resize;
+}
 .terminal-resize-handle::after {
   content: '';
   position: absolute;

@@ -13,7 +13,6 @@
 #define WCB_TARGET_BROADCAST  0
 #define WCB_TARGET_RAW_SERIAL 97
 #define WCB_TARGET_KYBER      98
-#define WCB_SPECIAL_PEER_ID   20
 #endif
 
 // =============== Global Variables ===============
@@ -26,6 +25,7 @@ extern int WCB_Number;
 extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
+extern uint8_t WCB_SPECIAL_PEER_ID;   // special peer ID (NaviCore), default 20, runtime-configurable
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
@@ -113,6 +113,8 @@ void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
 void loadSpecialPeerPreferences();
 void saveSpecialPeerPreferences(bool enabled);
+void loadSpecialPeerIDFromPreferences();
+void saveSpecialPeerIDToPreferences(uint8_t id);
 
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();

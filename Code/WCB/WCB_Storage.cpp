@@ -404,6 +404,27 @@ void saveSpecialPeerPreferences(bool enabled) {
                   WCB_SPECIAL_PEER_ID, enabled ? "ENABLED" : "DISABLED");
 }
 
+// Load the special peer ID from preferences (default 20).
+void loadSpecialPeerIDFromPreferences() {
+    preferences.begin("wcb_config", true);
+    WCB_SPECIAL_PEER_ID = preferences.getUChar("special_peer_id", 20);
+    preferences.end();
+}
+
+// Save the special peer ID to preferences. Takes effect after reboot
+// (peer registration runs during setup).
+void saveSpecialPeerIDToPreferences(uint8_t id) {
+    if (id < 1 || id > 20) {
+        Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", id);
+        return;
+    }
+    preferences.begin("wcb_config", false);
+    preferences.putUChar("special_peer_id", id);
+    preferences.end();
+    WCB_SPECIAL_PEER_ID = id;
+    Serial.printf("Special peer ID set to %d. Reboot to apply peer registration.\n", id);
+}
+
 // Save the WCB quantity to preferences
 void saveWCBQuantityPreferences(int quantity) {
     if (quantity < 1 || quantity > MAX_WCB_COUNT) {

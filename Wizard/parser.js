@@ -21,11 +21,12 @@ function createDefaultBoardConfig() {
   return {
     // Board Identity
     hwVersion:    0,       // 0 = not set, 1=1.0, 21=2.1, 23=2.3, 24=2.4, 31=3.1, 32=3.2
-    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38
+    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
     wcbNumber:    1,
     wcbQuantity:  1,
     alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
-    specialPeer:  false,   // ?SPECIAL,ON enables tracking of ID 20 as a peer
+    specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
+    specialPeerId: 20,     // special peer ID (1-20); used only when specialPeer is true
     // ---- Wizard-only metadata (never sent to firmware) ----------------
     // Slot type: 'wcb' (default — board card) or 'client' (lightweight
     // client view). Flipping does NOT alter what's on the physical board.
@@ -449,9 +450,13 @@ function parseToken(body, config) {
       break;
 
     case 'SPECIAL': {
-      // ?SPECIAL,ON / ?SPECIAL,OFF — enable/disable tracking of ID 20.
+      // ?SPECIAL,ON[,<id>] / ?SPECIAL,OFF — enable/disable the special peer (NaviCore).
       const sub = (parts[1] || '').trim().toUpperCase();
       config.specialPeer = (sub === 'ON' || sub === '1' || sub === 'TRUE');
+      if (config.specialPeer && parts[2]) {
+        const idVal = parseInt(parts[2]);
+        if (idVal >= 1 && idVal <= 20) config.specialPeerId = idVal;
+      }
       break;
     }
 
@@ -1069,8 +1074,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // same value so peer tables stay consistent.
   const curSpecial  = !!config.specialPeer;
   const baseSpecial = !!baseline?.specialPeer;
-  if (fullPush || !baseline || curSpecial !== baseSpecial)
-    add(`SPECIAL,${curSpecial ? 'ON' : 'OFF'}`);
+  if (fullPush || !baseline || curSpecial !== baseSpecial ||
+      (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
+    add(curSpecial ? `SPECIAL,ON,${config.specialPeerId ?? 20}` : `SPECIAL,OFF`);
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
