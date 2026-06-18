@@ -721,6 +721,33 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wizard-choice-label { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--text); }
 .wizard-choice-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
 
+/* ── Controller segmented selector (General Settings) — compact branded chips ── */
+/* Equal-size chips: flex:1 gives equal WIDTH, align-items:stretch equal HEIGHT. */
+.controller-seg { display: flex; gap: 8px; align-items: stretch; max-width: 540px; margin-bottom: 12px; }
+.ctrl-opt {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 46px; padding: 6px 12px; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: var(--radius2);
+  cursor: pointer; transition: all var(--transition); color: var(--text);
+}
+.ctrl-opt:hover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+.ctrl-logo      { width: 22px; height: 22px; object-fit: contain; }
+.ctrl-logo-wide { height: 18px; width: auto; max-width: 130px; object-fit: contain; display: block; }
+.ctrl-label     { font-family: var(--sans); font-size: 13px; font-weight: 700; letter-spacing: 0.3px; }
+.ctrl-none-icon { font-size: 16px; color: var(--text3); line-height: 1; }
+.ctrl-textwrap  { display: flex; flex-direction: column; align-items: center; gap: 1px; line-height: 1.1; }
+.ctrl-sub       { font-size: 9px; color: var(--text3); font-weight: 500; white-space: nowrap; }
+/* NaviCore (blue) */
+.ctrl-navicore .ctrl-label > span { color: #4d9fff; }
+.ctrl-opt.ctrl-navicore.selected { border-color: #4d9fff; background: rgba(77,159,255,0.14); box-shadow: 0 0 0 1px rgba(77,159,255,0.45); }
+.ctrl-opt.ctrl-navicore:hover     { border-color: #4d9fff; background: rgba(77,159,255,0.07); }
+/* Kyber (red) */
+.ctrl-opt.ctrl-kyber.selected { border-color: #e23b3b; background: rgba(226,59,59,0.14); box-shadow: 0 0 0 1px rgba(226,59,59,0.45); }
+.ctrl-opt.ctrl-kyber:hover     { border-color: #e23b3b; background: rgba(226,59,59,0.07); }
+/* None (neutral) */
+.ctrl-opt.ctrl-none.selected { border-color: var(--text3); background: var(--bg4); }
+
 /* Identity step column labels / inputs (WCB#, HW Version, LED Pin in one flex row) */
 .wizard-ident-label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.7px; text-transform: uppercase;

@@ -135,6 +135,9 @@ function createDefaultSystemConfig() {
       // mirror the per-board config so extractGeneralFields() works uniformly.
       specialPeer:    false,
       specialPeerId:  20,
+      // Animation controller for the whole system: 'none' | 'navicore' | 'kyber'.
+      // UI state (tools page) — derived from board configs; not pushed directly.
+      controller:     'none',
       etm: {
         enabled:          true,
         timeoutMs:        500,

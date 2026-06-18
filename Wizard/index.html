@@ -93,14 +93,22 @@
 
         <hr class="divider">
 
-        <!-- NaviCore — network-wide special peer (applies to every WCB) -->
-        <div class="subsection-title">NaviCore <span class="wiz-hint" data-tip="NaviCore is a remote astromech animation controller. It runs on the mesh as a special peer and broadcasts Maestro animations to every board set to Kyber → Remote. This is a network-wide setting — it applies to all WCBs.">i</span></div>
-        <div class="toggle-wrap mb-12">
-          <label class="toggle">
-            <input type="checkbox" id="g-navicore-enabled" onchange="onNavicoreToggle()">
-            <span class="toggle-track"></span>
-            <span class="toggle-label">Using NaviCore <span class="wiz-hint" data-tip="Enable if a NaviCore controller is on this network. Sets the special-peer flag on every WCB so they recognize NaviCore.">i</span></span>
-          </label>
+        <!-- Controller — network-wide choice of animation controller (NaviCore | Kyber | None) -->
+        <div class="subsection-title">Controller <span class="wiz-hint" data-tip="Which animation controller drives this system. NaviCore and Kyber are mutually exclusive. Pick one here, then choose which WCBs participate in each board section below.">i</span></div>
+        <div class="controller-seg" id="g-controller-seg" role="radiogroup" aria-label="Controller">
+          <button type="button" class="ctrl-opt ctrl-navicore" data-controller="navicore" onclick="onControllerChange('navicore')" title="NaviCore — remote astromech animation controller on the mesh">
+            <img src="../Images/navicore-icon.png" class="ctrl-logo" alt="">
+            <span class="ctrl-label">Navi<span>Core</span></span>
+          </button>
+          <button type="button" class="ctrl-opt ctrl-kyber" data-controller="kyber" onclick="onControllerChange('kyber')" title="Kyber — sound board wired to one WCB, broadcasting to Maestros">
+            <img src="../Images/kyberLogo.png" class="ctrl-logo-wide" alt="Kyber">
+          </button>
+          <button type="button" class="ctrl-opt ctrl-none" data-controller="none" onclick="onControllerChange('none')" title="No NaviCore or Kyber — a standard build (Shadow, Stealth, Padawan, …)">
+            <span class="ctrl-textwrap">
+              <span class="ctrl-label">Other</span>
+              <span class="ctrl-sub">Shadow, Stealth, Padawan…</span>
+            </span>
+          </button>
         </div>
         <div class="field-group" id="g-navicore-detail" style="display:none">
           <div class="field">
@@ -580,6 +588,8 @@
         <tbody id="b{N}-serial-tbody"></tbody>
       </table>
 
+      <!-- Kyber section (shown only when Controller = Kyber) -->
+      <div id="b{N}-kyber-section" style="display:none">
       <hr class="divider">
 
       <!-- Kyber -->
@@ -632,12 +642,25 @@
           Auto-computed from Maestros on all boards — configure Maestros on each board first, then push.
         </div>
       </div>
+      </div><!-- /b{N}-kyber-section -->
 
+      <!-- NaviCore section (shown only when Controller = NaviCore) -->
+      <div id="b{N}-navicore-section" style="display:none">
       <hr class="divider">
 
-      <!-- NaviCore (per-board status) -->
-      <div class="subsection-title">NaviCore <span class="wiz-hint" data-tip="Shows whether this board follows NaviCore. A board in Kyber 'Remote' mode listens for Maestro/Pololu broadcasts from NaviCore. Enable NaviCore network-wide in General Settings.">i</span></div>
-      <div id="b{N}-navicore-status" class="text-muted" style="font-size:13px;line-height:1.6">Not managed by NaviCore.</div>
+      <!-- NaviCore (per-board) — which boards follow NaviCore -->
+      <div class="subsection-title">NaviCore <span class="wiz-hint" data-tip="Whether this board follows NaviCore. 'Remote' = this board's Maestro is driven by NaviCore over the mesh (same backend as Kyber Remote, shown separately). Choose the Controller in General Settings.">i</span></div>
+      <div class="field-group" id="b{N}-navicore-wrap">
+        <div class="field">
+          <label>NaviCore Mode <span class="wiz-hint" data-tip="None: this board does not follow NaviCore. Remote: this board's Maestro listens for NaviCore's Pololu broadcasts.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-navicore-mode" value="none" checked onchange="onNavicoreRemoteChange({N})"><span>None</span></label>
+            <label title="This board's Maestro is driven remotely by NaviCore (listens for Pololu broadcasts)."><input type="radio" name="b{N}-navicore-mode" value="remote" onchange="onNavicoreRemoteChange({N})"><span>Remote</span></label>
+          </div>
+        </div>
+      </div>
+      <div id="b{N}-navicore-status" class="text-muted" style="font-size:13px;line-height:1.6">Not using NaviCore.</div>
+      </div><!-- /b{N}-navicore-section -->
 
       <hr class="divider">
 
