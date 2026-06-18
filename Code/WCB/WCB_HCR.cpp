@@ -427,17 +427,28 @@ void processHCRRuntimeCommand(const String &message) {
     return;
   }
   if (vU == "VOLUP" || vU == "VOLDN" || vU == "VOLDOWN") {
-    int ch = hcrChan(hcrField(body, 1));            // V|A|B
-    if (ch < 0) { Serial.println("[HCR] Usage: ;H,VOLUP|VOLDN,<V|A|B>[,<step>]"); return; }
-    String s = hcrField(body, 2);
-    int step = s.length() ? s.toInt() : 5;
+    // ;H,VOLUP|VOLDN[,<V|A|B>][,<step>]
+    // Channel is OPTIONAL: omit it (or pass just the step) to bump ALL channels
+    // (V, A and B) by the step. Step default 5.
+    String f1   = hcrField(body, 1);
+    int    ch   = hcrChan(f1);                       // V|A|B -> index, -1 if not a channel
+    bool   all  = (ch < 0);                          // no/invalid channel -> all channels
+    // Step is field 2 when a channel was named; otherwise field 1 (the step) or default.
+    String sStr = all ? (f1.length() ? f1 : hcrField(body, 2)) : hcrField(body, 2);
+    int    step = sStr.length() ? sStr.toInt() : 5;
     if (step <= 0) step = 5;
-    int cur = hcrCurVol(ch);
-    int nv  = (vU == "VOLUP") ? cur + step : cur - step;
-    hcrCancelFade(ch);
-    hcrSetVol(ch, nv);                              // hcrSetVol clamps 0-100
-    if (debugHCR) Serial.printf("[HCR-DBG] %s ch=%d %d->%d\n",
-                                vU.c_str(), ch, cur, constrain(nv,0,100));
+    const bool up = (vU == "VOLUP");
+    const int  chans[3] = { CH_V, CH_A, CH_B };
+    const int  n = all ? 3 : 1;
+    for (int i = 0; i < n; i++) {
+      const int c   = all ? chans[i] : ch;
+      const int cur = hcrCurVol(c);
+      const int nv  = up ? cur + step : cur - step;
+      hcrCancelFade(c);
+      hcrSetVol(c, nv);                              // hcrSetVol clamps 0-100
+      if (debugHCR) Serial.printf("[HCR-DBG] %s ch=%d %d->%d\n",
+                                  vU.c_str(), c, cur, constrain(nv, 0, 100));
+    }
     return;
   }
   if (vU == "FADEOUT") {

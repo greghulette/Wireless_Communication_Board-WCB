@@ -538,8 +538,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;H,PLAY,A|B,file,FADEIN,sec  Play, ramp 0->current vol"));
         Serial.println(F("  ;H,STOPWAV,A|B      Stop WAV on a channel"));
         Serial.println(F("  ;H,VOL,V|A|B,0-100  Set volume (V=vocalizer, A/B=wav)"));
-        Serial.println(F("  ;H,VOLUP,V|A|B[,step]  Volume up (step default 5)"));
-        Serial.println(F("  ;H,VOLDN,V|A|B[,step]  Volume down (step default 5)"));
+        Serial.println(F("  ;H,VOLUP[,V|A|B][,step]  Volume up (no channel = all; step default 5)"));
+        Serial.println(F("  ;H,VOLDN[,V|A|B][,step]  Volume down (no channel = all; step default 5)"));
         Serial.println(F("  ;H,FADEIN,A|B,sec   Ramp 0 -> current volume"));
         Serial.println(F("  ;H,FADEOUT,A|B,sec  Ramp -> 0, StopWAV, restore vol"));
         Serial.println(F("  ;H,STOP             Stop all audio and emotes"));
