@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '18.14:56.R.JUN.2026';
+const UI_VERSION = '18.18:46.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2105,6 +2105,41 @@ function onMaestroPortChange(n, rowId) {
   onMaestroChange(n);
 }
 
+// Rebuild the system-wide Maestro routing table after ANY board's Maestros
+// change. Every WCB needs the full table (id→wcb/port/baud) so it can forward a
+// Maestro command to whichever board hosts that Maestro over ESP-NOW — the
+// wizard builds this per board, but tools-page edits previously only updated the
+// edited board. Also refreshes the Kyber-local board's embedded targets. Any
+// board whose table actually changes is flagged unsaved so it gets re-pushed.
+// Returns the number of OTHER boards (besides `editedN`) that changed.
+function rebuildMaestroRoutingTables(editedN) {
+  const all = [];
+  for (const k in boardConfigs) {
+    const cfg = boardConfigs[k];
+    if (!cfg || cfg.type === 'client') continue;
+    for (const m of (cfg.maestros || [])) {
+      all.push({ id: m.id, wcb: cfg.wcbNumber, port: m.port, baud: m.baud });
+    }
+  }
+  const snap = JSON.stringify(all);
+  let othersChanged = 0;
+  for (const k in boardConfigs) {
+    const cfg = boardConfigs[k];
+    if (!cfg || cfg.type === 'client') continue;
+    let changed = false;
+    if (JSON.stringify(cfg.maestroTable ?? null) !== snap) { cfg.maestroTable = JSON.parse(snap); changed = true; }
+    // The Kyber-local board embeds the same full list as its KYBER,LOCAL targets.
+    if (cfg.kyber?.mode === 'local' && JSON.stringify(cfg.kyber.targets ?? null) !== snap) {
+      cfg.kyber.targets = JSON.parse(snap); changed = true;
+    }
+    if (changed) {
+      updateBoardStatusBadge(k, 'unsaved');   // routing changed → needs re-push
+      if (String(k) !== String(editedN)) othersChanged++;
+    }
+  }
+  return othersChanged;
+}
+
 function onMaestroChange(n) {
   syncMaestrosToConfig(n);
   onBoardFieldChange(n);
@@ -2112,12 +2147,17 @@ function onMaestroChange(n) {
   // under NaviCore starts listening for broadcasts; a board that loses its last
   // Maestro drops out of remote (remote is meaningless with no Maestro).
   reconcileRemoteWithMaestros(n);
-  // Refresh the auto-computed Kyber targets display on the LOCAL board
+  // Propagate the full Maestro routing table to EVERY board (so W1/W3 learn about
+  // a Maestro added on W2, etc.) — works with or without a Kyber-local board.
+  const othersChanged = rebuildMaestroRoutingTables(n);
+  // Refresh the auto-computed Kyber targets display on the LOCAL board (if any)
   const kyberBoard = findKyberLocalBoard();
   if (kyberBoard !== null) {
     populateKyberTargetsFromConfig(kyberBoard, boardConfigs[kyberBoard]);
-    // Warn if it's a different board — it will need a re-push to pick up the change
     if (kyberBoard !== n) showKyberRepushWarning(kyberBoard);
+  }
+  if (othersChanged > 0) {
+    showToast(`Maestro routing updated on ${othersChanged} other board${othersChanged === 1 ? '' : 's'} — re-push them (or Push All)`, 'info', 6000);
   }
 }
 
@@ -4773,7 +4813,7 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
 // overwrites it — or worse, they interleave and produce a torn config.
 const _boardPullInFlight = new Set();
 
-async function boardPull(n) {
+async function boardPull(n, opts = {}) {
   // Delegate to remote pull if this board is reached via relay
   if (remoteRelayForBoard[n]) { boardPullRemote(n); return; }
 
@@ -4788,7 +4828,10 @@ async function boardPull(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) {
     _boardPullInFlight.delete(n);
-    showToast('Board not connected', 'error');
+    // Only a USER-initiated pull (Pull Config button → {manual:true}) shows the
+    // error. Background verify pulls after a push/reboot/reconnect fail quietly —
+    // the board is just mid-reboot, and the connection badge already reflects it.
+    if (opts.manual) showToast('Board not connected', 'error');
     return;
   }
 

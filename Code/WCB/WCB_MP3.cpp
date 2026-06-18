@@ -17,6 +17,8 @@ extern void         updateBaudRate(int port, int baud);
 extern void         saveBroadcastSettingsToPreferences();
 extern void         saveBroadcastBlockSettings();
 extern void         recallCommandSlot(const String &key, int sourceID);
+extern bool         isSerialPortUsedForHCR(int port);  // WCB_HCR.cpp — for the port-conflict guard
+// PWM/MP3 predicates + Kyber_Local/Maestro_Remote come from WCB_Storage.h.
 
 // ---- Module globals -----------------------------------------------------
 MP3Config mp3Config = {};
@@ -441,6 +443,18 @@ void configureMP3(const String &args) {
 
   if (volume < 0 || volume > 64) {
     Serial.println("[MP3] Volume must be 0-64 (0=loudest, 64=inaudible)");
+    return;
+  }
+
+  // ---- Reject a port already claimed by PWM / Kyber / HCR ----------
+  // Mirrors canUsePWMOnPort (WCB_PWM.cpp) so two subsystems can't silently
+  // share one UART. Does NOT check MP3 itself, so re-configuring MP3 on its
+  // own port (e.g. just changing baud/volume) is still allowed.
+  if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
+      isSerialPortUsedForHCR(serialPort) ||
+      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
+      (serialPort == 2 && Kyber_Local)) {
+    Serial.printf("[MP3] S%d already in use by PWM/Kyber/HCR - config blocked\n", serialPort);
     return;
   }
 

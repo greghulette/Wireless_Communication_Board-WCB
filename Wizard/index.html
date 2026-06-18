@@ -483,7 +483,7 @@
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-etm-char" onclick="openStatsModal({N},'etm')" disabled title="Run ETM network characterization on this board">Network Test</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-hcr-status" onclick="openHCRStatusModal({N})" disabled style="display:none" title="Live HCR Vocalizer status (polls while open)">HCR Status</button>
           <button class="btn btn-ghost btn-sm" id="b{N}-btn-stats" onclick="openStatsModal({N},'stats')" disabled title="View ESP-NOW statistics for this board">ESP-NOW Stats</button>
-          <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N})" disabled>Pull Config</button>
+          <button class="btn btn-ghost btn-sm" id="b{N}-btn-pull" onclick="boardPull({N}, {manual:true})" disabled>Pull Config</button>
           <button class="btn btn-success btn-sm" id="b{N}-btn-go" onclick="boardGo({N})" disabled>Push Config</button>
           <span class="action-bar-divider"></span>
           <button class="btn btn-danger btn-sm" id="b{N}-btn-erase" onclick="boardFactoryReset({N})" disabled title="Erase all settings and reboot — optionally re-flash firmware">🏭 Factory Reset</button>

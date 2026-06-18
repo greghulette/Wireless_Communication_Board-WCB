@@ -642,6 +642,18 @@ void configureHCR(const String &args) {
     return;
   }
 
+  // ---- Reject a port already claimed by PWM / Kyber / MP3 ----------
+  // Mirrors canUsePWMOnPort (WCB_PWM.cpp) so two subsystems can't silently
+  // share one UART. Does NOT check HCR itself, so re-configuring HCR on its
+  // own port is still allowed.
+  if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
+      isSerialPortUsedForMP3(serialPort) ||
+      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
+      (serialPort == 2 && Kyber_Local)) {
+    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3 - config blocked\n", serialPort);
+    return;
+  }
+
   hcrReservePort(serialPort, baudRate);
 }
 
