@@ -13,7 +13,6 @@
 #define WCB_TARGET_BROADCAST  0
 #define WCB_TARGET_RAW_SERIAL 97
 #define WCB_TARGET_KYBER      98
-#define WCB_SPECIAL_PEER_ID   20
 #endif
 
 // =============== Global Variables ===============
@@ -23,8 +22,10 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
+extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
+extern uint8_t WCB_SPECIAL_PEER_ID;   // special peer ID (NaviCore), default 20, runtime-configurable
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
@@ -33,7 +34,7 @@ extern char CommandCharacter;
 extern char commandDelimiter;
 extern char LocalFunctionIdentifier;
 extern int wcb_hw_version;
-extern bool Kyber_Remote;
+extern bool Maestro_Remote;
 extern bool Kyber_Local;
 extern int  kyberLocalPort;   // serial port Kyber is physically on (0 = not configured)
 extern String Kyber_Location;
@@ -106,10 +107,14 @@ void loadMACPreferences();
 
 void loadWCBNumberFromPreferences();
 void saveWCBNumberToPreferences(int wcb_number_f);
+void loadWCBAlias();
+void saveWCBAlias(const String &alias);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
 void loadSpecialPeerPreferences();
 void saveSpecialPeerPreferences(bool enabled);
+void loadSpecialPeerIDFromPreferences();
+void saveSpecialPeerIDToPreferences(uint8_t id);
 
 void updateBaudRate(int port, int baud);
 void loadBaudRatesFromPreferences();

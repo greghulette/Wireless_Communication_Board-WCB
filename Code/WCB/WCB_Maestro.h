@@ -37,5 +37,8 @@ int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB);
 int8_t findSlotByMaestroIDPortTarget(uint8_t maestroID, uint8_t serialPort, uint8_t remoteWCB);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault, char delimiter, bool printToSerial = false);
+// defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
+void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
+                        char delimiter, bool printToSerial = false,
+                        const String &defSep = "^", const String &defFunc = "?");
 #endif

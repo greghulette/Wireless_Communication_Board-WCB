@@ -277,7 +277,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section.status-connected    { border-right: 3px solid var(--green); }
 .section.status-retrying     { border-right: 3px solid var(--yellow); }
 .section.status-error        { border-right: 3px solid var(--red); }
-.section.status-disconnected { border-right: 3px solid var(--red); }
+.section.status-disconnected { border-right: 3px solid var(--border2); }
 
 /* Board number pill in header */
 .board-num-pill {
@@ -307,7 +307,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 10px; font-family: var(--mono);
   padding: 3px 8px; border-radius: 3px;
-  letter-spacing: 0.3px; font-weight: 500;
+  letter-spacing: 0.3px; font-weight: 500; white-space: nowrap;
 }
 .badge-default { background: var(--bg4); color: var(--text3); border: 1px solid var(--border); }
 .badge-green   { background: rgba(0,232,122,0.1); color: var(--green); border: 1px solid rgba(0,232,122,0.3); }
@@ -363,10 +363,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   width: 12px; height: 12px; background: var(--text3);
   border-radius: 50%; top: 2px; left: 2px; transition: all var(--transition);
 }
-.toggle input:checked + .toggle-track { background: var(--green2); border-color: var(--green); }
+.toggle input:checked + .toggle-track { background: var(--accent2); border-color: var(--accent); }
 .toggle input:checked + .toggle-track::after { transform: translateX(16px); background: var(--bg); }
 .toggle-label { font-size: 12px; color: var(--text2); }
-.toggle input:checked ~ .toggle-label { color: var(--green); }
+.toggle input:checked ~ .toggle-label { color: var(--accent); }
 
 /* ─── Radio Group ────────────────────────────────────────────── */
 .radio-group { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -390,6 +390,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   font-size: 11px; font-weight: 600; letter-spacing: 1px;
   text-transform: uppercase; color: var(--text3);
   margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.subsection-title::before {
+  content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; flex-shrink: 0;
 }
 
 /* ─── Serial Port Table ──────────────────────────────────────── */
@@ -692,6 +696,8 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 /* Yes/No choice cards */
 .wizard-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.wizard-choice-grid.three { grid-template-columns: repeat(3, 1fr); align-items: stretch; }
+.wizard-choice-grid.three .wizard-choice-btn { padding: 18px 12px; }
 .wizard-choice-btn {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 6px; background: var(--bg3); border: 1px solid var(--border);
@@ -702,8 +708,49 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wizard-choice-btn.selected { border-color: var(--accent); background: rgba(0,212,255,0.12); }
 .wizard-choice-btn.selected-no { border-color: var(--text3); background: var(--bg4); }
 .wizard-choice-icon { font-size: 28px; line-height: 1; }
+/* NaviCore branded choice card */
+.wizard-choice-logo { width: 54px; height: 54px; object-fit: contain; }
+.wizard-choice-btn.navicore-yes:hover { border-color: #4d9fff; background: rgba(77,159,255,0.06); }
+.wizard-choice-btn.navicore-yes.selected { border-color: #4d9fff; background: rgba(77,159,255,0.14); box-shadow: 0 0 0 1px rgba(77,159,255,0.45), 0 4px 18px rgba(77,159,255,0.18); }
+.navicore-wordmark { font-weight: 700; letter-spacing: 0.3px; }
+.navicore-wordmark > span { color: #4d9fff; }
+.navicore-tagline { font-size: 9px; letter-spacing: 2px; color: #4d9fff; opacity: 0.85; font-weight: 600; }
+/* Kyber branded choice card (full "Kyber Controls" lockup) */
+.wizard-choice-banner { width: 100%; max-width: 210px; height: auto; border-radius: 6px; margin: 2px auto; }
+.wizard-choice-btn.kyber-yes:hover { border-color: #e23b3b; background: rgba(226,59,59,0.06); }
+.wizard-choice-btn.kyber-yes.selected { border-color: #e23b3b; background: rgba(226,59,59,0.14); box-shadow: 0 0 0 1px rgba(226,59,59,0.45), 0 4px 18px rgba(226,59,59,0.18); }
+/* Maestro branded choice card (Pololu) */
+.wizard-choice-btn.maestro-yes:hover { border-color: #3a5fd9; background: rgba(58,95,217,0.06); }
+.wizard-choice-btn.maestro-yes.selected { border-color: #3a5fd9; background: rgba(58,95,217,0.14); box-shadow: 0 0 0 1px rgba(58,95,217,0.45), 0 4px 18px rgba(58,95,217,0.18); }
 .wizard-choice-label { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--text); }
 .wizard-choice-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
+
+/* ── Controller segmented selector (General Settings) — compact branded chips ── */
+/* Equal-size chips: flex:1 gives equal WIDTH, align-items:stretch equal HEIGHT. */
+.controller-seg { display: flex; gap: 8px; align-items: stretch; max-width: 540px; margin-bottom: 12px; }
+.ctrl-opt {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 46px; padding: 6px 12px; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: var(--radius2);
+  cursor: pointer; transition: all var(--transition); color: var(--text);
+}
+.ctrl-opt:hover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+.ctrl-logo      { width: 22px; height: 22px; object-fit: contain; }
+.ctrl-logo-wide { width: auto; height: auto; max-width: 150px; max-height: 30px; object-fit: contain; display: block; }
+.ctrl-label     { font-family: var(--sans); font-size: 13px; font-weight: 700; letter-spacing: 0.3px; }
+.ctrl-none-icon { font-size: 16px; color: var(--text3); line-height: 1; }
+.ctrl-textwrap  { display: flex; flex-direction: column; align-items: center; gap: 1px; line-height: 1.1; }
+.ctrl-sub       { font-size: 9px; color: var(--text3); font-weight: 500; white-space: nowrap; }
+/* NaviCore (blue) */
+.ctrl-navicore .ctrl-label > span { color: #4d9fff; }
+.ctrl-opt.ctrl-navicore.selected { border-color: #4d9fff; background: rgba(77,159,255,0.14); box-shadow: 0 0 0 1px rgba(77,159,255,0.45); }
+.ctrl-opt.ctrl-navicore:hover     { border-color: #4d9fff; background: rgba(77,159,255,0.07); }
+/* Kyber (red) */
+.ctrl-opt.ctrl-kyber.selected { border-color: #e23b3b; background: rgba(226,59,59,0.14); box-shadow: 0 0 0 1px rgba(226,59,59,0.45); }
+.ctrl-opt.ctrl-kyber:hover     { border-color: #e23b3b; background: rgba(226,59,59,0.07); }
+/* None (neutral) */
+.ctrl-opt.ctrl-none.selected { border-color: var(--text3); background: var(--bg4); }
 
 /* Identity step column labels / inputs (WCB#, HW Version, LED Pin in one flex row) */
 .wizard-ident-label {
@@ -878,13 +925,23 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .terminal-drawer.open { display: flex; }
 
 .terminal-resize-handle {
-  height: 6px; cursor: ns-resize; flex-shrink: 0;
+  height: 10px; cursor: ns-resize; flex-shrink: 0;
   background: var(--border);
   transition: background var(--transition);
   position: relative;
+  user-select: none; -webkit-user-select: none;  /* never select the handle itself */
+  touch-action: none;                            /* let pointer-drag own the gesture */
 }
 .terminal-resize-handle:hover,
 .terminal-resize-handle.dragging { background: var(--accent); }
+/* Invisible grab zone extending above the thin bar so the terminal's top edge
+   is easy to grab without pixel-hunting (visible 10px → ~18px effective). */
+.terminal-resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: -8px; height: 8px;
+  cursor: ns-resize;
+}
 .terminal-resize-handle::after {
   content: '';
   position: absolute;
@@ -1059,14 +1116,14 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wiz-hint {
   display: inline-flex; align-items: center; justify-content: center;
   width: 15px; height: 15px; border-radius: 50%;
-  background: rgba(0,212,255,0.12); border: 1px solid rgba(0,212,255,0.35);
-  color: var(--accent); font-size: 9px; font-style: normal; font-weight: 700;
+  background: transparent; border: 1px solid var(--border2);
+  color: var(--text3); font-size: 9px; font-style: normal; font-weight: 700;
   cursor: help; position: relative; flex-shrink: 0;
   margin-left: 5px; vertical-align: middle; line-height: 1;
   transition: background 0.15s, border-color 0.15s;
 }
 .wiz-hint:hover {
-  background: rgba(0,212,255,0.22); border-color: rgba(0,212,255,0.6);
+  background: var(--accent); border-color: var(--accent); color: var(--bg);
 }
 .wiz-hint::after {
   content: attr(data-tip);
@@ -1091,6 +1148,13 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 /* tip-left variant: tooltip opens to the left (for icons near the right edge) */
 .wiz-hint.tip-left::after  { left: auto; right: 0; }
 .wiz-hint.tip-left::before { left: auto; right: 7px; }
+/* tip-down variant: tooltip opens BELOW the icon (for hints near the top of a
+   card, where the default upward tooltip would be clipped by the card edge) */
+.wiz-hint.tip-down::after  { bottom: auto; top: calc(100% + 8px); }
+.wiz-hint.tip-down::before {
+  bottom: auto; top: calc(100% + 3px);
+  border-top-color: transparent; border-bottom-color: var(--accent2);
+}
 
 /* ─── Stats Modal Output ─────────────────────────────────────── */
 .stats-modal-output {
@@ -1169,3 +1233,106 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   0%   { background: rgba(0,232,122,0.4); border-color: var(--green); }
   100% { background: rgba(0,232,122,0.08); border-color: var(--green); }
 }
+/* ── RC Controllers section (Phase 4: discovered via rc_hb broadcasts) ──
+   Sits at the bottom of the main content area, hidden until at least one
+   RC-Controller's heartbeat has been heard.  See _rcDiscoveryHook() in
+   app.js for the discovery logic and rc_telemetry.h in the RC-Controller
+   repo for the heartbeat-broadcast source. */
+.rc-devices-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--card-bg, #1a1d28);
+  border: 1px solid var(--border, #2a2f3d);
+  border-radius: 8px;
+}
+.rc-devices-section h2 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e0e0e0);
+  letter-spacing: 0.3px;
+}
+.rc-devices-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.rc-device-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg, #0f1115);
+  border: 1px solid var(--border, #2a2f3d);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.rc-device-card .rc-id {
+  font-weight: 700;
+  color: var(--accent, #4fc3f7);
+  font-size: 14px;
+  min-width: 56px;
+}
+.rc-device-card .rc-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted, #888);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.rc-device-card .rc-meta .rc-meta-line { line-height: 1.4; }
+.rc-device-card .rc-meta .rc-stale { color: var(--yellow, #ffb000); }
+.rc-device-card .rc-open-btn {
+  padding: 6px 10px;
+  background: var(--accent, #4fc3f7);
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rc-device-card .rc-open-btn:hover { filter: brightness(1.1); }
+.rc-devices-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted, #888);
+}
+.rc-devices-note a { text-decoration: underline; cursor: pointer; }
+
+
+/* ─── Refined layout tweaks ──────────────────── */
+/* Narrow the Bcast IN/OUT columns so Label & Status get the room.
+   Scoped to the Serial Ports table only (the Maestro table shares .serial-table). */
+.serial-table[id$="-serial-table"] th:nth-child(3), .serial-table[id$="-serial-table"] td:nth-child(3),
+.serial-table[id$="-serial-table"] th:nth-child(4), .serial-table[id$="-serial-table"] td:nth-child(4) { width: 80px; }
+/* Size MAC octet inputs to their 2-char content */
+#g-mac2, #g-mac3 { width: 80px; }
+/* Header: fence the primary actions (Wizard + Push All) apart from utilities */
+.primary-actions {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 12px; margin: 0 2px;
+  border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+}
+/* Action bar: visually separate the destructive Factory Reset */
+.action-bar-divider { width: 1px; height: 22px; background: var(--border2); margin: 0 4px; flex-shrink: 0; }
+
+/* WCB / WCB_Client type selector → accent pills (matches the demo) */
+.board-slot-type label {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 5px 12px;
+  font-size: 12px; color: var(--text2);
+  transition: all var(--transition);
+}
+.board-slot-type input[type="radio"] { display: none; }
+.board-slot-type label:has(input:checked) {
+  border-color: var(--accent); background: rgba(0,212,255,0.07); color: var(--accent);
+}
+
+/* NaviCore ID sits alone in its field-group — don't let it stretch full width */
+#g-navicore-detail { grid-template-columns: 200px; }

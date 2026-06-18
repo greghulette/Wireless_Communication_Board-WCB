@@ -56,25 +56,43 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.10:16.R.MAY.2026';
+const UI_VERSION = '18.14:56.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
 let _wizardSessionId = 0;            // incremented on each openWizard(); guards stale close timers
+let _wizAdvanceTimer = null;         // pending auto-advance timer (cancelable; one at a time)
+
+// Cancel any pending card auto-advance (called by manual nav so a stale timer
+// can't fire wizardNext() against the wrong step).
+function wizardCancelAutoAdvance() {
+  if (_wizAdvanceTimer) { clearTimeout(_wizAdvanceTimer); _wizAdvanceTimer = null; }
+}
 let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
 
 // ─── Init ─────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  checkBrowserCompat();
-  loadThemePreference();
-  initSystemConfig();
-  loadModePreference();
-  initTerminalResize();
-  showSplash();
-  fetchLatestFirmwareVersion();  // silent, best-effort
+function runWizardInit() {
+  // Each step runs in isolation: a throw in one init step (e.g. a browser-compat
+  // or layout read that fails in some environment) must NOT abort the rest. The
+  // chain used to run bare, so one early throw silently skipped everything after
+  // it — including initTerminalResize(), which left the terminal un-resizable.
+  const safe = (fn, name) => { try { fn(); } catch (e) { console.error(`[init] ${name} failed:`, e); } };
+  safe(checkBrowserCompat,         'checkBrowserCompat');
+  safe(loadThemePreference,        'loadThemePreference');
+  safe(initSystemConfig,           'initSystemConfig');
+  safe(loadModePreference,         'loadModePreference');
+  safe(initTerminalResize,         'initTerminalResize');
+  safe(showSplash,                 'showSplash');
+  safe(fetchLatestFirmwareVersion, 'fetchLatestFirmwareVersion');  // silent, best-effort
   const footerVer = document.getElementById('footer-ui-version');
   if (footerVer) footerVer.textContent = UI_VERSION;
-});
+}
+// Run now if the DOM is already parsed (script is at end of body), else wait.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', runWizardInit);
+} else {
+  runWizardInit();
+}
 
 // ─── Firmware Version (fetched from GitHub) ───────────────────────
 async function fetchLatestFirmwareVersion() {
@@ -197,11 +215,13 @@ function splashGoConfig() {
 function loadModePreference() {
   const saved = localStorage.getItem('wcb-mode') || 'simple';
   setMode(saved, true);
+  syncFwBranchSelect();   // reflect saved firmware branch immediately
 }
 
 function initSystemConfig() {
   systemConfig = WCBParser.createDefaultSystemConfig();
   renderBoards(1);
+  refreshControllerUI();   // select the default "None" controller chip
 }
 
 // ─── Theme ────────────────────────────────────────────────────────
@@ -239,6 +259,106 @@ function setMode(mode, silent = false) {
     if (mode === 'advanced' && etmEnabled) etmDetail.classList.add('visible');
     else etmDetail.classList.remove('visible');
   }
+
+  // Firmware Source: lazy-load the branch list the first time Advanced
+  // is opened; always keep the warning state in sync.
+  if (mode === 'advanced') populateFwBranches();
+  updateFwBranchWarn();
+}
+
+// ─── Firmware Source (branch selector — advanced/testing only) ─────
+// Pairs with getFirmwareBranch() in flasher.js (same localStorage key).
+// Default is always 'main' (released firmware); a non-main selection is
+// loudly flagged and intended only for testing unreleased branches.
+const FW_BRANCH_KEY = 'wcb_fw_branch';
+let _fwBranchesLoaded = false;
+
+function currentFwBranch() {
+  try { return (localStorage.getItem(FW_BRANCH_KEY) || '').trim() || 'main'; }
+  catch (_) { return 'main'; }
+}
+
+function updateFwBranchWarn() {
+  const warn = document.getElementById('fw-branch-warn');
+  if (!warn) return;
+  const b = currentFwBranch();
+  if (b && b !== 'main') {
+    const name = document.getElementById('fw-branch-warn-name');
+    if (name) name.textContent = b;
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function onFwBranchChange() {
+  const sel = document.getElementById('g-fw-branch');
+  if (!sel) return;
+  let b = (sel.value || 'main').trim() || 'main';
+  // Whitelist the same character set as flasher.js getFirmwareBranch() reads.
+  // Prevents an unexpected branch name (e.g. one populated from the GitHub
+  // API list with weird characters, or one manually typed by an advanced
+  // user) from being persisted and then interpolated into a URL.
+  if (!/^[A-Za-z0-9._/-]+$/.test(b) || b.length > 100) {
+    showToast(`Branch name "${b}" contains invalid characters — falling back to 'main'`, 'warning', 6000);
+    b = 'main';
+  }
+  try {
+    if (b === 'main') localStorage.removeItem(FW_BRANCH_KEY);
+    else              localStorage.setItem(FW_BRANCH_KEY, b);
+  } catch (_) {}
+  updateFwBranchWarn();
+  if (b !== 'main')
+    showToast(`Firmware source set to branch '${b}' — NOT released firmware`, 'info', 6000);
+  else
+    showToast('Firmware source: main (released)', 'success', 3000);
+}
+
+// Make the <select> reflect the saved branch even before the full list
+// is fetched, so the UI matches what the flasher will actually pull.
+function syncFwBranchSelect() {
+  const sel = document.getElementById('g-fw-branch');
+  if (!sel) return;
+  const saved = currentFwBranch();
+  if (![...sel.options].some(o => o.value === saved)) {
+    const o = document.createElement('option');
+    o.value = saved; o.textContent = saved + ' (testing)';
+    sel.appendChild(o);
+  }
+  sel.value = saved;
+  updateFwBranchWarn();
+}
+
+// Lazy-load the branch list from GitHub (filtered) on first Advanced open.
+async function populateFwBranches() {
+  if (_fwBranchesLoaded) return;
+  _fwBranchesLoaded = true;
+  const sel = document.getElementById('g-fw-branch');
+  if (!sel) return;
+  const saved = currentFwBranch();
+  try {
+    const r = await fetch('https://api.github.com/repos/greghulette/'
+                        + 'Wireless_Communication_Board-WCB/branches?per_page=100');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const hide = /^(claude\/|dependabot\/|revert-|gh-readonly)/i;
+    const names = data.map(b => b && b.name)
+                      .filter(n => n && n !== 'main' && !hide.test(n))
+                      .sort((a, b) => a.localeCompare(b));
+    const mk = (val, label) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label; sel.appendChild(o);
+    };
+    sel.innerHTML = '';
+    mk('main', 'main (released)');
+    names.forEach(n => mk(n, n));
+    if (![...sel.options].some(o => o.value === saved)) mk(saved, saved + ' (testing)');
+    sel.value = saved;
+  } catch (_) {
+    _fwBranchesLoaded = false;          // allow a retry on next Advanced open
+    syncFwBranchSelect();               // keep saved value selectable
+  }
+  updateFwBranchWarn();
 }
 
 // ─── Section Toggle ───────────────────────────────────────────────
@@ -424,6 +544,12 @@ function updatePortClaimUI(n) {
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
       label.disabled = true;
+    } else if (claim.type === 'hcr') {
+      claimNote.textContent = 'Managed by HCR Vocalizer';
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
     } else if (claim.type === 'serial-map') {
       const destStr = (claim.destinations || [])
         .map(d => d.wcbNumber > 0 ? `W${d.wcbNumber} S${d.port}` : `S${d.port}`)
@@ -503,6 +629,8 @@ function onKyberChange(n) {
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
   updateKyberMarcPortDropdown(n);
+  updateRemoteSectionsUI(n);
+  onBoardFieldChange(n);   // any Kyber/NaviCore mode change marks the board unsaved
 }
 
 function onKyberPortChange(n) {
@@ -810,6 +938,156 @@ function onGeneralETMChange() {
   _notifyGeneralChanged();
 }
 
+// ─── Controller (network-wide: NaviCore | Kyber | None) ───────────
+// One animation controller drives the system. NaviCore and Kyber are mutually
+// exclusive, so this is a single global choice in General Settings; each WCB
+// then picks its participation in the relevant per-board section. The choice is
+// UI state — it maps onto the firmware via per-board specialPeer (NaviCore) and
+// kyber.mode (Kyber).
+
+// Per-controller stash of board roles, so switching controllers resets to a
+// clean slate but flipping back restores what you had — UNTIL you push, which
+// commits the current state and clears the stash.
+let controllerRoleHistory = { navicore: null, kyber: null };
+
+function _snapshotControllerState() {
+  const boards = {};
+  for (const n in boardConfigs) boards[n] = JSON.parse(JSON.stringify(boardConfigs[n].kyber));
+  return {
+    boards,
+    specialPeer:   !!systemConfig.general.specialPeer,
+    specialPeerId: systemConfig.general.specialPeerId ?? 20,
+  };
+}
+
+function _restoreControllerState(snap) {
+  for (const n in boardConfigs) {
+    if (snap.boards[n]) boardConfigs[n].kyber = JSON.parse(JSON.stringify(snap.boards[n]));
+  }
+  systemConfig.general.specialPeer   = snap.specialPeer;
+  systemConfig.general.specialPeerId = snap.specialPeerId;
+}
+
+function _resetAllBoardRoles() {
+  for (const n in boardConfigs) {
+    const cfg = boardConfigs[n];
+    if (cfg.type === 'client') continue;
+    cfg.kyber.mode = 'none';
+    cfg.kyber.port = null;
+    cfg.kyber.marcduinoPort = null;
+    cfg.kyber.targets = [];
+  }
+}
+
+// Reconcile the auto-set Kyber serial-port labels with the board's current
+// kyber.mode. Switching the controller away from Kyber must not leave orphaned
+// "Kyber Maestro"/"Kyber Marcuino" labels (they'd push stale values to NVS);
+// switching back to a restored local Kyber must re-apply them. Custom labels
+// are never touched. evaluatePortClaims() re-derives claimedBy from the new mode.
+function _reconcileKyberPortLabels(cfg) {
+  const local = cfg.kyber.mode === 'local';
+  for (let i = 0; i < cfg.serialPorts.length; i++) {
+    const sp = cfg.serialPorts[i];
+    const portNum = i + 1;
+    if (local && cfg.kyber.port === portNum) {
+      if (!sp.label) sp.label = 'Kyber Maestro';
+    } else if (local && cfg.kyber.marcduinoPort === portNum) {
+      if (!sp.label) sp.label = 'Kyber Marcuino';
+    } else if (sp.label === 'Kyber Maestro' || sp.label === 'Kyber Marcuino') {
+      sp.label = '';   // orphaned auto-label — clear so it isn't pushed
+    }
+  }
+  WCBParser.evaluatePortClaims(cfg);
+}
+
+// Apply the controller's implied network flags to every WCB config and refresh
+// every board's UI (radios, section visibility, status). Only called on a real
+// controller switch (onControllerChange), so it also flags genuinely-changed
+// boards 'unsaved' — otherwise their per-board Push buttons would stay green.
+function _applyControllerToBoards() {
+  const ctrl = systemConfig.general.controller || 'none';
+  const usingNavi = ctrl === 'navicore';
+  for (const n in boardConfigs) {
+    if (boardConfigs[n].type === 'client') continue;
+    boardConfigs[n].specialPeer   = usingNavi;
+    boardConfigs[n].specialPeerId = systemConfig.general.specialPeerId ?? 20;
+    _reconcileKyberPortLabels(boardConfigs[n]);
+  }
+  systemConfig.general.specialPeer = usingNavi;
+  for (const n in boardConfigs) {
+    populateUIFromConfig(n, boardConfigs[n]);
+    if (boardConfigs[n].type === 'client') continue;
+    const base = boardBaselines[n];
+    const changed = !base
+      || base.specialPeer !== boardConfigs[n].specialPeer
+      || (base.kyber?.mode) !== boardConfigs[n].kyber.mode;
+    if (changed) updateBoardStatusBadge(n, 'unsaved');
+  }
+  refreshControllerUI();
+}
+
+// Highlight the selected segmented chip and show the NaviCore ID only for NaviCore.
+function refreshControllerUI() {
+  const ctrl = systemConfig.general.controller || 'none';
+  document.querySelectorAll('#g-controller-seg .ctrl-opt').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.controller === ctrl);
+  });
+  const detail = document.getElementById('g-navicore-detail');
+  if (detail) detail.style.display = (ctrl === 'navicore') ? '' : 'none';
+  const idEl = document.getElementById('g-navicore-id');
+  if (idEl) idEl.value = systemConfig.general.specialPeerId ?? 20;
+}
+
+function onControllerChange(newType) {
+  const oldType = systemConfig.general.controller || 'none';
+  if (newType === oldType) return;
+
+  // Stash the outgoing controller's per-board roles so flipping back restores them.
+  if (oldType === 'navicore' || oldType === 'kyber') {
+    controllerRoleHistory[oldType] = _snapshotControllerState();
+  }
+
+  systemConfig.general.controller = newType;
+
+  // Restore the new controller's stashed roles if we have them, else clean slate.
+  if ((newType === 'navicore' || newType === 'kyber') && controllerRoleHistory[newType]) {
+    _restoreControllerState(controllerRoleHistory[newType]);
+  } else {
+    _resetAllBoardRoles();
+    if (newType === 'navicore' && !systemConfig.general.specialPeerId) {
+      systemConfig.general.specialPeerId = 20;
+    }
+  }
+
+  _applyControllerToBoards();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+// Derive the global controller from the current board configs (used on load/pull).
+function deriveControllerFromBoards() {
+  let hasNavi = false, hasKyber = false, naviId = null;
+  for (const n in boardConfigs) {
+    const c = boardConfigs[n];
+    if (c.specialPeer) { hasNavi = true; naviId = c.specialPeerId ?? naviId; }
+    if (c.kyber?.mode === 'local' || (c.kyber?.mode === 'remote' && !c.specialPeer)) hasKyber = true;
+  }
+  systemConfig.general.controller = hasNavi ? 'navicore' : (hasKyber ? 'kyber' : 'none');
+  if (naviId) systemConfig.general.specialPeerId = naviId;
+}
+
+function onNavicoreIdChange() {
+  const id = parseInt(document.getElementById('g-navicore-id')?.value) || 20;
+  systemConfig.general.specialPeerId = id;
+  for (const n in boardConfigs) {
+    if (boardConfigs[n].type === 'client') continue;
+    boardConfigs[n].specialPeerId = id;
+  }
+  refreshAllNavicoreStatus();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
 // ─── General Settings Conflict Helpers ────────────────────────────
 const GENERAL_FIELD_LABELS = {
   espnowPassword: 'ESP-NOW Password',
@@ -826,6 +1104,8 @@ const GENERAL_FIELD_LABELS = {
   etmCount:       'ETM Message Count',
   etmDelay:       'ETM Message Delay (ms)',
   etmChecksum:    'ETM Checksum',
+  navicoreEnabled:'NaviCore',
+  navicoreId:     'NaviCore ID',
 };
 
 function extractGeneralFields(config) {
@@ -844,6 +1124,8 @@ function extractGeneralFields(config) {
     etmCount:       config.etm?.messageCount       ?? 20,
     etmDelay:       config.etm?.messageDelayMs     ?? 100,
     etmChecksum:    config.etm?.checksumEnabled    ?? true,
+    navicoreEnabled:config.specialPeer             ?? false,
+    navicoreId:     config.specialPeerId           ?? 20,
   };
 }
 
@@ -888,6 +1170,10 @@ function applyGeneralFieldsToBoardConfig(n, fields) {
     cfg.etm.messageDelayMs   = fields.etmDelay;
     cfg.etm.checksumEnabled  = fields.etmChecksum;
   }
+  if (cfg.type !== 'client') {
+    cfg.specialPeer   = fields.navicoreEnabled;
+    cfg.specialPeerId = fields.navicoreId;
+  }
 }
 
 // ─── Board Field Handlers ─────────────────────────────────────────
@@ -915,6 +1201,108 @@ function onWCBNumberChange(n) {
   const val = parseInt(sel.value);
   const qty = systemConfig?.general?.wcbQuantity || WCB_MAX;
   if (boardConfigs[n] && val >= 1 && val <= qty) boardConfigs[n].wcbNumber = val;
+  updateBoardAliasUI(n);   // header reads "WCB {wcbNumber} (Alias)"
+  onBoardFieldChange(n);
+}
+
+// ─── Alias (per-WCB friendly name) ─────────────────────────────────
+// Round-trips with the firmware ?ALIAS,<text> command (NVS-persisted).
+// Stored in boardConfigs[n].alias, max 24 chars.
+function onAliasChange(n) {
+  const el = document.getElementById(`b${n}-alias`);
+  if (!el || !boardConfigs[n]) return;
+  let v = (el.value || '').slice(0, 24);
+  // Mirror the firmware's saveWCBAlias() sanitization: any character that
+  // would corrupt the chained backup ('^', ',', ';', '?') or split it across
+  // lines ('\r', '\n') is replaced with '_' so the user's intent is still
+  // visible. We also strip the *currently configured* delimiter in case the
+  // user has overridden the default '^' (read it live each call so a
+  // delimiter change made just before typing here picks up immediately).
+  // Replacing — not dropping — matches firmware behaviour exactly, so a
+  // typed alias here round-trips identically through ?ALIAS push and pull.
+  const liveDelim = (document.getElementById('g-delimiter')?.value)
+                  || boardConfigs[n].delimiter || '^';
+  const bad = new Set(['^', ',', ';', '?', '\r', '\n', liveDelim]);
+  let cleaned = '';
+  for (const ch of v) cleaned += bad.has(ch) ? '_' : ch;
+  if (cleaned !== v) {
+    v = cleaned;
+    el.value = v;
+  }
+  boardConfigs[n].alias = v;
+  updateBoardAliasUI(n);
+  onBoardFieldChange(n);
+}
+
+// Reflect the alias / slot type everywhere they appear: the board-card
+// section header and the side-nav button. Safe to call when those
+// elements don't exist yet (early renders / non-board contexts).
+//
+//   WCB slot:    "WCB 1 (Body)"
+//   Client slot: "Client 1 (Dome Sensor)"
+function updateBoardAliasUI(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  const isClient = cfg.type === 'client';
+  const wcbN     = cfg.wcbNumber || n;
+  const alias    = isClient ? (cfg.clientAlias || '').trim()
+                            : (cfg.alias       || '').trim();
+  const prefix   = isClient ? `Client ${wcbN}` : `WCB ${wcbN}`;
+  const full     = alias ? `${prefix} (${alias})` : prefix;
+
+  // Card header: keep the static "WCB {N}" h2 stable; everything dynamic
+  // (including the prefix swap for client slots) lives in the suffix span.
+  // For wcb mode → suffix is "(alias)" or empty; for client mode → suffix
+  // is " · Client (alias)" so the original WCB number stays readable.
+  const label = document.getElementById(`b${n}-alias-label`);
+  if (label) {
+    label.textContent = isClient
+      ? (alias ? `· Client (${alias})` : '· Client')
+      : (alias ? `(${alias})` : '');
+  }
+
+  const navBtn = document.getElementById(`wcb-nav-btn-${n}`);
+  if (navBtn) navBtn.textContent = full;
+}
+
+// ─── Slot Type (Wizard-only: WCB vs WCB_Client) ────────────────────
+// Hides/shows the WCB-only body vs the lightweight Client pane.
+// Never sends anything to the physical board. Flipping back restores
+// the saved WCB config exactly as it was — config is preserved, not
+// deleted.
+function updateSlotTypeUI(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  const isClient = cfg.type === 'client';
+
+  // Radio state
+  const radio = document.querySelector(`input[name="b${n}-slot-type"][value="${isClient ? 'client' : 'wcb'}"]`);
+  if (radio) radio.checked = true;
+
+  // Body vs Client-pane visibility
+  const body   = document.getElementById(`b${n}-section-body`);
+  const cpane  = document.getElementById(`b${n}-client-pane`);
+  if (body)  body.style.display  = isClient ? 'none' : '';
+  if (cpane) cpane.style.display = isClient ? ''     : 'none';
+
+  // Header label format changes with type
+  updateBoardAliasUI(n);
+}
+
+function onSlotTypeChange(n) {
+  if (!boardConfigs[n]) return;
+  const chosen = document.querySelector(`input[name="b${n}-slot-type"]:checked`)?.value;
+  boardConfigs[n].type = (chosen === 'client') ? 'client' : 'wcb';
+  updateSlotTypeUI(n);
+  onBoardFieldChange(n);
+}
+
+function onClientAliasChange(n) {
+  const el = document.getElementById(`b${n}-client-alias`);
+  if (!el || !boardConfigs[n]) return;
+  const v = (el.value || '').slice(0, 24);
+  boardConfigs[n].clientAlias = v;
+  updateBoardAliasUI(n);
   onBoardFieldChange(n);
 }
 
@@ -928,6 +1316,19 @@ function onHWVersionChange(n) {
   const ledCustom = document.getElementById(`b${n}-led-pin-custom`);
   if (ledGroup)  ledGroup.style.display  = show ? 'flex' : 'none';
   if (ledCustom) ledCustom.style.display = 'none'; // reset custom on HW change
+
+  // Default the onboard-LED pin to the variant's pin (3.1 → GPIO38, 3.2 → GPIO48)
+  // when switching between the S3 boards, unless a custom pin is already chosen.
+  if (boardConfigs[n]) {
+    const cur = boardConfigs[n].statusLedPin;
+    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
+              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
+    if (def !== null) {
+      boardConfigs[n].statusLedPin = def;
+      const sel = document.getElementById(`b${n}-led-pin`);
+      if (sel) sel.value = String(def);
+    }
+  }
 
   onBoardFieldChange(n);
 }
@@ -972,6 +1373,89 @@ function syncKyberToConfig(n) {
   } else {
     config.kyber.port = null;
     config.kyber.marcduinoPort = null;
+  }
+}
+
+// ─── NaviCore vs Kyber "Remote" (per board) ───────────────────────
+// Backend is ONE function (MAESTRO_REMOTE / kyber.mode==='remote'), but the UI
+// tracks WHO drives it so only the matching control lights up:
+//   • NaviCore ON  (specialPeer) → NaviCore-section Remote button lit; the Kyber
+//                                  "Remote" radio is hidden so it can't light.
+//   • NaviCore OFF                → Kyber-section Remote radio lit; NaviCore
+//                                  section hidden.
+// The canonical Kyber radio still carries the backend state and stays checked
+// even when hidden, so syncKyberToConfig never clobbers 'remote'.
+function updateRemoteSectionsUI(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg) return;
+  const ctrl     = (typeof systemConfig !== 'undefined' && systemConfig?.general?.controller) || 'none';
+  const mode     = cfg.kyber?.mode ?? 'none';
+  const isRemote = mode === 'remote';
+
+  // Canonical Kyber radio reflects the backend mode (read by syncKyberToConfig,
+  // even while the Kyber section is hidden under a different controller).
+  const kyberRadio = document.querySelector(`input[name="b${n}-kyber"][value="${mode}"]`);
+  if (kyberRadio) kyberRadio.checked = true;
+  // NaviCore radio reflects remote/none.
+  const naviRadio = document.querySelector(`input[name="b${n}-navicore-mode"][value="${isRemote ? 'remote' : 'none'}"]`);
+  if (naviRadio) naviRadio.checked = true;
+
+  // Adaptive sections: show ONLY the active controller's section; hide both when None.
+  const kyberSection = document.getElementById(`b${n}-kyber-section`);
+  const naviSection  = document.getElementById(`b${n}-navicore-section`);
+  if (kyberSection) kyberSection.style.display = (ctrl === 'kyber')    ? '' : 'none';
+  if (naviSection)  naviSection.style.display  = (ctrl === 'navicore') ? '' : 'none';
+
+  updateNavicoreStatusText(n);
+}
+
+function updateNavicoreStatusText(n) {
+  const el  = document.getElementById(`b${n}-navicore-status`);
+  const cfg = boardConfigs[n];
+  if (!el || !cfg) return;
+  const isRemote = cfg.kyber?.mode === 'remote';
+  const id       = cfg.specialPeerId ?? 20;
+  if (isRemote && cfg.specialPeer) {
+    el.innerHTML = `<span style="color:var(--accent);font-weight:600">🛰 Remote</span> — this WCB listens for Maestro protocol messages from NaviCore (ID ${id}) and passes them to its local Maestro.`;
+  } else if (isRemote) {
+    el.innerHTML = `<b>Remote</b> — this WCB listens for Maestro protocol messages from another board (Kyber). Not driven by NaviCore.`;
+  } else if (cfg.specialPeer) {
+    el.innerHTML = `Set to <b>None</b> — this WCB ignores NaviCore Maestro traffic. Choose <b>Remote</b> only if NaviCore drives this board's Maestro (not needed for serial-only commands).`;
+  } else {
+    el.innerHTML = `Not using NaviCore. Enable it in <b>General Settings</b>, then set any board whose Maestro is driven by NaviCore to <b>Remote</b>.`;
+  }
+}
+
+function refreshAllNavicoreStatus() {
+  for (const n in boardConfigs) updateRemoteSectionsUI(n);
+}
+
+// Central setter: drive the backend kyber.mode through the canonical radio so
+// all the existing claim/visibility side-effects run, then resync the remote UI.
+function setBoardKyberMode(n, mode) {
+  const radio = document.querySelector(`input[name="b${n}-kyber"][value="${mode}"]`);
+  if (radio) { radio.checked = true; onKyberChange(n); }
+  else if (boardConfigs[n]) { boardConfigs[n].kyber.mode = mode; updateRemoteSectionsUI(n); }
+}
+
+// NaviCore-section radio (None/Remote) → set the backend mode accordingly.
+function onNavicoreRemoteChange(n) {
+  const mode = document.querySelector(`input[name="b${n}-navicore-mode"]:checked`)?.value ?? 'none';
+  setBoardKyberMode(n, mode === 'remote' ? 'remote' : 'none');
+}
+
+// Reconcile remote mode with Maestro presence (called when Maestros change):
+//   • remote but NO Maestro            → clear (remote relays a local Maestro's
+//                                         data — pointless without one).
+//   • NaviCore on + a Maestro + none   → set remote (parity with the wizard).
+function reconcileRemoteWithMaestros(n) {
+  const cfg = boardConfigs[n];
+  if (!cfg || cfg.type === 'client') return;
+  const hasMaestro = !!(cfg.maestros && cfg.maestros.length > 0);
+  if (cfg.kyber.mode === 'remote' && !hasMaestro) {
+    setBoardKyberMode(n, 'none');
+  } else if (cfg.specialPeer && hasMaestro && cfg.kyber.mode === 'none') {
+    setBoardKyberMode(n, 'remote');
   }
 }
 
@@ -1117,6 +1601,153 @@ function syncMP3ToConfig(n) {
   }
 }
 
+// ─── HCR Vocalizer ────────────────────────────────────────────────
+// Mirrors the MP3 pattern (single device, reserved port). HCR firmware
+// blocks >9600 baud on software serial (S3-S5), so the baud dropdown is
+// capped there. config.hcr round-trips via parser.js (HCR,PORT/POLL).
+function _hcrApplyBaudCap(n) {
+  const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+  const baudSel = document.getElementById(`b${n}-hcr-baud`);
+  if (!baudSel) return;
+  const isSoftSerial = portVal >= 3;          // S3-S5
+  for (const opt of baudSel.options) {
+    opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+  }
+  if (isSoftSerial && parseInt(baudSel.value) > 9600) {
+    baudSel.value = '9600';
+    const config = boardConfigs[n];
+    if (config) {
+      config.hcr.baud = 9600;
+      // Keep the underlying serial port baud in sync so buildCommandString
+      // doesn't emit a contradictory ?BAUD,S<port>,<high> alongside
+      // ?HCR,PORT,S<port>:9600 on the same push.
+      if (portVal >= 1 && portVal <= 5 && config.serialPorts?.[portVal - 1]) {
+        config.serialPorts[portVal - 1].baud = 9600;
+        const sBaudEl = document.getElementById(`b${n}-s${portVal}-baud`);
+        if (sBaudEl) sBaudEl.value = '9600';
+      }
+    }
+  }
+}
+
+function updateHCRPortDropdown(n) {
+  const portSel = document.getElementById(`b${n}-hcr-port`);
+  if (!portSel) return;
+  const config      = boardConfigs[n];
+  const currentPort = config?.hcr?.port;
+  portSel.innerHTML = '';
+  for (let p = 1; p <= 5; p++) {
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    if (!claim || claim.type === 'hcr') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      portSel.appendChild(opt);
+    }
+  }
+}
+
+function onHCRChange(n) {
+  const mode    = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  const isLocal = mode === 'local';
+  ['port', 'baud', 'poll'].forEach(id => {
+    const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
+    if (el) el.style.display = isLocal ? '' : 'none';
+  });
+
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'hcr') port.claimedBy = null;
+  }
+
+  config.hcr.enabled = isLocal;
+  if (!isLocal) config.hcr.port = null;
+
+  updateHCRPortDropdown(n);
+
+  if (isLocal) {
+    const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+    if (portVal >= 1 && portVal <= 5) {
+      config.hcr.port = portVal;
+      config.serialPorts[portVal - 1].claimedBy = { type: 'hcr' };
+      _hcrApplyBaudCap(n);
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateHCRPortDropdown(n);
+  updateHCRStatusBtn(n);
+  onBoardFieldChange(n);
+}
+
+function onHCRPortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'hcr') {
+      port.claimedBy    = null;
+      port.broadcastIn  = true;
+      port.broadcastOut = true;
+    }
+  }
+
+  const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
+  if (portVal >= 1 && portVal <= 5) {
+    config.hcr.port = portVal;
+    config.serialPorts[portVal - 1].claimedBy = { type: 'hcr' };
+    _hcrApplyBaudCap(n);
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateHCRPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onHCRBaudChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
+  onBoardFieldChange(n);
+}
+
+function onHCRPollChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  let v = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
+  if (isNaN(v)) v = 10;
+  // 0 = off; otherwise minimum 3s (keeps any serial port safe), max 3600.
+  v = (v <= 0) ? 0 : Math.max(3, Math.min(3600, v));
+  config.hcr.poll = v;
+  const el = document.getElementById(`b${n}-hcr-poll`);
+  if (el && parseInt(el.value) !== v) el.value = v;   // reflect the clamp
+  onBoardFieldChange(n);
+}
+
+function syncHCRToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  const mode = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  config.hcr.enabled = mode === 'local';
+  if (config.hcr.enabled) {
+    config.hcr.port = parseInt(document.getElementById(`b${n}-hcr-port`)?.value) || null;
+    config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
+    let pv = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
+    config.hcr.poll = isNaN(pv) ? 10 : (pv <= 0 ? 0 : Math.max(3, Math.min(3600, pv)));
+    // Keep serial port baud in sync so ?BAUD is generated correctly
+    if (config.hcr.port >= 1 && config.hcr.port <= 5) {
+      config.serialPorts[config.hcr.port - 1].baud = config.hcr.baud;
+    }
+  } else {
+    config.hcr.port = null;
+  }
+}
+
 function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
@@ -1149,6 +1780,15 @@ function populateUIFromConfig(n, config) {
     populateWCBDropdown(wcbNumSel, qty, selectedWcb, true);
   }
 
+  // Alias input + header/nav label
+  const aliasEl = document.getElementById(`b${n}-alias`);
+  if (aliasEl) aliasEl.value = (config.alias || '').slice(0, 24);
+
+  // Slot type + Client alias (Wizard-only — never touch the physical board)
+  const cAliasEl = document.getElementById(`b${n}-client-alias`);
+  if (cAliasEl) cAliasEl.value = (config.clientAlias || '').slice(0, 24);
+  updateSlotTypeUI(n);   // sets radio, body/client-pane visibility, header
+
   const hwSel = document.getElementById(`b${n}-hw-version`);
   if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
 
@@ -1179,7 +1819,9 @@ function populateUIFromConfig(n, config) {
     if (el('label')) el('label').value  = sp.label;
   }
 
-  // Kyber
+  // Kyber — None / Local / Remote are all directly selectable. "Remote" means
+  // this board has no local Kyber but listens for Maestro/Pololu broadcasts
+  // (e.g. driven by NaviCore).
   const kyberInput = document.querySelector(`input[name="b${n}-kyber"][value="${config.kyber.mode}"]`);
   if (kyberInput) {
     kyberInput.checked = true;
@@ -1209,12 +1851,19 @@ function populateUIFromConfig(n, config) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
-
+  updateRemoteSectionsUI(n);
   // Sequences
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (tbody) {
     tbody.innerHTML = '';
     for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
+  }
+
+  // Variables
+  const varTbody = document.getElementById(`b${n}-var-tbody`);
+  if (varTbody) {
+    varTbody.innerHTML = '';
+    for (const v of (config.variables ?? [])) appendVariableRow(n, v.name, v.value);
   }
 
   // MP3 Trigger
@@ -1246,8 +1895,35 @@ function populateUIFromConfig(n, config) {
     }
   }
 
+  // HCR Vocalizer
+  const hcrInput = document.querySelector(`input[name="b${n}-hcr"][value="${config.hcr.enabled ? 'local' : 'none'}"]`);
+  if (hcrInput) {
+    hcrInput.checked = true;
+    const isLocal = config.hcr.enabled;
+    ['port', 'baud', 'poll'].forEach(id => {
+      const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
+      if (el) el.style.display = isLocal ? '' : 'none';
+    });
+    updateHCRPortDropdown(n);
+    if (isLocal && config.hcr.port) {
+      const portSel = document.getElementById(`b${n}-hcr-port`);
+      if (portSel) portSel.value = config.hcr.port;
+      const baudSel = document.getElementById(`b${n}-hcr-baud`);
+      if (baudSel) {
+        const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 9600
+        for (const opt of baudSel.options) {
+          opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+        }
+        baudSel.value = config.hcr.baud ?? 9600;
+      }
+      const pollEl = document.getElementById(`b${n}-hcr-poll`);
+      if (pollEl) pollEl.value = config.hcr.poll ?? 10;
+    }
+  }
+
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
+  updateHCRStatusBtn(n);
   updateKyberPortDropdown(n);
   updateKyberMarcPortDropdown(n);
   populateMaestrosFromConfig(n, config);
@@ -1267,7 +1943,28 @@ function updatePushAllButton() {
   btn.classList.toggle('btn-pending', anyUnsaved);
 }
 
+// Live one-line board summary shown on the left of the action bar.
+function updateActionSummary(n) {
+  const el = document.getElementById(`b${n}-action-summary`);
+  if (!el) return;
+  const cfg = boardConfigs[n];
+  if (!cfg) { el.textContent = ''; return; }
+  const parts = [];
+  if (cfg.hcr && cfg.hcr.enabled && cfg.hcr.port) parts.push(`HCR on S${cfg.hcr.port}`);
+  if (cfg.mp3 && cfg.mp3.enabled && cfg.mp3.port) parts.push(`MP3 on S${cfg.mp3.port}`);
+  const maps = (cfg.mappings || []).length;
+  if (maps) parts.push(`${maps} mapping${maps === 1 ? '' : 's'}`);
+  const maes = (cfg.maestros || []).length;
+  if (maes) parts.push(`${maes} Maestro${maes === 1 ? '' : 's'}`);
+  const seqs = (cfg.sequences || []).length;
+  if (seqs) parts.push(`${seqs} sequence${seqs === 1 ? '' : 's'}`);
+  const vars = (cfg.variables || []).length;
+  if (vars) parts.push(`${vars} variable${vars === 1 ? '' : 's'}`);
+  el.textContent = parts.join('  \u00b7  ');
+}
+
 function updateBoardStatusBadge(n, state) {
+  updateActionSummary(n);
   const unsavedBadge = document.getElementById(`b${n}-unsaved-badge`);
   const goBtn        = document.getElementById(`b${n}-btn-go`);
   if (state === 'unsaved') {
@@ -1411,6 +2108,10 @@ function onMaestroPortChange(n, rowId) {
 function onMaestroChange(n) {
   syncMaestrosToConfig(n);
   onBoardFieldChange(n);
+  // Reconcile remote mode with Maestro presence: a board that gains a Maestro
+  // under NaviCore starts listening for broadcasts; a board that loses its last
+  // Maestro drops out of remote (remote is meaningless with no Maestro).
+  reconcileRemoteWithMaestros(n);
   // Refresh the auto-computed Kyber targets display on the LOCAL board
   const kyberBoard = findKyberLocalBoard();
   if (kyberBoard !== null) {
@@ -1480,7 +2181,9 @@ function removeMaestroRow(n, rowId) {
   tbody?.querySelectorAll('tr').forEach((row, i) => {
     row.cells[0].textContent = i + 1;
   });
-  syncMaestrosToConfig(n);
+  // Route through onMaestroChange so the remote-mode reconcile runs — removing
+  // the last Maestro must drop the board out of remote (and re-push the clear).
+  onMaestroChange(n);
 }
 
 function populateMaestrosFromConfig(n, config) {
@@ -2126,6 +2829,21 @@ function seqTextareaToValue(text, delim) {
     .join(delim);
 }
 
+// Firmware rejects IF embedded inside a timer payload (";t500,IF,cond") or a
+// routed payload (";w2,IF,cond"). Catch those forms before TEST/UPDATE so the
+// user gets a clear fix instead of a board-side error. The regexes are
+// anchored to the token heads (",IF," must directly follow ;t<digits> or
+// ;w<digits>) so a payload that merely contains the letters "if" is not
+// false-flagged.
+const SEQ_EMBEDDED_IF_RES = [/;t\d*\s*,\s*if\s*,/i, /;w\d+\s*,\s*if\s*,/i];
+function validateSequenceValue(value) {
+  if (SEQ_EMBEDDED_IF_RES.some(re => re.test(value))) {
+    showToast('IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd', 'error', 10000);
+    return false;
+  }
+  return true;
+}
+
 // Convert stored value string → textarea lines (one command per line)
 // Normalises inline *** comments to exactly one space: "CMD*** note" → "CMD *** note"
 //
@@ -2135,14 +2853,23 @@ function seqTextareaToValue(text, delim) {
 //   ^^***text  — standalone comment (double delimiter before ***): the empty segment
 //                produced by ^^ signals "own line", so it is kept as a separate line.
 //   CMD***text — already-inline comment (no leading delimiter): normalise spacing only.
-function seqValueToLines(value, delim) {
+//
+// IF conditionals gate the NEXT chained command, with optional ;t delay tokens in
+// between (e.g. "IF,flag=1^;t500^;M1,23") — the whole group is kept on ONE line
+// (literal delimiters preserved) so the conditional reads as a unit and saving
+// round-trips the exact same string.
+function seqValueToLines(value, delim, cmdChar = ';') {
   if (!value) return '';
   const rawParts = value.split(delim); // keep empty segments — they signal ^^
   const lines = [];
   let prevWasEmpty = false;
 
-  for (const raw of rawParts) {
-    const part = raw.trim();
+  // Timer tokens (e.g. ";t500") that may sit between an IF and its gated command
+  const cmdEsc  = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const timerRe = new RegExp(`^${cmdEsc}t\\d+$`, 'i');
+
+  for (let i = 0; i < rawParts.length; i++) {
+    const part = rawParts[i].trim();
 
     if (!part) {
       prevWasEmpty = true;
@@ -2157,6 +2884,18 @@ function seqValueToLines(value, delim) {
         // ^*** — inline comment; fold onto the preceding command line
         lines[lines.length - 1] += ' ' + part;
       }
+    } else if (/^IF,/i.test(part)) {
+      // Merge the IF token, any ;t delay tokens, and the first actionable
+      // command into one display line, keeping the delimiters within it.
+      let group = part.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+      while (i + 1 < rawParts.length) {
+        const next = rawParts[i + 1].trim();
+        if (!next || next.startsWith('***')) break;   // ^^ / comment — stop grouping
+        group += delim + next.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+        i++;
+        if (!timerRe.test(next)) break;               // gated command consumed — group complete
+      }
+      lines.push(group);
     } else {
       // Normalise spacing around any inline *** already in the command text
       lines.push(part.replace(/(\S)\s*(\*\*\*)/, '$1 $2'));
@@ -2200,8 +2939,9 @@ function appendSequenceRow(n, key, value) {
   const rowId = `seq-row-${n}-${++_rowIdCounter}`;
 
   // Convert stored delimiter-separated value → one-command-per-line for display
-  const delim = boardConfigs[n]?.delimiter ?? '^';
-  const lines = seqValueToLines(value, delim);
+  const delim   = boardConfigs[n]?.delimiter ?? '^';
+  const cmdChar = boardConfigs[n]?.cmdChar   ?? ';';
+  const lines = seqValueToLines(value, delim, cmdChar);
   const keyLen  = key.length;
   const valLen  = value.length;
 
@@ -2253,6 +2993,7 @@ async function removeSequenceRow(n, rowId) {
     const idx = store.sequences.findIndex(s => s.key === key);
     if (idx >= 0) store.sequences.splice(idx, 1);
   }
+  updateActionSummary(n);   // keep the action-bar summary's sequence count live
 
   if (!key) return;   // no key — nothing to tell the board
 
@@ -2302,6 +3043,13 @@ async function playSequence(n, rowId) {
   if (!row) return;
   const key = row.querySelector('.seq-key-input')?.value?.trim();
   if (!key) { showToast('Sequence key is empty', 'error'); return; }
+
+  // Validate the editor contents before running — firmware rejects IF
+  // embedded in ;t / ;w payloads (see validateSequenceValue)
+  const ta    = row.querySelector('.seq-val-textarea');
+  const delim = boardConfigs[n]?.delimiter ?? '^';
+  if (!validateSequenceValue(seqTextareaToValue(ta?.value ?? '', delim))) return;
+
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
   const cmd = `${cmdChar}SEQ${key}`;
 
@@ -2338,6 +3086,8 @@ async function updateSequence(n, rowId) {
   const funcChar = boardConfigs[n]?.funcChar  ?? '?';
   const value    = seqTextareaToValue(ta?.value ?? '', delim);
   if (!value) { showToast('Sequence value is empty', 'error'); return; }
+  // Firmware rejects IF embedded in ;t / ;w payloads — abort the save
+  if (!validateSequenceValue(value)) return;
 
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;
@@ -2398,6 +3148,7 @@ async function updateSequence(n, rowId) {
       if (idx >= 0) store.sequences[idx].value = value;
       else store.sequences.push({ key, value });
     }
+    updateActionSummary(n);   // keep the action-bar summary's sequence count live
     // Update the original-key marker so a second rename from this key works correctly
     if (keyInput) keyInput.dataset.originalKey = key;
   } catch (e) {
@@ -2418,6 +3169,181 @@ function getSequencesFromUI(n) {
     if (key && val) sequences.push({ key, value: val });
   });
   return sequences;
+}
+
+// ─── Variables ────────────────────────────────────────────────────
+
+// Variable names: 1-15 chars, letters/digits/underscore, case-sensitive
+const VAR_NAME_RE = /^[A-Za-z0-9_]{1,15}$/;
+
+// Send a single funcChar command to board n — direct, or via relay MGMT FRAG.
+// Returns true if the command was handed to a connection.
+async function sendVariableCommand(n, cmd) {
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) return false;
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const targetWCB = boardConfigs[n]?.wcbNumber || n;
+    await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${cmd}`, relayN);
+    return true;
+  }
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) return false;
+  await conn.send(cmd + '\r');
+  termLog(n, cmd, 'in');
+  return true;
+}
+
+function addVariableRow(n) { appendVariableRow(n, '', 0); }
+
+function appendVariableRow(n, name, value) {
+  const tbody = document.getElementById(`b${n}-var-tbody`);
+  if (!tbody) return;
+  const rowId = `var-row-${n}-${++_rowIdCounter}`;
+
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.innerHTML = `
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-name-input" type="text" value="${escHtml(name)}"
+             data-original-name="${escHtml(name)}"
+             placeholder="VarName" spellcheck="false" maxlength="15">
+    </td>
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-value-input" type="number" step="1" value="${escHtml(String(value))}"
+             placeholder="0" spellcheck="false">
+    </td>
+    <td class="seq-action-cell">
+      <button class="btn btn-primary btn-sm" title="Save/Update Variable"
+              onclick="updateVariable(${n},'${rowId}')" id="${rowId}-update">SAVE/UPDATE</button>
+      <button class="btn btn-danger btn-sm" title="Remove Variable"
+              onclick="removeVariableRow(${n},'${rowId}')">REMOVE</button>
+    </td>
+  `;
+  tbody.appendChild(tr);
+
+  updateVariableButtons(n);
+}
+
+function updateVariableButtons(n) {
+  const directConnected = boardConnections[n]?.isConnected() ?? false;
+  const remoteConnected = remoteRelayForBoard[n] !== undefined;
+  const anyConnected = directConnected || remoteConnected;
+  // SAVE/UPDATE works for direct and remote boards (remote via MGMT FRAG).
+  document.querySelectorAll(`[id^="var-row-${n}-"] [title="Save/Update Variable"]`).forEach(btn => {
+    btn.disabled = !anyConnected;
+  });
+}
+
+async function updateVariable(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const nameInput    = row.querySelector('.var-name-input');
+  const name         = nameInput?.value?.trim();
+  const originalName = nameInput?.dataset?.originalName ?? name;
+  if (!name) { showToast('Variable name is empty', 'error'); return; }
+  if (!VAR_NAME_RE.test(name)) {
+    showToast('Invalid variable name — 1-15 chars, letters/digits/underscore only', 'error');
+    return;
+  }
+  const value = parseInt(row.querySelector('.var-value-input')?.value, 10);
+  if (!Number.isInteger(value)) { showToast('Variable value must be an integer', 'error'); return; }
+
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const renamed  = originalName && originalName !== name;
+  const btn = document.getElementById(`${rowId}-update`);
+  if (btn) btn.disabled = true;
+
+  try {
+    // If the name changed, clear the old variable first
+    if (renamed) {
+      await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${originalName}`);
+      // Remove old name from in-memory stores
+      for (const store of [boardConfigs[n], boardBaselines[n]]) {
+        if (!store?.variables) continue;
+        store.variables = store.variables.filter(v => v.name !== originalName);
+      }
+    }
+
+    const sent = await sendVariableCommand(n, `${funcChar}VAR,SET,${name},${value}`);
+    if (!sent) { showToast('Board not connected', 'error'); return; }
+    showToast(`Variable "${name}" set to ${value} on WCB ${n}`, 'success');
+
+    // Patch the in-memory config and baseline so delta pushes stay accurate
+    for (const store of [boardConfigs[n], boardBaselines[n]]) {
+      if (!store) continue;
+      if (!store.variables) store.variables = [];
+      const ex = store.variables.find(v => v.name === name);
+      if (ex) ex.value = value;
+      else store.variables.push({ name, value });
+    }
+    updateActionSummary(n);   // keep the action-bar summary's variable count live
+    // Update the original-name marker so a second rename from this name works correctly
+    if (nameInput) nameInput.dataset.originalName = name;
+  } catch (e) {
+    showToast(`Variable update failed: ${e.message}`, 'error');
+    termLog(remoteRelayForBoard[n] ?? n, `VAR,SET error: ${e.message}`, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+    updateVariableButtons(n);
+  }
+}
+
+async function removeVariableRow(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const nameInput = row.querySelector('.var-name-input');
+  const name = (nameInput?.dataset?.originalName || nameInput?.value || '').trim();
+
+  // Remove from DOM immediately
+  row.remove();
+
+  // Patch in-memory config and baseline so the name doesn't resurface on next push
+  for (const store of [boardConfigs[n], boardBaselines[n]]) {
+    if (!store?.variables) continue;
+    const idx = store.variables.findIndex(v => v.name === name);
+    if (idx >= 0) store.variables.splice(idx, 1);
+  }
+  updateActionSummary(n);   // keep the action-bar summary's variable count live
+
+  if (!name) return;   // never saved — nothing to tell the board
+
+  // Send ?VAR,CLEAR,name immediately so the board doesn't wait for a full push
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  try {
+    const sent = await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${name}`);
+    if (sent) showToast(`Variable "${name}" removed from WCB ${n}`, 'info');
+  } catch (e) {
+    termLog(remoteRelayForBoard[n] ?? n, `VAR,CLEAR error: ${e.message}`, 'err');
+  }
+}
+
+// Collects the variable rows for a push/export.
+// Guard rails (a dropped row makes buildCommandString's diff emit VAR,CLEAR
+// for a variable that's still live on the board — silent destruction):
+//   - blank / non-integer VALUE → keep the row, treat the value as 0
+//   - INVALID name (fails VAR_NAME_RE) → return null; the caller must abort.
+//     A toast naming the bad row is shown here so every caller reports it.
+//   - completely blank NAME → skipped (a never-saved placeholder row; it has
+//     no on-board counterpart to clear)
+// Returns the variables array, or null when an invalid name must block the push.
+function getVariablesFromUI(n) {
+  const variables = [];
+  let badName = null;
+  document.getElementById(`b${n}-var-tbody`)?.querySelectorAll('tr').forEach(row => {
+    const name = row.querySelector('.var-name-input')?.value?.trim();
+    if (!name) return;                                    // empty placeholder row
+    if (!VAR_NAME_RE.test(name)) { badName ??= name; return; }
+    const val = parseInt(row.querySelector('.var-value-input')?.value, 10);
+    variables.push({ name, value: Number.isInteger(val) ? val : 0 });
+  });
+  if (badName !== null) {
+    showToast(`WCB ${n}: invalid variable name "${badName}" — 1-15 chars, letters/digits/underscore only. Fix or remove that row first.`, 'error');
+    return null;
+  }
+  return variables;
 }
 
 // ─── BoardConnection Class ────────────────────────────────────────
@@ -2798,6 +3724,15 @@ class BoardConnection {
             if (line) {
               this._dataCallbacks.forEach(cb => cb(line));
 
+              // ── RC-Controller discovery sniffer (Phase 4) ──────────────────
+              // Every serial line on every connected WCB gets fed to the RC
+              // discovery hook.  Fast-paths inside return early for non-JSON
+              // and JSON without a known rc_* type — see _rcDiscoveryHook
+              // at end of app.js for details.
+              if (typeof _rcDiscoveryHook === 'function') {
+                try { _rcDiscoveryHook(line, this.boardIndex); } catch (_) {}
+              }
+
               // ── Boot-message sniffer ──────────────────────────────────────
               // The firmware prints configured chars and software version during
               // every boot.  Capture them so we have the correct funcChar for
@@ -3088,6 +4023,7 @@ function setRemoteConnected(n, relayN) {
   ensureTerminalPane(relayN);          // remote traffic shows in relay's terminal
   updateTerminalPaneDot(n, true);
   updateSequencePlayButtons(n);        // enable UPDATE/TEST buttons for remote boards
+  updateVariableButtons(n);            // enable SAVE/UPDATE buttons for remote boards
   installEtmListener(relayN);         // track live/offline state via relay's ETM output
 }
 
@@ -3828,12 +4764,33 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
   });
 }
 
+// In-flight guard for direct-connect pulls. Prevents two boardPull(n) calls
+// from racing against each other on the same slot — the function awaits
+// twice (sendAndCollect bootstrap + funcChar fallback) and is called from
+// auto-detect, reconnect-after-reboot timers, and post-save fire-and-forget.
+// Without this guard, two parallel pulls can both call parseBackupString
+// and one writes boardConfigs[n] from a partial buffer, then the other
+// overwrites it — or worse, they interleave and produce a torn config.
+const _boardPullInFlight = new Set();
+
 async function boardPull(n) {
   // Delegate to remote pull if this board is reached via relay
   if (remoteRelayForBoard[n]) { boardPullRemote(n); return; }
 
+  // Drop overlapping pulls on the same slot. The first caller wins; the
+  // second silently returns. Anyone who needs guaranteed freshness can
+  // call again after this one resolves (badge state will reflect it).
+  if (_boardPullInFlight.has(n)) {
+    return;
+  }
+  _boardPullInFlight.add(n);
+
   const conn = boardConnections[n];
-  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+  if (!conn?.isConnected()) {
+    _boardPullInFlight.delete(n);
+    showToast('Board not connected', 'error');
+    return;
+  }
 
   const btn = document.getElementById(`b${n}-btn-pull`);
   if (btn) { btn.disabled = true; btn.textContent = 'Pulling…'; }
@@ -3933,6 +4890,11 @@ async function boardPull(n) {
   // Only restore slot-n's pull button if we didn't migrate away from it
   // (migration calls updateConnectionUI(n, false) which already disables it)
   if (!migrated && btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
+
+  // Release the in-flight guard — pull is complete (success or fail).
+  // On migration we release the original slot only; the new slot was never
+  // in the in-flight set.
+  _boardPullInFlight.delete(n);
 }
 
 // Fetch the firmware version string directly from the board and display it.
@@ -3974,13 +4936,15 @@ async function boardGo(n, opts = {}) {
   btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : isErase ? 'Erasing…' : 'Pushing…';
 
   if (isFlash || isUpdate || isFactory) {
-    // ── Validate HW version ──────────────────────────────────────
+    // ── HW version is a hint, not a gate ─────────────────────────
+    // flashFirmware detects the real chip family (and flash size) after the
+    // bootloader handshake and picks the matching binaries itself — the HW
+    // selection only pre-fetches a guess and is overridden (with a log) when
+    // it doesn't match the connected chip. So a missing selection no longer
+    // blocks flashing; it just skips the pre-fetch optimisation.
     const hwVersion = boardConfigs[n]?.hwVersion;
     if (!hwVersion) {
-      showToast('Select a hardware version before flashing', 'error');
-      btn.disabled = false;
-      btn.textContent = 'Push Config';
-      return;
+      termLog(n, 'No hardware version selected — firmware will be chosen by chip auto-detection', 'sys');
     }
 
     // ── Snapshot config and DOM NOW — before the flash starts ────────────
@@ -4015,8 +4979,10 @@ async function boardGo(n, opts = {}) {
       await flashFirmware(savedPort, hwVersion, {
         onProgress: (written, total) => updateFlashBar(n, written, total),
         onLog:      (msg)            => termLog(n, msg, 'sys'),
-        onStatus:   (msg)            => setFlashStatus(n, msg),
-        appOnly:    isUpdate,         // Update FW: app-only, NVS preserved
+        onStatus:   (msg)            => { setFlashStatus(n, msg); mirrorStatusToWizard(n, `⚡ ${msg}`); },
+        appOnly:    isUpdate,         // Update FW: app-only, NVS preserved (escalates to a
+                                      // full NVS-preserving flash once if the partition
+                                      // table changed — see flasher.js migration check)
         eraseNvs:   isFactory,        // Factory Reset: wipe NVS before flashing
       });
       flashOk = true;
@@ -4311,9 +5277,20 @@ async function boardGo(n, opts = {}) {
     syncMaestrosToConfig(n);
     syncKyberToConfig(n);
     syncMP3ToConfig(n);
+    syncHCRToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
+    const uiVariables    = getVariablesFromUI(n);
+    if (uiVariables === null) {
+      // Invalid variable name — getVariablesFromUI already showed the toast.
+      // Abort before building the command string so the diff can't emit a
+      // destructive VAR,CLEAR for a row that failed validation.
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
+    config.variables     = uiVariables;
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
     config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -4379,6 +5356,13 @@ async function boardGo(n, opts = {}) {
     // blind fixed delay that could overrun the UART RX buffer mid-commit and
     // silently drop a setting. One retry per command if no response arrives.
     let _pushFullyAcked = true;
+    const _pushTotal = commands.length;
+    let _pushDone = 0;
+    // A push commits the current controller/role state — drop the switch-undo
+    // history so a later controller change starts a fresh clean slate.
+    controllerRoleHistory = { navicore: null, kyber: null };
+    setFlashUI(n, true);                                          // reuse the board progress bar
+    setFlashStatus(n, `Pushing configuration… (${_pushTotal} settings)`);
     for (const cmd of commands) {
       termLog(n, cmd, 'in');
       let r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 5000 });
@@ -4390,7 +5374,9 @@ async function boardGo(n, opts = {}) {
         _pushFullyAcked = false;
         termLog(n, `No response to "${cmd}" after retry — config may be incomplete`, 'err');
       }
+      reportPushProgress(n, ++_pushDone, _pushTotal);
     }
+    setFlashUI(n, false);                                         // hide the bar once all settings are sent
 
     _needsReboot = commandStringNeedsReboot(cmdString);
     if (_needsReboot) {
@@ -4529,6 +5515,7 @@ function updateConnectionUI(n, connected) {
   if (etmCharBtn)  etmCharBtn.disabled  = !connected;
   if (statsBtn)    statsBtn.disabled    = !connected;
   if (identifyBtn) identifyBtn.disabled = !connected;
+  updateHCRStatusBtn(n);
   if (connBtn) {
     connBtn.disabled = false;
     connBtn.classList.remove('btn-flashing');
@@ -4539,6 +5526,7 @@ function updateConnectionUI(n, connected) {
   }
   updateBoardStatusBadge(n, connected ? 'connected' : 'default');
   updateSequencePlayButtons(n);
+  updateVariableButtons(n);
 
   // Create pane on first connect; update dot/input state on any connect/disconnect
   if (connected) ensureTerminalPane(n);
@@ -4650,11 +5638,20 @@ async function boardGoRemote(n, opts = {}) {
   syncMaestrosToConfig(n);
   syncKyberToConfig(n);
   syncMP3ToConfig(n);
+  syncHCRToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
   config.sequences      = getSequencesFromUI(n);
+  const uiVariables     = getVariablesFromUI(n);
+  if (uiVariables === null) {
+    // Invalid variable name — getVariablesFromUI already showed the toast.
+    // Abort before the diff can emit a destructive VAR,CLEAR.
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
+  config.variables      = uiVariables;
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
   config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
@@ -4870,7 +5867,22 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
   // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
   const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;
   const pullRelayFc = boardConfigs[relayN]?.funcChar || '?';
-  await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
+  try {
+    await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
+  } catch (e) {
+    // If the send itself throws (e.g. relay just disconnected), release the
+    // in-flight marker so a subsequent ETM-online event can re-trigger the
+    // pull. Otherwise the slot is permanently locked until the next page
+    // reload. The terminal-state delete calls (success / parse-error /
+    // max-retry) all run after sendAndCollect resolves, so we have to
+    // also cover the failed-send case explicitly.
+    _pullingBoards.delete(targetN);
+    cleanup();
+    if (timer) clearTimeout(timer);
+    termLog(relayN, `[Remote] Send to relay failed: ${e.message}`, 'err');
+    updateBoardStatusBadge(targetN, 'error');
+    throw e;
+  }
 }
 
 // Convenience wrapper — uses the relay tracked for this board
@@ -4925,6 +5937,22 @@ function syncGeneralFromConfig(config) {
   }
   const chksmEl = document.getElementById('g-etm-chksm');
   if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
+
+  // Controller (network-wide) — reflect the pulled board's value, then derive
+  // which controller the segmented selector should show.
+  if (systemConfig?.general) {
+    systemConfig.general.specialPeer   = !!config.specialPeer;
+    systemConfig.general.specialPeerId = config.specialPeerId ?? 20;
+  }
+  deriveControllerFromBoards();
+  if (config.specialPeer) {
+    systemConfig.general.controller = 'navicore';
+  } else if (config.kyber && (config.kyber.mode === 'local' || config.kyber.mode === 'remote')
+             && systemConfig.general.controller === 'none') {
+    systemConfig.general.controller = 'kyber';
+  }
+  refreshControllerUI();
+  refreshAllNavicoreStatus();
 }
 
 // ─── General DOM Snapshot ─────────────────────────────────────────
@@ -4942,6 +5970,8 @@ function captureGeneralDOMSnapshot() {
     delimiter: g('g-delimiter'),
     funcchar:  g('g-funcchar'),
     cmdchar:   g('g-cmdchar'),
+    controller: (systemConfig?.general?.controller) || 'none',
+    naviId:    g('g-navicore-id'),
   };
 }
 
@@ -4954,6 +5984,9 @@ function restoreGeneralDOMSnapshot(snap) {
   set('g-delimiter', snap.delimiter);
   set('g-funcchar',  snap.funcchar);
   set('g-cmdchar',   snap.cmdchar);
+  if (snap.naviId) set('g-navicore-id', snap.naviId);
+  if (systemConfig?.general && snap.controller) systemConfig.general.controller = snap.controller;
+  refreshControllerUI();
   // Keep systemConfig.general in sync (mirrors what syncGeneralFromConfig does)
   onGeneralPasswordChange();
   onGeneralMacChange();
@@ -5168,6 +6201,11 @@ function loadSystemFileContent(content) {
       populateUIFromConfig(n, board);
       updateBoardStatusBadge(n, 'default');
     }
+    // Derive the global Controller from the loaded boards and reflect it in the
+    // selector + per-board section visibility.
+    deriveControllerFromBoards();
+    refreshControllerUI();
+    refreshAllNavicoreStatus();
 
     showToast(`Loaded: ${system.droidName || 'unnamed droid'} — ${system.boards.length} board(s)`, 'success');
   } catch (e) {
@@ -5194,6 +6232,14 @@ function exportSystemFile() {
     if (boardConfigs[n]) {
       syncSerialUIToConfig(n);
       boardConfigs[n].sequences = getSequencesFromUI(n);
+      const uiVariables = getVariablesFromUI(n);
+      if (uiVariables === null) {
+        // Invalid variable name — getVariablesFromUI already showed the toast
+        // naming the bad row. Abort so the export can't silently drop it.
+        showToast(`Export aborted — fix the variable name on WCB ${n} first`, 'error');
+        return;
+      }
+      boardConfigs[n].variables = uiVariables;
       systemConfig.boards.push(boardConfigs[n]);
     }
   }
@@ -5211,34 +6257,54 @@ function exportSystemFile() {
 
 // ─── Terminal ─────────────────────────────────────────────────────
 function initTerminalResize() {
-  const handle  = document.getElementById('terminal-resize-handle');
-  const drawer  = document.getElementById('terminal-drawer');
-  if (!handle || !drawer) return;
+  const drawer = document.getElementById('terminal-drawer');
+  if (!drawer) return;
 
-  let startY, startH;
+  let startY, startH, dragging = false, activeHandle = null;
 
-  handle.addEventListener('mousedown', e => {
+  // Event DELEGATION on document — not a direct listener on the handle. A direct
+  // listener was silently lost because the terminal drawer/handle is re-rendered
+  // after init, leaving the listener on a detached element (resize then did
+  // nothing and the drag became a text-selection). Delegation survives any
+  // re-render: we match the handle with closest() on each pointerdown, then use
+  // pointer capture + a global userSelect lock so the drag can't turn into a
+  // text selection no matter where the cursor travels.
+  document.addEventListener('pointerdown', e => {
+    const handle = e.target?.closest?.('.terminal-resize-handle');
+    if (!handle) return;
+    dragging = true;
+    activeHandle = handle;
     startY = e.clientY;
     startH = drawer.offsetHeight;
     handle.classList.add('dragging');
-    document.addEventListener('mousemove', onDrag);
-    document.addEventListener('mouseup', stopDrag);
+    document.body.style.userSelect = 'none';      // suppress text selection while dragging
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
     e.preventDefault();
   });
 
-  function onDrag(e) {
-    const delta  = startY - e.clientY; // drag up = increase height
-    const newH   = Math.min(Math.max(startH + delta, 120), window.innerHeight * 0.8);
+  document.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const delta = startY - e.clientY;             // drag up = increase height
+    const maxH  = (window.innerHeight || 800) * 0.8;
+    const newH  = Math.min(Math.max(startH + delta, 120), maxH);
     drawer.style.height = newH + 'px';
-    syncMainPadding(); // keep page content above the terminal while resizing
-  }
+    syncMainPadding();                            // keep page content above the terminal
+    e.preventDefault();
+  });
 
-  function stopDrag() {
-    handle.classList.remove('dragging');
-    document.removeEventListener('mousemove', onDrag);
-    document.removeEventListener('mouseup', stopDrag);
-    syncMainPadding(); // final sync after drag ends
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    if (activeHandle) {
+      activeHandle.classList.remove('dragging');
+      try { activeHandle.releasePointerCapture(e.pointerId); } catch (_) {}
+      activeHandle = null;
+    }
+    document.body.style.userSelect = '';
+    syncMainPadding();
   }
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
 }
 
 function syncMainPadding() {
@@ -5279,13 +6345,14 @@ const DEBUG_MODES = [
   { key: 'main',  label: 'COMMANDS', cmd: 'DEBUG'       },
   { key: 'maestro', label: 'MAESTRO', cmd: 'DEBUG,MAESTRO' },
   { key: 'pwm',   label: 'PWM',      cmd: 'DEBUG,PWM'   },
+  { key: 'hcr',   label: 'HCR',      cmd: 'DEBUG,HCR'   },
   { key: 'etm',   label: 'ETM',      cmd: 'DEBUG,ETM'   },
   { key: 'mgmt',  label: 'MGMT',     cmd: 'DEBUG,MGMT'  },
 ];
 
 function ensureDebugState(n) {
   if (!boardDebugStates[n])
-    boardDebugStates[n] = { main: false, maestro: false, pwm: false, etm: false, mgmt: false };
+    boardDebugStates[n] = { main: false, maestro: false, pwm: false, hcr: false, etm: false, mgmt: false };
   return boardDebugStates[n];
 }
 
@@ -5462,7 +6529,7 @@ function updateTerminalPaneDot(n, connected) {
     input.placeholder = connected ? `Send to WCB ${n}…` : 'Board disconnected';
   }
   // Reset debug flags on disconnect — board loses them on every reboot
-  if (!connected) boardDebugStates[n] = { main: false, maestro: false, pwm: false, etm: false };
+  if (!connected) boardDebugStates[n] = { main: false, maestro: false, pwm: false, hcr: false, etm: false, mgmt: false };
   // Timestamp and auto-scroll are UI preferences — keep them across reconnects
   updateTerminalControls(n);
 }
@@ -5745,6 +6812,16 @@ function setFlashStatus(n, msg) {
   if (el) el.textContent = msg;
 }
 
+// Mirror a flash/push status line into the Setup Wizard's connect row (if the
+// wizard is on screen). The board-section progress bar lives behind the wizard
+// modal, so without this the wizard looks idle during flashing/pushing.
+function mirrorStatusToWizard(n, text) {
+  if (typeof wizardSetConnectStatus === 'function' &&
+      document.getElementById(`wiz-connect-status-${n}`)) {
+    wizardSetConnectStatus(n, 'busy', text);
+  }
+}
+
 function updateFlashBar(n, written, total) {
   const pct = total > 0 ? Math.round(written / total * 100) : 0;
   const bar = document.getElementById(`b${n}-flash-bar`);
@@ -5752,6 +6829,21 @@ function updateFlashBar(n, written, total) {
   const pctEl = document.getElementById(`b${n}-flash-pct`);
   if (pctEl) pctEl.textContent = total > 0 ? `${pct}%` : '';
   setFlashStatus(n, `Flashing… ${pct}%`);
+  mirrorStatusToWizard(n, `⚡ Flashing firmware… ${pct}%`);
+}
+
+// Config push has no byte stream like flashing — progress is "commands sent /
+// total". Reuse the board's progress-bar elements AND, when the Setup Wizard's
+// connect step is on screen, surface the percent in its status row (so a
+// non-technical user sees motion instead of an apparently-idle screen).
+function reportPushProgress(n, done, total) {
+  const pct = total > 0 ? Math.round(done / total * 100) : 0;
+  const bar = document.getElementById(`b${n}-flash-bar`);
+  if (bar) bar.style.width = `${pct}%`;
+  const pctEl = document.getElementById(`b${n}-flash-pct`);
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  setFlashStatus(n, `Pushing… ${done}/${total} settings (${pct}%)`);
+  mirrorStatusToWizard(n, `📤 Pushing config… ${pct}%`);
 }
 
 // ─── Identify ─────────────────────────────────────────────────────
@@ -5934,6 +7026,16 @@ function wizardDefaultState() {
     activeBoardTab: 0,
     connectMode:   null,   // null = not chosen yet, 'all', 'seq'
     connectSeqN:   1,      // current board slot in sequential connect mode
+    // ---- NaviCore (remote astromech brain; IS the special peer) ----
+    // navicoreEnabled drives useSpecialPeer at save time; navicoreId is the
+    // special-peer ID (default 20, changeable).
+    navicoreEnabled: false,
+    navicoreId:      20,
+    useSpecialPeer:  false,   // set from navicoreEnabled — the firmware ?SPECIAL flag
+    specialAlias:    '',
+    // Control-system choice (step 3): 'navicore' | 'kyber' | 'other' | null.
+    // Drives navicoreEnabled / kyberEnabled (mutually exclusive).
+    controlSystem:   null,
   };
 }
 
@@ -5943,6 +7045,10 @@ function wizardDefaultBoard(slotIndex) {
     hwVersion:    0,
     statusLedPin: 38,
     serialPorts: Array.from({length: 5}, () => ({ baud: 9600, label: '' })),
+    // ---- Slot type metadata (Wizard-only, mirrors Phase B config-tool) ----
+    type:         'wcb',   // 'wcb' | 'client'
+    alias:        '',      // WCB alias (round-trips to firmware via ?ALIAS)
+    clientAlias:  '',      // Client alias (Wizard-only; used when type='client')
   };
 }
 
@@ -5952,14 +7058,36 @@ function wizardInitBoards(qty) {
     prev[i] ?? wizardDefaultBoard(i + 1)
   );
   if (wizardState.kyberBoard > qty) wizardState.kyberBoard = 1;
+
+  // When the board count shrinks, any maestros/kybers that referenced a now-
+  // truncated slot would later dereference ws.boards[m.boardSlot-1].wcbNumber
+  // and throw (TypeError: cannot read property 'wcbNumber' of undefined).
+  // Drop those orphaned entries here so identity / kyber / maestro / serial
+  // steps and wizardExportConfig all see a self-consistent state.
+  if (Array.isArray(wizardState.maestros)) {
+    wizardState.maestros = wizardState.maestros.filter(m => m.boardSlot >= 1 && m.boardSlot <= qty);
+  }
+  if (Array.isArray(wizardState.kybers)) {
+    wizardState.kybers = wizardState.kybers.filter(k => k.boardSlot >= 1 && k.boardSlot <= qty);
+  }
+  // If kyberBoard was already valid (<= qty) and pointed at a slot that's
+  // now a Client (post-Phase-B), the kyber/maestro steps will catch and re-
+  // prompt; nothing to truncate here.
 }
 
 // ── Step list ──────────────────────────────────────────────────────
 function buildWizardSteps() {
   // Kyber and Maestro come before Serial so claimed ports are visible when labelling.
   // Network comes after Serial so port labels and claimed ports are set before network entry.
-  const steps = ['welcome','quantity','identity','kyber'];
-  if (wizardState.kyberEnabled) steps.push('kyber-config');
+  // Step 3 is a single Control-System choice — NaviCore, Kyber, or Other (they're
+  // mutually exclusive: Kyber can't run remote). The follow-up setup step (3b) is
+  // whichever one was chosen; "Other" has no follow-up.
+  const steps = ['welcome','quantity','identity','control'];
+  if (wizardState.controlSystem === 'navicore') {
+    steps.push('navicore-config');
+  } else if (wizardState.controlSystem === 'kyber') {
+    steps.push('kyber-config');
+  }
   steps.push('maestro');
   if (wizardState.maestroEnabled) steps.push('maestro-config');
   steps.push('serial','network','etm','review','firmware','connect');
@@ -5996,12 +7124,14 @@ function openWizard() {
 function closeWizard(event) {
   if (event && event.target !== document.getElementById('wizard-modal')) return;
   _wizardOpen = false;
+  wizardCancelAutoAdvance();    // drop any pending card auto-advance
   _wizardClearAllWatchers();    // stop all board connect watchers when wizard closes
   document.getElementById('wizard-modal').classList.remove('open');
 }
 
 // ── Navigation ─────────────────────────────────────────────────────
 function wizardNext() {
+  wizardCancelAutoAdvance();   // a manual/auto advance supersedes any pending one
   const key = wizardState.steps[wizardState.currentIdx];
 
   // Validate before saving
@@ -6022,12 +7152,15 @@ function wizardNext() {
     return;
   }
 
-  // After firmware choice is made, record the flash mode for each board
+  // After firmware choice is made, record the flash mode for each board.
+  // Skip Client slots entirely — there's no firmware to flash on a client
+  // (it runs its own sketch) and nothing to push to (no WCB at that slot).
   if (key === 'firmware') {
     const modeVal = !wizardState.needsFirmware ? (wizardState.eraseNvs ? 'erase' : 'configure')
                   : wizardState.eraseNvs       ? 'factory'
                   :                              'update';
     wizardState.boards.forEach((b, i) => {
+      if (b.type === 'client') return;
       boardFlashMode[i + 1]          = modeVal;
       boardAutoPushAfterFlash[i + 1] = true;
     });
@@ -6040,6 +7173,7 @@ function wizardNext() {
 }
 
 function wizardBack() {
+  wizardCancelAutoAdvance();   // don't let a pending auto-advance fire after going back
   if (wizardState.currentIdx > 0) {
     wizardSaveStep(wizardState.steps[wizardState.currentIdx]);
     wizardState.currentIdx--;
@@ -6058,7 +7192,8 @@ function wizardRenderStep() {
     'welcome':       'Setup Wizard',
     'quantity':      'Step 1 — System Size',
     'identity':      'Step 2 — Board Identity',
-    'kyber':         'Step 3 — Kyber Controller',
+    'control':        'Step 3 — Control System',
+    'navicore-config':'Step 3b — NaviCore Setup',
     'kyber-config':  'Step 3b — Kyber Setup',
     'maestro':       'Step 4 — Maestro Controller',
     'maestro-config':'Step 4b — Maestro Setup',
@@ -6135,7 +7270,8 @@ function wizardBuildStepHTML(key) {
     case 'network':      return wizardHTMLNetwork();
     case 'identity':     return wizardHTMLIdentity();
     case 'serial':       wizardState.activeBoardTab = 0; return wizardHTMLSerial();
-    case 'kyber':        return wizardHTMLKyber();
+    case 'control':      return wizardHTMLControl();
+    case 'navicore-config': return wizardHTMLNavicoreConfig();
     case 'kyber-config': return wizardHTMLKyberConfig();
     case 'maestro':      return wizardHTMLMaestro();
     case 'maestro-config': return wizardHTMLMaestroConfig();
@@ -6196,8 +7332,8 @@ function wizardHTMLQuantity() {
   }).join('');
 
   return `
-    <div class="wizard-section-title">How many WCBs are in your system?</div>
-    <div class="wizard-section-desc">Each board is one WCB unit connected via USB or ESP-NOW.</div>
+    <div class="wizard-section-title">How many slots total in your system?</div>
+    <div class="wizard-section-desc">Count <strong>WCBs + WCB_Clients</strong> combined — each occupies one ID slot (they share the same ID/MAC address space).</div>
     <div class="wizard-qty-grid">
       ${primaryBtns}
       <button id="wiz-qty-more-btn" class="wizard-qty-btn wizard-qty-more"
@@ -6271,49 +7407,124 @@ function wizardHTMLIdentity() {
     const ledPin    = b.statusLedPin || 38;
     const ledShown  = (b.hwVersion === 31 || b.hwVersion === 32);
     const isCustom  = ![38, 48, 47].includes(ledPin);
+    const isClient  = b.type === 'client';
+    const wcbChecked    = isClient ? ''        : 'checked';
+    const clientChecked = isClient ? 'checked' : '';
     return `
       <div class="wizard-tab-panel ${i === wizardState.activeBoardTab ? 'active' : ''}" id="wiz-panel-identity-${i}">
-        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
 
-          <!-- WCB # -->
-          <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-            <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
-            <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
-                   class="wizard-ident-input">
-          </div>
-
-          <!-- Hardware Version (fixed width — never resizes) -->
-          <div style="display:flex;flex-direction:column;gap:4px;width:140px;flex-shrink:0">
-            <div class="wizard-ident-label">Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below.')}</div>
-            <select id="wiz-b${i}-hwver" onchange="wizardOnHWVerChange(${i})" class="wizard-ident-input">
-              <option value="0">— Select —</option>
-              ${hwOpts}
-            </select>
-          </div>
-
-          <!-- LED Pin group: label centered above select+optional custom, side by side (HW 3.1/3.2 only) -->
-          <div id="wiz-b${i}-led-row" style="${ledShown?'display:flex':'display:none'};flex-direction:column;gap:4px;flex-shrink:0">
-            <div class="wizard-ident-label" style="text-align:center;justify-content:center">
-              LED Pin ${wizHint('GPIO pin for the NeoPixel LED. Default 38. Alternatives: 48, 47.', 'tip-left')}
-            </div>
-            <div style="display:flex;gap:4px">
-              <select id="wiz-b${i}-ledpin" class="wizard-ident-input" style="width:82px"
-                      onchange="wizardOnLEDPinChange(${i})">
-                <option value="38" ${!isCustom&&ledPin==38?'selected':''}>38</option>
-                <option value="48" ${!isCustom&&ledPin==48?'selected':''}>48</option>
-                <option value="47" ${!isCustom&&ledPin==47?'selected':''}>47</option>
-                <option value="0"  ${isCustom?'selected':''}>Other…</option>
-              </select>
-              <input type="number" id="wiz-b${i}-ledpin-custom" class="wizard-ident-input"
-                     min="0" max="48" placeholder="GPIO #"
-                     value="${isCustom ? ledPin : ''}"
-                     style="display:${isCustom?'':'none'};width:70px">
-            </div>
-          </div>
-
+        <!-- Slot Type — WCB vs WCB_Client. Wizard-only metadata.
+             Flipping hides the WCB-specific fields and shows the Client
+             fields; it never sends anything to a physical board. -->
+        <div style="display:flex;gap:18px;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--border);margin-bottom:12px;font-size:13px">
+          <span style="opacity:0.75;font-weight:500">Type:</span>
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+            <input type="radio" name="wiz-slot-type-${i}" value="wcb" ${wcbChecked}
+                   onchange="wizardOnSlotTypeChange(${i})"><span>WCB</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+            <input type="radio" name="wiz-slot-type-${i}" value="client" ${clientChecked}
+                   onchange="wizardOnSlotTypeChange(${i})"><span>WCB_Client</span>
+          </label>
+          ${wizHint('A slot is either a WCB board or a WCB_Client device — they share the same ID/MAC. Clients run their own sketch; the Wizard observes them but cannot flash or configure them.')}
         </div>
+
+        <!-- WCB fields (hidden when type='client') -->
+        <div id="wiz-b${i}-wcb-fields" style="${isClient ? 'display:none' : ''}">
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+
+            <!-- WCB # -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
+              <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
+              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+                     class="wizard-ident-input">
+            </div>
+
+            <!-- Hardware Version -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:140px;flex-shrink:0">
+              <div class="wizard-ident-label">Hardware Version ${wizHint('PCB version printed on the board label as VER:X.X — see the photo below.')}</div>
+              <select id="wiz-b${i}-hwver" onchange="wizardOnHWVerChange(${i})" class="wizard-ident-input">
+                <option value="0">— Select —</option>
+                ${hwOpts}
+              </select>
+            </div>
+
+            <!-- LED Pin (HW 3.1/3.2) -->
+            <div id="wiz-b${i}-led-row" style="${ledShown?'display:flex':'display:none'};flex-direction:column;gap:4px;flex-shrink:0">
+              <div class="wizard-ident-label" style="text-align:center;justify-content:center">
+                LED Pin ${wizHint('GPIO pin for the NeoPixel LED. Default 38. Alternatives: 48, 47.', 'tip-left')}
+              </div>
+              <div style="display:flex;gap:4px">
+                <select id="wiz-b${i}-ledpin" class="wizard-ident-input" style="width:82px"
+                        onchange="wizardOnLEDPinChange(${i})">
+                  <option value="38" ${!isCustom&&ledPin==38?'selected':''}>38</option>
+                  <option value="48" ${!isCustom&&ledPin==48?'selected':''}>48</option>
+                  <option value="47" ${!isCustom&&ledPin==47?'selected':''}>47</option>
+                  <option value="0"  ${isCustom?'selected':''}>Other…</option>
+                </select>
+                <input type="number" id="wiz-b${i}-ledpin-custom" class="wizard-ident-input"
+                       min="0" max="48" placeholder="GPIO #"
+                       value="${isCustom ? ledPin : ''}"
+                       style="display:${isCustom?'':'none'};width:70px">
+              </div>
+            </div>
+
+            <!-- Alias (WCB-side; round-trips via ?ALIAS) -->
+            <div style="display:flex;flex-direction:column;gap:4px;width:180px;flex-shrink:0">
+              <div class="wizard-ident-label">Alias ${wizHint('Friendly name for this WCB (e.g. Body, Dome). ≤24 chars. Saved to the WCB.')}</div>
+              <input id="wiz-b${i}-alias" type="text" maxlength="24" placeholder="e.g. Body"
+                     value="${escHtml(b.alias || '')}" class="wizard-ident-input">
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Client fields (shown when type='client') -->
+        <div id="wiz-b${i}-client-fields" style="${isClient ? '' : 'display:none'}">
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+
+            <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
+              <div class="wizard-ident-label">ID ${wizHint('The device_id this client occupies in your network. Must be unique among all slots.')}</div>
+              <input id="wiz-b${i}-cnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+                     class="wizard-ident-input">
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:4px;width:220px;flex-shrink:0">
+              <div class="wizard-ident-label">Client Alias ${wizHint('Friendly name for this client device. Wizard-only — the client device has no Wizard-config of its own. ≤24 chars.')}</div>
+              <input id="wiz-b${i}-calias" type="text" maxlength="24" placeholder="e.g. Dome Sensor"
+                     value="${escHtml(b.clientAlias || '')}" class="wizard-ident-input">
+            </div>
+
+            <div style="flex:1 1 100%;opacity:0.7;font-size:12px;padding-top:6px">
+              Client devices run their own sketch (using the WCB_Client library).
+              The Wizard does not flash, push to, or pull from a client.
+            </div>
+
+          </div>
+        </div>
+
       </div>`;
   }).join('');
+
+  // ─── Special slot (ID 20) ───────────────────────────────────────────
+  // Renders only when wizardState.useSpecialPeer is set. Always a client
+  // (no WCB lives at ID 20 by design); the alias is Wizard-only.
+  const specialPanel = wizardState.useSpecialPeer ? `
+    <div style="margin-top:20px;padding:14px;border:1px dashed var(--border);border-radius:8px;background:rgba(0,0,0,0.03)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <strong>Special Slot — ID 20</strong>
+        <span style="opacity:0.7;font-size:12px">always a WCB_Client (out-of-band)</span>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:4px;width:220px;flex-shrink:0">
+          <div class="wizard-ident-label">Client Alias ${wizHint('Friendly name for the ID-20 client device. Wizard-only.')}</div>
+          <input id="wiz-special-alias-ident" type="text" maxlength="24" placeholder="e.g. Pump Controller"
+                 value="${escHtml(wizardState.specialAlias || '')}"
+                 oninput="wizardState.specialAlias = this.value.slice(0,24)"
+                 class="wizard-ident-input">
+        </div>
+      </div>
+    </div>` : '';
   // Real board photo — shows the silkscreened label with VER: clearly visible.
   const labelSVG = `
     <div class="wizard-hw-label-hint">
@@ -6323,9 +7534,9 @@ function wizardHTMLIdentity() {
     </div>`;
 
   return `
-    <div class="wizard-section-title">Board Identity</div>
-    <div class="wizard-section-desc">Assign a unique number and hardware version to each board.</div>
-    ${tabs}${panels}
+    <div class="wizard-section-title">Slot Identity</div>
+    <div class="wizard-section-desc">For each slot, choose its type. WCB slots need a hardware version; Client slots only need an alias. Slot order follows the ID — clients keep their assigned ID just like WCBs.</div>
+    ${tabs}${panels}${specialPanel}
     ${labelSVG}`;
 }
 
@@ -6333,6 +7544,38 @@ function wizardOnHWVerChange(i) {
   const hwVal  = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
   const ledRow = document.getElementById(`wiz-b${i}-led-row`);
   if (ledRow) ledRow.style.display = (hwVal === 31 || hwVal === 32) ? 'flex' : 'none';
+  // Default the onboard-LED pin to the variant's pin (3.1 → 38, 3.2 → 48) when
+  // switching between the S3 boards, unless a custom pin is already chosen.
+  const b = wizardState.boards[i];
+  if (b) {
+    const cur = b.statusLedPin;
+    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
+              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
+    if (def !== null) {
+      b.statusLedPin = def;
+      const sel = document.getElementById(`wiz-b${i}-ledpin`);
+      if (sel) sel.value = String(def);
+    }
+  }
+}
+
+// Flip a slot between WCB and Client. Reveals/hides the per-type field
+// blocks and updates wizardState; doesn't touch boardConfigs or send
+// anything to a board — that happens at the end via wizardApplyConfig.
+function wizardOnSlotTypeChange(i) {
+  const chosen = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+  if (!wizardState.boards[i]) return;
+  const isClient = (chosen === 'client');
+  wizardState.boards[i].type = isClient ? 'client' : 'wcb';
+  const wcbFields    = document.getElementById(`wiz-b${i}-wcb-fields`);
+  const clientFields = document.getElementById(`wiz-b${i}-client-fields`);
+  if (wcbFields)    wcbFields.style.display    = isClient ? 'none' : '';
+  if (clientFields) clientFields.style.display = isClient ? ''     : 'none';
+  // Keep the two ID inputs in sync so flipping back and forth doesn't
+  // surprise the user with a different ID after the toggle.
+  const src = document.getElementById(isClient ? `wiz-b${i}-wcbnum` : `wiz-b${i}-cnum`);
+  const dst = document.getElementById(isClient ? `wiz-b${i}-cnum`   : `wiz-b${i}-wcbnum`);
+  if (src && dst && src.value) dst.value = src.value;
 }
 
 function wizardOnLEDPinChange(i) {
@@ -6342,8 +7585,17 @@ function wizardOnLEDPinChange(i) {
 }
 
 function wizardHTMLSerial() {
+  // Snap activeBoardTab off any Client slot before rendering so the
+  // tab strip and panels stay in sync (only WCBs are visible here).
+  if ((wizardState.boards[wizardState.activeBoardTab]?.type || 'wcb') === 'client') {
+    const firstWcb = wizardNextWcbSlot(1);
+    wizardState.activeBoardTab = firstWcb ? firstWcb - 1 : 0;
+  }
   const tabs   = wizardBoardTabs('serial');
   const panels = wizardState.boards.map((b, i) => {
+    // Client slots aren't configurable here — they run their own sketch
+    // with their own serial setup. Render nothing for them.
+    if ((b.type || 'wcb') === 'client') return '';
     const boardSlot = i + 1;
 
     // Build a claim map: portNum (1-based) → { owner, baud }
@@ -6413,31 +7665,67 @@ function wizardHTMLSerial() {
     ${tabs}${panels}`;
 }
 
-function wizardHTMLKyber() {
-  const yes = wizardState.kyberEnabled === true;
-  const no  = wizardState.kyberEnabled === false && wizardState.kyberEnabled !== null;
+function wizardHTMLControl() {
+  const cs = wizardState.controlSystem;   // 'navicore' | 'kyber' | 'other' | null
   return `
-    <div class="wizard-section-title">Kyber Sound Controller</div>
-    <div class="wizard-section-desc">Are any of your WCBs connected to a Kyber sound board?</div>
-    <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('kyberEnabled',true,this)">
-        <span class="wizard-choice-icon">🔊</span>
-        <span class="wizard-choice-label">Yes, I use Kyber</span>
-        <span class="wizard-choice-desc">One WCB will control the Kyber board via serial</span>
+    <div class="wizard-section-title">Control System</div>
+    <div class="wizard-section-desc">How are your animations driven? Pick one — <strong>NaviCore</strong> and <strong>Kyber</strong> can't be used together.</div>
+    <div class="wizard-choice-grid three">
+      <button class="wizard-choice-btn navicore-yes ${cs === 'navicore' ? 'selected' : ''}" onclick="wizardSetControl('navicore',this)">
+        <img src="../Images/navicore-icon.png" class="wizard-choice-logo" alt="NaviCore">
+        <span class="wizard-choice-label"><span class="navicore-wordmark">Navi<span>Core</span></span></span>
+        <span class="navicore-tagline">ASTROMECH ANIMATION CONTROLLER</span>
+        <span class="wizard-choice-desc">Remote brain on ID 20 — broadcasts Maestro commands to every board</span>
       </button>
-      <button class="wizard-choice-btn ${!yes ? 'selected-no' : ''}" onclick="wizardSetChoice('kyberEnabled',false,this)">
-        <span class="wizard-choice-icon">✕</span>
-        <span class="wizard-choice-label">No Kyber</span>
-        <span class="wizard-choice-desc">Skip Kyber configuration</span>
+      <button class="wizard-choice-btn kyber-yes ${cs === 'kyber' ? 'selected' : ''}" onclick="wizardSetControl('kyber',this)">
+        <img src="../Images/kyberLogo.png" class="wizard-choice-banner" alt="Kyber Controls">
+        <span class="wizard-choice-label">Kyber</span>
+        <span class="wizard-choice-desc">One WCB drives a Kyber sound board over serial</span>
+      </button>
+      <button class="wizard-choice-btn ${cs === 'other' ? 'selected-no' : ''}" onclick="wizardSetControl('other',this)">
+        <span class="wizard-choice-icon">🎛️</span>
+        <span class="wizard-choice-label">Other / None</span>
+        <span class="wizard-choice-desc">Neither NaviCore nor Kyber — standard WCB setup</span>
       </button>
     </div>`;
 }
 
+function wizardHTMLNavicoreConfig() {
+  const id = wizardState.navicoreId || 20;
+  const idOpts = Array.from({length: 20}, (_, i) => i + 1)
+    .map(n => `<option value="${n}" ${n === id ? 'selected' : ''}>${n}${n === 20 ? ' — default' : ''}</option>`).join('');
+  return `
+    <div class="wizard-section-title">NaviCore Setup</div>
+    <div class="wizard-section-desc">NaviCore runs as a remote peer on its own reserved ID, outside the numbered 1…N boards. It broadcasts Maestro animations over the mesh — every board with a Maestro listens automatically.</div>
+    <div class="wizard-field-row">
+      <label>NaviCore ID ${wizHint('The reserved peer ID NaviCore communicates on. Defaults to 20 (the out-of-band slot). Only change this if your NaviCore is configured for a different ID.')}</label>
+      <select id="wiz-navicore-id">${idOpts}</select>
+    </div>`;
+}
+
 function wizardHTMLKyberConfig() {
+  // Only WCB slots can host a Kyber — Client slots run their own sketch and
+  // don't have the firmware to drive a Kyber. Snap kyberBoard to a WCB slot
+  // first so the dropdown's selected value always points at something valid.
+  const firstWcb = wizardNextWcbSlot(1);
+  if (!firstWcb) {
+    // All Clients — no valid kyber host. Same banner pattern as Maestro.
+    return `
+      <div class="wizard-section-title">Kyber Setup</div>
+      <div class="wizard-warn-banner" style="background:#fffbe8;border:1px solid #e8c850;padding:12px;border-radius:6px;margin-top:10px">
+        ⚠️ No WCB slots are configured — every slot in this system is a WCB_Client.
+        A Kyber sound controller can only be hosted by a WCB (Clients run their own sketch).
+        Go back and change at least one slot's <b>Type</b> to <b>WCB</b>, or skip Kyber.
+      </div>`;
+  }
+  if ((wizardState.boards[wizardState.kyberBoard - 1]?.type || 'wcb') === 'client') {
+    wizardState.kyberBoard = firstWcb;
+  }
   const { kyberBoard, kyberPort, kyberBaud, kyberMarcduinoPort, quantity } = wizardState;
-  const boardOpts = Array.from({length: quantity}, (_, i) =>
-    `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
-  ).join('');
+  const boardOpts = Array.from({length: quantity}, (_, i) => {
+    if ((wizardState.boards[i]?.type || 'wcb') === 'client') return '';
+    return `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`;
+  }).filter(Boolean).join('');
   const maestroPortOpts = Array.from({length: 5}, (_, p) =>
     `<option value="${p+1}" ${(p+1) === kyberPort ? 'selected' : ''}>Serial ${p+1}</option>`
   ).join('');
@@ -6505,8 +7793,8 @@ function wizardHTMLMaestro() {
     <div class="wizard-section-title">Maestro Servo Controller</div>
     <div class="wizard-section-desc">Are any of your WCBs connected to a Pololu Maestro servo controller?</div>
     <div class="wizard-choice-grid">
-      <button class="wizard-choice-btn ${yes ? 'selected' : ''}" onclick="wizardSetChoice('maestroEnabled',true,this)">
-        <span class="wizard-choice-icon">⚙</span>
+      <button class="wizard-choice-btn maestro-yes ${yes ? 'selected' : ''}" onclick="wizardSetChoice('maestroEnabled',true,this)">
+        <img src="../Images/PololuLogo.png" class="wizard-choice-logo" alt="Pololu Maestro">
         <span class="wizard-choice-label">Yes, I use Maestro</span>
         <span class="wizard-choice-desc">One or more WCBs control Maestro boards via serial</span>
       </button>
@@ -6519,14 +7807,39 @@ function wizardHTMLMaestro() {
 }
 
 function wizardHTMLMaestroConfig() {
+  // Maestros can only live on WCB slots (Clients run their own sketch and
+  // don't have the WCB firmware to drive a Maestro). Snap any maestro
+  // currently pointing at a Client slot to the first WCB slot.
+  const firstWcb = wizardNextWcbSlot(1);
+  if (!firstWcb) {
+    // All slots are Clients — there's no WCB to host a Maestro. Render a
+    // banner explaining this; do NOT seed a maestros[] entry on a Client
+    // slot (would later dereference ws.boards[0].wcbNumber for the WCB
+    // build, even though slot 1 is a Client).
+    wizardState.maestros = [];   // clear any stale entries from before re-type
+    return `
+      <div class="wizard-section-title">Maestro Servo Controller Configuration</div>
+      <div class="wizard-warn-banner" style="background:#fffbe8;border:1px solid #e8c850;padding:12px;border-radius:6px;margin-top:10px">
+        ⚠️ No WCB slots are configured — every slot in this system is a WCB_Client.
+        A Pololu Maestro can only be controlled by a WCB (Clients run their own sketch).
+        Go back and change at least one slot's <b>Type</b> to <b>WCB</b>, or skip Maestro.
+      </div>`;
+  }
+  wizardState.maestros.forEach(m => {
+    if ((wizardState.boards[m.boardSlot - 1]?.type || 'wcb') === 'client') {
+      m.boardSlot = firstWcb;
+    }
+  });
   // Always start with at least one Maestro row — the user chose Maestro, so there's at least one.
   if (wizardState.maestros.length === 0) {
-    wizardState.maestros.push({ boardSlot: 1, id: 1, port: 1, baud: 115200 });
+    wizardState.maestros.push({ boardSlot: firstWcb, id: 1, port: 1, baud: 115200 });
   }
   const { maestros, quantity } = wizardState;
-  const boardOpts = (sel) => Array.from({length: quantity}, (_, i) =>
-    `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`
-  ).join('');
+  // Filter out Client slots from the Board dropdown.
+  const boardOpts = (sel) => Array.from({length: quantity}, (_, i) => {
+    if ((wizardState.boards[i]?.type || 'wcb') === 'client') return '';
+    return `<option value="${i+1}" ${(i+1) === sel ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`;
+  }).filter(Boolean).join('');
   const rows = maestros.map((m, mi) => {
     // Baud capped by port (ports 3-5 max 57600)
     const maxBaud = m.port >= 3 ? 57600 : Infinity;
@@ -6605,26 +7918,43 @@ function wizardHTMLEtm() {
 }
 
 function wizardHTMLReview() {
-  const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards } = wizardState;
+  const { quantity, password, mac2, mac3, kyberEnabled, maestroEnabled, etmEnabled, boards,
+          navicoreEnabled, navicoreId } = wizardState;
+  const wcbCount    = boards.filter(b => b.type !== 'client').length;
+  const clientCount = boards.filter(b => b.type === 'client').length;
   const boardRows = boards.map((b, i) => {
+    if (b.type === 'client') {
+      const al = (b.clientAlias || '').trim();
+      return `<div class="wizard-review-row">
+        <span class="wizard-review-label">Slot ${i+1}</span>
+        <span class="wizard-review-value">Client · ID ${b.wcbNumber}${al ? ` · ${escHtml(al)}` : ''}</span>
+      </div>`;
+    }
     const hwLabel = WCBParser.HW_VERSION_MAP[b.hwVersion]?.display ?? 'Not set';
+    const al      = (b.alias || '').trim();
     return `<div class="wizard-review-row">
-      <span class="wizard-review-label">Board ${i+1}</span>
-      <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}</span>
+      <span class="wizard-review-label">Slot ${i+1}</span>
+      <span class="wizard-review-value">WCB ${b.wcbNumber} · HW ${hwLabel}${al ? ` · ${escHtml(al)}` : ''}</span>
     </div>`;
   }).join('');
+  const navicoreRow = navicoreEnabled ? `
+    <div class="wizard-review-row">
+      <span class="wizard-review-label">NaviCore</span>
+      <span class="wizard-review-value">✅ Enabled · peer ID ${navicoreId}</span>
+    </div>` : '';
   return `
     <div class="wizard-section-title">Everything looks good!</div>
     <div class="wizard-section-desc">Review your settings below. Click "Apply & Connect" to write these to the config page and start connecting your boards.</div>
 
     <div class="wizard-review-section">
       <div class="wizard-review-heading">System</div>
-      <div class="wizard-review-row"><span class="wizard-review-label">Number of WCBs</span><span class="wizard-review-value">${quantity}</span></div>
+      <div class="wizard-review-row"><span class="wizard-review-label">Slots total</span><span class="wizard-review-value">${quantity} (${wcbCount} WCB${wcbCount===1?'':'s'}, ${clientCount} Client${clientCount===1?'':'s'})</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">ESP-NOW Password</span><span class="wizard-review-value">${escHtml(password)}</span></div>
       <div class="wizard-review-row"><span class="wizard-review-label">MAC Octets</span><span class="wizard-review-value">XX:XX:${mac2.toUpperCase()}:${mac3.toUpperCase()}:XX:XX</span></div>
+      ${navicoreRow}
     </div>
     <div class="wizard-review-section">
-      <div class="wizard-review-heading">Boards</div>
+      <div class="wizard-review-heading">Slots</div>
       ${boardRows}
     </div>
     <div class="wizard-review-section">
@@ -6672,7 +8002,11 @@ function wizardHTMLConnect() {
   }
 
   // ── Step 1+: Board rows ─────────────────────────────────────────
+  // Skip Client slots — they have no USB port to connect to, no firmware
+  // to flash, and no WCB to push config to. They're rendered as a small
+  // informational footer below the connect rows instead.
   const rows = boards.map((b, i) => {
+    if (b.type === 'client') return '';
     const n = i + 1;
     const isSeq    = connectMode === 'seq';
     const isActive = !isSeq || n === connectSeqN;
@@ -6724,11 +8058,31 @@ function wizardHTMLConnect() {
       </div>
     </details>`;
 
+  // Informational footer: list any Client slots (and ID 20) so the user
+  // knows the Wizard isn't connecting to them by design.
+  const clients = boards
+    .map((b, i) => ({ b, id: b.wcbNumber, alias: b.clientAlias, idx: i }))
+    .filter(c => c.b.type === 'client');
+  const hasSpecial = !!wizardState.useSpecialPeer;
+  const clientFooter = (clients.length > 0 || hasSpecial) ? `
+    <div style="margin-top:18px;padding:12px 14px;border:1px dashed var(--border);border-radius:8px;font-size:13px;opacity:0.85">
+      <div style="font-weight:600;margin-bottom:6px">Client slots — not connected by the Wizard</div>
+      <div style="opacity:0.8;font-size:12px;margin-bottom:8px">
+        Client devices run their own sketch and connect to the network on their own.
+        The Wizard cannot flash or push to them; ${hasSpecial ? '<code>?SPECIAL,ON</code> will be sent to every WCB so they can talk to ID 20. ' : ''}You'll exercise them via the regular boards.
+      </div>
+      <ul style="margin:0;padding-left:18px">
+        ${clients.map(c => `<li>ID ${c.id}${c.alias ? ` — <strong>${escHtml(c.alias)}</strong>` : ''}</li>`).join('')}
+        ${hasSpecial ? `<li>ID 20 (special)${wizardState.specialAlias ? ` — <strong>${escHtml(wizardState.specialAlias)}</strong>` : ''}</li>` : ''}
+      </ul>
+    </div>` : '';
+
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
     ${tipHtml}
     ${banner}
-    ${rows}`;
+    ${rows}
+    ${clientFooter}`;
 }
 
 function wizardConnectBannerText() {
@@ -6738,9 +8092,19 @@ function wizardConnectBannerText() {
   return '';
 }
 
+// Find the first WCB-type slot index (1-based) at or after `start`.
+// Returns 0 if no WCB slot remains (all clients).
+function wizardNextWcbSlot(start) {
+  for (let n = Math.max(1, start); n <= wizardState.quantity; n++) {
+    if ((wizardState.boards[n - 1]?.type || 'wcb') !== 'client') return n;
+  }
+  return 0;
+}
+
 function wizardSelectConnectMode(mode) {
   wizardState.connectMode = mode;
-  wizardState.connectSeqN = 1;
+  // Sequential mode starts at the first WCB slot (skipping any leading clients).
+  wizardState.connectSeqN = wizardNextWcbSlot(1) || 1;
   // Apply config to the main page only when the user commits to a connection mode
   if (mode) wizardApplyConfig();
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
@@ -6749,13 +8113,18 @@ function wizardSelectConnectMode(mode) {
     // Board rows now visible — hide the forward button
     if (nextBtn) nextBtn.style.display = 'none';
     wizardStartConnectWatchers();
-    // Auto-open port panel(s) — no Connect button click needed
+    // Auto-open port panel(s) — no Connect button click needed. Client
+    // slots are skipped (no USB port to open, no firmware to flash).
     if (mode === 'seq') {
-      setTimeout(() => _wizPortOpenPanel(1), 0);
+      const first = wizardNextWcbSlot(1);
+      if (first) setTimeout(() => _wizPortOpenPanel(first), 0);
     } else {
-      // All-at-once: open panels for every slot
+      // All-at-once: open panels for every WCB slot
       setTimeout(() => {
-        for (let i = 1; i <= wizardState.quantity; i++) _wizPortOpenPanel(i);
+        for (let i = 1; i <= wizardState.quantity; i++) {
+          if ((wizardState.boards[i - 1]?.type || 'wcb') === 'client') continue;
+          _wizPortOpenPanel(i);
+        }
       }, 0);
     }
   } else {
@@ -6771,10 +8140,11 @@ function wizardSelectConnectMode(mode) {
 
 function wizardSeqAdvance(completedSlot) {
   if (wizardState.connectMode !== 'seq') return;
-  const nextSlot = completedSlot + 1;
+  // Advance to the next WCB-type slot, skipping any client slots in between.
+  const nextSlot = wizardNextWcbSlot(completedSlot + 1);
   const bannerEl = document.getElementById('wiz-connect-banner');
 
-  if (nextSlot > wizardState.quantity) {
+  if (!nextSlot) {
     // All done — update banner
     if (bannerEl) { bannerEl.innerHTML = '✅ All boards configured!'; bannerEl.style.display = ''; }
     return;
@@ -6802,6 +8172,9 @@ function wizardSelectQty(n) {
   document.querySelectorAll('.wizard-qty-btn').forEach(btn => {
     btn.classList.toggle('selected', parseInt(btn.textContent) === n);
   });
+  // Clicking a quantity card advances like the step 3/4 choice cards. (The
+  // "More…" button calls wizardExpandQty, not this, so it won't auto-advance.)
+  wizardAdvanceAfterChoice();
 }
 
 function wizardSetChoice(field, value, btn) {
@@ -6811,6 +8184,36 @@ function wizardSetChoice(field, value, btn) {
     b.classList.remove('selected','selected-no');
   });
   btn.classList.add(value ? 'selected' : 'selected-no');
+  wizardAdvanceAfterChoice();
+}
+
+// Click-a-card → auto-advance to the next step. Small delay so the user sees
+// the card highlight register before the step transitions away. A single
+// cancelable timer keyed to the originating step: re-clicking (or a native
+// double-click) collapses to one advance, and if the step changes before it
+// fires (Back, or a different card) the stale timer is discarded.
+function wizardAdvanceAfterChoice() {
+  wizardCancelAutoAdvance();
+  const fromIdx = wizardState.currentIdx;
+  _wizAdvanceTimer = setTimeout(() => {
+    _wizAdvanceTimer = null;
+    if (_wizardOpen && wizardState.currentIdx === fromIdx) wizardNext();
+  }, 200);
+}
+
+// Step-3 control-system selection. NaviCore / Kyber are mutually exclusive;
+// "other" means neither. Keeps the derived flags + special-peer state in sync,
+// then auto-advances to the matching setup step (3b) — or straight to Maestro.
+function wizardSetControl(system, btn) {
+  wizardState.controlSystem   = system;
+  wizardState.navicoreEnabled = (system === 'navicore');
+  wizardState.kyberEnabled    = (system === 'kyber');
+  wizardState.useSpecialPeer  = wizardState.navicoreEnabled;
+  if (wizardState.navicoreEnabled && !wizardState.specialAlias) wizardState.specialAlias = 'NaviCore';
+  const parent = btn.closest('.wizard-choice-grid');
+  parent.querySelectorAll('.wizard-choice-btn').forEach(b => b.classList.remove('selected','selected-no'));
+  btn.classList.add(system === 'other' ? 'selected-no' : 'selected');
+  wizardAdvanceAfterChoice();
 }
 
 function wizardFillGen(inputId, type) {
@@ -6829,13 +8232,18 @@ function wizardSwitchBoardTab(step, i) {
 }
 
 function wizardBoardTabs(step) {
+  // The identity step is the one place where Client slots must remain
+  // visible — that's where the user chooses each slot's type. Every other
+  // per-board step (serial, etc.) only applies to WCBs.
+  const includeClients = (step === 'identity');
   return `<div class="wizard-board-tabs">
-    ${wizardState.boards.map((b, i) =>
-      `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
+    ${wizardState.boards.map((b, i) => {
+      if (!includeClients && (b.type || 'wcb') === 'client') return '';
+      return `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
                onclick="wizardSwitchBoardTab('${step}',${i})">
         WCB&nbsp;${b.wcbNumber}
-      </button>`
-    ).join('')}
+      </button>`;
+    }).filter(Boolean).join('')}
   </div>`;
 }
 
@@ -6922,6 +8330,20 @@ function wizardRemoveMaestro(mi) {
 function wizardSaveStep(key) {
   const get = (id) => document.getElementById(id);
   switch (key) {
+    case 'control':
+      // Control system is chosen via cards (wizardSetControl). Re-derive the
+      // flags here too so Back/Next always persist a consistent state, and
+      // mirror the special-peer flag (NaviCore IS the special peer).
+      wizardState.navicoreEnabled = (wizardState.controlSystem === 'navicore');
+      wizardState.kyberEnabled    = (wizardState.controlSystem === 'kyber');
+      wizardState.useSpecialPeer  = wizardState.navicoreEnabled;
+      if (wizardState.navicoreEnabled && !wizardState.specialAlias) wizardState.specialAlias = 'NaviCore';
+      break;
+    case 'navicore-config': {
+      const idv = parseInt(get('wiz-navicore-id')?.value);
+      if (!isNaN(idv) && idv >= 1 && idv <= 20) wizardState.navicoreId = idv;
+      break;
+    }
     case 'network':
       if (get('wiz-password')) wizardState.password = get('wiz-password').value.trim();
       if (get('wiz-mac2')) wizardState.mac2 = get('wiz-mac2').value.trim().toUpperCase().padStart(2,'0');
@@ -6932,16 +8354,32 @@ function wizardSaveStep(key) {
       break;
     case 'identity':
       wizardState.boards.forEach((b, i) => {
-        const num        = parseInt(get(`wiz-b${i}-wcbnum`)?.value);
-        const hw         = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
-        const ledSelVal  = get(`wiz-b${i}-ledpin`)?.value ?? '38';
-        const ledPin     = ledSelVal === '0'
-                           ? (parseInt(get(`wiz-b${i}-ledpin-custom`)?.value) || 38)
-                           : (parseInt(ledSelVal) || 38);
+        const chosen   = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+        const isClient = (chosen === 'client');
+        b.type = isClient ? 'client' : 'wcb';
+        // ID input lives in the visible block (WCB vs Client share the slot)
+        const numEl   = get(isClient ? `wiz-b${i}-cnum` : `wiz-b${i}-wcbnum`);
+        const num     = parseInt(numEl?.value);
         if (!isNaN(num)) b.wcbNumber = num;
-        if (!isNaN(hw))  b.hwVersion = hw;
-        b.statusLedPin = ledPin;
+        if (isClient) {
+          // Client: only the clientAlias matters; HW/LED stay at their saved
+          // values so flipping back to WCB restores the prior selection.
+          b.clientAlias = (get(`wiz-b${i}-calias`)?.value || '').slice(0, 24);
+        } else {
+          const hw         = parseInt(get(`wiz-b${i}-hwver`)?.value ?? 0);
+          const ledSelVal  = get(`wiz-b${i}-ledpin`)?.value ?? '38';
+          const ledPin     = ledSelVal === '0'
+                             ? (parseInt(get(`wiz-b${i}-ledpin-custom`)?.value) || 38)
+                             : (parseInt(ledSelVal) || 38);
+          if (!isNaN(hw))  b.hwVersion = hw;
+          b.statusLedPin = ledPin;
+          b.alias        = (get(`wiz-b${i}-alias`)?.value || '').slice(0, 24);
+        }
       });
+      // Special peer (ID 20) alias — read the identity-step input if present;
+      // fallback to the quantity-step input.
+      const sAliasEl = get('wiz-special-alias-ident') || get('wiz-special-alias');
+      if (sAliasEl) wizardState.specialAlias = (sAliasEl.value || '').slice(0, 24);
       break;
     case 'serial': {
       // Rebuild the claim map so we can distinguish user-typed labels from
@@ -6950,6 +8388,7 @@ function wizardSaveStep(key) {
       // instead — this way, if the user later moves Kyber/Maestro to a different
       // port and comes back, the freed port doesn't retain the stale owner name.
       wizardState.boards.forEach((b, i) => {
+        if ((b.type || 'wcb') === 'client') return;  // no serial inputs rendered for clients
         const boardSlot = i + 1;
         const claims = {};
         if (wizardState.kyberEnabled && wizardState.kyberBoard === boardSlot) {
@@ -7031,6 +8470,10 @@ function wizardSaveStep(key) {
 // ── Validation ─────────────────────────────────────────────────────
 function wizardValidateStep(key) {
   switch (key) {
+    case 'control':
+      if (!wizardState.controlSystem)
+        return 'Please choose a control system — NaviCore, Kyber, or Other.';
+      break;
     case 'network': {
       const pw = document.getElementById('wiz-password')?.value?.trim() ?? '';
       if (pw.length < 8) return 'Password must be at least 8 characters.';
@@ -7041,15 +8484,31 @@ function wizardValidateStep(key) {
       break;
     }
     case 'identity': {
-      const nums = wizardState.boards.map((_, i) =>
-        parseInt(document.getElementById(`wiz-b${i}-wcbnum`)?.value ?? 0)
-      );
-      if (nums.some(n => n < 1 || n > 99)) return 'WCB numbers must be between 1 and 99.';
-      if (new Set(nums).size !== nums.length) return 'Each board must have a unique WCB number.';
-      const hvs = wizardState.boards.map((_, i) =>
-        parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0)
-      );
-      if (hvs.some(h => h === 0)) return 'Please select a hardware version for every board.';
+      // Pull the ID from whichever input is visible (WCB or Client side).
+      const slotInfo = wizardState.boards.map((_, i) => {
+        const chosen   = document.querySelector(`input[name="wiz-slot-type-${i}"]:checked`)?.value;
+        const isClient = (chosen === 'client');
+        const idEl     = document.getElementById(isClient ? `wiz-b${i}-cnum` : `wiz-b${i}-wcbnum`);
+        return {
+          id:       parseInt(idEl?.value ?? 0),
+          isClient,
+        };
+      });
+      const ids = slotInfo.map(s => s.id);
+      if (ids.some(n => n < 1 || n > 99 || isNaN(n)))
+        return 'Each slot must have an ID between 1 and 99.';
+      if (new Set(ids).size !== ids.length)
+        return 'Each slot must have a unique ID (WCBs and Clients share the same address space).';
+      if (wizardState.useSpecialPeer && ids.includes(20))
+        return 'ID 20 is reserved for the special slot — pick a different ID for that slot, or uncheck the special peer option in the previous step.';
+      // HW version required only for WCB-type slots; clients run their own
+      // sketch and don't have a WCB hardware version.
+      const missingHw = slotInfo.some((s, i) => {
+        if (s.isClient) return false;
+        const hw = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
+        return hw === 0;
+      });
+      if (missingHw) return 'Please select a hardware version for every WCB slot.';
       break;
     }
     case 'maestro-config': {
@@ -7134,11 +8593,22 @@ function wizardApplyConfig() {
     cfg.delimiter  = ws.delimiter;
     cfg.funcChar   = ws.funcChar;
     cfg.cmdChar    = ws.cmdChar;
+    // Slot type metadata + aliases. specialPeer is a NETWORK setting
+    // (must be the same on every WCB), so apply ws.useSpecialPeer to
+    // every WCB-type slot — Client slots don't need it (they don't push).
+    cfg.type        = b.type || 'wcb';
+    cfg.alias       = (b.alias       || '').slice(0, 24);
+    cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
+    if (cfg.type !== 'client') { cfg.specialPeer = !!ws.useSpecialPeer; cfg.specialPeerId = ws.navicoreId || 20; }
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
       cfg.serialPorts[p].label = sp.label;
     });
+
+    // Kyber / Maestro routing only applies to WCB-type slots — Client slots
+    // run their own sketch and don't have the firmware to drive either.
+    if (cfg.type === 'client') return;
 
     // Kyber
     if (ws.kyberEnabled) {
@@ -7180,6 +8650,12 @@ function wizardApplyConfig() {
           cfg.kyber.mode = 'remote';
         }
       }
+    }
+
+    // NaviCore: every board with a Maestro listens to NaviCore's Pololu broadcasts
+    // via Kyber "remote" mode (Kyber itself can't run remote, so this reuses that path).
+    if (ws.navicoreEnabled && ws.maestros.some(m => m.boardSlot === (i + 1))) {
+      cfg.kyber.mode = 'remote';
     }
 
     // Maestro — local entries only (for port claiming, UI display, etc.)
@@ -7231,6 +8707,21 @@ function wizardApplyConfig() {
     systemConfig.general.etm = { ...systemConfig.general.etm, enabled: false };
   }
 
+  // NaviCore global toggle (network-wide special peer). Board configs already
+  // carry specialPeer/specialPeerId from the per-board loop above; reflect it
+  // into the General Settings UI so the toggle matches the wizard choice.
+  // Controller (network-wide) reflects the wizard's choice.
+  if (systemConfig?.general) {
+    systemConfig.general.specialPeer   = !!ws.useSpecialPeer;
+    systemConfig.general.specialPeerId = ws.navicoreId || 20;
+    systemConfig.general.controller    = ws.useSpecialPeer ? 'navicore'
+                                       : (ws.kyberEnabled ? 'kyber' : 'none');
+  }
+  const naviIdEl = document.getElementById('g-navicore-id');
+  if (naviIdEl) naviIdEl.value = ws.navicoreId || 20;
+  refreshControllerUI();
+  refreshAllNavicoreStatus();
+
   showToast('Config page updated from wizard', 'success');
 }
 
@@ -7262,11 +8753,22 @@ function wizardExportConfig() {
     cfg.delimiter      = ws.delimiter || '^';
     cfg.funcChar       = ws.funcChar  || '?';
     cfg.cmdChar        = ws.cmdChar   || ';';
+    // Slot type / aliases / special-peer (same metadata as wizardApplyConfig)
+    cfg.type        = b.type || 'wcb';
+    cfg.alias       = (b.alias       || '').slice(0, 24);
+    cfg.clientAlias = (b.clientAlias || '').slice(0, 24);
+    if (cfg.type !== 'client') { cfg.specialPeer = !!ws.useSpecialPeer; cfg.specialPeerId = ws.navicoreId || 20; }
 
     b.serialPorts.forEach((sp, p) => {
       cfg.serialPorts[p].baud  = sp.baud;
       cfg.serialPorts[p].label = sp.label;
     });
+
+    // Client slots get only the metadata above — no Kyber/Maestro/ETM
+    // routing (clients run their own sketch). Return the metadata-only
+    // cfg so it's still in the exported file (otherwise .map() yields
+    // `undefined` here and buildSystemFile crashes on board.wcbNumber).
+    if (cfg.type === 'client') return cfg;
 
     if (ws.kyberEnabled) {
       if ((i + 1) === ws.kyberBoard) {
@@ -7293,6 +8795,11 @@ function wizardExportConfig() {
         const hasPrimaryMaestro = ws.maestros.some(m => m.boardSlot === (i + 1) && (m.id === 1 || m.id === 2));
         if (hasPrimaryMaestro) cfg.kyber.mode = 'remote';
       }
+    }
+
+    // NaviCore: Maestro boards listen to NaviCore Pololu broadcasts via remote mode.
+    if (ws.navicoreEnabled && ws.maestros.some(m => m.boardSlot === (i + 1))) {
+      cfg.kyber.mode = 'remote';
     }
 
     const myMaestros = ws.maestros.filter(m => m.boardSlot === (i + 1));
@@ -7991,6 +9498,7 @@ let _statsBoardN = null;
 let _statsType   = null;   // 'etm' | 'stats'
 
 function openStatsModal(n, type) {
+  stopHCRStatusPolling();   // never leave the HCR poller running behind another view
   _statsBoardN = n;
   _statsType   = type;
   const wcbNum = boardConfigs[n]?.wcbNumber || n;
@@ -8009,9 +9517,114 @@ function closeStatsModal(event) {
   document.getElementById('stats-modal').classList.remove('open');
   _statsBoardN = null;
   _statsType   = null;
+  stopHCRStatusPolling();
 }
 
-function refreshStatsModal() { fetchStatsData(); }
+function refreshStatsModal() {
+  if (_hcrModalN != null) { fetchHCRStatus(); return; }
+  fetchStatsData();
+}
+
+// ─── HCR Status (on-demand modal — polls only while open) ─────────
+// Reuses the stats-modal DOM. Sends ?HCR,STATUS every 3s ONLY while the
+// modal is open; polling stops the instant it closes (no idle serial
+// traffic). The button is hidden unless HCR is configured on the board.
+let _hcrModalN     = null;
+let _hcrModalTimer = null;
+
+function stopHCRStatusPolling() {
+  if (_hcrModalTimer) { clearInterval(_hcrModalTimer); _hcrModalTimer = null; }
+  _hcrModalN = null;
+}
+
+function openHCRStatusModal(n) {
+  stopHCRStatusPolling();
+  // Switching from an ETM/Stats view? Clear that state too.
+  _statsBoardN = null;
+  _statsType   = null;
+  _hcrModalN   = n;
+  const wcbNum = boardConfigs[n]?.wcbNumber || n;
+  document.getElementById('stats-modal-title').textContent  = `HCR Status — WCB ${wcbNum}`;
+  document.getElementById('stats-modal-output').textContent = 'Fetching HCR status…';
+  document.getElementById('stats-modal').classList.add('open');
+  fetchHCRStatus();
+  _hcrModalTimer = setInterval(fetchHCRStatus, 3000);   // 3s while open
+}
+
+function _renderHCRStatus(line) {
+  // line: [HCR:cfg=1,port=3,poll=10,age=2,H=..,S=..,M=..,C=..,dur=..,
+  //        ovr=..,muse=..,wav=..,pV=..,pA=..,pB=..,vV=..,vA=..,vB=..]
+  const m = line.match(/\[HCR:([^\]]*)\]/);
+  if (!m) return 'No [HCR:...] response (board may not be running HCR firmware).';
+  const kv = {};
+  for (const pair of m[1].split(',')) {
+    const i = pair.indexOf('=');
+    if (i > 0) kv[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+  }
+  if (kv.cfg === '0') return 'HCR is not configured on this board.\n\nSet it up under the board’s “HCR Vocalizer” section, then Push Config.';
+  const playing = ch => (kv[ch] === undefined ? '?' : (kv[ch] === '-1' ? 'idle' : `file ${kv[ch]}`));
+  return [
+    `Port            : S${kv.port ?? '?'}`,
+    `Auto-poll       : ${kv.poll === '0' ? 'off' : (kv.poll ?? '?') + ' s'}`,
+    `Last update     : ${kv.age ?? '?'} s ago`,
+    ``,
+    `Emotions   H:${kv.H ?? '?'}  S:${kv.S ?? '?'}  M:${kv.M ?? '?'}  C:${kv.C ?? '?'}`,
+    `Emote dur. : ${kv.dur ?? '?'} s`,
+    `Override   : ${kv.ovr === '1' ? 'ON' : 'off'}`,
+    `Muse       : ${kv.muse === '1' ? 'ON' : 'off'}`,
+    `WAV files  : ${kv.wav ?? '?'}`,
+    ``,
+    `Playing  Vocalizer:${playing('pV')}  A:${playing('pA')}  B:${playing('pB')}`,
+    `Volume   V:${kv.vV ?? '?'}  A:${kv.vA ?? '?'}  B:${kv.vB ?? '?'}`,
+    ``,
+    `raw: ${line.trim()}`,
+  ].join('\n');
+}
+
+async function fetchHCRStatus() {
+  const n = _hcrModalN;
+  if (n == null) return;
+  const out = document.getElementById('stats-modal-output');
+  if (!out) return;
+
+  const conn = boardConnections[n];
+  if (!conn?.isConnected()) {
+    // Pre-await — modal state can't have changed yet; safe to write directly.
+    out.textContent = remoteRelayForBoard[n]
+      ? 'Open HCR Status on the board the HCR is directly connected to (relay not supported yet).'
+      : 'Board not connected.';
+    return;
+  }
+  const fc = boardConfigs[n]?.funcChar || '?';
+  // Helper: drop the result if the user closed the modal or switched to a
+  // different board / a different stats view while sendAndCollect was awaiting.
+  // Otherwise a late HCR response would overwrite the freshly-opened view.
+  const stillCurrent = () => _hcrModalN === n;
+  try {
+    const raw  = await conn.sendAndCollect(`${fc}HCR,STATUS`, 2500, '[HCR:');
+    if (!stillCurrent()) return;
+    const hcrLine = (raw || '').split('\n').reverse().find(l => l.includes('[HCR:'));
+    out.textContent = hcrLine
+      ? _renderHCRStatus(hcrLine)
+      : 'No HCR status response (timed out). Is HCR configured and the board on HCR firmware?';
+  } catch (e) {
+    if (!stillCurrent()) return;
+    out.textContent = `HCR status error: ${e.message || e}`;
+  }
+}
+
+// Show the HCR Status button only when HCR is configured on this board;
+// enable only when the board is reachable.
+function updateHCRStatusBtn(n) {
+  const btn = document.getElementById(`b${n}-btn-hcr-status`);
+  if (!btn) return;
+  const enabled   = !!boardConfigs[n]?.hcr?.enabled;
+  const connected = boardConnections[n]?.isConnected() ?? false;
+  const reachable = connected || (remoteRelayForBoard[n] !== undefined &&
+                    boardConnections[remoteRelayForBoard[n]]?.isConnected());
+  btn.style.display = enabled ? '' : 'none';
+  btn.disabled      = !reachable;
+}
 
 async function fetchStatsData() {
   const n    = _statsBoardN;
@@ -8141,3 +9754,138 @@ function escHtml(str) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+// ════════════════════════════════════════════════════════════════════════
+//  RC-Controller discovery (Phase 4 of remote-management bridge)
+//
+//  Every line that any tethered WCB prints to USB Serial passes through
+//  _rcDiscoveryHook() below (wired into BoardConnection._startReading()).
+//  When a JSON line of the form {"type":"rc_hb","id":N,...} arrives, we
+//  record the RC's metadata in _rcOnlineMap and re-render the
+//  #rc-devices-section panel.  Entries auto-expire after 6 s of silence
+//  (heartbeat is 0.5 Hz = 2 s, so 3 missed beats = offline).
+//
+//  The "Open in Config Tool" button on each card launches the RC config
+//  tool in a new tab using the URL the user has saved in localStorage.
+//  Default is the canonical repo-relative path (works when both repos
+//  are sibling clones under one GitHub root); user can override via the
+//  small "edit Config Tool URL" link at the bottom of the panel.
+// ════════════════════════════════════════════════════════════════════════
+
+const _rcOnlineMap   = new Map();   // rcId → { fw, mode, model, up, lastSeenAt, viaBoardIdx }
+const RC_OFFLINE_MS  = 6000;        // 3 missed 2-second heartbeats
+const RC_TOOL_URL_KEY = 'rc_config_tool_url';
+const RC_TOOL_URL_DEFAULT = '../../RC-Controller/config_tool/index.html';
+
+function _rcToolUrl() {
+  try {
+    return localStorage.getItem(RC_TOOL_URL_KEY) || RC_TOOL_URL_DEFAULT;
+  } catch (_) { return RC_TOOL_URL_DEFAULT; }
+}
+
+function _rcDiscoveryHook(line, boardIdx) {
+  // Fast-path: rc_hb lines start with `{"type":"rc_hb"`.  Cheaper than a
+  // full JSON.parse on every serial line (which includes plenty of WCB
+  // chatter).  If the prefix matches we then parse properly.
+  if (!line || line.length < 20 || line[0] !== '{') return;
+  if (line.indexOf('"rc_hb"') === -1 && line.indexOf('"rc_trig"') === -1 &&
+      line.indexOf('"rc_mode"') === -1) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch (_) { return; }
+  if (!msg || typeof msg.id !== 'number') return;
+
+  const id   = msg.id;
+  const now  = Date.now();
+  let entry  = _rcOnlineMap.get(id);
+  if (!entry) entry = { id, viaBoardIdx: boardIdx };
+  entry.lastSeenAt = now;
+  entry.viaBoardIdx = boardIdx;
+  if (msg.type === 'rc_hb') {
+    if (typeof msg.fw    === 'string') entry.fw    = msg.fw;
+    if (typeof msg.mode  === 'number') entry.mode  = msg.mode;
+    if (typeof msg.model === 'number') entry.model = msg.model;
+    if (typeof msg.up    === 'number') entry.up    = msg.up;
+  } else if (msg.type === 'rc_mode' && typeof msg.mode === 'number') {
+    entry.mode = msg.mode;
+  } else if (msg.type === 'rc_trig') {
+    entry.lastTrig = { mode: msg.mode, btn: msg.btn, tap: msg.tap, at: now };
+  }
+  _rcOnlineMap.set(id, entry);
+  _renderRcDevices();
+}
+
+// Friendly TX-model names.  Mirror of TX_MODELS in the RC's config_tool —
+// kept short here since the Wizard just needs the label.
+const _RC_MODEL_NAMES = { 0: 'X18', 1: 'X-Lite', 2: 'X20' };
+
+function _renderRcDevices() {
+  const section = document.getElementById('rc-devices-section');
+  const list    = document.getElementById('rc-devices-list');
+  if (!section || !list) return;
+
+  // Sweep expired.
+  const now = Date.now();
+  for (const [id, e] of _rcOnlineMap) {
+    if (now - e.lastSeenAt > RC_OFFLINE_MS) _rcOnlineMap.delete(id);
+  }
+
+  if (_rcOnlineMap.size === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+
+  const sorted = [..._rcOnlineMap.values()].sort((a, b) => a.id - b.id);
+  list.innerHTML = sorted.map(e => {
+    const age = Math.max(0, Math.round((now - e.lastSeenAt) / 1000));
+    const ageClass = age >= 3 ? 'rc-stale' : '';
+    const modelLbl = _RC_MODEL_NAMES[e.model] || ('model ' + e.model);
+    const modeLbl  = e.mode ? `mode ${e.mode}` : 'mode —';
+    const fwLbl    = e.fw   || '—';
+    const upLbl    = (typeof e.up === 'number')
+      ? `up ${Math.round(e.up)}s`
+      : '';
+    const trigLbl  = e.lastTrig
+      ? `· last trig: m${e.lastTrig.mode}b${e.lastTrig.btn}t${e.lastTrig.tap}`
+      : '';
+    return `
+      <div class="rc-device-card">
+        <div class="rc-id">RC #${e.id}</div>
+        <div class="rc-meta">
+          <div class="rc-meta-line">${escHtml(modelLbl)} · ${escHtml(modeLbl)}</div>
+          <div class="rc-meta-line">fw ${escHtml(fwLbl)} · ${escHtml(upLbl)}</div>
+          <div class="rc-meta-line ${ageClass}">last seen ${age}s ago ${trigLbl}</div>
+        </div>
+        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank"
+           title="Opens the RC config tool in a new tab. Don't forget to flip the 'Via WCB' toggle to manage this RC through this tethered WCB.">
+          Open ↗
+        </a>
+      </div>`;
+  }).join('');
+}
+
+// Periodic re-render so "last seen Ns ago" counters tick and stale entries
+// disappear without needing a new heartbeat to drive the GC sweep.
+setInterval(() => { if (_rcOnlineMap.size > 0) _renderRcDevices(); }, 1000);
+
+// "Edit Config Tool URL" link handler — small prompt to override the
+// default path.  Stored in localStorage so it survives reloads.
+document.addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!t || t.id !== 'rc-tool-url-edit') return;
+  ev.preventDefault();
+  const current = _rcToolUrl();
+  const next    = prompt(
+    'URL to your RC config tool (config_tool/index.html).\n' +
+    'Default (sibling repo clones):\n' + RC_TOOL_URL_DEFAULT,
+    current
+  );
+  if (next === null) return;   // cancelled
+  try {
+    if (next === '' || next === RC_TOOL_URL_DEFAULT) {
+      localStorage.removeItem(RC_TOOL_URL_KEY);
+    } else {
+      localStorage.setItem(RC_TOOL_URL_KEY, next.trim());
+    }
+  } catch (_) {}
+  _renderRcDevices();
+});

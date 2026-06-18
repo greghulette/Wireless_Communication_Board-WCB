@@ -515,7 +515,8 @@ void printMP3Settings() {
 }
 
 void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial) {
+                    char delimiter, bool printToSerial,
+                    const String &defSep, const String &defFunc) {
   if (!mp3Config.configured) return;
 
   // Main config line — includes volume
@@ -525,7 +526,7 @@ void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
   String cmd = String(LocalFunctionIdentifier) + cmdSuffix;
   if (printToSerial) Serial.println(cmd);
   chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += "^?" + cmdSuffix;
+  chainedConfigDefault += defSep + defFunc + cmdSuffix;
 
   // Error callback
   if (strlen(mp3Config.onErrCmd) > 0) {
@@ -533,7 +534,7 @@ void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
     cmd = String(LocalFunctionIdentifier) + cmdSuffix;
     if (printToSerial) Serial.println(cmd);
     chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += "^?" + cmdSuffix;
+    chainedConfigDefault += defSep + defFunc + cmdSuffix;
   }
 }
 

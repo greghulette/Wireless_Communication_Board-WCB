@@ -223,17 +223,22 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?KYBER,LOCAL      - This board has Kyber on S2"));
         Serial.println(F("  ?KYBER,LOCAL,S1,M1:W1S2:115200,M2:W2S1:115200,M3:W3S1:57600"));
-        Serial.println(F("  ?KYBER,REMOTE     - This board has Maestro, Kyber elsewhere"));
+        Serial.println(F("  ?MAESTRO,REMOTE   - This board has Maestro, controller elsewhere (canonical)"));
+        Serial.println(F("  ?KYBER,REMOTE     - Alias for ?MAESTRO,REMOTE (same function)"));
         Serial.println(F("  ?KYBER,CLEAR      - Disable Kyber"));
         Serial.println(F("  ?KYBER,LIST       - Show configuration"));
         Serial.println(F("\nNotes:"));
+        Serial.println(F("  - 'REMOTE' = this board hosts a Maestro driven remotely (Kyber OR NaviCore)."));
+        Serial.println(F("    It accepts Pololu/Maestro packets over the mesh. ?MAESTRO,REMOTE is the"));
+        Serial.println(F("    canonical name; ?KYBER,REMOTE remains a working alias."));
         Serial.println(F("  - Kyber LOCAL reserves S1 and S2 - cannot be used for other purposes"));
-        Serial.println(F("  - Kyber REMOTE reserves S1 only"));
+        Serial.println(F("  - REMOTE reserves S1 only (Maestro)"));
         Serial.println(F("  - PWM cannot be mapped to S1 or S2 when Kyber is configured"));
         Serial.println(F("  - Setting is saved to NVS and restored on reboot"));
-        Serial.println(F("  - Reboot required after changing Kyber mode"));
+        Serial.println(F("  - Reboot required after changing mode"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?KYBER_LOCAL / ?KYBER_REMOTE / ?KYBER_CLEAR / ?KYBER_LIST"));
+        Serial.println(F("  ?MAESTRO_REMOTE  (canonical underscore form)"));
 
     // ================================================================
     } else if (c == "ETM") {
@@ -495,6 +500,111 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
+    } else if (c == "HCR") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?HCR,<command>[,options]   (config/query)"));
+        Serial.println(F("       ;H,<command>[,options]    (runtime actions)"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Native Human-Cyborg Relations (HCR) Vocalizer integration."));
+        Serial.println(F("  One HCR per WCB on a reserved serial port. The WCB sends"));
+        Serial.println(F("  commands and polls live status. Drive it locally (serial/web),"));
+        Serial.println(F("  remotely (ESP-NOW unicast), or via the RC-Controller raw"));
+        Serial.println(F("  forward - all to the same HCR."));
+        Serial.println(F("\nConfiguration Commands (?HCR,...):"));
+        Serial.println(F("  PORT,Sx:baud      Reserve & configure the HCR port"));
+        Serial.println(F("                      baud: 9600/19200/38400/57600/115200"));
+        Serial.println(F("                      (S3-S5 software serial: 9600 only)"));
+        Serial.println(F("  CLEAR             Release the HCR port"));
+        Serial.println(F("  LIST              Show HCR configuration and link status"));
+        Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
+        Serial.println(F("  STATUS            Show cached HCR status  [HCR:...]"));
+        Serial.println(F("  REFRESH           Poll the HCR immediately"));
+        Serial.println(F("  GET,<field>       Query one value (EMOTION,H|S|M|C /"));
+        Serial.println(F("                      DURATION / OVERRIDE / MUSE / WAVCOUNT /"));
+        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B)"));
+        Serial.println(F("\nRuntime Actions (use ;H,...):"));
+        Serial.println(F("  ;H,STIM,e,lvl       Stimulate  e=H|S|M|C  lvl=MOD|STRONG"));
+        Serial.println(F("  ;H,TRIGGER,e,lvl    Trigger (same payload as STIM)"));
+        Serial.println(F("  ;H,OVERLOAD         Overload vocalization"));
+        Serial.println(F("  ;H,SETEMOTION,e,0-100  Set an emotion level directly"));
+        Serial.println(F("  ;H,RESETEMOTIONS    Reset all emotions to 0"));
+        Serial.println(F("  ;H,OVERRIDE,0|1     Personality-chip emotion override"));
+        Serial.println(F("  ;H,STOPEMOTE        Stop the current emote"));
+        Serial.println(F("  ;H,MUSE             Trigger one muse"));
+        Serial.println(F("  ;H,MUSE,0|1|TOGGLE  Disable / enable / toggle muse"));
+        Serial.println(F("  ;H,MUSE,GAP,min,max Set muse gap range (seconds)"));
+        Serial.println(F("  ;H,PLAY,A|B,0-9999  Play a WAV on channel A/B"));
+        Serial.println(F("  ;H,PLAY,A|B,file,FADEIN,sec  Play, ramp 0->current vol"));
+        Serial.println(F("  ;H,STOPWAV,A|B      Stop WAV on a channel"));
+        Serial.println(F("  ;H,VOL,V|A|B,0-100  Set volume (V=vocalizer, A/B=wav)"));
+        Serial.println(F("  ;H,VOLUP[,V|A|B][,step]  Volume up (no channel = all; step default 5)"));
+        Serial.println(F("  ;H,VOLDN[,V|A|B][,step]  Volume down (no channel = all; step default 5)"));
+        Serial.println(F("  ;H,FADEIN,A|B,sec   Ramp 0 -> current volume"));
+        Serial.println(F("  ;H,FADEOUT,A|B,sec  Ramp -> 0, StopWAV, restore vol"));
+        Serial.println(F("  ;H,STOP             Stop all audio and emotes"));
+        Serial.println(F("  ;H,FN,fn,chan,track Numeric dispatch (RC fn/chan/track)"));
+        Serial.println(F("  ;H,RAW,<string>     Send a literal HCR string verbatim"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?HCR,PORT,S1:9600             - HCR on S1 at 9600 baud"));
+        Serial.println(F("  ?HCR,POLL,5                   - Poll status every 5 s"));
+        Serial.println(F("  ?HCR,STATUS                   - Show cached status"));
+        Serial.println(F("  ;H,STIM,H,STRONG              - Strong happy stimulation"));
+        Serial.println(F("  ;H,PLAY,A,42                  - Play WAV 42 on channel A"));
+        Serial.println(F("  ;H,VOL,V,80                   - Vocalizer volume 80"));
+        Serial.println(F("  ;H,RAW,<MM,QM>                - Literal HCR string"));
+        Serial.println(F("  ;W2,;H,STIM,M,STRONG          - Stimulate WCB2's HCR"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
+        Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
+        Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
+        Serial.println(F("      periodic received status; ?DEBUG,HCR,OFF / dhcroff"));
+        Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
+    } else if (c == "VAR") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUser Variables + Conditional Execution"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Named, persistent integer variables (boolean = 0/non-zero),"));
+        Serial.println(F("  usable in stored sequences to gate commands. Up to 100 vars."));
+        Serial.println(F("  Names: 1-15 chars, case-sensitive, letters/digits/underscore."));
+        Serial.println(F("  Undefined variables read as 0. Per-board (each board's own NVS)."));
+        Serial.println(F("\nSet / mutate (runtime) -- ;V:"));
+        Serial.println(F("  ;V,<name>,<int>       Set to an integer"));
+        Serial.println(F("  ;V,<name>,true|false  Set to 1 / 0"));
+        Serial.println(F("  ;V,<name>,TOGGLE      Flip: non-zero -> 0, 0 -> 1"));
+        Serial.println(F("  ;V,<name>,INC[,n]     Add n (default 1)"));
+        Serial.println(F("  ;V,<name>,DEC[,n]     Subtract n (default 1)"));
+        Serial.println(F("\nManage -- ?VAR:"));
+        Serial.println(F("  ?VAR,LIST             List all variables and values"));
+        Serial.println(F("  ?VAR,SET,<name>,<v>   Create/update a variable (absolute value)"));
+        Serial.println(F("  ?VAR,GET,<name>       Show one variable"));
+        Serial.println(F("  ?VAR,CLEAR,<name>     Delete one variable"));
+        Serial.println(F("  ?VAR,CLEAR,ALL        Delete all variables"));
+        Serial.println(F("  (creating: ?VAR,SET or ;V both create on first use)"));
+        Serial.println(F("\nConditional -- IF (gates the NEXT delimited command):"));
+        Serial.println(F("  IF,<name><op><int>             op = =  !=  <  >  <=  >="));
+        Serial.println(F("  IF,<cond>,AND|OR,<cond>,...    left-to-right, no parentheses"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ;V,domeanimations,0            - disable a flag"));
+        Serial.println(F("  ;V,volume,INC,5                - volume += 5"));
+        Serial.println(F("  IF,domeanimations=1^;M1,23     - run M1,23 only if flag is 1"));
+        Serial.println(F("  IF,mode>2,AND,armed=1^;PP100   - compound condition"));
+        Serial.println(F("  IF,flag=1^;t500^;M1,23         - if flag, wait 500ms, then run"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - IF gates its next command; ;t delays between them are fine"));
+        Serial.println(F("    (a false IF skips the delay AND the command)."));
+        Serial.println(F("  - Evaluated when the sequence is invoked, not after delays."));
+        Serial.println(F("  - Set & test in SEPARATE sequences: ;V,x,1^IF,x=1^cmd reads"));
+        Serial.println(F("    the OLD value (the ;V hasn't run yet at evaluate time)."));
+        Serial.println(F("  - Chained IFs AND together (IF,a=1^IF,b=2^cmd); compound IF is clearer."));
+        Serial.println(F("  - IF can't ride inside ;t or ;w payloads — gate the whole"));
+        Serial.println(F("    token instead: IF,cond^;t500^cmd / IF,cond^;w2,cmd"));
+        Serial.println(F("  - Variables are saved to NVS and included in ?backup."));
+
+    // ================================================================
     } else if (c == "SEQ") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -739,6 +849,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?KYBER          Configure Kyber RC integration"));
         Serial.println(F("    ?MAESTRO        Configure Maestro servo controller(s)"));
         Serial.println(F("    ?MP3            Configure SparkFun MP3 Trigger v2.x"));
+        Serial.println(F("    ?HCR            Configure Human-Cyborg Relations Vocalizer"));
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
@@ -746,6 +857,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?SEQ,SAVE       Save a named command sequence"));
         Serial.println(F("    ?SEQ,LIST       List all saved sequences"));
         Serial.println(F("    ;Ckey           Run a saved sequence"));
+        Serial.println(F("\n  VARIABLES & LOGIC:"));
+        Serial.println(F("    ?VAR            Manage persistent variables (LIST/GET/CLEAR)"));
+        Serial.println(F("    ;V,name,value   Set/toggle/inc/dec a variable"));
+        Serial.println(F("    IF,name=value   Gate the next command on variable state"));
         Serial.println(F("\n  ROUTING COMMANDS:"));
         Serial.println(F("    ;Sx,msg         Send msg to serial port x"));
         Serial.println(F("    ;Wx,msg         Send msg to WCB x via ESP-NOW"));

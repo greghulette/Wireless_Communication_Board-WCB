@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.0.4_191016RMAY2026                                  *****////
+///*****                                          Version 6.1.0_172245RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -45,6 +45,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 ///*****                      https://github.com/greghulette/Wireless_Communication_Board-WCB/wiki              *****////
 ///*****                                                                                                        *****////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 
 /*
 ▄▄▄▄  ▄▄▄  ▄▄▄▄   ▄▄▄▄   ▄▄▄▄▄▄▄   ▄▄▄    ▄▄▄ ▄▄▄▄▄ ▄▄▄    ▄▄▄  ▄▄▄▄▄▄▄      ▄▄▄  ▄▄▄  ▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄      ▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄   ▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄  
@@ -84,10 +85,15 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_Storage.h"
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
+#include "WCB_HCR.h"
+#include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
+#include "esp_timer.h"   // one-shot boot-guard timer (cold-boot auto-recovery)
+#include "esp_ota_ops.h" // esp_ota_get_bootloader_description (boot banner)
+#include "rom/rtc.h"     // rtc_get_reset_reason (low-level per-core boot telemetry)
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
@@ -109,12 +115,17 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #define WCB_TARGET_BROADCAST  0   // Target ID: broadcast to all WCBs
 #define WCB_TARGET_RAW_SERIAL 97  // Target ID: raw serial port mapping packets (formerly 8)
 #define WCB_TARGET_KYBER      98  // Target ID: Kyber bridge packets (formerly 9)
-#define WCB_SPECIAL_PEER_ID   20  // Reserved peer ID for future special peer use
 #endif
+
+// Special peer ID (NaviCore) — runtime-configurable via ?SPECIAL,ON,<id> (default 20).
+// Kept OUTSIDE the #ifndef guard above: that guard is skipped whenever MAX_WCB_COUNT is
+// already defined (via WCB_Storage.h), which would drop this definition and break linking.
+uint8_t WCB_SPECIAL_PEER_ID = 20;
 
 // ============================= Global Variables =============================
 // Number of WCB boards in the system
 int WCB_Number = 1;                                                 // Default to WCB1.  Change to match your setup here or via command line
+String wcb_alias = "";                                              // Friendly per-WCB name (e.g. "Body"); set via ?ALIAS,<text>; ≤24 chars; "" = unset
 int Default_WCB_Quantity = 1;                                       // Default setting.  Change to match your setup here or via command line
 
 // Special peer: when enabled, WCB_SPECIAL_PEER_ID is always registered as a peer
@@ -138,7 +149,7 @@ char CommandCharacter = ';';                                        // Default s
 
 bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
-bool Kyber_Remote = false;  // this tracks if the Kyber is plugged into this board directly
+bool Maestro_Remote = false;  // board hosts a Maestro driven remotely (Kyber/NaviCore elsewhere): accepts Pololu/Maestro packets over the ESP-NOW mesh and relays to the local Maestro. Set by ?MAESTRO,REMOTE (alias: ?KYBER,REMOTE).
 String Kyber_Location;
 int kyberLocalPort = 0;      // serial port number Kyber is physically connected to (0 = not configured)
 
@@ -152,7 +163,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.0.4_191016RMAY2026";
+String SoftwareVersion = "6.1.0_172245RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -190,8 +201,11 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
 // Remote Management Packet Types
-#define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target
+#define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
+#define PACKET_TYPE_MGMT_FRAG_UNICAST 5  // chunk sent DIRECTLY by a WCB_Client
+                                         // (1.3.1+) — reassembled command keeps
+                                         // unicast semantics (no re-broadcast)
 #define PACKET_TYPE_CONFIG_REQ  5   // relay → target: request current config
 #define PACKET_TYPE_CONFIG_FRAG 6   // target → relay: config response fragment
 #define PACKET_TYPE_STATS_REQ   7   // relay → target: request ESP-NOW stats
@@ -207,6 +221,8 @@ bool debugMGMT = false;         // remote management protocol — off by default
 bool debugRawSerial = false;    // raw serial mapping — logs byte-level traffic in/out
 // debugRaw consolidated into debugMaestro
 
+bool debugHCR = false;          // HCR command/status debug — off by default
+
 // ETM Settings (NVS stored)
 bool debugETM = false;
 bool etmEnabled = true;   // NVS default is also true — overwritten at boot by loadETMSettings()
@@ -218,6 +234,142 @@ int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
 bool etmChecksumEnabled = true;    // ETM packet checksum verification (on by default)
 bool etmCharDebugWasSaved = false;   // was debugETM on before char test started
+
+// ── RC-Controller JSON-relay subscription ────────────────────────────────────
+// rc_telemetry.h on the RC broadcasts JSON heartbeats / channels / triggers
+// over the WCB network.  This bridge forwards them to USB Serial so a
+// browser-side config tool can read them via Web Serial.  But broadcasting
+// to USB unconditionally spams anyone tethered to the bridge for OTHER
+// reasons (Direct USB to a different prop, ?CS configuration, etc).
+//
+// Solution: only relay JSON when a host is actively using this bridge as a
+// WCB transport.  Receiving any ";w<id>,<cmd>" from USB pushes this timer
+// 20 s into the future; the JSON passthrough only fires while now < this
+// deadline.  Config tool's Via-WCB keep-alive PING (every 10 s) keeps it
+// hot; Direct-USB users never send ;w so they never see relay output.
+//
+// Sentinel: 0 means "never subscribed".  This matters because of millis()
+// wraparound — if the deadline is left at 0 and millis() exceeds INT32_MAX
+// (24.85 days uptime), the signed-cast comparison below would
+// spuriously flip true and start relaying without a host.  Always guard
+// the comparison with a `!= 0` check.
+//
+// volatile: written on Core 1 (processWCBMessage in serialCommandTask) and
+// read on Core 0 (rcJsonRelaySubscribed() in the ESP-NOW receive callback).
+// Aligned 32-bit access is atomic on Xtensa, so volatile (no caching/hoist)
+// is sufficient — no queue/mutex needed for this single scalar.
+volatile uint32_t rcJsonRelaySubscribedUntilMs = 0;
+
+// Helper for the "relay is currently subscribed" check.  Uses the signed-
+// difference trick so it survives millis() wraparound CORRECTLY: while
+// a real subscription is active (`deadline != 0`), the cast-compare
+// detects the negative delta as "deadline still in the future".  When
+// `deadline == 0` we short-circuit to false — see comment above.
+static inline bool rcJsonRelaySubscribed() {
+  if (rcJsonRelaySubscribedUntilMs == 0) return false;
+  return (int32_t)(millis() - rcJsonRelaySubscribedUntilMs) < 0;
+}
+
+// ── JSON relay queue (cross-core Serial output serialization) ────────────────
+// RC-Controller broadcasts arrive in the ESP-NOW receive callback, which
+// runs on the WiFi task (Core 0).  The main loop on Core 1 also writes to
+// Serial (boot logs, "Sending Unicast..." debug, etc).  ESP32's Serial
+// (HWCDC or UART) is NOT atomic across cores — concurrent writes can
+// interleave at byte granularity, producing garbled JSON that the config
+// tool's web-serial parser can't process.  Observed symptom: occasional
+// `<{"type":"rc_ch"...}Sending Unicast...` concatenated lines.
+//
+// Fix: never call Serial.println(etmCmd) from the WiFi-task callback.
+// Instead, push the JSON line into a FreeRTOS queue, and drain the queue
+// from the main loop (Core 1) where it can write without contention.
+//
+// Sized to comfortably exceed a 40-fragment GET_CONFIG burst PLUS the RC's
+// concurrent rc_hb / rc_ch telemetry that may interleave with it.
+// 64 × 220 = ~14 KB heap — acceptable on the ESP32, and the extra headroom
+// over the bare 40-fragment burst is what keeps a config pull from dropping
+// a fragment if loop() stalls briefly (e.g. on an NVS commit).
+constexpr size_t RC_JSON_QUEUE_SLOTS = 64;
+constexpr size_t RC_JSON_MAX_LEN     = 220;
+struct RcJsonRelaySlot {
+  char buf[RC_JSON_MAX_LEN];
+};
+QueueHandle_t rcJsonRelayQueue = nullptr;
+// Diagnostic: counts JSON lines dropped because the relay queue was full.
+// A silent drop makes a browser config-pull time out with no explanation;
+// surfacing the count turns that into a diagnosable event.
+volatile uint32_t rcJsonRelayDrops = 0;
+
+// Drains the relay queue to Serial.  Safe to call frequently from the main
+// loop; runs in bounded time (drains whatever fits in one swing, returns
+// immediately if empty).
+static inline void drainRcJsonRelay() {
+  if (!rcJsonRelayQueue) return;
+  RcJsonRelaySlot slot;
+  while (xQueueReceive(rcJsonRelayQueue, &slot, 0) == pdTRUE) {
+    Serial.println(slot.buf);
+  }
+}
+
+// Pushes a JSON line into the relay queue from the ESP-NOW callback.
+// Non-blocking (0 timeout) — if the queue is full, the line is dropped
+// rather than blocking the WiFi task.  Dropping is preferable to blocking
+// because the WiFi task can't service incoming packets while blocked.
+static inline void enqueueRcJsonRelay(const String& jsonLine) {
+  if (!rcJsonRelayQueue) return;
+  RcJsonRelaySlot slot;
+  strncpy(slot.buf, jsonLine.c_str(), sizeof(slot.buf) - 1);
+  slot.buf[sizeof(slot.buf) - 1] = '\0';
+  // Non-blocking (0 timeout): a full queue drops the line rather than
+  // blocking the WiFi task.  But count + log the drop — a dropped CONFIG
+  // fragment silently fails the browser's reassembly, so we never want this
+  // to be invisible.  (Serial.printf is safe here: drops are rare and this
+  // is the exceptional path, not the per-packet hot path.)
+  if (xQueueSend(rcJsonRelayQueue, &slot, 0) != pdTRUE) {
+    rcJsonRelayDrops++;
+    Serial.printf("[RCBRG] relay queue FULL — dropped a JSON line (total drops=%lu)\n",
+                  (unsigned long)rcJsonRelayDrops);
+  }
+}
+
+// ── Pending-timer-chain queue ─────────────────────────────────────────────
+// parseCommandGroups() writes the commandGroups std::vector AND mutates
+// currentGroupIndex / commandTimerModeEnabled / waitingForNextGroup. It
+// must NOT be called from the ESP-NOW WiFi-task callback because loop()
+// concurrently iterates the same vector via processCommandGroups() — a
+// vector resize concurrent with iteration is undefined behavior.
+//
+// Same pattern as rcJsonRelayQueue above: the callback enqueues the raw
+// chain string; loop() drains and calls parseCommandGroups() for each.
+// The local-serial entry point and SEQ playback both run inside loop()
+// already, so they keep calling parseCommandGroups() directly.
+//
+// Slot size 220 covers the 200-byte ESP-NOW structCommand plus any CRC
+// suffix that's already been stripped. 8 slots ≈ 1.76 KB heap.
+constexpr size_t TIMER_CHAIN_QUEUE_SLOTS = 8;
+constexpr size_t TIMER_CHAIN_MAX_LEN     = 220;
+struct PendingTimerChainSlot {
+  char buf[TIMER_CHAIN_MAX_LEN];
+};
+QueueHandle_t pendingTimerChainQueue = nullptr;
+
+// Drain on loop() context only. Each parseCommandGroups() call clobbers
+// the previous chain's state (same as before the queue) — if you want
+// multiple chains in flight you'd need a different scheduler.
+static inline void drainPendingTimerChains() {
+  if (!pendingTimerChainQueue) return;
+  PendingTimerChainSlot slot;
+  while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
+    parseCommandGroups(String(slot.buf));
+  }
+}
+
+static inline void enqueuePendingTimerChain(const String& chain) {
+  if (!pendingTimerChainQueue) return;
+  PendingTimerChainSlot slot;
+  strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
+  slot.buf[sizeof(slot.buf) - 1] = '\0';
+  xQueueSend(pendingTimerChainQueue, &slot, 0);
+}
 // ETM Board Status Table
 struct BoardStatus {
   bool online;
@@ -521,6 +673,8 @@ typedef struct __attribute__((packed)) {
 
 struct MgmtSession {
   bool     active;
+  bool     unicastOrigin;   // true = FRAG_UNICAST (WCB_Client): keep the
+                            // reassembled command target-local (no re-broadcast)
   uint16_t sessionId;
   uint8_t  totalChunks;
   uint16_t receivedMask;    // bitmask — bit N set when chunk N received
@@ -1345,12 +1499,22 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       String checksumCmd = data.substring(chkStart, chkEnd);
       String providedChecksum = checksumCmd.substring(4); // Skip "?CHK"
       providedChecksum.toUpperCase();
-      
-      // Get data without checksum for verification
+      providedChecksum.trim();
+      // LEGACY COMPAT: backups written by firmware <= 6.0.x used String(crc,HEX),
+      // which strips leading zeros (~1 in 16 backups are shorter than 8 chars).
+      // Left-pad to 8 so those backups still verify against the %08X form below.
+      while (providedChecksum.length() < 8) providedChecksum = "0" + providedChecksum;
+
+      // Get data without checksum for verification.
+      // Format as zero-padded 8 hex chars (%08X) — must match printBackupConfig's
+      // writer (WCB.ino:~4707) and the legacy verifier at WCB.ino:5121.
+      // The old String(x,HEX) form stripped leading zeros, so any CRC with a
+      // leading zero nibble failed verification.
       String dataWithoutChecksum = data.substring(0, chkPos);
       uint32_t calculatedChecksum = calculateCRC32(dataWithoutChecksum);
-      String calculatedChecksumStr = String(calculatedChecksum, HEX);
-      calculatedChecksumStr.toUpperCase();
+      char calcCrcBuf[9];
+      snprintf(calcCrcBuf, sizeof(calcCrcBuf), "%08X", calculatedChecksum);
+      String calculatedChecksumStr = String(calcCrcBuf);
       
       if (providedChecksum.equals(calculatedChecksumStr)) {
         Serial.println("✓ Command checksum VERIFIED - Configuration is intact");
@@ -1369,7 +1533,16 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     }
   }
   
-  // Normal parsing with special handling for ?CS commands
+  // Normal parsing with special handling for ?CS commands.
+  //
+  // IF gating (chain-local, resolved at invoke time): when a standalone
+  // "IF,<cond>" token evaluates false, the NEXT actionable token in THIS
+  // chain is consumed instead of enqueued. State lives on the stack — it
+  // cannot race across sources, queue drains, or timer groups the way the
+  // old global flag did. Note: IF tokens inside a ?SEQ,SAVE value never
+  // reach this logic (the SEQ,SAVE branch swallows its whole value), so
+  // stored sequences keep their IFs verbatim and evaluate them at recall.
+  bool ifSkipping = false;
   int startIdx = 0;
   while (startIdx < data.length()) {
     // Check if we're at the start of a ?CS command
@@ -1390,9 +1563,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       csCommand.trim();
       
       if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
-        enqueueCommand(csCommand, sourceID);
+        if (!ifGateConsumeToken(csCommand, ifSkipping)) {
+          enqueueCommand(csCommand, sourceID);
+        }
       }
-      
+
       // Move past this command
       startIdx = endPos;
       if (startIdx < data.length() && data.charAt(startIdx) == commandDelimiter) {
@@ -1424,7 +1599,9 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String seqSaveCmd = data.substring(startIdx, endPos);
         seqSaveCmd.trim();
         if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(seqSaveCmd, sourceID);
+          if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
+            enqueueCommand(seqSaveCmd, sourceID);
+          }
         }
         startIdx = endPos;
         if (startIdx < (int)data.length() && data.charAt(startIdx) == commandDelimiter) {
@@ -1443,7 +1620,9 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(mgmtCmd, sourceID);
+          if (!ifGateConsumeToken(mgmtCmd, ifSkipping)) {
+            enqueueCommand(mgmtCmd, sourceID);
+          }
         }
         break;  // ?MGMT,... is always the final command in a serial line
       }
@@ -1451,27 +1630,22 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
 
     // Normal command processing (not ?CS, ?SEQ,SAVE, or ?MGMT,...)
     int delimPos = data.indexOf(commandDelimiter, startIdx);
-    if (delimPos == -1) {
-      String singleCmd = data.substring(startIdx);
+    {
+      String singleCmd = (delimPos == -1) ? data.substring(startIdx)
+                                          : data.substring(startIdx, delimPos);
       singleCmd.trim();
       if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
-        } else {
+        if (singleCmd.startsWith(commentDelimiter)) {
           Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
+        } else if (ifGateConsumeToken(singleCmd, ifSkipping)) {
+          // Consumed by the IF gate (the IF itself, a gated command, or a
+          // pure ;t delay belonging to a gated command). Shared semantics
+          // live in ifGateConsumeToken — see WCB_Variables.cpp.
+        } else {
+          enqueueCommand(singleCmd, sourceID);
         }
       }
-      break;
-    } else {
-      String singleCmd = data.substring(startIdx, delimPos);
-      singleCmd.trim();
-      if (!singleCmd.isEmpty()) {
-        if (!singleCmd.startsWith(commentDelimiter)) {
-          enqueueCommand(singleCmd, sourceID);
-        } else {
-          Serial.printf("Ignored chain command: %s\n", singleCmd.c_str());
-        }
-      }
+      if (delimPos == -1) break;
       startIdx = delimPos + 1;
     }
   }
@@ -1980,8 +2154,16 @@ void handleMgmtPacket(const uint8_t *data) {
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
 
+  // Dispatch by packetType (the size-based router can't): FRAG (3) = wizard-
+  // relay origin, FRAG_UNICAST (5) = WCB_Client direct unicast. Anything else
+  // sharing this struct size (e.g. a future MGMT_ACK) must NOT be consumed as
+  // a chunk — it would clobber an in-progress session.
+  if (pkt.packetType != PACKET_TYPE_MGMT_FRAG &&
+      pkt.packetType != PACKET_TYPE_MGMT_FRAG_UNICAST) return;
+
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
 
   // Initialise the recent-session ring buffer on first use (avoids false matches
@@ -2002,15 +2184,29 @@ void handleMgmtPacket(const uint8_t *data) {
     }
   }
 
-  // Start a new session if needed
+  // Start a new session if needed.
+  // BUSY GUARD: a different sessionId may only take over when the active
+  // session has gone stale (>2 s without a chunk). Without this, two
+  // concurrent fragmented senders (e.g. a WCB_Client sketch + a Wizard push)
+  // memset each other's progress chunk-by-chunk and BOTH commands die
+  // silently. With the guard, the first session completes (chunks arrive ms
+  // apart) and the loser's chunks are rejected with a log.
   if (!mgmtSession.active || mgmtSession.sessionId != pkt.sessionId) {
+    if (mgmtSession.active &&
+        (millis() - mgmtSession.lastActivityMs) < 2000UL) {
+      if (debugMGMT) Serial.printf("[MGMT] Session %04X busy — rejecting chunk from session %04X\n",
+                                   mgmtSession.sessionId, pkt.sessionId);
+      return;
+    }
     memset(&mgmtSession, 0, sizeof(mgmtSession));
     mgmtSession.sessionId      = pkt.sessionId;
     mgmtSession.totalChunks    = pkt.totalChunks;
+    mgmtSession.unicastOrigin  = (pkt.packetType == PACKET_TYPE_MGMT_FRAG_UNICAST);
     mgmtSession.lastActivityMs = millis();   // stamp BEFORE active=true so checkMgmtTimeout() never sees active+zero timestamp
     mgmtSession.active         = true;       // "go live" flag — set last
-    if (debugMGMT) Serial.printf("[MGMT] New session %04X — expecting %d chunk(s)\n",
-                                 pkt.sessionId, pkt.totalChunks);
+    if (debugMGMT) Serial.printf("[MGMT] New session %04X — expecting %d chunk(s)%s\n",
+                                 pkt.sessionId, pkt.totalChunks,
+                                 mgmtSession.unicastOrigin ? " (client unicast)" : "");
   }
 
   // Store chunk if not already received
@@ -2037,10 +2233,17 @@ void handleMgmtPacket(const uint8_t *data) {
     mgmtRecentIds[mgmtRecentHead] = pkt.sessionId;
     mgmtRecentHead = (mgmtRecentHead + 1) % MGMT_RECENT_COUNT;
 
+    bool unicastOrigin = mgmtSession.unicastOrigin;  // capture before the memset
     memset(&mgmtSession, 0, sizeof(mgmtSession));   // clear before executing (reboot-safe)
-    // MGMT commands originate from the wizard, not from an ESP-NOW forwarding loop.
-    // Reset the loop-avoidance flag so the command can broadcast via ESP-NOW normally.
-    lastReceivedViaESPNOW = false;
+    // Origin decides re-broadcast semantics:
+    //  - Wizard-relay sessions (FRAG, type 3): the command originates from the
+    //    config tool, not an ESP-NOW forwarding loop — reset the flag so the
+    //    command can broadcast to peers normally (unchanged behavior).
+    //  - Client unicast sessions (FRAG_UNICAST, type 5): the sender addressed
+    //    THIS board. Keep the flag set so broadcastable tokens stay local —
+    //    otherwise a WCB_Client unicast would silently become a network-wide
+    //    broadcast the moment the command crossed the fragmentation threshold.
+    lastReceivedViaESPNOW = unicastOrigin;
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
@@ -2090,6 +2293,7 @@ String buildConfigString() {
   sprintf(hexBuffer, "%02X", umac_oct2); append("MAC,2," + String(hexBuffer));
   sprintf(hexBuffer, "%02X", umac_oct3); append("MAC,3," + String(hexBuffer));
   append("WCB,"  + String(WCB_Number));
+  if (wcb_alias.length() > 0) append("ALIAS," + wcb_alias);
   append("WCBQ," + String(Default_WCB_Quantity));
   append("EPASS," + String(espnowPassword));
 
@@ -2150,8 +2354,8 @@ String buildConfigString() {
                   ":" + String(baud);
     }
     append(kyberCmd);
-  } else if (Kyber_Remote) {
-    append("KYBER,REMOTE");
+  } else if (Maestro_Remote) {
+    append("MAESTRO,REMOTE");
   } else {
     append("KYBER,CLEAR");
   }
@@ -2161,6 +2365,13 @@ String buildConfigString() {
 
   // MP3 Trigger settings
   { String dummy; printMP3Backup(dummy, out, '^'); }
+
+  // HCR settings
+  { String dummy; printHCRBackup(dummy, out, '^'); }
+
+  // User variables (?VAR,SET,name,value per variable — webtool grammar is
+  // always the fixed '^?' form, so the default defSep/defFunc are correct here)
+  { String dummy; printVariablesBackup(dummy, out, '^'); }
 
   // ETM settings
   append(etmEnabled ? "ETM,ON" : "ETM,OFF");
@@ -2210,10 +2421,12 @@ String buildConfigString() {
     append(cmd);
   }
 
-  // Checksum
+  // Checksum (zero-padded %08X to match printBackupConfig and the verifiers
+  // at WCB.ino:~1471 and :~5121 — see fix #6 comment there).
   uint32_t checksum = calculateCRC32(out);
-  String chkCmd = "?CHK" + String(checksum, HEX);
-  chkCmd.toUpperCase();
+  char chkBuf[9];
+  snprintf(chkBuf, sizeof(chkBuf), "%08X", checksum);
+  String chkCmd = "?CHK" + String(chkBuf);
   out += "^" + chkCmd;
 
   // Prepend software version so the Wizard can read it from remote (MGMT) pulls.
@@ -2564,13 +2777,20 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // Maestro script triggers are intentionally sent without ETM (fire-and-forget).
     // Allow them through regardless of local ETM mode.
     bool isMaestroPacket = (peek.structCommand[1] == 'M' || peek.structCommand[1] == 'm');
+    // RC-Controller JSON bridge — RC firmware's rcTelemetry::tick() and
+    // emit* helpers broadcast JSON over WCBClient WITHOUT ETM wrapping;
+    // they're fire-and-forget telemetry (rc_hb / rc_ch / rc_trig / rc_mode)
+    // that the config tool reads via the bridge.  Whitelist '{'-prefixed
+    // payloads so they reach the normal RECEIVE PATH's JSON passthrough
+    // below instead of being dropped by the ETM-mismatch filter.
+    bool isRcJsonPacket  = (peek.structCommand[0] == '{');
 
-    if (!isRawPacket && !isPWMPacket && !isMaestroPacket) {
+    if (!isRawPacket && !isPWMPacket && !isMaestroPacket && !isRcJsonPacket) {
       if (debugEnabled || debugETM)
         Serial.println("[ETM] ⚠️  Dropped non-ETM packet — ETM is ON here but sender has ETM OFF. Enable ETM on all boards.");
       return;
     }
-    // Fall through to normal receive path for raw, PWM, and Maestro packets
+    // Fall through to normal receive path for raw, PWM, Maestro, and RC JSON.
   }
 
   // ---- ETM RECEIVE PATH ----
@@ -2580,28 +2800,50 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     etmReceived.structPassword[sizeof(etmReceived.structPassword) - 1] = '\0';
 
     if (String(etmReceived.structPassword) != String(espnowPassword)) return;
-    if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
+    // MAC-octet check was redundant here — already enforced at the top of
+    // espNowReceiveCallback (line ~2600).  Removed to avoid duplicate work.
 
     int senderWCB = atoi(etmReceived.structSenderID);
     int targetWCB = atoi(etmReceived.structTargetID);
 
-    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
-      int senderIdx = senderWCB - 1;
-      if (senderIdx >= 0 && senderWCB != WCB_Number &&
-          (senderIdx < Default_WCB_Quantity ||
-           (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID))) {
-        bool wasOffline = !boardTable[senderIdx].online;
-        boardTable[senderIdx].online = true;
-        boardTable[senderIdx].lastSeenMs = millis();
-        if (wasOffline) {
-          Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
-                        senderWCB,
-                        info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                        info->src_addr[3], info->src_addr[4], info->src_addr[5]);
-        } else if (debugETM) {
-          Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
-        }
+    // ── Validate sender ONCE for all packet types ────────────────────────
+    // Previously the bounds check only existed in the COMMAND branch (and
+    // ran AFTER etmSendAck), so:
+    //   • ACK path could index pendingAck / etmStats*[] with a noise-/
+    //     attacker-supplied senderWCB
+    //   • COMMAND path sent a spurious ACK to a non-existent peer before
+    //     dropping the packet
+    // Validate up-front so every downstream branch is safe. We allow
+    // WCB_SPECIAL_PEER_ID for HEARTBEAT only; ACK/COMMAND are gated by
+    // their own logic later.
+    bool isSpecialPeer = (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID);
+    int  senderIdx     = senderWCB - 1;
+    bool senderValid   = (senderWCB >= 1 && senderWCB <= MAX_WCB_COUNT &&
+                          senderIdx  >= 0 && senderIdx  <  MAX_WCB_COUNT &&
+                          senderWCB != WCB_Number);
+    if (!senderValid) {
+      if (debugETM) Serial.printf("[ETM] Dropped packet from invalid senderWCB=%d\n", senderWCB);
+      return;
+    }
+
+    // Refresh the sender's online presence on EVERY valid received ETM
+    // packet (not just heartbeats). Otherwise if heartbeats are dropped
+    // but commands flow, etmAddToPendingTable would skip the peer for
+    // ACK-pending tracking, leaving our unicast sends to it un-retried.
+    if (senderIdx < Default_WCB_Quantity || isSpecialPeer) {
+      bool wasOffline = !boardTable[senderIdx].online;
+      boardTable[senderIdx].online     = true;
+      boardTable[senderIdx].lastSeenMs = millis();
+      if (wasOffline) {
+        Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
+                      senderWCB,
+                      info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                      info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
+    }
+
+    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
+      if (debugETM) Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
       return;
     }
 
@@ -2615,12 +2857,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
         if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-        // Always ACK - even duplicates (so sender stops retrying)
+        // Always ACK - even duplicates (so sender stops retrying). Safe now
+        // because senderWCB was validated above.
         etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
-        // Duplicate detection
-        if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
-        int senderIdx = senderWCB - 1;
+        // Duplicate detection (senderIdx already validated above).
         bool isDuplicate = false;
         if (etmLastReceivedSeqValid[senderIdx] &&
             etmLastReceivedSeq[senderIdx] == etmReceived.structSequenceNumber) {
@@ -2679,15 +2920,79 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         }
 
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
-            // Use parseCommandsAndEnqueue (not enqueueCommand) so that wizard-relayed
-            // payloads containing chained commands (e.g. "?LABEL,S2,x^?BCAST,OUT,S2,OFF^...")
-            // are properly split on the command delimiter before execution.
-            // enqueueCommand would queue the whole string as one item, causing the first
-            // command's value parser to consume the remainder as part of its argument
-            // (e.g. LABEL saves "x^?BCAST,..." verbatim to NVS).
-            // parseCommandsAndEnqueue handles ?CS, ?SEQ,SAVE, and ?MGMT boundaries
-            // correctly, so it is safe to use here for all ETM-delivered payloads.
-            parseCommandsAndEnqueue(etmCmd, 0);
+            // ── RC-Controller bridge (JSON passthrough) ─────────────────────
+            // RC-Controller firmware (rc_telemetry.h) broadcasts JSON
+            // telemetry (rc_hb / rc_ch / rc_trig / rc_mode / PONG) over the
+            // ESP-NOW network so config_tool/index.html running in a browser
+            // can manage remote RCs through this USB-tethered WCB.  Any
+            // payload that starts with '{' is JSON and must NOT go through
+            // the WCB ;-command parser — just print it to USB Serial so the
+            // config tool's Web Serial reader picks it up.  Outbound
+            // (config tool → WCB → RC) rides the existing ;<rcId>,<json>
+            // syntax which the standard command path already relays.
+            if (etmCmd.length() > 0 && etmCmd[0] == '{') {
+                // Only relay if a USB host has been actively using us as a
+                // WCB bridge within the last ~20 s (see rcJsonRelay...
+                // declaration above).  Without this gate, the RC's 0.5 Hz
+                // rc_hb spams the serial port of anyone tethered for any
+                // other reason — confusing and wasteful.  We still consume
+                // the packet (no fall-through to the WCB command parser);
+                // we just don't echo it to USB.
+                //
+                // Note: we push to the relay queue rather than calling
+                // Serial.println here directly — we're on the WiFi task
+                // (Core 0) and Serial isn't atomic across cores.  The
+                // main loop drains the queue safely on Core 1.
+                if (rcJsonRelaySubscribed()) {
+                    enqueueRcJsonRelay(etmCmd);
+                    // Keep the subscription hot for the duration of an
+                    // in-flight transfer.  A multi-fragment CONFIG response
+                    // can take >1 s (ETM ACK round-trips + retries); if the
+                    // 20 s window happened to be near its edge, the tail
+                    // fragments would be dropped at the gate.  Relaying a
+                    // fragment is itself proof a host is actively pulling,
+                    // so push the deadline forward.
+                    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+                }
+                colorWipeStatus("ES", blue, 10);
+                return;
+            }
+
+            // General-debug visibility: mirror what processIncomingSerial prints
+            // for locally-typed commands, so ?DEBUG,ON shows ETM-received
+            // commands without needing the more verbose ?DEBUG,ETM,ON.
+            if (debugEnabled)
+                Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+
+            // Mirror the local-serial dispatch (WCB.ino:4863) so ETM-received
+            // chains behave identically to locally-typed ones:
+            //   - Timer chains ("...^;t<ms>^..." / "...^;t<ms>,cmd^...") must
+            //     go through parseCommandGroups so ;t segments become inter-
+            //     group delays rather than being enqueued as bogus commands
+            //     (which previously surfaced as "Invalid Serial Command").
+            //     The !startsWith(LFI) guard matches the local-serial path:
+            //     ? config commands are never timer-parsed.
+            //   - Non-timer payloads still go through parseCommandsAndEnqueue,
+            //     which properly splits on the command delimiter and handles
+            //     ?CS / ?SEQ,SAVE / ?MGMT boundaries (the reason this branch
+            //     used parseCommandsAndEnqueue instead of enqueueCommand to
+            //     begin with — see history below).
+            //   Reference: WCB_Storage.cpp:476 SEQ playback uses the same
+            //   gate, and is the canonical pattern.
+            //
+            // Historical: parseCommandsAndEnqueue replaced a raw enqueueCommand
+            // here so wizard-relayed payloads like "?LABEL,S2,x^?BCAST,OUT,S2,OFF^..."
+            // would split on the delimiter (otherwise LABEL saved the whole
+            // tail "x^?BCAST,..." verbatim to NVS). That fix is preserved by
+            // the else branch below.
+            if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
+                // parseCommandGroups mutates a std::vector iterated by loop();
+                // defer to loop() via the pendingTimerChainQueue (see comment
+                // at the queue's declaration).
+                enqueuePendingTimerChain(etmCmd);
+            } else {
+                parseCommandsAndEnqueue(etmCmd, 0);
+            }
         }
         colorWipeStatus("ES", blue, 10);
     }
@@ -2723,6 +3028,25 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t destPort = received.structCommand[1];
     size_t chunkLen  = (uint8_t)received.structCommand[2] | ((uint8_t)received.structCommand[3] << 8);
 
+    // Bounds check the wire-supplied length BEFORE any read/write past
+    // structCommand+4. structCommand is 200 bytes; data starts at +4, so the
+    // max valid chunkLen is 196. The Kyber-broadcast (just below) and
+    // raw-serial paths have their own equivalent guards (180 / 177). Without
+    // this check, a malformed packet with chunkLen >= 197 reads past the
+    // local struct copy into adjacent stack memory.
+    if (chunkLen == 0 || chunkLen > 196) {
+      if (debugMaestro || debugEnabled)
+        Serial.printf("[MAESTRO] Targeted Kyber rejected from WCB%d: bad chunkLen=%u\n",
+                      senderWCB, (unsigned)chunkLen);
+      return;
+    }
+    if (destPort < 1 || destPort > 5) {
+      if (debugMaestro || debugEnabled)
+        Serial.printf("[MAESTRO] Targeted Kyber rejected from WCB%d: bad destPort=%u\n",
+                      senderWCB, (unsigned)destPort);
+      return;
+    }
+
     if (debugMaestro) {
       uint8_t *dataPtr = (uint8_t *)(received.structCommand + 4);
       Serial.printf("[MAESTRO] WCB%d → WCB%d Serial%d  %d byte%s: ",
@@ -2733,7 +3057,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Serial.println();
     }
 
-    if (destWCB == WCB_Number && destPort >= 1 && destPort <= 5) {
+    if (destWCB == WCB_Number) {
       Stream &targetSerial = getSerialStream(destPort);
       targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
       targetSerial.flush();
@@ -2769,7 +3093,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
       // Also echo back to the local Kyber port
       if (kyberLocalPort > 0) getSerialStream(kyberLocalPort).write(dataPtr, chunkLen);
-    } else if (Kyber_Remote) {
+    } else if (Maestro_Remote) {
       // Write to every locally configured Maestro port
       bool wroteAny = false;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
@@ -2848,7 +3172,41 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  enqueueCommand(String(received.structCommand), 0);
+  // ── RC-Controller bridge (JSON passthrough, non-ETM path) ───────────────
+  // Mirror of the bridge code in the ETM RECEIVE PATH above — see the
+  // comment there for rationale.  RC-Controllers emit JSON ({"type":"rc_hb",
+  // ...}, {"type":"rc_ch", ...}, etc.); just relay to USB Serial so the
+  // config tool's Web Serial reader sees it, bypassing the WCB ;-command
+  // parser which doesn't understand JSON.  Gated on
+  // rcJsonRelaySubscribedUntilMs so we only spam USB when a host is
+  // actively using us as a WCB bridge (see declaration near top of file).
+  // Uses the relay queue + main-loop drain pattern for cross-core safety.
+  if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
+    if (rcJsonRelaySubscribed()) {
+      enqueueRcJsonRelay(receivedCmd);
+      // Keep the subscription hot during an in-flight transfer — see the
+      // matching comment in the ETM passthrough path above.
+      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+    }
+    colorWipeStatus("ES", blue, 10);
+    return;
+  }
+
+  // Non-ETM fallback path in the same callback. Use the same timer-aware /
+  // delimiter-aware dispatch as the local-serial entry point (WCB.ino:4863)
+  // and the ETM-tracked branch above, so ANY ESP-NOW-delivered payload —
+  // including chained commands and timer chains — behaves identically to a
+  // command typed at the local serial terminal. A raw enqueueCommand here
+  // would queue the whole chain as one item and break ;t<ms> + ^ chains.
+  if (debugEnabled)
+      Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
+  if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
+    // Same race-avoidance as the ETM branch above: defer parseCommandGroups
+    // to loop() via the queue (see pendingTimerChainQueue comment).
+    enqueuePendingTimerChain(receivedCmd);
+  } else {
+    parseCommandsAndEnqueue(receivedCmd, 0);
+  }
   colorWipeStatus("ES", blue, 10);
 }
 void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
@@ -2935,11 +3293,11 @@ void forwardMaestroDataToLocalKyber() {
     while (maestroSerial.available() > 0) {
       uint8_t b = (uint8_t)maestroSerial.read();
       kyberSerial.write(b);
-      if (Kyber_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+      if (Maestro_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
     }
   }
 
-  if (Kyber_Remote && remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
+  if (Maestro_Remote && remoteLen > 0) sendESPNowRaw(remoteBuf, remoteLen);
 }
 
 void forwardMaestroDataToRemoteKyber() {
@@ -2966,6 +3324,20 @@ void forwardMaestroDataToRemoteKyber() {
 //*******************************
 void handleSingleCommand(String cmd, int sourceID) {
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
+
+    // IF gating is resolved at INVOKE time inside the chain splitters
+    // (parseCommandsAndEnqueue / parseCommandGroups) with chain-local state —
+    // there is deliberately no global skip flag here (a global raced across
+    // sources, queue-drain boundaries, and timer groups). If an IF token
+    // still reaches the executor (a direct enqueue path), drop it so the raw
+    // "IF,..." text is never broadcast out the serial ports as data.
+    {
+        String u = cmd; u.trim();
+        if (isIfChainToken(u)) {
+            Serial.printf("[IF] '%s' reached the executor with nothing to gate — dropped\n", u.c_str());
+            return;
+        }
+    }
 
     // 0) Fixed webtool bootstrap command — always recognised regardless of
     //    configured LocalFunctionIdentifier.  Allows the config web tool to
@@ -3044,6 +3416,12 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "ETM,OFF") {
             debugETM = false;
             Serial.println("ETM debugging disabled");
+        } else if (argsUpper == "HCR,ON") {
+            debugHCR = true;
+            Serial.println("HCR debugging enabled");
+        } else if (argsUpper == "HCR,OFF") {
+            debugHCR = false;
+            Serial.println("HCR debugging disabled");
         } else if (argsUpper == "MGMT,ON") {
             debugMGMT = true;
             Serial.println("MGMT debugging enabled");
@@ -3364,19 +3742,47 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?ALIAS,<text>  /  ?ALIAS,CLEAR  /  ?ALIAS,LIST ---
+    // Friendly per-WCB name (e.g. "Body" / "Dome"). Saved to NVS,
+    // emitted in the config backup, and shown in the Wizard header
+    // alongside the WCB number. Limited to 24 chars (truncated on save).
+    if (rootUpper == "ALIAS") {
+        String argsTrim = args; argsTrim.trim();
+        String argsUp   = argsTrim; argsUp.toUpperCase();
+        if (argsTrim.length() == 0 || argsUp == "LIST") {
+            if (wcb_alias.length() == 0) Serial.println("Alias: (not set)");
+            else                         Serial.printf("Alias: %s\n", wcb_alias.c_str());
+        } else if (argsUp == "CLEAR") {
+            saveWCBAlias("");
+        } else {
+            saveWCBAlias(argsTrim);
+        }
+        return;
+    }
+
     // --- ?SPECIAL,ON/OFF ---
     // Enables or disables tracking and communication with the special peer (ID 20).
     // When ON: ID 20 is registered as an ESP-NOW peer, its heartbeats are tracked,
     // and it appears in ETM stats. Reboot required to apply peer registration.
     // When OFF: ID 20 is treated as unknown and ignored.
     if (rootUpper == "SPECIAL") {
-        if (argsUpper == "ON") {
+        if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
+            // ?SPECIAL,ON  or  ?SPECIAL,ON,<id>  (NaviCore peer ID; default 20)
+            int ci = argsUpper.indexOf(',');
+            if (ci >= 0) {
+                int newId = argsUpper.substring(ci + 1).toInt();
+                if (newId < 1 || newId > 20) {
+                    Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", newId);
+                    return;
+                }
+                saveSpecialPeerIDToPreferences((uint8_t)newId);
+            }
             saveSpecialPeerPreferences(true);
         } else if (argsUpper == "OFF") {
             saveSpecialPeerPreferences(false);
         } else {
             Serial.printf("Special peer (ID %d) is currently %s.\n"
-                          "Use ?SPECIAL,ON or ?SPECIAL,OFF\n",
+                          "Use ?SPECIAL,ON[,<id>] (1-20) or ?SPECIAL,OFF\n",
                           WCB_SPECIAL_PEER_ID,
                           specialPeerEnabled ? "ENABLED" : "DISABLED");
         }
@@ -3391,6 +3797,12 @@ void processLocalCommand(const String &message) {
             clearAllMaestroConfigs();
         } else if (argsUpper.startsWith("CLEAR,")) {
             clearMaestroByID(args.substring(args.indexOf(',') + 1));
+        } else if (argsUpper == "REMOTE") {
+            // ?MAESTRO,REMOTE — canonical name for "this board's Maestro is driven
+            // remotely (listens for Pololu/Maestro broadcasts over the mesh)".
+            // Same code path as the ?KYBER,REMOTE alias.
+            storeKyberSettings("remote");
+            printKyberSettings();
         } else {
             configureMaestro(args);
         }
@@ -3400,6 +3812,20 @@ void processLocalCommand(const String &message) {
     // --- ?MP3,... ---
     if (rootUpper == "MP3") {
         configureMP3(args);
+        return;
+    }
+
+    // --- ?HCR,... (Human-Cyborg Relations config/query) ---
+    if (rootUpper == "HCR") {
+        configureHCR(args);
+        return;
+    }
+
+    // --- ?VAR,... (user variable management) ---
+    //   ?VAR,LIST | ?VAR,GET,<name> | ?VAR,CLEAR,<name|ALL>
+    //   (set is the runtime command ;V,<name>,<value>; see docs/VARIABLES_DESIGN.md)
+    if (rootUpper == "VAR") {
+        processVarConfig(args);
         return;
     }
 
@@ -3596,6 +4022,12 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("detmon") || message.startsWith("DETMON")) {
         debugETM = true;
         Serial.println("ETM debugging enabled");
+    } else if (message.startsWith("dhcroff") || message.startsWith("DHCROFF")) {
+        debugHCR = false;
+        Serial.println("HCR debugging disabled");
+    } else if (message.startsWith("dhcron") || message.startsWith("DHCRON")) {
+        debugHCR = true;
+        Serial.println("HCR debugging enabled");
     } else if (message.startsWith("lf") || message.startsWith("LF")) {
         updateLocalFunctionIdentifier(message);
     } else if (message.equals("cclear") || message.equals("CCLEAR")) {
@@ -3636,6 +4068,10 @@ void processLocalCommand(const String &message) {
         clearAllMaestroConfigs();
     } else if (message == "maestro_default" || message == "MAESTRO_DEFAULT") {
         clearAllMaestroConfigs();
+    } else if (message.equals("maestro_remote") || message.equals("MAESTRO_REMOTE")) {
+        // Canonical name for the remote-Maestro function (alias: kyber_remote).
+        storeKyberSettings("remote");
+        printKyberSettings();
     } else if (message.startsWith("maestro") || message.startsWith("MAESTRO")) {
         configureMaestro(message.substring(7));
     } else if (message.equals("kyber_local") || message.equals("KYBER_LOCAL") ||
@@ -4166,6 +4602,13 @@ void updateHWVersion(const String &message) {
     chainedConfig        += String(commandDelimiter) + lfi + cmd;
     chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
+    if (wcb_alias.length() > 0) {
+        cmd = "ALIAS," + wcb_alias;
+        Serial.println(lfi + cmd);
+        chainedConfig        += String(commandDelimiter) + lfi + cmd;
+        chainedConfigDefault += defaultSep + defaultFunc + cmd;
+    }
+
     cmd = "WCBQ," + String(Default_WCB_Quantity);
     Serial.println(lfi + cmd);
     chainedConfig        += String(commandDelimiter) + lfi + cmd;
@@ -4179,18 +4622,34 @@ void updateHWVersion(const String &message) {
     // ---- Command Characters ----
     // DELIM:
     //   Configured string: skip entirely - board already uses correct delimiter throughout
-    //   Factory reset string: include only if non-default, then switch defaultSep
+    //   Factory reset string: include only if non-default.
+    //
+    //   IMPORTANT: do NOT switch the factory-chain SEPARATOR after emitting
+    //   ?DELIM. The restore is parsed by parseCommandsAndEnqueue, which splits
+    //   the WHOLE string ONCE up front using the receiving board's current
+    //   delimiter ('^' on a fresh board) — a mid-stream ?DELIM only takes
+    //   effect when it DEQUEUES, long after splitting is done. If the chain
+    //   flipped to the new delimiter here, every entry after ?DELIM (CMDCHAR,
+    //   BAUD, MAESTRO/MP3/HCR/VAR, ETM, and the trailing ?CHK) would collapse
+    //   into one un-split token and silently drop, and the '^?CHK' integrity
+    //   check would be missed. Keeping '^' throughout makes the whole chain
+    //   split correctly; ?DELIM still applies the new delimiter for FUTURE
+    //   input when it executes. (funcChar is different — see FUNCCHAR below.)
     if (commandDelimiter != '^') {
         cmd = "DELIM," + String(commandDelimiter);
         Serial.println(lfi + cmd);
         // configured string: intentionally skipped
         chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        defaultSep = String(commandDelimiter);  // all subsequent factory reset commands use new delimiter
     }
 
     // FUNCCHAR:
     //   Configured string: skip entirely - board already uses correct func identifier throughout
-    //   Factory reset string: include only if non-default, then switch defaultFunc
+    //   Factory reset string: include only if non-default, then switch defaultFunc.
+    //   Unlike the delimiter (above), the func identifier DOES flip here: it
+    //   governs DISPATCH (handleSingleCommand re-checks each token's prefix
+    //   against the live LocalFunctionIdentifier at dequeue time), so once
+    //   ?FUNCCHAR has executed, later already-split tokens must carry the new
+    //   prefix to be recognized as config commands.
     if (LocalFunctionIdentifier != '?') {
         cmd = "FUNCCHAR," + String(LocalFunctionIdentifier);
         Serial.println(lfi + cmd);
@@ -4283,8 +4742,8 @@ void updateHWVersion(const String &message) {
                         ":"  + String(baud);
         }
         cmd = kyberCmd;
-    } else if (Kyber_Remote) {
-        cmd = "KYBER,REMOTE";
+    } else if (Maestro_Remote) {
+        cmd = "MAESTRO,REMOTE";
     } else {
         cmd = "KYBER,CLEAR";
     }
@@ -4292,11 +4751,17 @@ void updateHWVersion(const String &message) {
     chainedConfig        += String(commandDelimiter) + lfi + cmd;
     chainedConfigDefault += defaultSep + defaultFunc + cmd;
 
-    // ---- Maestro Settings ----
-    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+    // ---- Maestro / MP3 / HCR / Variables (shared emitters) ----
+    // Pass the LIVE defaultSep/defaultFunc: they flip after the factory chain
+    // replays ?DELIM/?FUNCCHAR above, so entries appended here must use the
+    // post-flip characters or a custom-delimiter board never splits them on
+    // restore. Never hardcode '^'/'?' inside an emitter.
+    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+    printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+    printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
 
-    // ---- MP3 Trigger Settings ----
-    printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true);
+    // ---- User Variables (?VAR,SET,name,value) ----
+    printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
 
     // ---- ETM Settings ----
     cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
@@ -4341,7 +4806,7 @@ void updateHWVersion(const String &message) {
 
     // ---- Special Peer ----
     if (specialPeerEnabled) {
-        cmd = "SPECIAL,ON";
+        cmd = "SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID);
         Serial.println(lfi + cmd);
         chainedConfig        += String(commandDelimiter) + lfi + cmd;
         chainedConfigDefault += defaultSep + defaultFunc + cmd;
@@ -4400,13 +4865,18 @@ void updateHWVersion(const String &message) {
     }
 
     // ---- Checksums ----
+    // Format as zero-padded 8 hex chars (%08X) — matches the verifier at
+    // WCB.ino:5121 which always uses sprintf %08X. The previous String(x,HEX)
+    // form stripped leading zeros, so any CRC with a leading zero nibble
+    // (~1/16 chance) failed verification through the ?C* legacy path.
+    char crcStrBuf[9];
     uint32_t checksum = calculateCRC32(chainedConfig);
-    String checksumCmd = lfi + "CHK" + String(checksum, HEX);
-    checksumCmd.toUpperCase();
+    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksum);
+    String checksumCmd = lfi + "CHK" + String(crcStrBuf);
 
     uint32_t checksumDefault = calculateCRC32(chainedConfigDefault);
-    String checksumCmdDefault = "?CHK" + String(checksumDefault, HEX);  // factory reset always uses ?
-    checksumCmdDefault.toUpperCase();
+    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksumDefault);
+    String checksumCmdDefault = "?CHK" + String(crcStrBuf);  // factory reset always uses ?
 
     String chainedWithChecksum        = chainedConfig        + String(commandDelimiter) + checksumCmd;
     String chainedWithChecksumDefault = chainedConfigDefault + defaultSep               + checksumCmdDefault;
@@ -4451,6 +4921,10 @@ void processCommandCharcter(const String &message, int sourceID) {
       processPWMOutput(message);
     } else if (message.startsWith("a") || message.startsWith("A")) {
       processMP3AudioCommand(message);
+    } else if (message.startsWith("h") || message.startsWith("H")) {
+      processHCRRuntimeCommand(message);
+    } else if (message.startsWith("v") || message.startsWith("V")) {
+      processSetVariable(message);   // ;V,<name>,<value|TOGGLE|INC[,n]|DEC[,n]|true|false>
     } else {
         Serial.println("Invalid Serial Command");
     }
@@ -4498,20 +4972,63 @@ void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
 
-  // New format: comma present after the WCB number → greedy digit parse
-  // e.g. ;w1,RA  or  ;w13,RA
-  // Old format: no comma → single digit assumed (backward compatible)
-  // e.g. ;w1RA
-  int commaPos = message.indexOf(',');
-  if (commaPos > 1) {
-    // New format: digits between position 1 and comma
-    targetWCB = message.substring(1, commaPos).toInt();
-    espnow_message = message.substring(commaPos + 1);
+  // Parse the target WCB number. RULE (confirmed spec):
+  //   * NO comma after the digits  -> exactly ONE digit is the target (1-9),
+  //     everything from position 2 on is the payload — even if it starts
+  //     with a digit. (Legacy form; ;w2100 = send "100" to WCB2.)
+  //   * Comma right after the digit run -> the WHOLE run is the target,
+  //     enabling two-digit targets:  ;w13,RA  /  ;w20,<cmd>.
+  //
+  // We must NOT split on a comma that appears later inside the command
+  // payload. e.g.  ;w2;s4:PP100,50:W42:P  must route the WHOLE
+  // ";s4:PP100,50:W42:P" to WCB2 verbatim. (An earlier version split on the
+  // FIRST comma anywhere, truncating payloads; a later version greedily ate
+  // the whole digit run, breaking legacy digit-leading payloads like ;w2100.)
+  //
+  // Handles all forms:
+  //   ;w2RA                  -> target 2,  cmd "RA"      (single digit, no comma)
+  //   ;w2100                 -> target 2,  cmd "100"     (legacy digit payload)
+  //   ;w13,RA                -> target 13, cmd "RA"      (multi-digit needs comma)
+  //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P" (comma in payload)
+  //   ;w13,;s4:cmd,with,commas -> target 13, cmd ";s4:cmd,with,commas"
+  int digitEnd = 1;
+  while (digitEnd < (int)message.length() &&
+         message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
+  if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
+      // Comma-separated form: full digit run is the target (supports 10-20).
+      targetWCB = message.substring(1, digitEnd).toInt();
+      espnow_message = message.substring(digitEnd + 1);
   } else {
-    // Old format: single digit at position 1, command starts at position 2
-    targetWCB = message.substring(1, 2).toInt();
-    espnow_message = message.substring(2);
+      // Legacy no-comma form: exactly ONE digit is the target; the rest —
+      // including digits — is the payload.
+      targetWCB = message.substring(1, 2).toInt();
+      espnow_message = message.substring(2);
   }
+
+  // An IF cannot ride INSIDE a ;w payload: the chain splitter separates
+  // tokens BEFORE routing, so ';w2,IF,cond^cmd' delivers a lone 'IF,cond'
+  // with nothing to gate while 'cmd' executes unconditionally. Gate the
+  // whole routed command instead: IF,cond^;w2,cmd  (works — the IF gates
+  // the entire ;w token in its own chain). Reject loudly.
+  {
+      String payloadCheck = espnow_message;
+      payloadCheck.trim();
+      if (isIfChainToken(payloadCheck)) {
+          Serial.printf("[IF] ERROR: IF cannot be routed inside ;w — put it before "
+                        "the route instead: IF,cond%c;w%d,command. Command ignored.\n",
+                        commandDelimiter, targetWCB);
+          return;
+      }
+  }
+
+  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
+  // Any VALID ;w<id>,<cmd> arriving via USB means "a host (config tool's Via
+  // WCB mode, or WCB Wizard) is actively talking through this bridge".  Use
+  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
+  // rc_trig / rc_mode) to USB Serial.  Renewed AFTER the rejection checks so
+  // a rejected command doesn't subscribe the host to 20 s of RC JSON spam.
+  // Window is intentionally longer than the config tool's 10 s keep-alive.
+  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
@@ -4679,7 +5196,7 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
     // Normal broadcast behavior - send to all serial ports except restricted ones
     for (int i = 1; i <= 5; i++) {
-        if ((i == 1 && Kyber_Remote) || 
+        if ((i == 1 && Maestro_Remote) || 
             (i <= 2 && Kyber_Local) || 
             isSerialPortPWMOutput(i) ||
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
@@ -4710,6 +5227,14 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             continue;
         }
 
+        // Skip if the HCR is on this port (library owns it)
+        if (isSerialPortUsedForHCR(i)) {
+            if (debugEnabled) {
+                Serial.printf("Skipping S%d (HCR port)\n", i);
+            }
+            continue;
+        }
+
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
     }
@@ -4726,6 +5251,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // Skip ports reserved for the MP3 Trigger — responses are consumed
   // exclusively by processMP3Responses() in loop().
   if (isSerialPortUsedForMP3(sourceID)) return;
+
+  // Skip the HCR port — RX is owned exclusively by the HCRVocalizer
+  // library (status parsing) via processHCRTick() in loop().
+  if (isSerialPortUsedForHCR(sourceID)) return;
 
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
@@ -4786,7 +5315,10 @@ void processSerialCommandHelper(String &data, int sourceID) {
             // Extract checksum (skip delimiter + "?CHK")
             String providedChecksum = data.substring(chkPos + chkPattern.length());
             providedChecksum.toUpperCase();
-            
+            providedChecksum.trim();
+            // LEGACY COMPAT: <=6.0.x wrote checksums unpadded (String(crc,HEX)).
+            while (providedChecksum.length() < 8) providedChecksum = "0" + providedChecksum;
+
             // Calculate checksum for the command WITHOUT the checksum itself
             uint32_t calculatedChecksum = calculateCRC32(cmdWithoutChecksum);
             char calculatedChecksumStr[9];  // 8 hex chars + null terminator
@@ -4829,6 +5361,17 @@ void processSerialCommandHelper(String &data, int sourceID) {
 }
 
 
+// ── Boot telemetry ──────────────────────────────────────────────────────────
+// Boot-attempt counter in RTC noinit RAM: survives watchdog/software/panic
+// resets (and usually the reset button), is garbage only after true power
+// loss — the magic word detects that and restarts the count. After a "dark
+// board" episode, this banner tells you whether the chip had been silently
+// reset-looping through the app (count climbing), brown-outing (reason 15),
+// or never reached app code at all (count restarts at 1).
+#define BOOT_MAGIC 0xB007C0DEUL
+RTC_NOINIT_ATTR static uint32_t g_bootMagic;
+RTC_NOINIT_ATTR static uint32_t g_bootAttempts;
+
 void printResetReason() {
     esp_reset_reason_t reason = esp_reset_reason();
     Serial.printf("Reset reason: %d - ", reason);
@@ -4844,6 +5387,54 @@ void printResetReason() {
         case ESP_RST_BROWNOUT: Serial.println("Brownout Reset"); break;
         case ESP_RST_SDIO: Serial.println("SDIO Reset"); break;
         default: Serial.println("Unknown Reset"); break;
+    }
+    // Low-level per-core reset causes (rom/rtc.h). Key S3 codes:
+    //   1 = power-on   15 = RTC-WDT brown-out   16 = RTC-WDT system reset
+    //   (16 = the short-WDT bootloader's 3 s watchdog fired — auto-retry)
+    Serial.printf("RTC reset codes: core0=%d core1=%d\n",
+                  (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
+    if (g_bootMagic != BOOT_MAGIC) {        // true power loss → fresh count
+        g_bootMagic = BOOT_MAGIC;
+        g_bootAttempts = 0;
+    }
+    g_bootAttempts++;
+    Serial.printf("Boot attempts since power applied: %lu%s\n",
+                  (unsigned long)g_bootAttempts,
+                  g_bootAttempts > 1 ? "   <-- board retried/reset before this boot" : "");
+}
+
+// Report at boot which 2nd-stage bootloader is on the board. Reads the
+// esp_bootloader_desc_t embedded in every IDF 5.2+ bootloader image — no
+// flash dump needed. The CUSTOM short-watchdog bootloader (RTC WDT 9000 →
+// 3000 ms, cold-boot auto-retry) is identified by its unique build
+// timestamp; stock Arduino-core bootloaders carry Espressif's build date
+// (e.g. "Nov 12 2025"). If the custom bootloader is ever REBUILT, add the
+// new build's date_time to the table below (read it from this very banner).
+void printBootloaderInfo() {
+    static const char *CUSTOM_BOOT_DATES[] = {
+        "Jun  8 2026 16:02:21",   // WCB_S3_custom_bootloader_16MB_wdt3s.bin  (3.2, 16MB)
+        "Jun 10 2026 14:36:20",   // WCB_S3_custom_bootloader_8MB_wdt3s.bin   (3.1, 8MB)
+    };
+    esp_bootloader_desc_t desc;
+    if (esp_ota_get_bootloader_description(NULL, &desc) == ESP_OK) {
+        bool custom = false;
+        for (size_t i = 0; i < sizeof(CUSTOM_BOOT_DATES) / sizeof(CUSTOM_BOOT_DATES[0]); i++) {
+            if (strncmp(desc.date_time, CUSTOM_BOOT_DATES[i], sizeof(desc.date_time)) == 0) {
+                custom = true;
+                break;
+            }
+        }
+        if (custom) {
+            Serial.printf("Bootloader: CUSTOM short-WDT (cold-boot auto-retry) — built %s\n",
+                          desc.date_time);
+        } else {
+            Serial.printf("Bootloader: stock (IDF %s, built %s)\n",
+                          desc.idf_ver, desc.date_time);
+        }
+    } else {
+        // Pre-IDF-5.2 bootloaders have no description block (older deployed
+        // classic-ESP32 boards) — not an error, just unidentifiable.
+        Serial.println("Bootloader: unknown (no description block — old image)");
     }
 }
 
@@ -4881,7 +5472,7 @@ void serialCommandTask(void *pvParameters) {
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
             // Skip Serial1 and Serial2 - handled by Kyber task
-        } else if (Kyber_Remote) {
+        } else if (Maestro_Remote) {
             // Process Serial2 only if not raw-mapped
             if (!isSerialPortRawMapped(2)) {
                 processIncomingSerial(Serial2, 2);
@@ -5036,7 +5627,52 @@ void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt =
 }
 // ============================= Setup & Loop =============================
 
+// ── Cold-boot auto-recovery (boot guard) ───────────────────────────────────
+// On a cold / marginal power-up the board can stall somewhere in setup() — the
+// RMT/NeoPixel init, the boot delays, or the WiFi/ESP-NOW bring-up current
+// spike on a still-cold rail — and sit dark until someone presses the reset
+// button. The IDF bootloader's own watchdog is disabled right BEFORE setup()
+// runs, so a hang in here has nothing watching it: the board just stays dark.
+//
+// This one-shot esp_timer fires if setup() hasn't completed within
+// BOOT_GUARD_TIMEOUT_MS and forces a restart, so the board AUTO-RETRIES the
+// cold boot (re-trying until the rail/oscillator is stable enough to come all
+// the way up) instead of needing a human to press reset. The callback runs in
+// the esp_timer task — independent of the loop task that runs setup() — so a
+// hung setup() can't stop it from firing. It is cancelled at the end of a
+// successful setup(), so a healthy board never trips it.
+//
+// 10 s is comfortably longer than a normal boot (~3-4 s, even with the LED
+// retry loop) so it never false-triggers. Lower it for snappier cold recovery
+// ONLY after bench-confirming your worst-case normal boot time.
+#define BOOT_GUARD_TIMEOUT_MS 10000
+static esp_timer_handle_t _bootGuardTimer = nullptr;
+static void _bootGuardFired(void*) { ESP.restart(); }
+
+static void bootGuardArm() {
+  esp_timer_create_args_t args = {};
+  args.callback        = &_bootGuardFired;
+  args.arg             = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name            = "bootguard";
+  if (esp_timer_create(&args, &_bootGuardTimer) == ESP_OK) {
+    esp_timer_start_once(_bootGuardTimer, (uint64_t)BOOT_GUARD_TIMEOUT_MS * 1000ULL);
+  }
+}
+
+static void bootGuardDisarm() {
+  if (_bootGuardTimer) {
+    esp_timer_stop(_bootGuardTimer);
+    esp_timer_delete(_bootGuardTimer);
+    _bootGuardTimer = nullptr;
+  }
+}
+
 void setup() {
+  // Arm the boot guard FIRST so it covers the entire setup() (including the
+  // USB-stabilize and RMT delays below). Disarmed at the very end of setup().
+  bootGuardArm();
+
 
   // Enlarge the UART0 RX ring buffer (default 256 B) BEFORE Serial.begin().
   // Config pushes from the web tool arrive as a rapid burst of commands; each
@@ -5050,17 +5686,33 @@ void setup() {
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 
+  // Create the RC-Controller JSON relay queue before ESP-NOW starts so the
+  // first incoming broadcast can be safely enqueued.  See enqueueRcJsonRelay
+  // / drainRcJsonRelay comments for the cross-core Serial-output rationale.
+  rcJsonRelayQueue = xQueueCreate(RC_JSON_QUEUE_SLOTS, sizeof(RcJsonRelaySlot));
+
+  // Pending-timer-chain queue — keeps parseCommandGroups() off the WiFi
+  // task (it mutates a std::vector loop() iterates). See queue's declaration
+  // comment for the cross-thread rationale.
+  pendingTimerChainQueue = xQueueCreate(TIMER_CHAIN_QUEUE_SLOTS, sizeof(PendingTimerChainSlot));
+
   loadHWversion();
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
+  loadHCRSettings();      // Load HCR configuration from NVS
+  loadVariables();        // Build the user-variable RAM mirror from NVS
+  beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
-  printResetReason();  // Show the exact cause of reset
+  printResetReason();      // Show the exact cause of reset
+  printBootloaderInfo();   // CUSTOM short-WDT bootloader vs stock
   loadWCBNumberFromPreferences();
+  loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
   loadSpecialPeerPreferences();
+  loadSpecialPeerIDFromPreferences();
   loadMACPreferences();
 
   // Initialize the NeoPixel status LED
@@ -5083,10 +5735,23 @@ void setup() {
 Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   delay(1000);        // I hate using delays but this was added to allow the RMT to stabilize before using LEDs
   turnOnLEDforBoot();
-  // Create the command queue
+  // Create the command queue. If this fails, every subsequent path that
+  // routes through enqueueCommand / parseCommandsAndEnqueue (i.e. every
+  // command — ETM, serial, MGMT, wizard relay) short-circuits silently
+  // and the board appears alive but accepts no commands. Drive a hard
+  // visible error and reboot rather than continuing as a brick.
   commandQueue = xQueueCreate(200, sizeof(CommandQueueItem));
   if (!commandQueue) {
-    Serial.println("Failed to create command queue!");
+    Serial.println("FATAL: Failed to create command queue!");
+    Serial.println("       The board cannot accept any commands without it.");
+    Serial.println("       Rebooting in 3 seconds...");
+    // Try to give the user a visible LED hint if the status LED is alive.
+    // colorWipeStatus is defined later; statusLED may not be initialized
+    // yet — use a tight blink loop with the on-board GPIO if available.
+    for (int i = 0; i < 6; i++) {
+      delay(250);  // half-second cadence × 6 = 3 s total
+    }
+    ESP.restart();
   }
 
   Serial.println("\n\n-------------------------------------------------------");
@@ -5110,7 +5775,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
       // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
       Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
-  } else if (Kyber_Remote) {
+  } else if (Maestro_Remote) {
       // Kyber Remote REQUIRES Serial1 (Maestro only)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
       // Serial2 available for PWM or normal serial
@@ -5165,6 +5830,11 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   }
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
+  // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
+  // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
+  // but that silently cut ~11 dB of ESP-NOW link budget for every deployed
+  // installation (remote consoles / cross-room links). Cold-boot recovery is
+  // handled by the boot guard + custom bootloader WDT instead.
 
   // Dynamically update MAC addresses based on stored umac_oct2 & umac_oct3
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
@@ -5290,9 +5960,9 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
       xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Local Task Created");
   }    
-  if (Kyber_Remote) {
+  if (Maestro_Remote) {
       xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
-      Serial.println("Kyber_Remote Task Created");
+      Serial.println("Maestro_Remote Task Created");
   }
     bool hasPWMMappings = false;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
@@ -5311,13 +5981,20 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   xTaskCreatePinnedToCore(RawSerialForwardingTask, "Raw Serial Task", 4096, NULL, 1, NULL, 1);
   Serial.println("Raw Serial Forwarding Task Created");
   
-  delay(150);     
+  delay(150);
   turnOffLED();
+
+  // setup() reached the end successfully — cancel the boot guard so the
+  // running board can never be reset by it. (loop() only starts after this
+  // returns, so from here on a healthy board is never watched by the guard.)
+  bootGuardDisarm();
   // Serial.println("------------- Setup Complete-----------------");
 }
 
 void loop() {
   rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
+  drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
+  drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();
   processETMHeartbeats();
   processETMAcksAndRetries();
@@ -5326,7 +6003,9 @@ void loop() {
   checkMgmtTimeout();
   checkConfigPullTimeout();
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
-  // Handle queued commands
+  processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
+  // Handle queued commands. (IF gating happens before enqueue, in the chain
+  // splitters — by the time commands reach this queue they are unconditional.)
   if (!commandQueue) return;
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {

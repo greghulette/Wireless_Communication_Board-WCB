@@ -62,6 +62,16 @@ bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uin
 // ==================== Load & Save Functions ====================
 
 void saveHWversion(int wcb_hw_version_f){
+  // Validate BEFORE writing. The old order wrote the value first, so an
+  // invalid ?HW,0 (e.g. a config push from a Wizard with no HW selected)
+  // clobbered a previously-saved hardware version in NVS and the board came
+  // up with no pin map after the next reboot.
+  if (wcb_hw_version_f != 1  && wcb_hw_version_f != 21 && wcb_hw_version_f != 23 &&
+      wcb_hw_version_f != 24 && wcb_hw_version_f != 31 && wcb_hw_version_f != 32) {
+    Serial.printf("No valid HW version identified (%d) — stored HW version unchanged.\n",
+                  wcb_hw_version_f);
+    return;
+  }
   preferences.begin("hw_version", false);
   preferences.putInt("hw_version", wcb_hw_version_f);
   preferences.end();
@@ -77,9 +87,8 @@ void saveHWversion(int wcb_hw_version_f){
     Serial.println("Saved HW Ver: 3.1 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 32){
     Serial.println("Saved HW Ver: 3.2 to NVS.  Reboot to take effect!");
-  } else {
-    Serial.println("No valid HW version identified.");
   }
+  // (invalid values are rejected before the NVS write above)
   // updatePinMap();
 }
 
@@ -130,6 +139,14 @@ void printHWversion(){
 }
 
 void updateBaudRate(int port, int baud) {
+  // Reject out-of-range ports up front. Without this guard, a parse failure
+  // upstream (e.g. ?BAUD,SX,57600 → port=0) would write a "Serial0" NVS key
+  // into the serial_baud namespace, polluting storage and overlapping with
+  // any future legitimate use of port 0.
+  if (port < 1 || port > 5) {
+    Serial.printf("Invalid serial port %d (must be 1-5)\n", port);
+    return;
+  }
   if (!(baud == 110 || baud == 300 || baud == 600 || baud == 1200 ||
         baud == 2400 || baud == 9600 || baud == 14400 || baud == 19200 || baud == 38400 ||
         baud == 57600 || baud == 115200 || baud == 128000 || baud == 256000)) {
@@ -147,9 +164,7 @@ void updateBaudRate(int port, int baud) {
   // config backup (which read baudRates[]) keep reporting the OLD value until
   // the next reboot reloads NVS — so the web tool's verify-pull sees the stale
   // value, never advances its baseline, and re-pushes the same change forever.
-  if (port >= 1 && port <= 5) {
-    baudRates[port - 1] = baud;
-  }
+  baudRates[port - 1] = baud;
 
   // Save to preferences
   preferences.begin("serial_baud", false);
@@ -175,6 +190,52 @@ void saveWCBNumberToPreferences(int wcb_number_f) {
                                   // processed in the same push use the correct WCB number;
                                   // full network re-init (peers, MAC, ETM) still requires reboot
     Serial.printf("Changed WCB Number to: %d\nPlease reboot to take full effect\n", wcb_number_f);
+}
+
+// Per-WCB friendly alias (e.g. "Body" / "Dome"). Stored in the same
+// wcb_config NVS namespace as WCB_Number for simplicity. Capped at 24
+// chars on save; empty string = unset (treated as no alias).
+void loadWCBAlias() {
+    preferences.begin("wcb_config", true);
+    wcb_alias = preferences.getString("alias", "");
+    preferences.end();
+    if (wcb_alias.length() > 0) {
+        Serial.printf("Loaded WCB alias: %s\n", wcb_alias.c_str());
+    }
+}
+
+void saveWCBAlias(const String &alias) {
+    String a = alias;
+    a.trim();
+    // Strip characters that would corrupt the backup chain on restore:
+    //   ^   delimiter between chained commands
+    //   ,   field separator within a command
+    //   ;   command-character (would be parsed as a runtime verb)
+    //   ?   local-function-identifier (would be parsed as config command)
+    //   \r \n  literal newlines split the chain
+    // Replace with '_' so the user's intent is still readable instead of
+    // silently dropping characters.
+    for (unsigned i = 0; i < a.length(); i++) {
+        char c = a[i];
+        if (c == '^' || c == ',' || c == ';' || c == '?' ||
+            c == '\r' || c == '\n') {
+            a.setCharAt(i, '_');
+        }
+    }
+    // 24-char cap, but clamp on a UTF-8 codepoint boundary so we never split
+    // a multi-byte sequence (would leave invalid UTF-8 in NVS / the banner).
+    if (a.length() > 24) {
+        int cut = 24;
+        // back up while the byte at [cut] is a UTF-8 continuation (10xxxxxx)
+        while (cut > 0 && ((uint8_t)a[cut] & 0xC0) == 0x80) cut--;
+        a = a.substring(0, cut);
+    }
+    preferences.begin("wcb_config", false);
+    preferences.putString("alias", a);
+    preferences.end();
+    wcb_alias = a;
+    if (a.length() == 0) Serial.println("WCB alias cleared");
+    else                 Serial.printf("WCB alias set to: %s\n", a.c_str());
 }
 
 // Load baud rates from preferences
@@ -244,7 +305,7 @@ void printBaudRates() {
             Serial.printf(" (%s)", serialPortLabels[i].c_str());
         }
         // Auto-detected labels for Kyber/Maestro if no user label
-        else if (i == 0 && (Kyber_Local || Kyber_Remote)) {
+        else if (i == 0 && (Kyber_Local || Maestro_Remote)) {
             bool hasMaestroOnS1 = false;
             for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
                 if (maestroConfigs[m].configured && maestroConfigs[m].serialPort == 1) {
@@ -341,6 +402,27 @@ void saveSpecialPeerPreferences(bool enabled) {
     specialPeerEnabled = enabled;
     Serial.printf("Special peer (ID %d) %s. Reboot to apply peer registration.\n",
                   WCB_SPECIAL_PEER_ID, enabled ? "ENABLED" : "DISABLED");
+}
+
+// Load the special peer ID from preferences (default 20).
+void loadSpecialPeerIDFromPreferences() {
+    preferences.begin("wcb_config", true);
+    WCB_SPECIAL_PEER_ID = preferences.getUChar("special_peer_id", 20);
+    preferences.end();
+}
+
+// Save the special peer ID to preferences. Takes effect after reboot
+// (peer registration runs during setup).
+void saveSpecialPeerIDToPreferences(uint8_t id) {
+    if (id < 1 || id > 20) {
+        Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", id);
+        return;
+    }
+    preferences.begin("wcb_config", false);
+    preferences.putUChar("special_peer_id", id);
+    preferences.end();
+    WCB_SPECIAL_PEER_ID = id;
+    Serial.printf("Special peer ID set to %d. Reboot to apply peer registration.\n", id);
 }
 
 // Save the WCB quantity to preferences
@@ -857,7 +939,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
   
   if (baseCommand.equals("local")) {
     Kyber_Local = true;
-    Kyber_Remote = false;
+    Maestro_Remote = false;
     Kyber_Location = "local";
     kyberLocalPort = kyberPort;   // store globally so forwarding functions use correct port
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
@@ -880,14 +962,14 @@ if (params.startsWith("S") || params.startsWith("s")) {
     
   } else if (baseCommand.equals("remote")) {
     Kyber_Local = false;
-    Kyber_Remote = true;
+    Maestro_Remote = true;
     Kyber_Location = "remote";
     Serial.println("Kyber is REMOTE (on another WCB)");
     
   } else if (baseCommand.equals("clear")) {
     Kyber_Location = " ";
     Kyber_Local = false;
-    Kyber_Remote = false;
+    Maestro_Remote = false;
     kyberLocalPort = 0;
     kyberUseTargeting = false;
     
@@ -1043,7 +1125,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
       for (int wcb = 1; wcb <= Default_WCB_Quantity; wcb++) {
         if (wcb == WCB_Number) continue;
         
-        // Only add KYBER_REMOTE if this WCB has Maestro ID 1 or 2 physically on it
+        // Only add MAESTRO_REMOTE (legacy alias: KYBER_REMOTE) if this WCB has Maestro ID 1 or 2 physically on it
         bool needsKyberRemote = false;
         for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
           if (kyberTargets[i].enabled && 
@@ -1056,7 +1138,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
         
         String command = "";
         if (needsKyberRemote) {
-          command += "?" + String("KYBER_REMOTE^?");
+          command += "?" + String("MAESTRO_REMOTE^?");
         } else {
           command += "?";
         }
@@ -1151,16 +1233,16 @@ void loadKyberSettings(){
 
   if (Kyber_Location == "local"){
       Kyber_Local = true;
-      Kyber_Remote = false;
+      Maestro_Remote = false;
       // Fall back to port 2 (legacy default) if K_Port was never saved to NVS
       kyberLocalPort = (storedPort > 0 && storedPort <= 5) ? storedPort : 2;
   } else if (Kyber_Location == "remote"){
       Kyber_Local = false;
-      Kyber_Remote = true;
+      Maestro_Remote = true;
       kyberLocalPort = 0;
   } else {
       Kyber_Local = false;
-      Kyber_Remote = false;
+      Maestro_Remote = false;
       kyberLocalPort = 0;
   }
 };
@@ -1178,7 +1260,7 @@ void printKyberSettings() {
 
   if (Kyber_Local) {
     Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
-  } else if (Kyber_Remote) {
+  } else if (Maestro_Remote) {
     Serial.println("Initialized Serial1 for Kyber Remote mode");
   }
 
@@ -1846,7 +1928,7 @@ void printKyberList() {
 
       String cmd = "";
       if (needsKyberRemote) {
-        cmd += "?" + String("KYBER_REMOTE^?");
+        cmd += "?" + String("MAESTRO_REMOTE^?");
       } else {
         cmd += "?";
       }

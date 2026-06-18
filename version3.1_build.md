@@ -91,8 +91,8 @@ Follow these steps to order from a PCB manufacturer (JLCPCB, PCBWay, OSH Park, e
 
 **Purchase Options:**
 
-- **Option 1:** 3-pack with unsoldered headers - $18.99  
-  [Amazon: ESP32-S3 DevKitC 3-Pack](https://www.amazon.com/ESP32-S3-DevKitC-1-N8R2-Development-ESP32-S3-WROOM-1-Microcontroller-Integrated/dp/B0DKF4DSQ4/?th=1)
+- **Option 1:** 3-pack with unsoldered headers - $19.02  
+  [Amazon: ESP32-S3 DevKitC 3-Pack](https://www.amazon.com/dp/B0DB1WK3CW?ref=ppx_yo2ov_dt_b_fed_asin_title)
 
 - **Option 2:** Single board with pre-soldered headers - $15.00  
   [Amazon: ESP32-S3 DevKitC Single](https://www.amazon.com/Espressif-ESP32-S3-DevKitC-1-N8R8-Development-Board/dp/B09MHP42LY/)

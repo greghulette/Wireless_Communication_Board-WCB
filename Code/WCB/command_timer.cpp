@@ -1,6 +1,10 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_Storage.h" // Or wherever your commandDelimiter and parseCommandsAndEnqueue are
 #include "command_timer_queue.h"
+#include "WCB_Variables.h"   // isIfChainToken / evaluateIfCondition (IF gating)
+
+// '***' comment marker — defined in WCB.ino (mirrors WCB_Storage.cpp / WCB_Variables.cpp)
+extern String commentDelimiter;
 
 std::vector<CommandGroup> commandGroups;
 unsigned long lastGroupTime = 0;
@@ -68,7 +72,25 @@ void parseCommandGroups(const String &input) {
   CommandGroup currentGroup;
   currentGroup.delayAfterPrevious = 0;
 
-  for (const String &token : tokens) {
+  // IF gating (chain-local, evaluated NOW at invoke time — not after the
+  // timer delays fire). ALL gate semantics live in the shared
+  // ifGateConsumeToken (WCB_Variables.cpp) so this walker can never drift
+  // from parseCommandsAndEnqueue. Locally we only handle the timer-token
+  // mechanics. NOTE: every check below uses the TRIMMED token — user-typed
+  // spaces around '^' must not change classification.
+  bool ifSkipping = false;
+
+  for (const String &rawToken : tokens) {
+    String token = rawToken;
+    token.trim();
+    if (token.isEmpty()) continue;
+
+    // Comments are annotations: never executed, never consume the IF gate
+    // (matches parseCommandsAndEnqueue, which ignores them pre-gate).
+    if (token.startsWith(commentDelimiter)) continue;
+
+    if (ifGateConsumeToken(token, ifSkipping)) continue;
+
     if (token.startsWith(String(CommandCharacter) + "t") || token.startsWith(String(CommandCharacter) + "T")) {
       if (!currentGroup.commands.empty()) {
         commandGroups.push_back(currentGroup);
@@ -80,6 +102,19 @@ void parseCommandGroups(const String &input) {
       if (commaIndex != -1) {
         delayStr = token.substring(2, commaIndex);
         remaining = token.substring(commaIndex + 1);
+        remaining.trim();
+        // An IF cannot ride INSIDE a timer token: at fire time each group
+        // command is dispatched through its own parseCommandsAndEnqueue
+        // call, so the gate state would die with that stack frame and the
+        // next command would run ungated. Reject loudly instead of
+        // silently not gating.
+        if (isIfChainToken(remaining)) {
+          Serial.printf("[IF] ERROR: IF cannot be a timer payload (';t%s,%s') — "
+                        "write it as IF,cond^%ct%s^command instead. Token ignored.\n",
+                        delayStr.c_str(), remaining.c_str(),
+                        CommandCharacter, delayStr.c_str());
+          remaining = "";
+        }
       } else {
         delayStr = token.substring(2);
         remaining = "";
@@ -99,7 +134,11 @@ void parseCommandGroups(const String &input) {
           Serial.printf("⏱️ Delay capped to %i ms : originally requested %s ms\n", parsedDelayLimit, delayStr.c_str());
         }
       }
-      currentGroup.delayAfterPrevious = parsedDelay;
+      // ACCUMULATE (don't overwrite): consecutive delay tokens with no command
+      // between them — ';t500^;t300^cmd' or ';t500^***note^;t300^cmd' (the
+      // comment is dropped above, leaving the group empty) — must wait the SUM.
+      // A fresh group starts at 0, so += is also correct for the normal case.
+      currentGroup.delayAfterPrevious += parsedDelay;
       if (!remaining.isEmpty()) {
         currentGroup.commands.push_back(remaining);
       }
