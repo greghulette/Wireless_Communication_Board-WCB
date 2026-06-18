@@ -986,6 +986,8 @@ function parseSystemFile(fileContent) {
     system.general.funcChar       = generalConfig.funcChar;
     system.general.cmdChar        = generalConfig.cmdChar;
     system.general.etm            = generalConfig.etm;
+    system.general.specialPeer    = generalConfig.specialPeer ?? false;
+    system.general.specialPeerId  = generalConfig.specialPeerId ?? 20;
   }
 
   // Parse [WCB1], [WCB2], etc.
@@ -1330,6 +1332,11 @@ function buildSystemFile(system) {
 
   const generalBoard = createDefaultBoardConfig();
   applyGeneralToBoard(system.general, generalBoard);
+  // specialPeer (NaviCore) is a network-wide GENERAL field — reflect it on the
+  // synthetic board so the [GENERAL] block emits the correct SPECIAL,ON/OFF
+  // (applyGeneralToBoard intentionally skips it to avoid clobbering per-board).
+  generalBoard.specialPeer   = !!system.general.specialPeer;
+  generalBoard.specialPeerId = system.general.specialPeerId ?? 20;
   const generalCmd = buildCommandString(generalBoard, null, true, FILE_OPTS);
 
   lines.push('[GENERAL]');

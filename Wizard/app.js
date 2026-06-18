@@ -56,11 +56,18 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '17.21:49.R.JUN.2026';
+const UI_VERSION = '17.22:21.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
 let _wizardSessionId = 0;            // incremented on each openWizard(); guards stale close timers
+let _wizAdvanceTimer = null;         // pending auto-advance timer (cancelable; one at a time)
+
+// Cancel any pending card auto-advance (called by manual nav so a stale timer
+// can't fire wizardNext() against the wrong step).
+function wizardCancelAutoAdvance() {
+  if (_wizAdvanceTimer) { clearTimeout(_wizAdvanceTimer); _wizAdvanceTimer = null; }
+}
 let latestFirmwareVersion = null;    // e.g. 'v6.0' — fetched from GitHub on load
 
 // ─── Init ─────────────────────────────────────────────────────────
@@ -972,8 +979,31 @@ function _resetAllBoardRoles() {
   }
 }
 
+// Reconcile the auto-set Kyber serial-port labels with the board's current
+// kyber.mode. Switching the controller away from Kyber must not leave orphaned
+// "Kyber Maestro"/"Kyber Marcuino" labels (they'd push stale values to NVS);
+// switching back to a restored local Kyber must re-apply them. Custom labels
+// are never touched. evaluatePortClaims() re-derives claimedBy from the new mode.
+function _reconcileKyberPortLabels(cfg) {
+  const local = cfg.kyber.mode === 'local';
+  for (let i = 0; i < cfg.serialPorts.length; i++) {
+    const sp = cfg.serialPorts[i];
+    const portNum = i + 1;
+    if (local && cfg.kyber.port === portNum) {
+      if (!sp.label) sp.label = 'Kyber Maestro';
+    } else if (local && cfg.kyber.marcduinoPort === portNum) {
+      if (!sp.label) sp.label = 'Kyber Marcuino';
+    } else if (sp.label === 'Kyber Maestro' || sp.label === 'Kyber Marcuino') {
+      sp.label = '';   // orphaned auto-label — clear so it isn't pushed
+    }
+  }
+  WCBParser.evaluatePortClaims(cfg);
+}
+
 // Apply the controller's implied network flags to every WCB config and refresh
-// every board's UI (radios, section visibility, status).
+// every board's UI (radios, section visibility, status). Only called on a real
+// controller switch (onControllerChange), so it also flags genuinely-changed
+// boards 'unsaved' — otherwise their per-board Push buttons would stay green.
 function _applyControllerToBoards() {
   const ctrl = systemConfig.general.controller || 'none';
   const usingNavi = ctrl === 'navicore';
@@ -981,9 +1011,18 @@ function _applyControllerToBoards() {
     if (boardConfigs[n].type === 'client') continue;
     boardConfigs[n].specialPeer   = usingNavi;
     boardConfigs[n].specialPeerId = systemConfig.general.specialPeerId ?? 20;
+    _reconcileKyberPortLabels(boardConfigs[n]);
   }
   systemConfig.general.specialPeer = usingNavi;
-  for (const n in boardConfigs) populateUIFromConfig(n, boardConfigs[n]);
+  for (const n in boardConfigs) {
+    populateUIFromConfig(n, boardConfigs[n]);
+    if (boardConfigs[n].type === 'client') continue;
+    const base = boardBaselines[n];
+    const changed = !base
+      || base.specialPeer !== boardConfigs[n].specialPeer
+      || (base.kyber?.mode) !== boardConfigs[n].kyber.mode;
+    if (changed) updateBoardStatusBadge(n, 'unsaved');
+  }
   refreshControllerUI();
 }
 
@@ -7060,12 +7099,14 @@ function openWizard() {
 function closeWizard(event) {
   if (event && event.target !== document.getElementById('wizard-modal')) return;
   _wizardOpen = false;
+  wizardCancelAutoAdvance();    // drop any pending card auto-advance
   _wizardClearAllWatchers();    // stop all board connect watchers when wizard closes
   document.getElementById('wizard-modal').classList.remove('open');
 }
 
 // ── Navigation ─────────────────────────────────────────────────────
 function wizardNext() {
+  wizardCancelAutoAdvance();   // a manual/auto advance supersedes any pending one
   const key = wizardState.steps[wizardState.currentIdx];
 
   // Validate before saving
@@ -7107,6 +7148,7 @@ function wizardNext() {
 }
 
 function wizardBack() {
+  wizardCancelAutoAdvance();   // don't let a pending auto-advance fire after going back
   if (wizardState.currentIdx > 0) {
     wizardSaveStep(wizardState.steps[wizardState.currentIdx]);
     wizardState.currentIdx--;
@@ -8121,9 +8163,17 @@ function wizardSetChoice(field, value, btn) {
 }
 
 // Click-a-card → auto-advance to the next step. Small delay so the user sees
-// the card highlight register before the step transitions away.
+// the card highlight register before the step transitions away. A single
+// cancelable timer keyed to the originating step: re-clicking (or a native
+// double-click) collapses to one advance, and if the step changes before it
+// fires (Back, or a different card) the stale timer is discarded.
 function wizardAdvanceAfterChoice() {
-  setTimeout(() => { if (_wizardOpen) wizardNext(); }, 200);
+  wizardCancelAutoAdvance();
+  const fromIdx = wizardState.currentIdx;
+  _wizAdvanceTimer = setTimeout(() => {
+    _wizAdvanceTimer = null;
+    if (_wizardOpen && wizardState.currentIdx === fromIdx) wizardNext();
+  }, 200);
 }
 
 // Step-3 control-system selection. NaviCore / Kyber are mutually exclusive;
