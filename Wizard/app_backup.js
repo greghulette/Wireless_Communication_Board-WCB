@@ -56,7 +56,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '18.14:30.R.JUN.2026';
+const UI_VERSION = '17.22:21.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1943,28 +1943,7 @@ function updatePushAllButton() {
   btn.classList.toggle('btn-pending', anyUnsaved);
 }
 
-// Live one-line board summary shown on the left of the action bar.
-function updateActionSummary(n) {
-  const el = document.getElementById(`b${n}-action-summary`);
-  if (!el) return;
-  const cfg = boardConfigs[n];
-  if (!cfg) { el.textContent = ''; return; }
-  const parts = [];
-  if (cfg.hcr && cfg.hcr.enabled && cfg.hcr.port) parts.push(`HCR on S${cfg.hcr.port}`);
-  if (cfg.mp3 && cfg.mp3.enabled && cfg.mp3.port) parts.push(`MP3 on S${cfg.mp3.port}`);
-  const maps = (cfg.mappings || []).length;
-  if (maps) parts.push(`${maps} mapping${maps === 1 ? '' : 's'}`);
-  const maes = (cfg.maestros || []).length;
-  if (maes) parts.push(`${maes} Maestro${maes === 1 ? '' : 's'}`);
-  const seqs = (cfg.sequences || []).length;
-  if (seqs) parts.push(`${seqs} sequence${seqs === 1 ? '' : 's'}`);
-  const vars = (cfg.variables || []).length;
-  if (vars) parts.push(`${vars} variable${vars === 1 ? '' : 's'}`);
-  el.textContent = parts.join('  \u00b7  ');
-}
-
 function updateBoardStatusBadge(n, state) {
-  updateActionSummary(n);
   const unsavedBadge = document.getElementById(`b${n}-unsaved-badge`);
   const goBtn        = document.getElementById(`b${n}-btn-go`);
   if (state === 'unsaved') {
@@ -2993,7 +2972,6 @@ async function removeSequenceRow(n, rowId) {
     const idx = store.sequences.findIndex(s => s.key === key);
     if (idx >= 0) store.sequences.splice(idx, 1);
   }
-  updateActionSummary(n);   // keep the action-bar summary's sequence count live
 
   if (!key) return;   // no key — nothing to tell the board
 
@@ -3148,7 +3126,6 @@ async function updateSequence(n, rowId) {
       if (idx >= 0) store.sequences[idx].value = value;
       else store.sequences.push({ key, value });
     }
-    updateActionSummary(n);   // keep the action-bar summary's sequence count live
     // Update the original-key marker so a second rename from this key works correctly
     if (keyInput) keyInput.dataset.originalKey = key;
   } catch (e) {
@@ -3279,7 +3256,6 @@ async function updateVariable(n, rowId) {
       if (ex) ex.value = value;
       else store.variables.push({ name, value });
     }
-    updateActionSummary(n);   // keep the action-bar summary's variable count live
     // Update the original-name marker so a second rename from this name works correctly
     if (nameInput) nameInput.dataset.originalName = name;
   } catch (e) {
@@ -3306,7 +3282,6 @@ async function removeVariableRow(n, rowId) {
     const idx = store.variables.findIndex(v => v.name === name);
     if (idx >= 0) store.variables.splice(idx, 1);
   }
-  updateActionSummary(n);   // keep the action-bar summary's variable count live
 
   if (!name) return;   // never saved — nothing to tell the board
 

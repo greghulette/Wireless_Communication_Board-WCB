@@ -277,7 +277,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .section.status-connected    { border-right: 3px solid var(--green); }
 .section.status-retrying     { border-right: 3px solid var(--yellow); }
 .section.status-error        { border-right: 3px solid var(--red); }
-.section.status-disconnected { border-right: 3px solid var(--border2); }
+.section.status-disconnected { border-right: 3px solid var(--red); }
 
 /* Board number pill in header */
 .board-num-pill {
@@ -307,7 +307,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 10px; font-family: var(--mono);
   padding: 3px 8px; border-radius: 3px;
-  letter-spacing: 0.3px; font-weight: 500; white-space: nowrap;
+  letter-spacing: 0.3px; font-weight: 500;
 }
 .badge-default { background: var(--bg4); color: var(--text3); border: 1px solid var(--border); }
 .badge-green   { background: rgba(0,232,122,0.1); color: var(--green); border: 1px solid rgba(0,232,122,0.3); }
@@ -363,10 +363,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   width: 12px; height: 12px; background: var(--text3);
   border-radius: 50%; top: 2px; left: 2px; transition: all var(--transition);
 }
-.toggle input:checked + .toggle-track { background: var(--accent2); border-color: var(--accent); }
+.toggle input:checked + .toggle-track { background: var(--green2); border-color: var(--green); }
 .toggle input:checked + .toggle-track::after { transform: translateX(16px); background: var(--bg); }
 .toggle-label { font-size: 12px; color: var(--text2); }
-.toggle input:checked ~ .toggle-label { color: var(--accent); }
+.toggle input:checked ~ .toggle-label { color: var(--green); }
 
 /* ─── Radio Group ────────────────────────────────────────────── */
 .radio-group { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -390,10 +390,6 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   font-size: 11px; font-weight: 600; letter-spacing: 1px;
   text-transform: uppercase; color: var(--text3);
   margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 8px;
-}
-.subsection-title::before {
-  content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; flex-shrink: 0;
 }
 
 /* ─── Serial Port Table ──────────────────────────────────────── */
@@ -1116,14 +1112,14 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wiz-hint {
   display: inline-flex; align-items: center; justify-content: center;
   width: 15px; height: 15px; border-radius: 50%;
-  background: transparent; border: 1px solid var(--border2);
-  color: var(--text3); font-size: 9px; font-style: normal; font-weight: 700;
+  background: rgba(0,212,255,0.12); border: 1px solid rgba(0,212,255,0.35);
+  color: var(--accent); font-size: 9px; font-style: normal; font-weight: 700;
   cursor: help; position: relative; flex-shrink: 0;
   margin-left: 5px; vertical-align: middle; line-height: 1;
   transition: background 0.15s, border-color 0.15s;
 }
 .wiz-hint:hover {
-  background: var(--accent); border-color: var(--accent); color: var(--bg);
+  background: rgba(0,212,255,0.22); border-color: rgba(0,212,255,0.6);
 }
 .wiz-hint::after {
   content: attr(data-tip);
@@ -1303,36 +1299,3 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   color: var(--muted, #888);
 }
 .rc-devices-note a { text-decoration: underline; cursor: pointer; }
-
-
-/* ─── Refined layout tweaks ──────────────────── */
-/* Narrow the Bcast IN/OUT columns so Label & Status get the room.
-   Scoped to the Serial Ports table only (the Maestro table shares .serial-table). */
-.serial-table[id$="-serial-table"] th:nth-child(3), .serial-table[id$="-serial-table"] td:nth-child(3),
-.serial-table[id$="-serial-table"] th:nth-child(4), .serial-table[id$="-serial-table"] td:nth-child(4) { width: 80px; }
-/* Size MAC octet inputs to their 2-char content */
-#g-mac2, #g-mac3 { width: 80px; }
-/* Header: fence the primary actions (Wizard + Push All) apart from utilities */
-.primary-actions {
-  display: flex; align-items: center; gap: 8px;
-  padding: 0 12px; margin: 0 2px;
-  border-left: 1px solid var(--border); border-right: 1px solid var(--border);
-}
-/* Action bar: visually separate the destructive Factory Reset */
-.action-bar-divider { width: 1px; height: 22px; background: var(--border2); margin: 0 4px; flex-shrink: 0; }
-
-/* WCB / WCB_Client type selector → accent pills (matches the demo) */
-.board-slot-type label {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--bg3); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 5px 12px;
-  font-size: 12px; color: var(--text2);
-  transition: all var(--transition);
-}
-.board-slot-type input[type="radio"] { display: none; }
-.board-slot-type label:has(input:checked) {
-  border-color: var(--accent); background: rgba(0,212,255,0.07); color: var(--accent);
-}
-
-/* NaviCore ID sits alone in its field-group — don't let it stretch full width */
-#g-navicore-detail { grid-template-columns: 200px; }
