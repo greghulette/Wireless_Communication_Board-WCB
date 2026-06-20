@@ -140,9 +140,37 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     return;
   }
   
-  // Legacy behavior
-  if (maestroID == WCB_Number || maestroID == 9) {
-    uint8_t command[] = {0xAA, (maestroID == 9) ? WCB_Number : maestroID, 0x27, scriptNumber};
+  // Target 9 = "the local Maestro(s) on THIS board." Resolve through the
+  // configured Maestro mapping so each local Maestro is addressed with its OWN
+  // configured Pololu device ID and port. No longer assumes the device ID
+  // equals the WCB number, nor that the Maestro lives on S1.
+  if (maestroID == 9) {
+    bool wroteLocal = false;
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+      if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
+          maestroConfigs[i].serialPort > 0) {
+        uint8_t command[] = {0xAA, maestroConfigs[i].maestroID, 0x27, scriptNumber};
+        getSerialStream(maestroConfigs[i].serialPort).write(command, sizeof(command)); // no flush — UART drains async
+        Serial.printf("→ Maestro %d (local, target 9): S%d, Script %d\n",
+                      maestroConfigs[i].maestroID, maestroConfigs[i].serialPort, scriptNumber);
+        wroteLocal = true;
+      }
+    }
+    // Backward-compat: no local Maestro configured yet → legacy S1 + WCB number
+    // so boards that haven't been reconfigured still respond to target 9.
+    if (!wroteLocal) {
+      uint8_t command[] = {0xAA, WCB_Number, 0x27, scriptNumber};
+      Serial1.write(command, sizeof(command)); // no flush — UART drains async
+      Serial.printf("→ Maestro (local, target 9): legacy S1 fallback, dev %d, Script %d\n",
+                    WCB_Number, scriptNumber);
+    }
+    return;
+  }
+
+  // Legacy: targeting this board's own WCB number with nothing configured for
+  // that ID — keep the old hardcoded S1 write for backward compatibility.
+  if (maestroID == WCB_Number) {
+    uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
     Serial1.write(command, sizeof(command)); // no flush — UART drains async
     Serial.printf("→ Maestro %d: Legacy S1, Script %d\n", maestroID, scriptNumber);
     return;
