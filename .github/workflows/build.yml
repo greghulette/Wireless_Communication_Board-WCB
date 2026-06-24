@@ -40,15 +40,80 @@ jobs:
           # never be shadowed by a different copy on the build machine.
           arduino-cli lib list
 
+      # ─────────────────────────────────────────────────────────────────────
+      # Auto-version — main branch only.
+      #
+      # Bumps the PATCH of the current semver and re-stamps the build time in
+      # the established WCB format:  <semver>_<DDHHMM>R<MON><YEAR>  (US Eastern,
+      # e.g. 6.1.1_241530RJUN2026). The new string is written into WCB.ino
+      # BEFORE the build so the compiled firmware reports the same version that
+      # gets tagged + released. Done only on main so feature branches don't
+      # consume version numbers.
+      #
+      # The patch is bumped off whatever semver is in source. To start a new
+      # minor/major line, edit the semver in WCB.ino to e.g. 6.2.0 and push —
+      # the next release publishes 6.2.1 under the 6.2 line.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Auto-version (main only)
+        if: github.ref == 'refs/heads/main'
+        id: ver
+        run: |
+          set -euo pipefail
+          INO=Code/WCB/WCB.ino
+          CUR=$(grep 'String SoftwareVersion =' "$INO" | head -1 | grep -oE '"[^"]*"' | head -1 | tr -d '"')
+          SEMVER="${CUR%%_*}"
+          IFS=. read -r MAJOR MINOR PATCH _ <<< "$SEMVER"
+          MAJOR=${MAJOR:-0}; MINOR=${MINOR:-0}; PATCH=${PATCH:-0}
+          NEW_SEMVER="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          STAMP=$(TZ='America/New_York' date +'%d%H%MR%b%Y' | tr '[:lower:]' '[:upper:]')
+          NEW_VER="${NEW_SEMVER}_${STAMP}"
+          sed -i "s|String SoftwareVersion = \".*\";|String SoftwareVersion = \"${NEW_VER}\";|" "$INO"
+          echo "version=${NEW_VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW_VER}"    >> "$GITHUB_OUTPUT"
+          echo "Auto-version: ${CUR}  ->  ${NEW_VER}"
+
       - name: Run build script
         run: |
           chmod +x Code/bin/build.sh
           Code/bin/build.sh
 
       - name: Commit bin files
+        env:
+          NEWVER: ${{ steps.ver.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Code/bin/ Wizard/bin/
-          git diff --staged --quiet || git commit -m "Auto-build: update firmware binaries [skip ci]"
+          MSG="Auto-build: update firmware binaries [skip ci]"
+          [ -n "${NEWVER:-}" ] && MSG="Auto-release ${NEWVER} [skip ci]"
+          git add Code/bin/ Wizard/bin/ Code/WCB/WCB.ino
+          git diff --staged --quiet || git commit -m "$MSG"
           git push
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Tag + publish Release — main branch only.
+      #
+      # Tags the commit just pushed (which carries the bumped version + bins)
+      # and publishes a GitHub Release marked "Latest" with the built firmware
+      # attached. The README/wiki shields badge (github/v/release) then shows
+      # this version automatically. Guards make it a no-op if the tag/release
+      # already exists (e.g. a manual re-run).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Tag & publish release (main only)
+        if: github.ref == 'refs/heads/main' && steps.ver.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --latest \
+              --title "WCB Firmware ${VERSION}" \
+              --generate-notes \
+              Code/bin/WCB_${VERSION}_main_*.bin
+          fi
