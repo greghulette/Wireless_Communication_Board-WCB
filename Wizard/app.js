@@ -17,6 +17,18 @@ const _isWindows = (() => {
   return /windows/i.test(navigator.userAgent ?? '');
 })();
 
+// Detect macOS — HW 3.2 (ESP32-S3) flashing guidance differs on a Mac because
+// the CP2102 UART port's DTR/RTS auto-reset is unreliable there (must flash via
+// the native USB-Serial/JTAG port instead). iPadOS/iOS report "Mac" too, but
+// they have no Web Serial so the distinction is moot.
+const _isMac = (() => {
+  try {
+    const p = navigator.userAgentData?.platform ?? '';
+    if (p) return p.toLowerCase().includes('mac');
+  } catch (_) {}
+  return /mac/i.test(navigator.userAgent ?? '');
+})();
+
 // HW_VERSION_MAP is defined in parser.js — use WCBParser.HW_VERSION_MAP
 
 // Monotonically increasing counter for generating unique DOM row IDs.
@@ -56,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '18.18:46.R.JUN.2026';
+const UI_VERSION = '24.12:04.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7520,6 +7532,11 @@ function wizardHTMLIdentity() {
             </div>
 
           </div>
+
+          <!-- HW 3.2 dual-USB-port flashing guidance — toggled by wizardOnHWVerChange -->
+          <div id="wiz-b${i}-s3usb-note" style="${b.hwVersion === 32 ? '' : 'display:none'}">
+            ${s3PortGuidanceBoxHTML('margin:12px 0 0')}
+          </div>
         </div>
 
         <!-- Client fields (shown when type='client') -->
@@ -7587,6 +7604,9 @@ function wizardOnHWVerChange(i) {
   const hwVal  = parseInt(document.getElementById(`wiz-b${i}-hwver`)?.value ?? 0);
   const ledRow = document.getElementById(`wiz-b${i}-led-row`);
   if (ledRow) ledRow.style.display = (hwVal === 31 || hwVal === 32) ? 'flex' : 'none';
+  // HW 3.2 (S3) has two USB ports — show the flash/monitor port guidance.
+  const s3Note = document.getElementById(`wiz-b${i}-s3usb-note`);
+  if (s3Note) s3Note.style.display = (hwVal === 32) ? '' : 'none';
   // Default the onboard-LED pin to the variant's pin (3.1 → 38, 3.2 → 48) when
   // switching between the S3 boards, unless a custom pin is already chosen.
   const b = wizardState.boards[i];
@@ -8035,6 +8055,34 @@ function wizardFirmwareChoice(val, btn) {
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('firmware');
 }
 
+// ── HW 3.2 (ESP32-S3) dual-USB-port guidance ───────────────────────
+// The 3.2 board (an ESP32-S3-DevKitC-1 module) exposes TWO USB ports:
+//   • LEFT  — the chip's native USB-Serial/JTAG (silk-labeled "USB")
+//   • RIGHT — a CP2102 USB-UART bridge with DTR/RTS auto-reset ("UART")
+// On macOS the CP2102's reset lines behave unreliably through Web Serial, so the
+// download handshake fails on the RIGHT port — flashing must use the LEFT
+// (native) port, which resets via the chip's internal USB peripheral. The RIGHT
+// port still works fine for the serial monitor. Windows and Linux drive the
+// CP2102 reset correctly, so the RIGHT port handles both flash + monitor there.
+function s3PortGuidanceInnerHTML() {
+  return _isMac
+    ? `On a <strong>Mac</strong>: flash from the <strong>LEFT</strong> port — the native USB-Serial/JTAG port, silk-labeled <code>USB</code> (its reset is reliable on macOS). Use the <strong>RIGHT</strong> port — the CP2102 UART bridge, silk-labeled <code>UART</code> — for the serial monitor.`
+    : `On <strong>Windows</strong>/<strong>Linux</strong>: use the <strong>RIGHT</strong> port — the CP2102 UART bridge, silk-labeled <code>UART</code> — to flash and monitor.`;
+}
+
+function s3PortGuidanceBoxHTML(extraStyle = '') {
+  return `
+    <div class="wiz-s3-usb-note" style="margin:0 0 14px;padding:11px 14px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;background:rgba(0,0,0,0.03);font-size:12.5px;line-height:1.55;${extraStyle}">
+      <div style="font-weight:600;margin-bottom:4px">🔌 HW 3.2 (ESP32-S3) has two USB ports</div>
+      <div style="opacity:0.92">${s3PortGuidanceInnerHTML()}</div>
+    </div>`;
+}
+
+// True when any non-client slot in the wizard is a HW 3.2 (S3) board.
+function wizardHasHW32() {
+  return (wizardState.boards || []).some(b => b.type !== 'client' && b.hwVersion === 32);
+}
+
 function wizardHTMLConnect() {
   const { connectMode, connectSeqN, boards, needsFirmware, eraseNvs } = wizardState;
   // ── Auto-select sequential mode — skip the picker entirely ───────
@@ -8120,9 +8168,12 @@ function wizardHTMLConnect() {
       </ul>
     </div>` : '';
 
+  const s3PortGuidance = wizardHasHW32() ? s3PortGuidanceBoxHTML() : '';
+
   return `
     <div class="wizard-section-title">Connect &amp; Push</div>
     ${tipHtml}
+    ${s3PortGuidance}
     ${banner}
     ${rows}
     ${clientFooter}`;
