@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.0_201131RJUN2026                                  *****////
+///*****                                          Version 6.1.0_241138RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -163,7 +163,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.0_201131RJUN2026";
+String SoftwareVersion = "6.1.0_241138RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2985,6 +2985,26 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // would split on the delimiter (otherwise LABEL saved the whole
             // tail "x^?BCAST,..." verbatim to NVS). That fix is preserved by
             // the else branch below.
+            //
+            // RC alias query: a peer (NaviCore, device 20) sends "?WHOAMI" to
+            // learn who we are. Reply with our board number + friendly alias
+            // over the mesh so it can label us in its monitor. Sent back as a
+            // normal COMMAND packet (the only type NaviCore's WCB_Client
+            // ingests). Handled here, where senderWCB is known, rather than the
+            // generic command queue — a single short unicast, no relay/enqueue.
+            if (etmCmd.equalsIgnoreCase("?WHOAMI")) {
+                // Reply as JSON so NaviCore's rcTelemetry::handle() ingests it
+                // via its normal type-dispatch (it only parses commands that
+                // start with '{'). Escape the alias for safe embedding.
+                String esc = wcb_alias;
+                esc.replace("\\", "\\\\");
+                esc.replace("\"", "\\\"");
+                String reply = "{\"type\":\"wcb_alias\",\"id\":" + String(WCB_Number) +
+                               ",\"alias\":\"" + esc + "\"}";
+                sendESPNowMessage((uint8_t)senderWCB, reply.c_str(), true);
+                colorWipeStatus("ES", blue, 10);
+                return;
+            }
             if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
                 // parseCommandGroups mutates a std::vector iterated by loop();
                 // defer to loop() via the pendingTimerChainQueue (see comment
