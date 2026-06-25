@@ -68,6 +68,9 @@ jobs:
           STAMP=$(TZ='America/New_York' date +'%d%H%MR%b%Y' | tr '[:lower:]' '[:upper:]')
           NEW_VER="${NEW_SEMVER}_${STAMP}"
           sed -i "s|String SoftwareVersion = \".*\";|String SoftwareVersion = \"${NEW_VER}\";|" "$INO"
+          # Keep the decorative banner's "Version ..." line in sync too. Scoped to
+          # the '*****' banner lines so the substitution can't touch anything else.
+          sed -i "/\*\*\*\*\*/ s/\(Version \)[0-9][0-9.]*_[0-9]\{6\}R[A-Z]\{3\}[0-9]\{4\}/\1${NEW_VER}/" "$INO"
           echo "version=${NEW_VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEW_VER}"    >> "$GITHUB_OUTPUT"
           echo "Auto-version: ${CUR}  ->  ${NEW_VER}"

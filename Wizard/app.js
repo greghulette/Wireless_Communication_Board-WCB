@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '24.12:04.R.JUN.2026';
+const UI_VERSION = '25.12:33.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -109,8 +109,17 @@ if (document.readyState === 'loading') {
 // ─── Firmware Version (fetched from GitHub) ───────────────────────
 async function fetchLatestFirmwareVersion() {
   try {
+    // Read the latest published bin from the SAME branch the flasher pulls from
+    // (getFirmwareBranch from flasher.js — defaults to 'main', honors the
+    // wcb_fw_branch localStorage test override). Previously this hardcoded the
+    // stale 'multi_maestro' feature branch, so the "update available" indicator
+    // compared the board against an old branch and never reflected main.
+    const branch = (typeof getFirmwareBranch === 'function') ? getFirmwareBranch() : 'main';
+    const owner  = (typeof GITHUB_OWNER    === 'string') ? GITHUB_OWNER    : 'greghulette';
+    const repo   = (typeof GITHUB_REPO     === 'string') ? GITHUB_REPO     : 'Wireless_Communication_Board-WCB';
+    const path   = (typeof GITHUB_BIN_PATH === 'string') ? GITHUB_BIN_PATH : 'Code/bin';
     const r = await fetch(
-      'https://api.github.com/repos/greghulette/Wireless_Communication_Board-WCB/contents/Code/bin?ref=multi_maestro'
+      `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`
     );
     if (!r.ok) return;
     const files = await r.json();
@@ -324,6 +333,16 @@ function onFwBranchChange() {
     showToast(`Firmware source set to branch '${b}' — NOT released firmware`, 'info', 6000);
   else
     showToast('Firmware source: main (released)', 'success', 3000);
+
+  // Re-check "latest available" against the NEWLY-selected branch so the update
+  // indicator (and Update FW button) reflect the chosen firmware source instead
+  // of whatever branch was current at page load. Clear first so a failed re-fetch
+  // shows "unavailable" rather than the previous branch's version.
+  latestFirmwareVersion = null;
+  for (let n = 1; n <= 8; n++) {
+    if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
+  }
+  fetchLatestFirmwareVersion();   // async, best-effort — re-renders on success
 }
 
 // Make the <select> reflect the saved branch even before the full list
