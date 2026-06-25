@@ -5,12 +5,20 @@
 
 // '***' comment marker — defined in WCB.ino (mirrors WCB_Storage.cpp / WCB_Variables.cpp)
 extern String commentDelimiter;
+// ESP-NOW origin flag (loop-prevention), owned by WCB.ino.
+extern bool lastReceivedViaESPNOW;
 
 std::vector<CommandGroup> commandGroups;
 unsigned long lastGroupTime = 0;
 size_t currentGroupIndex = 0;
 bool commandTimerModeEnabled = false;
 bool waitingForNextGroup = false;
+// Origin captured when the active timer sequence was parsed. Timer groups fire
+// long after the original trigger, so the live global is unrelated by then —
+// processCommandGroups re-applies this while enqueuing each group's commands so
+// a peer-triggered (or locally-triggered) timer sequence keeps the correct
+// ESP-NOW re-broadcast behavior. Only one timer sequence is active at a time.
+bool commandGroupsEspnowOrigin = false;
 
 bool isTimerCommand(const String &input);
 void stopTimerSequence();
@@ -62,6 +70,8 @@ void parseCommandGroups(const String &input) {
   currentGroupIndex = 0;
   commandTimerModeEnabled = true;
   waitingForNextGroup = false;
+  // Capture the origin now; it's re-applied as each group fires (see processCommandGroups).
+  commandGroupsEspnowOrigin = lastReceivedViaESPNOW;
 
   String working = input;
   working.replace("\r", "");
@@ -166,6 +176,11 @@ void processCommandGroups() {
 
   if (waitingForNextGroup) {
     if (millis() - lastGroupTime >= group.delayAfterPrevious) {
+      // Re-apply the origin captured when this sequence was parsed so the commands
+      // enqueued now inherit the right ESP-NOW semantics. enqueueCommand snapshots
+      // the global, so it must hold this group's origin during the enqueue.
+      bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+      lastReceivedViaESPNOW = commandGroupsEspnowOrigin;
       for (const String &cmd : group.commands) {
         if (debugEnabled) {
           Serial.printf("[TimerGroup %u] Executing command: %s\n", currentGroupIndex + 1, cmd.c_str());
@@ -173,6 +188,7 @@ void processCommandGroups() {
         parseCommandsAndEnqueue(cmd, 0);
                 vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
       }
+      lastReceivedViaESPNOW = _savedEspNowOrigin;
       lastGroupTime = millis();
       currentGroupIndex++;
 

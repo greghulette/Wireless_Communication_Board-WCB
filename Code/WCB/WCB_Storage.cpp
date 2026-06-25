@@ -554,12 +554,25 @@ void recallCommandSlot(const String &key, int sourceID) {
         return;
     }
 
-    // Enqueue for execution
+    // Enqueue for execution.
+    //
+    // A stored sequence's commands are authored locally on THIS board and are
+    // meant to fan out to peers. They must NOT inherit the "received via ESP-NOW"
+    // flag from the trigger: when a PEER triggers the recall, that flag is set
+    // (loop-prevention), and without this every command in the sequence that
+    // needs to go back out over ESP-NOW to the other WCBs would be silently
+    // suppressed. Force local origin for the enqueue/parse; the per-item snapshot
+    // in enqueueCommand (and commandGroupsEspnowOrigin for timer sequences)
+    // carries it through to dispatch. Restore afterward so the rest of the queue
+    // drain is unaffected.
+    bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    lastReceivedViaESPNOW = false;
     if (isTimerCommand(stripped)) {
         parseCommandGroups(stripped);
     } else {
         parseCommandsAndEnqueue(stripped, sourceID);
     }
+    lastReceivedViaESPNOW = _savedEspNowOrigin;
 
 }
 

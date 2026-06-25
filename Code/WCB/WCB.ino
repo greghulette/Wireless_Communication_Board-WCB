@@ -78,6 +78,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 
 //  All of these librarires are included in the ESP32 by Espressif board library V3.3.4
 #include <Arduino.h>
+#include <functional>                       // std::function — shared config emitter (collectConfigCommands)
 #include <esp_wifi.h>
 #include <esp_now.h> 
 #include <WiFi.h>
@@ -163,7 +164,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.1_241321RJUN2026";
+String SoftwareVersion = "6.1.1_251207RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -349,6 +350,8 @@ constexpr size_t TIMER_CHAIN_QUEUE_SLOTS = 8;
 constexpr size_t TIMER_CHAIN_MAX_LEN     = 220;
 struct PendingTimerChainSlot {
   char buf[TIMER_CHAIN_MAX_LEN];
+  bool espnowOrigin;   // origin captured at enqueue; restored before parseCommandGroups so
+                       // the deferred timer group keeps the right ESP-NOW semantics.
 };
 QueueHandle_t pendingTimerChainQueue = nullptr;
 
@@ -359,7 +362,12 @@ static inline void drainPendingTimerChains() {
   if (!pendingTimerChainQueue) return;
   PendingTimerChainSlot slot;
   while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
+    // parseCommandGroups snapshots the current global into commandGroupsEspnowOrigin
+    // for the deferred fire — set it to this chain's captured origin first.
+    bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    lastReceivedViaESPNOW = slot.espnowOrigin;
     parseCommandGroups(String(slot.buf));
+    lastReceivedViaESPNOW = _savedEspNowOrigin;
   }
 }
 
@@ -368,6 +376,7 @@ static inline void enqueuePendingTimerChain(const String& chain) {
   PendingTimerChainSlot slot;
   strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
   slot.buf[sizeof(slot.buf) - 1] = '\0';
+  slot.espnowOrigin = lastReceivedViaESPNOW;   // remember origin for the deferred fire
   xQueueSend(pendingTimerChainQueue, &slot, 0);
 }
 // ETM Board Status Table
@@ -719,8 +728,13 @@ SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
 
 // ============================= FreeRTOS Queue Setup =============================
 typedef struct {
-  char *cmd;     // Dynamically allocated
-  int sourceID;  // 1..5 for serial, or 0 if we want to designate ESP-NOW or WCBX
+  char *cmd;          // Dynamically allocated
+  int sourceID;       // 1..5 for serial, or 0 if we want to designate ESP-NOW or WCBX
+  bool espnowOrigin;  // snapshot of lastReceivedViaESPNOW at enqueue time; restored at
+                      // dispatch so a command's ESP-NOW re-broadcast decision reflects
+                      // THIS command's true origin, not whatever the global held when the
+                      // queue happened to be drained (the global races across queue
+                      // boundaries — see the IF-gating note in handleSingleCommand).
 } CommandQueueItem;
 
 static QueueHandle_t commandQueue = nullptr;
@@ -1459,6 +1473,10 @@ void enqueueCommand(const String &cmd, int sourceID) {
 
   CommandQueueItem item;
   item.sourceID = sourceID;
+  // Snapshot the ESP-NOW origin NOW (at enqueue), while the global still reflects
+  // the source that produced this command. It is restored just before dispatch so
+  // forwarding decisions are per-command instead of riding a racy global.
+  item.espnowOrigin = lastReceivedViaESPNOW;
 
   // Allocate enough space for the command (including null terminator)
   int length = cmd.length() + 1;
@@ -2265,16 +2283,26 @@ void checkMgmtTimeout() {
 
 // Build a complete config string in the standard '?'^' format, suitable for
 // transmission to the webpage via the config pull mechanism.
-String buildConfigString() {
-  String out = "";
+// ───────────────────────────────────────────────────────────────────────────
+// collectConfigCommands — SINGLE SOURCE OF TRUTH for the WCB config command list.
+//
+// Walks every persisted setting in canonical order and hands each command BODY
+// (e.g. "HW,24", "SPECIAL,ON,20") to `emit`. `includeInLive` is false for the two
+// commands (DELIM, FUNCCHAR) that must NOT appear in the live/configured restore
+// chain — see printBackupConfig for the rationale. `emitHelpers` is invoked at the
+// spot where the Maestro/MP3/HCR/Variable sub-emitters belong, so each caller can
+// route them to its own output target.
+//
+// BOTH printBackupConfig() (serial backup) and buildConfigString() (ESP-NOW relay
+// pull) drive this, so a setting added here is emitted by both automatically — no
+// more "works on serial, missing on relay" drift (the bug that dropped SPECIAL).
+// ───────────────────────────────────────────────────────────────────────────
+void collectConfigCommands(const std::function<void(const String &cmd, bool includeInLive)> &emit,
+                           const std::function<void()> &emitHelpers) {
   String cmd;
   char   hexBuffer[3];
 
-  auto append = [&](const String &c) {
-    out += (out.isEmpty() ? "?" : "^?") + c;
-  };
-
-  // Hardware version
+  // Hardware version (clean number; "0" if unset — the caller warns separately)
   String hwSuffix;
   if      (wcb_hw_version == 1)  hwSuffix = "1";
   else if (wcb_hw_version == 21) hwSuffix = "21";
@@ -2283,38 +2311,38 @@ String buildConfigString() {
   else if (wcb_hw_version == 31) hwSuffix = "31";
   else if (wcb_hw_version == 32) hwSuffix = "32";
   else                            hwSuffix = "0";
-  append("HW," + hwSuffix);
+  emit("HW," + hwSuffix, true);
 
   // LED pin (HW 3.1/3.2 only — always include so config pull captures current value)
   if (wcb_hw_version == 31 || wcb_hw_version == 32)
-    append("LED,PIN," + String(STATUS_LED_PIN));
+    emit("LED,PIN," + String(STATUS_LED_PIN), true);
 
   // Network identity
-  sprintf(hexBuffer, "%02X", umac_oct2); append("MAC,2," + String(hexBuffer));
-  sprintf(hexBuffer, "%02X", umac_oct3); append("MAC,3," + String(hexBuffer));
-  append("WCB,"  + String(WCB_Number));
-  if (wcb_alias.length() > 0) append("ALIAS," + wcb_alias);
-  append("WCBQ," + String(Default_WCB_Quantity));
-  append("EPASS," + String(espnowPassword));
+  sprintf(hexBuffer, "%02X", umac_oct2); emit("MAC,2," + String(hexBuffer), true);
+  sprintf(hexBuffer, "%02X", umac_oct3); emit("MAC,3," + String(hexBuffer), true);
+  emit("WCB,"  + String(WCB_Number), true);
+  if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
+  emit("WCBQ," + String(Default_WCB_Quantity), true);
+  emit("EPASS," + String(espnowPassword), true);
 
-  // Command characters
-  if (commandDelimiter != '^')       append("DELIM,"   + String(commandDelimiter));
-  if (LocalFunctionIdentifier != '?') append("FUNCCHAR," + String(LocalFunctionIdentifier));
-  append("CMDCHAR," + String(CommandCharacter));
+  // Command characters — DELIM/FUNCCHAR are factory-chain-only (includeInLive=false)
+  if (commandDelimiter != '^')        emit("DELIM,"    + String(commandDelimiter), false);
+  if (LocalFunctionIdentifier != '?') emit("FUNCCHAR," + String(LocalFunctionIdentifier), false);
+  emit("CMDCHAR," + String(CommandCharacter), true);
 
   // Baud rates and labels
-  for (int i = 0; i < 5; i++) append("BAUD,S" + String(i + 1) + "," + String(baudRates[i]));
+  for (int i = 0; i < 5; i++) emit("BAUD,S" + String(i + 1) + "," + String(baudRates[i]), true);
   for (int i = 0; i < 5; i++)
     if (serialPortLabels[i].length() > 0)
-      append("LABEL,S" + String(i + 1) + "," + serialPortLabels[i]);
+      emit("LABEL,S" + String(i + 1) + "," + serialPortLabels[i], true);
 
   // Broadcast settings
   for (int i = 0; i < 5; i++)
-    append("BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF"));
+    emit("BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF"), true);
   for (int i = 0; i < 5; i++)
-    append("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"));
+    emit("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"), true);
 
-  // Serial mappings
+  // Serial monitor mappings
   for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
     if (!serialMonitorMappings[i].active) continue;
     cmd = "MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
@@ -2327,10 +2355,10 @@ String buildConfigString() {
         cmd += "W" + String(serialMonitorMappings[i].outputs[j].wcbNumber) +
                "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
     }
-    append(cmd);
+    emit(cmd, true);
   }
 
-  // Kyber
+  // Kyber / Maestro-remote
   if (Kyber_Local) {
     preferences.begin("kyber_settings", true);
     int kPort = preferences.getInt("K_Port", 2);
@@ -2353,35 +2381,28 @@ String buildConfigString() {
                   "S" + String(kyberTargets[i].targetPort) +
                   ":" + String(baud);
     }
-    append(kyberCmd);
+    emit(kyberCmd, true);
   } else if (Maestro_Remote) {
-    append("MAESTRO,REMOTE");
+    emit("MAESTRO,REMOTE", true);
   } else {
-    append("KYBER,CLEAR");
+    emit("KYBER,CLEAR", true);
   }
 
-  // Maestro settings (appends to out using same ^? format)
-  { String dummy; printMaestroBackup(dummy, out, '^'); }
-
-  // MP3 Trigger settings
-  { String dummy; printMP3Backup(dummy, out, '^'); }
-
-  // HCR settings
-  { String dummy; printHCRBackup(dummy, out, '^'); }
-
-  // User variables (?VAR,SET,name,value per variable — webtool grammar is
-  // always the fixed '^?' form, so the default defSep/defFunc are correct here)
-  { String dummy; printVariablesBackup(dummy, out, '^'); }
+  // Maestro / MP3 / HCR / Variable sub-emitters (routed to the caller's target)
+  emitHelpers();
 
   // ETM settings
-  append(etmEnabled ? "ETM,ON" : "ETM,OFF");
-  append("ETM,TIMEOUT," + String(etmTimeoutMs));
-  append("ETM,HB,"      + String(etmHeartbeatSec));
-  append("ETM,MISS,"    + String(etmMissedHeartbeats));
-  append("ETM,BOOT,"    + String(etmBootHeartbeatSec));
-  append("ETM,COUNT,"   + String(etmCharMessageCount));
-  append("ETM,DELAY,"   + String(etmCharDelayMs));
-  append("ETM,CHKSM,"   + String(etmChecksumEnabled ? "ON" : "OFF"));
+  emit(etmEnabled ? "ETM,ON" : "ETM,OFF", true);
+  emit("ETM,TIMEOUT," + String(etmTimeoutMs), true);
+  emit("ETM,HB,"      + String(etmHeartbeatSec), true);
+  emit("ETM,MISS,"    + String(etmMissedHeartbeats), true);
+  emit("ETM,BOOT,"    + String(etmBootHeartbeatSec), true);
+  emit("ETM,COUNT,"   + String(etmCharMessageCount), true);
+  emit("ETM,DELAY,"   + String(etmCharDelayMs), true);
+  emit("ETM,CHKSM,"   + String(etmChecksumEnabled ? "ON" : "OFF"), true);
+
+  // Special peer (NaviCore) — only when enabled
+  if (specialPeerEnabled) emit("SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID), true);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);
@@ -2398,15 +2419,15 @@ String buildConfigString() {
         preferences.begin("stored_cmds", true);
         String value = preferences.getString(key.c_str(), "");
         preferences.end();
-        append("SEQ,SAVE," + key + "," + value);
+        emit("SEQ,SAVE," + key + "," + value, true);
       }
       startIdx = ci + 1;
     }
   }
 
-  // PWM output ports and mappings
+  // PWM output ports + mappings (mappings LAST — restore triggers a reboot)
   for (int i = 0; i < pwmOutputCount; i++)
-    append("MAP,PWM,OUT,S" + String(pwmOutputPorts[i]));
+    emit("MAP,PWM,OUT,S" + String(pwmOutputPorts[i]), true);
   for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
     if (!pwmMappings[i].active) continue;
     cmd = "MAP,PWM,S" + String(pwmMappings[i].inputPort);
@@ -2418,16 +2439,35 @@ String buildConfigString() {
         cmd += "W" + String(pwmMappings[i].outputs[j].wcbNumber) +
                "S" + String(pwmMappings[i].outputs[j].serialPort);
     }
-    append(cmd);
+    emit(cmd, true);
   }
+}
+
+// Builds the always-'?' config string used by the ESP-NOW relay pull (the Wizard
+// reads it). Drives collectConfigCommands so it can never drift from the serial
+// backup (printBackupConfig). DELIM/FUNCCHAR are emitted in the always-'?' form
+// here regardless of includeInLive — the Wizard parses '?'-prefixed tokens.
+String buildConfigString() {
+  String out = "";
+  auto emit = [&](const String &c, bool /*includeInLive*/) {
+    out += (out.isEmpty() ? "?" : "^?") + c;
+  };
+  auto emitHelpers = [&]() {
+    String dummy;
+    printMaestroBackup(dummy, out, '^');
+    printMP3Backup(dummy, out, '^');
+    printHCRBackup(dummy, out, '^');
+    // User variables — webtool grammar is always the fixed '^?' form.
+    printVariablesBackup(dummy, out, '^');
+  };
+  collectConfigCommands(emit, emitHelpers);
 
   // Checksum (zero-padded %08X to match printBackupConfig and the verifiers
   // at WCB.ino:~1471 and :~5121 — see fix #6 comment there).
   uint32_t checksum = calculateCRC32(out);
   char chkBuf[9];
   snprintf(chkBuf, sizeof(chkBuf), "%08X", checksum);
-  String chkCmd = "?CHK" + String(chkBuf);
-  out += "^" + chkCmd;
+  out += "^?CHK" + String(chkBuf);
 
   // Prepend software version so the Wizard can read it from remote (MGMT) pulls.
   // The [VER:...] prefix is stripped by the Wizard before command parsing.
@@ -4572,317 +4612,44 @@ void updateHWVersion(const String &message) {
     Serial.println(commentDelimiter + " Copy and paste these commands to restore");
     Serial.println(commentDelimiter + " ========================================\n");
 
+    // Serial-only warning if HW version is unset. The command chain itself still
+    // emits a clean "HW,0" (no annotation junk) via collectConfigCommands below.
+    if (!(wcb_hw_version == 1  || wcb_hw_version == 21 || wcb_hw_version == 23 ||
+          wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32))
+        Serial.println("WARNING: Hardware version not set! Use ?HW,xx to set version before backup.");
+
     String chainedConfig        = "";
     String chainedConfigDefault = "";
-    String defaultSep  = "^";                      // factory reset separator, flips after ?DELIM
+    String defaultSep  = "^";                      // factory reset separator — never flips (see DELIM note)
     String defaultFunc = "?";                      // factory reset func identifier, flips after ?FUNCCHAR
     String lfi         = String(LocalFunctionIdentifier);  // shorthand for configured string
-    String cmd;
-    char hexBuffer[3];
 
-    // ---- Hardware Version ----
-    String hwSuffix = "";
-    if      (wcb_hw_version == 1)  hwSuffix = "1";
-    else if (wcb_hw_version == 21) hwSuffix = "21";
-    else if (wcb_hw_version == 23) hwSuffix = "23";
-    else if (wcb_hw_version == 24) hwSuffix = "24";
-    else if (wcb_hw_version == 31) hwSuffix = "31";
-    else if (wcb_hw_version == 32) hwSuffix = "32";
-    else {
-        Serial.println("WARNING: Hardware version not set! Use ?HW,xx to set version before backup.");
-        hwSuffix = "0  *** HARDWARE VERSION NOT SET - SET BEFORE RESTORING! ***";
-    }
-    Serial.println(lfi + "HW," + hwSuffix);
-    chainedConfig        = lfi + "HW," + hwSuffix;
-    chainedConfigDefault = "?HW,"     + hwSuffix;   // factory reset always uses ? prefix
-
-    // ---- LED Pin (HW 3.1/3.2 only — always include so restore captures current value) ----
-    if (wcb_hw_version == 31 || wcb_hw_version == 32) {
-        cmd = "LED,PIN," + String(STATUS_LED_PIN);
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- Network Identity ----
-    sprintf(hexBuffer, "%02X", umac_oct2);
-    cmd = "MAC,2," + String(hexBuffer);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    sprintf(hexBuffer, "%02X", umac_oct3);
-    cmd = "MAC,3," + String(hexBuffer);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "WCB," + String(WCB_Number);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    if (wcb_alias.length() > 0) {
-        cmd = "ALIAS," + wcb_alias;
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    cmd = "WCBQ," + String(Default_WCB_Quantity);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "EPASS," + String(espnowPassword);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    // ---- Command Characters ----
-    // DELIM:
-    //   Configured string: skip entirely - board already uses correct delimiter throughout
-    //   Factory reset string: include only if non-default.
-    //
-    //   IMPORTANT: do NOT switch the factory-chain SEPARATOR after emitting
-    //   ?DELIM. The restore is parsed by parseCommandsAndEnqueue, which splits
-    //   the WHOLE string ONCE up front using the receiving board's current
-    //   delimiter ('^' on a fresh board) — a mid-stream ?DELIM only takes
-    //   effect when it DEQUEUES, long after splitting is done. If the chain
-    //   flipped to the new delimiter here, every entry after ?DELIM (CMDCHAR,
-    //   BAUD, MAESTRO/MP3/HCR/VAR, ETM, and the trailing ?CHK) would collapse
-    //   into one un-split token and silently drop, and the '^?CHK' integrity
-    //   check would be missed. Keeping '^' throughout makes the whole chain
-    //   split correctly; ?DELIM still applies the new delimiter for FUTURE
-    //   input when it executes. (funcChar is different — see FUNCCHAR below.)
-    if (commandDelimiter != '^') {
-        cmd = "DELIM," + String(commandDelimiter);
-        Serial.println(lfi + cmd);
-        // configured string: intentionally skipped
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // FUNCCHAR:
-    //   Configured string: skip entirely - board already uses correct func identifier throughout
-    //   Factory reset string: include only if non-default, then switch defaultFunc.
-    //   Unlike the delimiter (above), the func identifier DOES flip here: it
-    //   governs DISPATCH (handleSingleCommand re-checks each token's prefix
-    //   against the live LocalFunctionIdentifier at dequeue time), so once
-    //   ?FUNCCHAR has executed, later already-split tokens must carry the new
-    //   prefix to be recognized as config commands.
-    if (LocalFunctionIdentifier != '?') {
-        cmd = "FUNCCHAR," + String(LocalFunctionIdentifier);
-        Serial.println(lfi + cmd);
-        // configured string: intentionally skipped
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        defaultFunc = String(LocalFunctionIdentifier);  // all subsequent factory reset commands use new func identifier
-    }
-
-    // CMDCHAR: always include for reference, no switching needed (; not used in backup commands)
-    cmd = "CMDCHAR," + String(CommandCharacter);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    // ---- Serial Port Baud Rates ----
-    for (int i = 0; i < 5; i++) {
-        cmd = "BAUD,S" + String(i + 1) + "," + String(baudRates[i]);
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- Serial Port Labels ----
-    for (int i = 0; i < 5; i++) {
-        if (serialPortLabels[i].length() > 0) {
-            cmd = "LABEL,S" + String(i + 1) + "," + serialPortLabels[i];
-            Serial.println(lfi + cmd);
-            chainedConfig        += String(commandDelimiter) + lfi + cmd;
-            chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        }
-    }
-
-    // ---- Broadcast Output Settings ----
-    for (int i = 0; i < 5; i++) {
-        cmd = "BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF");
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- Broadcast Input Settings ----
-    for (int i = 0; i < 5; i++) {
-        cmd = "BCAST,IN,S" + String(i + 1) + "," + (blockBroadcastFrom[i] ? "OFF" : "ON");
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- Serial Monitor Mappings ----
-    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-        if (serialMonitorMappings[i].active) {
-            bool isRaw = serialMonitorMappings[i].rawMode;
-            cmd = "MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
-            if (isRaw) cmd += ",R";
-            for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-                cmd += ",";
-                if (serialMonitorMappings[i].outputs[j].wcbNumber == 0) {
-                    cmd += "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
-                } else {
-                    cmd += "W" + String(serialMonitorMappings[i].outputs[j].wcbNumber) +
-                           "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
-                }
-            }
-            Serial.println(lfi + cmd);
-            chainedConfig        += String(commandDelimiter) + lfi + cmd;
-            chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        }
-    }
-
-    // ---- Kyber Settings ----
-    if (Kyber_Local) {
-        preferences.begin("kyber_settings", true);
-        int kyberPort = preferences.getInt("K_Port", 2);
-        preferences.end();
-        String kyberCmd = "KYBER,LOCAL,S" + String(kyberPort);
-        // Append all enabled Kyber targets so the backup fully restores the routing table
-        for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
-            if (!kyberTargets[i].enabled) continue;
-            uint32_t baud = 9600;
-            int8_t slot = findSlotByMaestroID(kyberTargets[i].maestroID);
-            if (slot >= 0 && maestroConfigs[slot].baudRate > 0) {
-                baud = maestroConfigs[slot].baudRate;
-            } else if (kyberTargets[i].targetWCB == (uint8_t)WCB_Number &&
-                       kyberTargets[i].targetPort >= 1 && kyberTargets[i].targetPort <= 5) {
-                baud = baudRates[kyberTargets[i].targetPort - 1];
-            }
-            kyberCmd += ",M" + String(kyberTargets[i].maestroID) +
-                        ":W" + String(kyberTargets[i].targetWCB) +
-                        "S"  + String(kyberTargets[i].targetPort) +
-                        ":"  + String(baud);
-        }
-        cmd = kyberCmd;
-    } else if (Maestro_Remote) {
-        cmd = "MAESTRO,REMOTE";
-    } else {
-        cmd = "KYBER,CLEAR";
-    }
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    // ---- Maestro / MP3 / HCR / Variables (shared emitters) ----
-    // Pass the LIVE defaultSep/defaultFunc: they flip after the factory chain
-    // replays ?DELIM/?FUNCCHAR above, so entries appended here must use the
-    // post-flip characters or a custom-delimiter board never splits them on
-    // restore. Never hardcode '^'/'?' inside an emitter.
-    printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-    printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-    printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-
-    // ---- User Variables (?VAR,SET,name,value) ----
-    printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-
-    // ---- ETM Settings ----
-    cmd = etmEnabled ? "ETM,ON" : "ETM,OFF";
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,TIMEOUT," + String(etmTimeoutMs);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,HB," + String(etmHeartbeatSec);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,MISS," + String(etmMissedHeartbeats);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,BOOT," + String(etmBootHeartbeatSec);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,COUNT," + String(etmCharMessageCount);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,DELAY," + String(etmCharDelayMs);
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    cmd = "ETM,CHKSM," + String(etmChecksumEnabled ? "ON" : "OFF");
-    Serial.println(lfi + cmd);
-    chainedConfig        += String(commandDelimiter) + lfi + cmd;
-    chainedConfigDefault += defaultSep + defaultFunc + cmd;
-
-    // ---- Special Peer ----
-    if (specialPeerEnabled) {
-        cmd = "SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID);
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- Stored Sequences ----
-    preferences.begin("stored_cmds", true);
-    String keyList = preferences.getString("key_list", "");
-    preferences.end();
-
-    if (keyList.length() > 0) {
-        int startIdx = 0;
-        while (startIdx < keyList.length()) {
-            int commaIndex = keyList.indexOf(',', startIdx);
-            if (commaIndex == -1) commaIndex = keyList.length();
-            String key = keyList.substring(startIdx, commaIndex);
-            key.trim();
-            if (key.length() > 0) {
-                preferences.begin("stored_cmds", true);
-                String value = preferences.getString(key.c_str(), "");
-                preferences.end();
-                cmd = "SEQ,SAVE," + key + "," + value;
-                Serial.println(lfi + cmd);
-                chainedConfig        += String(commandDelimiter) + lfi + cmd;
-                chainedConfigDefault += defaultSep + defaultFunc + cmd;
-            }
-            startIdx = commaIndex + 1;
-        }
-    }
-
-    // ---- PWM Output Ports (before mappings) ----
-    for (int i = 0; i < pwmOutputCount; i++) {
-        cmd = "MAP,PWM,OUT,S" + String(pwmOutputPorts[i]);
-        Serial.println(lfi + cmd);
-        chainedConfig        += String(commandDelimiter) + lfi + cmd;
-        chainedConfigDefault += defaultSep + defaultFunc + cmd;
-    }
-
-    // ---- PWM Mappings (LAST - triggers reboot) ----
-    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
-        if (pwmMappings[i].active) {
-            cmd = "MAP,PWM,S" + String(pwmMappings[i].inputPort);
-            for (int j = 0; j < pwmMappings[i].outputCount; j++) {
-                cmd += ",";
-                if (pwmMappings[i].outputs[j].wcbNumber == 0) {
-                    cmd += "S" + String(pwmMappings[i].outputs[j].serialPort);
-                } else {
-                    cmd += "W" + String(pwmMappings[i].outputs[j].wcbNumber) +
-                           "S" + String(pwmMappings[i].outputs[j].serialPort);
-                }
-            }
-            Serial.println(lfi + cmd);
-            chainedConfig        += String(commandDelimiter) + lfi + cmd;
-            chainedConfigDefault += defaultSep + defaultFunc + cmd;
-        }
-    }
+    // Per-command emitter: prints to Serial (lfi prefix), accumulates the LIVE
+    // chain (configured delimiter + funcChar) and the FACTORY-RESET chain (fixed
+    // '^' separator + defaultFunc). includeInLive=false (DELIM, FUNCCHAR) keeps
+    // those out of the live chain — the board already uses the right
+    // delimiter/funcChar. After ?FUNCCHAR the factory chain flips defaultFunc so
+    // SUBSEQUENT tokens carry the new prefix (governs DISPATCH at restore time).
+    // The separator is intentionally NOT flipped after ?DELIM: the restore is
+    // split ONCE up front using the receiving board's current delimiter, so
+    // keeping '^' throughout makes the whole chain split correctly.
+    auto emit = [&](const String &c, bool includeInLive) {
+        Serial.println(lfi + c);
+        if (includeInLive)
+            chainedConfig += (chainedConfig.isEmpty() ? String("") : String(commandDelimiter)) + lfi + c;
+        chainedConfigDefault += (chainedConfigDefault.isEmpty() ? String("") : defaultSep) + defaultFunc + c;
+        if (c.startsWith("FUNCCHAR,")) defaultFunc = String(LocalFunctionIdentifier);
+    };
+    // Sub-emitters run at the canonical point (after Kyber, before ETM). Pass the
+    // LIVE defaultSep/defaultFunc (defaultFunc has flipped by now if ?FUNCCHAR was
+    // emitted) so a custom-funcChar board still splits them on restore.
+    auto emitHelpers = [&]() {
+        printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+    };
+    collectConfigCommands(emit, emitHelpers);
 
     // ---- Checksums ----
     // Format as zero-padded 8 hex chars (%08X) — matches the verifier at
@@ -6031,6 +5798,11 @@ void loop() {
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
     String commandStr(inItem.cmd);
     free(inItem.cmd);
+    // Restore the origin captured at enqueue so this command's ESP-NOW re-broadcast
+    // decision is correct regardless of what else touched the global since. This is
+    // what lets a peer-triggered stored sequence still fan its commands out to the
+    // other WCBs (the sequence body is enqueued with espnowOrigin=false).
+    lastReceivedViaESPNOW = inItem.espnowOrigin;
     handleSingleCommand(commandStr, inItem.sourceID);
   }
 }
