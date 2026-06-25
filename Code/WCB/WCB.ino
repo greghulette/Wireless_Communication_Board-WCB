@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.4_251257RJUN2026                                  *****////
+///*****                                          Version 6.1.4_251534RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -99,6 +99,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
 #include "WCB_Help.h"
+#include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
@@ -164,7 +165,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.4_251257RJUN2026";
+String SoftwareVersion = "6.1.4_251534RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3802,6 +3803,14 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?OTALOCAL,* — local USB firmware OTA (Phase 1 of ESP-NOW relay OTA) ---
+    // Writes a streamed image to the INACTIVE OTA slot over direct USB; the
+    // ESP-NOW relay transport (Phase 2) reuses the same write core.
+    if (rootUpper == "OTALOCAL") {
+        processOtaLocalCommand(args);
+        return;
+    }
+
     // --- ?ALIAS,<text>  /  ?ALIAS,CLEAR  /  ?ALIAS,LIST ---
     // Friendly per-WCB name (e.g. "Body" / "Dome"). Saved to NVS,
     // emitted in the config backup, and shown in the Wizard header
@@ -5789,6 +5798,7 @@ void loop() {
   processETMLoad();
   checkMgmtTimeout();
   checkConfigPullTimeout();
+  checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
