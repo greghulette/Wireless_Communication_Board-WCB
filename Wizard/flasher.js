@@ -17,8 +17,20 @@
 // esptool-js's per-chip target modules ("Failed to fetch dynamically imported
 // module" at "Connecting to bootloader…"). Paths are relative to the Wizard
 // page so they resolve under the GitHub Pages subpath too. See vendor/README.md.
-const ESPTOOL_SRC  = './vendor/esptool-js/esptool-js-0.4.7.bundle.js';
-const CRYPTOJS_SRC = './vendor/crypto-js/crypto-js-4.2.0.min.js';
+// Resolve vendored deps relative to THIS script's own URL (flasher.js always
+// ships alongside vendor/), not the document base. A page whose base URL isn't
+// the Wizard dir — a directory-listing root, a redirect, an odd host path —
+// would otherwise make these 404 ("Could not load esptool-js / CryptoJS").
+// Falls back to the document-relative path if currentScript is unavailable.
+const _VENDOR_BASE = (() => {
+  try {
+    const u = document.currentScript && document.currentScript.src;
+    if (u) return new URL('vendor/', u).href;
+  } catch (_) {}
+  return './vendor/';
+})();
+const ESPTOOL_SRC  = _VENDOR_BASE + 'esptool-js/esptool-js-0.4.7.bundle.js';
+const CRYPTOJS_SRC = _VENDOR_BASE + 'crypto-js/crypto-js-4.2.0.min.js';
 
 // ─── Firmware source config ───────────────────────────────────────
 // Binaries live in Code/bin/ on GitHub with versioned names like:
