@@ -205,7 +205,8 @@ void processOtaLocalCommand(const String &args) {
     if (p < 0) { Serial.println("[OTA] BEGIN usage: ?OTALOCAL,BEGIN,<imageSize>,<family 0|1>"); return; }
     uint32_t size   = (uint32_t) rest.substring(0, p).toInt();
     uint8_t  family = (uint8_t)  rest.substring(p + 1).toInt();
-    otaBegin(OTA_LOCAL_SESSION, size, family);   // logs its own result
+    bool ok = otaBegin(OTA_LOCAL_SESSION, size, family);   // logs its own detail
+    Serial.printf("[OTA:BEGIN,%s,%u]\n", ok ? "OK" : "ERR", otaWrittenOffset());
     return;
   }
 
@@ -228,15 +229,24 @@ void processOtaLocalCommand(const String &args) {
       // Over reliable USB this should only happen on a real gap — report the cursor
       Serial.printf("[OTA] DATA rejected at offset %u (write cursor at %u)\n",
                     offset, otaWrittenOffset());
+      Serial.printf("[OTA:NAK,%u]\n", otaWrittenOffset());   // machine-readable resync point
+      return;
     }
+    // Machine-readable per-chunk ACK = flow control. The browser waits for this
+    // before sending the next chunk so the ESP32 RX buffer can't overflow while
+    // a flash write is in progress (USB has no other backpressure here).
+    Serial.printf("[OTA:ACK,%u]\n", otaWrittenOffset());
     return;
   }
 
   if (sub == "END") {
     if (otaEnd(OTA_LOCAL_SESSION)) {
+      Serial.println("[OTA:END,OK]");
       Serial.println("[OTA] rebooting into new firmware in 2s…");
       delay(2000);
       ESP.restart();
+    } else {
+      Serial.println("[OTA:END,ERR]");
     }
     return;
   }

@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '25.12:55.R.JUN.2026';
+const UI_VERSION = '25.15:42.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1219,6 +1219,94 @@ function boardUpdateFW(n) {
     return;
   }
   boardGo(n, { mode: 'update' });
+}
+
+// Base64-encode a Uint8Array (small chunks only — fine for ≤1 KB OTA frames).
+function _u8ToBase64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+
+// ─── OTA over USB serial (Phase 1 of ESP-NOW relay OTA) ─────────────────────
+// Streams the REAL firmware bin to the board's INACTIVE OTA slot via the
+// ?OTALOCAL,* commands — writing through the running firmware, so it needs NO
+// bootloader / download mode / BOOT button / auto-reset (the exact thing that
+// fails on Macs and button-less boards). ACK-paced for reliable flow control.
+async function boardOtaSerial(n) {
+  const conn = boardConnections[n];
+  if (remoteRelayForBoard[n]) { showToast('OTA-over-serial needs a direct USB connection', 'warning'); return; }
+  if (!conn?.isConnected())   { showToast('Connect the board via USB first', 'error'); return; }
+
+  const btn = document.getElementById(`b${n}-btn-ota-serial`);
+  const fc  = boardConfigs[n]?.funcChar ?? boardBootChars[n]?.funcChar ?? '?';
+  const cmd = (s) => `${fc}OTALOCAL,${s}`;
+
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
+    setFlashUI(n, true);
+    setFlashStatus(n, 'Reading board…');
+    termLog(n, '[OTA] starting OTA over USB serial…', 'sys');
+
+    // 1) Ask the board its chip family so we fetch the matching image (the
+    //    firmware also guards against a mismatch at BEGIN — this just avoids it).
+    const status = await conn.sendAndCollect(cmd('STATUS'), 4000, 'Session:');
+    const fm = status.match(/family\s+(\d)/i);
+    if (!fm) throw new Error('could not read chip family (?OTALOCAL,STATUS) — is this OTA-capable firmware?');
+    const family     = parseInt(fm[1]);
+    const binaryType = family === 1 ? 'ESP32S3' : 'ESP32';
+    termLog(n, `[OTA] board chip family ${family} → ${binaryType} image`, 'sys');
+
+    // 2) Fetch the REAL firmware (same source the normal flasher uses).
+    setFlashStatus(n, `Loading ${binaryType} firmware…`);
+    const fw = await getBinaryData(binaryType, (m) => termLog(n, m, 'sys'));
+    const appImg = fw.images.find(i => i.address === 0x10000);
+    if (!appImg) throw new Error('app image (0x10000) missing from firmware bundle');
+    const bytes = new Uint8Array(appImg.buf);
+    const total = bytes.length;
+    termLog(n, `[OTA] image ${total} bytes`, 'sys');
+
+    // 3) BEGIN — board validates chip family + partition size, esp_ota_begin.
+    setFlashStatus(n, 'Starting OTA…');
+    const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
+    if (!/\[OTA:BEGIN,OK,/.test(beginResp))
+      throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+
+    // 4) Stream chunks, ACK-paced. The board's ACK/NAK carries the authoritative
+    //    write cursor; we always follow it (rewind on NAK).
+    const CHUNK = 1024;
+    let offset = 0;
+    while (offset < total) {
+      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
+      const resp  = await conn.sendAndCollect(cmd(`DATA,${offset},${_u8ToBase64(slice)}`), 6000, '[OTA:');
+      const m = resp.match(/\[OTA:(ACK|NAK),(\d+)\]/);
+      if (!m) throw new Error(`no ACK for chunk @${offset} (board may have stalled)`);
+      const cursor = parseInt(m[2]);
+      if (m[1] === 'NAK') { termLog(n, `[OTA] gap — rewinding to ${cursor}`, 'sys'); offset = cursor; continue; }
+      offset = cursor;                       // ACK: advance to the board's confirmed cursor
+      updateFlashBar(n, offset, total);
+      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
+    }
+
+    // 5) END — board verifies (SHA) + sets boot partition + reboots.
+    setFlashStatus(n, 'Verifying…');
+    const endResp = await conn.sendAndCollect(cmd('END'), 12000, '[OTA:END,');
+    if (!/\[OTA:END,OK\]/.test(endResp))
+      throw new Error('OTA verify/finalize failed — ' + (endResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+
+    termLog(n, '[OTA] ✅ verified — board rebooting into new firmware', 'sys');
+    setFlashStatus(n, 'Rebooting…');
+    showToast(`WCB ${n}: OTA complete — rebooting into new firmware`, 'success');
+    // Board reboots now; its serial drops. Re-pull version after it comes back.
+    setTimeout(() => { boardPull(n).catch(() => {}); }, 6000);
+  } catch (e) {
+    termLog(n, `[OTA] ✕ ${e.message}`, 'err');
+    showToast(`OTA failed: ${e.message}`, 'error');
+    try { await conn.send(cmd('ABORT') + '\r'); } catch (_) {}   // free the board's handle
+  } finally {
+    setFlashUI(n, false);
+    if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA (serial)'; }
+  }
 }
 
 function onSerialFieldChange(n) {
