@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '26.11:00.R.JUN.2026';
+const UI_VERSION = '26.14:46.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1398,6 +1398,22 @@ async function boardOtaRelay(n) {
     termLog(n, `[OTA] ✅ WCB${targetWcb} verified — rebooting into new firmware`, 'sys');
     setFlashStatus(n, 'Rebooting…');
     showToast(`WCB ${targetWcb}: wireless OTA complete — rebooting`, 'success');
+
+    // The target reboots into the new image; its RTERM session state is volatile
+    // and lost across the reboot, and a fast reboot stays inside the relay's ~33 s
+    // ETM offline window — so the relay never prints "came ONLINE" and nothing
+    // auto-re-establishes. Proactively re-pull config + re-arm the remote terminal
+    // once it's back (remoteBoardPull re-sends RTERM,START on success; its own
+    // retries absorb boot timing). The firmware boot-announce usually triggers the
+    // ETM-listener path first — the _pullingBoards guard makes this a no-op then.
+    if (remoteRelayForBoard[n]) {
+      setTimeout(() => {
+        if (boardConnections[relayN]?.isConnected()) {
+          termLog(n, `[OTA] re-establishing relay session after reboot…`, 'sys');
+          remoteBoardPull(relayN, n);
+        }
+      }, 9000);
+    }
   } catch (e) {
     termLog(n, `[OTA] ✕ ${e.message}`, 'err');
     showToast(`Wireless OTA failed: ${e.message}`, 'error');
@@ -5996,9 +6012,14 @@ async function boardGoRemote(n, opts = {}) {
 }
 
 // Pull config from a remote board via the relay's CONFIG_REQ/CONFIG_FRAG protocol.
-// Sends ?MGMT,PULL,<targetN> to the relay; waits up to 15 s for [MGMT:CONFIG,<targetN>].
-// Auto-retries up to MAX_PULL_ATTEMPTS times (10 s apart) before marking error.
+// Sends ?MGMT,PULL,<targetN> to the relay; waits PULL_TIMEOUT_MS for [MGMT:CONFIG,<targetN>].
+// Auto-retries up to MAX_PULL_ATTEMPTS times (PULL_RETRY_MS apart) before marking error.
+// The timeout is short on purpose: a successful pull returns in well under a second,
+// and the relay+target now send CONFIG_REQ/FRAG redundantly, so a dropped first frame
+// should be rare — when it does happen we want to retry quickly, not stall ~15 s.
 const MAX_PULL_ATTEMPTS = 3;
+const PULL_TIMEOUT_MS   = 6000;
+const PULL_RETRY_MS     = 2500;
 async function remoteBoardPull(relayN, targetN, attempt = 1) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
@@ -6115,15 +6136,15 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     cleanup();
     if (attempt < MAX_PULL_ATTEMPTS) {
       updateBoardStatusBadge(targetN, 'retrying');
-      termLog(relayN, `[Remote] Pull attempt ${attempt}/${MAX_PULL_ATTEMPTS} timed out — retrying in 10s…`, 'sys');
-      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1), 10000);
+      termLog(relayN, `[Remote] Pull attempt ${attempt}/${MAX_PULL_ATTEMPTS} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
+      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1), PULL_RETRY_MS);
     } else {
       _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config pull failed after ${MAX_PULL_ATTEMPTS} attempts`, 'error');
       termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${MAX_PULL_ATTEMPTS} attempts`, 'err');
     }
-  }, 15000);
+  }, PULL_TIMEOUT_MS);
 
   // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
   const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;

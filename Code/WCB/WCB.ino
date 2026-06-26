@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_261100RJUN2026                                  *****////
+///*****                                          Version 6.2.0_261446RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -165,7 +165,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_261100RJUN2026";
+String SoftwareVersion = "6.2.0_261446RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -202,6 +202,10 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_COMMAND   0
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
+#define PACKET_TYPE_ETM_BOOT  11  // one-shot "I just (re)booted" announce — shares the
+                                  // espnow_struct_message_etm wire size as HEARTBEAT so it
+                                  // routes to the ETM handler; lets a relay print "came
+                                  // ONLINE" after a fast reboot that never crossed offline.
 // Remote Management Packet Types
 #define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
@@ -395,6 +399,12 @@ BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, we only use [0..Default
 unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
 bool etmBootHeartbeatSent = false;
 uint16_t etmSequenceNumber = 0;        // global sequence counter, Layer 3 uses this
+
+// Boot-announce: a few PACKET_TYPE_ETM_BOOT broadcasts right after startup so
+// relays re-mark this board ONLINE even after a reboot too fast to cross their
+// offline window (e.g. an OTA). Lets the wizard auto-re-establish a relay session.
+uint8_t       etmBootAnnouncesLeft  = 0;
+unsigned long etmNextBootAnnounceMs = 0;
 
 // ETM - Pending Message Table
 #define ETM_PENDING_MAX 10
@@ -779,6 +789,23 @@ void sendETMHeartbeat() {
   }
 }
 
+// Announce "(re)booted" to the mesh. Same wire struct as a heartbeat (so it
+// routes to the ETM handler) but PACKET_TYPE_ETM_BOOT, which makes receivers
+// force a "came ONLINE" edge even if they still thought we were online.
+void sendETMBootAnnounce() {
+  espnow_struct_message_etm bp;
+  memset(&bp, 0, sizeof(bp));
+  strncpy(bp.structPassword, espnowPassword, sizeof(bp.structPassword) - 1);
+  snprintf(bp.structSenderID, sizeof(bp.structSenderID), "%d", WCB_Number);
+  snprintf(bp.structTargetID, sizeof(bp.structTargetID), "0");  // broadcast
+  bp.structCommandIncluded = false;
+  bp.structPacketType      = PACKET_TYPE_ETM_BOOT;
+  bp.structSequenceNumber  = 0;
+
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+  if (debugETM) Serial.printf("[ETM] Boot announce sent (WCB%d)\n", WCB_Number);
+}
+
 void scheduleNextHeartbeat(bool isBoot) {
   unsigned long intervalMs;
   if (isBoot) {
@@ -796,6 +823,17 @@ void scheduleNextHeartbeat(bool isBoot) {
 
 void processETMHeartbeats() {
   if (!etmEnabled) return;
+
+  // Boot announce: a few spaced PACKET_TYPE_ETM_BOOT broadcasts in the first
+  // seconds after startup so relays print "[ETM] WCBn came ONLINE" even when
+  // this board reboots fast enough (e.g. after an OTA) to never cross their
+  // offline threshold — which is what the wizard listens for to re-establish
+  // the relay session. Sent redundantly because broadcast is unacknowledged.
+  if (etmBootAnnouncesLeft > 0 && millis() >= etmNextBootAnnounceMs) {
+    sendETMBootAnnounce();
+    etmBootAnnouncesLeft--;
+    etmNextBootAnnounceMs = millis() + 1200;
+  }
 
   // Send heartbeat when timer fires
   if (millis() >= etmNextHeartbeatMs) {
@@ -2484,6 +2522,20 @@ void handleConfigReqPacket(const uint8_t *data) {
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != WCB_Number) return;
 
+  // The relay sends CONFIG_REQ redundantly to survive broadcast loss; answer only
+  // the first of a burst. Ignore a repeat from the same requester within a short
+  // window so we don't fire multiple overlapping config responses. The window is
+  // shorter than the wizard's retry interval, so a genuine retry still gets served.
+  static uint32_t lastConfigReqMs   = 0;
+  static uint8_t  lastConfigReqFrom = 0;
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastConfigReqFrom && (nowMs - lastConfigReqMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate config request from WCB%d ignored\n", pkt.requesterWCB);
+    return;
+  }
+  lastConfigReqFrom = pkt.requesterWCB;
+  lastConfigReqMs   = nowMs;
+
   if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d\n", pkt.requesterWCB);
 
   String configStr = buildConfigString();
@@ -2503,27 +2555,34 @@ void handleConfigReqPacket(const uint8_t *data) {
 
   uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
 
-  for (int i = 0; i < totalChunks; i++) {
-    espnow_struct_config_frag frag;
-    memset(&frag, 0, sizeof(frag));
-    strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
-    frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
-    frag.sourceWCB    = WCB_Number;
-    frag.requesterWCB = pkt.requesterWCB;
-    frag.sessionId    = sessionId;
-    frag.chunkIdx     = (uint8_t)i;
-    frag.totalChunks  = (uint8_t)totalChunks;
+  // Send the whole fragmented config TWICE (two spaced passes, same sessionId).
+  // The relay dedups by chunkIdx (receivedMask), so a frame lost in one pass is
+  // recovered by the other. Without this, a single dropped broadcast frag stalls
+  // the entire pull until the wizard's multi-second retry. Two full passes give
+  // each frag's copies temporal separation (better than back-to-back resends).
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < totalChunks; i++) {
+      espnow_struct_config_frag frag;
+      memset(&frag, 0, sizeof(frag));
+      strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+      frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
+      frag.sourceWCB    = WCB_Number;
+      frag.requesterWCB = pkt.requesterWCB;
+      frag.sessionId    = sessionId;
+      frag.chunkIdx     = (uint8_t)i;
+      frag.totalChunks  = (uint8_t)totalChunks;
 
-    int start = i * chunkStride;
-    int end   = min(start + chunkStride, totalLen);
-    String chunk = configStr.substring(start, end);
-    // memset already zeroed the struct — payload[chunk.length()] is '\0'
-    memcpy(frag.payload, chunk.c_str(), chunk.length());
+      int start = i * chunkStride;
+      int end   = min(start + chunkStride, totalLen);
+      String chunk = configStr.substring(start, end);
+      // memset already zeroed the struct — payload[chunk.length()] is '\0'
+      memcpy(frag.payload, chunk.c_str(), chunk.length());
 
-    esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
-    if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X\n",
-                                 i + 1, totalChunks, sessionId);
-    delay(20);
+      esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+      if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X (pass %d)\n",
+                                   i + 1, totalChunks, sessionId, pass + 1);
+      delay(20);
+    }
   }
 }
 
@@ -2536,6 +2595,13 @@ void handleConfigFragPacket(const uint8_t *data) {
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+
+  // The target sends the config in two passes for loss resilience. Once a session
+  // has been fully reassembled and delivered, ignore any leftover frags bearing
+  // that same sessionId (the second pass) so we don't deliver the config twice or
+  // start a stray never-completing session. (sessionId 0 means "none".)
+  static uint16_t lastDeliveredSession = 0;
+  if (lastDeliveredSession != 0 && pkt.sessionId == lastDeliveredSession) return;
 
   // Start or continue pull session
   if (!pullSession.active || pullSession.sessionId != pkt.sessionId) {
@@ -2564,6 +2630,7 @@ void handleConfigFragPacket(const uint8_t *data) {
     String fullConfig = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullConfig += String(pullSession.chunks[i]);
     uint8_t srcWCB = pullSession.sourceWCB;
+    lastDeliveredSession = pkt.sessionId;   // suppress the redundant second pass
     memset(&pullSession, 0, sizeof(pullSession));
     // Deliver to webpage — always printed regardless of debugMGMT
     Serial.printf("[MGMT:CONFIG,%d]%s\n", srcWCB, fullConfig.c_str());
@@ -2741,10 +2808,20 @@ void handleMgmtPullRequest(const String &targetStr) {
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
 
-  esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  // Send the request redundantly. ESP-NOW broadcast is unacknowledged and the
+  // first frame to a board is frequently dropped on a busy mesh — which used to
+  // cost the wizard a full pull-timeout before it retried ("works on the 2nd
+  // try"). The target dedups repeats within a short window (handleConfigReqPacket),
+  // so these 3 sends still produce exactly one config response.
+  esp_err_t result = ESP_OK;
+  for (int i = 0; i < 3; i++) {
+    esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    if (r != ESP_OK) result = r;
+    delay(15);
+  }
   if (debugMGMT) {
     if (result == ESP_OK)
-      Serial.printf("[MGMT] Config pull request sent for WCB%d\n", targetWCB);
+      Serial.printf("[MGMT] Config pull request sent for WCB%d (x3)\n", targetWCB);
     else
       Serial.printf("[MGMT] Config pull request failed, error: %d\n", result);
   }
@@ -2903,19 +2980,26 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // but commands flow, etmAddToPendingTable would skip the peer for
     // ACK-pending tracking, leaving our unicast sends to it un-retried.
     if (senderIdx < Default_WCB_Quantity || isSpecialPeer) {
-      bool wasOffline = !boardTable[senderIdx].online;
+      bool wasOffline     = !boardTable[senderIdx].online;
+      bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
       boardTable[senderIdx].online     = true;
       boardTable[senderIdx].lastSeenMs = millis();
-      if (wasOffline) {
-        Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
-                      senderWCB,
+      // A boot announce always re-prints "came ONLINE" (even if we still thought
+      // the board was up) so the wizard re-establishes the relay session after a
+      // reboot too fast to have crossed our offline threshold (e.g. an OTA).
+      if (wasOffline || isBootAnnounce) {
+        Serial.printf("[ETM] WCB%d came ONLINE%s (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
+                      senderWCB, isBootAnnounce ? " (boot)" : "",
                       info->src_addr[0], info->src_addr[1], info->src_addr[2],
                       info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
     }
 
-    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
-      if (debugETM) Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
+    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT ||
+        etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT) {
+      if (debugETM) Serial.printf("[ETM] %s from WCB%d\n",
+                    etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT ? "Boot announce" : "Heartbeat",
+                    senderWCB);
       return;
     }
 
@@ -5774,6 +5858,8 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     memset(boardTable, 0, sizeof(boardTable));
     scheduleNextHeartbeat(true);  // randomized boot heartbeat
     etmInitPendingTable();
+    etmBootAnnouncesLeft  = 3;              // re-announce presence after this (re)boot
+    etmNextBootAnnounceMs = millis() + 1500;
   }
 
   Serial.println("------ General Settings --------------------------------");
