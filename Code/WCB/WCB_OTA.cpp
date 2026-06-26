@@ -4,6 +4,8 @@
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
 #include <esp_now.h>          // P2: relay OTA over ESP-NOW
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>   // P2: defer OTA flash writes out of the WiFi callback
 
 // Externs provided by WCB.ino
 extern int     WCB_Number;
@@ -420,4 +422,43 @@ void processOtaRelayCommand(const String &args) {
   }
 
   Serial.printf("[OTA] relay: unknown subcommand '%s'\n", sub.c_str());
+}
+
+// ── Deferred processing: keep esp_ota flash writes OUT of the WiFi callback ──
+// esp_ota_begin (erases ~1.2 MB) / esp_ota_write / esp_ota_end all block and
+// must not run in the ESP-NOW receive callback — doing so stalls the WiFi task
+// and the OTA session times out mid-stream. The callback copies the packet into
+// this queue; drainOtaPackets() (loop context) runs the handlers safely. This
+// mirrors how the command queue defers ESP-NOW-received commands to loop().
+typedef struct {
+  uint8_t  buf[244];   // largest OTA packet (ota_data = 243 B)
+  uint16_t len;
+} OtaPktSlot;
+static QueueHandle_t otaPktQueue = nullptr;
+
+void enqueueOtaPacket(const uint8_t *raw, uint16_t len) {
+  if (len == 0 || len > sizeof(((OtaPktSlot *)0)->buf)) return;
+  if (!otaPktQueue) {
+    otaPktQueue = xQueueCreate(12, sizeof(OtaPktSlot));
+    if (!otaPktQueue) return;
+  }
+  OtaPktSlot slot;
+  memcpy(slot.buf, raw, len);
+  slot.len = len;
+  xQueueSend(otaPktQueue, &slot, 0);   // drop if full — the browser resends from its cursor
+}
+
+void drainOtaPackets() {
+  if (!otaPktQueue) return;
+  OtaPktSlot slot;
+  while (xQueueReceive(otaPktQueue, &slot, 0) == pdTRUE) {
+    if (slot.len == sizeof(espnow_struct_ota_data)) {
+      handleOtaDataPacket(slot.buf);
+    } else if (slot.len == sizeof(espnow_struct_ota_ctrl)) {
+      uint8_t pt = ((espnow_struct_ota_ctrl *)slot.buf)->packetType;
+      if      (pt == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(slot.buf);
+      else if (pt == PACKET_TYPE_OTA_END)   handleOtaEndPacket(slot.buf);
+      else if (pt == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(slot.buf);
+    }
+  }
 }

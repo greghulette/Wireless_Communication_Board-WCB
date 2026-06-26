@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '26.10:05.R.JUN.2026';
+const UI_VERSION = '26.11:00.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1368,10 +1368,16 @@ async function boardOtaRelay(n) {
 
     // Stream 192-byte ESP-NOW frames, ACK-paced (target reports its write cursor).
     const CHUNK = 192;
-    let offset = 0, stalls = 0;
+    let offset = 0, stalls = 0, peak = 0;
     while (offset < total) {
       const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
       const ack = await _otaRelayAwaitAck(relayConn, cmd(`DATA,${targetWcb},${session},${offset},${_u8ToBase64(slice)}`), targetWcb, session, 4000);
+      // Cursor collapsed to 0 after real progress → the target dropped/timed out the
+      // session. Re-streaming the whole image from 0 can never succeed (the session
+      // id no longer matches), so fail fast with a clear message instead of spinning.
+      if (ack && ack.offset === 0 && peak > CHUNK) {
+        throw new Error(`target lost the OTA session at ${peak} bytes (it likely timed out or rebooted) — retry the OTA`);
+      }
       if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
         if (++stalls > 40) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
         if (ack && ack.offset < offset) offset = ack.offset;   // target is behind us — rewind
@@ -1379,6 +1385,7 @@ async function boardOtaRelay(n) {
       }
       stalls = 0;
       offset = ack.offset;                       // advance to the target's confirmed cursor
+      if (offset > peak) peak = offset;
       updateFlashBar(n, offset, total);
       setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
     }

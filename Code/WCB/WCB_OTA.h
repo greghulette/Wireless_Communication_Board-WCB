@@ -115,4 +115,12 @@ void handleOtaAbortPacket(const uint8_t *raw);
 void handleOtaAckRelay(const uint8_t *raw);
 void processOtaRelayCommand(const String &args);
 
+// ── Deferred target-side processing ─────────────────────────────────────────
+// esp_ota_begin/write/end are BLOCKING flash ops and MUST NOT run in the ESP-NOW
+// receive callback (WiFi task) — same rule the command queue follows. The
+// callback enqueues BEGIN/DATA/END/ABORT packets here; drainOtaPackets() (called
+// from loop()) dispatches them to the handlers above in safe loop() context.
+void enqueueOtaPacket(const uint8_t *raw, uint16_t len);
+void drainOtaPackets();
+
 #endif // WCB_OTA_H

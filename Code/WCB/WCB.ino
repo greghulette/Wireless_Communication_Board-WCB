@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_261005RJUN2026                                  *****////
+///*****                                          Version 6.2.0_261100RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -165,7 +165,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_261005RJUN2026";
+String SoftwareVersion = "6.2.0_261100RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2809,17 +2809,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
     return;
   }
-  // OTA over ESP-NOW (P2): ctrl (BEGIN/END/ABORT on target, ACK on relay) + data.
+  // OTA over ESP-NOW (P2). ACK is relay-side + lightweight → handle inline here.
+  // BEGIN/DATA/END/ABORT do BLOCKING flash work on the target → never in the WiFi
+  // callback; enqueue and let drainOtaPackets() run them in loop() context.
   if (len == sizeof(espnow_struct_ota_ctrl)) {
     uint8_t ptype = ((const espnow_struct_ota_ctrl*)incomingData)->packetType;
-    if      (ptype == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(incomingData);
-    else if (ptype == PACKET_TYPE_OTA_END)   handleOtaEndPacket(incomingData);
-    else if (ptype == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(incomingData);
-    else if (ptype == PACKET_TYPE_OTA_ACK)   handleOtaAckRelay(incomingData);
+    if (ptype == PACKET_TYPE_OTA_ACK) handleOtaAckRelay(incomingData);     // relay side, inline
+    else                              enqueueOtaPacket(incomingData, len);  // target side, deferred
     return;
   }
   if (len == sizeof(espnow_struct_ota_data)) {
-    handleOtaDataPacket(incomingData);
+    enqueueOtaPacket(incomingData, len);   // target side, deferred to loop()
     return;
   }
   // Remote terminal output from a target board → print [TERM:N] to USB
@@ -5837,6 +5837,7 @@ void loop() {
   processETMLoad();
   checkMgmtTimeout();
   checkConfigPullTimeout();
+  drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
