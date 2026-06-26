@@ -3,11 +3,19 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
+#include <esp_now.h>          // P2: relay OTA over ESP-NOW
 
 // Externs provided by WCB.ino
-extern int    WCB_Number;
-extern bool   debugEnabled;
-extern String SoftwareVersion;
+extern int     WCB_Number;
+extern bool    debugEnabled;
+extern String  SoftwareVersion;
+extern char    espnowPassword[40];               // P2: shared-secret gate
+extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6]; // P2: per-WCB MAC table
+
+// Struct sizes feed the size-based ESP-NOW router in WCB.ino — they MUST stay
+// distinct from every other packet ({43,204,226,230,249,252}). Lock them here.
+static_assert(sizeof(espnow_struct_ota_ctrl) == 55,  "ota_ctrl size changed — re-check router uniqueness");
+static_assert(sizeof(espnow_struct_ota_data) == 243, "ota_data size changed — re-check router uniqueness");
 
 // ── Single in-flight OTA session ────────────────────────────────────────────
 // Only one OTA can run at a time (one esp_ota handle). This matches the single
@@ -254,4 +262,162 @@ void processOtaLocalCommand(const String &args) {
   if (sub == "ABORT") { otaAbortSession("local abort command"); return; }
 
   Serial.printf("[OTA] unknown subcommand '%s' (use STATUS|BEGIN|DATA|END|ABORT)\n", sub.c_str());
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PHASE 2 — ESP-NOW RELAY OTA
+//  Target-side handlers (drive the SAME core above) + relay-side forward/ACK.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Build + unicast an OTA_ACK ctrl packet back to the relay.
+static void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uint32_t ackedOffset) {
+  if (relayWCB < 1 || relayWCB > MAX_WCB_COUNT) return;
+  espnow_struct_ota_ctrl ack;
+  memset(&ack, 0, sizeof(ack));
+  strncpy(ack.structPassword, espnowPassword, sizeof(ack.structPassword) - 1);
+  ack.packetType  = PACKET_TYPE_OTA_ACK;
+  ack.targetWCB   = relayWCB;             // addressed to the relay
+  ack.sourceWCB   = (uint8_t)WCB_Number;  // us (the target)
+  ack.status      = status;
+  ack.sessionId   = sessionId;
+  ack.ackedOffset = ackedOffset;
+  esp_now_send(WCBMacAddresses[relayWCB - 1], (const uint8_t *)&ack, sizeof(ack));
+}
+
+// Password + addressed-to-us gate shared by the target-side handlers.
+static bool otaPktAuth(const char *pw, uint8_t targetWCB) {
+  return (String(pw) == String(espnowPassword)) && (targetWCB == (uint8_t)WCB_Number);
+}
+
+// ── Target side (reuses otaBegin/otaWrite/otaEnd) ───────────────────────────
+void handleOtaBeginPacket(const uint8_t *raw) {
+  espnow_struct_ota_ctrl pkt;
+  memcpy(&pkt, raw, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
+  bool ok = otaBegin(pkt.sessionId, pkt.imageSize, pkt.chipFamily);
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, ok ? OTA_ST_OK : OTA_ST_ERR, otaWrittenOffset());
+}
+
+void handleOtaDataPacket(const uint8_t *raw) {
+  espnow_struct_ota_data pkt;
+  memcpy(&pkt, raw, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
+  uint16_t len = pkt.dataLen > OTA_ESPNOW_PAYLOAD ? OTA_ESPNOW_PAYLOAD : pkt.dataLen;
+  // Write (no-op on out-of-order/dup), then ALWAYS ack the current cursor so the
+  // browser learns where we are — covers a lost DATA (cursor stalls → resend
+  // from cursor) and a lost ACK (re-acked on the resent DATA).
+  otaWrite(pkt.sessionId, pkt.fragOffset, pkt.data, len);
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, otaWrittenOffset());
+}
+
+void handleOtaEndPacket(const uint8_t *raw) {
+  espnow_struct_ota_ctrl pkt;
+  memcpy(&pkt, raw, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
+  bool ok = otaEnd(pkt.sessionId);
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, ok ? OTA_ST_OK : OTA_ST_ERR, otaWrittenOffset());
+  if (ok) {
+    Serial.println("[OTA] remote update verified — rebooting into new firmware…");
+    delay(300);   // let the ACK actually transmit before the radio drops
+    ESP.restart();
+  }
+}
+
+void handleOtaAbortPacket(const uint8_t *raw) {
+  espnow_struct_ota_ctrl pkt;
+  memcpy(&pkt, raw, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
+  otaAbortSession("remote abort");
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, 0);
+}
+
+// ── Relay side ──────────────────────────────────────────────────────────────
+// A relay received the target's OTA_ACK — surface it to USB for the browser.
+void handleOtaAckRelay(const uint8_t *raw) {
+  espnow_struct_ota_ctrl pkt;
+  memcpy(&pkt, raw, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != (uint8_t)WCB_Number) return;   // ACK addressed to us (the relay)
+  Serial.printf("[OTA:ACK,%u,%u,%lu,%u]\n",
+                pkt.sourceWCB, pkt.sessionId, (unsigned long)pkt.ackedOffset, pkt.status);
+}
+
+// "?OTA,<SUB>,<target>,<session>,…" — build the OTA packet and unicast to target.
+//   BEGIN,<target>,<session>,<size>,<family>
+//   DATA,<target>,<session>,<offset>,<base64(<=192 B)>
+//   END,<target>,<session>      ABORT,<target>,<session>
+void processOtaRelayCommand(const String &args) {
+  int c1 = args.indexOf(',');
+  String sub  = (c1 < 0) ? args : args.substring(0, c1);
+  String rest = (c1 < 0) ? ""   : args.substring(c1 + 1);
+  sub.trim(); sub.toUpperCase();
+
+  // common prefix: <target>,<session>,…
+  int c2 = rest.indexOf(',');
+  uint8_t  target  = (uint8_t)((c2 < 0 ? rest : rest.substring(0, c2)).toInt());
+  String   r2      = (c2 < 0) ? "" : rest.substring(c2 + 1);
+  int c3 = r2.indexOf(',');
+  uint16_t session = (uint16_t)((c3 < 0 ? r2 : r2.substring(0, c3)).toInt());
+  String   r3      = (c3 < 0) ? "" : r2.substring(c3 + 1);
+
+  if (target < 1 || target > MAX_WCB_COUNT) {
+    Serial.printf("[OTA] relay: invalid target %u\n", target);
+    return;
+  }
+  const uint8_t *destMac = WCBMacAddresses[target - 1];
+
+  if (sub == "BEGIN") {
+    int p = r3.indexOf(',');
+    uint32_t size   = (uint32_t)((p < 0 ? r3 : r3.substring(0, p)).toInt());
+    uint8_t  family = (uint8_t) (p < 0 ? 0 : r3.substring(p + 1).toInt());
+    espnow_struct_ota_ctrl pkt; memset(&pkt, 0, sizeof(pkt));
+    strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+    pkt.packetType = PACKET_TYPE_OTA_BEGIN;
+    pkt.targetWCB  = target;
+    pkt.sourceWCB  = (uint8_t)WCB_Number;
+    pkt.chipFamily = family;
+    pkt.sessionId  = session;
+    pkt.imageSize  = size;
+    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    return;
+  }
+
+  if (sub == "DATA") {
+    int p = r3.indexOf(',');
+    if (p < 0) { Serial.println("[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>,<b64>"); return; }
+    uint32_t offset = (uint32_t)r3.substring(0, p).toInt();
+    String   b64    = r3.substring(p + 1); b64.trim();
+    espnow_struct_ota_data pkt; memset(&pkt, 0, sizeof(pkt));
+    strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+    pkt.packetType = PACKET_TYPE_OTA_DATA;
+    pkt.targetWCB  = target;
+    pkt.sourceWCB  = (uint8_t)WCB_Number;
+    pkt.sessionId  = session;
+    pkt.fragOffset = offset;
+    size_t outLen = 0;
+    int rc = mbedtls_base64_decode(pkt.data, sizeof(pkt.data), &outLen,
+                                   (const unsigned char *)b64.c_str(), b64.length());
+    if (rc != 0) { Serial.printf("[OTA] relay DATA base64 error %d\n", rc); return; }
+    pkt.dataLen = (uint16_t)outLen;
+    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    return;
+  }
+
+  if (sub == "END" || sub == "ABORT") {
+    espnow_struct_ota_ctrl pkt; memset(&pkt, 0, sizeof(pkt));
+    strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+    pkt.packetType = (sub == "END") ? PACKET_TYPE_OTA_END : PACKET_TYPE_OTA_ABORT;
+    pkt.targetWCB  = target;
+    pkt.sourceWCB  = (uint8_t)WCB_Number;
+    pkt.sessionId  = session;
+    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    return;
+  }
+
+  Serial.printf("[OTA] relay: unknown subcommand '%s'\n", sub.c_str());
 }

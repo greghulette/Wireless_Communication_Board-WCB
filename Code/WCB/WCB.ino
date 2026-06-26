@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_260910RJUN2026                                  *****////
+///*****                                          Version 6.2.0_261005RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -165,7 +165,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_260910RJUN2026";
+String SoftwareVersion = "6.2.0_261005RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2770,6 +2770,24 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // data plane.
   if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
 
+  // OTA struct sizes must stay distinct from every other ESP-NOW packet — the
+  // router below dispatches by size. WCB_OTA.cpp pins them to 55/243; assert no
+  // clash so a future field edit can't silently route OTA into another handler.
+  static_assert(
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_message) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_message),
+    "OTA ESP-NOW struct size collides with an existing packet — adjust OTA padding");
+
   // Handle known packet sizes
   if (len == sizeof(espnow_struct_mgmt)) {
     handleMgmtPacket(incomingData);
@@ -2789,6 +2807,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
+    return;
+  }
+  // OTA over ESP-NOW (P2): ctrl (BEGIN/END/ABORT on target, ACK on relay) + data.
+  if (len == sizeof(espnow_struct_ota_ctrl)) {
+    uint8_t ptype = ((const espnow_struct_ota_ctrl*)incomingData)->packetType;
+    if      (ptype == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(incomingData);
+    else if (ptype == PACKET_TYPE_OTA_END)   handleOtaEndPacket(incomingData);
+    else if (ptype == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(incomingData);
+    else if (ptype == PACKET_TYPE_OTA_ACK)   handleOtaAckRelay(incomingData);
+    return;
+  }
+  if (len == sizeof(espnow_struct_ota_data)) {
+    handleOtaDataPacket(incomingData);
     return;
   }
   // Remote terminal output from a target board → print [TERM:N] to USB
@@ -3808,6 +3839,14 @@ void processLocalCommand(const String &message) {
     // ESP-NOW relay transport (Phase 2) reuses the same write core.
     if (rootUpper == "OTALOCAL") {
         processOtaLocalCommand(args);
+        return;
+    }
+
+    // --- ?OTA,* — RELAY a firmware stream to a TARGET WCB over ESP-NOW (P2) ---
+    // This (USB-connected) board forwards the browser's OTA frames to the target
+    // over the mesh; the target writes its inactive slot and reboots.
+    if (rootUpper == "OTA") {
+        processOtaRelayCommand(args);
         return;
     }
 

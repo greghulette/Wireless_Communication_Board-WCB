@@ -570,8 +570,8 @@
             <button class="btn btn-warning btn-sm" id="b{N}-btn-update-fw"
                     onclick="boardUpdateFW({N})" style="display:none" title="A newer firmware version is available">⬆ Update FW</button>
             <button class="btn btn-ghost btn-sm" id="b{N}-btn-ota-serial"
-                    onclick="boardOtaSerial({N})"
-                    title="Update firmware over USB serial via OTA — no BOOT button / reset / download mode needed">⬆ OTA (serial)</button>
+                    onclick="boardOta({N})"
+                    title="OTA firmware update — over USB serial if connected directly, or wirelessly over ESP-NOW via a relay. No BOOT button / reset / download mode needed.">⬆ OTA</button>
           </div>
         </div>
 

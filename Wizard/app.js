@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '25.15:42.R.JUN.2026';
+const UI_VERSION = '26.10:05.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1228,6 +1228,13 @@ function _u8ToBase64(u8) {
   return btoa(s);
 }
 
+// Adaptive OTA entry point: stream over USB serial if the board is directly
+// connected, or wirelessly over ESP-NOW via its relay if it's remote.
+function boardOta(n) {
+  if (remoteRelayForBoard[n]) return boardOtaRelay(n);
+  return boardOtaSerial(n);
+}
+
 // ─── OTA over USB serial (Phase 1 of ESP-NOW relay OTA) ─────────────────────
 // Streams the REAL firmware bin to the board's INACTIVE OTA slot via the
 // ?OTALOCAL,* commands — writing through the running firmware, so it needs NO
@@ -1305,7 +1312,92 @@ async function boardOtaSerial(n) {
     try { await conn.send(cmd('ABORT') + '\r'); } catch (_) {}   // free the board's handle
   } finally {
     setFlashUI(n, false);
-    if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA (serial)'; }
+    if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
+  }
+}
+
+// Send an "?OTA,…" command to the relay and wait for the target's relayed ACK
+// line "[OTA:ACK,<target>,<session>,<offset>,<status>]". Returns {offset,status}
+// or null on timeout (lost DATA or lost ACK → caller resends from its cursor).
+async function _otaRelayAwaitAck(relayConn, command, targetWcb, session, timeoutMs) {
+  const sentinel = `[OTA:ACK,${targetWcb},${session},`;
+  const resp = await relayConn.sendAndCollect(command, timeoutMs, sentinel);
+  const m = resp.match(new RegExp(`\\[OTA:ACK,${targetWcb},${session},(\\d+),(\\d+)\\]`));
+  return m ? { offset: parseInt(m[1]), status: parseInt(m[2]) } : null;
+}
+
+// ─── OTA over ESP-NOW via a relay (Phase 2) ─────────────────────────────────
+// The board is reachable only via a USB-connected RELAY. We stream the firmware
+// to the relay over USB; the relay forwards each frame to the target over
+// ESP-NOW; the target writes its inactive slot and reboots — no USB on the
+// target at all. ACK-paced: the target's cumulative write cursor drives flow.
+async function boardOtaRelay(n) {
+  const relayN    = remoteRelayForBoard[n];
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
+
+  const targetWcb = boardConfigs[n]?.wcbNumber ?? n;
+  const session   = Math.floor(Math.random() * 0xFFFE) + 1;   // 1..65535
+  const fc        = boardConfigs[relayN]?.funcChar ?? '?';
+  const cmd       = (s) => `${fc}OTA,${s}`;
+  const btn       = document.getElementById(`b${n}-btn-ota-serial`);
+
+  // Chip family from the target's known HW version (firmware BEGIN guard is the backstop).
+  const hw         = boardConfigs[n]?.hwVersion;
+  const binaryType = (hw === 31 || hw === 32) ? 'ESP32S3' : 'ESP32';
+  const family     = binaryType === 'ESP32S3' ? 1 : 0;
+
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
+    setFlashUI(n, true);
+    setFlashStatus(n, `Loading ${binaryType} firmware…`);
+    termLog(n, `[OTA] wireless OTA to WCB${targetWcb} via relay WCB${relayN}…`, 'sys');
+
+    const fw = await getBinaryData(binaryType, (m) => termLog(n, m, 'sys'));
+    const appImg = fw.images.find(i => i.address === 0x10000);
+    if (!appImg) throw new Error('app image (0x10000) missing from firmware bundle');
+    const bytes = new Uint8Array(appImg.buf);
+    const total = bytes.length;
+    termLog(n, `[OTA] image ${total} bytes, session ${session}`, 'sys');
+
+    // BEGIN
+    setFlashStatus(n, 'Starting OTA…');
+    const beginAck = await _otaRelayAwaitAck(relayConn, cmd(`BEGIN,${targetWcb},${session},${total},${family}`), targetWcb, session, 8000);
+    if (!beginAck)              throw new Error(`no response from WCB${targetWcb} via relay — is it online & on this firmware?`);
+    if (beginAck.status !== 0)  throw new Error(`WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
+
+    // Stream 192-byte ESP-NOW frames, ACK-paced (target reports its write cursor).
+    const CHUNK = 192;
+    let offset = 0, stalls = 0;
+    while (offset < total) {
+      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
+      const ack = await _otaRelayAwaitAck(relayConn, cmd(`DATA,${targetWcb},${session},${offset},${_u8ToBase64(slice)}`), targetWcb, session, 4000);
+      if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
+        if (++stalls > 40) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
+        if (ack && ack.offset < offset) offset = ack.offset;   // target is behind us — rewind
+        continue;
+      }
+      stalls = 0;
+      offset = ack.offset;                       // advance to the target's confirmed cursor
+      updateFlashBar(n, offset, total);
+      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
+    }
+
+    // END — target verifies (SHA) + switches boot + reboots.
+    setFlashStatus(n, 'Verifying…');
+    const endAck = await _otaRelayAwaitAck(relayConn, cmd(`END,${targetWcb},${session}`), targetWcb, session, 12000);
+    if (!endAck || endAck.status !== 0) throw new Error('OTA verify/finalize failed on the target');
+
+    termLog(n, `[OTA] ✅ WCB${targetWcb} verified — rebooting into new firmware`, 'sys');
+    setFlashStatus(n, 'Rebooting…');
+    showToast(`WCB ${targetWcb}: wireless OTA complete — rebooting`, 'success');
+  } catch (e) {
+    termLog(n, `[OTA] ✕ ${e.message}`, 'err');
+    showToast(`Wireless OTA failed: ${e.message}`, 'error');
+    try { await relayConn.send(cmd(`ABORT,${targetWcb},${session}`) + '\r'); } catch (_) {}
+  } finally {
+    setFlashUI(n, false);
+    if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
   }
 }
 
