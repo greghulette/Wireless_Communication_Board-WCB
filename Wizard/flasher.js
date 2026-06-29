@@ -597,33 +597,38 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     throw new Error(msg);
   }
 
-  // ── Step 3c: Optionally prepend NVS + otadata erase images ────
+  // ── Step 3c: reset the OTA boot selector (ALWAYS) + erase NVS (factory only) ──
   // WCB partition layout (PartitionScheme=min_spiffs):
-  //   nvs     @ 0x9000,  size 0x5000 (20 KB)
+  //   nvs     @ 0x9000,  size 0x5000  (20 KB)
   //   otadata @ 0xE000,  size 0x2000  (8 KB — two 4 KB flash sectors)
   //   ota_0   @ 0x10000, size 0x1E0000 (~1.9 MB)
   //   ota_1   @ 0x1F0000
-  // (nvs & otadata offsets are identical to the old `default` scheme, so the
-  //  erase addresses below are unchanged across the scheme transition.)
   //
-  // Writing 0xFF buffers causes esptool to erase then rewrite those sectors.
-  // Both otadata sectors MUST be erased: if either sector still holds a valid
-  // OTA state pointing to ota_1 (e.g. from a previous OTA update), the
-  // bootloader will try to boot ota_1, fail (nothing there after a flash to
-  // ota_0), and the OTA rollback watchdog fires — causing an endless reboot loop.
+  // ALWAYS erase otadata on an esptool flash. esptool writes the app to ota_0
+  // (0x10000), so the boot selector MUST point at ota_0 afterward — otherwise a
+  // board that a prior OTA (?OTA / ?OTALOCAL) switched to ota_1 keeps booting
+  // ota_1 ("flashed but the version didn't change"), or hits the rollback
+  // reboot-loop if ota_1 is empty. This mirrors what the Arduino IDE upload does
+  // (it writes boot_app0.bin to 0xE000 every time), so IDE / esptool / OTA all
+  // agree on which slot boots. Writing a 0xFF buffer makes esptool erase the
+  // sector → bootloader defaults to ota_0. NVS (saved config) is left untouched
+  // here; wiping it is the opt-in factory-reset path below.
+  const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000
+  new Uint8Array(otadataBlank).fill(0xFF);
+  imagesToFlash = [...imagesToFlash, { buf: otadataBlank, address: 0xE000 }];
+
   if (eraseNvs) {
-    const nvsBlank     = new ArrayBuffer(0x5000);  // NVS: 20 KB @ 0x9000
-    const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000
+    const nvsBlank = new ArrayBuffer(0x5000);    // NVS: 20 KB @ 0x9000
     new Uint8Array(nvsBlank).fill(0xFF);
-    new Uint8Array(otadataBlank).fill(0xFF);
-    // Insert in ascending address order, before the app images
-    imagesToFlash = [
-      { buf: nvsBlank,     address: 0x9000 },  // erase NVS
-      { buf: otadataBlank, address: 0xE000 },  // erase OTA data → bootloader defaults to ota_0
-      ...imagesToFlash,
-    ];
-    onLog('Factory reset — NVS (0x9000, 20 KB) and OTA data (0xE000, 8 KB) will be erased');
+    imagesToFlash = [...imagesToFlash, { buf: nvsBlank, address: 0x9000 }];
+    onLog('Factory reset — NVS (0x9000, 20 KB) and OTA boot selector (0xE000) will be erased');
+  } else {
+    onLog('Reset OTA boot selector (0xE000) → board boots the freshly-flashed app (ota_0); NVS/config preserved');
   }
+
+  // Flash regions in ascending address order (bootloader → partitions → nvs →
+  // otadata → app), regardless of the order they were appended above.
+  imagesToFlash.sort((a, b) => a.address - b.address);
 
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);
 

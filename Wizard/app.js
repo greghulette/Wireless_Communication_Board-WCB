@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '26.14:46.R.JUN.2026';
+const UI_VERSION = '29.01:15.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -8387,7 +8387,7 @@ function wizardHTMLConnect() {
       <div style="font-weight:600;margin-bottom:6px">Client slots — not connected by the Wizard</div>
       <div style="opacity:0.8;font-size:12px;margin-bottom:8px">
         Client devices run their own sketch and connect to the network on their own.
-        The Wizard cannot flash or push to them; ${hasSpecial ? '<code>?SPECIAL,ON</code> will be sent to every WCB so they can talk to ID 20. ' : ''}You'll exercise them via the regular boards.
+        The Wizard cannot flash or push to them; ${hasSpecial ? '<code>?CONTROLLER,ON</code> will be sent to every WCB so they can talk to ID 20. ' : ''}You'll exercise them via the regular boards.
       </div>
       <ul style="margin:0;padding-left:18px">
         ${clients.map(c => `<li>ID ${c.id}${c.alias ? ` — <strong>${escHtml(c.alias)}</strong>` : ''}</li>`).join('')}

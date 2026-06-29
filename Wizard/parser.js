@@ -456,8 +456,10 @@ function parseToken(body, config) {
       config.wcbQuantity = parseInt(parts[1]) || 1;
       break;
 
+    case 'CONTROLLER':
     case 'SPECIAL': {
-      // ?SPECIAL,ON[,<id>] / ?SPECIAL,OFF — enable/disable the special peer (NaviCore).
+      // ?CONTROLLER,ON[,<id>] / ?CONTROLLER,OFF — enable/disable the controller peer
+      // (default NaviCore, ID 20). SPECIAL is the legacy alias kept for old configs.
       const sub = (parts[1] || '').trim().toUpperCase();
       config.specialPeer = (sub === 'ON' || sub === '1' || sub === 'TRUE');
       if (config.specialPeer && parts[2]) {
@@ -1087,13 +1089,14 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
     add(`WCBQ,${config.wcbQuantity}`);
 
-  // Special peer (ID 20): emit on diff. Every WCB in the network needs the
-  // same value so peer tables stay consistent.
+  // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
+  // network needs the same value so peer tables stay consistent. Canonical token
+  // is CONTROLLER; firmware still accepts the legacy SPECIAL on input.
   const curSpecial  = !!config.specialPeer;
   const baseSpecial = !!baseline?.specialPeer;
   if (fullPush || !baseline || curSpecial !== baseSpecial ||
       (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
-    add(curSpecial ? `SPECIAL,ON,${config.specialPeerId ?? 20}` : `SPECIAL,OFF`);
+    add(curSpecial ? `CONTROLLER,ON,${config.specialPeerId ?? 20}` : `CONTROLLER,OFF`);
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
