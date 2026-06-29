@@ -537,7 +537,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;H,PLAY,A|B,0-9999  Play a WAV on channel A/B"));
         Serial.println(F("  ;H,PLAY,A|B,file,FADEIN,sec  Play, ramp 0->current vol"));
         Serial.println(F("  ;H,STOPWAV,A|B      Stop WAV on a channel"));
-        Serial.println(F("  ;H,VOL,V|A|B,0-100  Set volume (V=vocalizer, A/B=wav)"));
+        Serial.println(F("  ;H,VOL[,V|A|B],0-100  Set volume (no channel = all V/A/B)"));
         Serial.println(F("  ;H,VOLUP[,V|A|B][,step]  Volume up (no channel = all; step default 5)"));
         Serial.println(F("  ;H,VOLDN[,V|A|B][,step]  Volume down (no channel = all; step default 5)"));
         Serial.println(F("  ;H,FADEIN,A|B,sec   Ramp 0 -> current volume"));
@@ -559,6 +559,42 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
         Serial.println(F("      periodic received status; ?DEBUG,HCR,OFF / dhcroff"));
+        Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
+    } else if (c == "WLED") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?WLED,<command>[,options]   (config/query)"));
+        Serial.println(F("       ;L,<command>[,options]     (runtime actions)"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Drive a stock WLED node over a reserved serial port using"));
+        Serial.println(F("  WLED's JSON API (no custom WLED firmware). Author the looks"));
+        Serial.println(F("  in WLED's web UI; the WCB fires presets / power / brightness."));
+        Serial.println(F("  Wire WCB TX -> WLED RX + ground; WLED listens at 115200 on a"));
+        Serial.println(F("  build whose LED pin is NOT on GPIO1/3 (GPIO2/16 is fine)."));
+        Serial.println(F("\nConfiguration Commands (?WLED,...):"));
+        Serial.println(F("  PORT,Sx:baud      Reserve & configure the WLED port"));
+        Serial.println(F("                      use a HARDWARE port (S1/S2) at 115200"));
+        Serial.println(F("  CLEAR             Release the WLED port"));
+        Serial.println(F("  LIST              Show WLED configuration and link status"));
+        Serial.println(F("  STATUS            Show status  [WLED:...]"));
+        Serial.println(F("\nRuntime Actions (use ;L,...):"));
+        Serial.println(F("  ;L,ON / ;L,OFF / ;L,TOGGLE   Power"));
+        Serial.println(F("  ;L,BRI,0-255        Master brightness"));
+        Serial.println(F("  ;L,PS,<n>           Recall preset n (primary workflow)"));
+        Serial.println(F("  ;L,COL,RRGGBB       Solid colour (RRGGBBWW for RGBW)"));
+        Serial.println(F("  ;L,FX,<n>[,sx,ix]   Effect by index (+ speed/intensity)"));
+        Serial.println(F("  ;L,PAL,<n>          Palette by index"));
+        Serial.println(F("  ;L,JSON,{...}       Raw /json/state passthrough (escape hatch)"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?WLED,PORT,S2:115200          - WLED on S2 at 115200"));
+        Serial.println(F("  ;L,PS,3                       - Fire preset 3"));
+        Serial.println(F("  ;L,COL,FF0000                 - Solid red"));
+        Serial.println(F("  ;W4,;L,PS,2                   - Preset 2 on WCB4's WLED"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Fire-and-forget: the WCB does not read WLED back"));
+        Serial.println(F("  - One WLED per WCB; reach others by targeting their WCB"));
+        Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
@@ -850,6 +886,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?MAESTRO        Configure Maestro servo controller(s)"));
         Serial.println(F("    ?MP3            Configure SparkFun MP3 Trigger v2.x"));
         Serial.println(F("    ?HCR            Configure Human-Cyborg Relations Vocalizer"));
+        Serial.println(F("    ?WLED           Configure WLED serial control (;L runtime)"));
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));

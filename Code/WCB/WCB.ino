@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_261446RJUN2026                                  *****////
+///*****                                          Version 6.2.0_290115RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -87,6 +87,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
 #include "WCB_HCR.h"
+#include "WCB_WLED.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -165,7 +166,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_261446RJUN2026";
+String SoftwareVersion = "6.2.0_290115RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1791,7 +1792,7 @@ void printConfigInfo() {
   if (specialPeerEnabled) {
     int spIdx = WCB_SPECIAL_PEER_ID - 1;
     unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000UL;
-    Serial.printf("  WCB%d (special): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
+    Serial.printf("  WCB%d (controller): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
                   WCB_SPECIAL_PEER_ID,
                   WCBMacAddresses[spIdx][0], WCBMacAddresses[spIdx][1], WCBMacAddresses[spIdx][2],
                   WCBMacAddresses[spIdx][3], WCBMacAddresses[spIdx][4], WCBMacAddresses[spIdx][5],
@@ -1809,7 +1810,7 @@ void printConfigInfo() {
   Serial.printf("Delimiter Character:      %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character:         %c\n", CommandCharacter);
-  if (specialPeerEnabled) Serial.printf("Special Peer:              ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
+  if (specialPeerEnabled) Serial.printf("Controller Peer:          ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);
@@ -2440,8 +2441,9 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("ETM,DELAY,"   + String(etmCharDelayMs), true);
   emit("ETM,CHKSM,"   + String(etmChecksumEnabled ? "ON" : "OFF"), true);
 
-  // Special peer (NaviCore) — only when enabled
-  if (specialPeerEnabled) emit("SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID), true);
+  // Controller peer (default NaviCore, ID 20) — only when enabled. Canonical token
+  // is CONTROLLER now; firmware + Wizard still accept the legacy SPECIAL on input.
+  if (specialPeerEnabled) emit("CONTROLLER,ON," + String(WCB_SPECIAL_PEER_ID), true);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);
@@ -2496,6 +2498,7 @@ String buildConfigString() {
     printMaestroBackup(dummy, out, '^');
     printMP3Backup(dummy, out, '^');
     printHCRBackup(dummy, out, '^');
+    printWLEDBackup(dummy, out, '^');
     // User variables — webtool grammar is always the fixed '^?' form.
     printVariablesBackup(dummy, out, '^');
   };
@@ -3952,19 +3955,22 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?SPECIAL,ON/OFF ---
-    // Enables or disables tracking and communication with the special peer (ID 20).
-    // When ON: ID 20 is registered as an ESP-NOW peer, its heartbeats are tracked,
+    // --- ?CONTROLLER,ON/OFF   (legacy alias: ?SPECIAL) ---
+    // Enables or disables tracking and communication with the "controller" peer — an
+    // extra pinned ESP-NOW peer that sits OUTSIDE the normal numbered WCB boards
+    // (default ID 20, e.g. NaviCore, but any 1-20 ID for a different controller).
+    // When ON: that ID is registered as an ESP-NOW peer, its heartbeats are tracked,
     // and it appears in ETM stats. Reboot required to apply peer registration.
-    // When OFF: ID 20 is treated as unknown and ignored.
-    if (rootUpper == "SPECIAL") {
+    // When OFF: that ID is treated as unknown and ignored.
+    // ?SPECIAL is kept as a back-compat alias so old configs/backups still parse.
+    if (rootUpper == "CONTROLLER" || rootUpper == "SPECIAL") {
         if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
-            // ?SPECIAL,ON  or  ?SPECIAL,ON,<id>  (NaviCore peer ID; default 20)
+            // ?CONTROLLER,ON  or  ?CONTROLLER,ON,<id>  (controller peer ID; default 20)
             int ci = argsUpper.indexOf(',');
             if (ci >= 0) {
                 int newId = argsUpper.substring(ci + 1).toInt();
                 if (newId < 1 || newId > 20) {
-                    Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", newId);
+                    Serial.printf("Invalid controller peer ID %d. Valid range: 1-20.\n", newId);
                     return;
                 }
                 saveSpecialPeerIDToPreferences((uint8_t)newId);
@@ -3973,8 +3979,8 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "OFF") {
             saveSpecialPeerPreferences(false);
         } else {
-            Serial.printf("Special peer (ID %d) is currently %s.\n"
-                          "Use ?SPECIAL,ON[,<id>] (1-20) or ?SPECIAL,OFF\n",
+            Serial.printf("Controller peer (ID %d) is currently %s.\n"
+                          "Use ?CONTROLLER,ON[,<id>] (1-20) or ?CONTROLLER,OFF\n",
                           WCB_SPECIAL_PEER_ID,
                           specialPeerEnabled ? "ENABLED" : "DISABLED");
         }
@@ -4010,6 +4016,12 @@ void processLocalCommand(const String &message) {
     // --- ?HCR,... (Human-Cyborg Relations config/query) ---
     if (rootUpper == "HCR") {
         configureHCR(args);
+        return;
+    }
+
+    // --- ?WLED,... (WLED serial control config/query) ---
+    if (rootUpper == "WLED") {
+        configureWLED(args);
         return;
     }
 
@@ -4779,6 +4791,7 @@ void updateHWVersion(const String &message) {
         printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printWLEDBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
     };
     collectConfigCommands(emit, emitHelpers);
@@ -4842,6 +4855,8 @@ void processCommandCharcter(const String &message, int sourceID) {
       processMP3AudioCommand(message);
     } else if (message.startsWith("h") || message.startsWith("H")) {
       processHCRRuntimeCommand(message);
+    } else if (message.startsWith("l") || message.startsWith("L")) {
+      processWLEDRuntimeCommand(message);   // ;L,ON|OFF|BRI|PS|COL|FX|PAL|JSON → WLED
     } else if (message.startsWith("v") || message.startsWith("V")) {
       processSetVariable(message);   // ;V,<name>,<value|TOGGLE|INC[,n]|DEC[,n]|true|false>
     } else {
@@ -5620,8 +5635,10 @@ void setup() {
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
   loadHCRSettings();      // Load HCR configuration from NVS
+  loadWLEDSettings();     // Load WLED serial-control configuration from NVS
   loadVariables();        // Build the user-variable RAM mirror from NVS
   beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
+  beginWLED();            // Bind the WLED write stream to its port (opened by normal serial init)
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();

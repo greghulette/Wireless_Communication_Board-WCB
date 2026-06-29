@@ -20,6 +20,7 @@ extern Preferences   preferences;
 // / saveSerialLabelToPreferences are declared by WCB_Storage.h (included above).
 extern Stream      &getSerialStream(int port);
 extern void         applyLiveBaud(int port, uint32_t baud);
+extern bool         isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — for the port-conflict guard
 
 // Serial3-5 are EspSoftwareSerial instances defined in WCB.ino.
 // Serial1/Serial2 are the ESP32 core HardwareSerial globals.
@@ -419,11 +420,27 @@ void processHCRRuntimeCommand(const String &message) {
     return;
   }
   if (vU == "VOL" || vU == "VOLUME") {
-    int ch = hcrChan(hcrField(body, 1));            // V|A|B
-    int v  = hcrField(body, 2).toInt();
-    if (ch < 0 || v < 0 || v > 100) { Serial.println("[HCR] Usage: ;H,VOL,<V|A|B>,<0-100>"); return; }
-    hcrCancelFade(ch);
-    hcrSetVol(ch, v);
+    // ;H,VOL[,<V|A|B>],<0-100>
+    // Channel is OPTIONAL: omit it to set ALL channels (V, A and B) to the value,
+    // mirroring VOLUP/VOLDN. Field 1 is the channel when it names one; otherwise
+    // field 1 is the value itself (no channel given -> apply to all).
+    String f1  = hcrField(body, 1);
+    int    ch  = hcrChan(f1);                        // V|A|B -> index, -1 if not a channel
+    bool   all = (ch < 0);                           // no/invalid channel -> all channels
+    String vStr = all ? f1 : hcrField(body, 2);
+    int    v    = vStr.toInt();
+    if (!vStr.length() || v < 0 || v > 100) {
+      Serial.println("[HCR] Usage: ;H,VOL[,<V|A|B>],<0-100>");
+      return;
+    }
+    const int chans[3] = { CH_V, CH_A, CH_B };
+    const int n = all ? 3 : 1;
+    for (int i = 0; i < n; i++) {
+      const int c = all ? chans[i] : ch;
+      hcrCancelFade(c);
+      hcrSetVol(c, v);
+      if (debugHCR) Serial.printf("[HCR-DBG] VOL ch=%d -> %d\n", c, v);
+    }
     return;
   }
   if (vU == "VOLUP" || vU == "VOLDN" || vU == "VOLDOWN") {
@@ -647,10 +664,10 @@ void configureHCR(const String &args) {
   // share one UART. Does NOT check HCR itself, so re-configuring HCR on its
   // own port is still allowed.
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
-      isSerialPortUsedForMP3(serialPort) ||
+      isSerialPortUsedForMP3(serialPort) || isSerialPortUsedForWLED(serialPort) ||
       (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
       (serialPort == 2 && Kyber_Local)) {
-    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3 - config blocked\n", serialPort);
+    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3/WLED - config blocked\n", serialPort);
     return;
   }
 
