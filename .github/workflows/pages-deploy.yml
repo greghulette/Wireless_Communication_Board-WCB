@@ -59,7 +59,11 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="${GITHUB_REF_NAME}"
-          if [ "$BRANCH" = "main" ]; then DEST="Wizard"; else DEST="dev/$BRANCH/Wizard"; fi
+          if [ "$BRANCH" = "main" ]; then
+            DEST="Wizard";             IMGDIR="Images"
+          else
+            DEST="dev/$BRANCH/Wizard";  IMGDIR="dev/$BRANCH/Images"
+          fi
           echo "Deploying branch '$BRANCH'  ->  /$DEST"
 
           WIZ="$GITHUB_WORKSPACE/Wizard"
@@ -83,6 +87,26 @@ jobs:
           mkdir -p "$GHP/$DEST"
           cp -a "$WIZ/." "$GHP/$DEST/"
           touch "$GHP/.nojekyll"          # serve files verbatim (no Jekyll processing)
+
+          # The Wizard pulls a few logos via ../Images/<file> (a sibling folder).
+          # Deploy ONLY the referenced files as a sibling Images/ — the repo's full
+          # Images/ tree is ~200 MB of docs photos the Wizard never uses. Discovered
+          # dynamically so it adapts if the Wizard's image set changes.
+          rm -rf "$GHP/$IMGDIR"
+          refs="$(grep -rhoE '\.\./Images/[A-Za-z0-9._-]+' "$WIZ" 2>/dev/null | sed 's#\.\./Images/##' | sort -u)"
+          if [ -n "$refs" ]; then
+            mkdir -p "$GHP/$IMGDIR"
+            n=0
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if [ -f "$GITHUB_WORKSPACE/Images/$f" ]; then
+                cp -a "$GITHUB_WORKSPACE/Images/$f" "$GHP/$IMGDIR/"; n=$((n+1))
+              else
+                echo "::warning::Wizard references Images/$f but it's missing in the repo"
+              fi
+            done <<< "$refs"
+            echo "Deployed $n referenced image(s) -> /$IMGDIR"
+          fi
 
           cd "$GHP"
           git add -A
