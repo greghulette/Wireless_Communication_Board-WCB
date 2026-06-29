@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.15:54.R.JUN.2026';
+const UI_VERSION = '29.17:35.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -110,10 +110,10 @@ if (document.readyState === 'loading') {
 async function fetchLatestFirmwareVersion() {
   try {
     // Read the latest published bin from the SAME branch the flasher pulls from
-    // (getFirmwareBranch from flasher.js — defaults to 'main', honors the
-    // wcb_fw_branch localStorage test override). Previously this hardcoded the
-    // stale 'multi_maestro' feature branch, so the "update available" indicator
-    // compared the board against an old branch and never reflected main.
+    // (getFirmwareBranch from flasher.js — derived from the URL: a
+    // /dev/<branch>/Wizard preview tracks that branch, prod/localhost track
+    // 'main'). This keeps the "update available" indicator honest — it compares
+    // each board against the firmware this Wizard would actually flash.
     const branch = (typeof getFirmwareBranch === 'function') ? getFirmwareBranch() : 'main';
     const owner  = (typeof GITHUB_OWNER    === 'string') ? GITHUB_OWNER    : 'greghulette';
     const repo   = (typeof GITHUB_REPO     === 'string') ? GITHUB_REPO     : 'Wireless_Communication_Board-WCB';
@@ -236,7 +236,6 @@ function splashGoConfig() {
 function loadModePreference() {
   const saved = localStorage.getItem('wcb-mode') || 'simple';
   setMode(saved, true);
-  syncFwBranchSelect();   // reflect saved firmware branch immediately
 }
 
 function initSystemConfig() {
@@ -280,116 +279,6 @@ function setMode(mode, silent = false) {
     if (mode === 'advanced' && etmEnabled) etmDetail.classList.add('visible');
     else etmDetail.classList.remove('visible');
   }
-
-  // Firmware Source: lazy-load the branch list the first time Advanced
-  // is opened; always keep the warning state in sync.
-  if (mode === 'advanced') populateFwBranches();
-  updateFwBranchWarn();
-}
-
-// ─── Firmware Source (branch selector — advanced/testing only) ─────
-// Pairs with getFirmwareBranch() in flasher.js (same localStorage key).
-// Default is always 'main' (released firmware); a non-main selection is
-// loudly flagged and intended only for testing unreleased branches.
-const FW_BRANCH_KEY = 'wcb_fw_branch';
-let _fwBranchesLoaded = false;
-
-function currentFwBranch() {
-  try { return (localStorage.getItem(FW_BRANCH_KEY) || '').trim() || 'main'; }
-  catch (_) { return 'main'; }
-}
-
-function updateFwBranchWarn() {
-  const warn = document.getElementById('fw-branch-warn');
-  if (!warn) return;
-  const b = currentFwBranch();
-  if (b && b !== 'main') {
-    const name = document.getElementById('fw-branch-warn-name');
-    if (name) name.textContent = b;
-    warn.style.display = 'block';
-  } else {
-    warn.style.display = 'none';
-  }
-}
-
-function onFwBranchChange() {
-  const sel = document.getElementById('g-fw-branch');
-  if (!sel) return;
-  let b = (sel.value || 'main').trim() || 'main';
-  // Whitelist the same character set as flasher.js getFirmwareBranch() reads.
-  // Prevents an unexpected branch name (e.g. one populated from the GitHub
-  // API list with weird characters, or one manually typed by an advanced
-  // user) from being persisted and then interpolated into a URL.
-  if (!/^[A-Za-z0-9._/-]+$/.test(b) || b.length > 100) {
-    showToast(`Branch name "${b}" contains invalid characters — falling back to 'main'`, 'warning', 6000);
-    b = 'main';
-  }
-  try {
-    if (b === 'main') localStorage.removeItem(FW_BRANCH_KEY);
-    else              localStorage.setItem(FW_BRANCH_KEY, b);
-  } catch (_) {}
-  updateFwBranchWarn();
-  if (b !== 'main')
-    showToast(`Firmware source set to branch '${b}' — NOT released firmware`, 'info', 6000);
-  else
-    showToast('Firmware source: main (released)', 'success', 3000);
-
-  // Re-check "latest available" against the NEWLY-selected branch so the update
-  // indicator (and Update FW button) reflect the chosen firmware source instead
-  // of whatever branch was current at page load. Clear first so a failed re-fetch
-  // shows "unavailable" rather than the previous branch's version.
-  latestFirmwareVersion = null;
-  for (let n = 1; n <= 8; n++) {
-    if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
-  }
-  fetchLatestFirmwareVersion();   // async, best-effort — re-renders on success
-}
-
-// Make the <select> reflect the saved branch even before the full list
-// is fetched, so the UI matches what the flasher will actually pull.
-function syncFwBranchSelect() {
-  const sel = document.getElementById('g-fw-branch');
-  if (!sel) return;
-  const saved = currentFwBranch();
-  if (![...sel.options].some(o => o.value === saved)) {
-    const o = document.createElement('option');
-    o.value = saved; o.textContent = saved + ' (testing)';
-    sel.appendChild(o);
-  }
-  sel.value = saved;
-  updateFwBranchWarn();
-}
-
-// Lazy-load the branch list from GitHub (filtered) on first Advanced open.
-async function populateFwBranches() {
-  if (_fwBranchesLoaded) return;
-  _fwBranchesLoaded = true;
-  const sel = document.getElementById('g-fw-branch');
-  if (!sel) return;
-  const saved = currentFwBranch();
-  try {
-    const r = await fetch('https://api.github.com/repos/greghulette/'
-                        + 'Wireless_Communication_Board-WCB/branches?per_page=100');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    const hide = /^(claude\/|dependabot\/|revert-|gh-readonly)/i;
-    const names = data.map(b => b && b.name)
-                      .filter(n => n && n !== 'main' && !hide.test(n))
-                      .sort((a, b) => a.localeCompare(b));
-    const mk = (val, label) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label; sel.appendChild(o);
-    };
-    sel.innerHTML = '';
-    mk('main', 'main (released)');
-    names.forEach(n => mk(n, n));
-    if (![...sel.options].some(o => o.value === saved)) mk(saved, saved + ' (testing)');
-    sel.value = saved;
-  } catch (_) {
-    _fwBranchesLoaded = false;          // allow a retry on next Advanced open
-    syncFwBranchSelect();               // keep saved value selectable
-  }
-  updateFwBranchWarn();
 }
 
 // ─── Section Toggle ───────────────────────────────────────────────
