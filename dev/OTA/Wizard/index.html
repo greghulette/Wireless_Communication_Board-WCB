@@ -150,26 +150,6 @@
 
         <hr class="divider advanced-only hidden">
 
-        <div class="subsection-title advanced-only hidden">Firmware Source <span class="text-muted">— advanced / testing only</span></div>
-        <div class="field-group advanced-only hidden">
-          <div class="field">
-            <label>Firmware Branch <span class="wiz-hint" data-tip="Which GitHub branch the flasher pulls firmware binaries from. Leave on 'main' for released firmware. Other branches are unreleased / in development — for testing only.">i</span></label>
-            <select id="g-fw-branch" onchange="onFwBranchChange()">
-              <option value="main">main (released)</option>
-            </select>
-          </div>
-          <div id="fw-branch-warn"
-               style="display:none;flex:1 1 100%;margin-top:6px;padding:8px 10px;border-radius:6px;
-                      background:rgba(220,80,40,0.15);border:1px solid rgba(220,80,40,0.5);
-                      color:var(--text2);font-size:12px;line-height:1.4">
-            ⚠ Flashing from branch <strong><span id="fw-branch-warn-name"></span></strong> —
-            this is <strong>NOT released firmware</strong>. Unreleased branches may be unstable
-            or incompatible. Use only for testing, then switch back to <strong>main</strong>.
-          </div>
-        </div>
-
-        <hr class="divider advanced-only hidden">
-
         <div class="subsection-title advanced-only hidden">Ensured Transmission Mode (ETM)</div>
         <div class="toggle-wrap mb-12 advanced-only hidden">
           <label class="toggle">

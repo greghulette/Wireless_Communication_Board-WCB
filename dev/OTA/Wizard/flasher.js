@@ -38,35 +38,46 @@ const CRYPTOJS_SRC = _VENDOR_BASE + 'crypto-js/crypto-js-4.2.0.min.js';
 //   WCB_6.0_271328RFEB2026_multi_maestro_ESP32S3.bin
 // The suffix (_ESP32.bin / _ESP32S3.bin) is stable; the prefix changes each build.
 // We use the GitHub Contents API to find the right file, then fetch it.
-// The branch is resolved at fetch time by getFirmwareBranch() (defaults to
-// 'main'; overridable via the Advanced → Firmware Source selector).
+// The branch is resolved at fetch time by getFirmwareBranch(), which derives it
+// from the URL the Wizard is served from (/dev/<branch>/Wizard → that branch;
+// /Wizard, localhost, file:// → 'main').
 const GITHUB_OWNER  = 'greghulette';
 const GITHUB_REPO   = 'Wireless_Communication_Board-WCB';
 const GITHUB_BRANCH_DEFAULT = 'main';
 const GITHUB_BIN_PATH = 'Code/bin';
 
-// Branch the flasher pulls binaries from. Defaults to 'main' (released
-// firmware). The Advanced → Firmware Source selector overrides this via
-// localStorage for testing unreleased branches. Never hard-code anything
-// but 'main' as the default — production must always pull released firmware.
+// Which branch's binaries the flasher pulls. The URL is the source of truth:
+// the deploy publishes branch previews to gh-pages:/dev/<branch>/Wizard (see
+// .github/workflows/pages-deploy.yml), so a Wizard served from there pulls THAT
+// branch's firmware, while production at /Wizard (and localhost / file://) pulls
+// 'main' (released). Never default to anything but 'main' — the public tool must
+// always pull released firmware.
 //
 // Whitelist what counts as a valid branch name: alphanumerics, '.', '_',
 // '-', '/'. This is the safe subset of Git ref names AND keeps the value
 // from being able to inject URL operators (?, &, #, =, /../) into the
-// GitHub Contents API request when interpolated. A malformed localStorage
-// value (manually edited, or stuffed by a malicious page hosting this
-// tool in an iframe) is dropped silently and the default is used instead.
+// GitHub Contents API request when interpolated. Anything outside it is
+// dropped silently and the default is used instead.
 const FW_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
 function isValidFwBranch(b) {
   return typeof b === 'string' && b.length > 0 && b.length <= 100 && FW_BRANCH_RE.test(b);
 }
 function getFirmwareBranch() {
+  // URL wins: a /dev/<branch>/Wizard preview always flashes its own branch.
+  // <branch> is the exact git ref name (slashes preserved, e.g. feature/x),
+  // which is also what the GitHub Contents API ?ref= expects.
+  try {
+    const m = location.pathname.match(/\/dev\/(.+)\/Wizard(?:\/|$)/);
+    if (m && isValidFwBranch(m[1])) return m[1];
+  } catch (_) { /* no location (non-browser) — fall through */ }
+  // Escape hatch (no UI): from prod/localhost you can force a branch by setting
+  // localStorage 'wcb_fw_branch' in the console; remove it to go back to 'main'.
+  // Ignored on a /dev/ preview URL above, so previews stay true to their path.
   try {
     const b = (localStorage.getItem('wcb_fw_branch') || '').trim();
-    return isValidFwBranch(b) ? b : GITHUB_BRANCH_DEFAULT;
-  } catch (_) {
-    return GITHUB_BRANCH_DEFAULT;
-  }
+    if (isValidFwBranch(b)) return b;
+  } catch (_) { /* localStorage unavailable — fall through */ }
+  return GITHUB_BRANCH_DEFAULT;
 }
 
 // ─── Script loader ────────────────────────────────────────────────
