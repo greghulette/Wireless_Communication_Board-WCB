@@ -1,0 +1,1473 @@
+/**
+ * WCB Backup Parser & Data Model
+ * 
+ * Parses the output of the ?backup command from WCB firmware.
+ * Builds a structured JavaScript object (BoardConfig) from the
+ * chained command string.
+ * 
+ * The ?backup command outputs two formats:
+ *   1. Configured format  — uses board's current delimiter & funcchar
+ *   2. Factory reset format — always uses ^ delimiter and ? funcchar
+ * 
+ * The parser extracts the factory reset format line (always last)
+ * since it has a known, stable format regardless of board config.
+ */
+
+// ─────────────────────────────────────────────
+// Default BoardConfig — represents a fresh/unconfigured board
+// All fields set to firmware defaults
+// ─────────────────────────────────────────────
+function createDefaultBoardConfig() {
+  return {
+    // Board Identity
+    hwVersion:    0,       // 0 = not set, 1=1.0, 21=2.1, 23=2.3, 24=2.4, 31=3.1, 32=3.2
+    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
+    wcbNumber:    1,
+    wcbQuantity:  1,
+    alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
+    specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
+    specialPeerId: 20,     // special peer ID (1-20); used only when specialPeer is true
+    // ---- Wizard-only metadata (never sent to firmware) ----------------
+    // Slot type: 'wcb' (default — board card) or 'client' (lightweight
+    // client view). Flipping does NOT alter what's on the physical board.
+    type:         'wcb',
+    clientAlias:  '',      // Friendly name for the client device at this slot
+
+
+    // Network
+    espnowPassword: 'change_me_or_risk_takeover',
+    macOctet2:    '00',
+    macOctet3:    '00',
+
+    // Command Characters
+    delimiter:    '^',
+    funcChar:     '?',
+    cmdChar:      ';',
+
+    // Serial Ports — index 0 = Serial1 ... index 4 = Serial5
+    serialPorts: [
+      { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
+      { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
+      { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
+      { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
+      { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
+    ],
+
+    // Kyber
+    kyber: {
+      mode:          'none',  // 'none' | 'local' | 'remote'
+      port:          null,    // 1-5 — Maestro port, only relevant for 'local'
+      baud:          115200,  // baud rate of the Kyber Maestro serial port
+      marcduinoPort: null,    // 1-5 — Marcuino port (9600, broadcasts), or null
+    },
+
+    // MP3 Trigger
+    mp3: {
+      enabled: false,
+      port:    null,   // 1-5 — serial port the MP3 Trigger is wired to
+      baud:    9600,
+      volume:  0,      // 0 = loudest, 64 = inaudible
+      onError: '',     // stored sequence key to run on error (optional)
+    },
+
+    // HCR (Human-Cyborg Relations) Vocalizer
+    hcr: {
+      enabled: false,
+      port:    null,   // 1-5 — serial port the HCR is wired to
+      baud:    9600,
+      poll:    10,     // status auto-poll interval (s); 0 = off
+    },
+
+    // Maestros — array of { id, port, baud }
+    maestros: [],
+
+    // Mappings — array of { type, sourcePort, rawMode, destinations: [{ wcbNumber, port }] }
+    mappings: [],
+
+    // ETM
+    etm: {
+      enabled:          true,
+      timeoutMs:        500,
+      heartbeatSec:     10,
+      missedHeartbeats: 3,
+      bootHeartbeatSec: 2,
+      messageCount:     20,
+      messageDelayMs:   100,
+      checksumEnabled:  true,
+    },
+
+    // Stored Sequences — array of { key, value }
+    sequences: [],
+
+    // Variables — array of { name, value } (persistent named int32s on the board)
+    variables: [],
+
+    // PWM Output Ports — array of port numbers that are PWM outputs
+    pwmOutputPorts: [],
+
+    // Firmware version (populated from GitHub Releases, not from board)
+    fwVersion: null,
+
+    // Source tracking — where did this config come from?
+    // 'default' | 'board' | 'file'
+    source: 'default',
+  };
+}
+
+// ─────────────────────────────────────────────
+// Default SystemConfig — wraps general + per-board configs
+// ─────────────────────────────────────────────
+function createDefaultSystemConfig() {
+  return {
+    // Droid name — stored in file header only, not on board
+    droidName: '',
+
+    // General settings — must match across all boards
+    general: {
+      wcbQuantity:    1,
+      espnowPassword: 'change_me_or_risk_takeover',
+      macOctet2:      '00',
+      macOctet3:      '00',
+      delimiter:      '^',
+      funcChar:       '?',
+      cmdChar:        ';',
+      // NaviCore (special peer) — network-wide: same on every WCB. Field names
+      // mirror the per-board config so extractGeneralFields() works uniformly.
+      specialPeer:    false,
+      specialPeerId:  20,
+      // Animation controller for the whole system: 'none' | 'navicore' | 'kyber'.
+      // UI state (tools page) — derived from board configs; not pushed directly.
+      controller:     'none',
+      etm: {
+        enabled:          true,
+        timeoutMs:        500,
+        heartbeatSec:     10,
+        missedHeartbeats: 3,
+        bootHeartbeatSec: 2,
+        messageCount:     20,
+        messageDelayMs:   100,
+        checksumEnabled:  true,
+      },
+    },
+
+    // Per-board configs — array indexed by board position (not WCB number)
+    boards: [],
+
+    // Source tracking
+    source: 'default',
+    lastModified: null,
+  };
+}
+
+// ─────────────────────────────────────────────
+// Hardware Version Helpers
+// ─────────────────────────────────────────────
+const HW_VERSION_MAP = {
+  '1':  { display: '1.0',  binary: 'ESP32',   value: 1  },
+  '21': { display: '2.1',  binary: 'ESP32',   value: 21 },
+  '23': { display: '2.3',  binary: 'ESP32',   value: 23 },
+  '24': { display: '2.4',  binary: 'ESP32',   value: 24 },
+  '31': { display: '3.1',  binary: 'ESP32S3', value: 31 },
+  '32': { display: '3.2',  binary: 'ESP32S3', value: 32 },
+};
+
+function hwValueToDisplay(value) {
+  return HW_VERSION_MAP[String(value)]?.display ?? 'Unknown';
+}
+
+function hwValueToBinary(value) {
+  return HW_VERSION_MAP[String(value)]?.binary ?? 'ESP32';
+}
+
+// ─────────────────────────────────────────────
+// Core Backup String Parser
+// 
+// Accepts either:
+//   - The full raw ?backup serial output (multi-line)
+//   - Just the chained command string line
+//
+// Returns a BoardConfig object.
+// ─────────────────────────────────────────────
+function parseBackupString(rawOutput) {
+  const config = createDefaultBoardConfig();
+  config.source = 'board';
+
+  // ── Token extraction strategy ─────────────────────────────────────────────
+  // Board backups (identified by the "WCB Configuration Backup" header) print
+  // each command on its own line ABOVE the chained sections.  Those per-line
+  // commands are trivial to parse regardless of configured funcChar/delimiter.
+  //
+  // The factory-reset chained line is intentionally designed to dynamically
+  // switch its own delimiter/funcChar mid-stream (so pasting it into a
+  // terminal works), which makes static splitting unreliable.
+  //
+  // File imports use the stable ?/^ format produced by buildSystemFile and are
+  // still parsed via the chained-line path.
+  let tokens;
+  if (rawOutput.includes('WCB Configuration Backup')) {
+    tokens = extractIndividualCommandLines(rawOutput);
+  } else {
+    tokens = extractChainedTokens(rawOutput);
+  }
+
+  if (!tokens.length) {
+    console.warn('[WCB Parser] No command tokens found in backup output');
+    return config;
+  }
+
+  // Pre-pass: extract WCB number before the main parse loop so that MAESTRO
+  // token routing (wcb === config.wcbNumber) works correctly even when ?MAESTRO
+  // appears before ?WCB in the firmware backup output.
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed || !trimmed.startsWith('?')) continue;
+    const body  = trimmed.substring(1);
+    const upper = body.toUpperCase();
+    const uParts = upper.split(',');
+    if (uParts[0] === 'WCB' && uParts[1] && !uParts[1].startsWith('Q')) {
+      config.wcbNumber = parseInt(body.split(',')[1]) || 1;
+      break;
+    }
+  }
+
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed || !trimmed.startsWith('?')) continue;
+
+    // Strip leading ? to get the command body
+    const body = trimmed.substring(1);
+    parseToken(body, config);
+  }
+
+  // After parsing, infer the Kyber Marcuino port from the serial port label so
+  // the UI can restore it after a boardPull.  The label 'Kyber Marcuino' is
+  // written to the board during the push; it comes back in the backup as
+  // ?LABEL,S<n>,Kyber Marcuino which the LABEL parser case stores on the port.
+  if (config.kyber.mode === 'local') {
+    const marcIdx = config.serialPorts.findIndex(
+      p => p.label?.toLowerCase() === 'kyber marcuino'
+    );
+    config.kyber.marcduinoPort = marcIdx >= 0 ? marcIdx + 1 : null;
+  }
+
+  // After parsing, evaluate port claims
+  evaluatePortClaims(config);
+
+  return config;
+}
+
+// ─────────────────────────────────────────────
+// Legacy runtime variable segments — shared regex builder.
+// Older firmware emitted variables as runtime "<cmdChar>V,name,value" commands
+// (e.g. ";V,foo,1") instead of the funcChar-prefixed ?VAR,SET CONFIG form.
+// The 'V' verb matches case-INsensitively (";v,foo,1" is the same command —
+// hence the 'i' flag), but variable NAMES remain case-SENSITIVE: the captured
+// name is re-emitted verbatim, and [A-Za-z0-9_] lists both cases explicitly,
+// so the 'i' flag cannot fold distinct names together.
+// `prefix` anchors the segment for the caller's context:
+//   '^'    — a whole trimmed line (extractIndividualCommandLines)
+//   '\\^'  — a segment glued to the end of a chained token (extractChainedTokens)
+// Value accepts an integer or TRUE/FALSE (both accepted by the firmware and
+// by parseToken's VAR,SET case).
+// ─────────────────────────────────────────────
+function buildLegacyVarRe(cmdChar, prefix) {
+  const cmdEsc = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`${prefix}${cmdEsc}V,([A-Za-z0-9_]{1,15}),(-?\\d+|TRUE|FALSE)$`, 'i');
+}
+
+// ─────────────────────────────────────────────
+// Board-backup path: parse the per-line commands the firmware prints above the
+// chained sections.  Each line is a single command with any funcChar prefix,
+// so there is no delimiter-switching ambiguity.
+// Returns tokens normalised to '?COMMAND,...' strings.
+// ─────────────────────────────────────────────
+function extractIndividualCommandLines(rawOutput) {
+  const lines    = rawOutput.split(/\r?\n/);
+  const tokens   = [];
+
+  // Detect the board's configured funcChar.
+  // The firmware prints e.g. ".FUNCCHAR,." when funcChar is non-default.
+  // Match: any single character, then "FUNCCHAR,", then the new char.
+  let funcChar = '?';
+  for (const line of lines) {
+    const m = line.trim().match(/^.FUNCCHAR,(.)/i);
+    if (m?.[1]) { funcChar = m[1]; break; }
+  }
+
+  // Detect the board's configured cmdChar the same way (e.g. ".CMDCHAR,/").
+  // Older firmware emitted variables as runtime ";V,name,value" lines using the
+  // cmdChar prefix instead of the funcChar-prefixed ?VAR,SET CONFIG form.
+  let cmdChar = ';';
+  for (const line of lines) {
+    const m = line.trim().match(/^.CMDCHAR,(.)/i);
+    if (m?.[1]) { cmdChar = m[1]; break; }
+  }
+
+  // Legacy runtime variable line, anchored to the whole line (";V,name,1",
+  // ";v,name,1" — see buildLegacyVarRe).
+  const legacyVarLineRe = buildLegacyVarRe(cmdChar, '^');
+
+  // Collect individual command lines that appear before the chained sections.
+  // The firmware prints one "Serial.println(lfi + cmd)" per command, then the
+  // "=== For Configured Boards ===" header marks the start of the chained block.
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Stop when the chained section begins
+    if (trimmed.includes('=== For Configured') || trimmed.includes('=== For Factory')) break;
+
+    // Skip header/comment/separator lines
+    if (trimmed.startsWith('***')) continue;
+    if (trimmed.startsWith('---')) continue;
+    if (/^[-=*]+$/.test(trimmed)) continue;
+
+    // Accept lines that start with '?' or the detected funcChar.
+    // Also accept legacy runtime variable lines ";V,name,value" (cmdChar
+    // prefix, 'V' verb case-insensitive — shared regex with the chained-token
+    // peel loop) — normalise them to the VAR,SET CONFIG form for parseToken.
+    let body = null;
+    if (trimmed.startsWith('?'))               body = trimmed.slice(1);
+    else if (trimmed.startsWith(funcChar))     body = trimmed.slice(1);
+    else {
+      const lm = trimmed.match(legacyVarLineRe);
+      if (lm) body = `VAR,SET,${lm[1]},${lm[2]}`;
+    }
+
+    // Skip lines that start with a known word (non-command output like "WARNING:",
+    // "Booting", "ETM:", etc.) — they won't have a single-char funcChar prefix
+    if (body !== null && body.length > 0) {
+      tokens.push('?' + body); // normalise prefix to '?' for parseToken
+    }
+  }
+
+  return tokens;
+}
+
+// ─────────────────────────────────────────────
+// File-import path: split the stable ?/^ chained string produced by
+// buildSystemFile (always written with outputFuncChar:'?' / outputDelim:'^').
+// ─────────────────────────────────────────────
+function extractChainedTokens(rawOutput) {
+  let commandString = extractFactoryResetLine(rawOutput);
+  if (!commandString) commandString = rawOutput.trim();
+  if (!commandString) return [];
+
+  // Detect the configured cmdChar (appears as a ?CMDCHAR,<c> token in the
+  // chain) so legacy runtime variable segments can be recognised below.
+  const cmdChar = commandString.match(/\?CMDCHAR,(.)/i)?.[1] ?? ';';
+
+  // Older firmware emitted variables as runtime "^;V,name,value" segments which
+  // glue onto the END of the previous token when splitting on "^?".  Strip them
+  // off (otherwise they'd fold into a preceding ?SEQ value and corrupt it) and
+  // re-emit them as normalised ?VAR,SET tokens.  Shared case-insensitive regex
+  // with the per-line path — "^;v,name,1" peels identically to "^;V,name,1".
+  const legacyVarRe = buildLegacyVarRe(cmdChar, '\\^');
+
+  // Split on "^?" boundaries.  ?SEQ,SAVE values embed "^" internally to chain
+  // device commands, so we split on the two-char boundary "^?" to avoid tearing
+  // saved-sequence values apart.
+  const rawParts = commandString.split('^?');
+  const tokens     = [];
+  const legacyVars = [];
+  for (let i = 0; i < rawParts.length; i++) {
+    let part = rawParts[i].trim();
+    if (!part) continue;
+
+    // Peel trailing legacy variable segments (may be stacked: "...^;V,a,1^;V,b,2")
+    const partVars = [];
+    let m;
+    while ((m = part.match(legacyVarRe))) {
+      partVars.unshift(`?VAR,SET,${m[1]},${m[2]}`);  // unshift keeps original order
+      part = part.slice(0, part.length - m[0].length).trim();
+    }
+    legacyVars.push(...partVars);
+
+    if (!part) continue;
+    tokens.push(i === 0 ? part : '?' + part); // restore '?' consumed by split
+  }
+  return tokens.concat(legacyVars);
+}
+
+// ─────────────────────────────────────────────
+// Extract the factory reset command line from raw ?backup output
+// ─────────────────────────────────────────────
+function extractFactoryResetLine(rawOutput) {
+  const lines = rawOutput.split(/\r?\n/);
+
+  let foundHeader = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Look for the factory reset section header
+    if (trimmed.includes('For Factory Reset') || trimmed.includes('Fresh Boards')) {
+      foundHeader = true;
+      continue;
+    }
+
+    // The next non-empty, non-comment line after the header is our command string
+    if (foundHeader && trimmed.length > 0 && !trimmed.startsWith('***')) {
+      return trimmed;
+    }
+  }
+
+  // Fallback: look for any line that starts with ?HW, which is always first in backup
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('?HW,') || trimmed.startsWith('?hw,')) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// Parse a single command token into the config object
+// token is the command body with leading ? already stripped
+// e.g. "HW,31" or "BAUD,S1,9600" or "ETM,ON"
+// ─────────────────────────────────────────────
+function parseToken(body, config) {
+  // Normalize to uppercase for matching, but preserve original case for values
+  const upper = body.toUpperCase();
+  const parts  = body.split(',');
+  const upperParts = upper.split(',');
+  const cmd = upperParts[0];
+
+  switch (cmd) {
+
+    // ── Board Identity ──
+    case 'HW':
+      config.hwVersion = parseInt(parts[1]) || 0;
+      break;
+
+    case 'LED':
+      if (upperParts[1] === 'PIN') config.statusLedPin = parseInt(parts[2]) || 38;
+      break;
+
+    case 'WCB':
+      // ?WCB,1  (not WCBQ)
+      if (upperParts[1] && !upperParts[1].startsWith('Q')) {
+        config.wcbNumber = parseInt(parts[1]) || 1;
+      }
+      break;
+
+    case 'WCBQ':
+      config.wcbQuantity = parseInt(parts[1]) || 1;
+      break;
+
+    case 'CONTROLLER':
+    case 'SPECIAL': {
+      // ?CONTROLLER,ON[,<id>] / ?CONTROLLER,OFF — enable/disable the controller peer
+      // (default NaviCore, ID 20). SPECIAL is the legacy alias kept for old configs.
+      const sub = (parts[1] || '').trim().toUpperCase();
+      config.specialPeer = (sub === 'ON' || sub === '1' || sub === 'TRUE');
+      if (config.specialPeer && parts[2]) {
+        const idVal = parseInt(parts[2]);
+        if (idVal >= 1 && idVal <= 20) config.specialPeerId = idVal;
+      }
+      break;
+    }
+
+    case 'ALIAS': {
+      // ?ALIAS,<text>   set
+      // ?ALIAS,CLEAR    clear
+      // ?ALIAS,LIST     (query, ignored on parse)
+      const sub = (parts[1] || '').trim();
+      const subU = sub.toUpperCase();
+      if (subU === 'CLEAR' || sub === '') {
+        config.alias = '';
+      } else if (subU !== 'LIST') {
+        // Preserve original case; join in case the alias contained a comma
+        // (rare — captured for completeness).
+        const raw = parts.slice(1).join(',').trim();
+        config.alias = raw.slice(0, 24);
+      }
+      break;
+    }
+
+    // ── Network ──
+    case 'EPASS':
+      // Password may contain commas — rejoin everything after EPASS,
+      config.espnowPassword = parts.slice(1).join(',');
+      break;
+
+    case 'MAC':
+      if (upperParts[1] === '2') config.macOctet2 = parts[2]?.toUpperCase() ?? '00';
+      if (upperParts[1] === '3') config.macOctet3 = parts[2]?.toUpperCase() ?? '00';
+      break;
+
+    // ── Command Characters ──
+    case 'DELIM':
+      config.delimiter = parts[1] ?? '^';
+      break;
+
+    case 'FUNCCHAR':
+      config.funcChar = parts[1] ?? '?';
+      break;
+
+    case 'CMDCHAR':
+      config.cmdChar = parts[1] ?? ';';
+      break;
+
+    // ── Serial Baud ──
+    case 'BAUD': {
+      // ?BAUD,S1,9600
+      const portStr = upperParts[1]; // "S1" - "S5"
+      const portIdx = parseInt(portStr?.replace('S', '')) - 1;
+      if (portIdx >= 0 && portIdx < 5) {
+        config.serialPorts[portIdx].baud = parseInt(parts[2]) || 9600;
+      }
+      break;
+    }
+
+    // ── Serial Labels ──
+    case 'LABEL': {
+      // ?LABEL,S1,MyLabel
+      const portStr = upperParts[1];
+      const portIdx = parseInt(portStr?.replace('S', '')) - 1;
+      if (portIdx >= 0 && portIdx < 5) {
+        config.serialPorts[portIdx].label = parts.slice(2).join(',');
+      }
+      break;
+    }
+
+    // ── Broadcast Output ──
+    case 'BCAST': {
+      // ?BCAST,OUT,S1,ON  or  ?BCAST,IN,S1,OFF
+      const direction = upperParts[1]; // 'OUT' or 'IN'
+      const portStr   = upperParts[2]; // 'S1' - 'S5'
+      const state     = upperParts[3]; // 'ON' or 'OFF'
+      const portIdx   = parseInt(portStr?.replace('S', '')) - 1;
+      if (portIdx >= 0 && portIdx < 5) {
+        const enabled = state === 'ON';
+        if (direction === 'OUT') config.serialPorts[portIdx].broadcastOut = enabled;
+        if (direction === 'IN')  config.serialPorts[portIdx].broadcastIn  = enabled;
+      }
+      break;
+    }
+
+    // ── Kyber ──
+    case 'KYBER': {
+      // ?KYBER,LOCAL,S<port>                              (no targets)
+      // ?KYBER,LOCAL,S<port>,M<id>:W<wcb>S<port>:<baud>  (with targets)
+      // ?KYBER,REMOTE  or  ?KYBER,CLEAR
+      const mode = upperParts[1];
+      if (mode === 'LOCAL') {
+        config.kyber.mode = 'local';
+        // Parse remaining parts: S<n> = port, M<id>:W<wcb>S<port>:<baud> = target
+        for (let i = 2; i < upperParts.length; i++) {
+          const p = upperParts[i];
+          if (/^S\d+$/.test(p)) {
+            config.kyber.port = parseInt(p.slice(1)) || null;
+          } else {
+            const mMatch = p.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
+            if (mMatch) {
+              if (!config.kyber.targets) config.kyber.targets = [];
+              const tId   = parseInt(mMatch[1]);
+              const tWcb  = parseInt(mMatch[2]);
+              const tPort = parseInt(mMatch[3]);
+              const tBaud = parseInt(mMatch[4]);
+              // Upsert by (id, wcb, port) — baud is mutable, not identity —
+              // so a repeated/contradictory target line can't accumulate
+              // phantom duplicates that keep the diff from converging.
+              const ex = config.kyber.targets.find(t => t.id === tId && t.wcb === tWcb && t.port === tPort);
+              if (ex) ex.baud = tBaud;
+              else    config.kyber.targets.push({ id: tId, wcb: tWcb, port: tPort, baud: tBaud });
+            }
+          }
+        }
+      } else if (mode === 'REMOTE') {
+        config.kyber.mode = 'remote';
+        config.kyber.port = null;
+      } else {
+        config.kyber.mode = 'none';
+        config.kyber.port = null;
+      }
+      break;
+    }
+
+    // ── MP3 Trigger ──
+    case 'MP3': {
+      const sub = upperParts[1];
+      if (sub && /^S\d/.test(sub)) {
+        // ?MP3,S2:9600:V0
+        const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
+        if (m) {
+          config.mp3.enabled = true;
+          config.mp3.port    = parseInt(m[1]);
+          config.mp3.baud    = parseInt(m[2]);
+          config.mp3.volume  = parseInt(m[3]);
+        }
+      } else if (sub === 'ONERR') {
+        config.mp3.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'CLEAR') {
+        config.mp3.enabled = false;
+        config.mp3.port    = null;
+      }
+      break;
+    }
+
+    case 'HCR': {
+      const sub = upperParts[1];
+      if (sub === 'PORT') {
+        // ?HCR,PORT,S1:9600
+        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
+        if (m) {
+          config.hcr.enabled = true;
+          config.hcr.port    = parseInt(m[1]);
+          config.hcr.baud    = parseInt(m[2]);
+        }
+      } else if (sub === 'POLL') {
+        config.hcr.poll = parseInt(parts[2]) || 0;
+      } else if (sub === 'CLEAR') {
+        config.hcr.enabled = false;
+        config.hcr.port    = null;
+      }
+      break;
+    }
+
+    // ── Maestro ──
+    case 'MAESTRO': {
+      // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
+      // Chained: ?MAESTRO,M1:W1S2:57600,M2:W2S1:57600
+      // Skip control subcommands
+      const sub = upperParts[1];
+      if (sub === 'REMOTE') {
+        // ?MAESTRO,REMOTE — canonical name for the remote-Maestro function
+        // (this board listens for Pololu/Maestro broadcasts). ?KYBER,REMOTE is
+        // the legacy alias handled in the KYBER case.
+        config.kyber.mode = 'remote';
+        config.kyber.port = null;
+        break;
+      }
+      if (sub === 'LIST' || sub === 'CLEAR' || sub === 'ENABLE' || sub === 'DISABLE') break;
+
+      // W == this board's wcbNumber → local maestro; W != → kyber target on this board
+      for (let i = 1; i < parts.length; i++) {
+        const entry = parts[i].toUpperCase();
+        const mMatch = entry.match(/^M(\d+):W(\d+)S(\d+):(\d+)$/);
+        if (mMatch) {
+          const id   = parseInt(mMatch[1]);
+          const wcb  = parseInt(mMatch[2]);
+          const port = parseInt(mMatch[3]);
+          const baud = parseInt(mMatch[4]);
+          if (wcb === config.wcbNumber) {
+            // Upsert by (id, port): a Maestro is identified by its ID and
+            // port; baud is a mutable attribute, not part of identity. A
+            // legacy/polluted board can emit two ?MAESTRO lines for the same
+            // (id, port) with different bauds — de-dupe (last wins) so the
+            // parsed baseline can't carry phantom duplicates that make the
+            // diff fire forever and re-push ?MAESTRO on every save.
+            const ex = config.maestros.find(m => m.id === id && m.port === port);
+            if (ex) ex.baud = baud;
+            else    config.maestros.push({ id, port, baud });
+          } else {
+            if (!config.kyber.targets) config.kyber.targets = [];
+            const ex = config.kyber.targets.find(t => t.id === id && t.wcb === wcb && t.port === port);
+            if (ex) ex.baud = baud;
+            else    config.kyber.targets.push({ id, wcb, port, baud });
+          }
+        }
+      }
+      break;
+    }
+
+    // ── ETM ──
+    case 'ETM': {
+      const subCmd = upperParts[1];
+      switch (subCmd) {
+        case 'ON':      config.etm.enabled          = true;                          break;
+        case 'OFF':     config.etm.enabled          = false;                         break;
+        case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 500;    break;
+        case 'HB':      config.etm.heartbeatSec      = parseInt(parts[2]) || 10;     break;
+        case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 3;      break;
+        case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
+        case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 20;     break;
+        case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
+        case 'CHKSM':   config.etm.checksumEnabled   = (parts[2]?.toUpperCase() === 'ON'); break;
+      }
+      break;
+    }
+
+    // ── Stored Sequences ──
+    case 'SEQ': {
+      // ?SEQ,SAVE,key,value  — value may contain commas
+      const subCmd = upperParts[1];
+      if (subCmd === 'SAVE') {
+        const key   = parts[2];
+        const value = parts.slice(3).join(',');
+        if (key) {
+          config.sequences.push({ key, value });
+        }
+      }
+      break;
+    }
+
+    // ── Variables ──
+    case 'VAR': {
+      // ?VAR,SET,name,value — backups emit one per variable (value is an
+      // absolute int, but tolerate TRUE/FALSE which the firmware also accepts).
+      // Other verbs (GET / CLEAR / LIST) are queries/actions — nothing to store.
+      // Verb matching is case-INsensitive (VAR,set / var,SET — cmd and subCmd
+      // come from upperParts); variable NAMES stay case-sensitive (parts[2]).
+      const subCmd = upperParts[1];
+      if (subCmd === 'SET') {
+        const name   = parts[2];                 // case-sensitive
+        const rawVal = (parts[3] ?? '').trim().toUpperCase();
+        if (name) {
+          const value = rawVal === 'TRUE'  ? 1
+                      : rawVal === 'FALSE' ? 0
+                      : (parseInt(parts[3]) || 0);
+          // Upsert by name so a repeated SET can't accumulate duplicates
+          if (!config.variables) config.variables = [];
+          const ex = config.variables.find(v => v.name === name);
+          if (ex) ex.value = value;
+          else    config.variables.push({ name, value });
+        }
+      }
+      break;
+    }
+
+    // ── PWM Output Port ──
+    case 'MAP': {
+      const mapType = upperParts[1];
+
+      if (mapType === 'PWM' && upperParts[2] === 'OUT') {
+        // ?MAP,PWM,OUT,S3  — declares a port as PWM output
+        const portStr = upperParts[3];
+        const port    = parseInt(portStr?.replace('S', ''));
+        if (port >= 1 && port <= 5) {
+          if (!config.pwmOutputPorts.includes(port)) {
+            config.pwmOutputPorts.push(port);
+          }
+        }
+
+      } else if (mapType === 'PWM') {
+        // ?MAP,PWM,S1,S2,W2S3  — PWM input mapping with destinations
+        parseMappingToken('PWM', parts, upperParts, config);
+
+      } else if (mapType === 'SERIAL') {
+        // ?MAP,SERIAL,S1  or  ?MAP,SERIAL,S1,R,S2,W2S3  — serial mapping
+        parseMappingToken('Serial', parts, upperParts, config);
+      }
+      break;
+    }
+
+    // ── Checksum — skip, handled separately ──
+    case 'CHK':
+      break;
+
+    default:
+      // Unknown token — log for debugging but don't throw
+      if (body.length > 0) {
+        console.debug('[WCB Parser] Unknown token:', body);
+      }
+      break;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Parse a MAP token into a mapping entry
+// ─────────────────────────────────────────────
+function parseMappingToken(type, parts, upperParts, config) {
+  // Serial: ?MAP,SERIAL,S1,R,S2,W2S3
+  //   parts[2] = source port (S1-S5)
+  //   parts[3] = 'R' if raw mode, or first destination
+  //   parts[4+] = destinations
+  //
+  // PWM: ?MAP,PWM,S1,S2,W2S3
+  //   parts[2] = source port
+  //   parts[3+] = destinations
+
+  const sourcePortStr = upperParts[2];
+  const sourcePort    = parseInt(sourcePortStr?.replace('S', ''));
+  if (!sourcePort || sourcePort < 1 || sourcePort > 5) return;
+
+  let rawMode    = false;
+  let destStart  = 3;
+
+  if (type.toUpperCase() === 'SERIAL' && upperParts[3] === 'R') {
+    rawMode   = true;
+    destStart = 4;
+  }
+
+  const destinations = [];
+  for (let i = destStart; i < parts.length; i++) {
+    const dest = parseDestination(parts[i].toUpperCase());
+    if (dest) destinations.push(dest);
+  }
+
+  config.mappings.push({
+    type,
+    sourcePort,
+    rawMode,
+    destinations,
+  });
+}
+
+// ─────────────────────────────────────────────
+// Parse a destination string
+// Formats: "S2" (local serial), "W2S3" (remote WCB2 Serial3)
+// ─────────────────────────────────────────────
+function parseDestination(destStr) {
+  if (!destStr) return null;
+
+  // Remote: W2S3 or W2S3
+  const remoteMatch = destStr.match(/^W(\d+)S(\d+)$/);
+  if (remoteMatch) {
+    return {
+      wcbNumber: parseInt(remoteMatch[1]),
+      port:      parseInt(remoteMatch[2]),
+    };
+  }
+
+  // Local: S2
+  const localMatch = destStr.match(/^S(\d+)$/);
+  if (localMatch) {
+    return {
+      wcbNumber: 0,   // 0 = local board
+      port:      parseInt(localMatch[1]),
+    };
+  }
+
+  console.debug('[WCB Parser] Unknown destination format:', destStr);
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// After all tokens parsed, evaluate port claims
+// and set claimedBy on each serial port accordingly
+// ─────────────────────────────────────────────
+function evaluatePortClaims(config) {
+  // Reset all claims first
+  for (const port of config.serialPorts) {
+    port.claimedBy = null;
+  }
+
+  // Kyber claims its ports (local mode only)
+  if (config.kyber.mode === 'local') {
+    if (config.kyber.port) {
+      const idx = config.kyber.port - 1;
+      if (idx >= 0 && idx < 5)
+        config.serialPorts[idx].claimedBy = { type: 'kyber' };
+    }
+    if (config.kyber.marcduinoPort) {
+      const idx = config.kyber.marcduinoPort - 1;
+      if (idx >= 0 && idx < 5)
+        config.serialPorts[idx].claimedBy = { type: 'kyber-marc' };
+    }
+  }
+
+  // MP3 Trigger claims its port
+  if (config.mp3.enabled && config.mp3.port) {
+    const idx = config.mp3.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'mp3' };
+  }
+
+  // HCR Vocalizer claims its port
+  if (config.hcr && config.hcr.enabled && config.hcr.port) {
+    const idx = config.hcr.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'hcr' };
+  }
+
+  // Maestros claim their ports
+  for (const maestro of config.maestros) {
+    const idx = maestro.port - 1;
+    if (idx >= 0 && idx < 5) {
+      config.serialPorts[idx].claimedBy = { type: 'maestro', id: maestro.id };
+    }
+  }
+
+  // PWM mappings claim their source ports AND any local destination ports
+  for (const mapping of config.mappings) {
+    if (mapping.type === 'PWM') {
+      const idx = mapping.sourcePort - 1;
+      if (idx >= 0 && idx < 5) {
+        config.serialPorts[idx].claimedBy = { type: 'pwm' };
+      }
+      // Also claim local (wcbNumber === 0) destination ports as PWM output
+      for (const dest of mapping.destinations || []) {
+        if (dest.wcbNumber === 0) {
+          const dIdx = dest.port - 1;
+          if (dIdx >= 0 && dIdx < 5 && !config.serialPorts[dIdx].claimedBy) {
+            config.serialPorts[dIdx].claimedBy = { type: 'pwm' };
+          }
+        }
+      }
+    }
+  }
+
+  // PWM output port declarations also claim ports
+  for (const port of config.pwmOutputPorts) {
+    const idx = port - 1;
+    if (idx >= 0 && idx < 5 && !config.serialPorts[idx].claimedBy) {
+      config.serialPorts[idx].claimedBy = { type: 'pwm' };
+    }
+  }
+
+  // Serial mappings — soft claim: informational only, doesn't lock the port
+  for (const mapping of config.mappings) {
+    if (mapping.type === 'Serial' && mapping.sourcePort >= 1 && mapping.sourcePort <= 5) {
+      const idx = mapping.sourcePort - 1;
+      if (!config.serialPorts[idx].claimedBy) {
+        config.serialPorts[idx].claimedBy = {
+          type: 'serial-map',
+          rawMode: mapping.rawMode ?? false,
+          destinations: mapping.destinations ?? [],
+        };
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+// System Config File Parser
+// 
+// Parses a WCB_system.txt file into a SystemConfig object.
+// File format:
+//   # comments
+//   [GENERAL]
+//   command string
+//   [WCB1]
+//   command string
+//   [WCB2]
+//   ...
+// ─────────────────────────────────────────────
+function parseSystemFile(fileContent) {
+  const system = createDefaultSystemConfig();
+  system.source = 'file';
+  system.lastModified = new Date().toISOString();
+
+  const lines = fileContent.split(/\r?\n/);
+
+  // Extract droid name from header comment
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const nameMatch = trimmed.match(/^#\s*Droid:\s*(.+)$/i);
+    if (nameMatch) {
+      system.droidName = nameMatch[1].trim();
+      break;
+    }
+  }
+
+  // Split into sections
+  const sections = {};
+  let currentSection = null;
+  let currentLines   = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const sectionMatch = trimmed.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      if (currentSection !== null) {
+        sections[currentSection] = currentLines.join('\n');
+      }
+      currentSection = sectionMatch[1].toUpperCase();
+      currentLines   = [];
+    } else if (currentSection !== null) {
+      currentLines.push(trimmed);
+    }
+  }
+  if (currentSection !== null) {
+    sections[currentSection] = currentLines.join('\n');
+  }
+
+  // Parse [GENERAL] section
+  if (sections['GENERAL']) {
+    const generalConfig = parseBackupString(sections['GENERAL']);
+    system.general.wcbQuantity    = generalConfig.wcbQuantity;
+    system.general.espnowPassword = generalConfig.espnowPassword;
+    system.general.macOctet2      = generalConfig.macOctet2;
+    system.general.macOctet3      = generalConfig.macOctet3;
+    system.general.delimiter      = generalConfig.delimiter;
+    system.general.funcChar       = generalConfig.funcChar;
+    system.general.cmdChar        = generalConfig.cmdChar;
+    system.general.etm            = generalConfig.etm;
+    system.general.specialPeer    = generalConfig.specialPeer ?? false;
+    system.general.specialPeerId  = generalConfig.specialPeerId ?? 20;
+  }
+
+  // Parse [WCB1], [WCB2], etc.
+  for (const [sectionName, content] of Object.entries(sections)) {
+    if (sectionName === 'GENERAL') continue;
+    const wcbMatch = sectionName.match(/^WCB(\d+)$/);
+    if (wcbMatch) {
+      const boardConfig = parseBackupString(content);
+      boardConfig.source = 'file';
+      // Apply general settings to board (general overrides board-level for shared fields)
+      applyGeneralToBoard(system.general, boardConfig);
+      system.boards.push(boardConfig);
+    }
+  }
+
+  // Sort boards by WCB number
+  system.boards.sort((a, b) => a.wcbNumber - b.wcbNumber);
+
+  // Update quantity to match actual board count if file has more boards
+  if (system.boards.length > system.general.wcbQuantity) {
+    system.general.wcbQuantity = system.boards.length;
+  }
+
+  return system;
+}
+
+// ─────────────────────────────────────────────
+// Apply general settings to a board config
+// General settings take precedence for shared fields
+// ─────────────────────────────────────────────
+function applyGeneralToBoard(general, board) {
+  board.wcbQuantity    = general.wcbQuantity;
+  board.espnowPassword = general.espnowPassword;
+  board.macOctet2      = general.macOctet2;
+  board.macOctet3      = general.macOctet3;
+  board.delimiter      = general.delimiter;
+  board.funcChar       = general.funcChar;
+  board.cmdChar        = general.cmdChar;
+  board.etm            = { ...general.etm };
+}
+
+// ─────────────────────────────────────────────
+// Config to Command String Builder
+//
+// Converts a BoardConfig back to a chained command string
+// that can be sent to the board via WebSerial.
+//
+// fullPush: if true, include all fields (post-flash)
+//           if false, only include fields that differ from baseline
+// ─────────────────────────────────────────────
+function buildCommandString(config, baseline = null, fullPush = false, opts = {}) {
+  // opts.outputFuncChar / opts.outputDelim let callers (e.g. buildSystemFile) lock the
+  // output FORMAT to '?' / '^' regardless of the config's actual funcChar/delimiter.
+  // This keeps exported .txt files in the standard format that parseBackupString always
+  // expects, while still capturing the real funcChar/delimiter as ?FUNCCHAR / ?DELIM
+  // command values inside the string.
+  const lfi   = opts.outputFuncChar ?? config.funcChar  ?? '?';
+  const delim = opts.outputDelim    ?? config.delimiter ?? '^';
+  const cmds  = [];
+
+  function add(cmd) { cmds.push(lfi + cmd); }
+  function changed(key, value) {
+    if (fullPush || baseline === null) return true;
+    return getNestedValue(baseline, key) !== value;
+  }
+
+  // ── Board Identity ──
+  // Only emit HW for known-valid versions (HW_VERSION_MAP keys) — pushing
+  // HW,0 (unset/unknown) used to clobber the board's stored hardware version.
+  const hwValid = HW_VERSION_MAP[String(config.hwVersion)] !== undefined;
+  if (hwValid && (fullPush || !baseline || baseline.hwVersion !== config.hwVersion))
+    add(`HW,${config.hwVersion}`);
+
+  // LED pin — only push for HW 3.1/3.2 and only when non-default (not 38)
+  // (hwValid is implied: 31/32 are always valid HW_VERSION_MAP keys)
+  if (hwValid && (config.hwVersion === 31 || config.hwVersion === 32)) {
+    const ledPin = config.statusLedPin || 38;
+    const bLedPin = baseline?.statusLedPin || 38;
+    if (fullPush || ledPin !== bLedPin)
+      add(`LED,PIN,${ledPin}`);
+  }
+
+  if (fullPush || !baseline || baseline.wcbNumber !== config.wcbNumber)
+    add(`WCB,${config.wcbNumber}`);
+
+  // Alias: emit on diff; clearing (set -> empty) sends ALIAS,CLEAR.
+  const curAlias  = (config.alias  || '').trim().slice(0, 24);
+  const baseAlias = (baseline?.alias || '').trim().slice(0, 24);
+  if (fullPush || !baseline || baseAlias !== curAlias) {
+    if (curAlias.length === 0) {
+      if (baseAlias.length > 0) add('ALIAS,CLEAR');
+    } else {
+      add(`ALIAS,${curAlias}`);
+    }
+  }
+
+  if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
+    add(`WCBQ,${config.wcbQuantity}`);
+
+  // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
+  // network needs the same value so peer tables stay consistent. Canonical token
+  // is CONTROLLER; firmware still accepts the legacy SPECIAL on input.
+  const curSpecial  = !!config.specialPeer;
+  const baseSpecial = !!baseline?.specialPeer;
+  if (fullPush || !baseline || curSpecial !== baseSpecial ||
+      (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
+    add(curSpecial ? `CONTROLLER,ON,${config.specialPeerId ?? 20}` : `CONTROLLER,OFF`);
+
+  // ── Network ──
+  if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
+    add(`MAC,2,${config.macOctet2}`);
+
+  if (fullPush || !baseline || baseline.macOctet3 !== config.macOctet3)
+    add(`MAC,3,${config.macOctet3}`);
+
+  if (fullPush || !baseline || baseline.espnowPassword !== config.espnowPassword)
+    add(`EPASS,${config.espnowPassword}`);
+
+  // ── Command Characters ──
+  if (fullPush || !baseline || baseline.delimiter !== config.delimiter)
+    add(`DELIM,${config.delimiter}`);
+
+  // Note: never send ?FUNCCHAR,? — the trailing '?' is treated as a second
+  // function-character invocation by the firmware, so the command is unparseable.
+  // Since '?' is the factory default the board already uses it; only send when
+  // the user has chosen a different character.
+  if (config.funcChar !== '?') {
+    if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
+      add(`FUNCCHAR,${config.funcChar}`);
+  }
+
+  if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
+    add(`CMDCHAR,${config.cmdChar}`);
+
+  // ── Serial Baud Rates ──
+  for (let i = 0; i < 5; i++) {
+    const cur  = config.serialPorts[i];
+    const base = baseline?.serialPorts?.[i];
+    if (fullPush || !base || base.baud !== cur.baud)
+      add(`BAUD,S${i+1},${cur.baud}`);
+  }
+
+  // ── Serial Labels ──
+  for (let i = 0; i < 5; i++) {
+    const cur  = config.serialPorts[i];
+    const base = baseline?.serialPorts?.[i];
+    if (cur.label && (fullPush || !base || base.label !== cur.label))
+      add(`LABEL,S${i+1},${cur.label}`);
+  }
+
+  // ── Broadcast Settings ──
+  for (let i = 0; i < 5; i++) {
+    const cur  = config.serialPorts[i];
+    const base = baseline?.serialPorts?.[i];
+    if (fullPush || !base || base.broadcastOut !== cur.broadcastOut)
+      add(`BCAST,OUT,S${i+1},${cur.broadcastOut ? 'ON' : 'OFF'}`);
+    if (fullPush || !base || base.broadcastIn !== cur.broadcastIn)
+      add(`BCAST,IN,S${i+1},${cur.broadcastIn ? 'ON' : 'OFF'}`);
+  }
+
+  // ── Kyber ──
+  // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
+  const kyberChanged = fullPush || !baseline ||
+    baseline.kyber.mode !== config.kyber.mode ||
+    baseline.kyber.port !== config.kyber.port ||
+    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
+
+  if (kyberChanged) {
+    if (config.kyber.mode === 'local') {
+      let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
+      if (config.kyber.targets?.length > 0)
+        cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
+      add(cmd);
+    } else if (config.kyber.mode === 'remote') {
+      // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
+      add('MAESTRO,REMOTE');
+    } else {
+      add('KYBER,CLEAR');
+    }
+  }
+
+  // ── MP3 Trigger ──
+  const mp3Changed = fullPush || !baseline ||
+    JSON.stringify(baseline.mp3) !== JSON.stringify(config.mp3);
+  if (mp3Changed) {
+    if (config.mp3.enabled && config.mp3.port) {
+      add(`MP3,S${config.mp3.port}:${config.mp3.baud}:V${config.mp3.volume}`);
+      if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
+    } else {
+      add('MP3,CLEAR');
+    }
+  }
+
+  // ── HCR Vocalizer ──
+  const hcrChanged = fullPush || !baseline ||
+    JSON.stringify(baseline.hcr) !== JSON.stringify(config.hcr);
+  if (hcrChanged) {
+    if (config.hcr.enabled && config.hcr.port) {
+      add(`HCR,PORT,S${config.hcr.port}:${config.hcr.baud}`);
+      add(`HCR,POLL,${config.hcr.poll}`);
+    } else {
+      add('HCR,CLEAR');
+    }
+  }
+
+  // ── Variables (per-name diff) ──
+  // Compare name-by-name so a single change doesn't re-push every variable.
+  // Also send VAR,CLEAR for any names removed since the baseline.
+  const baseVarMap = new Map((baseline?.variables ?? []).map(v => [v.name, v.value]));
+  const curVars    = config.variables ?? [];
+  const curVarMap  = new Map(curVars.map(v => [v.name, v.value]));
+  for (const v of curVars) {
+    if (fullPush || !baseline || baseVarMap.get(v.name) !== v.value) {
+      add(`VAR,SET,${v.name},${v.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [name] of baseVarMap) {
+      if (!curVarMap.has(name)) add(`VAR,CLEAR,${name}`);
+    }
+  }
+
+  // ── Maestros ──
+  // The ?KYBER,LOCAL command embeds Maestro targets and configures the serial port
+  // baud rate at runtime, but the firmware maintains a separate Maestro registry that
+  // stores each Maestro's baud independently.  The ?MAESTRO command is what updates
+  // that registry — if we skip it the registry retains the default (9600), the backup
+  // then contains ?MAESTRO,M1:W1S1:9600, and boardPull repopulates the UI with the
+  // wrong baud, corrupting every subsequent push.  Always send ?MAESTRO for local
+  // Maestros regardless of Kyber mode.
+  // maestroTable (set by wizard) carries the full multi-board routing table.
+  // Fall back to local maestros (with this board's WCB number) for normal edits.
+  const effectiveTable  = config.maestroTable   ?? config.maestros.map(m => ({ ...m, wcb: config.wcbNumber }));
+  const baselineTable   = baseline?.maestroTable ?? baseline?.maestros?.map(m => ({ ...m, wcb: config.wcbNumber }));
+  const maestrosChanged = fullPush || !baseline ||
+    JSON.stringify(baselineTable) !== JSON.stringify(effectiveTable);
+
+  if (maestrosChanged) {
+    const bTbl = baselineTable ?? [];
+    if (effectiveTable.length === 0) {
+      // Everything removed — one atomic clear is simplest.
+      if (bTbl.length > 0) add('MAESTRO,CLEAR,ALL');
+    } else {
+      // Targeted clears for Maestros that were in the baseline but removed or
+      // moved in the UI (matched by id+wcb+port — same identity the firmware
+      // slot uses). Without this, sending only the surviving entries below
+      // leaves the removed/old slot lingering in the firmware registry
+      // forever (e.g. moving M1 from S2→S1 orphans the S2 slot).
+      for (const b of bTbl) {
+        const stillPresent = effectiveTable.some(
+          e => e.id === b.id && e.wcb === b.wcb && e.port === b.port);
+        if (!stillPresent) add(`MAESTRO,CLEAR,M${b.id}:W${b.wcb}S${b.port}`);
+      }
+      const chain = effectiveTable
+        .map(m => `M${m.id}:W${m.wcb}S${m.port}:${m.baud}`)
+        .join(',');
+      add(`MAESTRO,${chain}`);
+    }
+  }
+
+  // ── ETM ──
+  const etm  = config.etm;
+  const betm = baseline?.etm;
+  if (fullPush || !betm || betm.enabled !== etm.enabled)
+    add(etm.enabled ? 'ETM,ON' : 'ETM,OFF');
+  if (etm.enabled) {
+    if (fullPush || !betm || betm.timeoutMs         !== etm.timeoutMs)         add(`ETM,TIMEOUT,${etm.timeoutMs}`);
+    if (fullPush || !betm || betm.heartbeatSec      !== etm.heartbeatSec)      add(`ETM,HB,${etm.heartbeatSec}`);
+    if (fullPush || !betm || betm.missedHeartbeats  !== etm.missedHeartbeats)  add(`ETM,MISS,${etm.missedHeartbeats}`);
+    if (fullPush || !betm || betm.bootHeartbeatSec  !== etm.bootHeartbeatSec)  add(`ETM,BOOT,${etm.bootHeartbeatSec}`);
+    if (fullPush || !betm || betm.messageCount      !== etm.messageCount)      add(`ETM,COUNT,${etm.messageCount}`);
+    if (fullPush || !betm || betm.messageDelayMs    !== etm.messageDelayMs)    add(`ETM,DELAY,${etm.messageDelayMs}`);
+    // Checksum must always be ON — never push OFF; correct the board if it has it disabled
+    if (fullPush || !betm || betm.checksumEnabled !== true) add('ETM,CHKSM,ON');
+  }
+
+  // ── PWM Output Ports ──
+  const pwmChanged = fullPush || !baseline ||
+    JSON.stringify(baseline.pwmOutputPorts) !== JSON.stringify(config.pwmOutputPorts);
+  if (pwmChanged) {
+    for (const port of config.pwmOutputPorts) {
+      add(`MAP,PWM,OUT,S${port}`);
+    }
+  }
+
+  // ── Mappings ──
+  const mappingsChanged = fullPush || !baseline ||
+    JSON.stringify(baseline.mappings) !== JSON.stringify(config.mappings);
+  if (mappingsChanged) {
+    for (const m of config.mappings) {
+      let cmd = `MAP,${m.type.toUpperCase()},S${m.sourcePort}`;
+      if (m.type.toUpperCase() === 'SERIAL' && m.rawMode) cmd += ',R';
+      for (const dest of m.destinations) {
+        cmd += dest.wcbNumber === 0
+          ? `,S${dest.port}`
+          : `,W${dest.wcbNumber}S${dest.port}`;
+      }
+      add(cmd);
+    }
+  }
+
+  // ── Stored Sequences (per-key diff) ──
+  // Compare key-by-key so that a single UPDATE doesn't re-push every sequence.
+  // Also send SEQ,CLEAR for any keys removed since the baseline.
+  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
+  for (const seq of config.sequences) {
+    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
+      add(`SEQ,SAVE,${seq.key},${seq.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [key] of baseSeqMap) {
+      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
+    }
+  }
+
+  return cmds.join(delim);
+}
+
+// ─────────────────────────────────────────────
+// System File Builder
+//
+// Converts a SystemConfig back to WCB_system.txt format
+// ─────────────────────────────────────────────
+function buildSystemFile(system) {
+  const lines = [];
+  const date  = new Date().toLocaleDateString('en-US');
+
+  lines.push('# WCB System Config');
+  if (system.droidName) lines.push(`# Droid: ${system.droidName}`);
+  lines.push(`# Created: ${date}`);
+  lines.push('# Tool: WCB Web Config Tool');
+  lines.push('');
+
+  // Build a synthetic board config for the general section.
+  // Always write the file with '?' prefix and '^' separator regardless of the
+  // configured funcChar/delimiter — parseBackupString hardcodes those as split
+  // boundaries, so non-default chars would produce an unreadable file.  The
+  // actual funcChar/delimiter/cmdChar settings are still written as command values
+  // (?FUNCCHAR,., ?DELIM,/ etc.) within the standard '?'/'^ ' format.
+  const FILE_OPTS = { outputFuncChar: '?', outputDelim: '^' };
+
+  const generalBoard = createDefaultBoardConfig();
+  applyGeneralToBoard(system.general, generalBoard);
+  // specialPeer (NaviCore) is a network-wide GENERAL field — reflect it on the
+  // synthetic board so the [GENERAL] block emits the correct SPECIAL,ON/OFF
+  // (applyGeneralToBoard intentionally skips it to avoid clobbering per-board).
+  generalBoard.specialPeer   = !!system.general.specialPeer;
+  generalBoard.specialPeerId = system.general.specialPeerId ?? 20;
+  const generalCmd = buildCommandString(generalBoard, null, true, FILE_OPTS);
+
+  lines.push('[GENERAL]');
+  lines.push(generalCmd);
+  lines.push('');
+
+  for (const board of system.boards) {
+    lines.push(`[WCB${board.wcbNumber}]`);
+    const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
+    lines.push(buildCommandString(boardWithQty, null, true, FILE_OPTS));
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+// ─────────────────────────────────────────────
+// Config Diff
+//
+// Returns an array of field paths that differ between two BoardConfigs.
+// Used to highlight yellow fields in the UI.
+// ─────────────────────────────────────────────
+function diffConfigs(configA, configB) {
+  const diffs = [];
+
+  function check(path, a, b) {
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      diffs.push({ path, from: a, to: b });
+    }
+  }
+
+  check('hwVersion',      configA.hwVersion,      configB.hwVersion);
+  check('wcbNumber',      configA.wcbNumber,       configB.wcbNumber);
+  check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
+  check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
+  check('macOctet2',      configA.macOctet2,       configB.macOctet2);
+  check('macOctet3',      configA.macOctet3,       configB.macOctet3);
+  check('delimiter',      configA.delimiter,       configB.delimiter);
+  check('funcChar',       configA.funcChar,        configB.funcChar);
+  check('cmdChar',        configA.cmdChar,         configB.cmdChar);
+  check('kyber',          configA.kyber,           configB.kyber);
+  check('mp3',            configA.mp3,             configB.mp3);
+  check('etm',            configA.etm,             configB.etm);
+  check('maestros',       configA.maestros,        configB.maestros);
+  check('mappings',       configA.mappings,        configB.mappings);
+  check('sequences',      configA.sequences,       configB.sequences);
+  check('variables',      configA.variables ?? [], configB.variables ?? []);
+  check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
+
+  for (let i = 0; i < 5; i++) {
+    const pa = configA.serialPorts[i];
+    const pb = configB.serialPorts[i];
+    check(`serialPorts[${i}].baud`,         pa.baud,         pb.baud);
+    check(`serialPorts[${i}].broadcastIn`,  pa.broadcastIn,  pb.broadcastIn);
+    check(`serialPorts[${i}].broadcastOut`, pa.broadcastOut, pb.broadcastOut);
+    check(`serialPorts[${i}].label`,        pa.label,        pb.label);
+  }
+
+  return diffs;
+}
+
+// ─────────────────────────────────────────────
+// Collect all Maestro definitions from all boards in a system
+// Used for topology propagation — push all Maestros to every board
+// ─────────────────────────────────────────────
+function collectAllMaestros(system) {
+  const all = [];
+  for (const board of system.boards) {
+    for (const m of board.maestros) {
+      all.push({ ...m, wcbNumber: board.wcbNumber });
+    }
+  }
+  return all;
+}
+
+// ─────────────────────────────────────────────
+// Get list of available (unclaimed) ports for a board
+// Returns array of port numbers [1-5]
+// ─────────────────────────────────────────────
+function getAvailablePorts(config) {
+  return config.serialPorts
+    .map((port, idx) => ({ port: idx + 1, claimed: port.claimedBy !== null }))
+    .filter(p => !p.claimed)
+    .map(p => p.port);
+}
+
+// ─────────────────────────────────────────────
+// Utility: deep get nested value by dot-path string
+// ─────────────────────────────────────────────
+function getNestedValue(obj, path) {
+  return path.split('.').reduce((acc, key) => acc?.[key], obj);
+}
+
+// ─────────────────────────────────────────────
+// Exports — available to app.js and parser.test.js
+// ─────────────────────────────────────────────
+if (typeof module !== 'undefined' && typeof module.exports !== 'undefined' && typeof window === 'undefined') {
+  // Node.js / test environment only (not browser)
+  module.exports = {
+    createDefaultBoardConfig,
+    createDefaultSystemConfig,
+    parseBackupString,
+    parseSystemFile,
+    buildCommandString,
+    buildSystemFile,
+    diffConfigs,
+    collectAllMaestros,
+    getAvailablePorts,
+    evaluatePortClaims,
+    HW_VERSION_MAP,
+    hwValueToDisplay,
+    hwValueToBinary,
+  };
+} else {
+  // Browser environment — attach to window
+  window.WCBParser = {
+    createDefaultBoardConfig,
+    createDefaultSystemConfig,
+    parseBackupString,
+    parseSystemFile,
+    buildCommandString,
+    buildSystemFile,
+    diffConfigs,
+    collectAllMaestros,
+    getAvailablePorts,
+    evaluatePortClaims,
+    HW_VERSION_MAP,
+    hwValueToDisplay,
+    hwValueToBinary,
+  };
+}

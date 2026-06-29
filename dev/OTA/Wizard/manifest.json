@@ -1,0 +1,18 @@
+{
+  "name": "WCB Firmware",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "../Code/bin/WCB_CURRENT_ESP32.bin", "offset": 0 }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "../Code/bin/WCB_CURRENT_ESP32S3.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
