@@ -16,6 +16,9 @@ extern void saveBroadcastBlockSettings();
 extern bool Kyber_Local;
 extern bool Maestro_Remote;
 extern bool debugPWMPassthrough;
+extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+// isSerialPortUsedForMP3 comes from WCB_Storage.h (included above).
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
@@ -60,7 +63,15 @@ bool canUsePWMOnPort(int port) {
         Serial.println("❌ Cannot use PWM on Serial2 - reserved for Kyber");
         return false;
     }
-    
+
+    // Reject ports already claimed by a serial-device module (HCR/MP3/WLED).
+    // Symmetric with those modules' own guards, which reject PWM ports — so two
+    // subsystems can never silently drive the same UART.
+    if (isSerialPortUsedForHCR(port) || isSerialPortUsedForMP3(port) || isSerialPortUsedForWLED(port)) {
+        Serial.printf("❌ Cannot use PWM on Serial%d - reserved for HCR/MP3/WLED\n", port);
+        return false;
+    }
+
     return true;
 }
 

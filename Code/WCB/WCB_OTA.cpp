@@ -13,6 +13,7 @@ extern bool    debugEnabled;
 extern String  SoftwareVersion;
 extern char    espnowPassword[40];               // P2: shared-secret gate
 extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6]; // P2: per-WCB MAC table
+extern void    otaRelayPrint(const char *line);  // defer relay-ACK Serial output to loop() (cross-core safe)
 
 // Struct sizes feed the size-based ESP-NOW router in WCB.ino — they MUST stay
 // distinct from every other packet ({43,204,226,230,249,252}). Lock them here.
@@ -345,8 +346,14 @@ void handleOtaAckRelay(const uint8_t *raw) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != (uint8_t)WCB_Number) return;   // ACK addressed to us (the relay)
-  Serial.printf("[OTA:ACK,%u,%u,%lu,%u]\n",
-                pkt.sourceWCB, pkt.sessionId, (unsigned long)pkt.ackedOffset, pkt.status);
+  // This runs in the ESP-NOW receive callback (WiFi task). ESP32 Serial isn't
+  // atomic across cores, and this [OTA:ACK,...] line is the browser's flow-control
+  // token — a direct write here can interleave with Core-1 output and garble it.
+  // Defer the print to loop() via the shared relay queue.
+  char line[64];
+  snprintf(line, sizeof(line), "[OTA:ACK,%u,%u,%lu,%u]",
+           pkt.sourceWCB, pkt.sessionId, (unsigned long)pkt.ackedOffset, pkt.status);
+  otaRelayPrint(line);
 }
 
 // "?OTA,<SUB>,<target>,<session>,…" — build the OTA packet and unicast to target.

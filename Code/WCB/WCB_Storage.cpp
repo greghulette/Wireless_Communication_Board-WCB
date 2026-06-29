@@ -23,6 +23,9 @@ extern int wcb_hw_version;
 extern char espnowPassword[40];
 extern void updatePinMap();
 extern void applyLiveBaud(int port, uint32_t baud);  // defined in WCB.ino — live re-init incl. SW serial S3-S5
+extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+// isSerialPortUsedForMP3 + isSerialPortPWMOutput/Input come from WCB_Storage.h / WCB_PWM.h.
 extern int SERIAL1_TX_PIN;        //  // Serial 1 Tx Pin
 extern int SERIAL1_RX_PIN;       //  // Serial 1 Rx Pin
 extern int SERIAL2_TX_PIN;       //  // Serial 2 Tx Pin
@@ -951,6 +954,17 @@ if (params.startsWith("S") || params.startsWith("s")) {
   }
   
   if (baseCommand.equals("local")) {
+    // Don't seize a UART another subsystem already owns. Symmetric with the
+    // HCR/MP3/WLED/PWM guards so two subsystems can't silently share one port.
+    // (Config-time only — loadKyberSettings() reads NVS directly, never replays
+    // this, so a saved config is never rejected at boot.)
+    if (kyberPort >= 1 && kyberPort <= 5 &&
+        (isSerialPortUsedForWLED(kyberPort) || isSerialPortUsedForHCR(kyberPort) ||
+         isSerialPortUsedForMP3(kyberPort)  || isSerialPortPWMOutput(kyberPort) ||
+         isSerialPortUsedForPWMInput(kyberPort))) {
+      Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - reserved by HCR/MP3/WLED/PWM\n", kyberPort);
+      return;
+    }
     Kyber_Local = true;
     Maestro_Remote = false;
     Kyber_Location = "local";

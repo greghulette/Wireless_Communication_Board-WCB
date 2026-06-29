@@ -49,6 +49,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10        # a wedged run must not block the serialized queue forever
     steps:
       - name: Check out the pushed branch
         uses: actions/checkout@v4

@@ -1282,14 +1282,20 @@ async function boardOtaSerial(n) {
     // 4) Stream chunks, ACK-paced. The board's ACK/NAK carries the authoritative
     //    write cursor; we always follow it (rewind on NAK).
     const CHUNK = 1024;
-    let offset = 0;
+    let offset = 0, stalls = 0;
     while (offset < total) {
       const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
       const resp  = await conn.sendAndCollect(cmd(`DATA,${offset},${_u8ToBase64(slice)}`), 6000, '[OTA:');
       const m = resp.match(/\[OTA:(ACK|NAK),(\d+)\]/);
       if (!m) throw new Error(`no ACK for chunk @${offset} (board may have stalled)`);
       const cursor = parseInt(m[2]);
-      if (m[1] === 'NAK') { termLog(n, `[OTA] gap — rewinding to ${cursor}`, 'sys'); offset = cursor; continue; }
+      if (m[1] === 'NAK' || cursor <= offset) {   // no forward progress → rewind + retry, but cap it
+        if (++stalls > 40) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
+        termLog(n, `[OTA] gap — rewinding to ${cursor}`, 'sys');
+        offset = cursor;
+        continue;
+      }
+      stalls = 0;
       offset = cursor;                       // ACK: advance to the board's confirmed cursor
       updateFlashBar(n, offset, total);
       setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);

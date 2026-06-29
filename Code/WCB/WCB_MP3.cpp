@@ -51,7 +51,9 @@ void sendMP3Raw(uint8_t byte1, int8_t byte2) {
   Stream &s = getSerialStream(mp3Config.serialPort);
   s.write(byte1);
   if (byte2 >= 0) s.write((uint8_t)byte2);
-  s.flush();
+  // No flush() — write() queues into the UART TX buffer and it drains async
+  // (mirror WCB_Maestro). Flushing blocked loop() ~1-4ms per audio command for
+  // no benefit (the MP3 Trigger doesn't require the caller to wait).
 }
 
 // ==================== Audio Command Dispatcher ===========================

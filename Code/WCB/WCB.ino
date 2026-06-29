@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_290115RJUN2026                                  *****////
+///*****                                          Version 6.2.0_291553RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -166,7 +166,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_290115RJUN2026";
+String SoftwareVersion = "6.2.0_291553RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -337,6 +337,12 @@ static inline void enqueueRcJsonRelay(const String& jsonLine) {
                   (unsigned long)rcJsonRelayDrops);
   }
 }
+
+// Non-static bridge so WCB_OTA.cpp's relay ACK handler can defer its Serial
+// output to loop() too (it runs in the ESP-NOW callback / WiFi task, where a
+// direct Serial write can interleave with Core-1 output and garble the
+// browser's [OTA:ACK,...] flow-control token). Reuses the relay queue above.
+void otaRelayPrint(const char *line) { enqueueRcJsonRelay(String(line)); }
 
 // ── Pending-timer-chain queue ─────────────────────────────────────────────
 // parseCommandGroups() writes the commandGroups std::vector AND mutates
@@ -2597,6 +2603,7 @@ void handleConfigFragPacket(const uint8_t *data) {
 
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
 
   // The target sends the config in two passes for loss resilience. Once a session
@@ -2701,6 +2708,40 @@ void handleETMReqPacket(const uint8_t *data) {
   startETMChar();
 }
 
+// ── Defer mgmt request responses out of the WiFi receive callback ───────────
+// CONFIG_REQ / STATS_REQ / ETM_REQ each generate a FRAGMENTED response with a
+// delay(20) per fragment (and CONFIG_REQ re-reads NVS via buildConfigString) —
+// hundreds of ms of work. Running that in the ESP-NOW receive callback (WiFi
+// task) stalls ESP-NOW and drops other inbound packets (heartbeats, OTA frags,
+// RC telemetry). So the callback only ENQUEUES the 43-byte request here, and
+// drainMgmtReqs() runs the heavy handler in loop() context — same pattern as the
+// OTA packet queue. All three share the espnow_struct_config_req wire struct, so
+// one queue + a packetType switch covers them. Auth (password + targetWCB) is
+// (re)validated inside each handler, so queuing unauthenticated junk is harmless.
+struct MgmtReqSlot { espnow_struct_config_req pkt; };
+static QueueHandle_t mgmtReqQueue = nullptr;
+
+void enqueueMgmtReq(const uint8_t *raw) {
+  if (!mgmtReqQueue) return;
+  MgmtReqSlot slot;
+  memcpy(&slot.pkt, raw, sizeof(slot.pkt));
+  xQueueSend(mgmtReqQueue, &slot, 0);   // drop if full → the requester retries (3x REQ + browser retry)
+}
+
+void drainMgmtReqs() {
+  if (!mgmtReqQueue) return;
+  MgmtReqSlot slot;
+  while (xQueueReceive(mgmtReqQueue, &slot, 0) == pdTRUE) {
+    const uint8_t *p = (const uint8_t *)&slot.pkt;
+    switch (slot.pkt.packetType) {
+      case PACKET_TYPE_CONFIG_REQ: handleConfigReqPacket(p); break;
+      case PACKET_TYPE_STATS_REQ:  handleStatsReqPacket(p);  break;
+      case PACKET_TYPE_ETM_REQ:    handleETMReqPacket(p);    break;
+      default: break;
+    }
+  }
+}
+
 // ── Relay side: reassemble ?STATS frags and output [MGMT:STATS,N]<data> ──────
 void handleStatsFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
@@ -2708,6 +2749,7 @@ void handleStatsFragPacket(const uint8_t *data) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
   if (!statsRelaySession.active || statsRelaySession.sessionId != pkt.sessionId) {
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
@@ -2742,6 +2784,7 @@ void handleETMFragPacket(const uint8_t *data) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
   if (!etmRelaySession.active || etmRelaySession.sessionId != pkt.sessionId) {
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
@@ -2874,11 +2917,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
   if (len == sizeof(espnow_struct_config_req)) {
-    // Dispatch by packetType — STATS_REQ and ETM_REQ share the same struct size
+    // CONFIG/STATS/ETM_REQ generate a blocking fragmented response (delay(20)/frag
+    // + NVS) — DEFER to loop() (drainMgmtReqs) so we don't stall the WiFi task,
+    // exactly like the OTA packets below. (STATS_REQ and ETM_REQ share this size.)
     uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
-    if      (ptype == PACKET_TYPE_CONFIG_REQ) handleConfigReqPacket(incomingData);
-    else if (ptype == PACKET_TYPE_STATS_REQ)  handleStatsReqPacket(incomingData);
-    else if (ptype == PACKET_TYPE_ETM_REQ)    handleETMReqPacket(incomingData);
+    if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_STATS_REQ ||
+        ptype == PACKET_TYPE_ETM_REQ) {
+      enqueueMgmtReq(incomingData);
+    }
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
@@ -3239,7 +3285,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (destWCB == WCB_Number) {
       Stream &targetSerial = getSerialStream(destPort);
       targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
-      targetSerial.flush();
+      // No flush() — we're in the ESP-NOW receive callback (WiFi task). write()
+      // queues into the UART TX buffer and it drains async; flush() would block
+      // the WiFi task until the FIFO empties (~200ms on a SW UART), dropping
+      // inbound ESP-NOW frames. Mirrors WCB_Maestro's deliberate no-flush sends.
     }
     return;
   }
@@ -3301,7 +3350,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     }
     Stream &targetSerial = getSerialStream(targetPort);
     targetSerial.write((uint8_t *)(received.structCommand + 3), chunkLen);
-    targetSerial.flush();
+    // No flush() — same reason as the targeted-Kyber path above: flushing here
+    // blocks the WiFi task (ESP-NOW) until the UART drains. write() drains async.
     if (debugMaestro) {
       Serial.printf("[MAESTRO] WCB%d → Serial%d  %d byte%s: ",
                     senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
@@ -5474,7 +5524,8 @@ void RawSerialForwardingTask(void *pvParameters) {
                           // Local output (either explicitly local or targeting self)
                           Stream &outputSerial = getSerialStream(output.serialPort);
                           outputSerial.write(buffer, len);
-                          outputSerial.flush();
+                          // No flush() — write() queues; the UART drains async.
+                          // Avoids blocking this forwarding task per chunk.
 
                           if (debugEnabled && output.wcbNumber == WCB_Number) {
                               Serial.printf("Mapping target W%dS%d is local - forwarding directly\n",
@@ -5624,6 +5675,10 @@ void setup() {
   // first incoming broadcast can be safely enqueued.  See enqueueRcJsonRelay
   // / drainRcJsonRelay comments for the cross-core Serial-output rationale.
   rcJsonRelayQueue = xQueueCreate(RC_JSON_QUEUE_SLOTS, sizeof(RcJsonRelaySlot));
+
+  // Mgmt request queue — CONFIG/STATS/ETM_REQ responses (blocking frag loops +
+  // NVS) are deferred out of the ESP-NOW callback into loop(); see drainMgmtReqs.
+  mgmtReqQueue = xQueueCreate(8, sizeof(MgmtReqSlot));
 
   // Pending-timer-chain queue — keeps parseCommandGroups() off the WiFi
   // task (it mutates a std::vector loop() iterates). See queue's declaration
@@ -5940,6 +5995,7 @@ void loop() {
   processETMLoad();
   checkMgmtTimeout();
   checkConfigPullTimeout();
+  drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
