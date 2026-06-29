@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy the Wizard to GitHub Pages.
+#
+#   main            → gh-pages:/Wizard               (PRODUCTION, URL unchanged)
+#   any other branch → gh-pages:/dev/<branch>/Wizard (per-branch PREVIEW)
+#
+# Each run rewrites ONLY its own slice of the gh-pages branch and leaves every
+# other path untouched, so production and all branch previews accumulate side by
+# side. New branches get a preview automatically the first time they touch Wizard/.
+#
+# Example URLs (replace <user> with the repo owner):
+#   https://<user>.github.io/Wireless_Communication_Board-WCB/Wizard/            (prod, main)
+#   https://<user>.github.io/Wireless_Communication_Board-WCB/dev/OTA/Wizard/    (OTA preview)
+#
+# ── ONE-TIME SETUP ──────────────────────────────────────────────────────────
+#   1. This workflow file must exist ON each branch you want deployed. Merge it
+#      to main so production deploys AND new branches (cut from main) inherit it.
+#   2. Bootstrap gh-pages BEFORE switching the Pages source:
+#        • run this workflow on `main`  (push, or Actions ▸ "Run workflow")  → creates gh-pages:/Wizard
+#        • run it on each branch you want a preview for                       → creates gh-pages:/dev/<branch>/Wizard
+#   3. Repo Settings ▸ Pages ▸ Source = "Deploy from a branch", Branch = "gh-pages" / "(root)".
+#      The production URL (.../Wizard/) is identical to today — it just now comes
+#      from gh-pages:/Wizard instead of main:/Wizard.
+#
+# (No new permission setting needed: build.yml already pushes, so Actions write
+#  access is enabled for this repo.)
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy Wizard to Pages
+
+on:
+  push:
+    # Every branch EXCEPT gh-pages (the publish target) and the throwaway
+    # claude/* worktree branches. Only when the Wizard (or this file) changes.
+    branches: ['**', '!gh-pages', '!claude/**']
+    paths:
+      - 'Wizard/**'
+      - '.github/workflows/pages-deploy.yml'
+  workflow_dispatch:    # manual "Run workflow" per branch — handy for the bootstrap above
+
+permissions:
+  contents: write       # push to the gh-pages branch
+
+concurrency:
+  # Constant group (NOT per-branch) so concurrent deploys from different branches
+  # serialize instead of racing on gh-pages. Queue, don't cancel.
+  group: gh-pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pushed branch
+        uses: actions/checkout@v4
+
+      - name: Publish this branch's Wizard into its gh-pages slice
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ "$BRANCH" = "main" ]; then DEST="Wizard"; else DEST="dev/$BRANCH/Wizard"; fi
+          echo "Deploying branch '$BRANCH'  ->  /$DEST"
+
+          WIZ="$GITHUB_WORKSPACE/Wizard"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          GHP="$(mktemp -d)"
+
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Get the current gh-pages (or start a clean orphan on first run).
+          if git ls-remote --exit-code --heads "$REMOTE" gh-pages >/dev/null 2>&1; then
+            git clone -q --branch gh-pages --single-branch "$REMOTE" "$GHP"
+          else
+            echo "gh-pages does not exist yet — creating it."
+            git -C "$GHP" init -q -b gh-pages
+            git -C "$GHP" remote add origin "$REMOTE"
+          fi
+
+          # Replace ONLY this branch's slice; every other path is left as-is.
+          rm -rf "${GHP:?}/$DEST"
+          mkdir -p "$GHP/$DEST"
+          cp -a "$WIZ/." "$GHP/$DEST/"
+          touch "$GHP/.nojekyll"          # serve files verbatim (no Jekyll processing)
+
+          cd "$GHP"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish for $BRANCH."
+            exit 0
+          fi
+          git commit -q -m "Deploy Wizard ($BRANCH) -> /$DEST [skip ci]"
+
+          # Serialized by concurrency; light retry covers any external race on gh-pages.
+          for i in 1 2 3; do
+            if git push -q origin gh-pages; then echo "Published /$DEST"; exit 0; fi
+            echo "Push rejected — syncing gh-pages and retrying ($i/3)…"
+            git fetch -q origin gh-pages && git rebase -q origin/gh-pages || true
+          done
+          echo "::error::Failed to push to gh-pages after 3 attempts."
+          exit 1
