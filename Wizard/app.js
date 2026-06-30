@@ -68,7 +68,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.17:35.R.JUN.2026';
+const UI_VERSION = '30.12:24.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1196,11 +1196,45 @@ async function boardOtaSerial(n) {
     if (!/\[OTA:END,OK\]/.test(endResp))
       throw new Error('OTA verify/finalize failed — ' + (endResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
 
+    // END,OK means the board switched boot slots and is rebooting NOW. Manage the
+    // reconnect ourselves like the flash / config-reboot paths instead of a blind
+    // delayed pull: a UART-bridge board keeps its port open across the reboot (so
+    // _startReading never errors and never reconnects on its own), and the old
+    // fixed 6 s pull often fired before the rebooted firmware finished WiFi/ESP-NOW
+    // init — it failed silently with nothing to retry, so the board never came back
+    // in the UI. Set _rebootManaged synchronously (NO await before it) so
+    // _startReading can't race its own reconnect if the port does drop.
+    conn._rebootManaged = true;
     termLog(n, '[OTA] ✅ verified — board rebooting into new firmware', 'sys');
     setFlashStatus(n, 'Rebooting…');
     showToast(`WCB ${n}: OTA complete — rebooting into new firmware`, 'success');
-    // Board reboots now; its serial drops. Re-pull version after it comes back.
-    setTimeout(() => { boardPull(n).catch(() => {}); }, 6000);
+
+    await conn.closeForReconnect();   // clean teardown so reconnect() reopens fresh
+    updateConnectionUI(n, false);
+    termLog(n, '[OTA] board rebooting — reconnecting…', 'sys');
+
+    // Fire-and-forget so the finally block re-enables the button immediately.
+    (async () => {
+      const reconnected = await conn.reconnect(_isWindows ? 14 : 12, 2000);
+      if (!reconnected) {
+        updateConnectionUI(n, false);
+        termLog(n, '[OTA] could not reconnect — reconnect manually', 'err');
+        showToast(`WCB ${n} did not come back after OTA — reconnect manually`, 'error');
+        return;
+      }
+      updateConnectionUI(n, true);
+      termLog(n, '[OTA] reconnected — waiting for new firmware…', 'sys');
+      // OTA keeps NVS, so just verify + refresh the version (no push). waitForBoardReady
+      // re-sends ?backup until the firmware actually answers — absorbs slow S3 boots.
+      const ready = await waitForBoardReady(n, conn);
+      if (ready) {
+        showToast(`WCB ${n} back online — new firmware`, 'success');
+        boardPull(n).catch(() => {});
+      } else {
+        termLog(n, '[OTA] board did not respond after reboot — pull manually', 'err');
+        showToast(`WCB ${n} did not respond after OTA`, 'error');
+      }
+    })();
   } catch (e) {
     termLog(n, `[OTA] ✕ ${e.message}`, 'err');
     showToast(`OTA failed: ${e.message}`, 'error');
