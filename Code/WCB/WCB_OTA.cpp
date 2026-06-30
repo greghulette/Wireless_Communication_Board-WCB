@@ -308,6 +308,11 @@ void handleOtaDataPacket(const uint8_t *raw) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
   uint16_t len = pkt.dataLen > OTA_ESPNOW_PAYLOAD ? OTA_ESPNOW_PAYLOAD : pkt.dataLen;
+  // Any in-session frame — even a dup from a lost-ACK resend — proves the browser
+  // is still streaming, so keep the session alive. Dups are write no-ops, so
+  // otaWrite() won't refresh lastActivityMs; without this a lost-ACK retry storm
+  // could trip the idle timeout and abort a transfer that was still live.
+  if (ota.active && pkt.sessionId == ota.sessionId) ota.lastActivityMs = millis();
   // Write (no-op on out-of-order/dup), then ALWAYS ack the current cursor so the
   // browser learns where we are — covers a lost DATA (cursor stalls → resend
   // from cursor) and a lost ACK (re-acked on the resent DATA).

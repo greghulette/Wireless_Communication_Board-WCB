@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_291553RJUN2026                                  *****////
+///*****                                          Version 6.2.0_301521RJUN2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -166,7 +166,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_291553RJUN2026";
+String SoftwareVersion = "6.2.0_301521RJUN2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -305,6 +305,19 @@ QueueHandle_t rcJsonRelayQueue = nullptr;
 // A silent drop makes a browser config-pull time out with no explanation;
 // surfacing the count turns that into a diagnosable event.
 volatile uint32_t rcJsonRelayDrops = 0;
+
+// While this board is actively relaying an OTA stream to a target, the per-chunk
+// [OTA:ACK,...] line (the browser's flow-control token) shares the relay queue
+// above. A chatty controller on the mesh — e.g. NaviCore broadcasting rc_hb /
+// rc_ch JSON continuously — can otherwise flood that 64-slot queue and get an
+// OTA ACK DROPPED on overflow; a single lost ACK stalls the transfer until the
+// target's session timeout (looked like a hang at ~70%). So pause the RC-JSON /
+// ETM passthrough for the duration of a transfer. Refreshed on every ?OTA
+// command; expires a few seconds after the stream ends.
+volatile uint32_t otaRelayForwardUntilMs = 0;
+static inline bool otaRelayForwarding() {
+  return otaRelayForwardUntilMs != 0 && (int32_t)(millis() - otaRelayForwardUntilMs) < 0;
+}
 
 // Drains the relay queue to Serial.  Safe to call frequently from the main
 // loop; runs in bounded time (drains whatever fits in one swing, returns
@@ -3148,7 +3161,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // Serial.println here directly — we're on the WiFi task
                 // (Core 0) and Serial isn't atomic across cores.  The
                 // main loop drains the queue safely on Core 1.
-                if (rcJsonRelaySubscribed()) {
+                if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
                     enqueueRcJsonRelay(etmCmd);
                     // Keep the subscription hot for the duration of an
                     // in-flight transfer.  A multi-fragment CONFIG response
@@ -3411,7 +3424,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // actively using us as a WCB bridge (see declaration near top of file).
   // Uses the relay queue + main-loop drain pattern for cross-core safety.
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    if (rcJsonRelaySubscribed()) {
+    if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
       enqueueRcJsonRelay(receivedCmd);
       // Keep the subscription hot during an in-flight transfer — see the
       // matching comment in the ETM passthrough path above.
@@ -3983,6 +3996,10 @@ void processLocalCommand(const String &message) {
     // This (USB-connected) board forwards the browser's OTA frames to the target
     // over the mesh; the target writes its inactive slot and reboots.
     if (rootUpper == "OTA") {
+        // Mark us as actively forwarding so the RC-JSON/ETM passthrough pauses and
+        // can't crowd the OTA ACK lines out of the shared relay queue. Refreshed
+        // every frame; lasts ~8 s past the last ?OTA command.
+        otaRelayForwardUntilMs = millis() + 8000UL;
         processOtaRelayCommand(args);
         return;
     }
