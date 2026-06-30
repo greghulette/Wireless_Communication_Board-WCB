@@ -70,7 +70,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.14:49.R.JUN.2026';
+const UI_VERSION = '30.15:41.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1311,8 +1311,15 @@ async function boardOtaRelay(n) {
         throw new Error(`target lost the OTA session at ${peak} bytes (it likely timed out or rebooted) — retry the OTA`);
       }
       if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
-        if (++stalls > 40) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
+        if (++stalls > 60) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
         if (ack && ack.offset < offset) offset = ack.offset;   // target is behind us — rewind
+        // Back off before resending. A stall means a frame or ACK was lost — almost
+        // always to ESP-NOW congestion (e.g. a controller broadcasting on the mesh).
+        // Re-sending instantly just floods the relay→target hop and deepens the
+        // congestion, so a single transient drop cascades straight to the cap. An
+        // escalating pause lets the target drain its queue + re-sync; the target's
+        // keep-alive means the slower cadence won't trip its 30 s session timeout.
+        await sleep(Math.min(stalls * 50, 600));
         continue;
       }
       stalls = 0;
