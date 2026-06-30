@@ -70,7 +70,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.15:41.R.JUN.2026';
+const UI_VERSION = '30.16:00.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1173,21 +1173,35 @@ async function boardOtaSerial(n) {
     // 4) Stream chunks, ACK-paced. The board's ACK/NAK carries the authoritative
     //    write cursor; we always follow it (rewind on NAK).
     const CHUNK = 1024;
-    let offset = 0, stalls = 0;
+    let offset = 0, stalls = 0, peak = 0;
     while (offset < total) {
       const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
       const resp  = await conn.sendAndCollect(cmd(`DATA,${offset},${_u8ToBase64(slice)}`), 6000, '[OTA:');
       const m = resp.match(/\[OTA:(ACK|NAK),(\d+)\]/);
-      if (!m) throw new Error(`no ACK for chunk @${offset} (board may have stalled)`);
-      const cursor = parseInt(m[2]);
-      if (m[1] === 'NAK' || cursor <= offset) {   // no forward progress → rewind + retry, but cap it
-        if (++stalls > 40) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
-        termLog(n, `[OTA] gap — rewinding to ${cursor}`, 'sys');
-        offset = cursor;
+      const cursor = m ? parseInt(m[2]) : -1;
+      // Cursor collapsed to 0 after real progress → the board's session timed out
+      // (it was too busy mid-flash to write for 30 s). Restreaming from 0 can't
+      // succeed, so fail fast with a clear message instead of spinning.
+      if (cursor === 0 && peak > CHUNK) {
+        throw new Error(`board lost the OTA session at ${peak} bytes (timed out — likely too busy mid-flash); retry the OTA`);
+      }
+      // No ACK in the 6 s window, a NAK, or a non-advancing cursor → the board was
+      // momentarily too busy to process this chunk. A busy board (ETM + HCR polls +
+      // controller traffic) can stall its loop() for a few seconds, and the old
+      // code aborted on the FIRST miss. Retry from the board's reported cursor
+      // instead — the write core is idempotent (a dup/gap is rejected with the
+      // real cursor) — and back off so a slow board gets time to catch up rather
+      // than being flooded. The board's 30 s session timeout still bounds a board
+      // that's truly wedged.
+      if (!m || m[1] === 'NAK' || cursor <= offset) {
+        if (++stalls > 60) throw new Error(`OTA stalled at ${offset} (no progress after retries — board not keeping up)`);
+        if (cursor >= 0) { termLog(n, `[OTA] gap — resyncing to ${cursor}`, 'sys'); offset = cursor; }
+        await sleep(Math.min(stalls * 50, 600));
         continue;
       }
       stalls = 0;
       offset = cursor;                       // ACK: advance to the board's confirmed cursor
+      if (offset > peak) peak = offset;
       updateFlashBar(n, offset, total);
       setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
     }
