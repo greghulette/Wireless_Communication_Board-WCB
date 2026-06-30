@@ -24,15 +24,39 @@ jobs:
 
       - name: Install ESP32 platform
         run: |
-          arduino-cli core update-index \
-            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.3.4 \
-            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          set -euo pipefail
+          ESP32_URL=https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          # The esp32 core pulls ~1.3 GB of toolchains from GitHub's CDN (esp-rv32
+          # alone is 568 MB). A single transient "connection reset by peer" on any
+          # one of those downloads otherwise fails the whole build, so retry with
+          # backoff. core install is idempotent — a re-run skips already-installed
+          # tools and re-fetches only what's missing.
+          retry() {
+            local n=1 max=5
+            while true; do
+              "$@" && return 0
+              if [ "$n" -ge "$max" ]; then echo "::error::'$*' failed after $max attempts"; return 1; fi
+              echo "::warning::attempt $n/$max for '$*' failed — retrying in $((n*15))s…"
+              sleep $((n*15)); n=$((n+1))
+            done
+          }
+          retry arduino-cli core update-index --additional-urls "$ESP32_URL"
+          retry arduino-cli core install esp32:esp32@3.3.4 --additional-urls "$ESP32_URL"
 
       - name: Install libraries
         run: |
-          arduino-cli lib install "EspSoftwareSerial@8.1.0"
-          arduino-cli lib install "Adafruit NeoPixel@1.12.5"
+          set -euo pipefail
+          retry() {
+            local n=1 max=5
+            while true; do
+              "$@" && return 0
+              if [ "$n" -ge "$max" ]; then echo "::error::'$*' failed after $max attempts"; return 1; fi
+              echo "::warning::attempt $n/$max for '$*' failed — retrying in $((n*10))s…"
+              sleep $((n*10)); n=$((n+1))
+            done
+          }
+          retry arduino-cli lib install "EspSoftwareSerial@8.1.0"
+          retry arduino-cli lib install "Adafruit NeoPixel@1.12.5"
           # HumanCyborgRelationsAPI (HCRVocalizer) is NOT installed as a library.
           # The WCB-patched, serial-only copy is bundled directly inside the
           # sketch at Code/WCB/src/HumanCyborgRelationsAPI and pulled in with a
