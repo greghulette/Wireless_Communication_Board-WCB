@@ -58,6 +58,8 @@ const _detecting = {};            // { [n]: true/false } — auto-detect active 
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
 const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
 const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
+const _otaInProgress = new Set(); // boards (slots) with a wireless relay OTA in flight — so the
+                                  // ETM listener doesn't fire pulls that fight the OTA stream
 const MGMT_CHUNK_SIZE  = 180;   // max payload chars per ESP-NOW packet
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
 
@@ -68,7 +70,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.12:24.R.JUN.2026';
+const UI_VERSION = '30.14:49.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1277,6 +1279,7 @@ async function boardOtaRelay(n) {
   const family     = binaryType === 'ESP32S3' ? 1 : 0;
 
   try {
+    _otaInProgress.add(n);   // pause ETM-listener pulls so they don't fight the OTA stream
     if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
     setFlashUI(n, true);
     setFlashStatus(n, `Loading ${binaryType} firmware…`);
@@ -1329,25 +1332,32 @@ async function boardOtaRelay(n) {
     showToast(`WCB ${targetWcb}: wireless OTA complete — rebooting`, 'success');
 
     // The target reboots into the new image; its RTERM session state is volatile
-    // and lost across the reboot, and a fast reboot stays inside the relay's ~33 s
-    // ETM offline window — so the relay never prints "came ONLINE" and nothing
-    // auto-re-establishes. Proactively re-pull config + re-arm the remote terminal
-    // once it's back (remoteBoardPull re-sends RTERM,START on success; its own
-    // retries absorb boot timing). The firmware boot-announce usually triggers the
-    // ETM-listener path first — the _pullingBoards guard makes this a no-op then.
-    if (remoteRelayForBoard[n]) {
-      setTimeout(() => {
-        if (boardConnections[relayN]?.isConnected()) {
-          termLog(n, `[OTA] re-establishing relay session after reboot…`, 'sys');
-          remoteBoardPull(relayN, n);
-        }
-      }, 9000);
-    }
+    // and lost across the reboot. We can't rely on the firmware boot-announce
+    // reaching the relay, nor on the ~33 s ETM offline edge (a fast reboot never
+    // crosses it), so drive the re-establish ourselves and make it bulletproof:
+    //   • re-assert the relay link (a long OTA can drop remoteRelayForBoard[n] if
+    //     the relay's reader blipped) so the proactive pull always runs;
+    //   • clear any stale in-flight guard left by an ETM-offline pull fired DURING
+    //     the OTA, otherwise every re-pull is silently deduped → "nothing happens";
+    //   • pull with a long attempt budget (12 ≈ ~100 s) because a freshly-OTA'd
+    //     board re-inits WiFi/ESP-NOW and may not answer ?MGMT,PULL for a while.
+    // remoteBoardPull re-arms the remote terminal (RTERM,START) on success and
+    // stops retrying the moment the config comes back. If the boot-announce path
+    // does fire first, its pull wins and this one is deduped — no double work.
+    remoteRelayForBoard[n] = relayN;
+    _pullingBoards.delete(n);
+    setTimeout(() => {
+      if (boardConnections[relayN]?.isConnected()) {
+        termLog(relayN, `[OTA] re-establishing relay session to WCB${targetWcb} after reboot…`, 'sys');
+        remoteBoardPull(relayN, n, 1, 12);
+      }
+    }, 8000);
   } catch (e) {
     termLog(n, `[OTA] ✕ ${e.message}`, 'err');
     showToast(`Wireless OTA failed: ${e.message}`, 'error');
     try { await relayConn.send(cmd(`ABORT,${targetWcb},${session}`) + '\r'); } catch (_) {}
   } finally {
+    _otaInProgress.delete(n);   // re-enable ETM-listener pulls now the OTA is done
     setFlashUI(n, false);
     if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
   }
@@ -5778,6 +5788,7 @@ function installEtmListener(relayN) {
     const offlineMatch = line.match(/\[ETM\] WCB(\d+) went OFFLINE/);
     if (onlineMatch) {
       const bn = parseInt(onlineMatch[1]);
+      if (_otaInProgress.has(bn)) return;   // OTA owns this board's state right now
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.add('connected');
         // Board announced itself — pull fresh config to confirm reachability and update state
@@ -5793,6 +5804,7 @@ function installEtmListener(relayN) {
       }
     } else if (offlineMatch) {
       const bn = parseInt(offlineMatch[1]);
+      if (_otaInProgress.has(bn)) return;   // don't fire pulls that fight the OTA stream
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.remove('connected');
         // Guard: don't stack pulls if a verification is already running
@@ -5949,7 +5961,7 @@ async function boardGoRemote(n, opts = {}) {
 const MAX_PULL_ATTEMPTS = 3;
 const PULL_TIMEOUT_MS   = 6000;
 const PULL_RETRY_MS     = 2500;
-async function remoteBoardPull(relayN, targetN, attempt = 1) {
+async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_PULL_ATTEMPTS) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
 
@@ -5962,10 +5974,10 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     _pullingBoards.add(targetN);
   }
 
-  termLog(relayN, `[Remote] Requesting config from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'sys');
+  termLog(relayN, `[Remote] Requesting config from WCB${targetN} (attempt ${attempt}/${maxAttempts})…`, 'sys');
   showToast(attempt === 1
     ? `Pulling config from WCB${targetN} via WCB${relayN}…`
-    : `Retrying pull from WCB${targetN} (attempt ${attempt}/${MAX_PULL_ATTEMPTS})…`, 'info');
+    : `Retrying pull from WCB${targetN} (attempt ${attempt}/${maxAttempts})…`, 'info');
 
   // Before the first pull we don't know the board's WCB_Number, so match
   // [MGMT:CONFIG,<any>] and extract the actual number from the response.
@@ -6063,15 +6075,15 @@ async function remoteBoardPull(relayN, targetN, attempt = 1) {
     if (done) return;
     done = true;
     cleanup();
-    if (attempt < MAX_PULL_ATTEMPTS) {
+    if (attempt < maxAttempts) {
       updateBoardStatusBadge(targetN, 'retrying');
-      termLog(relayN, `[Remote] Pull attempt ${attempt}/${MAX_PULL_ATTEMPTS} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
-      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1), PULL_RETRY_MS);
+      termLog(relayN, `[Remote] Pull attempt ${attempt}/${maxAttempts} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
+      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1, maxAttempts), PULL_RETRY_MS);
     } else {
       _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
-      showToast(`WCB${targetN}: config pull failed after ${MAX_PULL_ATTEMPTS} attempts`, 'error');
-      termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${MAX_PULL_ATTEMPTS} attempts`, 'err');
+      showToast(`WCB${targetN}: config pull failed after ${maxAttempts} attempts`, 'error');
+      termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${maxAttempts} attempts`, 'err');
     }
   }, PULL_TIMEOUT_MS);
 
