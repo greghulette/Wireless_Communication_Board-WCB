@@ -812,6 +812,56 @@
         </div>
       </div>
 
+      <!-- WLED (serial lighting) -->
+      <div class="subsection-title">WLED</div>
+      <div class="field-group">
+        <div class="field">
+          <label>WLED <span class="wiz-hint" data-tip="Enable if this WCB drives a stock WLED node over one of its serial ports (WLED's JSON API). The port is reserved exclusively — broadcast disabled — and runs at 115200, so only hardware ports S1/S2 are offered. Author looks as presets in WLED's web UI, then fire them from the controls below or from sequences with ;L,PS,n.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-wled" value="none" checked onchange="onWLEDChange({N})"><span>None</span></label>
+            <label><input type="radio" name="b{N}-wled" value="local" onchange="onWLEDChange({N})"><span>Enabled</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-wled-port-wrap" style="display:none">
+          <label>WLED Port <span class="wiz-hint" data-tip="Hardware serial port (S1/S2) the WLED node's RX is wired to. Reserved exclusively — broadcast disabled. S3–S5 are software serial and can't run WLED's 115200.">i</span></label>
+          <select id="b{N}-wled-port" onchange="onWLEDPortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-wled-baud-wrap" style="display:none">
+          <label>Baud Rate <span class="wiz-hint" data-tip="WLED serial baud. WLED's default is 115200 — leave it unless you changed it in WLED's settings.">i</span></label>
+          <select id="b{N}-wled-baud" onchange="onWLEDBaudChange({N})">
+            <option value="9600">9,600</option>
+            <option value="19200">19,200</option>
+            <option value="38400">38,400</option>
+            <option value="57600">57,600</option>
+            <option value="115200" selected>115,200</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- WLED live controls (shown only when WLED is enabled on this board) -->
+      <div class="field-group" id="b{N}-wled-controls" style="display:none">
+        <div class="field" style="flex:1 1 100%">
+          <label>WLED Controls <span class="wiz-hint" data-tip="Fire live commands to this board's WLED. Presets are the primary workflow — build looks in WLED's web UI, then recall them by number here or from sequences with ;L,PS,n. Requires the board to be connected (directly or via a relay) and WLED already pushed.">i</span></label>
+          <div class="flex items-center gap-8" style="flex-wrap:wrap">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'ON')">On</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'OFF')">Off</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'TOGGLE')">Toggle</button>
+          </div>
+          <div class="flex items-center gap-8" style="flex-wrap:wrap;margin-top:8px">
+            <label style="margin:0">Preset</label>
+            <input type="number" id="b{N}-wled-ps" min="1" max="250" value="1" style="width:70px">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledFirePreset({N})">Fire</button>
+            <label style="margin:0 0 0 12px">Brightness</label>
+            <input type="range" id="b{N}-wled-bri" min="0" max="255" value="128" oninput="document.getElementById('b{N}-wled-bri-val').textContent=this.value">
+            <span id="b{N}-wled-bri-val">128</span>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSetBri({N})">Set</button>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </template>

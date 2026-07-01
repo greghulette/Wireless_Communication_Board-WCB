@@ -78,6 +78,13 @@ function createDefaultBoardConfig() {
       poll:    10,     // status auto-poll interval (s); 0 = off
     },
 
+    // WLED (serial lighting) — drives a stock WLED node over a reserved UART
+    wled: {
+      enabled: false,
+      port:    null,   // 1-2 — hardware serial port (WLED wants 115200; S3-S5 can't)
+      baud:    115200, // WLED serial default
+    },
+
     // Maestros — array of { id, port, baud }
     maestros: [],
 
@@ -627,6 +634,24 @@ function parseToken(body, config) {
       break;
     }
 
+    // ── WLED (serial lighting) ──
+    case 'WLED': {
+      const sub = upperParts[1];
+      if (sub === 'PORT') {
+        // ?WLED,PORT,S1:115200
+        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
+        if (m) {
+          config.wled.enabled = true;
+          config.wled.port    = parseInt(m[1]);
+          config.wled.baud    = parseInt(m[2]);
+        }
+      } else if (sub === 'CLEAR') {
+        config.wled.enabled = false;
+        config.wled.port    = null;
+      }
+      break;
+    }
+
     // ── Maestro ──
     case 'MAESTRO': {
       // Format: ?MAESTRO,M<id>:W<wcb>S<port>:<baud>
@@ -871,6 +896,13 @@ function evaluatePortClaims(config) {
     const idx = config.hcr.port - 1;
     if (idx >= 0 && idx < 5)
       config.serialPorts[idx].claimedBy = { type: 'hcr' };
+  }
+
+  // WLED claims its port (guarded — never steal a port another device already owns)
+  if (config.wled && config.wled.enabled && config.wled.port) {
+    const idx = config.wled.port - 1;
+    if (idx >= 0 && idx < 5 && !config.serialPorts[idx].claimedBy)
+      config.serialPorts[idx].claimedBy = { type: 'wled' };
   }
 
   // Maestros claim their ports
@@ -1195,6 +1227,19 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     }
   }
 
+  // ── WLED (serial lighting) ──
+  if (config.wled) {
+    const wledChanged = fullPush || !baseline ||
+      JSON.stringify(baseline?.wled) !== JSON.stringify(config.wled);
+    if (wledChanged) {
+      if (config.wled.enabled && config.wled.port) {
+        add(`WLED,PORT,S${config.wled.port}:${config.wled.baud}`);
+      } else {
+        add('WLED,CLEAR');
+      }
+    }
+  }
+
   // ── Variables (per-name diff) ──
   // Compare name-by-name so a single change doesn't re-push every variable.
   // Also send VAR,CLEAR for any names removed since the baseline.
@@ -1382,6 +1427,8 @@ function diffConfigs(configA, configB) {
   check('cmdChar',        configA.cmdChar,         configB.cmdChar);
   check('kyber',          configA.kyber,           configB.kyber);
   check('mp3',            configA.mp3,             configB.mp3);
+  check('hcr',            configA.hcr,             configB.hcr);
+  check('wled',           configA.wled,            configB.wled);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
   check('mappings',       configA.mappings,        configB.mappings);
