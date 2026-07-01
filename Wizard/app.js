@@ -70,7 +70,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.16:00.R.JUN.2026';
+const UI_VERSION = '30.23:15.R.JUN.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -468,6 +468,12 @@ function updatePortClaimUI(n) {
       label.disabled = true;
     } else if (claim.type === 'hcr') {
       claimNote.textContent = 'Managed by HCR Vocalizer';
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
+    } else if (claim.type === 'wled') {
+      claimNote.textContent = 'Managed by WLED';
       baudSel.disabled = true;
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
@@ -1942,6 +1948,156 @@ function syncHCRToConfig(n) {
   }
 }
 
+// ─── WLED (serial lighting) ───────────────────────────────────────
+// Mirrors the HCR device pattern. WLED speaks JSON at 115200 and S3-S5 are
+// software serial (unreliable above 9600), so the port picker offers the
+// hardware ports S1/S2 only — matching the firmware's S1/S2-only guard.
+function updateWLEDPortDropdown(n) {
+  const portSel = document.getElementById(`b${n}-wled-port`);
+  if (!portSel) return;
+  const config      = boardConfigs[n];
+  const currentPort = config?.wled?.port;
+  portSel.innerHTML = '';
+  for (let p = 1; p <= 2; p++) {   // hardware serial only
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    if (!claim || claim.type === 'wled') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      portSel.appendChild(opt);
+    }
+  }
+}
+
+function onWLEDChange(n) {
+  const mode    = document.querySelector(`input[name="b${n}-wled"]:checked`)?.value ?? 'none';
+  const isLocal = mode === 'local';
+  ['port', 'baud'].forEach(id => {
+    const el = document.getElementById(`b${n}-wled-${id}-wrap`);
+    if (el) el.style.display = isLocal ? '' : 'none';
+  });
+
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'wled') port.claimedBy = null;
+  }
+
+  config.wled.enabled = isLocal;
+  if (!isLocal) config.wled.port = null;
+
+  updateWLEDPortDropdown(n);
+
+  if (isLocal) {
+    const portVal = parseInt(document.getElementById(`b${n}-wled-port`)?.value);
+    if (portVal >= 1 && portVal <= 2) {
+      config.wled.port = portVal;
+      config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateWLEDPortDropdown(n);
+  updateWLEDSectionUI(n);
+  onBoardFieldChange(n);
+}
+
+function onWLEDPortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'wled') {
+      port.claimedBy    = null;
+      port.broadcastIn  = true;
+      port.broadcastOut = true;
+    }
+  }
+
+  const portVal = parseInt(document.getElementById(`b${n}-wled-port`)?.value);
+  if (portVal >= 1 && portVal <= 2) {
+    config.wled.port = portVal;
+    config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateWLEDPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onWLEDBaudChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || 115200;
+  onBoardFieldChange(n);
+}
+
+function syncWLEDToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config || !config.wled) return;
+  const mode = document.querySelector(`input[name="b${n}-wled"]:checked`)?.value ?? 'none';
+  config.wled.enabled = mode === 'local';
+  if (config.wled.enabled) {
+    config.wled.port = parseInt(document.getElementById(`b${n}-wled-port`)?.value) || null;
+    config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || 115200;
+    // Keep the serial port baud in sync so ?BAUD is emitted consistently.
+    if (config.wled.port >= 1 && config.wled.port <= 5) {
+      config.serialPorts[config.wled.port - 1].baud = config.wled.baud;
+    }
+  } else {
+    config.wled.port = null;
+  }
+}
+
+// Live-control block is shown only when WLED is enabled + has a port on this board.
+function updateWLEDSectionUI(n) {
+  const controls = document.getElementById(`b${n}-wled-controls`);
+  if (!controls) return;
+  const on = !!(boardConfigs[n]?.wled?.enabled && boardConfigs[n]?.wled?.port);
+  controls.style.display = on ? '' : 'none';
+}
+
+// Fire a runtime ;L,<action> to this board's WLED. Reuses the sequence-Test
+// routing so it works both on a direct USB board and a remote board via its relay.
+async function wledSend(n, action) {
+  const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
+  const cmd = `${cmdChar}L,${action}`;
+  const relayN = remoteRelayForBoard[n];
+  if (relayN) {
+    const relayConn = boardConnections[relayN];
+    if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
+    const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const targetWCB = boardConfigs[n]?.wcbNumber || n;
+    const mgmtCmd = `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${cmd}`;
+    await sendMgmtReliable(relayConn, mgmtCmd, relayN);
+    showToast(`Sent: ${cmd} (remote)`, 'info');
+  } else {
+    const conn = boardConnections[n];
+    if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+    conn.send(cmd + '\r');
+    termLog(n, cmd, 'in');
+    showToast(`Sent: ${cmd}`, 'info');
+  }
+}
+
+function wledFirePreset(n) {
+  const ps = parseInt(document.getElementById(`b${n}-wled-ps`)?.value);
+  if (!(ps >= 1)) { showToast('Enter a preset number (1 or higher)', 'error'); return; }
+  wledSend(n, `PS,${ps}`);
+}
+
+function wledSetBri(n) {
+  let v = parseInt(document.getElementById(`b${n}-wled-bri`)?.value);
+  if (isNaN(v)) v = 128;
+  v = Math.max(0, Math.min(255, v));
+  wledSend(n, `BRI,${v}`);
+}
+
 function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
@@ -2114,6 +2270,25 @@ function populateUIFromConfig(n, config) {
       if (pollEl) pollEl.value = config.hcr.poll ?? 10;
     }
   }
+
+  // WLED (serial lighting)
+  const wledInput = document.querySelector(`input[name="b${n}-wled"][value="${config.wled?.enabled ? 'local' : 'none'}"]`);
+  if (wledInput) {
+    wledInput.checked = true;
+    const isLocal = config.wled?.enabled;
+    ['port', 'baud'].forEach(id => {
+      const el = document.getElementById(`b${n}-wled-${id}-wrap`);
+      if (el) el.style.display = isLocal ? '' : 'none';
+    });
+    updateWLEDPortDropdown(n);
+    if (isLocal && config.wled.port) {
+      const portSel = document.getElementById(`b${n}-wled-port`);
+      if (portSel) portSel.value = config.wled.port;
+      const baudSel = document.getElementById(`b${n}-wled-baud`);
+      if (baudSel) baudSel.value = config.wled.baud ?? 115200;
+    }
+  }
+  updateWLEDSectionUI(n);
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
@@ -5515,6 +5690,7 @@ async function boardGo(n, opts = {}) {
     syncKyberToConfig(n);
     syncMP3ToConfig(n);
     syncHCRToConfig(n);
+    syncWLEDToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
@@ -5878,6 +6054,7 @@ async function boardGoRemote(n, opts = {}) {
   syncKyberToConfig(n);
   syncMP3ToConfig(n);
   syncHCRToConfig(n);
+  syncWLEDToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
