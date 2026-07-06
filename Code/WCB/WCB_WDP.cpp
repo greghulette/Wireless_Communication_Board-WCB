@@ -17,8 +17,12 @@ extern bool        Maestro_Remote;
 extern bool        specialPeerEnabled;
 extern bool        debugEnabled;
 extern char        LocalFunctionIdentifier;   // the '?' function-command prefix
+extern String      serialPortLabels[5];       // RAW per-port labels ("" = unlabeled).
+                                              // NOT getSerialLabel() — that decorates as
+                                              // "Serial<N> (<label>)", which would eat the
+                                              // advert's 24-char budget and clip long names.
 extern Preferences preferences;
-// (MAX_WCB_COUNT, etmEnabled, WCB_Number, getSerialLabel come from WCB_Storage.h)
+// (MAX_WCB_COUNT, etmEnabled, WCB_Number come from WCB_Storage.h)
 
 // The ETM wire struct lives in WCB.ino, so the envelope build + broadcast do
 // too — this module just hands it a ready TLV payload.
@@ -120,8 +124,8 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   // port: [port][label]. Advertised last so the core identity always fits; a
   // label set that would overflow the 200 B payload is dropped gracefully.
   for (int p = 1; p <= 5; p++) {
-    String lbl = getSerialLabel(p);
-    if (lbl.length() == 0) continue;
+    String lbl = serialPortLabels[p - 1];   // raw label, not the "Serial<N> (...)" form
+    if (lbl.length() == 0) continue;         // unlabeled port — don't advertise
     int L = lbl.length(); if (L > 24) L = 24;
     uint8_t v[25];
     v[0] = (uint8_t)p;
@@ -286,8 +290,10 @@ static void printWdpList() {
   Serial.println();
   Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller");
   Serial.println();
-  Serial.println("WCB   Alias             Platform    Cap           Maestros    Age    State");
-  Serial.println("----  ----------------  ----------  ------------  ----------  -----  -----");
+  Serial.printf("%-4s  %-16s  %-10s  %-12s  %-10s  %-5s  %-5s\n",
+                "WCB", "Alias", "Platform", "Cap", "Maestros", "Age", "State");
+  Serial.printf("%-4s  %-16s  %-10s  %-12s  %-10s  %-5s  %-5s\n",
+                "----", "----------------", "----------", "------------", "----------", "-----", "-----");
   int count = 0;
   unsigned long now = millis();
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
