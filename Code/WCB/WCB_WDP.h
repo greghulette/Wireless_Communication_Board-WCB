@@ -51,6 +51,7 @@ struct WdpNeighbor {
   char          fwVer[28];     // firmware version string
   uint8_t       hwVer;         // 0/1/21/23/24/31/32
   uint16_t      capFlags;      // WDP_CAP_* bitmap
+  uint8_t       ctrlId;        // controller (special-peer) ID this board links to; 0=none/unknown
   uint8_t       maestroIds[WDP_MAX_MAESTRO];  // this board's local Maestro IDs
   uint8_t       maestroCount;
   char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled

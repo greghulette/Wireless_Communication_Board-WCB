@@ -48,6 +48,7 @@ static unsigned long wdpNextAdvertMs = 0;
 #define WDP_TLV_CAPFLAGS 0x05
 #define WDP_TLV_MAESTRO  0x06
 #define WDP_TLV_PORTLABEL 0x09   // [port(1)][label bytes] — one TLV per labeled serial port
+#define WDP_TLV_CTRLID   0x0A    // [id(1)] — controller (special-peer) ID; sent only when linked
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -114,6 +115,10 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
     uint16_t cf = wdpCapFlags();
     uint8_t v[2] = { (uint8_t)(cf & 0xFF), (uint8_t)(cf >> 8) };   // little-endian
     o = putTLV(buf, o, max, WDP_TLV_CAPFLAGS, v, 2);
+  }
+  if (specialPeerEnabled) {                     // which controller this board links to
+    uint8_t id = WCB_SPECIAL_PEER_ID;
+    o = putTLV(buf, o, max, WDP_TLV_CTRLID, &id, 1);
   }
   {
     uint8_t ids[WDP_MAX_MAESTRO];
@@ -205,6 +210,9 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       case WDP_TLV_CAPFLAGS:
         if (len >= 2) nb.capFlags = (uint16_t)val[0] | ((uint16_t)val[1] << 8);
         break;
+      case WDP_TLV_CTRLID:
+        if (len >= 1) nb.ctrlId = val[0];
+        break;
       case WDP_TLV_MAESTRO: {
         int L = len > WDP_MAX_MAESTRO ? WDP_MAX_MAESTRO : len;
         memcpy(nb.maestroIds, val, L); nb.maestroCount = (uint8_t)L; break;
@@ -260,7 +268,7 @@ static void wdpCapNames(uint16_t cf, char *out, int max) {
   static const struct { uint16_t bit; const char *name; } NAMES[] = {
     { WDP_CAP_MAESTRO_LOC, "Maestro host" }, { WDP_CAP_MAESTRO_REM, "Maestro remote" },
     { WDP_CAP_KYBER_LOCAL, "Kyber local" }, { WDP_CAP_HCR, "HCR" }, { WDP_CAP_MP3, "MP3" },
-    { WDP_CAP_WLED, "WLED" }, { WDP_CAP_PWM, "PWM" }, { WDP_CAP_CONTROLLER, "Controller peer" },
+    { WDP_CAP_WLED, "WLED" }, { WDP_CAP_PWM, "PWM" }, { WDP_CAP_CONTROLLER, "Controller link" },
   };
   int o = 0; out[0] = '\0';
   for (unsigned i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
@@ -288,7 +296,7 @@ static void wdpMaestroStr(const WdpNeighbor &nb, char *out, int max) {
 // Summary table — `show cdp neighbors` for the WCB mesh.
 static void printWdpList() {
   Serial.println();
-  Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller");
+  Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller link");
   Serial.println();
   Serial.printf("%-4s  %-16s  %-10s  %-12s  %-10s  %-5s  %-5s\n",
                 "WCB", "Alias", "Platform", "Cap", "Maestros", "Age", "State");
@@ -324,7 +332,10 @@ static void printWdpDetail(int wcbNum) {
   Serial.printf("==== WCB %d  \"%s\" ====\n", nb.wcbNumber, nb.alias[0] ? nb.alias : "(no alias)");
   Serial.printf("  Platform    : %s (hw %d)\n", wdpHwName(nb.hwVer), nb.hwVer);
   Serial.printf("  Firmware    : %s\n", nb.fwVer[0] ? nb.fwVer : "?");
-  Serial.printf("  Capabilities: %s  [0x%04X]\n", caps, nb.capFlags);
+  if ((nb.capFlags & WDP_CAP_CONTROLLER) && nb.ctrlId > 0)
+    Serial.printf("  Capabilities: %s  (controller ID %d)\n", caps, nb.ctrlId);
+  else
+    Serial.printf("  Capabilities: %s\n", caps);
   Serial.printf("  Maestros    : %s\n", maestro);
   Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
                 nb.confirmed ? "live" : "stale");
@@ -346,8 +357,8 @@ static void printWdpDump() {
     if (!nb.valid) continue;
     count++;
     char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
-    Serial.printf("[WDP:N=%d,ALIAS=%s,HW=%d,FW=%s,CAP=%04X,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
-                  nb.wcbNumber, nb.alias, nb.hwVer, nb.fwVer, nb.capFlags, maestro,
+    Serial.printf("[WDP:N=%d,ALIAS=%s,HW=%d,FW=%s,CAP=%04X,CTRL=%d,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
+                  nb.wcbNumber, nb.alias, nb.hwVer, nb.fwVer, nb.capFlags, nb.ctrlId, maestro,
                   (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
   }
   Serial.printf("[WDP:END,count=%d]\n", count);
