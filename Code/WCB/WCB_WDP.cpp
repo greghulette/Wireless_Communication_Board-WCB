@@ -16,8 +16,9 @@ extern bool        Kyber_Local;
 extern bool        Maestro_Remote;
 extern bool        specialPeerEnabled;
 extern bool        debugEnabled;
+extern char        LocalFunctionIdentifier;   // the '?' function-command prefix
 extern Preferences preferences;
-// (MAX_WCB_COUNT, etmEnabled, WCB_Number come from WCB_Storage.h)
+// (MAX_WCB_COUNT, etmEnabled, WCB_Number, getSerialLabel come from WCB_Storage.h)
 
 // The ETM wire struct lives in WCB.ino, so the envelope build + broadcast do
 // too — this module just hands it a ready TLV payload.
@@ -42,6 +43,7 @@ static unsigned long wdpNextAdvertMs = 0;
 #define WDP_TLV_HWVER    0x04
 #define WDP_TLV_CAPFLAGS 0x05
 #define WDP_TLV_MAESTRO  0x06
+#define WDP_TLV_PORTLABEL 0x09   // [port(1)][label bytes] — one TLV per labeled serial port
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -113,6 +115,18 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
     uint8_t ids[WDP_MAX_MAESTRO];
     int n = wdpLocalMaestroIds(ids);
     if (n > 0) o = putTLV(buf, o, max, WDP_TLV_MAESTRO, ids, n);
+  }
+  // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
+  // port: [port][label]. Advertised last so the core identity always fits; a
+  // label set that would overflow the 200 B payload is dropped gracefully.
+  for (int p = 1; p <= 5; p++) {
+    String lbl = getSerialLabel(p);
+    if (lbl.length() == 0) continue;
+    int L = lbl.length(); if (L > 24) L = 24;
+    uint8_t v[25];
+    v[0] = (uint8_t)p;
+    memcpy(v + 1, lbl.c_str(), L);
+    o = putTLV(buf, o, max, WDP_TLV_PORTLABEL, v, 1 + L);
   }
 
   if (o < max) buf[o++] = WDP_TLV_END;   // explicit terminator (tail is 0 anyway)
@@ -191,6 +205,17 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
         int L = len > WDP_MAX_MAESTRO ? WDP_MAX_MAESTRO : len;
         memcpy(nb.maestroIds, val, L); nb.maestroCount = (uint8_t)L; break;
       }
+      case WDP_TLV_PORTLABEL: {
+        if (len >= 1) {
+          int port = val[0];
+          if (port >= 1 && port <= 5) {
+            int L = len - 1; if (L > 24) L = 24;
+            memcpy(nb.portLabels[port - 1], val + 1, L);
+            nb.portLabels[port - 1][L] = '\0';
+          }
+        }
+        break;
+      }
       default: break;                     // unknown TLV — skipped by its length (forward-compatible)
     }
     o += 2 + len;
@@ -201,24 +226,125 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
 
 // ==================== Command / query ====================================
 
+// Chip family name from the HW version number.
+static const char *wdpHwName(uint8_t hw) {
+  if (hw >= 31) return "ESP32-S3";
+  if (hw >  0)  return "ESP32";
+  return "?";
+}
+
+// Compact single-letter capability codes for the summary table (e.g. "M C R").
+static void wdpCapCodes(uint16_t cf, char *out, int max) {
+  static const struct { uint16_t bit; char code; } CODES[] = {
+    { WDP_CAP_MAESTRO_LOC, 'M' }, { WDP_CAP_MAESTRO_REM, 'R' },
+    { WDP_CAP_KYBER_LOCAL, 'K' }, { WDP_CAP_HCR, 'H' }, { WDP_CAP_MP3, '3' },
+    { WDP_CAP_WLED, 'W' }, { WDP_CAP_PWM, 'P' }, { WDP_CAP_CONTROLLER, 'C' },
+  };
+  int o = 0;
+  for (unsigned i = 0; i < sizeof(CODES) / sizeof(CODES[0]); i++) {
+    if (cf & CODES[i].bit) {
+      if (o && o < max - 1) out[o++] = ' ';
+      if (o < max - 1)      out[o++] = CODES[i].code;
+    }
+  }
+  if (o == 0 && max > 1) out[o++] = '-';
+  out[o] = '\0';
+}
+
+// Spelled-out capability names for the detail view.
+static void wdpCapNames(uint16_t cf, char *out, int max) {
+  static const struct { uint16_t bit; const char *name; } NAMES[] = {
+    { WDP_CAP_MAESTRO_LOC, "Maestro host" }, { WDP_CAP_MAESTRO_REM, "Maestro remote" },
+    { WDP_CAP_KYBER_LOCAL, "Kyber local" }, { WDP_CAP_HCR, "HCR" }, { WDP_CAP_MP3, "MP3" },
+    { WDP_CAP_WLED, "WLED" }, { WDP_CAP_PWM, "PWM" }, { WDP_CAP_CONTROLLER, "Controller peer" },
+  };
+  int o = 0; out[0] = '\0';
+  for (unsigned i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+    if (!(cf & NAMES[i].bit)) continue;
+    int need = (int)strlen(NAMES[i].name) + (o ? 2 : 0);
+    if (o + need >= max - 1) break;
+    if (o) { out[o++] = ','; out[o++] = ' '; }
+    strcpy(out + o, NAMES[i].name); o += strlen(NAMES[i].name);
+  }
+  if (o == 0 && max > 5) strcpy(out, "none");
+}
+
+// Dot-joined local Maestro IDs ("-" when none).
+static void wdpMaestroStr(const WdpNeighbor &nb, char *out, int max) {
+  if (nb.maestroCount == 0) { if (max > 1) { out[0] = '-'; out[1] = '\0'; } return; }
+  int o = 0; out[0] = '\0';
+  for (int m = 0; m < nb.maestroCount && m < WDP_MAX_MAESTRO; m++) {
+    char t[8]; snprintf(t, sizeof(t), "%s%d", m ? "." : "", nb.maestroIds[m]);
+    int need = strlen(t);
+    if (o + need >= max - 1) break;
+    strcpy(out + o, t); o += need;
+  }
+}
+
+// Summary table — `show cdp neighbors` for the WCB mesh.
 static void printWdpList() {
-  Serial.println("---- WDP Neighbors ----");
+  Serial.println();
+  Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller");
+  Serial.println();
+  Serial.println("WCB   Alias             Platform    Cap           Maestros    Age    State");
+  Serial.println("----  ----------------  ----------  ------------  ----------  -----  -----");
   int count = 0;
   unsigned long now = millis();
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     WdpNeighbor &nb = wdpNeighbors[i];
     if (!nb.valid) continue;
     count++;
-    char maestro[48] = "";
-    for (int m = 0; m < nb.maestroCount && m < WDP_MAX_MAESTRO; m++) {
-      char t[8]; snprintf(t, sizeof(t), "%s%d", m ? "." : "", nb.maestroIds[m]);
-      strncat(maestro, t, sizeof(maestro) - strlen(maestro) - 1);
-    }
-    Serial.printf("[WDP:N=%d,ALIAS=%s,HW=%d,FW=%s,CAP=%04X,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
-                  nb.wcbNumber, nb.alias, nb.hwVer, nb.fwVer, nb.capFlags,
-                  maestro, (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
+    char cap[24];     wdpCapCodes(nb.capFlags, cap, sizeof(cap));
+    char maestro[24]; wdpMaestroStr(nb, maestro, sizeof(maestro));
+    char ageStr[12];  snprintf(ageStr, sizeof(ageStr), "%lus", (now - nb.lastAdvertMs) / 1000);
+    Serial.printf("%-4d  %-16.16s  %-10.10s  %-12.12s  %-10.10s  %-5s  %-5s\n",
+                  nb.wcbNumber, nb.alias[0] ? nb.alias : "-", wdpHwName(nb.hwVer),
+                  cap, maestro, ageStr, nb.confirmed ? "live" : "stale");
   }
-  Serial.printf("---- End WDP (%d neighbor%s) ----\n", count, count == 1 ? "" : "s");
+  if (count == 0) Serial.println("(no neighbors discovered yet)");
+  Serial.printf("\nTotal WDP neighbors: %d   (%cWDP,<n> for detail)\n", count, LocalFunctionIdentifier);
+}
+
+// Detail view — `show cdp neighbors detail` for one board.
+static void printWdpDetail(int wcbNum) {
+  if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT || !wdpNeighbors[wcbNum - 1].valid) {
+    Serial.printf("[WDP] no neighbor WCB%d — see %cWDP,LIST\n", wcbNum, LocalFunctionIdentifier);
+    return;
+  }
+  WdpNeighbor &nb = wdpNeighbors[wcbNum - 1];
+  char caps[128];    wdpCapNames(nb.capFlags, caps, sizeof(caps));
+  char maestro[24];  wdpMaestroStr(nb, maestro, sizeof(maestro));
+  Serial.println();
+  Serial.printf("==== WCB %d  \"%s\" ====\n", nb.wcbNumber, nb.alias[0] ? nb.alias : "(no alias)");
+  Serial.printf("  Platform    : %s (hw %d)\n", wdpHwName(nb.hwVer), nb.hwVer);
+  Serial.printf("  Firmware    : %s\n", nb.fwVer[0] ? nb.fwVer : "?");
+  Serial.printf("  Capabilities: %s  [0x%04X]\n", caps, nb.capFlags);
+  Serial.printf("  Maestros    : %s\n", maestro);
+  Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
+                nb.confirmed ? "live" : "stale");
+  Serial.println("  Interfaces  :");
+  bool any = false;
+  for (int p = 0; p < 5; p++) {
+    if (nb.portLabels[p][0]) { Serial.printf("    S%d  %s\n", p + 1, nb.portLabels[p]); any = true; }
+  }
+  if (!any) Serial.println("    (none advertised)");
+  Serial.println();
+}
+
+// Machine-readable dump (for the config tool / scripts).
+static void printWdpDump() {
+  int count = 0;
+  unsigned long now = millis();
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    WdpNeighbor &nb = wdpNeighbors[i];
+    if (!nb.valid) continue;
+    count++;
+    char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
+    Serial.printf("[WDP:N=%d,ALIAS=%s,HW=%d,FW=%s,CAP=%04X,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
+                  nb.wcbNumber, nb.alias, nb.hwVer, nb.fwVer, nb.capFlags, maestro,
+                  (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
+  }
+  Serial.printf("[WDP:END,count=%d]\n", count);
 }
 
 static void printWdpStatus() {
@@ -233,11 +359,21 @@ void processWdpCommand(const String &args) {
 
   if (au == "" || au == "LIST") { printWdpList();   return; }
   if (au == "STATUS")           { printWdpStatus(); return; }
+  if (au == "DUMP")             { printWdpDump();    return; }
   if (au == "ON")  { wdpEnabled = true;  saveWdpSettings(); Serial.println("[WDP] enabled");  return; }
   if (au == "OFF") { wdpEnabled = false; saveWdpSettings(); Serial.println("[WDP] disabled"); return; }
   if (au == "CLEAR") { memset(wdpNeighbors, 0, sizeof(wdpNeighbors)); Serial.println("[WDP] neighbor table cleared"); return; }
 
-  Serial.printf("[WDP] unknown subcommand '%s' (LIST/STATUS/ON/OFF/CLEAR)\n", a.c_str());
+  // ?WDP,DETAIL,<n>  or  ?WDP,<n>  → drill into one neighbor
+  if (au.startsWith("DETAIL")) {
+    int c = a.indexOf(',');
+    printWdpDetail(c >= 0 ? a.substring(c + 1).toInt() : 0);
+    return;
+  }
+  int n = a.toInt();
+  if (n > 0) { printWdpDetail(n); return; }
+
+  Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | ON | OFF | CLEAR)\n", a.c_str());
 }
 
 // ==================== NVS + lifecycle ====================================

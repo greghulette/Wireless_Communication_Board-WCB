@@ -20,10 +20,12 @@
 //   Table     : RAM-only, sized MAX_WCB_COUNT, indexed by (WCB number - 1).
 //               Only the WDP on/off flag persists to NVS, never the table.
 //
-//   Commands  : ?WDP,LIST    dump the neighbor table (machine-readable)
-//               ?WDP,STATUS  [WDP:en=..,proto=..,neighbors=..]
-//               ?WDP,ON|OFF  enable/disable (persisted; default ON with ETM)
-//               ?WDP,CLEAR   wipe the RAM neighbor table
+//   Commands  : ?WDP,LIST      summary table of all neighbors (CDP-style)
+//               ?WDP,<n>       detail for one neighbor (alias, caps, ports)
+//               ?WDP,STATUS    [WDP:en=..,proto=..,neighbors=..]
+//               ?WDP,DUMP      machine-readable [WDP:N=..] lines (for tools)
+//               ?WDP,ON|OFF    enable/disable (persisted; default ON with ETM)
+//               ?WDP,CLEAR     wipe the RAM neighbor table
 // -----------------------------------------------------------------------
 
 #define WDP_PROTO_VERSION 0x01
@@ -51,6 +53,7 @@ struct WdpNeighbor {
   uint16_t      capFlags;      // WDP_CAP_* bitmap
   uint8_t       maestroIds[WDP_MAX_MAESTRO];  // this board's local Maestro IDs
   uint8_t       maestroCount;
+  char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled
   unsigned long lastAdvertMs;
 };
 
