@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '06.12:36.R.JUL.2026';
+const UI_VERSION = '06.13:50.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -345,6 +345,11 @@ function updateWCBNav(count) {
       window.scrollTo({ top, behavior: 'smooth' });
     };
     nav.appendChild(btn);
+    // Re-apply this board's alias label. The button is (re)created with a bare
+    // "WCB n" caption, so without this a nav rebuild (e.g. a second board
+    // connecting → renderBoards) would silently drop every already-labeled
+    // board's alias until it happened to be refreshed by some other path.
+    updateBoardAliasUI(n);
   }
 }
 

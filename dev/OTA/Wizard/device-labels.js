@@ -16,21 +16,26 @@
 const WCB_DEVICE_LABELS = `
 Maestro
 Marcduino
-Droidnet
-Magic Panel
-Roam A Dome Home
+DroidNet
+Magic Panel(IA)
+Magic Panel(PRINTDRD)
+Roam-A-Dome
 MP3 Trigger
-HCR
+H-CR
 Stealth
 Padawan
 Shadow
 Shadow RC
 Penumbra
+Sabé
+NaviCore
 Periscope
 Uppity Spinner
 Life Form Scanner
 Leia Projector
 Saber Launcher
+Short Circuit
+ARDS/K-ARDS
 Teeces
 AstroPixels
 Rseries Logics
