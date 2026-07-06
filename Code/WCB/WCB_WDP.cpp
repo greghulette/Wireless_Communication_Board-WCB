@@ -236,6 +236,25 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
 }
 
+// ==================== Alias resolution ===================================
+// Case-insensitive alias -> WCB number over the RAM neighbor table. Returns the
+// number on a UNIQUE match, 0 if no board advertises that alias, or -1 if more
+// than one does (ambiguous — the caller tells the user to use the number). The
+// local board is intentionally excluded; the caller matches wcb_alias first.
+int wdpResolveAlias(const char *alias) {
+  if (!alias || !alias[0]) return 0;
+  String want = alias;
+  int number = 0, matches = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    const WdpNeighbor &nb = wdpNeighbors[i];
+    if (!nb.valid || nb.alias[0] == '\0') continue;
+    if (want.equalsIgnoreCase(nb.alias)) { matches++; number = nb.wcbNumber; }
+  }
+  if (matches == 0) return 0;
+  if (matches > 1)  return -1;
+  return number;
+}
+
 // ==================== Command / query ====================================
 
 // Chip family name from the HW version number.

@@ -167,7 +167,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_061350RJUL2026";
+String SoftwareVersion = "6.2.0_061434RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2902,7 +2902,7 @@ void handleMgmtETMRequest(const String &targetStr) {
 // Relay side: handle ?MGMT,PULL,<targetWCB> — send a config pull request
 void handleMgmtPullRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) {
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {   // mesh supports up to MAX_WCB_COUNT boards, not 8
     if (debugMGMT) Serial.println("[MGMT] PULL: invalid targetWCB");
     return;
   }
@@ -3217,14 +3217,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // main loop drains the queue safely on Core 1.
                 if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
                     enqueueRcJsonRelay(etmCmd);
-                    // Keep the subscription hot for the duration of an
-                    // in-flight transfer.  A multi-fragment CONFIG response
-                    // can take >1 s (ETM ACK round-trips + retries); if the
-                    // 20 s window happened to be near its edge, the tail
-                    // fragments would be dropped at the gate.  Relaying a
-                    // fragment is itself proof a host is actively pulling,
-                    // so push the deadline forward.
-                    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+                    // NB: do NOT renew the subscription here. The window is
+                    // driven SOLELY by explicit host activity — a ;w command or
+                    // the Wizard's bare-;w keep-alive. Self-renewing on the
+                    // controller's own 0.5 Hz rc_hb made the subscription
+                    // immortal, so a single ;w left USB streaming forever.
                 }
                 colorWipeStatus("ES", blue, 10);
                 return;
@@ -3480,9 +3477,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
     if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
       enqueueRcJsonRelay(receivedCmd);
-      // Keep the subscription hot during an in-flight transfer — see the
-      // matching comment in the ETM passthrough path above.
-      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+      // Do NOT renew here — the subscription is host-driven only (see the
+      // matching note in the ETM passthrough path above). Self-renewing on
+      // rc_hb made the relay perpetual after a single ;w.
     }
     colorWipeStatus("ES", blue, 10);
     return;
@@ -5039,6 +5036,21 @@ void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
 
+  // Bare ";w" (just the 'w', no target, no payload) is a SUBSCRIPTION
+  // KEEP-ALIVE: a host — the Wizard's RC Controllers panel — telling us it
+  // still wants the controller's rc_hb/rc_ch JSON mirrored to USB. Renew the
+  // ~20 s relay window and return: no routing, no "invalid target" noise. The
+  // relay no longer self-renews on inbound telemetry, so THIS (and real ;w
+  // commands) is what holds it open; when the host stops, relaying stops ~20 s
+  // later, so an idle/closed Wizard never leaves telemetry streaming to USB.
+  {
+    String ka = message; ka.trim();
+    if (ka.length() == 1) {   // dispatch guarantees it starts with 'w'/'W'
+      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+      return;
+    }
+  }
+
   // Parse the target WCB number. RULE (confirmed spec):
   //   * NO comma after the digits  -> exactly ONE digit is the target (1-9),
   //     everything from position 2 on is the payload — even if it starts
@@ -5058,18 +5070,54 @@ void processWCBMessage(const String &message){
   //   ;w13,RA                -> target 13, cmd "RA"      (multi-digit needs comma)
   //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P" (comma in payload)
   //   ;w13,;s4:cmd,with,commas -> target 13, cmd ";s4:cmd,with,commas"
-  int digitEnd = 1;
-  while (digitEnd < (int)message.length() &&
-         message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
-  if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
-      // Comma-separated form: full digit run is the target (supports 10-20).
-      targetWCB = message.substring(1, digitEnd).toInt();
-      espnow_message = message.substring(digitEnd + 1);
+  // ── Alias form: ;w<alias>,<cmd> ──────────────────────────────────────────
+  // When the character after 'w' is NOT a digit, the token up to the first
+  // comma is a board ALIAS (not a number). Resolve it to a WCB number via the
+  // WDP neighbor table, or to THIS board when it matches our own alias. Any
+  // non-numeric ;w target parsed to 0 ("invalid") before, so this adds no
+  // regression to the numeric forms. Aliases used here should start with a
+  // letter — a digit-leading name still parses as a number.
+  bool aliasForm = (message.length() > 1 &&
+                    !(message[1] >= '0' && message[1] <= '9'));
+  if (aliasForm) {
+      int    commaPos = message.indexOf(',');
+      String alias    = (commaPos >= 1) ? message.substring(1, commaPos) : String("");
+      alias.trim();
+      if (commaPos < 0 || alias.length() == 0) {
+          Serial.println("[;w] alias form: use ;w<alias>,<command>  (e.g. ;wdome,;s2test)");
+          return;
+      }
+      espnow_message = message.substring(commaPos + 1);
+      if (alias.equalsIgnoreCase(wcb_alias)) {
+          targetWCB = WCB_Number;                       // our own alias → run locally
+      } else {
+          int r = wdpResolveAlias(alias.c_str());
+          if (r == 0) {
+              Serial.printf("[;w] No board named \"%s\" is known — see %cWDP,LIST\n",
+                            alias.c_str(), LocalFunctionIdentifier);
+              return;
+          }
+          if (r < 0) {
+              Serial.printf("[;w] Alias \"%s\" is ambiguous (multiple boards) — use the number\n",
+                            alias.c_str());
+              return;
+          }
+          targetWCB = r;
+      }
   } else {
-      // Legacy no-comma form: exactly ONE digit is the target; the rest —
-      // including digits — is the payload.
-      targetWCB = message.substring(1, 2).toInt();
-      espnow_message = message.substring(2);
+      int digitEnd = 1;
+      while (digitEnd < (int)message.length() &&
+             message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
+      if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
+          // Comma-separated form: full digit run is the target (supports 10-20).
+          targetWCB = message.substring(1, digitEnd).toInt();
+          espnow_message = message.substring(digitEnd + 1);
+      } else {
+          // Legacy no-comma form: exactly ONE digit is the target; the rest —
+          // including digits — is the payload.
+          targetWCB = message.substring(1, 2).toInt();
+          espnow_message = message.substring(2);
+      }
   }
 
   // An IF cannot ride INSIDE a ;w payload: the chain splitter separates

@@ -70,6 +70,12 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *structCommand);
 // ---- Command / query -----------------------------------------------------
 void processWdpCommand(const String &args);
 
+// ---- Alias resolution (used by the ;w<alias> command router) --------------
+// Returns the WCB number for a UNIQUE alias match in the neighbor table,
+// 0 if no board advertises that alias, or -1 if it's ambiguous (>1 match).
+// The local board is NOT considered here (the caller matches wcb_alias first).
+int wdpResolveAlias(const char *alias);
+
 // ---- NVS -----------------------------------------------------------------
 void loadWdpSettings();
 void saveWdpSettings();
