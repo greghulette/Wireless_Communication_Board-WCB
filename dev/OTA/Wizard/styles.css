@@ -1058,7 +1058,9 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .etm-detail.visible { display: block; }
 
 /* ─── Toast Notifications ────────────────────────────────────── */
-.toast-container { position: fixed; top: 72px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+/* Above the splash (600) and wizard modal (500) so warnings shown at startup
+   (e.g. a stale firmware-branch override) aren't hidden behind an overlay. */
+.toast-container { position: fixed; top: 72px; right: 16px; z-index: 700; display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 10px 16px;
@@ -1069,6 +1071,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .toast.success { border-color: var(--green2); }
 .toast.error   { border-color: var(--red2); }
+.toast.warning { border-color: var(--yellow); }
 .toast.info    { border-color: var(--accent2); }
 .toast-msg     { flex: 1; }
 .toast-btn {

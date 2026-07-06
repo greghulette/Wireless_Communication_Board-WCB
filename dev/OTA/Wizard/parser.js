@@ -953,6 +953,23 @@ function evaluatePortClaims(config) {
       }
     }
   }
+
+  // Kyber/Maestro MODE reservations — mirror the firmware's device-port guards:
+  // with a local Kyber, ?WLED/?HCR/?MP3 configs are rejected on BOTH S1 and S2;
+  // with remote Maestro (NaviCore-driven), they are rejected on S1 (see the
+  // identical guards in WCB_WLED.cpp / WCB_HCR.cpp / WCB_MP3.cpp). Without this,
+  // device dropdowns offer ports the board will refuse and the push fails
+  // silently. Applied LAST with a no-clobber guard so a real claim (maestro,
+  // kyber.port, serial-map, …) always keeps its more specific type — this only
+  // fills otherwise-empty slots to keep them out of the device dropdowns.
+  if (config.kyber) {
+    const reserve = (idx) => {
+      if (!config.serialPorts[idx].claimedBy)
+        config.serialPorts[idx].claimedBy = { type: 'kyber-reserved' };
+    };
+    if (config.kyber.mode === 'local')  { reserve(0); reserve(1); }
+    if (config.kyber.mode === 'remote') { reserve(0); }
+  }
 }
 
 // ─────────────────────────────────────────────
