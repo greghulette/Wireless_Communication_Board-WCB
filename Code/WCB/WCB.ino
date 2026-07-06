@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_301521RJUN2026                                  *****////
+///*****                                          Version 6.2.0_061147RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -88,6 +88,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_MP3.h"
 #include "WCB_HCR.h"
 #include "WCB_WLED.h"
+#include "WCB_WDP.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -166,7 +167,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_301521RJUN2026";
+String SoftwareVersion = "6.2.0_061147RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -207,6 +208,9 @@ typedef struct __attribute__((packed)) {
                                   // espnow_struct_message_etm wire size as HEARTBEAT so it
                                   // routes to the ETM handler; lets a relay print "came
                                   // ONLINE" after a fast reboot that never crossed offline.
+#define PACKET_TYPE_WDP       12  // WDP discovery advert — rides the espnow_struct_message_etm
+                                  // wire size (like HEARTBEAT/ETM_BOOT); TLV identity/capability
+                                  // payload in structCommand[200]. See WCB_WDP.{h,cpp}.
 // Remote Management Packet Types
 #define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
@@ -824,6 +828,49 @@ void sendETMBootAnnounce() {
 
   esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
   if (debugETM) Serial.printf("[ETM] Boot announce sent (WCB%d)\n", WCB_Number);
+}
+
+// ─── WDP (Wireless Discovery Protocol) transport ─────────────────────────────
+// WCB_WDP owns the neighbor table + TLV payload + commands; the ETM wire struct
+// lives here, so the envelope build/broadcast and the deferred RX decode do too.
+struct WdpPktSlot { espnow_struct_message_etm pkt; };
+static QueueHandle_t wdpPktQueue = nullptr;
+
+// Wrap a WDP TLV payload in the ETM envelope and broadcast it (called by wdpTick).
+void wdpBroadcast(const uint8_t *payload, int len) {
+  espnow_struct_message_etm bp;
+  memset(&bp, 0, sizeof(bp));
+  strncpy(bp.structPassword, espnowPassword, sizeof(bp.structPassword) - 1);
+  snprintf(bp.structSenderID, sizeof(bp.structSenderID), "%d", WCB_Number);
+  snprintf(bp.structTargetID, sizeof(bp.structTargetID), "0");   // broadcast
+  bp.structCommandIncluded = 1;
+  if (len < 0) len = 0;
+  if (len > (int)sizeof(bp.structCommand)) len = sizeof(bp.structCommand);
+  memcpy(bp.structCommand, payload, len);
+  bp.structPacketType     = PACKET_TYPE_WDP;
+  bp.structSequenceNumber = 0;
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+}
+
+// Callback-side (WiFi task, Core 0): copy the raw advert into a queue. The TLV
+// decode + neighbor-table write happen in loop() (drainWdpPackets), never inline
+// — same rule as OTA/MGMT to keep the ESP-NOW receive path fast.
+void enqueueWdpPacket(const uint8_t *raw) {
+  if (!wdpPktQueue) return;
+  WdpPktSlot slot;
+  memcpy(&slot.pkt, raw, sizeof(slot.pkt));
+  xQueueSend(wdpPktQueue, &slot, 0);   // drop-if-full — periodic re-adverts recover
+}
+
+// Loop-side: decode queued adverts into the WCB_WDP neighbor table.
+void drainWdpPackets() {
+  if (!wdpPktQueue) return;
+  WdpPktSlot slot;
+  while (xQueueReceive(wdpPktQueue, &slot, 0) == pdTRUE) {
+    slot.pkt.structSenderID[sizeof(slot.pkt.structSenderID) - 1] = '\0';
+    int senderWCB = atoi(slot.pkt.structSenderID);
+    wdpOnAdvertReceived(senderWCB, (const uint8_t *)slot.pkt.structCommand);
+  }
 }
 
 void scheduleNextHeartbeat(bool isBoot) {
@@ -3057,6 +3104,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
     }
 
+    // WDP discovery advert — presence already refreshed above; decode the TLV
+    // identity/capabilities into the neighbor table off the WiFi task (loop()).
+    if (etmReceived.structPacketType == PACKET_TYPE_WDP) {
+      enqueueWdpPacket(incomingData);
+      return;
+    }
+
     if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT ||
         etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT) {
       if (debugETM) Serial.printf("[ETM] %s from WCB%d\n",
@@ -3988,6 +4042,12 @@ void processLocalCommand(const String &message) {
     // Writes a streamed image to the INACTIVE OTA slot over direct USB; the
     // ESP-NOW relay transport (Phase 2) reuses the same write core.
     if (rootUpper == "OTALOCAL") {
+        // Same suppression as the ?OTA relay path below: during a serial OTA the
+        // [OTA:ACK,...] flow-control lines share USB with the RC-JSON passthrough,
+        // and a chatty controller (NaviCore rc_hb/rc_ch) eats enough serial
+        // bandwidth to slow the ACK round-trips dramatically. Pause the relay of
+        // that telemetry while chunks are flowing (~8 s past the last command).
+        otaRelayForwardUntilMs = millis() + 8000UL;
         processOtaLocalCommand(args);
         return;
     }
@@ -4089,6 +4149,12 @@ void processLocalCommand(const String &message) {
     // --- ?WLED,... (WLED serial control config/query) ---
     if (rootUpper == "WLED") {
         configureWLED(args);
+        return;
+    }
+
+    // --- ?WDP,... (Wireless Discovery Protocol — neighbor table query) ---
+    if (rootUpper == "WDP") {
+        processWdpCommand(args);
         return;
     }
 
@@ -5711,6 +5777,8 @@ void setup() {
   loadVariables();        // Build the user-variable RAM mirror from NVS
   beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
   beginWLED();            // Bind the WLED write stream to its port (opened by normal serial init)
+  wdpPktQueue = xQueueCreate(8, sizeof(WdpPktSlot));  // received WDP adverts, decoded in loop()
+  wdpBegin();             // WDP discovery: load on/off flag, clear neighbor table, arm advert cadence
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
@@ -6007,6 +6075,7 @@ void loop() {
   drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();
   processETMHeartbeats();
+  wdpTick();               // WDP: broadcast our advert on schedule + age the neighbor table
   processETMAcksAndRetries();
   processETMChar();
   processETMLoad();
@@ -6014,6 +6083,7 @@ void loop() {
   checkConfigPullTimeout();
   drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
+  drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)

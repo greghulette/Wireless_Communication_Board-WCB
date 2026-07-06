@@ -60,6 +60,9 @@ const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listene
 const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
 const _otaInProgress = new Set(); // boards (slots) with a wireless relay OTA in flight — so the
                                   // ETM listener doesn't fire pulls that fight the OTA stream
+const _suppressedEtmEdges = new Set(); // remote boards whose ETM online/offline edge was swallowed
+                                       // during an OTA — replayed once the last OTA finishes so a
+                                       // board that rebooted mid-transfer still gets reconciled
 const MGMT_CHUNK_SIZE  = 180;   // max payload chars per ESP-NOW packet
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
 
@@ -70,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.23:15.R.JUN.2026';
+const UI_VERSION = '06.11:47.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -95,6 +98,7 @@ function runWizardInit() {
   safe(loadThemePreference,        'loadThemePreference');
   safe(initSystemConfig,           'initSystemConfig');
   safe(loadModePreference,         'loadModePreference');
+  safe(initDeviceCombobox,         'initDeviceCombobox');
   safe(initTerminalResize,         'initTerminalResize');
   safe(showSplash,                 'showSplash');
   safe(fetchLatestFirmwareVersion, 'fetchLatestFirmwareVersion');  // silent, best-effort
@@ -238,6 +242,33 @@ function splashGoConfig() {
 function loadModePreference() {
   const saved = localStorage.getItem('wcb-mode') || 'simple';
   setMode(saved, true);
+  warnStaleFwBranchOverride();
+}
+
+// The firmware branch is normally derived from the URL (see flasher.js
+// getFirmwareBranch). A localStorage 'wcb_fw_branch' override still wins on
+// non-preview URLs — deliberately, as a console-only escape hatch — but the OLD
+// Firmware Source selector UI also wrote this key, and its warning banner is
+// gone. Without this check, a leftover selection from that UI would silently
+// keep redirecting production flashes to a dev branch forever.
+//
+// Delegate to the flasher's OWN resolution so the warning can never disagree
+// with what the flasher will actually pull: on a real preview URL the flasher
+// honors the path branch (key ignored) → stay silent; otherwise ask it directly,
+// and anything non-'main' can only be a valid stale override. Persistent + above
+// the splash/wizard overlays (showToast z-index/duration) so it survives the
+// splash → wizard → flash flow, which is exactly when it matters.
+function warnStaleFwBranchOverride() {
+  try {
+    const m = location.pathname.match(/\/dev\/(.+)\/Wizard(?:\/|$)/);
+    if (m && typeof isValidFwBranch === 'function' && isValidFwBranch(m[1])) return; // honored preview branch
+    const b = (typeof getFirmwareBranch === 'function') ? getFirmwareBranch() : 'main';
+    if (b === 'main') return;
+    showToast(
+      `⚠ Firmware source is overridden to branch '${b}' — NOT released firmware. ` +
+      `To flash released firmware, run localStorage.removeItem('wcb_fw_branch') in the console and reload.`,
+      'warning', 0);   // 0 = persistent (dismiss-only) — must not vanish before the user flashes
+  } catch (_) { /* flasher helpers or localStorage unavailable — nothing to warn about */ }
 }
 
 function initSystemConfig() {
@@ -381,6 +412,102 @@ function addBoardSection(n) {
   if (wcbNumSel) populateWCBDropdown(wcbNumSel, qty, n, true);
 }
 
+// ─── Device-label combobox (per-port label fields) ────────────────
+// One shared, type-to-filter dropdown reused across every serial-port label
+// input, so a droid device can be named from the standard vocabulary
+// (device-labels.js → WCB_DEVICE_LABELS) while free text stays fully allowed.
+// The input stays an ordinary text field — this only augments it, and a pick
+// fires the same 'change' path a manual edit does (→ onSerialFieldChange).
+// A single body-level popup (not a per-input one) avoids serial-table clipping
+// and works for boards/ports added later via event delegation.
+let _devPop = null, _devInput = null, _devOpts = [], _devActive = -1;
+
+function _devLabels() {
+  return (typeof WCB_DEVICE_LABELS !== 'undefined' && Array.isArray(WCB_DEVICE_LABELS)) ? WCB_DEVICE_LABELS : [];
+}
+
+function initDeviceCombobox() {
+  if (_devPop || !_devLabels().length) return;
+  const pop = document.createElement('div');
+  pop.id = 'dev-combo-pop';
+  pop.setAttribute('role', 'listbox');
+  pop.style.cssText =
+    'position:fixed; z-index:2000; display:none; max-height:240px; overflow-y:auto;' +
+    'background:var(--bg3); border:1px solid var(--border2); border-radius:var(--radius);' +
+    'box-shadow:0 6px 22px rgba(0,0,0,0.45); font-size:13px; padding:4px;';
+  document.body.appendChild(pop);
+  _devPop = pop;
+
+  // Open on focus / typing of any port-label input (delegated, so later-rendered
+  // boards are covered). Skip disabled inputs — a claimed port's label is locked.
+  document.addEventListener('focusin', (e) => {
+    const t = e.target;
+    if (t && t.classList && t.classList.contains('port-label-input') && !t.disabled) {
+      _devInput = t;
+      _devRender();
+    }
+  });
+  document.addEventListener('input', (e) => { if (e.target === _devInput) _devRender(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.target !== _devInput || !_devPop || _devPop.style.display === 'none') return;
+    if (e.key === 'ArrowDown')    { e.preventDefault(); _devSetActive(Math.min(_devActive + 1, _devOpts.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _devSetActive(Math.max(_devActive - 1, 0)); }
+    else if (e.key === 'Enter')   { if (_devActive >= 0) { e.preventDefault(); _devCommit(_devOpts[_devActive].textContent); } else _devHide(); }
+    else if (e.key === 'Escape')  { _devHide(); }
+  });
+  document.addEventListener('focusout', (e) => { if (e.target === _devInput) setTimeout(_devHide, 150); });
+  // A fixed popup can't track the input while the PAGE scrolls, so close it —
+  // but NOT when the scroll is the list's own internal scroll (capture phase
+  // catches both; the list stays put since it's position:fixed).
+  window.addEventListener('scroll', (e) => {
+    if (_devPop && (e.target === _devPop || (e.target.nodeType === 1 && _devPop.contains(e.target)))) return;
+    _devHide();
+  }, true);
+  window.addEventListener('resize', _devHide);
+}
+
+function _devRender() {
+  const input = _devInput;
+  if (!input || !_devPop) return;
+  const q = (input.value || '').trim().toLowerCase();
+  const matches = _devLabels().filter(t => t.toLowerCase().includes(q));
+  _devPop.innerHTML = ''; _devOpts = []; _devActive = -1;
+  if (!matches.length) { _devHide(); return; }
+  for (const t of matches) {
+    const el = document.createElement('div');
+    el.setAttribute('role', 'option');
+    el.textContent = t;
+    el.style.cssText = 'padding:6px 10px; cursor:pointer; border-radius:4px; color:var(--text); white-space:nowrap;';
+    // mousedown (not click) + preventDefault so the input never blurs mid-pick.
+    el.addEventListener('mousedown', (ev) => { ev.preventDefault(); _devCommit(t); });
+    el.addEventListener('mouseenter', () => _devSetActive(_devOpts.indexOf(el)));
+    _devPop.appendChild(el);
+    _devOpts.push(el);
+  }
+  const r = input.getBoundingClientRect();
+  _devPop.style.left     = Math.round(r.left) + 'px';
+  _devPop.style.top      = Math.round(r.bottom + 2) + 'px';
+  _devPop.style.minWidth = Math.max(160, Math.round(r.width)) + 'px';
+  _devPop.style.display  = 'block';
+}
+
+function _devSetActive(i) {
+  _devOpts.forEach((el, ix) => { el.style.background = (ix === i) ? 'var(--bg4)' : 'transparent'; });
+  _devActive = i;
+  if (i >= 0) _devOpts[i].scrollIntoView({ block: 'nearest' });
+}
+
+function _devCommit(val) {
+  const input = _devInput;
+  if (!input) return;
+  const max = input.maxLength > 0 ? input.maxLength : 30;
+  input.value = (val || '').slice(0, max);
+  _devHide();
+  input.dispatchEvent(new Event('change', { bubbles: true }));  // same path as a manual edit
+}
+
+function _devHide() { if (_devPop) _devPop.style.display = 'none'; _devActive = -1; }
+
 // ─── Serial Table ─────────────────────────────────────────────────
 function renderSerialTable(n) {
   const tbody = document.getElementById(`b${n}-serial-tbody`);
@@ -406,8 +533,8 @@ function renderSerialTable(n) {
         <input type="checkbox" id="b${n}-s${p}-bcout" checked onchange="onSerialFieldChange(${n})">
         <span class="toggle-track"></span>
       </label></td>
-      <td><input type="text" id="b${n}-s${p}-label" placeholder="Label…" maxlength="30"
-        onchange="onSerialFieldChange(${n})" spellcheck="false"></td>
+      <td><input type="text" id="b${n}-s${p}-label" class="port-label-input" placeholder="Label…" maxlength="30"
+        onchange="onSerialFieldChange(${n})" spellcheck="false" autocomplete="off"></td>
       <td><span class="claimed-note" id="b${n}-s${p}-claim"></span></td>
     `;
     tbody.appendChild(row);
@@ -478,6 +605,14 @@ function updatePortClaimUI(n) {
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
       label.disabled = true;
+    } else if (claim.type === 'kyber-reserved') {
+      // Mode-level reservation (Kyber local / remote Maestro): the firmware
+      // refuses WLED/HCR/MP3 configs on this port, so it's hidden from those
+      // dropdowns — but the port itself stays user-configurable (soft claim).
+      claimNote.textContent = 'Reserved: Kyber/Maestro mode';
+      baudSel.disabled = false; label.disabled = false;
+      bcin.disabled  = false;  bcin.checked  = config.serialPorts[p - 1].broadcastIn  ?? true;
+      bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
     } else if (claim.type === 'serial-map') {
       const destStr = (claim.destinations || [])
         .map(d => d.wcbNumber > 0 ? `W${d.wcbNumber} S${d.port}` : `S${d.port}`)
@@ -1299,7 +1434,12 @@ async function boardOtaRelay(n) {
   const family     = binaryType === 'ESP32S3' ? 1 : 0;
 
   try {
-    _otaInProgress.add(n);   // pause ETM-listener pulls so they don't fight the OTA stream
+    // Pause ETM-listener pulls so they don't fight the OTA stream. Register BOTH
+    // keys: the ETM listener parses the WCB NUMBER off the relay's serial line,
+    // while everything else here is keyed by board SLOT — they're usually equal
+    // but not guaranteed to be.
+    _otaInProgress.add(n);
+    if (targetWcb !== n) _otaInProgress.add(targetWcb);
     if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
     setFlashUI(n, true);
     setFlashStatus(n, `Loading ${binaryType} firmware…`);
@@ -1371,7 +1511,11 @@ async function boardOtaRelay(n) {
     // remoteBoardPull re-arms the remote terminal (RTERM,START) on success and
     // stops retrying the moment the config comes back. If the boot-announce path
     // does fire first, its pull wins and this one is deduped — no double work.
-    remoteRelayForBoard[n] = relayN;
+    // setRemoteConnected (not a raw mapping write) so that if the relay's reader
+    // blipped mid-OTA (clearRemoteBoardsForRelay tore down the mapping, remote
+    // UI, and ETM listener) the WHOLE remote link is rebuilt, not just the map.
+    // It is idempotent when nothing was torn down.
+    setRemoteConnected(n, relayN);
     _pullingBoards.delete(n);
     setTimeout(() => {
       if (boardConnections[relayN]?.isConnected()) {
@@ -1384,7 +1528,27 @@ async function boardOtaRelay(n) {
     showToast(`Wireless OTA failed: ${e.message}`, 'error');
     try { await relayConn.send(cmd(`ABORT,${targetWcb},${session}`) + '\r'); } catch (_) {}
   } finally {
-    _otaInProgress.delete(n);   // re-enable ETM-listener pulls now the OTA is done
+    _otaInProgress.delete(n);          // re-enable ETM-listener pulls now the OTA is done
+    _otaInProgress.delete(targetWcb);
+    // Replay ETM edges swallowed during the transfer — but only once the LAST
+    // concurrent OTA finishes (so overlapping OTAs don't fight a still-running
+    // stream). Skip this OTA's own target (it already gets a dedicated delayed
+    // re-pull above); re-resolve the relay live (it may have been torn down by
+    // clearRemoteBoardsForRelay mid-OTA); and clear any stale in-flight pull so
+    // the reconciliation isn't deduped into a no-op.
+    if (_otaInProgress.size === 0 && _suppressedEtmEdges.size > 0) {
+      const boards = [..._suppressedEtmEdges];
+      _suppressedEtmEdges.clear();
+      for (const bn of boards) {
+        if (bn === n || bn === targetWcb) continue;
+        const r = remoteRelayForBoard[bn];
+        if (!r || !boardConnections[r]?.isConnected()) continue;
+        termLog(r, `[ETM] reconciling WCB${bn} after OTA (edge deferred during transfer)…`, 'sys');
+        _pullingBoards.delete(bn);
+        remoteBoardPull(r, bn);
+        startRemoteTermSession(r, bn);
+      }
+    }
     setFlashUI(n, false);
     if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
   }
@@ -1949,16 +2113,18 @@ function syncHCRToConfig(n) {
 }
 
 // ─── WLED (serial lighting) ───────────────────────────────────────
-// Mirrors the HCR device pattern. WLED speaks JSON at 115200 and S3-S5 are
-// software serial (unreliable above 9600), so the port picker offers the
-// hardware ports S1/S2 only — matching the firmware's S1/S2-only guard.
+// Mirrors the HCR device pattern. WLED speaks JSON at 115200, so the picker
+// offers the hardware ports S1/S2 (the firmware rejects WLED above 9600 baud on
+// the software-serial ports S3-S5). A port CLI-configured on S3-S5 @9600 is
+// still preserved in the dropdown so a pulled config round-trips instead of
+// collapsing to '' and getting wiped by a spurious WLED,CLEAR on the next push.
 function updateWLEDPortDropdown(n) {
   const portSel = document.getElementById(`b${n}-wled-port`);
   if (!portSel) return;
   const config      = boardConfigs[n];
   const currentPort = config?.wled?.port;
   portSel.innerHTML = '';
-  for (let p = 1; p <= 2; p++) {   // hardware serial only
+  for (let p = 1; p <= 2; p++) {   // hardware serial — the normal 115200 case
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
     if (!claim || claim.type === 'wled') {
       const opt = document.createElement('option');
@@ -1966,6 +2132,40 @@ function updateWLEDPortDropdown(n) {
       opt.textContent = `Serial ${p}`;
       if (p === currentPort) opt.selected = true;
       portSel.appendChild(opt);
+    }
+  }
+  // Preserve a CLI-configured software-serial port so it survives a round-trip.
+  if (currentPort >= 3 && currentPort <= 5) {
+    const opt = document.createElement('option');
+    opt.value = currentPort;
+    opt.textContent = `Serial ${currentPort} (software — CLI-set)`;
+    opt.selected = true;
+    portSel.appendChild(opt);
+  }
+}
+
+// Release a WLED-claimed serial port, mirroring the firmware clearWLEDConfig
+// side effects (re-enable broadcast both ways; optionally reset baud; drop the
+// 'WLED' label) so the UI never lies about a port WLED no longer owns. Writes
+// the DOM baud/label too, since syncSerialUIToConfig re-reads those at push time
+// and would otherwise clobber the config change before the diff runs.
+function _releaseWLEDPort(n, resetBaud) {
+  const config = boardConfigs[n];
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    const port = config.serialPorts[i];
+    if (port.claimedBy?.type !== 'wled') continue;
+    port.claimedBy    = null;
+    port.broadcastIn  = true;
+    port.broadcastOut = true;
+    if (resetBaud) {
+      port.baud = 9600;
+      const baudDom = document.getElementById(`b${n}-s${i + 1}-baud`);
+      if (baudDom) baudDom.value = '9600';
+    }
+    if (port.label === 'WLED') {
+      port.label = '';
+      const labelDom = document.getElementById(`b${n}-s${i + 1}-label`);
+      if (labelDom) labelDom.value = '';
     }
   }
 }
@@ -1981,9 +2181,8 @@ function onWLEDChange(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'wled') port.claimedBy = null;
-  }
+  // Disable (or re-enable) releases the old port with full CLEAR side effects.
+  _releaseWLEDPort(n, true);
 
   config.wled.enabled = isLocal;
   if (!isLocal) config.wled.port = null;
@@ -1991,8 +2190,28 @@ function onWLEDChange(n) {
   updateWLEDPortDropdown(n);
 
   if (isLocal) {
-    const portVal = parseInt(document.getElementById(`b${n}-wled-port`)?.value);
-    if (portVal >= 1 && portVal <= 2) {
+    const portSel = document.getElementById(`b${n}-wled-port`);
+    if (!portSel || portSel.options.length === 0) {
+      // No hardware port free — the firmware would reject the push. Refuse the
+      // enable outright instead of leaving an enabled/port-null state that emits
+      // a silent WLED,CLEAR and (on a remote board) bakes into the baseline.
+      showToast('No free hardware port (S1/S2) for WLED — free a Kyber/Maestro/MP3/HCR port first', 'error');
+      config.wled.enabled = false;
+      config.wled.port    = null;
+      const noneRadio = document.querySelector(`input[name="b${n}-wled"][value="none"]`);
+      if (noneRadio) noneRadio.checked = true;
+      ['port', 'baud'].forEach(id => {
+        const el = document.getElementById(`b${n}-wled-${id}-wrap`);
+        if (el) el.style.display = 'none';
+      });
+      WCBParser.evaluatePortClaims(config);
+      updatePortClaimUI(n);
+      updateWLEDSectionUI(n);
+      onBoardFieldChange(n);
+      return;
+    }
+    const portVal = parseInt(portSel.value);
+    if (portVal >= 1 && portVal <= 5) {
       config.wled.port = portVal;
       config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
     }
@@ -2009,16 +2228,12 @@ function onWLEDPortChange(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  for (const port of config.serialPorts) {
-    if (port.claimedBy?.type === 'wled') {
-      port.claimedBy    = null;
-      port.broadcastIn  = true;
-      port.broadcastOut = true;
-    }
-  }
+  // Moving ports: release the old one (drop label + restore broadcast) but keep
+  // its baud — a move doesn't reset baud, matching firmware wledReservePort.
+  _releaseWLEDPort(n, false);
 
   const portVal = parseInt(document.getElementById(`b${n}-wled-port`)?.value);
-  if (portVal >= 1 && portVal <= 2) {
+  if (portVal >= 1 && portVal <= 5) {
     config.wled.port = portVal;
     config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
   }
@@ -2042,10 +2257,16 @@ function syncWLEDToConfig(n) {
   const mode = document.querySelector(`input[name="b${n}-wled"]:checked`)?.value ?? 'none';
   config.wled.enabled = mode === 'local';
   if (config.wled.enabled) {
-    config.wled.port = parseInt(document.getElementById(`b${n}-wled-port`)?.value) || null;
-    config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || 115200;
-    // Keep the serial port baud in sync so ?BAUD is emitted consistently.
-    if (config.wled.port >= 1 && config.wled.port <= 5) {
+    // Fall back to the existing configured port/baud if the <select> has no
+    // value, so we never emit a destructive WLED,CLEAR for a board that still
+    // has WLED (e.g. a CLI-set S3-5 port, or all hardware ports momentarily
+    // claimed). An enabled-but-no-port state can't push meaningfully → disable.
+    config.wled.port = parseInt(document.getElementById(`b${n}-wled-port`)?.value) || config.wled.port || null;
+    config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || config.wled.baud || 115200;
+    if (!config.wled.port) {
+      config.wled.enabled = false;
+    } else if (config.wled.port >= 1 && config.wled.port <= 5) {
+      // Keep the serial port baud in sync so ?BAUD is emitted consistently.
       config.serialPorts[config.wled.port - 1].baud = config.wled.baud;
     }
   } else {
@@ -2108,7 +2329,7 @@ function syncSerialUIToConfig(n) {
     // so reading them back would corrupt the config with spurious BCAST,OFF commands.
     // serial-map is a soft claim — the toggles remain live and should be synced normally.
     const claimType = config.serialPorts[p - 1].claimedBy?.type;
-    const hardClaim = claimType && claimType !== 'serial-map';
+    const hardClaim = claimType && claimType !== 'serial-map' && claimType !== 'kyber-reserved';
     if (!hardClaim) {
       config.serialPorts[p - 1].broadcastIn  = document.getElementById(`b${n}-s${p}-bcin`)?.checked ?? true;
       config.serialPorts[p - 1].broadcastOut = document.getElementById(`b${n}-s${p}-bcout`)?.checked ?? true;
@@ -5985,7 +6206,15 @@ function installEtmListener(relayN) {
     const offlineMatch = line.match(/\[ETM\] WCB(\d+) went OFFLINE/);
     if (onlineMatch) {
       const bn = parseInt(onlineMatch[1]);
-      if (_otaInProgress.has(bn)) return;   // OTA owns this board's state right now
+      // Any in-flight wireless OTA owns the relay link: a config pull triggered
+      // here (even for a DIFFERENT board) would fight the OTA stream for the
+      // same relay USB bandwidth + ESP-NOW airtime. DEFER the edge (record it)
+      // rather than drop it — a board that reboots mid-OTA still gets reconciled
+      // when the transfer finishes (ETM edges are one-shot; nothing replays them).
+      if (_otaInProgress.size > 0) {
+        if (remoteRelayForBoard[bn] === relayN) _suppressedEtmEdges.add(bn);
+        return;
+      }
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.add('connected');
         // Board announced itself — pull fresh config to confirm reachability and update state
@@ -6001,7 +6230,12 @@ function installEtmListener(relayN) {
       }
     } else if (offlineMatch) {
       const bn = parseInt(offlineMatch[1]);
-      if (_otaInProgress.has(bn)) return;   // don't fire pulls that fight the OTA stream
+      // Offline edges are EXPECTED noise while an OTA saturates the channel —
+      // defer (record) rather than toast/badge/pull until the transfer finishes.
+      if (_otaInProgress.size > 0) {
+        if (remoteRelayForBoard[bn] === relayN) _suppressedEtmEdges.add(bn);
+        return;
+      }
       if (remoteRelayForBoard[bn] === relayN) {
         document.getElementById(`b${bn}-dot`)?.classList.remove('connected');
         // Guard: don't stack pulls if a verification is already running
@@ -7384,9 +7618,10 @@ function showToast(message, type = 'info', duration = 3500) {
   const container = document.getElementById('toast-container');
   const toast     = document.createElement('div');
   toast.className = `toast ${type}`;
-  const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ';
+  const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠' : 'ℹ';
 
-  // Error toasts stay longer; all toasts get copy + dismiss buttons
+  // Error toasts stay longer; all toasts get copy + dismiss buttons.
+  // A duration of 0 (or non-finite) means persistent — dismiss-only.
   const effectiveDuration = type === 'error' ? Math.max(duration, 12000) : duration;
 
   const copySvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2H3.5A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>`;
@@ -7407,7 +7642,11 @@ function showToast(message, type = 'info', duration = 3500) {
   toast.querySelector('.toast-dismiss').addEventListener('click', () => toast.remove());
 
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), effectiveDuration);
+  // Only auto-remove for a finite, positive duration — 0/Infinity = persistent.
+  // (setTimeout coerces Infinity to 0, which would remove it immediately.)
+  if (Number.isFinite(effectiveDuration) && effectiveDuration > 0) {
+    setTimeout(() => toast.remove(), effectiveDuration);
+  }
   return toast;
 }
 

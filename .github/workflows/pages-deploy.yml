@@ -41,9 +41,15 @@ permissions:
   contents: write       # push to the gh-pages branch
 
 concurrency:
-  # Constant group (NOT per-branch) so concurrent deploys from different branches
-  # serialize instead of racing on gh-pages. Queue, don't cancel.
-  group: gh-pages-deploy
+  # Per-branch group. A constant group would serialize all branches, but GitHub
+  # keeps at most ONE pending run per group — so pushing branch B while branch A's
+  # deploy is running AND another run is queued CANCELS the queued run (silently
+  # skipping e.g. a production main deploy). Per-branch groups keep each branch's
+  # latest deploy alive; cross-branch pushes to gh-pages may race, which the
+  # fetch+rebase retry loop below already handles (each run edits only its own
+  # slice of the tree, so rebases never conflict). Same-branch rapid pushes
+  # supersede older pending runs — fine, the newest deploys the newest state.
+  group: gh-pages-deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
