@@ -1034,7 +1034,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 .terminal-pane-output {
   flex: 1; overflow-y: auto; padding: 6px 10px;
-  font-size: 12px; line-height: 1.7; background: var(--bg);
+  font-family: var(--mono); font-size: 12px; line-height: 1.7; background: var(--bg);
+  /* Preserve the firmware's own spacing (aligned tables like ?WDP,LIST, ?HELP,
+     backup dumps) — default 'normal' collapses runs of spaces and mangles them.
+     pre-wrap keeps the padding; word-break wraps a rare long unbroken token. */
+  white-space: pre-wrap; word-break: break-word;
 }
 .terminal-line-in  { color: var(--accent); }
 .terminal-line-in::before { content: '> '; color: var(--text3); }
