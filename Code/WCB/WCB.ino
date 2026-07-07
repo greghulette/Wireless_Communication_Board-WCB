@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_071334RJUL2026                                  *****////
+///*****                                          Version 6.2.0_071433RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -135,6 +135,7 @@ int Default_WCB_Quantity = 1;                                       // Default s
 // Special peer: when enabled, WCB_SPECIAL_PEER_ID is always registered as a peer
 // regardless of Default_WCB_Quantity (for future use)
 bool specialPeerEnabled = false;  // Controlled via ?SPECIAL,ON/OFF — saved to preferences
+void enableControllerPeer(uint8_t id);   // enable + persist + live-register the controller (special) peer
 
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
@@ -167,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_071334RJUL2026";
+String SoftwareVersion = "6.2.0_071433RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4091,15 +4092,16 @@ void processLocalCommand(const String &message) {
         if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
             // ?CONTROLLER,ON  or  ?CONTROLLER,ON,<id>  (controller peer ID; default 20)
             int ci = argsUpper.indexOf(',');
+            uint8_t id = WCB_SPECIAL_PEER_ID;
             if (ci >= 0) {
                 int newId = argsUpper.substring(ci + 1).toInt();
                 if (newId < 1 || newId > 20) {
                     Serial.printf("Invalid controller peer ID %d. Valid range: 1-20.\n", newId);
                     return;
                 }
-                saveSpecialPeerIDToPreferences((uint8_t)newId);
+                id = (uint8_t)newId;
             }
-            saveSpecialPeerPreferences(true);
+            enableControllerPeer(id);   // persists + registers the peer live (no reboot)
         } else if (argsUpper == "OFF") {
             saveSpecialPeerPreferences(false);
         } else {
@@ -5781,6 +5783,27 @@ static void bootGuardDisarm() {
     esp_timer_stop(_bootGuardTimer);
     esp_timer_delete(_bootGuardTimer);
     _bootGuardTimer = nullptr;
+  }
+}
+
+// Enable the controller (special) peer at `id`: persist it AND register the
+// ESP-NOW peer LIVE, so it takes effect immediately without a reboot. Shared by
+// the ?CONTROLLER,ON command and by WDP auto-config (hearing a NaviCore/Sabé
+// announce). Idempotent — safe to call repeatedly.
+void enableControllerPeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return;
+  if (WCB_SPECIAL_PEER_ID != id) saveSpecialPeerIDToPreferences(id);   // sets var + persists
+  if (!specialPeerEnabled)       saveSpecialPeerPreferences(true);     // sets var + persists
+  // Register the out-of-band peer live (in-band 1..quantity peers are already
+  // registered at boot). Guarded so we never add ourselves or double-add.
+  if (id != WCB_Number && id > Default_WCB_Quantity &&
+      !esp_now_is_peer_exist(WCBMacAddresses[id - 1])) {
+    esp_now_peer_info_t sp = {};
+    memcpy(sp.peer_addr, WCBMacAddresses[id - 1], 6);
+    sp.channel = 0;
+    sp.encrypt = false;
+    if (esp_now_add_peer(&sp) == ESP_OK)
+      Serial.printf("Controller peer WCB%d registered (live).\n", id);
   }
 }
 

@@ -27,6 +27,8 @@ extern Preferences preferences;
 // The ETM wire struct lives in WCB.ino, so the envelope build + broadcast do
 // too — this module just hands it a ready TLV payload.
 extern void wdpBroadcast(const uint8_t *payload, int len);
+// Auto-config action: enable this board's controller (special) peer, live.
+extern void enableControllerPeer(uint8_t id);
 
 // ---- Module state --------------------------------------------------------
 bool wdpEnabled = true;
@@ -183,6 +185,16 @@ void wdpTick() {
 // ==================== Advert receive (decode into table) =================
 // Called from drainWdpPackets() in WCB.ino (loop context — Serial is safe here).
 
+// A device type whose announce should auto-enable this board's controller
+// (special) peer. Case-insensitive; \xC3\xA9 is the UTF-8 'é' so both the
+// accented ("Sabé") and plain ("Sabe") spellings match.
+static bool wdpIsControllerType(const char *type) {
+  static const char *CONTROLLERS[] = { "NaviCore", "Sab\xC3\xA9", "Sabe" };
+  for (unsigned i = 0; i < sizeof(CONTROLLERS) / sizeof(CONTROLLERS[0]); i++)
+    if (String(type).equalsIgnoreCase(CONTROLLERS[i])) return true;
+  return false;
+}
+
 void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   if (!wdpEnabled) return;
   if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
@@ -251,6 +263,18 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   }
   if (!wasValid)
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
+
+  // ---- Auto-config: a newly-learned controller device enables our controller
+  // (special) peer, pointed at that device's ID — the same effect as
+  // ?CONTROLLER,ON,<id>, registered live. Gated on !wasValid so it fires once
+  // per learn and never re-fights a manual ?CONTROLLER,OFF (which leaves the
+  // neighbor 'valid'). Safe: it only registers a peer + tracks heartbeats.
+  if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias) &&
+      !(specialPeerEnabled && WCB_SPECIAL_PEER_ID == (uint8_t)senderWCB)) {
+    Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
+                  nb.alias, senderWCB);
+    enableControllerPeer((uint8_t)senderWCB);
+  }
 }
 
 // ==================== Alias resolution ===================================

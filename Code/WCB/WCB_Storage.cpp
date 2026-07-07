@@ -403,7 +403,7 @@ void saveSpecialPeerPreferences(bool enabled) {
     preferences.putBool("special_peer", enabled);
     preferences.end();
     specialPeerEnabled = enabled;
-    Serial.printf("Special peer (ID %d) %s. Reboot to apply peer registration.\n",
+    Serial.printf("Controller peer (ID %d) %s.\n",
                   WCB_SPECIAL_PEER_ID, enabled ? "ENABLED" : "DISABLED");
 }
 
@@ -425,7 +425,7 @@ void saveSpecialPeerIDToPreferences(uint8_t id) {
     preferences.putUChar("special_peer_id", id);
     preferences.end();
     WCB_SPECIAL_PEER_ID = id;
-    Serial.printf("Special peer ID set to %d. Reboot to apply peer registration.\n", id);
+    Serial.printf("Controller peer ID set to %d.\n", id);
 }
 
 // Save the WCB quantity to preferences
