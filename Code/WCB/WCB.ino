@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_071433RJUL2026                                  *****////
+///*****                                          Version 6.2.0_071459RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_071433RJUL2026";
+String SoftwareVersion = "6.2.0_071459RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3216,7 +3216,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // Serial.println here directly — we're on the WiFi task
                 // (Core 0) and Serial isn't atomic across cores.  The
                 // main loop drains the queue safely on Core 1.
-                if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
+                // Skip rc_ch (the controller's high-rate channel/stick stream):
+                // nothing on the config-tool side consumes it and it floods USB.
+                // rc_hb / rc_trig / rc_mode still pass for the RC Controllers panel.
+                if (rcJsonRelaySubscribed() && !otaRelayForwarding() &&
+                    etmCmd.indexOf("\"rc_ch\"") < 0) {
                     enqueueRcJsonRelay(etmCmd);
                     // NB: do NOT renew the subscription here. The window is
                     // driven SOLELY by explicit host activity — a ;w command or
@@ -3476,7 +3480,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // actively using us as a WCB bridge (see declaration near top of file).
   // Uses the relay queue + main-loop drain pattern for cross-core safety.
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
+    // Skip rc_ch (high-rate channel/stick stream) — unconsumed by the config
+    // tool and it floods USB; rc_hb / rc_trig / rc_mode still pass for the panel.
+    if (rcJsonRelaySubscribed() && !otaRelayForwarding() &&
+        receivedCmd.indexOf("\"rc_ch\"") < 0) {
       enqueueRcJsonRelay(receivedCmd);
       // Do NOT renew here — the subscription is host-driven only (see the
       // matching note in the ETM passthrough path above). Self-renewing on
