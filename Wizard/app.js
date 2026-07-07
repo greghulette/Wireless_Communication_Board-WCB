@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '06.14:35.R.JUL.2026';
+const UI_VERSION = '07.15:12.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -10579,24 +10579,14 @@ function _renderRcDevices() {
 // disappear without needing a new heartbeat to drive the GC sweep.
 setInterval(() => { if (_rcOnlineMap.size > 0) _renderRcDevices(); }, 1000);
 
-// ── RC-telemetry subscription keep-alive ────────────────────────────────────
-// The firmware relays the controller's rc_hb/rc_ch JSON to USB only while a
-// host holds a subscription — opened by a ;w command and expiring ~20 s later
-// (the firmware no longer self-renews it on inbound telemetry). The RC panel is
-// passive, so WE hold that subscription open: send a bare ";w" — a
-// subscribe-only no-op the firmware answers silently — to every connected board
-// every 10 s (half the window, so one dropped keep-alive is harmless). It stops
-// the instant boards disconnect, so the board quits relaying ~20 s later; an
-// idle/closed Wizard never leaves telemetry streaming to USB. Skipped while an
-// OTA or config pull is in flight so we never inject into that byte stream.
-setInterval(() => {
-  if (_otaInProgress.size > 0 || _pullingBoards.size > 0) return;
-  for (const [slot, conn] of Object.entries(boardConnections)) {
-    if (!conn?.isConnected()) continue;
-    const cc = boardConfigs[slot]?.cmdChar || boardBootChars[slot]?.cmdChar || ';';
-    conn.send(`${cc}w\r`).catch(() => {});
-  }
-}, 10000);
+// ── RC-telemetry relay: ON-DEMAND, not always-on ────────────────────────────
+// We deliberately do NOT auto-subscribe the firmware's RC-JSON relay. It's
+// opened only by an actual ;w bridge command (Via-WCB mode) and expires ~20 s
+// after the last one, so a board that isn't being actively driven never streams
+// rc_hb/rc_trig/rc_mode to USB — the terminal stays quiet by default. The RC
+// Controllers panel therefore populates while you're bridging and goes stale
+// otherwise; if we ever want always-on monitoring it should be an explicit,
+// user-toggled opt-in, not a silent background keep-alive.
 
 // "Edit Config Tool URL" link handler — small prompt to override the
 // default path.  Stored in localStorage so it survives reloads.
