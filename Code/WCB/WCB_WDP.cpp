@@ -49,6 +49,12 @@ static unsigned long wdpNextAdvertMs = 0;
 #define WDP_TLV_MAESTRO  0x06
 #define WDP_TLV_PORTLABEL 0x09   // [port(1)][label bytes] — one TLV per labeled serial port
 #define WDP_TLV_CTRLID   0x0A    // [id(1)] — controller (special-peer) ID; sent only when linked
+// ---- Device-identity TLVs (shared with WDP-DA + the WCB_Client library) ----
+// A WCB_Client device advertises these instead of the WCB-specific TLVs above.
+// Presence of DEVTYPE marks the sender as a client device, not a WCB.
+#define WDP_TLV_DEVTYPE  0x0B    // string — canonical device type name (from the vocabulary)
+#define WDP_TLV_HWREV    0x0C    // string — hardware revision (distinct from numeric HWVER)
+#define WDP_TLV_CAPTAGS  0x0D    // string — space-separated capability tags (optional)
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -213,6 +219,17 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       case WDP_TLV_CTRLID:
         if (len >= 1) nb.ctrlId = val[0];
         break;
+      // ---- Client-device identity (WCB_Client) ----------------------------
+      case WDP_TLV_DEVTYPE: {   // device type name doubles as the neighbor's alias
+        int L = len > 24 ? 24 : len; memcpy(nb.alias, val, L); nb.alias[L] = '\0';
+        nb.isClient = true; break;
+      }
+      case WDP_TLV_HWREV: {
+        int L = len > 15 ? 15 : len; memcpy(nb.hwRev, val, L); nb.hwRev[L] = '\0'; break;
+      }
+      case WDP_TLV_CAPTAGS: {
+        int L = len > 48 ? 48 : len; memcpy(nb.capTags, val, L); nb.capTags[L] = '\0'; break;
+      }
       case WDP_TLV_MAESTRO: {
         int L = len > WDP_MAX_MAESTRO ? WDP_MAX_MAESTRO : len;
         memcpy(nb.maestroIds, val, L); nb.maestroCount = (uint8_t)L; break;
@@ -327,11 +344,19 @@ static void printWdpList() {
     WdpNeighbor &nb = wdpNeighbors[i];
     if (!nb.valid) continue;
     count++;
-    char cap[24];     wdpCapCodes(nb.capFlags, cap, sizeof(cap));
-    char maestro[24]; wdpMaestroStr(nb, maestro, sizeof(maestro));
+    char cap[24]; char maestro[24];
+    const char *platform;
+    if (nb.isClient) {                       // client device — no WCB serial-port facts
+      platform = "client";
+      strcpy(cap, "-"); strcpy(maestro, "-");
+    } else {
+      platform = wdpHwName(nb.hwVer);
+      wdpCapCodes(nb.capFlags, cap, sizeof(cap));
+      wdpMaestroStr(nb, maestro, sizeof(maestro));
+    }
     char ageStr[12];  snprintf(ageStr, sizeof(ageStr), "%lus", (now - nb.lastAdvertMs) / 1000);
     Serial.printf("%-4d  %-16.16s  %-10.10s  %-12.12s  %-10.10s  %-5s  %-5s\n",
-                  nb.wcbNumber, nb.alias[0] ? nb.alias : "-", wdpHwName(nb.hwVer),
+                  nb.wcbNumber, nb.alias[0] ? nb.alias : "-", platform,
                   cap, maestro, ageStr, nb.confirmed ? "live" : "stale");
   }
   if (count == 0) Serial.println("(no neighbors discovered yet)");
@@ -345,9 +370,24 @@ static void printWdpDetail(int wcbNum) {
     return;
   }
   WdpNeighbor &nb = wdpNeighbors[wcbNum - 1];
+  Serial.println();
+
+  // ---- Client device (WCB_Client) — device-style detail --------------------
+  if (nb.isClient) {
+    Serial.printf("==== Device %d  \"%s\" ====\n", nb.wcbNumber, nb.alias[0] ? nb.alias : "(unnamed)");
+    Serial.printf("  Type        : %s\n", nb.alias[0] ? nb.alias : "?");
+    Serial.printf("  Firmware    : %s\n", nb.fwVer[0] ? nb.fwVer : "?");
+    if (nb.hwRev[0])   Serial.printf("  Hardware    : %s\n", nb.hwRev);
+    if (nb.capTags[0]) Serial.printf("  Capabilities: %s\n", nb.capTags);
+    Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
+                  nb.confirmed ? "live" : "stale");
+    Serial.println();
+    return;
+  }
+
+  // ---- WCB neighbor --------------------------------------------------------
   char caps[128];    wdpCapNames(nb.capFlags, caps, sizeof(caps));
   char maestro[24];  wdpMaestroStr(nb, maestro, sizeof(maestro));
-  Serial.println();
   Serial.printf("==== WCB %d  \"%s\" ====\n", nb.wcbNumber, nb.alias[0] ? nb.alias : "(no alias)");
   Serial.printf("  Platform    : %s (hw %d)\n", wdpHwName(nb.hwVer), nb.hwVer);
   Serial.printf("  Firmware    : %s\n", nb.fwVer[0] ? nb.fwVer : "?");
@@ -376,8 +416,9 @@ static void printWdpDump() {
     if (!nb.valid) continue;
     count++;
     char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
-    Serial.printf("[WDP:N=%d,ALIAS=%s,HW=%d,FW=%s,CAP=%04X,CTRL=%d,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
-                  nb.wcbNumber, nb.alias, nb.hwVer, nb.fwVer, nb.capFlags, nb.ctrlId, maestro,
+    Serial.printf("[WDP:N=%d,CLIENT=%d,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
+                  nb.wcbNumber, nb.isClient ? 1 : 0, nb.alias, nb.hwVer, nb.hwRev, nb.fwVer,
+                  nb.capFlags, nb.ctrlId, nb.capTags, maestro,
                   (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
   }
   Serial.printf("[WDP:END,count=%d]\n", count);

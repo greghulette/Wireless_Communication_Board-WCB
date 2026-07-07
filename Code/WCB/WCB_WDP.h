@@ -55,6 +55,13 @@ struct WdpNeighbor {
   uint8_t       maestroIds[WDP_MAX_MAESTRO];  // this board's local Maestro IDs
   uint8_t       maestroCount;
   char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled
+  // ---- Client-device fields (WCB_Client / WDP-DA identity) ----------------
+  // A WCB_Client device advertises WDP_TLV_DEVTYPE instead of the WCB fields.
+  // When isClient is set, `alias` holds the device's canonical type name and the
+  // WCB-only fields (hwVer/capFlags/maestro/portLabels) are unused.
+  bool          isClient;      // true = a WCB_Client device, not a WCB
+  char          hwRev[16];     // client hardware revision string ("" = none)
+  char          capTags[49];   // client capability tags, space-separated ("" = none)
   unsigned long lastAdvertMs;
 };
 
