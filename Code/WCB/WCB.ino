@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_072249RJUL2026                                  *****////
+///*****                                          Version 6.2.0_080851RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_072307RJUL2026";
+String SoftwareVersion = "6.2.0_080851RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2623,7 +2623,7 @@ void handleConfigReqPacket(const uint8_t *data) {
     return;
   }
 
-  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+  uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
 
   // Send the whole fragmented config TWICE (two spaced passes, same sessionId).
   // The relay dedups by chunkIdx (receivedMask), so a frame lost in one pass is
@@ -2719,7 +2719,7 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
     if (debugMGMT) Serial.printf("[MGMT] Result too large (%d chars) — cannot relay\n", totalLen);
     return;
   }
-  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+  uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
   for (int i = 0; i < totalChunks; i++) {
     espnow_struct_config_frag frag;
     memset(&frag, 0, sizeof(frag));
@@ -5154,7 +5154,7 @@ void processWCBMessage(const String &message){
   // told apart by payload type, which matches intent. The config tool's 10 s
   // JSON PING holds the ~20 s window open for the whole session; when it stops,
   // relaying stops ~20 s later. (Renewed after the reject checks above.)
-  if (targetWCB == WCB_SPECIAL_PEER_ID &&
+  if (specialPeerEnabled && targetWCB == WCB_SPECIAL_PEER_ID &&
       espnow_message.length() > 0 && espnow_message[0] == '{')
     rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
@@ -5803,6 +5803,17 @@ static void bootGuardDisarm() {
 // announce). Idempotent — safe to call repeatedly.
 void enableControllerPeer(uint8_t id) {
   if (id < 1 || id > MAX_WCB_COUNT) return;
+  // Switching to a DIFFERENT controller id: drop the peer we previously
+  // live-registered for the OLD out-of-band id so the ESP-NOW peer table (cap
+  // 20) doesn't leak stale entries. Only out-of-band peers (> quantity) are
+  // removed — in-band 1..quantity peers are shared and registered at boot, and
+  // must never be deleted here. Done BEFORE saveSpecialPeerIDToPreferences
+  // overwrites WCB_SPECIAL_PEER_ID.
+  if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != id &&
+      WCB_SPECIAL_PEER_ID > Default_WCB_Quantity && WCB_SPECIAL_PEER_ID != WCB_Number &&
+      esp_now_is_peer_exist(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1])) {
+    esp_now_del_peer(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1]);
+  }
   if (WCB_SPECIAL_PEER_ID != id) saveSpecialPeerIDToPreferences(id);   // sets var + persists
   if (!specialPeerEnabled)       saveSpecialPeerPreferences(true);     // sets var + persists
   // Register the out-of-band peer live (in-band 1..quantity peers are already

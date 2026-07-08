@@ -185,6 +185,14 @@ void wdpTick() {
 // ==================== Advert receive (decode into table) =================
 // Called from drainWdpPackets() in WCB.ino (loop context — Serial is safe here).
 
+// In-place replace bytes that would corrupt the comma/bracket-delimited
+// ?WDP,DUMP record (',' ']' and control chars) with '_'. Applied to
+// wire-sourced neighbor strings after decode.
+static void wdpScrub(char *s) {
+  for (; *s; ++s)
+    if (*s == ',' || *s == ']' || (uint8_t)*s < 0x20) *s = '_';
+}
+
 // A device type whose announce should auto-enable this board's controller
 // (special) peer. Case-insensitive; \xC3\xA9 is the UTF-8 'é' so both the
 // accented ("Sabé") and plain ("Sabe") spellings match.
@@ -261,6 +269,11 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     }
     o += 2 + len;
   }
+  // Neutralize bytes that would corrupt the comma/bracket-delimited ?WDP,DUMP
+  // line — wire strings are unsanitized here (unlike locally-set aliases, which
+  // saveWCBAlias strips at the source).
+  wdpScrub(nb.alias); wdpScrub(nb.fwVer); wdpScrub(nb.hwRev); wdpScrub(nb.capTags);
+
   if (!wasValid)
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
 
@@ -269,9 +282,11 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // change (the neighbor stays 'valid' across periodic re-adverts).
   if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias)) {
     // (1) Enable our controller (special) peer, pointed at this device — same
-    //     effect as ?CONTROLLER,ON,<id>, registered live. It only registers a
-    //     peer + tracks heartbeats, so it's safe.
-    if (!(specialPeerEnabled && WCB_SPECIAL_PEER_ID == (uint8_t)senderWCB)) {
+    //     effect as ?CONTROLLER,ON,<id>, registered live. Only adopt when NO
+    //     controller is configured yet: never clobber a manually-pinned (or
+    //     already-adopted) controller just because a different one is heard on
+    //     the mesh. It only registers a peer + tracks heartbeats, so it's safe.
+    if (!specialPeerEnabled) {
       Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
                     nb.alias, senderWCB);
       enableControllerPeer((uint8_t)senderWCB);
