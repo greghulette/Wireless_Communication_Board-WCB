@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_072222RJUL2026                                  *****////
+///*****                                          Version 6.2.0_072249RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_072222RJUL2026";
+String SoftwareVersion = "6.2.0_072249RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5045,17 +5045,13 @@ void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
 
-  // Bare ";w" (just the 'w', no target, no payload) is a SUBSCRIPTION
-  // KEEP-ALIVE: a host — the Wizard's RC Controllers panel — telling us it
-  // still wants the controller's rc_hb/rc_ch JSON mirrored to USB. Renew the
-  // ~20 s relay window and return: no routing, no "invalid target" noise. The
-  // relay no longer self-renews on inbound telemetry, so THIS (and real ;w
-  // commands) is what holds it open; when the host stops, relaying stops ~20 s
-  // later, so an idle/closed Wizard never leaves telemetry streaming to USB.
+  // Bare ";w" (just the 'w', no target, no payload) is an incomplete route.
+  // Print usage and return — it does NOT touch RC telemetry. (Nothing in the
+  // ;w family subscribes the RC-JSON relay anymore; telemetry is opt-in only.)
   {
     String ka = message; ka.trim();
     if (ka.length() == 1) {   // dispatch guarantees it starts with 'w'/'W'
-      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+      Serial.println("[;w] usage: ;w<target|alias>,<command>");
       return;
     }
   }
@@ -5145,17 +5141,21 @@ void processWCBMessage(const String &message){
       }
   }
 
-  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
-  // Relay the RC controller's inbound JSON (rc_hb / rc_trig / rc_mode) to USB
-  // ONLY when this ;w is addressed to the controller itself — i.e. a host is
-  // actively bridging the RC (config tool's Via-WCB mode). A plain ;w route to
-  // some OTHER board (e.g. ;wdome,;s3test) must NOT turn on RC telemetry — that
-  // conflated command routing with "feed me controller state" and sprayed the
-  // terminal on every routed command. Bare ;w still subscribes explicitly
-  // (above). Renewed after the rejection checks so a rejected command can't
-  // subscribe. Window is intentionally longer than the config tool's 10 s
-  // keep-alive.
-  if (targetWCB == WCB_SPECIAL_PEER_ID)
+  // ── RC-Controller-bridge subscription (Via-WCB management) ────────────────
+  // Turn on the RC-JSON relay ONLY when this ;w carries a JSON payload to the
+  // controller (special peer) — i.e. the NaviCore config tool bridging through
+  // this WCB (;w20,{"type":"PING"} keep-alive every 10 s + JSON commands). That
+  // is a deliberate management session that needs the NaviCore's JSON replies
+  // (rc_hb / rc_trig / rc_mode / PONG / config) mirrored back to USB.
+  //
+  // A plain TEXT route — ;wdome,test / ;wNaviCore,test / ;w20,test — is not JSON
+  // and never turns on telemetry. That's the fix for the bug where ANY routed
+  // command sprayed rc_hb: routing (text) and management-bridging (JSON) are now
+  // told apart by payload type, which matches intent. The config tool's 10 s
+  // JSON PING holds the ~20 s window open for the whole session; when it stops,
+  // relaying stops ~20 s later. (Renewed after the reject checks above.)
+  if (targetWCB == WCB_SPECIAL_PEER_ID &&
+      espnow_message.length() > 0 && espnow_message[0] == '{')
     rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // Check if target is the local WCB
