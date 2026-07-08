@@ -197,6 +197,19 @@
       </div>
     </div>
 
+    <!-- ═══ WDP MESH (device inventory across the droid) ═══════════════════
+         wdpMeshRefresh() sends ?WDP,DUMP to a connected board and renders every
+         WCB + client device + serial-attached device the mesh has discovered. -->
+    <div id="wdp-mesh-section" class="rc-devices-section">
+      <h2 class="section-title">🕸️ WDP Mesh
+        <button type="button" id="wdp-mesh-refresh" class="btn btn-ghost"
+                onclick="wdpMeshRefresh()" style="float:right;font-size:13px">↻ Refresh</button>
+      </h2>
+      <div id="wdp-mesh-body">
+        <div class="rc-devices-note">Connect a board and click <strong>Refresh</strong> to see every WCB and device the mesh has discovered.</div>
+      </div>
+    </div>
+
   </main>
 </div>
 

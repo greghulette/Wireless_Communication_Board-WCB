@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '07.15:12.R.JUL.2026';
+const UI_VERSION = '08.16:03.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -10578,6 +10578,119 @@ function _renderRcDevices() {
 // Periodic re-render so "last seen Ns ago" counters tick and stale entries
 // disappear without needing a new heartbeat to drive the GC sweep.
 setInterval(() => { if (_rcOnlineMap.size > 0) _renderRcDevices(); }, 1000);
+
+// ─── WDP mesh view ──────────────────────────────────────────────────────────
+// wdpMeshRefresh() queries a connected board with ?WDP,DUMP and renders the
+// mesh it has discovered (WCBs + client devices + serial-attached devices) into
+// #wdp-mesh-body. Read-only. A board doesn't list itself in its own table.
+
+function _wdpEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Parse the ?WDP,DUMP response. String fields are scrubbed of ',' and ']' on the
+// board, so [^,] / [^\]] field matching is safe.
+function parseWdpDump(raw) {
+  const nodes = {}, order = [];
+  for (const line of String(raw).split('\n')) {
+    const t = line.trim();
+    let m = t.match(/^\[WDP:N=(\d+),CLIENT=(\d+),ALIAS=([^,]*),HW=(\d+),HWREV=([^,]*),FW=([^,]*),CAP=([0-9A-Fa-f]+),CTRL=(\d+),CAPTAGS=([^,]*),MAESTRO=([^,]*),AGE=(\d+),SEEN=(\d+)\]$/);
+    if (m) {
+      const n = +m[1];
+      nodes[n] = { n, client: m[2] === '1', alias: m[3], hw: +m[4], hwRev: m[5],
+                   fw: m[6], cap: parseInt(m[7], 16), ctrl: +m[8], capTags: m[9],
+                   maestro: m[10], age: +m[11], live: m[12] === '1', ifs: [] };
+      order.push(n);
+      continue;
+    }
+    m = t.match(/^\[WDPIF:N=(\d+),S=(\d+),DEV=([^\]]*)\]$/);
+    if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); }
+  }
+  return order.map(n => nodes[n]);
+}
+
+const _WDP_CAP_BITS = [
+  [0x0001, 'HCR'], [0x0002, 'MP3'], [0x0004, 'WLED'], [0x0008, 'Kyber'],
+  [0x0010, 'Maestro-remote'], [0x0020, 'PWM'], [0x0040, 'Controller'], [0x0080, 'Maestro-host'],
+];
+function _wdpCapLabels(cap) {
+  return _WDP_CAP_BITS.filter(([b]) => cap & b).map(([, n]) => n).join(', ');
+}
+function _wdpPlatform(nd) {
+  if (nd.client) return 'client';
+  if (nd.hw >= 31) return 'ESP32-S3';
+  if (nd.hw > 0)   return 'ESP32';
+  return '?';
+}
+function _wdpKind(nd) {
+  if (!nd.client) return 'WCB';
+  return /^(navicore|sab)/i.test(nd.alias || '') ? 'Controller' : 'Client';
+}
+
+function renderWdpMesh(nodes, viaWcb) {
+  const body = document.getElementById('wdp-mesh-body');
+  if (!body) return;
+  if (!nodes.length) {
+    body.innerHTML = `<div class="rc-devices-note">WCB ${viaWcb} hasn't discovered any neighbors yet — give the mesh a few seconds, or verify WDP is on (<code>?WDP,STATUS</code>).</div>`;
+    return;
+  }
+  const rows = nodes.map(nd => {
+    const caps    = nd.client ? _wdpEsc(nd.capTags || '') : _wdpCapLabels(nd.cap);
+    const ctrl    = nd.ctrl ? ` <span class="wdp-sub">&rarr;ctrl ${nd.ctrl}</span>` : '';
+    const maestro = (nd.maestro && nd.maestro !== '-') ? _wdpEsc(nd.maestro) : '&mdash;';
+    const ifs     = nd.ifs.length
+      ? nd.ifs.map(i => `<div class="wdp-if">S${i.s} ${_wdpEsc(i.dev)}</div>`).join('')
+      : '<span class="wdp-sub">&mdash;</span>';
+    return `<tr class="${nd.live ? '' : 'wdp-stale'}">
+      <td>${nd.n}</td>
+      <td><strong>${_wdpEsc(nd.alias || '—')}</strong>${ctrl}</td>
+      <td>${_wdpKind(nd)}</td>
+      <td>${_wdpEsc(_wdpPlatform(nd))}</td>
+      <td>${_wdpEsc(nd.fw || '—')}${nd.hwRev ? ' <span class="wdp-sub">(' + _wdpEsc(nd.hwRev) + ')</span>' : ''}</td>
+      <td>${caps || '&mdash;'}</td>
+      <td>${maestro}</td>
+      <td>${ifs}</td>
+      <td class="wdp-sub">${nd.age}s</td>
+      <td>${nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>'}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `
+    <div class="wdp-mesh-scroll">
+      <table class="wdp-mesh-table">
+        <thead><tr>
+          <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>
+          <th>Capabilities</th><th>Maestros</th><th>Devices</th><th>Age</th><th>State</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="rc-devices-note">Discovered by WCB ${viaWcb} &middot; ${nodes.length} node${nodes.length === 1 ? '' : 's'}. Shows what that board hears on the mesh (it doesn't list itself).</div>`;
+}
+
+async function wdpMeshRefresh() {
+  const body = document.getElementById('wdp-mesh-body');
+  let slot = null, conn = null;
+  for (const [k, c] of Object.entries(boardConnections)) {
+    if (c && c.isConnected()) { slot = k; conn = c; break; }
+  }
+  if (!conn) {
+    if (body) body.innerHTML = `<div class="rc-devices-note">No board connected — connect one first, then Refresh.</div>`;
+    return;
+  }
+  const btn = document.getElementById('wdp-mesh-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const fc     = boardConfigs[slot]?.funcChar || boardBootChars[slot]?.funcChar || '?';
+    const wcbNum = boardConfigs[slot]?.wcbNumber || slot;
+    const raw    = await conn.sendAndCollect(`${fc}WDP,DUMP`, 4000, '[WDP:END');
+    renderWdpMesh(parseWdpDump(raw), wcbNum);
+  } catch (e) {
+    if (body) body.innerHTML = `<div class="rc-devices-note">Failed to read the mesh: ${_wdpEsc((e && e.message) || e)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+  }
+}
 
 // ── RC-telemetry relay: ON-DEMAND, not always-on ────────────────────────────
 // We deliberately do NOT auto-subscribe the firmware's RC-JSON relay. It's
