@@ -38,7 +38,7 @@ Short Circuit
 ARDS/K-ARDS
 Teeces
 AstroPixels
-Rseries Logics
+R-Series Logics
 PSI Front
 PSI Rear
 HP Controller

@@ -138,7 +138,8 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   // label set that would overflow the 200 B payload is dropped gracefully.
   for (int p = 1; p <= 5; p++) {
     String lbl = serialPortLabels[p - 1];   // raw label, not the "Serial<N> (...)" form
-    if (lbl.length() == 0) continue;         // unlabeled port — don't advertise
+    if (lbl.length() == 0) lbl = wdpDaType(p);  // unlabeled → fall back to a WDP-DA detected device type
+    if (lbl.length() == 0) continue;         // still nothing — don't advertise
     int L = lbl.length(); if (L > 24) L = 24;
     uint8_t v[25];
     v[0] = (uint8_t)p;
@@ -273,6 +274,7 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // line — wire strings are unsanitized here (unlike locally-set aliases, which
   // saveWCBAlias strips at the source).
   wdpScrub(nb.alias); wdpScrub(nb.fwVer); wdpScrub(nb.hwRev); wdpScrub(nb.capTags);
+  for (int _p = 0; _p < 5; _p++) wdpScrub(nb.portLabels[_p]);
 
   if (!wasValid)
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
@@ -319,6 +321,107 @@ int wdpResolveAlias(const char *alias) {
   if (matches == 0) return 0;
   if (matches > 1)  return -1;
   return number;
+}
+
+// ==================== WDP-DA: serial-attached device announces ============
+// A device wired to a serial port self-identifies with "@WDP1 {json}" (see
+// docs/WDP_DEVICE_ANNOUNCE.md). processIncomingSerial routes any line starting
+// with "@WDP" here. RAM-only, TTL-aged; feeds the advert port label + ?WDP,DA.
+
+static WdpDaDevice wdpDaDevices[5];
+static const unsigned long WDP_DA_TTL_MS = 90000UL;   // ~3 missed 25-30 s announces
+
+// Pull a "key":"value" string out of a flat JSON object. out is always
+// NUL-terminated (possibly empty). No escape handling — identity strings don't
+// contain quotes.
+static bool wdpDaExtractStr(const String &json, const char *key, char *out, int outSize) {
+  out[0] = '\0';
+  String pat = String("\"") + key + "\"";
+  int k = json.indexOf(pat);            if (k < 0) return false;
+  int colon = json.indexOf(':', k + pat.length()); if (colon < 0) return false;
+  int q1 = json.indexOf('"', colon + 1);            if (q1 < 0) return false;
+  int q2 = json.indexOf('"', q1 + 1);               if (q2 < 0) return false;
+  int L = q2 - q1 - 1; if (L > outSize - 1) L = outSize - 1;
+  for (int i = 0; i < L; i++) out[i] = json[q1 + 1 + i];
+  out[L] = '\0';
+  return true;
+}
+
+// Pull "caps":[ "a","b" ] into out as space-separated tags.
+static void wdpDaExtractCaps(const String &json, char *out, int outSize) {
+  out[0] = '\0';
+  int k = json.indexOf("\"caps\""); if (k < 0) return;
+  int lb = json.indexOf('[', k);    if (lb < 0) return;
+  int rb = json.indexOf(']', lb);   if (rb < 0) return;
+  int o = 0; bool inTok = false;
+  for (int i = lb + 1; i < rb && o < outSize - 1; i++) {
+    char c = json[i];
+    if (c == '"') { if (inTok && o < outSize - 1) out[o++] = ' '; inTok = !inTok; continue; }
+    if (inTok && o < outSize - 1) out[o++] = c;
+  }
+  while (o > 0 && out[o - 1] == ' ') o--;
+  out[o] = '\0';
+}
+
+void wdpDaHandleLine(int port, const char *line) {
+  if (port < 1 || port > 5 || !line) return;
+  String s = line; s.trim();
+  if (!s.startsWith("@WDP1")) return;          // only protocol version 1
+  int brace = s.indexOf('{'); if (brace < 0) return;
+  String json = s.substring(brace);
+
+  char type[25] = "";
+  if (!wdpDaExtractStr(json, "type", type, sizeof(type)) || !type[0]) return;  // type required
+
+  WdpDaDevice &d = wdpDaDevices[port - 1];
+  bool wasPresent = d.present;
+  memset(&d, 0, sizeof(d));
+  d.present    = true;
+  d.lastSeenMs = millis();
+  strncpy(d.type, type, sizeof(d.type) - 1);
+  wdpDaExtractStr(json, "fw", d.fw,    sizeof(d.fw));
+  wdpDaExtractStr(json, "hw", d.hwRev, sizeof(d.hwRev));
+  wdpDaExtractCaps(json,      d.capTags, sizeof(d.capTags));
+  // Wire strings are unsanitized — neutralize bytes that would corrupt the
+  // advertised port label / ?WDP,DUMP (matches the neighbor-decode scrub).
+  wdpScrub(d.type); wdpScrub(d.fw); wdpScrub(d.hwRev); wdpScrub(d.capTags);
+
+  if (!wasPresent)
+    Serial.printf("[WDP-DA] S%d: %s%s%s\n", port, d.type, d.fw[0] ? " fw " : "", d.fw);
+}
+
+void wdpDaTick() {
+  unsigned long now = millis();
+  for (int i = 0; i < 5; i++) {
+    WdpDaDevice &d = wdpDaDevices[i];
+    if (d.present && (now - d.lastSeenMs) > WDP_DA_TTL_MS) {
+      Serial.printf("[WDP-DA] S%d: %s stopped announcing\n", i + 1, d.type);
+      d.present = false;
+    }
+  }
+}
+
+const char *wdpDaType(int port) {
+  if (port < 1 || port > 5) return "";
+  return wdpDaDevices[port - 1].present ? wdpDaDevices[port - 1].type : "";
+}
+
+void wdpDaPrint() {
+  Serial.println();
+  Serial.println("Serial-attached devices (WDP-DA announces):");
+  unsigned long now = millis();
+  int n = 0;
+  for (int i = 0; i < 5; i++) {
+    WdpDaDevice &d = wdpDaDevices[i];
+    if (!d.present) continue;
+    n++;
+    Serial.printf("  S%d  %-24.24s  fw %-14.14s  %lus ago\n",
+                  i + 1, d.type, d.fw[0] ? d.fw : "?", (now - d.lastSeenMs) / 1000);
+    if (d.hwRev[0])   Serial.printf("       hw %s\n", d.hwRev);
+    if (d.capTags[0]) Serial.printf("       caps: %s\n", d.capTags);
+  }
+  if (n == 0) Serial.println("  (none — a wired device self-identifies by sending @WDP1)");
+  Serial.println();
 }
 
 // ==================== Command / query ====================================
@@ -469,6 +572,12 @@ static void printWdpDump() {
                   nb.wcbNumber, nb.isClient ? 1 : 0, nb.alias, nb.hwVer, nb.hwRev, nb.fwVer,
                   nb.capFlags, nb.ctrlId, nb.capTags, maestro,
                   (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
+    // Per-port interface devices (advertised port labels, incl. WDP-DA detected
+    // serial devices). DEV is the last field so a comma inside a label can't
+    // shift parsing; labels are already scrubbed of ']'.
+    for (int p = 0; p < 5; p++)
+      if (nb.portLabels[p][0])
+        Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
   }
   Serial.printf("[WDP:END,count=%d]\n", count);
 }
@@ -486,6 +595,7 @@ void processWdpCommand(const String &args) {
   if (au == "" || au == "LIST") { printWdpList();   return; }
   if (au == "STATUS")           { printWdpStatus(); return; }
   if (au == "DUMP")             { printWdpDump();    return; }
+  if (au == "DA")               { wdpDaPrint();      return; }   // serial-attached devices (@WDP1)
   if (au == "ON")  { wdpEnabled = true;  saveWdpSettings(); Serial.println("[WDP] enabled");  return; }
   if (au == "OFF") { wdpEnabled = false; saveWdpSettings(); Serial.println("[WDP] disabled"); return; }
   if (au == "CLEAR") { memset(wdpNeighbors, 0, sizeof(wdpNeighbors)); Serial.println("[WDP] neighbor table cleared"); return; }
@@ -499,7 +609,7 @@ void processWdpCommand(const String &args) {
   int n = a.toInt();
   if (n > 0) { printWdpDetail(n); return; }
 
-  Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | ON | OFF | CLEAR)\n", a.c_str());
+  Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | ON | OFF | CLEAR)\n", a.c_str());
 }
 
 // ==================== NVS + lifecycle ====================================

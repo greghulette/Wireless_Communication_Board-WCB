@@ -1311,6 +1311,27 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .rc-devices-note a { text-decoration: underline; cursor: pointer; }
 
+/* ── WDP mesh view ────────────────────────────────────────────────────── */
+.wdp-mesh-scroll { overflow-x: auto; }
+.wdp-mesh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.wdp-mesh-table th,
+.wdp-mesh-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: nowrap;
+}
+.wdp-mesh-table th { color: var(--text-secondary, #9aa3b0); font-weight: 600; }
+.wdp-mesh-table tr.wdp-stale { opacity: 0.5; }
+.wdp-if  { white-space: nowrap; }
+.wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-live { color: var(--green); }
+
 
 /* ─── Refined layout tweaks ──────────────────── */
 /* Narrow the Bcast IN/OUT columns so Label & Status get the room.

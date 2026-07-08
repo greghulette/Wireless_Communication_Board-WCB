@@ -87,4 +87,29 @@ int wdpResolveAlias(const char *alias);
 void loadWdpSettings();
 void saveWdpSettings();
 
+// ---- WDP-DA: serial-attached device announces (@WDP1) --------------------
+// A device wired to a WCB serial port periodically sends "@WDP1 {json}" to
+// self-identify (see docs/WDP_DEVICE_ANNOUNCE.md). We capture its identity per
+// port; it fills this board's advertised port label (when unlabeled) and lists
+// under ?WDP,DA. RAM-only, TTL-aged; never persisted.
+struct WdpDaDevice {
+  bool          present;       // heard an announce within the TTL
+  char          type[25];      // device type (from the shared vocabulary)
+  char          fw[28];        // device firmware version ("" = none)
+  char          hwRev[16];     // hardware revision ("" = none)
+  char          capTags[49];   // space-separated capability tags ("" = none)
+  unsigned long lastSeenMs;
+};
+
+// Handle a serial line that begins with "@WDP" on port (1-5): validate the
+// @WDP1 marker, parse the JSON identity, update the per-port record.
+void wdpDaHandleLine(int port, const char *line);
+// Age out serial devices not heard within the TTL. Call each loop().
+void wdpDaTick();
+// ?WDP,DA — print this board's detected serial-attached devices.
+void wdpDaPrint();
+// Detected device type for port (1-5), or "" if none — used to fill the port's
+// advertised label when the user hasn't set one.
+const char *wdpDaType(int port);
+
 #endif

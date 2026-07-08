@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_080851RJUL2026                                  *****////
+///*****                                          Version 6.2.0_081603RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_080851RJUL2026";
+String SoftwareVersion = "6.2.0_081603RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5391,6 +5391,15 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
+          // WDP-DA: a device on this port self-identifying with "@WDP1 {json}"
+          // (see docs/WDP_DEVICE_ANNOUNCE.md). Capture its identity instead of
+          // running it through the command parser. (sourceID 0 = USB is ignored
+          // inside wdpDaHandleLine — announces come from ports 1-5.)
+          if (serialBuffer.startsWith("@WDP")) {
+            wdpDaHandleLine(sourceID, serialBuffer.c_str());
+            serialBuffer = "";
+            continue;
+          }
           // MGMT commands are internal relay traffic — gate under debugMGMT, not debugEnabled
           bool _isMgmt = serialBuffer.startsWith(String(LocalFunctionIdentifier) + "MGMT");
           if ((_isMgmt && debugMGMT) || (!_isMgmt && debugEnabled)) {
@@ -6169,6 +6178,7 @@ void loop() {
   processCommandGroups();
   processETMHeartbeats();
   wdpTick();               // WDP: broadcast our advert on schedule + age the neighbor table
+  wdpDaTick();             // WDP-DA: age out serial-attached devices that stopped announcing
   processETMAcksAndRetries();
   processETMChar();
   processETMLoad();
