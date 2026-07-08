@@ -264,16 +264,26 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   if (!wasValid)
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
 
-  // ---- Auto-config: a newly-learned controller device enables our controller
-  // (special) peer, pointed at that device's ID — the same effect as
-  // ?CONTROLLER,ON,<id>, registered live. Gated on !wasValid so it fires once
-  // per learn and never re-fights a manual ?CONTROLLER,OFF (which leaves the
-  // neighbor 'valid'). Safe: it only registers a peer + tracks heartbeats.
-  if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias) &&
-      !(specialPeerEnabled && WCB_SPECIAL_PEER_ID == (uint8_t)senderWCB)) {
-    Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
-                  nb.alias, senderWCB);
-    enableControllerPeer((uint8_t)senderWCB);
+  // ---- Auto-config on hearing a controller device (NaviCore/Sabé) -----------
+  // Gated on !wasValid so it fires once per learn and never re-fights a manual
+  // change (the neighbor stays 'valid' across periodic re-adverts).
+  if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias)) {
+    // (1) Enable our controller (special) peer, pointed at this device — same
+    //     effect as ?CONTROLLER,ON,<id>, registered live. It only registers a
+    //     peer + tracks heartbeats, so it's safe.
+    if (!(specialPeerEnabled && WCB_SPECIAL_PEER_ID == (uint8_t)senderWCB)) {
+      Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
+                    nb.alias, senderWCB);
+      enableControllerPeer((uint8_t)senderWCB);
+    }
+    // (2) If this board has a physically-attached Maestro (and isn't itself the
+    //     local Kyber host), switch it to REMOTE so the controller can drive it
+    //     over the mesh — same effect as ?MAESTRO,REMOTE.
+    uint8_t _localMaestros[WDP_MAX_MAESTRO];
+    if (wdpLocalMaestroIds(_localMaestros) > 0 && !Kyber_Local && !Maestro_Remote) {
+      Serial.println("[WDP] local Maestro present — enabling Maestro remote so the controller can drive it");
+      storeKyberSettings("remote");
+    }
   }
 }
 
