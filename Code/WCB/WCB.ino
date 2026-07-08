@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_071459RJUL2026                                  *****////
+///*****                                          Version 6.2.0_072222RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_071459RJUL2026";
+String SoftwareVersion = "6.2.0_072222RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5146,13 +5146,17 @@ void processWCBMessage(const String &message){
   }
 
   // ── RC-Controller-bridge subscription renewal ─────────────────────────────
-  // Any VALID ;w<id>,<cmd> arriving via USB means "a host (config tool's Via
-  // WCB mode, or WCB Wizard) is actively talking through this bridge".  Use
-  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
-  // rc_trig / rc_mode) to USB Serial.  Renewed AFTER the rejection checks so
-  // a rejected command doesn't subscribe the host to 20 s of RC JSON spam.
-  // Window is intentionally longer than the config tool's 10 s keep-alive.
-  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+  // Relay the RC controller's inbound JSON (rc_hb / rc_trig / rc_mode) to USB
+  // ONLY when this ;w is addressed to the controller itself — i.e. a host is
+  // actively bridging the RC (config tool's Via-WCB mode). A plain ;w route to
+  // some OTHER board (e.g. ;wdome,;s3test) must NOT turn on RC telemetry — that
+  // conflated command routing with "feed me controller state" and sprayed the
+  // terminal on every routed command. Bare ;w still subscribes explicitly
+  // (above). Renewed after the rejection checks so a rejected command can't
+  // subscribe. Window is intentionally longer than the config tool's 10 s
+  // keep-alive.
+  if (targetWCB == WCB_SPECIAL_PEER_ID)
+    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
