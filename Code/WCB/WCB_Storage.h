@@ -188,6 +188,7 @@ void setSerialMappingRawMode(int inputPort, bool raw);
 // Maestro configuration storage
 void saveMaestroSettings();
 void loadMaestroSettings();
+void normalizeMaestroSelfSlots();   // repair legacy remote-to-self slots (call after WCB_Number is loaded)
 void printMaestroSettings();
 void saveETMSettings();
 void loadETMSettings();

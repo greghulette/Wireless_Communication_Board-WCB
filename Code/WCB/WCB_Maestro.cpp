@@ -574,7 +574,12 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
         // the correct prefix (live funcChar vs factory-chain func id).
         String suffix = "MAESTRO,M" + String(maestroConfigs[i].maestroID);
 
-        if (maestroConfigs[i].serialPort > 0) {
+        // Decide local-vs-remote by remoteWCB (the slot's true identity key —
+        // same rule configure/clear use), NOT by serialPort. Keying on serialPort
+        // let a malformed remote-to-self slot emit as a local-looking line that
+        // CLEAR could never match. (normalizeMaestroSelfSlots() also purges those
+        // at boot; this keeps emit and CLEAR in agreement regardless.)
+        if (maestroConfigs[i].remoteWCB == 0) {
             suffix += ":W" + String(WCB_Number) +
                       "S" + String(maestroConfigs[i].serialPort) +
                       ":" + String(maestroConfigs[i].baudRate);

@@ -1830,8 +1830,33 @@ void loadMaestroSettings() {
     maestroConfigs[i].configured = preferences.getBool(keyEn.c_str(),    false);
     maestroConfigs[i].baudRate   = preferences.getUInt(keyBaud.c_str(),  9600);
   }
-  
+
   preferences.end();
+  // NOTE: cannot normalize remote-to-self slots here — this runs before
+  // loadWCBNumberFromPreferences() at boot, so WCB_Number is still the default.
+  // normalizeMaestroSelfSlots() is called from setup() once WCB_Number is known.
+}
+
+// Repair a legacy "remote-to-self" Maestro slot (remoteWCB == this board's own
+// WCB number). No current config path can create one, but older firmware could
+// persist it — and it breaks the Wizard's CLEAR-then-re-add cycle: the backup
+// emits it as a local M:W<self>S1, but its stored key is {serialPort=0,
+// remoteWCB=self} while CLEAR searches for {serialPort=1, remoteWCB=0}, so CLEAR
+// never matches and every push stacks another duplicate Maestro. Collapse it to a
+// plain local slot so it obeys the same invariant configure/clear enforce.
+// MUST be called AFTER loadWCBNumberFromPreferences(). Persists the one-time repair.
+void normalizeMaestroSelfSlots() {
+  bool changed = false;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == WCB_Number) {
+      maestroConfigs[i].serialPort = maestroConfigs[i].serialPort ? maestroConfigs[i].serialPort : 1;
+      maestroConfigs[i].remoteWCB  = 0;
+      changed = true;
+      Serial.printf("[MAESTRO] repaired legacy remote-to-self slot: M%d → local S%d\n",
+                    maestroConfigs[i].maestroID, maestroConfigs[i].serialPort);
+    }
+  }
+  if (changed) saveMaestroSettings();
 }
 
 void printMaestroSettings() {
