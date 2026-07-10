@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_101008RJUL2026                                  *****////
+///*****                                          Version 6.2.0_101158RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_101008RJUL2026";
+String SoftwareVersion = "6.2.0_101158RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3231,9 +3231,22 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
         if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-        // Always ACK - even duplicates (so sender stops retrying). Safe now
+        // ACK - even duplicates (so an ensured sender stops retrying). Safe now
         // because senderWCB was validated above.
-        etmSendAck(senderWCB, etmReceived.structSequenceNumber);
+        //
+        // EXCEPTION: best-effort JSON telemetry broadcasts (a chatty controller
+        // such as NaviCore streaming rc_hb / rc_ch at up to 5 Hz, sent with
+        // ensured=false to targetWCB 0) must NOT be ACKed. The sender never tracks
+        // these, so a per-frame unicast ACK back to it is pure waste — worse, the
+        // failing-ACK stream (the controller is busy transmitting and often won't
+        // MAC-ACK them) saturates OUR ESP-NOW TX queue and starves our own
+        // heartbeats/adverts until the mesh marks US offline. Ensured unicast
+        // commands (targetWCB == WCB_Number) and ;-command broadcasts (payload is
+        // not bare JSON) still ACK exactly as before.
+        bool bestEffortTelemetry =
+            (targetWCB == 0 && etmReceived.structCommand[0] == '{');
+        if (!bestEffortTelemetry)
+            etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
         // Duplicate detection (senderIdx already validated above).
         bool isDuplicate = false;
