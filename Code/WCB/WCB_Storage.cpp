@@ -874,6 +874,18 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
+    preferences.begin("led_config", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("wdp_cfg", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("learned_peers", false);
+    preferences.clear();
+    preferences.end();
+
     clearAllPWMMappings();
 
     Serial.println("NVS cleared. Restarting...");

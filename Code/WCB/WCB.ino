@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_081603RJUL2026                                  *****////
+///*****                                          Version 6.2.0_092049RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_081603RJUL2026";
+String SoftwareVersion = "6.2.0_092049RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -418,7 +418,38 @@ struct BoardStatus {
   unsigned long totalRetries;
   unsigned long totalFailed;
 };
-BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, we only use [0..Default_WCB_Quantity-1]
+BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, indexed by (wcbNumber-1)
+
+// ── Dynamic peer membership ──────────────────────────────────────────────────
+// The set of boards this WCB treats as mesh peers. Historically this was exactly
+// the contiguous range 1..Default_WCB_Quantity; it is now an explicit membership
+// set so peers can also be LEARNED from WDP adverts at runtime, no reboot and no
+// need to re-provision every board. Indexed by (wcbNumber-1). The special/
+// controller peer (specialPeerEnabled / WCB_SPECIAL_PEER_ID) is still tracked
+// separately and is NOT reflected in these arrays.
+//   wcbPeerLearned[] — discovered via WDP auto-join (persisted; survives a WCBQ
+//                      change and, once Stage-3 persistence lands, a reboot)
+//   wcbPeerActive[]  — the live union {1..Default_WCB_Quantity floor} ∪ learned,
+//                      minus self. THIS is what every ETM loop iterates.
+// When auto-join is off, wcbPeerLearned[] stays empty so wcbPeerActive[] == the
+// WCBQ floor == today's behavior exactly.
+bool wcbPeerActive[MAX_WCB_COUNT]  = { false };
+bool wcbPeerLearned[MAX_WCB_COUNT] = { false };
+// millis() when a learned peer was first heard vs. last confirmed; drives the
+// "confirmed reciprocating" gate and stale eviction (Stages 3-4).
+uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT] = { 0 };  // WDP adverts heard (caps at 255)
+bool    wcbPeerReciprocated[MAX_WCB_COUNT] = { false };  // has this learned peer ever ACKed us?
+
+// Learned-peer persistence (NVS namespace "learned_peers"): membership survives
+// reboot so the fleet doesn't re-discover from scratch. A learned peer is
+// PERMANENT — once heard, it is always expected to be on and ready; membership
+// never self-evicts (a bench-tested board must not forget its powered-off
+// fleet). Cleanup is the operator's call: ?WDP,FORGET,<id> / ?WDP,CLEAR.
+// Writes are debounced and happen ONLY on a membership change (never
+// per-advert) to spare flash.
+#define LEARNED_FLUSH_DEBOUNCE_MS 5000UL     // coalesce a burst of changes into one write
+bool          learnedPeersDirty   = false;
+unsigned long learnedPeersFlushMs = 0;
 
 // ETM Heartbeat timing
 unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
@@ -911,7 +942,8 @@ void processETMHeartbeats() {
 
   // Check for boards that have gone offline
   unsigned long offlineThresholdMs = (unsigned long)(etmHeartbeatSec + 1) * etmMissedHeartbeats * 1000UL;
-  for (int i = 0; i < Default_WCB_Quantity; i++) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerActive[i]) continue;    // only sweep boards we treat as peers
     if (i + 1 == WCB_Number) continue;  // skip ourselves
     if (boardTable[i].online) {
       if (millis() - boardTable[i].lastSeenMs > offlineThresholdMs) {
@@ -954,7 +986,9 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   if (slot == -1) {
     if (debugETM) Serial.println("[ETM] Pending table full, evicting oldest entry");
     slot = 0;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    // Tally by the evicted entry's own expected-ACK bitset (the snapshot taken
+    // at send time), NOT live membership — iterate the full range on the bit.
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (etmPendingTable[slot].expectAckFrom[b] && !etmPendingTable[slot].receivedAckFrom[b]) {
         etmStatsFailed[b]++;
       }
@@ -980,13 +1014,19 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
     entry.retryCount[b]      = 0;
   }
 
-  for (int b = 0; b < Default_WCB_Quantity; b++) {
+  for (int b = 0; b < MAX_WCB_COUNT; b++) {
+    if (!wcbPeerActive[b]) continue;   // snapshot the expected-ACK set from active members
     int wcbNum = b + 1;
     if (wcbNum == WCB_Number) continue;
     if (!boardTable[b].online) continue;
 
     // For unicast, only expect ACK from the target board
     if (targetWCB != 0 && wcbNum != targetWCB) continue;
+
+    // Mixed-fleet guard: a learned peer that has never ACKed us does NOT block
+    // broadcast completion (it may be a phantom or run non-reciprocating fw).
+    // Unicast still expects its ACK so first-contact retries work normally.
+    if (targetWCB == 0 && wcbPeerLearned[b] && !wcbPeerReciprocated[b]) continue;
 
     entry.expectAckFrom[b] = true;
     etmStatsSent[b]++;
@@ -1006,6 +1046,9 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
     if (!etmPendingTable[i].receivedAckFrom[boardIdx]) {
       etmPendingTable[i].receivedAckFrom[boardIdx] = true;
       etmStatsAckd[boardIdx]++;
+      // A learned peer that ACKs has proven it reciprocates ETM — from now on it
+      // may count toward broadcast completion (see etmAddToPendingTable).
+      if (wcbPeerLearned[boardIdx]) wcbPeerReciprocated[boardIdx] = true;
       if (debugETM) {
         Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
       }
@@ -1027,9 +1070,10 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
       }
     }
 
-    // Check if all expected ACKs received
+    // Check if all expected ACKs received — evaluate the per-entry bitset over
+    // the full range so a peer learned/removed mid-flight can't race this.
     bool allDone = true;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (etmPendingTable[i].expectAckFrom[b] && !etmPendingTable[i].receivedAckFrom[b]) {
         allDone = false;
         break;
@@ -1055,7 +1099,9 @@ void processETMAcksAndRetries() {
 
     bool anyStillPending = false;
 
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    // Retry off the per-entry expected-ACK bitset (its send-time snapshot), so
+    // membership changes during the retry window can't add/drop targets here.
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (!entry.expectAckFrom[b]) continue;
       if (entry.receivedAckFrom[b]) continue;
 
@@ -1112,9 +1158,9 @@ void processETMAcksAndRetries() {
 
     entry.lastSentMs = millis(); // reset timer for next retry window
 
-    // Check if all resolved
+    // Check if all resolved — per-entry bitset over the full range.
     bool allResolved = true;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (entry.expectAckFrom[b] && !entry.receivedAckFrom[b]) {
         allResolved = false;
         break;
@@ -1124,6 +1170,21 @@ void processETMAcksAndRetries() {
       entry.active = false;
       if (debugETM) Serial.printf("[ETM] Seq %d resolved\n", entry.sequenceNumber);
     }
+  }
+}
+
+// Clear a peer from every in-flight pending entry's expected-ACK set. Called
+// when a peer is removed from membership so a departing board can't leave a
+// broadcast waiting forever. Counts one failure per still-open expectation.
+void etmClearPeerFromPending(int boardIdx) {
+  if (boardIdx < 0 || boardIdx >= MAX_WCB_COUNT) return;
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    if (!etmPendingTable[i].active) continue;
+    if (etmPendingTable[i].expectAckFrom[boardIdx] &&
+        !etmPendingTable[i].receivedAckFrom[boardIdx]) {
+      etmStatsFailed[boardIdx]++;
+    }
+    etmPendingTable[i].expectAckFrom[boardIdx] = false;
   }
 }
 
@@ -1190,8 +1251,8 @@ void processETMChar() {
 
     int peers[MAX_WCB_COUNT];
     int peerCount = 0;
-    for (int i = 1; i <= Default_WCB_Quantity; i++) {
-        if (i != WCB_Number && boardTable[i - 1].online) peers[peerCount++] = i;
+    for (int i = 1; i <= MAX_WCB_COUNT; i++) {
+        if (wcbPeerActive[i - 1] && boardTable[i - 1].online) peers[peerCount++] = i;
     }
     if (peerCount == 0) {
         Serial.println("[ETM] Characterization aborted: no online peers.");
@@ -1359,13 +1420,21 @@ void processETMLoad() {
         if (sendBcast) {
             sendESPNowMessage(0, payload.c_str(), false);  // broadcast, not ETM
         } else {
-            // Round-robin unicast to peers
-            int target = etmLoadRoundRobinIndex + 1;
-            if (target == WCB_Number) target++;  // skip self
-            if (target > Default_WCB_Quantity) target = 1;
-            if (target == WCB_Number) target++;  // skip self again if WCB1
-            etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % Default_WCB_Quantity;
-            sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+            // Round-robin unicast across the active member peers. Walk the
+            // membership set by index (not raw id arithmetic) so a sparse /
+            // learned peer set never targets a non-existent id.
+            int nPeers = activePeerCount();
+            if (nPeers > 0) {
+                int want = etmLoadRoundRobinIndex % nPeers;
+                int seen = 0, target = 0;
+                for (int i = 0; i < MAX_WCB_COUNT; i++) {
+                    if (!wcbPeerActive[i]) continue;
+                    if (seen == want) { target = i + 1; break; }
+                    seen++;
+                }
+                etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % nPeers;
+                if (target != 0) sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+            }
         }
 
         loadMsgCount++;
@@ -1381,8 +1450,8 @@ String buildStatsString() {
   out += " ESP-NOW Statistics (Since Last Reboot) ---\n";
   if (etmEnabled) {
     unsigned long totalSent = 0, totalAckd = 0, totalRetries = 0, totalFailed = 0;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
-      if (b + 1 == WCB_Number) continue;
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
+      if (!wcbPeerActive[b]) continue;   // active member peers (incl. learned)
       totalSent    += etmStatsSent[b];    totalAckd    += etmStatsAckd[b];
       totalRetries += etmStatsRetries[b]; totalFailed  += etmStatsFailed[b];
     }
@@ -1425,7 +1494,8 @@ String buildStatsString() {
   }
   if (etmEnabled) {
     out += "\n--------------- ETM Per-Board Statistics ---------------\n";
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
+      if (!wcbPeerActive[b]) continue;   // active member peers (incl. learned)
       int wcbNum = b + 1;
       if (wcbNum == WCB_Number) continue;
       unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
@@ -1835,7 +1905,8 @@ void printConfigInfo() {
                 broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2],
                 broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
   Serial.println("Peers:");
-  for (int i = 0; i < Default_WCB_Quantity; i++) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerActive[i] && (i + 1) != WCB_Number) continue;  // members + self
     if (i + 1 == WCB_Number) {
       Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  (this board)\n",
                     i + 1,
@@ -2430,6 +2501,13 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
+  // Derived live membership count (WCBQ floor ∪ WDP-learned peers). When
+  // auto-join is on this can exceed WCBQ; the Wizard shows it read-only so the
+  // operator sees what the board actually talks to, not just what they typed.
+  // includeInLive=false: it's board-derived telemetry, NOT restorable config —
+  // keep it out of the backup chain (like DELIM/FUNCCHAR) so a restore never
+  // dispatches ?PEERSLIVE,<n>.
+  emit("PEERSLIVE," + String(activePeerCount()), false);
   emit("EPASS," + String(espnowPassword), true);
 
   // Command characters — DELIM/FUNCCHAR are factory-chain-only (includeInLive=false)
@@ -3085,11 +3163,26 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       return;
     }
 
+    // ── Bind the claimed sender id to the sender's real MAC ──────────────────
+    // Every WCB and every WCB_Client forces its STA MAC to the derived address
+    // 02:oct2:oct3:00:00:<id>, so the LAST MAC octet IS the board number. A
+    // packet whose structSenderID disagrees with its source MAC is either
+    // spoofed (a rogue in-group node claiming another id) or a misconfigured
+    // board; drop it before it can touch boardTable / ACK state / auto-join.
+    // This closes ghost-ACK (a rogue satisfying an ACK the real board never
+    // sent), phantom-online, and controller-alias spoofing. Safe as a hard rule
+    // because no board on the mesh runs a non-derived MAC.
+    if (info->src_addr[5] != senderWCB) {
+      if (debugETM) Serial.printf("[ETM] Dropped id-spoof: senderWCB=%d but src MAC .%u\n",
+                                  senderWCB, info->src_addr[5]);
+      return;
+    }
+
     // Refresh the sender's online presence on EVERY valid received ETM
     // packet (not just heartbeats). Otherwise if heartbeats are dropped
     // but commands flow, etmAddToPendingTable would skip the peer for
     // ACK-pending tracking, leaving our unicast sends to it un-retried.
-    if (senderIdx < Default_WCB_Quantity || isSpecialPeer) {
+    if (wcbPeerActive[senderIdx] || isSpecialPeer) {
       bool wasOffline     = !boardTable[senderIdx].online;
       bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
       boardTable[senderIdx].online     = true;
@@ -4040,6 +4133,8 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "WCBQ") {
         int qty = args.toInt();
         saveWCBQuantityPreferences(qty);
+        rebuildActivePeers();            // WCBQ is the membership floor
+        syncActivePeerRegistrations();   // register/free peers live — no reboot needed
         return;
     }
 
@@ -4092,8 +4187,8 @@ void processLocalCommand(const String &message) {
     // extra pinned ESP-NOW peer that sits OUTSIDE the normal numbered WCB boards
     // (default ID 20, e.g. NaviCore, but any 1-20 ID for a different controller).
     // When ON: that ID is registered as an ESP-NOW peer, its heartbeats are tracked,
-    // and it appears in ETM stats. Reboot required to apply peer registration.
-    // When OFF: that ID is treated as unknown and ignored.
+    // and it appears in ETM stats. Registered LIVE via enableControllerPeer() — no
+    // reboot needed. When OFF: that ID is treated as unknown and ignored.
     // ?SPECIAL is kept as a back-compat alias so old configs/backups still parse.
     if (rootUpper == "CONTROLLER" || rootUpper == "SPECIAL") {
         if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
@@ -4645,6 +4740,8 @@ void update3rdMACOctet(const String &message){
 void updateWCBQuantity(const String &message){
   int wcbQty = message.substring(4).toInt();
   saveWCBQuantityPreferences(wcbQty);
+  rebuildActivePeers();            // WCBQ is the membership floor
+  syncActivePeerRegistrations();   // register/free peers live — no reboot needed
 }
 
 void updateSerialLabel(const String &message) {
@@ -5170,7 +5267,7 @@ void processWCBMessage(const String &message){
   }
 
   // Remote target - send via ESP-NOW
-  bool isValidTarget = (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) ||
+  bool isValidTarget = (targetWCB >= 1 && targetWCB <= MAX_WCB_COUNT && wcbPeerActive[targetWCB - 1]) ||
                        (specialPeerEnabled && targetWCB == WCB_SPECIAL_PEER_ID);
   if (isValidTarget) {
       if (debugEnabled) {
@@ -5838,6 +5935,186 @@ void enableControllerPeer(uint8_t id) {
   }
 }
 
+// Recompute wcbPeerActive[] = {WCBQ floor 1..Default_WCB_Quantity} ∪ {learned},
+// minus self. Pure bookkeeping — ESP-NOW (de)registration is done by
+// addActivePeer / removeActivePeer. Call after WCBQ or the learned set changes.
+void rebuildActivePeers() {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    bool floorMember = (i < Default_WCB_Quantity);
+    wcbPeerActive[i] = (floorMember || wcbPeerLearned[i]) && (i + 1 != WCB_Number);
+  }
+}
+
+// Count of active member peers — for status and the Wizard live-peer readout.
+int activePeerCount() {
+  int n = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++) if (wcbPeerActive[i]) n++;
+  return n;
+}
+
+// ── Live peer add/remove (generalizes the controller-peer path to N slots) ───
+// Register board `id` as an ESP-NOW peer immediately (no reboot) and mark it an
+// active member. `learned` = discovered via WDP auto-join (vs a WCBQ floor
+// member). Transactional: membership is only set once the ESP-NOW peer actually
+// exists, so a failed add (e.g. the 20-peer cap) never leaves a tracked-but-
+// unreachable ghost. Returns true if the board is an active registered peer.
+bool addActivePeer(uint8_t id, bool learned) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  if (id == WCB_Number) return false;                 // never a peer to ourselves
+  if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) return false;  // controller is not a regular mesh peer
+  int idx = id - 1;
+
+  if (!esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, WCBMacAddresses[idx], 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) != ESP_OK) {
+      Serial.printf("[PEER] Could not add WCB%d (ESP-NOW peer table full? cap 20)\n", id);
+      return false;                                   // transactional: don't mark active
+    }
+    Serial.printf("[PEER] WCB%d registered (live%s).\n", id, learned ? ", learned" : "");
+  }
+
+  // Only ids ABOVE the WCBQ floor carry the "learned" (persisted) bit. A floor
+  // board is already a member by configuration, so it must never acquire the
+  // learned bit — otherwise a FORGET/CLEAR/reload path would treat it as a
+  // departed peer and tear down its live presence + ACK tracking.
+  if (learned && id > Default_WCB_Quantity) {
+    wcbPeerLearned[idx] = true;
+    learnedPeersDirty   = true;                            // persist membership (debounced)
+    learnedPeersFlushMs = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  }
+  rebuildActivePeers();
+  return wcbPeerActive[idx];
+}
+
+// Remove board `id` from membership. Only unregisters the ESP-NOW peer when the
+// board is OUT-OF-BAND (not a 1..Default_WCB_Quantity floor member, not the
+// special peer) — shared in-band peers registered at boot must never be deleted
+// (same rule as enableControllerPeer). Clears in-flight ACK expectations so a
+// removed peer can't wedge a pending broadcast.
+void removeActivePeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return;
+  if (id == WCB_Number) return;
+  int idx = id - 1;
+
+  wcbPeerLearned[idx]      = false;
+  wcbPeerAdvertCount[idx]  = 0;
+  wcbPeerReciprocated[idx] = false;
+  learnedPeersDirty        = true;                          // persist membership (debounced)
+  learnedPeersFlushMs      = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  rebuildActivePeers();
+
+  bool stillFloor = (idx < Default_WCB_Quantity);
+  bool isSpecial  = (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID);
+  if (!stillFloor && !isSpecial && esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_del_peer(WCBMacAddresses[idx]);
+    Serial.printf("[PEER] WCB%d unregistered.\n", id);
+  }
+  // Only tear down presence + in-flight ACK expectations for a board ACTUALLY
+  // leaving membership. rebuildActivePeers() above already restored a floor
+  // member's active flag, so a still-active (floor or special) peer is left
+  // undisturbed — otherwise we'd falsely mark a live peer offline and mis-tally
+  // its pending broadcast ACKs as failures.
+  if (!wcbPeerActive[idx] && !isSpecial) {
+    boardTable[idx].online = false;
+    etmClearPeerFromPending(idx);   // drop any ACK expectations referencing it
+  }
+}
+
+// Reconcile the ESP-NOW peer table with current membership: register any active
+// member (or the special peer) that isn't registered yet, and unregister any
+// out-of-band entry that is no longer a member. Idempotent. Lets a live WCBQ
+// change (the membership floor) take effect without a reboot. Never touches the
+// broadcast peer (a different MAC not in WCBMacAddresses[]).
+void syncActivePeerRegistrations() {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (i + 1 == WCB_Number) continue;
+    bool isSpecial  = (specialPeerEnabled && (i + 1) == WCB_SPECIAL_PEER_ID);
+    bool shouldHave = wcbPeerActive[i] || isSpecial;
+    bool have       = esp_now_is_peer_exist(WCBMacAddresses[i]);
+    if (shouldHave && !have) {
+      esp_now_peer_info_t p = {};
+      memcpy(p.peer_addr, WCBMacAddresses[i], 6);
+      p.channel = 0;
+      p.encrypt = false;
+      esp_now_add_peer(&p);
+    } else if (!shouldHave && have) {
+      esp_now_del_peer(WCBMacAddresses[i]);
+      boardTable[i].online = false;
+    }
+  }
+}
+
+// ── Learned-peer persistence ─────────────────────────────────────────────────
+// Persist only MEMBERSHIP (which ids are learned) as a 20-bit mask — identity
+// (alias/caps) re-learns from adverts, and MACs are always derived, so there is
+// nothing else to store. Fingerprinted with the MAC octets so a mesh-group
+// change auto-invalidates the table instead of registering wrong-group peers.
+void saveLearnedPeers() {
+  uint32_t mask = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++)
+    if (wcbPeerLearned[i]) mask |= (1UL << i);
+  preferences.begin("learned_peers", false);
+  preferences.putUChar("ver", 1);
+  preferences.putUChar("o2", umac_oct2);
+  preferences.putUChar("o3", umac_oct3);
+  preferences.putUInt("mask", mask);
+  preferences.end();
+}
+
+// Restore the learned membership at boot. Each learned peer is registered LIVE
+// and is a permanent member from that moment — online/offline is tracked by its
+// heartbeats, but membership never self-evicts (only ?WDP,FORGET / ?WDP,CLEAR
+// remove). A blob captured under different MAC octets (a mesh-group change) or
+// an unknown schema version is discarded.
+void loadLearnedPeers() {
+  preferences.begin("learned_peers", true);
+  uint8_t  ver  = preferences.getUChar("ver", 0);
+  uint8_t  o2   = preferences.getUChar("o2", 0);
+  uint8_t  o3   = preferences.getUChar("o3", 0);
+  uint32_t mask = preferences.getUInt("mask", 0);
+  preferences.end();
+
+  if (ver != 1) return;                               // no/older blob → nothing to restore
+  if (o2 != umac_oct2 || o3 != umac_oct3) {           // saved under a different mesh group
+    Serial.println("[PEER] learned-peer table saved under different MAC octets — discarding");
+    preferences.begin("learned_peers", false); preferences.clear(); preferences.end();
+    return;
+  }
+
+  int restored = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!(mask & (1UL << i))) continue;
+    uint8_t id = i + 1;
+    if (id == WCB_Number) continue;
+    if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) continue;
+    if (addActivePeer(id, true)) restored++;
+  }
+  learnedPeersDirty = false;                           // reloaded set already matches NVS
+  if (restored > 0)
+    Serial.printf("[PEER] restored %d learned peer(s) from NVS\n", restored);
+}
+
+// Called every loop(): flush debounced learned-membership changes to NVS.
+void drainLearnedPeerMaintenance() {
+  if (learnedPeersDirty && (long)(millis() - learnedPeersFlushMs) >= 0) {
+    saveLearnedPeers();
+    learnedPeersDirty = false;
+  }
+}
+
+// Drop ALL learned peers (keeps the WCBQ floor). Backs ?WDP,CLEAR. Persists.
+void clearAllLearnedPeers() {
+  int n = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++)
+    if (wcbPeerLearned[i]) { removeActivePeer(i + 1); n++; }
+  saveLearnedPeers();
+  learnedPeersDirty = false;
+  if (n > 0) Serial.printf("[PEER] dropped %d learned peer(s)\n", n);
+}
+
 void setup() {
   // Arm the boot guard FIRST so it covers the entire setup() (including the
   // USB-stabilize and RMT delays below). Disarmed at the very end of setup().
@@ -6089,6 +6366,16 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     }
   }
 
+  // Seed the dynamic membership set from the boards we just registered. At this
+  // point that is exactly the WCBQ floor. Keeps wcbPeerActive[] == today's
+  // behavior when nothing has been learned.
+  rebuildActivePeers();
+
+  // Re-inject learned peers persisted from a previous session — registered live
+  // (ESP-NOW is inited above) as permanent members. Discarded only if the MAC
+  // octets changed since they were saved (different mesh group).
+  loadLearnedPeers();
+
   // Add broadcast peer
   esp_now_peer_info_t broadcastPeer = {};
   memcpy(broadcastPeer.peer_addr, broadcastMACAddress, 6);
@@ -6179,6 +6466,7 @@ void loop() {
   processETMHeartbeats();
   wdpTick();               // WDP: broadcast our advert on schedule + age the neighbor table
   wdpDaTick();             // WDP-DA: age out serial-attached devices that stopped announcing
+  drainLearnedPeerMaintenance();  // flush learned-peer NVS writes + post-boot prune
   processETMAcksAndRetries();
   processETMChar();
   processETMLoad();

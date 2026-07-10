@@ -29,9 +29,17 @@ extern Preferences preferences;
 extern void wdpBroadcast(const uint8_t *payload, int len);
 // Auto-config action: enable this board's controller (special) peer, live.
 extern void enableControllerPeer(uint8_t id);
+// Dynamic peer membership (WCB.ino): learn regular WCBs from their adverts.
+extern bool    addActivePeer(uint8_t id, bool learned);
+extern void    removeActivePeer(uint8_t id);
+extern void    clearAllLearnedPeers();
+extern int     activePeerCount();
+extern bool    wcbPeerActive[MAX_WCB_COUNT];
+extern uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT];
 
 // ---- Module state --------------------------------------------------------
-bool wdpEnabled = true;
+bool wdpEnabled  = true;
+bool wdpAutoJoin = true;   // learn regular WCBs from their adverts (default ON)
 static WdpNeighbor wdpNeighbors[MAX_WCB_COUNT];
 
 static const unsigned long WDP_PERIOD_MS = 60000UL;    // periodic backstop advert
@@ -300,6 +308,24 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     if (wdpLocalMaestroIds(_localMaestros) > 0 && !Kyber_Local && !Maestro_Remote) {
       Serial.println("[WDP] local Maestro present — enabling Maestro remote so the controller can drive it");
       storeKyberSettings("remote");
+    }
+  }
+
+  // ---- Auto-join (regular WCBs only) ----------------------------------------
+  // Client devices (NaviCore/Sabé) are peered via the controller path above,
+  // never as regular ETM mesh peers — so this only applies to real WCBs. The
+  // sender id was bound to its source MAC in the receive callback, so senderWCB
+  // is trustworthy here. Once joined, a peer is a permanent (persisted) member —
+  // only ?WDP,FORGET / ?WDP,CLEAR remove it.
+  if (!nb.isClient) {
+    int idx = senderWCB - 1;
+    if (wcbPeerAdvertCount[idx] < 255) wcbPeerAdvertCount[idx]++;
+    // Join a not-yet-known WCB after >=2 adverts, so a single spoofed/echoed
+    // packet can't inject a peer. Gated on the (default-ON) auto-join setting.
+    if (wdpAutoJoin && !wcbPeerActive[idx] && wcbPeerAdvertCount[idx] >= 2) {
+      Serial.printf("[WDP] auto-joining WCB%d%s%s as a mesh peer\n",
+                    senderWCB, nb.alias[0] ? " " : "", nb.alias);
+      addActivePeer((uint8_t)senderWCB, true);
     }
   }
 }
@@ -585,7 +611,8 @@ static void printWdpDump() {
 static void printWdpStatus() {
   int n = 0;
   for (int i = 0; i < MAX_WCB_COUNT; i++) if (wdpNeighbors[i].valid) n++;
-  Serial.printf("[WDP:en=%d,proto=%d,neighbors=%d]\n", wdpEnabled ? 1 : 0, WDP_PROTO_VERSION, n);
+  Serial.printf("[WDP:en=%d,autojoin=%d,proto=%d,neighbors=%d,peers=%d]\n",
+                wdpEnabled ? 1 : 0, wdpAutoJoin ? 1 : 0, WDP_PROTO_VERSION, n, activePeerCount());
 }
 
 void processWdpCommand(const String &args) {
@@ -598,7 +625,44 @@ void processWdpCommand(const String &args) {
   if (au == "DA")               { wdpDaPrint();      return; }   // serial-attached devices (@WDP1)
   if (au == "ON")  { wdpEnabled = true;  saveWdpSettings(); Serial.println("[WDP] enabled");  return; }
   if (au == "OFF") { wdpEnabled = false; saveWdpSettings(); Serial.println("[WDP] disabled"); return; }
-  if (au == "CLEAR") { memset(wdpNeighbors, 0, sizeof(wdpNeighbors)); Serial.println("[WDP] neighbor table cleared"); return; }
+
+  // ?WDP,AUTOJOIN[,ON|,OFF] — learn regular WCBs from their adverts
+  if (au.startsWith("AUTOJOIN")) {
+    if (au.endsWith("OFF")) { wdpAutoJoin = false; saveWdpSettings(); Serial.println("[WDP] auto-join disabled"); }
+    else                    { wdpAutoJoin = true;  saveWdpSettings(); Serial.println("[WDP] auto-join enabled");  }
+    return;
+  }
+
+  // ?WDP,ADD,<id> — manually register a WCB as a (learned, persisted) peer
+  if (au.startsWith("ADD")) {
+    int c = a.indexOf(',');
+    int id = (c >= 0) ? a.substring(c + 1).toInt() : 0;
+    if (id >= 1 && id <= MAX_WCB_COUNT)
+      Serial.printf(addActivePeer((uint8_t)id, true) ? "[WDP] added WCB%d as a peer\n"
+                                                     : "[WDP] could not add WCB%d\n", id);
+    else Serial.println("[WDP] usage: ?WDP,ADD,<id>");
+    return;
+  }
+
+  // ?WDP,FORGET,<id> — drop one learned peer (floor peers are unaffected)
+  if (au.startsWith("FORGET")) {
+    int c = a.indexOf(',');
+    int id = (c >= 0) ? a.substring(c + 1).toInt() : 0;
+    if (id >= 1 && id <= MAX_WCB_COUNT) {
+      removeActivePeer((uint8_t)id);
+      wdpNeighbors[id - 1].valid = false;
+      Serial.printf("[WDP] forgot WCB%d\n", id);
+    } else Serial.println("[WDP] usage: ?WDP,FORGET,<id>");
+    return;
+  }
+
+  // ?WDP,CLEAR — drop ALL learned peers AND wipe the neighbor table
+  if (au == "CLEAR") {
+    clearAllLearnedPeers();
+    memset(wdpNeighbors, 0, sizeof(wdpNeighbors));
+    Serial.println("[WDP] neighbor table + learned peers cleared");
+    return;
+  }
 
   // ?WDP,DETAIL,<n>  or  ?WDP,<n>  → drill into one neighbor
   if (au.startsWith("DETAIL")) {
@@ -609,20 +673,23 @@ void processWdpCommand(const String &args) {
   int n = a.toInt();
   if (n > 0) { printWdpDetail(n); return; }
 
-  Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | ON | OFF | CLEAR)\n", a.c_str());
+  Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | "
+                "ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)\n", a.c_str());
 }
 
 // ==================== NVS + lifecycle ====================================
 
 void loadWdpSettings() {
   preferences.begin("wdp_cfg", true);
-  wdpEnabled = preferences.getBool("en", true);   // default ON
+  wdpEnabled  = preferences.getBool("en", true);        // default ON
+  wdpAutoJoin = preferences.getBool("autojoin", true);  // default ON
   preferences.end();
 }
 
 void saveWdpSettings() {
   preferences.begin("wdp_cfg", false);
   preferences.putBool("en", wdpEnabled);
+  preferences.putBool("autojoin", wdpAutoJoin);
   preferences.end();
 }
 
