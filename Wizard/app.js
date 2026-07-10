@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.12:15.R.JUL.2026';
+const UI_VERSION = '10.13:23.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4477,10 +4477,12 @@ class BoardConnection {
               // instead of the relay's own pane.
               const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
               if (termMatch) {
-                termLog(parseInt(termMatch[1]), termMatch[2], 'out');
+                if (!_suppressTerminalLine(termMatch[2]))
+                  termLog(parseInt(termMatch[1]), termMatch[2], 'out');
               } else {
                 const displayed = this._lineTransform ? this._lineTransform(line) : line;
-                if (displayed !== null) termLog(this.boardIndex, displayed, 'out');
+                if (displayed !== null && !_suppressTerminalLine(displayed))
+                  termLog(this.boardIndex, displayed, 'out');
               }
             }
           }
@@ -7268,6 +7270,19 @@ function clearTerminalPane(n) {
 
 function clearAllTerminals() {
   document.querySelectorAll('[id^="term-pane-output-"]').forEach(el => el.innerHTML = '');
+}
+
+// Terminal DISPLAY filter (visual only). By the time a line reaches the terminal-
+// render step in _startReading(), it has already been handed to _dataCallbacks —
+// so sendAndCollect() and the WDP parser have seen it. Suppressing it here just
+// keeps the pane readable. The mesh-discovery poller fires ?WDP,DUMP every ~12s;
+// its multi-line reply (plus the command echo) would otherwise bury real board
+// output. That data is shown in the Mesh panel instead. Informational one-off
+// lines like "[WDP] learned …" / "[WDP] advert sent …" are NOT hidden — they end
+// in ']' not ':', so they don't match.
+function _suppressTerminalLine(line) {
+  return /^\[WDP(IF|CFG)?:/.test(line)                                  // [WDP:…] [WDPIF:…] [WDPCFG:…] dump rows
+      || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line); // the ?WDP,DUMP command echo
 }
 
 function termLog(boardIndex, text, type = 'out') {
