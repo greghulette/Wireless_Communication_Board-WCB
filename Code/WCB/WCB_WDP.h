@@ -66,6 +66,7 @@ struct WdpNeighbor {
 };
 
 extern bool wdpEnabled;
+extern bool wdpAutoJoin;   // learn regular WCBs from adverts as permanent peers (default ON)
 
 // ---- Lifecycle -----------------------------------------------------------
 void wdpBegin();   // load NVS flag, clear the table, arm the advert cadence

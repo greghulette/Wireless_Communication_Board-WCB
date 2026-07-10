@@ -24,6 +24,7 @@ function createDefaultBoardConfig() {
     statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
     wcbNumber:    1,
     wcbQuantity:  1,
+    livePeerCount: null,   // PEERSLIVE telemetry (read-only; null = not reported)
     alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
     specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
     specialPeerId: 20,     // special peer ID (1-20); used only when specialPeer is true
@@ -461,6 +462,13 @@ function parseToken(body, config) {
 
     case 'WCBQ':
       config.wcbQuantity = parseInt(parts[1]) || 1;
+      break;
+
+    case 'PEERSLIVE':
+      // Read-only telemetry from the board: live mesh membership (WCBQ floor +
+      // WDP auto-joined peers). Displayed, never re-emitted as a command.
+      config.livePeerCount = parseInt(parts[1]);
+      if (isNaN(config.livePeerCount)) config.livePeerCount = null;
       break;
 
     case 'CONTROLLER':

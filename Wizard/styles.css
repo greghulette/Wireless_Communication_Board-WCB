@@ -1332,6 +1332,39 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
 .wdp-live { color: var(--green); }
 
+/* Live-peers badge next to the WCB Quantity dropdown (PEERSLIVE telemetry) */
+.peers-live-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: rgba(0,232,122,0.1);
+  color: var(--green);
+  border: 1px solid rgba(0,232,122,0.3);
+}
+
+/* Mesh-panel membership badges + controls */
+.wdp-peer-floor   { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-peer-learned { color: var(--accent); font-size: 12px; }
+.wdp-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 8px; flex-wrap: wrap;
+}
+.wdp-toolbar .wdp-btn {
+  background: var(--bg4); color: var(--text2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.wdp-toolbar .wdp-btn:hover { border-color: var(--accent); color: var(--accent); }
+.wdp-btn-forget {
+  background: none; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text3); font-size: 11px; padding: 1px 6px; cursor: pointer;
+  margin-left: 6px;
+}
+.wdp-btn-forget:hover { border-color: var(--red); color: var(--red); }
+
 
 /* ─── Refined layout tweaks ──────────────────── */
 /* Narrow the Bcast IN/OUT columns so Label & Status get the room.

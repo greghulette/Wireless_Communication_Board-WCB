@@ -35,6 +35,7 @@ extern void    removeActivePeer(uint8_t id);
 extern void    clearAllLearnedPeers();
 extern int     activePeerCount();
 extern bool    wcbPeerActive[MAX_WCB_COUNT];
+extern bool    wcbPeerLearned[MAX_WCB_COUNT];
 extern uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT];
 
 // ---- Module state --------------------------------------------------------
@@ -594,10 +595,16 @@ static void printWdpDump() {
     if (!nb.valid) continue;
     count++;
     char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
-    Serial.printf("[WDP:N=%d,CLIENT=%d,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=%lu,SEEN=%d]\n",
+    // PEER: this board's membership relationship to the neighbor —
+    // 0 = not a mesh peer (e.g. client devices), 1 = WCBQ-floor member,
+    // 2 = auto-joined/learned member. Appended last-but-SEEN so older Wizard
+    // regexes (anchored on SEEN) fail soft rather than mis-parse.
+    int peerFlag = nb.isClient ? 0
+                 : (wcbPeerLearned[i] ? 2 : (wcbPeerActive[i] ? 1 : 0));
+    Serial.printf("[WDP:N=%d,CLIENT=%d,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=%lu,SEEN=%d,PEER=%d]\n",
                   nb.wcbNumber, nb.isClient ? 1 : 0, nb.alias, nb.hwVer, nb.hwRev, nb.fwVer,
                   nb.capFlags, nb.ctrlId, nb.capTags, maestro,
-                  (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0);
+                  (now - nb.lastAdvertMs) / 1000, nb.confirmed ? 1 : 0, peerFlag);
     // Per-port interface devices (advertised port labels, incl. WDP-DA detected
     // serial devices). DEV is the last field so a comma inside a label can't
     // shift parsing; labels are already scrubbed of ']'.
@@ -605,6 +612,8 @@ static void printWdpDump() {
       if (nb.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
   }
+  // Membership summary for the config tool: auto-join state + live peer count.
+  Serial.printf("[WDPCFG:AUTOJOIN=%d,PEERS=%d]\n", wdpAutoJoin ? 1 : 0, activePeerCount());
   Serial.printf("[WDP:END,count=%d]\n", count);
 }
 

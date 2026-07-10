@@ -2,7 +2,9 @@
 
 **A way for a device wired to a WCB serial port to tell the WCB what it is.**
 
-**Status:** Draft / for builder review. WCB firmware + config‑tool support not yet implemented.
+**Status:** Implemented — WCB firmware receives these announcements today (`?WDP,DA` shows what
+each port has announced, and the detected type rides into the mesh view automatically). See
+[`WDP_DESIGN.md`](WDP_DESIGN.md) for the mesh side.
 **Who this is for:** Anyone building a device (Arduino, ESP, PIC, …) that plugs into a WCB. You do **not** need to modify any WCB code — this is entirely on your device.
 
 ---

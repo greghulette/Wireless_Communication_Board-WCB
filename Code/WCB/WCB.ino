@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_092049RJUL2026                                  *****////
+///*****                                          Version 6.2.0_092132RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_092049RJUL2026";
+String SoftwareVersion = "6.2.0_092132RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4135,6 +4135,15 @@ void processLocalCommand(const String &message) {
         saveWCBQuantityPreferences(qty);
         rebuildActivePeers();            // WCBQ is the membership floor
         syncActivePeerRegistrations();   // register/free peers live — no reboot needed
+        return;
+    }
+
+    // --- ?PEERSLIVE — read-only: derived live peer count (WCBQ floor ∪ learned).
+    // Emitted in config dumps as telemetry; accepting it here (any argument is
+    // ignored) makes a restore that replays the factory chain harmless.
+    if (rootUpper == "PEERSLIVE") {
+        Serial.printf("Live peers: %d (WCBQ floor %d%s)\n", activePeerCount(),
+                      Default_WCB_Quantity, wdpAutoJoin ? " + learned, auto-join ON" : "");
         return;
     }
 
