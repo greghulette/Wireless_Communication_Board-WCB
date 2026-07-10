@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.10:44.R.JUL.2026';
+const UI_VERSION = '10.12:15.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -325,6 +325,7 @@ let _navBoardNumbers = [];   // board numbers currently shown in the jump-nav (s
 let _navScrollRaf  = null;
 let _meshBoards = new Set(); // WCB numbers discovered on the mesh beyond the floor
 let _boardFloor = 0;         // WCBQ floor: sections 1.._boardFloor always render
+const _meshClients = new Map(); // WCB_Client devices discovered on the mesh: id → last WDP node (status/caps)
 
 // Accepts either a count (legacy: renders 1..count) or an explicit array of
 // board numbers (sparse: WCBQ floor ∪ discovered peers).
@@ -10838,7 +10839,63 @@ function wdpClearLearned() {
 // Skips while an OTA owns the relay link. Reuses the WDP dump the panel already
 // parses, so no new board-side traffic beyond one ?WDP,DUMP per interval.
 let _meshDiscoverBusy = false;
-const _meshAutoConnected = new Set();   // WCBs the poller has already attempted to connect+pull (one-shot, ever)
+
+// ── WCB_Client cards ────────────────────────────────────────────────────────
+// A client (e.g. NaviCore) has no remote management — the Wizard can only observe
+// it. So instead of a full config section we reuse the slot's lightweight "client"
+// view (the b{N}-client-pane / slot-type='client' path) and fill it with the live
+// status + advertised capabilities parsed from the WDP dump. Idempotent: called
+// every discovery sweep to refresh; never auto-pulls or configures anything.
+function upsertClientCard(nd) {
+  const n = nd.n;
+  if (!(n >= 1 && n <= WCB_MAX)) return;
+  if (boardConnections[n]?.isConnected?.()) return;   // a live USB-connected WCB owns this slot
+  addDiscoveredBoards([n]);                            // ensure the section exists (idempotent)
+  const cfg = boardConfigs[n];
+  if (!cfg) return;                                    // section not built yet — next sweep catches it
+  if (cfg.type !== 'client') {                         // flip to the lightweight client view
+    cfg.type = 'client';
+    updateSlotTypeUI(n);
+  }
+  // Seed the Wizard-only friendly name from the advert if the user hasn't typed one.
+  if (nd.alias && !cfg.clientAlias) {
+    cfg.clientAlias = nd.alias.slice(0, 24);
+    const aliasEl = document.getElementById(`b${n}-client-alias`);
+    if (aliasEl && !aliasEl.value) aliasEl.value = cfg.clientAlias;
+    updateBoardAliasUI(n);
+  }
+  _meshClients.set(n, nd);
+  renderClientStatus(n, nd, true);
+}
+
+// Render the live status/capabilities block inside a client card. `online`
+// reflects whether we heard the client on the most recent sweep.
+function renderClientStatus(n, nd, online) {
+  const host = document.getElementById(`b${n}-client-status`);
+  if (!host) return;
+  const kind    = _wdpKind(nd);                        // 'Controller' | 'Client'
+  const capList = (nd.capTags || '').trim() ? nd.capTags.trim().split(/\s+/) : [];
+  const seen    = (nd.age != null) ? ` <span class="cs-sub">· heard ${nd.age}s ago</span>` : '';
+  const caps    = capList.length
+    ? capList.map(c => `<span class="cs-cap">${_wdpEsc(c)}</span>`).join(' ')
+    : '<span class="cs-sub">none advertised</span>';
+  host.innerHTML =
+    `<div class="cs-row"><span class="cs-k">Status</span><span class="cs-v">` +
+      `<span class="cs-dot ${online ? 'on' : 'off'}"></span>${online ? 'Online' : 'Offline'}${online ? seen : ''}</span></div>` +
+    `<div class="cs-row"><span class="cs-k">Type</span><span class="cs-v">${_wdpEsc(kind)}` +
+      `${nd.ctrl ? ` <span class="cs-sub">&rarr; controller ${nd.ctrl}</span>` : ''}</span></div>` +
+    `<div class="cs-row"><span class="cs-k">Firmware</span><span class="cs-v">${_wdpEsc(nd.fw || '—')}` +
+      `${nd.hwRev ? ` <span class="cs-sub">(${_wdpEsc(nd.hwRev)})</span>` : ''}</span></div>` +
+    `<div class="cs-row"><span class="cs-k">Capabilities</span><span class="cs-v">${caps}</span></div>`;
+}
+
+// A previously-seen client wasn't in this sweep's dump — show it offline but keep
+// the card (last-known identity/caps) so it doesn't silently disappear.
+function markClientOffline(n) {
+  const nd = _meshClients.get(n);
+  if (nd) renderClientStatus(n, nd, false);
+}
+
 async function meshAutoDiscoverTick() {
   if (_meshDiscoverBusy) return;
   if (typeof _otaInProgress !== 'undefined' && _otaInProgress.size > 0) return;  // don't fight an OTA
@@ -10851,22 +10908,27 @@ async function meshAutoDiscoverTick() {
     if (!parsed.nodes || !parsed.nodes.length) return;
     renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
 
+    const seenClients = new Set();
     for (const nd of parsed.nodes) {
-      if (nd.client) continue;                              // clients: mesh panel only, no config section
       const n = nd.n;
       if (n === t.wcbNum || String(n) === String(t.slot)) continue;  // skip the relay board itself
+      if (nd.client) {
+        seenClients.add(n);
+        upsertClientCard(nd);                              // clients get a lightweight status/capabilities card
+        continue;
+      }
       if (boardConnections[n]?.isConnected?.()) continue;            // already connected directly
-      addDiscoveredBoards([n]);                             // always keep the section (cheap, idempotent)
-      // Connect + default-pull EXACTLY ONCE per board, ever — never re-attempt on a
-      // later tick, even if the pull failed (a failed pull clears remoteRelayForBoard,
-      // which must NOT re-arm us into a retry loop). A failed board is left with its
-      // section + WDP info; the user can retry with its Pull button.
-      if (_meshAutoConnected.has(n)) continue;
-      _meshAutoConnected.add(n);
-      if (remoteRelayForBoard[n] === undefined) setRemoteConnected(n, t.slot);  // register remote-behind-relay
-      updateBoardStatusBadge(n, 'remote');
-      remoteBoardPull(t.slot, n);                           // one default pull (also dedup-guarded internally)
+      // Detection just SURFACES the board — create its section and stop. We do NOT
+      // auto-connect or auto-pull anymore: the user pulls when ready via the card's
+      // Connect button (which arms the relay + pulls). Auto-pulling on every newly
+      // heard peer fought live traffic and surprised the user; enabling the card is
+      // enough.
+      addDiscoveredBoards([n]);                             // idempotent: keep the section
     }
+    // A client card we've shown before but didn't hear this sweep → mark offline
+    // (its section stays so the user can see it dropped, not silently vanish).
+    for (const id of _meshClients.keys())
+      if (!seenClients.has(id)) markClientOffline(id);
   } catch (_) { /* transient — the next tick retries the DUMP, not the pull */ }
   finally { _meshDiscoverBusy = false; }
 }
