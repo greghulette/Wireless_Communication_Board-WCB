@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_101158RJUL2026                                  *****////
+///*****                                          Version 6.2.0_101258RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_101158RJUL2026";
+String SoftwareVersion = "6.2.0_101258RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -6318,6 +6318,15 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   }
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
+  // ESP-NOW needs the radio awake to hear the MAC-layer ACK that arrives a few
+  // microseconds after every unicast TX. The Arduino/IDF default in STA mode with
+  // no AP association is WIFI_PS_MIN_MODEM, which dozes the radio between DTIM
+  // windows — so a send can miss its ACK and the send-status callback reports
+  // "MAC-layer FAILED" even though the frame went out. That starves heartbeats,
+  // adverts and unicast ACKs and makes the board look OFFLINE to the rest of the
+  // mesh. Pin power-save OFF so ESP-NOW TX/ACK is reliable. (Costs a few mA of
+  // extra idle current — negligible for a mains/animatronics board.)
+  esp_wifi_set_ps(WIFI_PS_NONE);
   // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
   // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
   // but that silently cut ~11 dB of ESP-NOW link budget for every deployed
