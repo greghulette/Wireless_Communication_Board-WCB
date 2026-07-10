@@ -67,12 +67,13 @@
         <div class="subsection-title">Network Identity</div>
         <div class="field-group">
           <div class="field">
-            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options.">i</span></label>
+            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options. With WDP auto-join, boards heard on the mesh beyond this floor join automatically — the live badge shows what the board actually talks to.">i</span></label>
             <select id="g-wcbq" onchange="onWCBQuantityChange()">
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
               <option value="_more">More…</option>
             </select>
+            <span id="g-peerslive" class="peers-live-badge" style="display:none" title="Peers this board is actually meshed with right now (WCBQ floor + WDP auto-joined). Read-only — reported by the board on config pull."></span>
           </div>
           <div class="field">
             <label>ESP-NOW Password <span class="wiz-hint" data-tip="Shared passphrase for the ESP-NOW wireless mesh. Every board in the system must use the same password to communicate.">i</span></label>

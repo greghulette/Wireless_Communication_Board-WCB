@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '08.16:03.R.JUL.2026';
+const UI_VERSION = '09.21:32.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6578,6 +6578,19 @@ function syncGeneralFromConfig(config) {
     populateWCBDropdown(wcbqSel, Math.max(config.wcbQuantity, WCB_MAX), config.wcbQuantity, true);
   }
   set('g-wcbq',      config.wcbQuantity);
+
+  // Live mesh membership badge (PEERSLIVE telemetry — WCBQ floor + auto-joined).
+  // Only shown when the pulled config carried the value (newer firmware).
+  const plEl = document.getElementById('g-peerslive');
+  if (plEl) {
+    if (typeof config.livePeerCount === 'number' && config.livePeerCount >= 0) {
+      plEl.textContent = `mesh: ${config.livePeerCount} live peer${config.livePeerCount === 1 ? '' : 's'}`;
+      plEl.style.display = '';
+    } else {
+      plEl.style.display = 'none';
+    }
+  }
+
   set('g-password',  config.espnowPassword);
   set('g-mac2',      config.macOctet2);
   set('g-mac3',      config.macOctet3);
@@ -10590,24 +10603,31 @@ function _wdpEsc(s) {
 }
 
 // Parse the ?WDP,DUMP response. String fields are scrubbed of ',' and ']' on the
-// board, so [^,] / [^\]] field matching is safe.
+// board, so [^,] / [^\]] field matching is safe. PEER= (membership: 0 none,
+// 1 WCBQ-floor, 2 auto-joined) and the [WDPCFG:...] summary are optional so
+// dumps from older firmware still parse. Returns { nodes, cfg } — cfg is null
+// when the firmware didn't send the summary line.
 function parseWdpDump(raw) {
   const nodes = {}, order = [];
+  let cfg = null;
   for (const line of String(raw).split('\n')) {
     const t = line.trim();
-    let m = t.match(/^\[WDP:N=(\d+),CLIENT=(\d+),ALIAS=([^,]*),HW=(\d+),HWREV=([^,]*),FW=([^,]*),CAP=([0-9A-Fa-f]+),CTRL=(\d+),CAPTAGS=([^,]*),MAESTRO=([^,]*),AGE=(\d+),SEEN=(\d+)\]$/);
+    let m = t.match(/^\[WDP:N=(\d+),CLIENT=(\d+),ALIAS=([^,]*),HW=(\d+),HWREV=([^,]*),FW=([^,]*),CAP=([0-9A-Fa-f]+),CTRL=(\d+),CAPTAGS=([^,]*),MAESTRO=([^,]*),AGE=(\d+),SEEN=(\d+)(?:,PEER=(\d))?\]$/);
     if (m) {
       const n = +m[1];
       nodes[n] = { n, client: m[2] === '1', alias: m[3], hw: +m[4], hwRev: m[5],
                    fw: m[6], cap: parseInt(m[7], 16), ctrl: +m[8], capTags: m[9],
-                   maestro: m[10], age: +m[11], live: m[12] === '1', ifs: [] };
+                   maestro: m[10], age: +m[11], live: m[12] === '1',
+                   peer: m[13] !== undefined ? +m[13] : null, ifs: [] };
       order.push(n);
       continue;
     }
     m = t.match(/^\[WDPIF:N=(\d+),S=(\d+),DEV=([^\]]*)\]$/);
-    if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); }
+    if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); continue; }
+    m = t.match(/^\[WDPCFG:AUTOJOIN=(\d),PEERS=(\d+)\]$/);
+    if (m) cfg = { autojoin: m[1] === '1', peers: +m[2] };
   }
-  return order.map(n => nodes[n]);
+  return { nodes: order.map(n => nodes[n]), cfg };
 }
 
 const _WDP_CAP_BITS = [
@@ -10628,11 +10648,42 @@ function _wdpKind(nd) {
   return /^(navicore|sab)/i.test(nd.alias || '') ? 'Controller' : 'Client';
 }
 
-function renderWdpMesh(nodes, viaWcb) {
+// Membership cell: what the queried board's peer table says about this
+// neighbor. Auto-joined (learned) peers get a Forget button — removing one is
+// deliberately a user action (membership is permanent otherwise).
+function _wdpPeerCell(nd) {
+  if (nd.peer === null || nd.client) return '<span class="wdp-sub">&mdash;</span>';
+  if (nd.peer === 2)
+    return `<span class="wdp-peer-learned">auto-joined</span>` +
+           `<button class="wdp-btn-forget" onclick="wdpForgetPeer(${nd.n})" ` +
+           `title="Remove WCB ${nd.n} from this board's learned peer list (it will re-join on the next adverts if auto-join is on)">✕</button>`;
+  if (nd.peer === 1) return '<span class="wdp-peer-floor">configured</span>';
+  return '<span class="wdp-sub">not peered</span>';
+}
+
+function renderWdpMesh(nodes, viaWcb, cfg) {
   const body = document.getElementById('wdp-mesh-body');
   if (!body) return;
+
+  // Toolbar (only when the firmware reports membership state): auto-join
+  // toggle + live peer count + clear-learned when any learned peers exist.
+  let toolbar = '';
+  if (cfg) {
+    const anyLearned = nodes.some(nd => nd.peer === 2);
+    toolbar = `<div class="wdp-toolbar">
+      <span class="wdp-sub">Auto-join:</span>
+      <button class="wdp-btn" onclick="wdpAutoJoinToggle(${cfg.autojoin ? 1 : 0})"
+        title="When on, this board permanently adds any WCB it hears advertise (twice) as a mesh peer.">
+        ${cfg.autojoin ? 'ON — heard boards join automatically' : 'OFF — peer list is pinned'}
+      </button>
+      <span class="wdp-sub">Live peers: ${cfg.peers}</span>
+      ${anyLearned ? `<button class="wdp-btn" onclick="wdpClearLearned()"
+        title="Forget ALL auto-joined peers on this board (configured 1..WCBQ peers are kept).">Clear learned</button>` : ''}
+    </div>`;
+  }
+
   if (!nodes.length) {
-    body.innerHTML = `<div class="rc-devices-note">WCB ${viaWcb} hasn't discovered any neighbors yet — give the mesh a few seconds, or verify WDP is on (<code>?WDP,STATUS</code>).</div>`;
+    body.innerHTML = toolbar + `<div class="rc-devices-note">WCB ${viaWcb} hasn't discovered any neighbors yet — give the mesh a few seconds, or verify WDP is on (<code>?WDP,STATUS</code>).</div>`;
     return;
   }
   const rows = nodes.map(nd => {
@@ -10651,16 +10702,17 @@ function renderWdpMesh(nodes, viaWcb) {
       <td>${caps || '&mdash;'}</td>
       <td>${maestro}</td>
       <td>${ifs}</td>
+      <td>${_wdpPeerCell(nd)}</td>
       <td class="wdp-sub">${nd.age}s</td>
       <td>${nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>'}</td>
     </tr>`;
   }).join('');
-  body.innerHTML = `
+  body.innerHTML = toolbar + `
     <div class="wdp-mesh-scroll">
       <table class="wdp-mesh-table">
         <thead><tr>
           <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>
-          <th>Capabilities</th><th>Maestros</th><th>Devices</th><th>Age</th><th>State</th>
+          <th>Capabilities</th><th>Maestros</th><th>Devices</th><th>Peer</th><th>Age</th><th>State</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -10668,28 +10720,59 @@ function renderWdpMesh(nodes, viaWcb) {
     <div class="rc-devices-note">Discovered by WCB ${viaWcb} &middot; ${nodes.length} node${nodes.length === 1 ? '' : 's'}. Shows what that board hears on the mesh (it doesn't list itself).</div>`;
 }
 
+// First connected board = the one the mesh panel talks to (same rule the
+// refresh has always used). Returns null when nothing is connected.
+function _wdpMeshConn() {
+  for (const [k, c] of Object.entries(boardConnections)) {
+    if (c && c.isConnected()) {
+      const fc = boardConfigs[k]?.funcChar || boardBootChars[k]?.funcChar || '?';
+      return { slot: k, conn: c, fc, wcbNum: boardConfigs[k]?.wcbNumber || k };
+    }
+  }
+  return null;
+}
+
 async function wdpMeshRefresh() {
   const body = document.getElementById('wdp-mesh-body');
-  let slot = null, conn = null;
-  for (const [k, c] of Object.entries(boardConnections)) {
-    if (c && c.isConnected()) { slot = k; conn = c; break; }
-  }
-  if (!conn) {
+  const t = _wdpMeshConn();
+  if (!t) {
     if (body) body.innerHTML = `<div class="rc-devices-note">No board connected — connect one first, then Refresh.</div>`;
     return;
   }
   const btn = document.getElementById('wdp-mesh-refresh');
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
-    const fc     = boardConfigs[slot]?.funcChar || boardBootChars[slot]?.funcChar || '?';
-    const wcbNum = boardConfigs[slot]?.wcbNumber || slot;
-    const raw    = await conn.sendAndCollect(`${fc}WDP,DUMP`, 4000, '[WDP:END');
-    renderWdpMesh(parseWdpDump(raw), wcbNum);
+    const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
+    const parsed = parseWdpDump(raw);
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);
   } catch (e) {
     if (body) body.innerHTML = `<div class="rc-devices-note">Failed to read the mesh: ${_wdpEsc((e && e.message) || e)}</div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
   }
+}
+
+// Fire a ?WDP subcommand at the mesh board, then re-pull the table so the
+// panel always reflects what the firmware actually did.
+async function _wdpMeshCommand(sub) {
+  const t = _wdpMeshConn();
+  if (!t) return;
+  try { await t.conn.send(`${t.fc}WDP,${sub}\r`); } catch (_) {}
+  setTimeout(wdpMeshRefresh, 300);   // give the board a beat to apply + persist
+}
+
+function wdpAutoJoinToggle(currentlyOn) {
+  _wdpMeshCommand(`AUTOJOIN,${currentlyOn ? 'OFF' : 'ON'}`);
+}
+
+function wdpForgetPeer(n) {
+  if (!confirm(`Forget WCB ${n}?\n\nRemoves it from this board's learned peer list (and NVS). If auto-join is on and the board is still advertising, it will re-join automatically.`)) return;
+  _wdpMeshCommand(`FORGET,${n}`);
+}
+
+function wdpClearLearned() {
+  if (!confirm('Forget ALL auto-joined peers on this board?\n\nConfigured peers (1..WCBQ) are kept. Boards still advertising will re-join if auto-join stays on.')) return;
+  _wdpMeshCommand('CLEAR');
 }
 
 // ── RC-telemetry relay: ON-DEMAND, not always-on ────────────────────────────
