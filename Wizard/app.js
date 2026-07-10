@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.10:08.R.JUL.2026';
+const UI_VERSION = '10.10:44.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -10838,6 +10838,7 @@ function wdpClearLearned() {
 // Skips while an OTA owns the relay link. Reuses the WDP dump the panel already
 // parses, so no new board-side traffic beyond one ?WDP,DUMP per interval.
 let _meshDiscoverBusy = false;
+const _meshAutoConnected = new Set();   // WCBs the poller has already attempted to connect+pull (one-shot, ever)
 async function meshAutoDiscoverTick() {
   if (_meshDiscoverBusy) return;
   if (typeof _otaInProgress !== 'undefined' && _otaInProgress.size > 0) return;  // don't fight an OTA
@@ -10855,15 +10856,18 @@ async function meshAutoDiscoverTick() {
       const n = nd.n;
       if (n === t.wcbNum || String(n) === String(t.slot)) continue;  // skip the relay board itself
       if (boardConnections[n]?.isConnected?.()) continue;            // already connected directly
-      const firstTime = remoteRelayForBoard[n] === undefined;
-      addDiscoveredBoards([n]);                             // ensure a grid section exists first
-      if (firstTime) {
-        setRemoteConnected(n, t.slot);                      // register remote-behind-relay (tested path)
-        updateBoardStatusBadge(n, 'remote');
-        remoteBoardPull(t.slot, n);                         // default pull (dedup-guarded internally)
-      }
+      addDiscoveredBoards([n]);                             // always keep the section (cheap, idempotent)
+      // Connect + default-pull EXACTLY ONCE per board, ever — never re-attempt on a
+      // later tick, even if the pull failed (a failed pull clears remoteRelayForBoard,
+      // which must NOT re-arm us into a retry loop). A failed board is left with its
+      // section + WDP info; the user can retry with its Pull button.
+      if (_meshAutoConnected.has(n)) continue;
+      _meshAutoConnected.add(n);
+      if (remoteRelayForBoard[n] === undefined) setRemoteConnected(n, t.slot);  // register remote-behind-relay
+      updateBoardStatusBadge(n, 'remote');
+      remoteBoardPull(t.slot, n);                           // one default pull (also dedup-guarded internally)
     }
-  } catch (_) { /* transient — the next tick retries */ }
+  } catch (_) { /* transient — the next tick retries the DUMP, not the pull */ }
   finally { _meshDiscoverBusy = false; }
 }
 
