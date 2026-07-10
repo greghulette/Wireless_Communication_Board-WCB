@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_101258RJUL2026                                  *****////
+///*****                                          Version 6.2.0_101357RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_101258RJUL2026";
+String SoftwareVersion = "6.2.0_101357RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5962,6 +5962,17 @@ void enableControllerPeer(uint8_t id) {
     sp.encrypt = false;
     if (esp_now_add_peer(&sp) == ESP_OK)
       Serial.printf("Controller peer WCB%d registered (live).\n", id);
+  }
+
+  // Mutual exclusion with the learned-peer set: an id that is the controller is
+  // the SPECIAL peer, never ALSO a learned peer. If it had been auto-joined as a
+  // learned client earlier (e.g. while the controller was disabled), drop that
+  // learned bit so we don't dual-track it for online/ACK. It re-joins as a
+  // learned client automatically if the controller is later turned off.
+  if (id >= 1 && id <= MAX_WCB_COUNT && wcbPeerLearned[id - 1]) {
+    wcbPeerLearned[id - 1] = false;
+    learnedPeersDirty      = true;
+    rebuildActivePeers();
   }
 }
 

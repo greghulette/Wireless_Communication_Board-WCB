@@ -15,6 +15,7 @@ extern String      SoftwareVersion;   // firmware version string
 extern bool        Kyber_Local;
 extern bool        Maestro_Remote;
 extern bool        specialPeerEnabled;
+extern uint8_t     WCB_SPECIAL_PEER_ID;   // controller/special peer id — excluded from learned auto-join
 extern bool        debugEnabled;
 extern char        LocalFunctionIdentifier;   // the '?' function-command prefix
 extern String      serialPortLabels[5];       // RAW per-port labels ("" = unlabeled).
@@ -355,21 +356,32 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // Evaluated every advert; a no-op once we're already remote / the Kyber host.
   wdpEvaluateMaestroRemote();
 
-  // ---- Auto-join (regular WCBs only) ----------------------------------------
-  // Client devices (NaviCore/Sabé) are peered via the controller path above,
-  // never as regular ETM mesh peers — so this only applies to real WCBs. The
-  // sender id was bound to its source MAC in the receive callback, so senderWCB
-  // is trustworthy here. Once joined, a peer is a permanent (persisted) member —
-  // only ?WDP,FORGET / ?WDP,CLEAR remove it.
-  if (!nb.isClient) {
+  // ---- Auto-join (real WCBs AND client devices) -----------------------------
+  // Every WCB and every WCB_Client forces its STA MAC to the derived scheme
+  // 02:oct2:oct3:00:00:<id>, so a learned peer's MAC is always known from its id
+  // — a client registers exactly like a WCB. We store ANY device we hear (so we
+  // can reach it) and persist it across reboots; the peer table is large enough
+  // that transient devices aren't a concern, and ?WDP,FORGET / ?WDP,CLEAR clean
+  // it up. A learned peer that never ACKs (a passive monitor) is harmless: it is
+  // skipped from ensured-broadcast completion until it reciprocates (see
+  // etmAddToPendingTable, wcbPeerReciprocated). The sender id was bound to its
+  // source MAC in the receive callback, so senderWCB is trustworthy.
+  //
+  // EXCEPTION: the controller / special peer is registered via the controller
+  // path above (enableControllerPeer), not as a learned peer — addActivePeer()
+  // rejects it anyway, so skip it here while it holds that role.
+  {
     int idx = senderWCB - 1;
     if (wcbPeerAdvertCount[idx] < 255) wcbPeerAdvertCount[idx]++;
-    // Join a not-yet-known WCB after >=2 adverts, so a single spoofed/echoed
-    // packet can't inject a peer. Gated on the (default-ON) auto-join setting.
-    if (wdpAutoJoin && !wcbPeerActive[idx] && wcbPeerAdvertCount[idx] >= 2) {
-      Serial.printf("[WDP] auto-joining WCB%d%s%s as a mesh peer\n",
-                    senderWCB, nb.alias[0] ? " " : "", nb.alias);
-      addActivePeer((uint8_t)senderWCB, true);
+    bool isSpecialPeer = specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID;
+    // Join after >=2 adverts so a single spoofed/echoed packet can't inject a
+    // peer. Gated on the (default-ON) auto-join setting.
+    if (wdpAutoJoin && !isSpecialPeer && !wcbPeerActive[idx] &&
+        wcbPeerAdvertCount[idx] >= 2) {
+      if (addActivePeer((uint8_t)senderWCB, true))
+        Serial.printf("[WDP] auto-joined WCB%d%s%s (%s)\n", senderWCB,
+                      nb.alias[0] ? " " : "", nb.alias,
+                      nb.isClient ? "client" : "board");
     }
   }
 }
@@ -639,11 +651,12 @@ static void printWdpDump() {
     count++;
     char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
     // PEER: this board's membership relationship to the neighbor —
-    // 0 = not a mesh peer (e.g. client devices), 1 = WCBQ-floor member,
-    // 2 = auto-joined/learned member. Appended last-but-SEEN so older Wizard
+    // 0 = not a mesh peer (the controller/special peer, or a not-yet-joined
+    // device), 1 = WCBQ-floor member, 2 = auto-joined/learned member. Clients
+    // CAN now be learned peers (auto-join stores them like WCBs), so this is no
+    // longer forced to 0 for clients. Appended last-but-SEEN so older Wizard
     // regexes (anchored on SEEN) fail soft rather than mis-parse.
-    int peerFlag = nb.isClient ? 0
-                 : (wcbPeerLearned[i] ? 2 : (wcbPeerActive[i] ? 1 : 0));
+    int peerFlag = wcbPeerLearned[i] ? 2 : (wcbPeerActive[i] ? 1 : 0);
     Serial.printf("[WDP:N=%d,CLIENT=%d,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=%lu,SEEN=%d,PEER=%d]\n",
                   nb.wcbNumber, nb.isClient ? 1 : 0, nb.alias, nb.hwVer, nb.hwRev, nb.fwVer,
                   nb.capFlags, nb.ctrlId, nb.capTags, maestro,
