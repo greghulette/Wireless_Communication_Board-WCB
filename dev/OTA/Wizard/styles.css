@@ -1332,6 +1332,21 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
 .wdp-live { color: var(--green); }
 
+/* WCB_Client lightweight status card (b{N}-client-status) */
+.client-status { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.client-status .cs-row { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.client-status .cs-k { flex: 0 0 96px; color: var(--text-secondary, #9aa3b0); }
+.client-status .cs-v { flex: 1 1 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.client-status .cs-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.client-status .cs-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.client-status .cs-dot.on  { background: var(--green, #3fb950); box-shadow: 0 0 5px var(--green, #3fb950); }
+.client-status .cs-dot.off { background: var(--text-secondary, #9aa3b0); }
+.client-status .cs-cap {
+  font-size: 11px; padding: 1px 7px; border-radius: 3px;
+  background: var(--bg4, #21262d); color: var(--text2, #c9d1d9);
+  border: 1px solid var(--border, #30363d);
+}
+
 /* Live-peers badge next to the WCB Quantity dropdown (PEERSLIVE telemetry) */
 .peers-live-badge {
   display: inline-block;

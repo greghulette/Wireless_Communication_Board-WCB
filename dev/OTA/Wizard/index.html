@@ -462,10 +462,13 @@
           <input type="text" id="b{N}-client-alias" maxlength="24" placeholder="e.g. Dome Sensor" oninput="onClientAliasChange({N})">
         </div>
         <div class="field" style="flex:1 1 100%;opacity:0.7;font-size:12px;padding-top:6px">
-          This slot is a WCB_Client device — the Wizard observes it but can't
-          configure it. Live status / online indicator coming next.
+          This slot is a WCB_Client device — the Wizard observes it over the mesh
+          but can't configure it.
         </div>
       </div>
+      <!-- Live mesh status + advertised capabilities, filled by upsertClientCard()
+           from the WDP dump. Empty until the client is heard on the mesh. -->
+      <div id="b{N}-client-status" class="client-status"></div>
     </div>
 
     <div class="section-body" id="b{N}-section-body">
