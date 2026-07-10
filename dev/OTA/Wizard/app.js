@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.08:54.R.JUL.2026';
+const UI_VERSION = '10.10:08.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -321,16 +321,23 @@ function toggleSection(id) {
 
 // ─── WCB Jump Nav ─────────────────────────────────────────────────
 const BOARD_COLORS = ['#00d4ff','#a78bfa','#f87171','#fb923c','#f472b6','#facc15','#818cf8','#60a5fa'];
-let _navBoardCount = 0;
+let _navBoardNumbers = [];   // board numbers currently shown in the jump-nav (sparse)
 let _navScrollRaf  = null;
+let _meshBoards = new Set(); // WCB numbers discovered on the mesh beyond the floor
+let _boardFloor = 0;         // WCBQ floor: sections 1.._boardFloor always render
 
-function updateWCBNav(count) {
+// Accepts either a count (legacy: renders 1..count) or an explicit array of
+// board numbers (sparse: WCBQ floor ∪ discovered peers).
+function updateWCBNav(arg) {
+  const numbers = Array.isArray(arg)
+    ? arg.slice()
+    : Array.from({ length: Math.max(0, arg | 0) }, (_, i) => i + 1);
   const nav = document.getElementById('wcb-nav');
   if (!nav) return;
-  _navBoardCount = count;
+  _navBoardNumbers = numbers;
   nav.innerHTML = '';
-  nav.style.display = count > 0 ? 'flex' : 'none';
-  for (let n = 1; n <= count; n++) {
+  nav.style.display = numbers.length > 0 ? 'flex' : 'none';
+  for (const n of numbers) {
     const color = BOARD_COLORS[(n - 1) % 8];
     const btn   = document.createElement('button');
     btn.className   = 'wcb-nav-btn';
@@ -354,12 +361,12 @@ function updateWCBNav(count) {
 }
 
 function _updateActiveNavBtn() {
-  if (_navBoardCount === 0) return;
+  if (_navBoardNumbers.length === 0) return;
   const navEl       = document.getElementById('wcb-nav');
   const offsetTop   = (navEl?.offsetHeight || 0) + 60;
   const viewH       = window.innerHeight;
   let bestN = null, bestPx = 0;
-  for (let n = 1; n <= _navBoardCount; n++) {
+  for (const n of _navBoardNumbers) {
     const sec = document.getElementById(`section-board-${n}`);
     if (!sec) continue;
     const r   = sec.getBoundingClientRect();
@@ -378,20 +385,58 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 
 // ─── Render Boards ────────────────────────────────────────────────
-function renderBoards(count) {
-  const container = document.getElementById('boards-container');
-  const existing  = container.querySelectorAll('[id^="section-board-"]').length;
+// The set of board numbers the grid should render: the WCBQ floor (1.._boardFloor)
+// ∪ WDP-discovered peers ∪ any board with a live connection. Sorted, 1..WCB_MAX.
+function desiredBoardNumbers() {
+  const s = new Set();
+  for (let i = 1; i <= _boardFloor; i++) s.add(i);
+  for (const n of _meshBoards) s.add(n);
+  for (const k in boardConnections) if (boardConnections[k]?.isConnected?.()) s.add(+k);
+  return [...s].filter(n => n >= 1 && n <= WCB_MAX).sort((a, b) => a - b);
+}
 
-  if (count > existing) {
-    for (let i = existing + 1; i <= count; i++) addBoardSection(i);
-  } else if (count < existing) {
-    for (let i = existing; i > count; i--) {
-      document.getElementById(`section-board-${i}`)?.remove();
-      delete boardConnections[i];
-      delete boardConfigs[i];
-    }
+// Reconcile the rendered sections against desiredBoardNumbers(). Sparse-aware
+// (sections are keyed by number, so gaps like {1,2,20} are fine); never removes
+// a board that currently has a live connection.
+function reconcileBoardGrid() {
+  const container = document.getElementById('boards-container');
+  if (!container) return;
+  const want    = desiredBoardNumbers();
+  const wantSet = new Set(want);
+  const have    = new Map();
+  container.querySelectorAll('[id^="section-board-"]').forEach(el => {
+    have.set(+el.id.replace('section-board-', ''), el);
+  });
+  for (const [n, el] of have) {
+    if (wantSet.has(n)) continue;
+    if (boardConnections[n]?.isConnected?.()) continue;   // never yank a live board
+    el.remove();
+    delete boardConnections[n];
+    delete boardConfigs[n];
   }
-  updateWCBNav(count);
+  for (const n of want) if (!have.has(n)) addBoardSection(n);
+  // Keep DOM order ascending by board number so out-of-order adds sit right.
+  [...container.querySelectorAll('[id^="section-board-"]')]
+    .sort((a, b) => (+a.id.replace('section-board-', '')) - (+b.id.replace('section-board-', '')))
+    .forEach(el => container.appendChild(el));
+  updateWCBNav(want);
+}
+
+// Back-compat entry point: `count` sets the contiguous WCBQ floor (1..count).
+function renderBoards(count) {
+  _boardFloor = Math.max(0, count | 0);
+  reconcileBoardGrid();
+}
+
+// Add WDP-discovered WCB numbers to the grid. Returns true if anything new was
+// added. Clients are handled separately (not full board sections).
+function addDiscoveredBoards(numbers) {
+  let added = false;
+  for (const n of numbers) {
+    if (n >= 1 && n <= WCB_MAX && !_meshBoards.has(n)) { _meshBoards.add(n); added = true; }
+  }
+  if (added) reconcileBoardGrid();
+  return added;
 }
 
 function addBoardSection(n) {
@@ -10783,6 +10828,48 @@ function wdpClearLearned() {
   if (!confirm('Forget ALL auto-joined peers on this board?\n\nConfigured peers (1..WCBQ) are kept. Boards still advertising will re-join if auto-join stays on.')) return;
   _wdpMeshCommand('CLEAR');
 }
+
+// ── Automatic mesh discovery ────────────────────────────────────────────────
+// Polls the connected board's WDP neighbor table on a timer (no Refresh click),
+// keeps the mesh panel live (so CLIENT devices show status + capabilities on
+// their own, read-only), and auto-adds any real WCB it hasn't seen to the config
+// grid — connecting it via the relay and pulling its config, the same tested
+// path as a manual "remote connect". Client devices never get a config section.
+// Skips while an OTA owns the relay link. Reuses the WDP dump the panel already
+// parses, so no new board-side traffic beyond one ?WDP,DUMP per interval.
+let _meshDiscoverBusy = false;
+async function meshAutoDiscoverTick() {
+  if (_meshDiscoverBusy) return;
+  if (typeof _otaInProgress !== 'undefined' && _otaInProgress.size > 0) return;  // don't fight an OTA
+  const t = _wdpMeshConn();
+  if (!t) return;
+  _meshDiscoverBusy = true;
+  try {
+    const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
+    const parsed = parseWdpDump(raw);
+    if (!parsed.nodes || !parsed.nodes.length) return;
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
+
+    for (const nd of parsed.nodes) {
+      if (nd.client) continue;                              // clients: mesh panel only, no config section
+      const n = nd.n;
+      if (n === t.wcbNum || String(n) === String(t.slot)) continue;  // skip the relay board itself
+      if (boardConnections[n]?.isConnected?.()) continue;            // already connected directly
+      const firstTime = remoteRelayForBoard[n] === undefined;
+      addDiscoveredBoards([n]);                             // ensure a grid section exists first
+      if (firstTime) {
+        setRemoteConnected(n, t.slot);                      // register remote-behind-relay (tested path)
+        updateBoardStatusBadge(n, 'remote');
+        remoteBoardPull(t.slot, n);                         // default pull (dedup-guarded internally)
+      }
+    }
+  } catch (_) { /* transient — the next tick retries */ }
+  finally { _meshDiscoverBusy = false; }
+}
+
+// Poll every 12 s while a board is connected; first sweep a few seconds after load.
+setInterval(meshAutoDiscoverTick, 12000);
+setTimeout(meshAutoDiscoverTick, 4000);
 
 // ── RC-telemetry relay: ON-DEMAND, not always-on ────────────────────────────
 // We deliberately do NOT auto-subscribe the firmware's RC-JSON relay. It's
