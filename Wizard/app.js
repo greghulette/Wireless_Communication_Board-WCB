@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '09.21:32.R.JUL.2026';
+const UI_VERSION = '10.08:54.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -10624,8 +10624,10 @@ function parseWdpDump(raw) {
     }
     m = t.match(/^\[WDPIF:N=(\d+),S=(\d+),DEV=([^\]]*)\]$/);
     if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); continue; }
-    m = t.match(/^\[WDPCFG:AUTOJOIN=(\d),PEERS=(\d+)\]$/);
-    if (m) cfg = { autojoin: m[1] === '1', peers: +m[2] };
+    // EN= is optional so a dump from firmware before the EN field still parses.
+    m = t.match(/^\[WDPCFG:(?:EN=(\d),)?AUTOJOIN=(\d),PEERS=(\d+)\]$/);
+    if (m) cfg = { enabled: m[1] === undefined ? true : m[1] === '1',
+                   autojoin: m[2] === '1', peers: +m[3] };
   }
   return { nodes: order.map(n => nodes[n]), cfg };
 }
@@ -10664,6 +10666,13 @@ function _wdpPeerCell(nd) {
 function renderWdpMesh(nodes, viaWcb, cfg) {
   const body = document.getElementById('wdp-mesh-body');
   if (!body) return;
+
+  // WDP turned OFF on this board — a definitive state, not "no neighbors yet".
+  // (cfg.enabled is only reported by firmware that sends the EN= field.)
+  if (cfg && cfg.enabled === false) {
+    body.innerHTML = `<div class="rc-devices-note">WDP discovery is <strong>disabled</strong> on WCB ${viaWcb} — enable it with <code>?WDP,ON</code> to see the mesh.</div>`;
+    return;
+  }
 
   // Toolbar (only when the firmware reports membership state): auto-join
   // toggle + live peer count + clear-learned when any learned peers exist.

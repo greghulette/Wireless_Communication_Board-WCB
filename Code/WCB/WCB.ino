@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_092132RJUL2026                                  *****////
+///*****                                          Version 6.2.0_100854RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_092132RJUL2026";
+String SoftwareVersion = "6.2.0_100854RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2589,6 +2589,14 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // Controller peer (default NaviCore, ID 20) — only when enabled. Canonical token
   // is CONTROLLER now; firmware + Wizard still accept the legacy SPECIAL on input.
   if (specialPeerEnabled) emit("CONTROLLER,ON," + String(WCB_SPECIAL_PEER_ID), true);
+
+  // WDP settings — both default ON, so only the OFF states need to ride the
+  // config chain (otherwise a restore silently reverts a deliberate ?WDP,OFF /
+  // ?WDP,AUTOJOIN,OFF back to ON on the replacement board). Learned-peer
+  // membership itself is board-derived (NVS, MAC-fingerprinted) and is NOT part
+  // of a portable config, so it is intentionally not emitted here.
+  if (!wdpEnabled)  emit("WDP,OFF", true);
+  if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);

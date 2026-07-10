@@ -81,20 +81,37 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   // targets (e.g. M2 local on this board AND M2 remote on WCB3), and every
   // matching slot must receive the command.
   bool handled = false;
+
+  // Dedup by RESOLVED physical destination so overlapping config slots can't
+  // double-fire one device. Every matching slot here shares this same maestroID
+  // (it's the match key), so a repeated destination IS the same physical Maestro:
+  //   • local  → dedup by serial port  (same id + same port = same device on the wire)
+  //   • remote → dedup by target WCB   (same id + same board = same device over there)
+  // Distinct ports / distinct boards still each fire — this only drops true repeats.
+  // NOTE: the broadcast (id 0) path below is deliberately NOT deduped this way,
+  // because there each write carries a DIFFERENT device id and multiple Maestros
+  // can be daisy-chained on one serial line.
+  uint8_t  sentLocalPorts = 0;   // bit p set → wrote serial port p (1..5)
+  uint32_t sentRemoteWCBs = 0;   // bit w set → unicast WCB w      (1..20)
+
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].maestroID != maestroID) continue;
     MaestroConfig &config = maestroConfigs[i];
 
     // LOCAL Maestro
     if (config.serialPort > 0) {
-      uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
-      Stream &targetSerial = getSerialStream(config.serialPort);
-      // write() queues bytes into the hardware UART TX buffer (256 bytes).
-      // flush() would block ~347–694 µs waiting for the 4 bytes to transmit —
-      // unnecessary and a direct source of jitter. The UART drains asynchronously.
-      targetSerial.write(command, sizeof(command));
-      Serial.printf("→ Maestro %d: Local S%d, Script %d\n",
-                    maestroID, config.serialPort, scriptNumber);
+      uint8_t portBit = (config.serialPort <= 7) ? (uint8_t)(1u << config.serialPort) : 0;
+      if (portBit && !(sentLocalPorts & portBit)) {   // one write per physical port
+        sentLocalPorts |= portBit;
+        uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
+        Stream &targetSerial = getSerialStream(config.serialPort);
+        // write() queues bytes into the hardware UART TX buffer (256 bytes).
+        // flush() would block ~347–694 µs waiting for the 4 bytes to transmit —
+        // unnecessary and a direct source of jitter. The UART drains asynchronously.
+        targetSerial.write(command, sizeof(command));
+        Serial.printf("→ Maestro %d: Local S%d, Script %d\n",
+                      maestroID, config.serialPort, scriptNumber);
+      }
       handled = true;
     }
 
@@ -102,11 +119,15 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     // ;m commands are processed commands, not raw passthrough, so delivery
     // confirmation matters.  Raw Kyber Maestro port bytes bypass this path entirely.
     if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
-      String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
-      if (debugEnabled) {
-        Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
-                      maestroID, config.remoteWCB, scriptNumber);
+      uint32_t wcbBit = (config.remoteWCB <= 31) ? (1u << config.remoteWCB) : 0;
+      if (wcbBit && !(sentRemoteWCBs & wcbBit)) {     // one unicast per target board
+        sentRemoteWCBs |= wcbBit;
+        String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
+        sendESPNowMessage(config.remoteWCB, espnowMsg.c_str());
+        if (debugEnabled) {
+          Serial.printf("→ Maestro %d: Unicast to WCB%d, Script %d\n",
+                        maestroID, config.remoteWCB, scriptNumber);
+        }
       }
       handled = true;
     }

@@ -4,28 +4,31 @@
 #include <Arduino.h>
 
 // -----------------------------------------------------------------------
-// WDP — Wireless Discovery Protocol (Phase 2: discovery only)
+// WDP — Wireless Discovery Protocol.  Full design: docs/WDP_DESIGN.md
 //
 // "CDP/LLDP for WCBs." Every board periodically broadcasts a compact TLV
 // advert of its OWN identity + capabilities on the existing ESP-NOW mesh;
-// every board decodes adverts into a RAM neighbor table. Phase 2 is purely
-// INFORMATIONAL — it builds the table and serves ?WDP,LIST for the config
-// tool. No actionable routing / auto-adopt (that is Phase 3).
+// every board decodes adverts into a RAM neighbor table. On top of that
+// discovery, WDP now also drives ACTIONABLE auto-config: controller-peer
+// auto-adopt, Maestro-remote auto-enable (source-aware, see
+// wdpEvaluateMaestroRemote), and dynamic persistent PEER MEMBERSHIP —
+// boards heard on the mesh are auto-joined and remembered (see WCB.ino
+// learned_peers / addActivePeer).
 //
 //   Transport : rides the existing 252-byte espnow_struct_message_etm with a
 //               new PACKET_TYPE_WDP=12; the TLV payload packs into
 //               structCommand[200]. Because it rides the ETM struct + gate,
 //               WDP requires ETM enabled.
-//   Cadence   : 3x boot burst + a ~60 s periodic backstop + (future) on-change.
-//   Table     : RAM-only, sized MAX_WCB_COUNT, indexed by (WCB number - 1).
-//               Only the WDP on/off flag persists to NVS, never the table.
+//   Cadence   : 3x boot burst + a ~60 s periodic backstop.
+//   Table     : RAM-only neighbor table, sized MAX_WCB_COUNT, indexed by
+//               (WCB number - 1). The WDP on/off + auto-join flags persist to
+//               NVS (wdp_cfg); learned-peer MEMBERSHIP persists separately
+//               (learned_peers), MAC-octet fingerprinted.
 //
-//   Commands  : ?WDP,LIST      summary table of all neighbors (CDP-style)
-//               ?WDP,<n>       detail for one neighbor (alias, caps, ports)
-//               ?WDP,STATUS    [WDP:en=..,proto=..,neighbors=..]
-//               ?WDP,DUMP      machine-readable [WDP:N=..] lines (for tools)
-//               ?WDP,ON|OFF    enable/disable (persisted; default ON with ETM)
-//               ?WDP,CLEAR     wipe the RAM neighbor table
+//   Commands  : ?WDP,LIST | ?WDP,<n> | ?WDP,DETAIL,<n> | ?WDP,STATUS |
+//               ?WDP,DUMP | ?WDP,DA | ?WDP,ON | ?WDP,OFF |
+//               ?WDP,AUTOJOIN[,ON|,OFF] | ?WDP,ADD,<id> | ?WDP,FORGET,<id> |
+//               ?WDP,CLEAR
 // -----------------------------------------------------------------------
 
 #define WDP_PROTO_VERSION 0x01

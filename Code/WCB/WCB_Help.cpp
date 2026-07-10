@@ -384,20 +384,20 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("\nUsage: ?WCBQ,<quantity>"));
         Serial.println(F("\nDescription:"));
-        Serial.println(F("  Sets the total number of WCB boards in the system. This is used"));
-        Serial.println(F("  to determine how many ESP-NOW peers to register, and which boards"));
-        Serial.println(F("  ETM should expect heartbeats from. Must be set correctly on all"));
-        Serial.println(F("  boards for the system to function properly."));
+        Serial.println(F("  Sets the baseline (FLOOR) number of WCB boards in the system —"));
+        Serial.println(F("  boards 1..quantity are always registered as ESP-NOW peers. With WDP"));
+        Serial.println(F("  auto-join on (the default), boards heard on the mesh beyond this floor"));
+        Serial.println(F("  are added automatically, so WCBQ no longer has to cover every board."));
         Serial.println(F("\nParameters:"));
-        Serial.println(F("  quantity      Total number of WCB boards (1-9)"));
+        Serial.println(F("  quantity      Baseline number of WCB boards (1-20)"));
         Serial.println(F("\nExamples:"));
-        Serial.println(F("  ?WCBQ,1        - Single board system"));
-        Serial.println(F("  ?WCBQ,2        - Two board system"));
-        Serial.println(F("  ?WCBQ,3        - Three board system"));
+        Serial.println(F("  ?WCBQ,1        - Single board (rely on auto-join for the rest)"));
+        Serial.println(F("  ?WCBQ,2        - Two board floor"));
+        Serial.println(F("  ?WCBQ,3        - Three board floor"));
         Serial.println(F("\nNotes:"));
-        Serial.println(F("  - Reboot required after changing quantity"));
-        Serial.println(F("  - ALL boards in the system should have the same WCBQ value"));
-        Serial.println(F("  - ETM uses this to know which boards to expect heartbeats from"));
+        Serial.println(F("  - Takes effect immediately — peer registrations reconcile live (no reboot)"));
+        Serial.println(F("  - WDP auto-join (?WDP,AUTOJOIN) can extend membership above this floor"));
+        Serial.println(F("  - ETM uses membership to know which boards to expect heartbeats from"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?WCBQx   (e.g. ?WCBQ2)"));
@@ -709,6 +709,37 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?STATSRESET    - Reset stats"));
 
     // ================================================================
+    } else if (c == "WDP") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?WDP[,<subcommand>]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Wireless Discovery Protocol — \"CDP/LLDP for WCBs.\" Every board"));
+        Serial.println(F("  advertises its own identity + capabilities on the mesh and learns"));
+        Serial.println(F("  its neighbors into a live table. Drives auto-config: controller"));
+        Serial.println(F("  auto-adopt, Maestro-remote auto-enable, and dynamic PEER MEMBERSHIP"));
+        Serial.println(F("  (auto-join) — boards heard on the mesh are added as peers and"));
+        Serial.println(F("  remembered across reboots. Requires ETM enabled."));
+        Serial.println(F("\nView:"));
+        Serial.println(F("  ?WDP  /  ?WDP,LIST   Neighbor table (all boards + client devices)"));
+        Serial.println(F("  ?WDP,<n>             Detail for one neighbor (caps, ports, Maestros)"));
+        Serial.println(F("  ?WDP,STATUS          One-line status (en, autojoin, peers)"));
+        Serial.println(F("  ?WDP,DUMP            Machine-readable dump (for the config tool)"));
+        Serial.println(F("  ?WDP,DA              Serial-attached (@WDP1) devices per port"));
+        Serial.println(F("\nEnable / discovery:"));
+        Serial.println(F("  ?WDP,ON  /  ?WDP,OFF          Enable/disable WDP (persisted; default ON)"));
+        Serial.println(F("  ?WDP,AUTOJOIN                 Show auto-join state"));
+        Serial.println(F("  ?WDP,AUTOJOIN,ON | ,OFF       Learn heard WCBs as peers (default ON)"));
+        Serial.println(F("\nPeer membership:"));
+        Serial.println(F("  ?WDP,ADD,<id>        Manually add WCB <id> as a (persisted) peer"));
+        Serial.println(F("  ?WDP,FORGET,<id>     Drop one learned peer (frees its slot + NVS)"));
+        Serial.println(F("  ?WDP,CLEAR           Drop ALL learned peers + wipe the neighbor table"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - WCBQ is the FLOOR; auto-join extends membership above it"));
+        Serial.println(F("  - Learned peers are permanent until FORGET/CLEAR (not aged out)"));
+        Serial.println(F("  - See PEERSLIVE / the Wizard mesh panel for the live peer count"));
+
+    // ================================================================
     } else if (c == "DELIM") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("\nDescription:"));
@@ -890,6 +921,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
+        Serial.println(F("    ?WDP            Mesh discovery + neighbor table (auto-join peers)"));
         Serial.println(F("\n  COMMAND SEQUENCES:"));
         Serial.println(F("    ?SEQ,SAVE       Save a named command sequence"));
         Serial.println(F("    ?SEQ,LIST       List all saved sequences"));

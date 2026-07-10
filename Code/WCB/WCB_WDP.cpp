@@ -213,6 +213,54 @@ static bool wdpIsControllerType(const char *type) {
   return false;
 }
 
+// Does any WCB neighbor advertise the given capability bit? (WCB fact — client
+// devices carry capabilities as text tags, not in this bitmap, so they're skipped.)
+static bool wdpMeshHasCap(uint16_t capBit) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wdpNeighbors[i].valid || wdpNeighbors[i].isClient) continue;
+    if (wdpNeighbors[i].capFlags & capBit) return true;
+  }
+  return false;
+}
+
+// Is a controller-type client (NaviCore / Sabé) present on the mesh?
+static bool wdpMeshHasControllerClient() {
+  for (int i = 0; i < MAX_WCB_COUNT; i++)
+    if (wdpNeighbors[i].valid && wdpNeighbors[i].isClient &&
+        wdpIsControllerType(wdpNeighbors[i].alias))
+      return true;
+  return false;
+}
+
+// Auto-configure Maestro-remote from whatever raw-Maestro SOURCE is on the mesh.
+// Two rulesets, because the sources address Maestros differently:
+//   • NaviCore/Sabé present → ANY local Maestro qualifies (the controller streams
+//     raw packets to every Maestro).
+//   • Kyber-local present    → only a local Maestro with ID 1 or 2 (the R-series
+//     Kyber brain only addresses 1 and 2; IDs 3+ are ;m-driven and never remote).
+//   • Both present           → the controller (more open) ruleset wins.
+// Sticky + idempotent: only ever ENABLES, and is a no-op once we're already remote
+// or if this board is itself the Kyber host. storeKyberSettings persists the flag
+// live, but the receive relay task only spawns at boot, so we note "reboot to apply."
+static void wdpEvaluateMaestroRemote() {
+  if (Kyber_Local || Maestro_Remote) return;      // we're the source, or already remote
+  uint8_t ids[WDP_MAX_MAESTRO];
+  int n = wdpLocalMaestroIds(ids);
+  if (n == 0) return;                              // no local Maestro to drive
+
+  const char *why = nullptr;
+  if (wdpMeshHasControllerClient()) {
+    why = "controller (NaviCore/Sabé) on mesh";   // NaviCore ruleset: any Maestro
+  } else if (wdpMeshHasCap(WDP_CAP_KYBER_LOCAL)) {
+    for (int i = 0; i < n; i++)                    // Kyber ruleset: only Maestro 1 or 2
+      if (ids[i] == 1 || ids[i] == 2) { why = "Kyber-local on mesh + local Maestro 1/2"; break; }
+  }
+  if (why) {
+    Serial.printf("[WDP] %s — enabling Maestro remote (reboot to fully apply)\n", why);
+    storeKyberSettings("remote");
+  }
+}
+
 void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   if (!wdpEnabled) return;
   if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
@@ -288,29 +336,24 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   if (!wasValid)
     Serial.printf("[WDP] learned WCB%d%s%s\n", senderWCB, nb.alias[0] ? " " : "", nb.alias);
 
-  // ---- Auto-config on hearing a controller device (NaviCore/Sabé) -----------
+  // ---- Auto-adopt the controller peer on hearing a controller device --------
   // Gated on !wasValid so it fires once per learn and never re-fights a manual
-  // change (the neighbor stays 'valid' across periodic re-adverts).
-  if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias)) {
-    // (1) Enable our controller (special) peer, pointed at this device — same
-    //     effect as ?CONTROLLER,ON,<id>, registered live. Only adopt when NO
-    //     controller is configured yet: never clobber a manually-pinned (or
-    //     already-adopted) controller just because a different one is heard on
-    //     the mesh. It only registers a peer + tracks heartbeats, so it's safe.
-    if (!specialPeerEnabled) {
-      Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
-                    nb.alias, senderWCB);
-      enableControllerPeer((uint8_t)senderWCB);
-    }
-    // (2) If this board has a physically-attached Maestro (and isn't itself the
-    //     local Kyber host), switch it to REMOTE so the controller can drive it
-    //     over the mesh — same effect as ?MAESTRO,REMOTE.
-    uint8_t _localMaestros[WDP_MAX_MAESTRO];
-    if (wdpLocalMaestroIds(_localMaestros) > 0 && !Kyber_Local && !Maestro_Remote) {
-      Serial.println("[WDP] local Maestro present — enabling Maestro remote so the controller can drive it");
-      storeKyberSettings("remote");
-    }
+  // change (the neighbor stays 'valid' across periodic re-adverts). Only adopt
+  // when NO controller is configured yet: never clobber a manually-pinned (or
+  // already-adopted) controller just because a different one is heard on the
+  // mesh. It only registers a peer + tracks heartbeats, so it's safe.
+  if (!wasValid && nb.isClient && wdpIsControllerType(nb.alias) && !specialPeerEnabled) {
+    Serial.printf("[WDP] heard controller \"%s\" (WCB%d) — auto-enabling controller peer\n",
+                  nb.alias, senderWCB);
+    enableControllerPeer((uint8_t)senderWCB);
   }
+
+  // ---- Auto-config Maestro-remote from the mesh's raw-Maestro source --------
+  // Decoupled from the controller adopt above: Maestro-remote is about a
+  // Kyber-local OR a NaviCore/Sabé being present as a stream source, with
+  // different Maestro-ID rules per source (see wdpEvaluateMaestroRemote).
+  // Evaluated every advert; a no-op once we're already remote / the Kyber host.
+  wdpEvaluateMaestroRemote();
 
   // ---- Auto-join (regular WCBs only) ----------------------------------------
   // Client devices (NaviCore/Sabé) are peered via the controller path above,
@@ -612,8 +655,10 @@ static void printWdpDump() {
       if (nb.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
   }
-  // Membership summary for the config tool: auto-join state + live peer count.
-  Serial.printf("[WDPCFG:AUTOJOIN=%d,PEERS=%d]\n", wdpAutoJoin ? 1 : 0, activePeerCount());
+  // Config summary for the tool: WDP enabled, auto-join state, live peer count.
+  // EN lets the Wizard distinguish "WDP disabled here" from "mesh just empty".
+  Serial.printf("[WDPCFG:EN=%d,AUTOJOIN=%d,PEERS=%d]\n",
+                wdpEnabled ? 1 : 0, wdpAutoJoin ? 1 : 0, activePeerCount());
   Serial.printf("[WDP:END,count=%d]\n", count);
 }
 
@@ -635,10 +680,16 @@ void processWdpCommand(const String &args) {
   if (au == "ON")  { wdpEnabled = true;  saveWdpSettings(); Serial.println("[WDP] enabled");  return; }
   if (au == "OFF") { wdpEnabled = false; saveWdpSettings(); Serial.println("[WDP] disabled"); return; }
 
-  // ?WDP,AUTOJOIN[,ON|,OFF] — learn regular WCBs from their adverts
+  // ?WDP,AUTOJOIN         → report state (query never mutates)
+  // ?WDP,AUTOJOIN,ON|OFF  → set it
   if (au.startsWith("AUTOJOIN")) {
-    if (au.endsWith("OFF")) { wdpAutoJoin = false; saveWdpSettings(); Serial.println("[WDP] auto-join disabled"); }
-    else                    { wdpAutoJoin = true;  saveWdpSettings(); Serial.println("[WDP] auto-join enabled");  }
+    int c = a.indexOf(',');
+    String arg = (c >= 0) ? a.substring(c + 1) : "";
+    arg.trim(); arg.toUpperCase();
+    if      (arg == "")    Serial.printf("[WDP] auto-join is %s\n", wdpAutoJoin ? "ON" : "OFF");
+    else if (arg == "ON")  { wdpAutoJoin = true;  saveWdpSettings(); Serial.println("[WDP] auto-join enabled");  }
+    else if (arg == "OFF") { wdpAutoJoin = false; saveWdpSettings(); Serial.println("[WDP] auto-join disabled"); }
+    else                   Serial.println("[WDP] usage: ?WDP,AUTOJOIN[,ON|,OFF]");
     return;
   }
 

@@ -15,6 +15,7 @@ extern String commentDelimiter;
 extern int Default_WCB_Quantity;
 extern int WCB_Number;
 extern bool specialPeerEnabled;
+extern bool wcbPeerActive[];   // dynamic peer membership (WCB.ino): floor ∪ learned
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern char espnowPassword[40];
@@ -438,7 +439,9 @@ void saveWCBQuantityPreferences(int quantity) {
     preferences.putInt("wcb_quantity", quantity);
     preferences.end();
     Default_WCB_Quantity = quantity;
-    Serial.printf("Saved new WCB Quantities to: %d.  Please reboot to take effect\n", Default_WCB_Quantity);
+    // The ?WCBQ callers reconcile peer registrations live (rebuildActivePeers +
+    // syncActivePeerRegistrations) right after this, so no reboot is required.
+    Serial.printf("Saved WCB quantity: %d. Peer registrations reconciled live (no reboot needed).\n", Default_WCB_Quantity);
 }
 
 // Load ESP-NOW password from preferences
@@ -1082,10 +1085,15 @@ if (params.startsWith("S") || params.startsWith("s")) {
             
             Serial.printf("Kyber target %d: Maestro %d → WCB%d S%d (%d baud)\n",
                           targetIndex + 1, maestroID, wcbNum, portNum, baudRate);
-            if (wcbNum > Default_WCB_Quantity)
-              Serial.printf("⚠️  Warning: WCB%d is not in your neighbor list (?WCBQ is %d). "
-                            "Run ?WCBQ,%d and reboot to add it, or this target will not be reachable.\n",
-                            wcbNum, Default_WCB_Quantity, wcbNum > Default_WCB_Quantity ? wcbNum : Default_WCB_Quantity);
+            // Warn only if the target board isn't a current mesh peer (floor OR
+            // WDP-learned). With auto-join on, a board above WCBQ may already be a
+            // member — don't cry wolf, and don't tell anyone to reboot.
+            if (wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT && !wcbPeerActive[wcbNum - 1] &&
+                !(specialPeerEnabled && wcbNum == WCB_Number))
+              Serial.printf("⚠️  Warning: WCB%d is not a current mesh peer (WCBQ floor is %d, "
+                            "and it hasn't been auto-joined). Add it with ?WDP,ADD,%d (or raise "
+                            "?WCBQ), or this target won't be reachable.\n",
+                            wcbNum, Default_WCB_Quantity, wcbNum);
             
             // Auto-configure Maestro. Use the SAME slot key as the ?MAESTRO
             // handler — (maestroID, serialPort, remoteWCB) — so the two config
