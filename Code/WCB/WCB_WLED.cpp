@@ -363,8 +363,10 @@ void configureWLED(const String &args) {
 
   // ---- REMOTE (hosted on another board): store a proxy, no local port ----
   if (targetWCB != WCB_Number) {
-    if (targetWCB < 1 || targetWCB > Default_WCB_Quantity) {
-      Serial.printf("[WLED] Invalid WCB number. Must be W1-W%d\n", Default_WCB_Quantity);
+    // Accept any mesh peer (1..MAX_WCB_COUNT) — the same range auto-add + routing
+    // use — so an auto-learned proxy above the WCBQ floor survives a backup restore.
+    if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+      Serial.printf("[WLED] Invalid WCB number. Must be W1-W%d\n", MAX_WCB_COUNT);
       return;
     }
     // One slot per id — reuse the id's existing slot (incl. converting a former

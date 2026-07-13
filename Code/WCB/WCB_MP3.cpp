@@ -325,16 +325,24 @@ void processMP3Responses() {
 
 void clearMP3Config() {
   uint8_t freedPort = mp3Config.serialPort;
+  // ?MP3,CLEAR removes the LOCAL host only; the auto-learned remote route is a
+  // separate axis (?MP3,REMOTE,OFF / factory reset). Preserve it so a Wizard
+  // full-push CLEAR can't wipe a route it never observed. (See clearHCRConfig.)
+  uint8_t savedRemote = mp3Config.remoteWCB;
 
   memset(&mp3Config, 0, sizeof(mp3Config));
   mp3Config.configured = false;
   mp3Config.baudRate   = 9600;
   mp3Config.volume     = 20;
+  mp3Config.remoteWCB  = savedRemote;
   mp3Volume            = 20;
   _mp3PendingCallback  = "";
 
   saveMP3Settings();
-  Serial.println("[MP3] Configuration cleared");
+  Serial.println("[MP3] Local configuration cleared");
+  if (mp3Config.remoteWCB > 0)
+    Serial.printf("  (still routing ;A to WCB%d — %cMP3,REMOTE,OFF to stop)\n",
+                  mp3Config.remoteWCB, LocalFunctionIdentifier);
 
   if (freedPort > 0) {
     if (!serialBroadcastEnabled[freedPort - 1]) {
@@ -391,9 +399,11 @@ void configureMP3(const String &args) {
     }
     int wIdx = vU.indexOf('W');
     int host = (wIdx >= 0) ? v.substring(wIdx + 1).toInt() : v.toInt();
-    if (host < 1 || host > Default_WCB_Quantity || host == WCB_Number) {
+    // Bound matches auto-learn + routing (1..MAX_WCB_COUNT, incl. learned peers
+    // above the WCBQ floor) so a persisted route always round-trips through a backup.
+    if (host < 1 || host > MAX_WCB_COUNT || host == WCB_Number) {
       Serial.printf("[MP3] Invalid host. Use %cMP3,REMOTE,W<n> (1-%d, not this board)\n",
-                    LocalFunctionIdentifier, Default_WCB_Quantity);
+                    LocalFunctionIdentifier, MAX_WCB_COUNT);
       return;
     }
     if (mp3Config.configured) clearMP3Config();   // was a local host — release the port

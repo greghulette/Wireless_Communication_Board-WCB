@@ -624,9 +624,10 @@ function parseToken(body, config) {
         if (v === 'OFF' || v === '0' || v === '') config.mp3.remoteWCB = 0;
         else { const m = v.match(/W?(\d+)/); if (m) config.mp3.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
-        config.mp3.enabled   = false;
-        config.mp3.port      = null;
-        config.mp3.remoteWCB = 0;
+        config.mp3.enabled = false;
+        config.mp3.port    = null;
+        // remoteWCB (the route) is a separate axis — ?MP3,CLEAR clears only the
+        // local host, matching the firmware. Use REMOTE,OFF to drop the route.
       }
       break;
     }
@@ -650,9 +651,10 @@ function parseToken(body, config) {
         if (v === 'OFF' || v === '0' || v === '') config.hcr.remoteWCB = 0;
         else { const m = v.match(/W?(\d+)/); if (m) config.hcr.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
-        config.hcr.enabled   = false;
-        config.hcr.port      = null;
-        config.hcr.remoteWCB = 0;
+        config.hcr.enabled = false;
+        config.hcr.port    = null;
+        // remoteWCB (the route) is a separate axis — ?HCR,CLEAR clears only the
+        // local host, matching the firmware. Use REMOTE,OFF to drop the route.
       }
       break;
     }

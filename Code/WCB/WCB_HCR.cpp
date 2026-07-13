@@ -505,7 +505,12 @@ void processHCRRuntimeCommand(const String &message) {
 // ==================== Configuration (?HCR,...) ==========================
 
 void clearHCRConfig() {
-  uint8_t freedPort = hcrConfig.serialPort;
+  uint8_t freedPort   = hcrConfig.serialPort;
+  // ?HCR,CLEAR removes the LOCAL host only. The auto-learned remote route is a
+  // separate axis (cleared by ?HCR,REMOTE,OFF or a factory reset), so a Wizard
+  // full-push CLEAR on a board it models as "no HCR" can't silently wipe a route
+  // the Wizard never observed. Preserve it across the memset.
+  uint8_t savedRemote = hcrConfig.remoteWCB;
 
   if (_hcr) { delete _hcr; _hcr = nullptr; }
   _hcrPort = nullptr;
@@ -514,9 +519,13 @@ void clearHCRConfig() {
   hcrConfig.configured = false;
   hcrConfig.baudRate   = 9600;
   hcrConfig.pollSec    = 10;
+  hcrConfig.remoteWCB  = savedRemote;
 
   saveHCRSettings();
-  Serial.println("[HCR] Configuration cleared");
+  Serial.println("[HCR] Local configuration cleared");
+  if (hcrConfig.remoteWCB > 0)
+    Serial.printf("  (still routing ;H to WCB%d — %cHCR,REMOTE,OFF to stop)\n",
+                  hcrConfig.remoteWCB, LocalFunctionIdentifier);
 
   if (freedPort > 0) {
     if (!serialBroadcastEnabled[freedPort - 1]) {
@@ -610,9 +619,13 @@ void configureHCR(const String &args) {
     }
     int wIdx = vU.indexOf('W');
     int host = (wIdx >= 0) ? v.substring(wIdx + 1).toInt() : v.toInt();
-    if (host < 1 || host > Default_WCB_Quantity || host == WCB_Number) {
+    // Bound MUST match what auto-learn + routing accept (1..MAX_WCB_COUNT, incl.
+    // learned peers ABOVE the WCBQ floor) — else an auto-learned host above the
+    // floor round-trips into the backup but is rejected on restore, silently
+    // dropping the persisted route.
+    if (host < 1 || host > MAX_WCB_COUNT || host == WCB_Number) {
       Serial.printf("[HCR] Invalid host. Use %cHCR,REMOTE,W<n> (1-%d, not this board)\n",
-                    LocalFunctionIdentifier, Default_WCB_Quantity);
+                    LocalFunctionIdentifier, MAX_WCB_COUNT);
       return;
     }
     if (hcrConfig.configured) clearHCRConfig();   // was a local host — release the port
