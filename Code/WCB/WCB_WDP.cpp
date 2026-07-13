@@ -429,22 +429,6 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // Evaluated every advert; a no-op once we're already remote / the Kyber host.
   wdpEvaluateMaestroRemote();
 
-  // ---- Auto-config remote Maestros (persisted per-device routing table) ------
-  // Every Maestro this neighbor PHYSICALLY hosts becomes a remote proxy slot on
-  // this board (id -> senderWCB @ baud), identical to a manual ?MAESTRO,<id>:W..,
-  // so ;M<id> / raw-Maestro traffic routes to the right board with no hand
-  // config. First-host-wins + idempotent, and persisted (survives reboot) so the
-  // table is warm on boot. Gated on the same auto-join master switch, and only
-  // for real WCB neighbors that carry baud (the MAESTRO_CFG TLV; old id-only
-  // adverts leave baudCode==0xFF and are skipped — nothing to configure with).
-  if (wdpAutoJoin && !nb.isClient) {
-    for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
-      if (nb.maestroBaudCode[i] == 0xFF) continue;   // no baud on the wire — can't auto-config
-      maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB,
-                           wdpCodeToBaud(nb.maestroBaudCode[i]));
-    }
-  }
-
   // ---- Auto-join (real WCBs AND client devices) -----------------------------
   // Every WCB and every WCB_Client forces its STA MAC to the derived scheme
   // 02:oct2:oct3:00:00:<id>, so a learned peer's MAC is always known from its id
@@ -471,6 +455,26 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
         Serial.printf("[WDP] auto-joined WCB%d%s%s (%s)\n", senderWCB,
                       nb.alias[0] ? " " : "", nb.alias,
                       nb.isClient ? "client" : "board");
+    }
+  }
+
+  // ---- Auto-config remote Maestros (persisted per-device routing table) ------
+  // Every Maestro a PEER neighbor physically hosts becomes a remote proxy slot on
+  // this board (id -> senderWCB @ baud), identical to a manual ?MAESTRO,<id>:W..,
+  // so ;M<id> / raw-Maestro traffic routes to the right board with no hand config.
+  // First-host-wins + idempotent + persisted (survives reboot; warm table on boot).
+  // Runs AFTER auto-join and is gated on wcbPeerActive: we only auto-config a
+  // Maestro on a board we can actually REACH (a proxy to a non-peer is unroutable),
+  // which also inherits auto-join's >=2-advert vetting for learned peers so one
+  // stray/echoed advert can't inject a persisted proxy. Skips clients (they don't
+  // host Maestros) and any Maestro whose baud didn't arrive as a usable value —
+  // old id-only advert (0xFF), a garbled out-of-range code, or baud 0 all map to
+  // wdpCodeToBaud()==0, and there's nothing safe to configure a proxy with.
+  if (wdpAutoJoin && !nb.isClient && wcbPeerActive[senderWCB - 1]) {
+    for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
+      uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);
+      if (baud == 0) continue;   // unknown / garbled / baud-0 — nothing to configure
+      maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud);
     }
   }
 }

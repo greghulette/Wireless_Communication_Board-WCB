@@ -396,8 +396,13 @@ String remaining = message;
 // remoteWCB:hostWCB, baud}. Behavior:
 //   • existing proxy to THIS host  -> refresh baud only if it changed
 //   • id already configured elsewhere (local, or a proxy to another host)
-//                                   -> skip (first-host-wins; never shadow a
-//                                      local Maestro or re-home a live proxy)
+//                                   -> skip: first-host-wins, and it NEVER
+//                                      re-homes on its own — even if the original
+//                                      host goes offline or the Maestro is
+//                                      physically moved, the stale binding stays
+//                                      until the user clears it (?MAESTRO,CLEAR /
+//                                      clear-by-id). This deliberately never
+//                                      shadows a local Maestro of the same id.
 //   • otherwise                     -> claim an empty slot
 // Persists via saveMaestroSettings() and is safe to call every advert. Returns
 // true iff a slot was added or its baud changed (so the caller could log it).

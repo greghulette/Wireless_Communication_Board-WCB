@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '10.13:23.R.JUL.2026';
+const UI_VERSION = '13.10:37.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -676,6 +676,9 @@ function updatePortClaimUI(n) {
       bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
     }
   }
+  // A claim change here may have freed or taken a port — re-filter Maestro
+  // dropdowns too so they stay consistent with HCR/MP3/WLED/Kyber/PWM.
+  refreshAllMaestroPortDropdowns(n);
 }
 
 // ─── Kyber ────────────────────────────────────────────────────────
@@ -2714,10 +2717,16 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
 
   portSel.innerHTML = '<option value="">— Select —</option>';
   for (let p = 1; p <= 5; p++) {
-    // Exclude ports claimed by kyber (either port) or other maestro rows
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    const claimedByKyber = claim?.type === 'kyber' || claim?.type === 'kyber-marc';
-    if (claimedByKyber || otherClaims.has(p)) continue;
+    // Match the HCR/MP3/WLED port dropdowns' "unclaimed or mine" rule: offer a
+    // port only if THIS row already holds it, or it's free, or the only claim on
+    // it is a stray Maestro claim (not another live row). Anything held by HCR,
+    // MP3, WLED, Kyber, PWM or a serial map — or by a DIFFERENT Maestro row — is
+    // filtered out so two features can't fight over the same UART.
+    const heldByOtherFeature = claim && claim.type !== 'maestro';
+    const heldByOtherMaestro = otherClaims.has(p);
+    const offer = (p === selectedPort) || (!heldByOtherFeature && !heldByOtherMaestro);
+    if (!offer) continue;
 
     const opt = document.createElement('option');
     opt.value = p;
@@ -2725,6 +2734,16 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
     if (p === selectedPort) opt.selected = true;
     portSel.appendChild(opt);
   }
+}
+
+// Re-filter every open Maestro row's port dropdown on board n. Call whenever a
+// port claim may have changed elsewhere (HCR/MP3/WLED/Kyber/PWM/serial-map) so a
+// Maestro dropdown can't keep offering a port another feature just claimed.
+function refreshAllMaestroPortDropdowns(n) {
+  document.getElementById(`b${n}-maestro-tbody`)?.querySelectorAll('tr').forEach(row => {
+    const portSel = row.querySelector('[id$="-port"]');
+    if (portSel) refreshMaestroPortDropdown(n, row.id, parseInt(portSel.value) || null);
+  });
 }
 
 function onMaestroPortChange(n, rowId) {
@@ -2843,15 +2862,7 @@ function syncMaestrosToConfig(n) {
   });
 
   WCBParser.evaluatePortClaims(config);
-  updatePortClaimUI(n);
-  // Refresh all port dropdowns in maestro rows to reflect new claims
-  tbody.querySelectorAll('tr').forEach(row => {
-    const portSel = row.querySelector('[id$="-port"]');
-    if (portSel) {
-      const cur = parseInt(portSel.value) || null;
-      refreshMaestroPortDropdown(n, row.id, cur);
-    }
-  });
+  updatePortClaimUI(n);   // also re-filters every Maestro row's port dropdown
   updateKyberPortDropdown(n);
 }
 
