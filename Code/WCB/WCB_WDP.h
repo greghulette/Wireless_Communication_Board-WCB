@@ -33,6 +33,7 @@
 
 #define WDP_PROTO_VERSION 0x01
 #define WDP_MAX_MAESTRO   9      // per-board local Maestro IDs advertised
+#define WDP_MAX_WLED      9      // per-board local WLED IDs advertised
 
 // Capability bitmap (WDP_TLV_CAPFLAGS, uint16 little-endian on the wire).
 #define WDP_CAP_HCR         0x0001
@@ -58,6 +59,9 @@ struct WdpNeighbor {
   uint8_t       maestroIds[WDP_MAX_MAESTRO];  // this board's local Maestro IDs
   uint8_t       maestroBaudCode[WDP_MAX_MAESTRO]; // baud code per id (WDP_TLV_MAESTRO_CFG); 0xFF = unknown (old advert)
   uint8_t       maestroCount;
+  uint8_t       wledIds[WDP_MAX_WLED];        // this board's local WLED IDs
+  uint8_t       wledBaudCode[WDP_MAX_WLED];   // baud code per id (WDP_TLV_WLED_CFG); 0xFF = unknown
+  uint8_t       wledCount;
   char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled
   // ---- Client-device fields (WCB_Client / WDP-DA identity) ----------------
   // A WCB_Client device advertises WDP_TLV_DEVTYPE instead of the WCB fields.

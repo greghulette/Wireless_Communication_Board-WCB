@@ -17,6 +17,7 @@ extern bool        Maestro_Remote;
 extern bool        specialPeerEnabled;
 extern uint8_t     WCB_SPECIAL_PEER_ID;   // controller/special peer id — excluded from learned auto-join
 extern bool        debugEnabled;
+extern bool        debugMGMT;         // remote-management debug level (?DEBUG,MGMT,ON) — WDP rides here
 extern char        LocalFunctionIdentifier;   // the '?' function-command prefix
 extern String      serialPortLabels[5];       // RAW per-port labels ("" = unlabeled).
                                               // NOT getSerialLabel() — that decorates as
@@ -61,6 +62,7 @@ static unsigned long wdpNextAdvertMs = 0;
 #define WDP_TLV_CAPFLAGS 0x05
 #define WDP_TLV_MAESTRO  0x06
 #define WDP_TLV_MAESTRO_CFG 0x0E // [id(1)][baudCode(1)] records — rich Maestro id+baud for auto-config
+#define WDP_TLV_WLED_CFG    0x0F // [id(1)][baudCode(1)] records — WLED id+baud for auto-config
 #define WDP_TLV_PORTLABEL 0x09   // [port(1)][label bytes] — one TLV per labeled serial port
 #define WDP_TLV_CTRLID   0x0A    // [id(1)] — controller (special-peer) ID; sent only when linked
 // ---- Device-identity TLVs (shared with WDP-DA + the WCB_Client library) ----
@@ -76,7 +78,6 @@ static uint16_t wdpCapFlags() {
   uint16_t f = 0;
   if (hcrConfig.configured)  f |= WDP_CAP_HCR;
   if (mp3Config.configured)  f |= WDP_CAP_MP3;
-  if (wledConfig.configured) f |= WDP_CAP_WLED;
   if (Kyber_Local)           f |= WDP_CAP_KYBER_LOCAL;
   if (Maestro_Remote)        f |= WDP_CAP_MAESTRO_REM;
   if (pwmOutputCount > 0 || activePWMCount > 0) f |= WDP_CAP_PWM;
@@ -84,6 +85,10 @@ static uint16_t wdpCapFlags() {
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
         maestroConfigs[i].serialPort > 0) { f |= WDP_CAP_MAESTRO_LOC; break; }
+  }
+  for (int i = 0; i < MAX_WLED_PER_WCB; i++) {   // WDP_CAP_WLED = this board hosts a WLED
+    if (wledConfigs[i].configured && wledConfigs[i].remoteWCB == 0 &&
+        wledConfigs[i].serialPort > 0) { f |= WDP_CAP_WLED; break; }
   }
   return f;
 }
@@ -126,6 +131,22 @@ static int wdpLocalMaestroCfg(uint8_t *ids, uint8_t *codes) {
         maestroConfigs[i].serialPort > 0) {
       ids[n]   = maestroConfigs[i].maestroID;
       codes[n] = wdpBaudToCode(maestroConfigs[i].baudRate);
+      n++;
+    }
+  }
+  return n;
+}
+
+// This board's PHYSICALLY-attached WLED IDs + baud codes — feeds WDP_TLV_WLED_CFG
+// so neighbors can auto-configure a remote WLED proxy (id + host + baud). Mirrors
+// wdpLocalMaestroCfg; remote proxies (serialPort==0) are NOT re-advertised.
+static int wdpLocalWLEDCfg(uint8_t *ids, uint8_t *codes) {
+  int n = 0;
+  for (int i = 0; i < MAX_WLED_PER_WCB && n < WDP_MAX_WLED; i++) {
+    if (wledConfigs[i].configured && wledConfigs[i].remoteWCB == 0 &&
+        wledConfigs[i].serialPort > 0) {
+      ids[n]   = wledConfigs[i].wledID;
+      codes[n] = wdpBaudToCode(wledConfigs[i].baudRate);
       n++;
     }
   }
@@ -181,6 +202,15 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
       o = putTLV(buf, o, max, WDP_TLV_MAESTRO_CFG, rec, n * 2);
     }
   }
+  {
+    uint8_t ids[WDP_MAX_WLED], codes[WDP_MAX_WLED];
+    int n = wdpLocalWLEDCfg(ids, codes);
+    if (n > 0) {
+      uint8_t rec[WDP_MAX_WLED * 2];                       // [id][baudCode] pairs
+      for (int i = 0; i < n; i++) { rec[i * 2] = ids[i]; rec[i * 2 + 1] = codes[i]; }
+      o = putTLV(buf, o, max, WDP_TLV_WLED_CFG, rec, n * 2);
+    }
+  }
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
   // label set that would overflow the 200 B payload is dropped gracefully.
@@ -206,7 +236,7 @@ static void wdpSendAdvert() {
   memset(payload, 0, sizeof(payload));
   int len = wdpBuildPayload(payload, sizeof(payload));
   wdpBroadcast(payload, len);
-  if (debugEnabled) Serial.printf("[WDP] advert sent (%d B)\n", len);
+  if (debugMGMT) Serial.printf("[WDP] advert sent (%d B)\n", len);   // mesh-mgmt chatter — under ?DEBUG,MGMT
 }
 
 void wdpTick() {
@@ -386,6 +416,15 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
         nb.maestroCount = (uint8_t)recs;
         break;
       }
+      case WDP_TLV_WLED_CFG: {      // [id][baudCode] pairs — this board's local WLED nodes
+        int recs = len / 2; if (recs > WDP_MAX_WLED) recs = WDP_MAX_WLED;
+        for (int i = 0; i < recs; i++) {
+          nb.wledIds[i]      = val[i * 2];
+          nb.wledBaudCode[i] = val[i * 2 + 1];
+        }
+        nb.wledCount = (uint8_t)recs;
+        break;
+      }
       case WDP_TLV_PORTLABEL: {
         if (len >= 1) {
           int port = val[0];
@@ -475,6 +514,11 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);
       if (baud == 0) continue;   // unknown / garbled / baud-0 — nothing to configure
       maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud);
+    }
+    for (int i = 0; i < nb.wledCount && i < WDP_MAX_WLED; i++) {   // same rules for WLED
+      uint32_t baud = wdpCodeToBaud(nb.wledBaudCode[i]);
+      if (baud == 0) continue;
+      wledAutoAddRemote(nb.wledIds[i], (uint8_t)senderWCB, baud);
     }
   }
 }
@@ -730,6 +774,18 @@ static void printWdpDetail(int wcbNum) {
         Serial.printf(" %d@%lu", nb.maestroIds[m], (unsigned long)wdpCodeToBaud(nb.maestroBaudCode[m]));
       else                                  // legacy id-only advert
         Serial.printf(" %d", nb.maestroIds[m]);
+    }
+    Serial.println();
+  }
+  if (nb.wledCount == 0) {
+    Serial.println("  WLED        : -");
+  } else {
+    Serial.printf("  WLED        :");
+    for (int w = 0; w < nb.wledCount && w < WDP_MAX_WLED; w++) {
+      if (nb.wledBaudCode[w] != 0xFF)
+        Serial.printf(" %d@%lu", nb.wledIds[w], (unsigned long)wdpCodeToBaud(nb.wledBaudCode[w]));
+      else
+        Serial.printf(" %d", nb.wledIds[w]);
     }
     Serial.println();
   }
