@@ -64,19 +64,21 @@ function createDefaultBoardConfig() {
 
     // MP3 Trigger
     mp3: {
-      enabled: false,
-      port:    null,   // 1-5 — serial port the MP3 Trigger is wired to
-      baud:    9600,
-      volume:  0,      // 0 = loudest, 64 = inaudible
-      onError: '',     // stored sequence key to run on error (optional)
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the MP3 Trigger is wired to
+      baud:      9600,
+      volume:    0,      // 0 = loudest, 64 = inaudible
+      onError:   '',     // stored sequence key to run on error (optional)
+      remoteWCB: 0,      // 0 = none; else this board routes ;A to the MP3 on WCB<n>
     },
 
     // HCR (Human-Cyborg Relations) Vocalizer
     hcr: {
-      enabled: false,
-      port:    null,   // 1-5 — serial port the HCR is wired to
-      baud:    9600,
-      poll:    10,     // status auto-poll interval (s); 0 = off
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the HCR is wired to
+      baud:      9600,
+      poll:      10,     // status auto-poll interval (s); 0 = off
+      remoteWCB: 0,      // 0 = none; else this board routes ;H to the HCR on WCB<n>
     },
 
     // WLED (serial lighting) — array of { id, port, baud }. LOCAL WLED nodes on
@@ -608,16 +610,23 @@ function parseToken(body, config) {
         // ?MP3,S2:9600:V0
         const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
         if (m) {
-          config.mp3.enabled = true;
-          config.mp3.port    = parseInt(m[1]);
-          config.mp3.baud    = parseInt(m[2]);
-          config.mp3.volume  = parseInt(m[3]);
+          config.mp3.enabled   = true;
+          config.mp3.port      = parseInt(m[1]);
+          config.mp3.baud      = parseInt(m[2]);
+          config.mp3.volume    = parseInt(m[3]);
+          config.mp3.remoteWCB = 0;   // local host — not a client
         }
       } else if (sub === 'ONERR') {
         config.mp3.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'REMOTE') {
+        // ?MP3,REMOTE,W<n> | OFF — this board routes ;A to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.mp3.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.mp3.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
-        config.mp3.enabled = false;
-        config.mp3.port    = null;
+        config.mp3.enabled   = false;
+        config.mp3.port      = null;
+        config.mp3.remoteWCB = 0;
       }
       break;
     }
@@ -628,15 +637,22 @@ function parseToken(body, config) {
         // ?HCR,PORT,S1:9600
         const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
         if (m) {
-          config.hcr.enabled = true;
-          config.hcr.port    = parseInt(m[1]);
-          config.hcr.baud    = parseInt(m[2]);
+          config.hcr.enabled   = true;
+          config.hcr.port      = parseInt(m[1]);
+          config.hcr.baud      = parseInt(m[2]);
+          config.hcr.remoteWCB = 0;   // local host — not a client
         }
       } else if (sub === 'POLL') {
         config.hcr.poll = parseInt(parts[2]) || 0;
+      } else if (sub === 'REMOTE') {
+        // ?HCR,REMOTE,W<n> | OFF — this board routes ;H to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.hcr.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.hcr.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
-        config.hcr.enabled = false;
-        config.hcr.port    = null;
+        config.hcr.enabled   = false;
+        config.hcr.port      = null;
+        config.hcr.remoteWCB = 0;
       }
       break;
     }
@@ -1255,6 +1271,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.mp3.enabled && config.mp3.port) {
       add(`MP3,S${config.mp3.port}:${config.mp3.baud}:V${config.mp3.volume}`);
       if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
+    } else if (config.mp3.remoteWCB) {
+      add(`MP3,REMOTE,W${config.mp3.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
       add('MP3,CLEAR');
     }
@@ -1267,6 +1285,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.hcr.enabled && config.hcr.port) {
       add(`HCR,PORT,S${config.hcr.port}:${config.hcr.baud}`);
       add(`HCR,POLL,${config.hcr.poll}`);
+    } else if (config.hcr.remoteWCB) {
+      add(`HCR,REMOTE,W${config.hcr.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
       add('HCR,CLEAR');
     }
