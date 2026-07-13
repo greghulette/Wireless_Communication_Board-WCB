@@ -829,40 +829,34 @@
         </div>
       </div>
 
-      <!-- WLED (serial lighting) -->
-      <div class="subsection-title">WLED</div>
-      <div class="field-group">
-        <div class="field">
-          <label>WLED <span class="wiz-hint" data-tip="Enable if this WCB drives a stock WLED node over one of its serial ports (WLED's JSON API). The port is reserved exclusively — broadcast disabled — and runs at 115200, so only hardware ports S1/S2 are offered. Author looks as presets in WLED's web UI, then fire them from the controls below or from sequences with ;L,PS,n.">i</span></label>
-          <div class="radio-group">
-            <label><input type="radio" name="b{N}-wled" value="none" checked onchange="onWLEDChange({N})"><span>None</span></label>
-            <label><input type="radio" name="b{N}-wled" value="local" onchange="onWLEDChange({N})"><span>Enabled</span></label>
-          </div>
+      <!-- WLED (serial lighting) — ID-addressed, multiple per board -->
+      <div>
+        <div class="flex items-center gap-8 mb-12">
+          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">WLED</div>
+          <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})">+ Add</button>
         </div>
-        <div class="field" id="b{N}-wled-port-wrap" style="display:none">
-          <label>WLED Port <span class="wiz-hint" data-tip="Hardware serial port (S1/S2) the WLED node's RX is wired to. Reserved exclusively — broadcast disabled. S3–S5 are software serial and can't run WLED's 115200.">i</span></label>
-          <select id="b{N}-wled-port" onchange="onWLEDPortChange({N})">
-            <option value="1">Serial 1</option>
-            <option value="2">Serial 2</option>
-          </select>
-        </div>
-        <div class="field" id="b{N}-wled-baud-wrap" style="display:none">
-          <label>Baud Rate <span class="wiz-hint" data-tip="WLED serial baud. WLED's default is 115200 — leave it unless you changed it in WLED's settings.">i</span></label>
-          <select id="b{N}-wled-baud" onchange="onWLEDBaudChange({N})">
-            <option value="9600">9,600</option>
-            <option value="19200">19,200</option>
-            <option value="38400">38,400</option>
-            <option value="57600">57,600</option>
-            <option value="115200" selected>115,200</option>
-          </select>
-        </div>
+        <table class="serial-table" id="b{N}-wled-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>WLED ID <span class="wiz-hint" data-tip="System-wide WLED identifier (1-9). Address it from anywhere with ;L<id>,… — the command routes to whichever board hosts it. Must be UNIQUE across the whole network.">i</span></th>
+              <th>Port <span class="wiz-hint" data-tip="Serial port the WLED node's RX is wired to on this board. Reserved exclusively (broadcast disabled). WLED wants 115200 — use a hardware port (S1/S2); S3–S5 are software serial and cap at 9,600.">i</span></th>
+              <th>Baud <span class="wiz-hint" data-tip="WLED serial baud. Default 115200 — leave it unless you changed it in WLED's settings.">i</span></th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="b{N}-wled-tbody"></tbody>
+        </table>
+        <p class="text-muted mt-8">Each WLED needs a unique ID across the network. Fire from sequences with &#59;L&lt;id&gt;,PS,n (or bare &#59;L for this board's WLED).</p>
       </div>
 
-      <!-- WLED live controls (shown only when WLED is enabled on this board) -->
+      <!-- WLED live controls (shown when >=1 WLED is configured on this board) -->
       <div class="field-group" id="b{N}-wled-controls" style="display:none">
         <div class="field" style="flex:1 1 100%">
-          <label>WLED Controls <span class="wiz-hint" data-tip="Fire live commands to this board's WLED. Presets are the primary workflow — build looks in WLED's web UI, then recall them by number here or from sequences with ;L,PS,n. Requires the board to be connected (directly or via a relay) and WLED already pushed.">i</span></label>
+          <label>WLED Controls <span class="wiz-hint" data-tip="Fire live commands to a WLED on this board. Presets are the primary workflow — build looks in WLED's web UI, then recall them by number here or from sequences with ;L<id>,PS,n. Requires the board connected (directly or via a relay) and WLED already pushed.">i</span></label>
           <div class="flex items-center gap-8" style="flex-wrap:wrap">
+            <label style="margin:0">Target</label>
+            <select id="b{N}-wled-target" style="width:90px"></select>
             <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'ON')">On</button>
             <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'OFF')">Off</button>
             <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'TOGGLE')">Toggle</button>
