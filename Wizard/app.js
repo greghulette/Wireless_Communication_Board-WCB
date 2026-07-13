@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '13.10:37.R.JUL.2026';
+const UI_VERSION = '13.14:19.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -676,9 +676,10 @@ function updatePortClaimUI(n) {
       bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
     }
   }
-  // A claim change here may have freed or taken a port — re-filter Maestro
-  // dropdowns too so they stay consistent with HCR/MP3/WLED/Kyber/PWM.
+  // A claim change here may have freed or taken a port — re-filter the Maestro
+  // and WLED dropdowns too so they stay consistent with HCR/MP3/Kyber/PWM.
   refreshAllMaestroPortDropdowns(n);
+  refreshAllWLEDPortDropdowns(n);
 }
 
 // ─── Kyber ────────────────────────────────────────────────────────
@@ -2172,175 +2173,181 @@ function syncHCRToConfig(n) {
 // the software-serial ports S3-S5). A port CLI-configured on S3-S5 @9600 is
 // still preserved in the dropdown so a pulled config round-trips instead of
 // collapsing to '' and getting wiped by a spurious WLED,CLEAR on the next push.
-function updateWLEDPortDropdown(n) {
-  const portSel = document.getElementById(`b${n}-wled-port`);
+// ─── WLED (ID-addressed, multi-row — mirrors Maestro) ─────────────
+const WLED_BAUD_RATES = [9600, 19200, 38400, 57600, 115200];
+
+function addWLEDRow(n) {
+  // Default to the lowest free ID 1-9 so two rows don't collide.
+  const used = new Set((boardConfigs[n]?.wleds ?? []).map(w => w.id));
+  let id = 1; while (used.has(id) && id < 9) id++;
+  appendWLEDRow(n, { id, port: null, baud: 115200 });
+  onWLEDChange(n);
+}
+
+function appendWLEDRow(n, wled) {
+  const tbody = document.getElementById(`b${n}-wled-tbody`);
+  if (!tbody) return;
+  const rowNum = tbody.rows.length + 1;
+  const rowId  = `wled-row-${n}-${++_rowIdCounter}`;
+
+  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
+    `<option value="${v}" ${v === wled.id ? 'selected' : ''}>${v}</option>`).join('');
+
+  const maxBaud  = (wled.port >= 3) ? 9600 : Infinity;   // S3-5 software serial cap
+  const safeBaud = Math.min(wled.baud, maxBaud);
+  const baudOptions = WLED_BAUD_RATES.filter(b => b <= maxBaud).map(b =>
+    `<option value="${b}" ${b === safeBaud ? 'selected' : ''}>${b.toLocaleString()}</option>`).join('');
+
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.innerHTML = `
+    <td style="color:var(--text3)">${rowNum}</td>
+    <td><select id="${rowId}-id" onchange="onWLEDChange(${n})">${idOptions}</select></td>
+    <td><select id="${rowId}-port" onchange="onWLEDPortChange(${n},'${rowId}')">
+      <option value="">&#8212; Select &#8212;</option>
+    </select></td>
+    <td><select id="${rowId}-baud" onchange="onWLEDChange(${n})">${baudOptions}</select></td>
+    <td><button class="btn btn-danger btn-sm btn-icon" onclick="removeWLEDRow(${n},'${rowId}')">&#128465;</button></td>
+  `;
+  tbody.appendChild(tr);
+  refreshWLEDPortDropdown(n, rowId, wled.port);
+}
+
+// Offer a port only if it's this row's own, or free, or claimed by another WLED
+// row we can reuse — same "unclaimed or mine" rule as the Maestro picker, so a
+// port held by HCR/MP3/Maestro/Kyber/PWM or another WLED row is filtered out.
+function refreshWLEDPortDropdown(n, rowId, selectedPort) {
+  const portSel = document.getElementById(`${rowId}-port`);
   if (!portSel) return;
-  const config      = boardConfigs[n];
-  const currentPort = config?.wled?.port;
-  portSel.innerHTML = '';
-  for (let p = 1; p <= 2; p++) {   // hardware serial — the normal 115200 case
+  const config = boardConfigs[n];
+
+  const otherClaims = new Set();
+  document.getElementById(`b${n}-wled-tbody`)?.querySelectorAll('tr').forEach(row => {
+    if (row.id === rowId) return;
+    const p = parseInt(row.querySelector('[id$="-port"]')?.value);
+    if (p) otherClaims.add(p);
+  });
+
+  portSel.innerHTML = '<option value="">— Select —</option>';
+  for (let p = 1; p <= 5; p++) {
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    if (!claim || claim.type === 'wled') {
-      const opt = document.createElement('option');
-      opt.value = p;
-      opt.textContent = `Serial ${p}`;
-      if (p === currentPort) opt.selected = true;
-      portSel.appendChild(opt);
-    }
-  }
-  // Preserve a CLI-configured software-serial port so it survives a round-trip.
-  if (currentPort >= 3 && currentPort <= 5) {
+    const heldByOtherFeature = claim && claim.type !== 'wled';
+    const heldByOtherWled    = otherClaims.has(p);
+    const offer = (p === selectedPort) || (!heldByOtherFeature && !heldByOtherWled);
+    if (!offer) continue;
     const opt = document.createElement('option');
-    opt.value = currentPort;
-    opt.textContent = `Serial ${currentPort} (software — CLI-set)`;
-    opt.selected = true;
+    opt.value = p;
+    opt.textContent = `Serial ${p}`;
+    if (p === selectedPort) opt.selected = true;
     portSel.appendChild(opt);
   }
 }
 
-// Release a WLED-claimed serial port, mirroring the firmware clearWLEDConfig
-// side effects (re-enable broadcast both ways; optionally reset baud; drop the
-// 'WLED' label) so the UI never lies about a port WLED no longer owns. Writes
-// the DOM baud/label too, since syncSerialUIToConfig re-reads those at push time
-// and would otherwise clobber the config change before the diff runs.
-function _releaseWLEDPort(n, resetBaud) {
-  const config = boardConfigs[n];
-  for (let i = 0; i < config.serialPorts.length; i++) {
-    const port = config.serialPorts[i];
-    if (port.claimedBy?.type !== 'wled') continue;
-    port.claimedBy    = null;
-    port.broadcastIn  = true;
-    port.broadcastOut = true;
-    if (resetBaud) {
-      port.baud = 9600;
-      const baudDom = document.getElementById(`b${n}-s${i + 1}-baud`);
-      if (baudDom) baudDom.value = '9600';
-    }
-    if (port.label === 'WLED') {
-      port.label = '';
-      const labelDom = document.getElementById(`b${n}-s${i + 1}-label`);
-      if (labelDom) labelDom.value = '';
-    }
+// Re-filter every open WLED row's port dropdown (call when a claim changes).
+function refreshAllWLEDPortDropdowns(n) {
+  document.getElementById(`b${n}-wled-tbody`)?.querySelectorAll('tr').forEach(row => {
+    const portSel = row.querySelector('[id$="-port"]');
+    if (portSel) refreshWLEDPortDropdown(n, row.id, parseInt(portSel.value) || null);
+  });
+}
+
+function removeWLEDRow(n, rowId) {
+  document.getElementById(rowId)?.remove();
+  const tbody = document.getElementById(`b${n}-wled-tbody`);
+  tbody?.querySelectorAll('tr').forEach((row, i) => { row.cells[0].textContent = i + 1; });
+  onWLEDChange(n);
+}
+
+function populateWLEDsFromConfig(n, config) {
+  const tbody = document.getElementById(`b${n}-wled-tbody`);
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  for (const w of (config.wleds ?? [])) appendWLEDRow(n, w);
+  updateWLEDSectionUI(n);
+}
+
+function onWLEDPortChange(n, rowId) {
+  const portSel = document.getElementById(`${rowId}-port`);
+  const baudSel = document.getElementById(`${rowId}-baud`);
+  if (portSel && baudSel) {
+    const port    = parseInt(portSel.value) || 0;
+    const maxBaud = port >= 3 ? 9600 : Infinity;   // S3-5 software-serial cap
+    const curBaud = parseInt(baudSel.value) || 115200;
+    baudSel.innerHTML = WLED_BAUD_RATES.filter(b => b <= maxBaud).map(b =>
+      `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`).join('');
   }
+  onWLEDChange(n);
 }
 
 function onWLEDChange(n) {
-  const mode    = document.querySelector(`input[name="b${n}-wled"]:checked`)?.value ?? 'none';
-  const isLocal = mode === 'local';
-  ['port', 'baud'].forEach(id => {
-    const el = document.getElementById(`b${n}-wled-${id}-wrap`);
-    if (el) el.style.display = isLocal ? '' : 'none';
-  });
-
-  const config = boardConfigs[n];
-  if (!config) return;
-
-  // Disable (or re-enable) releases the old port with full CLEAR side effects.
-  _releaseWLEDPort(n, true);
-
-  config.wled.enabled = isLocal;
-  if (!isLocal) config.wled.port = null;
-
-  updateWLEDPortDropdown(n);
-
-  if (isLocal) {
-    const portSel = document.getElementById(`b${n}-wled-port`);
-    if (!portSel || portSel.options.length === 0) {
-      // No hardware port free — the firmware would reject the push. Refuse the
-      // enable outright instead of leaving an enabled/port-null state that emits
-      // a silent WLED,CLEAR and (on a remote board) bakes into the baseline.
-      showToast('No free hardware port (S1/S2) for WLED — free a Kyber/Maestro/MP3/HCR port first', 'error');
-      config.wled.enabled = false;
-      config.wled.port    = null;
-      const noneRadio = document.querySelector(`input[name="b${n}-wled"][value="none"]`);
-      if (noneRadio) noneRadio.checked = true;
-      ['port', 'baud'].forEach(id => {
-        const el = document.getElementById(`b${n}-wled-${id}-wrap`);
-        if (el) el.style.display = 'none';
-      });
-      WCBParser.evaluatePortClaims(config);
-      updatePortClaimUI(n);
-      updateWLEDSectionUI(n);
-      onBoardFieldChange(n);
-      return;
-    }
-    const portVal = parseInt(portSel.value);
-    if (portVal >= 1 && portVal <= 5) {
-      config.wled.port = portVal;
-      config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
-    }
-  }
-
-  WCBParser.evaluatePortClaims(config);
-  updatePortClaimUI(n);
-  updateWLEDPortDropdown(n);
+  syncWLEDsToConfig(n);
   updateWLEDSectionUI(n);
   onBoardFieldChange(n);
 }
 
-function onWLEDPortChange(n) {
+// Rebuild config.wleds + serial-port claims from the live WLED rows. Releases all
+// prior WLED claims first, then re-claims each row's port (label 'WLED', broadcast
+// disabled both ways — mirrors the firmware's wledReserveLocalPort).
+function syncWLEDsToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
 
-  // Moving ports: release the old one (drop label + restore broadcast) but keep
-  // its baud — a move doesn't reset baud, matching firmware wledReservePort.
-  _releaseWLEDPort(n, false);
-
-  const portVal = parseInt(document.getElementById(`b${n}-wled-port`)?.value);
-  if (portVal >= 1 && portVal <= 5) {
-    config.wled.port = portVal;
-    config.serialPorts[portVal - 1].claimedBy = { type: 'wled' };
+  for (let i = 0; i < config.serialPorts.length; i++) {
+    const sp = config.serialPorts[i];
+    if (sp.claimedBy?.type === 'wled') {
+      sp.claimedBy    = null;
+      sp.broadcastIn  = true;
+      sp.broadcastOut = true;
+      if (sp.label === 'WLED') {
+        sp.label = '';
+        const labelDom = document.getElementById(`b${n}-s${i + 1}-label`);
+        if (labelDom) labelDom.value = '';
+      }
+    }
   }
+
+  config.wleds = [];
+  document.getElementById(`b${n}-wled-tbody`)?.querySelectorAll('tr').forEach(row => {
+    const id   = parseInt(row.querySelector('[id$="-id"]')?.value);
+    const port = parseInt(row.querySelector('[id$="-port"]')?.value);
+    const baud = parseInt(row.querySelector('[id$="-baud"]')?.value) || 115200;
+    if (id >= 1 && id <= 9 && port >= 1 && port <= 5) {
+      config.wleds.push({ id, port, baud });
+      const sp = config.serialPorts[port - 1];
+      sp.claimedBy    = { type: 'wled', id };
+      sp.label        = 'WLED';
+      sp.broadcastOut = false;
+      sp.broadcastIn  = false;
+      sp.baud         = baud;   // keep the serial port baud consistent with ?BAUD
+    }
+  });
 
   WCBParser.evaluatePortClaims(config);
-  updatePortClaimUI(n);
-  updateWLEDPortDropdown(n);
-  onBoardFieldChange(n);
+  updatePortClaimUI(n);    // also re-filters the Maestro + WLED port dropdowns
+  updateKyberPortDropdown(n);
 }
 
-function onWLEDBaudChange(n) {
-  const config = boardConfigs[n];
-  if (!config) return;
-  config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || 115200;
-  onBoardFieldChange(n);
-}
-
-function syncWLEDToConfig(n) {
-  const config = boardConfigs[n];
-  if (!config || !config.wled) return;
-  const mode = document.querySelector(`input[name="b${n}-wled"]:checked`)?.value ?? 'none';
-  config.wled.enabled = mode === 'local';
-  if (config.wled.enabled) {
-    // Fall back to the existing configured port/baud if the <select> has no
-    // value, so we never emit a destructive WLED,CLEAR for a board that still
-    // has WLED (e.g. a CLI-set S3-5 port, or all hardware ports momentarily
-    // claimed). An enabled-but-no-port state can't push meaningfully → disable.
-    config.wled.port = parseInt(document.getElementById(`b${n}-wled-port`)?.value) || config.wled.port || null;
-    config.wled.baud = parseInt(document.getElementById(`b${n}-wled-baud`)?.value) || config.wled.baud || 115200;
-    if (!config.wled.port) {
-      config.wled.enabled = false;
-    } else if (config.wled.port >= 1 && config.wled.port <= 5) {
-      // Keep the serial port baud in sync so ?BAUD is emitted consistently.
-      config.serialPorts[config.wled.port - 1].baud = config.wled.baud;
-    }
-  } else {
-    config.wled.port = null;
-  }
-}
-
-// Live-control block is shown only when WLED is enabled + has a port on this board.
+// Live-control block is shown when this board hosts >=1 WLED. The Target dropdown
+// lists the configured WLED IDs so the buttons address a specific one (;L<id>,…).
 function updateWLEDSectionUI(n) {
   const controls = document.getElementById(`b${n}-wled-controls`);
   if (!controls) return;
-  const on = !!(boardConfigs[n]?.wled?.enabled && boardConfigs[n]?.wled?.port);
-  controls.style.display = on ? '' : 'none';
+  const wleds = boardConfigs[n]?.wleds ?? [];
+  controls.style.display = wleds.length ? '' : 'none';
+  const target = document.getElementById(`b${n}-wled-target`);
+  if (target) {
+    const cur = target.value;
+    target.innerHTML = wleds.map(w => `<option value="${w.id}">WLED ${w.id}</option>`).join('');
+    if (wleds.some(w => String(w.id) === cur)) target.value = cur;   // preserve selection
+  }
 }
 
-// Fire a runtime ;L,<action> to this board's WLED. Reuses the sequence-Test
-// routing so it works both on a direct USB board and a remote board via its relay.
+// Fire a runtime ;L<id>,<action> to the selected WLED. Reuses the sequence-Test
+// routing so it works on a direct USB board and a remote board via its relay.
 async function wledSend(n, action) {
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
-  const cmd = `${cmdChar}L,${action}`;
+  const id  = document.getElementById(`b${n}-wled-target`)?.value || '';
+  const cmd = `${cmdChar}L${id},${action}`;
   const relayN = remoteRelayForBoard[n];
   if (relayN) {
     const relayConn = boardConnections[relayN];
@@ -2546,24 +2553,8 @@ function populateUIFromConfig(n, config) {
     }
   }
 
-  // WLED (serial lighting)
-  const wledInput = document.querySelector(`input[name="b${n}-wled"][value="${config.wled?.enabled ? 'local' : 'none'}"]`);
-  if (wledInput) {
-    wledInput.checked = true;
-    const isLocal = config.wled?.enabled;
-    ['port', 'baud'].forEach(id => {
-      const el = document.getElementById(`b${n}-wled-${id}-wrap`);
-      if (el) el.style.display = isLocal ? '' : 'none';
-    });
-    updateWLEDPortDropdown(n);
-    if (isLocal && config.wled.port) {
-      const portSel = document.getElementById(`b${n}-wled-port`);
-      if (portSel) portSel.value = config.wled.port;
-      const baudSel = document.getElementById(`b${n}-wled-baud`);
-      if (baudSel) baudSel.value = config.wled.baud ?? 115200;
-    }
-  }
-  updateWLEDSectionUI(n);
+  // WLED (serial lighting) — ID-addressed, multi-row
+  populateWLEDsFromConfig(n, config);
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
@@ -5983,7 +5974,7 @@ async function boardGo(n, opts = {}) {
     syncKyberToConfig(n);
     syncMP3ToConfig(n);
     syncHCRToConfig(n);
-    syncWLEDToConfig(n);
+    syncWLEDsToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
     config.sequences     = getSequencesFromUI(n);
@@ -6360,7 +6351,7 @@ async function boardGoRemote(n, opts = {}) {
   syncKyberToConfig(n);
   syncMP3ToConfig(n);
   syncHCRToConfig(n);
-  syncWLEDToConfig(n);
+  syncWLEDsToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
   if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }

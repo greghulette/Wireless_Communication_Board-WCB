@@ -79,12 +79,11 @@ function createDefaultBoardConfig() {
       poll:    10,     // status auto-poll interval (s); 0 = off
     },
 
-    // WLED (serial lighting) — drives a stock WLED node over a reserved UART
-    wled: {
-      enabled: false,
-      port:    null,   // 1-2 — hardware serial port (WLED wants 115200; S3-S5 can't)
-      baud:    115200, // WLED serial default
-    },
+    // WLED (serial lighting) — array of { id, port, baud }. LOCAL WLED nodes on
+    // this board, each with a system-wide ID (1-9). ID-addressed, mirrors maestros;
+    // reach a WLED on another board with ;L<id> (firmware routes it). Remote proxies
+    // are firmware-managed (WDP auto-add) and NOT tracked here.
+    wleds: [],
 
     // Maestros — array of { id, port, baud }
     maestros: [],
@@ -642,20 +641,41 @@ function parseToken(body, config) {
       break;
     }
 
-    // ── WLED (serial lighting) ──
+    // ── WLED (serial lighting) — ID-addressed, mirrors Maestro ──
     case 'WLED': {
+      // Upsert a LOCAL WLED by id (one slot per id, matching the firmware).
+      const upsertWled = (id, port, baud) => {
+        if (!config.wleds) config.wleds = [];
+        const ex = config.wleds.find(w => w.id === id);
+        if (ex) { ex.port = port; ex.baud = baud; }
+        else    config.wleds.push({ id, port, baud });
+      };
       const sub = upperParts[1];
-      if (sub === 'PORT') {
-        // ?WLED,PORT,S1:115200
-        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
-        if (m) {
-          config.wled.enabled = true;
-          config.wled.port    = parseInt(m[1]);
-          config.wled.baud    = parseInt(m[2]);
+      if (sub === 'CLEAR') {
+        // ?WLED,CLEAR (all)  |  ?WLED,CLEAR,<id> (one)
+        if (parts[2] != null && parts[2] !== '') {
+          const id = parseInt(parts[2]);
+          config.wleds = (config.wleds ?? []).filter(w => w.id !== id);
+        } else {
+          config.wleds = [];
         }
-      } else if (sub === 'CLEAR') {
-        config.wled.enabled = false;
-        config.wled.port    = null;
+        break;
+      }
+      if (sub === 'LIST' || sub === 'STATUS') break;
+      if (sub === 'PORT') {
+        // Legacy ?WLED,PORT,S<port>:<baud>  →  local WLED id 1
+        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
+        if (m) upsertWled(1, parseInt(m[1]), parseInt(m[2]));
+        break;
+      }
+      // New ?WLED,<id>:W<wcb>S<port>:<baud>  (chained entries allowed)
+      for (let i = 1; i < parts.length; i++) {
+        const wm = parts[i].toUpperCase().match(/^(\d+):W(\d+)S(\d+):(\d+)$/);
+        if (!wm) continue;
+        const id = parseInt(wm[1]), wcb = parseInt(wm[2]), port = parseInt(wm[3]), baud = parseInt(wm[4]);
+        // Only track WLEDs LOCAL to this board; W<other>S0 remote proxies are
+        // firmware-managed (WDP auto-add) and must not appear as editable rows.
+        if (wcb === config.wcbNumber) upsertWled(id, port, baud);
       }
       break;
     }
@@ -906,11 +926,11 @@ function evaluatePortClaims(config) {
       config.serialPorts[idx].claimedBy = { type: 'hcr' };
   }
 
-  // WLED claims its port (guarded — never steal a port another device already owns)
-  if (config.wled && config.wled.enabled && config.wled.port) {
-    const idx = config.wled.port - 1;
-    if (idx >= 0 && idx < 5 && !config.serialPorts[idx].claimedBy)
-      config.serialPorts[idx].claimedBy = { type: 'wled' };
+  // WLED nodes claim their ports (one per local WLED, keyed by id)
+  for (const w of (config.wleds ?? [])) {
+    const idx = w.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'wled', id: w.id };
   }
 
   // Maestros claim their ports
@@ -1252,16 +1272,21 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     }
   }
 
-  // ── WLED (serial lighting) ──
-  if (config.wled) {
-    const wledChanged = fullPush || !baseline ||
-      JSON.stringify(baseline?.wled) !== JSON.stringify(config.wled);
-    if (wledChanged) {
-      if (config.wled.enabled && config.wled.port) {
-        add(`WLED,PORT,S${config.wled.port}:${config.wled.baud}`);
-      } else {
-        add('WLED,CLEAR');
-      }
+  // ── WLED (serial lighting) — local WLED nodes, ID-addressed ──
+  const wledTable  = config.wleds ?? [];
+  const bWledTable = baseline?.wleds ?? [];
+  const wledChanged = fullPush || !baseline ||
+    JSON.stringify(bWledTable) !== JSON.stringify(wledTable);
+  if (wledChanged) {
+    // Targeted clears for local WLEDs removed since the baseline (keyed by id —
+    // one slot per id in the firmware). NEVER a blanket ?WLED,CLEAR: that would
+    // also wipe firmware-managed remote proxies. A moved/re-bauded id needs no
+    // clear — the firmware reuses that id's slot on the next ?WLED,<id>:… .
+    for (const b of bWledTable) {
+      if (!wledTable.some(e => e.id === b.id)) add(`WLED,CLEAR,${b.id}`);
+    }
+    for (const w of wledTable) {
+      add(`WLED,${w.id}:W${config.wcbNumber}S${w.port}:${w.baud}`);
     }
   }
 
@@ -1453,7 +1478,7 @@ function diffConfigs(configA, configB) {
   check('kyber',          configA.kyber,           configB.kyber);
   check('mp3',            configA.mp3,             configB.mp3);
   check('hcr',            configA.hcr,             configB.hcr);
-  check('wled',           configA.wled,            configB.wled);
+  check('wleds',          configA.wleds,           configB.wleds);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
   check('mappings',       configA.mappings,        configB.mappings);
