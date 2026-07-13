@@ -25,7 +25,7 @@ extern MP3Config mp3Config;
 extern uint8_t   mp3Volume;  // current tracked volume (0=loudest, 64=inaudible ceiling)
 
 // ---- Core ---------------------------------------------------------------
-void sendMP3Raw(uint8_t byte1, int8_t byte2 = -1);   // send 1 or 2-byte protocol msg
+void sendMP3Raw(uint8_t byte1, int byte2 = -1);   // send 1 or 2-byte protocol msg (byte2 0-255, -1=none)
 void processMP3AudioCommand(const String &message);   // dispatch ;A,... commands
 
 // ---- Configuration (?MP3,...) -------------------------------------------

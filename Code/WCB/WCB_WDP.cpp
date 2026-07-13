@@ -38,6 +38,7 @@ extern int     activePeerCount();
 extern bool    wcbPeerActive[MAX_WCB_COUNT];
 extern bool    wcbPeerLearned[MAX_WCB_COUNT];
 extern uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT];
+extern bool    wcbPeerOnline(uint8_t id);   // registered peer AND currently ETM-online (for cap routing)
 
 // ---- Module state --------------------------------------------------------
 bool wdpEnabled  = true;
@@ -59,6 +60,7 @@ static unsigned long wdpNextAdvertMs = 0;
 #define WDP_TLV_HWVER    0x04
 #define WDP_TLV_CAPFLAGS 0x05
 #define WDP_TLV_MAESTRO  0x06
+#define WDP_TLV_MAESTRO_CFG 0x0E // [id(1)][baudCode(1)] records — rich Maestro id+baud for auto-config
 #define WDP_TLV_PORTLABEL 0x09   // [port(1)][label bytes] — one TLV per labeled serial port
 #define WDP_TLV_CTRLID   0x0A    // [id(1)] — controller (special-peer) ID; sent only when linked
 // ---- Device-identity TLVs (shared with WDP-DA + the WCB_Client library) ----
@@ -86,6 +88,21 @@ static uint16_t wdpCapFlags() {
   return f;
 }
 
+// Ordered, APPEND-ONLY Maestro baud table. The array index IS the WDP wire code
+// carried in WDP_TLV_MAESTRO_CFG — never reorder or remove entries or the codes
+// drift between firmware versions. Mirrors the baud whitelist validated in
+// configureMaestro() (WCB_Maestro.cpp); keep the two in sync.
+static const uint32_t WDP_BAUD_TABLE[] = {
+  0, 110, 300, 600, 1200, 2400, 9600, 14400,
+  19200, 38400, 57600, 115200, 128000, 256000
+};
+static const uint8_t WDP_BAUD_N = sizeof(WDP_BAUD_TABLE) / sizeof(WDP_BAUD_TABLE[0]);
+static uint8_t  wdpBaudToCode(uint32_t b) {
+  for (uint8_t i = 0; i < WDP_BAUD_N; i++) if (WDP_BAUD_TABLE[i] == b) return i;
+  return 0xFF;   // unrecognized baud → advertise "unknown"; receivers won't auto-config it
+}
+static uint32_t wdpCodeToBaud(uint8_t c) { return c < WDP_BAUD_N ? WDP_BAUD_TABLE[c] : 0; }
+
 // This board's PHYSICALLY-attached Maestro IDs (remoteWCB==0). Remote proxies
 // (serialPort==0) are NOT advertised as local capabilities.
 static int wdpLocalMaestroIds(uint8_t *out) {
@@ -94,6 +111,22 @@ static int wdpLocalMaestroIds(uint8_t *out) {
     if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
         maestroConfigs[i].serialPort > 0) {
       out[n++] = maestroConfigs[i].maestroID;
+    }
+  }
+  return n;
+}
+
+// Same selection as wdpLocalMaestroIds, but also emits each Maestro's baud as a
+// wire code — feeds the rich WDP_TLV_MAESTRO_CFG so neighbors can auto-configure
+// a remote proxy (id + host + baud) without a manual ?MAESTRO.
+static int wdpLocalMaestroCfg(uint8_t *ids, uint8_t *codes) {
+  int n = 0;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB && n < WDP_MAX_MAESTRO; i++) {
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
+        maestroConfigs[i].serialPort > 0) {
+      ids[n]   = maestroConfigs[i].maestroID;
+      codes[n] = wdpBaudToCode(maestroConfigs[i].baudRate);
+      n++;
     }
   }
   return n;
@@ -139,9 +172,14 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
     o = putTLV(buf, o, max, WDP_TLV_CTRLID, &id, 1);
   }
   {
-    uint8_t ids[WDP_MAX_MAESTRO];
-    int n = wdpLocalMaestroIds(ids);
-    if (n > 0) o = putTLV(buf, o, max, WDP_TLV_MAESTRO, ids, n);
+    uint8_t ids[WDP_MAX_MAESTRO], codes[WDP_MAX_MAESTRO];
+    int n = wdpLocalMaestroCfg(ids, codes);
+    if (n > 0) {
+      o = putTLV(buf, o, max, WDP_TLV_MAESTRO, ids, n);   // legacy id-only (old receivers + display)
+      uint8_t rec[WDP_MAX_MAESTRO * 2];                    // [id][baudCode] pairs
+      for (int i = 0; i < n; i++) { rec[i * 2] = ids[i]; rec[i * 2 + 1] = codes[i]; }
+      o = putTLV(buf, o, max, WDP_TLV_MAESTRO_CFG, rec, n * 2);
+    }
   }
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
@@ -222,6 +260,30 @@ static bool wdpMeshHasCap(uint16_t capBit) {
     if (wdpNeighbors[i].capFlags & capBit) return true;
   }
   return false;
+}
+
+// Owner of a capability = the LOWEST-numbered board that advertises it AND is a
+// reachable, ETM-ONLINE peer — INCLUDING this board (self is judged by the same
+// wdpCapFlags() predicate that built our own advert; self is always reachable).
+// Returns 0 if nobody — not even self — owns it. Client devices are skipped
+// (their caps are free-text tags, not this bitmap); a client can ISSUE a trigger
+// but is never a routing owner.
+//
+// A REMOTE owner is gated on wcbPeerOnline() (registered peer + ETM-online),
+// NOT on WDP's nb.confirmed: WDP's TTL (~180 s) is far longer than the ETM
+// offline window (~33 s), so a just-powered-off board stays WDP-confirmed and a
+// routed trigger sent to it would black-hole. Gating on ETM-online skips it and
+// lets election fall to the next-lowest live owner (or local).
+int wdpCapOwner(uint16_t capBit) {
+  int owner = (wdpCapFlags() & capBit) ? WCB_Number : 0;   // self: always reachable locally
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    WdpNeighbor &nb = wdpNeighbors[i];
+    if (!nb.valid || nb.isClient)     continue;
+    if (!(nb.capFlags & capBit))      continue;
+    if (!wcbPeerOnline(nb.wcbNumber)) continue;   // reachable + ETM-online only
+    if (owner == 0 || nb.wcbNumber < owner) owner = nb.wcbNumber;
+  }
+  return owner;
 }
 
 // Is a controller-type client (NaviCore / Sabé) present on the mesh?
@@ -311,7 +373,18 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       }
       case WDP_TLV_MAESTRO: {
         int L = len > WDP_MAX_MAESTRO ? WDP_MAX_MAESTRO : len;
-        memcpy(nb.maestroIds, val, L); nb.maestroCount = (uint8_t)L; break;
+        memcpy(nb.maestroIds, val, L); nb.maestroCount = (uint8_t)L;
+        for (int i = 0; i < L; i++) nb.maestroBaudCode[i] = 0xFF;  // unknown unless MAESTRO_CFG overrides
+        break;
+      }
+      case WDP_TLV_MAESTRO_CFG: {   // [id][baudCode] pairs — supersedes the id-only TLV above
+        int recs = len / 2; if (recs > WDP_MAX_MAESTRO) recs = WDP_MAX_MAESTRO;
+        for (int i = 0; i < recs; i++) {
+          nb.maestroIds[i]      = val[i * 2];
+          nb.maestroBaudCode[i] = val[i * 2 + 1];
+        }
+        nb.maestroCount = (uint8_t)recs;
+        break;
       }
       case WDP_TLV_PORTLABEL: {
         if (len >= 1) {
@@ -355,6 +428,22 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // different Maestro-ID rules per source (see wdpEvaluateMaestroRemote).
   // Evaluated every advert; a no-op once we're already remote / the Kyber host.
   wdpEvaluateMaestroRemote();
+
+  // ---- Auto-config remote Maestros (persisted per-device routing table) ------
+  // Every Maestro this neighbor PHYSICALLY hosts becomes a remote proxy slot on
+  // this board (id -> senderWCB @ baud), identical to a manual ?MAESTRO,<id>:W..,
+  // so ;M<id> / raw-Maestro traffic routes to the right board with no hand
+  // config. First-host-wins + idempotent, and persisted (survives reboot) so the
+  // table is warm on boot. Gated on the same auto-join master switch, and only
+  // for real WCB neighbors that carry baud (the MAESTRO_CFG TLV; old id-only
+  // adverts leave baudCode==0xFF and are skipped — nothing to configure with).
+  if (wdpAutoJoin && !nb.isClient) {
+    for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
+      if (nb.maestroBaudCode[i] == 0xFF) continue;   // no baud on the wire — can't auto-config
+      maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB,
+                           wdpCodeToBaud(nb.maestroBaudCode[i]));
+    }
+  }
 
   // ---- Auto-join (real WCBs AND client devices) -----------------------------
   // Every WCB and every WCB_Client forces its STA MAC to the derived scheme
@@ -621,7 +710,6 @@ static void printWdpDetail(int wcbNum) {
 
   // ---- WCB neighbor --------------------------------------------------------
   char caps[128];    wdpCapNames(nb.capFlags, caps, sizeof(caps));
-  char maestro[24];  wdpMaestroStr(nb, maestro, sizeof(maestro));
   Serial.printf("==== WCB %d  \"%s\" ====\n", nb.wcbNumber, nb.alias[0] ? nb.alias : "(no alias)");
   Serial.printf("  Platform    : %s (hw %d)\n", wdpHwName(nb.hwVer), nb.hwVer);
   Serial.printf("  Firmware    : %s\n", nb.fwVer[0] ? nb.fwVer : "?");
@@ -629,7 +717,18 @@ static void printWdpDetail(int wcbNum) {
     Serial.printf("  Capabilities: %s  (controller ID %d)\n", caps, nb.ctrlId);
   else
     Serial.printf("  Capabilities: %s\n", caps);
-  Serial.printf("  Maestros    : %s\n", maestro);
+  if (nb.maestroCount == 0) {
+    Serial.println("  Maestros    : -");
+  } else {
+    Serial.printf("  Maestros    :");
+    for (int m = 0; m < nb.maestroCount && m < WDP_MAX_MAESTRO; m++) {
+      if (nb.maestroBaudCode[m] != 0xFF)   // rich advert — show id@baud
+        Serial.printf(" %d@%lu", nb.maestroIds[m], (unsigned long)wdpCodeToBaud(nb.maestroBaudCode[m]));
+      else                                  // legacy id-only advert
+        Serial.printf(" %d", nb.maestroIds[m]);
+    }
+    Serial.println();
+  }
   Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
                 nb.confirmed ? "live" : "stale");
   Serial.println("  Interfaces  :");

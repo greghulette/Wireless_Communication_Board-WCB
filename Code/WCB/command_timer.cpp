@@ -66,6 +66,16 @@ void printTimerDebugInfo(const String &delayStr, unsigned long parsedDelay, unsi
 }
 
 void parseCommandGroups(const String &input) {
+  // Single global timer state — only one timer sequence runs at a time. If one is
+  // still in flight (e.g. a running sequence recalled another timer-bearing stored
+  // sequence, or a new ;t… was issued mid-run) this replaces it. That used to be
+  // SILENT, dropping the outer sequence's remaining groups; surface it so the loss
+  // is visible. (True nested timer sequences would need a save/restore stack.)
+  if (commandTimerModeEnabled && currentGroupIndex < commandGroups.size()) {
+    Serial.printf("⚠️ Timer sequence replaced mid-run — %u remaining group(s) of the "
+                  "previous sequence dropped (nested timer sequences aren't supported).\n",
+                  (unsigned)(commandGroups.size() - currentGroupIndex));
+  }
   commandGroups.clear();
   currentGroupIndex = 0;
   commandTimerModeEnabled = true;

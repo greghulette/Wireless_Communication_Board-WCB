@@ -889,6 +889,12 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
+    // Previously MISSED by factory reset — HCR, WLED, and user-variable configs
+    // survived an erase and re-seized their ports / reappeared after reboot.
+    preferences.begin("hcr_cfg", false);   preferences.clear(); preferences.end();
+    preferences.begin("wled_cfg", false);  preferences.clear(); preferences.end();
+    preferences.begin("wcb_vars", false);  preferences.clear(); preferences.end();
+
     clearAllPWMMappings();
 
     Serial.println("NVS cleared. Restarting...");

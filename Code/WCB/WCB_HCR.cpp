@@ -325,6 +325,19 @@ void processHCRRuntimeCommand(const String &message) {
     int fn    = hcrField(body, 1).toInt();
     int chan  = hcrField(body, 2).toInt();
     int track = hcrField(body, 3).toInt();
+    // Bounds-check chan for the fns that index a fixed library array with no guard
+    // of their own — but per-function, since the ranges differ: emotion fns
+    // (SetEmotion 2 / Trigger 3 / Stimulate 4) allow 0-3, WAV fns (PlayWAV 14 /
+    // StopWAV 16) allow 0-2 (channel array is "VAB"), and the rest ignore chan
+    // (SetVolume 17 self-guards). Don't validate the chan-less fns, so a stray 3rd
+    // field can't reject them.
+    int maxChan = (fn == 2 || fn == 3 || fn == 4)  ? 3
+                : (fn == 14 || fn == 16)            ? 2
+                : -1;
+    if (maxChan >= 0 && (chan < 0 || chan > maxChan)) {
+      Serial.printf("[HCR] FN %d channel %d out of range (0-%d)\n", fn, chan, maxChan);
+      return;
+    }
     switch (fn) {
       case 2:  _hcr->SetEmotion(chan, track);   _hcr->update(); break;
       case 3:  _hcr->Trigger(chan, track);                      break;

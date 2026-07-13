@@ -24,6 +24,11 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber);
 void configureMaestro(const String &message);
 void clearMaestroByID(const String &message);
 void clearAllMaestroConfigs();
+// Auto-add (or baud-refresh) a REMOTE Maestro proxy learned from a WDP advert:
+// slot = {id, serialPort:0, remoteWCB:hostWCB, baud}. First-host-wins + idempotent
+// + persisted. Returns true if a slot was added or its baud changed. Called from
+// the WDP advert handler (loop task → NVS-safe). See WCB_WDP.cpp.
+bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud);
 
 // Helper functions
 int8_t findSlotByMaestroID(uint8_t maestroID);

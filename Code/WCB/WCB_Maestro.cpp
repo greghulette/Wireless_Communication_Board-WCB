@@ -391,6 +391,51 @@ String remaining = message;
   }
 }
 
+// Auto-add (or baud-refresh) a REMOTE Maestro proxy learned from a WDP advert.
+// Mirrors the REMOTE branch of configureMaestro: slot = {id, serialPort:0,
+// remoteWCB:hostWCB, baud}. Behavior:
+//   • existing proxy to THIS host  -> refresh baud only if it changed
+//   • id already configured elsewhere (local, or a proxy to another host)
+//                                   -> skip (first-host-wins; never shadow a
+//                                      local Maestro or re-home a live proxy)
+//   • otherwise                     -> claim an empty slot
+// Persists via saveMaestroSettings() and is safe to call every advert. Returns
+// true iff a slot was added or its baud changed (so the caller could log it).
+bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
+  if (maestroID < 1 || maestroID > 9)      return false;
+  if (hostWCB == 0 || hostWCB == WCB_Number) return false;   // not a remote host
+
+  int8_t slot = findSlotByMaestroIDPortTarget(maestroID, 0, hostWCB);
+  if (slot >= 0) {                         // already proxied to this exact host
+    if (baud != 0 && maestroConfigs[slot].baudRate != baud) {
+      maestroConfigs[slot].baudRate = baud;
+      saveMaestroSettings();
+      Serial.printf("[WDP] Maestro %d @ WCB%d baud updated to %lu\n",
+                    maestroID, hostWCB, (unsigned long)baud);
+      return true;
+    }
+    return false;                          // unchanged — nothing to do
+  }
+  if (isMaestroConfigured(maestroID)) return false;   // owned elsewhere — don't shadow/re-home
+
+  slot = findEmptySlot();
+  if (slot < 0) {
+    if (debugEnabled)                       // rare (9 slots); debug-gated to avoid steady-state spam
+      Serial.printf("[WDP] Maestro %d @ WCB%d heard but no free slot (max %d) — clear one to auto-add\n",
+                    maestroID, hostWCB, MAX_MAESTROS_PER_WCB);
+    return false;
+  }
+  maestroConfigs[slot].maestroID  = maestroID;
+  maestroConfigs[slot].serialPort = 0;      // remote proxy
+  maestroConfigs[slot].remoteWCB  = hostWCB;
+  maestroConfigs[slot].configured = true;
+  maestroConfigs[slot].baudRate   = baud;
+  saveMaestroSettings();
+  Serial.printf("[WDP] auto-added remote Maestro %d on WCB%d @ %lu baud (slot %d)\n",
+                maestroID, hostWCB, (unsigned long)baud, slot + 1);
+  return true;
+}
+
 // Clear one slot and do the port housekeeping (broadcast re-enable, baud
 // reset). Does NOT call saveMaestroSettings() — the caller saves once after
 // clearing one or more slots.
@@ -541,13 +586,13 @@ void clearAllMaestroConfigs() {
         Serial.printf("  ✓ S%d input enabled\n", i + 1);
       }
     }
-    // **RESET BAUD RATES ON ALL FREED PORTS**
-    Serial.println("Resetting baud rates on freed ports:");
-    for (int i = 0; i < 5; i++) {
-        if (portsUsed[i]) {
-            updateBaudRate(i + 1, 9600);
-            Serial.printf("  ✓ S%d baud rate reset to 9600\n", i + 1);
-        }
+  }
+  // **RESET BAUD RATES ON ALL FREED PORTS** (once — was nested in the loop above)
+  Serial.println("Resetting baud rates on freed ports:");
+  for (int i = 0; i < 5; i++) {
+    if (portsUsed[i]) {
+      updateBaudRate(i + 1, 9600);
+      Serial.printf("  ✓ S%d baud rate reset to 9600\n", i + 1);
     }
   }
   

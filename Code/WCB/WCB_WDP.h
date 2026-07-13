@@ -56,6 +56,7 @@ struct WdpNeighbor {
   uint16_t      capFlags;      // WDP_CAP_* bitmap
   uint8_t       ctrlId;        // controller (special-peer) ID this board links to; 0=none/unknown
   uint8_t       maestroIds[WDP_MAX_MAESTRO];  // this board's local Maestro IDs
+  uint8_t       maestroBaudCode[WDP_MAX_MAESTRO]; // baud code per id (WDP_TLV_MAESTRO_CFG); 0xFF = unknown (old advert)
   uint8_t       maestroCount;
   char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled
   // ---- Client-device fields (WCB_Client / WDP-DA identity) ----------------
@@ -86,6 +87,13 @@ void processWdpCommand(const String &args);
 // 0 if no board advertises that alias, or -1 if it's ambiguous (>1 match).
 // The local board is NOT considered here (the caller matches wcb_alias first).
 int wdpResolveAlias(const char *alias);
+
+// ---- Capability routing ---------------------------------------------------
+// Returns the WCB number that OWNS a capability (WDP_CAP_HCR/MP3/WLED/...):
+// the lowest-numbered ONLINE board advertising it, self included. 0 if nobody
+// (not even this board) owns it. Used to route ;H/;A/;L triggers to the single
+// board with the device, firing exactly once. See routeCapCommand() in WCB.ino.
+int wdpCapOwner(uint16_t capBit);
 
 // ---- NVS -----------------------------------------------------------------
 void loadWdpSettings();

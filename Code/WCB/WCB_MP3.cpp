@@ -42,7 +42,7 @@ bool isSerialPortUsedForMP3(int port) {
 
 // ==================== Low-level Send =====================================
 
-void sendMP3Raw(uint8_t byte1, int8_t byte2) {
+void sendMP3Raw(uint8_t byte1, int byte2) {
   if (!mp3Config.configured || mp3Config.serialPort == 0) {
     Serial.printf("[MP3] Not configured — use %cMP3,S<port>:<baud>:V<vol>\n",
                   LocalFunctionIdentifier);
@@ -50,6 +50,9 @@ void sendMP3Raw(uint8_t byte1, int8_t byte2) {
   }
   Stream &s = getSerialStream(mp3Config.serialPort);
   s.write(byte1);
+  // byte2 is an int with sentinel -1 = "no second byte". A plain int8_t here (and
+  // (int8_t) casts at the call sites) made tracks 128-255 negative, so >=0 failed
+  // and the track byte was dropped. int preserves the full 0-255 range.
   if (byte2 >= 0) s.write((uint8_t)byte2);
   // No flush() — write() queues into the UART TX buffer and it drains async
   // (mirror WCB_Maestro). Flushing blocked loop() ~1-4ms per audio command for
@@ -110,8 +113,8 @@ void processMP3AudioCommand(const String &message) {
     _mp3PendingCallback = callbackKey;
 
     // Send volume first, then play
-    sendMP3Raw('v', (int8_t)mp3Volume);
-    sendMP3Raw('t', (int8_t)trackNum);
+    sendMP3Raw('v', mp3Volume);
+    sendMP3Raw('t', trackNum);
 
     if (debugEnabled) {
       Serial.printf("[MP3] Play track %d  vol=%d", trackNum, mp3Volume);
@@ -153,8 +156,8 @@ void processMP3AudioCommand(const String &message) {
     _mp3PendingCallback = callbackKey;
 
     // Send volume first, then play
-    sendMP3Raw('v', (int8_t)mp3Volume);
-    sendMP3Raw('p', (int8_t)trackIdx);
+    sendMP3Raw('v', mp3Volume);
+    sendMP3Raw('p', trackIdx);
 
     if (debugEnabled) {
       Serial.printf("[MP3] Play FS index %d  vol=%d", trackIdx, mp3Volume);
@@ -193,7 +196,7 @@ void processMP3AudioCommand(const String &message) {
       return;
     }
     mp3Volume = (uint8_t)n;
-    sendMP3Raw('v', (int8_t)mp3Volume);
+    sendMP3Raw('v', mp3Volume);
     saveMP3Settings();
     if (debugEnabled) Serial.printf("[MP3] Volume set to %d\n", mp3Volume);
     return;
@@ -202,7 +205,7 @@ void processMP3AudioCommand(const String &message) {
   // ---- VOLUP  (louder — decrease value, floor 0) -----------------------
   if (restUpper == "VOLUP") {
     mp3Volume = (mp3Volume <= 5) ? 0 : mp3Volume - 5;
-    sendMP3Raw('v', (int8_t)mp3Volume);
+    sendMP3Raw('v', mp3Volume);
     saveMP3Settings();
     Serial.printf("[MP3] Volume up → %d\n", mp3Volume);
     return;
@@ -211,7 +214,7 @@ void processMP3AudioCommand(const String &message) {
   // ---- VOLDN  (quieter — increase value, ceiling 64) -------------------
   if (restUpper == "VOLDN") {
     mp3Volume = (mp3Volume >= 59) ? 64 : mp3Volume + 5;
-    sendMP3Raw('v', (int8_t)mp3Volume);
+    sendMP3Raw('v', mp3Volume);
     saveMP3Settings();
     Serial.printf("[MP3] Volume down → %d\n", mp3Volume);
     return;
@@ -219,14 +222,14 @@ void processMP3AudioCommand(const String &message) {
 
   // ---- COUNT  (request total track count) ------------------------------
   if (restUpper == "COUNT") {
-    sendMP3Raw('S', (int8_t)'1');
+    sendMP3Raw('S', '1');
     if (debugEnabled) Serial.println("[MP3] Requesting track count...");
     return;
   }
 
   // ---- VER  (request firmware version string) --------------------------
   if (restUpper == "VER") {
-    sendMP3Raw('S', (int8_t)'0');
+    sendMP3Raw('S', '0');
     if (debugEnabled) Serial.println("[MP3] Requesting firmware version...");
     return;
   }
