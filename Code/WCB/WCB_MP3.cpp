@@ -4,6 +4,7 @@
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int          WCB_Number;
+extern int          Default_WCB_Quantity;   // for validating a ?MP3,REMOTE,W<n> host
 extern bool         debugEnabled;
 extern char         LocalFunctionIdentifier;
 extern char         commandDelimiter;
@@ -376,6 +377,32 @@ void configureMP3(const String &args) {
     return;
   }
 
+  // ---- REMOTE,W<n> | REMOTE,OFF — route ;A to the MP3 on another board ----
+  // Persisted routing (auto-learned from WDP, set by hand, or restored). A board
+  // that HOSTS an MP3 Trigger locally never needs this.
+  if (aUpper.startsWith("REMOTE")) {
+    String v = (a.indexOf(',') >= 0) ? a.substring(a.indexOf(',') + 1) : "";
+    v.trim(); String vU = v; vU.toUpperCase();
+    if (vU == "" || vU == "OFF" || vU == "0") {
+      mp3Config.remoteWCB = 0;
+      saveMP3Settings();
+      Serial.println("[MP3] Remote routing cleared");
+      return;
+    }
+    int wIdx = vU.indexOf('W');
+    int host = (wIdx >= 0) ? v.substring(wIdx + 1).toInt() : v.toInt();
+    if (host < 1 || host > Default_WCB_Quantity || host == WCB_Number) {
+      Serial.printf("[MP3] Invalid host. Use %cMP3,REMOTE,W<n> (1-%d, not this board)\n",
+                    LocalFunctionIdentifier, Default_WCB_Quantity);
+      return;
+    }
+    if (mp3Config.configured) clearMP3Config();   // was a local host — release the port
+    mp3Config.remoteWCB = (uint8_t)host;
+    saveMP3Settings();
+    Serial.printf("[MP3] Routing ;A to WCB%d\n", host);
+    return;
+  }
+
   // ---- ONERR,... --------------------------------------------------
   if (aUpper.startsWith("ONERR,")) {
     String key = args.substring(6);
@@ -503,6 +530,7 @@ void configureMP3(const String &args) {
   mp3Config.baudRate   = (uint32_t)baudRate;
   mp3Config.volume     = (uint8_t)volume;
   mp3Config.configured = true;
+  mp3Config.remoteWCB  = 0;   // we host it now — not a client of another board
   mp3Volume            = (uint8_t)volume;
 
   saveMP3Settings();
@@ -517,9 +545,13 @@ void configureMP3(const String &args) {
 void printMP3Settings() {
   Serial.println("\n--- MP3 Trigger Configuration ---");
   if (!mp3Config.configured) {
-    Serial.println("  Not configured.");
-    Serial.printf("  Use: %cMP3,S<port>:<baud>:V<vol>  (e.g. %cMP3,S2:9600:V25)\n",
-                  LocalFunctionIdentifier, LocalFunctionIdentifier);
+    if (mp3Config.remoteWCB > 0) {
+      Serial.printf("  Routes ;A to WCB%d (remote host)\n", mp3Config.remoteWCB);
+    } else {
+      Serial.println("  Not configured.");
+      Serial.printf("  Use: %cMP3,S<port>:<baud>:V<vol>  (e.g. %cMP3,S2:9600:V25)\n",
+                    LocalFunctionIdentifier, LocalFunctionIdentifier);
+    }
     Serial.println("---------------------------------");
     return;
   }
@@ -537,7 +569,17 @@ void printMP3Settings() {
 void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
                     char delimiter, bool printToSerial,
                     const String &defSep, const String &defFunc) {
-  if (!mp3Config.configured) return;
+  // Client board (no local MP3, routes ;A to a remote host): persist the route.
+  if (!mp3Config.configured) {
+    if (mp3Config.remoteWCB > 0) {
+      String suffix = "MP3,REMOTE,W" + String(mp3Config.remoteWCB);
+      String cmd = String(LocalFunctionIdentifier) + suffix;
+      if (printToSerial) Serial.println(cmd);
+      chainedConfig        += String(delimiter) + cmd;
+      chainedConfigDefault += defSep + defFunc + suffix;
+    }
+    return;
+  }
 
   // Main config line — includes volume
   String cmdSuffix = "MP3,S" + String(mp3Config.serialPort) +
@@ -568,6 +610,7 @@ void saveMP3Settings() {
   preferences.putUChar ("vol",    mp3Volume);           // save current tracked volume
   preferences.putUChar ("defvol", mp3Config.volume);    // save configured default
   preferences.putString("onErr",  mp3Config.onErrCmd);
+  preferences.putUChar ("rwcb",   mp3Config.remoteWCB);
   preferences.end();
 }
 
@@ -579,6 +622,7 @@ void loadMP3Settings() {
   mp3Config.volume     = preferences.getUChar ("defvol", 20);
   mp3Volume            = preferences.getUChar ("vol",    20);
   String err           = preferences.getString("onErr",  "");
+  mp3Config.remoteWCB  = preferences.getUChar ("rwcb",   0);
   preferences.end();
 
   strncpy(mp3Config.onErrCmd, err.c_str(), sizeof(mp3Config.onErrCmd) - 1);
@@ -590,5 +634,19 @@ void loadMP3Settings() {
                   (unsigned long)mp3Config.baudRate,
                   mp3Config.volume,
                   mp3Volume);
+  } else if (mp3Config.remoteWCB > 0) {
+    Serial.printf("[MP3] Loaded: routes ;A to WCB%d\n", mp3Config.remoteWCB);
   }
+}
+
+// Auto-learn the MP3 host from a WDP advert. First-host-wins + persisted: never
+// override a local host or an already-stored host. Returns true if newly stored.
+bool mp3AutoAddRemote(uint8_t hostWCB) {
+  if (hostWCB == 0 || hostWCB == WCB_Number) return false;
+  if (mp3Config.configured)                  return false;   // we host it locally
+  if (mp3Config.remoteWCB != 0)              return false;   // already have a host
+  mp3Config.remoteWCB = hostWCB;
+  saveMP3Settings();
+  Serial.printf("[WDP] MP3 host learned — routing ;A to WCB%d\n", hostWCB);
+  return true;
 }

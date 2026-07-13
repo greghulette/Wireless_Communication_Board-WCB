@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_131037RJUL2026                                  *****////
+///*****                                          Version 6.2.0_131513RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -168,7 +168,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_131222RJUL2026";
+String SoftwareVersion = "6.2.0_131513RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5216,26 +5216,31 @@ void verifyBackupChecksum(const String &message) {
 
 /// Processing Command Character
 //*******************************
-// Route a capability trigger (HCR/MP3/WLED) to the SINGLE board that owns the
-// device, firing exactly once. Local-first: if this board owns the capability —
-// or nobody on the mesh advertises it (degrade to legacy local behavior so a
-// lone/un-provisioned board still works) — run the local handler. If a REMOTE
-// board owns it, forward the original ";<message>" as a unicast (ETM-ACKed) to
-// that owner. The lastReceivedViaESPNOW short-circuit is the one-hop cap: a
-// command that arrived over the mesh was already routed to us, so we execute it
-// locally and NEVER re-forward — no routing loops, no duplicate fires. Exactly-
-// once falls out of "owner election collapses N candidates to one target" + this
-// cap, so no dedup table is needed. (message is the command WITHOUT the leading
-// command char, e.g. "H,STIM,..." for ;H,STIM.)
-void routeCapCommand(uint16_t capBit, const String &message,
-                     void (*localHandler)(const String &)) {
-  if (lastReceivedViaESPNOW) { localHandler(message); return; }   // routed to us → run
-  int owner = wdpCapOwner(capBit);
-  if (owner == 0 || owner == WCB_Number) { localHandler(message); return; }  // local-first
+// Route a capability trigger (HCR/MP3) to whichever board HOSTS the device, using
+// PERSISTED routing first and live discovery only as a fallback. Order:
+//   1. arrived over the mesh (lastReceivedViaESPNOW) or we host it locally → run here
+//   2. a stored host is set (auto-learned from WDP / set by hand / restored from a
+//      backup) → forward the original ";<message>" there (ETM-ACKed). This is what
+//      makes routing survive reboots + work on cold boot without waiting for adverts.
+//   3. else fall back to LIVE capability election (wdpCapOwner) so a board that hasn't
+//      learned a host yet still routes; if nobody advertises it, run local (the
+//      handler prints the device's own "not configured" message).
+// The lastReceivedViaESPNOW short-circuit is the one-hop cap: a command routed to us
+// is executed locally and NEVER re-forwarded — no loops, no duplicate fires. (message
+// is the command WITHOUT the leading command char, e.g. "H,STIM,..." for ;H,STIM.)
+void routeStoredOrCap(bool localHosted, uint8_t storedHost, uint16_t capBit,
+                      const String &message, void (*localHandler)(const String &)) {
+  if (lastReceivedViaESPNOW || localHosted) { localHandler(message); return; }
+  uint8_t target = storedHost;
+  if (target == 0) {                              // no stored host — try live election
+    int owner = wdpCapOwner(capBit);
+    if (owner > 0 && owner != WCB_Number) target = (uint8_t)owner;
+  }
+  if (target == 0 || target == WCB_Number) { localHandler(message); return; }  // nobody → local
   String fwd = String(CommandCharacter) + message;                // rebuild ";<cmd>"
-  sendESPNowMessage((uint8_t)owner, fwd.c_str());                 // unicast to owner (+ETM ACK)
+  sendESPNowMessage(target, fwd.c_str());                         // unicast to host (+ETM ACK)
   if (debugETM || debugEnabled)
-    Serial.printf("[ROUTE] %c%s -> owner WCB%d\n", CommandCharacter, message.c_str(), owner);
+    Serial.printf("[ROUTE] %c%s -> host WCB%d\n", CommandCharacter, message.c_str(), target);
 }
 
 void processCommandCharcter(const String &message, int sourceID) {
@@ -5251,9 +5256,11 @@ void processCommandCharcter(const String &message, int sourceID) {
     } else if (message.startsWith("p") || message.startsWith("P")) {
       processPWMOutput(message);
     } else if (message.startsWith("a") || message.startsWith("A")) {
-      routeCapCommand(WDP_CAP_MP3, message, processMP3AudioCommand);  // route to the MP3 owner, fire once
+      routeStoredOrCap(mp3Config.configured, mp3Config.remoteWCB, WDP_CAP_MP3,
+                       message, processMP3AudioCommand);   // → the MP3 host (stored, then live)
     } else if (message.startsWith("h") || message.startsWith("H")) {
-      routeCapCommand(WDP_CAP_HCR, message, processHCRRuntimeCommand);  // route to the HCR owner, fire once
+      routeStoredOrCap(hcrConfig.configured, hcrConfig.remoteWCB, WDP_CAP_HCR,
+                       message, processHCRRuntimeCommand); // → the HCR host (stored, then live)
     } else if (message.startsWith("l") || message.startsWith("L")) {
       processWLEDRuntimeCommand(message);   // ;L,ON|OFF|BRI|PS|COL|FX|PAL|JSON → WLED
     } else if (message.startsWith("v") || message.startsWith("V")) {

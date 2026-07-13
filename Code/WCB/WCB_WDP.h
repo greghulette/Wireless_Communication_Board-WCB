@@ -95,8 +95,8 @@ int wdpResolveAlias(const char *alias);
 // ---- Capability routing ---------------------------------------------------
 // Returns the WCB number that OWNS a capability (WDP_CAP_HCR/MP3/WLED/...):
 // the lowest-numbered ONLINE board advertising it, self included. 0 if nobody
-// (not even this board) owns it. Used to route ;H/;A/;L triggers to the single
-// board with the device, firing exactly once. See routeCapCommand() in WCB.ino.
+// (not even this board) owns it. Used as the LIVE fallback when routing ;H/;A
+// triggers whose host hasn't been persisted yet. See routeStoredOrCap() in WCB.ino.
 int wdpCapOwner(uint16_t capBit);
 
 // ---- NVS -----------------------------------------------------------------

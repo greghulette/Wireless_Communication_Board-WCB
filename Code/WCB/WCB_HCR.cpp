@@ -7,6 +7,7 @@
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
+extern int           Default_WCB_Quantity;   // for validating a ?HCR,REMOTE,W<n> host
 extern bool          debugEnabled;
 extern bool          debugHCR;     // toggled via ?DEBUG,HCR,ON|OFF or dhcron/dhcroff
 extern char          LocalFunctionIdentifier;
@@ -574,6 +575,7 @@ static void hcrReservePort(int serialPort, int baudRate) {
   hcrConfig.serialPort = (uint8_t)serialPort;
   hcrConfig.baudRate   = (uint32_t)baudRate;
   hcrConfig.configured = true;
+  hcrConfig.remoteWCB  = 0;   // we host it now — not a client of another board
   // pollSec is preserved from NVS/POLL command (default 10, 0 = user set OFF).
 
   saveHCRSettings();
@@ -591,6 +593,32 @@ void configureHCR(const String &args) {
   if (aU == "REFRESH")         {
     if (_hcr) { _hcr->getUpdate(); Serial.println("[HCR] Refresh requested"); }
     else      Serial.println("[HCR] Not configured");
+    return;
+  }
+
+  // ---- REMOTE,W<n> | REMOTE,OFF — route ;H to the HCR on another board ----
+  // Persisted routing (auto-learned from WDP, or set by hand / restored from a
+  // backup). A board that HOSTS an HCR locally never needs this.
+  if (aU.startsWith("REMOTE")) {
+    String v = (a.indexOf(',') >= 0) ? a.substring(a.indexOf(',') + 1) : "";
+    v.trim(); String vU = v; vU.toUpperCase();
+    if (vU == "" || vU == "OFF" || vU == "0") {
+      hcrConfig.remoteWCB = 0;
+      saveHCRSettings();
+      Serial.println("[HCR] Remote routing cleared");
+      return;
+    }
+    int wIdx = vU.indexOf('W');
+    int host = (wIdx >= 0) ? v.substring(wIdx + 1).toInt() : v.toInt();
+    if (host < 1 || host > Default_WCB_Quantity || host == WCB_Number) {
+      Serial.printf("[HCR] Invalid host. Use %cHCR,REMOTE,W<n> (1-%d, not this board)\n",
+                    LocalFunctionIdentifier, Default_WCB_Quantity);
+      return;
+    }
+    if (hcrConfig.configured) clearHCRConfig();   // was a local host — release the port
+    hcrConfig.remoteWCB = (uint8_t)host;
+    saveHCRSettings();
+    Serial.printf("[HCR] Routing ;H to WCB%d\n", host);
     return;
   }
 
@@ -692,7 +720,10 @@ void configureHCR(const String &args) {
 void printHCRSettings() {
   Serial.println("---- HCR Configuration ----");
   if (!hcrConfig.configured) {
-    Serial.println("  Not configured.  Use ?HCR,PORT,S<port>:<baud>");
+    if (hcrConfig.remoteWCB > 0)
+      Serial.printf("  Routes ;H to WCB%d (remote host)\n", hcrConfig.remoteWCB);
+    else
+      Serial.println("  Not configured.  Use ?HCR,PORT,S<port>:<baud>");
     return;
   }
   Serial.printf("  Port:  S%d\n", hcrConfig.serialPort);
@@ -733,7 +764,17 @@ void printHCRStatus() {
 void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
                     char delimiter, bool printToSerial,
                     const String &defSep, const String &defFunc) {
-  if (!hcrConfig.configured) return;
+  // Client board (no local HCR, routes ;H to a remote host): persist the route.
+  if (!hcrConfig.configured) {
+    if (hcrConfig.remoteWCB > 0) {
+      String suffix = "HCR,REMOTE,W" + String(hcrConfig.remoteWCB);
+      String cmd = String(LocalFunctionIdentifier) + suffix;
+      if (printToSerial) Serial.println(cmd);
+      chainedConfig        += String(delimiter) + cmd;
+      chainedConfigDefault += defSep + defFunc + suffix;
+    }
+    return;
+  }
 
   String suffix = "HCR,PORT,S" + String(hcrConfig.serialPort) +
                   ":" + String(hcrConfig.baudRate);
@@ -757,6 +798,7 @@ void saveHCRSettings() {
   preferences.putUInt ("baud", hcrConfig.baudRate);
   preferences.putBool ("en",   hcrConfig.configured);
   preferences.putUShort("poll", hcrConfig.pollSec);
+  preferences.putUChar("rwcb", hcrConfig.remoteWCB);
   preferences.end();
 }
 
@@ -766,6 +808,7 @@ void loadHCRSettings() {
   hcrConfig.baudRate   = preferences.getUInt  ("baud", 9600);
   hcrConfig.configured = preferences.getBool  ("en",   false);
   hcrConfig.pollSec    = preferences.getUShort("poll", 10);
+  hcrConfig.remoteWCB  = preferences.getUChar ("rwcb", 0);
   preferences.end();
 
   if (hcrConfig.configured) {
@@ -773,5 +816,20 @@ void loadHCRSettings() {
                   hcrConfig.serialPort,
                   (unsigned long)hcrConfig.baudRate,
                   (unsigned)hcrConfig.pollSec);
+  } else if (hcrConfig.remoteWCB > 0) {
+    Serial.printf("[HCR] Loaded: routes ;H to WCB%d\n", hcrConfig.remoteWCB);
   }
+}
+
+// Auto-learn the HCR host from a WDP advert. First-host-wins + persisted: never
+// override a local host or an already-stored host (a physical move is re-set by
+// hand / ?HCR,REMOTE). Returns true if a host was newly stored.
+bool hcrAutoAddRemote(uint8_t hostWCB) {
+  if (hostWCB == 0 || hostWCB == WCB_Number) return false;
+  if (hcrConfig.configured)                  return false;   // we host it locally
+  if (hcrConfig.remoteWCB != 0)              return false;   // already have a host
+  hcrConfig.remoteWCB = hostWCB;
+  saveHCRSettings();
+  Serial.printf("[WDP] HCR host learned — routing ;H to WCB%d\n", hostWCB);
+  return true;
 }

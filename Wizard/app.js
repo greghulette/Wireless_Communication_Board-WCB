@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '13.14:19.R.JUL.2026';
+const UI_VERSION = '13.15:13.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2011,12 +2011,14 @@ function syncMP3ToConfig(n) {
     config.mp3.baud    = parseInt(document.getElementById(`b${n}-mp3-baud`)?.value) || 9600;
     config.mp3.volume  = parseInt(document.getElementById(`b${n}-mp3-vol`)?.value) ?? 0;
     config.mp3.onError = document.getElementById(`b${n}-mp3-onerr`)?.value?.trim() ?? '';
+    config.mp3.remoteWCB = 0;   // hosts it locally now — can't also be a remote client
     // Keep serial port baud in sync so ?BAUD is generated correctly
     if (config.mp3.port >= 1 && config.mp3.port <= 5) {
       config.serialPorts[config.mp3.port - 1].baud = config.mp3.baud;
     }
   } else {
     config.mp3.port = null;
+    // remoteWCB (auto-learned route) is preserved — a client board keeps its host.
   }
 }
 
@@ -2158,12 +2160,14 @@ function syncHCRToConfig(n) {
     config.hcr.baud = parseInt(document.getElementById(`b${n}-hcr-baud`)?.value) || 9600;
     let pv = parseInt(document.getElementById(`b${n}-hcr-poll`)?.value);
     config.hcr.poll = isNaN(pv) ? 10 : (pv <= 0 ? 0 : Math.max(3, Math.min(3600, pv)));
+    config.hcr.remoteWCB = 0;   // hosts it locally now — can't also be a remote client
     // Keep serial port baud in sync so ?BAUD is generated correctly
     if (config.hcr.port >= 1 && config.hcr.port <= 5) {
       config.serialPorts[config.hcr.port - 1].baud = config.hcr.baud;
     }
   } else {
     config.hcr.port = null;
+    // remoteWCB (auto-learned route) is preserved — a client board keeps its host.
   }
 }
 
@@ -2319,6 +2323,13 @@ function syncWLEDsToConfig(n) {
       sp.broadcastOut = false;
       sp.broadcastIn  = false;
       sp.baud         = baud;   // keep the serial port baud consistent with ?BAUD
+      // Mirror baud + label into the serial-section DOM too, so an EXPORT (which
+      // reads the DOM via syncSerialUIToConfig, not syncWLEDsToConfig) can't read
+      // a stale value back over these — matches syncMaestrosToConfig.
+      const baudDom  = document.getElementById(`b${n}-s${port}-baud`);
+      if (baudDom)  baudDom.value  = baud;
+      const labelDom = document.getElementById(`b${n}-s${port}-label`);
+      if (labelDom) labelDom.value = 'WLED';
     }
   });
 

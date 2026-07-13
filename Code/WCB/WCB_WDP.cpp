@@ -520,6 +520,10 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       if (baud == 0) continue;
       wledAutoAddRemote(nb.wledIds[i], (uint8_t)senderWCB, baud);
     }
+    // HCR / MP3 are single-owner capabilities (no id): learn + persist the host so
+    // ;H / ;A route there across reboots. First-host-wins (see hcr/mp3AutoAddRemote).
+    if (nb.capFlags & WDP_CAP_HCR) hcrAutoAddRemote((uint8_t)senderWCB);
+    if (nb.capFlags & WDP_CAP_MP3) mp3AutoAddRemote((uint8_t)senderWCB);
   }
 }
 

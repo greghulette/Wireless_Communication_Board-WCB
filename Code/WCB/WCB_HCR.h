@@ -30,12 +30,19 @@
 
 struct HCRConfig {
   uint8_t  serialPort;   // 1-5 (local UART port); 0 = not configured
-  bool     configured;
+  bool     configured;   // true = this board HOSTS the HCR locally
   uint32_t baudRate;     // default 9600
   uint16_t pollSec;      // auto-poll interval in seconds; 0 = off; default 10
+  uint8_t  remoteWCB;    // 0 = none; else the WCB that HOSTS the HCR (this board is a
+                         // client that routes ;H there). Persisted + backed up so the
+                         // routing survives reboots and a config restore (see WCB_WDP).
 };
 
 extern HCRConfig hcrConfig;
+
+// Auto-learn the HCR host from a WDP advert: if this board has no local HCR and no
+// host yet, remember hostWCB (first-host-wins, persisted). Returns true if stored.
+bool hcrAutoAddRemote(uint8_t hostWCB);
 
 // ---- Runtime (;H,...) ---------------------------------------------------
 void processHCRRuntimeCommand(const String &message);   // dispatch ;H,... actions
