@@ -499,7 +499,6 @@
       </div>
 
       <!-- Board Identity — flex row so HW version stays fixed width regardless of LED pin visibility -->
-      <div class="subsection" style="--rail:#4f8cff">
       <div class="subsection-title">Board Identity</div>
       <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px">
 
@@ -575,10 +574,9 @@
 
       </div>
 
-      </div>
+      <hr class="divider">
 
       <!-- Serial Ports -->
-      <div class="subsection" style="--rail:#45d6e0">
       <div class="subsection-title">Serial Ports</div>
       <table class="serial-table" id="b{N}-serial-table">
         <thead>
@@ -593,10 +591,9 @@
         </thead>
         <tbody id="b{N}-serial-tbody"></tbody>
       </table>
-      </div>
 
       <!-- Kyber section (shown only when Controller = Kyber) -->
-      <div id="b{N}-kyber-section" class="subsection" style="--rail:#ff5d6c;display:none">
+      <div id="b{N}-kyber-section" style="display:none">
       <hr class="divider">
 
       <!-- Kyber -->
@@ -652,7 +649,7 @@
       </div><!-- /b{N}-kyber-section -->
 
       <!-- NaviCore section (shown only when Controller = NaviCore) -->
-      <div id="b{N}-navicore-section" class="subsection" style="--rail:#60a5fa;display:none">
+      <div id="b{N}-navicore-section" style="display:none">
       <hr class="divider">
 
       <!-- NaviCore (per-board) — which boards follow NaviCore -->
@@ -672,7 +669,7 @@
       <hr class="divider">
 
       <!-- Maestro -->
-      <div class="subsection" style="--rail:#3ecf8e">
+      <div>
         <div class="flex items-center gap-8 mb-12">
           <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Maestro</div>
           <button class="btn btn-ghost btn-sm" onclick="addMaestroRow({N})">+ Add</button>
@@ -695,7 +692,7 @@
       <hr class="divider">
 
       <!-- Mappings -->
-      <div class="subsection" style="--rail:#ffc107">
+      <div>
         <div class="flex items-center gap-8 mb-12">
           <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Mappings</div>
           <button class="btn btn-ghost btn-sm" onclick="addMappingRow({N})">+ Add Mapping</button>
@@ -710,8 +707,9 @@
         <div id="b{N}-mappings-container"></div>
       </div>
 
+      <hr class="divider">
+
       <!-- Stored Sequences -->
-      <div class="subsection" style="--rail:#b07cff">
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
@@ -730,10 +728,10 @@
         </thead>
         <tbody id="b{N}-seq-tbody"></tbody>
       </table>
-      </div>
+
+      <hr class="divider">
 
       <!-- Variables -->
-      <div class="subsection" style="--rail:#ff7ac6">
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Variables</div>
         <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})">+ Add</button>
@@ -748,10 +746,10 @@
         </thead>
         <tbody id="b{N}-var-tbody"></tbody>
       </table>
-      </div>
+
+      <hr class="divider">
 
       <!-- MP3 Trigger -->
-      <div class="subsection" style="--rail:#ff8c00">
       <div class="subsection-title">MP3 Trigger</div>
       <div class="field-group">
         <div class="field">
@@ -803,10 +801,8 @@
           <input type="text" id="b{N}-mp3-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onMP3OnErrChange({N})">
         </div>
       </div>
-      </div>
 
       <!-- HCR Vocalizer -->
-      <div class="subsection" style="--rail:#00d4ff">
       <div class="subsection-title">HCR Vocalizer</div>
       <div class="field-group">
         <div class="field">
@@ -846,10 +842,9 @@
           <input type="number" id="b{N}-hcr-poll" min="0" max="3600" value="10" onchange="onHCRPollChange({N})">
         </div>
       </div>
-      </div>
 
       <!-- WLED (serial lighting) — ID-addressed, multiple per board -->
-      <div class="subsection" style="--rail:#7ee787">
+      <div>
         <div class="subsection-title">WLED
           <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})" style="margin-left:6px">+ Add</button>
         </div>
