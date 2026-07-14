@@ -841,10 +841,9 @@
 
       <!-- WLED (serial lighting) — ID-addressed, multiple per board -->
       <div>
-        <div class="flex items-center gap-8 mb-12">
-          <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">WLED</div>
-          <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})">+ Add</button>
-        </div>
+        <div class="subsection-title">WLED
+        <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})" style="margin-left:6px">+ Add</button>
+      </div>
         <table class="serial-table" id="b{N}-wled-table">
           <thead>
             <tr>

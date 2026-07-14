@@ -370,6 +370,9 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 /* ─── Radio Group ────────────────────────────────────────────── */
 .radio-group { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Keep mode selectors (None/Enabled/Remote) on one line, sized to content */
+.field:has(> .radio-group) { width: auto; min-width: 0; flex: 0 0 auto; }
+.field > .radio-group { flex-wrap: nowrap; }
 .radio-group label {
   display: flex; align-items: center; gap: 6px;
   background: var(--bg3); border: 1px solid var(--border);
@@ -387,13 +390,13 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 /* ─── Dividers & Subsections ─────────────────────────────────── */
 .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 .subsection-title {
-  font-size: 12px; font-weight: 700; letter-spacing: 1px;
+  font-size: 14px; font-weight: 800; letter-spacing: 1px;
   text-transform: uppercase; color: var(--text2);
-  margin-top: 30px; margin-bottom: 14px; padding-bottom: 8px;
+  margin-top: 40px; margin-bottom: 14px; padding-bottom: 8px;
   border-bottom: 1px solid var(--border2);
   display: flex; align-items: center; gap: 9px;
 }
-.subsection-title:first-child { margin-top: 4px; }
+.section-body > .subsection-title:first-child { margin-top: 4px; }
 .subsection-title::before {
   content: ''; width: 4px; height: 15px; background: var(--accent);
   border-radius: 2px; flex-shrink: 0; box-shadow: 0 0 6px rgba(0,212,255,0.45);
@@ -1339,3 +1342,20 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 /* NaviCore ID sits alone in its field-group — don't let it stretch full width */
 #g-navicore-detail { grid-template-columns: 200px; }
+
+/* Hide a table's header row until it actually has rows */
+.serial-table:has(tbody:empty) thead,
+.seq-table:has(tbody:empty) thead { display: none; }
+
+/* Make the inline (+Add) subsection headers match the plain ones:
+   same top spacing + full-width underline (their title strips the border inline). */
+.flex.items-center.gap-8.mb-12:has(.subsection-title) {
+  margin-top: 40px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border2);
+}
+/* Title rides inside the row — the wrapper owns the top gap, so zero the title's */
+.flex.items-center.gap-8.mb-12 > .subsection-title { margin-top: 0; }
+
+/* Headers self-separate (each subsection title has its own underline),
+   so the standalone <hr> dividers are redundant — hide them. */
+.section-body hr.divider { display: none; }
