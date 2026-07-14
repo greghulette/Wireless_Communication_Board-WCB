@@ -1386,3 +1386,7 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
 /* Total WCB Quantity is only ever 1-2 digits */
 .field:has(#g-wcbq) { flex: 0 0 auto; }
 #g-wcbq { width: 110px; }
+
+/* Center narrow MAC fields so the box lines up under its wider header */
+.field:has(#g-mac2), .field:has(#g-mac3) { align-items: center; }
+.field:has(#g-mac2) > label, .field:has(#g-mac3) > label { text-align: center; }
