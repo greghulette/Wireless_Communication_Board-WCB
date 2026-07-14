@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_141443RJUL2026                                  *****////
+///*****                                          Version 6.2.0_141455RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -175,7 +175,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_141443RJUL2026";
+String SoftwareVersion = "6.2.0_141455RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2529,6 +2529,7 @@ void handleMgmtPacket(const uint8_t *data) {
     //    otherwise a WCB_Client unicast would silently become a network-wide
     //    broadcast the moment the command crossed the fragmentation threshold.
     lastReceivedViaESPNOW = unicastOrigin;
+    inSequenceBody = false;   // reassembled command is top-level, not a sequence body
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
@@ -3405,6 +3406,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         bool wizardOrigin = (etmCmd.length() > 0 && (uint8_t)etmCmd[0] == 0x01);
         if (wizardOrigin) etmCmd = etmCmd.substring(1);  // strip marker before executing
         lastReceivedViaESPNOW = !wizardOrigin;
+        inSequenceBody = false;   // received command is top-level, not a sequence body
         colorWipeStatus("ES", green, 200);
 
         if (debugETM) {
@@ -3673,6 +3675,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 
   // Normal command for this board
   lastReceivedViaESPNOW = true;
+  inSequenceBody = false;   // received command is top-level, not a sequence body
   colorWipeStatus("ES", green, 200);
 
   if (targetWCB != 0 && targetWCB != WCB_Number) {
@@ -5740,6 +5743,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
 
           // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
+          // A console command is always top-level, never a sequence body. Reset here too
+          // (mirrors lastReceivedViaESPNOW) so a value left over from a prior recall's body
+          // drain cannot latch and suppress this recall's mesh fan-out.
+          inSequenceBody = false;
 
           // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
@@ -6761,5 +6768,11 @@ void loop() {
     lastReceivedViaESPNOW = inItem.espnowOrigin;
     inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
     handleSingleCommand(commandStr, inItem.sourceID);
+    // A sequence-body item's flag must NOT persist past its own dispatch: a recall's body
+    // commands drain last, so without this the global would latch true and every later
+    // top-level recall would be misread as nested and skip its mesh fan-out. The per-item
+    // restore above re-establishes the correct value for the next item; the sources
+    // (serial/ETM/MGMT/receive) reset it too, so this just closes the drain-boundary leak.
+    inSequenceBody = false;
   }
 }
