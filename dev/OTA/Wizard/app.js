@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '14.11:36.R.JUL.2026';
+const UI_VERSION = '14.12:13.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4581,11 +4581,22 @@ class BoardConnection {
               }
 
               // Route [TERM:N]<text> lines to the remote board's terminal pane
-              // instead of the relay's own pane.
+              // instead of the relay's own pane. N is the SOURCE board's WCB number,
+              // but terminals are keyed by UI SLOT — which needn't equal the WCB
+              // number. Map it to the slot reached via THIS relay whose configured
+              // wcbNumber matches; otherwise two differently-numbered boards behind
+              // one relay cross-contaminate each other's terminals (e.g. W3's output
+              // landing in W1's pane). Fall back to the number if it's not yet known.
               const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
               if (termMatch) {
+                const srcWcb = parseInt(termMatch[1]);
+                let slot = srcWcb;
+                for (const s of Object.keys(remoteRelayForBoard)) {
+                  if (remoteRelayForBoard[s] === this.boardIndex &&
+                      (boardConfigs[s]?.wcbNumber ?? +s) === srcWcb) { slot = +s; break; }
+                }
                 if (!_suppressTerminalLine(termMatch[2]))
-                  termLog(parseInt(termMatch[1]), termMatch[2], 'out');
+                  termLog(slot, termMatch[2], 'out');
               } else {
                 const displayed = this._lineTransform ? this._lineTransform(line) : line;
                 if (displayed !== null && !_suppressTerminalLine(displayed))
@@ -4880,9 +4891,10 @@ async function startRemoteTermSession(relayN, targetN) {
   try {
     const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
     const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
+    const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
     const relayFc    = boardConfigs[relayN]?.funcChar   || '?';
     const targetFc   = boardConfigs[targetN]?.funcChar  || '?';
-    const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayN}`;
+    const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
     await sendMgmtReliable(relayConn, rtermStartCmd, null);
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
   } catch (_) {}
@@ -10864,24 +10876,25 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
     return;
   }
   const rows = nodes.map(nd => {
+    const isSelf  = nd.peer === 3;   // firmware flags the querying board's own row
     const caps    = nd.client ? _wdpEsc(nd.capTags || '') : _wdpCapLabels(nd.cap);
     const ctrl    = nd.ctrl ? ` <span class="wdp-sub">&rarr;ctrl ${nd.ctrl}</span>` : '';
     const maestro = (nd.maestro && nd.maestro !== '-') ? _wdpEsc(nd.maestro) : '&mdash;';
     const ifs     = nd.ifs.length
       ? nd.ifs.map(i => `<div class="wdp-if">S${i.s} ${_wdpEsc(i.dev)}</div>`).join('')
       : '<span class="wdp-sub">&mdash;</span>';
-    return `<tr class="${nd.live ? '' : 'wdp-stale'}">
+    return `<tr class="${nd.live ? '' : 'wdp-stale'}${isSelf ? ' wdp-self' : ''}">
       <td>${nd.n}</td>
-      <td><strong>${_wdpEsc(nd.alias || '—')}</strong>${ctrl}</td>
+      <td><strong>${_wdpEsc(nd.alias || '—')}</strong>${isSelf ? ' <span class="wdp-self-tag">this board</span>' : ''}${ctrl}</td>
       <td>${_wdpKind(nd)}</td>
       <td>${_wdpEsc(_wdpPlatform(nd))}</td>
       <td>${_wdpEsc(nd.fw || '—')}${nd.hwRev ? ' <span class="wdp-sub">(' + _wdpEsc(nd.hwRev) + ')</span>' : ''}</td>
       <td>${caps || '&mdash;'}</td>
       <td>${maestro}</td>
       <td>${ifs}</td>
-      <td>${_wdpPeerCell(nd)}</td>
-      <td class="wdp-sub">${nd.age}s</td>
-      <td>${nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>'}</td>
+      <td>${isSelf ? '<span class="wdp-sub">&mdash;</span>' : _wdpPeerCell(nd)}</td>
+      <td class="wdp-sub">${isSelf ? '&mdash;' : nd.age + 's'}</td>
+      <td>${isSelf ? '<span class="wdp-live">&#9679; this board</span>' : (nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>')}</td>
     </tr>`;
   }).join('');
   body.innerHTML = toolbar + `
@@ -10894,7 +10907,15 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
         <tbody>${rows}</tbody>
       </table>
     </div>
-    <div class="rc-devices-note">Discovered by WCB ${viaWcb} &middot; ${nodes.length} node${nodes.length === 1 ? '' : 's'}. Shows what that board hears on the mesh (it doesn't list itself).</div>`;
+    <div class="rc-devices-note">${(() => {
+      const hasSelf = nodes.some(nd => nd.peer === 3);
+      const others  = nodes.length - (hasSelf ? 1 : 0);
+      if (hasSelf && others === 0)
+        return `The mesh as seen from WCB ${viaWcb} &middot; only <em>this board</em> so far — no other boards heard yet.`;
+      if (hasSelf)
+        return `The mesh as seen from WCB ${viaWcb} &middot; ${nodes.length} boards, incl. <em>this board</em> and ${others} it hears.`;
+      return `Discovered by WCB ${viaWcb} &middot; ${nodes.length} node${nodes.length === 1 ? '' : 's'}. Shows what that board hears on the mesh (it doesn't list itself).`;
+    })()}</div>`;
 }
 
 // First connected board = the one the mesh panel talks to (same rule the
