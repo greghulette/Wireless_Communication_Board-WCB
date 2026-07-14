@@ -1273,9 +1273,13 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.mp3.enabled && config.mp3.port) {
       add(`MP3,S${config.mp3.port}:${config.mp3.baud}:V${config.mp3.volume}`);
       if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
-    } else if (config.mp3.remoteWCB) {
+    } else if (config.mp3.remoteWCB && config.mp3.remoteWCB !== config.wcbNumber) {
       add(`MP3,REMOTE,W${config.mp3.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
+      // No local host, no route. Explicitly drop a route ONLY on a delta where the
+      // baseline had one (user switched Remote→None) — never on a full push, so we
+      // can't clobber a firmware auto-learned route the Wizard never observed.
+      if (baseline?.mp3?.remoteWCB && !fullPush) add('MP3,REMOTE,OFF');
       add('MP3,CLEAR');
     }
   }
@@ -1287,9 +1291,11 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.hcr.enabled && config.hcr.port) {
       add(`HCR,PORT,S${config.hcr.port}:${config.hcr.baud}`);
       add(`HCR,POLL,${config.hcr.poll}`);
-    } else if (config.hcr.remoteWCB) {
+    } else if (config.hcr.remoteWCB && config.hcr.remoteWCB !== config.wcbNumber) {
       add(`HCR,REMOTE,W${config.hcr.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
+      // See MP3 above: a route is dropped only on a delta where the baseline had one.
+      if (baseline?.hcr?.remoteWCB && !fullPush) add('HCR,REMOTE,OFF');
       add('HCR,CLEAR');
     }
   }
