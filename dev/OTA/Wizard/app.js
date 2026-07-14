@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '14.09:50.R.JUL.2026';
+const UI_VERSION = '14.10:47.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2232,8 +2232,13 @@ function syncHCRToConfig(n) {
 const WLED_BAUD_RATES = [9600, 19200, 38400, 57600, 115200];
 
 function addWLEDRow(n) {
-  // Default to the lowest free ID 1-9 so two rows don't collide.
-  const used = new Set((boardConfigs[n]?.wleds ?? []).map(w => w.id));
+  // Default to the lowest free ID 1-9. WLED IDs are network-unique, so avoid ids
+  // already used by LOCAL rows AND by remote (auto-learned) WLEDs on this board.
+  const cfg  = boardConfigs[n];
+  const used = new Set([
+    ...(cfg?.wleds ?? []).map(w => w.id),
+    ...(cfg?.wledRemotes ?? []).map(w => w.id),
+  ]);
   let id = 1; while (used.has(id) && id < 9) id++;
   appendWLEDRow(n, { id, port: null, baud: 115200 });
   onWLEDChange(n);
@@ -2317,8 +2322,29 @@ function populateWLEDsFromConfig(n, config) {
   const tbody = document.getElementById(`b${n}-wled-tbody`);
   if (!tbody) return;
   tbody.innerHTML = '';
-  for (const w of (config.wleds ?? [])) appendWLEDRow(n, w);
+  for (const w of (config.wleds ?? [])) appendWLEDRow(n, w);           // local — editable
+  for (const r of (config.wledRemotes ?? [])) appendRemoteWLEDRow(n, r); // remote — read-only
   updateWLEDSectionUI(n);
+}
+
+// Read-only row for a WLED hosted on ANOTHER board (auto-learned over WDP). Pure
+// observability — not editable, not pushed. Mirrors HCR's Remote view. Marked
+// data-remote so syncWLEDsToConfig skips it.
+function appendRemoteWLEDRow(n, remote) {
+  const tbody = document.getElementById(`b${n}-wled-tbody`);
+  if (!tbody) return;
+  const rowNum = tbody.rows.length + 1;
+  const tr = document.createElement('tr');
+  tr.setAttribute('data-remote', '1');
+  tr.style.opacity = '0.65';
+  tr.innerHTML = `
+    <td style="color:var(--text3)">${rowNum}</td>
+    <td>${remote.id}</td>
+    <td><span class="text-muted">&#8594; WCB${remote.host}</span></td>
+    <td><span class="text-muted">${(remote.baud || 0).toLocaleString()}</span></td>
+    <td><span title="Hosted on WCB${remote.host} — auto-learned from the mesh, managed by that board" style="opacity:0.5;font-size:15px;padding:0 8px">&#128274;</span></td>
+  `;
+  tbody.appendChild(tr);
 }
 
 function onWLEDPortChange(n, rowId) {
@@ -2363,6 +2389,7 @@ function syncWLEDsToConfig(n) {
 
   config.wleds = [];
   document.getElementById(`b${n}-wled-tbody`)?.querySelectorAll('tr').forEach(row => {
+    if (row.dataset.remote === '1') return;   // read-only remote WLED — not editable, not pushed
     const id   = parseInt(row.querySelector('[id$="-id"]')?.value);
     const port = parseInt(row.querySelector('[id$="-port"]')?.value);
     const baud = parseInt(row.querySelector('[id$="-baud"]')?.value) || 115200;
@@ -2394,13 +2421,17 @@ function syncWLEDsToConfig(n) {
 function updateWLEDSectionUI(n) {
   const controls = document.getElementById(`b${n}-wled-controls`);
   if (!controls) return;
-  const wleds = boardConfigs[n]?.wleds ?? [];
-  controls.style.display = wleds.length ? '' : 'none';
+  const locals  = boardConfigs[n]?.wleds ?? [];
+  const remotes = boardConfigs[n]?.wledRemotes ?? [];
+  // ;L<id> routes to whichever board hosts the id, so both local AND remote WLEDs
+  // are firable from this board's controls.
+  const ids = [...new Set([...locals.map(w => w.id), ...remotes.map(w => w.id)])].sort((a, b) => a - b);
+  controls.style.display = ids.length ? '' : 'none';
   const target = document.getElementById(`b${n}-wled-target`);
   if (target) {
     const cur = target.value;
-    target.innerHTML = wleds.map(w => `<option value="${w.id}">WLED ${w.id}</option>`).join('');
-    if (wleds.some(w => String(w.id) === cur)) target.value = cur;   // preserve selection
+    target.innerHTML = ids.map(id => `<option value="${id}">WLED ${id}</option>`).join('');
+    if (ids.some(id => String(id) === cur)) target.value = cur;   // preserve selection
   }
 }
 

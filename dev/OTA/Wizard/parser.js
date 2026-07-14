@@ -83,9 +83,13 @@ function createDefaultBoardConfig() {
 
     // WLED (serial lighting) — array of { id, port, baud }. LOCAL WLED nodes on
     // this board, each with a system-wide ID (1-9). ID-addressed, mirrors maestros;
-    // reach a WLED on another board with ;L<id> (firmware routes it). Remote proxies
-    // are firmware-managed (WDP auto-add) and NOT tracked here.
+    // reach a WLED on another board with ;L<id> (firmware routes it).
     wleds: [],
+
+    // Remote WLEDs this board auto-learned from other boards (display-only, read-only
+    // in the UI, never pushed). { id, host, baud }. Populated from the ?WLED,<id>:
+    // W<host>S0 lines the firmware puts in the backup.
+    wledRemotes: [],
 
     // Maestros — array of { id, port, baud }
     maestros: [],
@@ -691,9 +695,15 @@ function parseToken(body, config) {
         const wm = parts[i].toUpperCase().match(/^(\d+):W(\d+)S(\d+):(\d+)$/);
         if (!wm) continue;
         const id = parseInt(wm[1]), wcb = parseInt(wm[2]), port = parseInt(wm[3]), baud = parseInt(wm[4]);
-        // Only track WLEDs LOCAL to this board; W<other>S0 remote proxies are
-        // firmware-managed (WDP auto-add) and must not appear as editable rows.
-        if (wcb === config.wcbNumber) upsertWled(id, port, baud);
+        if (wcb === config.wcbNumber) {
+          upsertWled(id, port, baud);                 // LOCAL — editable
+        } else {
+          // Remote proxy (W<host>S0) — auto-learned; display-only, never pushed.
+          if (!config.wledRemotes) config.wledRemotes = [];
+          const ex = config.wledRemotes.find(w => w.id === id);
+          if (ex) { ex.host = wcb; ex.baud = baud; }
+          else    config.wledRemotes.push({ id, host: wcb, baud });
+        }
       }
       break;
     }
