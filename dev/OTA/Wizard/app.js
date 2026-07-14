@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '13.15:23.R.JUL.2026';
+const UI_VERSION = '14.09:50.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1880,12 +1880,15 @@ function reconcileRemoteWithMaestros(n) {
 
 // ─── MP3 Trigger ──────────────────────────────────────────────────
 function onMP3Change(n) {
-  const mode    = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
-  const isLocal = mode === 'local';
+  const mode     = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
+  const isLocal  = mode === 'local';
+  const isRemote = mode === 'remote';
   ['port', 'baud', 'vol', 'onerr'].forEach(id => {
     const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
     if (el) el.style.display = isLocal ? '' : 'none';
   });
+  const remoteWrap = document.getElementById(`b${n}-mp3-remote-wrap`);
+  if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
 
   const config = boardConfigs[n];
   if (!config) return;
@@ -1896,8 +1899,15 @@ function onMP3Change(n) {
   }
 
   config.mp3.enabled = isLocal;
-  if (!isLocal) {
-    config.mp3.port = null;
+  if (!isLocal) config.mp3.port = null;
+
+  if (isRemote) {
+    const hostSel = document.getElementById(`b${n}-mp3-remote-wcb`);
+    if (hostSel && hostSel.options.length === 0)
+      _populateRouteHostDropdown(n, hostSel, config.mp3.remoteWCB || 0);
+    config.mp3.remoteWCB = parseInt(hostSel?.value) || 0;
+  } else {
+    config.mp3.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
   }
 
   updateMP3PortDropdown(n);
@@ -2016,9 +2026,12 @@ function syncMP3ToConfig(n) {
     if (config.mp3.port >= 1 && config.mp3.port <= 5) {
       config.serialPorts[config.mp3.port - 1].baud = config.mp3.baud;
     }
+  } else if (mode === 'remote') {
+    config.mp3.port = null;
+    config.mp3.remoteWCB = parseInt(document.getElementById(`b${n}-mp3-remote-wcb`)?.value) || config.mp3.remoteWCB || 0;
   } else {
     config.mp3.port = null;
-    // remoteWCB (auto-learned route) is preserved — a client board keeps its host.
+    config.mp3.remoteWCB = 0;   // None — clears the route (push emits REMOTE,OFF only on a delta)
   }
 }
 
@@ -2069,13 +2082,39 @@ function updateHCRPortDropdown(n) {
   }
 }
 
+// Populate a device-route "Host WCB" dropdown (HCR/MP3 Remote mode) with the mesh's
+// WCB numbers, selecting the current host. Reused by both devices.
+function _populateRouteHostDropdown(n, sel, selectedHost) {
+  if (!sel) return;
+  const cfg  = boardConfigs[n];
+  const self = cfg?.wcbNumber || 0;
+  const qty = Math.max(
+    systemConfig?.general?.wcbQuantity || 0,
+    parseInt(document.getElementById('g-wcbq')?.value) || 0,
+    self,
+    selectedHost || 0,
+    2
+  );
+  populateWCBDropdown(sel, qty, selectedHost || 0, true);
+  // A board can't route to its OWN device — drop its own number from the host list.
+  sel.querySelector(`option[value="${self}"]`)?.remove();
+  // Select the current host, or the first valid (non-self) host — NEVER let the
+  // <select> silently default to this board's own number (a dead self-route the
+  // firmware rejects, which would then re-push forever).
+  if (selectedHost && selectedHost !== self) sel.value = String(selectedHost);
+  else if (sel.options.length)               sel.value = sel.options[0].value;
+}
+
 function onHCRChange(n) {
-  const mode    = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
-  const isLocal = mode === 'local';
+  const mode     = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  const isLocal  = mode === 'local';
+  const isRemote = mode === 'remote';
   ['port', 'baud', 'poll'].forEach(id => {
     const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
     if (el) el.style.display = isLocal ? '' : 'none';
   });
+  const remoteWrap = document.getElementById(`b${n}-hcr-remote-wrap`);
+  if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
 
   const config = boardConfigs[n];
   if (!config) return;
@@ -2086,6 +2125,15 @@ function onHCRChange(n) {
 
   config.hcr.enabled = isLocal;
   if (!isLocal) config.hcr.port = null;
+
+  if (isRemote) {
+    const hostSel = document.getElementById(`b${n}-hcr-remote-wcb`);
+    if (hostSel && hostSel.options.length === 0)
+      _populateRouteHostDropdown(n, hostSel, config.hcr.remoteWCB || 0);
+    config.hcr.remoteWCB = parseInt(hostSel?.value) || 0;
+  } else {
+    config.hcr.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
+  }
 
   updateHCRPortDropdown(n);
 
@@ -2165,9 +2213,12 @@ function syncHCRToConfig(n) {
     if (config.hcr.port >= 1 && config.hcr.port <= 5) {
       config.serialPorts[config.hcr.port - 1].baud = config.hcr.baud;
     }
+  } else if (mode === 'remote') {
+    config.hcr.port = null;
+    config.hcr.remoteWCB = parseInt(document.getElementById(`b${n}-hcr-remote-wcb`)?.value) || config.hcr.remoteWCB || 0;
   } else {
     config.hcr.port = null;
-    // remoteWCB (auto-learned route) is preserved — a client board keeps its host.
+    config.hcr.remoteWCB = 0;   // None — clears the route (push emits REMOTE,OFF only on a delta)
   }
 }
 
@@ -2509,15 +2560,19 @@ function populateUIFromConfig(n, config) {
     for (const v of (config.variables ?? [])) appendVariableRow(n, v.name, v.value);
   }
 
-  // MP3 Trigger
-  const mp3Input = document.querySelector(`input[name="b${n}-mp3"][value="${config.mp3.enabled ? 'local' : 'none'}"]`);
+  // MP3 Trigger — local host / remote route (to another board) / none
+  const mp3Mode  = config.mp3.enabled ? 'local' : (config.mp3.remoteWCB > 0 ? 'remote' : 'none');
+  const mp3Input = document.querySelector(`input[name="b${n}-mp3"][value="${mp3Mode}"]`);
   if (mp3Input) {
     mp3Input.checked = true;
-    const isLocal = config.mp3.enabled;
+    const isLocal  = mp3Mode === 'local';
+    const isRemote = mp3Mode === 'remote';
     ['port', 'baud', 'vol', 'onerr'].forEach(id => {
       const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
       if (el) el.style.display = isLocal ? '' : 'none';
     });
+    const remoteWrap = document.getElementById(`b${n}-mp3-remote-wrap`);
+    if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
     updateMP3PortDropdown(n);
     if (isLocal && config.mp3.port) {
       const portSel = document.getElementById(`b${n}-mp3-port`);
@@ -2535,18 +2590,24 @@ function populateUIFromConfig(n, config) {
       if (volEl) volEl.value = config.mp3.volume ?? 0;
       const onErrEl = document.getElementById(`b${n}-mp3-onerr`);
       if (onErrEl) onErrEl.value = config.mp3.onError ?? '';
+    } else if (isRemote) {
+      _populateRouteHostDropdown(n, document.getElementById(`b${n}-mp3-remote-wcb`), config.mp3.remoteWCB);
     }
   }
 
-  // HCR Vocalizer
-  const hcrInput = document.querySelector(`input[name="b${n}-hcr"][value="${config.hcr.enabled ? 'local' : 'none'}"]`);
+  // HCR Vocalizer — local host / remote route (to another board) / none
+  const hcrMode  = config.hcr.enabled ? 'local' : (config.hcr.remoteWCB > 0 ? 'remote' : 'none');
+  const hcrInput = document.querySelector(`input[name="b${n}-hcr"][value="${hcrMode}"]`);
   if (hcrInput) {
     hcrInput.checked = true;
-    const isLocal = config.hcr.enabled;
+    const isLocal  = hcrMode === 'local';
+    const isRemote = hcrMode === 'remote';
     ['port', 'baud', 'poll'].forEach(id => {
       const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
       if (el) el.style.display = isLocal ? '' : 'none';
     });
+    const remoteWrap = document.getElementById(`b${n}-hcr-remote-wrap`);
+    if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
     updateHCRPortDropdown(n);
     if (isLocal && config.hcr.port) {
       const portSel = document.getElementById(`b${n}-hcr-port`);
@@ -2561,6 +2622,8 @@ function populateUIFromConfig(n, config) {
       }
       const pollEl = document.getElementById(`b${n}-hcr-poll`);
       if (pollEl) pollEl.value = config.hcr.poll ?? 10;
+    } else if (isRemote) {
+      _populateRouteHostDropdown(n, document.getElementById(`b${n}-hcr-remote-wcb`), config.hcr.remoteWCB);
     }
   }
 

@@ -753,7 +753,12 @@
           <div class="radio-group">
             <label><input type="radio" name="b{N}-mp3" value="none" checked onchange="onMP3Change({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-mp3" value="local" onchange="onMP3Change({N})"><span>Enabled</span></label>
+            <label title="This board has no local MP3 Trigger; it routes ;A to the MP3 on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-mp3" value="remote" onchange="onMP3Change({N})"><span>Remote</span></label>
           </div>
+        </div>
+        <div class="field" id="b{N}-mp3-remote-wrap" style="display:none">
+          <label>MP3 Host <span class="wiz-hint" data-tip="The WCB that physically hosts the MP3 Trigger. This board routes ;A there over the mesh. Auto-learned from WDP when a board announces its MP3 — pin a specific host here.">i</span></label>
+          <select id="b{N}-mp3-remote-wcb" onchange="onMP3Change({N})"></select>
         </div>
         <div class="field" id="b{N}-mp3-port-wrap" style="display:none">
           <label>MP3 Port <span class="wiz-hint" data-tip="Serial port the MP3 Trigger is wired to on this board. Reserved exclusively — will not broadcast.">i</span></label>
@@ -801,7 +806,12 @@
           <div class="radio-group">
             <label><input type="radio" name="b{N}-hcr" value="none" checked onchange="onHCRChange({N})"><span>None</span></label>
             <label><input type="radio" name="b{N}-hcr" value="local" onchange="onHCRChange({N})"><span>Enabled</span></label>
+            <label title="This board has no local HCR; it routes ;H to the HCR on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-hcr" value="remote" onchange="onHCRChange({N})"><span>Remote</span></label>
           </div>
+        </div>
+        <div class="field" id="b{N}-hcr-remote-wrap" style="display:none">
+          <label>HCR Host <span class="wiz-hint" data-tip="The WCB that physically hosts the HCR Vocalizer. This board routes ;H there over the mesh. Auto-learned from WDP when a board announces its HCR — pin a specific host here.">i</span></label>
+          <select id="b{N}-hcr-remote-wcb" onchange="onHCRChange({N})"></select>
         </div>
         <div class="field" id="b{N}-hcr-port-wrap" style="display:none">
           <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 9600 baud.">i</span></label>
