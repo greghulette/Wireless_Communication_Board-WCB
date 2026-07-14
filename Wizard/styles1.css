@@ -387,16 +387,13 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 /* ─── Dividers & Subsections ─────────────────────────────────── */
 .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 .subsection-title {
-  font-size: 12px; font-weight: 700; letter-spacing: 1px;
-  text-transform: uppercase; color: var(--text2);
-  margin-top: 30px; margin-bottom: 14px; padding-bottom: 8px;
-  border-bottom: 1px solid var(--border2);
-  display: flex; align-items: center; gap: 9px;
+  font-size: 11px; font-weight: 600; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--text3);
+  margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
 }
-.subsection-title:first-child { margin-top: 4px; }
 .subsection-title::before {
-  content: ''; width: 4px; height: 15px; background: var(--accent);
-  border-radius: 2px; flex-shrink: 0; box-shadow: 0 0 6px rgba(0,212,255,0.45);
+  content: ''; width: 3px; height: 13px; background: var(--accent); border-radius: 2px; flex-shrink: 0;
 }
 
 /* ─── Serial Port Table ──────────────────────────────────────── */
@@ -1037,7 +1034,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 .terminal-pane-output {
   flex: 1; overflow-y: auto; padding: 6px 10px;
-  font-size: 12px; line-height: 1.7; background: var(--bg);
+  font-family: var(--mono); font-size: 12px; line-height: 1.7; background: var(--bg);
+  /* Preserve the firmware's own spacing (aligned tables like ?WDP,LIST, ?HELP,
+     backup dumps) — default 'normal' collapses runs of spaces and mangles them.
+     pre-wrap keeps the padding; word-break wraps a rare long unbroken token. */
+  white-space: pre-wrap; word-break: break-word;
 }
 .terminal-line-in  { color: var(--accent); }
 .terminal-line-in::before { content: '> '; color: var(--text3); }
@@ -1061,7 +1062,9 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .etm-detail.visible { display: block; }
 
 /* ─── Toast Notifications ────────────────────────────────────── */
-.toast-container { position: fixed; top: 72px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+/* Above the splash (600) and wizard modal (500) so warnings shown at startup
+   (e.g. a stale firmware-branch override) aren't hidden behind an overlay. */
+.toast-container { position: fixed; top: 72px; right: 16px; z-index: 700; display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 10px 16px;
@@ -1072,6 +1075,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 }
 .toast.success { border-color: var(--green2); }
 .toast.error   { border-color: var(--red2); }
+.toast.warning { border-color: var(--yellow); }
 .toast.info    { border-color: var(--accent2); }
 .toast-msg     { flex: 1; }
 .toast-btn {
@@ -1306,6 +1310,75 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   color: var(--muted, #888);
 }
 .rc-devices-note a { text-decoration: underline; cursor: pointer; }
+
+/* ── WDP mesh view ────────────────────────────────────────────────────── */
+.wdp-mesh-scroll { overflow-x: auto; }
+.wdp-mesh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.wdp-mesh-table th,
+.wdp-mesh-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: nowrap;
+}
+.wdp-mesh-table th { color: var(--text-secondary, #9aa3b0); font-weight: 600; }
+.wdp-mesh-table tr.wdp-stale { opacity: 0.5; }
+.wdp-if  { white-space: nowrap; }
+.wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-live { color: var(--green); }
+
+/* WCB_Client lightweight status card (b{N}-client-status) */
+.client-status { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.client-status .cs-row { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.client-status .cs-k { flex: 0 0 96px; color: var(--text-secondary, #9aa3b0); }
+.client-status .cs-v { flex: 1 1 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.client-status .cs-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.client-status .cs-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.client-status .cs-dot.on  { background: var(--green, #3fb950); box-shadow: 0 0 5px var(--green, #3fb950); }
+.client-status .cs-dot.off { background: var(--text-secondary, #9aa3b0); }
+.client-status .cs-cap {
+  font-size: 11px; padding: 1px 7px; border-radius: 3px;
+  background: var(--bg4, #21262d); color: var(--text2, #c9d1d9);
+  border: 1px solid var(--border, #30363d);
+}
+
+/* Live-peers badge next to the WCB Quantity dropdown (PEERSLIVE telemetry) */
+.peers-live-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: rgba(0,232,122,0.1);
+  color: var(--green);
+  border: 1px solid rgba(0,232,122,0.3);
+}
+
+/* Mesh-panel membership badges + controls */
+.wdp-peer-floor   { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-peer-learned { color: var(--accent); font-size: 12px; }
+.wdp-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 8px; flex-wrap: wrap;
+}
+.wdp-toolbar .wdp-btn {
+  background: var(--bg4); color: var(--text2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.wdp-toolbar .wdp-btn:hover { border-color: var(--accent); color: var(--accent); }
+.wdp-btn-forget {
+  background: none; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text3); font-size: 11px; padding: 1px 6px; cursor: pointer;
+  margin-left: 6px;
+}
+.wdp-btn-forget:hover { border-color: var(--red); color: var(--red); }
 
 
 /* ─── Refined layout tweaks ──────────────────── */
