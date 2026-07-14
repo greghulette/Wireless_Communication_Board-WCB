@@ -839,6 +839,41 @@ static void printWdpDetail(int wcbNum) {
 static void printWdpDump() {
   int count = 0;
   unsigned long now = millis();
+
+  // SELF row first — a WDP neighbor table never includes the board itself, so the
+  // mesh view was missing the very board you're plugged into. Emit this board's own
+  // identity in the same record format (reusing the neighbor emit path via a temp),
+  // flagged PEER=3 so the Wizard renders it as "this board". Not counted in `count`.
+  {
+    WdpNeighbor self;
+    memset(&self, 0, sizeof(self));
+    self.wcbNumber = (uint8_t)WCB_Number;
+    strncpy(self.alias, wcb_alias.c_str(),      sizeof(self.alias) - 1);
+    strncpy(self.fwVer, SoftwareVersion.c_str(), sizeof(self.fwVer) - 1);
+    self.hwVer    = (uint8_t)wcb_hw_version;
+    self.capFlags = wdpCapFlags();
+    self.ctrlId   = specialPeerEnabled ? WCB_SPECIAL_PEER_ID : 0;
+    uint8_t sids[WDP_MAX_MAESTRO];
+    int sn = wdpLocalMaestroIds(sids);
+    for (int m = 0; m < sn; m++) self.maestroIds[m] = sids[m];
+    self.maestroCount = (uint8_t)sn;
+    for (int p = 0; p < 5; p++) {
+      String lbl = serialPortLabels[p];
+      if (lbl.length() == 0) lbl = wdpDaType(p + 1);
+      strncpy(self.portLabels[p], lbl.c_str(), sizeof(self.portLabels[p]) - 1);
+    }
+    wdpScrub(self.alias); wdpScrub(self.fwVer);
+    for (int p = 0; p < 5; p++) wdpScrub(self.portLabels[p]);
+
+    char smaestro[48]; wdpMaestroStr(self, smaestro, sizeof(smaestro));
+    Serial.printf("[WDP:N=%d,CLIENT=0,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=0,SEEN=1,PEER=3]\n",
+                  self.wcbNumber, self.alias, self.hwVer, self.hwRev, self.fwVer,
+                  self.capFlags, self.ctrlId, self.capTags, smaestro);
+    for (int p = 0; p < 5; p++)
+      if (self.portLabels[p][0])
+        Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", self.wcbNumber, p + 1, self.portLabels[p]);
+  }
+
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     WdpNeighbor &nb = wdpNeighbors[i];
     if (!nb.valid) continue;
