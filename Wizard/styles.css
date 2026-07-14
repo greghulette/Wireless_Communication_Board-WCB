@@ -318,7 +318,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 /* ─── Form Elements ──────────────────────────────────────────── */
 .field-group {
-  display: flex; flex-wrap: wrap; align-items: flex-end;
+  display: flex; flex-wrap: wrap; align-items: flex-start;
   gap: 14px; margin-bottom: 18px;
 }
 .field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; min-width: 0; }
@@ -1382,3 +1382,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 select[id$="-hcr-baud"], select[id$="-mp3-baud"], select[id$="-kyber-baud"] { width: 130px; }
 input[id$="-hcr-poll"], input[id$="-mp3-vol"] { width: 120px; }
 select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { width: 150px; }
+
+/* Total WCB Quantity is only ever 1-2 digits */
+.field:has(#g-wcbq) { flex: 0 0 auto; }
+#g-wcbq { width: 110px; }
