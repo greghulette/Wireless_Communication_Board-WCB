@@ -7,6 +7,8 @@
 extern String commentDelimiter;
 // ESP-NOW origin flag (loop-prevention), owned by WCB.ino.
 extern bool lastReceivedViaESPNOW;
+// Sequence-body flag (nested-recall fanout suppression), owned by WCB.ino.
+extern bool inSequenceBody;
 
 std::vector<CommandGroup> commandGroups;
 unsigned long lastGroupTime = 0;
@@ -19,6 +21,10 @@ bool waitingForNextGroup = false;
 // a peer-triggered (or locally-triggered) timer sequence keeps the correct
 // ESP-NOW re-broadcast behavior. Only one timer sequence is active at a time.
 bool commandGroupsEspnowOrigin = false;
+// Sequence-body flag captured when the active timer sequence was parsed, re-applied while
+// enqueuing each group's commands (parallel to commandGroupsEspnowOrigin) so a nested `;C`
+// inside a TIMER sequence body is not re-fanned out to the mesh.
+bool commandGroupsSequenceBody = false;
 
 bool isTimerCommand(const String &input);
 void stopTimerSequence();
@@ -82,6 +88,7 @@ void parseCommandGroups(const String &input) {
   waitingForNextGroup = false;
   // Capture the origin now; it's re-applied as each group fires (see processCommandGroups).
   commandGroupsEspnowOrigin = lastReceivedViaESPNOW;
+  commandGroupsSequenceBody = inSequenceBody;   // same, for nested-recall fanout suppression
 
   String working = input;
   working.replace("\r", "");
@@ -190,7 +197,9 @@ void processCommandGroups() {
       // enqueued now inherit the right ESP-NOW semantics. enqueueCommand snapshots
       // the global, so it must hold this group's origin during the enqueue.
       bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+      bool _savedSeqBody       = inSequenceBody;
       lastReceivedViaESPNOW = commandGroupsEspnowOrigin;
+      inSequenceBody        = commandGroupsSequenceBody;
       for (const String &cmd : group.commands) {
         if (debugEnabled) {
           Serial.printf("[TimerGroup %u] Executing command: %s\n", currentGroupIndex + 1, cmd.c_str());
@@ -199,6 +208,7 @@ void processCommandGroups() {
                 vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
       }
       lastReceivedViaESPNOW = _savedEspNowOrigin;
+      inSequenceBody        = _savedSeqBody;
       lastGroupTime = millis();
       currentGroupIndex++;
 

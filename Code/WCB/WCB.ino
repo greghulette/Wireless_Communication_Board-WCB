@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_141213RJUL2026                                  *****////
+///*****                                          Version 6.2.0_141443RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -160,7 +160,14 @@ int kyberLocalPort = 0;      // serial port number Kyber is physically connected
 
 // Flag to track if last received message was via ESP-NOW
 bool lastReceivedViaESPNOW = false;
- 
+
+// True while the command currently being dispatched is a command from INSIDE a stored
+// sequence body (as opposed to a top-level command typed at a console or arrived over the
+// mesh). Snapshotted per queue item at enqueue and restored at drain, exactly like
+// espnowOrigin/lastReceivedViaESPNOW. Used so that a top-level `;C`/`;SEQ` recall fans the
+// trigger out to the mesh, but a NESTED `;C` inside a running sequence body does not.
+bool inSequenceBody = false;
+
 // Debugging flag (default: off)
 bool debugEnabled = false; 
 bool debugMaestro = false;
@@ -168,7 +175,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_141213RJUL2026";
+String SoftwareVersion = "6.2.0_141443RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -382,6 +389,8 @@ struct PendingTimerChainSlot {
   char buf[TIMER_CHAIN_MAX_LEN];
   bool espnowOrigin;   // origin captured at enqueue; restored before parseCommandGroups so
                        // the deferred timer group keeps the right ESP-NOW semantics.
+  bool sequenceBody;   // sequence-body flag captured at enqueue; restored before parse so a
+                       // nested recall inside a TIMER sequence body is not re-fanned out.
 };
 QueueHandle_t pendingTimerChainQueue = nullptr;
 
@@ -392,12 +401,16 @@ static inline void drainPendingTimerChains() {
   if (!pendingTimerChainQueue) return;
   PendingTimerChainSlot slot;
   while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
-    // parseCommandGroups snapshots the current global into commandGroupsEspnowOrigin
-    // for the deferred fire — set it to this chain's captured origin first.
+    // parseCommandGroups snapshots the current globals into commandGroupsEspnowOrigin /
+    // commandGroupsSequenceBody for the deferred fire — set them to this chain's captured
+    // origin + body-flag first.
     bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = slot.espnowOrigin;
+    inSequenceBody        = slot.sequenceBody;
     parseCommandGroups(String(slot.buf));
     lastReceivedViaESPNOW = _savedEspNowOrigin;
+    inSequenceBody        = _savedSeqBody;
   }
 }
 
@@ -407,6 +420,7 @@ static inline void enqueuePendingTimerChain(const String& chain) {
   strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
   slot.buf[sizeof(slot.buf) - 1] = '\0';
   slot.espnowOrigin = lastReceivedViaESPNOW;   // remember origin for the deferred fire
+  slot.sequenceBody = inSequenceBody;          // ...and whether it came from a sequence body
   xQueueSend(pendingTimerChainQueue, &slot, 0);
 }
 // ETM Board Status Table
@@ -807,6 +821,9 @@ typedef struct {
                       // THIS command's true origin, not whatever the global held when the
                       // queue happened to be drained (the global races across queue
                       // boundaries — see the IF-gating note in handleSingleCommand).
+  bool sequenceBody;  // snapshot of inSequenceBody at enqueue; restored at dispatch so a
+                      // nested `;C`/`;SEQ` recall inside a sequence body is not re-fanned
+                      // out to the mesh (only the top-level trigger fans out).
 } CommandQueueItem;
 
 static QueueHandle_t commandQueue = nullptr;
@@ -1715,6 +1732,9 @@ void enqueueCommand(const String &cmd, int sourceID) {
   // the source that produced this command. It is restored just before dispatch so
   // forwarding decisions are per-command instead of riding a racy global.
   item.espnowOrigin = lastReceivedViaESPNOW;
+  // Same idea for the sequence-body flag, so a nested recall's mesh-fanout suppression
+  // survives the async queue (see recallStoredCommand / inSequenceBody).
+  item.sequenceBody = inSequenceBody;
 
   // Allocate enough space for the command (including null terminator)
   int length = cmd.length() + 1;
@@ -5250,7 +5270,7 @@ void processCommandCharcter(const String &message, int sourceID) {
     } else if (message.startsWith("w") || message.startsWith("W")) {
         processWCBMessage(message);
     } else if (message.startsWith("c") || message.startsWith("C") || message.startsWith(String("SEQ")) || message.startsWith(String("seq"))) {
-        recallStoredCommand(message, sourceID); 
+        recallStoredCommand(message, sourceID);
     } else if (message.startsWith("m") || message.startsWith("M")) {
         processMaestroCommand(message);
     } else if (message.startsWith("p") || message.startsWith("P")) {
@@ -5454,28 +5474,71 @@ void processWCBMessage(const String &message){
   }
 }
 
+// Recall a stored sequence by name (`;Ckey` or `;SEQkey`).
+//
+// A TOP-LEVEL recall — one typed at a console / sent by the Wizard — fans out across the
+// whole mesh: every board that has a sequence saved under <key> runs its OWN copy, exactly
+// once, no matter which board it was entered on. Names need not be unique (a name shared by
+// several boards fires all of them, each once). This is what makes a stored sequence
+// triggerable "from anywhere".
+//
+// LOCAL-ONLY: append ",L" (or ",LOCAL") to the key — `;Ckey,L` / `;SEQkey,L` — to run ONLY
+// this board and never touch the mesh. Sequence keys never contain a comma (key_list is
+// comma-delimited), so the suffix is unambiguous. The Wizard TEST button uses this so testing
+// a single row stays single-board.
+//
+// NESTED recalls (a `;Ckey` inside a running sequence body) and recalls that ARRIVED over
+// the mesh also do NOT fan out — they run locally only, exactly as before. That keeps a
+// sub-sequence call (`;C` inside a body — a documented, supported pattern) from being
+// re-broadcast N times, and stops the trigger from looping. The distinction rides:
+//   * !localOnly             — the ",L" suffix was NOT present
+//   * !lastReceivedViaESPNOW — this recall did NOT arrive over the mesh
+//   * !inSequenceBody        — this recall is not a command inside a sequence body
+//                              (snapshotted per queue item, just like espnowOrigin)
+// so the one broadcast happens only for a genuine mesh-scoped top-level trigger. "Exactly
+// once per board" is then guaranteed by the ETM per-(sender,seq) dedup ring on receive; the
+// lastReceivedViaESPNOW one-hop cap stops any received copy from being re-broadcast.
 void recallStoredCommand(const String &message, int sourceID) {
     Serial.print("Recall stored command request received:");
     Serial.println(message);
-    if (message.startsWith("SEQ") || message.startsWith("seq")) {
-        // Format: SEQkey
-        Serial.println("Recalling stored sequence command...");
-        String key = message.substring(3);
-        key.trim();
-        if (key.length() > 0) {
-            recallCommandSlot(key, sourceID);
-        } else {
-            Serial.println("Invalid recall command. Use SEQkey to recall a command.");
+
+    // Strip the SEQ/C prefix to get the key.
+    const bool isSeq = message.startsWith("SEQ") || message.startsWith("seq");
+    String key = isSeq ? message.substring(3) : message.substring(1);
+    key.trim();
+
+    // ",L" / ",LOCAL" suffix => local-only (no mesh fan-out).
+    bool localOnly = false;
+    int commaPos = key.indexOf(',');
+    if (commaPos >= 0) {
+        String suffix = key.substring(commaPos + 1);
+        suffix.trim();
+        suffix.toUpperCase();
+        if (suffix == "L" || suffix == "LOCAL") {
+            localOnly = true;
+            key = key.substring(0, commaPos);
+            key.trim();
         }
-    } else {
-  String key = message.substring(1);
-  key.trim();
-  if (key.length() > 0) {
+    }
+
+    if (key.length() == 0) {
+        Serial.println(isSeq ? "Invalid recall command. Use SEQkey (or SEQkey,L for local-only)."
+                             : "Invalid recall command. Use ;Ckey (or ;Ckey,L for local-only).");
+        return;
+    }
+
+    // Fan the trigger out to the mesh — but ONLY for a genuine mesh-scoped top-level trigger:
+    // not the local-only ",L" form, not one that arrived over the mesh, and not a nested body
+    // command. Reconstruct a clean ;C/;SEQ form (never carrying ",L") so each peer dispatches
+    // straight back through this recall path, where its own lastReceivedViaESPNOW=true
+    // suppresses a re-broadcast. Fires before the local run so peers start in step.
+    if (!localOnly && !lastReceivedViaESPNOW && !inSequenceBody) {
+        String trigger = String(CommandCharacter) + (isSeq ? "SEQ" : "C") + key;
+        sendESPNowMessage(0, trigger.c_str());   // target 0 = broadcast, ETM
+    }
+
+    if (isSeq) Serial.println("Recalling stored sequence command...");
     recallCommandSlot(key, sourceID);
-  } else {
-    Serial.println("Invalid recall command. Use ;Ckey to recall a command.");
-  }
-}
 }
 
 void processMaestroCommand(const String &message){
@@ -6696,6 +6759,7 @@ void loop() {
     // what lets a peer-triggered stored sequence still fan its commands out to the
     // other WCBs (the sequence body is enqueued with espnowOrigin=false).
     lastReceivedViaESPNOW = inItem.espnowOrigin;
+    inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
     handleSingleCommand(commandStr, inItem.sourceID);
   }
 }

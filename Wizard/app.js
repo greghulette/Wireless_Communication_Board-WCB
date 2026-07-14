@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '14.12:13.R.JUL.2026';
+const UI_VERSION = '14.14:43.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2582,6 +2582,7 @@ function populateUIFromConfig(n, config) {
   if (tbody) {
     tbody.innerHTML = '';
     for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
+    refreshAllSeqSharedIndicators();   // board n's keys changed → refresh every board's hints
   }
 
   // Variables
@@ -3740,8 +3741,9 @@ function appendSequenceRow(n, key, value) {
       <input class="seq-key-input" type="text" value="${escHtml(key)}"
              data-original-key="${escHtml(key)}"
              placeholder="KeyName" spellcheck="false" maxlength="15"
-             oninput="updateSeqKeyCount('${rowId}')">
+             oninput="updateSeqKeyCount('${rowId}'); refreshSeqSharedIndicators(${n})">
       <div class="seq-char-count" id="${rowId}-key-count">${keyLen}/15</div>
+      <div class="seq-key-shared" id="${rowId}-shared" style="display:none"></div>
     </td>
     <td class="seq-val-cell">
       <textarea class="seq-val-textarea" placeholder="One command per line…" spellcheck="false"
@@ -3765,6 +3767,7 @@ function appendSequenceRow(n, key, value) {
   if (ta) requestAnimationFrame(() => autoResizeTextarea(ta));
 
   updateSequencePlayButtons(n);
+  refreshSeqSharedIndicators(n);   // populate the "⇄ also on Wx" hint for this row
 }
 
 async function removeSequenceRow(n, rowId) {
@@ -3782,6 +3785,7 @@ async function removeSequenceRow(n, rowId) {
     if (idx >= 0) store.sequences.splice(idx, 1);
   }
   updateActionSummary(n);   // keep the action-bar summary's sequence count live
+  refreshAllSeqSharedIndicators();   // removed key may no longer overlap → refresh hints
 
   if (!key) return;   // no key — nothing to tell the board
 
@@ -3826,6 +3830,53 @@ function updateSequencePlayButtons(n) {
   });
 }
 
+// ── Shared-key indicator ────────────────────────────────────────────────────
+// A top-level ;C/;SEQ recall now fires MESH-WIDE: every board that has a sequence
+// under that name runs its own copy. So a key that also exists on other boards is a
+// shared trigger. We surface that with a compact one-liner under the key name — no
+// separate "remote keys" section, just a hint on the local rows that overlap.
+
+// Other known boards (by WCB number) that have a stored sequence under `key`.
+function seqKeyRemoteBoards(n, key) {
+  const k = (key || '').trim();
+  if (!k) return [];
+  const out = [];
+  for (const slot of Object.keys(boardConfigs)) {
+    const m = +slot;
+    if (m === n) continue;
+    const seqs = boardConfigs[m]?.sequences;
+    if (Array.isArray(seqs) && seqs.some(s => (s.key || '').trim() === k)) {
+      out.push(boardConfigs[m]?.wcbNumber || m);
+    }
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
+}
+
+// Recompute the "⇄ also on Wx" hint under each key in board n's sequence table.
+function refreshSeqSharedIndicators(n) {
+  const tbody = document.getElementById(`b${n}-seq-tbody`);
+  if (!tbody) return;
+  tbody.querySelectorAll('tr').forEach(row => {
+    const ind = row.querySelector('.seq-key-shared');
+    if (!ind) return;
+    const key = row.querySelector('.seq-key-input')?.value ?? '';
+    const remotes = seqKeyRemoteBoards(n, key);
+    if (remotes.length) {
+      ind.textContent = `⇄ also on ${remotes.map(w => 'W' + w).join(', ')}`;
+      ind.title = 'This name also exists on these boards — a top-level ;C/;SEQ fires them all at once.';
+      ind.style.display = '';
+    } else {
+      ind.textContent = '';
+      ind.style.display = 'none';
+    }
+  });
+}
+
+// A board's sequences changed → every board's hints may reference it, so refresh all.
+function refreshAllSeqSharedIndicators() {
+  for (const slot of Object.keys(boardConfigs)) refreshSeqSharedIndicators(+slot);
+}
+
 async function playSequence(n, rowId) {
   const row = document.getElementById(rowId);
   if (!row) return;
@@ -3839,7 +3890,12 @@ async function playSequence(n, rowId) {
   if (!validateSequenceValue(seqTextareaToValue(ta?.value ?? '', delim))) return;
 
   const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
-  const cmd = `${cmdChar}SEQ${key}`;
+  // TEST defaults to this ONE board (,L = local-only) so validating a single row doesn't
+  // fire the whole mesh. The "Test mesh-wide" checkbox drops the ,L so you can exercise the
+  // real mesh-wide fan-out — every board that has this key runs its own copy.
+  const meshWide = document.getElementById(`b${n}-seq-test-mesh`)?.checked ?? false;
+  const cmd = meshWide ? `${cmdChar}SEQ${key}` : `${cmdChar}SEQ${key},L`;
+  const scopeLabel = meshWide ? 'mesh-wide' : 'local';
 
   const relayN = remoteRelayForBoard[n];
   if (relayN) {
@@ -3851,13 +3907,13 @@ async function playSequence(n, rowId) {
     const seqRunTargetWCB = boardConfigs[n]?.wcbNumber || n;
     const mgmtCmd = `${relayFc}MGMT,FRAG,${seqRunTargetWCB},${sessionId},0,1,${cmd}`;
     await sendMgmtReliable(relayConn, mgmtCmd, relayN);
-    showToast(`Sent: ${cmd} (remote)`, 'info');
+    showToast(`Sent: ${cmd} (${scopeLabel}, remote)`, 'info');
   } else {
     const conn = boardConnections[n];
     if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
     conn.send(cmd + '\r');
     termLog(n, cmd, 'in');
-    showToast(`Sent: ${cmd}`, 'info');
+    showToast(`Sent: ${cmd} (${scopeLabel})`, 'info');
   }
 }
 
@@ -3937,6 +3993,7 @@ async function updateSequence(n, rowId) {
       else store.sequences.push({ key, value });
     }
     updateActionSummary(n);   // keep the action-bar summary's sequence count live
+    refreshAllSeqSharedIndicators();   // saved key may now overlap other boards → refresh hints
     // Update the original-key marker so a second rename from this key works correctly
     if (keyInput) keyInput.dataset.originalKey = key;
   } catch (e) {

@@ -5,6 +5,7 @@
 #include "WCB_PWM.h"
 #include "WCB_Maestro.h"  // For MAX_MAESTROS_PER_WCB and maestroConfigs
 // Declare the external variables that are defined in the main sketch
+extern bool inSequenceBody;   // WCB.ino — nested-recall mesh-fanout suppression flag
 extern Preferences preferences;
 extern unsigned long baudRates[5];
 extern bool serialBroadcastEnabled[5];
@@ -571,14 +572,20 @@ void recallCommandSlot(const String &key, int sourceID) {
     // in enqueueCommand (and commandGroupsEspnowOrigin for timer sequences)
     // carries it through to dispatch. Restore afterward so the rest of the queue
     // drain is unaffected.
+    // Also mark these as INSIDE a sequence body: a nested `;C`/`;SEQ` recall in this body
+    // must run locally only, NOT re-fan the trigger out to the mesh (see recallStoredCommand).
+    // Carried per-item exactly like the origin flag above.
     bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = false;
+    inSequenceBody        = true;
     if (isTimerCommand(stripped)) {
         parseCommandGroups(stripped);
     } else {
         parseCommandsAndEnqueue(stripped, sourceID);
     }
     lastReceivedViaESPNOW = _savedEspNowOrigin;
+    inSequenceBody        = _savedSeqBody;
 
 }
 

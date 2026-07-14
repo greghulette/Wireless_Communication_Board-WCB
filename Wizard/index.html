@@ -713,6 +713,10 @@
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <label class="seq-test-scope" style="margin-left:auto">
+          <input type="checkbox" id="b{N}-seq-test-mesh"> Test mesh-wide
+          <span class="wiz-hint tip-left" data-tip="Off (default): TEST fires this board only (;SEQkey,L). On: TEST fires the sequence on EVERY board that has the same key (;SEQkey) — the real mesh-wide trigger.">i</span>
+        </label>
       </div>
       <table class="seq-table">
         <thead>
@@ -842,8 +846,8 @@
       <!-- WLED (serial lighting) — ID-addressed, multiple per board -->
       <div>
         <div class="subsection-title">WLED
-        <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})" style="margin-left:6px">+ Add</button>
-      </div>
+          <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})" style="margin-left:6px">+ Add</button>
+        </div>
         <table class="serial-table" id="b{N}-wled-table">
           <thead>
             <tr>
