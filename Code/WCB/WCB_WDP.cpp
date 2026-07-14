@@ -52,6 +52,12 @@ static const unsigned long WDP_TTL_MS    = 180000UL;   // facts go stale after ~
 static uint8_t       wdpBootLeft     = 0;
 static unsigned long wdpNextBootMs   = 0;
 static unsigned long wdpNextAdvertMs = 0;
+// On-change re-announce: hash of the last-SENT advert payload + when to next check
+// whether the payload changed. Lets a config edit (device added/cleared, alias/label
+// changed, capability flipped) propagate in ~½s instead of the ~60s periodic backstop,
+// with NO need to instrument every config path — we detect any content change directly.
+static uint32_t      wdpLastAdvertHash   = 0;
+static unsigned long wdpNextDirtyCheckMs = 0;
 
 // ---- TLV registry (payload rides structCommand[200]) --------------------
 #define WDP_MAGIC        'W'
@@ -231,11 +237,19 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
 
 // ==================== Advert send (cadence) ==============================
 
+// Cheap FNV-1a over the advert bytes — a content fingerprint, not security.
+static uint32_t wdpFnv1a(const uint8_t *d, int n) {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < n; i++) { h ^= d[i]; h *= 16777619u; }
+  return h;
+}
+
 static void wdpSendAdvert() {
   uint8_t payload[200];
   memset(payload, 0, sizeof(payload));
   int len = wdpBuildPayload(payload, sizeof(payload));
   wdpBroadcast(payload, len);
+  wdpLastAdvertHash = wdpFnv1a(payload, len);   // remember what we just advertised
   if (debugMGMT) Serial.printf("[WDP] advert sent (%d B)\n", len);   // mesh-mgmt chatter — under ?DEBUG,MGMT
 }
 
@@ -251,6 +265,23 @@ void wdpTick() {
   if ((long)(now - wdpNextAdvertMs) >= 0) {
     wdpSendAdvert();
     wdpNextAdvertMs = now + WDP_PERIOD_MS;
+  }
+  // On-change re-announce: if the advert content changed since we last sent one (a
+  // device was configured/cleared, alias/label edited, a capability flipped), send
+  // now instead of waiting for the ~60s backstop. Hash the payload ~2x/sec — a burst
+  // of config commands collapses into one or two adverts. No config path needs to know
+  // about WDP; any change to what wdpBuildPayload emits is detected here.
+  if ((long)(now - wdpNextDirtyCheckMs) >= 0) {
+    wdpNextDirtyCheckMs = now + 500;
+    uint8_t buf[200]; memset(buf, 0, sizeof(buf));
+    int len = wdpBuildPayload(buf, sizeof(buf));
+    uint32_t h = wdpFnv1a(buf, len);
+    if (wdpLastAdvertHash == 0) {
+      wdpLastAdvertHash = h;              // first check — establish the baseline, don't advert
+    } else if (h != wdpLastAdvertHash) {
+      wdpSendAdvert();                    // content changed — announce now (updates the hash)
+      if (wdpBootLeft < 1) { wdpBootLeft = 1; wdpNextBootMs = now + 800; }  // 1 re-send for reliability
+    }
   }
   // Age descriptive facts stale (keep the slot as topology memory).
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
