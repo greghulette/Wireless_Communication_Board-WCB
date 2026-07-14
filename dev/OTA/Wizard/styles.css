@@ -318,11 +318,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 
 /* ─── Form Elements ──────────────────────────────────────────── */
 .field-group {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  display: flex; flex-wrap: wrap; align-items: flex-end;
   gap: 14px; margin-bottom: 18px;
 }
-.field { display: flex; flex-direction: column; gap: 5px; }
+.field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; min-width: 0; }
 .field label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
   text-transform: uppercase; color: var(--text2); font-family: var(--sans);
@@ -1110,7 +1109,7 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   .header { padding: 0 12px; }
   .main   { padding: 0 12px 160px; }
   .drop-zone, .browser-warning { margin: 10px 12px; }
-  .field-group { grid-template-columns: 1fr; }
+  .field-group .field { flex-basis: 100%; }
 }
 
 /* ─── Splash Screen ──────────────────────────────────────────── */
@@ -1372,3 +1371,14 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .subsection > .subsection-title,
 .subsection > .flex.items-center.gap-8.mb-12 { margin-top: 0; }
 .subsection .subsection-title::before { display: none; }
+
+/* Narrow content-sized fields — don't let short values stretch a full flex track */
+.field:has(#g-mac2), .field:has(#g-mac3),
+.field:has(select[id$="-hcr-baud"]),  .field:has(input[id$="-hcr-poll"]),
+.field:has(select[id$="-mp3-baud"]),  .field:has(input[id$="-mp3-vol"]),
+.field:has(select[id$="-kyber-baud"]),.field:has(select[id$="-hcr-port"]),
+.field:has(select[id$="-mp3-port"]),  .field:has(select[id$="-kyber-port"]) { flex: 0 0 auto; }
+#g-mac2, #g-mac3 { width: 90px; }
+select[id$="-hcr-baud"], select[id$="-mp3-baud"], select[id$="-kyber-baud"] { width: 130px; }
+input[id$="-hcr-poll"], input[id$="-mp3-vol"] { width: 120px; }
+select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { width: 150px; }
