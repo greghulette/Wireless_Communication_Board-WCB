@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.11:31.R.JUL.2026';
+const UI_VERSION = '15.11:45.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -456,11 +456,26 @@ function addBoardSection(n) {
   }
 
   renderSerialTable(n);
-  boardConfigs[n] = WCBParser.createDefaultBoardConfig();
-  boardConfigs[n].wcbNumber = n;
+  // Preserve a config that already exists for this slot. A board can migrate or
+  // connect into a slot BEFORE its section is built (auto-migration into a
+  // not-yet-rendered slot, then WDP neighbor discovery finally creates the card).
+  // Clobbering it with a blank default would drop the pulled config.
+  if (!boardConfigs[n]) {
+    boardConfigs[n] = WCBParser.createDefaultBoardConfig();
+    boardConfigs[n].wcbNumber = n;
+  }
   const wcbNumSel = document.getElementById(`b${n}-wcb-number`);
   const qty = systemConfig?.general?.wcbQuantity || n;
   if (wcbNumSel) populateWCBDropdown(wcbNumSel, qty, n, true);
+  // If a connection was already established for this slot before its section
+  // existed, reflect that now that the DOM is present — otherwise the freshly
+  // built card shows "Not Connected" for a board that is actually connected
+  // (the exact symptom when a USB board auto-migrates into a slot that WDP
+  // discovery later renders).
+  if (boardConnections[n]?.isConnected?.()) {
+    populateUIFromConfig(n, boardConfigs[n]);
+    updateConnectionUI(n, true);
+  }
 }
 
 // ─── Device-label combobox (per-port label fields) ────────────────
@@ -5730,6 +5745,12 @@ async function boardPull(n, opts = {}) {
         boardBaselines[detected] = JSON.parse(JSON.stringify(config));
         delete boardConfigs[n];
         delete boardBaselines[n];
+
+        // The target slot's card may not exist yet (e.g. only slot n was rendered).
+        // boardConnections[detected] is now live, so desiredBoardNumbers() includes
+        // it — reconcile builds section-board-detected (and, via addBoardSection,
+        // reflects the live connection + config) before we populate it below.
+        reconcileBoardGrid();
 
         populateUIFromConfig(detected, config);
         updateConnectionUI(n, false);        // clear vacated slot
