@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.15:17.R.JUL.2026';
+const UI_VERSION = '15.15:23.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -10917,7 +10917,7 @@ function escHtml(str) {
 const _rcOnlineMap   = new Map();   // rcId → { fw, mode, model, up, lastSeenAt, viaBoardIdx }
 const RC_OFFLINE_MS  = 6000;        // 3 missed 2-second heartbeats
 const RC_TOOL_URL_KEY = 'rc_config_tool_url';
-const RC_TOOL_URL_DEFAULT = '../../RC-Controller/config_tool/index.html';
+const RC_TOOL_URL_DEFAULT = 'https://greghulette.github.io/NaviCore/config_tool/';
 
 function _rcToolUrl() {
   try {
@@ -11341,8 +11341,8 @@ document.addEventListener('click', (ev) => {
   ev.preventDefault();
   const current = _rcToolUrl();
   const next    = prompt(
-    'URL to your RC config tool (config_tool/index.html).\n' +
-    'Default (sibling repo clones):\n' + RC_TOOL_URL_DEFAULT,
+    'URL to your NaviCore config tool.\n' +
+    'Default (hosted):\n' + RC_TOOL_URL_DEFAULT,
     current
   );
   if (next === null) return;   // cancelled
