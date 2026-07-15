@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.14:24.R.JUL.2026';
+const UI_VERSION = '15.15:11.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4993,11 +4993,17 @@ function setRemoteConnected(n, relayN) {
     updateFwBtn.title = 'Connect via USB to update firmware — not available over wireless relay';
   }
   updateBoardStatusBadge(n, 'remote');
-  ensureTerminalPane(relayN);          // remote traffic shows in relay's terminal
+  ensureTerminalPane(relayN);          // relay's own pane (its [TERM] demux + [MGMT] replies)
+  ensureTerminalPane(n);               // the TARGET board gets its own pane for [TERM:n] output
   updateTerminalPaneDot(n, true);
   updateSequencePlayButtons(n);        // enable UPDATE/TEST buttons for remote boards
   updateVariableButtons(n);            // enable SAVE/UPDATE buttons for remote boards
   installEtmListener(relayN);         // track live/offline state via relay's ETM output
+  // Start the remote-terminal stream NOW, independent of the config pull. The pull can time out
+  // (or a MgmtRelay may never answer ?MGMT,PULL), and the ETM-online path never fires for a relay
+  // that emits no ETM heartbeats — so without this the target board would have no usable terminal.
+  // RTERM,START is idempotent, so the pull-success path re-issuing it is harmless.
+  startRemoteTermSession(relayN, n);
 }
 
 // When a relay board goes offline, disconnect every remote board that relied on it.
