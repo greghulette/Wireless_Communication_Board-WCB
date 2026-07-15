@@ -1390,3 +1390,100 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
 /* Center narrow MAC fields so the box lines up under its wider header */
 .field:has(#g-mac2), .field:has(#g-mac3) { align-items: center; }
 .field:has(#g-mac2) > label, .field:has(#g-mac3) > label { text-align: center; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Feature styles — mesh view / client-status / peers-live / mesh toolbar,
+   self-row highlight, shared-key hint, and the Test-mesh-wide toggle.
+   styles.css is the SINGLE source of truth (index.html loads only this file).
+   The old styles1.css duplicate that used to strand these was removed — do not
+   re-create a second stylesheet.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── WDP mesh view ────────────────────────────────────────────────────── */
+.wdp-mesh-scroll { overflow-x: auto; }
+.wdp-mesh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.wdp-mesh-table th,
+.wdp-mesh-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: nowrap;
+}
+.wdp-mesh-table th { color: var(--text-secondary, #9aa3b0); font-weight: 600; }
+.wdp-mesh-table tr.wdp-stale { opacity: 0.5; }
+.wdp-if  { white-space: nowrap; }
+.wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-live { color: var(--green); }
+/* The querying board's own row (PEER=3) — highlighted so the view shows the whole mesh. */
+.wdp-mesh-table tr.wdp-self > td { background: rgba(120, 140, 255, 0.07); }
+.wdp-mesh-table tr.wdp-self > td:first-child { box-shadow: inset 3px 0 0 var(--accent, #6c8cff); }
+.wdp-self-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border: 1px solid var(--accent, #6c8cff);
+                border-radius: 10px; font-size: 11px; font-weight: 600; color: var(--accent, #6c8cff);
+                vertical-align: middle; white-space: nowrap; }
+
+/* WCB_Client lightweight status card (b{N}-client-status) */
+.client-status { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.client-status .cs-row { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.client-status .cs-k { flex: 0 0 96px; color: var(--text-secondary, #9aa3b0); }
+.client-status .cs-v { flex: 1 1 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.client-status .cs-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.client-status .cs-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.client-status .cs-dot.on  { background: var(--green, #3fb950); box-shadow: 0 0 5px var(--green, #3fb950); }
+.client-status .cs-dot.off { background: var(--text-secondary, #9aa3b0); }
+.client-status .cs-cap {
+  font-size: 11px; padding: 1px 7px; border-radius: 3px;
+  background: var(--bg4, #21262d); color: var(--text2, #c9d1d9);
+  border: 1px solid var(--border, #30363d);
+}
+
+/* Live-peers badge next to the WCB Quantity dropdown (PEERSLIVE telemetry) */
+.peers-live-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: rgba(0,232,122,0.1);
+  color: var(--green);
+  border: 1px solid rgba(0,232,122,0.3);
+}
+
+/* Mesh-panel membership badges + controls */
+.wdp-peer-floor   { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
+.wdp-peer-learned { color: var(--accent); font-size: 12px; }
+.wdp-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 8px; flex-wrap: wrap;
+}
+.wdp-toolbar .wdp-btn {
+  background: var(--bg4); color: var(--text2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.wdp-toolbar .wdp-btn:hover { border-color: var(--accent); color: var(--accent); }
+.wdp-btn-forget {
+  background: none; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text3); font-size: 11px; padding: 1px 6px; cursor: pointer;
+  margin-left: 6px;
+}
+.wdp-btn-forget:hover { border-color: var(--red); color: var(--red); }
+
+/* "⇄ also on Wx" hint — this key also exists on other boards, so a top-level
+   ;C/;SEQ triggers them all at once. Compact, sits right under the key name. */
+.seq-key-shared {
+  font-size: 10px; color: var(--accent); margin-top: 3px;
+  font-family: var(--mono); line-height: 1.3; word-break: break-word;
+}
+/* "Test mesh-wide" toggle in the Stored Sequences header — off = TEST fires this
+   board only (;SEQkey,L); on = TEST fans out to the whole mesh (;SEQkey). */
+.seq-test-scope {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text2); cursor: pointer; white-space: nowrap;
+}
+.seq-test-scope input { cursor: pointer; margin: 0; }
