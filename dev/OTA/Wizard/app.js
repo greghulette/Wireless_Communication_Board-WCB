@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.13:48.R.JUL.2026';
+const UI_VERSION = '15.14:06.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -445,22 +445,26 @@ function applyRelayRole(n) {
   renderRelayCard(n);
 }
 
-// Arm one heard board for remote management through the relay.
-function relayManageOne(relaySlot, targetN) {
+// Route one heard board through the relay so it's manageable. `pull` = also fetch its config
+// now (single-board action); relayRouteAll uses pull=false to avoid flooding the relay, which
+// reassembles ONE config reply at a time.
+function relayManageOne(relaySlot, targetN, pull = true) {
   if (!(targetN >= 1 && targetN <= WCB_MAX)) return;
   if (boardConnections[targetN]?.isConnected?.()) return;    // don't override a direct-USB board
   addDiscoveredBoards([targetN]);        // ensure section-board-targetN exists
   setRemoteConnected(targetN, relaySlot);
-  remoteBoardPull(relaySlot, targetN);   // pull through the relay (Phase-2b answers ?MGMT,PULL)
+  if (pull) remoteBoardPull(relaySlot, targetN);   // Phase-2b answers ?MGMT,PULL
   renderRelayCard(relaySlot);
 }
 
+// Arm every heard board for management through the relay (no pull — pull each on demand).
 function relayRouteAll(relaySlot) {
   const relayWcb = boardConfigs[relaySlot]?.wcbNumber;
   for (const nd of (_relayNodes[relaySlot] || [])) {
     if (nd.client || nd.n === relayWcb) continue;            // skip clients + the relay itself
     if (boardConnections[nd.n]?.isConnected?.()) continue;   // skip direct-USB boards
-    relayManageOne(relaySlot, nd.n);
+    if (remoteRelayForBoard[nd.n] === relaySlot) continue;   // already armed
+    relayManageOne(relaySlot, nd.n, false);                  // arm-only
   }
 }
 
@@ -5172,6 +5176,12 @@ async function boardDisconnect(n) {
   try { await boardConnections[n]?.disconnect(); } catch (_) {}
   delete boardConnections[n];
   delete remoteRelayForBoard[n];
+  if (_relaySlots.has(n)) {                   // a MgmtRelay: drop its flag + dedicated card so the
+    _relaySlots.delete(n);                    // slot is freed and a real board of that number can show
+    delete _relayNodes[n];
+    document.getElementById(`relay-card-${n}`)?.remove();
+    reconcileBoardGrid();
+  }
   updateConnectionUI(n, false);
   if (btn) btn.disabled = false;
 }
@@ -5783,12 +5793,28 @@ async function boardPull(n, opts = {}) {
     // relay is a special conduit, not a configurable board, so it must not seed the network
     // baseline, inflate the grid from its own ?WCBQ, or get a numbered board section.
     if (config.isRelay) {
-      boardConfigs[n]   = config;
-      boardBaselines[n] = JSON.parse(JSON.stringify(config));
-      _relaySlots.add(n);
-      applyRelayRole(n);          // evict any grid section for this slot, render the relay card
-      fetchBoardVersion(n);       // async: fills config.fwVersion; card refreshes on the next mesh tick
+      // Anchor the relay at slot = its WCB number so the connection SLOT and mesh WCB
+      // NUMBER stop colliding (the relay's DEVICE_ID is a value no real board uses). This
+      // fixes the duplicate "WCB 19" and makes it list/route as "WCB <id>" via relay.
+      const relaySlot = config.wcbNumber || n;
+      if (relaySlot !== n) {
+        conn.boardIndex = relaySlot;
+        boardConnections[relaySlot] = conn;
+        delete boardConnections[n];
+        document.getElementById(`section-board-${n}`)?.remove();
+        delete boardConfigs[n];
+        delete boardBaselines[n];
+        _relaySlots.delete(n);
+        _meshBoards.delete(n);
+        updateConnectionUI(n, false);          // clear the vacated landed slot's header/buttons
+      }
+      boardConfigs[relaySlot]   = config;
+      boardBaselines[relaySlot] = JSON.parse(JSON.stringify(config));
+      _relaySlots.add(relaySlot);
+      applyRelayRole(relaySlot);               // evict any grid section, render the relay card
+      fetchBoardVersion(relaySlot);            // async: fills config.fwVersion; card refreshes on mesh tick
       _boardPullInFlight.delete(n);
+      _boardPullInFlight.delete(relaySlot);
       if (btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
       return;
     }
@@ -11227,13 +11253,17 @@ async function meshAutoDiscoverTick() {
     const parsed = parseWdpDump(raw);
     if (!parsed.nodes || !parsed.nodes.length) return;
     renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
-    // If we're querying THROUGH a management relay, keep its card's "relaying" list live.
-    if (_relaySlots.has(+t.slot)) { _relayNodes[t.slot] = parsed.nodes; renderRelayCard(+t.slot); }
+    // Feed EVERY relay card from this sweep — any connected board's dump shows the whole mesh,
+    // so the relay card stays live even when the mesh is queried through a non-relay board.
+    for (const rs of _relaySlots) { _relayNodes[rs] = parsed.nodes; renderRelayCard(rs); }
 
     const seenClients = new Set();
     for (const nd of parsed.nodes) {
       const n = nd.n;
-      if (n === t.wcbNum || String(n) === String(t.slot)) continue;  // skip the relay board itself
+      // Skip the querying board's own self-row, and any management relay's node — a relay has
+      // its own dedicated card, so it must NOT be surfaced as a numbered mesh board (that was
+      // the duplicate "WCB 19"). NB: match relays by NUMBER (_relaySlots is keyed by wcbNumber).
+      if (n === t.wcbNum || _relaySlots.has(n)) continue;
       if (nd.client) {
         seenClients.add(n);
         upsertClientCard(nd);                              // clients get a lightweight status/capabilities card
