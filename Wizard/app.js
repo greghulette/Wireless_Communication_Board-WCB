@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.12:22.R.JUL.2026';
+const UI_VERSION = '15.13:48.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -325,6 +325,8 @@ let _navBoardNumbers = [];   // board numbers currently shown in the jump-nav (s
 let _navScrollRaf  = null;
 let _meshBoards = new Set(); // WCB numbers discovered on the mesh beyond the floor
 let _boardFloor = 0;         // WCBQ floor: sections 1.._boardFloor always render
+let _relaySlots = new Set(); // USB slots that are MgmtRelays — kept OUT of the numbered grid
+let _relayNodes = {};        // relaySlot → last WDP node array it advertised (feeds the relay card)
 const _meshClients = new Map(); // WCB_Client devices discovered on the mesh: id → last WDP node (status/caps)
 
 // Accepts either a count (legacy: renders 1..count) or an explicit array of
@@ -393,7 +395,8 @@ function desiredBoardNumbers() {
   for (let i = 1; i <= _boardFloor; i++) s.add(i);
   for (const n of _meshBoards) s.add(n);
   for (const k in boardConnections) if (boardConnections[k]?.isConnected?.()) s.add(+k);
-  return [...s].filter(n => n >= 1 && n <= WCB_MAX).sort((a, b) => a - b);
+  // MgmtRelay slots render as a dedicated card, never a numbered grid section.
+  return [...s].filter(n => n >= 1 && n <= WCB_MAX && !_relaySlots.has(n)).sort((a, b) => a - b);
 }
 
 // Reconcile the rendered sections against desiredBoardNumbers(). Sparse-aware
@@ -427,6 +430,77 @@ function reconcileBoardGrid() {
 function renderBoards(count) {
   _boardFloor = Math.max(0, count | 0);
   reconcileBoardGrid();
+}
+
+// ── Management-relay card (a MgmtRelay: USB conduit into the mesh, not a board) ──────────
+// A relay reports ?RELAY,1 → kept out of the numbered grid (desiredBoardNumbers filter) and
+// shown as a compact card in #relay-cards. The mesh WCBs it hears (via its WDP dump) are
+// managed THROUGH it: "Manage via relay" arms remoteRelayForBoard so push/test/identify/
+// terminal/pull route to the relay (handleMgmtFrag + the config-req path).
+
+function applyRelayRole(n) {
+  document.getElementById(`section-board-${n}`)?.remove();   // drop any numbered section
+  _meshBoards.delete(n);
+  reconcileBoardGrid();          // filter keeps slot n out of the grid + nav; live conn untouched
+  renderRelayCard(n);
+}
+
+// Arm one heard board for remote management through the relay.
+function relayManageOne(relaySlot, targetN) {
+  if (!(targetN >= 1 && targetN <= WCB_MAX)) return;
+  if (boardConnections[targetN]?.isConnected?.()) return;    // don't override a direct-USB board
+  addDiscoveredBoards([targetN]);        // ensure section-board-targetN exists
+  setRemoteConnected(targetN, relaySlot);
+  remoteBoardPull(relaySlot, targetN);   // pull through the relay (Phase-2b answers ?MGMT,PULL)
+  renderRelayCard(relaySlot);
+}
+
+function relayRouteAll(relaySlot) {
+  const relayWcb = boardConfigs[relaySlot]?.wcbNumber;
+  for (const nd of (_relayNodes[relaySlot] || [])) {
+    if (nd.client || nd.n === relayWcb) continue;            // skip clients + the relay itself
+    if (boardConnections[nd.n]?.isConnected?.()) continue;   // skip direct-USB boards
+    relayManageOne(relaySlot, nd.n);
+  }
+}
+
+function renderRelayCard(n) {
+  const host = document.getElementById('relay-cards');
+  if (!host) return;
+  const cfg      = boardConfigs[n] || {};
+  const online   = !!boardConnections[n]?.isConnected?.();
+  const relayWcb = cfg.wcbNumber;
+  const relayed  = (_relayNodes[n] || []).filter(nd => !nd.client && nd.n !== relayWcb);
+  const name     = escHtml(cfg.clientAlias || cfg.alias || `WCB ${relayWcb ?? n}`);
+
+  let card = document.getElementById(`relay-card-${n}`);
+  if (!card) { card = document.createElement('div'); card.id = `relay-card-${n}`; card.className = 'rc-devices-section'; host.appendChild(card); }
+
+  const boardsHtml = relayed.length
+    ? relayed.map(nd => {
+        const bound = remoteRelayForBoard[nd.n] === n;
+        const label = `WCB ${nd.n}${nd.alias ? ` (${escHtml(nd.alias)})` : ''}`;
+        const right = bound
+          ? '<span class="cs-cap">managed</span>'
+          : `<button class="btn btn-ghost btn-sm" onclick="relayManageOne(${n},${nd.n})">Manage via relay</button>`;
+        return `<div class="cs-row"><span class="cs-k">${label}</span><span class="cs-v">${right}</span></div>`;
+      }).join('')
+    : '<div class="cs-sub">No mesh WCBs heard yet.</div>';
+
+  card.innerHTML =
+    `<h2 class="section-title">📡 Management Relay — ${name}` +
+      `<button type="button" class="btn btn-ghost btn-sm" style="float:right" ` +
+        `onclick="document.getElementById('wdp-mesh-section')?.scrollIntoView({behavior:'smooth'})">🕸️ Mesh</button></h2>` +
+    `<div class="client-status">` +
+      `<div class="cs-row"><span class="cs-k">Status</span><span class="cs-v"><span class="cs-dot ${online ? 'on' : 'off'}"></span>${online ? 'Connected (USB)' : 'Offline'}</span></div>` +
+      `<div class="cs-row"><span class="cs-k">Identity</span><span class="cs-v">WCB ${relayWcb ?? '—'} · HW ${cfg.hwVersion ?? '—'} · FW ${escHtml(cfg.fwVersion || '—')}</span></div>` +
+      `<div class="cs-row"><span class="cs-k">Relaying</span><span class="cs-v">${relayed.length} board(s)</span></div>` +
+      boardsHtml +
+      `<div class="cs-row"><span class="cs-v">` +
+        `<button class="btn btn-ghost btn-sm" onclick="ensureTerminalPane(${n})">Terminal</button> ` +
+        `<button class="btn btn-primary btn-sm" onclick="relayRouteAll(${n})">Manage all via relay</button>` +
+      `</span></div>` +
+    `</div>`;
 }
 
 // Add WDP-discovered WCB numbers to the grid. Returns true if anything new was
@@ -5704,6 +5778,21 @@ async function boardPull(n, opts = {}) {
   try {
     const config = WCBParser.parseBackupString(raw);
 
+    // ── Management relay (?RELAY,1): dedicated card, kept OUT of the numbered WCB grid ──
+    // Short-circuit BEFORE the general-settings baseline / WCBQ render / slot-migrate — a
+    // relay is a special conduit, not a configurable board, so it must not seed the network
+    // baseline, inflate the grid from its own ?WCBQ, or get a numbered board section.
+    if (config.isRelay) {
+      boardConfigs[n]   = config;
+      boardBaselines[n] = JSON.parse(JSON.stringify(config));
+      _relaySlots.add(n);
+      applyRelayRole(n);          // evict any grid section for this slot, render the relay card
+      fetchBoardVersion(n);       // async: fills config.fwVersion; card refreshes on the next mesh tick
+      _boardPullInFlight.delete(n);
+      if (btn) { btn.textContent = 'Pull Config'; btn.disabled = false; }
+      return;
+    }
+
     // ── General settings: establish baseline on first pull, detect mismatches after ──
     const incomingGeneral = extractGeneralFields(config);
     if (!generalBaseline) {
@@ -6427,6 +6516,9 @@ function updateConnectionUI(n, connected) {
   if (connected) ensureTerminalPane(n);
   updateTerminalPaneDot(n, connected);
   if (connected) updatePaneVisibilityChip(n);
+
+  // A relay slot has no board section — refresh its dedicated card's status dot instead.
+  if (_relaySlots.has(n)) renderRelayCard(n);
 }
 
 // ─── Remote Management ────────────────────────────────────────────
@@ -11135,6 +11227,8 @@ async function meshAutoDiscoverTick() {
     const parsed = parseWdpDump(raw);
     if (!parsed.nodes || !parsed.nodes.length) return;
     renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
+    // If we're querying THROUGH a management relay, keep its card's "relaying" list live.
+    if (_relaySlots.has(+t.slot)) { _relayNodes[t.slot] = parsed.nodes; renderRelayCard(+t.slot); }
 
     const seenClients = new Set();
     for (const nd of parsed.nodes) {
