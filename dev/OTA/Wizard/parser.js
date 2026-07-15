@@ -33,6 +33,7 @@ function createDefaultBoardConfig() {
     // client view). Flipping does NOT alter what's on the physical board.
     type:         'wcb',
     clientAlias:  '',      // Friendly name for the client device at this slot
+    isRelay:      false,   // true when the device's backup carried ?RELAY,1 (a MgmtRelay)
 
 
     // Network
@@ -452,6 +453,12 @@ function parseToken(body, config) {
     // ── Board Identity ──
     case 'HW':
       config.hwVersion = parseInt(parts[1]) || 0;
+      break;
+
+    case 'RELAY':
+      // ?RELAY,1 — device is a management relay (MgmtRelay); render a dedicated
+      // relay card outside the numbered WCB grid instead of a board section.
+      config.isRelay = (parseInt(parts[1]) || 0) === 1;
       break;
 
     case 'LED':
