@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.14:19.R.JUL.2026';
+const UI_VERSION = '15.14:24.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -502,7 +502,8 @@ function renderRelayCard(n) {
       boardsHtml +
       `<div class="cs-row"><span class="cs-v">` +
         `<button class="btn btn-ghost btn-sm" onclick="ensureTerminalPane(${n})">Terminal</button> ` +
-        `<button class="btn btn-primary btn-sm" onclick="relayRouteAll(${n})">Manage all via relay</button>` +
+        `<button class="btn btn-primary btn-sm" onclick="relayRouteAll(${n})">Manage all via relay</button> ` +
+        `<button class="btn btn-danger btn-sm" onclick="boardDisconnect(${n})">Disconnect</button>` +
       `</span></div>` +
     `</div>`;
 }
@@ -4794,6 +4795,16 @@ class BoardConnection {
       } else {
         termLog(this.boardIndex, 'Could not reconnect — board may need manual reconnect', 'err');
         showToast(`WCB ${this.boardIndex} did not come back — reconnect manually`, 'error');
+        // A management relay that never came back: free its slot + card so a real board of that
+        // number can surface later (the physical-unplug path doesn't run boardDisconnect's cleanup).
+        const rn = this.boardIndex;
+        if (_relaySlots.has(rn)) {
+          _relaySlots.delete(rn);
+          delete _relayNodes[rn];
+          delete boardConnections[rn];
+          document.getElementById(`relay-card-${rn}`)?.remove();
+          reconcileBoardGrid();
+        }
       }
     }
   }
@@ -5796,7 +5807,13 @@ async function boardPull(n, opts = {}) {
       // Anchor the relay at slot = its WCB number so the connection SLOT and mesh WCB
       // NUMBER stop colliding (the relay's DEVICE_ID is a value no real board uses). This
       // fixes the duplicate "WCB 19" and makes it list/route as "WCB <id>" via relay.
-      const relaySlot = config.wcbNumber || n;
+      let relaySlot = config.wcbNumber || n;
+      // Don't clobber a real board already LIVE at that number (nothing enforces the relay's id
+      // being unused). Keep the relay on its landed slot and warn, rather than orphan the board.
+      if (relaySlot !== n && boardConnections[relaySlot] !== conn && boardConnections[relaySlot]?.isConnected?.()) {
+        showToast(`Relay id ${relaySlot} is already a connected WCB — give the relay a spare id`, 'warning', 8000);
+        relaySlot = n;
+      }
       if (relaySlot !== n) {
         conn.boardIndex = relaySlot;
         boardConnections[relaySlot] = conn;
