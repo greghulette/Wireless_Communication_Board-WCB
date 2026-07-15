@@ -457,7 +457,7 @@
          Hidden when type='wcb'. -->
     <div class="section-body" id="b{N}-client-pane" style="display:none">
       <div class="field-group">
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 200px">
           <label>Client Alias <span class="wiz-hint" data-tip="Friendly name for this client device (e.g. Dome Sensor). Wizard-only — the client device has no Wizard-config of its own. ≤24 chars.">i</span></label>
           <input type="text" id="b{N}-client-alias" maxlength="24" placeholder="e.g. Dome Sensor" oninput="onClientAliasChange({N})">
         </div>
@@ -504,7 +504,7 @@
       <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px">
 
         <!-- WCB # (narrow fixed) -->
-        <div class="field" style="width:120px;flex-shrink:0">
+        <div class="field" style="flex:0 0 96px">
           <label>WCB # <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
             <!-- populated dynamically -->
@@ -512,13 +512,13 @@
         </div>
 
         <!-- Alias (friendly name, e.g. "Body" / "Dome") -->
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 180px">
           <label>Alias <span class="wiz-hint" data-tip="Friendly name for this WCB (e.g. Body, Dome). Shown in the header next to the WCB number. ≤24 chars. Leave blank for none.">i</span></label>
           <input type="text" id="b{N}-alias" maxlength="24" placeholder="e.g. Body" oninput="onAliasChange({N})">
         </div>
 
         <!-- Hardware Version (fixed width — never resizes) -->
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 210px">
           <label>Hardware Version <span class="wiz-hint" data-tip="Physical board revision. Determines which pins the serial ports and LED utilize.">i</span></label>
           <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
             <option value="0">— Select —</option>
@@ -558,7 +558,7 @@
         </div>
 
         <!-- Software Version (fills remaining space) -->
-        <div class="field" style="flex:1;min-width:180px">
+        <div class="field" style="flex:1 1 300px;min-width:300px">
           <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
           <div style="display:flex;align-items:center;gap:8px">
             <span id="b{N}-sw-version"
