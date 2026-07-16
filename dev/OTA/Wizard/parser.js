@@ -24,6 +24,7 @@ function createDefaultBoardConfig() {
     statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
     wcbNumber:    1,
     wcbQuantity:  1,
+    meshChannel:  1,       // ESP-NOW mesh channel (1–13); network-wide, all boards must match
     livePeerCount: null,   // PEERSLIVE telemetry (read-only; null = not reported)
     alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
     specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
@@ -139,6 +140,7 @@ function createDefaultSystemConfig() {
     // General settings — must match across all boards
     general: {
       wcbQuantity:    1,
+      meshChannel:    1,
       espnowPassword: 'change_me_or_risk_takeover',
       macOctet2:      '00',
       macOctet3:      '00',
@@ -475,6 +477,14 @@ function parseToken(body, config) {
     case 'WCBQ':
       config.wcbQuantity = parseInt(parts[1]) || 1;
       break;
+
+    case 'WCBCH': {
+      // ESP-NOW mesh channel (1–11). Clamp out-of-range to the default so a
+      // malformed line can't push an invalid channel back to the fleet.
+      const ch = parseInt(parts[1]);
+      config.meshChannel = (ch >= 1 && ch <= 11) ? ch : 1;
+      break;
+    }
 
     case 'PEERSLIVE':
       // Read-only telemetry from the board: live mesh membership (WCBQ floor +
@@ -1093,6 +1103,7 @@ function parseSystemFile(fileContent) {
   if (sections['GENERAL']) {
     const generalConfig = parseBackupString(sections['GENERAL']);
     system.general.wcbQuantity    = generalConfig.wcbQuantity;
+    system.general.meshChannel    = generalConfig.meshChannel ?? 1;
     system.general.espnowPassword = generalConfig.espnowPassword;
     system.general.macOctet2      = generalConfig.macOctet2;
     system.general.macOctet3      = generalConfig.macOctet3;
@@ -1134,6 +1145,7 @@ function parseSystemFile(fileContent) {
 // ─────────────────────────────────────────────
 function applyGeneralToBoard(general, board) {
   board.wcbQuantity    = general.wcbQuantity;
+  board.meshChannel    = general.meshChannel ?? 1;
   board.espnowPassword = general.espnowPassword;
   board.macOctet2      = general.macOctet2;
   board.macOctet3      = general.macOctet3;
@@ -1200,6 +1212,11 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
 
   if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
     add(`WCBQ,${config.wcbQuantity}`);
+
+  // ESP-NOW mesh channel (1–11). Network-wide; the firmware persists it and applies it
+  // on reboot, and every board must land on the same channel, so a push moves the whole fleet.
+  if (fullPush || !baseline || (baseline.meshChannel ?? 1) !== (config.meshChannel ?? 1))
+    add(`WCBCH,${config.meshChannel ?? 1}`);
 
   // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
   // network needs the same value so peer tables stay consistent. Canonical token
@@ -1514,6 +1531,7 @@ function diffConfigs(configA, configB) {
   check('hwVersion',      configA.hwVersion,      configB.hwVersion);
   check('wcbNumber',      configA.wcbNumber,       configB.wcbNumber);
   check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
+  check('meshChannel',    configA.meshChannel ?? 1, configB.meshChannel ?? 1);
   check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
   check('macOctet2',      configA.macOctet2,       configB.macOctet2);
   check('macOctet3',      configA.macOctet3,       configB.macOctet3);

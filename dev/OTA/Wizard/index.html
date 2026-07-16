@@ -92,6 +92,15 @@
               oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
               style="text-transform:uppercase" spellcheck="false">
           </div>
+          <div class="field advanced-only hidden">
+            <label>Mesh Channel <span class="wiz-hint tip-left" data-tip="ESP-NOW radio channel (1–11) for the whole mesh. The ESP32 has one radio, so every WCB and WCB_Client device must be on this channel or it can't hear the mesh. Leave at 1 unless channel 1 is congested or you must match a hosted access point — then move the ENTIRE fleet together: a push stages the change, and each board applies it on its next reboot. (12–13 are omitted — they need a WiFi-country override the firmware doesn't set.)">i</span></label>
+            <select id="g-meshch" onchange="onMeshChannelChange()">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+              <option value="10">10</option><option value="11">11</option>
+            </select>
+          </div>
         </div>
 
         <hr class="divider">

@@ -73,7 +73,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.15:23.R.JUL.2026';
+const UI_VERSION = '16.14:09.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1071,6 +1071,14 @@ function onGeneralMacChange() {
   _notifyGeneralChanged();
 }
 
+function onMeshChannelChange() {
+  const ch = parseInt(document.getElementById('g-meshch').value) || 1;
+  systemConfig.general.meshChannel = ch;
+  for (const n in boardConfigs) boardConfigs[n].meshChannel = ch;
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
 function validateMacOctet(input) {
   const val = input.value.trim().toUpperCase();
   const valid = /^[0-9A-F]{0,2}$/.test(val);
@@ -1302,6 +1310,7 @@ function onNavicoreIdChange() {
 
 // ─── General Settings Conflict Helpers ────────────────────────────
 const GENERAL_FIELD_LABELS = {
+  meshChannel:    'Mesh Channel',
   espnowPassword: 'ESP-NOW Password',
   macOctet2:      'MAC Octet 2',
   macOctet3:      'MAC Octet 3',
@@ -1322,6 +1331,7 @@ const GENERAL_FIELD_LABELS = {
 
 function extractGeneralFields(config) {
   return {
+    meshChannel:    config.meshChannel             ?? 1,
     espnowPassword: config.espnowPassword          ?? '',
     macOctet2:      config.macOctet2               ?? '00',
     macOctet3:      config.macOctet3               ?? '00',
@@ -1366,6 +1376,7 @@ function isDefaultNetworkSettings(fields) {
 function applyGeneralFieldsToBoardConfig(n, fields) {
   const cfg = boardConfigs[n];
   if (!cfg) return;
+  cfg.meshChannel    = fields.meshChannel;
   cfg.espnowPassword = fields.espnowPassword;
   cfg.macOctet2      = fields.macOctet2;
   cfg.macOctet3      = fields.macOctet3;
@@ -5147,6 +5158,7 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-password',  newFields.espnowPassword);
     set('g-mac2',      newFields.macOctet2);
     set('g-mac3',      newFields.macOctet3);
+    set('g-meshch',    newFields.meshChannel);
     set('g-delimiter', newFields.delimiter);
     set('g-funcchar',  newFields.funcChar);
     set('g-cmdchar',   newFields.cmdChar);
@@ -5160,6 +5172,7 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-etm-delay',   newFields.etmDelay);
     onGeneralPasswordChange();
     onGeneralMacChange();
+    onMeshChannelChange();
     onGeneralCmdCharChange();
     onETMToggle();
     onETMChecksumToggle();
@@ -6339,6 +6352,7 @@ async function boardGo(n, opts = {}) {
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
     config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
+    config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
     config.delimiter      = document.getElementById('g-delimiter').value || '^';
     config.funcChar       = document.getElementById('g-funcchar').value  || '?';
     config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -6719,6 +6733,7 @@ async function boardGoRemote(n, opts = {}) {
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
   config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
+  config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
   config.delimiter      = document.getElementById('g-delimiter').value || '^';
   config.funcChar       = document.getElementById('g-funcchar').value  || '?';
   config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -6999,6 +7014,7 @@ function syncGeneralFromConfig(config) {
   set('g-password',  config.espnowPassword);
   set('g-mac2',      config.macOctet2);
   set('g-mac3',      config.macOctet3);
+  set('g-meshch',    config.meshChannel || 1);
   set('g-delimiter', config.delimiter);
   set('g-funcchar',  config.funcChar);
   set('g-cmdchar',   config.cmdChar);
@@ -7006,6 +7022,7 @@ function syncGeneralFromConfig(config) {
   // Keep systemConfig.general in sync — el.value assignments above don't fire
   // oninput/onchange, so systemConfig.general would otherwise stay at its defaults.
   if (systemConfig?.general) systemConfig.general.wcbQuantity = config.wcbQuantity;
+  if (systemConfig?.general) systemConfig.general.meshChannel = config.meshChannel ?? 1;
   onGeneralPasswordChange();
   onGeneralMacChange();
   onGeneralCmdCharChange();
@@ -7052,6 +7069,7 @@ function captureGeneralDOMSnapshot() {
     password:  g('g-password'),
     mac2:      g('g-mac2'),
     mac3:      g('g-mac3'),
+    meshch:    g('g-meshch'),
     wcbq:      g('g-wcbq'),
     delimiter: g('g-delimiter'),
     funcchar:  g('g-funcchar'),
@@ -7066,6 +7084,7 @@ function restoreGeneralDOMSnapshot(snap) {
   set('g-password',  snap.password);
   set('g-mac2',      snap.mac2);
   set('g-mac3',      snap.mac3);
+  set('g-meshch',    snap.meshch);
   set('g-wcbq',      snap.wcbq);
   set('g-delimiter', snap.delimiter);
   set('g-funcchar',  snap.funcchar);
@@ -7091,6 +7110,7 @@ function commandStringNeedsReboot(cmdString) {
   if (u.includes('HW,'))    return true;   // Hardware version — pin map changes
   if (u.includes('WCB,'))   return true;   // Board number or quantity (WCBQ also matches)
   if (u.includes('MAC,'))   return true;   // MAC octets — ESP-NOW identity
+  if (u.includes('WCBCH,')) return true;   // Mesh channel — firmware applies it on reboot, not live
   if (u.includes('KYBER,')) return true;   // Kyber mode — serial port reservation
   // PWM INPUT mapping (MAP,PWM,Sx,...) — firmware auto-reboots, but we signal it too
   // PWM OUTPUT declaration (MAP,PWM,OUT,Sx) does NOT need a reboot
@@ -7107,6 +7127,7 @@ function commandStringChangesNetworkGroup(cmdString) {
   const u = cmdString.toUpperCase();
   if (u.includes('MAC,2,') || u.includes('MAC,3,')) return true;
   if (u.includes('EPASS,')) return true;
+  if (u.includes('WCBCH,')) return true;   // Mesh channel — rebooted remote board lands on a channel the relay isn't on
   return false;
 }
 
@@ -7119,6 +7140,7 @@ function confirmNetworkGroupChange(n, cmdString) {
     const changes = [];
     if (u.includes('MAC,2,') || u.includes('MAC,3,')) changes.push('MAC octets — ESP-NOW network group address');
     if (u.includes('EPASS,')) changes.push('ESP-NOW password');
+    if (u.includes('WCBCH,')) changes.push('Mesh channel — the rebooted board lands on a different radio channel');
 
     const list = changes.map(c => `<li style="margin-bottom:4px">${c}</li>`).join('');
     document.getElementById('network-group-change-body').innerHTML = `
@@ -7259,6 +7281,7 @@ function loadSystemFileContent(content) {
     generalBaseline = {
       sourceBoard: 'file',
       fields: extractGeneralFields({
+        meshChannel:    system.general.meshChannel,
         espnowPassword: system.general.espnowPassword,
         macOctet2:      system.general.macOctet2,
         macOctet3:      system.general.macOctet3,
@@ -7270,6 +7293,7 @@ function loadSystemFileContent(content) {
 
     syncGeneralFromConfig(Object.assign(WCBParser.createDefaultBoardConfig(), {
       wcbQuantity: system.general.wcbQuantity,
+      meshChannel: system.general.meshChannel,
       espnowPassword: system.general.espnowPassword,
       macOctet2: system.general.macOctet2,
       macOctet3: system.general.macOctet3,
@@ -7303,6 +7327,7 @@ function loadSystemFileContent(content) {
 // ─── File Export ──────────────────────────────────────────────────
 function exportSystemFile() {
   systemConfig.general.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
+  systemConfig.general.meshChannel    = parseInt(document.getElementById('g-meshch').value) || 1;
   systemConfig.general.espnowPassword = document.getElementById('g-password').value;
   systemConfig.general.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase();
   systemConfig.general.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase();
