@@ -3,6 +3,14 @@ name: Build WCB Firmware
 on:
   push:
     branches: [ '**' ]
+    # Only rebuild firmware when firmware source (or this workflow) changes.
+    # Wizard-only / docs-only pushes must NOT trigger a rebuild: the ESP32 build
+    # stamps a fresh timestamp into the image on every compile, so the bins always
+    # differ and the auto-commit step below would push new binaries and force a
+    # pull before the next push. Wizard deploys are handled by pages-deploy.yml.
+    paths:
+      - 'Code/**'
+      - '.github/workflows/build.yml'
 
 permissions:
   contents: write
