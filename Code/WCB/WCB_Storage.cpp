@@ -445,6 +445,36 @@ void saveWCBQuantityPreferences(int quantity) {
     Serial.printf("Saved WCB quantity: %d. Peer registrations reconciled live (no reboot needed).\n", Default_WCB_Quantity);
 }
 
+// Load the ESP-NOW mesh channel from preferences (default WCB_MESH_CHANNEL_DEFAULT).
+// A stale or out-of-range value falls back to the default so a corrupt NVS blob
+// can't strand the board off-channel.
+void loadMeshChannelFromPreferences() {
+    preferences.begin("wcb_config", true);
+    meshChannel = preferences.getUChar("mesh_channel", WCB_MESH_CHANNEL_DEFAULT);
+    preferences.end();
+    if (meshChannel < 1 || meshChannel > 11) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
+}
+
+// Save the ESP-NOW mesh channel to preferences. Applied on the NEXT REBOOT, NOT
+// live: switching the radio immediately would drop this board off the mesh mid-
+// configuration — fatal when the ?WCBCH arrived over ESP-NOW (Wizard relay / client
+// unicast), because the sender stays on the old channel and can no longer reach
+// this board to confirm or retry. Deferring keeps the whole fleet reachable on the
+// old channel until a coordinated reboot moves everyone at once. The boot path
+// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it.
+void saveMeshChannelToPreferences(uint8_t channel) {
+    if (channel < 1 || channel > 11) {
+        Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", channel);
+        return;
+    }
+    preferences.begin("wcb_config", false);
+    preferences.putUChar("mesh_channel", channel);
+    preferences.end();
+    meshChannel = channel;
+    Serial.printf("Mesh channel saved as %d — reboot to apply. Move ALL WCBs + clients "
+                  "to this channel together (one radio = one channel).\n", meshChannel);
+}
+
 // Load ESP-NOW password from preferences
 void loadESPNowPasswordFromPreferences() {
     preferences.begin("espnow_config", true); // Open in read mode

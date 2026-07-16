@@ -140,6 +140,7 @@ void enableControllerPeer(uint8_t id);   // enable + persist + live-register the
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
 uint8_t umac_oct3 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
+uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change
 
 // User-defined ESP-NOW password
 char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting. Change to match your setup here or via command line.  Lower case characters only!
@@ -175,7 +176,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_141455RJUL2026";
+String SoftwareVersion = "6.2.0_161409RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2591,6 +2592,7 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
+  emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
   // Derived live membership count (WCBQ floor ∪ WDP-learned peers). When
   // auto-join is on this can exceed WCBQ; the Wizard shows it read-only so the
   // operator sees what the board actually talks to, not just what they typed.
@@ -4280,6 +4282,22 @@ void processLocalCommand(const String &message) {
         saveWCBQuantityPreferences(qty);
         rebuildActivePeers();            // WCBQ is the membership floor
         syncActivePeerRegistrations();   // register/free peers live — no reboot needed
+        return;
+    }
+
+    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11) ---
+    // Persisted and applied on the NEXT REBOOT, not live (see saveMeshChannelToPreferences):
+    // a live radio switch would drop this board off the mesh mid-config — fatal for a
+    // relayed ?WCBCH, since the sender stays on the old channel. Range-check the plain
+    // int BEFORE the uint8_t cast so wrap values (e.g. 268→12) can't slip past. Push to
+    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once.
+    if (rootUpper == "WCBCH") {
+        int ch = args.toInt();
+        if (ch < 1 || ch > 11) {
+            Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", ch);
+            return;
+        }
+        saveMeshChannelToPreferences((uint8_t)ch);   // persists; applies on reboot
         return;
     }
 
@@ -6432,6 +6450,7 @@ void setup() {
   normalizeMaestroSelfSlots();
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
+  loadMeshChannelFromPreferences();   // must precede WiFi init below (esp_wifi_set_channel)
   loadSpecialPeerPreferences();
   loadSpecialPeerIDFromPreferences();
   loadMACPreferences();
@@ -6560,6 +6579,19 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // mesh. Pin power-save OFF so ESP-NOW TX/ACK is reliable. (Costs a few mA of
   // extra idle current — negligible for a mains/animatronics board.)
   esp_wifi_set_ps(WIFI_PS_NONE);
+  // Pin the ESP-NOW mesh channel explicitly. Peers are registered with channel 0
+  // ("current channel"), and an unassociated STA otherwise just defaults to 1 — so
+  // channel 1 was only ever an accident, not a guarantee. Make it deterministic and
+  // operator-selectable (?WCBCH / Wizard). One radio = one channel, so every WCB and
+  // WCB_Client must share meshChannel or they silently can't hear each other. Check
+  // the result: a rejected channel (e.g. 12–13 without a country override) would
+  // otherwise leave the radio on the wrong channel with no signal.
+  {
+    esp_err_t chErr = esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
+    if (chErr != ESP_OK)
+      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-11.\n",
+                    meshChannel, chErr);
+  }
   // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
   // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
   // but that silently cut ~11 dB of ESP-NOW link budget for every deployed

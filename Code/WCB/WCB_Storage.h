@@ -15,6 +15,16 @@
 #define WCB_TARGET_KYBER      98
 #endif
 
+// ESP-NOW mesh channel (1–11). The whole mesh AND every WCB_Client device must
+// share this channel — the ESP32 has one radio, so a board on a different channel
+// is silently unreachable. 1–11 only: 12–13 need a WiFi-country override the firmware
+// doesn't set (and aren't US-legal), so esp_wifi_set_channel would silently reject them.
+// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config).
+// Own guard so both WCB.ino and WCB_Storage.cpp see it.
+#ifndef WCB_MESH_CHANNEL_DEFAULT
+#define WCB_MESH_CHANNEL_DEFAULT 1
+#endif
+
 // =============== Global Variables ===============
 extern Preferences preferences;
 
@@ -22,6 +32,7 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
+extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–11); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
 extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
@@ -111,6 +122,8 @@ void loadWCBAlias();
 void saveWCBAlias(const String &alias);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
+void loadMeshChannelFromPreferences();
+void saveMeshChannelToPreferences(uint8_t channel);
 void loadSpecialPeerPreferences();
 void saveSpecialPeerPreferences(bool enabled);
 void loadSpecialPeerIDFromPreferences();
