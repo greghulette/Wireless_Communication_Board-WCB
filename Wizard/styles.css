@@ -322,6 +322,11 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   gap: 14px; margin-bottom: 18px;
 }
 .field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; min-width: 0; }
+/* An advanced-only field that still RESERVES its flex slot when hidden in simple
+   mode — stays invisible but keeps occupying space, so sibling boxes (e.g. the
+   ESP-NOW password) don't stretch to fill the gap. Higher specificity + !important
+   beats `.hidden { display:none !important }`. */
+.field.advanced-only.reserve-space.hidden { display: flex !important; visibility: hidden; }
 .field label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
   text-transform: uppercase; color: var(--text2); font-family: var(--sans);
