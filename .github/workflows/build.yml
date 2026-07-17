@@ -70,6 +70,17 @@ jobs:
           # sketch at Code/WCB/src/HumanCyborgRelationsAPI and pulled in with a
           # relative #include, so it compiles with no install step here — and can
           # never be shadowed by a different copy on the build machine.
+          #
+          # WcbCmd (shared ;-command translators, compiled by BOTH this firmware and
+          # NaviCore) is CLONED straight from GitHub — NOT `arduino-cli lib install` —
+          # so the CI builds against the LATEST push immediately, with zero Arduino
+          # Library Manager indexing lag (that index takes hours-to-a-day after a tag).
+          USERDIR="$(arduino-cli config get directories.user 2>/dev/null || true)"
+          [ -n "$USERDIR" ] || USERDIR="$HOME/Arduino"
+          LIBDIR="$USERDIR/libraries"
+          mkdir -p "$LIBDIR"
+          rm -rf "$LIBDIR/WcbCmd"
+          retry git clone --depth 1 https://github.com/greghulette/WcbCmd.git "$LIBDIR/WcbCmd"
           arduino-cli lib list
 
       # ─────────────────────────────────────────────────────────────────────

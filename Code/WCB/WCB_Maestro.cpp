@@ -1,6 +1,8 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_Maestro.h"
 #include "WCB_Storage.h"
+#include <WcbCmd.h>          // shared ;M/;A/;L/;H → native-byte translators (WcbMaestro::buildSubroutineFrame
+                            // is byte-identical to the inline {0xAA,id,0x27,seq}; same lib NaviCore compiles)
 
 extern bool maestroEnabled;
 extern int WCB_Number;
@@ -103,7 +105,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
       uint8_t portBit = (config.serialPort <= 7) ? (uint8_t)(1u << config.serialPort) : 0;
       if (portBit && !(sentLocalPorts & portBit)) {   // one write per physical port
         sentLocalPorts |= portBit;
-        uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
+        uint8_t command[4]; WcbMaestro::buildSubroutineFrame(maestroID, scriptNumber, command);
         Stream &targetSerial = getSerialStream(config.serialPort);
         // write() queues bytes into the hardware UART TX buffer (256 bytes).
         // flush() would block ~347–694 µs waiting for the 4 bytes to transmit —
@@ -139,14 +141,14 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   if (maestroID == 0) {
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
       if (maestroConfigs[i].configured && maestroConfigs[i].serialPort > 0) {
-        uint8_t command[] = {0xAA, maestroConfigs[i].maestroID, 0x27, scriptNumber};
+        uint8_t command[4]; WcbMaestro::buildSubroutineFrame(maestroConfigs[i].maestroID, scriptNumber, command);
         Stream &targetSerial = getSerialStream(maestroConfigs[i].serialPort);
         targetSerial.write(command, sizeof(command)); // no flush — UART drains async
       }
     }
     
     if (!isMaestroConfigured(WCB_Number)) {
-      uint8_t command[] = {0xAA, WCB_Number, 0x27, scriptNumber};
+      uint8_t command[4]; WcbMaestro::buildSubroutineFrame(WCB_Number, scriptNumber, command);
       Serial1.write(command, sizeof(command)); // no flush — UART drains async
     }
     
@@ -170,7 +172,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
       if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
           maestroConfigs[i].serialPort > 0) {
-        uint8_t command[] = {0xAA, maestroConfigs[i].maestroID, 0x27, scriptNumber};
+        uint8_t command[4]; WcbMaestro::buildSubroutineFrame(maestroConfigs[i].maestroID, scriptNumber, command);
         getSerialStream(maestroConfigs[i].serialPort).write(command, sizeof(command)); // no flush — UART drains async
         Serial.printf("→ Maestro %d (local, target 9): S%d, Script %d\n",
                       maestroConfigs[i].maestroID, maestroConfigs[i].serialPort, scriptNumber);
@@ -180,7 +182,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     // Backward-compat: no local Maestro configured yet → legacy S1 + WCB number
     // so boards that haven't been reconfigured still respond to target 9.
     if (!wroteLocal) {
-      uint8_t command[] = {0xAA, WCB_Number, 0x27, scriptNumber};
+      uint8_t command[4]; WcbMaestro::buildSubroutineFrame(WCB_Number, scriptNumber, command);
       Serial1.write(command, sizeof(command)); // no flush — UART drains async
       Serial.printf("→ Maestro (local, target 9): legacy S1 fallback, dev %d, Script %d\n",
                     WCB_Number, scriptNumber);
@@ -191,7 +193,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   // Legacy: targeting this board's own WCB number with nothing configured for
   // that ID — keep the old hardcoded S1 write for backward compatibility.
   if (maestroID == WCB_Number) {
-    uint8_t command[] = {0xAA, maestroID, 0x27, scriptNumber};
+    uint8_t command[4]; WcbMaestro::buildSubroutineFrame(maestroID, scriptNumber, command);
     Serial1.write(command, sizeof(command)); // no flush — UART drains async
     Serial.printf("→ Maestro %d: Legacy S1, Script %d\n", maestroID, scriptNumber);
     return;

@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <SoftwareSerial.h>
 #include "src/HumanCyborgRelationsAPI/hcr.h"  // WCB-patched HCR, bundled in-sketch (no lib install)
+#include <WcbCmd.h>          // shared ;H translator (HcrCodec) + fade (HcrFade) — same lib NaviCore runs
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
@@ -70,105 +71,42 @@ static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
 static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
 static unsigned long _hcrNextPollMs   = 0;  // next scheduled getUpdate() — own timer
 
-// ---- Volume shadow + per-channel fade state -----------------------------
-// HCR has no native fade; we synthesize a non-blocking ramp per channel,
-// stepped from processHCRTick(). _hcrVol holds the last *settled* volume
-// the WCB commanded for each channel (0=V,1=A,2=B) — used as the fade
-// target / restore point because polled getVolume() can be up to pollSec
-// stale. -1 = unknown (seed from poll, else default 100).
-static int _hcrVol[3] = { -1, -1, -1 };
+// ---- Volume + fade → the shared WcbCmd codec / fade module ------------------
+// HcrCodec is the SINGLE source of truth for per-channel commanded volume (0=V,
+// 1=A, 2=B; range 0-99 — the device/library range: HCRVocalizer SetEmotion/
+// SetVolume cap at 99). HcrFade synthesizes the non-blocking ramp the device has
+// no native command for. BOTH are the same code NaviCore runs, so an HCR fades /
+// steps volume identically whichever board drives it — one command source.
+static HcrCodec hcrCodec;
+static HcrFade  hcrFade;
 
-struct HcrFade {
-  bool     active    = false;
-  int      from      = 0;
-  int      to        = 0;
-  uint32_t startMs   = 0;
-  uint32_t durMs     = 0;
-  uint32_t nextStep  = 0;
-  int      lastSent  = -1;
-  bool     stopAtEnd = false;   // fade-out: StopWAV + restore when done
-  int      restoreTo = 0;
-};
-static HcrFade _fade[3];                       // by channel (0=V,1=A,2=B)
-static const uint16_t HCR_FADE_STEP_MS = 150;  // ramp granularity
-
-// Set a channel volume AND record it as the settled shadow (user intent).
+// Set a channel volume through the shared codec (updates its shadow = user intent).
 static void hcrSetVol(int ch, int v) {
-  if (ch < 0 || ch > 2 || !_hcr) return;
-  v = constrain(v, 0, 100);
-  _hcr->SetVolume(ch, v);
-  _hcrVol[ch] = v;
+  if (ch < 0 || ch > 2 || !_hcrPort) return;
+  hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 99));   // fn 17 = SetVolume
 }
 
-// Best-effort "current" volume: settled shadow, else last poll, else 100.
+// Current commanded volume — the codec's shadow (seeded 50, exact after the first
+// SetVolume on this port; matches NaviCore's shared shadow).
 static int hcrCurVol(int ch) {
-  if (ch >= 0 && ch <= 2 && _hcrVol[ch] >= 0) return _hcrVol[ch];
-  if (_hcr) { int v = (int)(_hcr->getVolume(ch) + 0.5f);
-              if (v > 0) return constrain(v, 0, 100); }
-  return 100;
+  int v = hcrCodec.getVol(ch);
+  return (v >= 0) ? v : 50;
 }
 
-static void hcrCancelFade(int ch) {
-  if (ch >= 0 && ch <= 2) _fade[ch].active = false;
-}
+static void hcrCancelFade(int ch) { hcrFade.cancel(ch); }
 
-// Begin a ramp on ch from->to over durSec. stopAtEnd: on reaching the end,
-// StopWAV(ch) then restore volume to restoreTo (fade-out semantics).
+// Begin a ramp on ch from->to over durSec (delegates to the shared HcrFade; every
+// step writes through hcrCodec so its shadow and the emitted bytes stay in sync).
+// stopAtEnd: on reaching the end, StopWAV(ch) then restore volume to restoreTo.
 static void hcrStartFade(int ch, int from, int to, int durSec,
                          bool stopAtEnd, int restoreTo) {
-  if (ch < 0 || ch > 2 || !_hcr) return;
-  from = constrain(from, 0, 100);
-  to   = constrain(to,   0, 100);
-  HcrFade &f = _fade[ch];
-  f.active = false;                       // supersede any in-flight fade
-  if (durSec <= 0) {                      // instant — one write, no anchor
-    _hcr->SetVolume(ch, to);
-    if (stopAtEnd) { _hcr->StopWAV(ch); hcrSetVol(ch, restoreTo); }
-    else           { _hcrVol[ch] = to; }
-    return;
-  }
-  // Anchor the start point only if it differs from current — avoids an
-  // extra packet when from already matches what's on the wire.
-  if (from != hcrCurVol(ch)) _hcr->SetVolume(ch, from);
-  f.from = from; f.to = to;
-  f.startMs = millis(); f.durMs = (uint32_t)durSec * 1000UL;
-  f.nextStep = 0; f.lastSent = from;
-  f.stopAtEnd = stopAtEnd; f.restoreTo = restoreTo;
-  f.active = true;
-  if (debugHCR) Serial.printf("[HCR-DBG] fade start ch=%d %d->%d %ds%s\n",
-                              ch, from, to, durSec,
-                              stopAtEnd ? " (stop+restore)" : "");
+  if (!_hcrPort) return;
+  hcrFade.start(hcrCodec, *_hcrPort, ch, from, to, durSec, stopAtEnd, restoreTo);
 }
 
 // Step all active fades — called every loop tick (non-blocking).
 static void hcrStepFades() {
-  if (!_hcr) return;
-  uint32_t now = millis();
-  for (int ch = 0; ch < 3; ch++) {
-    HcrFade &f = _fade[ch];
-    if (!f.active) continue;
-    uint32_t elapsed = now - f.startMs;
-    if (elapsed >= f.durMs) {                 // done
-      _hcr->SetVolume(ch, f.to);
-      if (f.stopAtEnd) {
-        _hcr->StopWAV(ch);
-        _hcr->SetVolume(ch, f.restoreTo);
-        _hcrVol[ch] = f.restoreTo;
-      } else {
-        _hcrVol[ch] = f.to;
-      }
-      f.active = false;
-      if (debugHCR) Serial.printf("[HCR-DBG] fade done ch=%d -> %d%s\n",
-                                  ch, f.stopAtEnd ? f.restoreTo : f.to,
-                                  f.stopAtEnd ? " (stopped+restored)" : "");
-      continue;
-    }
-    if (now < f.nextStep) continue;
-    f.nextStep = now + HCR_FADE_STEP_MS;
-    int v = f.from + (int)((long)(f.to - f.from) * (long)elapsed / (long)f.durMs);
-    v = constrain(v, 0, 100);
-    if (v != f.lastSent) { _hcr->SetVolume(ch, v); f.lastSent = v; }
-  }
+  if (_hcrPort) hcrFade.tick(hcrCodec, *_hcrPort);
 }
 
 // ==================== Port-conflict Query ================================
@@ -326,32 +264,23 @@ void processHCRRuntimeCommand(const String &message) {
     int fn    = hcrField(body, 1).toInt();
     int chan  = hcrField(body, 2).toInt();
     int track = hcrField(body, 3).toInt();
-    // Bounds-check chan for the fns that index a fixed library array with no guard
-    // of their own — but per-function, since the ranges differ: emotion fns
-    // (SetEmotion 2 / Trigger 3 / Stimulate 4) allow 0-3, WAV fns (PlayWAV 14 /
-    // StopWAV 16) allow 0-2 (channel array is "VAB"), and the rest ignore chan
-    // (SetVolume 17 self-guards). Don't validate the chan-less fns, so a stray 3rd
-    // field can't reject them.
-    int maxChan = (fn == 2 || fn == 3 || fn == 4)  ? 3
-                : (fn == 14 || fn == 16)            ? 2
-                : -1;
-    if (maxChan >= 0 && (chan < 0 || chan > maxChan)) {
-      Serial.printf("[HCR] FN %d channel %d out of range (0-%d)\n", fn, chan, maxChan);
+    // Route the numeric RC-Controller convention through the shared HcrCodec — one
+    // source of truth with NaviCore (both compile WcbHcr.cpp). normalize() owns the
+    // per-fn ranges (rejects out-of-range chan/track, emotion chan 4, track>99) and
+    // covers fns 2-13, 16, 17, 18, 19. fn 14 (PlayWAV) stays on the HCRVocalizer
+    // library to keep its 150 ms per-channel debounce — its bytes are identical to
+    // the codec's PlayWAV.
+    if (fn == 14) {
+      if (chan < 0 || chan > 2) {
+        Serial.printf("[HCR] FN 14 channel %d out of range (0-2)\n", chan);
+        return;
+      }
+      if (_hcr) { _hcr->PlayWAV(chan, track); _hcr->update(); }
+    } else if (_hcrPort && hcrCodec.emit(*_hcrPort, (uint8_t)fn, chan, track)) {
+      if (fn == 2 && _hcr) _hcr->update();   // SetEmotion: nudge an immediate status refresh (matches old)
+    } else {
+      Serial.printf("[HCR] FN %d,%d,%d rejected (unknown fn or out-of-range)\n", fn, chan, track);
       return;
-    }
-    switch (fn) {
-      case 2:  _hcr->SetEmotion(chan, track);   _hcr->update(); break;
-      case 3:  _hcr->Trigger(chan, track);                      break;
-      case 4:  _hcr->Stimulate(chan, track);                    break;
-      case 5:  _hcr->Overload();                                break;
-      case 6:  _hcr->Muse();                                    break;
-      case 8:  _hcr->Stop();                                    break;
-      case 9:  _hcr->StopEmote();                               break;
-      case 11: _hcr->ResetEmotions();                           break;
-      case 14: _hcr->PlayWAV(chan, track);      _hcr->update(); break;
-      case 16: _hcr->StopWAV(chan);                             break;
-      case 17: _hcr->SetVolume(chan, track);                    break;
-      default: Serial.printf("[HCR] Unknown fn=%d\n", fn);      return;
     }
     if (debugHCR || debugEnabled) Serial.printf("[HCR-DBG] FN %d,%d,%d\n", fn, chan, track);
     return;

@@ -1,6 +1,7 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_WLED.h"
 #include "WCB_Storage.h"
+#include <WcbCmd.h>          // shared ;L → WLED-JSON translator (WcbWled::build) — same lib NaviCore runs
 #include <Preferences.h>
 #include <SoftwareSerial.h>
 
@@ -32,19 +33,8 @@ static bool wledBaudValid(int b) {
   return b == 9600 || b == 19200 || b == 38400 || b == 57600 || b == 115200;
 }
 
-// Split a comma list, return field idx (0-based), trimmed. "" if absent.
-static String wledField(const String &s, int idx) {
-  int start = 0;
-  for (int i = 0; i < idx; i++) {
-    int c = s.indexOf(',', start);
-    if (c < 0) return "";
-    start = c + 1;
-  }
-  int end = s.indexOf(',', start);
-  String f = (end < 0) ? s.substring(start) : s.substring(start, end);
-  f.trim();
-  return f;
-}
+// (wledField comma-split helper moved into the shared WcbWled — the ;L verb
+//  parsing now lives entirely in WcbWled::build.)
 
 // ==================== Slot helpers (mirror the Maestro model) ============
 
@@ -106,82 +96,15 @@ static void wledSend(Stream &out, const String &json) {
 // Translate one ;L verb (ON/OFF/BRI/PS/…) to WLED JSON and write it to `port`.
 // `cmd` is the verb + args WITHOUT the leading L / id (e.g. "PS,2", "JSON,{...}").
 static void wledDispatchLocal(int port, const String &cmd) {
-  String body = cmd; body.trim();
-  if (body.length() == 0) { Serial.println("[WLED] Empty ;L command"); return; }
-
-  String verb = wledField(body, 0);
-  String vU   = verb; vU.toUpperCase();
-  Stream &out = getSerialStream(port);
-
-  // ---- JSON: raw passthrough — everything after "JSON," verbatim ---------
-  // (may contain commas / braces, so do NOT field-split it). Escape hatch for
-  // anything the compact verbs don't cover.
-  if (vU == "JSON") {
-    int firstComma = body.indexOf(',');
-    String payload = (firstComma < 0) ? "" : body.substring(firstComma + 1);
-    payload.trim();
-    if (payload.length() == 0) { Serial.println("[WLED] JSON needs a payload"); return; }
-    wledSend(out, payload);
-    return;
-  }
-
-  if (vU == "ON")     { wledSend(out, "{\"on\":true}");  return; }
-  if (vU == "OFF")    { wledSend(out, "{\"on\":false}"); return; }
-  if (vU == "TOGGLE") { wledSend(out, "{\"on\":\"t\"}"); return; }
-
-  if (vU == "BRI") {
-    int bri = constrain(wledField(body, 1).toInt(), 0, 255);
-    wledSend(out, "{\"bri\":" + String(bri) + "}");
-    return;
-  }
-
-  if (vU == "PS") {            // recall preset (primary workflow)
-    String n = wledField(body, 1);
-    if (n.length() == 0) { Serial.println("[WLED] Usage: ;L[id],PS,<preset#>"); return; }
-    wledSend(out, "{\"ps\":" + String(n.toInt()) + "}");
-    return;
-  }
-
-  if (vU == "COL") {           // solid colour on segment 0: RRGGBB or RRGGBBWW
-    String hex = wledField(body, 1);
-    if (hex.startsWith("#")) hex = hex.substring(1);
-    if (hex.length() != 6 && hex.length() != 8) {
-      Serial.println("[WLED] Usage: ;L[id],COL,RRGGBB  (or RRGGBBWW for RGBW)");
-      return;
-    }
-    unsigned long v = strtoul(hex.c_str(), nullptr, 16);
-    int r, g, b, w = -1;
-    if (hex.length() == 8) { r = (v >> 24) & 0xFF; g = (v >> 16) & 0xFF; b = (v >> 8) & 0xFF; w = v & 0xFF; }
-    else                   { r = (v >> 16) & 0xFF; g = (v >> 8)  & 0xFF; b = v & 0xFF; }
-    String col = "[" + String(r) + "," + String(g) + "," + String(b);
-    if (w >= 0) col += "," + String(w);
-    col += "]";
-    wledSend(out, "{\"seg\":[{\"col\":[" + col + "]}]}");
-    return;
-  }
-
-  if (vU == "FX") {            // effect by index, optional speed + intensity
-    String n = wledField(body, 1);
-    if (n.length() == 0) { Serial.println("[WLED] Usage: ;L[id],FX,<index>[,<speed>,<intensity>]"); return; }
-    String seg = "{\"fx\":" + String(n.toInt());
-    String sx = wledField(body, 2);
-    String ix = wledField(body, 3);
-    if (sx.length()) seg += ",\"sx\":" + String(constrain(sx.toInt(), 0, 255));
-    if (ix.length()) seg += ",\"ix\":" + String(constrain(ix.toInt(), 0, 255));
-    seg += "}";
-    wledSend(out, "{\"seg\":[" + seg + "]}");
-    return;
-  }
-
-  if (vU == "PAL") {           // palette by index
-    String n = wledField(body, 1);
-    if (n.length() == 0) { Serial.println("[WLED] Usage: ;L[id],PAL,<index>"); return; }
-    wledSend(out, "{\"seg\":[{\"pal\":" + String(n.toInt()) + "}]}");
-    return;
-  }
-
-  Serial.printf("[WLED] Unknown ;L command: %s  (ON/OFF/TOGGLE/BRI/PS/COL/FX/PAL/JSON)\n",
-                verb.c_str());
+  // Verb → WLED JSON is the shared translator (WcbWled::build) — byte-identical to the
+  // old inline branches (verified against the golden vectors), the SAME lib NaviCore
+  // runs. build() prints the identical usage / unknown-verb messages to the diag
+  // (&Serial) and returns "" when there's nothing to send. Routing (the ;L<id> parse,
+  // slot lookup, remote ESP-NOW forward), ?WLED config, NVS and port reservation all
+  // stay in the firmware. wledSend keeps the [WLED-DBG] TX log here.
+  String json = WcbWled::build(cmd, &Serial);
+  if (json.length() == 0) return;   // empty / unknown / bad args — message already printed
+  wledSend(getSerialStream(port), json);
 }
 
 void processWLEDRuntimeCommand(const String &message) {

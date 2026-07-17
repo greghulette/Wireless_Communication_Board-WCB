@@ -1,6 +1,7 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_MP3.h"
 #include "WCB_Storage.h"
+#include <WcbCmd.h>          // shared ;A translator (Mp3Codec) — byte-identical to inline; same lib NaviCore runs
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int          WCB_Number;
@@ -26,14 +27,41 @@ extern bool         isSerialPortUsedForWLED(int port); // WCB_WLED.cpp — for t
 MP3Config mp3Config = {};
 uint8_t   mp3Volume = 20;   // current tracked volume shadow
 
-// Per-play callback — runtime only, not persisted
+// Per-play callback — runtime only, not persisted.
+// NOTE: with the shared Mp3Codec (below) the codec now OWNS the pending-ONFIN key
+// internally; this String is retained only for printMP3Settings' "Pending ONFIN"
+// display (now always empty) and is otherwise vestigial. The codec fires onFinished
+// (→ recallCommandSlot) directly from poll(), matching the old behavior.
 static String _mp3PendingCallback = "";
 
-// Response accumulation state (persistent across loop() calls)
-static String  _mp3RespBuf   = "";
-static bool    _mp3InStatus  = false;  // accumulating a '=' status string
-static bool    _mp3InTrigger = false;  // accumulating 'M' + 3-byte trigger report
-static uint8_t _mp3TriggerBytes = 0;
+// ── Shared translator (WcbCmd) — the SAME Mp3Codec NaviCore compiles ────────────
+// Turns the ;A verbs into the MP3 Trigger's native serial bytes, byte-identical to
+// the old inline sendMP3Raw path. Routing, the ?MP3 config/NVS, and the
+// "not configured" guard stay here in the firmware.
+static Mp3Codec mp3Codec;
+
+// Wire the codec's host hooks ONCE (plain function pointers; safe to re-assign).
+static void wireMp3Callbacks() {
+  mp3Codec.onVolumeChanged = [](uint8_t v){          // VOL / VOLUP / VOLDN moved the shadow
+    mp3Volume = v;                                   // mirror it — backup/?MP3 read mp3Volume
+    saveMP3Settings();
+    Serial.printf("[MP3] Volume → %d\n", v);         // user-facing feedback (was "up/down → n")
+  };
+  mp3Codec.onFinished = [](const char* key){ recallCommandSlot(String(key), 0); };                       // ONFIN
+  mp3Codec.onError    = [](){ if (strlen(mp3Config.onErrCmd) > 0) recallCommandSlot(String(mp3Config.onErrCmd), 0); };
+}
+
+// Bind the codec to the resolved MP3 port and push the volume shadow into it (no
+// emit). Call at boot AND after every ?MP3 reconfigure/clear — otherwise the codec
+// would play a STALE volume after ?MP3,…:V<new> or write the OLD port after a port
+// change (the byte/target divergences the guide's load-only snippet missed).
+static void mp3BindCodec() {
+  if (mp3Config.configured && mp3Config.serialPort > 0)
+    mp3Codec.begin(getSerialStream(mp3Config.serialPort), &Serial);
+  mp3Codec.setVolume(mp3Volume);
+}
+
+// (RX accumulation state moved into the shared Mp3Codec — see processMP3Responses.)
 
 // ==================== Port-conflict Query ================================
 
@@ -78,169 +106,23 @@ void processMP3AudioCommand(const String &message) {
     return;
   }
 
-  // ---- PLAY,n[,ONFIN,key]  or  PLAY,n[,key]  --------------------------
-  // ---- (sends volume first, then play command) -------------------------
-  if (restUpper.startsWith("PLAY,")) {
-    String playArgs = rest.substring(5);  // everything after "PLAY,"
-
-    // Split track number from optional callback
-    int commaIdx = playArgs.indexOf(',');
-    int trackNum;
-    String callbackKey = "";
-
-    if (commaIdx == -1) {
-      // No callback — just a track number
-      trackNum = playArgs.toInt();
-    } else {
-      trackNum = playArgs.substring(0, commaIdx).toInt();
-      String afterTrack = playArgs.substring(commaIdx + 1);  // "ONFIN,key" or "key"
-      String afterUpper = afterTrack;
-      afterUpper.toUpperCase();
-
-      if (afterUpper.startsWith("ONFIN,")) {
-        callbackKey = afterTrack.substring(6);  // explicit: strip "ONFIN,"
-      } else {
-        callbackKey = afterTrack;               // implicit: the whole thing is the key
-      }
-      callbackKey.trim();
-    }
-
-    if (trackNum < 1 || trackNum > 255) {
-      Serial.println("[MP3] PLAY: track number must be 1-255");
-      return;
-    }
-
-    // Store callback (overwrites any previous pending callback)
-    _mp3PendingCallback = callbackKey;
-
-    // Send volume first, then play
-    sendMP3Raw('v', mp3Volume);
-    sendMP3Raw('t', trackNum);
-
-    if (debugEnabled) {
-      Serial.printf("[MP3] Play track %d  vol=%d", trackNum, mp3Volume);
-      if (callbackKey.length() > 0) Serial.printf("  → callback: %s", callbackKey.c_str());
-      Serial.println();
-    }
-    return;
+  // ── Wire bytes + volume shadow + ONFIN pending → the shared Mp3Codec ────────────
+  // Byte-identical to the old inline sendMP3Raw path: 'v'+shadow then 't'/'p', the
+  // VOLUP/VOLDN ±5 step math with the 0/64 clamps, COUNT/VER — the SAME codec
+  // NaviCore runs. handle() stores the ONFIN key internally (rejecting an
+  // out-of-range PLAY BEFORE it touches pending, exactly like the old code) and
+  // returns false only on an unknown/out-of-range verb. `rest` is already
+  // 'A'-stripped + trimmed, so there's no trailing-whitespace mismatch.
+  //
+  // Console note: the per-verb debug logs (Play/Next/…) and the specific
+  // range-reject strings are consolidated into the one help line below; volume
+  // feedback now comes from onVolumeChanged ("[MP3] Volume → n"). Wire bytes and
+  // the RX-side console are unchanged.
+  if (!mp3Codec.handle(rest.c_str())) {
+    Serial.printf("[MP3] Unknown or invalid audio command: %s\n", rest.c_str());
+    Serial.println("  Valid: PLAY,n[,ONFIN,key]  PLAY,n[,key]  PLAYFS,n[,ONFIN,key]");
+    Serial.println("         STOP  NEXT  PREV  VOL,n (0-64)  VOLUP  VOLDN  COUNT  VER");
   }
-
-  // ---- PLAYFS,n[,ONFIN,key]  or  PLAYFS,n[,key]  ----------------------
-  if (restUpper.startsWith("PLAYFS,")) {
-    String playArgs = rest.substring(7);  // everything after "PLAYFS,"
-
-    int commaIdx = playArgs.indexOf(',');
-    int trackIdx;
-    String callbackKey = "";
-
-    if (commaIdx == -1) {
-      trackIdx = playArgs.toInt();
-    } else {
-      trackIdx = playArgs.substring(0, commaIdx).toInt();
-      String afterTrack = playArgs.substring(commaIdx + 1);
-      String afterUpper = afterTrack;
-      afterUpper.toUpperCase();
-
-      if (afterUpper.startsWith("ONFIN,")) {
-        callbackKey = afterTrack.substring(6);
-      } else {
-        callbackKey = afterTrack;
-      }
-      callbackKey.trim();
-    }
-
-    if (trackIdx < 0 || trackIdx > 255) {
-      Serial.println("[MP3] PLAYFS: index must be 0-255");
-      return;
-    }
-
-    _mp3PendingCallback = callbackKey;
-
-    // Send volume first, then play
-    sendMP3Raw('v', mp3Volume);
-    sendMP3Raw('p', trackIdx);
-
-    if (debugEnabled) {
-      Serial.printf("[MP3] Play FS index %d  vol=%d", trackIdx, mp3Volume);
-      if (callbackKey.length() > 0) Serial.printf("  → callback: %s", callbackKey.c_str());
-      Serial.println();
-    }
-    return;
-  }
-
-  // ---- STOP  (start/stop toggle) ---------------------------------------
-  if (restUpper == "STOP") {
-    sendMP3Raw('O');
-    if (debugEnabled) Serial.println("[MP3] Start/Stop toggle");
-    return;
-  }
-
-  // ---- NEXT ------------------------------------------------------------
-  if (restUpper == "NEXT") {
-    sendMP3Raw('F');
-    if (debugEnabled) Serial.println("[MP3] Next track");
-    return;
-  }
-
-  // ---- PREV ------------------------------------------------------------
-  if (restUpper == "PREV") {
-    sendMP3Raw('R');
-    if (debugEnabled) Serial.println("[MP3] Previous track");
-    return;
-  }
-
-  // ---- VOL,n  (0=loudest, 64=inaudible ceiling) ------------------------
-  if (restUpper.startsWith("VOL,")) {
-    int n = rest.substring(4).toInt();
-    if (n < 0 || n > 64) {
-      Serial.println("[MP3] VOL: value must be 0-64 (0=loudest, 64=inaudible)");
-      return;
-    }
-    mp3Volume = (uint8_t)n;
-    sendMP3Raw('v', mp3Volume);
-    saveMP3Settings();
-    if (debugEnabled) Serial.printf("[MP3] Volume set to %d\n", mp3Volume);
-    return;
-  }
-
-  // ---- VOLUP  (louder — decrease value, floor 0) -----------------------
-  if (restUpper == "VOLUP") {
-    mp3Volume = (mp3Volume <= 5) ? 0 : mp3Volume - 5;
-    sendMP3Raw('v', mp3Volume);
-    saveMP3Settings();
-    Serial.printf("[MP3] Volume up → %d\n", mp3Volume);
-    return;
-  }
-
-  // ---- VOLDN  (quieter — increase value, ceiling 64) -------------------
-  if (restUpper == "VOLDN") {
-    mp3Volume = (mp3Volume >= 59) ? 64 : mp3Volume + 5;
-    sendMP3Raw('v', mp3Volume);
-    saveMP3Settings();
-    Serial.printf("[MP3] Volume down → %d\n", mp3Volume);
-    return;
-  }
-
-  // ---- COUNT  (request total track count) ------------------------------
-  if (restUpper == "COUNT") {
-    sendMP3Raw('S', '1');
-    if (debugEnabled) Serial.println("[MP3] Requesting track count...");
-    return;
-  }
-
-  // ---- VER  (request firmware version string) --------------------------
-  if (restUpper == "VER") {
-    sendMP3Raw('S', '0');
-    if (debugEnabled) Serial.println("[MP3] Requesting firmware version...");
-    return;
-  }
-
-  // ---- Unknown ---------------------------------------------------------
-  Serial.printf("[MP3] Unknown audio command: %s\n", rest.c_str());
-  Serial.println("  Valid: PLAY,n[,ONFIN,key]  PLAY,n[,key]  PLAYFS,n[,ONFIN,key]");
-  Serial.println("         STOP  NEXT  PREV");
-  Serial.println("         VOL,n (0-64)  VOLUP  VOLDN");
-  Serial.println("         COUNT  VER");
 }
 
 // ==================== Response Reader ====================================
@@ -250,75 +132,10 @@ void processMP3AudioCommand(const String &message) {
 
 void processMP3Responses() {
   if (!mp3Config.configured || mp3Config.serialPort == 0) return;
-
-  Stream &s = getSerialStream(mp3Config.serialPort);
-
-  while (s.available()) {
-    uint8_t b = s.read();
-
-    // ---- 'M' + 3 bytes: quiet-mode trigger report — silently discard ---
-    if (_mp3InTrigger) {
-      _mp3TriggerBytes++;
-      if (_mp3TriggerBytes >= 3) {
-        _mp3InTrigger    = false;
-        _mp3TriggerBytes = 0;
-      }
-      continue;
-    }
-
-    // ---- '=' + ASCII + CR: status response (version / track count) -----
-    if (_mp3InStatus) {
-      if (b == '\r' || b == '\n') {
-        Serial.printf("[MP3] Status: %s\n", _mp3RespBuf.c_str());
-        _mp3RespBuf  = "";
-        _mp3InStatus = false;
-      } else {
-        _mp3RespBuf += (char)b;
-      }
-      continue;
-    }
-
-    // ---- Single-byte responses -----------------------------------------
-    switch (b) {
-
-      case 'X':   // Track finished normally
-        Serial.println("[MP3] Track finished");
-        if (_mp3PendingCallback.length() > 0) {
-          recallCommandSlot(_mp3PendingCallback, 0);
-          _mp3PendingCallback = "";
-        }
-        _mp3RespBuf = "";
-        break;
-
-      case 'x':   // Track cancelled (stop during playback)
-        Serial.println("[MP3] Track cancelled");
-        _mp3PendingCallback = "";  // clear — don't fire on cancel
-        _mp3RespBuf = "";
-        break;
-
-      case 'E':   // Error — track not found or device fault
-        Serial.println("[MP3] Error: track not found or device error");
-        _mp3PendingCallback = "";  // clear — don't fire ONFIN on error
-        _mp3RespBuf = "";
-        if (strlen(mp3Config.onErrCmd) > 0) {
-          recallCommandSlot(String(mp3Config.onErrCmd), 0);
-        }
-        break;
-
-      case '=':   // Start of status string
-        _mp3RespBuf  = "";
-        _mp3InStatus = true;
-        break;
-
-      case 'M':   // Start of quiet-mode trigger report (M + 3 bytes)
-        _mp3InTrigger    = true;
-        _mp3TriggerBytes = 0;
-        break;
-
-      default:    // Unknown byte — silently ignore
-        break;
-    }
-  }
+  // RX pump moved into the shared codec — identical X/x/E/=/M handling and identical
+  // "[MP3] Track finished / cancelled / Error / Status" console output (verified
+  // word-for-word), and it fires onFinished (ONFIN → recallCommandSlot) + onError.
+  mp3Codec.poll();
 }
 
 // ==================== Configuration (?MP3,...) ===========================
@@ -339,6 +156,7 @@ void clearMP3Config() {
   _mp3PendingCallback  = "";
 
   saveMP3Settings();
+  mp3BindCodec();   // resync the codec's volume shadow to the default (port released)
   Serial.println("[MP3] Local configuration cleared");
   if (mp3Config.remoteWCB > 0)
     Serial.printf("  (still routing ;A to WCB%d — %cMP3,REMOTE,OFF to stop)\n",
@@ -545,6 +363,7 @@ void configureMP3(const String &args) {
 
   saveMP3Settings();
   saveSerialLabelToPreferences(serialPort, "MP3 Trigger");
+  mp3BindCodec();   // rebind codec to the new port + push the new volume (no emit)
 
   Serial.printf("[MP3] Configured: S%d at %d baud  default volume=%d\n",
                 serialPort, baudRate, volume);
@@ -647,6 +466,9 @@ void loadMP3Settings() {
   } else if (mp3Config.remoteWCB > 0) {
     Serial.printf("[MP3] Loaded: routes ;A to WCB%d\n", mp3Config.remoteWCB);
   }
+
+  wireMp3Callbacks();   // one-time host hooks (volume mirror, ONFIN, onError)
+  mp3BindCodec();       // bind the codec to the resolved port + sync the volume shadow
 }
 
 // Auto-learn the MP3 host from a WDP advert. First-host-wins + persisted: never
