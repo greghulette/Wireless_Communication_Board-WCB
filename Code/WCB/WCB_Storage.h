@@ -40,6 +40,7 @@ extern uint8_t WCB_SPECIAL_PEER_ID;   // special peer ID (NaviCore), default 20,
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
+extern bool broadcastToS0;   // echo broadcast output to S0/USB (opt-in, persisted)
 extern unsigned long baudRates[5];
 extern char CommandCharacter;
 extern char commandDelimiter;

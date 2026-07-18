@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_141455RJUL2026                                  *****////
+///*****                                          Version 6.2.0_181352RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_171020RJUL2026";
+String SoftwareVersion = "6.2.0_181352RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -578,6 +578,7 @@ TaskHandle_t identifyTaskHandle = NULL;  // Prevents overlapping ?IDENTIFY runs
 
 // Broadcast enabled settings for each serial port (modifiable)
 bool serialBroadcastEnabled[5] = {true, true, true, true, true};
+bool broadcastToS0 = false;   // opt-in: also echo broadcast output to S0/USB (incl. when it arrived on S0). Persisted.
 String serialPortLabels[5] = {"", "", "", "", ""};
 
 // Current baud rates (modifiable)
@@ -2617,6 +2618,7 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // Broadcast settings
   for (int i = 0; i < 5; i++)
     emit("BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF"), true);
+  emit("BCAST,OUT,S0," + String(broadcastToS0 ? "ON" : "OFF"), true);   // S0/USB output (opt-in)
   for (int i = 0; i < 5; i++)
     emit("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"), true);
 
@@ -4129,13 +4131,21 @@ void processLocalCommand(const String &message) {
             portStr.toUpperCase();
             String state = args.substring(thirdComma + 1);
             state.toUpperCase();
+            bool enable = (state == "ON");
+
+            // S0/USB is an OUTPUT-only target (echoes even when the broadcast came in on S0).
+            if (direction == "OUT" && portStr == "S0") {
+                broadcastToS0 = enable;
+                saveBroadcastSettingsToPreferences();
+                Serial.printf("Broadcast OUTPUT on S0 (USB): %s\n", enable ? "Enabled" : "Disabled");
+                return;
+            }
 
             int port = portStr.substring(1).toInt();
             if (port < 1 || port > 5) {
-                Serial.println("Invalid port. Must be S1-S5");
+                Serial.println("Invalid port. Must be S1-S5 (S0 = OUT only)");
                 return;
             }
-            bool enable = (state == "ON");
 
             if (direction == "IN") {
                 blockBroadcastFrom[port - 1] = !enable;
@@ -4750,9 +4760,11 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabel(message.substring(4).toInt());
     } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
-        updateBroadcastInputSetting(message.substring(3));
+        updateBroadcastInputSetting(message);   // pass FULL "SBISxON" — the fn strips "SBI" itself
+                                                 // (was double-stripped here → whole command was dead)
     } else if (message.startsWith("sbo") || message.startsWith("SBO")) {
-        updateBroadcastOutputSetting(message.substring(3));
+        updateBroadcastOutputSetting(message);  // pass FULL "SBOSxON" — the fn strips "SBO" itself
+                                                 // (was double-stripped here → whole command was dead)
     } else if (message == "reset_broadcast" || message == "RESET_BROADCAST") {
         resetBroadcastSettingsNamespace();
     } else if (message.startsWith("statsreset") || message.startsWith("STATSRESET")) {
@@ -5083,16 +5095,24 @@ void updateBroadcastOutputSetting(const String &message) {
         enable = true;
     }
     
-    int port = portStr.toInt();
-    
-    if (port < 1 || port > 5) {
-        Serial.println("Invalid port number. Must be 1-5");
+    // S0/USB output (opt-in): echoes even when the broadcast arrived on S0.
+    if (portStr == "0") {
+        broadcastToS0 = enable;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("S0/USB broadcast output: %s\n", enable ? "ENABLED" : "DISABLED");
         return;
     }
-    
+
+    int port = portStr.toInt();
+
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port number. Must be 0-5 (0 = USB)");
+        return;
+    }
+
     serialBroadcastEnabled[port - 1] = enable;
     saveBroadcastSettingsToPreferences();
-    
+
     Serial.printf("Serial%d broadcast output: %s\n", port, enable ? "ENABLED" : "DISABLED");
 }
 
@@ -5719,6 +5739,14 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
+    }
+
+    // Opt-in: also echo the broadcast out S0/USB. UNLIKE S1-S5 this fires even when the
+    // broadcast arrived on S0 (no i==sourceID suppression) — a USB host that injects a
+    // broadcast still sees it echoed back on S0.
+    if (broadcastToS0) {
+        Serial.println(cmd);
+        if (debugEnabled) { Serial.printf("Sent to S0/USB: %s\n", cmd.c_str()); }
     }
 
     // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage)

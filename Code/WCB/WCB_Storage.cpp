@@ -334,6 +334,7 @@ void saveBroadcastSettingsToPreferences() {
         String key = "S" + String(i + 1);
         preferences.putInt(key.c_str(), serialBroadcastEnabled[i] ? 1 : 0);
     }
+    preferences.putInt("S0", broadcastToS0 ? 1 : 0);   // S0/USB broadcast output (opt-in)
     preferences.end();
 }
 
@@ -344,6 +345,7 @@ void loadBroadcastSettingsFromPreferences() {
         int value = preferences.getInt(key.c_str(), 1);  // default = 1 (enabled)
         serialBroadcastEnabled[i] = (value == 1);
     }
+    broadcastToS0 = (preferences.getInt("S0", 0) == 1);   // S0/USB output defaults OFF
     preferences.end();
 }
 

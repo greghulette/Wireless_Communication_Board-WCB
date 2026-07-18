@@ -56,6 +56,10 @@ function createDefaultBoardConfig() {
       { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
     ],
 
+    // S0/USB broadcast output — global opt-in (NOT a per-serial-port setting). Round-tripped
+    // through backup import/export; set on the board via ?SBOS0 / ?BCAST,OUT,S0. No UI toggle.
+    broadcastToS0: false,
+
     // Kyber
     kyber: {
       mode:          'none',  // 'none' | 'local' | 'remote'
@@ -571,13 +575,17 @@ function parseToken(body, config) {
 
     // ── Broadcast Output ──
     case 'BCAST': {
-      // ?BCAST,OUT,S1,ON  or  ?BCAST,IN,S1,OFF
+      // ?BCAST,OUT,S1,ON  or  ?BCAST,IN,S1,OFF   (S0 = OUT only — USB echo)
       const direction = upperParts[1]; // 'OUT' or 'IN'
-      const portStr   = upperParts[2]; // 'S1' - 'S5'
+      const portStr   = upperParts[2]; // 'S0' - 'S5'
       const state     = upperParts[3]; // 'ON' or 'OFF'
+      const enabled   = state === 'ON';
+      if (direction === 'OUT' && portStr === 'S0') {
+        config.broadcastToS0 = enabled;   // global USB echo — no per-port slot
+        break;
+      }
       const portIdx   = parseInt(portStr?.replace('S', '')) - 1;
       if (portIdx >= 0 && portIdx < 5) {
-        const enabled = state === 'ON';
         if (direction === 'OUT') config.serialPorts[portIdx].broadcastOut = enabled;
         if (direction === 'IN')  config.serialPorts[portIdx].broadcastIn  = enabled;
       }
@@ -1278,6 +1286,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (fullPush || !base || base.broadcastIn !== cur.broadcastIn)
       add(`BCAST,IN,S${i+1},${cur.broadcastIn ? 'ON' : 'OFF'}`);
   }
+  // S0/USB broadcast output — global (no per-port slot). Preserve on round-trip.
+  if (fullPush || (baseline?.broadcastToS0 ?? false) !== (config.broadcastToS0 ?? false))
+    add(`BCAST,OUT,S0,${config.broadcastToS0 ? 'ON' : 'OFF'}`);
 
   // ── Kyber ──
   // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
@@ -1548,6 +1559,7 @@ function diffConfigs(configA, configB) {
   check('sequences',      configA.sequences,       configB.sequences);
   check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
+  check('broadcastToS0',  configA.broadcastToS0 ?? false, configB.broadcastToS0 ?? false);
 
   for (let i = 0; i < 5; i++) {
     const pa = configA.serialPorts[i];
