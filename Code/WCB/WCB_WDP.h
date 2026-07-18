@@ -34,6 +34,7 @@
 #define WDP_PROTO_VERSION 0x01
 #define WDP_MAX_MAESTRO   9      // per-board local Maestro IDs advertised
 #define WDP_MAX_WLED      9      // per-board local WLED IDs advertised
+#define WDP_MAX_PWMTARGET 10     // remote PWM output (WCB,port) targets advertised
 
 // Capability bitmap (WDP_TLV_CAPFLAGS, uint16 little-endian on the wire).
 #define WDP_CAP_HCR         0x0001
@@ -63,6 +64,11 @@ struct WdpNeighbor {
   uint8_t       wledBaudCode[WDP_MAX_WLED];   // baud code per id (WDP_TLV_WLED_CFG); 0xFF = unknown
   uint8_t       wledCount;
   char          portLabels[5][25];            // advertised serial-port (interface) labels; "" = unlabeled
+  // ---- Receiver-side PWM auto-config ---------------------------------------
+  // Ports on THIS board (1-5) that this neighbor drives as a remote PWM output
+  // (decoded from its WDP_TLV_PWMTARGET). We self-configure them as output ports.
+  uint8_t       pwmSelfPorts[5];
+  uint8_t       pwmSelfCount;
   // ---- Client-device fields (WCB_Client / WDP-DA identity) ----------------
   // A WCB_Client device advertises WDP_TLV_DEVTYPE instead of the WCB fields.
   // When isClient is set, `alias` holds the device's canonical type name and the

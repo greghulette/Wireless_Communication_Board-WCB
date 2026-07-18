@@ -45,6 +45,7 @@ void loadPWMMappingsFromPreferences();
 void processPWMPassthrough();
 void configureRemotePWMOutput(int serialPort);
 bool isSerialPortUsedForPWMInput(int port);
+bool canUsePWMOnPort(int port);   // false if the port is reserved (e.g. Kyber) and can't do PWM
 
 
 extern int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS];  // Ports configured as PWM output only

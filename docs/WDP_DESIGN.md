@@ -88,6 +88,9 @@ Unknown TLV types are skipped via the length prefix — forward compatible in bo
 | `0x0B` | DEVTYPE | device type name — marks the sender as a **client device**; doubles as its display name | client |
 | `0x0C` | HWREV | hardware revision string, ≤15 | client |
 | `0x0D` | CAPTAGS | space‑separated capability tags, ≤48 | client |
+| `0x0E` | MAESTRO_CFG | `[id][baudCode]` pairs — Maestro id+baud, for remote-proxy auto-config | WCB |
+| `0x0F` | WLED_CFG | `[id][baudCode]` pairs — WLED id+baud, for remote-proxy auto-config | WCB |
+| `0x10` | PWMTARGET | `[targetWCB][port]` pairs — this board's REMOTE PWM outputs; each named board self-configures that output port | WCB |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -225,6 +228,13 @@ On **first learn** of a client device whose DEVTYPE is a controller (`NaviCore`,
    controller is never overridden.
 2. If this board has a physically attached Maestro (and isn't the Kyber‑local host), flip
    Maestro‑remote on so the controller can drive it over the mesh.
+
+On **every advert** from a confirmed peer whose `PWMTARGET` TLV (§3) names this board as a
+remote **PWM output** target: if that port isn't already a PWM output and isn't reserved
+(e.g. Kyber), reserve/configure it live — pin set + persisted to NVS, no reboot. Receiver-side
+(the target owns its own config), so a board that was powered off when the mapping was created
+still self-configures the instant it hears the advert. Idempotent; **add-only** — a deleted
+mapping's port is cleared by the existing `;MAP,PWM,CLEAR,OUT` push, not by advert absence.
 
 Plus the membership auto‑join of §6. Further capability‑driven auto‑config (Maestro routing
 tables, single‑owner trigger routing for HCR/MP3/WLED) is under design — see §10.

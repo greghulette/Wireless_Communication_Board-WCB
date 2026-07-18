@@ -77,6 +77,10 @@ static unsigned long wdpNextDirtyCheckMs = 0;
 #define WDP_TLV_DEVTYPE  0x0B    // string — canonical device type name (from the vocabulary)
 #define WDP_TLV_HWREV    0x0C    // string — hardware revision (distinct from numeric HWVER)
 #define WDP_TLV_CAPTAGS  0x0D    // string — space-separated capability tags (optional)
+#define WDP_TLV_PWMTARGET 0x10   // [targetWCB(1)][port(1)] pairs — this board's REMOTE PWM
+                                 // outputs. Each named board self-configures that output port
+                                 // (receiver-side), so a target that was powered off when the
+                                 // mapping was made still sets itself up on its next advert.
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -159,6 +163,35 @@ static int wdpLocalWLEDCfg(uint8_t *ids, uint8_t *codes) {
   return n;
 }
 
+// This board's PWM REMOTE-output targets: the (WCB,port) pairs its active PWM
+// mappings drive on OTHER boards. Local outputs (wcbNumber 0 or self) are excluded
+// — the local board configures those itself. Fills [targetWCB][port] records for
+// WDP_TLV_PWMTARGET so each targeted board self-configures its output port even if
+// it was powered off when the mapping was created. Deduped; capped at
+// WDP_MAX_PWMTARGET pairs. Unlike Maestro/WLED (which advertise INCOMING routes for
+// others to proxy TO this board), this advertises OUTGOING config for the target
+// board to apply to itself.
+static int wdpLocalPwmTargets(uint8_t *rec) {
+  int n = 0;
+  for (int i = 0; i < MAX_PWM_MAPPINGS && n < WDP_MAX_PWMTARGET; i++) {
+    if (!pwmMappings[i].active) continue;
+    for (int j = 0; j < pwmMappings[i].outputCount && n < WDP_MAX_PWMTARGET; j++) {
+      int wcb  = pwmMappings[i].outputs[j].wcbNumber;
+      int port = pwmMappings[i].outputs[j].serialPort;
+      if (wcb <= 0 || wcb == WCB_Number) continue;   // local output — no advert needed
+      if (port < 1 || port > 5)          continue;
+      bool dup = false;                              // collapse duplicate (wcb,port)
+      for (int k = 0; k < n; k++)
+        if (rec[k * 2] == wcb && rec[k * 2 + 1] == port) { dup = true; break; }
+      if (dup) continue;
+      rec[n * 2]     = (uint8_t)wcb;
+      rec[n * 2 + 1] = (uint8_t)port;
+      n++;
+    }
+  }
+  return n;
+}
+
 // ==================== TLV encode (our own advert) ========================
 
 static int putTLV(uint8_t *buf, int o, int max, uint8_t type, const uint8_t *val, int len) {
@@ -216,6 +249,16 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
       for (int i = 0; i < n; i++) { rec[i * 2] = ids[i]; rec[i * 2 + 1] = codes[i]; }
       o = putTLV(buf, o, max, WDP_TLV_WLED_CFG, rec, n * 2);
     }
+  }
+  // PWM remote-output targets (see wdpLocalPwmTargets): tell every board this one
+  // drives to reserve its output port, so the target self-configures even if it was
+  // powered off when the mapping was created. Advertised BEFORE the (cosmetic) port
+  // labels so this functional config wins the payload budget. Only sent when this
+  // board actually has remote PWM outputs.
+  {
+    uint8_t rec[WDP_MAX_PWMTARGET * 2];
+    int n = wdpLocalPwmTargets(rec);
+    if (n > 0) o = putTLV(buf, o, max, WDP_TLV_PWMTARGET, rec, n * 2);
   }
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
@@ -467,6 +510,20 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
         }
         break;
       }
+      case WDP_TLV_PWMTARGET: {   // [targetWCB][port] pairs — the sender's remote PWM outputs.
+        // Keep only the ports that name THIS board; we self-configure them below.
+        int pairs = len / 2;
+        for (int i = 0; i < pairs; i++) {
+          uint8_t tgt = val[i * 2];
+          uint8_t prt = val[i * 2 + 1];
+          if (tgt != (uint8_t)WCB_Number || prt < 1 || prt > 5) continue;
+          bool dup = false;
+          for (int k = 0; k < nb.pwmSelfCount; k++)
+            if (nb.pwmSelfPorts[k] == prt) { dup = true; break; }
+          if (!dup && nb.pwmSelfCount < 5) nb.pwmSelfPorts[nb.pwmSelfCount++] = prt;
+        }
+        break;
+      }
       default: break;                     // unknown TLV — skipped by its length (forward-compatible)
     }
     o += 2 + len;
@@ -555,6 +612,23 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     // ;H / ;A route there across reboots. First-host-wins (see hcr/mp3AutoAddRemote).
     if (nb.capFlags & WDP_CAP_HCR) hcrAutoAddRemote((uint8_t)senderWCB);
     if (nb.capFlags & WDP_CAP_MP3) mp3AutoAddRemote((uint8_t)senderWCB);
+
+    // Receiver-side PWM output auto-config: the sender named THIS board as a remote
+    // PWM output target (decoded into nb.pwmSelfPorts). Reserve/configure each such
+    // port locally if we haven't already — this is the fix for "a board powered off
+    // when the mapping was made never got configured." addPWMOutputPort is idempotent
+    // (no-op if the port is already an output) and applies LIVE — pin config + NVS,
+    // NO reboot (unlike a mapping add or a port removal).
+    for (int i = 0; i < nb.pwmSelfCount; i++) {
+      uint8_t prt = nb.pwmSelfPorts[i];
+      if (isSerialPortPWMOutput(prt)) continue;   // already an output — nothing to do
+      if (!canUsePWMOnPort(prt))      continue;   // reserved (e.g. Kyber): can't configure — skip
+                                                  // SILENTLY so we don't re-log/re-attempt every
+                                                  // advert (the guard above would never flip).
+      Serial.printf("[WDP] WCB%d drives our S%d — auto-configuring PWM output\n",
+                    senderWCB, prt);
+      addPWMOutputPort(prt);   // usable + not-yet-output ⇒ guaranteed to take (output count < 5)
+    }
   }
 }
 
