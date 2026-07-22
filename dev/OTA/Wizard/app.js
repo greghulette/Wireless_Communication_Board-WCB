@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '22.09:50.R.JUL.2026';
+const UI_VERSION = '22.11:40.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -2524,7 +2524,7 @@ function onWLEDChange(n) {
 }
 
 // Rebuild config.wleds + serial-port claims from the live WLED rows. Releases all
-// prior WLED claims first, then re-claims each row's port (label 'WLED', broadcast
+// prior WLED claims first, then re-claims each row's port (label 'WLED <id>', broadcast
 // disabled both ways — mirrors the firmware's wledReserveLocalPort).
 function syncWLEDsToConfig(n) {
   const config = boardConfigs[n];
@@ -2536,7 +2536,9 @@ function syncWLEDsToConfig(n) {
       sp.claimedBy    = null;
       sp.broadcastIn  = true;
       sp.broadcastOut = true;
-      if (sp.label === 'WLED') {
+      // Clear only the auto-generated label — legacy 'WLED' or the new 'WLED <id>' —
+      // so a user's custom label on the port is preserved across a re-sync.
+      if (/^WLED( \d+)?$/.test(sp.label)) {
         sp.label = '';
         const labelDom = document.getElementById(`b${n}-s${i + 1}-label`);
         if (labelDom) labelDom.value = '';
@@ -2554,7 +2556,7 @@ function syncWLEDsToConfig(n) {
       config.wleds.push({ id, port, baud });
       const sp = config.serialPorts[port - 1];
       sp.claimedBy    = { type: 'wled', id };
-      sp.label        = 'WLED';
+      sp.label        = 'WLED ' + id;
       sp.broadcastOut = false;
       sp.broadcastIn  = false;
       sp.baud         = baud;   // keep the serial port baud consistent with ?BAUD
@@ -2564,7 +2566,7 @@ function syncWLEDsToConfig(n) {
       const baudDom  = document.getElementById(`b${n}-s${port}-baud`);
       if (baudDom)  baudDom.value  = baud;
       const labelDom = document.getElementById(`b${n}-s${port}-label`);
-      if (labelDom) labelDom.value = 'WLED';
+      if (labelDom) labelDom.value = 'WLED ' + id;
     }
   });
 
@@ -11157,12 +11159,19 @@ function _wdpKind(nd) {
 // neighbor. Auto-joined (learned) peers get a Forget button — removing one is
 // deliberately a user action (membership is permanent otherwise).
 function _wdpPeerCell(nd) {
-  if (nd.peer === null || nd.client) return '<span class="wdp-sub">&mdash;</span>';
+  if (nd.peer === null) return '<span class="wdp-sub">&mdash;</span>';
+  // TEMPORARY peer: live but never persisted; it drops itself on silence
+  // and is gone on reboot. Shown for clients too (a temp management relay is a client).
+  if (nd.peer === 4)
+    return `<span class="wdp-peer-learned">temporary</span>` +
+           `<button class="wdp-btn-forget" onclick="wdpForgetPeer(${nd.n})" ` +
+           `title="Drop this temporary peer now. It re-adopts if it keeps advertising as temporary, and never persists across a reboot.">✕</button>`;
   if (nd.peer === 2)
     return `<span class="wdp-peer-learned">auto-joined</span>` +
            `<button class="wdp-btn-forget" onclick="wdpForgetPeer(${nd.n})" ` +
            `title="Remove WCB ${nd.n} from this board's learned peer list (it will re-join on the next adverts if auto-join is on)">✕</button>`;
   if (nd.peer === 1) return '<span class="wdp-peer-floor">configured</span>';
+  if (nd.client) return '<span class="wdp-sub">&mdash;</span>';   // non-member client (e.g. controller)
   return '<span class="wdp-sub">not peered</span>';
 }
 
