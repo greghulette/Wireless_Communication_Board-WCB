@@ -39,6 +39,24 @@ static struct {
 #define OTA_LOCAL_SESSION     1         // fixed session id for the local USB path
 #define OTA_LOCAL_MAX_CHUNK   1024      // max decoded bytes per ?OTALOCAL,DATA line
 #define OTA_PROGRESS_STEP     65536UL   // print a progress line every 64 KB
+#define OTA_LOCAL_DEFAULT_BAUD 115200UL // USB serial baud outside an OTA transfer
+
+// A local USB OTA can temporarily raise the USB serial baud for the byte transfer
+// (the 115200 terminal rate is the throughput bottleneck — base64 image @115200 is
+// minutes). 0 = at the default; >0 = bumped, so teardown knows to restore it. The
+// host drives the switch via ?OTALOCAL,BAUD (see processOtaLocalCommand).
+static uint32_t s_otaXferBaud = 0;
+
+// Return the USB serial to the default baud if a transfer bumped it. Idempotent.
+// Called from otaAbortSession (covers ABORT + the 30 s idle timeout); the END path
+// reboots instead, which resets the baud in setup().
+static void otaRestoreLocalBaud() {
+  if (s_otaXferBaud) {
+    Serial.flush();                                // drain anything still queued
+    Serial.updateBaudRate(OTA_LOCAL_DEFAULT_BAUD);
+    s_otaXferBaud = 0;
+  }
+}
 
 uint8_t otaLocalChipFamily() {
 #if   defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -72,6 +90,7 @@ void otaAbortSession(const char *reason) {
     Serial.printf("[OTA] aborted: %s (current app intact)\n", reason ? reason : "");
   }
   otaTeardown();
+  otaRestoreLocalBaud();   // if a transfer bumped the USB baud, return it to 115200
 }
 
 void checkOtaTimeout() {
@@ -210,6 +229,34 @@ void processOtaLocalCommand(const String &args) {
 
   if (sub == "STATUS" || sub.isEmpty()) { otaPrintStatus(); return; }
 
+  if (sub == "BAUD") {
+    // rest = "<baud>" — temporarily raise THIS board's USB serial rate for the transfer.
+    // Handshake: ACK at the CURRENT baud + flush so the host reads it, THEN switch our
+    // UART; the host switches its side after the ACK. Auto-restored to 115200 on reboot
+    // (END OK), on END failure, or via otaAbortSession (ABORT/timeout).
+    //
+    // REQUIRE an active session: the only restore paths are tied to the session
+    // (END reboot / END-fail restore / otaAbortSession from ABORT or the ota.active-gated
+    // idle timeout). A bump with no session in flight would have nothing to undo it and
+    // could strand the baud, so reject it. The host always bumps AFTER BEGIN.
+    if (!ota.active) {
+      Serial.printf("[OTA:BAUD,ERR,%lu]\n", (unsigned long)OTA_LOCAL_DEFAULT_BAUD);
+      return;
+    }
+    uint32_t baud = (uint32_t) rest.toInt();
+    if (baud != 115200 && baud != 230400 && baud != 460800 &&
+        baud != 921600 && baud != 1000000) {
+      Serial.printf("[OTA:BAUD,ERR,%lu]\n", (unsigned long)OTA_LOCAL_DEFAULT_BAUD);
+      return;
+    }
+    Serial.printf("[OTA:BAUD,OK,%lu]\n", (unsigned long)baud);   // ack at the OLD baud
+    Serial.flush();                                              // ensure it's on the wire
+    delay(20);
+    Serial.updateBaudRate(baud);
+    s_otaXferBaud = (baud == OTA_LOCAL_DEFAULT_BAUD) ? 0 : baud;
+    return;
+  }
+
   if (sub == "BEGIN") {
     // rest = "<imageSize>,<chipFamily>"
     int p = rest.indexOf(',');
@@ -258,6 +305,11 @@ void processOtaLocalCommand(const String &args) {
       ESP.restart();
     } else {
       Serial.println("[OTA:END,ERR]");
+      // A failed finalize does NOT reboot and has already cleared the session, so the
+      // ota.active-gated idle timeout can't restore the baud. Restore it here (flush
+      // sends [OTA:END,ERR] at the high baud first) so a bumped transfer that fails
+      // verify — the documented too-fast-bridge outcome — can't strand the USB rate.
+      otaRestoreLocalBaud();
     }
     return;
   }

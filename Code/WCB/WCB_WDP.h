@@ -26,7 +26,7 @@
 //               (learned_peers), MAC-octet fingerprinted.
 //
 //   Commands  : ?WDP,LIST | ?WDP,<n> | ?WDP,DETAIL,<n> | ?WDP,STATUS |
-//               ?WDP,DUMP | ?WDP,DA | ?WDP,ON | ?WDP,OFF |
+//               ?WDP,DUMP | ?WDP,DA | ?WDP,POLL | ?WDP,ON | ?WDP,OFF |
 //               ?WDP,AUTOJOIN[,ON|,OFF] | ?WDP,ADD,<id> | ?WDP,FORGET,<id> |
 //               ?WDP,CLEAR
 // -----------------------------------------------------------------------
@@ -99,10 +99,13 @@ void processWdpCommand(const String &args);
 int wdpResolveAlias(const char *alias);
 
 // ---- Capability routing ---------------------------------------------------
-// Returns the WCB number that OWNS a capability (WDP_CAP_HCR/MP3/WLED/...):
-// the lowest-numbered ONLINE board advertising it, self included. 0 if nobody
-// (not even this board) owns it. Used as the LIVE fallback when routing ;H/;A
-// triggers whose host hasn't been persisted yet. See routeStoredOrCap() in WCB.ino.
+// Returns the WCB number that OWNS a capability bit: the lowest-numbered ONLINE
+// board advertising it, self included. 0 if nobody (not even this board) owns it.
+// This is generic over any WDP_CAP_* bit, but only the single-owner, ID-LESS
+// capabilities route through it today — HCR (;H) and MP3 (;A) — as the LIVE
+// fallback when no host is persisted (or a pinned host is offline). WLED and
+// Maestro are NOT elected here: they are ID-addressed (;L<id> / ;M<id>) and route
+// per-id to the board that advertised that id. See routeStoredOrCap() in WCB.ino.
 int wdpCapOwner(uint16_t capBit);
 
 // ---- NVS -----------------------------------------------------------------

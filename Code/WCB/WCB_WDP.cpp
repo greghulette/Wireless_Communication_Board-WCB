@@ -81,6 +81,9 @@ static unsigned long wdpNextDirtyCheckMs = 0;
                                  // outputs. Each named board self-configures that output port
                                  // (receiver-side), so a target that was powered off when the
                                  // mapping was made still sets itself up on its next advert.
+#define WDP_TLV_SOLICIT  0x11    // len 0 — a "please advertise now" request (?WDP,POLL). Carries
+                                 // no facts; a receiver schedules a prompt advert and does NOT
+                                 // record the solicit as a neighbor (it would wipe real facts).
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -296,6 +299,32 @@ static void wdpSendAdvert() {
   if (debugMGMT) Serial.printf("[WDP] advert sent (%d B)\n", len);   // mesh-mgmt chatter — under ?DEBUG,MGMT
 }
 
+// Broadcast a bare SOLICIT — "everyone advertise now" — so a fresh/renamed board or an
+// operator opening the Wizard can populate the whole mesh in ~1 s instead of waiting up
+// to the 60 s backstop. Carries no facts (see WDP_TLV_SOLICIT).
+static void wdpSendSolicit() {
+  uint8_t p[8];
+  int o = 0;
+  p[o++] = WDP_MAGIC;
+  p[o++] = WDP_PROTO_VERSION;
+  p[o++] = WDP_TLV_SOLICIT;
+  p[o++] = 0;                // len 0
+  p[o++] = WDP_TLV_END;
+  wdpBroadcast(p, o);
+  if (debugMGMT) Serial.println("[WDP] solicit broadcast");
+}
+
+// A solicit was heard — arm ONE prompt advert, staggered by board number so a fleet
+// doesn't answer in lockstep (a broadcast storm). Reuses the boot-burst timer: arm it
+// if idle, or pull an already-pending burst earlier; never lengthens a larger burst.
+static void wdpArmSolicitedAdvert() {
+  unsigned long now    = millis();
+  unsigned long jitter = (unsigned long)((WCB_Number % 16) * 40);   // 0..600 ms stagger
+  if (wdpBootLeft < 1) { wdpBootLeft = 1; wdpNextBootMs = now + jitter; }
+  else if ((long)((now + jitter) - wdpNextBootMs) < 0) wdpNextBootMs = now + jitter;
+  if (debugMGMT) Serial.println("[WDP] solicited — advertising shortly");
+}
+
 void wdpTick() {
   if (!wdpEnabled || !etmEnabled) return;   // WDP rides the ETM broadcast layer
   unsigned long now = millis();
@@ -432,6 +461,22 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   if (!wdpEnabled) return;
   if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   if (cmd[0] != (uint8_t)WDP_MAGIC || cmd[1] != WDP_PROTO_VERSION) return;
+
+  // Solicitation check FIRST — a bare SOLICIT carries no facts, so decoding it as an
+  // advert (memset + rebuild below) would erase the sender's real neighbor record. If
+  // this packet contains a SOLICIT TLV, arm a prompt advert and return without touching
+  // the table. (Auto-join isn't triggered here either — a solicit isn't an advert.)
+  {
+    int s = 2;
+    while (s + 2 <= 200) {
+      uint8_t ty = cmd[s];
+      if (ty == WDP_TLV_END) break;
+      int ln = cmd[s + 1];
+      if (s + 2 + ln > 200) break;
+      if (ty == WDP_TLV_SOLICIT) { wdpArmSolicitedAdvert(); return; }
+      s += 2 + ln;
+    }
+  }
 
   WdpNeighbor &nb = wdpNeighbors[senderWCB - 1];
   bool wasValid = nb.valid;
@@ -598,10 +643,24 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // old id-only advert (0xFF), a garbled out-of-range code, or baud 0 all map to
   // wdpCodeToBaud()==0, and there's nothing safe to configure a proxy with.
   if (wdpAutoJoin && !nb.isClient && wcbPeerActive[senderWCB - 1]) {
+    bool maestroChanged = false;
     for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
       uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);
       if (baud == 0) continue;   // unknown / garbled / baud-0 — nothing to configure
-      maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud);
+      if (maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud))
+        maestroChanged = true;
+    }
+    // If THIS board is the Kyber host forwarding by target, a newly auto-learned
+    // remote Maestro must land in kyberTargets[] too — otherwise forwardDataFromKyber
+    // never broadcasts the sabre stream to the just-discovered board until a manual
+    // ?KYBER,LOCAL re-issue. Add-only so a manual remote-port stays put; broadcast
+    // mode (kyberUseTargeting==false) already reaches remote Maestros, so skip it.
+    if (maestroChanged && Kyber_Local && kyberUseTargeting) {
+      if (reconcileKyberTargetsFromMaestroConfigs() > 0) {
+        saveKyberTargets();
+        if (debugEnabled)
+          Serial.println("[WDP] Kyber targets updated for auto-learned remote Maestro");
+      }
     }
     for (int i = 0; i < nb.wledCount && i < WDP_MAX_WLED; i++) {   // same rules for WLED
       uint32_t baud = wdpCodeToBaud(nb.wledBaudCode[i]);
@@ -627,8 +686,17 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
                                                   // advert (the guard above would never flip).
       Serial.printf("[WDP] WCB%d drives our S%d — auto-configuring PWM output\n",
                     senderWCB, prt);
-      addPWMOutputPort(prt);   // usable + not-yet-output ⇒ guaranteed to take (output count < 5)
+      addPWMOutputPort(prt, (uint8_t)senderWCB);  // tag the source so it can self-heal on removal
     }
+    // Self-heal: if the sender previously drove one of our ports but its FRESH advert
+    // no longer names it, the mapping was deleted — clear the stale output config we
+    // auto-added for it (add-only ports become self-healing). Runs on this live advert,
+    // so the source is definitively present; a stale/offline source never triggers a
+    // clear. Only clears ports tagged to THIS source — manual outputs are never touched.
+    // Clears the list + NVS + broadcast flags now; the pin fully returns to serial on the
+    // next reboot (same as the manual ;MAP,PWM,CLEAR,OUT, minus its forced reboot — we
+    // must not auto-reboot just because a peer dropped a mapping).
+    reconcileWdpAutoPWMOutputs((uint8_t)senderWCB, nb.pwmSelfPorts, nb.pwmSelfCount);
   }
 }
 
@@ -809,6 +877,42 @@ static void wdpMaestroStr(const WdpNeighbor &nb, char *out, int max) {
   }
 }
 
+// Dot-joined "<id>@<baud>" list for the machine dump ("-" when none). Falls back to
+// a bare id when the baud code is unknown (0xFF — a legacy id-only advert). Used for
+// the supplementary [WDPX:...] line so the Wizard can show remote WLED nodes and the
+// per-device baud that the terse MAESTRO= field omits. Values contain no ',' or ']'.
+static void wdpIdBaudStr(const uint8_t *ids, const uint8_t *codes, uint8_t count,
+                         int maxItems, char *out, int max) {
+  if (count == 0) { if (max > 1) { out[0] = '-'; out[1] = '\0'; } return; }
+  int o = 0; out[0] = '\0';
+  for (int m = 0; m < count && m < maxItems; m++) {
+    char t[16];
+    if (codes[m] != 0xFF)
+      snprintf(t, sizeof(t), "%s%d@%lu", o ? "." : "", ids[m],
+               (unsigned long)wdpCodeToBaud(codes[m]));
+    else
+      snprintf(t, sizeof(t), "%s%d", o ? "." : "", ids[m]);
+    int need = strlen(t);
+    if (o + need >= max - 1) break;
+    strcpy(out + o, t); o += need;
+  }
+  if (o == 0 && max > 1) { out[0] = '-'; out[1] = '\0'; }
+}
+
+// Emit the supplementary [WDPX:...] dump line for one record — the per-device baud
+// the terse MAESTRO= field drops, plus the full WLED list (invisible in the main
+// record entirely). Skipped when the board hosts neither Maestro nor WLED, so a
+// plain WCB adds no extra line. A separate line (not new fields on [WDP:...]) so an
+// older Wizard simply ignores it instead of failing to parse the whole record.
+static void wdpEmitDumpX(const WdpNeighbor &nb) {
+  if (nb.maestroCount == 0 && nb.wledCount == 0) return;
+  char mb[80]; wdpIdBaudStr(nb.maestroIds, nb.maestroBaudCode, nb.maestroCount,
+                            WDP_MAX_MAESTRO, mb, sizeof(mb));
+  char wl[80]; wdpIdBaudStr(nb.wledIds, nb.wledBaudCode, nb.wledCount,
+                            WDP_MAX_WLED, wl, sizeof(wl));
+  Serial.printf("[WDPX:N=%d,MB=%s,WL=%s]\n", nb.wcbNumber, mb, wl);
+}
+
 // Summary table — `show cdp neighbors` for the WCB mesh.
 static void printWdpList() {
   Serial.println();
@@ -927,10 +1031,14 @@ static void printWdpDump() {
     self.hwVer    = (uint8_t)wcb_hw_version;
     self.capFlags = wdpCapFlags();
     self.ctrlId   = specialPeerEnabled ? WCB_SPECIAL_PEER_ID : 0;
-    uint8_t sids[WDP_MAX_MAESTRO];
-    int sn = wdpLocalMaestroIds(sids);
-    for (int m = 0; m < sn; m++) self.maestroIds[m] = sids[m];
+    uint8_t sids[WDP_MAX_MAESTRO], scodes[WDP_MAX_MAESTRO];
+    int sn = wdpLocalMaestroCfg(sids, scodes);
+    for (int m = 0; m < sn; m++) { self.maestroIds[m] = sids[m]; self.maestroBaudCode[m] = scodes[m]; }
     self.maestroCount = (uint8_t)sn;
+    uint8_t swids[WDP_MAX_WLED], swcodes[WDP_MAX_WLED];
+    int swn = wdpLocalWLEDCfg(swids, swcodes);
+    for (int w = 0; w < swn; w++) { self.wledIds[w] = swids[w]; self.wledBaudCode[w] = swcodes[w]; }
+    self.wledCount = (uint8_t)swn;
     for (int p = 0; p < 5; p++) {
       String lbl = serialPortLabels[p];
       if (lbl.length() == 0) lbl = wdpDaType(p + 1);
@@ -946,6 +1054,17 @@ static void printWdpDump() {
     for (int p = 0; p < 5; p++)
       if (self.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", self.wcbNumber, p + 1, self.portLabels[p]);
+    wdpEmitDumpX(self);                      // MB=/WL= (Maestro+WLED id@baud)
+    // This board's OUTGOING remote-PWM targets — authoritative, straight from the
+    // live mappings. Each is an edge "SELF drives WCB<DST> S<port>". Neighbor rows
+    // below emit the reverse direction (a neighbor driving one of OUR ports).
+    {
+      uint8_t prec[WDP_MAX_PWMTARGET * 2];
+      int pn = wdpLocalPwmTargets(prec);
+      for (int k = 0; k < pn; k++)
+        Serial.printf("[WDPPWM:N=%d,DST=%d,S=%d]\n",
+                      (int)self.wcbNumber, (int)prec[k * 2], (int)prec[k * 2 + 1]);
+    }
   }
 
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
@@ -970,6 +1089,14 @@ static void printWdpDump() {
     for (int p = 0; p < 5; p++)
       if (nb.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
+    wdpEmitDumpX(nb);                        // MB=/WL= (Maestro+WLED id@baud)
+    // Remote-PWM edges terminating on THIS board: ports of ours the neighbor drives
+    // (decoded into pwmSelfPorts). Edge "neighbor drives WCB<self> S<port>". The
+    // sender's targets aimed at OTHER boards aren't in our table — only edges
+    // touching this board are reconstructable from a single dump (by design).
+    for (int p = 0; p < nb.pwmSelfCount && p < 5; p++)
+      Serial.printf("[WDPPWM:N=%d,DST=%d,S=%d]\n",
+                    (int)nb.wcbNumber, (int)WCB_Number, (int)nb.pwmSelfPorts[p]);
   }
   // Config summary for the tool: WDP enabled, auto-join state, live peer count.
   // EN lets the Wizard distinguish "WDP disabled here" from "mesh just empty".
@@ -993,6 +1120,15 @@ void processWdpCommand(const String &args) {
   if (au == "STATUS")           { printWdpStatus(); return; }
   if (au == "DUMP")             { printWdpDump();    return; }
   if (au == "DA")               { wdpDaPrint();      return; }   // serial-attached devices (@WDP1)
+  // ?WDP,POLL — force convergence now: advertise ourselves + broadcast a SOLICIT so
+  // every other board advertises within ~1 s instead of waiting for the 60 s backstop.
+  if (au == "POLL") {
+    if (!wdpEnabled || !etmEnabled) { Serial.println("[WDP] POLL needs WDP + ETM enabled"); return; }
+    wdpSendAdvert();
+    wdpSendSolicit();
+    Serial.println("[WDP] polled: advertised + solicited the mesh");
+    return;
+  }
   if (au == "ON")  { wdpEnabled = true;  saveWdpSettings(); Serial.println("[WDP] enabled");  return; }
   if (au == "OFF") { wdpEnabled = false; saveWdpSettings(); Serial.println("[WDP] disabled"); return; }
 
@@ -1050,7 +1186,7 @@ void processWdpCommand(const String &args) {
   if (n > 0) { printWdpDetail(n); return; }
 
   Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | "
-                "ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)\n", a.c_str());
+                "POLL | ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)\n", a.c_str());
 }
 
 // ==================== NVS + lifecycle ====================================

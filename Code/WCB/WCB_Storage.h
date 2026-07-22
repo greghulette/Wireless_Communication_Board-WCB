@@ -150,6 +150,11 @@ void loadKyberSettings();
 void printKyberSettings();
 void saveKyberTargets();
 void loadKyberTargets();
+// Add-only reconcile: give every configured Maestro that lacks one an enabled
+// kyberTargets[] entry, WITHOUT disturbing existing entries (or their documented
+// remote ports). Used when WDP auto-learns a remote Maestro so a Kyber-LOCAL host
+// begins forwarding to it with no manual ?KYBER,LOCAL re-issue. Returns # added.
+int reconcileKyberTargetsFromMaestroConfigs();
 void printKyberList();
 
 

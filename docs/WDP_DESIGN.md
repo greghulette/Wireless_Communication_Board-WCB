@@ -51,6 +51,7 @@ callback runs on the WiFi task and must not do heavy work.
 |---|---|---|
 | Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce |
 | Periodic backstop | every 60 s | staggered per board (`WCB_Number`‑based phase) so co‑booted boards don't collide |
+| Solicited | 1× on hearing a SOLICIT (or local `?WDP,POLL`) | jittered 0–600 ms by board number so a fleet doesn't reply in lockstep; lets an operator refresh the whole mesh on demand |
 
 Facts go **stale** after `WDP_TTL_MS` = 180 s (~3 missed adverts). Staleness is display state —
 the record stays in RAM until overwritten or `?WDP,CLEAR`.
@@ -91,6 +92,7 @@ Unknown TLV types are skipped via the length prefix — forward compatible in bo
 | `0x0E` | MAESTRO_CFG | `[id][baudCode]` pairs — Maestro id+baud, for remote-proxy auto-config | WCB |
 | `0x0F` | WLED_CFG | `[id][baudCode]` pairs — WLED id+baud, for remote-proxy auto-config | WCB |
 | `0x10` | PWMTARGET | `[targetWCB][port]` pairs — this board's REMOTE PWM outputs; each named board self-configures that output port | WCB |
+| `0x11` | SOLICIT | len 0 — a bare "advertise now" request (`?WDP,POLL`); carries no facts, receivers reply with a jittered advert and never record it | WCB |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -175,6 +177,7 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 | `?WDP,STATUS` | `[WDP:en,autojoin,proto,neighbors,peers]` one‑liner |
 | `?WDP,DUMP` | machine‑readable dump for the Wizard (below) |
 | `?WDP,DA` | serial‑attached (WDP‑DA) devices per port |
+| `?WDP,POLL` | advertise now + broadcast a SOLICIT so every board re‑advertises (fast convergence; skips the 60 s wait) |
 | `?WDP,ON` / `?WDP,OFF` | enable/disable WDP (persisted; default ON) |
 | `?WDP,AUTOJOIN[,ON\|,OFF]` | auto‑join learned peers (persisted; default ON) |
 | `?WDP,ADD,<id>` | manually add a learned peer (same as hearing it) |
@@ -187,14 +190,22 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 ```
 [WDP:N=..,CLIENT=..,ALIAS=..,HW=..,HWREV=..,FW=..,CAP=....,CTRL=..,CAPTAGS=..,MAESTRO=..,AGE=..,SEEN=..,PEER=..]
 [WDPIF:N=..,S=<port>,DEV=<label>]          ← one per labeled/detected port
+[WDPX:N=..,MB=<id@baud.…>,WL=<id@baud.…>]  ← per board hosting Maestro/WLED: the per-device baud the
+                                             main line omits, plus the full WLED list (`-` = none)
+[WDPPWM:N=<src>,DST=<dst>,S=<port>]         ← a remote-PWM drive edge: board <src> drives WCB <dst>'s S<port>
 [WDPCFG:AUTOJOIN=..,PEERS=..]
 [WDP:END,count=..]
 ```
 
+The self row is emitted first, flagged `PEER=3`. `WDPX`/`WDPPWM` are separate lines (not new
+fields on `[WDP:...]`) so older Wizards ignore them instead of failing to parse the record; only
+edges *touching the queried board* are reconstructable from one dump (a board keeps just the
+`PWMTARGET` entries that name itself), so the full graph is assembled across per‑board pulls.
+
 **Wizard:** the *WDP Mesh* panel renders the dump — every neighbor with kind/platform/fw/caps/
-Maestros/port devices/membership, plus an auto‑join toggle, per‑row Forget for learned peers, and
-Clear‑learned. The General section shows a read‑only "mesh: N live peers" badge next to WCB
-Quantity (from `PEERSLIVE` in the config pull).
+Maestros (with baud)/remote WLED/remote‑PWM wiring/port devices/membership, plus an auto‑join
+toggle, per‑row Forget for learned peers, and Clear‑learned. The General section shows a
+read‑only "mesh: N live peers" badge next to WCB Quantity (from `PEERSLIVE` in the config pull).
 
 ---
 
@@ -233,23 +244,45 @@ On **every advert** from a confirmed peer whose `PWMTARGET` TLV (§3) names this
 remote **PWM output** target: if that port isn't already a PWM output and isn't reserved
 (e.g. Kyber), reserve/configure it live — pin set + persisted to NVS, no reboot. Receiver-side
 (the target owns its own config), so a board that was powered off when the mapping was created
-still self-configures the instant it hears the advert. Idempotent; **add-only** — a deleted
-mapping's port is cleared by the existing `;MAP,PWM,CLEAR,OUT` push, not by advert absence.
+still self-configures the instant it hears the advert. Idempotent and **self-healing**: the
+auto-configured port is tagged (persisted) with its driving board, and when that board's *fresh*
+advert stops naming the port (the mapping was deleted) the receiver clears its stale output
+config itself — dropping the port from the list + NVS and re-enabling that port's broadcasts — so
+a deletion made while the receiver was offline no longer strands the port forever waiting on a
+`;MAP,PWM,CLEAR,OUT` push it may have missed. As with the manual clear (which reboots), the pin is
+fully returned to plain serial on the next reboot; the self-heal deliberately does **not** force
+one — a board shouldn't reboot itself because a *peer* dropped a mapping. Only WDP-tagged ports
+self-heal; a manually configured PWM output is never auto-removed.
 
-Plus the membership auto‑join of §6. Further capability‑driven auto‑config (Maestro routing
-tables, single‑owner trigger routing for HCR/MP3/WLED) is under design — see §10.
+On **every** `;H` / `;A` trigger, **single‑owner capability routing** (`routeStoredOrCap` →
+`wdpCapOwner`) resolves the command to exactly one host: a persisted/pinned host if it is set and
+online, otherwise the lowest‑numbered **online** board advertising the capability (HCR / MP3), so
+a broadcast can't fire the trigger N times. A pinned host that is *offline* fails over to live
+election instead of black‑holing. WLED and Maestro are **id‑addressed** (`;L<id>` / `;M<id>` route
+per‑id to the board that advertised that id), so they need no single‑owner election.
+
+On **first learn** of a peer‑hosted Maestro or WLED, its `id → board @ baud` is auto‑added as a
+remote proxy (`maestroAutoAddRemote` / `wledAutoAddRemote`) from the `MAESTRO_CFG` / `WLED_CFG`
+TLVs — first‑host‑wins, persisted. No port field is needed in the TLV: remote Kyber bytes are
+broadcast and the target board owns its own port. A **Kyber‑local** host additionally folds a
+newly‑learned remote Maestro into its live `kyberTargets` (add‑only), so it forwards to the
+just‑discovered board with no manual `?KYBER,LOCAL` re‑issue.
+
+Plus the membership auto‑join of §6.
 
 ---
 
 ## 10. Future work (designed, not built)
 
-- **Capability‑based command routing** — address a command to a *capability* instead of a board
-  (`"whoever has MP3"`), resolved at the origin to exactly **one** owner so triggers can't fire
-  N times on a broadcast. Needs owner election (deterministic lowest‑id, or pinned).
-- **Maestro auto‑config** — populate Kyber routing from MAESTRO TLVs so the Kyber host learns
-  `id → board` without manual setup; needs port info added to the TLV.
-- Draft ideas not shipped: ROLE (`0x02`) and HEALTH (`0x08`) TLVs, on‑request advert
-  solicitation, management‑peer (19) ephemeral adoption, descriptive‑table persistence.
+*(Single‑owner capability routing (HCR/MP3) and Maestro/WLED `id → board` auto‑config — once
+listed here — have shipped; see §9.)*
+
+- **Generic capability addressing** — a syntax to address any command to a *capability*
+  (`"whoever has X"`). Today only the ID‑less HCR/MP3 triggers auto‑resolve to a single owner;
+  there is no general `;@<cap>` addressing form, and the Wizard has no surface to view or pin
+  which board currently owns a capability.
+- Draft TLVs / ideas not shipped: ROLE (`0x02`) and HEALTH (`0x08`) TLVs, management‑peer (19)
+  ephemeral adoption, and descriptive‑table persistence (deliberately a non‑goal — §4).
 
 ---
 

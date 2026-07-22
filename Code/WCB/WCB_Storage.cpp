@@ -941,6 +941,43 @@ void eraseNVSFlash() {
     ESP.restart();
 }
 
+// Add-only reconcile of kyberTargets[] from the current maestroConfigs[]. Unlike
+// the ?KYBER,LOCAL,Sx empty-params auto-populate (which wipes and rebuilds), this
+// PRESERVES every existing enabled target — including a manually-documented remote
+// port — and only adds a new enabled slot for a configured Maestro that has no
+// target yet. Remote proxies (serialPort==0) get targetPort=1, which is unused at
+// runtime for remote targets (forwardDataFromKyber broadcasts; the remote board
+// owns its port). Returns the number of NEW targets added. Does NOT persist —
+// callers save when the return is > 0.
+int reconcileKyberTargetsFromMaestroConfigs() {
+  int added = 0;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured) continue;
+    uint8_t id = maestroConfigs[i].maestroID;
+
+    bool have = false;
+    for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+      if (kyberTargets[j].enabled && kyberTargets[j].maestroID == id) { have = true; break; }
+    }
+    if (have) continue;
+
+    int slot = -1;
+    for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+      if (!kyberTargets[j].enabled) { slot = j; break; }
+    }
+    if (slot < 0) break;   // table full — nothing more we can add
+
+    kyberTargets[slot].maestroID  = id;
+    kyberTargets[slot].targetWCB  = maestroConfigs[i].remoteWCB > 0
+                                    ? maestroConfigs[i].remoteWCB : WCB_Number;
+    kyberTargets[slot].targetPort = maestroConfigs[i].serialPort > 0
+                                    ? maestroConfigs[i].serialPort : 1;
+    kyberTargets[slot].enabled    = true;
+    added++;
+  }
+  return added;
+}
+
 void storeKyberSettings(const String &message) {
   int firstComma = message.indexOf(',');
   String baseCommand;

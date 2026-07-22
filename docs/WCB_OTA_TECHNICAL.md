@@ -96,10 +96,22 @@ A line‑oriented command driver over any `Serial` stream (UART bridge *or* nati
 | Command | Action |
 |---|---|
 | `?OTALOCAL,STATUS` | print partitions / running version / session |
+| `?OTALOCAL,BAUD,<baud>` | raise/restore the USB serial rate for the transfer (see below) |
 | `?OTALOCAL,BEGIN,<imageSize>,<family>` | `otaBegin` (family 0=ESP32, 1=S3) |
 | `?OTALOCAL,DATA,<offset>,<base64>` | base64‑decode → `otaWrite` (one in‑order chunk) |
 | `?OTALOCAL,END` | `otaEnd` → on success, reboot |
 | `?OTALOCAL,ABORT` | teardown, no boot switch |
+
+- **Transfer‑baud bump (throughput):** the 115200 terminal rate is the bottleneck — a
+  base64‑inflated app image over 115200 takes minutes. After `BEGIN`, the host may send
+  `?OTALOCAL,BAUD,<baud>` (allowed: 230400/460800/**921600**/1000000, or 115200 to restore).
+  Handshake: the board prints `[OTA:BAUD,OK,<baud>]` **at the current baud**, `Serial.flush()`es,
+  then `Serial.updateBaudRate()`s; the host switches its side after reading the ACK. Bumped
+  **only after `BEGIN`** so the 30 s idle timeout owns the restore if the session strands.
+  Auto‑restored to 115200 on **reboot** (`END`) or in `otaAbortSession` (**ABORT / timeout**).
+  A too‑fast bridge just corrupts bytes → `END` SHA verify fails → retry (never bricks). Host
+  side uses `SerialPort.reconfigure()` (no DTR toggle, so no reset mid‑OTA); it stays at 115200
+  if the browser lacks `reconfigure()`. At 921600 the transfer drops from minutes to ~30 s.
 
 - **Chunking:** base64 text per `DATA` line; decoded chunk ≤ `OTA_LOCAL_MAX_CHUNK = 1024` B into a static scratch buffer via `mbedtls_base64_decode` (no per‑call malloc). The host picks a chunk size ≤ 1024.
 - **Machine‑readable markers** (the host parses these, not the human log):

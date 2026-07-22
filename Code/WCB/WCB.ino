@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_181352RJUL2026                                  *****////
+///*****                                          Version 6.2.0_212154RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_181352RJUL2026";
+String SoftwareVersion = "6.2.0_212154RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -842,7 +842,7 @@ void enqueueCommand(const String &cmd, int sourceID);
 void checkConfigPullTimeout();
 String buildConfigString();
 void processPWMPassthrough();
-void addPWMOutputPort(int port);
+void addPWMOutputPort(int port, uint8_t wdpAutoSrc);  // default (0) lives in WCB_PWM.h; match arity here
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
@@ -5282,11 +5282,19 @@ void verifyBackupChecksum(const String &message) {
 // PERSISTED routing first and live discovery only as a fallback. Order:
 //   1. arrived over the mesh (lastReceivedViaESPNOW) or we host it locally → run here
 //   2. a stored host is set (auto-learned from WDP / set by hand / restored from a
-//      backup) → forward the original ";<message>" there (ETM-ACKed). This is what
-//      makes routing survive reboots + work on cold boot without waiting for adverts.
-//   3. else fall back to LIVE capability election (wdpCapOwner) so a board that hasn't
-//      learned a host yet still routes; if nobody advertises it, run local (the
-//      handler prints the device's own "not configured" message).
+//      backup) AND it is currently online → forward the original ";<message>" there
+//      (ETM-ACKed). This makes routing survive reboots + work on cold boot without
+//      waiting for adverts.
+//   3. else (no stored host, OR the pinned host was seen this session and has since
+//      gone dark = genuinely offline) fall back to LIVE capability election
+//      (wdpCapOwner, which only returns an ONLINE owner) so a dead host doesn't
+//      black-hole the trigger when another board still advertises the capability.
+//      A pin that simply hasn't re-advertised yet after a reboot is NOT treated as
+//      dead — it's honored (ETM unicast + retries cover a briefly-unreachable pin),
+//      so an operator's explicit pin survives the boot window instead of losing to
+//      whichever alternate owner happens to be heard first. If election finds no
+//      online owner the stored host stays as a best-effort target; if there is
+//      neither, run local (the handler prints the device's own "not configured").
 // The lastReceivedViaESPNOW short-circuit is the one-hop cap: a command routed to us
 // is executed locally and NEVER re-forwarded — no loops, no duplicate fires. (message
 // is the command WITHOUT the leading command char, e.g. "H,STIM,..." for ;H,STIM.)
@@ -5294,7 +5302,12 @@ void routeStoredOrCap(bool localHosted, uint8_t storedHost, uint16_t capBit,
                       const String &message, void (*localHandler)(const String &)) {
   if (lastReceivedViaESPNOW || localHosted) { localHandler(message); return; }
   uint8_t target = storedHost;
-  if (target == 0) {                              // no stored host — try live election
+  // Fail over ONLY for no-pin or a genuinely-dead pin (seen this session, now offline)
+  // — never for a pin that just hasn't been re-heard since boot. wdpCapOwner() returns
+  // only an ONLINE owner (or 0), and we override just when it finds a real online
+  // alternative; otherwise the stored host stays as the best-effort target.
+  bool pinGenuinelyDead = (target != 0) && wcbPeerEverSeen(target) && !wcbPeerOnline(target);
+  if (target == 0 || pinGenuinelyDead) {
     int owner = wdpCapOwner(capBit);
     if (owner > 0 && owner != WCB_Number) target = (uint8_t)owner;
   }
@@ -6253,6 +6266,16 @@ void rebuildActivePeers() {
 bool wcbPeerOnline(uint8_t id) {
   if (id < 1 || id > MAX_WCB_COUNT) return false;
   return wcbPeerActive[id - 1] && boardTable[id - 1].online;
+}
+
+// Have we EVER received a packet from board `id` this session (heartbeat/advert/ACK…)?
+// lastSeenMs is 0 until the first packet and is never reset (the offline sweep clears
+// `online` but keeps the timestamp), so nonzero == "seen at least once". Lets routing
+// tell a genuinely-offline host (seen, then dark) from one merely not-yet-reheard after
+// a reboot — so an operator's capability pin is honored across the boot window.
+bool wcbPeerEverSeen(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  return boardTable[id - 1].lastSeenMs != 0;
 }
 
 // Count of active member peers — for status and the Wizard live-peer readout.

@@ -38,6 +38,7 @@ const int PWM_STABILITY_RANGE = 6;   // μs range for stability
 
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;
+uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};  // see WCB_PWM.h
 
 // PWM reading variables for each port
 volatile unsigned long pwmRiseTime[5] = {0};
@@ -787,33 +788,61 @@ bool isSerialPortPWMOutput(int port) {
     return false;
 }
 
-void addPWMOutputPort(int port) {
+void addPWMOutputPort(int port, uint8_t wdpAutoSrc) {
     if (port < 1 || port > 5) {
         Serial.println("Invalid port number. Must be 1-5");
         return;
     }
-    
+
     // Check if port can be used for PWM
     if (!canUsePWMOnPort(port)) {
         return;
     }
-    
+
     if (isSerialPortPWMOutput(port)) {
         Serial.printf("Serial%d already configured as PWM output\n", port);
-        return;
+        return;   // already an output — DON'T retag (a manual port stays manual so it
+                  // can never be auto-removed, and the first WDP source keeps ownership)
     }
-    
+
     if (pwmOutputCount >= MAX_PWM_OUTPUT_PORTS) {
         Serial.println("Maximum PWM output ports reached");
         return;
     }
-    
+
+    pwmOutputAutoSrc[pwmOutputCount] = wdpAutoSrc;   // 0 = manual, >0 = WDP self-config source
     pwmOutputPorts[pwmOutputCount++] = port;
-    
+
     configureRemotePWMOutput(port);
-    
+
     savePWMOutputPortsToPreferences();
     Serial.printf("Serial%d configured as PWM output port\n", port);
+}
+
+void reconcileWdpAutoPWMOutputs(uint8_t srcWCB, const uint8_t *wantPorts, uint8_t wantCount) {
+    if (srcWCB == 0) return;
+    // KNOWN LIMITATION (misconfiguration only): a port is cleared purely on the tagging
+    // source dropping it. If TWO boards drive the same receiver port (a config error —
+    // their ;P streams already fight one pin), and the tag-owner drops it while the other
+    // still wants it, the port is briefly cleared (broadcasts re-enable on it) until the
+    // other board's next advert re-adds it (<=60 s backstop). Not hardened deliberately:
+    // checking "does any other neighbor still name this port" would pull the WDP neighbor
+    // table into WCB_PWM, and two sources on one output port is itself the real bug to fix.
+    // removePWMOutputPort() compacts the arrays, so don't blindly advance the index.
+    for (int i = 0; i < pwmOutputCount; ) {
+        if (pwmOutputAutoSrc[i] == srcWCB) {
+            int p = pwmOutputPorts[i];
+            bool wanted = false;
+            for (int k = 0; k < wantCount; k++) if (wantPorts[k] == p) { wanted = true; break; }
+            if (!wanted) {
+                Serial.printf("[WDP] WCB%d no longer drives our S%d - clearing auto-configured PWM output\n",
+                              srcWCB, p);
+                removePWMOutputPort(p);   // shuffles this slot out; re-examine same index
+                continue;
+            }
+        }
+        i++;
+    }
 }
 
 void removePWMOutputPort(int port) {
@@ -821,8 +850,10 @@ void removePWMOutputPort(int port) {
         if (pwmOutputPorts[i] == port) {
             for (int j = i; j < pwmOutputCount - 1; j++) {
                 pwmOutputPorts[j] = pwmOutputPorts[j + 1];
+                pwmOutputAutoSrc[j] = pwmOutputAutoSrc[j + 1];
             }
             pwmOutputPorts[--pwmOutputCount] = 0;
+            pwmOutputAutoSrc[pwmOutputCount] = 0;
             savePWMOutputPortsToPreferences();
             // Re-enable broadcasts for this port — they were suppressed while it was a PWM output.
             // (If a Push Config was sent while the port was claimed, its NVS broadcast values
@@ -847,6 +878,8 @@ void savePWMOutputPortsToPreferences() {
     for (int i = 0; i < pwmOutputCount; i++) {
         String key = "port" + String(i);
         preferences.putInt(key.c_str(), pwmOutputPorts[i]);
+        String akey = "auto" + String(i);         // WDP self-config source (0 = manual)
+        preferences.putUChar(akey.c_str(), pwmOutputAutoSrc[i]);
     }
     preferences.end();
 }
@@ -866,11 +899,14 @@ void loadPWMOutputPortsFromPreferences() {
     for (int i = 0; i < savedCount; i++) {
         String key = "port" + String(i);
         int port = preferences.getInt(key.c_str(), 0);
-        
+        String akey = "auto" + String(i);
+        uint8_t autoSrc = preferences.getUChar(akey.c_str(), 0);  // 0 for pre-tag NVS = manual
+
         if (port > 0) {
             // Check if this port conflicts with Kyber
             if (canUsePWMOnPort(port)) {
-                pwmOutputPorts[pwmOutputCount++] = port;
+                pwmOutputAutoSrc[pwmOutputCount] = autoSrc;   // keep provenance aligned to the
+                pwmOutputPorts[pwmOutputCount++] = port;      // compacted (Kyber-skipped) list
                 configureRemotePWMOutput(port);
             } else {
                 Serial.printf("⚠️  Skipping PWM output port Serial%d - conflicts with Kyber\n", port);

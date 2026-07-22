@@ -18,6 +18,7 @@
 // Local USB command driver. `args` is the text AFTER "OTALOCAL," — i.e. the
 // subcommand and its parameters. Subcommands:
 //   ?OTALOCAL,STATUS                       → print partitions / running ver / session
+//   ?OTALOCAL,BAUD,<baud>                  → raise/restore USB serial rate for the transfer
 //   ?OTALOCAL,BEGIN,<imageSize>,<family>   → start (family: 0=ESP32, 1=ESP32-S3)
 //   ?OTALOCAL,DATA,<offset>,<base64>       → one in-order chunk (offset = byte cursor)
 //   ?OTALOCAL,END                          → verify, set boot partition, reboot
