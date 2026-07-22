@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '21.21:54.R.JUL.2026';
+const UI_VERSION = '22.09:50.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4968,10 +4968,9 @@ async function modalManualSelect() {
   _detecting[n] = false;
   // Open the browser's native WebSerial picker — shows real COM port names
   try {
-    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-    let port;
-    try { port = await navigator.serial.requestPort({ filters }); }
-    catch { port = await navigator.serial.requestPort(); }
+    // Unfiltered picker — show ALL serial ports so every board (WCB bridge chips,
+    // S3-native USB, older boards with other USB-serial chips) is selectable.
+    const port = await navigator.serial.requestPort();
     if (port) await _modalDoConnect(n, port);
   } catch (e) {
     if (e?.name !== 'NotFoundError') showToast(`Connect failed: ${e.message}`, 'error');
@@ -4985,10 +4984,9 @@ async function modalAuthorize() {
   if (n === null) return;
   _detecting[n] = false;
   try {
-    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-    let port;
-    try { port = await navigator.serial.requestPort({ filters }); }
-    catch { port = await navigator.serial.requestPort(); }
+    // Unfiltered picker — show ALL serial ports so every board (WCB bridge chips,
+    // S3-native USB, older boards with other USB-serial chips) is selectable.
+    const port = await navigator.serial.requestPort();
     if (port) await _modalDoConnect(n, port);
   } catch (e) {
     if (e?.name !== 'NotFoundError') showToast(`Connect failed: ${e.message}`, 'error');
@@ -5511,8 +5509,7 @@ async function showPortPickerModal(n, initialPorts, usedPorts, usedByBoard) {
     newBtn.textContent = '+ Authorize…';
     newBtn.addEventListener('click', async () => {
       try {
-        const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-        await navigator.serial.requestPort({ filters });
+        await navigator.serial.requestPort();   // unfiltered — authorize any serial port
         _portPickerPorts = await navigator.serial.getPorts();
         renderBody();
       } catch { /* user cancelled */ }
@@ -5596,13 +5593,6 @@ async function boardManualConnect(n) {
 }
 
 // ─── Auto-detect: monitor ports for reset, connect the one that resets ─
-// Known USB-UART vendor IDs used on WCB hardware
-const WCB_VENDOR_IDS = [
-  0x10C4, // Silicon Labs (CP2102, CP2102N, CP2104)
-  0x1A86, // QinHeng (CH340, CH341)
-  0x0403, // FTDI (FT232R)
-];
-
 async function boardAutoDetect(n) {
   const btn = document.getElementById(`b${n}-btn-connect`);
 
@@ -5628,8 +5618,7 @@ async function boardAutoDetect(n) {
   if (firstTime) {
     showToast('No paired boards — select your WCB boards in the picker to authorize them.', 'info', 7000);
     try {
-      const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-      await navigator.serial.requestPort({ filters });
+      await navigator.serial.requestPort();   // unfiltered — show every serial port
       knownPorts = await navigator.serial.getPorts();
     } catch {
       _detecting[n] = false; setDetecting(false); return;
@@ -5642,11 +5631,11 @@ async function boardAutoDetect(n) {
   const usedPorts = new Set(
     Object.values(boardConnections).filter(c => c?.isConnected() && c.port).map(c => c.port)
   );
-  const available = knownPorts.filter(p => {
-    if (usedPorts.has(p)) return false;
-    const { usbVendorId } = p.getInfo();
-    return WCB_VENDOR_IDS.includes(usbVendorId);
-  });
+  // No USB-vendor filter — any authorized port not already in use is eligible, so a
+  // board whose USB-serial chip isn't a known WCB bridge (e.g. some V1 boards, or an
+  // S3-native board) auto-connects too. NOTE: a continuously-streaming authorized board
+  // can win the reset-monitor race below; press reset on the board you actually want.
+  const available = knownPorts.filter(p => !usedPorts.has(p));
 
   // ── First-time: connect ALL authorized boards immediately ─────
   if (firstTime) {
@@ -10438,8 +10427,7 @@ async function wizPortAuthorize(n) {
   const inWizard = document.getElementById('wizard-modal')?.classList.contains('open');
   let port;
   try {
-    const filters = WCB_VENDOR_IDS.map(id => ({ usbVendorId: id }));
-    port = await navigator.serial.requestPort({ filters });
+    port = await navigator.serial.requestPort();   // unfiltered — show every serial port
   } catch { /* user cancelled */ }
   if (!inWizard && port) {
     // On the main page, the user already knows which board this is — connect immediately.
