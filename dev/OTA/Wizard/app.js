@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '22.11:40.R.JUL.2026';
+const UI_VERSION = '22.14:06.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -139,7 +139,43 @@ async function fetchLatestFirmwareVersion() {
     for (let n = 1; n <= 8; n++) {
       if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
     }
+    return true;   // reached GitHub + parsed a version
   } catch (_) { /* offline or rate-limited — ignore */ }
+  return false;
+}
+
+// ─── Manual "check for updates" (firmware) ────────────────────────
+// Re-runs the GitHub firmware-version fetch on demand (no page reload); the per-board
+// version boxes then re-render (✓ up to date / ↑ update available / dev). THROTTLED so
+// rapid clicks can't hammer GitHub's unauthenticated API rate limit — one real check per
+// FW_CHECK_THROTTLE_MS, and EVERY check button is disabled during that cooldown so it
+// doesn't matter which board's icon is pressed.
+let _fwCheckLastMs = 0;
+const FW_CHECK_THROTTLE_MS = 5000;   // min gap between GitHub checks (~a few seconds)
+
+async function boardCheckFwUpdate(n) {
+  const remaining = FW_CHECK_THROTTLE_MS - (Date.now() - _fwCheckLastMs);
+  if (remaining > 0) {
+    showToast(`Please wait ${Math.ceil(remaining / 1000)}s between update checks`, 'info', 2000);
+    return;
+  }
+  _fwCheckLastMs = Date.now();
+
+  const allBtns = Array.from(document.querySelectorAll('[id$="-btn-check-fw"]'));
+  const btn     = document.getElementById(`b${n}-btn-check-fw`);
+  allBtns.forEach(b => { b.disabled = true; });
+  if (btn) btn.textContent = '…';
+
+  try {
+    const ok = await fetchLatestFirmwareVersion();
+    if (ok && latestFirmwareVersion) showToast(`Latest firmware on GitHub: ${latestFirmwareVersion}`, 'success', 3500);
+    else showToast('Could not reach GitHub (offline or rate-limited) — try again shortly', 'warning', 3500);
+  } finally {
+    if (btn) btn.textContent = '↻';
+    // Keep the buttons disabled for the full cooldown (belt-and-suspenders with the
+    // _fwCheckLastMs guard) so the rate limit is respected even on rapid clicks.
+    setTimeout(() => allBtns.forEach(b => { b.disabled = false; }), FW_CHECK_THROTTLE_MS);
+  }
 }
 
 // Parse the build timestamp embedded in a WCB version string.
