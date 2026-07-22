@@ -47,7 +47,8 @@ static uint32_t codeToBaud(uint8_t c){ return c<BAUD_N ? BAUD_TABLE[c] : 0; }
 
 // ---- encoder: putTLV, mirrors WCB_WDP.cpp:200 ------------------------------
 static int putTLV(uint8_t*buf,int o,int max,uint8_t type,const uint8_t*val,int len){
-  if(len<0) len=0; if(len>255) len=255;
+  if(len<0) len=0;
+  if(len>255) len=255;
   if(o+2+len>max) return o;
   buf[o++]=type; buf[o++]=(uint8_t)len;
   for(int i=0;i<len;i++) buf[o++]=val[i];
@@ -82,8 +83,15 @@ static DecodeKind decode(int senderWCB, uint8_t srcMacLastOctet,
   if (srcMacLastOctet != (uint8_t)senderWCB) return DK_REJECTED;
 
   // SOLICIT short-circuit BEFORE any wipe (WCB_WDP.cpp:434+ new block).
-  { int s=2; while(s+2<=200){ uint8_t ty=cmd[s]; if(ty==T_END) break; int ln=cmd[s+1];
-      if(s+2+ln>200) break; if(ty==T_SOLICIT) return DK_SOLICIT; s+=2+ln; } }
+  { int s=2;
+    while(s+2<=200){
+      uint8_t ty=cmd[s];
+      if(ty==T_END) break;
+      int ln=cmd[s+1];
+      if(s+2+ln>200) break;
+      if(ty==T_SOLICIT) return DK_SOLICIT;
+      s+=2+ln;
+    } }
 
   nb = Neighbor();                       // memset-equivalent wholesale replace
   nb.valid=true; nb.confirmed=true; nb.wcbNumber=(uint8_t)senderWCB;
@@ -107,7 +115,8 @@ static DecodeKind decode(int senderWCB, uint8_t srcMacLastOctet,
       case T_WLED_CFG: { int r=len/2; if(r>9)r=9; for(int i=0;i<r;i++){nb.wledIds[i]=val[i*2]; nb.wledBaud[i]=val[i*2+1];} nb.wledCount=r; break; }
       case T_PORTLABEL: if(len>=1){ int p=val[0]; if(p>=1&&p<=5) nb.portLabels[p-1].assign((const char*)(val+1), len-1);} break;
       case T_PWMTARGET: { int r=len/2; for(int i=0;i<r;i++){ uint8_t tgt=val[i*2], prt=val[i*2+1];
-            if(tgt!=(uint8_t)selfWCB) continue; if(prt<1||prt>5) continue;
+            if(tgt!=(uint8_t)selfWCB) continue;
+            if(prt<1||prt>5) continue;
             bool dup=false; for(int j=0;j<nb.pwmSelfCount;j++) if(nb.pwmSelfPorts[j]==prt) dup=true;
             if(!dup && nb.pwmSelfCount<5) nb.pwmSelfPorts[nb.pwmSelfCount++]=prt; } break; }
       default: break;                    // unknown TLV — skipped via length (forward compatible)
