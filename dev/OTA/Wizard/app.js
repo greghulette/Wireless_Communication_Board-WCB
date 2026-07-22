@@ -58,8 +58,9 @@ const _detecting = {};            // { [n]: true/false } — auto-detect active 
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
 const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
 const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
-const _otaInProgress = new Set(); // boards (slots) with a wireless relay OTA in flight — so the
-                                  // ETM listener doesn't fire pulls that fight the OTA stream
+const _otaInProgress = new Set(); // boards (slots) with an OTA in flight (wireless relay OR direct
+                                  // USB) — so the ETM listener + mesh-discovery tick don't fire
+                                  // pulls that fight the OTA stream
 const _suppressedEtmEdges = new Set(); // remote boards whose ETM online/offline edge was swallowed
                                        // during an OTA — replayed once the last OTA finishes so a
                                        // board that rebooted mid-transfer still gets reconciled
@@ -73,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '18.13:52.R.JUL.2026';
+const UI_VERSION = '21.21:54.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1432,6 +1433,13 @@ function boardOta(n) {
 // ?OTALOCAL,* commands — writing through the running firmware, so it needs NO
 // bootloader / download mode / BOOT button / auto-reset (the exact thing that
 // fails on Macs and button-less boards). ACK-paced for reliable flow control.
+// Faster USB serial rate for the OTA byte transfer. The 115200 terminal rate is the
+// throughput bottleneck (a base64 app image over 115200 is minutes). Both sides switch
+// to this for the transfer and restore to 115200 after. CP2102/CH9102 bridges handle
+// 921600; if a particular board's bridge corrupts at this rate the OTA just fails END
+// (SHA verify) and you retry — lower this to 460800 if that happens. 115200 disables it.
+const OTA_XFER_BAUD = 921600;
+
 async function boardOtaSerial(n) {
   const conn = boardConnections[n];
   if (remoteRelayForBoard[n]) { showToast('OTA-over-serial needs a direct USB connection', 'warning'); return; }
@@ -1440,10 +1448,15 @@ async function boardOtaSerial(n) {
   const btn = document.getElementById(`b${n}-btn-ota-serial`);
   const fc  = boardConfigs[n]?.funcChar ?? boardBootChars[n]?.funcChar ?? '?';
   const cmd = (s) => `${fc}OTALOCAL,${s}`;
+  let bumped = false;   // did we raise the serial baud for the transfer? (restore on error)
 
   try {
     if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
     setFlashUI(n, true);
+    // Claim the port for the OTA so the 12 s mesh-discovery tick (and any other
+    // _otaInProgress-gated pull) won't inject ?WDP,DUMP into the transfer — doubly
+    // important now that the transfer runs at a raised baud. Mirrors the relay path.
+    _otaInProgress.add(n);
     setFlashStatus(n, 'Reading board…');
     termLog(n, '[OTA] starting OTA over USB serial…', 'sys');
 
@@ -1470,6 +1483,32 @@ async function boardOtaSerial(n) {
     const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
     if (!/\[OTA:BEGIN,OK,/.test(beginResp))
       throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+
+    // 3b) Raise the transfer baud (best-effort). Only AFTER BEGIN, so the board's 30 s
+    //     OTA timeout will restore its baud if anything strands the session. The board
+    //     acks BAUD at 115200, then switches its UART; we switch ours after the ack.
+    //     If the browser can't change baud live, we silently stay at 115200.
+    if (OTA_XFER_BAUD !== 115200 && conn.port && typeof conn.port.reconfigure === 'function') {
+      const br = await conn.sendAndCollect(cmd(`BAUD,${OTA_XFER_BAUD}`), 3000, '[OTA:BAUD,');
+      if (/\[OTA:BAUD,OK,/.test(br)) {
+        // The board switches its UART the instant it ACKs — independent of us — so once
+        // we see OK we are COMMITTED. Set `bumped` BEFORE switching our side so a setBaud
+        // failure runs the outer catch's 115200 restore, and make that failure FATAL:
+        // streaming DATA at 115200 into a board now at 921600 just garbles + stalls, so
+        // abort immediately rather than silently continuing at a mismatched baud.
+        bumped = true;
+        await sleep(40);                     // let the board finish switching its UART
+        try {
+          await conn.setBaud(OTA_XFER_BAUD);   // switch our side to match
+        } catch (e) {
+          throw new Error(`could not match the board's raised baud (${e?.message ?? e}) — aborting OTA`);
+        }
+        termLog(n, `[OTA] transfer baud raised to ${OTA_XFER_BAUD}`, 'sys');
+      } else {
+        // Board declined (old firmware / no active session) — both sides stay at 115200.
+        termLog(n, '[OTA] board declined baud raise — staying at 115200', 'sys');
+      }
+    }
 
     // 4) Stream chunks, ACK-paced. The board's ACK/NAK carries the authoritative
     //    write cursor; we always follow it (rewind on NAK).
@@ -1513,6 +1552,10 @@ async function boardOtaSerial(n) {
     if (!/\[OTA:END,OK\]/.test(endResp))
       throw new Error('OTA verify/finalize failed — ' + (endResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
 
+    // Verified + rebooting into 115200; the closeForReconnect/reconnect below reopens
+    // the port at 115200, so our baud resets with no explicit restore on this path.
+    bumped = false;
+
     // END,OK means the board switched boot slots and is rebooting NOW. Manage the
     // reconnect ourselves like the flash / config-reboot paths instead of a blind
     // delayed pull: a UART-bridge board keeps its port open across the reboot (so
@@ -1555,8 +1598,17 @@ async function boardOtaSerial(n) {
   } catch (e) {
     termLog(n, `[OTA] ✕ ${e.message}`, 'err');
     showToast(`OTA failed: ${e.message}`, 'error');
-    try { await conn.send(cmd('ABORT') + '\r'); } catch (_) {}   // free the board's handle
+    try { await conn.send(cmd('ABORT') + '\r'); } catch (_) {}   // free the board's handle (at whatever baud we're on)
+    if (bumped) {
+      // The board restores its own baud on ABORT (and on its 30 s idle timeout); bring
+      // our side back to 115200 too so the terminal isn't left mismatched. Let the
+      // ABORT flush at the high baud first.
+      await sleep(150);
+      try { await conn.setBaud(115200); } catch (_) {}
+      bumped = false;
+    }
   } finally {
+    _otaInProgress.delete(n);   // release the port for the mesh-discovery tick again
     setFlashUI(n, false);
     if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
   }
@@ -4575,6 +4627,17 @@ class BoardConnection {
         this.port = null;
       }
     } catch (_) {}
+  }
+
+  // Change the live serial baud WITHOUT closing the port. Uses SerialPort.reconfigure(),
+  // which keeps the active reader/writer streams intact and — crucially — does NOT toggle
+  // DTR, so it can't trigger the RC-differentiator reset mid-OTA (a close/reopen would).
+  // Used to run the OTA byte transfer faster than the 115200 terminal rate. Throws if the
+  // browser lacks reconfigure() so the caller can fall back to staying at 115200.
+  async setBaud(baud) {
+    if (!this.port || typeof this.port.reconfigure !== 'function')
+      throw new Error('live baud change (SerialPort.reconfigure) not supported by this browser');
+    await this.port.reconfigure({ baudRate: baud });
   }
 
   async send(data) {
@@ -11061,12 +11124,21 @@ function parseWdpDump(raw) {
       nodes[n] = { n, client: m[2] === '1', alias: m[3], hw: +m[4], hwRev: m[5],
                    fw: m[6], cap: parseInt(m[7], 16), ctrl: +m[8], capTags: m[9],
                    maestro: m[10], age: +m[11], live: m[12] === '1',
-                   peer: m[13] !== undefined ? +m[13] : null, ifs: [] };
+                   peer: m[13] !== undefined ? +m[13] : null,
+                   mb: '', wl: '', pwm: [], ifs: [] };
       order.push(n);
       continue;
     }
     m = t.match(/^\[WDPIF:N=(\d+),S=(\d+),DEV=([^\]]*)\]$/);
     if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); continue; }
+    // Supplementary [WDPX:...] — per-device Maestro/WLED baud (id@baud dot-lists)
+    // the terse main record drops. New line type; older dumps simply omit it.
+    m = t.match(/^\[WDPX:N=(\d+),MB=([^,]*),WL=([^\]]*)\]$/);
+    if (m) { const n = +m[1]; if (nodes[n]) { nodes[n].mb = m[2]; nodes[n].wl = m[3]; } continue; }
+    // [WDPPWM:...] — a remote-PWM drive edge: board N drives WCB DST's serial S.
+    // Attached to the driving (source) node so its row shows what it drives.
+    m = t.match(/^\[WDPPWM:N=(\d+),DST=(\d+),S=(\d+)\]$/);
+    if (m) { const n = +m[1]; if (nodes[n]) nodes[n].pwm.push({ dst: +m[2], s: +m[3] }); continue; }
     // EN= is optional so a dump from firmware before the EN field still parses.
     m = t.match(/^\[WDPCFG:(?:EN=(\d),)?AUTOJOIN=(\d),PEERS=(\d+)\]$/);
     if (m) cfg = { enabled: m[1] === undefined ? true : m[1] === '1',
@@ -11129,6 +11201,8 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
         ${cfg.autojoin ? 'ON — heard boards join automatically' : 'OFF — peer list is pinned'}
       </button>
       <span class="wdp-sub">Live peers: ${cfg.peers}</span>
+      <button class="wdp-btn" onclick="wdpPollMesh()"
+        title="Ask every board to advertise now (?WDP,POLL) — refreshes the whole mesh in about a second instead of waiting for the periodic backstop.">Poll mesh</button>
       ${anyLearned ? `<button class="wdp-btn" onclick="wdpClearLearned()"
         title="Forget ALL auto-joined peers on this board (configured 1..WCBQ peers are kept).">Clear learned</button>` : ''}
     </div>`;
@@ -11142,10 +11216,18 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
     const isSelf  = nd.peer === 3;   // firmware flags the querying board's own row
     const caps    = nd.client ? _wdpEsc(nd.capTags || '') : _wdpCapLabels(nd.cap);
     const ctrl    = nd.ctrl ? ` <span class="wdp-sub">&rarr;ctrl ${nd.ctrl}</span>` : '';
-    const maestro = (nd.maestro && nd.maestro !== '-') ? _wdpEsc(nd.maestro) : '&mdash;';
-    const ifs     = nd.ifs.length
-      ? nd.ifs.map(i => `<div class="wdp-if">S${i.s} ${_wdpEsc(i.dev)}</div>`).join('')
-      : '<span class="wdp-sub">&mdash;</span>';
+    // Prefer the richer id@baud list (WDPX MB=) when the board sent it; fall back to
+    // the terse id-only MAESTRO= field from the main record for older firmware.
+    const maestro = (nd.mb && nd.mb !== '-') ? _wdpEsc(nd.mb)
+                  : ((nd.maestro && nd.maestro !== '-') ? _wdpEsc(nd.maestro) : '&mdash;');
+    // Devices cell = advertised port interfaces + remote WLED nodes + remote-PWM
+    // wiring (edges "this board drives WCB<dst> S<port>"), all previously invisible.
+    const devParts = nd.ifs.map(i => `<div class="wdp-if">S${i.s} ${_wdpEsc(i.dev)}</div>`);
+    if (nd.wl && nd.wl !== '-')
+      devParts.push(`<div class="wdp-if">WLED ${_wdpEsc(nd.wl)}</div>`);
+    for (const e of (nd.pwm || []))
+      devParts.push(`<div class="wdp-if wdp-sub">PWM &rarr; WCB${e.dst} S${e.s}</div>`);
+    const ifs = devParts.length ? devParts.join('') : '<span class="wdp-sub">&mdash;</span>';
     return `<tr class="${nd.live ? '' : 'wdp-stale'}${isSelf ? ' wdp-self' : ''}">
       <td>${nd.n}</td>
       <td><strong>${_wdpEsc(nd.alias || '—')}</strong>${isSelf ? ' <span class="wdp-self-tag">this board</span>' : ''}${ctrl}</td>
@@ -11234,6 +11316,16 @@ function wdpForgetPeer(n) {
 function wdpClearLearned() {
   if (!confirm('Forget ALL auto-joined peers on this board?\n\nConfigured peers (1..WCBQ) are kept. Boards still advertising will re-join if auto-join stays on.')) return;
   _wdpMeshCommand('CLEAR');
+}
+
+// ?WDP,POLL — ask every board to advertise now, then re-pull. Solicited replies are
+// jittered up to ~600 ms, so wait a beat longer than _wdpMeshCommand's 300 ms before
+// refreshing so the freshly-heard boards are already in the table.
+async function wdpPollMesh() {
+  const t = _wdpMeshConn();
+  if (!t) return;
+  try { await t.conn.send(`${t.fc}WDP,POLL\r`); } catch (_) {}
+  setTimeout(wdpMeshRefresh, 900);
 }
 
 // ── Automatic mesh discovery ────────────────────────────────────────────────
