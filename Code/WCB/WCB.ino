@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_212154RJUL2026                                  *****////
+///*****                                          Version 6.2.0_221140RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_212154RJUL2026";
+String SoftwareVersion = "6.2.0_221140RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -451,6 +451,13 @@ BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, indexed by (wcbNumber-1
 // WCBQ floor == today's behavior exactly.
 bool wcbPeerActive[MAX_WCB_COUNT]  = { false };
 bool wcbPeerLearned[MAX_WCB_COUNT] = { false };
+// TEMPORARY peers: registered LIVE so the mesh can reach them, but NEVER
+// persisted (not in learned_peers) and evicted after TEMPORARY_PEER_TTL_MS of silence.
+// A device that advertises the WDP "temporary" flag (WDP_ADVFLAG_TEMPORARY) — e.g. an
+// occasional management relay — is reachable while active, gone on reboot, and
+// self-cleans when it goes quiet, keeping the 20-slot ESP-NOW peer table lean.
+bool wcbPeerTemporary[MAX_WCB_COUNT] = { false };
+#define TEMPORARY_PEER_TTL_MS 180000UL   // silence before a temporary peer is dropped (~3 min)
 // millis() when a learned peer was first heard vs. last confirmed; drives the
 // "confirmed reciprocating" gate and stale eviction (Stages 3-4).
 uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT] = { 0 };  // WDP adverts heard (caps at 255)
@@ -987,6 +994,30 @@ void processETMHeartbeats() {
         boardTable[spIdx].online = false;
         Serial.printf("[ETM] WCB%d (special peer) went OFFLINE (no heartbeat for %lus)\n",
                       WCB_SPECIAL_PEER_ID, offlineThresholdMs / 1000UL);
+      }
+    }
+  }
+
+  // Evict TEMPORARY peers that have gone silent past their TTL: del_peer +
+  // drop membership so the ESP-NOW table doesn't hold a slot for a device that stopped
+  // advertising (e.g. a management relay whose session ended). Temporary peers are
+  // RAM-only + never persisted, so this (plus reboot) is their only cleanup. A much
+  // longer TTL than the ETM offline threshold so a WDP-only device advertising on the
+  // ~60 s cadence isn't dropped between adverts. lastSeenMs is refreshed by ANY packet.
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerTemporary[i] || boardTable[i].lastSeenMs == 0) continue;
+    if (millis() - boardTable[i].lastSeenMs > TEMPORARY_PEER_TTL_MS) {
+      uint8_t id = i + 1;
+      Serial.printf("[PEER] temporary WCB%d evicted — silent for %lus\n",
+                    id, (millis() - boardTable[i].lastSeenMs) / 1000UL);
+      wcbPeerTemporary[i]    = false;
+      wcbPeerAdvertCount[i]  = 0;      // re-vet (>=2 adverts) if it returns
+      wcbPeerReciprocated[i] = false;
+      rebuildActivePeers();
+      if (!wcbPeerActive[i] && esp_now_is_peer_exist(WCBMacAddresses[i])) {
+        esp_now_del_peer(WCBMacAddresses[i]);
+        boardTable[i].online = false;
+        etmClearPeerFromPending(i);
       }
     }
   }
@@ -6255,7 +6286,7 @@ void enableControllerPeer(uint8_t id) {
 void rebuildActivePeers() {
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     bool floorMember = (i < Default_WCB_Quantity);
-    wcbPeerActive[i] = (floorMember || wcbPeerLearned[i]) && (i + 1 != WCB_Number);
+    wcbPeerActive[i] = (floorMember || wcbPeerLearned[i] || wcbPeerTemporary[i]) && (i + 1 != WCB_Number);
   }
 }
 
@@ -6322,6 +6353,43 @@ bool addActivePeer(uint8_t id, bool learned) {
   return wcbPeerActive[idx];
 }
 
+// Register board `id` as a TEMPORARY peer: live ESP-NOW registration so
+// the mesh can reach it, but NOT persisted (never sets wcbPeerLearned / touches NVS)
+// and subject to silence-eviction (see the reaper in processETMHeartbeats). If the id
+// was a persisted learned peer, it is DOWNGRADED (learned bit cleared + re-saved) so a
+// device that flips to advertising "temporary" stops being permanent. Transactional
+// like addActivePeer. Only meaningful ABOVE the WCBQ floor — a floor id is already a
+// permanent member by config. Returns true if it's now an active peer.
+bool addTemporaryPeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  if (id == WCB_Number) return false;
+  if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) return false;  // controller path owns it
+  int idx = id - 1;
+  if (id <= Default_WCB_Quantity) return false;   // floor member — already permanent; flag is moot
+
+  if (!esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, WCBMacAddresses[idx], 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) != ESP_OK) {
+      Serial.printf("[PEER] Could not add temporary WCB%d (ESP-NOW peer table full? cap 20)\n", id);
+      return false;                                 // transactional: don't mark active
+    }
+    Serial.printf("[PEER] WCB%d registered (live, TEMPORARY).\n", id);
+  }
+
+  // Downgrade a previously-permanent peer that now advertises temporary.
+  if (wcbPeerLearned[idx]) {
+    wcbPeerLearned[idx] = false;
+    learnedPeersDirty   = true;                             // persist the removal (debounced)
+    learnedPeersFlushMs = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  }
+  wcbPeerTemporary[idx] = true;
+  rebuildActivePeers();
+  return wcbPeerActive[idx];
+}
+
 // Remove board `id` from membership. Only unregisters the ESP-NOW peer when the
 // board is OUT-OF-BAND (not a 1..Default_WCB_Quantity floor member, not the
 // special peer) — shared in-band peers registered at boot must never be deleted
@@ -6333,6 +6401,7 @@ void removeActivePeer(uint8_t id) {
   int idx = id - 1;
 
   wcbPeerLearned[idx]      = false;
+  wcbPeerTemporary[idx]    = false;
   wcbPeerAdvertCount[idx]  = 0;
   wcbPeerReciprocated[idx] = false;
   learnedPeersDirty        = true;                          // persist membership (debounced)
@@ -6438,11 +6507,11 @@ void drainLearnedPeerMaintenance() {
   }
 }
 
-// Drop ALL learned peers (keeps the WCBQ floor). Backs ?WDP,CLEAR. Persists.
+// Drop ALL learned + temporary peers (keeps the WCBQ floor). Backs ?WDP,CLEAR. Persists.
 void clearAllLearnedPeers() {
   int n = 0;
   for (int i = 0; i < MAX_WCB_COUNT; i++)
-    if (wcbPeerLearned[i]) { removeActivePeer(i + 1); n++; }
+    if (wcbPeerLearned[i] || wcbPeerTemporary[i]) { removeActivePeer(i + 1); n++; }
   saveLearnedPeers();
   learnedPeersDirty = false;
   if (n > 0) Serial.printf("[PEER] dropped %d learned peer(s)\n", n);

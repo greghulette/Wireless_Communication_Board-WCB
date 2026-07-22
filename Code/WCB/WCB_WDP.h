@@ -74,6 +74,9 @@ struct WdpNeighbor {
   // When isClient is set, `alias` holds the device's canonical type name and the
   // WCB-only fields (hwVer/capFlags/maestro/portLabels) are unused.
   bool          isClient;      // true = a WCB_Client device, not a WCB
+  bool          temporary;     // advertised the WDP "temporary" flag (WDP_ADVFLAG_TEMPORARY)
+                               // — adopt as a TEMPORARY peer (live but not persisted), never
+                               // as a permanent learned peer. See addTemporaryPeer (WCB.ino).
   char          hwRev[16];     // client hardware revision string ("" = none)
   char          capTags[49];   // client capability tags, space-separated ("" = none)
   unsigned long lastAdvertMs;

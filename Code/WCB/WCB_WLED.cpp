@@ -160,8 +160,8 @@ void processWLEDRuntimeCommand(const String &message) {
 // ==================== Port reservation ==================================
 
 // Reserve a local port for WLED: apply baud, disable broadcast both ways (don't
-// feed mesh traffic to WLED, don't re-broadcast WLED bytes), label it "WLED".
-static void wledReserveLocalPort(int port, uint32_t baud) {
+// feed mesh traffic to WLED, don't re-broadcast WLED bytes), label it "WLED <id>".
+static void wledReserveLocalPort(int port, uint32_t baud, uint8_t wledID) {
   if (baud != baudRates[port - 1]) updateBaudRate(port, baud);
   else                             applyLiveBaud(port, baud);
 
@@ -175,7 +175,7 @@ static void wledReserveLocalPort(int port, uint32_t baud) {
     saveBroadcastBlockSettings();
     Serial.printf("  ⚠️  Disabled broadcast input on S%d (WLED port)\n", port);
   }
-  saveSerialLabelToPreferences(port, "WLED");
+  saveSerialLabelToPreferences(port, "WLED " + String(wledID));
 }
 
 // Release a local port no WLED uses anymore: re-enable broadcast, reset baud,
@@ -340,7 +340,7 @@ void configureWLED(const String &args) {
   if (slot < 0) slot = findEmptyWLEDSlot();
   if (slot < 0) { Serial.printf("[WLED] No free slots (max %d)\n", MAX_WLED_PER_WCB); return; }
 
-  wledReserveLocalPort(serialPort, (uint32_t)baudRate);
+  wledReserveLocalPort(serialPort, (uint32_t)baudRate, (uint8_t)wledID);
   wledConfigs[slot] = { (uint8_t)wledID, (uint8_t)serialPort, 0, true, (uint32_t)baudRate };
   saveWLEDSettings();
 

@@ -93,6 +93,7 @@ Unknown TLV types are skipped via the length prefix — forward compatible in bo
 | `0x0F` | WLED_CFG | `[id][baudCode]` pairs — WLED id+baud, for remote-proxy auto-config | WCB |
 | `0x10` | PWMTARGET | `[targetWCB][port]` pairs — this board's REMOTE PWM outputs; each named board self-configures that output port | WCB |
 | `0x11` | SOLICIT | len 0 — a bare "advertise now" request (`?WDP,POLL`); carries no facts, receivers reply with a jittered advert and never record it | WCB |
+| `0x12` | FLAGS | `[flags:1]` advert-flags bitmap. Bit `0x01` **TEMPORARY** = "adopt me as a **temporary** peer" — live so the mesh can reach it, but never persisted, evicted on silence, gone on reboot. For occasional devices (e.g. a management relay) | client (or WCB) |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -139,20 +140,30 @@ Historically the peer set was the contiguous range `1..WCBQ` and adding a board 
 every board's quantity. As built, each board maintains an explicit **membership set**:
 
 ```
-active peers = {1..WCBQ}  ∪  {learned peers}  ∪  {controller/special peer}
-               (the floor)    (WDP auto-join)     (tracked separately)
+active peers = {1..WCBQ}  ∪  {learned peers}  ∪  {temporary peers}  ∪  {controller/special peer}
+               (the floor)    (WDP auto-join)     (WDP TEMPORARY)       (tracked separately)
 ```
 
-- **Auto‑join** (default **ON**, `?WDP,AUTOJOIN,ON|OFF`, persisted): when a board hears a regular
-  WCB advertise **twice**, it registers it as an ESP‑NOW peer **live** and adds it to membership.
-  Client devices and the controller id are never auto‑joined (clients are handled by the
-  controller path, §9).
+- **Auto‑join** (default **ON**, `?WDP,AUTOJOIN,ON|OFF`, persisted): when a board hears a device
+  advertise **twice**, it registers it as an ESP‑NOW peer **live** and adds it to membership.
+  Regular WCBs **and** client devices both auto‑join (both force the derived MAC, so the peer is
+  reachable from its id alone); the controller id is never auto‑joined (handled by the controller
+  path, §9). A device that advertises the TEMPORARY flag (§3) joins as a *temporary* peer instead
+  (below).
 - **Learned peers are permanent.** Membership is persisted to NVS (`learned_peers`: schema
   version + MAC‑octet fingerprint + 20‑bit mask) and restored on every boot. Heartbeats drive
   online/offline as always, but membership never self‑evicts — a powered‑down board stays a
   member and simply shows offline until it returns. Cleanup is deliberately the operator's call:
   `?WDP,FORGET,<id>` (one) or `?WDP,CLEAR` (all learned). Changing the mesh MAC octets discards
   the saved membership (the fingerprint no longer matches).
+- **Temporary peers.** A device can advertise the `FLAGS`/TEMPORARY bit (§3) to say
+  *"adopt me, but don't keep me."* It registers live like a learned peer (so the mesh can reach
+  it) but is **never persisted** to `learned_peers`, is **gone on reboot**, and is **evicted after
+  ~180 s of silence** (`del_peer` — keeps the 20‑slot ESP‑NOW table lean). A device that was a
+  permanent learned peer and then starts advertising the flag is **downgraded** to temporary. Use
+  it for occasional devices — e.g. a management relay you connect now and then — that shouldn't
+  become a permanent fixture; `?WDP,FORGET` / `?WDP,CLEAR` drop them like any peer. They show
+  `PEER=4` ("temporary") in `?WDP,DUMP` and the Wizard mesh panel.
 - **WCBQ is the floor, not the ceiling.** It still pre‑registers `1..WCBQ` at boot (useful so a
   fresh board isn't peerless before the first advert), and a live `?WCBQ` change reconciles
   registrations without a reboot. Run WCBQ=1 for a purely learned mesh.
@@ -185,7 +196,8 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 | `?WDP,CLEAR` | drop all learned peers + wipe the neighbor table |
 | `?PEERSLIVE` | read‑only: live membership count (also emitted in config pulls) |
 
-**DUMP format** (one line per neighbor, `PEER`: 0 = not a member, 1 = WCBQ floor, 2 = learned):
+**DUMP format** (one line per neighbor, `PEER`: 0 = not a member, 1 = WCBQ floor, 2 = learned,
+3 = self, 4 = temporary):
 
 ```
 [WDP:N=..,CLIENT=..,ALIAS=..,HW=..,HWREV=..,FW=..,CAP=....,CTRL=..,CAPTAGS=..,MAESTRO=..,AGE=..,SEEN=..,PEER=..]
@@ -274,15 +286,17 @@ Plus the membership auto‑join of §6.
 
 ## 10. Future work (designed, not built)
 
-*(Single‑owner capability routing (HCR/MP3) and Maestro/WLED `id → board` auto‑config — once
-listed here — have shipped; see §9.)*
+*(Single‑owner capability routing (HCR/MP3), Maestro/WLED `id → board` auto‑config, and
+temporary peers — once listed here — have shipped; see §9 / §6. The temporary idea
+generalized the old "management‑peer 19" sketch into a per‑device `FLAGS`/TEMPORARY advert bit,
+so any device can opt in regardless of id.)*
 
 - **Generic capability addressing** — a syntax to address any command to a *capability*
   (`"whoever has X"`). Today only the ID‑less HCR/MP3 triggers auto‑resolve to a single owner;
   there is no general `;@<cap>` addressing form, and the Wizard has no surface to view or pin
   which board currently owns a capability.
-- Draft TLVs / ideas not shipped: ROLE (`0x02`) and HEALTH (`0x08`) TLVs, management‑peer (19)
-  ephemeral adoption, and descriptive‑table persistence (deliberately a non‑goal — §4).
+- Draft TLVs / ideas not shipped: ROLE (`0x02`) and HEALTH (`0x08`) TLVs, and descriptive‑table
+  persistence (deliberately a non‑goal — §4).
 
 ---
 

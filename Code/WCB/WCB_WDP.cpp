@@ -33,11 +33,13 @@ extern void wdpBroadcast(const uint8_t *payload, int len);
 extern void enableControllerPeer(uint8_t id);
 // Dynamic peer membership (WCB.ino): learn regular WCBs from their adverts.
 extern bool    addActivePeer(uint8_t id, bool learned);
+extern bool    addTemporaryPeer(uint8_t id);   // TEMPORARY peer: live but not persisted (see WCB.ino)
 extern void    removeActivePeer(uint8_t id);
 extern void    clearAllLearnedPeers();
 extern int     activePeerCount();
 extern bool    wcbPeerActive[MAX_WCB_COUNT];
 extern bool    wcbPeerLearned[MAX_WCB_COUNT];
+extern bool    wcbPeerTemporary[MAX_WCB_COUNT];
 extern uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT];
 extern bool    wcbPeerOnline(uint8_t id);   // registered peer AND currently ETM-online (for cap routing)
 
@@ -84,6 +86,11 @@ static unsigned long wdpNextDirtyCheckMs = 0;
 #define WDP_TLV_SOLICIT  0x11    // len 0 — a "please advertise now" request (?WDP,POLL). Carries
                                  // no facts; a receiver schedules a prompt advert and does NOT
                                  // record the solicit as a neighbor (it would wipe real facts).
+#define WDP_TLV_FLAGS    0x12    // [flags:1] — advert flags bitmap (below). A device sets bits to
+                                 // change how remotes treat it. Absent = all-zero (default).
+#define WDP_ADVFLAG_TEMPORARY 0x01  // "I'm TEMPORARY" — adopt me as a live-but-not-persisted peer
+                                    // (gone on reboot, evicted on silence), never a permanent one.
+                                    // For occasional devices like a management relay.
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -509,6 +516,9 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       case WDP_TLV_CTRLID:
         if (len >= 1) nb.ctrlId = val[0];
         break;
+      case WDP_TLV_FLAGS:   // advert flags bitmap — currently just the "temporary" bit
+        if (len >= 1) nb.temporary = (val[0] & WDP_ADVFLAG_TEMPORARY) != 0;
+        break;
       // ---- Client-device identity (WCB_Client) ----------------------------
       case WDP_TLV_DEVTYPE: {   // device type name doubles as the neighbor's alias
         int L = len > 24 ? 24 : len; memcpy(nb.alias, val, L); nb.alias[L] = '\0';
@@ -619,14 +629,28 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     int idx = senderWCB - 1;
     if (wcbPeerAdvertCount[idx] < 255) wcbPeerAdvertCount[idx]++;
     bool isSpecialPeer = specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID;
-    // Join after >=2 adverts so a single spoofed/echoed packet can't inject a
-    // peer. Gated on the (default-ON) auto-join setting.
-    if (wdpAutoJoin && !isSpecialPeer && !wcbPeerActive[idx] &&
-        wcbPeerAdvertCount[idx] >= 2) {
-      if (addActivePeer((uint8_t)senderWCB, true))
-        Serial.printf("[WDP] auto-joined WCB%d%s%s (%s)\n", senderWCB,
-                      nb.alias[0] ? " " : "", nb.alias,
-                      nb.isClient ? "client" : "board");
+    bool vetted = wcbPeerAdvertCount[idx] >= 2;   // >=2 adverts so one stray/echoed packet can't inject
+    if (wdpAutoJoin && !isSpecialPeer) {
+      if (nb.temporary) {
+        // Device asked to be TEMPORARY (e.g. a management relay): adopt as an temporary
+        // peer — live so we can reach it, but never persisted, and evicted on silence.
+        // Also downgrades a peer that was permanently learned and now advertises
+        // temporary. addTemporaryPeer is a no-op once it's already temporary, so gate on
+        // !wcbPeerTemporary so we only act (and log) on the transition.
+        if (vetted && !wcbPeerTemporary[idx]) {
+          bool wasLearned = wcbPeerLearned[idx];
+          if (addTemporaryPeer((uint8_t)senderWCB))
+            Serial.printf("[WDP] %s WCB%d%s%s (temporary)\n",
+                          wasLearned ? "downgraded to temporary" : "temporarily joined",
+                          senderWCB, nb.alias[0] ? " " : "", nb.alias);
+        }
+      } else if (!wcbPeerActive[idx] && vetted) {
+        // Default: permanent auto-join (persisted learned peer), unchanged.
+        if (addActivePeer((uint8_t)senderWCB, true))
+          Serial.printf("[WDP] auto-joined WCB%d%s%s (%s)\n", senderWCB,
+                        nb.alias[0] ? " " : "", nb.alias,
+                        nb.isClient ? "client" : "board");
+      }
     }
   }
 
@@ -642,7 +666,8 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // host Maestros) and any Maestro whose baud didn't arrive as a usable value —
   // old id-only advert (0xFF), a garbled out-of-range code, or baud 0 all map to
   // wdpCodeToBaud()==0, and there's nothing safe to configure a proxy with.
-  if (wdpAutoJoin && !nb.isClient && wcbPeerActive[senderWCB - 1]) {
+  if (wdpAutoJoin && !nb.isClient && wcbPeerActive[senderWCB - 1] &&
+      !wcbPeerTemporary[senderWCB - 1]) {   // never derive PERSISTED config from a temp peer
     bool maestroChanged = false;
     for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
       uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);
@@ -1074,11 +1099,12 @@ static void printWdpDump() {
     char maestro[48]; wdpMaestroStr(nb, maestro, sizeof(maestro));
     // PEER: this board's membership relationship to the neighbor —
     // 0 = not a mesh peer (the controller/special peer, or a not-yet-joined
-    // device), 1 = WCBQ-floor member, 2 = auto-joined/learned member. Clients
-    // CAN now be learned peers (auto-join stores them like WCBs), so this is no
-    // longer forced to 0 for clients. Appended last-but-SEEN so older Wizard
-    // regexes (anchored on SEEN) fail soft rather than mis-parse.
-    int peerFlag = wcbPeerLearned[i] ? 2 : (wcbPeerActive[i] ? 1 : 0);
+    // device), 1 = WCBQ-floor member, 2 = auto-joined/learned member, 4 = TEMPORARY
+    // (temporary) peer — live but not persisted, evicted on silence. Clients CAN be
+    // learned peers (auto-join stores them like WCBs), so this is not forced to 0 for
+    // clients. Appended last-but-SEEN so older Wizard regexes (anchored on SEEN) fail
+    // soft rather than mis-parse.
+    int peerFlag = wcbPeerTemporary[i] ? 4 : (wcbPeerLearned[i] ? 2 : (wcbPeerActive[i] ? 1 : 0));
     Serial.printf("[WDP:N=%d,CLIENT=%d,ALIAS=%s,HW=%d,HWREV=%s,FW=%s,CAP=%04X,CTRL=%d,CAPTAGS=%s,MAESTRO=%s,AGE=%lu,SEEN=%d,PEER=%d]\n",
                   nb.wcbNumber, nb.isClient ? 1 : 0, nb.alias, nb.hwVer, nb.hwRev, nb.fwVer,
                   nb.capFlags, nb.ctrlId, nb.capTags, maestro,
