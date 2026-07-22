@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_221140RJUL2026                                  *****////
+///*****                                          Version 6.2.0_221406RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_221140RJUL2026";
+String SoftwareVersion = "6.2.0_221406RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -457,7 +457,11 @@ bool wcbPeerLearned[MAX_WCB_COUNT] = { false };
 // occasional management relay — is reachable while active, gone on reboot, and
 // self-cleans when it goes quiet, keeping the 20-slot ESP-NOW peer table lean.
 bool wcbPeerTemporary[MAX_WCB_COUNT] = { false };
-#define TEMPORARY_PEER_TTL_MS 180000UL   // silence before a temporary peer is dropped (~3 min)
+#define TEMPORARY_PEER_TTL_MS 50000UL    // silence before a temporary peer is dropped (~50 s =
+                                         // ~3 missed 15 s temp adverts). MATCHES WCB_Client's
+                                         // WCB_WDP_TEMP_NEIGHBOR_TTL_MS so a powered-off temp
+                                         // device (e.g. a mgmt relay) clears from the WCB peer
+                                         // table / ?WDP view as promptly as from a NaviCore roster.
 // millis() when a learned peer was first heard vs. last confirmed; drives the
 // "confirmed reciprocating" gate and stale eviction (Stages 3-4).
 uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT] = { 0 };  // WDP adverts heard (caps at 255)

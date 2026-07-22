@@ -159,7 +159,8 @@ active peers = {1..WCBQ}  ∪  {learned peers}  ∪  {temporary peers}  ∪  {co
 - **Temporary peers.** A device can advertise the `FLAGS`/TEMPORARY bit (§3) to say
   *"adopt me, but don't keep me."* It registers live like a learned peer (so the mesh can reach
   it) but is **never persisted** to `learned_peers`, is **gone on reboot**, and is **evicted after
-  ~180 s of silence** (`del_peer` — keeps the 20‑slot ESP‑NOW table lean). A device that was a
+  ~50 s of silence** (`del_peer` — keeps the 20‑slot ESP‑NOW table lean; matches the `WCB_Client`
+  temporary‑neighbor TTL so it clears the WCB roster as promptly as a NaviCore's). A device that was a
   permanent learned peer and then starts advertising the flag is **downgraded** to temporary. Use
   it for occasional devices — e.g. a management relay you connect now and then — that shouldn't
   become a permanent fixture; `?WDP,FORGET` / `?WDP,CLEAR` drop them like any peer. They show
