@@ -21,6 +21,7 @@ struct WcbVar {
   char    name[WCB_VAR_NAME_MAX + 1];
   int32_t value;
   bool    used;
+  bool    persist;   // false = RAM-only (e.g. live Maestro telemetry) — never written to NVS
 };
 static WcbVar vars[WCB_MAX_VARIABLES];
 static int    varCount = 0;
@@ -66,7 +67,7 @@ bool isValidVariableName(const String &name) {
 static void saveVarsToNVS() {
   String blob;
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
-    if (!vars[i].used) continue;
+    if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars never touch flash
     blob += vars[i].name;
     blob += '=';
     blob += String((long)vars[i].value);
@@ -108,8 +109,9 @@ void loadVariables() {
         if (slot >= 0 && isValidVariableName(nm)) {
           strncpy(vars[slot].name, nm.c_str(), WCB_VAR_NAME_MAX);
           vars[slot].name[WCB_VAR_NAME_MAX] = '\0';
-          vars[slot].value = v;
-          vars[slot].used  = true;
+          vars[slot].value   = v;
+          vars[slot].used    = true;
+          vars[slot].persist = true;   // anything loaded from NVS is persistent
           varCount++;
         }
       }
@@ -121,7 +123,7 @@ void loadVariables() {
 }
 
 // ---- core store ---------------------------------------------------------
-bool setVariable(const String &name, int32_t value) {
+static bool setVariableImpl(const String &name, int32_t value, bool persist) {
   if (!isValidVariableName(name)) return false;
   int idx = findVarSlot(name);
   if (idx < 0) {
@@ -136,16 +138,34 @@ bool setVariable(const String &name, int32_t value) {
     vars[idx].name[WCB_VAR_NAME_MAX] = '\0';
     vars[idx].used = true;
     varCount++;
-  } else if (vars[idx].value == value) {
-    // Unchanged — skip the NVS commit entirely. Every save rewrites the whole
-    // variable blob to flash (loop() stalls ms per write + erase-cycle wear on
-    // the 20 KB NVS partition), so repeated identical sets from sequences must
-    // not touch flash. RAM mirror is already correct.
+  } else if (!persist && vars[idx].persist) {
+    // A RAM-only set must NEVER demote an existing PERSISTENT variable to RAM-only — that
+    // would drop it from NVS on the next save and from backups. Refuse (e.g. live Maestro
+    // telemetry whose name collides with a user ;V variable): keep the persistent var intact.
+    return false;
+  } else if (vars[idx].value == value && vars[idx].persist == persist) {
+    // Unchanged (value AND persistence) — skip the NVS commit entirely. Every save
+    // rewrites the whole variable blob to flash (loop() stalls ms per write +
+    // erase-cycle wear on the 20 KB NVS partition), so repeated identical sets from
+    // sequences (or live telemetry polls) must not touch flash. RAM mirror is already
+    // correct.
     return true;
   }
-  vars[idx].value = value;
-  saveVarsToNVS();
+  vars[idx].value   = value;
+  vars[idx].persist = persist;
+  if (persist) saveVarsToNVS();   // RAM-only sets never write flash
   return true;
+}
+
+// Persistent set (the ";V" path): RAM mirror + NVS.
+bool setVariable(const String &name, int32_t value) {
+  return setVariableImpl(name, value, true);
+}
+
+// RAM-only set (live Maestro get-replies): readable by IF/;V, never persisted, gone on
+// reboot. Safe to poll at any rate — no flash wear. See WCB_Maestro get-query handling.
+bool setVariableRAM(const String &name, int32_t value) {
+  return setVariableImpl(name, value, false);
 }
 
 int32_t getVariable(const String &name, int32_t defVal) {
@@ -413,7 +433,7 @@ void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
                           char delimiter, bool printToSerial,
                           const String &defSep, const String &defFunc) {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
-    if (!vars[i].used) continue;
+    if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars (live telemetry) are not backed up
     // Emit as a CONFIG command (?VAR,SET,name,value), not runtime ";V":
     //  - flows through the Wizard's '^?' chain grammar and per-line parser
     //  - restores via processVarConfig exactly like every other ? entry

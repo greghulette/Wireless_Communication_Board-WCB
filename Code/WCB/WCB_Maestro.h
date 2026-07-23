@@ -28,6 +28,16 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber);
 // (verb-form branch) and the definition for the full routing/dedup notes.
 void sendMaestroServoVerb(const char *verbBody);
 
+// Get-query request/response (getMovingState/getPosition/getErrors). handleMaestroGet
+// reads a local Maestro's reply into a RAM variable (m<dev>moving / m<dev>pos<ch> /
+// m<dev>err) that IF logic tests, or forwards the query to the hosting board; the two
+// helpers service the cross-board wire forms ;MG<dev>,<replyTo>,<verb> and ;M!<name>=<val>.
+// While a query reads, the background Maestro-RX readers must skip maestroQueryPort.
+extern volatile int maestroQueryPort;
+void handleMaestroGet(int dev, const String &verb, const String &ch, int replyToWCB);
+void handleMaestroGetForwarded(const String &body);   // ;MG body (excludes "MG")
+void handleMaestroResult(const String &body);         // ;M! body (excludes "M!")
+
 // Configuration functions
 void configureMaestro(const String &message);
 void clearMaestroByID(const String &message);

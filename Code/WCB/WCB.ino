@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_230905RJUL2026                                  *****////
+///*****                                          Version 6.2.0_231102RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_230905RJUL2026";
+String SoftwareVersion = "6.2.0_231102RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3868,8 +3868,10 @@ void forwardMaestroDataToLocalKyber() {
   // Read from every locally configured Maestro port and forward to Kyber
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
+      if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
       uint8_t b = (uint8_t)maestroSerial.read();
       kyberSerial.write(b);
       if (Maestro_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
@@ -3886,8 +3888,10 @@ void forwardMaestroDataToRemoteKyber() {
   // Read from every locally configured Maestro port and batch for ESP-NOW
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
+      if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
       uint8_t b = (uint8_t)maestroSerial.read();
       if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
     }
@@ -5635,6 +5639,15 @@ void processMaestroCommand(const String &message){
   // ";M" has two shapes (see WcbMaestro.h grammar). message here is the command with the
   // CommandCharacter stripped but the leading 'M'/'m' still present — e.g. "M11", "M1,1",
   // or "M2,setTarget,0,6000".
+
+  // Cross-board get-query wire forms (letter after 'M' — device commands always have a digit):
+  //   ;M!<name>=<value>          a get-result pushed home → store RAM-only
+  //   ;MG<dev>,<replyTo>,<verb>  a get forwarded to us (the host) → read our Maestro + reply
+  if (message.length() > 1 && message[1] == '!') { handleMaestroResult(message.substring(2)); return; }
+  if (message.length() > 2 && (message[1] == 'G' || message[1] == 'g')) {
+    handleMaestroGetForwarded(message.substring(2)); return;
+  }
+
   int comma = message.indexOf(',');
 
   // ── SUBROUTINE trigger — the SAME command in two spellings ──
@@ -5857,9 +5870,14 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // library (status parsing) via processHCRTick() in loop().
   if (isSerialPortUsedForHCR(sourceID)) return;
 
+  // Skip a port whose Maestro is mid get-query — handleMaestroGet is reading the reply
+  // bytes and must not have them stolen/mis-parsed as a line command.
+  if (sourceID != 0 && sourceID == maestroQueryPort) return;
+
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
   while (serial.available()) {
+    if (sourceID != 0 && sourceID == maestroQueryPort) break;   // a get-query claimed this port mid-drain
     char c = serial.read();
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
@@ -6132,14 +6150,17 @@ void RawSerialForwardingTask(void *pvParameters) {
             // addSerialMonitorMapping sets that flag for every mapped port, so using it
             // would silently skip all serial mappings.
             if (Kyber_Local && kyberLocalPort > 0 && inputPort == kyberLocalPort) continue;
+            if (inputPort == maestroQueryPort) continue;   // a Maestro get-query owns this port's reply bytes
 
             Stream &inputSerial = getSerialStream(inputPort);
 
             // Read raw bytes if available - use read() not readBytes()
             if (inputSerial.available() > 0) {
                 int len = 0;
-                // Read all available bytes (up to buffer size)
+                // Read all available bytes (up to buffer size). Re-test the query gate each
+                // byte: a get-query can start under us mid-drain (same-core time-slice).
                 while (inputSerial.available() > 0 && len < sizeof(buffer)) {
+                    if (inputPort == maestroQueryPort) break;
                     buffer[len++] = inputSerial.read();
                 }
                 

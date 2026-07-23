@@ -25,6 +25,7 @@ void loadVariables();             // call once in setup(): build RAM mirror from
 
 // ---- Core store (RAM-mirrored, NVS-backed) ------------------------------
 bool    setVariable(const String &name, int32_t value);   // false on bad name / table full
+bool    setVariableRAM(const String &name, int32_t value);// RAM-only (not persisted; no flash wear)
 int32_t getVariable(const String &name, int32_t defVal = 0);
 bool    variableExists(const String &name);
 bool    clearVariable(const String &name);                 // false if not found

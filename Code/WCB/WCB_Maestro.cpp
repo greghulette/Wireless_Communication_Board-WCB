@@ -1,8 +1,15 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_Maestro.h"
 #include "WCB_Storage.h"
+#include "WCB_Variables.h"   // setVariableRAM — get-query replies land in RAM-only variables
 #include <WcbCmd.h>          // shared ;M/;A/;L/;H → native-byte translators (WcbMaestro::buildSubroutineFrame
                             // is byte-identical to the inline {0xAA,id,0x27,seq}; same lib NaviCore compiles)
+
+// While a get-query is reading its Maestro's reply, the three background readers that
+// drain Maestro RX (forwardMaestroDataToLocalKyber/RemoteKyber + processIncomingSerial)
+// must SKIP that port so they don't steal the reply bytes. 0 = no query active.
+volatile int maestroQueryPort = 0;
+static const unsigned long MAESTRO_QUERY_TIMEOUT_MS = 25;   // reply is a few bytes @57600 — usually <2ms
 
 extern bool maestroEnabled;
 extern int WCB_Number;
@@ -265,6 +272,19 @@ void sendMaestroServoVerb(const char *verbBody) {
   int    ci      = body.indexOf(',');
   String payload = (ci >= 0) ? body.substring(ci + 1) : String();   // after the first comma
 
+  // Get-queries (getMovingState/getPosition/getErrors) are request→reply, not fire-and-
+  // forget: hand them to the query engine, which reads the Maestro's answer and stores it
+  // in a RAM variable. This is a LOCALLY-originated query, so the reply lands here.
+  {
+    int    pc = payload.indexOf(',');
+    String v0 = (pc < 0) ? payload : payload.substring(0, pc);
+    String v0l = v0; v0l.toLowerCase();
+    if (v0l.startsWith("get")) {
+      handleMaestroGet(dev, v0, (pc < 0) ? String() : payload.substring(pc + 1), WCB_Number);
+      return;
+    }
+  }
+
   // Config-matched routing (dedup: one write per port, one unicast per board).
   bool     handled        = false;
   uint8_t  sentLocalPorts = 0;
@@ -338,6 +358,120 @@ void sendMaestroServoVerb(const char *verbBody) {
     if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Fallback %s\n",
                                     dev, verbBody, target ? "unicast" : "broadcast");
   }
+}
+
+// ==================== Get-query request/response ====================
+// A ;M<dev>,get* verb is a REQUEST/RESPONSE, not fire-and-forget: send the Pololu query,
+// read the Maestro's reply, and drop the value into a RAM-only variable that IF logic can
+// test (e.g. IF,m2moving=0). Because the reply is asynchronous the query and the IF must
+// be SEPARATE invocations with a ;t gap. Variable naming:
+//   getMovingState -> m<dev>moving (0/1)   getPosition,<ch> -> m<dev>pos<ch>   getErrors -> m<dev>err
+// Cross-board: the originator forwards ;MG<dev>,<replyTo>,<verb>[,<ch>] to the hosting
+// board, which reads its local Maestro and pushes ;M!<name>=<value> back to <replyTo>.
+
+// Map a get verb to its reply length + the RAM variable it writes. Returns false if not a get.
+static bool maestroGetInfo(int dev, const String &verb, const String &ch,
+                           int &expectedBytes, String &varName) {
+  if (verb.equalsIgnoreCase("getMovingState")) { expectedBytes = 1; varName = "m" + String(dev) + "moving";     return true; }
+  if (verb.equalsIgnoreCase("getErrors"))      { expectedBytes = 2; varName = "m" + String(dev) + "err";        return true; }
+  if (verb.equalsIgnoreCase("getPosition"))    { expectedBytes = 2; varName = "m" + String(dev) + "pos" + ch;   return true; }
+  return false;
+}
+
+// Service a get-query for device `dev`. `replyToWCB` is the board whose RAM state should
+// receive the result (its IF logic reads it). Devices 1-8 only (0/9 are fan-out targets;
+// a query needs a single answer).
+void handleMaestroGet(int dev, const String &verb, const String &ch, int replyToWCB) {
+  if (dev < 1 || dev > 8) { if (debugEnabled) Serial.printf("[MAESTRO] get: bad device %d (1-8 only)\n", dev); return; }
+
+  int expectedBytes; String varName;
+  if (!maestroGetInfo(dev, verb, ch, expectedBytes, varName)) {
+    if (debugEnabled) Serial.printf("[MAESTRO] get: unknown query '%s'\n", verb.c_str());
+    return;
+  }
+  if (varName.length() > 15) { if (debugEnabled) Serial.printf("[MAESTRO] get: var name too long: %s\n", varName.c_str()); return; }
+
+  // Build the Pololu request frame from the reconstructed verb body.
+  String  verbBody = String(dev) + "," + verb + (ch.length() ? ("," + ch) : "");
+  uint8_t frame[WcbMaestro::MAX_FRAME];
+  size_t  n = WcbMaestro::build(verbBody.c_str(), frame, sizeof(frame));
+  if (n == 0) { if (debugEnabled) Serial.printf("[MAESTRO] get: bad query %s\n", verbBody.c_str()); return; }
+
+  // Where does dev live? (local serial port, or a remote host WCB)
+  int localPort = 0, hostWCB = 0;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured || maestroConfigs[i].maestroID != dev) continue;
+    if (maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) localPort = maestroConfigs[i].serialPort;
+    else if (maestroConfigs[i].remoteWCB > 0)                                 hostWCB   = maestroConfigs[i].remoteWCB;
+  }
+
+  // REMOTE: forward the query to the hosting board, carrying the originator so it replies
+  // home. Never bounce a query we ourselves received over ESP-NOW (a ;MG we can't service).
+  if (localPort == 0) {
+    if (lastReceivedViaESPNOW) return;
+    String fwd = String(CommandCharacter) + "MG" + String(dev) + "," + String(replyToWCB) + "," + verb
+                 + (ch.length() ? ("," + ch) : "");
+    if (hostWCB > 0) sendESPNowMessage((uint8_t)hostWCB, fwd.c_str());       // unicast to the host
+    else             sendESPNowMessage(0, fwd.c_str(), false);              // unconfigured → let the host find it
+    if (debugMaestro) Serial.printf("→ Maestro %d get '%s' -> WCB%d (reply to %d)\n", dev, verb.c_str(), hostWCB, replyToWCB);
+    return;
+  }
+
+  // LOCAL: gated timed read of the reply on this Maestro's port.
+  Stream &s = getSerialStream(localPort);
+  maestroQueryPort = localPort;                 // background readers skip this port now
+  while (s.available() > 0) s.read();           // discard any stale bytes
+  s.write(frame, n);                            // send the request
+  uint8_t reply[2]; int got = 0;
+  unsigned long t0 = millis();
+  while (got < expectedBytes && (millis() - t0) < MAESTRO_QUERY_TIMEOUT_MS) {
+    if (s.available() > 0) reply[got++] = (uint8_t)s.read();
+    else delay(1);                               // yield ~1ms rather than spin — don't starve loop()/tasks
+  }
+  maestroQueryPort = 0;                          // release the port
+
+  if (got < expectedBytes) {
+    if (debugMaestro) Serial.printf("[MAESTRO] get %d '%s': timeout (%d/%d bytes) — value kept\n",
+                                    dev, verb.c_str(), got, expectedBytes);
+    return;                                      // leave the previous value in place
+  }
+  int32_t value = (expectedBytes == 1) ? reply[0] : (int32_t)(reply[0] | (reply[1] << 8));
+
+  setVariableRAM(varName, value);                // THIS board's IF can now read it
+  if (debugMaestro) Serial.printf("[MAESTRO] get %d '%s' -> %s=%ld\n", dev, verb.c_str(), varName.c_str(), (long)value);
+
+  // If a remote board asked, push the result home (its IF reads its own RAM copy).
+  if (replyToWCB > 0 && replyToWCB != WCB_Number) {
+    String res = String(CommandCharacter) + "M!" + varName + "=" + String((long)value);
+    sendESPNowMessage((uint8_t)replyToWCB, res.c_str());
+  }
+}
+
+// ;MG<dev>,<replyTo>,<verb>[,<ch>] — a get forwarded to us (the host). body excludes "MG".
+void handleMaestroGetForwarded(const String &body) {
+  int c1 = body.indexOf(',');            if (c1 < 0) return;
+  int c2 = body.indexOf(',', c1 + 1);    if (c2 < 0) return;
+  int    dev     = body.substring(0, c1).toInt();
+  int    replyTo = body.substring(c1 + 1, c2).toInt();
+  if (replyTo < 1 || replyTo > MAX_WCB_COUNT) return;   // malformed/injected reply-to → drop, don't misroute
+  String rest    = body.substring(c2 + 1);          // "getMovingState" | "getPosition,0"
+  int c3 = rest.indexOf(',');
+  String verb = (c3 < 0) ? rest : rest.substring(0, c3);
+  String ch   = (c3 < 0) ? String() : rest.substring(c3 + 1);
+  handleMaestroGet(dev, verb, ch, replyTo);
+}
+
+// ;M!<name>=<value> — a get-result pushed home from the host. Store RAM-only. body excludes "M!".
+void handleMaestroResult(const String &body) {
+  int eq = body.indexOf('=');
+  if (eq <= 0) return;
+  String name = body.substring(0, eq); name.trim();
+  // Only accept our own telemetry namespace ("m" + device 1-8): a mesh peer must not be
+  // able to set (or, via the RAM path, silently demote/clobber) arbitrary WCB variables.
+  if (name.length() < 2 || name[0] != 'm' || name[1] < '1' || name[1] > '8') return;
+  int32_t value = (int32_t)body.substring(eq + 1).toInt();
+  setVariableRAM(name, value);
+  if (debugMaestro) Serial.printf("[MAESTRO] result %s=%ld (from mesh)\n", name.c_str(), (long)value);
 }
 
 // ==================== Configuration Functions ====================
