@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_231102RJUL2026                                  *****////
+///*****                                          Version 6.2.0_231503RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_231102RJUL2026";
+String SoftwareVersion = "6.2.0_231503RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1017,6 +1017,8 @@ void processETMHeartbeats() {
       wcbPeerTemporary[i]    = false;
       wcbPeerAdvertCount[i]  = 0;      // re-vet (>=2 adverts) if it returns
       wcbPeerReciprocated[i] = false;
+      wdpForgetNeighbor(id);          // also drop its WDP neighbor row so ?WDP,DUMP (and the
+                                      // Wizard) stop showing this ephemeral peer once it's gone
       rebuildActivePeers();
       if (!wcbPeerActive[i] && esp_now_is_peer_exist(WCBMacAddresses[i])) {
         esp_now_del_peer(WCBMacAddresses[i]);

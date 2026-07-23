@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '23.11:02.R.JUL.2026';
+const UI_VERSION = '23.15:03.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11396,7 +11396,7 @@ function upsertClientCard(nd) {
     updateBoardAliasUI(n);
   }
   _meshClients.set(n, nd);
-  renderClientStatus(n, nd, true);
+  renderClientStatus(n, nd, nd.live);   // honor the dump's SEEN flag — a stale row is NOT "Online"
 }
 
 // Render the live status/capabilities block inside a client card. `online`
@@ -11425,6 +11425,19 @@ function renderClientStatus(n, nd, online) {
 function markClientOffline(n) {
   const nd = _meshClients.get(n);
   if (nd) renderClientStatus(n, nd, false);
+}
+
+// A TEMPORARY (ephemeral) client that dropped out of the dump should VANISH, not linger as
+// an Offline tombstone — it was only ever a transient session (e.g. a mgmt relay). Mirrors
+// the relay-card removal path (drop from _meshBoards so reconcile won't re-add the section).
+function removeClientCard(n) {
+  if (boardConnections[n]?.isConnected?.()) return;   // never yank a live board
+  _meshClients.delete(n);
+  _meshBoards.delete(n);
+  delete boardConfigs[n];
+  delete boardConnections[n];
+  document.getElementById(`section-board-${n}`)?.remove();
+  reconcileBoardGrid();
 }
 
 async function meshAutoDiscoverTick() {
@@ -11462,10 +11475,16 @@ async function meshAutoDiscoverTick() {
       // enough.
       addDiscoveredBoards([n]);                             // idempotent: keep the section
     }
-    // A client card we've shown before but didn't hear this sweep → mark offline
-    // (its section stays so the user can see it dropped, not silently vanish).
-    for (const id of _meshClients.keys())
-      if (!seenClients.has(id)) markClientOffline(id);
+    // A client we've shown before but didn't hear this sweep: a TEMPORARY peer VANISHES
+    // (its ephemeral session ended — e.g. a mgmt relay evicted after its TTL); any other
+    // client tombstones as Offline (keep last-known identity so it doesn't silently vanish).
+    // Snapshot the keys — removeClientCard mutates _meshClients during the loop.
+    for (const id of [..._meshClients.keys()])
+      if (!seenClients.has(id)) {
+        const prev = _meshClients.get(id);
+        if (prev && prev.peer === 4) removeClientCard(id);
+        else                          markClientOffline(id);
+      }
   } catch (_) { /* transient — the next tick retries the DUMP, not the pull */ }
   finally { _meshDiscoverBusy = false; }
 }

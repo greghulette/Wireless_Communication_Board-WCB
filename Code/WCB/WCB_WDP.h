@@ -91,6 +91,7 @@ void wdpTick();    // loop(): send adverts on schedule + age the table
 
 // ---- Receive (called from the loop-drained WDP queue in WCB.ino) ---------
 void wdpOnAdvertReceived(int senderWCB, const uint8_t *structCommand);
+void wdpForgetNeighbor(uint8_t id);   // drop a neighbor row so ?WDP,DUMP stops emitting it (temporary eviction)
 
 // ---- Command / query -----------------------------------------------------
 void processWdpCommand(const String &args);

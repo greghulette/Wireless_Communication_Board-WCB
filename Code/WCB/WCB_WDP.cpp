@@ -1038,6 +1038,13 @@ static void printWdpDetail(int wcbNum) {
   Serial.println();
 }
 
+// Drop one neighbor from the WDP table so ?WDP,DUMP stops emitting it. Called when a
+// TEMPORARY peer is evicted after its TTL (ephemeral — it must fully vanish, not linger
+// with an ever-growing AGE), and by ?WDP,FORGET. Floor/learned peers use ?WDP,FORGET.
+void wdpForgetNeighbor(uint8_t id) {
+  if (id >= 1 && id <= MAX_WCB_COUNT) wdpNeighbors[id - 1].valid = false;
+}
+
 // Machine-readable dump (for the config tool / scripts).
 static void printWdpDump() {
   int count = 0;
@@ -1188,7 +1195,7 @@ void processWdpCommand(const String &args) {
     int id = (c >= 0) ? a.substring(c + 1).toInt() : 0;
     if (id >= 1 && id <= MAX_WCB_COUNT) {
       removeActivePeer((uint8_t)id);
-      wdpNeighbors[id - 1].valid = false;
+      wdpForgetNeighbor((uint8_t)id);
       Serial.printf("[WDP] forgot WCB%d\n", id);
     } else Serial.println("[WDP] usage: ?WDP,FORGET,<id>");
     return;
