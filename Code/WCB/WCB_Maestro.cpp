@@ -9,6 +9,7 @@ extern int WCB_Number;
 extern int Default_WCB_Quantity;
 extern bool lastReceivedViaESPNOW;
 extern bool debugEnabled;
+extern bool debugMaestro;
 extern char LocalFunctionIdentifier;
 extern char CommandCharacter;
 extern unsigned long baudRates[5];
@@ -219,6 +220,126 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   }
 }
 
+// ── Native Pololu servo/query verb routing ──────────────────────────────────────
+// Build the frame from a ";M" verb body (e.g. "2,setTarget,0,6000") and route it by
+// device# EXACTLY like the ;M<id><seq> subroutine trigger — a full parallel of
+// sendMaestroCommand: config-matched LOCAL write / REMOTE forward, and the SAME dev-0
+// broadcast, dev-9 "all local Maestros", dev==WCB_Number legacy-S1, and unconfigured
+// fallback. Broadcast / target-9 re-address the verb to each Maestro's OWN id (the
+// payload after the device# is location-independent), so "all Maestros goHome" works.
+//
+// Query verbs (getPosition/…) write only the REQUEST frame; the Maestro's reply rides the
+// existing Maestro→Kyber return path. WcbMaestro::build validates every arg (returns 0 on
+// a bad verb/range), so a malformed verb never reaches the servo wire.
+
+// Re-address the verb payload to Maestro id `tid` and write that frame to `out`.
+static void writeVerbFrameTo(Stream &out, int tid, const String &payload) {
+  String  cmd = String(tid) + "," + payload;              // "<tid>,goHome" / "<tid>,5" / …
+  uint8_t f[WcbMaestro::MAX_FRAME];
+  size_t  nn = WcbMaestro::build(cmd.c_str(), f, sizeof(f));
+  if (nn) out.write(f, nn);                               // no flush — UART drains async
+}
+
+// The ";M…" text to forward to another board. A numeric single-digit payload keeps the
+// legacy no-comma spelling (";M15"); everything else uses the unambiguous comma form
+// (";M1,goHome", ";M12,5"), which the receiver re-parses identically.
+static String maestroVerbForwardText(int dev, const String &payload) {
+  bool numeric = payload.length() > 0;
+  for (unsigned i = 0; i < payload.length(); i++)
+    if (payload[i] < '0' || payload[i] > '9') { numeric = false; break; }
+  String pfx = String(CommandCharacter) + "M" + String(dev);
+  return (numeric && dev >= 0 && dev <= 9) ? (pfx + payload) : (pfx + "," + payload);
+}
+
+void sendMaestroServoVerb(const char *verbBody) {
+  // verbBody = "<dev>,<payload>" — payload is a subroutine number (numeric comma form) or a
+  // verb ("goHome" / "setTarget,0,6000"). Validate + build THIS device's frame once.
+  uint8_t frame[WcbMaestro::MAX_FRAME];
+  size_t  n = WcbMaestro::build(verbBody, frame, sizeof(frame));
+  if (n == 0) {
+    if (debugEnabled) Serial.printf("[MAESTRO] bad verb, ignored: %s\n", verbBody);
+    return;
+  }
+  String body    = verbBody;
+  int    dev     = body.toInt();                          // routing key = leading digits
+  int    ci      = body.indexOf(',');
+  String payload = (ci >= 0) ? body.substring(ci + 1) : String();   // after the first comma
+
+  // Config-matched routing (dedup: one write per port, one unicast per board).
+  bool     handled        = false;
+  uint8_t  sentLocalPorts = 0;
+  uint32_t sentRemoteWCBs = 0;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured || maestroConfigs[i].maestroID != dev) continue;
+    MaestroConfig &config = maestroConfigs[i];
+    if (config.serialPort > 0) {                          // LOCAL — write this dev's frame
+      uint8_t portBit = (config.serialPort <= 7) ? (uint8_t)(1u << config.serialPort) : 0;
+      if (portBit && !(sentLocalPorts & portBit)) {
+        sentLocalPorts |= portBit;
+        getSerialStream(config.serialPort).write(frame, n);
+        if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Local S%d\n", dev, verbBody, config.serialPort);
+      }
+      handled = true;
+    }
+    if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) { // REMOTE — forward the verb TEXT
+      uint32_t wcbBit = (config.remoteWCB <= 31) ? (1u << config.remoteWCB) : 0;
+      if (wcbBit && !(sentRemoteWCBs & wcbBit)) {
+        sentRemoteWCBs |= wcbBit;
+        sendESPNowMessage(config.remoteWCB, maestroVerbForwardText(dev, payload).c_str());
+        if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Unicast WCB%d\n", dev, verbBody, config.remoteWCB);
+      }
+      handled = true;
+    }
+  }
+  if (handled) return;
+
+  // Broadcast (dev 0) — every LOCAL Maestro runs the verb re-addressed to its own id, and
+  // the verb text goes out to the mesh so remote boards do the same. Mirrors the legacy
+  // sendMaestroCommand broadcast, including its default-Maestro-on-S1 fallback so an
+  // un-mapped board still actuates its S1 Maestro (Pololu id = WCB number).
+  if (dev == 0) {
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++)
+      if (maestroConfigs[i].configured && maestroConfigs[i].serialPort > 0)
+        writeVerbFrameTo(getSerialStream(maestroConfigs[i].serialPort), maestroConfigs[i].maestroID, payload);
+    if (!isMaestroConfigured(WCB_Number))
+      writeVerbFrameTo(Serial1, WCB_Number, payload);
+    if (!lastReceivedViaESPNOW)
+      sendESPNowMessage(0, maestroVerbForwardText(0, payload).c_str(), false);
+    if (debugMaestro) Serial.printf("→ Maestro Broadcast verb '%s'\n", verbBody);
+    return;
+  }
+
+  // Target 9 — "the local Maestro(s) on THIS board", each addressed by its own id.
+  if (dev == 9) {
+    bool wroteLocal = false;
+    for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++)
+      if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
+        writeVerbFrameTo(getSerialStream(maestroConfigs[i].serialPort), maestroConfigs[i].maestroID, payload);
+        wroteLocal = true;
+      }
+    if (!wroteLocal) writeVerbFrameTo(Serial1, WCB_Number, payload);   // legacy S1 fallback
+    if (debugMaestro) Serial.printf("→ Maestro (local, target 9) verb '%s'\n", verbBody);
+    return;
+  }
+
+  // dev == this board's own number, nothing configured → legacy local S1 write. This is the
+  // case that must NOT self-forward over ESP-NOW (a board can't ESP-NOW its own MAC).
+  if (dev == WCB_Number) {
+    Serial1.write(frame, n);   // no flush — UART drains async
+    if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Legacy S1\n", dev, verbBody);
+    return;
+  }
+
+  // Unconfigured fallback — forward the verb text so whichever board owns `dev` handles it.
+  // Guarded so a verb we received over ESP-NOW is never bounced (dev==WCB_Number handled above).
+  if (!lastReceivedViaESPNOW) {
+    uint8_t target = (dev >= 1 && dev <= Default_WCB_Quantity) ? (uint8_t)dev : 0;  // else discovery-broadcast
+    sendESPNowMessage(target, maestroVerbForwardText(dev, payload).c_str(), false);
+    if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Fallback %s\n",
+                                    dev, verbBody, target ? "unicast" : "broadcast");
+  }
+}
+
 // ==================== Configuration Functions ====================
 void configureMaestro(const String &message) {
   // Format: ?MAESTRO,M<maestroID>:W<wcb>S<port>:<baud>
@@ -267,8 +388,8 @@ String remaining = message;
     int baudRate = singleConfig.substring(secondColon + 1).toInt();
     
     // Validate Maestro ID
-    if (maestroID < 1 || maestroID > 9) {
-      Serial.println("Invalid Maestro ID. Must be 1-9");
+    if (maestroID < 1 || maestroID > 8) {
+      Serial.println("Invalid Maestro ID. Must be 1-8 (9=all local, 0=all Maestros are reserved)");
       startIdx = nextComma + 1;
       continue;
     }
@@ -409,7 +530,7 @@ String remaining = message;
 // Persists via saveMaestroSettings() and is safe to call every advert. Returns
 // true iff a slot was added or its baud changed (so the caller could log it).
 bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
-  if (maestroID < 1 || maestroID > 9)      return false;
+  if (maestroID < 1 || maestroID > 8)      return false;
   if (hostWCB == 0 || hostWCB == WCB_Number) return false;   // not a remote host
 
   int8_t slot = findSlotByMaestroIDPortTarget(maestroID, 0, hostWCB);
@@ -500,8 +621,8 @@ void clearMaestroByID(const String &message) {
   // ---- Bare ID: clear every slot with this ID ----
   if (colon < 0) {
     int maestroID = s.toInt();
-    if (maestroID < 1 || maestroID > 9) {
-      Serial.printf("Invalid Maestro ID. Must be M1-M9\n");
+    if (maestroID < 1 || maestroID > 8) {
+      Serial.printf("Invalid Maestro ID. Must be M1-M8 (9=all local, 0=all are reserved)\n");
       return;
     }
     int cleared = 0;
@@ -527,7 +648,7 @@ void clearMaestroByID(const String &message) {
   tgt.toUpperCase();
   int wi = tgt.indexOf('W');
   int si = tgt.indexOf('S');
-  if (maestroID < 1 || maestroID > 9 || wi < 0 || si < 0 || si <= wi) {
+  if (maestroID < 1 || maestroID > 8 || wi < 0 || si < 0 || si <= wi) {
     Serial.printf("Invalid CLEAR target '%s'. Use M<id>:W<wcb>S<port> or M<id>\n",
                   message.c_str());
     return;

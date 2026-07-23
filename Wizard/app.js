@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '22.14:06.R.JUL.2026';
+const UI_VERSION = '23.09:05.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3839,7 +3839,7 @@ function validateSequenceValue(value) {
 //   CMD***text — already-inline comment (no leading delimiter): normalise spacing only.
 //
 // IF conditionals gate the NEXT chained command, with optional ;t delay tokens in
-// between (e.g. "IF,flag=1^;t500^;M1,23") — the whole group is kept on ONE line
+// between (e.g. "IF,flag=1^;t500^;M11") — the whole group is kept on ONE line
 // (literal delimiters preserved) so the conditional reads as a unit and saving
 // round-trips the exact same string.
 function seqValueToLines(value, delim, cmdChar = ';') {

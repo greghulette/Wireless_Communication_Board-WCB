@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_221406RJUL2026                                  *****////
+///*****                                          Version 6.2.0_230905RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_221406RJUL2026";
+String SoftwareVersion = "6.2.0_230905RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5632,10 +5632,53 @@ void recallStoredCommand(const String &message, int sourceID) {
 }
 
 void processMaestroCommand(const String &message){
-  int message_maestroID = message.substring(1,2).toInt();
-  int message_maestroSeq = message.substring(2).toInt();
-  if (message_maestroSeq < 0 || message_maestroSeq > 255) return;
-  sendMaestroCommand(message_maestroID,message_maestroSeq);
+  // ";M" has two shapes (see WcbMaestro.h grammar). message here is the command with the
+  // CommandCharacter stripped but the leading 'M'/'m' still present — e.g. "M11", "M1,1",
+  // or "M2,setTarget,0,6000".
+  int comma = message.indexOf(',');
+
+  // ── SUBROUTINE trigger — the SAME command in two spellings ──
+  //   ;M<id><seq>   (no comma; id = first digit, seq = the rest)
+  //   ;M<dev>,<n>   (comma + a plain integer)
+  // Both route through the identical sendMaestroCommand path so ;M1,1 behaves EXACTLY like
+  // ;M11 — dev-0 broadcast, dev-9 target-local, and remote-forwarding all come for free.
+  if (comma < 0) {
+    if (message.length() < 2 || message[1] < '0' || message[1] > '9') return;   // bare/typo ;M → ignore
+    int id  = message.substring(1, 2).toInt();
+    int seq = message.substring(2).toInt();
+    if (seq < 0 || seq > 255) return;
+    sendMaestroCommand(id, seq);
+    return;
+  }
+  {
+    String devStr = message.substring(1, comma);    // between 'M' and the first comma
+    String after  = message.substring(comma + 1);   // "1" | "goHome" | "1,1000" | "setTarget,0,6000"
+    bool devDigits = devStr.length() > 0;
+    for (int i = 0; i < (int)devStr.length(); i++)
+      if (devStr[i] < '0' || devStr[i] > '9') { devDigits = false; break; }
+    bool pureInt = after.length() > 0;
+    for (int i = 0; i < (int)after.length(); i++)
+      if (after[i] < '0' || after[i] > '9') { pureInt = false; break; }
+    // A real device number + a plain integer → the subroutine trigger; route it like ;M11.
+    // dev 0-9 only (Maestro ids are 1-9, id 0 = broadcast); a 2+ digit dev, a verb, or an
+    // EMPTY device field (";M,5") falls through to the verb path, which builds the frame and
+    // rejects/forwards it — so a missing device number can't silently broadcast.
+    if (devDigits && pureInt) {
+      int  dev = devStr.toInt();
+      long seq = after.toInt();
+      if (dev >= 0 && dev <= 9 && seq >= 0 && seq <= 255) {
+        sendMaestroCommand((uint8_t)dev, (uint8_t)seq);
+        return;
+      }
+    }
+  }
+
+  // ── Native Pololu servo/query verb ──
+  //   ;M<dev>,<verb>[,args]   (also ;M<dev>,<n>,<param> — a numeric sub WITH a parameter)
+  // Build the device-addressed frame with the shared WcbCmd translator and route it the
+  // SAME way as ;M<id><seq>: to the configured LOCAL Maestro port, or forwarded to the
+  // configured REMOTE WCB for processing there. See sendMaestroServoVerb.
+  sendMaestroServoVerb(message.c_str() + 1);   // skip the leading 'M'
 }
 
 void processPWMOutput(const String &message) {

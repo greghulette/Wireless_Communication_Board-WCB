@@ -52,10 +52,11 @@ void printCommandHelp(const String &cmd);
 // DEVICES
 //   ?KYBER,LOCAL             Kyber physically connected to this board (S2)
 //   ?MAESTRO,Mx:WxSx:baud    Configure a Maestro controller
-//                              Mx=Maestro ID (1-9), WxSx=target WCB+port, baud=baud rate
+//                              Mx=Maestro ID (1-8; 9 & 0 reserved), WxSx=target WCB+port, baud=rate
 //                              If WxSx matches this board's WCB number, Maestro is LOCAL
 //                              (serial port configured + baud set); otherwise REMOTE
-//                              (command routed via ESP-NOW when ;Mx,script is called)
+//                              (command routed via ESP-NOW when a ;M<id><seq> or
+//                               ;M<dev>,verb command targets that Maestro)
 //                              Can chain multiple: M1:W2S1:57600,M2:W2S2:57600,M3:W3S1:57600
 //   ?KYBER,REMOTE            Maestro local, Kyber on another board
 //   ?KYBER,CLEAR             Disable Kyber integration
@@ -150,7 +151,12 @@ void printCommandHelp(const String &cmd);
 //   ;Wx,message              Send message to WCB x via ESP-NOW unicast
 //   ;Ckey                    Run stored sequence named key
 //   ;SEQkey                    Run stored sequence named key
-//   ;Mx,script               Trigger Maestro x script number
+//   ;M<id><seq>              Trigger Maestro subroutine (id 1-8; 0=all, 9=all local; e.g. ;M11)
+//   ;M<dev>,<n>[,<param>]    Same subroutine trigger, comma spelling (;M1,1 == ;M11)
+//   ;M<dev>,<verb>[,args]    Native Pololu servo/query verb (dev 1-8; 0=all, 9=local). Verbs:
+//                              setTarget,<ch>,<val> / setSpeed,<ch>,<val> / setAccel,<ch>,<val>
+//                              goHome / sub,<n>[,<param>] / getPosition,<ch> /
+//                              getMovingState / getErrors   (see ?MAESTRO help)
 //   ;Tms,command             Wait ms milliseconds then execute command
 //                              Used standalone or chained in sequences
 //                              Example: ;T500,CMD1^;T1000,CMD2

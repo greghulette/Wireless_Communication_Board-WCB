@@ -11,7 +11,9 @@ struct MaestroConfig {
   uint32_t baudRate;    // ADD THIS
 };
 
-#define MAX_MAESTROS_PER_WCB 9  // Can track all 9 Maestros in the system
+#define MAX_MAESTROS_PER_WCB 9  // Config-slot capacity. Maestro device IDs are 1-8;
+                                // id 9 (all local) and id 0 (all Maestros) are RESERVED
+                                // routing targets, never stored as a device.
 
 extern MaestroConfig maestroConfigs[MAX_MAESTROS_PER_WCB];
 extern bool maestroEnabled;
@@ -19,6 +21,12 @@ extern bool lastReceivedViaESPNOW;
 
 // Core Maestro functions
 void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber);
+// Native Pololu servo/query verb: build the device#-addressed frame from a ";M" verb
+// body (e.g. "2,setTarget,0,6000") via the shared WcbMaestro translator and route it by
+// device# the SAME way as ;M<id><seq> (sendMaestroCommand) — to the configured local
+// Maestro port, or forwarded to the configured remote WCB. See processMaestroCommand
+// (verb-form branch) and the definition for the full routing/dedup notes.
+void sendMaestroServoVerb(const char *verbBody);
 
 // Configuration functions
 void configureMaestro(const String &message);

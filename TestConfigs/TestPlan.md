@@ -126,13 +126,24 @@
 
 | # | Test | Expected | P/F |
 |---|------|----------|-----|
-| 5.1 | From WCB2: `;M1,1` (Maestro ID1, Script 1) | Maestro ID1 executes script 1. Physical servo movement or Maestro LED confirms. | |
-| 5.2 | From WCB2: `;M2,1` (Maestro ID2, Script 1) | Maestro ID2 executes script 1. | |
-| 5.3 | From WCB3: `;M3,1` (Maestro ID3, Script 1) | Maestro ID3 executes script 1. | |
-| 5.4 | From WCB1: `;W2,;M1,1` | Command routes WCB1→WCB2 via ESP-NOW. WCB2 fires Maestro ID1 Script 1. Same result as 5.1. | |
-| 5.5 | From WCB1: `;W3,;M3,1` | WCB3 fires Maestro ID3 Script 1. | |
-| 5.6 | From WCB1: `;M0,2` (Maestro 0 = broadcast all, Script 2) | All three Maestros execute Script 2 simultaneously. | |
+| 5.1 | From WCB2: `;M11` (Maestro ID1, subroutine 1) | Maestro ID1 executes script 1. Physical servo movement or Maestro LED confirms. | |
+| 5.2 | From WCB2: `;M21` (Maestro ID2, subroutine 1) | Maestro ID2 executes script 1. | |
+| 5.3 | From WCB3: `;M31` (Maestro ID3, subroutine 1) | Maestro ID3 executes script 1. | |
+| 5.4 | From WCB1: `;W2,;M11` | Command routes WCB1→WCB2 via ESP-NOW. WCB2 fires Maestro ID1 script 1. Same result as 5.1. | |
+| 5.5 | From WCB1: `;W3,;M31` | WCB3 fires Maestro ID3 script 1. | |
+| 5.6 | From WCB1: `;M02` (Maestro 0 = broadcast all, subroutine 2) | All three Maestros execute Script 2 simultaneously. | |
 | 5.7 | `?MAESTRO,LIST` on each board. | WCB2: IDs 1 and 2 local (S1/S2, 57,600). ID3 remote (W3S1). WCB3: ID3 local (S1, 57,600). IDs 1 and 2 remote. WCB1: all three remote. | |
+
+**The subroutine trigger has two equivalent spellings:** `;M<id><seq>` (`;M11`) and the comma form `;M<dev>,<n>` (`;M1,1` — identical to `;M11`). A **verb name** after the comma instead selects native Pololu servo/query commands (`;M<dev>,verb`):
+
+| # | Test | Expected | P/F |
+|---|------|----------|-----|
+| 5.8 | From WCB2: `;M1,setTarget,0,6000` (native verb: channel 0 → 6000 qtr-µs ≈ 1500 µs) | Maestro ID1 servo on channel 0 moves to ~center. Confirms comma = verb form. | |
+| 5.9 | From WCB2: `;M1,goHome` | Maestro ID1 sends all channels to their configured home positions. | |
+| 5.10 | From WCB2: `;M1,setSpeed,0,10` then `;M1,setTarget,0,8000` | Channel 0 slews to 8000 slowly (speed-limited) — demonstrates setSpeed. | |
+| 5.11 | From WCB1: `;W2,;M1,setTarget,0,4000` | Verb routes WCB1→WCB2 via ESP-NOW; ID1 channel 0 moves. Verb args (commas) survive the `;W` wrap. | |
+| 5.12 | From WCB2 with `?DEBUG,MAESTRO,ON`: `;M1,bogus` and `;M1,setTarget,0` (bad verb / missing arg) | Both rejected — **no** Pololu frame printed / sent. Malformed verbs never reach the servo wire. | |
+| 5.13 | From WCB2: `;M1,1` (comma spelling of `;M11`) | Identical to 5.1 — Maestro ID1 runs subroutine 1. Confirms `;M1,1` ≡ `;M11`, and routes the same (test from WCB1 with `;W`/remote mapping to confirm it forwards like `;M11`). | |
 
 ---
 
@@ -236,7 +247,7 @@
 | 12.1 | `?DEBUG,ON` on WCB1. Send a few commands. Then `?DEBUG,OFF`. | Verbose processing output visible during ON. Stops when OFF. | |
 | 12.2 | `?DEBUG,ETM,ON` on WCB1. Send `;W2,?config`. | ETM packet detail visible (sequence number, retry count, ACK). | |
 | 12.3 | `?DEBUG,PWM,ON` on WCB2. Wiggle Maestro ID2 Ch1 (full config loaded). | Pulse widths print as they change. | |
-| 12.4 | `?DEBUG,MAESTRO,ON` on WCB2. Trigger `;M1,1`. | Binary frame bytes visible in terminal. | |
+| 12.4 | `?DEBUG,MAESTRO,ON` on WCB2. Trigger `;M11`, then `;M1,goHome`. | Binary Pololu frame bytes visible for both the subroutine trigger and the verb. | |
 
 ---
 

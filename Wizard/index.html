@@ -696,7 +696,7 @@
           <thead>
             <tr>
               <th style="width:60px">#</th>
-              <th>Maestro ID <span class="wiz-hint" data-tip="Numeric ID for this Maestro controller. Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
+              <th>Maestro ID <span class="wiz-hint" data-tip="Maestro device ID 1-8 (set in the Pololu Maestro Control Center). IDs 9 (all local Maestros) and 0 (all Maestros) are reserved runtime targets. Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
               <th>Port <span class="wiz-hint" data-tip="Serial port this Maestro is connected to on this board.">i</span></th>
               <th>Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with this Maestro controller.">i</span></th>
               <th style="width:60px"></th>
@@ -705,6 +705,7 @@
           <tbody id="b{N}-maestro-tbody"></tbody>
         </table>
         <p class="text-muted mt-8">IDs do not need to be unique — same ID on multiple boards triggers simultaneously.</p>
+        <p class="text-muted mt-8">Device IDs are 1-8. Trigger from sequences with &#59;M&lt;id&gt;&lt;seq&gt; or the comma spelling &#59;M&lt;dev&gt;,&lt;n&gt; (e.g. &#59;M11 = &#59;M1,1 = ID 1 subroutine 1). Reserved targets: &#59;M0&lt;seq&gt; = all Maestros, &#59;M9&lt;seq&gt; = all Maestros on this board. A <em>verb name</em> after the comma instead sends native Pololu servo/query commands: &#59;M&lt;dev&gt;,setTarget,&lt;ch&gt;,&lt;val&gt; / setSpeed / setAccel / goHome / sub,&lt;n&gt;[,&lt;param&gt;] / getPosition,&lt;ch&gt; / getMovingState / getErrors.</p>
       </div>
 
       <hr class="divider">
