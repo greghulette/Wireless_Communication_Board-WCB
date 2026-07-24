@@ -37,6 +37,9 @@ extern volatile int maestroQueryPort;
 void handleMaestroGet(int dev, const String &verb, const String &ch, int replyToWCB);
 void handleMaestroGetForwarded(const String &body);   // ;MG body (excludes "MG")
 void handleMaestroResult(const String &body);         // ;M! body (excludes "M!")
+// Rewrite a standalone inbound ;M<dev>,getX read (received over the mesh) to ;MG<dev>,<sender>,getX
+// so the reply routes back to the SENDER (:MQR to a controller, ;M! to a WCB). No-op otherwise.
+void maestroRewriteInboundGet(String &cmd, int sender);
 
 // Configuration functions
 void configureMaestro(const String &message);

@@ -440,6 +440,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    setSpeed,<ch>,<val>    channel speed limit (0-16383)"));
         Serial.println(F("    setAccel,<ch>,<val>    channel acceleration (0-255)"));
         Serial.println(F("    goHome                 all channels to home"));
+        Serial.println(F("    stopScript             stop the running Maestro script"));
         Serial.println(F("    sub,<n>[,<param>]      run subroutine <n> 0-255 [+param 0-16383]"));
         Serial.println(F("    getPosition,<ch>       -> RAM var m<dev>pos<ch>  (0-16383)"));
         Serial.println(F("    getMovingState         -> RAM var m<dev>moving   (0 or 1)"));

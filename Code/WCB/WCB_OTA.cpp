@@ -148,6 +148,7 @@ bool otaWrite(uint16_t sessionId, uint32_t offset, const uint8_t *data, uint16_t
     Serial.printf("[OTA] write overruns image (%u + %u > %u) — aborting\n",
                   ota.written, len, ota.imageSize);
     otaTeardown();
+    otaRestoreLocalBaud();   // this failure ENDS the session — don't strand the USB at a bumped baud
     return false;
   }
 
@@ -155,6 +156,7 @@ bool otaWrite(uint16_t sessionId, uint32_t offset, const uint8_t *data, uint16_t
   if (e != ESP_OK) {
     Serial.printf("[OTA] esp_ota_write failed @%u: %s — aborting\n", offset, esp_err_to_name(e));
     otaTeardown();
+    otaRestoreLocalBaud();   // this failure ENDS the session — don't strand the USB at a bumped baud
     return false;
   }
   ota.written       += len;
@@ -176,6 +178,7 @@ bool otaEnd(uint16_t sessionId) {
   if (ota.written != ota.imageSize) {
     Serial.printf("[OTA] END rejected: incomplete %u / %u B\n", ota.written, ota.imageSize);
     otaTeardown();
+    otaRestoreLocalBaud();   // this failure ENDS the session — don't strand the USB at a bumped baud
     return false;
   }
 

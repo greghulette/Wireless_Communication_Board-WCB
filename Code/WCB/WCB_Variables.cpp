@@ -36,6 +36,14 @@ static int findFreeSlot() {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) if (!vars[i].used) return i;
   return -1;
 }
+// Reclaim one RAM-only (telemetry) slot so a new variable can be created. Persistent vars
+// are NEVER evicted — this stops accumulated Maestro get-telemetry from starving persistent
+// ;V / ?VAR vars (and config-restore) out of the shared fixed table.
+static int evictOneRamSlot() {
+  for (int i = 0; i < WCB_MAX_VARIABLES; i++)
+    if (vars[i].used && !vars[i].persist) { vars[i].used = false; varCount--; return i; }
+  return -1;
+}
 
 // Comma-separated field, 0-based, trimmed; "" if absent.
 static String vField(const String &s, int idx) {
@@ -127,13 +135,14 @@ static bool setVariableImpl(const String &name, int32_t value, bool persist) {
   if (!isValidVariableName(name)) return false;
   int idx = findVarSlot(name);
   if (idx < 0) {
-    if (varCount >= WCB_MAX_VARIABLES) {
-      Serial.printf("[VAR] Variable limit (%d) reached — cannot create '%s'\n",
+    idx = findFreeSlot();
+    if (idx < 0) idx = evictOneRamSlot();   // table full → recycle a RAM/telemetry slot so a
+                                            // persistent var (or fresh telemetry) is never starved
+    if (idx < 0) {
+      Serial.printf("[VAR] table full (%d persistent vars) — cannot create '%s'\n",
                     WCB_MAX_VARIABLES, name.c_str());
       return false;
     }
-    idx = findFreeSlot();
-    if (idx < 0) return false;
     strncpy(vars[idx].name, name.c_str(), WCB_VAR_NAME_MAX);
     vars[idx].name[WCB_VAR_NAME_MAX] = '\0';
     vars[idx].used = true;

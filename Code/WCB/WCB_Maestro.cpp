@@ -17,6 +17,7 @@ extern int Default_WCB_Quantity;
 extern bool lastReceivedViaESPNOW;
 extern bool debugEnabled;
 extern bool debugMaestro;
+extern uint8_t WCB_SPECIAL_PEER_ID;   // controller/NaviCore device id (default 20) — gets :MQR replies
 extern char LocalFunctionIdentifier;
 extern char CommandCharacter;
 extern unsigned long baudRates[5];
@@ -405,6 +406,11 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
     else if (maestroConfigs[i].remoteWCB > 0)                                 hostWCB   = maestroConfigs[i].remoteWCB;
   }
 
+  // Legacy default (no ?MAESTRO config): this board's OWN Maestro is device == WCB_Number on
+  // S1 — mirror the ;M<id><seq> / ;M<dev>,goHome fallback so a get on it reads S1 locally
+  // instead of broadcasting an unanswerable ;MG into the mesh.
+  if (localPort == 0 && hostWCB == 0 && dev == WCB_Number) localPort = 1;
+
   // REMOTE: forward the query to the hosting board, carrying the originator so it replies
   // home. Never bounce a query we ourselves received over ESP-NOW (a ;MG we can't service).
   if (localPort == 0) {
@@ -440,10 +446,24 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
   setVariableRAM(varName, value);                // THIS board's IF can now read it
   if (debugMaestro) Serial.printf("[MAESTRO] get %d '%s' -> %s=%ld\n", dev, verb.c_str(), varName.c_str(), (long)value);
 
-  // If a remote board asked, push the result home (its IF reads its own RAM copy).
+  // Deliver the result to whoever asked. The controller/special peer (NaviCore = device
+  // WCB_SPECIAL_PEER_ID) speaks the ":MQR,<id>,<chan>,<KIND>,<value>" reply format it parses
+  // in onCommand (KIND = POS|MOV|ERR); any other WCB gets the ";M!<var>=<value>" form that
+  // feeds its RAM/IF state. The asker sends a PLAIN ;M<dev>,getX; the WCB receive path rewrites
+  // inbound mesh reads to ;MG<dev>,<sender>,verb (maestroRewriteInboundGet) so replyTo is set.
   if (replyToWCB > 0 && replyToWCB != WCB_Number) {
-    String res = String(CommandCharacter) + "M!" + varName + "=" + String((long)value);
+    String res;
+    if (replyToWCB == WCB_SPECIAL_PEER_ID) {
+      const char *kind = verb.equalsIgnoreCase("getPosition")    ? "POS"
+                       : verb.equalsIgnoreCase("getMovingState") ? "MOV"
+                       : verb.equalsIgnoreCase("getErrors")      ? "ERR" : "";
+      res = String(":MQR,") + String(dev) + "," + (ch.length() ? ch : String("0"))
+          + "," + kind + "," + String((long)value);
+    } else {
+      res = String(CommandCharacter) + "M!" + varName + "=" + String((long)value);
+    }
     sendESPNowMessage((uint8_t)replyToWCB, res.c_str());
+    if (debugMaestro) Serial.printf("[MAESTRO] get reply -> WCB%d: %s\n", replyToWCB, res.c_str());
   }
 }
 
@@ -472,6 +492,28 @@ void handleMaestroResult(const String &body) {
   int32_t value = (int32_t)body.substring(eq + 1).toInt();
   setVariableRAM(name, value);
   if (debugMaestro) Serial.printf("[MAESTRO] result %s=%ld (from mesh)\n", name.c_str(), (long)value);
+}
+
+// A native Maestro READ (;M<dev>,getX[,ch]) received OVER THE MESH must reply to the SENDER,
+// not this board — NaviCore (the controller) sends a plain ;M<dev>,getMovingState and reads
+// the reply back; a peer WCB likewise. Rewrite a standalone inbound get in place to the
+// ;MG<dev>,<sender>,getX[,ch] forwarded-get form so the existing get-query path routes the
+// reply home (:MQR to the special peer/controller, ;M! to a WCB). No-op for actuation verbs
+// (they need no reply), chains, or anything malformed. Called at the ESP-NOW receive sites
+// where senderWCB is known — see the ETM + non-ETM command dispatch in WCB.ino.
+void maestroRewriteInboundGet(String &cmd, int sender) {
+  if (sender < 1 || sender > MAX_WCB_COUNT) return;
+  if (cmd.indexOf('^') >= 0) return;                          // standalone command only
+  int p = (cmd.length() && cmd[0] == CommandCharacter) ? 1 : 0;
+  if (p + 1 >= (int)cmd.length() || (cmd[p] != 'M' && cmd[p] != 'm')) return;
+  int comma = cmd.indexOf(',', p + 1);
+  if (comma <= p + 1) return;                                 // need <dev> then a comma
+  for (int i = p + 1; i < comma; i++) if (cmd[i] < '0' || cmd[i] > '9') return;
+  String after = cmd.substring(comma + 1);                    // "getMovingState" | "getPosition,0" | "goHome"
+  String low = after; low.toLowerCase();
+  if (!low.startsWith("get")) return;                         // only get* reads carry a reply
+  String dev = cmd.substring(p + 1, comma);
+  cmd = String(CommandCharacter) + "MG" + dev + "," + String(sender) + "," + after;
 }
 
 // ==================== Configuration Functions ====================

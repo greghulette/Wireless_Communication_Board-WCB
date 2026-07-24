@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_231503RJUL2026                                  *****////
+///*****                                          Version 6.2.0_241013RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_231503RJUL2026";
+String SoftwareVersion = "6.2.0_241013RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3548,6 +3548,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
+            // A native Maestro read received over the mesh must reply to the SENDER —
+            // rewrite ;M<dev>,getX → ;MG<dev>,<sender>,getX so the get-query path routes
+            // the reply home (:MQR to a controller like NaviCore, ;M! to a peer WCB).
+            maestroRewriteInboundGet(etmCmd, senderWCB);
             if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
                 // parseCommandGroups mutates a std::vector iterated by loop();
                 // defer to loop() via the pendingTimerChainQueue (see comment
@@ -3775,6 +3779,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // would queue the whole chain as one item and break ;t<ms> + ^ chains.
   if (debugEnabled)
       Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
+  // Native Maestro read over the mesh → reply to the SENDER (see the ETM branch above).
+  maestroRewriteInboundGet(receivedCmd, senderWCB);
   if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
     // Same race-avoidance as the ETM branch above: defer parseCommandGroups
     // to loop() via the queue (see pendingTimerChainQueue comment).
@@ -6456,6 +6462,12 @@ bool addTemporaryPeer(uint8_t id) {
     learnedPeersFlushMs = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
   }
   wcbPeerTemporary[idx] = true;
+  // Stamp lastSeenMs at adoption so the TTL reaper (processETMHeartbeats) treats this peer
+  // correctly: without it, a peer adopted with no subsequent packet keeps lastSeenMs==0 and
+  // the reaper's "==0" guard skips it forever (leaked slot), and a RE-adopted peer would carry
+  // its stale pre-eviction timestamp and get evicted again within one loop tick (adopt/evict
+  // flap). NOT online=true — a temporary peer must outlive the shorter ETM offline threshold.
+  boardTable[idx].lastSeenMs = millis();
   rebuildActivePeers();
   return wcbPeerActive[idx];
 }

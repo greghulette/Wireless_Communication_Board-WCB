@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '23.15:03.R.JUL.2026';
+const UI_VERSION = '24.10:13.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11434,8 +11434,9 @@ function removeClientCard(n) {
   if (boardConnections[n]?.isConnected?.()) return;   // never yank a live board
   _meshClients.delete(n);
   _meshBoards.delete(n);
-  delete boardConfigs[n];
   delete boardConnections[n];
+  // Keep boardConfigs[n]: if this ephemeral peer returns, addBoardSection preserves the
+  // existing config so a user-typed client alias isn't lost. The section is what vanishes.
   document.getElementById(`section-board-${n}`)?.remove();
   reconcileBoardGrid();
 }
@@ -11482,8 +11483,10 @@ async function meshAutoDiscoverTick() {
     for (const id of [..._meshClients.keys()])
       if (!seenClients.has(id)) {
         const prev = _meshClients.get(id);
-        if (prev && prev.peer === 4) removeClientCard(id);
-        else                          markClientOffline(id);
+        // A temporary peer OUTSIDE the WCBQ floor vanishes; a floor slot (1..floor) always
+        // renders, so tombstone it Offline instead of fighting reconcileBoardGrid re-adding it.
+        if (prev && prev.peer === 4 && id > _boardFloor) removeClientCard(id);
+        else                                             markClientOffline(id);
       }
   } catch (_) { /* transient — the next tick retries the DUMP, not the pull */ }
   finally { _meshDiscoverBusy = false; }
