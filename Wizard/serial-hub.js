@@ -124,6 +124,16 @@
       this._setRole('follower');
       this._post({ t: 'hello' });        // ask any existing leader to announce its state
       this._campaign();                  // queue for the lock (may promote us to leader)
+
+      // Visibility-driven leadership: the FOREGROUND tab should own the port so its read
+      // loop isn't background-throttled (a hidden leader starves high-rate telemetry to
+      // ~1 Hz). Claim on becoming visible; a hidden leader hands off.
+      this._visHandler = () => this._onVisibilityChange();
+      try { document.addEventListener('visibilitychange', this._visHandler); } catch (_) {}
+      // If we loaded in the foreground behind an already-running (maybe hidden) leader,
+      // claim once the lock election has settled.
+      try { setTimeout(() => this._onVisibilityChange(), 400); } catch (_) {}
+
       this._log('joined channel "' + this.channelName + '"');
       return this;
     }
@@ -160,6 +170,9 @@
       this._joined  = false;
 
       try { this._post({ t: 'bye' }); } catch (_) {}
+
+      if (this._visHandler) { try { document.removeEventListener('visibilitychange', this._visHandler); } catch (_) {} this._visHandler = null; }
+      if (this._claimTimer) { try { clearTimeout(this._claimTimer); } catch (_) {} this._claimTimer = null; }
 
       await this._closePort();
 
@@ -313,6 +326,49 @@
       // keep this._port + this._leaderPortInfo so a re-join can reopen without re-picking
     }
 
+    // ── Visibility-driven leadership handoff ────────────────────────────────────
+    _isVisible() {
+      try { return document.visibilityState === 'visible'; } catch (_) { return true; }
+    }
+
+    _onVisibilityChange() {
+      if (this._leaving) return;
+      if (this._isVisible()) {
+        if (this._role !== 'leader') this._claimLeadership();
+      } else {
+        if (this._claimTimer) { clearTimeout(this._claimTimer); this._claimTimer = null; }
+        // A leader going to the background invites a visible tab to take over so telemetry
+        // doesn't drop to the background-throttled ~1 Hz.
+        if (this._role === 'leader') this._post({ t: 'yield' });
+      }
+    }
+
+    _claimLeadership() {
+      if (this._claimTimer) { clearTimeout(this._claimTimer); this._claimTimer = null; }
+      // Debounce: only claim if we STAY visible briefly, so a quick alt-tab flick doesn't
+      // force a handoff (each handoff reopens the port → resets the tethered board).
+      this._claimTimer = setTimeout(() => {
+        this._claimTimer = null;
+        if (!this._leaving && this._isVisible() && this._role !== 'leader') {
+          this._log('foreground — claiming the shared port');
+          this._post({ t: 'claim' });
+        }
+      }, 600);
+    }
+
+    // Hidden leader gives up the port so a visible tab can own it (and read un-throttled).
+    async _relinquish() {
+      if (this._role !== 'leader') return;
+      this._log('handing the shared port to the foreground tab');
+      if (this._portOpen) this._sawLeaderPort = true;   // a port exists → the claimer can adopt it
+      await this._closePort();                          // free the physical port for the claimer
+      this._setRole('follower');
+      this._leaderPortOpen = false;
+      const release = this._releaseLock; this._releaseLock = null;
+      if (release) release();     // release the lock → the queued claimer promotes to leader
+      this._campaign();           // re-enter the queue so we can reclaim leadership later
+    }
+
     // ── Cross-tab bus ───────────────────────────────────────────────────────────
 
     _post(msg) { if (this._bc) { try { this._bc.postMessage(msg); } catch (_) {} } }
@@ -337,6 +393,15 @@
           break;
         case 'hello':                                // a tab joined — leader re-announces
           if (this._role === 'leader') this._announceState();
+          break;
+        case 'claim':                                // a now-VISIBLE tab wants to own the port
+          // Hand off only if WE are the leader AND we're hidden (background-throttled). A
+          // visible leader keeps it — no throttling to escape, and relinquishing would just
+          // thrash (and reset the board) between two live tabs.
+          if (this._role === 'leader' && !this._isVisible()) this._relinquish();
+          break;
+        case 'yield':                                // the (now-hidden) leader invites a visible tab to take over
+          if (this._role !== 'leader' && this._isVisible()) this._claimLeadership();
           break;
         case 'bye':
           break;
