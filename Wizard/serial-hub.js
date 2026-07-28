@@ -270,13 +270,20 @@
     }
 
     async _readLoop() {
-      while (this._role === 'leader' && this._port && this._port.readable && !this._leaving) {
-        try {
-          this._reader = this._port.readable.getReader();
-        } catch (_) { break; }
+      // Read ONE reader session until the stream ends (done) or errors, then STOP.
+      // Do NOT re-acquire the reader in a loop: during a leadership handoff / port
+      // teardown the port can enter a state where `readable` is truthy but read()
+      // fails immediately, and re-acquiring would spin a tight async loop that pins
+      // the main thread (Chrome's "page unresponsive"). A genuine reboot/unplug ends
+      // the stream and we reflect portOpen=false; the owning tab reconnects if needed.
+      if (this._role !== 'leader' || !this._port || !this._port.readable || this._leaving) return;
+      let reader = null;
+      try { reader = this._reader = this._port.readable.getReader(); }
+      catch (_) { this._reader = null; }
+      if (reader) {
         try {
           while (true) {
-            const { value, done } = await this._reader.read();
+            const { value, done } = await reader.read();
             if (done) break;
             if (value && value.byteLength) {
               this._emit('data', value);             // our own tool
@@ -284,15 +291,14 @@
             }
           }
         } catch (_) {
-          // stream error (unplug / reboot) — fall through to re-acquire or exit
+          // stream error (unplug / reboot / handoff teardown) — stop, don't re-acquire
         } finally {
-          try { this._reader && this._reader.releaseLock(); } catch (_) {}
+          try { reader.releaseLock(); } catch (_) {}
           this._reader = null;
         }
-        if (this._leaving) break;
       }
-      // Port died under us (not a clean leave) → reflect it.
-      if (this._portOpen && !this._leaving) {
+      // Stream ended. If this wasn't a clean leave/relinquish, reflect the port going away.
+      if (this._portOpen && !this._leaving && this._role === 'leader') {
         this._portOpen = false;
         this._announceState();
         this._log('port read loop ended (unplug/reboot?)');
