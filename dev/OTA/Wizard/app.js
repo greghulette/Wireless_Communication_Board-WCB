@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.10:45.R.JUL.2026';
+const UI_VERSION = '28.11:05.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4688,8 +4688,8 @@ class BoardConnection {
 
   async send(data) {
     // Shared-hub mode: hand the bytes to the hub (leader writes to the real port;
-    // a follower relays to the leader). No local SerialPort in this tab.
-    if (this._shared) { this._hub.send(data); return; }
+    // a follower relays to the leader). Await it so multi-fragment sends stay paced.
+    if (this._shared) { await this._hub.send(data); return; }
     if (!this._connected || !this.port?.writable) throw new Error('Not connected');
     // Serialize sends per connection. Concurrent send() calls — e.g. arming several boards
     // through ONE relay, each firing RTERM,START plus a config request at once — would each

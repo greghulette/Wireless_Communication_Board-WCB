@@ -155,16 +155,19 @@
     }
 
     // Send bytes (or a string) to the shared port. Leader writes directly; a follower
-    // relays to the leader over the bus. Never throws for a follower with no leader yet —
-    // the bytes are just dropped (surface portOpen to the user so they know why).
+    // relays to the leader over the bus. Returns a Promise that (for the leader) resolves
+    // when the write actually completes — callers should AWAIT it so multi-fragment sends
+    // stay flow-controlled (paced) instead of bursting and overwhelming the WCB's ESP-NOW
+    // TX queue. Never throws for a follower with no leader yet — bytes are just dropped
+    // (surface portOpen so the user knows why).
     send(data) {
       const bytes = toBytes(data);
-      if (!bytes.byteLength) return;
+      if (!bytes.byteLength) return Promise.resolve();
       if (this._role === 'leader') {
-        this._writeToPort(bytes).catch(e => this._log('write failed: ' + (e && e.message || e)));
-      } else {
-        this._post({ t: 'tx', b: copyBytes(bytes) });
+        return this._writeToPort(bytes).catch(e => this._log('write failed: ' + (e && e.message || e)));
       }
+      this._post({ t: 'tx', b: copyBytes(bytes) });
+      return Promise.resolve();
     }
 
     // Stop participating. Leader closes the port and releases the lock (promoting the
