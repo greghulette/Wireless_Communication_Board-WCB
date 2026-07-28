@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.15:28.R.JUL.2026';
+const UI_VERSION = '28.15:40.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7955,7 +7955,8 @@ function clearAllTerminals() {
 // in ']' not ':', so they don't match.
 function _suppressTerminalLine(line) {
   return /^\[WDP[A-Z]*:/.test(line)                                    // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — all discovery-dump rows (parsed separately; never user-facing)
-      || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line); // the ?WDP,DUMP command echo
+      || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line)  // the ?WDP,DUMP command echo
+      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1)); // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
 }
 
 function termLog(boardIndex, text, type = 'out') {
