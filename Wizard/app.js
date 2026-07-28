@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '24.10:13.R.JUL.2026';
+const UI_VERSION = '27.22:09.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4402,6 +4402,10 @@ class BoardConnection {
     // Set true before ?reboot when boardGo is managing the reconnect itself.
     // Prevents _startReading's auto-reconnect from racing with the fire-and-forget.
     this._rebootManaged = false;
+    // Shared-hub ("share port across tabs") transport — see connectShared(). When
+    // true this board has NO SerialPort of its own; all I/O rides the WcbSerialHub.
+    this._shared = false;
+    this._hub = null;
   }
 
   isConnected() { return this._connected; }
@@ -4679,6 +4683,9 @@ class BoardConnection {
   }
 
   async send(data) {
+    // Shared-hub mode: hand the bytes to the hub (leader writes to the real port;
+    // a follower relays to the leader). No local SerialPort in this tab.
+    if (this._shared) { this._hub.send(data); return; }
     if (!this._connected || !this.port?.writable) throw new Error('Not connected');
     // Serialize sends per connection. Concurrent send() calls — e.g. arming several boards
     // through ONE relay, each firing RTERM,START plus a config request at once — would each
@@ -4766,6 +4773,153 @@ class BoardConnection {
 
   onData(callback) { this._dataCallbacks.push(callback); }
 
+  // Process ONE already-trimmed serial line: RC-noise filter → data callbacks,
+  // RC-discovery sniffer, boot-message char/version sniffer, and terminal routing.
+  // Factored out of _startReading so shared-hub mode (WcbSerialHub) can push the
+  // very same per-line logic for bytes that arrive over the hub instead of a port.
+  _handleLine(line) {
+    // RC-Controller telemetry (rc_hb heartbeat ~0.5 Hz, rc_ch stick
+    // data) is consumed by the RC Controllers panel via the discovery
+    // hook below — don't ALSO echo it to the terminal. Once the
+    // firmware's RC-JSON relay is subscribed (any ;w command) the
+    // heartbeat streams forever, otherwise burying real board output.
+    // Low-rate rc_trig / rc_mode events stay visible.
+    const _isRcNoise = line[0] === '{' &&
+      (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1);
+    if (!_isRcNoise) this._dataCallbacks.forEach(cb => cb(line));
+
+    // ── RC-Controller discovery sniffer (Phase 4) ──────────────────
+    // Every serial line on every connected WCB gets fed to the RC
+    // discovery hook.  Fast-paths inside return early for non-JSON
+    // and JSON without a known rc_* type — see _rcDiscoveryHook
+    // at end of app.js for details.
+    if (typeof _rcDiscoveryHook === 'function') {
+      try { _rcDiscoveryHook(line, this.boardIndex); } catch (_) {}
+    }
+
+    // ── Boot-message sniffer ──────────────────────────────────────
+    // The firmware prints configured chars and software version during
+    // every boot.  Capture them so we have the correct funcChar for
+    // backup/reboot commands before a full pull has succeeded.
+    // Note: firmware has a typo — "Delimeter" (one 'm').
+    const n = this.boardIndex;
+    let charDetected = false;
+    const funcMatch  = line.match(/^Local Function Identifier:\s*(\S)/);
+    const delimMatch = line.match(/^Delimeter Character:\s*(\S)/);
+    const cmdMatch   = line.match(/^Command Character:\s*(\S)/);
+    const verMatch   = line.match(/^Software Version:\s*(\S+)/);
+    if (funcMatch) {
+      boardBootChars[n] ??= {};
+      boardBootChars[n].funcChar  = funcMatch[1];
+      if (boardConfigs[n]) boardConfigs[n].funcChar  = funcMatch[1];
+      charDetected = true;
+    }
+    if (delimMatch) {
+      boardBootChars[n] ??= {};
+      boardBootChars[n].delimiter = delimMatch[1];
+      if (boardConfigs[n]) boardConfigs[n].delimiter = delimMatch[1];
+      charDetected = true;
+    }
+    if (cmdMatch) {
+      boardBootChars[n] ??= {};
+      boardBootChars[n].cmdChar   = cmdMatch[1];
+      if (boardConfigs[n]) boardConfigs[n].cmdChar   = cmdMatch[1];
+      charDetected = true;
+    }
+    if (verMatch) {
+      const ver = verMatch[1].trim();
+      if (boardConfigs[n]) boardConfigs[n].fwVersion = ver;
+      updateBoardSwVersionDisplay(n);
+    }
+    if (charDetected) {
+      // Also keep the general DOM fields and systemConfig in sync so
+      // subsequent buildCommandString calls use the right chars.
+      const fc = boardConfigs[n].funcChar;
+      const dl = boardConfigs[n].delimiter;
+      const cc = boardConfigs[n].cmdChar;
+      const gFC = document.getElementById('g-funcchar');
+      const gDL = document.getElementById('g-delimiter');
+      const gCC = document.getElementById('g-cmdchar');
+      let domChanged = false;
+      if (gFC && gFC.value !== fc) { gFC.value = fc; domChanged = true; }
+      if (gDL && gDL.value !== dl) { gDL.value = dl; domChanged = true; }
+      if (gCC && gCC.value !== cc) { gCC.value = cc; domChanged = true; }
+      // Propagate updated DOM values to systemConfig and all boardConfigs
+      if (domChanged) onGeneralCmdCharChange();
+    }
+
+    // Route [TERM:N]<text> lines to the remote board's terminal pane
+    // instead of the relay's own pane. N is the SOURCE board's WCB number,
+    // but terminals are keyed by UI SLOT — which needn't equal the WCB
+    // number. Map it to the slot reached via THIS relay whose configured
+    // wcbNumber matches; otherwise two differently-numbered boards behind
+    // one relay cross-contaminate each other's terminals (e.g. W3's output
+    // landing in W1's pane). Fall back to the number if it's not yet known.
+    const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
+    if (termMatch) {
+      const srcWcb = parseInt(termMatch[1]);
+      let slot = srcWcb;
+      for (const s of Object.keys(remoteRelayForBoard)) {
+        if (remoteRelayForBoard[s] === this.boardIndex &&
+            (boardConfigs[s]?.wcbNumber ?? +s) === srcWcb) { slot = +s; break; }
+      }
+      if (!_suppressTerminalLine(termMatch[2]))
+        termLog(slot, termMatch[2], 'out');
+    } else {
+      const displayed = this._lineTransform ? this._lineTransform(line) : line;
+      if (displayed !== null && !_suppressTerminalLine(displayed))
+        termLog(this.boardIndex, displayed, 'out');
+    }
+  }
+
+  // ── Shared-hub transport (opt-in "share port across tabs") ─────────────────
+  // When shared mode is on, this board does NOT own a SerialPort. All I/O rides
+  // the singleton WcbSerialHub: send() posts to the hub (leader writes it to the
+  // real port; a follower relays it to the leader), and inbound bytes arrive via
+  // the hub's 'data' event, decoded + line-split here and pushed through the SAME
+  // _handleLine() path as a direct connection. The heavy port machinery
+  // (_startReading / reconnect / flashing) is intentionally bypassed — flashing
+  // needs the raw port and stays on a normal direct connection.
+  connectShared(hub) {
+    this._shared = true;
+    this._hub = hub;
+    this._sharedBuf = '';
+    this._sharedDecoder = new TextDecoder();
+    this._onHubData = (u8) => {
+      this._sharedBuf += this._sharedDecoder.decode(u8, { stream: true });
+      let nl;
+      while ((nl = this._sharedBuf.indexOf('\n')) !== -1) {
+        const line = this._sharedBuf.slice(0, nl).replace(/\r$/, '').trim();
+        this._sharedBuf = this._sharedBuf.slice(nl + 1);
+        if (line) this._handleLine(line);
+      }
+    };
+    this._onHubState = (st) => {
+      // Reflect the shared port's open/closed state as this board's connection state.
+      const open = !!st.portOpen;
+      if (open !== this._connected) {
+        this._connected = open;
+        updateConnectionUI(this.boardIndex, open);
+      }
+    };
+    hub.on('data', this._onHubData);
+    hub.on('state', this._onHubState);
+    hub.join();
+    this._connected = hub.portOpen;
+  }
+
+  // Detach from the hub without disturbing the port (other tabs keep sharing it).
+  leaveShared() {
+    if (!this._shared) return;
+    try { this._hub?.off('data',  this._onHubData); }  catch (_) {}
+    try { this._hub?.off('state', this._onHubState); } catch (_) {}
+    try { this._hub?.leave(); } catch (_) {}
+    this._shared = false;
+    this._hub = null;
+    this._connected = false;
+    updateConnectionUI(this.boardIndex, false);
+  }
+
   async _startReading() {
     termLog(this.boardIndex, `[sr] start: connected=${this._connected} readable=${!!this.port?.readable}`, 'sys');
     outer: while (this._connected && this.port?.readable) {
@@ -4787,100 +4941,7 @@ class BoardConnection {
           while ((nl = this._readBuffer.indexOf('\n')) !== -1) {
             const line = this._readBuffer.slice(0, nl).replace(/\r$/, '').trim();
             this._readBuffer = this._readBuffer.slice(nl + 1);
-            if (line) {
-              // RC-Controller telemetry (rc_hb heartbeat ~0.5 Hz, rc_ch stick
-              // data) is consumed by the RC Controllers panel via the discovery
-              // hook below — don't ALSO echo it to the terminal. Once the
-              // firmware's RC-JSON relay is subscribed (any ;w command) the
-              // heartbeat streams forever, otherwise burying real board output.
-              // Low-rate rc_trig / rc_mode events stay visible.
-              const _isRcNoise = line[0] === '{' &&
-                (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1);
-              if (!_isRcNoise) this._dataCallbacks.forEach(cb => cb(line));
-
-              // ── RC-Controller discovery sniffer (Phase 4) ──────────────────
-              // Every serial line on every connected WCB gets fed to the RC
-              // discovery hook.  Fast-paths inside return early for non-JSON
-              // and JSON without a known rc_* type — see _rcDiscoveryHook
-              // at end of app.js for details.
-              if (typeof _rcDiscoveryHook === 'function') {
-                try { _rcDiscoveryHook(line, this.boardIndex); } catch (_) {}
-              }
-
-              // ── Boot-message sniffer ──────────────────────────────────────
-              // The firmware prints configured chars and software version during
-              // every boot.  Capture them so we have the correct funcChar for
-              // backup/reboot commands before a full pull has succeeded.
-              // Note: firmware has a typo — "Delimeter" (one 'm').
-              const n = this.boardIndex;
-              let charDetected = false;
-              const funcMatch  = line.match(/^Local Function Identifier:\s*(\S)/);
-              const delimMatch = line.match(/^Delimeter Character:\s*(\S)/);
-              const cmdMatch   = line.match(/^Command Character:\s*(\S)/);
-              const verMatch   = line.match(/^Software Version:\s*(\S+)/);
-              if (funcMatch) {
-                boardBootChars[n] ??= {};
-                boardBootChars[n].funcChar  = funcMatch[1];
-                if (boardConfigs[n]) boardConfigs[n].funcChar  = funcMatch[1];
-                charDetected = true;
-              }
-              if (delimMatch) {
-                boardBootChars[n] ??= {};
-                boardBootChars[n].delimiter = delimMatch[1];
-                if (boardConfigs[n]) boardConfigs[n].delimiter = delimMatch[1];
-                charDetected = true;
-              }
-              if (cmdMatch) {
-                boardBootChars[n] ??= {};
-                boardBootChars[n].cmdChar   = cmdMatch[1];
-                if (boardConfigs[n]) boardConfigs[n].cmdChar   = cmdMatch[1];
-                charDetected = true;
-              }
-              if (verMatch) {
-                const ver = verMatch[1].trim();
-                if (boardConfigs[n]) boardConfigs[n].fwVersion = ver;
-                updateBoardSwVersionDisplay(n);
-              }
-              if (charDetected) {
-                // Also keep the general DOM fields and systemConfig in sync so
-                // subsequent buildCommandString calls use the right chars.
-                const fc = boardConfigs[n].funcChar;
-                const dl = boardConfigs[n].delimiter;
-                const cc = boardConfigs[n].cmdChar;
-                const gFC = document.getElementById('g-funcchar');
-                const gDL = document.getElementById('g-delimiter');
-                const gCC = document.getElementById('g-cmdchar');
-                let domChanged = false;
-                if (gFC && gFC.value !== fc) { gFC.value = fc; domChanged = true; }
-                if (gDL && gDL.value !== dl) { gDL.value = dl; domChanged = true; }
-                if (gCC && gCC.value !== cc) { gCC.value = cc; domChanged = true; }
-                // Propagate updated DOM values to systemConfig and all boardConfigs
-                if (domChanged) onGeneralCmdCharChange();
-              }
-
-              // Route [TERM:N]<text> lines to the remote board's terminal pane
-              // instead of the relay's own pane. N is the SOURCE board's WCB number,
-              // but terminals are keyed by UI SLOT — which needn't equal the WCB
-              // number. Map it to the slot reached via THIS relay whose configured
-              // wcbNumber matches; otherwise two differently-numbered boards behind
-              // one relay cross-contaminate each other's terminals (e.g. W3's output
-              // landing in W1's pane). Fall back to the number if it's not yet known.
-              const termMatch = line.match(/^\[TERM:(\d+)\](.*)/);
-              if (termMatch) {
-                const srcWcb = parseInt(termMatch[1]);
-                let slot = srcWcb;
-                for (const s of Object.keys(remoteRelayForBoard)) {
-                  if (remoteRelayForBoard[s] === this.boardIndex &&
-                      (boardConfigs[s]?.wcbNumber ?? +s) === srcWcb) { slot = +s; break; }
-                }
-                if (!_suppressTerminalLine(termMatch[2]))
-                  termLog(slot, termMatch[2], 'out');
-              } else {
-                const displayed = this._lineTransform ? this._lineTransform(line) : line;
-                if (displayed !== null && !_suppressTerminalLine(displayed))
-                  termLog(this.boardIndex, displayed, 'out');
-              }
-            }
+            if (line) this._handleLine(line);
           }
         }
       } catch (e) {
@@ -4936,6 +4997,69 @@ class BoardConnection {
 
 // ─── Board Actions ────────────────────────────────────────────────
 // ─── Connect Modal ────────────────────────────────────────────────
+// ─── Shared serial hub (opt-in "share port across tabs") ───────────────────
+// One WcbSerialHub per page, lazily created. Lets the Wizard coexist with the
+// NaviCore config tool (or a second Wizard tab) on ONE USB-tethered board: the
+// first same-origin tab to grab the port is the leader/owner, the rest are
+// followers that relay through it. Requires same-origin tabs (BroadcastChannel +
+// Web Locks). Flashing is NOT available in shared mode — it needs the raw port.
+let _sharedHub = null;
+function getSharedHub() {
+  if (!_sharedHub) {
+    if (typeof WcbSerialHub === 'undefined' || !WcbSerialHub.supported)
+      throw new Error('Port sharing needs a Chromium browser (WebSerial + Web Locks + BroadcastChannel)');
+    _sharedHub = new WcbSerialHub({ baudRate: 115200 });
+  }
+  return _sharedHub;
+}
+
+// Connect a board slot through the shared hub. requestPort() is called FIRST,
+// straight from the Connect click, so it still has the user activation the picker
+// needs. If this tab becomes the leader the hub opens the picked port; if a
+// follower (another tab already owns it), the picked port is ignored — cancelling
+// the picker is the right move for a follower.
+async function sharedConnect(n) {
+  const hub = getSharedHub();
+  try { await hub.requestPort(); } catch (_) { /* follower / cancelled — fine */ }
+  // Only ONE board can own the shared port; drop any other slot already sharing.
+  for (const [k, c] of Object.entries(boardConnections)) {
+    if (parseInt(k) !== n && c?._shared) { c.leaveShared(); delete boardConnections[k]; }
+  }
+  if (boardConnections[n]?.isConnected?.()) await boardDisconnect(n);
+  const conn = new BoardConnection(n);
+  conn.connectShared(hub);
+  boardConnections[n] = conn;
+  delete remoteRelayForBoard[n];
+  return conn;
+}
+
+// Connect-modal action: share this slot's port across tabs.
+async function modalSharedConnect() {
+  const n = _connectModalSlot;
+  document.getElementById('connect-modal').classList.remove('open');
+  _connectModalSlot = null;
+  if (n === null) return;
+  _detecting[n] = false;
+  const btn = document.getElementById(`b${n}-btn-connect`);
+  if (btn) { btn.textContent = 'Sharing…'; btn.disabled = true; }
+  try {
+    await sharedConnect(n);
+    const hub = getSharedHub();
+    updateConnectionUI(n, hub.portOpen);
+    // Leader election + port open settle a beat after join(); the hub's 'state'
+    // handler updates the card reactively. Keep the toast neutral, and auto-pull
+    // only once the shared port is actually open.
+    showToast(hub.portOpen
+      ? `WCB ${n} shared (this tab is ${hub.role})`
+      : `WCB ${n}: shared mode on — opening port…`, 'success');
+    setTimeout(() => { if (getSharedHub().portOpen) boardPull(n); }, 1800);
+  } catch (e) {
+    showToast(`Share failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function openConnectModal(n) {
   _connectModalSlot = n;
   // Title reflects whether auto-detect is already running
@@ -4948,8 +5072,9 @@ function openConnectModal(n) {
     .filter(([k, c]) => parseInt(k) !== n && c?.isConnected())
     .map(([k]) => parseInt(k));
 
+  let _remoteHtml = '';
   if (relays.length > 0) {
-    remoteSection.innerHTML =
+    _remoteHtml =
       `<div class="modal-divider-label">or connect wirelessly</div>` +
       relays.map(r =>
         `<button class="modal-option" onclick="modalRemoteConnect(${r})">
@@ -4960,11 +5085,19 @@ function openConnectModal(n) {
           </div>
         </button>`
       ).join('');
-    remoteSection.style.display = 'flex';
-  } else {
-    remoteSection.innerHTML = '';
-    remoteSection.style.display = 'none';
   }
+  // Always offer the cross-tab shared-port option (coexist with the NaviCore tab).
+  _remoteHtml +=
+    `<div class="modal-divider-label">or share a port across tabs</div>
+    <button class="modal-option" onclick="modalSharedConnect()">
+      <span class="modal-option-icon">🔗</span>
+      <div class="modal-option-text">
+        <div class="modal-option-title">Share port across tabs</div>
+        <div class="modal-option-desc">Coexist with the NaviCore tab (or a 2nd Wizard tab) on ONE USB board — the first tab picks the port, the rest follow. Same-origin only; flashing stays on a direct USB connect.</div>
+      </div>
+    </button>`;
+  remoteSection.innerHTML = _remoteHtml;
+  remoteSection.style.display = 'flex';
 
   document.getElementById('connect-modal').classList.add('open');
 }
@@ -5314,7 +5447,11 @@ async function boardDisconnect(n) {
   const btn = document.getElementById(`b${n}-btn-connect`);
   if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
   clearRemoteBoardsForRelay(n);              // drop remote boards that relay through this one
-  try { await boardConnections[n]?.disconnect(); } catch (_) {}
+  const _c = boardConnections[n];
+  try {
+    if (_c?._shared) _c.leaveShared();       // shared mode: detach from the hub (other tabs keep the port)
+    else await _c?.disconnect();
+  } catch (_) {}
   delete boardConnections[n];
   delete remoteRelayForBoard[n];
   if (_relaySlots.has(n)) {                   // a MgmtRelay: drop its flag + dedicated card so the
@@ -6078,6 +6215,14 @@ async function boardGo(n, opts = {}) {
   const isErase    = mode === 'erase';
   const pushConfig = opts.pushConfig ?? true;  // false = skip auto-push after factory reset
   const btn       = document.getElementById(`b${n}-btn-go`);
+
+  // Shared-hub mode has no raw SerialPort in this tab, so esptool-based operations
+  // (flash / update / factory / erase) can't run. Config push works fine (it just
+  // sends command strings through the hub). Steer the user to a direct USB connect.
+  if (conn._shared && (isFlash || isUpdate || isFactory || isErase)) {
+    showToast('Flashing/erase needs a direct USB connection — disconnect shared mode and reconnect this board via USB', 'warning', 8000);
+    return;
+  }
 
   btn.disabled = true;
   btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : isErase ? 'Erasing…' : 'Pushing…';
@@ -10753,6 +10898,9 @@ function wizardStartConnectWatchers() {
 // ─── ETM Char / ESP-NOW Stats Modal ───────────────────────────────
 let _statsBoardN = null;
 let _statsType   = null;   // 'etm' | 'stats'
+// True while an ETM/stats capture is in flight. The 12s mesh WDP poll checks this
+// and skips its ?WDP,DUMP so it can't inject into (and corrupt) the captured output.
+let _statsFetchBusy = false;
 
 function openStatsModal(n, type) {
   stopHCRStatusPolling();   // never leave the HCR poller running behind another view
@@ -10898,12 +11046,20 @@ async function fetchStatsData() {
   // ETM characterization runs 3 phases — warn the user it takes time
   const relayN = remoteRelayForBoard[n];
   output.textContent = isEtm
-    ? (relayN ? `Running characterization on WCB ${n} via WCB ${relayN} — this takes about 15 seconds…`
-              : 'Running characterization — this takes about 10 seconds…')
+    ? (relayN ? `Running characterization on WCB ${n} via WCB ${relayN} — this can take 30–60s…`
+              : 'Running characterization — this can take 30–60s…')
     : (relayN ? `Fetching stats from WCB ${n} via WCB ${relayN}…` : 'Fetching…');
 
-  const timeout = isEtm ? 30000 : 5000;
-  const relayTimeout = isEtm ? 60000 : 10000;  // relay needs extra time for ESP-NOW round-trip
+  // ETM runs the firmware through 3 phases. Phase 3 loads the network on purpose
+  // (it floods every peer with traffic), so under that self-induced congestion its
+  // ACKs get delayed/lost and the phase runs toward its internal phaseTimeout
+  // (≈29s for a couple of peers, more with more) rather than completing early. So
+  // the whole sweep legitimately takes ~30-60s+. Give the collection room — the
+  // 'Based on worst' sentinel ends it the instant the summary prints, so a healthy
+  // run still returns as soon as it's actually done, not at the cap.
+  const timeout = isEtm ? 75000 : 5000;
+  const relayTimeout = isEtm ? 120000 : 10000;  // relay adds the ESP-NOW round-trip on top
+  _statsFetchBusy = true;   // pause the 12s mesh WDP poll so ?WDP,DUMP can't inject into the capture
   try {
     let result = '';
     if (relayN) {
@@ -11000,6 +11156,8 @@ async function fetchStatsData() {
     output.textContent = result || '(no response received)';
   } catch (e) {
     output.textContent = `Error: ${e.message}`;
+  } finally {
+    _statsFetchBusy = false;   // re-enable the mesh WDP poll now the capture is done
   }
 }
 
@@ -11443,6 +11601,7 @@ function removeClientCard(n) {
 
 async function meshAutoDiscoverTick() {
   if (_meshDiscoverBusy) return;
+  if (_statsFetchBusy) return;   // don't inject ?WDP,DUMP into an in-flight ETM/stats capture
   if (typeof _otaInProgress !== 'undefined' && _otaInProgress.size > 0) return;  // don't fight an OTA
   const t = _wdpMeshConn();
   if (!t) return;
