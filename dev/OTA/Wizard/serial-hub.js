@@ -50,6 +50,12 @@
     // rc_ch subscription often never established). The WCB forwards UART→USB WITHOUT
     // host DTR (NaviCore's normal Via-WCB works with no DTR at all), so leave it off.
     assertDTR:   false,
+    // Visibility handoff is OFF by default. Handing the port to the foreground tab means
+    // closing it in one tab and RE-OPENING it in the other — and re-opening a WCB toggles
+    // DTR, firing its RC-differentiator reset. So a handoff = a WCB REBOOT on every tab
+    // swap (shows up as "Power-on Reset"). Not worth it: keep ONE sticky owner (whichever
+    // tab picks the port); the other stays a follower. (Failover on owner CLOSE still runs.)
+    visibilityHandoff: false,
   };
 
   // Structured-clone over BroadcastChannel copies typed arrays fine, but to be safe
@@ -70,6 +76,7 @@
       this.lockName    = o.lockName;
       this.baudRate    = o.baudRate;
       this.assertDTR   = o.assertDTR;
+      this._visibilityHandoff = o.visibilityHandoff;
 
       this._role       = 'idle';     // 'idle' | 'follower' | 'leader'
       this._joined     = false;
@@ -130,14 +137,17 @@
       this._post({ t: 'hello' });        // ask any existing leader to announce its state
       this._campaign();                  // queue for the lock (may promote us to leader)
 
-      // Visibility-driven leadership: the FOREGROUND tab should own the port so its read
-      // loop isn't background-throttled (a hidden leader starves high-rate telemetry to
-      // ~1 Hz). Claim on becoming visible; a hidden leader hands off.
-      this._visHandler = () => this._onVisibilityChange();
-      try { document.addEventListener('visibilitychange', this._visHandler); } catch (_) {}
-      // If we loaded in the foreground behind an already-running (maybe hidden) leader,
-      // claim once the lock election has settled.
-      try { setTimeout(() => this._onVisibilityChange(), 400); } catch (_) {}
+      // Visibility-driven leadership handoff (OFF by default — see DEFAULTS): it would
+      // give the foreground tab the port so its read loop isn't background-throttled, but
+      // each handoff re-opens the port and thus REBOOTS the WCB. Disabled ⇒ the port has
+      // ONE sticky owner (whichever tab picked it); failover still runs when that tab CLOSES.
+      if (this._visibilityHandoff) {
+        this._visHandler = () => this._onVisibilityChange();
+        try { document.addEventListener('visibilitychange', this._visHandler); } catch (_) {}
+        // If we loaded in the foreground behind an already-running (maybe hidden) leader,
+        // claim once the lock election has settled.
+        try { setTimeout(() => this._onVisibilityChange(), 400); } catch (_) {}
+      }
 
       this._log('joined channel "' + this.channelName + '"');
       return this;
