@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.14:45.R.JUL.2026';
+const UI_VERSION = '28.15:28.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7954,7 +7954,7 @@ function clearAllTerminals() {
 // lines like "[WDP] learned …" / "[WDP] advert sent …" are NOT hidden — they end
 // in ']' not ':', so they don't match.
 function _suppressTerminalLine(line) {
-  return /^\[WDP(IF|CFG)?:/.test(line)                                  // [WDP:…] [WDPIF:…] [WDPCFG:…] dump rows
+  return /^\[WDP[A-Z]*:/.test(line)                                    // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — all discovery-dump rows (parsed separately; never user-facing)
       || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line); // the ?WDP,DUMP command echo
 }
 
