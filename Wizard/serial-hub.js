@@ -44,7 +44,12 @@
     channelName: 'wcb-shared-serial',        // BroadcastChannel name — the cross-tab contract
     lockName:    'wcb-shared-serial-owner',  // Web Lock name — the single "who owns the port" token
     baudRate:    115200,
-    assertDTR:   true,   // pulse DTR=true after open (CH9102F/"USB Single Serial" needs it to forward UART→USB)
+    // Do NOT assert DTR: the shared port is a WCB gateway, and DTR=true fires its
+    // one-shot RC-differentiator RESET — the WCB reboots and drops off the mesh right
+    // as we're handshaking, which made shared connects sporadic (config sometimes in,
+    // rc_ch subscription often never established). The WCB forwards UART→USB WITHOUT
+    // host DTR (NaviCore's normal Via-WCB works with no DTR at all), so leave it off.
+    assertDTR:   false,
   };
 
   // Structured-clone over BroadcastChannel copies typed arrays fine, but to be safe
@@ -270,38 +275,44 @@
     }
 
     async _readLoop() {
-      // Read ONE reader session until the stream ends (done) or errors, then STOP.
-      // Do NOT re-acquire the reader in a loop: during a leadership handoff / port
-      // teardown the port can enter a state where `readable` is truthy but read()
-      // fails immediately, and re-acquiring would spin a tight async loop that pins
-      // the main thread (Chrome's "page unresponsive"). A genuine reboot/unplug ends
-      // the stream and we reflect portOpen=false; the owning tab reconnects if needed.
-      if (this._role !== 'leader' || !this._port || !this._port.readable || this._leaving) return;
-      let reader = null;
-      try { reader = this._reader = this._port.readable.getReader(); }
-      catch (_) { this._reader = null; }
-      if (reader) {
+      // Read the port; when a session ends/errors, RECOVER — wait a short backoff, then
+      // re-acquire. A transient blip must not kill telemetry. But cap it: if we get NO
+      // data across several consecutive sessions the port is genuinely dead/erroring, so
+      // STOP instead of spinning (a tight re-acquire loop with no delay froze the tab —
+      // Chrome "page unresponsive"). The backoff is what prevents the spin; the empty-
+      // session cap is the give-up. A healthy stream never ends between reads, so this
+      // loop just sits inside the inner read() for the life of the connection.
+      let emptySessions = 0;
+      while (this._role === 'leader' && this._port && this._port.readable && !this._leaving) {
+        let reader = null;
+        try { reader = this._reader = this._port.readable.getReader(); }
+        catch (_) { this._reader = null; break; }
+        let gotData = false;
         try {
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
             if (value && value.byteLength) {
+              gotData = true;
               this._emit('data', value);             // our own tool
               this._post({ t: 'rx', b: copyBytes(value) });   // followers
             }
           }
         } catch (_) {
-          // stream error (unplug / reboot / handoff teardown) — stop, don't re-acquire
+          // stream error — recover below unless it's persistent
         } finally {
-          try { reader.releaseLock(); } catch (_) {}
+          try { reader && reader.releaseLock(); } catch (_) {}
           this._reader = null;
         }
+        if (this._leaving || this._role !== 'leader') break;
+        if (gotData) emptySessions = 0;
+        else if (++emptySessions >= 6) break;   // ~6 empty sessions in a row → port dead, give up
+        await new Promise(r => setTimeout(r, 250));   // backoff BETWEEN re-acquires — prevents the tight spin
       }
-      // Stream ended. If this wasn't a clean leave/relinquish, reflect the port going away.
       if (this._portOpen && !this._leaving && this._role === 'leader') {
         this._portOpen = false;
         this._announceState();
-        this._log('port read loop ended (unplug/reboot?)');
+        this._log('port read loop ended (unplug?)');
       }
     }
 
