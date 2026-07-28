@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '27.22:09.R.JUL.2026';
+const UI_VERSION = '27.23:52.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4408,7 +4408,11 @@ class BoardConnection {
     this._hub = null;
   }
 
-  isConnected() { return this._connected; }
+  // For a shared-hub board, "connected" == the shared port is actually open (live,
+  // from the hub) rather than our own _connected bookkeeping — so any card rebuild
+  // that re-derives state via isConnected() (see addBoardSection) can't leave a
+  // genuinely-live shared board showing "Not Connected".
+  isConnected() { return this._shared ? !!this._hub?.portOpen : this._connected; }
 
   async connect(existingPort = null, usedPorts = new Set()) {
     if (!('serial' in navigator)) throw new Error('WebSerial not supported in this browser');
@@ -4896,14 +4900,16 @@ class BoardConnection {
     };
     this._onHubState = (st) => {
       // Reflect the shared port's open/closed state as this board's connection state.
+      // Always re-apply (idempotent) so a card rebuilt mid-session can't get stuck
+      // showing the wrong state; isConnected() already tracks the live hub value.
       const open = !!st.portOpen;
-      if (open !== this._connected) {
-        this._connected = open;
-        updateConnectionUI(this.boardIndex, open);
-      }
+      this._connected = open;
+      updateConnectionUI(this.boardIndex, open);
     };
-    hub.on('data', this._onHubData);
+    this._onHubLog = (m) => termLog(this.boardIndex, `[hub] ${m}`, 'sys');
+    hub.on('data',  this._onHubData);
     hub.on('state', this._onHubState);
+    hub.on('log',   this._onHubLog);
     hub.join();
     this._connected = hub.portOpen;
   }
@@ -4913,6 +4919,7 @@ class BoardConnection {
     if (!this._shared) return;
     try { this._hub?.off('data',  this._onHubData); }  catch (_) {}
     try { this._hub?.off('state', this._onHubState); } catch (_) {}
+    try { this._hub?.off('log',   this._onHubLog); }   catch (_) {}
     try { this._hub?.leave(); } catch (_) {}
     this._shared = false;
     this._hub = null;
@@ -5045,14 +5052,18 @@ async function modalSharedConnect() {
   try {
     await sharedConnect(n);
     const hub = getSharedHub();
+    // Leader election + the port actually opening settle a beat after join(). Wait
+    // (bounded) for the shared port to open, THEN reflect the connected state and
+    // pull — so the card doesn't flash/stick on "Not Connected". The hub's 'state'
+    // handler also drives the card reactively as a backstop.
+    for (let i = 0; i < 40 && !hub.portOpen; i++) await new Promise(r => setTimeout(r, 100));
     updateConnectionUI(n, hub.portOpen);
-    // Leader election + port open settle a beat after join(); the hub's 'state'
-    // handler updates the card reactively. Keep the toast neutral, and auto-pull
-    // only once the shared port is actually open.
-    showToast(hub.portOpen
-      ? `WCB ${n} shared (this tab is ${hub.role})`
-      : `WCB ${n}: shared mode on — opening port…`, 'success');
-    setTimeout(() => { if (getSharedHub().portOpen) boardPull(n); }, 1800);
+    if (hub.portOpen) {
+      showToast(`WCB ${n} shared (this tab is ${hub.role})`, 'success');
+      boardPull(n);
+    } else {
+      showToast(`WCB ${n}: shared — no tab has opened the port yet`, 'warning', 6000);
+    }
   } catch (e) {
     showToast(`Share failed: ${e.message}`, 'error');
   } finally {
