@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.11:59.R.JUL.2026';
+const UI_VERSION = '28.14:45.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -364,6 +364,7 @@ let _meshBoards = new Set(); // WCB numbers discovered on the mesh beyond the fl
 let _boardFloor = 0;         // WCBQ floor: sections 1.._boardFloor always render
 let _relaySlots = new Set(); // USB slots that are MgmtRelays — kept OUT of the numbered grid
 let _relayNodes = {};        // relaySlot → last WDP node array it advertised (feeds the relay card)
+const _relayRouteAllBusy = new Set(); // relaySlots with a "Manage all" sequential pull in flight (double-click guard)
 const _meshClients = new Map(); // WCB_Client devices discovered on the mesh: id → last WDP node (status/caps)
 
 // Accepts either a count (legacy: renders 1..count) or an explicit array of
@@ -483,8 +484,8 @@ function applyRelayRole(n) {
 }
 
 // Route one heard board through the relay so it's manageable. `pull` = also fetch its config
-// now (single-board action); relayRouteAll uses pull=false to avoid flooding the relay, which
-// reassembles ONE config reply at a time.
+// now (single-board action); relayRouteAll arms with pull=false then pulls SEQUENTIALLY itself
+// (the relay reassembles ONE config reply at a time).
 function relayManageOne(relaySlot, targetN, pull = true) {
   if (!(targetN >= 1 && targetN <= WCB_MAX)) return;
   if (boardConnections[targetN]?.isConnected?.()) return;    // don't override a direct-USB board
@@ -494,14 +495,44 @@ function relayManageOne(relaySlot, targetN, pull = true) {
   renderRelayCard(relaySlot);
 }
 
-// Arm every heard board for management through the relay (no pull — pull each on demand).
-function relayRouteAll(relaySlot) {
-  const relayWcb = boardConfigs[relaySlot]?.wcbNumber;
-  for (const nd of (_relayNodes[relaySlot] || [])) {
-    if (nd.client || nd.n === relayWcb) continue;            // skip clients + the relay itself
-    if (boardConnections[nd.n]?.isConnected?.()) continue;   // skip direct-USB boards
-    if (remoteRelayForBoard[nd.n] === relaySlot) continue;   // already armed
-    relayManageOne(relaySlot, nd.n, false);                  // arm-only
+// Arm every heard board for management through the relay, then pull each config
+// SEQUENTIALLY. The relay reassembles one config reply at a time, and the pull's
+// [MGMT:CONFIG,] listener isn't target-filtered — so overlapping pulls would
+// cross-assign configs to the wrong board. Hence one-at-a-time, awaiting each to
+// fully settle (config parsed, or all retries exhausted) before the next.
+async function relayRouteAll(relaySlot) {
+  if (_relayRouteAllBusy.has(relaySlot)) return;   // ignore a double-click while a run is active
+  _relayRouteAllBusy.add(relaySlot);
+  try {
+    const relayWcb = boardConfigs[relaySlot]?.wcbNumber;
+    const targets = [];
+    for (const nd of (_relayNodes[relaySlot] || [])) {
+      if (nd.client || nd.n === relayWcb) continue;          // skip clients + the relay itself
+      if (boardConnections[nd.n]?.isConnected?.()) continue; // skip direct-USB boards
+      targets.push(nd.n);
+    }
+    // Arm all up front so every board shows "managed" immediately…
+    for (const n of targets) {
+      if (remoteRelayForBoard[n] !== relaySlot) relayManageOne(relaySlot, n, false);
+    }
+    // …then pull the configs one at a time. Skip boards already pulled
+    // (boardBaselines set) or mid-pull from an ETM-online auto-trigger, so a
+    // repeat click only fills the gaps.
+    const toPull = targets.filter(n => !boardBaselines[n] && !_pullingBoards.has(n));
+    if (!toPull.length) return;
+    showToast(`Pulling ${toPull.length} config(s) via WCB${relaySlot}…`, 'info');
+    let ok = 0;
+    for (const n of toPull) {
+      const success = await new Promise(res => {
+        remoteBoardPull(relaySlot, n, 1, MAX_PULL_ATTEMPTS, res).catch(() => res(false));
+      });
+      if (success) ok++;
+      await sleep(MGMT_CHUNK_DELAY);   // courtesy gap so the relay's reassembly buffer clears
+    }
+    showToast(`Manage all: ${ok}/${toPull.length} config(s) pulled via WCB${relaySlot}`,
+              ok === toPull.length ? 'success' : 'error');
+  } finally {
+    _relayRouteAllBusy.delete(relaySlot);
   }
 }
 
@@ -7076,14 +7107,19 @@ async function boardGoRemote(n, opts = {}) {
 const MAX_PULL_ATTEMPTS = 3;
 const PULL_TIMEOUT_MS   = 6000;
 const PULL_RETRY_MS     = 2500;
-async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_PULL_ATTEMPTS) {
+// onComplete(success:boolean) — optional, fired ONCE when this pull cycle fully
+// settles (config parsed, or all retries exhausted). Lets a bulk caller
+// (relayRouteAll) sequence pulls strictly one-at-a-time; retries thread the
+// same callback through so it fires only on the final outcome.
+async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_PULL_ATTEMPTS, onComplete = null) {
   const relayConn = boardConnections[relayN];
-  if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); return; }
+  if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); onComplete?.(false); return; }
 
   // Guard against duplicate pulls triggered by the double "[ETM] WCBn came ONLINE" on boot
   if (attempt === 1) {
     if (_pullingBoards.has(targetN)) {
       termLog(relayN, `[Remote] Pull for WCB${targetN} already in progress — skipping duplicate`, 'sys');
+      onComplete?.(false);
       return;
     }
     _pullingBoards.add(targetN);
@@ -7128,6 +7164,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: empty config response`, 'error');
       termLog(relayN, `[Remote] WCB${targetN} returned empty config`, 'err');
+      onComplete?.(false);
       return;
     }
 
@@ -7177,11 +7214,13 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
       // Start the remote terminal session so WCB${targetN}'s Serial output is mirrored here
       startRemoteTermSession(relayN, targetN);
       _pullingBoards.delete(targetN);
+      onComplete?.(true);
     } catch (e) {
       _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
       termLog(relayN, `[Remote] Config parse error for WCB${targetN}: ${e.message}`, 'err');
+      onComplete?.(false);
     }
   };
 
@@ -7193,12 +7232,13 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
     if (attempt < maxAttempts) {
       updateBoardStatusBadge(targetN, 'retrying');
       termLog(relayN, `[Remote] Pull attempt ${attempt}/${maxAttempts} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
-      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1, maxAttempts), PULL_RETRY_MS);
+      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1, maxAttempts, onComplete), PULL_RETRY_MS);
     } else {
       _pullingBoards.delete(targetN);
       updateBoardStatusBadge(targetN, 'error');
       showToast(`WCB${targetN}: config pull failed after ${maxAttempts} attempts`, 'error');
       termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${maxAttempts} attempts`, 'err');
+      onComplete?.(false);
     }
   }, PULL_TIMEOUT_MS);
 
@@ -7219,6 +7259,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
     if (timer) clearTimeout(timer);
     termLog(relayN, `[Remote] Send to relay failed: ${e.message}`, 'err');
     updateBoardStatusBadge(targetN, 'error');
+    onComplete?.(false);
     throw e;
   }
 }
