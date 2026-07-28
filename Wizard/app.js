@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.11:05.R.JUL.2026';
+const UI_VERSION = '28.11:47.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4871,7 +4871,11 @@ class BoardConnection {
         termLog(slot, termMatch[2], 'out');
     } else {
       const displayed = this._lineTransform ? this._lineTransform(line) : line;
-      if (displayed !== null && !_suppressTerminalLine(displayed))
+      // Don't echo RC telemetry noise (rc_hb 0.5Hz, rc_ch up to 20Hz) to the terminal —
+      // the RC Controllers panel / discovery hook already consume it, and now that the WCB
+      // relays rc_ch it would bury real board output. (rc_trig / rc_mode aren't _isRcNoise,
+      // so those low-rate events still show.)
+      if (!_isRcNoise && displayed !== null && !_suppressTerminalLine(displayed))
         termLog(this.boardIndex, displayed, 'out');
     }
   }
