@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_241456RJUL2026                                  *****////
+///*****                                          Version 6.2.0_281130RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_241456RJUL2026";
+String SoftwareVersion = "6.2.0_281130RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3481,11 +3481,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // Serial.println here directly — we're on the WiFi task
                 // (Core 0) and Serial isn't atomic across cores.  The
                 // main loop drains the queue safely on Core 1.
-                // Skip rc_ch (the controller's high-rate channel/stick stream):
-                // nothing on the config-tool side consumes it and it floods USB.
-                // rc_hb / rc_trig / rc_mode still pass for the RC Controllers panel.
-                if (rcJsonRelaySubscribed() && !otaRelayForwarding() &&
-                    etmCmd.indexOf("\"rc_ch\"") < 0) {
+                // Relay ALL RC JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode) to a
+                // subscribed host. rc_ch (the high-rate channel/stick stream) USED to be
+                // dropped here ("nothing consumes it, floods USB") — but the NaviCore
+                // config tool's live channel monitor now consumes it over Via-WCB. And
+                // the RC only broadcasts rc_ch while a host is actively subscribed to IT
+                // (its own 15s ;w20 gate), so relaying it here can't flood an idle link:
+                // no config tool subscribed ⇒ no rc_ch on the mesh ⇒ nothing to relay.
+                if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
                     enqueueRcJsonRelay(etmCmd);
                     // NB: do NOT renew the subscription here. The window is
                     // driven SOLELY by explicit host activity — a ;w command or
@@ -3758,10 +3761,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // actively using us as a WCB bridge (see declaration near top of file).
   // Uses the relay queue + main-loop drain pattern for cross-core safety.
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    // Skip rc_ch (high-rate channel/stick stream) — unconsumed by the config
-    // tool and it floods USB; rc_hb / rc_trig / rc_mode still pass for the panel.
-    if (rcJsonRelaySubscribed() && !otaRelayForwarding() &&
-        receivedCmd.indexOf("\"rc_ch\"") < 0) {
+    // Relay ALL RC JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode) to a subscribed
+    // host. rc_ch was previously dropped here as "unconsumed / floods USB", but the
+    // config tool's live channel monitor now consumes it, and the RC only broadcasts
+    // rc_ch while a host is subscribed to it (15s ;w20 gate) — so it can't flood an
+    // idle link (no subscriber ⇒ no rc_ch on the mesh ⇒ nothing to relay).
+    if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
       enqueueRcJsonRelay(receivedCmd);
       // Do NOT renew here — the subscription is host-driven only (see the
       // matching note in the ETM passthrough path above). Self-renewing on
