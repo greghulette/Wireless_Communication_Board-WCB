@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.10:11.R.JUL.2026';
+const UI_VERSION = '29.10:28.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6137,6 +6137,11 @@ async function boardPull(n, opts = {}) {
         _relaySlots.delete(n);
         _meshBoards.delete(n);
         updateConnectionUI(n, false);          // clear the vacated landed slot's header/buttons
+        // A relay landing on a placeholder slot leaves the SAME phantom terminal pane
+        // as the normal migration (hub logs + config backup printed to slot n). Move
+        // them to the relay's pane and remove the stale slot-n pane/tab — this is the
+        // "WCB 1 shows up when only the relay is connected" bug.
+        migrateTerminalPane(n, relaySlot);
       }
       boardConfigs[relaySlot]   = config;
       boardBaselines[relaySlot] = JSON.parse(JSON.stringify(config));
@@ -6203,19 +6208,9 @@ async function boardPull(n, opts = {}) {
 
         termLog(detected, `↑ Auto-migrated from slot ${n} — this board is WCB ${detected}`, 'sys');
         // The config-backup dump already printed to the placeholder slot's pane (the
-        // pull ran before we knew the WCB number). Move it into the real board's pane,
-        // then drop the now-phantom slot-n pane + tab — otherwise a direct-USB connect
-        // leaves a stale "WCB n" terminal showing WCB <detected>'s config.
-        {
-          const srcOut = document.getElementById(`term-pane-output-${n}`);
-          const dstOut = document.getElementById(`term-pane-output-${detected}`);
-          if (srcOut && dstOut && srcOut !== dstOut) {
-            const frag = document.createDocumentFragment();
-            while (srcOut.firstChild) frag.appendChild(srcOut.firstChild);
-            dstOut.insertBefore(frag, dstOut.firstChild);   // backup lands before the migrate note
-          }
-          removeTerminalPane(n);
-        }
+        // pull ran before we knew the WCB number). Move it into the real board's pane
+        // and drop the now-phantom slot-n pane + tab.
+        migrateTerminalPane(n, detected);
         showToast(`WCB ${detected} detected — moved from slot ${n} → slot ${detected}`, 'info', 6000);
         migrated = true;
         fetchBoardVersion(detected);
@@ -7970,6 +7965,22 @@ function clearTerminalPane(n) {
 function removeTerminalPane(n) {
   document.getElementById(`term-pane-${n}`)?.remove();
   document.getElementById(`term-vis-chip-${n}`)?.remove();
+}
+
+// Move a placeholder slot's terminal output into the real board's pane (if that
+// pane exists yet) and remove the now-phantom slot pane/tab. Used by BOTH the
+// normal slot-migration AND the relay-role path: a connection lands on slot `from`,
+// prints hub logs + the config-pull backup there, then its true WCB number `to` is
+// learned. Without this the vacated slot lingers as a stale "WCB <from>" terminal.
+function migrateTerminalPane(from, to) {
+  const srcOut = document.getElementById(`term-pane-output-${from}`);
+  const dstOut = document.getElementById(`term-pane-output-${to}`);
+  if (srcOut && dstOut && srcOut !== dstOut) {
+    const frag = document.createDocumentFragment();
+    while (srcOut.firstChild) frag.appendChild(srcOut.firstChild);
+    dstOut.insertBefore(frag, dstOut.firstChild);
+  }
+  removeTerminalPane(from);
 }
 
 function clearAllTerminals() {
