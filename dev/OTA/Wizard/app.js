@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.15:40.R.JUL.2026';
+const UI_VERSION = '28.23:01.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -511,9 +511,15 @@ async function relayRouteAll(relaySlot) {
       if (boardConnections[nd.n]?.isConnected?.()) continue; // skip direct-USB boards
       targets.push(nd.n);
     }
-    // Arm all up front so every board shows "managed" immediately…
+    // Arm all up front so every board shows "managed" immediately. A board that is
+    // ALREADY managed (e.g. after the relay reconnected) keeps its UI state, but its
+    // remote-terminal session (RTERM) on the target is now stale — the relay stopped
+    // mirroring its serial, so it can send commands but gets no output back. Re-issue
+    // RTERM,START for those too (it's idempotent) so a reconnect never leaves a
+    // "managed" board deaf. New boards get RTERM,START via relayManageOne→setRemoteConnected.
     for (const n of targets) {
       if (remoteRelayForBoard[n] !== relaySlot) relayManageOne(relaySlot, n, false);
+      else startRemoteTermSession(relaySlot, n);   // already managed → re-arm its (stale) RTERM session
     }
     // …then pull the configs one at a time. Skip boards already pulled
     // (boardBaselines set) or mid-pull from an ETM-online auto-trigger, so a
