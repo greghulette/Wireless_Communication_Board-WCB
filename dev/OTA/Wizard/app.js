@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.23:01.R.JUL.2026';
+const UI_VERSION = '29.00:31.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5360,8 +5360,11 @@ function clearRemoteConnected(n) {
 }
 
 // ─── Remote Terminal Session Management ───────────────────────────
-// Starts a remote terminal session on board targetN by sending
-// ?RTERM,START,<relayN> via MGMT (single-chunk push).
+// Starts a remote terminal session on board targetN by sending ?RTERM,START,<relayN>
+// via MGMT. Sent 3× (matching the config-req retry count): the arming rides a single
+// FRAG forward with NO relay-side retry, so one dropped ESP-NOW packet leaves the
+// target receiving commands but never mirroring its output back — a silent, deaf
+// terminal. RTERM,START is idempotent, so repeating it is harmless.
 async function startRemoteTermSession(relayN, targetN) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) return;
@@ -5372,7 +5375,7 @@ async function startRemoteTermSession(relayN, targetN) {
     const relayFc    = boardConfigs[relayN]?.funcChar   || '?';
     const targetFc   = boardConfigs[targetN]?.funcChar  || '?';
     const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
-    await sendMgmtReliable(relayConn, rtermStartCmd, null);
+    await sendMgmtReliable(relayConn, rtermStartCmd, null, 3, 250);   // 3× for reliable arming — see note above
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
   } catch (_) {}
 }
