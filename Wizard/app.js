@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.10:28.R.JUL.2026';
+const UI_VERSION = '29.11:00.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11296,6 +11296,24 @@ function _rcToolUrl() {
   } catch (_) { return RC_TOOL_URL_DEFAULT; }
 }
 
+// Open the RC config tool. If THIS Wizard is the shared-port leader, hand the tool
+// a ?share=1 flag so it auto-joins the shared port (as a follower of OUR port) —
+// the user never has to pick "Via a WCB" over there. If we're NOT sharing, the
+// tool can't grab the port (we hold it), so hint the user and open the plain URL.
+function rcOpenConfigTool(ev) {
+  try {
+    const hub = (typeof getSharedHub === 'function') ? getSharedHub() : null;
+    if (hub && hub.role === 'leader' && hub.portOpen) {
+      ev.preventDefault();
+      const url = _rcToolUrl();
+      window.open(url + (url.includes('?') ? '&' : '?') + 'share=1', '_blank', 'noopener');
+      return false;
+    }
+    showToast('Tip: share this WCB across tabs (Connect → "Share port across tabs") so the config tool can auto-connect to it.', 'info', 6000);
+  } catch (_) {}
+  return true;   // fall through to the plain href (manual connect in the tool)
+}
+
 function _rcDiscoveryHook(line, boardIdx) {
   // Fast-path: rc_hb lines start with `{"type":"rc_hb"`.  Cheaper than a
   // full JSON.parse on every serial line (which includes plenty of WCB
@@ -11369,8 +11387,8 @@ function _renderRcDevices() {
           <div class="rc-meta-line">fw ${escHtml(fwLbl)} · ${escHtml(upLbl)}</div>
           <div class="rc-meta-line ${ageClass}">last seen ${age}s ago ${trigLbl}</div>
         </div>
-        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank"
-           title="Opens the RC config tool in a new tab. Don't forget to flip the 'Via WCB' toggle to manage this RC through this tethered WCB.">
+        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank" onclick="return rcOpenConfigTool(event)"
+           title="Opens the RC config tool in a new tab. If this WCB is shared across tabs, the tool auto-connects to it; otherwise pick 'Via a WCB' there.">
           Open ↗
         </a>
       </div>`;
