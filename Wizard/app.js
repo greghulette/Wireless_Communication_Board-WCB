@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.11:00.R.JUL.2026';
+const UI_VERSION = '29.13:41.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5067,12 +5067,28 @@ function getSharedHub() {
 // follower (another tab already owns it), the picked port is ignored — cancelling
 // the picker is the right move for a follower.
 async function sharedConnect(n) {
-  const hub = getSharedHub();
-  try { await hub.requestPort(); } catch (_) { /* follower / cancelled — fine */ }
-  // Only ONE board can own the shared port; drop any other slot already sharing.
+  // The shared hub owns exactly ONE port and can't switch it in place: once asked
+  // to move to a new port it gets stuck following the dead/old one ("no tab has
+  // opened the port yet") and a MgmtRelay's card is left orphaned. Since it's a
+  // singleton that's never rebuilt, retrying just reuses the broken hub. So on
+  // EVERY shared connect, fully tear down any prior share and REBUILD the hub from
+  // scratch. This block is synchronous (no await) so it runs BEFORE requestPort
+  // while the Connect click's user activation is still valid for the port picker.
   for (const [k, c] of Object.entries(boardConnections)) {
-    if (parseInt(k) !== n && c?._shared) { c.leaveShared(); delete boardConnections[k]; }
+    if (!c?._shared) continue;
+    try { c.leaveShared(); } catch (_) {}
+    if (_relaySlots.has(+k)) {                     // a shared MgmtRelay → drop its card + slot too
+      _relaySlots.delete(+k); delete _relayNodes[+k];
+      document.getElementById(`relay-card-${k}`)?.remove();
+    }
+    delete boardConnections[k];
+    updateConnectionUI(+k, false);
   }
+  if (_sharedHub) { try { _sharedHub.leave(); } catch (_) {} _sharedHub = null; }
+  reconcileBoardGrid();
+
+  const hub = getSharedHub();                       // fresh hub for the new port
+  try { await hub.requestPort(); } catch (_) { /* follower / cancelled — fine */ }
   if (boardConnections[n]?.isConnected?.()) await boardDisconnect(n);
   const conn = new BoardConnection(n);
   conn.connectShared(hub);
