@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.09:56.R.JUL.2026';
+const UI_VERSION = '29.10:11.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -136,7 +136,7 @@ async function fetchLatestFirmwareVersion() {
     if (!m) return;
     latestFirmwareVersion = `v${m[1]}`;
     // Re-evaluate version display for any boards that already have a version from the board
-    for (let n = 1; n <= 8; n++) {
+    for (let n = 1; n <= WCB_MAX; n++) {
       if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
     }
     return true;   // reached GitHub + parsed a version
@@ -5874,7 +5874,7 @@ async function boardAutoDetect(n) {
       _detecting[n] = false; setDetecting(false); return;
     }
     const freeSlots = [];
-    for (let s = 1; s <= 8; s++) {
+    for (let s = 1; s <= WCB_MAX; s++) {
       if (!boardConnections[s]?.isConnected()) freeSlots.push(s);
     }
     let busy = 0;
