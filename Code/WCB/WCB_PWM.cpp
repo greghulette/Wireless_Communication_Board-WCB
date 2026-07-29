@@ -249,7 +249,7 @@ void addPWMMapping(const String &config, bool autoReboot) {
             }
         }
         
-        if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
+        if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
             // Validate local output ports aren't in use by Kyber
             if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                 Serial.printf("⚠️  Skipping output Serial%d - reserved for Kyber\n", serialPort);
@@ -452,9 +452,9 @@ void listPWMMappingsBoot() {
 }
 
 void clearAllPWMMappings() {
-    bool remoteBoards[10] = {false};
-    int remotePorts[10][5];
-    int remotePortCounts[10] = {0};
+    bool remoteBoards[MAX_WCB_COUNT + 1] = {false};   // indexed by WCB number (0 = local), sized to the full peer range
+    int remotePorts[MAX_WCB_COUNT + 1][5];
+    int remotePortCounts[MAX_WCB_COUNT + 1] = {0};
     
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
@@ -475,7 +475,7 @@ void clearAllPWMMappings() {
     }
     
     if (canSendESPNow()) {
-        for (int wcb = 1; wcb <= 9; wcb++) {
+        for (int wcb = 1; wcb <= MAX_WCB_COUNT; wcb++) {
             if (remoteBoards[wcb]) {
                 for (int p = 0; p < remotePortCounts[wcb]; p++) {
                     char remoteCmd[32];
@@ -578,7 +578,7 @@ void loadPWMMappingsFromPreferences() {
                     }
                 }
                 
-                if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
+                if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
                     if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                         // Skip local outputs that conflict with Kyber
                     } else {

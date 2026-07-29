@@ -1623,7 +1623,7 @@ void addSerialMonitorMapping(const String &message) {
             continue;
         }
 
-            if (wcbNum > 9 || serialPort < 0 || serialPort > 5) {
+            if (wcbNum > MAX_WCB_COUNT || serialPort < 0 || serialPort > 5) {
                 Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
                 continue;
             }

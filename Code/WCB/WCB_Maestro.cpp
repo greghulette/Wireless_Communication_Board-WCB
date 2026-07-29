@@ -583,8 +583,8 @@ String remaining = message;
     int targetWCB = destStr.substring(wIndex + 1, sIndex).toInt();
     int serialPort = destStr.substring(sIndex + 1).toInt();
     
-    if (targetWCB < 1 || targetWCB > Default_WCB_Quantity) {
-      Serial.printf("Invalid WCB number. Must be W1-W%d\n", Default_WCB_Quantity);
+    if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+      Serial.printf("Invalid WCB number. Must be W1-W%d\n", MAX_WCB_COUNT);
       startIdx = nextComma + 1;
       continue;
     }

@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_281130RJUL2026                                  *****////
+///*****                                          Version 6.2.0_290933RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_281130RJUL2026";
+String SoftwareVersion = "6.2.0_290933RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3102,7 +3102,7 @@ void handleETMFragPacket(const uint8_t *data) {
 // ── Relay side: handle ?MGMT,STATS,<n> and ?MGMT,ETM,<n> ────────────────────
 void handleMgmtStatsRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) return;
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -3115,7 +3115,7 @@ void handleMgmtStatsRequest(const String &targetStr) {
 
 void handleMgmtETMRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) return;
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -4636,10 +4636,13 @@ void processLocalCommand(const String &message) {
         rtermCmd.toUpperCase();
         if (rtermCmd.startsWith("START,")) {
             uint8_t relayWCB = (uint8_t)args.substring(6).toInt();
-            if (relayWCB >= 1 && relayWCB <= 8) {
+            // Was hard-capped at 8, which silently rejected a high-numbered relay
+            // (e.g. a MgmtRelay at WCB19) — the mirror never armed and the relayed
+            // terminal returned nothing. Any valid WCB number can be a relay.
+            if (relayWCB >= 1 && relayWCB <= MAX_WCB_COUNT) {
                 WCBDebugSerial.startSession(relayWCB);
             } else {
-                Serial.println("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..8");
+                Serial.printf("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..%d\n", MAX_WCB_COUNT);
             }
         } else if (rtermCmd == "STOP") {
             WCBDebugSerial.stopSession();
