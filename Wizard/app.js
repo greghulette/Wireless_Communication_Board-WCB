@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.00:31.R.JUL.2026';
+const UI_VERSION = '29.09:56.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6167,7 +6167,7 @@ async function boardPull(n, opts = {}) {
 
     const detected = config.wcbNumber;
 
-    if (detected !== n && detected >= 2 && detected <= 8) {
+    if (detected !== n && detected >= 2 && detected <= WCB_MAX) {
       // ── Board self-identifies as a different slot ─────────────────
       if (boardConnections[detected]?.isConnected()) {
         // Conflict: target slot already occupied → keep in current slot with a warning
@@ -6202,6 +6202,20 @@ async function boardPull(n, opts = {}) {
         updateConnectionUI(detected, true);  // activate correct slot
 
         termLog(detected, `↑ Auto-migrated from slot ${n} — this board is WCB ${detected}`, 'sys');
+        // The config-backup dump already printed to the placeholder slot's pane (the
+        // pull ran before we knew the WCB number). Move it into the real board's pane,
+        // then drop the now-phantom slot-n pane + tab — otherwise a direct-USB connect
+        // leaves a stale "WCB n" terminal showing WCB <detected>'s config.
+        {
+          const srcOut = document.getElementById(`term-pane-output-${n}`);
+          const dstOut = document.getElementById(`term-pane-output-${detected}`);
+          if (srcOut && dstOut && srcOut !== dstOut) {
+            const frag = document.createDocumentFragment();
+            while (srcOut.firstChild) frag.appendChild(srcOut.firstChild);
+            dstOut.insertBefore(frag, dstOut.firstChild);   // backup lands before the migrate note
+          }
+          removeTerminalPane(n);
+        }
         showToast(`WCB ${detected} detected — moved from slot ${n} → slot ${detected}`, 'info', 6000);
         migrated = true;
         fetchBoardVersion(detected);
@@ -7948,6 +7962,14 @@ function updateTerminalPaneDot(n, connected) {
 function clearTerminalPane(n) {
   const out = document.getElementById(`term-pane-output-${n}`);
   if (out) out.innerHTML = '';
+}
+
+// Remove a terminal pane and its visibility chip entirely (not just clear it) —
+// used when a board auto-migrates OFF a placeholder slot so the vacated slot's
+// pane doesn't linger as a phantom "WCB n" terminal for a board that isn't there.
+function removeTerminalPane(n) {
+  document.getElementById(`term-pane-${n}`)?.remove();
+  document.getElementById(`term-vis-chip-${n}`)?.remove();
 }
 
 function clearAllTerminals() {

@@ -132,8 +132,26 @@ jobs:
           MSG="Auto-build: update firmware binaries [skip ci]"
           [ -n "${NEWVER:-}" ] && MSG="Auto-release ${NEWVER} [skip ci]"
           git add Code/bin/ Wizard/bin/ Code/WCB/WCB.ino
-          git diff --staged --quiet || git commit -m "$MSG"
-          git push
+          if git diff --staged --quiet; then
+            echo "No binary changes to commit."
+            exit 0
+          fi
+          git commit -m "$MSG"
+          # Rebase-and-retry: every commit stamps fw_version.h (under Code/), so even
+          # Wizard-only commits trigger this build. Concurrent runs then race to push
+          # their binary commit and a bare push fails non-fast-forward. Rebase our bin
+          # commit onto whatever landed and retry instead of failing the whole run.
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Pushed binaries (attempt ${attempt})."
+              exit 0
+            fi
+            echo "Push rejected — rebasing on ${GITHUB_REF_NAME} (attempt ${attempt})…"
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}" || { echo "Rebase failed."; exit 1; }
+          done
+          echo "Push still failing after retries."
+          exit 1
 
       # ─────────────────────────────────────────────────────────────────────
       # Tag + publish Release — main branch only.
