@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.13:34.R.JUL.2026';
+const UI_VERSION = '30.14:22.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5101,9 +5101,36 @@ function getSharedHub() {
 }
 
 // True once some board is using the shared hub (the ONE shared port is taken). New
-// connections auto-share only while this is false — see establishConnection().
+// connections auto-share only while this is false — see establishConnection(). A board
+// borrowed for a flash (conn._wasSharedBeforeFlash) still OWNS the slot even though it's
+// temporarily direct, so a board connected mid-flash goes DIRECT, not a 2nd shared hub.
 function _hasSharedPort() {
-  return Object.values(boardConnections).some(c => c && c._shared);
+  return Object.values(boardConnections).some(c => c && (c._shared || c._wasSharedBeforeFlash));
+}
+
+// True if another same-origin tab already LEADS the shared hub (holds its Web Lock).
+// Probed before we join, so any held instance is necessarily a different tab. Gates
+// auto-share: joining as a follower would silently relay to THAT tab's port, not the one
+// the user just picked. Best-effort — returns false where navigator.locks is unavailable.
+async function _anotherTabLeadsShare() {
+  if (!navigator.locks || !navigator.locks.query) return false;
+  try {
+    const nm = (_sharedHub && _sharedHub.lockName) || 'wcb-shared-serial-owner';
+    const q  = await navigator.locks.query();
+    return (q.held || []).some(l => l.name === nm);
+  } catch (_) { return false; }
+}
+
+// True if the shared hub we LEAD has other tabs queued as followers on its Web Lock.
+// A flash borrow releases the lock, which would let a follower promote and grab the
+// device mid-flash — so we refuse to borrow (steer to direct USB) when followers exist.
+async function _hubHasFollowers(hub) {
+  if (!navigator.locks || !navigator.locks.query) return false;
+  try {
+    const nm = (hub && hub.lockName) || 'wcb-shared-serial-owner';
+    const q  = await navigator.locks.query();
+    return (q.pending || []).some(l => l.name === nm);
+  } catch (_) { return false; }
 }
 
 // Guards the auto-share decision against a parallel-connect race (first-time
@@ -5115,13 +5142,33 @@ let _autoShareClaimed = false;
 // shared port exists yet) is opened as the SHARED port, so the NaviCore tab / a 2nd
 // Wizard tab can always attach to one; every board after that is a normal direct USB
 // connection. Returns the BoardConnection (already stored in boardConnections[n]).
-async function establishConnection(n, port, usedPorts = new Set()) {
-  if (!_hasSharedPort() && !_autoShareClaimed) {
+async function establishConnection(n, port, usedPorts = new Set(), allowShare = true) {
+  // Auto-share only when (a) the caller allows it — the first-time BULK auto-detect opts
+  // out (allowShare=false) so every board connects direct and a busy port is reported
+  // rather than silently "shared"; (b) no shared port exists yet in this tab; (c) no
+  // parallel connect already claimed the slot; and (d) NO other same-origin tab already
+  // leads the shared hub — else we'd join as a follower and relay to THAT tab's port
+  // instead of opening the one the user picked (silently configuring the wrong board).
+  if (allowShare && !_hasSharedPort() && !_autoShareClaimed && !(await _anotherTabLeadsShare())) {
     _autoShareClaimed = true;                 // claim synchronously → parallel connects go direct
     try {
       const conn = await sharedConnect(n, port);
-      showToast(`WCB ${n} is the shared port — the NaviCore tab / a 2nd Wizard tab can attach to it`, 'info', 6000);
-      return conn;
+      // Confirm the shared port actually OPENED. adoptPort/_openAndRead SWALLOW an open
+      // failure (e.g. the port is already open in another app), which would otherwise
+      // leave the board showing "connected" on a dead share. Wait briefly for real
+      // leadership + portOpen; if it never opens, tear the share down and fall through to
+      // a direct connect so the caller surfaces the real port error, not a phantom connect.
+      const hub = conn._hub;
+      // ~3s — matches the sibling hub-open waits (becomeShared 2s, modalSharedConnect 4s)
+      // so a slow-but-valid first open (Windows CH340/CP2102 driver load) isn't demoted.
+      for (let i = 0; i < 60 && hub && !hub.portOpen; i++) await new Promise(r => setTimeout(r, 50));
+      if (hub && hub.portOpen) {
+        showToast(`WCB ${n} is the shared port — the NaviCore tab / a 2nd Wizard tab can attach to it`, 'info', 6000);
+        return conn;
+      }
+      try { conn.leaveShared(); } catch (_) {}
+      if (_sharedHub) { try { _sharedHub.leave(); } catch (_) {} _sharedHub = null; }
+      delete boardConnections[n];
     } finally {
       _autoShareClaimed = false;              // the _shared conn now exists → _hasSharedPort() covers it
     }
@@ -5972,7 +6019,7 @@ async function boardAutoDetect(n) {
     await Promise.all(available.slice(0, freeSlots.length).map(async (port, i) => {
       const slot = freeSlots[i];
       try {
-        const conn = await establishConnection(slot, port);
+        const conn = await establishConnection(slot, port, new Set(), false);  // bulk: all direct, report busy ports
         updateConnectionUI(slot, true);
         setTimeout(() => boardPull(slot), 3000);
       } catch (err) {
@@ -6357,7 +6404,20 @@ async function fetchBoardVersion(n) {
 // Runs BEFORE the post-flash config push, which then flows over the re-shared hub.
 async function _reshareAfterFlash(conn, n) {
   if (!conn || !conn._wasSharedBeforeFlash) return;
-  conn._wasSharedBeforeFlash = false;
+  conn._wasSharedBeforeFlash = false;         // clear on EVERY path so the borrow flag can't latch
+  // Board didn't come back (reconnect failed) → nothing live to re-share.
+  if (!conn._connected || !conn.port) {
+    termLog(n, '⚠ Port not re-shared — the board is offline after the operation.', 'sys');
+    return;
+  }
+  // Another board grabbed the shared slot while we were borrowed → stay a valid DIRECT
+  // connection rather than clobbering it. (_hasSharedPort steers concurrent connects
+  // direct during the borrow, so this is belt-and-suspenders.)
+  if (Object.values(boardConnections).some(c => c && c !== conn && c._shared)) {
+    conn._connected = true;
+    termLog(n, 'Another board is already the shared port — staying direct.', 'sys');
+    return;
+  }
   try {
     await conn.becomeShared();
     termLog(n, '🔌→🔗 Re-shared the port across tabs.', 'sys');
@@ -6391,15 +6451,26 @@ async function boardGo(n, opts = {}) {
   // it), we can't borrow it — steer the user to a direct USB connect instead.
   if (conn._shared && (isFlash || isUpdate || isFactory || isErase)) {
     const hub = conn._hub;
-    if (!hub || !hub._port) {
+    // Borrow only when THIS tab is the leader that actually holds the OPEN port. A
+    // follower has hub._port set too (adoptPort sets it unconditionally), so test role +
+    // the PRIVATE _portOpen (the public getter is true for a follower whose remote leader
+    // holds the port) — a follower must not borrow a port it never opened.
+    if (!hub || hub.role !== 'leader' || !hub._portOpen) {
       showToast('Flashing/erase needs the shared port, and this tab is only following it. Reconnect this board via direct USB, then flash.', 'warning', 9000);
+      return;
+    }
+    // Refuse when another tab is actively sharing this port: borrowing releases our Web
+    // Lock, and a queued follower would promote and grab the device mid-flash (corrupting
+    // both the flash and the share). Have the user close the other tab or use direct USB.
+    if (await _hubHasFollowers(hub)) {
+      showToast('Another tab (NaviCore / a 2nd Wizard) is sharing this board. Close it first — or connect this board via direct USB — to flash it.', 'warning', 10000);
       return;
     }
     termLog(n, '🔗→🔌 Borrowing the shared port for this operation (will re-share after)…', 'sys');
     const borrowedPort = await hub.releasePortKeepOpen();   // stop the hub, keep the port OPEN
     if (_sharedHub === hub) _sharedHub = null;
     conn.becomeDirect(borrowedPort);      // conn now directly owns + reads the live port
-    conn._wasSharedBeforeFlash = true;    // re-share the port once the op settles
+    conn._wasSharedBeforeFlash = true;    // re-share the port once the op settles (also holds the slot)
     // fall through — the rest of boardGo now treats conn as a normal direct connection
   }
 
@@ -6646,6 +6717,7 @@ async function boardGo(n, opts = {}) {
       }
     }
 
+    await _reshareAfterFlash(conn, n);   // catch-all: re-share (or clear the borrow flag) on any flash exit
     btn.disabled = false;
     btn.textContent = 'Push Config';
     return;
@@ -6731,6 +6803,7 @@ async function boardGo(n, opts = {}) {
       showToast(`Erase failed: ${e.message}`, 'error');
       termLog(n, `Erase error: ${e.message}`, 'err');
     }
+    await _reshareAfterFlash(conn, n);   // catch-all: re-share (or clear the borrow flag) on any erase exit
     btn.disabled = false;
     btn.textContent = 'Push Config';
     return;
@@ -6871,32 +6944,42 @@ async function boardGo(n, opts = {}) {
         // Close our side immediately — this cancels any pending reader.read() so
         // _startReading exits cleanly (sees _connected=false, skips its own reconnect).
         // Then we manage the reconnect ourselves in the background.
-        await conn.closeForReconnect();
-        updateConnectionUI(n, false);
-        termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
+        if (conn._shared) {
+          // Shared-hub path: the hub owns the port, and a UART-bridge WCB gateway keeps
+          // USB up through a SOFTWARE reboot — so there is nothing to close/reopen; the
+          // hub's read loop just resumes on the same live port. Running the direct
+          // closeForReconnect()+reconnect() here would operate on a portless shared conn
+          // (this.port===null) and falsely report "did not come back". Stay Connected.
+          conn._rebootManaged = false;
+          termLog(n, 'Board rebooting on the shared port…', 'sys');
+        } else {
+          await conn.closeForReconnect();
+          updateConnectionUI(n, false);
+          termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
 
-        // Fire-and-forget reconnect so the Go button re-enables right away.
-        // In wizard context, wizardWatchForConnect polls isConnected() and
-        // waits for this background reconnect to finish before marking ✓ Done.
-        // Use 15 attempts × 2 s = up to 30 s — Mac USB re-enumeration can be
-        // significantly slower than Windows for CH340/CP2102 adapters.
-        (async () => {
-          const reconnected = await conn.reconnect(15, 2000);
-          if (reconnected) {
-            updateConnectionUI(n, true);
-            termLog(n, 'Reconnected after reboot', 'sys');
-            showToast(`WCB ${n} reconnected`, 'success');
-            if (!_wizardOpen) {
-              // Wizard path: wizardWatchForConnect does its own verify pull.
-              // Only auto-pull when wizard is not in control.
-              termLog(n, 'Auto-pulling config…', 'sys');
-              setTimeout(() => boardPull(n), 3000);
+          // Fire-and-forget reconnect so the Go button re-enables right away.
+          // In wizard context, wizardWatchForConnect polls isConnected() and
+          // waits for this background reconnect to finish before marking ✓ Done.
+          // Use 15 attempts × 2 s = up to 30 s — Mac USB re-enumeration can be
+          // significantly slower than Windows for CH340/CP2102 adapters.
+          (async () => {
+            const reconnected = await conn.reconnect(15, 2000);
+            if (reconnected) {
+              updateConnectionUI(n, true);
+              termLog(n, 'Reconnected after reboot', 'sys');
+              showToast(`WCB ${n} reconnected`, 'success');
+              if (!_wizardOpen) {
+                // Wizard path: wizardWatchForConnect does its own verify pull.
+                // Only auto-pull when wizard is not in control.
+                termLog(n, 'Auto-pulling config…', 'sys');
+                setTimeout(() => boardPull(n), 3000);
+              }
+            } else {
+              termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
+              showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
             }
-          } else {
-            termLog(n, 'Could not auto-reconnect — reconnect manually', 'err');
-            showToast(`WCB ${n} did not come back — reconnect manually`, 'error');
-          }
-        })();
+          })();
+        }
 
       } else {
         // ── Deferred-reboot path — boardGoAll sends the reboot explicitly ──
