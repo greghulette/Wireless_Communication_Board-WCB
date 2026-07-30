@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.00:02.R.JUL.2026';
+const UI_VERSION = '30.13:34.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4968,6 +4968,45 @@ class BoardConnection {
     updateConnectionUI(this.boardIndex, false);
   }
 
+  // ── Transport swap: shared ⇄ direct (used by flash/erase auto-demote) ──────
+  // Convert this SHARED board into a DIRECT owner of `port`, which the caller has
+  // already borrowed OPEN from the hub (see hub.releasePortKeepOpen). Detaches the
+  // hub listeners and starts a direct read loop, so conn.send()/reads work at once —
+  // erase relies on sending ?ERASE,NVS over the live port before it closes/reconnects.
+  becomeDirect(port) {
+    try { this._hub?.off('data',  this._onHubData); }  catch (_) {}
+    try { this._hub?.off('state', this._onHubState); } catch (_) {}
+    try { this._hub?.off('log',   this._onHubLog); }   catch (_) {}
+    this._shared = false;
+    this._hub = null;
+    this.port = port;
+    this._connected = true;
+    this._startReading();
+  }
+
+  // Convert this DIRECT connection back into a SHARED one on its (currently OPEN)
+  // port with NO reopen — so the WCB isn't reset again after a flash. Stops the direct
+  // read loop and releases the reader (leaving the port open+unlocked), then hands it
+  // to a fresh hub that adopts it as-is. Awaits until the hub is actually leading with
+  // the port open, so config-push sends that follow aren't dropped by a not-yet-leader.
+  async becomeShared() {
+    const port = this.port;
+    if (!port) throw new Error('becomeShared: no port to share');
+    this._connected     = false;   // stop _startReading cleanly (no self-reconnect)
+    this._rebootManaged = false;
+    if (this.reader) {
+      try { await this.reader.cancel(); } catch (_) {}
+      try { this.reader.releaseLock(); }  catch (_) {}
+      this.reader = null;
+    }
+    this.port = null;              // the hub owns the port now
+    if (_sharedHub) { try { _sharedHub.leave(); } catch (_) {} _sharedHub = null; }
+    const hub = getSharedHub();
+    await hub.adoptPort(port);     // hub opens it (already-open → used as-is) once it leads
+    this.connectShared(hub);
+    for (let i = 0; i < 40 && !hub.portOpen; i++) await new Promise(r => setTimeout(r, 50));
+  }
+
   async _startReading() {
     termLog(this.boardIndex, `[sr] start: connected=${this._connected} readable=${!!this.port?.readable}`, 'sys');
     outer: while (this._connected && this.port?.readable) {
@@ -5061,12 +5100,44 @@ function getSharedHub() {
   return _sharedHub;
 }
 
+// True once some board is using the shared hub (the ONE shared port is taken). New
+// connections auto-share only while this is false — see establishConnection().
+function _hasSharedPort() {
+  return Object.values(boardConnections).some(c => c && c._shared);
+}
+
+// Guards the auto-share decision against a parallel-connect race (first-time
+// auto-detect connects several boards at once): the first caller claims the shared
+// slot synchronously so the rest go direct, even before the shared conn exists.
+let _autoShareClaimed = false;
+
+// Establish slot n on an already-granted port. The FIRST board connected (while no
+// shared port exists yet) is opened as the SHARED port, so the NaviCore tab / a 2nd
+// Wizard tab can always attach to one; every board after that is a normal direct USB
+// connection. Returns the BoardConnection (already stored in boardConnections[n]).
+async function establishConnection(n, port, usedPorts = new Set()) {
+  if (!_hasSharedPort() && !_autoShareClaimed) {
+    _autoShareClaimed = true;                 // claim synchronously → parallel connects go direct
+    try {
+      const conn = await sharedConnect(n, port);
+      showToast(`WCB ${n} is the shared port — the NaviCore tab / a 2nd Wizard tab can attach to it`, 'info', 6000);
+      return conn;
+    } finally {
+      _autoShareClaimed = false;              // the _shared conn now exists → _hasSharedPort() covers it
+    }
+  }
+  const conn = new BoardConnection(n);
+  await conn.connect(port, usedPorts);
+  boardConnections[n] = conn;
+  return conn;
+}
+
 // Connect a board slot through the shared hub. requestPort() is called FIRST,
 // straight from the Connect click, so it still has the user activation the picker
 // needs. If this tab becomes the leader the hub opens the picked port; if a
 // follower (another tab already owns it), the picked port is ignored — cancelling
 // the picker is the right move for a follower.
-async function sharedConnect(n) {
+async function sharedConnect(n, existingPort = null) {
   // The shared hub owns exactly ONE port and can't switch it in place: once asked
   // to move to a new port it gets stuck following the dead/old one ("no tab has
   // opened the port yet") and a MgmtRelay's card is left orphaned. Since it's a
@@ -5093,7 +5164,10 @@ async function sharedConnect(n) {
   reconcileBoardGrid();
 
   const hub = getSharedHub();                       // fresh hub for the new port
-  try { await hub.requestPort(); } catch (_) { /* follower / cancelled — fine */ }
+  try {
+    if (existingPort) await hub.adoptPort(existingPort);   // auto-share: reuse the already-granted port (no picker)
+    else              await hub.requestPort();             // explicit "Share" button: pick a port now
+  } catch (_) { /* follower / cancelled — fine */ }
   if (boardConnections[n]?.isConnected?.()) await boardDisconnect(n);
   const conn = new BoardConnection(n);
   conn.connectShared(hub);
@@ -5166,7 +5240,7 @@ function openConnectModal(n) {
       <span class="modal-option-icon">🔗</span>
       <div class="modal-option-text">
         <div class="modal-option-title">Share port across tabs</div>
-        <div class="modal-option-desc">Coexist with the NaviCore tab (or a 2nd Wizard tab) on ONE USB board — the first tab picks the port, the rest follow. Same-origin only; flashing stays on a direct USB connect.</div>
+        <div class="modal-option-desc">Coexist with the NaviCore tab (or a 2nd Wizard tab) on ONE USB board — the first tab picks the port, the rest follow. Your first connected board already shares automatically; use this to share a specific board instead. Flashing borrows the port and re-shares. Same-origin only.</div>
       </div>
     </button>`;
   remoteSection.innerHTML = _remoteHtml;
@@ -5248,9 +5322,7 @@ async function _modalDoConnect(n, port) {
         .map(([, c]) => c.port)
     );
     if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
-    const conn = new BoardConnection(n);
-    await conn.connect(port, usedPorts);
-    boardConnections[n] = conn;
+    const conn = await establishConnection(n, port, usedPorts);
     delete remoteRelayForBoard[n];
     updateConnectionUI(n, true);
     showToast(`WCB ${n} connected — pulling config…`, 'success');
@@ -5830,9 +5902,7 @@ async function boardManualConnect(n) {
     }
     const selectedPort = pick; // always a SerialPort object at this point
 
-    const conn = new BoardConnection(n);
-    await conn.connect(selectedPort, usedPorts);
-    boardConnections[n] = conn;
+    const conn = await establishConnection(n, selectedPort, usedPorts);
     delete remoteRelayForBoard[n];   // direct USB connection — not routed via relay
     updateConnectionUI(n, true);
     showToast(`Connected to WCB ${n} — pulling config…`, 'success');
@@ -5902,9 +5972,7 @@ async function boardAutoDetect(n) {
     await Promise.all(available.slice(0, freeSlots.length).map(async (port, i) => {
       const slot = freeSlots[i];
       try {
-        const conn = new BoardConnection(slot);
-        await conn.connect(port);
-        boardConnections[slot] = conn;
+        const conn = await establishConnection(slot, port);
         updateConnectionUI(slot, true);
         setTimeout(() => boardPull(slot), 3000);
       } catch (err) {
@@ -5943,9 +6011,7 @@ async function boardAutoDetect(n) {
     resetToast?.remove(); // dismiss the "press reset" prompt immediately
     try { await port.close(); } catch (_) {}
     try {
-      const conn = new BoardConnection(n);
-      await conn.connect(port);
-      boardConnections[n] = conn;
+      const conn = await establishConnection(n, port);
       updateConnectionUI(n, true);
       // Auto-close the connect modal if it's still open for this slot
       if (_connectModalSlot === n) {
@@ -6285,6 +6351,21 @@ async function fetchBoardVersion(n) {
   } catch (_) { /* version fetch is optional — ignore timeouts/errors */ }
 }
 
+// After a flash/erase that auto-demoted a shared board (see boardGo's guard), hand the
+// now-reconnected port back to a fresh shared hub so the "one shared port" the NaviCore
+// tab attaches to is restored. No-op unless the board was shared before the operation.
+// Runs BEFORE the post-flash config push, which then flows over the re-shared hub.
+async function _reshareAfterFlash(conn, n) {
+  if (!conn || !conn._wasSharedBeforeFlash) return;
+  conn._wasSharedBeforeFlash = false;
+  try {
+    await conn.becomeShared();
+    termLog(n, '🔌→🔗 Re-shared the port across tabs.', 'sys');
+  } catch (e) {
+    termLog(n, `⚠ Could not re-share the port after the operation: ${e && e.message || e}`, 'sys');
+  }
+}
+
 async function boardGo(n, opts = {}) {
   // Delegate to the remote push path when this board is reached via relay
   if (remoteRelayForBoard[n]) return boardGoRemote(n, opts);
@@ -6301,12 +6382,25 @@ async function boardGo(n, opts = {}) {
   const pushConfig = opts.pushConfig ?? true;  // false = skip auto-push after factory reset
   const btn       = document.getElementById(`b${n}-btn-go`);
 
-  // Shared-hub mode has no raw SerialPort in this tab, so esptool-based operations
-  // (flash / update / factory / erase) can't run. Config push works fine (it just
-  // sends command strings through the hub). Steer the user to a direct USB connect.
+  // Shared-hub mode has no raw SerialPort in this tab, and esptool-based operations
+  // (flash / update / factory) plus erase (close/reopen for the NVS-erase reboot) need
+  // one. Rather than forcing the user to tear down the share by hand, AUTO-DEMOTE:
+  // borrow the still-OPEN port the hub holds, run the op as a direct connection, then
+  // re-share the same port afterwards (see _reshareAfterFlash at the reconnect points).
+  // If this tab is only FOLLOWING the shared port (another tab is the leader that owns
+  // it), we can't borrow it — steer the user to a direct USB connect instead.
   if (conn._shared && (isFlash || isUpdate || isFactory || isErase)) {
-    showToast('Flashing/erase needs a direct USB connection — disconnect shared mode and reconnect this board via USB', 'warning', 8000);
-    return;
+    const hub = conn._hub;
+    if (!hub || !hub._port) {
+      showToast('Flashing/erase needs the shared port, and this tab is only following it. Reconnect this board via direct USB, then flash.', 'warning', 9000);
+      return;
+    }
+    termLog(n, '🔗→🔌 Borrowing the shared port for this operation (will re-share after)…', 'sys');
+    const borrowedPort = await hub.releasePortKeepOpen();   // stop the hub, keep the port OPEN
+    if (_sharedHub === hub) _sharedHub = null;
+    conn.becomeDirect(borrowedPort);      // conn now directly owns + reads the live port
+    conn._wasSharedBeforeFlash = true;    // re-share the port once the op settles
+    // fall through — the rest of boardGo now treats conn as a normal direct connection
   }
 
   btn.disabled = true;
@@ -6395,6 +6489,7 @@ async function boardGo(n, opts = {}) {
       if (reconnected) {
         updateConnectionUI(n, true);
         boardFlashMode[n] = 'configure';   // reset mode after flash
+        await _reshareAfterFlash(conn, n); // give the port back to a shared hub if it was shared pre-flash
 
         if (isUpdate) {
           // App-only update: NVS is intact — verify and/or push wizard config
@@ -6502,6 +6597,7 @@ async function boardGo(n, opts = {}) {
       if (recovered) {
         updateConnectionUI(n, true);
         boardFlashMode[n] = 'configure';
+        await _reshareAfterFlash(conn, n);
 
         if (isFactory) {
           // A factory reset MUST erase NVS before we configure — we cannot
@@ -6588,6 +6684,7 @@ async function boardGo(n, opts = {}) {
       if (reconnected) {
         updateConnectionUI(n, true);
         delete boardAutoPushAfterFlash[n];
+        await _reshareAfterFlash(conn, n);
 
         // Restore the pre-erase config snapshot right before pushing so any boardPull
         // that fired during the wait doesn't overwrite boardConfigs[n].
@@ -10790,9 +10887,7 @@ async function wizPortComplete(n, port) {
     const usedPorts = _wizPortUsedByOthers(n);
     try {
       if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
-      const conn = new BoardConnection(n);
-      await conn.connect(port, usedPorts);
-      boardConnections[n] = conn;
+      const conn = await establishConnection(n, port, usedPorts);
       delete remoteRelayForBoard[n];
       updateConnectionUI(n, true);
       showToast(`WCB ${n} connected — pulling config…`, 'success');
@@ -10812,9 +10907,7 @@ async function wizPortComplete(n, port) {
     const usedPorts = _wizPortUsedByOthers(n);
     try {
       if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
-      const conn = new BoardConnection(n);
-      await conn.connect(port, usedPorts);
-      boardConnections[n] = conn;
+      const conn = await establishConnection(n, port, usedPorts);
       delete remoteRelayForBoard[n];
       // Close modal and reset it to options view
       document.getElementById('connect-modal-options').style.display  = '';
@@ -10838,9 +10931,7 @@ async function wizPortComplete(n, port) {
     const usedPorts = _wizPortUsedByOthers(n);
     try {
       if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
-      const conn = new BoardConnection(n);
-      await conn.connect(port, usedPorts);
-      boardConnections[n] = conn;
+      const conn = await establishConnection(n, port, usedPorts);
       delete remoteRelayForBoard[n];
       if (strip) strip.style.display = 'none';
       updateConnectionUI(n, true);

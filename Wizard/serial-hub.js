@@ -164,6 +164,20 @@
       return p;
     }
 
+    // Like requestPort() but ADOPT an already-granted SerialPort (no picker, no user
+    // gesture). Used when the caller already holds the port — auto-sharing a board the
+    // user just connected directly, or re-sharing a port borrowed back for a flash.
+    // Opens it now if we're already the leader; otherwise it opens when we win the lock.
+    // The port may be open or closed: _openAndRead()'s "already open → use as-is" branch
+    // adopts an open one without a reset.
+    async adoptPort(port) {
+      this._port = port;
+      try { this._leaderPortInfo = port && port.getInfo ? port.getInfo() : null; } catch (_) {}
+      if (this._role === 'leader') await this._openAndRead();
+      else this._log('port adopted; will open it if this tab becomes the leader');
+      return port;
+    }
+
     // Send bytes (or a string) to the shared port. Leader writes directly; a follower
     // relays to the leader over the bus. Returns a Promise that (for the leader) resolves
     // when the write actually completes — callers should AWAIT it so multi-fragment sends
@@ -200,6 +214,32 @@
       if (this._bc) { try { this._bc.close(); } catch (_) {} this._bc = null; }
       this._setRole('idle');
       this._log('left');
+    }
+
+    // Give up leadership + stop reading, but DELIBERATELY do NOT close the port — hand
+    // the still-OPEN, reader-unlocked port back to the caller, which will drive it
+    // directly (flash/erase auto-demote borrows it, then re-shares afterwards). This is
+    // leave() minus the _closePort() so esptool / a direct read loop can take the port
+    // over with no reopen (no WCB reset). Returns the open port (or null if we had none).
+    async releasePortKeepOpen() {
+      this._leaving = true;
+      this._joined  = false;
+      try { this._post({ t: 'bye' }); } catch (_) {}
+      if (this._visHandler) { try { document.removeEventListener('visibilitychange', this._visHandler); } catch (_) {} this._visHandler = null; }
+      if (this._claimTimer) { try { clearTimeout(this._claimTimer); } catch (_) {} this._claimTimer = null; }
+      if (this._reader) {
+        try { await this._reader.cancel(); }  catch (_) {}
+        try { this._reader.releaseLock(); }   catch (_) {}
+        this._reader = null;
+      }
+      this._portOpen = false;
+      if (this._lockAbort)   { try { this._lockAbort.abort(); } catch (_) {} this._lockAbort = null; }
+      if (this._releaseLock) { try { this._releaseLock(); }    catch (_) {} this._releaseLock = null; }
+      if (this._bc) { try { this._bc.close(); } catch (_) {} this._bc = null; }
+      const port = this._port;
+      this._setRole('idle');
+      this._log('released port (kept open) for direct use');
+      return port;
     }
 
     // ── Leadership (Web Locks) ──────────────────────────────────────────────────
