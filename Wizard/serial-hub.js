@@ -281,6 +281,12 @@
           await new Promise(r => setTimeout(r, delayMs));
         }
       }
+      // A leave()/resign that raced the (possibly >1s) open() above set _leaving or
+      // flipped _role, but close() on a still-OPENING port is a no-op that _closePort
+      // swallowed — so the port can finish opening AFTER teardown. Re-check here and
+      // close the now-open port instead of latching _portOpen + starting a dead read
+      // loop, which would orphan an open SerialPort in a hub the app already dropped.
+      if (this._leaving || this._role !== 'leader') { try { await this._port.close(); } catch (_) {} return; }
       if (this.assertDTR) { try { await this._port.setSignals({ dataTerminalReady: true }); } catch (_) {} }
       this._portOpen = true;
       this._announceState();
