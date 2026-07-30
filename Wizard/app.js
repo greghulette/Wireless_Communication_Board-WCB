@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.14:48.R.JUL.2026';
+const UI_VERSION = '30.15:20.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -8224,8 +8224,15 @@ function clearAllTerminals() {
 // output. That data is shown in the Mesh panel instead. Informational one-off
 // lines like "[WDP] learned …" / "[WDP] advert sent …" are NOT hidden — they end
 // in ']' not ':', so they don't match.
+// A MANUALLY-typed ?WDP,DUMP (from the terminal input) opens this short window during
+// which the dump's [WDP…] rows are SHOWN — so you can read the roster + AGE= field by
+// hand — while the ~12s auto-poll flood stays hidden. sendTerminalCommandTo() sets it;
+// this closes it on the terminating [WDP:END row.
+let _showWdpDumpUntil = 0;
 function _suppressTerminalLine(line) {
-  return /^\[WDP[A-Z]*:/.test(line)                                    // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — all discovery-dump rows (parsed separately; never user-facing)
+  const showWdp = Date.now() < _showWdpDumpUntil;                  // a hand-typed ?WDP,DUMP is in flight
+  if (showWdp && /^\[WDP:END/.test(line)) _showWdpDumpUntil = 0;   // dump done — re-hide the auto-poll flood
+  return (!showWdp && /^\[WDP[A-Z]*:/.test(line))                  // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — discovery-dump rows (parsed separately; hidden unless a manual dump is in flight)
       || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line)  // the ?WDP,DUMP command echo
       || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1)); // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
 }
@@ -8294,6 +8301,10 @@ async function sendTerminalCommandTo(n) {
   const cmd   = input?.value?.trim();
   if (!cmd) return;
   input.value = '';
+
+  // A hand-typed ?WDP,DUMP should actually SHOW its output — open a brief window so its
+  // [WDP…] rows bypass the terminal filter that otherwise hides the 12s auto-poll flood.
+  if (/wdp,dump$/i.test(cmd)) _showWdpDumpUntil = Date.now() + 8000;
 
   // Push to per-board history (skip duplicates of the last entry)
   if (!boardCmdHistory[n]) boardCmdHistory[n] = [];
