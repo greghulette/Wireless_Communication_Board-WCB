@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_290933RJUL2026                                  *****////
+///*****                                          Version 6.2.0_301551RJUL2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_290933RJUL2026";
+String SoftwareVersion = "6.2.0_301551RJUL2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -249,7 +249,7 @@ bool debugETM = false;
 bool etmEnabled = true;   // NVS default is also true — overwritten at boot by loadETMSettings()
 int etmBootHeartbeatSec = 2;
 int etmHeartbeatSec = 10;
-int etmMissedHeartbeats = 3;
+int etmMissedHeartbeats = 5;   // (etmHeartbeatSec+1)*5 = 55s offline window — widened from 3/33s so a few lost broadcast heartbeats on a busy mesh don't flap a live board (mirrors WCBClient _missedBeforeOffline)
 int etmTimeoutMs = 500;
 int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
