@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '29.13:41.R.JUL.2026';
+const UI_VERSION = '30.00:02.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5076,9 +5076,14 @@ async function sharedConnect(n) {
   // while the Connect click's user activation is still valid for the port picker.
   for (const [k, c] of Object.entries(boardConnections)) {
     if (!c?._shared) continue;
+    // Clear a shared MgmtRelay's managed remote boards BEFORE leaveShared(), so the
+    // best-effort RTERM,STOP can still forward through the still-live hub and so
+    // remoteRelayForBoard / the ETM listener / the disabled per-board UI don't orphan
+    // onto a slot we're about to delete (mirrors boardDisconnect's teardown order).
+    if (_relaySlots.has(+k)) clearRemoteBoardsForRelay(+k);
     try { c.leaveShared(); } catch (_) {}
     if (_relaySlots.has(+k)) {                     // a shared MgmtRelay → drop its card + slot too
-      _relaySlots.delete(+k); delete _relayNodes[+k];
+      _relaySlots.delete(+k); delete _relayNodes[+k]; _relayRouteAllBusy.delete(+k);
       document.getElementById(`relay-card-${k}`)?.remove();
     }
     delete boardConnections[k];
@@ -7983,12 +7988,17 @@ function removeTerminalPane(n) {
   document.getElementById(`term-vis-chip-${n}`)?.remove();
 }
 
-// Move a placeholder slot's terminal output into the real board's pane (if that
-// pane exists yet) and remove the now-phantom slot pane/tab. Used by BOTH the
-// normal slot-migration AND the relay-role path: a connection lands on slot `from`,
-// prints hub logs + the config-pull backup there, then its true WCB number `to` is
-// learned. Without this the vacated slot lingers as a stale "WCB <from>" terminal.
+// Move a placeholder slot's terminal output into the real board's pane and remove
+// the now-phantom slot pane/tab. Used by BOTH the normal slot-migration AND the
+// relay-role path: a connection lands on slot `from`, prints hub logs + the config-
+// pull backup there, then its true WCB number `to` is learned. The destination pane
+// is ENSURED first, so the relay path — whose `to` pane isn't created until remote-
+// management setup runs later — still MOVES the captured backup instead of discarding
+// it when removeTerminalPane deletes the source. Without this the vacated slot also
+// lingers as a stale "WCB <from>" terminal.
 function migrateTerminalPane(from, to) {
+  if (from === to) return;              // nothing to migrate; must not delete the live pane
+  ensureTerminalPane(to);               // guarantee the destination exists before the move
   const srcOut = document.getElementById(`term-pane-output-${from}`);
   const dstOut = document.getElementById(`term-pane-output-${to}`);
   if (srcOut && dstOut && srcOut !== dstOut) {
