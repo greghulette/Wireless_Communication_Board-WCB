@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.14:22.R.JUL.2026';
+const UI_VERSION = '30.14:48.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5174,7 +5174,30 @@ async function establishConnection(n, port, usedPorts = new Set(), allowShare = 
     }
   }
   const conn = new BoardConnection(n);
-  await conn.connect(port, usedPorts);
+  try {
+    await conn.connect(port, usedPorts);
+  } catch (e) {
+    // Auto-recover the "refreshed the Wizard, NaviCore took over the port" case: if the
+    // open failed AND another same-origin tab is leading the shared hub, this port is the
+    // one that tab holds open — a direct open() here can NEVER succeed, so JOIN its shared
+    // session as a follower instead of surfacing a confusing "failed to open" error. Gated
+    // on an open-type failure + a live shared leader, so a genuinely-absent/other-app port
+    // still errors normally (and we don't blindly follow a DIFFERENT port — see auto-share).
+    const msg = (e && e.message) || '';
+    // Only auto-follow when there is exactly ONE granted port: then the port that just
+    // failed to open IS unambiguously the one the leading tab holds, so joining its share
+    // can't attach us to a DIFFERENT physical board. With 2+ granted ports we can't tell
+    // whether this port failed because the sharing tab holds it or for an unrelated reason
+    // (e.g. it's open in the Arduino IDE), so we don't guess — the explicit "Share port"
+    // button stays the manual recovery there.
+    let onlyGrantedPort = false;
+    try { onlyGrantedPort = (await navigator.serial.getPorts()).length === 1; } catch (_) {}
+    if (/open|already|access|busy|in use/i.test(msg) && onlyGrantedPort && await _anotherTabLeadsShare()) {
+      showToast('That port is shared by another tab — joining the shared session.', 'info', 7000);
+      return sharedConnect(n, port);
+    }
+    throw e;
+  }
   boardConnections[n] = conn;
   return conn;
 }
