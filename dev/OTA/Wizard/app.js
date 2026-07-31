@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '31.13:17.R.JUL.2026';
+const UI_VERSION = '31.13:56.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11521,6 +11521,14 @@ function escHtml(str) {
 
 const _rcOnlineMap   = new Map();   // rcId → { fw, mode, model, up, lastSeenAt, viaBoardIdx }
 const RC_OFFLINE_MS  = 12000;       // 6 missed 2-second rc_hb beacons — generous so a couple of lost unACK'd broadcasts (esp. under mesh congestion) don't hide the RC "Open" launcher (was 6s/3-missed, which flickered the RC panel in/out)
+// The RC "Open" launcher must NOT depend on the rc_hb telemetry relay, which the
+// firmware streams ONLY while a host is subscribed (bridging / a config tool live) —
+// otherwise the launcher for the config tool needs the config tool already open. So
+// ALSO feed the panel from WDP discovery: any mesh device advertising the 'rc'
+// capability (e.g. NaviCore). That roster is robust (~180s board-side, polled every
+// 12s), so the launcher stays put; live rc_hb detail enriches it when it IS streaming.
+const _rcWdpMap      = new Map();   // rcId → { id, name, fw, lastSeenAt } — WDP-discovered RC controllers
+const RC_WDP_STALE_MS = 40000;      // drop a WDP-discovered RC after ~3 missed 12s mesh sweeps
 const RC_TOOL_URL_KEY = 'rc_config_tool_url';
 const RC_TOOL_URL_DEFAULT = 'https://greghulette.github.io/NaviCore/config_tool/';
 
@@ -11588,43 +11596,57 @@ function _renderRcDevices() {
   const list    = document.getElementById('rc-devices-list');
   if (!section || !list) return;
 
-  // Sweep expired.
+  // Sweep expired: live rc_hb entries (12s) and WDP-discovered ones (40s / ~3 sweeps).
   const now = Date.now();
   for (const [id, e] of _rcOnlineMap) {
     if (now - e.lastSeenAt > RC_OFFLINE_MS) _rcOnlineMap.delete(id);
   }
-
-  if (_rcOnlineMap.size === 0) {
-    section.style.display = 'none';
-    return;
+  for (const [id, w] of _rcWdpMap) {
+    if (now - w.lastSeenAt > RC_WDP_STALE_MS) _rcWdpMap.delete(id);
   }
+
+  // An RC shows if it's heard LIVE (rc_hb) OR merely DISCOVERED on the mesh (WDP) —
+  // so the "Open" launcher is available even when no telemetry is streaming.
+  const ids = [...new Set([..._rcOnlineMap.keys(), ..._rcWdpMap.keys()])].sort((a, b) => a - b);
+  if (ids.length === 0) { section.style.display = 'none'; return; }
   section.style.display = '';
 
-  const sorted = [..._rcOnlineMap.values()].sort((a, b) => a.id - b.id);
-  list.innerHTML = sorted.map(e => {
-    const age = Math.max(0, Math.round((now - e.lastSeenAt) / 1000));
-    const ageClass = age >= 3 ? 'rc-stale' : '';
-    const modelLbl = _RC_MODEL_NAMES[e.model] || ('model ' + e.model);
-    const modeLbl  = e.mode ? `mode ${e.mode}` : 'mode —';
-    const fwLbl    = e.fw   || '—';
-    const upLbl    = (typeof e.up === 'number')
-      ? `up ${Math.round(e.up)}s`
-      : '';
-    const trigLbl  = e.lastTrig
-      ? `· last trig: m${e.lastTrig.mode}b${e.lastTrig.btn}t${e.lastTrig.tap}`
-      : '';
-    return `
+  const openBtn = `
+        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank" onclick="return rcOpenConfigTool(event)"
+           title="Opens the RC config tool in a new tab. If this WCB is shared across tabs, the tool auto-connects to it; otherwise pick 'Via a WCB' there.">
+          Open ↗
+        </a>`;
+
+  list.innerHTML = ids.map(id => {
+    const e = _rcOnlineMap.get(id);   // live rc_hb detail, if streaming
+    const w = _rcWdpMap.get(id);      // WDP-discovered presence, if on the mesh
+    if (e) {
+      const age = Math.max(0, Math.round((now - e.lastSeenAt) / 1000));
+      const ageClass = age >= 3 ? 'rc-stale' : '';
+      const modelLbl = _RC_MODEL_NAMES[e.model] || ('model ' + e.model);
+      const modeLbl  = e.mode ? `mode ${e.mode}` : 'mode —';
+      const fwLbl    = e.fw || (w && w.fw) || '—';
+      const upLbl    = (typeof e.up === 'number') ? `up ${Math.round(e.up)}s` : '';
+      const trigLbl  = e.lastTrig ? `· last trig: m${e.lastTrig.mode}b${e.lastTrig.btn}t${e.lastTrig.tap}` : '';
+      return `
       <div class="rc-device-card">
-        <div class="rc-id">RC #${e.id}</div>
+        <div class="rc-id">RC #${id}</div>
         <div class="rc-meta">
           <div class="rc-meta-line">${escHtml(modelLbl)} · ${escHtml(modeLbl)}</div>
           <div class="rc-meta-line">fw ${escHtml(fwLbl)} · ${escHtml(upLbl)}</div>
           <div class="rc-meta-line ${ageClass}">last seen ${age}s ago ${trigLbl}</div>
-        </div>
-        <a class="rc-open-btn" href="${escHtml(_rcToolUrl())}" target="_blank" onclick="return rcOpenConfigTool(event)"
-           title="Opens the RC config tool in a new tab. If this WCB is shared across tabs, the tool auto-connects to it; otherwise pick 'Via a WCB' there.">
-          Open ↗
-        </a>
+        </div>${openBtn}
+      </div>`;
+    }
+    // WDP-only — discovered on the mesh, but no live telemetry stream right now.
+    return `
+      <div class="rc-device-card">
+        <div class="rc-id">RC #${id}</div>
+        <div class="rc-meta">
+          <div class="rc-meta-line">${escHtml((w && w.name) || ('RC #' + id))}</div>
+          <div class="rc-meta-line">fw ${escHtml((w && w.fw) || '—')}</div>
+          <div class="rc-meta-line rc-stale">on the mesh · live telemetry off (bridge, or open the tool, to stream)</div>
+        </div>${openBtn}
       </div>`;
   }).join('');
 }
@@ -11889,6 +11911,13 @@ let _meshDiscoverBusy = false;
 function upsertClientCard(nd) {
   const n = nd.n;
   if (!(n >= 1 && n <= WCB_MAX)) return;
+  // Feed the RC-Controllers "Open" launcher from WDP discovery (robust ~180s roster,
+  // polled every 12s) so it doesn't depend on the rc_hb telemetry relay being
+  // subscribed. Any mesh device advertising the 'rc' capability is an RC controller.
+  if (nd.live && /(^|\s)rc(\s|$)/.test(nd.capTags || '')) {
+    _rcWdpMap.set(n, { id: n, name: nd.alias || ('RC #' + n), fw: nd.fw || '', lastSeenAt: Date.now() });
+    _renderRcDevices();
+  }
   if (boardConnections[n]?.isConnected?.()) return;   // a live USB-connected WCB owns this slot
   addDiscoveredBoards([n]);                            // ensure the section exists (idempotent)
   const cfg = boardConfigs[n];
