@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '30.15:20.R.JUL.2026';
+const UI_VERSION = '31.13:17.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11520,7 +11520,7 @@ function escHtml(str) {
 // ════════════════════════════════════════════════════════════════════════
 
 const _rcOnlineMap   = new Map();   // rcId → { fw, mode, model, up, lastSeenAt, viaBoardIdx }
-const RC_OFFLINE_MS  = 6000;        // 3 missed 2-second heartbeats
+const RC_OFFLINE_MS  = 12000;       // 6 missed 2-second rc_hb beacons — generous so a couple of lost unACK'd broadcasts (esp. under mesh congestion) don't hide the RC "Open" launcher (was 6s/3-missed, which flickered the RC panel in/out)
 const RC_TOOL_URL_KEY = 'rc_config_tool_url';
 const RC_TOOL_URL_DEFAULT = 'https://greghulette.github.io/NaviCore/config_tool/';
 
