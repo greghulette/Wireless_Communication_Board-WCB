@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '31.13:56.R.JUL.2026';
+const UI_VERSION = '31.21:59.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5184,15 +5184,23 @@ async function establishConnection(n, port, usedPorts = new Set(), allowShare = 
     // on an open-type failure + a live shared leader, so a genuinely-absent/other-app port
     // still errors normally (and we don't blindly follow a DIFFERENT port — see auto-share).
     const msg = (e && e.message) || '';
-    // Only auto-follow when there is exactly ONE granted port: then the port that just
-    // failed to open IS unambiguously the one the leading tab holds, so joining its share
-    // can't attach us to a DIFFERENT physical board. With 2+ granted ports we can't tell
-    // whether this port failed because the sharing tab holds it or for an unrelated reason
-    // (e.g. it's open in the Arduino IDE), so we don't guess — the explicit "Share port"
-    // button stays the manual recovery there.
+    // Decide whether joining the leader's share can only attach us to the RIGHT board.
+    // Two safe signals (either suffices):
+    //   (a) exactly ONE granted port  → the port that just failed IS unambiguously the one
+    //       the leading tab holds, so the share is that board.
+    //   (b) THIS slot was the shared port in a prior session of this tab (persisted across
+    //       the refresh that handed leadership to the other tab) → the busy port is the same
+    //       board by identity, even with many ports granted. This is the common real case:
+    //       Greg shares W1, refreshes, NaviCore takes over W1, he reconnects W1.
+    // Without one of these we can't tell whether the port failed because the sharing tab
+    // holds it or for an unrelated reason (e.g. it's open in the Arduino IDE), so we don't
+    // guess — the explicit "Share port" button stays the manual recovery. A LIVE shared
+    // leader is required in all cases, so a stale persisted slot alone can never misfire.
     let onlyGrantedPort = false;
     try { onlyGrantedPort = (await navigator.serial.getPorts()).length === 1; } catch (_) {}
-    if (/open|already|access|busy|in use/i.test(msg) && onlyGrantedPort && await _anotherTabLeadsShare()) {
+    let wasSharedHere = false;
+    try { wasSharedHere = localStorage.getItem('wcbSharedSlot') === String(n); } catch (_) {}
+    if (/open|already|access|busy|in use/i.test(msg) && (onlyGrantedPort || wasSharedHere) && await _anotherTabLeadsShare()) {
       showToast('That port is shared by another tab — joining the shared session.', 'info', 7000);
       return sharedConnect(n, port);
     }
@@ -5243,6 +5251,11 @@ async function sharedConnect(n, existingPort = null) {
   conn.connectShared(hub);
   boardConnections[n] = conn;
   delete remoteRelayForBoard[n];
+  // Remember which slot is the shared port. Survives a refresh (localStorage), so when the
+  // Wizard reloads and the OTHER tab has taken over the port, a direct reconnect of THIS
+  // same slot can safely auto-join the leader's share — the busy port is unambiguously the
+  // same board even with many ports granted. See establishConnection's open-failure branch.
+  try { localStorage.setItem('wcbSharedSlot', String(n)); } catch (_) {}
   return conn;
 }
 
@@ -5666,10 +5679,15 @@ async function boardDisconnect(n) {
   if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
   clearRemoteBoardsForRelay(n);              // drop remote boards that relay through this one
   const _c = boardConnections[n];
+  const _wasShared = !!_c?._shared;          // leaveShared() flips _shared=false — capture it first
   try {
     if (_c?._shared) _c.leaveShared();       // shared mode: detach from the hub (other tabs keep the port)
     else await _c?.disconnect();
   } catch (_) {}
+  // A deliberate disconnect of the shared board clears the remembered shared slot, so a later
+  // busy-open of this port won't auto-join a share that no longer represents this board. (A
+  // refresh does NOT hit this path, so the failover-reconnect flow still finds the slot.)
+  try { if (_wasShared && localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
   delete boardConnections[n];
   delete remoteRelayForBoard[n];
   if (_relaySlots.has(n)) {                   // a MgmtRelay: drop its flag + dedicated card so the
@@ -8234,7 +8252,8 @@ function _suppressTerminalLine(line) {
   if (showWdp && /^\[WDP:END/.test(line)) _showWdpDumpUntil = 0;   // dump done — re-hide the auto-poll flood
   return (!showWdp && /^\[WDP[A-Z]*:/.test(line))                  // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — discovery-dump rows (parsed separately; hidden unless a manual dump is in flight)
       || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line)  // the ?WDP,DUMP command echo
-      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1)); // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
+      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1  // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
+        || line.indexOf('"WCB_STATUS"') !== -1 || line.indexOf('"PONG"') !== -1)); // config-tool status/ping poll replies (a shared-port NaviCore tab spams ;w<n>,{GET_WCB_STATUS}/{PING} every ~3s). The Wizard never consumes these — hide the flood. (The ;w echo + "Sending Unicast…" lines are WCB debug, already gated by ?DEBUG,OFF.)
 }
 
 function termLog(boardIndex, text, type = 'out') {
