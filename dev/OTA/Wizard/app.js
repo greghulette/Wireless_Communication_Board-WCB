@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '31.21:59.R.JUL.2026';
+const UI_VERSION = '31.22:21.R.JUL.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -8252,8 +8252,8 @@ function _suppressTerminalLine(line) {
   if (showWdp && /^\[WDP:END/.test(line)) _showWdpDumpUntil = 0;   // dump done — re-hide the auto-poll flood
   return (!showWdp && /^\[WDP[A-Z]*:/.test(line))                  // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — discovery-dump rows (parsed separately; hidden unless a manual dump is in flight)
       || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line)  // the ?WDP,DUMP command echo
-      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1  // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
-        || line.indexOf('"WCB_STATUS"') !== -1 || line.indexOf('"PONG"') !== -1)); // config-tool status/ping poll replies (a shared-port NaviCore tab spams ;w<n>,{GET_WCB_STATUS}/{PING} every ~3s). The Wizard never consumes these — hide the flood. (The ;w echo + "Sending Unicast…" lines are WCB debug, already gated by ?DEBUG,OFF.)
+      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1))  // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
+      || /"type":"(?:GET_WCB_STATUS|WCB_STATUS|PING|PONG)"/.test(line); // config-tool status/ping poll (a shared-port NaviCore tab spams ;w<n>,{GET_WCB_STATUS}/{PING} every ~3s; the Wizard never consumes it). Matches the type token ANYWHERE, so it hides the whole round-trip: the "Processing input from Serial0: ;w<n>,{…}" echo, the "Sending Unicast ESP-NOW message to WCB<n>: {…}" relay log, AND the {…WCB_STATUS…}/{…PONG…} replies. Non-poll commands you type still show (they carry a different/no type token). Fragment chunks {"f":…,"of":…} are real transfer data, so they're left visible.
 }
 
 function termLog(boardIndex, text, type = 'out') {
