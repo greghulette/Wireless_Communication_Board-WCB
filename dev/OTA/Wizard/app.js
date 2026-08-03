@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '31.22:21.R.JUL.2026';
+const UI_VERSION = '03.09:41.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4912,7 +4912,9 @@ class BoardConnection {
       // the RC Controllers panel / discovery hook already consume it, and now that the WCB
       // relays rc_ch it would bury real board output. (rc_trig / rc_mode aren't _isRcNoise,
       // so those low-rate events still show.)
-      if (!_isRcNoise && displayed !== null && !_suppressTerminalLine(displayed))
+      // _isRcNoise (rc_hb/rc_ch) is normally hard-suppressed here; ?TERMDEBUG,ON (_termVerbose)
+      // overrides it so even the high-rate telemetry surfaces for troubleshooting.
+      if ((_termVerbose || !_isRcNoise) && displayed !== null && !_suppressTerminalLine(displayed))
         termLog(this.boardIndex, displayed, 'out');
     }
   }
@@ -8247,13 +8249,18 @@ function clearAllTerminals() {
 // hand — while the ~12s auto-poll flood stays hidden. sendTerminalCommandTo() sets it;
 // this closes it on the terminating [WDP:END row.
 let _showWdpDumpUntil = 0;
+// "Terminal debug" — hidden, command-only (NO menu-bar toggle by design). OFF by default:
+// the routine telemetry/poll noise below is filtered so the pane stays readable. Type
+// ?TERMDEBUG,ON in any terminal to reveal ALL of it for advanced troubleshooting (and
+// ?TERMDEBUG,OFF / bare ?TERMDEBUG to toggle back). sendTerminalCommandTo() flips this.
+let _termVerbose = false;
 function _suppressTerminalLine(line) {
+  if (_termVerbose) return false;                                 // advanced troubleshooting: show EVERYTHING, unfiltered
   const showWdp = Date.now() < _showWdpDumpUntil;                  // a hand-typed ?WDP,DUMP is in flight
   if (showWdp && /^\[WDP:END/.test(line)) _showWdpDumpUntil = 0;   // dump done — re-hide the auto-poll flood
   return (!showWdp && /^\[WDP[A-Z]*:/.test(line))                  // [WDP:…] [WDPIF:…] [WDPCFG:…] [WDPX:…] [WDPPWM:…] — discovery-dump rows (parsed separately; hidden unless a manual dump is in flight)
       || /^Processing (?:ETM )?input from \S+:\s*\?WDP,DUMP\b/.test(line)  // the ?WDP,DUMP command echo
-      || (line[0] === '{' && (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1))  // RC telemetry noise. The main read path also gates on _isRcNoise, but a relayed [TERM:N]{…rc_hb…} reaches termLog via the [TERM:] branch — where _isRcNoise (outer line starts with '[') never fires — so filter it here too.
-      || /"type":"(?:GET_WCB_STATUS|WCB_STATUS|PING|PONG)"/.test(line); // config-tool status/ping poll (a shared-port NaviCore tab spams ;w<n>,{GET_WCB_STATUS}/{PING} every ~3s; the Wizard never consumes it). Matches the type token ANYWHERE, so it hides the whole round-trip: the "Processing input from Serial0: ;w<n>,{…}" echo, the "Sending Unicast ESP-NOW message to WCB<n>: {…}" relay log, AND the {…WCB_STATUS…}/{…PONG…} replies. Non-poll commands you type still show (they carry a different/no type token). Fragment chunks {"f":…,"of":…} are real transfer data, so they're left visible.
+      || /"type":"(?:rc_hb|rc_ch|rc_trig|rc_mode|GET_WCB_STATUS|WCB_STATUS|PING|PONG)"/.test(line); // RC telemetry (rc_hb/rc_ch high-rate, rc_trig/rc_mode button+mode events) + config-tool status/ping poll (a shared-port NaviCore tab spams ;w<n>,{GET_WCB_STATUS}/{PING} every ~3s). Matches the type token ANYWHERE, so it hides bare replies, [TERM:N]{…} relayed forms, AND the "Processing input from Serial0: ;w<n>,{…}" / "Sending Unicast ESP-NOW message to WCB<n>: {…}" echo+send prefixes alike. Non-telemetry commands you type still show (different/no type token); fragment chunks {"f":…,"of":…} are real transfer data, left visible. (rc_hb/rc_ch also get gated on the main read path by _isRcNoise; see there for the _termVerbose override.)
 }
 
 function termLog(boardIndex, text, type = 'out') {
@@ -8320,6 +8327,20 @@ async function sendTerminalCommandTo(n) {
   const cmd   = input?.value?.trim();
   if (!cmd) return;
   input.value = '';
+
+  // Wizard-LOCAL terminal command (never sent to the board): ?TERMDEBUG toggles "terminal
+  // debug", which reveals the telemetry/poll noise (rc_hb/rc_ch/rc_trig/rc_mode, WDP dumps,
+  // and the config-tool GET_WCB_STATUS/PING round-trip) that's filtered by default. This is
+  // the deliberately-hidden advanced-troubleshooting switch — no menu-bar button.
+  const tdMatch = cmd.match(/^\?TERMDEBUG(?:,\s*(ON|OFF))?$/i);
+  if (tdMatch) {
+    const arg = tdMatch[1]?.toUpperCase();
+    _termVerbose = arg ? (arg === 'ON') : !_termVerbose;
+    termLog(n, _termVerbose
+      ? 'Terminal debug ON — showing ALL filtered telemetry/poll noise (rc_*, WDP dumps, status/ping). ?TERMDEBUG,OFF to re-hide.'
+      : 'Terminal debug OFF — telemetry/poll noise hidden (default). ?TERMDEBUG,ON to reveal.', 'sys');
+    return;
+  }
 
   // A hand-typed ?WDP,DUMP should actually SHOW its output — open a brief window so its
   // [WDP…] rows bypass the terminal filter that otherwise hides the 12s auto-poll flood.
@@ -11562,17 +11583,49 @@ function _rcToolUrl() {
 // the user never has to pick "Via a WCB" over there. If we're NOT sharing, the
 // tool can't grab the port (we hold it), so hint the user and open the plain URL.
 function rcOpenConfigTool(ev) {
+  ev.preventDefault();                       // we open the window ourselves (synchronously, so the popup isn't blocked)
+  const url       = _rcToolUrl();
+  const withShare = url + (url.includes('?') ? '&' : '?') + 'share=1';
   try {
-    const hub = (typeof getSharedHub === 'function') ? getSharedHub() : null;
+    let hub = (typeof getSharedHub === 'function') ? getSharedHub() : null;
+
+    // Already leading the shared port → hand NaviCore ?share=1 straight away.
     if (hub && hub.role === 'leader' && hub.portOpen) {
-      ev.preventDefault();
-      const url = _rcToolUrl();
-      window.open(url + (url.includes('?') ? '&' : '?') + 'share=1', '_blank', 'noopener');
+      window.open(withShare, '_blank', 'noopener');
       return false;
     }
-    showToast('Tip: share this WCB across tabs (Connect → "Share port across tabs") so the config tool can auto-connect to it.', 'info', 6000);
-  } catch (_) {}
-  return true;   // fall through to the plain href (manual connect in the tool)
+
+    // We hold a board on a DIRECT USB port → promote it to SHARED in place (no reopen, so the
+    // WCB isn't reset) so the config tool can attach. This is what actually makes "the first
+    // WCB you connect is the shared port" true even when auto-share didn't fire at connect
+    // time (e.g. the first-time bulk auto-detect, or another tab held the lock). Open the tab
+    // NOW during the click (so it isn't popup-blocked), share, THEN navigate it to ?share=1.
+    const direct = Object.entries(boardConnections)
+      .find(([, c]) => c && !c._shared && c.isConnected?.() && c.port);
+    if (direct) {
+      const [k, conn] = direct;
+      const w = window.open('about:blank', '_blank');   // keep the handle → do NOT use 'noopener'
+      showToast(`Sharing WCB ${k} so the config tool can attach…`, 'info', 4000);
+      conn.becomeShared().then(() => {
+        const h = (typeof getSharedHub === 'function') ? getSharedHub() : null;
+        const ok = !!(h && h.portOpen);
+        if (!ok) showToast('Shared, but the port didn’t open — the tool may need a manual connect.', 'warning', 6000);
+        const dest = ok ? withShare : url;
+        if (w) w.location.href = dest; else window.open(dest, '_blank', 'noopener');
+      }).catch(e => {
+        showToast(`Couldn’t share WCB ${k}: ${e.message}. Opening the tool for a manual connect.`, 'error', 7000);
+        if (w) w.location.href = url; else window.open(url, '_blank', 'noopener');
+      });
+      return false;
+    }
+
+    // Nothing connected here to share → open plain + explain how sharing works.
+    showToast('Connect a WCB here first — the first board you connect becomes the shared port the config tool attaches to.', 'info', 7000);
+    window.open(url, '_blank', 'noopener');
+  } catch (_) {
+    try { window.open(url, '_blank', 'noopener'); } catch (_) {}
+  }
+  return false;
 }
 
 function _rcDiscoveryHook(line, boardIdx) {
