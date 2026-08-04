@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '03.23:28.R.AUG.2026';
+const UI_VERSION = '04.19:43.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -12138,6 +12138,17 @@ async function meshAutoDiscoverTick() {
       // heard peer fought live traffic and surprised the user; enabling the card is
       // enough.
       addDiscoveredBoards([n]);                             // idempotent: keep the section
+      // Seed the tab's friendly name from the WDP advert so a discovered-but-not-yet-connected
+      // WCB shows "(Dome)" straight away instead of a bare "WCB N" — the same courtesy clients
+      // get in upsertClientCard. Only when the user hasn't typed an alias (a later config pull
+      // overwrites with the authoritative one, and this never clobbers a user edit / live board).
+      const dcfg = boardConfigs[n];
+      if (dcfg && nd.alias && !(dcfg.alias || '').trim()) {
+        dcfg.alias = nd.alias.slice(0, 24);
+        const dAliasEl = document.getElementById(`b${n}-alias`);
+        if (dAliasEl && !dAliasEl.value) dAliasEl.value = dcfg.alias;
+        updateBoardAliasUI(n);                             // refresh the tab label now
+      }
     }
     // A client we've shown before but didn't hear this sweep: a TEMPORARY peer VANISHES
     // (its ephemeral session ended — e.g. a mgmt relay evicted after its TTL); any other
