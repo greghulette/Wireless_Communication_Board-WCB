@@ -658,16 +658,27 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   // Every Maestro a PEER neighbor physically hosts becomes a remote proxy slot on
   // this board (id -> senderWCB @ baud), identical to a manual ?MAESTRO,<id>:W..,
   // so ;M<id> / raw-Maestro traffic routes to the right board with no hand config.
-  // First-host-wins + idempotent + persisted (survives reboot; warm table on boot).
+  // Per-HOST (not first-host-wins) + idempotent + persisted (survives reboot; warm
+  // table on boot) — a device number hosted by several boards is legal and each gets
+  // its own proxy slot, because the mesh Maestro id is a MULTICAST address.
   // Runs AFTER auto-join and is gated on wcbPeerActive: we only auto-config a
   // Maestro on a board we can actually REACH (a proxy to a non-peer is unroutable),
   // which also inherits auto-join's >=2-advert vetting for learned peers so one
-  // stray/echoed advert can't inject a persisted proxy. Skips clients (they don't
-  // host Maestros) and any Maestro whose baud didn't arrive as a usable value —
+  // stray/echoed advert can't inject a persisted proxy. Admits the CONTROLLER (which
+  // does host Maestros) but no other client, and skips any Maestro whose baud didn't
+  // arrive as a usable value —
   // old id-only advert (0xFF), a garbled out-of-range code, or baud 0 all map to
   // wdpCodeToBaud()==0, and there's nothing safe to configure a proxy with.
-  if (wdpAutoJoin && !nb.isClient && wcbPeerActive[senderWCB - 1] &&
-      !wcbPeerTemporary[senderWCB - 1]) {   // never derive PERSISTED config from a temp peer
+  // EXCEPTION: the CONTROLLER (special peer — a NaviCore) is the one client device that
+  // DOES host Maestros, and it advertises them with the same MAESTRO/MAESTRO_CFG TLVs a
+  // board does. Both normal conjuncts block it: it always sets nb.isClient (it emits
+  // DEVTYPE), and it is never wcbPeerActive[] (addActivePeer rejects it by design). Admit
+  // ONLY the pinned controller id — every other client still needs !isClient &&
+  // wcbPeerActive. senderWCB was bound to the source MAC on the receive path, so the id
+  // can't be spoofed into this branch.
+  bool isControllerPeer = (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID);
+  if (wdpAutoJoin && !wcbPeerTemporary[senderWCB - 1] &&
+      (isControllerPeer || (!nb.isClient && wcbPeerActive[senderWCB - 1]))) {   // never derive PERSISTED config from a temp peer
     bool maestroChanged = false;
     for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
       uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);

@@ -129,6 +129,17 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     // REMOTE Maestro — use ETM so the receiving board ACKs the command.
     // ;m commands are processed commands, not raw passthrough, so delivery
     // confirmation matters.  Raw Kyber Maestro port bytes bypass this path entirely.
+    //
+    // EVERY ;M send in this file goes out ETM — unicast, broadcast and the
+    // unconfigured fallbacks alike. Two reasons, and the second is not optional:
+    //   1. They are all one-shot commands (a subroutine trigger, a verb, a get
+    //      request), not a servo stream, so the ACK traffic is negligible and the
+    //      retry is worth having. Receivers dedup by (sender, seq), so a retry
+    //      cannot double-fire a subroutine.
+    //   2. A non-ETM send builds the 249-byte legacy espnow_struct_message instead
+    //      of the 252-byte ETM one, and WCB_Client drops anything that is not
+    //      exactly 252 bytes. So a non-ETM ;M is INVISIBLE to every client device
+    //      on the mesh — including a NaviCore hosting Maestros of its own.
     if (config.remoteWCB > 0 && !lastReceivedViaESPNOW) {
       uint32_t wcbBit = (config.remoteWCB <= 31) ? (1u << config.remoteWCB) : 0;
       if (wcbBit && !(sentRemoteWCBs & wcbBit)) {     // one unicast per target board
@@ -163,7 +174,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M0" + String(scriptNumber);
-      sendESPNowMessage(0, espnowMsg.c_str(), false);
+      sendESPNowMessage(0, espnowMsg.c_str());   // ETM — see the note on the remote branch above
     }
     
     if (debugEnabled) {
@@ -212,7 +223,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   if (maestroID >= 1 && maestroID <= Default_WCB_Quantity) {
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(maestroID, espnowMsg.c_str(), false);
+      sendESPNowMessage(maestroID, espnowMsg.c_str());
       if (debugEnabled) {
         Serial.printf("→ Maestro %d: Fallback unicast to WCB%d, Script %d\n",
                       maestroID, maestroID, scriptNumber);
@@ -221,7 +232,7 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   } else {
     if (!lastReceivedViaESPNOW) {
       String espnowMsg = String(CommandCharacter) + "M" + String(maestroID) + String(scriptNumber);
-      sendESPNowMessage(0, espnowMsg.c_str(), false);
+      sendESPNowMessage(0, espnowMsg.c_str());
       Serial.printf("→ Maestro %d: Fallback broadcast, Script %d\n",
                     maestroID, scriptNumber);
     }
@@ -325,7 +336,7 @@ void sendMaestroServoVerb(const char *verbBody) {
     if (!isMaestroConfigured(WCB_Number))
       writeVerbFrameTo(Serial1, WCB_Number, payload);
     if (!lastReceivedViaESPNOW)
-      sendESPNowMessage(0, maestroVerbForwardText(0, payload).c_str(), false);
+      sendESPNowMessage(0, maestroVerbForwardText(0, payload).c_str());
     if (debugMaestro) Serial.printf("→ Maestro Broadcast verb '%s'\n", verbBody);
     return;
   }
@@ -355,7 +366,7 @@ void sendMaestroServoVerb(const char *verbBody) {
   // Guarded so a verb we received over ESP-NOW is never bounced (dev==WCB_Number handled above).
   if (!lastReceivedViaESPNOW) {
     uint8_t target = (dev >= 1 && dev <= Default_WCB_Quantity) ? (uint8_t)dev : 0;  // else discovery-broadcast
-    sendESPNowMessage(target, maestroVerbForwardText(dev, payload).c_str(), false);
+    sendESPNowMessage(target, maestroVerbForwardText(dev, payload).c_str());
     if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Fallback %s\n",
                                     dev, verbBody, target ? "unicast" : "broadcast");
   }
@@ -418,7 +429,7 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
     String fwd = String(CommandCharacter) + "MG" + String(dev) + "," + String(replyToWCB) + "," + verb
                  + (ch.length() ? ("," + ch) : "");
     if (hostWCB > 0) sendESPNowMessage((uint8_t)hostWCB, fwd.c_str());       // unicast to the host
-    else             sendESPNowMessage(0, fwd.c_str(), false);              // unconfigured → let the host find it
+    else             sendESPNowMessage(0, fwd.c_str());                     // unconfigured → let the host find it
     if (debugMaestro) Serial.printf("→ Maestro %d get '%s' -> WCB%d (reply to %d)\n", dev, verb.c_str(), hostWCB, replyToWCB);
     return;
   }
@@ -694,15 +705,19 @@ String remaining = message;
 // Mirrors the REMOTE branch of configureMaestro: slot = {id, serialPort:0,
 // remoteWCB:hostWCB, baud}. Behavior:
 //   • existing proxy to THIS host  -> refresh baud only if it changed
-//   • id already configured elsewhere (local, or a proxy to another host)
-//                                   -> skip: first-host-wins, and it NEVER
-//                                      re-homes on its own — even if the original
-//                                      host goes offline or the Maestro is
-//                                      physically moved, the stale binding stays
-//                                      until the user clears it (?MAESTRO,CLEAR /
-//                                      clear-by-id). This deliberately never
-//                                      shadows a local Maestro of the same id.
-//   • otherwise                     -> claim an empty slot
+//   • no proxy to this host yet     -> claim an empty slot, EVEN IF this id is
+//                                      already hosted locally or proxied to a
+//                                      DIFFERENT host. Duplicate Maestro ids are a
+//                                      supported mesh arrangement (the same id can
+//                                      live on this board AND on one or more others),
+//                                      and sendMaestroCommand() fans ;M<id> out to
+//                                      every matching slot — so each advertising host
+//                                      needs its OWN proxy. This is per-host, NOT
+//                                      first-host-wins, and a proxy alongside a local
+//                                      Maestro of the same id is intended (multicast).
+//   • no free slot                 -> skip (logged; 9-slot cap)
+// Never re-homes or evicts on its own: a proxy to a host that goes offline, or whose
+// Maestro is physically moved, stays until cleared (?MAESTRO,CLEAR / clear-by-id).
 // Persists via saveMaestroSettings() and is safe to call every advert. Returns
 // true iff a slot was added or its baud changed (so the caller could log it).
 bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
@@ -720,8 +735,10 @@ bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
     }
     return false;                          // unchanged — nothing to do
   }
-  if (isMaestroConfigured(maestroID)) return false;   // owned elsewhere — don't shadow/re-home
-
+  // Intentionally NO "already configured elsewhere" guard: duplicate Maestro ids are legal
+  // (same id local AND/OR on multiple hosts), and sendMaestroCommand fans ;M<id> to every
+  // matching slot, so each host gets its OWN proxy. The exact (id,host) duplicate was already
+  // handled above; fall through to claim a fresh slot for this new host.
   slot = findEmptySlot();
   if (slot < 0) {
     if (debugEnabled)                       // rare (9 slots); debug-gated to avoid steady-state spam

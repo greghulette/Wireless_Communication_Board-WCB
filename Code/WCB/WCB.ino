@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_301551RJUL2026                                  *****////
+///*****                                          Version 6.2.0_041921RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_301551RJUL2026";
+String SoftwareVersion = "6.2.0_041921RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1123,7 +1123,17 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   }
 
   for (int b = 0; b < MAX_WCB_COUNT; b++) {
-    if (!wcbPeerActive[b]) continue;   // snapshot the expected-ACK set from active members
+    // The controller / special peer (NaviCore) is deliberately never wcbPeerActive[] —
+    // addActivePeer rejects it, since it doesn't consume a WCB slot — but it IS a
+    // registered ESP-NOW target, and WCB_Client ACKs every COMMAND packet it receives.
+    // Without an exception here its slot is never added to expectAckFrom, so EVERY
+    // ensured send to it — a ;w20 route, a remote-Maestro forward, a broadcast it is
+    // supposed to act on — was a single best-effort transmission with no retry, even
+    // though the caller asked for ensured delivery. Treat it like any other online
+    // board and expect its ACK; the online gate below still applies, so this is inert
+    // until its first heartbeat lands.
+    bool isSpecialPeerSlot = (specialPeerEnabled && (b + 1) == WCB_SPECIAL_PEER_ID);
+    if (!wcbPeerActive[b] && !isSpecialPeerSlot) continue;   // snapshot the expected-ACK set from active members
     int wcbNum = b + 1;
     if (wcbNum == WCB_Number) continue;
     if (!boardTable[b].online) continue;
@@ -6380,7 +6390,16 @@ void rebuildActivePeers() {
 // that has gone dark — WDP presence alone (much longer TTL) is not enough.
 bool wcbPeerOnline(uint8_t id) {
   if (id < 1 || id > MAX_WCB_COUNT) return false;
-  return wcbPeerActive[id - 1] && boardTable[id - 1].online;
+  // The controller / special peer is never in wcbPeerActive[] — addActivePeer rejects
+  // it because it doesn't consume a WCB slot — yet it IS a registered unicast target
+  // that heartbeats like any board. Count it as a member here, the same exception
+  // etmAddToPendingTable, the presence refresh and removeActivePeer already make.
+  // Without it a live, heartbeating controller reads as permanently unreachable, so a
+  // capability pinned to it (?HCR,REMOTE,W20) is judged "genuinely dead" on every
+  // trigger and re-elected away. The online gate below still decides reachability, so
+  // one that has actually gone dark still fails over to election as intended.
+  bool isSpecial = (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID);
+  return (wcbPeerActive[id - 1] || isSpecial) && boardTable[id - 1].online;
 }
 
 // Have we EVER received a packet from board `id` this session (heartbeat/advert/ACK…)?

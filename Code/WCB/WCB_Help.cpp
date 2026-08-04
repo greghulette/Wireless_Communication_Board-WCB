@@ -277,7 +277,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      accurate timing and restored when complete"));
         Serial.println(F("  CHKSM,ON/OFF      Enable/disable CRC32 checksum on ETM packets"));
         Serial.println(F("                      Detects corrupted packets before execution"));
-        Serial.println(F("                      Default: OFF"));
+        Serial.println(F("                      Default: ON"));
         Serial.println(F("                      ALL boards must match or packets are rejected"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?ETM,ON"));
