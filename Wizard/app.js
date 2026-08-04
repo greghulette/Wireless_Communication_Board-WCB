@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '03.11:20.R.AUG.2026';
+const UI_VERSION = '03.23:28.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -5007,6 +5007,10 @@ class BoardConnection {
     await hub.adoptPort(port);     // hub opens it (already-open → used as-is) once it leads
     this.connectShared(hub);
     for (let i = 0; i < 40 && !hub.portOpen; i++) await new Promise(r => setTimeout(r, 50));
+    // Record the shared slot so a later refresh→reconnect can auto-join this board (mirrors
+    // sharedConnect). Without this, a board first shared via the RC "Open" launcher or a flash
+    // re-share was invisible to establishConnection's failover-reconnect on a multi-port setup.
+    try { localStorage.setItem('wcbSharedSlot', String(this.boardIndex)); } catch (_) {}
   }
 
   async _startReading() {
@@ -5171,6 +5175,9 @@ async function establishConnection(n, port, usedPorts = new Set(), allowShare = 
       try { conn.leaveShared(); } catch (_) {}
       if (_sharedHub) { try { _sharedHub.leave(); } catch (_) {} _sharedHub = null; }
       delete boardConnections[n];
+      // Auto-share failed and we're falling through to a DIRECT connect → don't leave the stale
+      // shared-slot marker sharedConnect just set, pointing at a now-direct slot.
+      try { if (localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
     } finally {
       _autoShareClaimed = false;              // the _shared conn now exists → _hasSharedPort() covers it
     }
@@ -5203,8 +5210,35 @@ async function establishConnection(n, port, usedPorts = new Set(), allowShare = 
     let wasSharedHere = false;
     try { wasSharedHere = localStorage.getItem('wcbSharedSlot') === String(n); } catch (_) {}
     if (/open|already|access|busy|in use/i.test(msg) && (onlyGrantedPort || wasSharedHere) && await _anotherTabLeadsShare()) {
+      const shared = await sharedConnect(n, port);
+      // wasSharedHere is a slot NUMBER, not a port identity: with 2+ granted ports it can't tell
+      // whether the leader holds the SAME board whose port just failed. As a follower we ride the
+      // LEADER's port, so verify it matches the port the user picked before trusting the join —
+      // hub._leaderPortInfo is the leader's getInfo(), announced via its 'state'. On a definite
+      // mismatch, roll the join back and surface the real open error instead of silently binding
+      // this slot to a DIFFERENT board. (onlyGrantedPort is exact → skip; two identical-model
+      // boards share VID/PID, so this stays best-effort in that case.)
+      if (!onlyGrantedPort) {
+        const jhub = shared && shared._hub;
+        let want = null; try { want = port && port.getInfo ? port.getInfo() : null; } catch (_) {}
+        // Wait for the leader's 'state' broadcast — it sets _leaderPortOpen AND overwrites
+        // _leaderPortInfo with the LEADER's port. Before it lands, _leaderPortInfo still holds
+        // OUR just-adopted port (serial-hub.js adoptPort), which would false-match. If it never
+        // arrives (~600ms), proceed best-effort rather than block the user.
+        for (let i = 0; i < 24 && jhub && !jhub._leaderPortOpen; i++) await new Promise(r => setTimeout(r, 25));
+        const got = (jhub && jhub._leaderPortOpen) ? jhub._leaderPortInfo : null;
+        if (want && got && want.usbVendorId != null && got.usbVendorId != null &&
+            (want.usbVendorId !== got.usbVendorId || want.usbProductId !== got.usbProductId)) {
+          try { shared.leaveShared(); } catch (_) {}
+          if (_sharedHub) { try { _sharedHub.leave(); } catch (_) {} _sharedHub = null; }
+          delete boardConnections[n];
+          updateConnectionUI(n, false);
+          showToast('That port is a different board than the shared session holds — not joining.', 'warning', 8000);
+          throw e;
+        }
+      }
       showToast('That port is shared by another tab — joining the shared session.', 'info', 7000);
-      return sharedConnect(n, port);
+      return shared;
     }
     throw e;
   }
@@ -5681,15 +5715,15 @@ async function boardDisconnect(n) {
   if (btn) { btn.textContent = 'Disconnecting…'; btn.disabled = true; }
   clearRemoteBoardsForRelay(n);              // drop remote boards that relay through this one
   const _c = boardConnections[n];
-  const _wasShared = !!_c?._shared;          // leaveShared() flips _shared=false — capture it first
   try {
     if (_c?._shared) _c.leaveShared();       // shared mode: detach from the hub (other tabs keep the port)
     else await _c?.disconnect();
   } catch (_) {}
-  // A deliberate disconnect of the shared board clears the remembered shared slot, so a later
-  // busy-open of this port won't auto-join a share that no longer represents this board. (A
-  // refresh does NOT hit this path, so the failover-reconnect flow still finds the slot.)
-  try { if (_wasShared && localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
+  // Any deliberate disconnect of THIS slot clears the remembered shared slot when it points here —
+  // whether the slot was truly shared or a stale marker was left on a now-direct slot (e.g. a
+  // failed auto-share). A refresh does NOT hit this path, so the failover-reconnect flow still
+  // finds the slot when the OTHER tab has legitimately taken over the port.
+  try { if (localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
   delete boardConnections[n];
   delete remoteRelayForBoard[n];
   if (_relaySlots.has(n)) {                   // a MgmtRelay: drop its flag + dedicated card so the
@@ -11592,8 +11626,10 @@ function rcOpenConfigTool(ev) {
   try {
     let hub = (typeof getSharedHub === 'function') ? getSharedHub() : null;
 
-    // Already leading the shared port → hand NaviCore ?share=1 straight away.
-    if (hub && hub.role === 'leader' && hub.portOpen) {
+    // Already leading the shared port → hand NaviCore ?share=1 straight away. Use the PRIVATE
+    // _portOpen (WE opened it), not the public portOpen getter which is also true for a follower
+    // that merely sees the leader's port.
+    if (hub && hub.role === 'leader' && hub._portOpen) {
       window.open(withShare, '_blank', 'noopener');
       return false;
     }
@@ -11608,17 +11644,30 @@ function rcOpenConfigTool(ev) {
     if (direct) {
       const [k, conn] = direct;
       const w = window.open('about:blank', '_blank');   // keep the handle → do NOT use 'noopener'
-      showToast(`Sharing WCB ${k} so the config tool can attach…`, 'info', 4000);
-      conn.becomeShared().then(() => {
-        const h = (typeof getSharedHub === 'function') ? getSharedHub() : null;
-        const ok = !!(h && h.portOpen);
-        if (!ok) showToast('Shared, but the port didn’t open — the tool may need a manual connect.', 'warning', 6000);
-        const dest = ok ? withShare : url;
-        if (w) w.location.href = dest; else window.open(dest, '_blank', 'noopener');
-      }).catch(e => {
-        showToast(`Couldn’t share WCB ${k}: ${e.message}. Opening the tool for a manual connect.`, 'error', 7000);
-        if (w) w.location.href = url; else window.open(url, '_blank', 'noopener');
-      });
+      (async () => {
+        // GUARD: if another same-origin tab ALREADY leads the shared hub, promoting THIS board
+        // would lose the lock election and leave us a FOLLOWER of the OTHER tab's board — the
+        // config tool would then attach to the wrong WCB and our direct board would be orphaned
+        // (becomeShared nulls this.port). Don't promote; open the tool plain so it can attach to
+        // the existing share itself. Mirrors establishConnection's auto-share guard.
+        if (await _anotherTabLeadsShare()) {
+          showToast('Another tab already holds the shared port — opening the tool; connect it there if needed.', 'info', 7000);
+          if (w) w.location.href = url; else window.open(url, '_blank', 'noopener');
+          return;
+        }
+        showToast(`Sharing WCB ${k} so the config tool can attach…`, 'info', 4000);
+        try {
+          await conn.becomeShared();
+          const h = (typeof getSharedHub === 'function') ? getSharedHub() : null;
+          const ok = !!(h && h.role === 'leader' && h._portOpen);   // WE actually lead with OUR port open
+          if (!ok) showToast('Shared, but this tab didn’t win the port — the tool may need a manual connect.', 'warning', 6000);
+          const dest = ok ? withShare : url;
+          if (w) w.location.href = dest; else window.open(dest, '_blank', 'noopener');
+        } catch (e) {
+          showToast(`Couldn’t share WCB ${k}: ${e.message}. Opening the tool for a manual connect.`, 'error', 7000);
+          if (w) w.location.href = url; else window.open(url, '_blank', 'noopener');
+        }
+      })();
       return false;
     }
 
@@ -11728,7 +11777,7 @@ function _renderRcDevices() {
 
 // Periodic re-render so "last seen Ns ago" counters tick and stale entries
 // disappear without needing a new heartbeat to drive the GC sweep.
-setInterval(() => { if (_rcOnlineMap.size > 0) _renderRcDevices(); }, 1000);
+setInterval(() => { if (_rcOnlineMap.size > 0 || _rcWdpMap.size > 0) _renderRcDevices(); }, 1000);  // include _rcWdpMap so WDP-only RC cards (no live rc_hb) still age out via the RC_WDP_STALE_MS sweep
 
 // ─── WDP mesh view ──────────────────────────────────────────────────────────
 // wdpMeshRefresh() queries a connected board with ?WDP,DUMP and renders the
@@ -11989,7 +12038,7 @@ function upsertClientCard(nd) {
   // Feed the RC-Controllers "Open" launcher from WDP discovery (robust ~180s roster,
   // polled every 12s) so it doesn't depend on the rc_hb telemetry relay being
   // subscribed. Any mesh device advertising the 'rc' capability is an RC controller.
-  if (nd.live && /(^|\s)rc(\s|$)/.test(nd.capTags || '')) {
+  if (nd.live && /(^|\s)rc(\.|\s|$)/i.test(nd.capTags || '')) {   // case-insensitive + dotted-namespace tolerant (rc, RC, rc.tx) but still boundary-anchored (not arc/src)
     _rcWdpMap.set(n, { id: n, name: nd.alias || ('RC #' + n), fw: nd.fw || '', lastSeenAt: Date.now() });
     _renderRcDevices();
   }
