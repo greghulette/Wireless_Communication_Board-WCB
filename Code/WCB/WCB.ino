@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_041921RAUG2026                                  *****////
+///*****                                          Version 6.2.0_051053RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -177,7 +177,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_041921RAUG2026";
+String SoftwareVersion = "6.2.0_051053RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1125,14 +1125,19 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   for (int b = 0; b < MAX_WCB_COUNT; b++) {
     // The controller / special peer (NaviCore) is deliberately never wcbPeerActive[] —
     // addActivePeer rejects it, since it doesn't consume a WCB slot — but it IS a
-    // registered ESP-NOW target, and WCB_Client ACKs every COMMAND packet it receives.
-    // Without an exception here its slot is never added to expectAckFrom, so EVERY
-    // ensured send to it — a ;w20 route, a remote-Maestro forward, a broadcast it is
-    // supposed to act on — was a single best-effort transmission with no retry, even
-    // though the caller asked for ensured delivery. Treat it like any other online
-    // board and expect its ACK; the online gate below still applies, so this is inert
-    // until its first heartbeat lands.
-    bool isSpecialPeerSlot = (specialPeerEnabled && (b + 1) == WCB_SPECIAL_PEER_ID);
+    // registered unicast target and it ACKs every COMMAND packet it receives. Without
+    // an exception here its slot is never added to expectAckFrom, so a ;w20 route or a
+    // remote-Maestro forward to it is one best-effort send with no ETM retry, despite
+    // the callers asking for ensured delivery.
+    //
+    // SCOPED TO UNICAST ADDRESSED TO IT — deliberately. Expecting its ACK on BROADCASTS
+    // too costs one extra ACK plus a potential unicast retry burst on EVERY broadcast
+    // the mesh sends, and holds each broadcast's pending slot open longer waiting for
+    // it. That is fleet-wide overhead paid during bulk transfers (config pull, OTA)
+    // which are exactly when the mesh is least able to absorb it. Every send this
+    // exception exists for — ;w20, remote-Maestro forwards — is unicast anyway.
+    bool isSpecialPeerSlot = (specialPeerEnabled && (b + 1) == WCB_SPECIAL_PEER_ID &&
+                              targetWCB == WCB_SPECIAL_PEER_ID);
     if (!wcbPeerActive[b] && !isSpecialPeerSlot) continue;   // snapshot the expected-ACK set from active members
     int wcbNum = b + 1;
     if (wcbNum == WCB_Number) continue;
