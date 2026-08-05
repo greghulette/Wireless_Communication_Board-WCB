@@ -96,6 +96,7 @@
       this._leaderPortInfo = null;
       this._leaderPortOpen = false;  // follower's view of whether SOME leader has the port open
       this._sawLeaderPort  = false;  // have we EVER seen a real leader hold an open port? gates failover adopt
+      this._portlessRetries = 0;     // consecutive portless failover promotions → escalating step-down backoff (reset on any real port)
 
       this._listeners  = { data: [], role: [], state: [], log: [] };
     }
@@ -135,7 +136,7 @@
 
       this._setRole('follower');
       this._post({ t: 'hello' });        // ask any existing leader to announce its state
-      this._campaign();                  // queue for the lock (may promote us to leader)
+      this._maybeCampaign();             // enter the lock election ONLY if we hold a port (or saw one) — a portless tab just follows, never squats the lock
 
       // Visibility-driven leadership handoff (OFF by default — see DEFAULTS): it would
       // give the foreground tab the port so its read loop isn't background-throttled, but
@@ -159,6 +160,7 @@
       const p = await navigator.serial.requestPort();
       this._port = p;
       try { this._leaderPortInfo = p.getInfo ? p.getInfo() : null; } catch (_) {}
+      this._maybeCampaign();   // now that we hold a port, enter the election if we weren't already (conditional-campaign)
       if (this._role === 'leader') await this._openAndRead();
       else this._log('port selected; will open it if this tab becomes the leader');
       return p;
@@ -173,6 +175,7 @@
     async adoptPort(port) {
       this._port = port;
       try { this._leaderPortInfo = port && port.getInfo ? port.getInfo() : null; } catch (_) {}
+      this._maybeCampaign();   // now that we hold a port, enter the election if we weren't already (conditional-campaign)
       if (this._role === 'leader') await this._openAndRead();
       else this._log('port adopted; will open it if this tab becomes the leader');
       return port;
@@ -244,6 +247,20 @@
 
     // ── Leadership (Web Locks) ──────────────────────────────────────────────────
 
+    // Enter the leader election ONLY when we have something to lead with: our own port, or
+    // evidence a real shared port exists to inherit on failover (_sawLeaderPort). A pure
+    // attach-only tab — e.g. a config tool opened with ?share=1 whose requestPort() had no
+    // user gesture, so it holds NO port — must NOT campaign: if it won the single exclusive
+    // lock it would hold it with no port and DEADLOCK every other tab (it just squats). Such a
+    // tab simply follows and waits for a leader's 'state'. Idempotent: no-op if already queued
+    // for, or holding, the lock.
+    _maybeCampaign() {
+      if (!this._joined || this._leaving) return;
+      if (this._lockAbort || this._releaseLock) return;   // already campaigning or leading
+      if (!this._port && !this._sawLeaderPort) return;     // nothing to lead with → stay a follower
+      this._campaign();
+    }
+
     _campaign() {
       // One exclusive lock, requested by every tab. The holder is THE leader; the rest
       // wait in the browser's lock queue. We hold the lock for our entire reign by
@@ -271,8 +288,27 @@
       // must NOT grab some random granted port: it may be open in another app entirely
       // (that's exactly the "port is already open" failure). Wait for requestPort() instead.
       if (!this._port && this._sawLeaderPort) await this._adoptGrantedPort();
-      if (this._port)  await this._openAndRead();
-      else             this._announceState();     // leader but no port yet → tell followers portOpen:false
+      if (this._port)  { this._portlessRetries = 0; await this._openAndRead(); }
+      else             this._stepDownPortless();   // won the lock but have no port (device gone on a failover) → yield, don't squat
+    }
+
+    // We won the lock on a failover but have no port and couldn't adopt one — the shared
+    // device is physically gone. Do NOT squat the exclusive lock (that re-creates the very
+    // deadlock conditional-campaigning prevents): announce the dead state, release the lock,
+    // then re-queue after a jittered backoff so a real port-holder queued behind us is served,
+    // and so we retry cleanly when the device returns. The backoff prevents a microtask-speed
+    // self-spin when we're the only candidate.
+    _stepDownPortless() {
+      this._announceState();                 // portOpen:false → followers know nothing is open
+      this._setRole('follower');
+      const release = this._releaseLock; this._releaseLock = null;
+      if (release) { try { release(); } catch (_) {} }
+      // Escalate the backoff so a permanently-absent device settles to a slow poll instead of
+      // ~1 Hz leader↔follower + '[hub] became LEADER' churn, while still auto-recovering when it
+      // returns (the counter is reset on any real port — _becomeLeader success + 'state' portOpen).
+      this._portlessRetries++;
+      const delay = Math.min(800 * Math.pow(2, this._portlessRetries - 1), 30000) + Math.floor(Math.random() * 700);
+      setTimeout(() => { if (this._joined && !this._leaving) this._maybeCampaign(); }, delay);
     }
 
     // A promoted follower usually has no SerialPort object of its own — but the port was
@@ -442,7 +478,7 @@
       this._leaderPortOpen = false;
       const release = this._releaseLock; this._releaseLock = null;
       if (release) release();     // release the lock → the queued claimer promotes to leader
-      this._campaign();           // re-enter the queue so we can reclaim leadership later
+      this._maybeCampaign();      // re-enter the queue so we can reclaim leadership later (only while still eligible)
     }
 
     // ── Cross-tab bus ───────────────────────────────────────────────────────────
@@ -463,7 +499,7 @@
           if (this._role !== 'leader') {
             this._leaderPortOpen = !!msg.portOpen;
             if (msg.portInfo) this._leaderPortInfo = msg.portInfo;
-            if (msg.portOpen && msg.portInfo) this._sawLeaderPort = true;  // a real leader owns a port → we may inherit it on failover
+            if (msg.portOpen && msg.portInfo) { this._sawLeaderPort = true; this._portlessRetries = 0; this._maybeCampaign(); }  // a real leader owns a port → become failover-eligible + enter the election; a device that came back resets the step-down backoff
             this._emitState();
           }
           break;
