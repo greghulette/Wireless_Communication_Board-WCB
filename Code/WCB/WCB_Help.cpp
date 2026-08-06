@@ -531,6 +531,68 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
+    } else if (c == "DFP" || c == "DFPLAYER") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?DFP,<command>[,options]   (config/query)"));
+        Serial.println(F("       ;D,<command>[,options]    (runtime playback)"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Configures and controls a DFRobot DFPlayer Mini (and YX5300 /"));
+        Serial.println(F("  MH2024K clones) on a local serial port. One DFPlayer per WCB."));
+        Serial.println(F("  It is the ALTERNATE audio device to the MP3 Trigger (?MP3 / ;A);"));
+        Serial.println(F("  a board can host both, on different ports."));
+        Serial.println(F("\n  TWO DIFFERENCES FROM THE MP3 TRIGGER:"));
+        Serial.println(F("    - Baud is FIXED at 9600 by the module. Nothing else works."));
+        Serial.println(F("    - Volume is 0-30 where 0=SILENT and 30=LOUDEST. That is the"));
+        Serial.println(F("      INVERSE of the MP3 Trigger's 0-64 (0=loudest). Do not copy"));
+        Serial.println(F("      a volume value between the two."));
+        Serial.println(F("\nConfiguration Commands:"));
+        Serial.println(F("  S<port>[:<baud>][:V<vol>]  Configure DFPlayer"));
+        Serial.println(F("                           port: 1-5 (any free port)"));
+        Serial.println(F("                           baud: optional, must be 9600"));
+        Serial.println(F("                           vol:  0-30 (0=silent, 30=loudest)"));
+        Serial.println(F("  LIST                   Show current configuration"));
+        Serial.println(F("  CLEAR                  Remove configuration, free the port"));
+        Serial.println(F("  REMOTE,W<n>            Route ;D to the DFPlayer on WCB<n>"));
+        Serial.println(F("  REMOTE,OFF             Stop routing ;D to a remote host"));
+        Serial.println(F("  ONERR,<key>            Run stored command <key> on device error"));
+        Serial.println(F("  ONERR,CLEAR            Remove error callback"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?DFP,S2                       - DFPlayer on S2, 9600 baud, vol 20"));
+        Serial.println(F("  ?DFP,S2:9600:V20              - Same, fully spelled out"));
+        Serial.println(F("  ?DFP,S3:V25                   - S3, baud implied, volume 25"));
+        Serial.println(F("  ?DFP,LIST                     - Show configuration"));
+        Serial.println(F("  ?DFP,CLEAR                    - Remove configuration"));
+        Serial.println(F("\nPlayback Commands (use ;D,...):"));
+        Serial.println(F("  ;D,PLAY,<n>                Play track n (1-2999, global index)"));
+        Serial.println(F("  ;D,PLAY,<n>,ONFIN,<key>    Play track n, run ;C<key> when finished"));
+        Serial.println(F("  ;D,FOLDER,<f>,<t>          Play /<f>/<t>.mp3 (f 1-99, t 1-255)"));
+        Serial.println(F("  ;D,MP3FOLDER,<n>           Play track n from the /MP3 folder"));
+        Serial.println(F("  ;D,STOP                    Stop playback"));
+        Serial.println(F("  ;D,NEXT / ;D,PREV          Skip forward / back"));
+        Serial.println(F("  ;D,PAUSE / ;D,RESUME       Pause / resume"));
+        Serial.println(F("  ;D,RANDOM                  Play a random track"));
+        Serial.println(F("  ;D,VOL,<n>                 Set volume: 0=silent, 30=loudest"));
+        Serial.println(F("  ;D,VOLUP / ;D,VOLDN        Louder / quieter by 2 steps"));
+        Serial.println(F("  ;D,LOOP,<n>                Repeat track n forever"));
+        Serial.println(F("  ;D,LOOPALL,<0|1>           Loop the whole card off / on"));
+        Serial.println(F("  ;D,LOOPFOLDER,<f>          Loop folder f"));
+        Serial.println(F("  ;D,EQ,<0-5>                Normal/Pop/Rock/Jazz/Classic/Bass"));
+        Serial.println(F("  ;D,DEVICE,<n>              1=USB 2=SD 3=AUX 4=Sleep 5=Flash"));
+        Serial.println(F("  ;D,RESET                   Reset the module"));
+        Serial.println(F("  ;D,STATUS                  Query play status (prints to USB)"));
+        Serial.println(F("\nMulti-board:"));
+        Serial.println(F("    ;W2,;D,PLAY,5             Play track 5 on WCB2's DFPlayer"));
+        Serial.println(F("  A ;D on a board with no DFPlayer is auto-routed to the board"));
+        Serial.println(F("  that advertises one (WDP capability), same as ;A and ;H."));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on the DFPlayer port"));
+        Serial.println(F("  - A DFPlayer needs ~1.5-3s after power-on before it accepts commands"));
+        Serial.println(F("  - Volume is NOT re-sent before each play (the module remembers it)"));
+        Serial.println(F("  - Current volume tracked in NVS and persists across reboots"));
+        Serial.println(F("  - Clone modules vary: RANDOM/EQ/LOOPFOLDER may be no-ops on some"));
+
+    // ================================================================
     } else if (c == "HCR") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));

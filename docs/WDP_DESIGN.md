@@ -99,7 +99,8 @@ Unknown TLV types are skipped via the length prefix — forward compatible in bo
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
 
 **CAPFLAGS bits:** `0x0001` HCR · `0x0002` MP3 · `0x0004` WLED · `0x0008` Kyber‑local ·
-`0x0010` Maestro‑remote · `0x0020` PWM · `0x0040` Controller‑link · `0x0080` Maestro‑host.
+`0x0010` Maestro‑remote · `0x0020` PWM · `0x0040` Controller‑link · `0x0080` Maestro‑host ·
+`0x0100` DFPlayer.
 
 Wire strings are scrubbed on receive (`,`/`]`/control chars → `_`) so they can't corrupt the
 machine‑readable dump lines (§7).
@@ -267,9 +268,10 @@ fully returned to plain serial on the next reboot; the self-heal deliberately do
 one — a board shouldn't reboot itself because a *peer* dropped a mapping. Only WDP-tagged ports
 self-heal; a manually configured PWM output is never auto-removed.
 
-On **every** `;H` / `;A` trigger, **single‑owner capability routing** (`routeStoredOrCap` →
+On **every** `;H` / `;A` / `;D` trigger, **single‑owner capability routing** (`routeStoredOrCap` →
 `wdpCapOwner`) resolves the command to exactly one host: a persisted/pinned host if it is set and
-online, otherwise the lowest‑numbered **online** board advertising the capability (HCR / MP3), so
+online, otherwise the lowest‑numbered **online** board advertising the capability (HCR / MP3 /
+DFPlayer), so
 a broadcast can't fire the trigger N times. A pinned host that is *offline* fails over to live
 election instead of black‑holing. WLED and Maestro are **id‑addressed** (`;L<id>` / `;M<id>` route
 per‑id to the board that advertised that id), so they need no single‑owner election.

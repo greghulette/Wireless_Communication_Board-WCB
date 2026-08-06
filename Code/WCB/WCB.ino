@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_051053RAUG2026                                  *****////
+///*****                                          Version 6.2.0_052233RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -84,9 +84,10 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include <WiFi.h>
 #include <HardwareSerial.h>
 #include "WCB_Storage.h"
-#include <WcbCmd.h>          // shared ;M/;A/;L/;H → native-byte translators (WCBCMD_VERSION); the SAME lib NaviCore compiles
+#include <WcbCmd.h>          // shared ;M/;A/;L/;H/;D → native-byte translators (WCBCMD_VERSION); the SAME lib NaviCore compiles
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
+#include "WCB_DFP.h"
 #include "WCB_HCR.h"
 #include "WCB_WLED.h"
 #include "WCB_WDP.h"
@@ -177,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_051053RAUG2026";
+String SoftwareVersion = "6.2.0_052233RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2805,6 +2806,7 @@ String buildConfigString() {
     String dummy;
     printMaestroBackup(dummy, out, '^');
     printMP3Backup(dummy, out, '^');
+    printDFPBackup(dummy, out, '^');
     printHCRBackup(dummy, out, '^');
     printWLEDBackup(dummy, out, '^');
     // User variables — webtool grammar is always the fixed '^?' form.
@@ -4501,6 +4503,12 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?DFP,... (DFPlayer Mini — the other audio device) ---
+    if (rootUpper == "DFP") {
+        configureDFP(args);
+        return;
+    }
+
     // --- ?HCR,... (Human-Cyborg Relations config/query) ---
     if (rootUpper == "HCR") {
         configureHCR(args);
@@ -5299,6 +5307,7 @@ void updateHWVersion(const String &message) {
     auto emitHelpers = [&]() {
         printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printDFPBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printWLEDBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
@@ -5403,6 +5412,9 @@ void processCommandCharcter(const String &message, int sourceID) {
     } else if (message.startsWith("a") || message.startsWith("A")) {
       routeStoredOrCap(mp3Config.configured, mp3Config.remoteWCB, WDP_CAP_MP3,
                        message, processMP3AudioCommand);   // → the MP3 host (stored, then live)
+    } else if (message.startsWith("d") || message.startsWith("D")) {
+      routeStoredOrCap(dfpConfig.configured, dfpConfig.remoteWCB, WDP_CAP_DFPLAYER,
+                       message, processDFPCommand);        // → the DFPlayer host (stored, then live)
     } else if (message.startsWith("h") || message.startsWith("H")) {
       routeStoredOrCap(hcrConfig.configured, hcrConfig.remoteWCB, WDP_CAP_HCR,
                        message, processHCRRuntimeCommand); // → the HCR host (stored, then live)
@@ -5864,6 +5876,15 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             continue;
         }
 
+        // Skip if a DFPlayer is on this port — its 10-byte frames are the
+        // driver's protocol, and broadcast text would corrupt them.
+        if (isSerialPortUsedForDFP(i)) {
+            if (debugEnabled) {
+                Serial.printf("Skipping S%d (DFPlayer port)\n", i);
+            }
+            continue;
+        }
+
         // Skip if the HCR is on this port (library owns it)
         if (isSerialPortUsedForHCR(i)) {
             if (debugEnabled) {
@@ -5896,6 +5917,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // Skip ports reserved for the MP3 Trigger — responses are consumed
   // exclusively by processMP3Responses() in loop().
   if (isSerialPortUsedForMP3(sourceID)) return;
+
+  // Same for the DFPlayer port — processDFPResponses() owns those bytes, and
+  // half a 10-byte frame read away here would break ONFIN/error decoding.
+  if (isSerialPortUsedForDFP(sourceID)) return;
 
   // Skip the HCR port — RX is owned exclusively by the HCRVocalizer
   // library (status parsing) via processHCRTick() in loop().
@@ -6667,6 +6692,7 @@ void setup() {
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
+  loadDFPSettings();      // Load DFPlayer Mini configuration from NVS
   loadHCRSettings();      // Load HCR configuration from NVS
   loadWLEDSettings();     // Load WLED serial-control configuration from NVS
   loadVariables();        // Build the user-variable RAM mirror from NVS
@@ -7021,6 +7047,7 @@ void loop() {
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
+  processDFPResponses();   // Read DFPlayer Mini response frames (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
   // splitters — by the time commands reach this queue they are unconditional.)

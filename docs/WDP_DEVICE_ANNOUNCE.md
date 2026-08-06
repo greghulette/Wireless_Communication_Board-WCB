@@ -66,7 +66,7 @@ fuller:   @WDP1 {"type":"Flthy HP Controller","fw":"2.3.0","hw":"revB","caps":["
 
 ```
 Maestro · Marcduino · DroidNet · Magic Panel(IA) · Magic Panel(PRINTDRD) ·
-Roam‑A‑Dome · MP3 Trigger · H‑CR · Stealth · Padawan · Shadow · Shadow RC ·
+Roam‑A‑Dome · MP3 Trigger · DFPlayer · H‑CR · Stealth · Padawan · Shadow · Shadow RC ·
 Penumbra · Sabé · NaviCore · Periscope · Uppity Spinner · Life Form Scanner ·
 Leia Projector · Saber Launcher · Short Circuit · ARDS/K‑ARDS · Teeces ·
 AstroPixels · Rseries Logics · PSI Front · PSI Rear · HP Controller ·

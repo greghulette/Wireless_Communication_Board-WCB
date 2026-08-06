@@ -3,6 +3,7 @@
 #include "WCB_Storage.h"      // MAX_WCB_COUNT, etmEnabled, WCB_Number externs
 #include "WCB_HCR.h"          // hcrConfig
 #include "WCB_MP3.h"          // mp3Config
+#include "WCB_DFP.h"          // dfpConfig
 #include "WCB_WLED.h"         // wledConfig
 #include "WCB_Maestro.h"      // maestroConfigs[], MAX_MAESTROS_PER_WCB
 #include "WCB_PWM.h"          // pwmOutputCount, activePWMCount
@@ -98,6 +99,7 @@ static uint16_t wdpCapFlags() {
   uint16_t f = 0;
   if (hcrConfig.configured)  f |= WDP_CAP_HCR;
   if (mp3Config.configured)  f |= WDP_CAP_MP3;
+  if (dfpConfig.configured)  f |= WDP_CAP_DFPLAYER;
   if (Kyber_Local)           f |= WDP_CAP_KYBER_LOCAL;
   if (Maestro_Remote)        f |= WDP_CAP_MAESTRO_REM;
   if (pwmOutputCount > 0 || activePWMCount > 0) f |= WDP_CAP_PWM;
@@ -703,10 +705,12 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       if (baud == 0) continue;
       wledAutoAddRemote(nb.wledIds[i], (uint8_t)senderWCB, baud);
     }
-    // HCR / MP3 are single-owner capabilities (no id): learn + persist the host so
-    // ;H / ;A route there across reboots. First-host-wins (see hcr/mp3AutoAddRemote).
-    if (nb.capFlags & WDP_CAP_HCR) hcrAutoAddRemote((uint8_t)senderWCB);
-    if (nb.capFlags & WDP_CAP_MP3) mp3AutoAddRemote((uint8_t)senderWCB);
+    // HCR / MP3 / DFPlayer are single-owner capabilities (no id): learn + persist the
+    // host so ;H / ;A / ;D route there across reboots. First-host-wins (see
+    // hcr/mp3/dfpAutoAddRemote).
+    if (nb.capFlags & WDP_CAP_HCR)      hcrAutoAddRemote((uint8_t)senderWCB);
+    if (nb.capFlags & WDP_CAP_MP3)      mp3AutoAddRemote((uint8_t)senderWCB);
+    if (nb.capFlags & WDP_CAP_DFPLAYER) dfpAutoAddRemote((uint8_t)senderWCB);
 
     // Receiver-side PWM output auto-config: the sender named THIS board as a remote
     // PWM output target (decoded into nb.pwmSelfPorts). Reserve/configure each such
@@ -871,6 +875,7 @@ static void wdpCapCodes(uint16_t cf, char *out, int max) {
     { WDP_CAP_MAESTRO_LOC, 'M' }, { WDP_CAP_MAESTRO_REM, 'R' },
     { WDP_CAP_KYBER_LOCAL, 'K' }, { WDP_CAP_HCR, 'H' }, { WDP_CAP_MP3, '3' },
     { WDP_CAP_WLED, 'W' }, { WDP_CAP_PWM, 'P' }, { WDP_CAP_CONTROLLER, 'C' },
+    { WDP_CAP_DFPLAYER, 'D' },
   };
   int o = 0;
   for (unsigned i = 0; i < sizeof(CODES) / sizeof(CODES[0]); i++) {
@@ -889,6 +894,7 @@ static void wdpCapNames(uint16_t cf, char *out, int max) {
     { WDP_CAP_MAESTRO_LOC, "Maestro host" }, { WDP_CAP_MAESTRO_REM, "Maestro remote" },
     { WDP_CAP_KYBER_LOCAL, "Kyber local" }, { WDP_CAP_HCR, "HCR" }, { WDP_CAP_MP3, "MP3" },
     { WDP_CAP_WLED, "WLED" }, { WDP_CAP_PWM, "PWM" }, { WDP_CAP_CONTROLLER, "Controller link" },
+    { WDP_CAP_DFPLAYER, "DFPlayer" },
   };
   int o = 0; out[0] = '\0';
   for (unsigned i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {

@@ -45,6 +45,7 @@
 #define WDP_CAP_PWM         0x0020
 #define WDP_CAP_CONTROLLER  0x0040
 #define WDP_CAP_MAESTRO_LOC 0x0080
+#define WDP_CAP_DFPLAYER    0x0100   // this board hosts a DFPlayer Mini (;D)
 
 // One learned neighbor. A board is the sole authority for its own facts, so an
 // advert REPLACES that board's entry wholesale (dropped facts vanish naturally).

@@ -21,6 +21,7 @@ Magic Panel(IA)
 Magic Panel(PRINTDRD)
 Roam-A-Dome
 MP3 Trigger
+DFPlayer
 H-CR
 Stealth
 Padawan
