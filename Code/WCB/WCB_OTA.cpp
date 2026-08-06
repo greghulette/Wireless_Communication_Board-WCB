@@ -397,12 +397,21 @@ void handleOtaDataPacket(const uint8_t *raw) {
   // is still streaming, so keep the session alive. Dups are write no-ops, so
   // otaWrite() won't refresh lastActivityMs; without this a lost-ACK retry storm
   // could trip the idle timeout and abort a transfer that was still live.
-  if (ota.active && pkt.sessionId == ota.sessionId) ota.lastActivityMs = millis();
-  // Write (no-op on out-of-order/dup), then ALWAYS ack the current cursor so the
-  // browser learns where we are — covers a lost DATA (cursor stalls → resend
-  // from cursor) and a lost ACK (re-acked on the resent DATA).
+  const bool inSession = (ota.active && pkt.sessionId == ota.sessionId);
+  if (inSession) ota.lastActivityMs = millis();
+  // Write (no-op on out-of-order/dup), then ack the current cursor so the browser
+  // learns where we are — covers a lost DATA (cursor stalls → resend from cursor)
+  // and a lost ACK (re-acked on the resent DATA).
   otaWrite(pkt.sessionId, pkt.fragOffset, pkt.data, len);
-  sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, otaWrittenOffset());
+  // Report the session's REAL state. If a failed write already tore the session down
+  // (image overrun / esp_ota_write error / idle abort), otaWrittenOffset() reads 0 and
+  // an OK+0 ACK is indistinguishable from a stale duplicate: the browser ignores it,
+  // times out, rewinds, resends from 0, is re-answered OK+0 — a genuine infinite hang
+  // that looks like success with a frozen progress bar. OTA_ST_ERR on a no-longer-active
+  // session makes it fail loudly instead. A frame for a DIFFERENT session gets its own id
+  // back, which the browser filters out. (Matches navicore_ota.h, which already carries this.)
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, inSession ? OTA_ST_OK : OTA_ST_ERR,
+             otaWrittenOffset());
 }
 
 void handleOtaEndPacket(const uint8_t *raw) {

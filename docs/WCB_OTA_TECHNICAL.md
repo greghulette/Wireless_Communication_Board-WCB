@@ -173,7 +173,7 @@ The WCB's ESP‑NOW receive callback routes packets **by total `len`**, not by r
 Each: `memcpy` the struct, null‑terminate the password, gate, act, ACK.
 - Gate `otaPktAuth(pw, targetWCB)` = `password == espnowPassword && targetWCB == myWCB`. (The mesh‑wide MAC‑group gate runs earlier in the callback.)
 - `handleOtaBeginPacket` → `otaBegin` → ACK (OK/ERR, cursor).
-- `handleOtaDataPacket` → `otaWrite(sessionId, fragOffset, data, dataLen)` (no‑op on gap/dup) → **ALWAYS** ACK the *current* cursor.
+- `handleOtaDataPacket` → `otaWrite(sessionId, fragOffset, data, dataLen)` (no‑op on gap/dup) → ACK the *current* cursor — status `OTA_ST_OK` while the session is live, `OTA_ST_ERR` once a failed write has torn it down (so a collapsed `offset=0` reads as a real error, not a rewind).
 - `handleOtaEndPacket` → `otaEnd` → ACK → on success `delay(300)` (let the ACK transmit before the radio drops) → `ESP.restart()`.
 - `handleOtaAbortPacket` → abort → ACK.
 
@@ -182,6 +182,8 @@ The target **always ACKs its current contiguous write cursor**, even on a duplic
 - **Lost DATA** → cursor doesn't advance → browser sees a stale cursor → resends from there.
 - **Lost ACK** → re‑sent on the next (resent) DATA.
 - esp_ota verifies the whole image before switching, so a silently‑wrong byte can't ship.
+
+- **Write error / idle abort** → the session is torn down, and the ACK carries `OTA_ST_ERR` instead of a false `OTA_ST_OK`+`offset=0` (which a host cannot tell from a stale duplicate — it would resend from 0 indefinitely, a hang that looks like success). The Wizard's relay‑OTA loop fast‑fails on `status != 0`. Matches `navicore_ota.h`.
 
 ### Relay side
 - `processOtaRelayCommand("?OTA,<SUB>,<target>,<session>,…")` builds the matching struct and `esp_now_send`s it to `WCBMacAddresses[target-1]`.
@@ -263,6 +265,7 @@ if (len == sizeof(espnow_struct_ota_data)) { enqueueOtaPacket(data, len); return
 | Chip‑family mismatch | `BEGIN` rejected (brick guard) — current app intact |
 | No inactive OTA slot | `BEGIN` rejected — wrong partition table |
 | Out‑of‑order / dup chunk | `otaWrite` no‑op; ACK stale cursor → sender resends |
+| Image overrun / `esp_ota_write` error mid-stream | session torn down; ACK `OTA_ST_ERR` → host fails fast; current app intact |
 | SHA/magic verify fail at `END` | image rejected; current app intact |
 | 30 s idle | session aborted; current app intact |
 | Power loss mid‑write | inactive slot corrupt; device still boots current app |
@@ -285,3 +288,13 @@ if (len == sizeof(espnow_struct_ota_data)) { enqueueOtaPacket(data, len); return
 ---
 
 *Companion: `WDP_DESIGN.md` (mesh discovery — how a board advertises capabilities) and the WCB Wizard (`Wizard/app.js` `boardOtaSerial`/`boardOtaRelay`, `Wizard/flasher.js`).*
+
+---
+
+## Revision log
+
+Newest first. One row per change that altered what this document describes.
+
+| Date | Commit | Change | Why |
+|---|---|---|---|
+| 2026-08-06 | — | Target DATA ACK reports the session's real state: `OTA_ST_ERR` once a failed write (image overrun / `esp_ota_write` error / idle abort) has torn the session down, instead of `OTA_ST_OK`+`offset=0`. The Wizard's relay‑OTA loop fast‑fails on `status != 0`. | A false `OK`+`0` is indistinguishable from a stale duplicate to the host — it rewinds, resends from 0, is re‑answered `OK`+`0`, and stalls (looks like success, frozen bar). Parity with `navicore_ota.h`, which already carried the guard. |
