@@ -327,9 +327,26 @@ void processOtaLocalCommand(const String &args) {
 //  Target-side handlers (drive the SAME core above) + relay-side forward/ACK.
 // ════════════════════════════════════════════════════════════════════════════
 
+// esp_now_send() only reaches a REGISTERED peer. Normal unicasts register the target via
+// addActivePeer(); the OTA send paths did not — so a target (or relay) that wasn't already
+// mutually peered couldn't unicast the OTA ACK / frame, the send returned
+// ESP_ERR_ESPNOW_NOT_FOUND and was silently lost, and the Wizard saw "no response … via
+// relay". Register the peer on-demand (best-effort; the MAC is deterministic from the WCB
+// number) so relay OTA works even when the two boards weren't peered beforehand.
+static void otaEnsurePeer(uint8_t wcbNum) {
+  if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT) return;
+  const uint8_t *mac = WCBMacAddresses[wcbNum - 1];
+  if (esp_now_is_peer_exist(mac)) return;
+  esp_now_peer_info_t p = {};
+  memcpy(p.peer_addr, mac, 6);
+  p.channel = 0; p.encrypt = false;
+  esp_now_add_peer(&p);   // best-effort; if the peer table is truly full the send just fails as before
+}
+
 // Build + unicast an OTA_ACK ctrl packet back to the relay.
 static void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uint32_t ackedOffset) {
   if (relayWCB < 1 || relayWCB > MAX_WCB_COUNT) return;
+  otaEnsurePeer(relayWCB);   // the target may not be peered with a mgmt relay → register it so the ACK can actually unicast back
   espnow_struct_ota_ctrl ack;
   memset(&ack, 0, sizeof(ack));
   strncpy(ack.structPassword, espnowPassword, sizeof(ack.structPassword) - 1);
@@ -439,6 +456,7 @@ void processOtaRelayCommand(const String &args) {
     return;
   }
   const uint8_t *destMac = WCBMacAddresses[target - 1];
+  otaEnsurePeer(target);   // ensure the target is a registered ESP-NOW peer before forwarding any OTA frame
 
   if (sub == "BEGIN") {
     int p = r3.indexOf(',');
