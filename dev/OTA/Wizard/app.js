@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '05.22:33.R.AUG.2026';
+const UI_VERSION = '06.09:16.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1754,6 +1754,16 @@ async function boardOtaRelay(n) {
       // id no longer matches), so fail fast with a clear message instead of spinning.
       if (ack && ack.offset === 0 && peak > CHUNK) {
         throw new Error(`target lost the OTA session at ${peak} bytes (it likely timed out or rebooted) — retry the OTA`);
+      }
+      // The target flags a dead/torn-down session with OTA_ST_ERR (status != 0) — an
+      // image overrun, a flash-write error, or an idle-timeout abort. That session id
+      // can never accept another byte, so resending is futile: fail fast with the cause
+      // rather than stalling to the retry cap. (WCB firmware + navicore_ota.h both send
+      // this honest status; a live in-flight dup/gap still ACKs OK, so it can't misfire
+      // on normal loss-recovery. The collapse-to-0 check above wins for the nicer
+      // "lost at N bytes" message when progress had been made.)
+      if (ack && ack.status !== 0) {
+        throw new Error(`target rejected OTA data near ${offset} bytes (write error or lost session) — retry the OTA`);
       }
       if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
         if (++stalls > 60) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
