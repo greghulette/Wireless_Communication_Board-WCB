@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '05.01:29.R.AUG.2026';
+const UI_VERSION = '05.22:33.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -11831,6 +11831,7 @@ function parseWdpDump(raw) {
 const _WDP_CAP_BITS = [
   [0x0001, 'HCR'], [0x0002, 'MP3'], [0x0004, 'WLED'], [0x0008, 'Kyber'],
   [0x0010, 'Maestro-remote'], [0x0020, 'PWM'], [0x0040, 'Controller'], [0x0080, 'Maestro-host'],
+  [0x0100, 'DFPlayer'],
 ];
 function _wdpCapLabels(cap) {
   return _WDP_CAP_BITS.filter(([b]) => cap & b).map(([, n]) => n).join(', ');
