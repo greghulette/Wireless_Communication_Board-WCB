@@ -343,10 +343,23 @@ static void otaEnsurePeer(uint8_t wcbNum) {
   esp_now_add_peer(&p);   // best-effort; if the peer table is truly full the send just fails as before
 }
 
+// Register the peer if needed, unicast, and LOG on failure instead of silently dropping. The
+// one remaining hard case is a FULL 20-slot ESP-NOW peer table: otaEnsurePeer's add can't
+// succeed, esp_now_send returns ESP_ERR_ESPNOW_NOT_FOUND (12390/0x3066), and the frame would
+// vanish — surfacing it turns a silent "no response via relay" into a diagnosable line that
+// points at the real limit (clear a peer, or raise the cap). Used by BOTH OTA send legs.
+static void otaUnicast(uint8_t destWcb, const void *buf, size_t len, const char *label) {
+  if (destWcb < 1 || destWcb > MAX_WCB_COUNT) return;
+  otaEnsurePeer(destWcb);
+  esp_err_t r = esp_now_send(WCBMacAddresses[destWcb - 1], (const uint8_t *)buf, len);
+  if (r != ESP_OK)
+    Serial.printf("[OTA] %s -> WCB%u send failed rc=%d (ESP-NOW peer table full? cap 20)\n",
+                  label, destWcb, (int)r);
+}
+
 // Build + unicast an OTA_ACK ctrl packet back to the relay.
 static void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uint32_t ackedOffset) {
   if (relayWCB < 1 || relayWCB > MAX_WCB_COUNT) return;
-  otaEnsurePeer(relayWCB);   // the target may not be peered with a mgmt relay → register it so the ACK can actually unicast back
   espnow_struct_ota_ctrl ack;
   memset(&ack, 0, sizeof(ack));
   strncpy(ack.structPassword, espnowPassword, sizeof(ack.structPassword) - 1);
@@ -356,7 +369,7 @@ static void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uin
   ack.status      = status;
   ack.sessionId   = sessionId;
   ack.ackedOffset = ackedOffset;
-  esp_now_send(WCBMacAddresses[relayWCB - 1], (const uint8_t *)&ack, sizeof(ack));
+  otaUnicast(relayWCB, &ack, sizeof(ack), "ACK");   // ensures the peer, unicasts, logs a full-table drop
 }
 
 // Password + addressed-to-us gate shared by the target-side handlers.
@@ -455,9 +468,6 @@ void processOtaRelayCommand(const String &args) {
     Serial.printf("[OTA] relay: invalid target %u\n", target);
     return;
   }
-  const uint8_t *destMac = WCBMacAddresses[target - 1];
-  otaEnsurePeer(target);   // ensure the target is a registered ESP-NOW peer before forwarding any OTA frame
-
   if (sub == "BEGIN") {
     int p = r3.indexOf(',');
     uint32_t size   = (uint32_t)((p < 0 ? r3 : r3.substring(0, p)).toInt());
@@ -470,7 +480,7 @@ void processOtaRelayCommand(const String &args) {
     pkt.chipFamily = family;
     pkt.sessionId  = session;
     pkt.imageSize  = size;
-    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    otaUnicast(target, &pkt, sizeof(pkt), sub.c_str());
     return;
   }
 
@@ -491,7 +501,7 @@ void processOtaRelayCommand(const String &args) {
                                    (const unsigned char *)b64.c_str(), b64.length());
     if (rc != 0) { Serial.printf("[OTA] relay DATA base64 error %d\n", rc); return; }
     pkt.dataLen = (uint16_t)outLen;
-    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    otaUnicast(target, &pkt, sizeof(pkt), sub.c_str());
     return;
   }
 
@@ -502,7 +512,7 @@ void processOtaRelayCommand(const String &args) {
     pkt.targetWCB  = target;
     pkt.sourceWCB  = (uint8_t)WCB_Number;
     pkt.sessionId  = session;
-    esp_now_send(destMac, (const uint8_t *)&pkt, sizeof(pkt));
+    otaUnicast(target, &pkt, sizeof(pkt), sub.c_str());
     return;
   }
 
