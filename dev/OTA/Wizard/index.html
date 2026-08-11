@@ -752,12 +752,14 @@
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Variables</div>
         <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})">+ Add</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-var-refresh" onclick="refreshVariablesFromBoard({N})" title="Query the board for its live variables — shows persistent (saved, editable) and temporary (runtime, read-only) ones">↻ Refresh</button>
       </div>
       <table class="seq-table">
         <thead>
           <tr>
             <th style="width:150px">Name <span class="wiz-hint" data-tip="Variable name (1-15 chars, letters/digits/underscore, case-sensitive). Reference it with ;V commands or IF conditions inside stored sequences.">i</span></th>
-            <th style="width:150px">Value <span class="wiz-hint" data-tip="Integer value stored persistently on the board — survives reboots.">i</span></th>
+            <th style="width:120px">Value <span class="wiz-hint" data-tip="Signed 32-bit integer. Persistent variables are saved to the board (survive reboots); temporary ones are runtime-only.">i</span></th>
+            <th style="width:110px">Type <span class="wiz-hint" data-tip="Persistent = saved to the board's NVS and editable here. Temporary = runtime-only (created by ;V or a sequence); shown read-only after a Refresh.">i</span></th>
             <th style="width:80px">Actions</th>
           </tr>
         </thead>

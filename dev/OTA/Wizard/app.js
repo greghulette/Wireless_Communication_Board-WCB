@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '06.09:16.R.AUG.2026';
+const UI_VERSION = '11.17:33.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4266,6 +4266,12 @@ function getSequencesFromUI(n) {
 // Variable names: 1-15 chars, letters/digits/underscore, case-sensitive
 const VAR_NAME_RE = /^[A-Za-z0-9_]{1,15}$/;
 
+// Type badges (border + colored text on transparent — legible in light and dark).
+const VAR_BADGE = {
+  persist: `<span style="border:1px solid #3a9a5a;color:#3a9a5a;padding:0 6px;border-radius:8px;font-size:11px;white-space:nowrap">Persistent</span>`,
+  temp:    `<span style="border:1px solid #d08a30;color:#d08a30;padding:0 6px;border-radius:8px;font-size:11px;white-space:nowrap">Temporary</span>`,
+};
+
 // Send a single funcChar command to board n — direct, or via relay MGMT FRAG.
 // Returns true if the command was handed to a connection.
 async function sendVariableCommand(n, cmd) {
@@ -4305,6 +4311,7 @@ function appendVariableRow(n, name, value) {
       <input class="seq-key-input var-value-input" type="number" step="1" value="${escHtml(String(value))}"
              placeholder="0" spellcheck="false">
     </td>
+    <td class="seq-key-cell">${VAR_BADGE.persist}</td>
     <td class="seq-action-cell">
       <button class="btn btn-primary btn-sm" title="Save/Update Variable"
               onclick="updateVariable(${n},'${rowId}')" id="${rowId}-update">SAVE/UPDATE</button>
@@ -4325,6 +4332,9 @@ function updateVariableButtons(n) {
   document.querySelectorAll(`[id^="var-row-${n}-"] [title="Save/Update Variable"]`).forEach(btn => {
     btn.disabled = !anyConnected;
   });
+  // Refresh (live ?VAR,LIST) needs a connection too.
+  const refreshBtn = document.getElementById(`b${n}-var-refresh`);
+  if (refreshBtn) refreshBtn.disabled = !anyConnected;
 }
 
 async function updateVariable(n, rowId) {
@@ -4407,6 +4417,121 @@ async function removeVariableRow(n, rowId) {
     if (sent) showToast(`Variable "${name}" removed from WCB ${n}`, 'info');
   } catch (e) {
     termLog(remoteRelayForBoard[n] ?? n, `VAR,CLEAR error: ${e.message}`, 'err');
+  }
+}
+
+// ─── Live variable view (?VAR,LIST) ───────────────────────────────────
+// The config panel is fed by Pull Config / backup, which only carries PERSISTENT
+// variables. To also surface TEMPORARY (runtime, ;V) variables — and any persistent
+// var set on the board but not yet in the config — Refresh queries ?VAR,LIST live.
+// Persistent vars stay editable config rows; temporary (and live-only) vars render
+// read-only below them, cleared and rebuilt on each Refresh.
+
+// Parse ?VAR,LIST output lines: "  <name> = <int>  [persistent|volatile]".
+// Ignores the header / "N/100 used" footer / "(none)".
+function parseVarList(lines) {
+  const out = [];
+  const re = /^\s*([A-Za-z0-9_]{1,15})\s*=\s*(-?\d+)\s+\[(persistent|volatile)\]/;
+  for (const raw of (lines || [])) {
+    const m = String(raw).match(re);
+    if (m) out.push({ name: m[1], value: parseInt(m[2], 10), persist: m[3] === 'persistent' });
+  }
+  return out;
+}
+
+// Send ?VAR,LIST and collect the reply, direct OR via relay. Direct: raw serial
+// lines. Via relay: the target's output returns as [TERM:<wcb>]<line> on the relay
+// connection (the remote terminal is active for relay-managed boards). Resolves with
+// the (unwrapped) response lines; finishes early on the "N/100 used"/"(none)" footer.
+function collectVarList(n, timeoutMs = 3500) {
+  const relayN = remoteRelayForBoard[n];
+  const fc = boardConfigs[n]?.funcChar ?? '?';
+  return new Promise((resolve, reject) => {
+    let conn, extract, sendPromise;
+    if (relayN !== undefined) {
+      conn = boardConnections[relayN];
+      if (!conn?.isConnected()) { reject(new Error(`relay WCB ${relayN} not connected`)); return; }
+      const targetWCB = boardConfigs[n]?.wcbNumber || n;
+      const termRe = new RegExp(`^\\[TERM:${targetWCB}\\](.*)`);
+      extract = (line) => { const m = String(line).match(termRe); return m ? m[1] : null; };
+      sendPromise = sendVariableCommand(n, `${fc}VAR,LIST`);   // routed via relay MGMT FRAG
+    } else {
+      conn = boardConnections[n];
+      if (!conn?.isConnected()) { reject(new Error('board not connected')); return; }
+      extract = (line) => line;
+      sendPromise = conn.send(`${fc}VAR,LIST\r`);
+    }
+    const lines = [];
+    let timer, done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine);
+      resolve(lines);
+    };
+    const onLine = (line) => {
+      const inner = extract(line);
+      if (inner == null) return;   // relay: not a [TERM:<wcb>] line for our target
+      lines.push(inner);
+      if (/\d+\/\d+\s+used/.test(inner) || /\(none\)/.test(inner)) finish();
+    };
+    conn._dataCallbacks.push(onLine);
+    timer = setTimeout(finish, timeoutMs);
+    Promise.resolve(sendPromise).catch(finish);
+  });
+}
+
+// Read-only row for a variable that lives on the board but isn't an editable config
+// row — a temporary (runtime) var, or a persistent var not yet pulled into the config.
+function appendLiveVariableRow(n, name, value, persist) {
+  const tbody = document.getElementById(`b${n}-var-tbody`);
+  if (!tbody) return;
+  const tr = document.createElement('tr');
+  tr.className = 'var-row-live';
+  const note = persist ? 'on board — not in config' : 'runtime — not saved';
+  tr.innerHTML = `
+    <td class="seq-key-cell"><span style="opacity:.65">${escHtml(name)}</span></td>
+    <td class="seq-key-cell"><span style="opacity:.65">${escHtml(String(value))}</span></td>
+    <td class="seq-key-cell">${persist ? VAR_BADGE.persist : VAR_BADGE.temp}</td>
+    <td class="seq-action-cell"><span style="opacity:.55;font-size:11px">${note}</span></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+// Rebuild the read-only live rows from a ?VAR,LIST result. Editable config rows are
+// left untouched (so unsaved edits survive); any board var NOT already an editable
+// row is shown read-only with its real type.
+function renderLiveVariables(n, parsed) {
+  const tbody = document.getElementById(`b${n}-var-tbody`);
+  if (!tbody) return;
+  tbody.querySelectorAll('.var-row-live').forEach(r => r.remove());
+  const editableNames = new Set(
+    [...tbody.querySelectorAll('tr:not(.var-row-live) .var-name-input')]
+      .map(i => i.value.trim()).filter(Boolean)
+  );
+  for (const v of parsed) {
+    if (editableNames.has(v.name)) continue;   // already shown as an editable config row
+    appendLiveVariableRow(n, v.name, v.value, v.persist);
+  }
+}
+
+async function refreshVariablesFromBoard(n) {
+  const btn = document.getElementById(`b${n}-var-refresh`);
+  const directConnected = boardConnections[n]?.isConnected() ?? false;
+  const remoteConnected = remoteRelayForBoard[n] !== undefined;
+  if (!directConnected && !remoteConnected) { showToast('Board not connected', 'error'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '↻ …'; }
+  try {
+    const lines  = await collectVarList(n);
+    const parsed = parseVarList(lines);
+    renderLiveVariables(n, parsed);
+    const p = parsed.filter(v => v.persist).length;
+    const t = parsed.length - p;
+    showToast(`WCB ${n}: ${parsed.length} variable(s) on board — ${p} persistent, ${t} temporary`, 'info');
+  } catch (e) {
+    showToast(`Variable refresh failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
   }
 }
 
