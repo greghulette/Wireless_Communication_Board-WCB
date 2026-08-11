@@ -751,8 +751,9 @@
       <div class="subsection" style="--rail:#ff7ac6">
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Variables</div>
-        <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})">+ Add</button>
-        <button class="btn btn-ghost btn-sm" id="b{N}-var-refresh" onclick="refreshVariablesFromBoard({N})" title="Query the board for its live variables — shows persistent (saved, editable) and temporary (runtime, read-only) ones">↻ Refresh</button>
+        <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})" title="Add a persistent variable — saved to the board's NVS, survives reboots">+ Persistent</button>
+        <button class="btn btn-ghost btn-sm" onclick="addTemporaryVariableRow({N})" title="Add a temporary variable — runtime-only (set with ;V), not saved with the config, gone on reboot">+ Temporary</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-var-refresh" onclick="refreshVariablesFromBoard({N})" title="Query the board for its live variables — shows persistent (editable) and temporary (editable, runtime-only) ones">↻ Refresh</button>
       </div>
       <table class="seq-table">
         <thead>
