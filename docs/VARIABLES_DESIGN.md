@@ -7,9 +7,12 @@ sequences, at the serial terminal, and over ESP-NOW.
 
 ## 1. Variables
 
-- **Store:** NVS namespace `wcb_vars`, **RAM-mirrored** at boot. Reads (`IF`,
-  `?VAR,GET`) hit RAM (instant); writes (`;V`, `?VAR,CLEAR`) update RAM **and**
-  NVS.
+- **Store:** two kinds, one namespace. **Volatile** vars (`;V`, the default) live
+  in RAM only — no flash, gone on reboot. **Persistent** vars (`;VP`, `?VAR,SET`)
+  are RAM-mirrored and saved to NVS namespace `wcb_vars` (loaded into RAM at boot).
+  Reads (`IF`, `?VAR,GET`) always hit RAM (instant); a persistent write also commits
+  the NVS blob. A name is **one** variable — it's *either* volatile or persistent at
+  any moment, not two separate slots.
 - **Cap:** 100 variables (`WCB_MAX_VARIABLES`). Set #101 → error.
 - **Type:** signed 32-bit integer. "Boolean" is just `0` / non-zero — `true`/
   `false` are input sugar for `1`/`0`. No separate type is tracked.
@@ -22,32 +25,45 @@ sequences, at the serial terminal, and over ESP-NOW.
 
 ## 2. Commands
 
-### Set / mutate (runtime) — `;V`
-`;V,<name>,<value-or-verb>[,<amount>]`
+### Set / mutate (runtime) — `;V` (volatile) / `;VP` (persistent)
+`;V,<name>,<value-or-verb>[,<amount>]`  — volatile (default)
+`;VP,<name>,<value-or-verb>[,<amount>]` — persistent (saved to NVS)
 
 | Form | Effect |
 |------|--------|
-| `;V,name,<int>` | set to integer |
+| `;V,name,<int>` | set to integer (**volatile**) |
+| `;VP,name,<int>` | set + **persist** to NVS |
 | `;V,name,0` / `,1` | set boolean |
 | `;V,name,true` / `,false` | set 1 / 0 |
 | `;V,name,TOGGLE` | flip: non-zero → 0, 0 → 1 |
 | `;V,name,INC` / `;V,name,INC,<n>` | add n (default 1) |
 | `;V,name,DEC` / `;V,name,DEC,<n>` | subtract n (default 1) |
 
-`;V` is a `;` runtime command, so it works in sequences / serial / ESP-NOW and
-respects the `IF` gate (a gated `;V` is skipped).
+`;VP` accepts the same verbs. The comma after `V`/`VP` is **required** — the old
+no-comma `;Vname,value` shorthand was removed.
+
+**Persistence is a property of the variable, chosen at creation and never silently
+lost:**
+- `;V` on a **new** name → volatile; `;VP` (or `?VAR,SET`) on a new name → persistent.
+- `;VP` **promotes** an existing volatile var to persistent.
+- `;V` on an existing **persistent** var keeps it persistent (and persists the new
+  value) — it does **not** demote. Demoting persistent → volatile is deliberate:
+  `?VAR,CLEAR` then recreate with `;V`.
+
+Both are `;` runtime commands — they work in sequences / serial / ESP-NOW and
+respect the `IF` gate (a gated set is skipped).
 
 ### Manage (config) — `?VAR`
-- `?VAR,LIST` — list every variable and value
-- `?VAR,SET,<name>,<value>` — create/update with an **absolute** value
-  (int / `true` / `false`; no `TOGGLE`/`INC`/`DEC` — those are runtime `;V`).
-  Used by the Tools-page variable manager.
+- `?VAR,LIST` — list every variable, its value, and its `[volatile]`/`[persistent]` type
+- `?VAR,SET,<name>,<value>` — create/update a **persistent** variable with an
+  **absolute** value (int / `true` / `false`; no `TOGGLE`/`INC`/`DEC` — those are
+  runtime `;V`/`;VP`). Used by the Tools-page variable manager.
 - `?VAR,GET,<name>` — print one
 - `?VAR,CLEAR,<name>` — delete one
 - `?VAR,CLEAR,ALL` — delete all
 
-Note: there is no separate "declare" step — the first `;V,name,value` **or**
-`?VAR,SET,name,value` creates the variable.
+Note: there is no separate "declare" step — the first `;V` (volatile), `;VP`, or
+`?VAR,SET` (persistent) creates the variable.
 
 ### Conditional (runtime) — `IF`
 `IF,<condition>[,AND|OR,<condition> …]`
@@ -117,9 +133,11 @@ parseCommandsAndEnqueue / parseCommandGroups, while walking the tokens:
 
 ## 5. Backup
 
-`?backup` emits one `;V,<name>,<absolute-int>` line per variable, so variables
-round-trip through a backup/restore and survive a reflash (not just a reboot).
-Relative verbs (`TOGGLE`/`INC`/`DEC`) are never emitted — only absolute values.
+`?backup` emits one `?VAR,SET,<name>,<absolute-int>` config line per **persistent**
+variable, so persistent variables round-trip through a backup/restore and survive a
+reflash (not just a reboot). **Volatile** variables are RAM-only and are **not**
+backed up. Relative verbs (`TOGGLE`/`INC`/`DEC`) are never emitted — only absolute
+values.
 
 ---
 
@@ -137,7 +155,13 @@ Relative verbs (`TOGGLE`/`INC`/`DEC`) are never emitted — only absolute values
 
 - 100 int vars ≈ ~5 KB, sharing the single 20 KB NVS partition with all config.
   Fine today; gets dedicated space when/if the 8/16 MB repartition happens.
-- `;V` writes flash — don't put it inside a fast timer loop (flash wear).
+- **Flash wear:** volatile `;V` never writes flash — safe to drive from a fast timer
+  loop or a live feed at any rate. Only persistent writes (`;VP` / `?VAR,SET`) commit
+  the NVS blob, and each rewrites the *whole* variables blob, so keep a
+  rapidly-changing value **volatile** (don't `;VP` it). NVS wear-levels (~1–6 M blob
+  rewrites before the 20 KB partition wears), but a persistent value churned hundreds
+  of times a second can still wear it out in hours — which is exactly why volatile is
+  the default.
 - No nesting: `IF,a=1^IF,b=1^M23` does **not** mean "a AND b" (the first IF just
   gates the second IF). Use compound `IF,a=1,AND,b=1` instead.
 
@@ -147,8 +171,18 @@ Relative verbs (`TOGGLE`/`INC`/`DEC`) are never emitted — only absolute values
 
 | File | Change |
 |------|--------|
-| `WCB_Variables.h/.cpp` (new) | RAM+NVS store, `;V` / `?VAR` handlers, `IF` evaluator + `ifGateConsumeToken()` (the ONE shared gate implementation), name validation, backup emit (`?VAR,SET` form) |
-| `WCB.ino` | `loadVariables()` in setup; chain-local IF gating in `parseCommandsAndEnqueue` (via the shared helper); IF-in-`;w`-payload rejection in `processWCBMessage`; bare-IF safety drop in `handleSingleCommand`; `;V` case in the `;` dispatcher; `?VAR` case in `processLocalCommand`; backup emit call |
+| `WCB_Variables.h/.cpp` | RAM+NVS store with a volatile (`;V`, default) / persistent (`;VP`, `?VAR,SET`) split — `;VP` promotes, `;V` never demotes; `;V`/`;VP`/`?VAR` handlers, `IF` evaluator + `ifGateConsumeToken()` (the ONE shared gate implementation), name validation, backup emit (`?VAR,SET` form, persistent only) |
+| `WCB.ino` | `loadVariables()` in setup; chain-local IF gating in `parseCommandsAndEnqueue` (via the shared helper); IF-in-`;w`-payload rejection in `processWCBMessage`; bare-IF safety drop in `handleSingleCommand`; `;V`/`;VP` (V-prefixed) case in the `;` dispatcher; `?VAR` case in `processLocalCommand`; backup emit call |
 | `command_timer.cpp` | chain-local IF gating in `parseCommandGroups` (same shared helper); IF-as-timer-payload rejection; trimmed-token handling |
 | `WCB_Help.cpp` | `?VAR ?`, `;V`, `IF` help blocks + overview lines |
 | Wizard `app.js`/`index.html`/`parser.js` | Tools-page Variables manager; IF+command grouped on one editor line; `?VAR,SET` (and legacy `;V`) round-trips in backup parse/build |
+
+---
+
+## Revision log
+
+Newest first. One row per change that altered what this document describes.
+
+| Date | Commit | Change | Why |
+|---|---|---|---|
+| 2026-08-06 | — | Split variables into **volatile** (`;V`, now the default — RAM-only) and **persistent** (`;VP` / `?VAR,SET` — NVS). `;VP` promotes a volatile var; `;V` never demotes a persistent one. Dropped the no-comma `;Vname` shorthand; `?VAR,LIST` now shows the type. Also corrected §5 (backup emits `?VAR,SET`, not `;V`). | A `;V` in a fast loop rewrote the whole NVS blob on every value change — hundreds of writes/sec could wear out the shared 20 KB partition in hours. Making the churny default RAM-only protects the flash without the user having to know; persistence is now an explicit opt-in (`;VP`). |

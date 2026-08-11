@@ -166,7 +166,8 @@ static bool setVariableImpl(const String &name, int32_t value, bool persist) {
   return true;
 }
 
-// Persistent set (the ";V" path): RAM mirror + NVS.
+// Persistent set (?VAR,SET, backup restore, and the ;VP promote path): RAM mirror + NVS.
+// Promotes an existing volatile variable to persistent.
 bool setVariable(const String &name, int32_t value) {
   return setVariableImpl(name, value, true);
 }
@@ -199,17 +200,32 @@ void clearAllVariables() {
   saveVarsToNVS();
 }
 
-// ---- ;V,<name>,<value|verb>[,<amount>] ----------------------------------
+// ---- ;V,<name>,<value|verb>[,<amount>]  /  ;VP,<name>,...  ---------------
+//  ;V  = VOLATILE (RAM-only, the default): no flash write on value churn, gone on
+//        reboot. Safe to hammer from a sequence/feed at any rate.
+//  ;VP = PERSISTENT (saved to NVS): survives reboot, in ?backup.
+//  The comma after V / VP is REQUIRED — the old no-comma ";Vname" shorthand is gone.
 void processSetVariable(const String &message) {
-  String body = message; body.trim();
-  // strip leading "V" / "V,"
-  if (body.length() && (body[0] == 'V' || body[0] == 'v'))
-    body = (body.length() > 1 && body[1] == ',') ? body.substring(2) : body.substring(1);
+  String m = message; m.trim();
+
+  // Persistence comes from the COMMAND, not a field: "VP," -> persistent, "V," -> volatile.
+  bool cmdPersist;
+  String body;
+  if (m.length() >= 3 && (m[1] == 'P' || m[1] == 'p') && m[2] == ',') {
+    cmdPersist = true;  body = m.substring(3);
+  } else if (m.length() >= 2 && m[1] == ',') {
+    cmdPersist = false; body = m.substring(2);
+  } else {
+    Serial.printf("[VAR] usage: %cV,<name>,<value>  (volatile)  |  %cVP,<name>,<value>  (persistent)\n",
+                  CommandCharacter, CommandCharacter);
+    return;
+  }
   body.trim();
 
   String name = vField(body, 0);
   String f1   = vField(body, 1);
   String f2   = vField(body, 2);
+  const char *verb = cmdPersist ? "VP" : "V";
 
   if (!isValidVariableName(name)) {
     Serial.printf("[VAR] Invalid name '%s' — 1-%d chars, letters/digits/underscore only\n",
@@ -217,8 +233,8 @@ void processSetVariable(const String &message) {
     return;
   }
   if (f1.length() == 0) {
-    Serial.printf("[VAR] %cV needs a value: %cV,%s,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>\n",
-                  CommandCharacter, CommandCharacter, name.c_str());
+    Serial.printf("[VAR] %c%s needs a value: %c%s,%s,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>\n",
+                  CommandCharacter, verb, CommandCharacter, verb, name.c_str());
     return;
   }
 
@@ -236,8 +252,16 @@ void processSetVariable(const String &message) {
     newVal = (int32_t)f1.toInt();   // integer literal (non-numeric -> 0)
   }
 
-  if (setVariable(name, newVal))
-    Serial.printf("[VAR] %s = %ld\n", name.c_str(), (long)newVal);
+  // Persistence rule: ;VP forces persistent (creating OR promoting a volatile var).
+  // ;V keeps an EXISTING variable's current persistence and makes NEW ones volatile —
+  // so a plain ;V never silently drops a persistent variable's NVS backing, and the
+  // unaware "counter in a tight loop" case stays RAM-only and never wears the flash.
+  int slot = findVarSlot(name);
+  bool effPersist = cmdPersist ? true : (slot >= 0 ? vars[slot].persist : false);
+
+  if (setVariableImpl(name, newVal, effPersist))
+    Serial.printf("[VAR] %s = %ld  [%s]\n", name.c_str(), (long)newVal,
+                  effPersist ? "persistent" : "volatile");
 }
 
 // ---- ?VAR,...  (args = text after "VAR") --------------------------------
@@ -245,7 +269,8 @@ static void listVariables() {
   Serial.println("---- Variables ----");
   if (varCount == 0) { Serial.println("  (none)"); return; }
   for (int i = 0; i < WCB_MAX_VARIABLES; i++)
-    if (vars[i].used) Serial.printf("  %s = %ld\n", vars[i].name, (long)vars[i].value);
+    if (vars[i].used) Serial.printf("  %s = %ld  [%s]\n", vars[i].name, (long)vars[i].value,
+                                    vars[i].persist ? "persistent" : "volatile");
   Serial.printf("  %d/%d used\n", varCount, WCB_MAX_VARIABLES);
 }
 
@@ -276,7 +301,7 @@ void processVarConfig(const String &args) {
     }
     String vU = vStr; vU.toUpperCase();
     int32_t v = (vU == "TRUE") ? 1 : (vU == "FALSE") ? 0 : (int32_t)vStr.toInt();
-    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld\n", name.c_str(), (long)v);
+    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
     return;
   }
 

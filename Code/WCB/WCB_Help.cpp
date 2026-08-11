@@ -700,25 +700,29 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  usable in stored sequences to gate commands. Up to 100 vars."));
         Serial.println(F("  Names: 1-15 chars, case-sensitive, letters/digits/underscore."));
         Serial.println(F("  Undefined variables read as 0. Per-board (each board's own NVS)."));
-        Serial.println(F("\nSet / mutate (runtime) -- ;V:"));
-        Serial.println(F("  ;V,<name>,<int>       Set to an integer"));
+        Serial.println(F("\nSet / mutate (runtime) -- ;V (volatile) / ;VP (persistent):"));
+        Serial.println(F("  ;V,<name>,<int>       Set (VOLATILE: RAM-only, no flash wear)"));
+        Serial.println(F("  ;VP,<name>,<int>      Set + persist to NVS (survives reboot)"));
         Serial.println(F("  ;V,<name>,true|false  Set to 1 / 0"));
         Serial.println(F("  ;V,<name>,TOGGLE      Flip: non-zero -> 0, 0 -> 1"));
         Serial.println(F("  ;V,<name>,INC[,n]     Add n (default 1)"));
         Serial.println(F("  ;V,<name>,DEC[,n]     Subtract n (default 1)"));
+        Serial.println(F("  (;VP takes the same verbs. Default is VOLATILE; ;VP promotes"));
+        Serial.println(F("   a volatile var, ;V never demotes a persistent one.)"));
         Serial.println(F("\nManage -- ?VAR:"));
         Serial.println(F("  ?VAR,LIST             List all variables and values"));
         Serial.println(F("  ?VAR,SET,<name>,<v>   Create/update a variable (absolute value)"));
         Serial.println(F("  ?VAR,GET,<name>       Show one variable"));
         Serial.println(F("  ?VAR,CLEAR,<name>     Delete one variable"));
         Serial.println(F("  ?VAR,CLEAR,ALL        Delete all variables"));
-        Serial.println(F("  (creating: ?VAR,SET or ;V both create on first use)"));
+        Serial.println(F("  (?VAR,SET creates/updates as PERSISTENT, same as ;VP)"));
         Serial.println(F("\nConditional -- IF (gates the NEXT delimited command):"));
         Serial.println(F("  IF,<name><op><int>             op = =  !=  <  >  <=  >="));
         Serial.println(F("  IF,<cond>,AND|OR,<cond>,...    left-to-right, no parentheses"));
         Serial.println(F("\nExamples:"));
-        Serial.println(F("  ;V,domeanimations,0            - disable a flag"));
-        Serial.println(F("  ;V,volume,INC,5                - volume += 5"));
+        Serial.println(F("  ;V,domeanimations,0            - disable a flag (volatile)"));
+        Serial.println(F("  ;V,volume,INC,5                - volume += 5 (volatile)"));
+        Serial.println(F("  ;VP,startupmode,2              - persist a setting to NVS"));
         Serial.println(F("  IF,domeanimations=1^;M11       - run M1 sub1 only if flag is 1"));
         Serial.println(F("  IF,mode>2,AND,armed=1^;PP100   - compound condition"));
         Serial.println(F("  IF,flag=1^;t500^;M2,goHome     - if flag, wait 500ms, then home"));
@@ -731,7 +735,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Chained IFs AND together (IF,a=1^IF,b=2^cmd); compound IF is clearer."));
         Serial.println(F("  - IF can't ride inside ;t or ;w payloads — gate the whole"));
         Serial.println(F("    token instead: IF,cond^;t500^cmd / IF,cond^;w2,cmd"));
-        Serial.println(F("  - Variables are saved to NVS and included in ?backup."));
+        Serial.println(F("  - Only PERSISTENT vars (;VP / ?VAR,SET) are saved to NVS &"));
+        Serial.println(F("    in ?backup. Volatile (;V) vars are RAM-only -- use them for"));
+        Serial.println(F("    fast-changing values so you don't wear out the flash."));
 
     // ================================================================
     } else if (c == "SEQ") {
@@ -1029,8 +1035,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?SEQ,LIST       List all saved sequences"));
         Serial.println(F("    ;Ckey           Run a saved sequence"));
         Serial.println(F("\n  VARIABLES & LOGIC:"));
-        Serial.println(F("    ?VAR            Manage persistent variables (LIST/GET/CLEAR)"));
-        Serial.println(F("    ;V,name,value   Set/toggle/inc/dec a variable"));
+        Serial.println(F("    ?VAR            Manage variables (LIST/SET/GET/CLEAR)"));
+        Serial.println(F("    ;V / ;VP        Set a variable (volatile / persistent)"));
         Serial.println(F("    IF,name=value   Gate the next command on variable state"));
         Serial.println(F("\n  ROUTING COMMANDS:"));
         Serial.println(F("    ;Sx,msg         Send msg to serial port x"));
