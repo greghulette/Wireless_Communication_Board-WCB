@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '11.18:49.R.AUG.2026';
+const UI_VERSION = '11.19:03.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4583,22 +4583,42 @@ function appendLiveVariableRow(n, name, value, persist) {
   tbody.appendChild(tr);
 }
 
-// Rebuild the read-only live rows from a ?VAR,LIST result. Editable config rows are
-// left untouched (so unsaved edits survive); any board var NOT already an editable
-// row is shown read-only with its real type.
+// Reconcile the panel with a ?VAR,LIST result. For a board var that already has an
+// editable row, refresh that row's DISPLAYED value to the live value (Refresh = show
+// what's actually on the board) — but never yank the value out from under an active
+// edit. For a persistent editable row, also sync the in-memory config + baseline so
+// the display, the push baseline, and the board all agree (a later Push won't revert
+// the value you just refreshed). Any board var without an editable row is added below:
+// persistent → read-only, temporary → editable (SET → ;V). Prior live rows are rebuilt.
 function renderLiveVariables(n, parsed) {
   const tbody = document.getElementById(`b${n}-var-tbody`);
   if (!tbody) return;
   tbody.querySelectorAll('.var-row-live').forEach(r => r.remove());
-  const editableNames = new Set(
-    [...tbody.querySelectorAll('tr:not(.var-row-live) .var-name-input')]
-      .map(i => i.value.trim()).filter(Boolean)
-  );
+  const editableByName = new Map();
+  for (const nameInput of tbody.querySelectorAll('tr:not(.var-row-live) .var-name-input')) {
+    const nm = nameInput.value.trim();
+    if (nm) editableByName.set(nm, nameInput.closest('tr'));
+  }
   for (const v of parsed) {
-    if (editableNames.has(v.name)) continue;   // already shown as an editable row
+    const row = editableByName.get(v.name);
+    if (row) {
+      const valInput = row.querySelector('.var-value-input');
+      if (valInput && valInput !== document.activeElement) valInput.value = String(v.value);
+      // Persistent editable rows are config — reconcile config + baseline to the board.
+      if (row.dataset.varType !== 'temporary' && v.persist) {
+        for (const store of [boardConfigs[n], boardBaselines[n]]) {
+          if (!store) continue;
+          if (!store.variables) store.variables = [];
+          const ex = store.variables.find(x => x.name === v.name);
+          if (ex) ex.value = v.value; else store.variables.push({ name: v.name, value: v.value });
+        }
+      }
+      continue;
+    }
     if (v.persist) appendLiveVariableRow(n, v.name, v.value, true);  // read-only (on board, not in config)
     else           appendTempVariableRow(n, v.name, v.value, true);  // editable temporary (SET → ;V)
   }
+  updateActionSummary(n);   // keep the action-bar summary in sync after a reconcile
 }
 
 async function refreshVariablesFromBoard(n) {
