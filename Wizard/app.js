@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '11.17:33.R.AUG.2026';
+const UI_VERSION = '11.18:49.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4293,6 +4293,91 @@ async function sendVariableCommand(n, cmd) {
 }
 
 function addVariableRow(n) { appendVariableRow(n, '', 0); }
+function addTemporaryVariableRow(n) { appendTempVariableRow(n, '', 0, false); }
+
+// Editable TEMPORARY (volatile) variable row — SET sends ";V,name,value" (cmdChar),
+// which updates the board's RAM value WITHOUT persisting it or touching the config.
+// Used by "+ Temporary" (live=false, name editable) and by Refresh for each volatile
+// var on the board (live=true, name read-only, cleared/rebuilt on the next Refresh).
+function appendTempVariableRow(n, name, value, live = false) {
+  const tbody = document.getElementById(`b${n}-var-tbody`);
+  if (!tbody) return;
+  const rowId = `var-row-${n}-${++_rowIdCounter}`;
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.dataset.varType = 'temporary';
+  if (live) tr.className = 'var-row-live';
+  tr.innerHTML = `
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-name-input" type="text" value="${escHtml(name)}"
+             data-original-name="${escHtml(name)}" ${live ? 'readonly style="opacity:.7"' : 'placeholder="VarName"'}
+             spellcheck="false" maxlength="15">
+    </td>
+    <td class="seq-key-cell">
+      <input class="seq-key-input var-value-input" type="number" step="1" value="${escHtml(String(value))}"
+             placeholder="0" spellcheck="false">
+    </td>
+    <td class="seq-key-cell">${VAR_BADGE.temp}</td>
+    <td class="seq-action-cell">
+      <button class="btn btn-primary btn-sm" title="Save/Update Variable"
+              onclick="updateTempVariable(${n},'${rowId}')" id="${rowId}-update">SET</button>
+      <button class="btn btn-danger btn-sm" title="Remove Variable"
+              onclick="clearVariableRow(${n},'${rowId}')">${live ? 'CLEAR' : 'REMOVE'}</button>
+    </td>
+  `;
+  tbody.appendChild(tr);
+  updateVariableButtons(n);
+}
+
+// SET on a temporary row → ";V,name,value" (volatile). Never touches config/baseline —
+// it's runtime state, so it won't survive a reboot or appear in a config pull.
+async function updateTempVariable(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const name = row.querySelector('.var-name-input')?.value?.trim();
+  if (!name) { showToast('Variable name is empty', 'error'); return; }
+  if (!VAR_NAME_RE.test(name)) {
+    showToast('Invalid variable name — 1-15 chars, letters/digits/underscore only', 'error');
+    return;
+  }
+  const value = parseInt(row.querySelector('.var-value-input')?.value, 10);
+  if (!Number.isInteger(value)) { showToast('Variable value must be an integer', 'error'); return; }
+  const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
+  const btn = document.getElementById(`${rowId}-update`);
+  if (btn) btn.disabled = true;
+  try {
+    const sent = await sendVariableCommand(n, `${cmdChar}V,${name},${value}`);
+    if (!sent) { showToast('Board not connected', 'error'); return; }
+    const nameInput = row.querySelector('.var-name-input');
+    if (nameInput) nameInput.dataset.originalName = name;   // lock the name for a later CLEAR/Refresh pairing
+    showToast(`Temporary "${name}" set to ${value} on WCB ${n} (runtime only — not saved)`, 'info');
+  } catch (e) {
+    showToast(`Set failed: ${e.message}`, 'error');
+    termLog(remoteRelayForBoard[n] ?? n, `;V error: ${e.message}`, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+    updateVariableButtons(n);
+  }
+}
+
+// Remove a temporary/live row from the panel and clear it on the board. ?VAR,CLEAR
+// deletes any variable (persistent OR volatile) from the board. Config rows use
+// removeVariableRow() instead (which also prunes the in-memory config for pushes).
+async function clearVariableRow(n, rowId) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  const nameInput = row.querySelector('.var-name-input');
+  const name = (nameInput?.dataset?.originalName || nameInput?.value || '').trim();
+  row.remove();
+  if (!name) return;   // never set — nothing on the board
+  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  try {
+    const sent = await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${name}`);
+    if (sent) showToast(`Variable "${name}" cleared on WCB ${n}`, 'info');
+  } catch (e) {
+    termLog(remoteRelayForBoard[n] ?? n, `VAR,CLEAR error: ${e.message}`, 'err');
+  }
+}
 
 function appendVariableRow(n, name, value) {
   const tbody = document.getElementById(`b${n}-var-tbody`);
@@ -4510,8 +4595,9 @@ function renderLiveVariables(n, parsed) {
       .map(i => i.value.trim()).filter(Boolean)
   );
   for (const v of parsed) {
-    if (editableNames.has(v.name)) continue;   // already shown as an editable config row
-    appendLiveVariableRow(n, v.name, v.value, v.persist);
+    if (editableNames.has(v.name)) continue;   // already shown as an editable row
+    if (v.persist) appendLiveVariableRow(n, v.name, v.value, true);  // read-only (on board, not in config)
+    else           appendTempVariableRow(n, v.name, v.value, true);  // editable temporary (SET → ;V)
   }
 }
 
