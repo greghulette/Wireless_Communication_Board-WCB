@@ -259,7 +259,14 @@ void processSetVariable(const String &message) {
   int slot = findVarSlot(name);
   bool effPersist = cmdPersist ? true : (slot >= 0 ? vars[slot].persist : false);
 
-  if (setVariableImpl(name, newVal, effPersist))
+  // Only ECHO when the set actually changes something (new var, new value, or a
+  // volatile→persistent promote). A no-op set — same value at the same persistence,
+  // e.g. a controller (NaviCore) re-broadcasting an unchanged ;V,MODE,1 every 60 s —
+  // is silenced here just as it is skipped for the NVS write, so it can't flood the
+  // serial. NB: this echo is NOT gated by any debug flag; it's a plain set confirmation.
+  bool changed = (slot < 0) || vars[slot].value != newVal || vars[slot].persist != effPersist;
+
+  if (setVariableImpl(name, newVal, effPersist) && changed)
     Serial.printf("[VAR] %s = %ld  [%s]\n", name.c_str(), (long)newVal,
                   effPersist ? "persistent" : "volatile");
 }
@@ -301,7 +308,11 @@ void processVarConfig(const String &args) {
     }
     String vU = vStr; vU.toUpperCase();
     int32_t v = (vU == "TRUE") ? 1 : (vU == "FALSE") ? 0 : (int32_t)vStr.toInt();
-    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
+    // Echo only a real change (same no-op suppression as the ;V path, so a repeated
+    // ?VAR,SET,MODE,1 doesn't spam the serial). ?VAR,SET always creates persistent.
+    int sslot = findVarSlot(name);
+    bool schanged = (sslot < 0) || vars[sslot].value != v || !vars[sslot].persist;
+    if (setVariable(name, v) && schanged) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
     return;
   }
 
