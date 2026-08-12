@@ -789,7 +789,7 @@ void printCommandHelp(const String &cmd) {
     } else if (c == "STATS") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
-        Serial.println(F("\nUsage: ?STATS  /  ?STATS,RESET"));
+        Serial.println(F("\nUsage: ?STATS  /  ?STATS,RESET  /  ?STATS,RPT,..."));
         Serial.println(F("\nDescription:"));
         Serial.println(F("  Displays ESP-NOW transmission statistics since last reboot."));
         Serial.println(F("  Shows counts for command messages, PWM passthrough, and raw"));
@@ -798,6 +798,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nCommands:"));
         Serial.println(F("  (none)            Display all current statistics"));
         Serial.println(F("  RESET             Reset all counters to zero"));
+        Serial.println(F("  RPT,<fields>      Store a report from ANOTHER node (see below)"));
         Serial.println(F("\nOutput includes:"));
         Serial.println(F("  - Unicast command attempts, delivered, failed"));
         Serial.println(F("  - Delivery success rate percentage"));
@@ -805,11 +806,21 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Raw Kyber data counts (if used)"));
         Serial.println(F("  - Per-board ETM stats when ETM is enabled"));
         Serial.println(F("  - Board online/offline status with last seen time"));
+        Serial.println(F("  - Rows other nodes reported about THEMSELVES (?STATS,RPT)"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?STATS             - Show statistics"));
         Serial.println(F("  ?STATS,RESET       - Reset all counters"));
+        Serial.println(F("\nReceiving reports from other nodes:"));
+        Serial.println(F("  ?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>"));
+        Serial.println(F("  A node (e.g. NaviCore) sends this to report ITS OWN counters."));
+        Serial.println(F("  Stored here and listed under 'Reported by Other Nodes'."));
+        Serial.println(F("  <from> is in the payload because a '?' command carries no sender id."));
+        Serial.println(F("  All 8 fields are required — a short report is dropped, not stored."));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Statistics reset automatically on reboot"));
+        Serial.println(F("  - Reported rows are RAM-only; ?STATS,RESET clears them too"));
+        Serial.println(F("  - A '?' command is handled locally: a report is never re-broadcast"));
+        Serial.println(F("    and never written to this board's serial ports"));
         Serial.println(F("  - Use ?DEBUG,ETM,ON for detailed per-packet logging"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?STATS         - Show stats"));

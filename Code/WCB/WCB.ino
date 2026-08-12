@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_120939RAUG2026                                  *****////
+///*****                                          Version 6.2.0_121535RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_120939RAUG2026";
+String SoftwareVersion = "6.2.0_121535RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -512,6 +512,29 @@ unsigned long etmStatsSent[MAX_WCB_COUNT]    = {0};
 unsigned long etmStatsAckd[MAX_WCB_COUNT]    = {0};
 unsigned long etmStatsRetries[MAX_WCB_COUNT] = {0};
 unsigned long etmStatsFailed[MAX_WCB_COUNT]  = {0};
+
+// ── Reported stats (?STATS,RPT) ─────────────────────────────────────────────
+// Delivery counters OTHER nodes report about THEMSELVES. Each node measures its
+// own links and pushes its own row here; this board never computes them and
+// never forwards them on. Indexed by the reporting node's id - 1.
+//
+// Deliberately arrives as a LOCAL "?" command, not a ";" one: "?" is handled by
+// processLocalCommand and returns (WCB.ino ≈3964), so a report can never fall
+// through to processBroadcastCommand and get sprayed out this board's serial
+// ports or re-broadcast to the mesh. A ";" verb would have to be excluded from
+// those paths by hand; "?" is that exclusion by construction.
+//
+// RAM-only and never persisted — a reboot clears them, which is intended: these
+// describe the reporters' current session, and a stale row surviving a reboot
+// would read as live data. `used` distinguishes "reported zero" from "never
+// reported"; lastMs ages a row so a dead reporter is visibly stale, not silently
+// frozen at its last good numbers.
+struct ReportedStats {
+  bool          used;
+  unsigned long sent, ackd, retries, failed, noSlot, bcast, recv;
+  unsigned long lastMs;      // millis() when this row last updated
+};
+ReportedStats reportedStats[MAX_WCB_COUNT] = {};
 
 // ETM - Duplicate detection. A per-sender RING of recently-seen seqs, not a single
 // slot: retries reuse the original seq and can arrive AFTER a newer seq from the
@@ -1653,8 +1676,75 @@ String buildStatsString() {
     }
     out += "--------------------------------------------------------\n";
   }
+  // Rows other nodes reported about THEMSELVES (?STATS,RPT). Kept visually apart
+  // from this board's own numbers above — they are measured elsewhere, by a node
+  // that may be reporting a totally different view of the same link, and reading
+  // them as ours would be badly misleading.
+  {
+    bool any = false;
+    for (int b = 0; b < MAX_WCB_COUNT; b++) if (reportedStats[b].used) { any = true; break; }
+    if (any) {
+      out += "\n------------- Reported by Other Nodes -------------\n";
+      for (int b = 0; b < MAX_WCB_COUNT; b++) {
+        const ReportedStats& r = reportedStats[b];
+        if (!r.used) continue;
+        unsigned long ageS = (millis() - r.lastMs) / 1000;
+        snprintf(buf, sizeof(buf),
+                 "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, NoSlot: %lu, "
+                 "Bcast: %lu, Recv: %lu  (%lus ago)\n",
+                 b + 1, r.sent, r.ackd, r.retries, r.failed, r.noSlot, r.bcast, r.recv, ageS);
+        out += buf;
+      }
+      out += "---------------------------------------------------\n";
+    }
+  }
   out += "--- End of ESP-NOW Statistics ---\n";
   return out;
+}
+
+// Parse and store one "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>"
+// report. `rest` is everything after "RPT", i.e. starting at the comma before <from>.
+//
+// The reporter's id travels IN THE PAYLOAD because processLocalCommand() takes no
+// sourceID — "?" commands are dispatched without it (WCB.ino ≈3965). Threading it
+// through would touch every local command; one field costs nothing.
+//
+// Strict: a row is stored only if ALL eight fields are present. A short report is
+// dropped whole rather than written partially, so a truncated packet can never
+// leave a row that looks like real data with zeros in the missing columns.
+void storeReportedStats(const String& rest) {
+  unsigned long v[8] = {0};
+  int found = 0, start = 0;
+  // rest starts with the comma before <from>; skip it, then split on commas.
+  if (rest.length() && rest[0] == ',') start = 1;
+  for (int i = 0; i < 8 && start <= (int)rest.length(); i++) {
+    int c = rest.indexOf(',', start);
+    String f = (c < 0) ? rest.substring(start) : rest.substring(start, c);
+    f.trim();
+    if (!f.length()) break;
+    v[i] = (unsigned long)f.toInt();
+    found++;
+    if (c < 0) break;
+    start = c + 1;
+  }
+  if (found < 8) {
+    Serial.printf("[STATS] RPT ignored — need 8 fields (from,sent,ackd,retries,failed,noSlot,bcast,recv), got %d\n",
+                  found);
+    return;
+  }
+  int from = (int)v[0];
+  if (from < 1 || from > MAX_WCB_COUNT) {
+    Serial.printf("[STATS] RPT ignored — reporter id %d out of range (1-%d)\n", from, MAX_WCB_COUNT);
+    return;
+  }
+  ReportedStats& r = reportedStats[from - 1];
+  r.used = true;
+  r.sent = v[1]; r.ackd = v[2]; r.retries = v[3]; r.failed = v[4];
+  r.noSlot = v[5]; r.bcast = v[6]; r.recv = v[7];
+  r.lastMs = millis();
+  if (debugEnabled)
+    Serial.printf("[STATS] RPT from WCB%d: sent=%lu ackd=%lu retries=%lu failed=%lu noSlot=%lu bcast=%lu recv=%lu\n",
+                  from, r.sent, r.ackd, r.retries, r.failed, r.noSlot, r.bcast, r.recv);
 }
 
 // Build ETM characterization results as a String (used by printETMCharResults and relay response)
@@ -4562,10 +4652,15 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?STATS,RESET or ?STATS ---
+    // --- ?STATS,RESET | ?STATS,RPT,... | ?STATS ---
     if (rootUpper == "STATS") {
         if (argsUpper == "RESET") {
             resetESPNowStats();
+        } else if (argsUpper.startsWith("RPT")) {
+            // A peer reporting ITS OWN delivery counters. Store only — never
+            // echo, never forward: this arrives every 30s from every reporting
+            // node, and printing it would bury the console. ?STATS shows it.
+            storeReportedStats(args.substring(3));   // strip "RPT", keep the leading comma
         } else {
             printESPNowStats();
         }
@@ -4926,6 +5021,11 @@ void resetESPNowStats() {
         etmStatsAckd[b] = 0;
         etmStatsRetries[b] = 0;
         etmStatsFailed[b] = 0;
+        // Clear the reported rows too: ?STATS,RESET means "the numbers on this
+        // screen start from now", and leaving another node's last report behind
+        // next to freshly-zeroed local counters invites reading them together.
+        // Each reporter re-populates its row on its next push.
+        reportedStats[b] = ReportedStats{};
     }
     Serial.println("ESP-NOW statistics reset.");
 }
