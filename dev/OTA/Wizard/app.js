@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '11.19:03.R.AUG.2026';
+const UI_VERSION = '12.09:47.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1496,6 +1496,13 @@ function _u8ToBase64(u8) {
 
 // Adaptive OTA entry point: stream over USB serial if the board is directly
 // connected, or wirelessly over ESP-NOW via its relay if it's remote.
+// Format an elapsed firmware-update duration (ms): "12.3s" under a minute, else "M:SS".
+function _fmtDur(ms) {
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+}
+
 function boardOta(n) {
   if (remoteRelayForBoard[n]) return boardOtaRelay(n);
   return boardOtaSerial(n);
@@ -1530,6 +1537,7 @@ async function boardOtaSerial(n) {
     // _otaInProgress-gated pull) won't inject ?WDP,DUMP into the transfer — doubly
     // important now that the transfer runs at a raised baud. Mirrors the relay path.
     _otaInProgress.add(n);
+    const _t0 = performance.now();
     setFlashStatus(n, 'Reading board…');
     termLog(n, '[OTA] starting OTA over USB serial…', 'sys');
 
@@ -1616,7 +1624,7 @@ async function boardOtaSerial(n) {
       offset = cursor;                       // ACK: advance to the board's confirmed cursor
       if (offset > peak) peak = offset;
       updateFlashBar(n, offset, total);
-      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
+      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
     }
 
     // 5) END — board verifies (SHA) + sets boot partition + reboots.
@@ -1638,9 +1646,10 @@ async function boardOtaSerial(n) {
     // in the UI. Set _rebootManaged synchronously (NO await before it) so
     // _startReading can't race its own reconnect if the port does drop.
     conn._rebootManaged = true;
-    termLog(n, '[OTA] ✅ verified — board rebooting into new firmware', 'sys');
+    const _el = _fmtDur(performance.now() - _t0);
+    termLog(n, `[OTA] ✅ verified in ${_el} — board rebooting into new firmware`, 'sys');
     setFlashStatus(n, 'Rebooting…');
-    showToast(`WCB ${n}: OTA complete — rebooting into new firmware`, 'success');
+    showToast(`WCB ${n}: OTA complete in ${_el} — rebooting`, 'success');
 
     await conn.closeForReconnect();   // clean teardown so reconnect() reopens fresh
     updateConnectionUI(n, false);
@@ -1725,6 +1734,7 @@ async function boardOtaRelay(n) {
     // but not guaranteed to be.
     _otaInProgress.add(n);
     if (targetWcb !== n) _otaInProgress.add(targetWcb);
+    const _t0 = performance.now();
     if (btn) { btn.disabled = true; btn.textContent = 'OTA…'; }
     setFlashUI(n, true);
     setFlashStatus(n, `Loading ${binaryType} firmware…`);
@@ -1781,7 +1791,7 @@ async function boardOtaRelay(n) {
       offset = ack.offset;                       // advance to the target's confirmed cursor
       if (offset > peak) peak = offset;
       updateFlashBar(n, offset, total);
-      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}%`);
+      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
     }
 
     // END — target verifies (SHA) + switches boot + reboots.
@@ -1789,9 +1799,10 @@ async function boardOtaRelay(n) {
     const endAck = await _otaRelayAwaitAck(relayConn, cmd(`END,${targetWcb},${session}`), targetWcb, session, 12000);
     if (!endAck || endAck.status !== 0) throw new Error('OTA verify/finalize failed on the target');
 
-    termLog(n, `[OTA] ✅ WCB${targetWcb} verified — rebooting into new firmware`, 'sys');
+    const _el = _fmtDur(performance.now() - _t0);
+    termLog(n, `[OTA] ✅ WCB${targetWcb} verified in ${_el} — rebooting into new firmware`, 'sys');
     setFlashStatus(n, 'Rebooting…');
-    showToast(`WCB ${targetWcb}: wireless OTA complete — rebooting`, 'success');
+    showToast(`WCB ${targetWcb}: wireless OTA complete in ${_el} — rebooting`, 'success');
 
     // The target reboots into the new image; its RTERM session state is volatile
     // and lost across the reboot. We can't rely on the firmware boot-announce
