@@ -4,6 +4,7 @@
 
 extern char        LocalFunctionIdentifier;
 extern char        CommandCharacter;
+extern bool        debugEnabled;   // ?DEBUG,ON — gates the runtime ;V set-confirmation echo
 
 // Dedicated NVS handle for variables. Using our OWN Preferences object (rather
 // than the shared global) means our begin()/end() can never collide with a
@@ -259,14 +260,12 @@ void processSetVariable(const String &message) {
   int slot = findVarSlot(name);
   bool effPersist = cmdPersist ? true : (slot >= 0 ? vars[slot].persist : false);
 
-  // Only ECHO when the set actually changes something (new var, new value, or a
-  // volatile→persistent promote). A no-op set — same value at the same persistence,
-  // e.g. a controller (NaviCore) re-broadcasting an unchanged ;V,MODE,1 every 60 s —
-  // is silenced here just as it is skipped for the NVS write, so it can't flood the
-  // serial. NB: this echo is NOT gated by any debug flag; it's a plain set confirmation.
-  bool changed = (slot < 0) || vars[slot].value != newVal || vars[slot].persist != effPersist;
-
-  if (setVariableImpl(name, newVal, effPersist) && changed)
+  // The ;V/;VP set-confirmation echo is DEBUG-ONLY (?DEBUG,ON). ;V is a routine runtime
+  // command — a controller (NaviCore) re-broadcasting ;V,MODE,{mode} every 60 s would
+  // otherwise print a line a minute forever, and it isn't debug the user asked for. Off
+  // by default (silent); enable debugging to watch variables change. (setVariableImpl is
+  // still called unconditionally — only the echo is gated.)
+  if (setVariableImpl(name, newVal, effPersist) && debugEnabled)
     Serial.printf("[VAR] %s = %ld  [%s]\n", name.c_str(), (long)newVal,
                   effPersist ? "persistent" : "volatile");
 }
@@ -308,11 +307,10 @@ void processVarConfig(const String &args) {
     }
     String vU = vStr; vU.toUpperCase();
     int32_t v = (vU == "TRUE") ? 1 : (vU == "FALSE") ? 0 : (int32_t)vStr.toInt();
-    // Echo only a real change (same no-op suppression as the ;V path, so a repeated
-    // ?VAR,SET,MODE,1 doesn't spam the serial). ?VAR,SET always creates persistent.
-    int sslot = findVarSlot(name);
-    bool schanged = (sslot < 0) || vars[sslot].value != v || !vars[sslot].persist;
-    if (setVariable(name, v) && schanged) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
+    // ?VAR,SET is a deliberate config/tool command (not the mesh ;V spam path), and this
+    // echo is the Wizard's push-ack line (sendAndAwaitIdle waits for it), so it ALWAYS
+    // prints — do not gate it behind debug.
+    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
     return;
   }
 
