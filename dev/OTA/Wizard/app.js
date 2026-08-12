@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '12.10:02.R.AUG.2026';
+const UI_VERSION = '12.10:20.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -8856,8 +8856,10 @@ function updateFlashBar(n, written, total) {
   const pct = total > 0 ? Math.round(written / total * 100) : 0;
   const bar = document.getElementById(`b${n}-flash-bar`);
   if (bar) bar.style.width = `${pct}%`;
+  // The percent is shown in the status line (e.g. "Uploading… 22% • 1:16" / "Flashing… 22%")
+  // — don't also stamp it on the bar; one percentage is enough. The bar's fill is the visual.
   const pctEl = document.getElementById(`b${n}-flash-pct`);
-  if (pctEl) pctEl.textContent = total > 0 ? `${pct}%` : '';
+  if (pctEl) pctEl.textContent = '';
   setFlashStatus(n, `Flashing… ${pct}%`);
   mirrorStatusToWizard(n, `⚡ Flashing firmware… ${pct}%`);
 }
