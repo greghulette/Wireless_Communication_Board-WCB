@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '12.09:47.R.AUG.2026';
+const UI_VERSION = '12.10:02.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6845,12 +6845,13 @@ async function boardGo(n, opts = {}) {
     btn.textContent = 'Flashing…';
     setFlashUI(n, true);
 
+    const _flashT0 = performance.now();
     let flashOk = false;
     try {
       await flashFirmware(savedPort, hwVersion, {
         onProgress: (written, total) => updateFlashBar(n, written, total),
         onLog:      (msg)            => termLog(n, msg, 'sys'),
-        onStatus:   (msg)            => { setFlashStatus(n, msg); mirrorStatusToWizard(n, `⚡ ${msg}`); },
+        onStatus:   (msg)            => { const _e = _fmtDur(performance.now() - _flashT0); setFlashStatus(n, `${msg} • ${_e}`); mirrorStatusToWizard(n, `⚡ ${msg} • ${_e}`); },
         appOnly:    isUpdate,         // Update FW: app-only, NVS preserved (escalates to a
                                       // full NVS-preserving flash once if the partition
                                       // table changed — see flasher.js migration check)
@@ -6863,7 +6864,9 @@ async function boardGo(n, opts = {}) {
       if (boardConfigs[n]?.fwVersion) updateBoardSwVersionDisplay(n);
       else setBoardSwVersion(n, '(flashed)', true);
       const label = isUpdate ? 'updated' : isFactory ? 'factory reset' : 'flashed';
-      showToast(`WCB ${n} firmware ${label}!`, 'success');
+      const _el = _fmtDur(performance.now() - _flashT0);
+      termLog(n, `Firmware ${label} in ${_el}`, 'sys');
+      showToast(`WCB ${n} firmware ${label} in ${_el}!`, 'success');
     } catch (e) {
       showToast(`Flash failed: ${e.message.split('\n')[0]}`, 'error');
       termLog(n, `Flash error: ${e.message}`, 'err');
