@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '13.11:25.R.AUG.2026';
+const UI_VERSION = '13.13:54.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -8574,11 +8574,20 @@ function termLog(boardIndex, text, type = 'out') {
     if (boardAutoScroll[idx] !== false) output.scrollTop = output.scrollHeight;
   };
 
-  // If a specific pane exists for this board, use it; otherwise create one on the fly
+  // Use this board's pane if it exists; otherwise create one on the fly — but ONLY for a
+  // board the user can actually talk to: connected over USB (a connection object exists),
+  // reached via a relay, or a pane they opened themselves (the Terminal button). A merely
+  // DISCOVERED board — heard on the mesh but never connected — must NOT sprout an
+  // auto-terminal; its output falls through to the shared/system pane below instead.
   if (boardIndex > 0) {
-    ensureTerminalPane(boardIndex);
-    const output = document.getElementById(`term-pane-output-${boardIndex}`);
-    if (output) { addLine(output, boardIndex); return; }
+    const managed = !!boardConnections[boardIndex]
+                 || remoteRelayForBoard[boardIndex] !== undefined
+                 || !!document.getElementById(`term-pane-${boardIndex}`);
+    if (managed) {
+      ensureTerminalPane(boardIndex);
+      const output = document.getElementById(`term-pane-output-${boardIndex}`);
+      if (output) { addLine(output, boardIndex); return; }
+    }
   }
   // boardIndex 0 (system) → log to first available pane, or ignore
   const anyOutput = document.querySelector('[id^="term-pane-output-"]');
