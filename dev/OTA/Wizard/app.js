@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '12.10:20.R.AUG.2026';
+const UI_VERSION = '13.11:25.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -6467,7 +6467,9 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
     // Survives USB drops because _dataCallbacks is never cleared on reconnect.
     const onLine = (line) => {
       if (done) return;
-      termLog(n, `[wait] ${line.substring(0, 80)}`, 'sys');
+      // NB: do NOT echo every received line here — the normal terminal already shows
+      // them, so echoing would double every line (and tag anything the user types
+      // during the boot-watch with a "[wait]" prefix). We only watch for the sentinel.
       if (line.includes('End of Backup')) {
         done = true;
         clearTimeout(tickTimer);
