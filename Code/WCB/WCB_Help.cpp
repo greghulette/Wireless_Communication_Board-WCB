@@ -811,7 +811,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?STATS             - Show statistics"));
         Serial.println(F("  ?STATS,RESET       - Reset all counters"));
         Serial.println(F("\nReceiving reports from other nodes:"));
-        Serial.println(F("  ?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>"));
+        Serial.println(F("  ?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv>"));
         Serial.println(F("  A node (e.g. NaviCore) sends this to report ITS OWN counters."));
         Serial.println(F("  Stored here and listed under 'Reported by Other Nodes'."));
         Serial.println(F("  <from> is in the payload because a '?' command carries no sender id."));

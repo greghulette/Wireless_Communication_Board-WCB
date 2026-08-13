@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_121535RAUG2026                                  *****////
+///*****                                          Version 6.2.0_131049RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_121535RAUG2026";
+String SoftwareVersion = "6.2.0_131049RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -531,7 +531,7 @@ unsigned long etmStatsFailed[MAX_WCB_COUNT]  = {0};
 // frozen at its last good numbers.
 struct ReportedStats {
   bool          used;
-  unsigned long sent, ackd, retries, failed, noSlot, bcast, recv;
+  unsigned long sent, ackd, retries, failed, unguaranteed, bcast, recv;
   unsigned long lastMs;      // millis() when this row last updated
 };
 ReportedStats reportedStats[MAX_WCB_COUNT] = {};
@@ -1690,9 +1690,9 @@ String buildStatsString() {
         if (!r.used) continue;
         unsigned long ageS = (millis() - r.lastMs) / 1000;
         snprintf(buf, sizeof(buf),
-                 "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, NoSlot: %lu, "
+                 "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, Unguaranteed: %lu, "
                  "Bcast: %lu, Recv: %lu  (%lus ago)\n",
-                 b + 1, r.sent, r.ackd, r.retries, r.failed, r.noSlot, r.bcast, r.recv, ageS);
+                 b + 1, r.sent, r.ackd, r.retries, r.failed, r.unguaranteed, r.bcast, r.recv, ageS);
         out += buf;
       }
       out += "---------------------------------------------------\n";
@@ -1702,7 +1702,7 @@ String buildStatsString() {
   return out;
 }
 
-// Parse and store one "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>"
+// Parse and store one "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv>"
 // report. `rest` is everything after "RPT", i.e. starting at the comma before <from>.
 //
 // The reporter's id travels IN THE PAYLOAD because processLocalCommand() takes no
@@ -1728,7 +1728,7 @@ void storeReportedStats(const String& rest) {
     start = c + 1;
   }
   if (found < 8) {
-    Serial.printf("[STATS] RPT ignored — need 8 fields (from,sent,ackd,retries,failed,noSlot,bcast,recv), got %d\n",
+    Serial.printf("[STATS] RPT ignored — need 8 fields (from,sent,ackd,retries,failed,unguaranteed,bcast,recv), got %d\n",
                   found);
     return;
   }
@@ -1740,11 +1740,11 @@ void storeReportedStats(const String& rest) {
   ReportedStats& r = reportedStats[from - 1];
   r.used = true;
   r.sent = v[1]; r.ackd = v[2]; r.retries = v[3]; r.failed = v[4];
-  r.noSlot = v[5]; r.bcast = v[6]; r.recv = v[7];
+  r.unguaranteed = v[5]; r.bcast = v[6]; r.recv = v[7];
   r.lastMs = millis();
   if (debugEnabled)
-    Serial.printf("[STATS] RPT from WCB%d: sent=%lu ackd=%lu retries=%lu failed=%lu noSlot=%lu bcast=%lu recv=%lu\n",
-                  from, r.sent, r.ackd, r.retries, r.failed, r.noSlot, r.bcast, r.recv);
+    Serial.printf("[STATS] RPT from WCB%d: sent=%lu ackd=%lu retries=%lu failed=%lu unguaranteed=%lu bcast=%lu recv=%lu\n",
+                  from, r.sent, r.ackd, r.retries, r.failed, r.unguaranteed, r.bcast, r.recv);
 }
 
 // Build ETM characterization results as a String (used by printETMCharResults and relay response)
