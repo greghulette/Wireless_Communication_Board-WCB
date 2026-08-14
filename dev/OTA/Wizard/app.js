@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '13.13:54.R.AUG.2026';
+const UI_VERSION = '14.11:23.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1500,7 +1500,10 @@ function _u8ToBase64(u8) {
 function _fmtDur(ms) {
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
-  return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+  // Round to whole seconds FIRST, then split — otherwise a value like 119.6s would
+  // Math.round(59.6)→60 and render "1:60" instead of "2:00".
+  const total = Math.round(s);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
 function boardOta(n) {
@@ -4660,11 +4663,18 @@ async function refreshVariablesFromBoard(n) {
 //     A toast naming the bad row is shown here so every caller reports it.
 //   - completely blank NAME → skipped (a never-saved placeholder row; it has
 //     no on-board counterpart to clear)
+//   - TEMPORARY (runtime ;V) rows → skipped: they are volatile, live only in the
+//     board's RAM, and are NOT part of the persistent config. Including them here
+//     would make buildCommandString emit ?VAR,SET (persistent) for a volatile var —
+//     silently promoting it to NVS and wearing the flash, the exact thing the
+//     volatile/persistent split exists to prevent. (Read-only live rows have no
+//     input and are skipped by the blank-name guard already.)
 // Returns the variables array, or null when an invalid name must block the push.
 function getVariablesFromUI(n) {
   const variables = [];
   let badName = null;
   document.getElementById(`b${n}-var-tbody`)?.querySelectorAll('tr').forEach(row => {
+    if (row.dataset.varType === 'temporary') return;      // runtime-only — never in the persistent config
     const name = row.querySelector('.var-name-input')?.value?.trim();
     if (!name) return;                                    // empty placeholder row
     if (!VAR_NAME_RE.test(name)) { badName ??= name; return; }
