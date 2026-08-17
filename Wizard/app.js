@@ -74,7 +74,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '14.11:23.R.AUG.2026';
+const UI_VERSION = '17.19:54.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -814,6 +814,12 @@ function updatePortClaimUI(n) {
       label.disabled = true;
     } else if (claim.type === 'hcr') {
       claimNote.textContent = 'Managed by HCR Vocalizer';
+      baudSel.disabled = true;
+      bcin.disabled  = true;  bcin.checked  = false;
+      bcout.disabled = true;  bcout.checked = false;
+      label.disabled = true;
+    } else if (claim.type === 'dfp') {
+      claimNote.textContent = 'Managed by DFPlayer';
       baudSel.disabled = true;
       bcin.disabled  = true;  bcin.checked  = false;
       bcout.disabled = true;  bcout.checked = false;
@@ -2132,9 +2138,32 @@ function reconcileRemoteWithMaestros(n) {
   }
 }
 
+// ─── Audio devices (MP3 Trigger / HCR Vocalizer / DFPlayer) ────────
+// Each device has an Enable checkbox (b<n>-<dev>-enable) that shows/hides its
+// settings block, plus a Local/Remote sub-radio (name b<n>-<dev>). The effective
+// "mode" is: not enabled -> 'none'; else the sub-radio value (default 'local').
+function _audioMode(n, dev) {
+  if (!document.getElementById(`b${n}-${dev}-enable`)?.checked) return 'none';
+  return document.querySelector(`input[name="b${n}-${dev}"]:checked`)?.value || 'local';
+}
+// Enable-toggle handler: show/hide the device block, default a freshly-enabled
+// device to Local, then run its change handler to sync config + inner fields.
+function onAudioToggle(n, dev) {
+  const on    = document.getElementById(`b${n}-${dev}-enable`)?.checked;
+  const block = document.getElementById(`b${n}-${dev}-block`);
+  if (block) block.style.display = on ? '' : 'none';
+  if (on && !document.querySelector(`input[name="b${n}-${dev}"]:checked`)) {
+    const localRadio = document.querySelector(`input[name="b${n}-${dev}"][value="local"]`);
+    if (localRadio) localRadio.checked = true;
+  }
+  if      (dev === 'mp3') onMP3Change(n);
+  else if (dev === 'hcr') onHCRChange(n);
+  else if (dev === 'dfp') onDFPChange(n);
+}
+
 // ─── MP3 Trigger ──────────────────────────────────────────────────
 function onMP3Change(n) {
-  const mode     = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
+  const mode     = _audioMode(n, 'mp3');
   const isLocal  = mode === 'local';
   const isRemote = mode === 'remote';
   ['port', 'baud', 'vol', 'onerr'].forEach(id => {
@@ -2268,7 +2297,7 @@ function updateMP3PortDropdown(n) {
 function syncMP3ToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
-  const mode = document.querySelector(`input[name="b${n}-mp3"]:checked`)?.value ?? 'none';
+  const mode = _audioMode(n, 'mp3');
   config.mp3.enabled = mode === 'local';
   if (config.mp3.enabled) {
     config.mp3.port    = parseInt(document.getElementById(`b${n}-mp3-port`)?.value) || null;
@@ -2286,6 +2315,149 @@ function syncMP3ToConfig(n) {
   } else {
     config.mp3.port = null;
     config.mp3.remoteWCB = 0;   // None — clears the route (push emits REMOTE,OFF only on a delta)
+  }
+}
+
+// ─── DFPlayer Mini ────────────────────────────────────────────────
+// Mirrors the MP3 pattern (single device, reserved port). DFPlayer runs
+// at a fixed 9600 baud (no picker) and its volume range is 0-30.
+// config.dfp round-trips via parser.js (DFP,S<port>:9600:V<vol> / REMOTE).
+function onDFPChange(n) {
+  const mode     = _audioMode(n, 'dfp');
+  const isLocal  = mode === 'local';
+  const isRemote = mode === 'remote';
+  ['port', 'vol', 'onerr'].forEach(id => {
+    const el = document.getElementById(`b${n}-dfp-${id}-wrap`);
+    if (el) el.style.display = isLocal ? '' : 'none';
+  });
+  const remoteWrap = document.getElementById(`b${n}-dfp-remote-wrap`);
+  if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
+
+  const config = boardConfigs[n];
+  if (!config) return;
+  // Configs loaded from a pre-DFPlayer save file have no .dfp — backfill it so
+  // enabling the device here doesn't touch an undefined object.
+  if (!config.dfp) config.dfp = { enabled:false, port:null, baud:9600, volume:15, onError:'', remoteWCB:0 };
+
+  // Clear any existing DFP port claim
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'dfp') port.claimedBy = null;
+  }
+
+  config.dfp.enabled = isLocal;
+  if (!isLocal) config.dfp.port = null;
+
+  if (isRemote) {
+    const hostSel = document.getElementById(`b${n}-dfp-remote-wcb`);
+    if (hostSel && hostSel.options.length === 0)
+      _populateRouteHostDropdown(n, hostSel, config.dfp.remoteWCB || 0);
+    config.dfp.remoteWCB = parseInt(hostSel?.value) || 0;
+  } else {
+    config.dfp.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
+  }
+
+  updateDFPPortDropdown(n);
+
+  if (isLocal) {
+    const portVal = parseInt(document.getElementById(`b${n}-dfp-port`)?.value);
+    if (portVal >= 1 && portVal <= 5) {
+      config.dfp.port = portVal;
+      config.serialPorts[portVal - 1].claimedBy = { type: 'dfp' };
+    }
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateDFPPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onDFPPortChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+
+  // Clear previous DFP claim and restore its broadcast settings
+  for (const port of config.serialPorts) {
+    if (port.claimedBy?.type === 'dfp') {
+      port.claimedBy    = null;
+      port.broadcastIn  = true;
+      port.broadcastOut = true;
+    }
+  }
+
+  const portVal = parseInt(document.getElementById(`b${n}-dfp-port`)?.value);
+  if (portVal >= 1 && portVal <= 5) {
+    config.dfp.port = portVal;
+    config.serialPorts[portVal - 1].claimedBy = { type: 'dfp' };
+  }
+
+  WCBParser.evaluatePortClaims(config);
+  updatePortClaimUI(n);
+  updateDFPPortDropdown(n);
+  onBoardFieldChange(n);
+}
+
+function onDFPVolChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  let v = parseInt(document.getElementById(`b${n}-dfp-vol`)?.value);
+  if (isNaN(v)) v = 15;
+  v = Math.max(0, Math.min(30, v));
+  config.dfp.volume = v;
+  onBoardFieldChange(n);
+}
+
+function onDFPOnErrChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.dfp.onError = document.getElementById(`b${n}-dfp-onerr`)?.value?.trim() ?? '';
+  onBoardFieldChange(n);
+}
+
+function updateDFPPortDropdown(n) {
+  const portSel = document.getElementById(`b${n}-dfp-port`);
+  if (!portSel) return;
+
+  const config      = boardConfigs[n];
+  const currentPort = config?.dfp?.port;
+
+  portSel.innerHTML = '';
+  for (let p = 1; p <= 5; p++) {
+    const claim = config?.serialPorts?.[p - 1]?.claimedBy;
+    // Show unclaimed ports, or the port already claimed by DFPlayer
+    if (!claim || claim.type === 'dfp') {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `Serial ${p}`;
+      if (p === currentPort) opt.selected = true;
+      portSel.appendChild(opt);
+    }
+  }
+}
+
+function syncDFPToConfig(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  if (!config.dfp) config.dfp = { enabled:false, port:null, baud:9600, volume:15, onError:'', remoteWCB:0 };
+  const mode = _audioMode(n, 'dfp');
+  config.dfp.enabled = mode === 'local';
+  if (config.dfp.enabled) {
+    config.dfp.port   = parseInt(document.getElementById(`b${n}-dfp-port`)?.value) || null;
+    config.dfp.baud   = 9600;   // DFPlayer is fixed at 9600
+    let v = parseInt(document.getElementById(`b${n}-dfp-vol`)?.value);
+    if (isNaN(v)) v = 15;
+    config.dfp.volume  = Math.max(0, Math.min(30, v));
+    config.dfp.onError = document.getElementById(`b${n}-dfp-onerr`)?.value?.trim() ?? '';
+    config.dfp.remoteWCB = 0;   // hosts it locally now — can't also be a remote client
+    if (config.dfp.port >= 1 && config.dfp.port <= 5) {
+      config.serialPorts[config.dfp.port - 1].baud = 9600;
+    }
+  } else if (mode === 'remote') {
+    config.dfp.port = null;
+    config.dfp.remoteWCB = parseInt(document.getElementById(`b${n}-dfp-remote-wcb`)?.value) || config.dfp.remoteWCB || 0;
+  } else {
+    config.dfp.port = null;
+    config.dfp.remoteWCB = 0;   // None — clears the route (push emits REMOTE,OFF only on a delta)
   }
 }
 
@@ -2360,7 +2532,7 @@ function _populateRouteHostDropdown(n, sel, selectedHost) {
 }
 
 function onHCRChange(n) {
-  const mode     = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  const mode     = _audioMode(n, 'hcr');
   const isLocal  = mode === 'local';
   const isRemote = mode === 'remote';
   ['port', 'baud', 'poll'].forEach(id => {
@@ -2455,7 +2627,7 @@ function onHCRPollChange(n) {
 function syncHCRToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
-  const mode = document.querySelector(`input[name="b${n}-hcr"]:checked`)?.value ?? 'none';
+  const mode = _audioMode(n, 'hcr');
   config.hcr.enabled = mode === 'local';
   if (config.hcr.enabled) {
     config.hcr.port = parseInt(document.getElementById(`b${n}-hcr-port`)?.value) || null;
@@ -2848,70 +3020,118 @@ function populateUIFromConfig(n, config) {
     for (const v of (config.variables ?? [])) appendVariableRow(n, v.name, v.value);
   }
 
-  // MP3 Trigger — local host / remote route (to another board) / none
-  const mp3Mode  = config.mp3.enabled ? 'local' : (config.mp3.remoteWCB > 0 ? 'remote' : 'none');
-  const mp3Input = document.querySelector(`input[name="b${n}-mp3"][value="${mp3Mode}"]`);
-  if (mp3Input) {
-    mp3Input.checked = true;
-    const isLocal  = mp3Mode === 'local';
-    const isRemote = mp3Mode === 'remote';
-    ['port', 'baud', 'vol', 'onerr'].forEach(id => {
-      const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
-      if (el) el.style.display = isLocal ? '' : 'none';
-    });
-    const remoteWrap = document.getElementById(`b${n}-mp3-remote-wrap`);
-    if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
-    updateMP3PortDropdown(n);
-    if (isLocal && config.mp3.port) {
-      const portSel = document.getElementById(`b${n}-mp3-port`);
-      if (portSel) portSel.value = config.mp3.port;
-      // Apply S3-S5 baud cap in the dropdown
-      const baudSel = document.getElementById(`b${n}-mp3-baud`);
-      if (baudSel) {
-        const isSoftSerial = config.mp3.port >= 3;
-        for (const opt of baudSel.options) {
-          opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
+  // MP3 Trigger — Enable toggle + Local/Remote sub-radio + fields
+  {
+    const mp3Mode = config.mp3.enabled ? 'local' : (config.mp3.remoteWCB > 0 ? 'remote' : 'none');
+    const on = mp3Mode !== 'none';
+    const enableEl = document.getElementById(`b${n}-mp3-enable`);
+    if (enableEl) enableEl.checked = on;
+    const blockEl = document.getElementById(`b${n}-mp3-block`);
+    if (blockEl) blockEl.style.display = on ? '' : 'none';
+    const mp3Input = on ? document.querySelector(`input[name="b${n}-mp3"][value="${mp3Mode}"]`) : null;
+    if (mp3Input) {
+      mp3Input.checked = true;
+      const isLocal  = mp3Mode === 'local';
+      const isRemote = mp3Mode === 'remote';
+      ['port', 'baud', 'vol', 'onerr'].forEach(id => {
+        const el = document.getElementById(`b${n}-mp3-${id}-wrap`);
+        if (el) el.style.display = isLocal ? '' : 'none';
+      });
+      const remoteWrap = document.getElementById(`b${n}-mp3-remote-wrap`);
+      if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
+      updateMP3PortDropdown(n);
+      if (isLocal && config.mp3.port) {
+        const portSel = document.getElementById(`b${n}-mp3-port`);
+        if (portSel) portSel.value = config.mp3.port;
+        // Apply S3-S5 baud cap in the dropdown
+        const baudSel = document.getElementById(`b${n}-mp3-baud`);
+        if (baudSel) {
+          const isSoftSerial = config.mp3.port >= 3;
+          for (const opt of baudSel.options) {
+            opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
+          }
+          baudSel.value = config.mp3.baud ?? 9600;
         }
-        baudSel.value = config.mp3.baud ?? 9600;
+        const volEl = document.getElementById(`b${n}-mp3-vol`);
+        if (volEl) volEl.value = config.mp3.volume ?? 0;
+        const onErrEl = document.getElementById(`b${n}-mp3-onerr`);
+        if (onErrEl) onErrEl.value = config.mp3.onError ?? '';
+      } else if (isRemote) {
+        _populateRouteHostDropdown(n, document.getElementById(`b${n}-mp3-remote-wcb`), config.mp3.remoteWCB);
       }
-      const volEl = document.getElementById(`b${n}-mp3-vol`);
-      if (volEl) volEl.value = config.mp3.volume ?? 0;
-      const onErrEl = document.getElementById(`b${n}-mp3-onerr`);
-      if (onErrEl) onErrEl.value = config.mp3.onError ?? '';
-    } else if (isRemote) {
-      _populateRouteHostDropdown(n, document.getElementById(`b${n}-mp3-remote-wcb`), config.mp3.remoteWCB);
     }
   }
 
-  // HCR Vocalizer — local host / remote route (to another board) / none
-  const hcrMode  = config.hcr.enabled ? 'local' : (config.hcr.remoteWCB > 0 ? 'remote' : 'none');
-  const hcrInput = document.querySelector(`input[name="b${n}-hcr"][value="${hcrMode}"]`);
-  if (hcrInput) {
-    hcrInput.checked = true;
-    const isLocal  = hcrMode === 'local';
-    const isRemote = hcrMode === 'remote';
-    ['port', 'baud', 'poll'].forEach(id => {
-      const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
-      if (el) el.style.display = isLocal ? '' : 'none';
-    });
-    const remoteWrap = document.getElementById(`b${n}-hcr-remote-wrap`);
-    if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
-    updateHCRPortDropdown(n);
-    if (isLocal && config.hcr.port) {
-      const portSel = document.getElementById(`b${n}-hcr-port`);
-      if (portSel) portSel.value = config.hcr.port;
-      const baudSel = document.getElementById(`b${n}-hcr-baud`);
-      if (baudSel) {
-        const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 9600
-        for (const opt of baudSel.options) {
-          opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+  // HCR Vocalizer — Enable toggle + Local/Remote sub-radio + fields
+  {
+    const hcrMode = config.hcr.enabled ? 'local' : (config.hcr.remoteWCB > 0 ? 'remote' : 'none');
+    const on = hcrMode !== 'none';
+    const enableEl = document.getElementById(`b${n}-hcr-enable`);
+    if (enableEl) enableEl.checked = on;
+    const blockEl = document.getElementById(`b${n}-hcr-block`);
+    if (blockEl) blockEl.style.display = on ? '' : 'none';
+    const hcrInput = on ? document.querySelector(`input[name="b${n}-hcr"][value="${hcrMode}"]`) : null;
+    if (hcrInput) {
+      hcrInput.checked = true;
+      const isLocal  = hcrMode === 'local';
+      const isRemote = hcrMode === 'remote';
+      ['port', 'baud', 'poll'].forEach(id => {
+        const el = document.getElementById(`b${n}-hcr-${id}-wrap`);
+        if (el) el.style.display = isLocal ? '' : 'none';
+      });
+      const remoteWrap = document.getElementById(`b${n}-hcr-remote-wrap`);
+      if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
+      updateHCRPortDropdown(n);
+      if (isLocal && config.hcr.port) {
+        const portSel = document.getElementById(`b${n}-hcr-port`);
+        if (portSel) portSel.value = config.hcr.port;
+        const baudSel = document.getElementById(`b${n}-hcr-baud`);
+        if (baudSel) {
+          const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 9600
+          for (const opt of baudSel.options) {
+            opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+          }
+          baudSel.value = config.hcr.baud ?? 9600;
         }
-        baudSel.value = config.hcr.baud ?? 9600;
+        const pollEl = document.getElementById(`b${n}-hcr-poll`);
+        if (pollEl) pollEl.value = config.hcr.poll ?? 10;
+      } else if (isRemote) {
+        _populateRouteHostDropdown(n, document.getElementById(`b${n}-hcr-remote-wcb`), config.hcr.remoteWCB);
       }
-      const pollEl = document.getElementById(`b${n}-hcr-poll`);
-      if (pollEl) pollEl.value = config.hcr.poll ?? 10;
-    } else if (isRemote) {
-      _populateRouteHostDropdown(n, document.getElementById(`b${n}-hcr-remote-wcb`), config.hcr.remoteWCB);
+    }
+  }
+
+  // DFPlayer Mini — Enable toggle + Local/Remote sub-radio + fields
+  {
+    const dfpMode = (config.dfp && config.dfp.enabled) ? 'local'
+                  : (config.dfp && config.dfp.remoteWCB > 0 ? 'remote' : 'none');
+    const on = dfpMode !== 'none';
+    const enableEl = document.getElementById(`b${n}-dfp-enable`);
+    if (enableEl) enableEl.checked = on;
+    const blockEl = document.getElementById(`b${n}-dfp-block`);
+    if (blockEl) blockEl.style.display = on ? '' : 'none';
+    const dfpInput = on ? document.querySelector(`input[name="b${n}-dfp"][value="${dfpMode}"]`) : null;
+    if (dfpInput) {
+      dfpInput.checked = true;
+      const isLocal  = dfpMode === 'local';
+      const isRemote = dfpMode === 'remote';
+      ['port', 'vol', 'onerr'].forEach(id => {
+        const el = document.getElementById(`b${n}-dfp-${id}-wrap`);
+        if (el) el.style.display = isLocal ? '' : 'none';
+      });
+      const remoteWrap = document.getElementById(`b${n}-dfp-remote-wrap`);
+      if (remoteWrap) remoteWrap.style.display = isRemote ? '' : 'none';
+      updateDFPPortDropdown(n);
+      if (isLocal && config.dfp.port) {
+        const portSel = document.getElementById(`b${n}-dfp-port`);
+        if (portSel) portSel.value = config.dfp.port;
+        const volEl = document.getElementById(`b${n}-dfp-vol`);
+        if (volEl) volEl.value = config.dfp.volume ?? 15;
+        const onErrEl = document.getElementById(`b${n}-dfp-onerr`);
+        if (onErrEl) onErrEl.value = config.dfp.onError ?? '';
+      } else if (isRemote) {
+        _populateRouteHostDropdown(n, document.getElementById(`b${n}-dfp-remote-wcb`), config.dfp.remoteWCB);
+      }
     }
   }
 
@@ -2949,6 +3169,7 @@ function updateActionSummary(n) {
   const parts = [];
   if (cfg.hcr && cfg.hcr.enabled && cfg.hcr.port) parts.push(`HCR on S${cfg.hcr.port}`);
   if (cfg.mp3 && cfg.mp3.enabled && cfg.mp3.port) parts.push(`MP3 on S${cfg.mp3.port}`);
+  if (cfg.dfp && cfg.dfp.enabled && cfg.dfp.port) parts.push(`DFPlayer on S${cfg.dfp.port}`);
   const maps = (cfg.mappings || []).length;
   if (maps) parts.push(`${maps} mapping${maps === 1 ? '' : 's'}`);
   const maes = (cfg.maestros || []).length;
@@ -7169,6 +7390,7 @@ async function boardGo(n, opts = {}) {
     syncKyberToConfig(n);
     syncMP3ToConfig(n);
     syncHCRToConfig(n);
+    syncDFPToConfig(n);
     syncWLEDsToConfig(n);
     autoComputeKyberTargets(n);   // derive targets from all boards' Maestros
     const config = boardConfigs[n];
@@ -7560,6 +7782,7 @@ async function boardGoRemote(n, opts = {}) {
   syncKyberToConfig(n);
   syncMP3ToConfig(n);
   syncHCRToConfig(n);
+  syncDFPToConfig(n);
   syncWLEDsToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
