@@ -87,6 +87,17 @@ function createDefaultBoardConfig() {
       remoteWCB: 0,      // 0 = none; else this board routes ;H to the HCR on WCB<n>
     },
 
+    // DFPlayer Mini (alternate audio device) — baud fixed at 9600 by the module;
+    // volume 0 = silent .. 30 = loudest (the INVERSE of the MP3 Trigger's scale).
+    dfp: {
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the DFPlayer is wired to
+      baud:      9600,   // fixed by the module — not user-adjustable
+      volume:    15,     // 0 = silent .. 30 = loudest
+      onError:   '',     // stored sequence key to run on a module error (optional)
+      remoteWCB: 0,      // 0 = none; else this board routes ;D to the DFPlayer on WCB<n>
+    },
+
     // WLED (serial lighting) — array of { id, port, baud }. LOCAL WLED nodes on
     // this board, each with a system-wide ID (1-9). ID-addressed, mirrors maestros;
     // reach a WLED on another board with ;L<id> (firmware routes it).
@@ -688,6 +699,33 @@ function parseToken(body, config) {
       break;
     }
 
+    case 'DFP': {
+      const sub = upperParts[1];
+      if (sub && /^S\d/.test(sub)) {
+        // ?DFP,S3:9600:V15 — local host (baud fixed 9600 by the module, volume 0-30)
+        const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
+        if (m) {
+          config.dfp.enabled   = true;
+          config.dfp.port      = parseInt(m[1]);
+          config.dfp.baud      = parseInt(m[2]);
+          config.dfp.volume    = parseInt(m[3]);
+          config.dfp.remoteWCB = 0;   // local host — not a client
+        }
+      } else if (sub === 'ONERR') {
+        config.dfp.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'REMOTE') {
+        // ?DFP,REMOTE,W<n> | OFF — this board routes ;D to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.dfp.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.dfp.remoteWCB = parseInt(m[1]); }
+      } else if (sub === 'CLEAR') {
+        config.dfp.enabled = false;
+        config.dfp.port    = null;
+        // remoteWCB (the route) is a separate axis — ?DFP,CLEAR clears only the local host.
+      }
+      break;
+    }
+
     // ── WLED (serial lighting) — ID-addressed, mirrors Maestro ──
     case 'WLED': {
       // Upsert a LOCAL WLED by id (one slot per id, matching the firmware).
@@ -977,6 +1015,13 @@ function evaluatePortClaims(config) {
     const idx = config.hcr.port - 1;
     if (idx >= 0 && idx < 5)
       config.serialPorts[idx].claimedBy = { type: 'hcr' };
+  }
+
+  // DFPlayer Mini claims its port
+  if (config.dfp && config.dfp.enabled && config.dfp.port) {
+    const idx = config.dfp.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'dfp' };
   }
 
   // WLED nodes claim their ports (one per local WLED, keyed by id)
@@ -1342,6 +1387,23 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
       // See MP3 above: a route is dropped only on a delta where the baseline had one.
       if (baseline?.hcr?.remoteWCB && !fullPush) add('HCR,REMOTE,OFF');
       add('HCR,CLEAR');
+    }
+  }
+
+  // ── DFPlayer Mini (mirrors MP3: baud fixed 9600, volume 0-30) ──
+  if (config.dfp) {
+    const dfpChanged = fullPush || !baseline ||
+      JSON.stringify(baseline.dfp) !== JSON.stringify(config.dfp);
+    if (dfpChanged) {
+      if (config.dfp.enabled && config.dfp.port) {
+        add(`DFP,S${config.dfp.port}:${config.dfp.baud}:V${config.dfp.volume}`);
+        if (config.dfp.onError) add(`DFP,ONERR,${config.dfp.onError}`);
+      } else if (config.dfp.remoteWCB && config.dfp.remoteWCB !== config.wcbNumber) {
+        add(`DFP,REMOTE,W${config.dfp.remoteWCB}`);   // client: persist the route, don't wipe it
+      } else {
+        if (baseline?.dfp?.remoteWCB && !fullPush) add('DFP,REMOTE,OFF');
+        add('DFP,CLEAR');
+      }
     }
   }
 

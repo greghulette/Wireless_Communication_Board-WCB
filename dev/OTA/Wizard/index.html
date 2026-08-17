@@ -768,15 +768,25 @@
       </table>
       </div>
 
-      <!-- MP3 Trigger -->
+      <!-- Audio (MP3 Trigger / HCR Vocalizer / DFPlayer) -->
       <div class="subsection" style="--rail:#ff8c00">
-      <div class="subsection-title">MP3 Trigger</div>
+      <div class="subsection-title">Audio</div>
       <div class="field-group">
         <div class="field">
-          <label>MP3 Trigger <span class="wiz-hint" data-tip="Only use this if the WCB itself is sending play/stop commands directly to the MP3 Trigger. If another controller (e.g. Marcduino) is driving the MP3 Trigger through the WCB via broadcast or serial mapping, leave this None and just set the baud rate with the Serial Ports table.">i</span></label>
+          <label>Audio devices on this board <span class="wiz-hint" data-tip="Enable the audio device(s) physically wired to this WCB. A board can host more than one, on different serial ports. Each enabled device shows its own settings below. Leave all off if another controller drives audio through this WCB via broadcast/serial mapping.">i</span></label>
           <div class="radio-group">
-            <label><input type="radio" name="b{N}-mp3" value="none" checked onchange="onMP3Change({N})"><span>None</span></label>
-            <label><input type="radio" name="b{N}-mp3" value="local" onchange="onMP3Change({N})"><span>Enabled</span></label>
+            <label><input type="checkbox" id="b{N}-mp3-enable" onchange="onAudioToggle({N},'mp3')"><span>MP3 Trigger</span></label>
+            <label><input type="checkbox" id="b{N}-hcr-enable" onchange="onAudioToggle({N},'hcr')"><span>HCR Vocalizer</span></label>
+            <label><input type="checkbox" id="b{N}-dfp-enable" onchange="onAudioToggle({N},'dfp')"><span>DFPlayer</span></label>
+          </div>
+        </div>
+
+        <!-- MP3 Trigger block -->
+        <div id="b{N}-mp3-block" style="display:none">
+        <div class="field">
+          <label>MP3 Trigger mode <span class="wiz-hint" data-tip="Local = the MP3 Trigger is wired to this WCB. Remote = this board routes ;A to the MP3 Trigger on another WCB.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-mp3" value="local" checked onchange="onMP3Change({N})"><span>Local</span></label>
             <label title="This board has no local MP3 Trigger; it routes ;A to the MP3 on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-mp3" value="remote" onchange="onMP3Change({N})"><span>Remote</span></label>
           </div>
         </div>
@@ -820,18 +830,14 @@
           <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the MP3 Trigger reports an error. Leave blank to disable. Example: errhandler">i</span></label>
           <input type="text" id="b{N}-mp3-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onMP3OnErrChange({N})">
         </div>
-      </div>
-      </div>
+        </div><!-- /mp3-block -->
 
-      <!-- HCR Vocalizer -->
-      <div class="subsection" style="--rail:#00d4ff">
-      <div class="subsection-title">HCR Vocalizer</div>
-      <div class="field-group">
+        <!-- HCR Vocalizer block -->
+        <div id="b{N}-hcr-block" style="display:none">
         <div class="field">
-          <label>HCR Vocalizer <span class="wiz-hint" data-tip="Enable if this WCB talks directly to a Human-Cyborg Relations (HCR) Vocalizer on one of its serial ports. The port is reserved exclusively; the WCB sends ;H commands and polls status. Leave None if another controller drives the HCR through the WCB.">i</span></label>
+          <label>HCR Vocalizer mode <span class="wiz-hint" data-tip="Local = the HCR Vocalizer is wired to this WCB (it sends ;H and polls status). Remote = this board routes ;H to the HCR on another WCB.">i</span></label>
           <div class="radio-group">
-            <label><input type="radio" name="b{N}-hcr" value="none" checked onchange="onHCRChange({N})"><span>None</span></label>
-            <label><input type="radio" name="b{N}-hcr" value="local" onchange="onHCRChange({N})"><span>Enabled</span></label>
+            <label><input type="radio" name="b{N}-hcr" value="local" checked onchange="onHCRChange({N})"><span>Local</span></label>
             <label title="This board has no local HCR; it routes ;H to the HCR on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-hcr" value="remote" onchange="onHCRChange({N})"><span>Remote</span></label>
           </div>
         </div>
@@ -863,6 +869,40 @@
           <label>Status Poll (sec) <span class="wiz-hint tip-left" data-tip="How often the WCB polls the HCR for status. Minimum 3 seconds (keeps every serial port safe). Default 10. Set 0 to disable automatic polling.">i</span></label>
           <input type="number" id="b{N}-hcr-poll" min="0" max="3600" value="10" onchange="onHCRPollChange({N})">
         </div>
+        </div><!-- /hcr-block -->
+
+        <!-- DFPlayer block -->
+        <div id="b{N}-dfp-block" style="display:none">
+        <div class="field">
+          <label>DFPlayer mode <span class="wiz-hint" data-tip="Local = a DFPlayer Mini is wired to this WCB. Remote = this board routes ;D to the DFPlayer on another WCB. Baud is fixed at 9600 by the module.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-dfp" value="local" checked onchange="onDFPChange({N})"><span>Local</span></label>
+            <label title="This board has no local DFPlayer; it routes ;D to the DFPlayer on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-dfp" value="remote" onchange="onDFPChange({N})"><span>Remote</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-dfp-remote-wrap" style="display:none">
+          <label>DFPlayer Host <span class="wiz-hint" data-tip="The WCB that physically hosts the DFPlayer. This board routes ;D there over the mesh. Auto-learned from WDP when a board announces its DFPlayer — pin a specific host here.">i</span></label>
+          <select id="b{N}-dfp-remote-wcb" onchange="onDFPChange({N})"></select>
+        </div>
+        <div class="field" id="b{N}-dfp-port-wrap" style="display:none">
+          <label>DFPlayer Port <span class="wiz-hint" data-tip="Serial port the DFPlayer Mini is wired to on this board. Reserved exclusively — will not broadcast. Baud is fixed at 9600 by the module.">i</span></label>
+          <select id="b{N}-dfp-port" onchange="onDFPPortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-dfp-vol-wrap" style="display:none">
+          <label>Default Volume <span class="wiz-hint tip-left" data-tip="0 = silent, 30 = loudest (the inverse of the MP3 Trigger's scale). Applied before playback so volume stays consistent.">i</span></label>
+          <input type="number" id="b{N}-dfp-vol" min="0" max="30" value="15" onchange="onDFPVolChange({N})">
+        </div>
+        <div class="field" id="b{N}-dfp-onerr-wrap" style="display:none">
+          <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the DFPlayer reports a module error. Leave blank to disable. Example: errhandler">i</span></label>
+          <input type="text" id="b{N}-dfp-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onDFPOnErrChange({N})">
+        </div>
+        </div><!-- /dfp-block -->
       </div>
       </div>
 
