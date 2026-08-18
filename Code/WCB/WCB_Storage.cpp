@@ -742,6 +742,60 @@ while (startIdx < keyList.length()) {
     Serial.println("--- End of Stored Commands ---");
 }
 
+// ── Stored-sequence inventory (names only) ─────────────────────────────────
+// See WCB_Storage.h for the format and why names-only exists as a separate path
+// from ?SEQ,LIST / the config pull.
+
+uint32_t sequenceKeysHash() {
+    preferences.begin("stored_cmds", true);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+
+    uint32_t h = 2166136261u;                     // FNV-1a 32-bit offset basis
+    for (unsigned i = 0; i < keyList.length(); i++) {
+        h ^= (uint8_t)keyList[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+String buildSequenceNamesString() {
+    preferences.begin("stored_cmds", true);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+
+    // Hash the RAW key_list (not the rebuilt output) so this matches
+    // sequenceKeysHash() and the WDP_TLV_SEQHASH advert byte-for-byte.
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < keyList.length(); i++) {
+        h ^= (uint8_t)keyList[i];
+        h *= 16777619u;
+    }
+
+    // Walk key_list exactly as listStoredCommands does — trailing comma, possible
+    // empty entries from a legacy erase — but emit only the names.
+    String names = "";
+    int    count = 0;
+    int    startIdx = 0;
+    while (startIdx < (int)keyList.length()) {
+        int commaIndex = keyList.indexOf(',', startIdx);
+        if (commaIndex == -1) commaIndex = keyList.length();
+
+        String key = keyList.substring(startIdx, commaIndex);
+        key.trim();
+        if (key.length() > 0) {
+            names += ",";
+            names += key;
+            count++;
+        }
+        startIdx = commaIndex + 1;
+    }
+
+    char hdr[16];
+    snprintf(hdr, sizeof(hdr), "%08X,%d", h, count);
+    return String(hdr) + names;
+}
+
 // Clear all stored commands
 void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);

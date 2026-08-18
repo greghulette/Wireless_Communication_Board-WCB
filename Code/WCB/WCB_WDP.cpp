@@ -87,6 +87,13 @@ static unsigned long wdpNextDirtyCheckMs = 0;
 #define WDP_TLV_SOLICIT  0x11    // len 0 — a "please advertise now" request (?WDP,POLL). Carries
                                  // no facts; a receiver schedules a prompt advert and does NOT
                                  // record the solicit as a neighbor (it would wipe real facts).
+#define WDP_TLV_SEQHASH  0x13    // [hash:4 LE] — FNV-1a over this board's stored-sequence
+                                 // key_list. A change means "my sequence inventory moved,
+                                 // re-pull it with ?MGMT,SEQ,<n>". Names themselves are NOT
+                                 // advertised: ~16 B each would evict the port labels from
+                                 // the 200 B payload. 4 bytes buys the same freshness signal.
+                                 // NOTE: draft ids 0x02/0x07/0x08 are burned (never shipped,
+                                 // see docs/WDP_DESIGN.md §10) — do not recycle them.
 #define WDP_TLV_FLAGS    0x12    // [flags:1] — advert flags bitmap (below). A device sets bits to
                                  // change how remotes treat it. Absent = all-zero (default).
 #define WDP_ADVFLAG_TEMPORARY 0x01  // "I'm TEMPORARY" — adopt me as a live-but-not-persisted peer
@@ -271,6 +278,17 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
     uint8_t rec[WDP_MAX_PWMTARGET * 2];
     int n = wdpLocalPwmTargets(rec);
     if (n > 0) o = putTLV(buf, o, max, WDP_TLV_PWMTARGET, rec, n * 2);
+  }
+  // Stored-sequence inventory fingerprint. 6 bytes on the wire, and it goes in
+  // BEFORE the port labels for the same reason PWMTARGET does: it drives a
+  // consumer's re-pull decision, whereas labels are cosmetic. Always advertised
+  // (an empty set has a well-defined hash), so a peer can distinguish "no
+  // sequences" from "old firmware that never sends this".
+  {
+    uint32_t h = sequenceKeysHash();
+    uint8_t v[4] = { (uint8_t)(h & 0xFF), (uint8_t)((h >> 8) & 0xFF),
+                     (uint8_t)((h >> 16) & 0xFF), (uint8_t)((h >> 24) & 0xFF) };  // little-endian
+    o = putTLV(buf, o, max, WDP_TLV_SEQHASH, v, 4);
   }
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
@@ -520,6 +538,10 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
         break;
       case WDP_TLV_FLAGS:   // advert flags bitmap — currently just the "temporary" bit
         if (len >= 1) nb.temporary = (val[0] & WDP_ADVFLAG_TEMPORARY) != 0;
+        break;
+      case WDP_TLV_SEQHASH:  // stored-sequence inventory fingerprint (little-endian)
+        if (len >= 4) nb.seqHash = (uint32_t)val[0]        | ((uint32_t)val[1] << 8) |
+                                   ((uint32_t)val[2] << 16) | ((uint32_t)val[3] << 24);
         break;
       // ---- Client-device identity (WCB_Client) ----------------------------
       case WDP_TLV_DEVTYPE: {   // device type name doubles as the neighbor's alias
@@ -1044,6 +1066,11 @@ static void printWdpDetail(int wcbNum) {
     }
     Serial.println();
   }
+  if (nb.seqHash == 0)
+    Serial.println("  Sequences   : (not advertised)");
+  else
+    Serial.printf("  Sequences   : hash %08X   (%cMGMT,SEQ,%d to list)\n",
+                  nb.seqHash, LocalFunctionIdentifier, nb.wcbNumber);
   Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
                 nb.confirmed ? "live" : "stale");
   Serial.println("  Interfaces  :");
@@ -1104,6 +1131,10 @@ static void printWdpDump() {
       if (self.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", self.wcbNumber, p + 1, self.portLabels[p]);
     wdpEmitDumpX(self);                      // MB=/WL= (Maestro+WLED id@baud)
+    // Sequence-inventory fingerprint as its OWN record, not a new field on the
+    // [WDP:...] line — that line's field order is load-bearing for older Wizard
+    // regexes (see the PEER= note below).
+    Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)self.wcbNumber, sequenceKeysHash());
     // This board's OUTGOING remote-PWM targets — authoritative, straight from the
     // live mappings. Each is an edge "SELF drives WCB<DST> S<port>". Neighbor rows
     // below emit the reverse direction (a neighbor driving one of OUR ports).
@@ -1140,6 +1171,11 @@ static void printWdpDump() {
       if (nb.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
     wdpEmitDumpX(nb);                        // MB=/WL= (Maestro+WLED id@baud)
+    // Sequence-inventory fingerprint (own record — see the SELF row above).
+    // Omitted entirely when the neighbor advertised no hash, so a consumer can tell
+    // "old firmware" from "no sequences" (the empty set hashes to 811C9DC5).
+    if (nb.seqHash != 0)
+      Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)nb.wcbNumber, nb.seqHash);
     // Remote-PWM edges terminating on THIS board: ports of ours the neighbor drives
     // (decoded into pwmSelfPorts). Edge "neighbor drives WCB<self> S<port>". The
     // sender's targets aimed at OTHER boards aren't in our table — only edges

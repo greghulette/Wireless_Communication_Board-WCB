@@ -94,6 +94,7 @@ Unknown TLV types are skipped via the length prefix — forward compatible in bo
 | `0x10` | PWMTARGET | `[targetWCB][port]` pairs — this board's REMOTE PWM outputs; each named board self-configures that output port | WCB |
 | `0x11` | SOLICIT | len 0 — a bare "advertise now" request (`?WDP,POLL`); carries no facts, receivers reply with a jittered advert and never record it | WCB |
 | `0x12` | FLAGS | `[flags:1]` advert-flags bitmap. Bit `0x01` **TEMPORARY** = "adopt me as a **temporary** peer" — live so the mesh can reach it, but never persisted, evicted on silence, gone on reboot. For occasional devices (e.g. a management relay) | client (or WCB) |
+| `0x13` | SEQHASH | `[hash:4 LE]` FNV‑1a over the board's stored‑sequence `key_list` — a fingerprint of *which sequences exist*, not their contents. A consumer caches the names it pulled and re‑pulls only when this changes. Absent (`0`) means the firmware predates the TLV; an **empty** inventory is `0x811C9DC5`, not `0`. See [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md) | WCB |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -314,3 +315,13 @@ so any device can opt in regardless of id.)*
 - Wizard: `Wizard/app.js` (`parseWdpDump`, `renderWdpMesh`, mesh actions), `Wizard/parser.js`
   (`PEERSLIVE`).
 - Serial device announce: [`WDP_DEVICE_ANNOUNCE.md`](WDP_DEVICE_ANNOUNCE.md).
+- Stored-sequence inventory (the `SEQHASH` TLV and the pull it triggers):
+  [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md).
+
+---
+
+## 12. Revision log
+
+| Date | Change | Commit |
+|---|---|---|
+| 2026-08-17 | Added TLV `0x13` **SEQHASH** — 4-byte stored-sequence inventory fingerprint, advertised before PORTLABEL so it survives a full payload. Names themselves are **not** advertised (~16 B each would evict the port labels from the fixed 200 B payload); they are pulled on demand — see [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md). Decoder + `WdpNeighbor::seqHash` in firmware and `WCB_Client`; new `[WDPSEQ:N=,HASH=]` record in `?WDP,DUMP`; round-trip and absence-semantics coverage in `tests/wdp_wire_test.cpp`. | _pending_ |

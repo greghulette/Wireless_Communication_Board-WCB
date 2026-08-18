@@ -140,6 +140,31 @@ void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
 void saveStoredCommandsToPreferences(const String &message);
 void listStoredCommands();
+
+// ── Stored-sequence INVENTORY (names only, no values) ──────────────────────
+// The full ?SEQ,LIST print and the config-pull chain both carry sequence VALUES,
+// which blows past the 16-chunk (2912 char) relay ceiling on a board with a real
+// sequence set. A consumer that only needs to know WHAT exists (NaviCore's command
+// picker, a web UI) wants names alone — ~16 bytes per entry instead of hundreds.
+//
+// buildSequenceNamesString() is the single source of truth for that inventory and
+// is used by BOTH ?SEQ,NAMES (console) and the SEQ_REQ/SEQ_FRAG mesh request, so
+// the two can never disagree. Format:
+//
+//     <hash8hex>,<count>[,<key1>,<key2>,...]
+//
+// Comma separation is safe: saveStoredCommandsToPreferences() takes the key as
+// everything BEFORE the first comma, so a stored key can never contain one.
+// The empty case is "811C9DC5,0" — the FNV offset basis and a zero count, so a
+// parser needs no special case for "board has no sequences".
+String   buildSequenceNamesString();
+
+// FNV-1a over the raw NVS key_list. Cheap content fingerprint of "which sequences
+// exist" — NOT security, and order-sensitive (key_list preserves save order), which
+// is what we want: it answers "did MY inventory change", not "do two boards match".
+// Also advertised as WDP_TLV_SEQHASH so a peer can tell when to re-request the list
+// instead of polling for it.
+uint32_t sequenceKeysHash();
 void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();

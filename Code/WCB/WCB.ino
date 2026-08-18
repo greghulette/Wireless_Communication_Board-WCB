@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_141123RAUG2026                                  *****////
+///*****                                          Version 6.2.0_172007RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_141123RAUG2026";
+String SoftwareVersion = "6.2.0_172007RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -234,6 +234,13 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ETM_REQ     8   // relay → target: request ETM characterization
 #define PACKET_TYPE_STATS_FRAG  9   // target → relay: ?STATS response fragment
 #define PACKET_TYPE_ETM_FRAG    10  // target → relay: ?ETM,CHAR response fragment
+// 11 = ETM_BOOT, 12 = WDP (declared above with the ETM-struct types), 20+ = OTA.
+#define PACKET_TYPE_SEQ_REQ     13  // relay → target: request stored-sequence NAMES
+#define PACKET_TYPE_SEQ_FRAG    14  // target → relay: sequence-name response fragment
+                                    // Names only — deliberately NOT the values. The
+                                    // config pull already carries values and a real
+                                    // sequence set pushes it against the 16-chunk
+                                    // ceiling; an inventory is ~16 bytes per entry.
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -839,6 +846,7 @@ struct ConfigPullSession {
 ConfigPullSession pullSession      = {};  // relay-side reassembly for remote config pull
 ConfigPullSession statsRelaySession = {};  // relay-side reassembly for remote ?STATS
 ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?ETM,CHAR
+ConfigPullSession seqRelaySession   = {};  // relay-side reassembly for remote ?SEQ,NAMES
 uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
 
 // ESP-NOW messages
@@ -2509,6 +2517,10 @@ void handleMgmtForward(const String &args) {
     handleMgmtStatsRequest(args.substring(c1 + 1));
     return;
   }
+  if (type == "SEQ") {
+    handleMgmtSeqRequest(args.substring(c1 + 1));
+    return;
+  }
   if (type == "ETM") {
     // Expect ?MGMT,ETM,CHAR,<targetWCB>
     String etmArgs = args.substring(c1 + 1);  // "CHAR,3"
@@ -3090,6 +3102,36 @@ void handleStatsReqPacket(const uint8_t *data) {
   sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_STATS_FRAG);
 }
 
+// ── Target side: handle SEQ_REQ → send this board's sequence NAMES back ──────
+// Reads NVS (key_list + nothing else) and fragments the inventory back to the
+// requester. Deferred out of the WiFi callback via enqueueMgmtReq like its peers.
+void handleSeqReqPacket(const uint8_t *data) {
+  espnow_struct_config_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+
+  // The requester sends SEQ_REQ 3x (see handleMgmtSeqRequest) because a first
+  // broadcast frame is routinely dropped on a busy mesh. Without a dedup window
+  // that would fire THREE full fragmented responses. Same guard, same reasoning
+  // as handleConfigReqPacket — shorter than any sane retry interval, so a genuine
+  // retry is still answered.
+  static uint32_t lastSeqReqMs   = 0;
+  static uint8_t  lastSeqReqFrom = 0;
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastSeqReqFrom && (nowMs - lastSeqReqMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq request from WCB%d ignored\n", pkt.requesterWCB);
+    return;
+  }
+  lastSeqReqFrom = pkt.requesterWCB;
+  lastSeqReqMs   = nowMs;
+
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request from WCB%d\n", pkt.requesterWCB);
+  String result = buildSequenceNamesString();
+  sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_SEQ_FRAG);
+}
+
 // ── Target side: handle ETM_REQ → start ETM char, results sent in printETMCharResults ──
 void handleETMReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
@@ -3135,6 +3177,7 @@ void drainMgmtReqs() {
       case PACKET_TYPE_CONFIG_REQ: handleConfigReqPacket(p); break;
       case PACKET_TYPE_STATS_REQ:  handleStatsReqPacket(p);  break;
       case PACKET_TYPE_ETM_REQ:    handleETMReqPacket(p);    break;
+      case PACKET_TYPE_SEQ_REQ:    handleSeqReqPacket(p);    break;
       default: break;
     }
   }
@@ -3171,6 +3214,41 @@ void handleStatsFragPacket(const uint8_t *data) {
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
     Serial.printf("[MGMT:STATS,%d]%s\n", srcWCB, fullResult.c_str());
     if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: reassemble sequence-name frags → [MGMT:SEQ,N]<hash>,<count>,... ──
+void handleSeqFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!seqRelaySession.active || seqRelaySession.sessionId != pkt.sessionId) {
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+    seqRelaySession.sourceWCB      = pkt.sourceWCB;
+    seqRelaySession.sessionId      = pkt.sessionId;
+    seqRelaySession.totalChunks    = pkt.totalChunks;
+    seqRelaySession.lastActivityMs = millis();
+    seqRelaySession.active         = true;
+  }
+  if (!(seqRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(seqRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    seqRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    seqRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  seqRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (seqRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqRelaySession.chunks[i]);
+    uint8_t srcWCB = seqRelaySession.sourceWCB;
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+    Serial.printf("[MGMT:SEQ,%d]%s\n", srcWCB, fullResult.c_str());
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
 }
@@ -3222,6 +3300,30 @@ void handleMgmtStatsRequest(const String &targetStr) {
   pkt.requesterWCB = WCB_Number;
   esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
   if (debugMGMT) Serial.printf("[MGMT] Stats request sent to WCB%d\n", targetWCB);
+}
+
+// ── Relay side: handle ?MGMT,SEQ,<n> — ask a board for its sequence NAMES ────
+void handleMgmtSeqRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+    if (debugMGMT) Serial.println("[MGMT] SEQ: invalid targetWCB");
+    return;
+  }
+  espnow_struct_config_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_SEQ_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+
+  // Sent 3x for the same reason the config pull is (first broadcast frame to a
+  // board is frequently dropped on a busy mesh). handleSeqReqPacket dedups within
+  // 1.5 s, so this still produces exactly one response.
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    delay(15);
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (x3)\n", targetWCB);
 }
 
 void handleMgmtETMRequest(const String &targetStr) {
@@ -3278,6 +3380,14 @@ void checkConfigPullTimeout() {
     if (debugMGMT) Serial.printf("[MGMT] Config pull session %04X timed out\n", pullSession.sessionId);
     memset(&pullSession, 0, sizeof(pullSession));
   }
+  // Same reaping for the sequence-name session. Without it a half-received
+  // inventory (target rebooted mid-send) stays "active" until a new sessionId
+  // happens along, and its stale chunks would prefix the next reassembly.
+  if (seqRelaySession.active &&
+      (millis() - seqRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names session %04X timed out\n", seqRelaySession.sessionId);
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+  }
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
@@ -3320,7 +3430,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // exactly like the OTA packets below. (STATS_REQ and ETM_REQ share this size.)
     uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
     if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_STATS_REQ ||
-        ptype == PACKET_TYPE_ETM_REQ) {
+        ptype == PACKET_TYPE_ETM_REQ    || ptype == PACKET_TYPE_SEQ_REQ) {
       enqueueMgmtReq(incomingData);
     }
     return;
@@ -3330,6 +3440,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t ptype = ((const espnow_struct_config_frag*)incomingData)->packetType;
     if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_SEQ_FRAG)    handleSeqFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
     return;
   }
@@ -4639,6 +4750,11 @@ void processLocalCommand(const String &message) {
 
         if (seqCmdUpper == "LIST") {
             listStoredCommands();
+        } else if (seqCmdUpper == "NAMES") {
+            // Machine-readable inventory — names only, one line, same string the
+            // SEQ_REQ mesh path returns. Prefixed like the relay output so a host
+            // parsing this board's console uses ONE parser for local and remote.
+            Serial.printf("[MGMT:SEQ,%d]%s\n", WCB_Number, buildSequenceNamesString().c_str());
         } else if (seqCmdUpper == "CLEAR") {
             String seqArgsUpper = seqArgs;
             seqArgsUpper.toUpperCase();

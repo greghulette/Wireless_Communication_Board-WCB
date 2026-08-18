@@ -768,6 +768,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;Cwave                             - Run 'wave' everywhere it exists"));
         Serial.println(F("  ;Cwave,L                           - Run 'wave' on this board only"));
         Serial.println(F("  ?SEQ,LIST                          - Show all sequences"));
+        Serial.println(F("  ?SEQ,NAMES                         - Names only, one parseable line"));
+        Serial.println(F("  ?MGMT,SEQ,3                        - Names from WCB3 over the mesh"));
         Serial.println(F("  ?SEQ,CLEAR,wave                    - Delete 'wave'"));
         Serial.println(F("  ?SEQ,CLEAR,ALL                     - Delete everything"));
         Serial.println(F("\nNotes:"));
@@ -1044,6 +1046,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\n  COMMAND SEQUENCES:"));
         Serial.println(F("    ?SEQ,SAVE       Save a named command sequence"));
         Serial.println(F("    ?SEQ,LIST       List all saved sequences"));
+        Serial.println(F("    ?SEQ,NAMES      Sequence inventory, machine-readable"));
         Serial.println(F("    ;Ckey           Run a saved sequence"));
         Serial.println(F("\n  VARIABLES & LOGIC:"));
         Serial.println(F("    ?VAR            Manage variables (LIST/SET/GET/CLEAR)"));

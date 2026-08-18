@@ -36,6 +36,7 @@ static const uint8_t T_END      = 0x00, T_ALIAS = 0x01, T_FWVER = 0x03, T_HWVER 
 static const uint8_t T_CAPFLAGS = 0x05, T_MAESTRO = 0x06, T_PORTLABEL = 0x09, T_CTRLID = 0x0A;
 static const uint8_t T_DEVTYPE  = 0x0B, T_HWREV = 0x0C, T_CAPTAGS = 0x0D;
 static const uint8_t T_MAESTRO_CFG = 0x0E, T_WLED_CFG = 0x0F, T_PWMTARGET = 0x10, T_SOLICIT = 0x11;
+static const uint8_t T_FLAGS = 0x12, T_SEQHASH = 0x13;
 
 static const uint16_t CAP_HCR = 0x0001, CAP_MP3 = 0x0002, CAP_WLED = 0x0004;
 
@@ -65,6 +66,7 @@ struct Neighbor {
   uint8_t wledIds[9]={0}, wledBaud[9]={0}; int wledCount=0;
   std::string portLabels[5];
   uint8_t pwmSelfPorts[5]={0}; int pwmSelfCount=0;
+  uint32_t seqHash=0;   // T_SEQHASH; 0 = not advertised (an EMPTY set is 0x811C9DC5)
 };
 
 // Result of feeding a packet to the decoder.
@@ -119,6 +121,8 @@ static DecodeKind decode(int senderWCB, uint8_t srcMacLastOctet,
             if(prt<1||prt>5) continue;
             bool dup=false; for(int j=0;j<nb.pwmSelfCount;j++) if(nb.pwmSelfPorts[j]==prt) dup=true;
             if(!dup && nb.pwmSelfCount<5) nb.pwmSelfPorts[nb.pwmSelfCount++]=prt; } break; }
+      case T_SEQHASH: if(len>=4) nb.seqHash=(uint32_t)val[0]|((uint32_t)val[1]<<8)|
+                                            ((uint32_t)val[2]<<16)|((uint32_t)val[3]<<24); break;
       default: break;                    // unknown TLV — skipped via length (forward compatible)
     }
     o += 2 + len;
@@ -191,6 +195,48 @@ static void test_unknown_and_truncated(){
   bad[b++]=T_ALIAS; bad[b++]=250;                                // claims 250 bytes near the end
   Neighbor nb2;
   CHECK(decode(4,4,bad,b,1,nb2)==DK_ADVERT && nb2.alias.empty(), "over-long TLV stops decode safely");
+}
+
+// T_SEQHASH (0x13) — the stored-sequence inventory fingerprint that tells a
+// consumer WHEN to re-pull sequence names (?MGMT,SEQ,<n> / requestSequenceNames).
+// The names themselves are deliberately NOT on the wire: ~16 B each would evict
+// the port labels from the fixed 200 B payload.
+static void test_seqhash(){
+  printf("seqhash TLV round-trip + absence semantics...\n");
+  uint8_t buf[200]; memset(buf,0,sizeof(buf));
+  int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+  // 0x811C9DC5 = FNV-1a offset basis = the hash of an EMPTY key_list. Chosen here
+  // deliberately: it is the value most likely to be confused with "no hash", and
+  // it must survive the round-trip as a real, non-zero reading.
+  const uint32_t H = 0x811C9DC5u;
+  { uint8_t v[4]={(uint8_t)(H&0xFF),(uint8_t)((H>>8)&0xFF),
+                  (uint8_t)((H>>16)&0xFF),(uint8_t)((H>>24)&0xFF)};   // little-endian
+    o=putTLV(buf,o,200,T_SEQHASH,v,4); }
+  o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"DomeBoard",9);
+  buf[o++]=T_END;
+  Neighbor nb;
+  CHECK(decode(4,4,buf,o,1,nb)==DK_ADVERT, "advert with seqhash decodes");
+  CHECK(nb.seqHash==H, "seqhash little-endian round-trip");
+  CHECK(nb.alias=="DomeBoard", "TLVs after seqhash still parse");
+
+  // An advert with NO seqhash must leave it 0 — that is how a consumer tells
+  // "firmware predates the TLV" from "board has zero sequences" (which is H).
+  uint8_t old[200]; memset(old,0,sizeof(old));
+  int p=0; old[p++]=WDP_MAGIC; old[p++]=WDP_PROTO_VERSION;
+  p=putTLV(old,p,200,T_ALIAS,(const uint8_t*)"OldFw",5);
+  old[p++]=T_END;
+  Neighbor nb2;
+  CHECK(decode(4,4,old,p,1,nb2)==DK_ADVERT && nb2.seqHash==0, "absent seqhash reads 0, not the empty-set hash");
+
+  // A short/corrupt SEQHASH must be ignored rather than half-applied.
+  uint8_t shortH[200]; memset(shortH,0,sizeof(shortH));
+  int s=0; shortH[s++]=WDP_MAGIC; shortH[s++]=WDP_PROTO_VERSION;
+  { uint8_t v2[2]={0xC5,0x9D}; s=putTLV(shortH,s,200,T_SEQHASH,v2,2); }
+  s=putTLV(shortH,s,200,T_ALIAS,(const uint8_t*)"Short",5);
+  shortH[s++]=T_END;
+  Neighbor nb3;
+  CHECK(decode(4,4,shortH,s,1,nb3)==DK_ADVERT && nb3.seqHash==0 && nb3.alias=="Short",
+        "under-length seqhash ignored, later TLVs still parse");
 }
 
 static void test_maestro_cfg_supersedes(){
@@ -273,6 +319,7 @@ int main(){
   printf("== WDP wire-format & election spec test ==\n");
   test_roundtrip();
   test_unknown_and_truncated();
+  test_seqhash();
   test_maestro_cfg_supersedes();
   test_pwmtarget_self_only();
   test_solicit();
