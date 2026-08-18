@@ -1,10 +1,13 @@
 # Stored-Sequence Inventory
 
-How a consumer — NaviCore, a browser UI, another controller — finds out **which stored
-sequences exist** on the WCBs in a mesh, and keeps that list fresh.
+How a consumer — NaviCore, a browser UI, another controller — discovers **which stored
+sequences exist** on the WCBs in a mesh, pulls any one of them in full, and pushes edits
+and new sequences back.
 
 The problem it solves: anything that offers "run a sequence" needs the list of sequences.
 Hard-coding it goes stale silently the first time someone saves one from the Wizard.
+
+Three operations, covered in §3 (list), §3a (fetch one), §3b (write).
 
 ---
 
@@ -56,8 +59,14 @@ feature exists to route around.
 Two halves.
 
 **A 4-byte fingerprint rides the WDP advert.** `WDP_TLV_SEQHASH` (`0x13`) is FNV-1a over
-the board's NVS `key_list`. It changes whenever a sequence is saved, renamed or erased.
-Six bytes on the wire, which the advert can afford.
+the board's NVS `key_list` **and every stored value**. It changes whenever a sequence is
+saved, edited, renamed or erased. Six bytes on the wire, which the advert can afford.
+
+It covers values, not just names, because editing a sequence in place never touches
+`key_list` — a keys-only hash would leave every peer holding a stale copy while believing
+it current, which is the exact failure the fingerprint exists to prevent. It is cached in
+RAM and invalidated at each write path: the WDP dirty-check rebuilds the advert twice a
+second, and hashing values uncached would mean N NVS reads at 2 Hz forever.
 
 **The names are pulled on demand** with a dedicated request/response pair, only when the
 hash a consumer sees differs from the hash it cached.
@@ -340,5 +349,5 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
-| 2026-08-17 | Added the **read-one** and **write** halves: `PACKET_TYPE_SEQVAL_REQ`/`SEQVAL_FRAG` (15/16) with a 59-byte keyed request struct, `?SEQ,GET,<key>`, `?MGMT,SEQGET,<n>,<key>`, and `requestSequence`/`onSequenceValue`/`saveSequence`/`deleteSequence` in `WCB_Client`. `TOOBIG`/`NOTFOUND` are explicit statuses rather than silence. Writes reuse the existing `?SEQ,SAVE` command path — no new wire format. **SEQHASH now covers stored values**, so an in-place edit is visible to peers (see `WDP_DESIGN.md`). `MgmtReqSlot` widened to the largest request on that queue and given a `len`, since SEQVAL_REQ is 59 B against the previous 43. | _pending_ |
-| 2026-08-17 | Initial version. `PACKET_TYPE_SEQ_REQ`/`SEQ_FRAG` (13/14), `?SEQ,NAMES`, `?MGMT,SEQ,<n>`, WDP TLV `0x13` SEQHASH, `[WDPSEQ:]` dump record, and the `WCB_Client` `onSequenceNames`/`requestSequenceNames` API. | _pending_ |
+| 2026-08-17 | Added the **read-one** and **write** halves: `PACKET_TYPE_SEQVAL_REQ`/`SEQVAL_FRAG` (15/16) with a 59-byte keyed request struct, `?SEQ,GET,<key>`, `?MGMT,SEQGET,<n>,<key>`, and `requestSequence`/`onSequenceValue`/`saveSequence`/`deleteSequence` in `WCB_Client`. `TOOBIG`/`NOTFOUND` are explicit statuses rather than silence. Writes reuse the existing `?SEQ,SAVE` command path — no new wire format. **SEQHASH now covers stored values**, so an in-place edit is visible to peers (see `WDP_DESIGN.md`). `MgmtReqSlot` widened to the largest request on that queue and given a `len`, since SEQVAL_REQ is 59 B against the previous 43. | `80f44d9` |
+| 2026-08-17 | Initial version. `PACKET_TYPE_SEQ_REQ`/`SEQ_FRAG` (13/14), `?SEQ,NAMES`, `?MGMT,SEQ,<n>`, WDP TLV `0x13` SEQHASH, `[WDPSEQ:]` dump record, and the `WCB_Client` `onSequenceNames`/`requestSequenceNames` API. | `bbd6bdf` |
