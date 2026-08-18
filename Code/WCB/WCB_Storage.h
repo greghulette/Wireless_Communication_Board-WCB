@@ -159,12 +159,21 @@ void listStoredCommands();
 // parser needs no special case for "board has no sequences".
 String   buildSequenceNamesString();
 
-// FNV-1a over the raw NVS key_list. Cheap content fingerprint of "which sequences
-// exist" — NOT security, and order-sensitive (key_list preserves save order), which
-// is what we want: it answers "did MY inventory change", not "do two boards match".
-// Also advertised as WDP_TLV_SEQHASH so a peer can tell when to re-request the list
-// instead of polling for it.
-uint32_t sequenceKeysHash();
+// FNV-1a over the NVS key_list AND every stored value. Cheap content fingerprint of
+// "what sequences this board has" — NOT security, and order-sensitive (key_list
+// preserves save order), which is what we want: it answers "did MY inventory
+// change", not "do two boards match".
+//
+// It covers VALUES, not just names, because editing a sequence in place never
+// touches key_list — a keys-only hash would leave every peer holding a stale copy
+// while believing it current. That is the whole point of the fingerprint.
+//
+// Advertised as WDP_TLV_SEQHASH, so a peer re-pulls only when something actually
+// changed. CACHED: the WDP dirty-check rebuilds the advert twice a second, and
+// hashing values uncached would mean N NVS reads at 2 Hz forever. Every write path
+// must call invalidateSequenceInventoryHash().
+uint32_t sequenceInventoryHash();
+void     invalidateSequenceInventoryHash();
 void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();

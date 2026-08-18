@@ -285,7 +285,7 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   // (an empty set has a well-defined hash), so a peer can distinguish "no
   // sequences" from "old firmware that never sends this".
   {
-    uint32_t h = sequenceKeysHash();
+    uint32_t h = sequenceInventoryHash();
     uint8_t v[4] = { (uint8_t)(h & 0xFF), (uint8_t)((h >> 8) & 0xFF),
                      (uint8_t)((h >> 16) & 0xFF), (uint8_t)((h >> 24) & 0xFF) };  // little-endian
     o = putTLV(buf, o, max, WDP_TLV_SEQHASH, v, 4);
@@ -1134,7 +1134,7 @@ static void printWdpDump() {
     // Sequence-inventory fingerprint as its OWN record, not a new field on the
     // [WDP:...] line — that line's field order is load-bearing for older Wizard
     // regexes (see the PEER= note below).
-    Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)self.wcbNumber, sequenceKeysHash());
+    Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)self.wcbNumber, sequenceInventoryHash());
     // This board's OUTGOING remote-PWM targets — authoritative, straight from the
     // live mappings. Each is an edge "SELF drives WCB<DST> S<port>". Neighbor rows
     // below emit the reverse direction (a neighbor driving one of OUR ports).

@@ -769,7 +769,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;Cwave,L                           - Run 'wave' on this board only"));
         Serial.println(F("  ?SEQ,LIST                          - Show all sequences"));
         Serial.println(F("  ?SEQ,NAMES                         - Names only, one parseable line"));
+        Serial.println(F("  ?SEQ,GET,wave                      - One sequence: key,status,value"));
         Serial.println(F("  ?MGMT,SEQ,3                        - Names from WCB3 over the mesh"));
+        Serial.println(F("  ?MGMT,SEQGET,3,wave                - One sequence from WCB3"));
         Serial.println(F("  ?SEQ,CLEAR,wave                    - Delete 'wave'"));
         Serial.println(F("  ?SEQ,CLEAR,ALL                     - Delete everything"));
         Serial.println(F("\nNotes:"));

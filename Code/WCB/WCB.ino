@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_172007RAUG2026                                  *****////
+///*****                                          Version 6.2.0_172045RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_172007RAUG2026";
+String SoftwareVersion = "6.2.0_172045RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -241,6 +241,13 @@ typedef struct __attribute__((packed)) {
                                     // config pull already carries values and a real
                                     // sequence set pushes it against the 16-chunk
                                     // ceiling; an inventory is ~16 bytes per entry.
+#define PACKET_TYPE_SEQVAL_REQ  15  // relay → target: request ONE sequence by key
+#define PACKET_TYPE_SEQVAL_FRAG 16  // target → relay: that sequence's value
+                                    // One at a time, by key. A single value is bounded
+                                    // (~1800 chars ≈ 10 of 16 chunks) whereas the whole
+                                    // set is not — a consumer walks the name list and
+                                    // pulls each key, which has no aggregate ceiling and
+                                    // resumes cleanly if a board drops mid-walk.
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -794,6 +801,26 @@ typedef struct __attribute__((packed)) {
   uint8_t requesterWCB;    // which WCB is asking (relay)
 } espnow_struct_config_req;
 
+// Single-sequence request: relay → target (59 bytes)
+//
+// A separate struct from espnow_struct_config_req because it must carry the KEY,
+// and the 43-byte request has no room. It cannot instead be sent as an ordinary
+// `?SEQ,GET,<key>` command: a command arriving over ESP-NOW does not carry its
+// sender into the handler (sourceID is a SERIAL PORT — 0=USB, 1-5 — and the
+// ESP-NOW origin is only the `lastReceivedViaESPNOW` bool), so the target would
+// have no idea which board to answer.
+//
+// 59 bytes is deliberately distinct from every other packet size (43/55/226/230/
+// 243/249/252) — the receive path routes BY SIZE first. The static_assert in
+// espNowReceiveCallback pins it.
+typedef struct __attribute__((packed)) {
+  char    structPassword[40];
+  uint8_t packetType;      // PACKET_TYPE_SEQVAL_REQ
+  uint8_t targetWCB;       // which WCB holds the sequence
+  uint8_t requesterWCB;    // which WCB is asking
+  char    key[16];         // sequence key, NUL-terminated (15 chars = the NVS key limit)
+} espnow_struct_seqval_req;
+
 // Config pull response fragment: target → relay (230 bytes)
 typedef struct __attribute__((packed)) {
   char     structPassword[40];
@@ -846,7 +873,8 @@ struct ConfigPullSession {
 ConfigPullSession pullSession      = {};  // relay-side reassembly for remote config pull
 ConfigPullSession statsRelaySession = {};  // relay-side reassembly for remote ?STATS
 ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?ETM,CHAR
-ConfigPullSession seqRelaySession   = {};  // relay-side reassembly for remote ?SEQ,NAMES
+ConfigPullSession seqRelaySession    = {};  // relay-side reassembly for remote ?SEQ,NAMES
+ConfigPullSession seqValRelaySession = {};  // relay-side reassembly for remote ?SEQ,GET,<key>
 uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
 
 // ESP-NOW messages
@@ -2521,6 +2549,10 @@ void handleMgmtForward(const String &args) {
     handleMgmtSeqRequest(args.substring(c1 + 1));
     return;
   }
+  if (type == "SEQGET") {
+    handleMgmtSeqValRequest(args.substring(c1 + 1));   // "<wcb>,<key>"
+    return;
+  }
   if (type == "ETM") {
     // Expect ?MGMT,ETM,CHAR,<targetWCB>
     String etmArgs = args.substring(c1 + 1);  // "CHAR,3"
@@ -3132,6 +3164,72 @@ void handleSeqReqPacket(const uint8_t *data) {
   sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_SEQ_FRAG);
 }
 
+// ── Target side: handle SEQVAL_REQ → send ONE sequence's value back ──────────
+// Reply payload is always "<key>,<status>,<value>" so the requester can match the
+// answer to its request and tell the three outcomes apart:
+//   OK       — value follows
+//   NOTFOUND — no such key (value empty)
+//   TOOBIG   — the value exceeds what sendResultFrags can carry (value empty)
+//
+// TOOBIG is reported EXPLICITLY rather than dropped. Silent overflow is precisely
+// what makes the config-pull path unusable for sequences (it sends nothing and logs
+// only under debugMGMT), and reintroducing it here would recreate the bug this whole
+// feature exists to route around.
+void handleSeqValReqPacket(const uint8_t *data) {
+  espnow_struct_seqval_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  pkt.key[sizeof(pkt.key) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+
+  String key = String(pkt.key);
+  key.trim();
+  if (key.length() == 0) return;
+
+  // Dedup a repeat of the SAME key from the SAME requester, matching the burst the
+  // requester sends. Keyed on the key too, so a consumer walking a name list back to
+  // back (get "wave", then "park") is never mistaken for a retry of the previous one.
+  static uint32_t lastSeqValMs   = 0;
+  static uint8_t  lastSeqValFrom = 0;
+  static String   lastSeqValKey  = "";
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastSeqValFrom && key == lastSeqValKey &&
+      (nowMs - lastSeqValMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq-value request '%s' from WCB%d ignored\n",
+                                 key.c_str(), pkt.requesterWCB);
+    return;
+  }
+  lastSeqValFrom = pkt.requesterWCB;
+  lastSeqValKey  = key;
+  lastSeqValMs   = nowMs;
+
+  preferences.begin("stored_cmds", true);
+  bool   exists = preferences.isKey(key.c_str());
+  String value  = preferences.getString(key.c_str(), "");
+  preferences.end();
+
+  String reply;
+  if (!exists && value.length() == 0) {
+    reply = key + ",NOTFOUND,";
+  } else {
+    // Budget check BEFORE sending: sendResultFrags silently refuses anything over
+    // MGMT_MAX_CHUNKS. Account for the "<key>,OK," header we prepend.
+    const int maxPayload = MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1);
+    if ((int)(key.length() + 4 + value.length()) > maxPayload) {
+      Serial.printf("[MGMT] Sequence '%s' is %d chars — too large to relay (max %d)\n",
+                    key.c_str(), value.length(), maxPayload - (int)key.length() - 4);
+      reply = key + ",TOOBIG,";
+    } else {
+      reply = key + ",OK," + value;
+    }
+  }
+
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' from WCB%d (%d chars)\n",
+                               key.c_str(), pkt.requesterWCB, reply.length());
+  sendResultFrags(reply, pkt.requesterWCB, PACKET_TYPE_SEQVAL_FRAG);
+}
+
 // ── Target side: handle ETM_REQ → start ETM char, results sent in printETMCharResults ──
 void handleETMReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
@@ -3155,16 +3253,26 @@ void handleETMReqPacket(const uint8_t *data) {
 // task) stalls ESP-NOW and drops other inbound packets (heartbeats, OTA frags,
 // RC telemetry). So the callback only ENQUEUES the 43-byte request here, and
 // drainMgmtReqs() runs the heavy handler in loop() context — same pattern as the
-// OTA packet queue. All three share the espnow_struct_config_req wire struct, so
-// one queue + a packetType switch covers them. Auth (password + targetWCB) is
-// (re)validated inside each handler, so queuing unauthenticated junk is harmless.
-struct MgmtReqSlot { espnow_struct_config_req pkt; };
+// OTA packet queue. Auth (password + targetWCB) is (re)validated inside each
+// handler, so queuing unauthenticated junk is harmless.
+//
+// The slot is sized to the LARGEST request that rides this queue, not to
+// espnow_struct_config_req: SEQVAL_REQ is 59 bytes because it carries a key.
+// `len` is stored so each handler is handed exactly the bytes that arrived — a
+// blind memcpy of the slot size would read past a 43-byte packet's buffer.
+struct MgmtReqSlot {
+  uint8_t len;
+  uint8_t raw[sizeof(espnow_struct_seqval_req)];   // the widest request on this queue
+};
 static QueueHandle_t mgmtReqQueue = nullptr;
 
-void enqueueMgmtReq(const uint8_t *raw) {
+void enqueueMgmtReq(const uint8_t *raw, int len) {
   if (!mgmtReqQueue) return;
+  if (len <= 0 || len > (int)sizeof(((MgmtReqSlot*)0)->raw)) return;
   MgmtReqSlot slot;
-  memcpy(&slot.pkt, raw, sizeof(slot.pkt));
+  memset(&slot, 0, sizeof(slot));
+  slot.len = (uint8_t)len;
+  memcpy(slot.raw, raw, len);
   xQueueSend(mgmtReqQueue, &slot, 0);   // drop if full → the requester retries (3x REQ + browser retry)
 }
 
@@ -3172,12 +3280,18 @@ void drainMgmtReqs() {
   if (!mgmtReqQueue) return;
   MgmtReqSlot slot;
   while (xQueueReceive(mgmtReqQueue, &slot, 0) == pdTRUE) {
-    const uint8_t *p = (const uint8_t *)&slot.pkt;
-    switch (slot.pkt.packetType) {
+    const uint8_t *p = slot.raw;
+    // packetType sits at the same offset in every request struct on this queue
+    // (immediately after structPassword[40]), so one peek routes them all.
+    uint8_t ptype = slot.raw[40];
+    switch (ptype) {
       case PACKET_TYPE_CONFIG_REQ: handleConfigReqPacket(p); break;
       case PACKET_TYPE_STATS_REQ:  handleStatsReqPacket(p);  break;
       case PACKET_TYPE_ETM_REQ:    handleETMReqPacket(p);    break;
       case PACKET_TYPE_SEQ_REQ:    handleSeqReqPacket(p);    break;
+      case PACKET_TYPE_SEQVAL_REQ:
+        if (slot.len >= (int)sizeof(espnow_struct_seqval_req)) handleSeqValReqPacket(p);
+        break;
       default: break;
     }
   }
@@ -3249,6 +3363,41 @@ void handleSeqFragPacket(const uint8_t *data) {
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
     Serial.printf("[MGMT:SEQ,%d]%s\n", srcWCB, fullResult.c_str());
     if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: reassemble one sequence → [MGMT:SEQVAL,N]<key>,<status>,<value> ──
+void handleSeqValFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!seqValRelaySession.active || seqValRelaySession.sessionId != pkt.sessionId) {
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+    seqValRelaySession.sourceWCB      = pkt.sourceWCB;
+    seqValRelaySession.sessionId      = pkt.sessionId;
+    seqValRelaySession.totalChunks    = pkt.totalChunks;
+    seqValRelaySession.lastActivityMs = millis();
+    seqValRelaySession.active         = true;
+  }
+  if (!(seqValRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(seqValRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    seqValRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    seqValRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  seqValRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (seqValRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqValRelaySession.chunks[i]);
+    uint8_t srcWCB = seqValRelaySession.sourceWCB;
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+    Serial.printf("[MGMT:SEQVAL,%d]%s\n", srcWCB, fullResult.c_str());
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
 }
@@ -3326,6 +3475,43 @@ void handleMgmtSeqRequest(const String &targetStr) {
   if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (x3)\n", targetWCB);
 }
 
+// ── Relay side: handle ?MGMT,SEQGET,<n>,<key> — pull ONE sequence from a board ──
+void handleMgmtSeqValRequest(const String &args) {
+  int c = args.indexOf(',');
+  if (c < 0) {
+    if (debugMGMT) Serial.println("[MGMT] SEQGET: expected ?MGMT,SEQGET,<wcb>,<key>");
+    return;
+  }
+  uint8_t targetWCB = (uint8_t)args.substring(0, c).toInt();
+  String  key       = args.substring(c + 1);
+  key.trim();
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+    if (debugMGMT) Serial.println("[MGMT] SEQGET: invalid targetWCB");
+    return;
+  }
+  if (key.length() == 0 || key.length() > 15) {   // 15 = the NVS key limit
+    Serial.println("[MGMT] SEQGET: key must be 1-15 chars");
+    return;
+  }
+
+  espnow_struct_seqval_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_SEQVAL_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+  strncpy(pkt.key, key.c_str(), sizeof(pkt.key) - 1);
+
+  // 3x for the same reason as the config pull; the target dedups on
+  // (requester, key) within 1.5 s so this still produces one response.
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    delay(15);
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' sent to WCB%d (x3)\n",
+                               key.c_str(), targetWCB);
+}
+
 void handleMgmtETMRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
   if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
@@ -3388,6 +3574,11 @@ void checkConfigPullTimeout() {
     if (debugMGMT) Serial.printf("[MGMT] Sequence-names session %04X timed out\n", seqRelaySession.sessionId);
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
   }
+  if (seqValRelaySession.active &&
+      (millis() - seqValRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-value session %04X timed out\n", seqValRelaySession.sessionId);
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+  }
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
@@ -3419,6 +3610,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_message),
     "OTA ESP-NOW struct size collides with an existing packet — adjust OTA padding");
 
+  // Same rule for the single-sequence request: it exists as its own struct only
+  // because it must carry a 16-byte key, and it is routed purely by its size.
+  static_assert(
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_message) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_ota_ctrl) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_ota_data),
+    "espnow_struct_seqval_req size collides with an existing packet — adjust key[] padding");
+
   // Handle known packet sizes
   if (len == sizeof(espnow_struct_mgmt)) {
     handleMgmtPacket(incomingData);
@@ -3431,8 +3635,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
     if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_STATS_REQ ||
         ptype == PACKET_TYPE_ETM_REQ    || ptype == PACKET_TYPE_SEQ_REQ) {
-      enqueueMgmtReq(incomingData);
+      enqueueMgmtReq(incomingData, len);
     }
+    return;
+  }
+  if (len == sizeof(espnow_struct_seqval_req)) {
+    // Reads NVS and fragments a reply — deferred to loop() like its siblings.
+    uint8_t ptype = ((const espnow_struct_seqval_req*)incomingData)->packetType;
+    if (ptype == PACKET_TYPE_SEQVAL_REQ) enqueueMgmtReq(incomingData, len);
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
@@ -3441,6 +3651,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_SEQ_FRAG)    handleSeqFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_SEQVAL_FRAG) handleSeqValFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
     return;
   }
@@ -4750,6 +4961,22 @@ void processLocalCommand(const String &message) {
 
         if (seqCmdUpper == "LIST") {
             listStoredCommands();
+        } else if (seqCmdUpper == "GET") {
+            // One sequence, in the SAME "<key>,<status>,<value>" shape the mesh
+            // reply uses, so a host needs one parser for local and remote.
+            String gk = seqArgs; gk.trim();
+            if (gk.length() == 0) {
+                Serial.println("Usage: ?SEQ,GET,<key>");
+            } else {
+                preferences.begin("stored_cmds", true);
+                bool   ex = preferences.isKey(gk.c_str());
+                String v  = preferences.getString(gk.c_str(), "");
+                preferences.end();
+                if (!ex && v.length() == 0)
+                    Serial.printf("[MGMT:SEQVAL,%d]%s,NOTFOUND,\n", WCB_Number, gk.c_str());
+                else
+                    Serial.printf("[MGMT:SEQVAL,%d]%s,OK,%s\n", WCB_Number, gk.c_str(), v.c_str());
+            }
         } else if (seqCmdUpper == "NAMES") {
             // Machine-readable inventory — names only, one line, same string the
             // SEQ_REQ mesh path returns. Prefixed like the relay output so a host

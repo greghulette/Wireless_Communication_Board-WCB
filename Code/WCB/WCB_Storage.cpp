@@ -659,6 +659,7 @@ void saveStoredCommandsToPreferences(const String &message) {
   }
 
   preferences.end();
+  invalidateSequenceInventoryHash();   // WDP re-advertises the new fingerprint within ~500 ms
   Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
 }
 
@@ -699,6 +700,7 @@ void eraseStoredCommandByName(const String &name) {
 
     preferences.putString("key_list", updatedList);
     preferences.end();
+    invalidateSequenceInventoryHash();
 
     if (removed) {
         Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
@@ -746,16 +748,50 @@ while (startIdx < keyList.length()) {
 // See WCB_Storage.h for the format and why names-only exists as a separate path
 // from ?SEQ,LIST / the config pull.
 
-uint32_t sequenceKeysHash() {
+// Cached inventory hash. Recomputed lazily, and ONLY after a write — the WDP
+// dirty-check rebuilds the whole advert payload twice a second (WCB_WDP.cpp), and
+// hashing values there uncached would mean N NVS reads at 2 Hz forever.
+static uint32_t seqInvHashCache  = 0;
+static bool     seqInvHashValid  = false;
+
+void invalidateSequenceInventoryHash() { seqInvHashValid = false; }
+
+uint32_t sequenceInventoryHash() {
+    if (seqInvHashValid) return seqInvHashCache;
+
     preferences.begin("stored_cmds", true);
     String keyList = preferences.getString("key_list", "");
     preferences.end();
 
     uint32_t h = 2166136261u;                     // FNV-1a 32-bit offset basis
-    for (unsigned i = 0; i < keyList.length(); i++) {
-        h ^= (uint8_t)keyList[i];
-        h *= 16777619u;
+    auto feed = [&h](const String &s) {
+        for (unsigned i = 0; i < s.length(); i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+        h ^= 0xFF; h *= 16777619u;                // record separator — "ab"+"c" != "a"+"bc"
+    };
+
+    feed(keyList);
+
+    // Hash the VALUES too, not just the names. Editing a sequence in place doesn't
+    // touch key_list, so a keys-only hash would leave every peer believing its
+    // cached copy was still current — the exact failure this fingerprint exists to
+    // prevent. Walked in key_list order so the result is stable.
+    int startIdx = 0;
+    while (startIdx < (int)keyList.length()) {
+        int commaIndex = keyList.indexOf(',', startIdx);
+        if (commaIndex == -1) commaIndex = keyList.length();
+        String key = keyList.substring(startIdx, commaIndex);
+        key.trim();
+        if (key.length() > 0) {
+            preferences.begin("stored_cmds", true);
+            String value = preferences.getString(key.c_str(), "");
+            preferences.end();
+            feed(value);
+        }
+        startIdx = commaIndex + 1;
     }
+
+    seqInvHashCache = h;
+    seqInvHashValid = true;
     return h;
 }
 
@@ -764,13 +800,9 @@ String buildSequenceNamesString() {
     String keyList = preferences.getString("key_list", "");
     preferences.end();
 
-    // Hash the RAW key_list (not the rebuilt output) so this matches
-    // sequenceKeysHash() and the WDP_TLV_SEQHASH advert byte-for-byte.
-    uint32_t h = 2166136261u;
-    for (unsigned i = 0; i < keyList.length(); i++) {
-        h ^= (uint8_t)keyList[i];
-        h *= 16777619u;
-    }
+    // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
+    // the two directly, so they must never be computed two different ways.
+    uint32_t h = sequenceInventoryHash();
 
     // Walk key_list exactly as listStoredCommands does — trailing comma, possible
     // empty entries from a legacy erase — but emit only the names.
@@ -801,6 +833,7 @@ void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
     preferences.end();
+    invalidateSequenceInventoryHash();
 }
 
 // Normalise legacy ^*** inline-comment markers in a stored sequence value.
@@ -892,6 +925,10 @@ void migrateOldStoredCommands() {
     preferences.begin("stored_cmds", false);
     preferences.putBool("seq_mig_done", true);
     preferences.end();
+    // Migration rewrites values (comment-marker normalisation), so the fingerprint
+    // must not survive it. Runs before the first advert anyway — this is belt-and-
+    // braces against a future reorder of setup().
+    invalidateSequenceInventoryHash();
 
     if (recovered > 0) {
         Serial.printf("[MIGRATION] Sequence recovery complete — %d sequence(s) restored.\n", recovered);
