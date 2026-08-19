@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191453RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191512RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191453RAUG2026";
+String SoftwareVersion = "6.2.0_191512RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4598,7 +4598,14 @@ void processLocalCommand(const String &message) {
     // Checked BEFORE the shortcut, and deliberately only for verbs whose tail is opaque data —
     // everything else keeps the convenient "?VERB?" help form.
     bool dataBearingVerb = message.startsWith("MGMT,") || message.startsWith("mgmt,") ||
-                           message.startsWith("SEQ,")  || message.startsWith("seq,");
+                           message.startsWith("SEQ,")  || message.startsWith("seq,") ||
+                           // FUNCCHAR/CMDCHAR take a literal character as their argument, and that
+                           // character can be '?'. Without this exemption "set the function char
+                           // back to ?" was unexpressible — the command was eaten as a help
+                           // request whatever prefix carried it — so a board moved to a custom
+                           // funcChar could never be returned to the default except by ?ERASE,NVS.
+                           message.startsWith("FUNCCHAR,") || message.startsWith("funcchar,") ||
+                           message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,");
 
     if (!dataBearingVerb && message.endsWith("?")) {  // no space required
         String cmd = message.substring(0, message.length() - 1);
@@ -6482,10 +6489,28 @@ void processPWMOutput(const String &message) {
     unsigned long pulseWidth = message.substring(2).toInt();
     
     if (port < 1 || port > 5 || pulseWidth < 500 || pulseWidth > 2500) {
-        if (debugPWMEnabled) Serial.println("Invalid PWM output command");
+        // Was gated on debugPWMEnabled, which is defined false and assigned NOWHERE — so this
+        // rejection was literally unreachable and a malformed ;P was silently ignored.
+        // debugPWMPassthrough is the flag ?DEBUG,PWM,ON actually sets.
+        if (debugPWMPassthrough)
+            Serial.printf("[PWM] Invalid ;P command '%s' (expected ;Pxnnnn, port 1-5, width 500-2500)\n",
+                          message.c_str());
         return;
     }
-    
+
+    // Refuse to drive a port another device is actively using. This deliberately does NOT require
+    // a positive PWM-output declaration: a receiver driven by a REMOTE board's PWM mapping has no
+    // local declaration, and the unconditional pinMode below is what makes that work. Blocking
+    // only OWNED ports keeps remote PWM functional while stopping a stray ;P from reconfiguring a
+    // live UART's TX pin mid-transfer — which silently kills that device until the next reboot.
+    if (isSerialPortUsedForMP3(port) || isSerialPortUsedForDFP(port) ||
+        isSerialPortUsedForHCR(port) || isSerialPortUsedForWLED(port) ||
+        isSerialPortRawMapped(port)  || (Kyber_Local && port == kyberLocalPort)) {
+        if (debugPWMPassthrough)
+            Serial.printf("[PWM] Ignoring ;P on S%d — the port is in use by another device\n", port);
+        return;
+    }
+
     int txPin = 0;
     switch(port) {
         case 1: txPin = SERIAL1_TX_PIN; break;

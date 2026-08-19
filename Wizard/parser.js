@@ -1330,10 +1330,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // function-character invocation by the firmware, so the command is unparseable.
   // Since '?' is the factory default the board already uses it; only send when
   // the user has chosen a different character.
-  if (config.funcChar !== '?') {
-    if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
-      add(`FUNCCHAR,${config.funcChar}`);
-  }
+  if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
+    add(`FUNCCHAR,${config.funcChar}`);
 
   if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
     add(`CMDCHAR,${config.cmdChar}`);

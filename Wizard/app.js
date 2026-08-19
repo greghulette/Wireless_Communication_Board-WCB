@@ -88,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.14:57.R.AUG.2026';
+const UI_VERSION = '19.15:12.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7535,9 +7535,11 @@ async function boardGo(n, opts = {}) {
         bootstrap.push(`${curFuncChar}CMDCHAR,${config.cmdChar}`);
       // FUNCCHAR must be LAST — the board switches its parser immediately on receipt,
       // so any bootstrap command after it would need the NEW prefix, not the current one.
-      // Never send ?FUNCCHAR,? — '?' suffix is re-parsed as a new command invocation.
-      // The default is already '?', so only send when the target is something else.
-      if (config.funcChar !== curFuncChar && config.funcChar !== '?')
+      // Setting it back to '?' IS now supported: the firmware exempts FUNCCHAR,/CMDCHAR, from the
+      // trailing-'?' help shortcut, so `xFUNCCHAR,?` reaches the setter. Suppressing it used to
+      // leave the board on the old char while the rest of the push went out with '?' —
+      // unrecognised, so the board sprayed every command to its serial ports and over the mesh.
+      if (config.funcChar !== curFuncChar)
         bootstrap.push(`${curFuncChar}FUNCCHAR,${config.funcChar}`);
       for (const cmd of bootstrap) {
         termLog(n, cmd, 'in');
