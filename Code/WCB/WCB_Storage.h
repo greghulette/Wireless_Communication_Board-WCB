@@ -71,8 +71,14 @@ extern int etmCharDelayMs;
 
 extern String storedCommands[MAX_STORED_COMMANDS];
 
-extern void enqueueCommand(const String &cmd, int sourceID);  // Declare it as an external function
-extern void parseCommandsAndEnqueue(const String &data, int sourceID);
+// Signature must match WCB.ino's definition exactly, defaults included — a second declaration
+// without the defaults makes every two-argument call ambiguous.
+extern void enqueueCommand(const String &cmd, int sourceID,
+                           int originEspnow = -1, int originSeqBody = -1);
+// originEspnow/originSeqBody: pass 0 or 1 to state the origin explicitly instead of relying on the
+// cross-task globals (see enqueueCommand above). -1 = use the globals.
+extern void parseCommandsAndEnqueue(const String &data, int sourceID,
+                                    int originEspnow = -1, int originSeqBody = -1);
 
 struct SerialMonitorOutput {
     uint8_t wcbNumber;    // 0 = local, 1-9 = remote WCB

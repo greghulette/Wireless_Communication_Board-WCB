@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191515RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191525RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191515RAUG2026";
+String SoftwareVersion = "6.2.0_191525RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -221,6 +221,11 @@ typedef struct __attribute__((packed)) {
 // therefore recorded a successful delivery, ETM never retried, and ?STATS showed 100%. Silent
 // data loss that actively reported success.
 #define ETM_MAX_CMD_WITH_CRC  187
+
+// Max DATA bytes in one WCB_TARGET_RAW_SERIAL chunk. The sender and the receive-side bound must
+// agree: the receiver rejects a larger chunk outright, so a sender using a bigger figure loses
+// those bytes silently. Kept as one constant so the two cannot drift apart again.
+#define RAW_SERIAL_MAX_CHUNK  177
 
 #define PACKET_TYPE_COMMAND   0
 #define PACKET_TYPE_ACK       1
@@ -950,7 +955,8 @@ static QueueHandle_t commandQueue = nullptr;
 // ============================= Forward Declarations =============================
 void writeSerialString(Stream &serialPort, String stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
-void enqueueCommand(const String &cmd, int sourceID);
+// Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
+void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
 void checkConfigPullTimeout();
 String buildConfigString();
 void processPWMPassthrough();
@@ -2015,18 +2021,26 @@ void applyLiveBaud(int port, uint32_t baud) {
 }
 
 // Enqueue commands for asynchronous processing
-void enqueueCommand(const String &cmd, int sourceID) {
+// originEspnow / originSeqBody: pass 0 or 1 to state this command's origin EXPLICITLY; leave at
+// the -1 default to fall back to the globals.
+//
+// The globals are unsynchronised shared mutable state written by three tasks across two cores —
+// the WiFi receive callback (Core 0), serialCommandTask and the loop task (Core 1) — so a write
+// from one can land between another task setting them and this snapshot reading them, staging the
+// wrong origin for a command. Callers that already know the answer should say so rather than
+// routing it through a global that a concurrent packet can clobber.
+void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody) {
   if (!commandQueue) return;
 
   CommandQueueItem item;
   item.sourceID = sourceID;
-  // Snapshot the ESP-NOW origin NOW (at enqueue), while the global still reflects
-  // the source that produced this command. It is restored just before dispatch so
-  // forwarding decisions are per-command instead of riding a racy global.
-  item.espnowOrigin = lastReceivedViaESPNOW;
+  // Explicit origin wins; otherwise snapshot the global NOW (at enqueue), while it still reflects
+  // the source that produced this command. Restored just before dispatch so forwarding decisions
+  // are per-command instead of riding the global.
+  item.espnowOrigin = (originEspnow >= 0) ? (originEspnow != 0) : lastReceivedViaESPNOW;
   // Same idea for the sequence-body flag, so a nested recall's mesh-fanout suppression
   // survives the async queue (see recallStoredCommand / inSequenceBody).
-  item.sequenceBody = inSequenceBody;
+  item.sequenceBody = (originSeqBody >= 0) ? (originSeqBody != 0) : inSequenceBody;
 
   // Allocate enough space for the command (including null terminator)
   int length = cmd.length() + 1;
@@ -2048,7 +2062,7 @@ void enqueueCommand(const String &cmd, int sourceID) {
 }
 
 
-void parseCommandsAndEnqueue(const String &data, int sourceID) {
+void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Check if this is a restore with checksum
   int firstDelim = data.indexOf(commandDelimiter);
   if (firstDelim != -1) {
@@ -2141,7 +2155,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       
       if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
         if (!ifGateConsumeToken(csCommand, ifSkipping)) {
-          enqueueCommand(csCommand, sourceID);
+          enqueueCommand(csCommand, sourceID, originEspnow, originSeqBody);
         }
       }
 
@@ -2177,7 +2191,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         seqSaveCmd.trim();
         if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
           if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
-            enqueueCommand(seqSaveCmd, sourceID);
+            enqueueCommand(seqSaveCmd, sourceID, originEspnow, originSeqBody);
           }
         }
         startIdx = endPos;
@@ -2198,7 +2212,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
           if (!ifGateConsumeToken(mgmtCmd, ifSkipping)) {
-            enqueueCommand(mgmtCmd, sourceID);
+            enqueueCommand(mgmtCmd, sourceID, originEspnow, originSeqBody);
           }
         }
         break;  // ?MGMT,... is always the final command in a serial line
@@ -2219,7 +2233,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
           // pure ;t delay belonging to a gated command). Shared semantics
           // live in ifGateConsumeToken — see WCB_Variables.cpp.
         } else {
-          enqueueCommand(singleCmd, sourceID);
+          enqueueCommand(singleCmd, sourceID, originEspnow, originSeqBody);
         }
       }
       if (delimPos == -1) break;
@@ -2616,7 +2630,12 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
     size_t offset = 0;
     while (offset < len) {
         size_t chunkSize = len - offset;
-        if (chunkSize > 180) chunkSize = 180;
+        // 177, NOT 180 — the receiver rejects anything larger (see the WCB_TARGET_RAW_SERIAL
+        // branch in espNowReceiveCallback). At 180 a chunk of 178-180 bytes was transmitted and
+        // then silently dropped at the far end, with the only diagnostic behind debugMaestro.
+        // Today RawSerialForwardingTask never exceeds its own 64-byte buffer, so this is latent
+        // for WCB-to-WCB traffic, but a WCB_Client or hand-crafted sender can reach it.
+        if (chunkSize > RAW_SERIAL_MAX_CHUNK) chunkSize = RAW_SERIAL_MAX_CHUNK;
 
         espnow_struct_message msg;
         memset(&msg, 0, sizeof(msg));
@@ -4158,7 +4177,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // at the queue's declaration).
                 enqueuePendingTimerChain(etmCmd);
             } else {
-                parseCommandsAndEnqueue(etmCmd, 0);
+                // Explicit origin: a wizard-relayed command is NOT mesh-origin (so it may
+                // re-broadcast), anything else on this path is. Passing it beats reading the
+                // global, which serialCommandTask or the loop drain can overwrite in between.
+                parseCommandsAndEnqueue(etmCmd, 0, wizardOrigin ? 0 : 1, 0);
             }
         }
         colorWipeStatus("ES", blue, 10);
@@ -4284,7 +4306,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   if (targetWCB == WCB_TARGET_RAW_SERIAL) {
     uint8_t targetPort = (uint8_t)received.structCommand[0];
     size_t chunkLen    = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
-    if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
+    if (chunkLen > RAW_SERIAL_MAX_CHUNK || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
       if (debugMaestro)
         Serial.printf("[MAESTRO] Invalid chunk from WCB%d: port=%d, len=%d — rejected\n",
                       senderWCB, targetPort, (int)chunkLen);
@@ -4401,7 +4423,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // to loop() via the queue (see pendingTimerChainQueue comment).
     enqueuePendingTimerChain(receivedCmd);
   } else {
-    parseCommandsAndEnqueue(receivedCmd, 0);
+    // Same explicit origin as the ETM branch — see the note there.
+    parseCommandsAndEnqueue(receivedCmd, 0, wizardOriginPlain ? 0 : 1, 0);
   }
   colorWipeStatus("ES", blue, 10);
 }
