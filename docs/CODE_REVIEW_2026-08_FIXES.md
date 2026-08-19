@@ -160,8 +160,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-105 | TODO | `Wizard/app.js:10931` | ⚠FIX | wizardApplyConfig never writes boardConfigs[n] for Client slots — slot type and client alias are silently dropped |
 | FIX-106 | TODO | `Wizard/app.js:11748` | ⚠FIX | Connect & Push always reports "✓ Done", even when the push never happened or the board never came back |
 | FIX-107 | **DONE** | `Wizard/app.js:12610` |  | The 12 s mesh-discovery poll injects ?WDP,DUMP into an in-flight config push, faking ACKs for dropped settings |
-| FIX-108 | TODO | `Wizard/flasher.js:414` |  | Recognized-but-unsupported chips (ESP32-S2/C2/C3/C5/C6/C61/H2/P4) are flashed with ESP32 or S3 firmware whenever a HW version is selected |
-| FIX-109 | TODO | `Wizard/flasher.js:686` | ⚠FIX | Flash progress bar stalls at ~62% — esptool reports COMPRESSED bytes but the denominator is the uncompressed total |
+| FIX-108 | **DONE** | `Wizard/flasher.js:414` |  | Recognized-but-unsupported chips (ESP32-S2/C2/C3/C5/C6/C61/H2/P4) are flashed with ESP32 or S3 firmware whenever a HW version is selected |
+| FIX-109 | **DONE** | `Wizard/flasher.js:686` | ⚠FIX | Flash progress bar stalls at ~62% — esptool reports COMPRESSED bytes but the denominator is the uncompressed total |
 | FIX-110 | **DONE** | `Wizard/index.html:640` |  | Kyber Maestro Baud <select> cannot represent 5 of the 13 firmware-legal baud rates — a pulled 19200 blanks the control and Push silently rewrites the  |
 | FIX-111 | **DONE** | `Wizard/index.html:809` |  | MP3 baud picker offers values the firmware rejects outright, discarding the whole MP3 config |
 | FIX-112 | **DONE** | `Wizard/parser.js:902` | ⚠FIX | The Wizard drops ?WDP,OFF / ?WDP,AUTOJOIN,OFF from a pulled config and never re-emits them — an export/restore silently re-enables discovery |
@@ -183,7 +183,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-121 | **DONE** | `Code/WCB/WCB_Help.cpp:364` |  | ?WCB? help caps the board number at 9; the parser accepts 1-20 |
 | FIX-122 | **DONE** | `Code/WCB/WCB_Help.cpp:1015` |  | Ten implemented ? commands have no help topic and no menu entry; asking for help on them silently prints the generic menu |
 | FIX-123 | **DONE** | `Code/WCB/WCB.ino:5138` | ⚠FIX | ?LED,PIN re-inits the NeoPixel object while the WiFi task dereferences it, leaking the old object and opening a use-after-free |
-| FIX-124 | TODO | `Wizard/flasher.js:720` |  | Post-flash hard reset never runs — `loader.afterFlash` does not exist in the vendored esptool-js 0.4.7 |
+| FIX-124 | **DONE** | `Wizard/flasher.js:720` |  | Post-flash hard reset never runs — `loader.afterFlash` does not exist in the vendored esptool-js 0.4.7 |
 
 ---
 
@@ -245,3 +245,6 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-014 | `WCB.ino` | `applyLiveBaud` called `end()`/`begin()` on a live SoftwareSerial while `serialCommandTask` (5 ms poll) and `RawSerialForwardingTask` were inside `available()`/`read()` on the same object — a read against a freed RX buffer, reachable from an ordinary `?BAUD,Sx` or any config push that changes a baud. Added a `serialReconfigPort` ownership flag that both drainers honour, plus a settle delay before teardown. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-065 | `WCB.ino` | A rebooted peer restarts its sequence counter at 1, but our duplicate ring still held its pre-reboot seqs — so its first commands matched “already seen” and were **ACKed and silently not executed**. The boot-announce edge now clears that sender’s history. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-077 | `WCB_Storage.cpp` | `?KYBER,LOCAL` / `?KYBER,REMOTE` change the mode at runtime, but `KyberLocalTask`/`KyberRemoteTask` are created only at boot — the newly-owned ports had no reader until a restart. Both paths now say a reboot is required instead of looking configured-but-deaf. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-108 | `Wizard/flasher.js` | A **recognised but unsupported** ESP32 variant (S2/C2/C3/C5/C6/C61/H2/P4) produced `detectedType = null` and then fell through to the HW-version-mapped binary — writing ESP32 or S3 firmware onto silicon it was not built for. Now refuses outright; the fallback is reserved for a genuinely unreadable chip id. | JS ✅ |
+| 2026-08-19 | FIX-109 | `Wizard/flasher.js` | Progress bar stalled around 62 %: with `compress:true` esptool reports **compressed** byte counts while the denominator was the sum of **uncompressed** image sizes. Per-file fraction is now weighted by that file’s uncompressed share, which is correct either way. | JS ✅ |
+| 2026-08-19 | FIX-124 | `Wizard/flasher.js` | The post-flash hard reset silently did nothing — the vendored esptool-js 0.4.7 has neither `afterFlash` nor `after_flash`. Tries every known spelling, then falls back to a manual DTR/RTS pulse (both verified present on the vendored transport), and logs if it still could not reset. | JS ✅ |
