@@ -650,8 +650,23 @@ void saveStoredCommandsToPreferences(const String &message) {
     return;
   }
 
+  // An ESP32 NVS key is capped at 15 characters. A longer one makes putString fail while the name
+  // was still appended to key_list below — so the sequence was listed, reported as "Stored:", and
+  // advertised to peers, but recalling it found nothing. Both shipping clients already enforce 15
+  // (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
+  if (key.length() > 15) {
+    Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
+                  key.c_str(), (unsigned)key.length());
+    return;
+  }
+
   preferences.begin("stored_cmds", false);
-  preferences.putString(key.c_str(), value);
+  if (!preferences.putString(key.c_str(), value)) {
+    preferences.end();
+    Serial.printf("Failed to store sequence '%s' (NVS write rejected). Not added to the list.\n",
+                  key.c_str());
+    return;
+  }
 
   String existingKeys = preferences.getString("key_list", "");
   bool alreadyExists = false;
@@ -1049,7 +1064,10 @@ void eraseNVSFlash() {
     // values here intact — every deleted sequence reappeared on the next boot.
     preferences.begin("stored_commands", false); preferences.clear(); preferences.end();
 
-    clearAllPWMMappings();
+    // false = do not restart here and do not broadcast ?REBOOT. clearAllPWMMappings() used to end
+    // in ESP.restart(), so eraseNVSFlash() never reached its own confirmation or restart below —
+    // and it rebooted every other WCB in the fleet as a side effect of one board being erased.
+    clearAllPWMMappings(false);
 
     // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the
     // Wizard's factory-reset modal both say so). Say what to do about it: until ?HW is set the
@@ -1210,30 +1228,42 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Serial.println("Kyber is REMOTE (on another WCB)");
     
   } else if (baseCommand.equals("clear")) {
+    // Act on the port the Kyber was ACTUALLY on, and only if it was configured at all.
+    //
+    // This used to operate on `kyberPort`, which the bare `?KYBER,CLEAR` path hard-codes to 2.
+    // Because collectConfigCommands emits ?KYBER,CLEAR in EVERY non-Kyber board's config chain,
+    // every full push to every plain board reset Serial2 to 9600 and re-enabled its broadcast
+    // flags — silently undoing settings the same push had just applied a few commands earlier.
+    const int clearPort = (kyberLocalPort >= 1 && kyberLocalPort <= 5) ? kyberLocalPort : 0;
+
     Kyber_Location = " ";
     Kyber_Local = false;
     Maestro_Remote = false;
     kyberLocalPort = 0;
     kyberUseTargeting = false;
-    
-    if (kyberPort > 0) {
-      updateBaudRate(kyberPort, 9600);
-      Serial.printf("✓ Reset S%d baud rate to 9600 (Kyber port)\n", kyberPort);
+
+    if (clearPort > 0) {
+      updateBaudRate(clearPort, 9600);
+      Serial.printf("✓ Reset S%d baud rate to 9600 (was the Kyber port)\n", clearPort);
     }
-    
+
     preferences.begin("kyber_settings", false);
     preferences.putString("K_Location", Kyber_Location);
     preferences.end();
 
-    if (!serialBroadcastEnabled[kyberPort - 1]) {
-      serialBroadcastEnabled[kyberPort - 1] = true;
-      saveBroadcastSettingsToPreferences();
-      Serial.printf("✓ Re-enabled broadcast output on S%d\n", kyberPort);
-    }
-    if (blockBroadcastFrom[kyberPort - 1]) {
-      blockBroadcastFrom[kyberPort - 1] = false;
-      saveBroadcastBlockSettings();
-      Serial.printf("✓ Re-enabled broadcast input on S%d\n", kyberPort);
+    // Only touch broadcast flags for a port the Kyber actually held. Indexing with the
+    // hard-coded 2 also meant `?KYBER,CLEAR,S0` wrote serialBroadcastEnabled[-1].
+    if (clearPort > 0) {
+      if (!serialBroadcastEnabled[clearPort - 1]) {
+        serialBroadcastEnabled[clearPort - 1] = true;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("✓ Re-enabled broadcast output on S%d\n", clearPort);
+      }
+      if (blockBroadcastFrom[clearPort - 1]) {
+        blockBroadcastFrom[clearPort - 1] = false;
+        saveBroadcastBlockSettings();
+        Serial.printf("✓ Re-enabled broadcast input on S%d\n", clearPort);
+      }
     }
     saveKyberTargets();
     Serial.println("Kyber cleared. Run ?MAESTRO_DEFAULT to clear Maestro configs.");

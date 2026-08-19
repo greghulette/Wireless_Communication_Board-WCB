@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191343RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191404RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191343RAUG2026";
+String SoftwareVersion = "6.2.0_191404RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5229,7 +5229,24 @@ void processLocalCommand(const String &message) {
     // --- ?FUNCCHAR,x ---
     if (rootUpper == "FUNCCHAR") {
         if (args.length() == 1) {
-            LocalFunctionIdentifier = args.charAt(0);
+            char nc = args.charAt(0);
+            // Reject a collision with the command character. handleSingleCommand tests the
+            // function identifier FIRST, so setting funcChar to ';' routed the entire ';' command
+            // family into processLocalCommand — every ;M/;L/;H/;D device command stopped working.
+            // The setting persists to NVS, so it survived reboots too.
+            if (nc == CommandCharacter) {
+                Serial.printf("'%c' is already the command character — the entire '%c' command "
+                              "family would stop working. Pick a different function identifier.\n",
+                              nc, CommandCharacter);
+                return;
+            }
+            // Control/whitespace characters can never be typed as a prefix and would strand
+            // the board's console.
+            if (nc <= ' ' || nc == 0x7F) {
+                Serial.println("Function identifier must be a printable, non-space character.");
+                return;
+            }
+            LocalFunctionIdentifier = nc;
             saveLocalFunctionIdentifierAndCommandCharacter();
             Serial.printf("Local function identifier updated to '%c'\n", LocalFunctionIdentifier);
         } else {
@@ -6089,8 +6106,13 @@ void processSerialMessage(const String &message) {
         return;
     }
 
-    // Extract message to send
+    // Extract message to send.
+    // Strip ONE optional ',' separator after the port digit. Every sibling runtime verb accepts
+    // `;V<id>,<payload>` style and strips the comma, so `;S3,hello` looked identical — but this
+    // handler kept it, putting a literal leading comma on the wire to the device. Devices that
+    // parse their own framing then saw ",hello".
     String serialMessage = message.substring(2);
+    if (serialMessage.startsWith(",")) serialMessage = serialMessage.substring(1);
     serialMessage.trim();
 
     // Handle USB (Serial0) separately
@@ -6319,6 +6341,38 @@ void recallStoredCommand(const String &message, int sourceID) {
         String trigger = String(CommandCharacter) + (isSeq ? "SEQ" : "C") + key;
         sendESPNowMessage(0, trigger.c_str());   // target 0 = broadcast, ETM
     }
+
+    // Cycle guard. A sequence whose body recalls itself (directly, or via a ring A→B→A) never
+    // recursed on the STACK — recallCommandSlot enqueues and returns, and the nested recall runs
+    // from a later top-level drain — so a depth counter would not catch it. What it did do was
+    // re-enqueue forever, so loop() drained an endlessly-refilled queue and the board serviced
+    // nothing else.
+    //
+    // Track the keys expanded during the CURRENT drain instead. inSequenceBody is already true
+    // for anything a sequence body enqueues, so the chain is identifiable; the set is cleared
+    // whenever a genuine top-level recall starts.
+    static String activeChainKeys[8];
+    static uint8_t activeChainDepth = 0;
+    if (!inSequenceBody) {
+        activeChainDepth = 0;              // fresh top-level trigger — start a new chain
+    } else {
+        for (uint8_t i = 0; i < activeChainDepth; i++) {
+            if (activeChainKeys[i].equalsIgnoreCase(key)) {
+                Serial.printf("Sequence '%s' recalls itself (directly or in a loop) — refusing to "
+                              "expand it again. Break the cycle in the stored sequence.\n",
+                              key.c_str());
+                return;
+            }
+        }
+        if (activeChainDepth >= (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0]))) {
+            Serial.printf("Sequence nesting deeper than %u — refusing to expand '%s'.\n",
+                          (unsigned)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])),
+                          key.c_str());
+            return;
+        }
+    }
+    if (activeChainDepth < (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])))
+        activeChainKeys[activeChainDepth++] = key;
 
     if (isSeq) Serial.println("Recalling stored sequence command...");
     recallCommandSlot(key, sourceID);
@@ -6795,17 +6849,26 @@ void serialCommandTask(void *pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
         processIncomingSerial(Serial, 0);
-        
+
+        // A port owned by the Kyber task must not be drained here too — two tasks reading one
+        // UART steal bytes from each other and corrupt every frame. The skip below used to be
+        // hard-coded to S1/S2, but kyberLocalPort is configurable S1-S5 (?KYBER,LOCAL,Sx): with
+        // the Kyber on S3/S4/S5 both tasks polled it. S2 is the default, which is why this never
+        // showed on the bench.
+        const int kyberOwned = Kyber_Local ? kyberLocalPort : 0;
+
         // Process serial ports 3-5 only if not raw-mapped
         // (raw-mapped ports are owned by RawSerialForwardingTask — calling
         //  processIncomingSerial on them would race for bytes and corrupt binary data)
-        if (!isSerialPortRawMapped(3)) processIncomingSerial(Serial3, 3);
-        if (!isSerialPortRawMapped(4)) processIncomingSerial(Serial4, 4);
-        if (!isSerialPortRawMapped(5)) processIncomingSerial(Serial5, 5);
+        if (!isSerialPortRawMapped(3) && kyberOwned != 3) processIncomingSerial(Serial3, 3);
+        if (!isSerialPortRawMapped(4) && kyberOwned != 4) processIncomingSerial(Serial4, 4);
+        if (!isSerialPortRawMapped(5) && kyberOwned != 5) processIncomingSerial(Serial5, 5);
 
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
-            // Skip Serial1 and Serial2 - handled by Kyber task
+            // Skip Serial1 and Serial2 — handled by the Kyber task (S1 is the Maestro side,
+            // S2 the historical Kyber port). Deliberately unchanged: the Kyber task drains both
+            // regardless of kyberLocalPort, so draining either here would race it.
         } else if (Maestro_Remote) {
             // Process Serial2 only if not raw-mapped
             if (!isSerialPortRawMapped(2)) {
@@ -6935,7 +6998,12 @@ void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt =
     digitalWrite(STATUS_LED_PIN, LOW);
     delay(50);  // Reduced from 750ms
     
-    // Try to init
+    // Try to init. Free any previous instance first: ?LED,PIN re-runs this, and assigning over
+    // the old pointer leaked it (~50 bytes plus its RMT/pixel buffer) every time.
+    if (statusLED != nullptr) {
+      delete statusLED;
+      statusLED = nullptr;
+    }
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
     delay(50);  // Reduced from 750ms
     statusLED->begin();

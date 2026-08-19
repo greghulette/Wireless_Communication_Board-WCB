@@ -39,7 +39,10 @@ void addPWMMapping(const String &config, bool autoReboot = true);
 void removePWMMapping(int inputPort);
 void listPWMMappings();
 void listPWMMappingsBoot();
-void clearAllPWMMappings();
+// autoReboot=false: clear locally WITHOUT restarting this board and WITHOUT broadcasting ?REBOOT
+// to the fleet. Used by eraseNVSFlash(), which has its own restart to perform afterwards and must
+// not reboot every other WCB just because this one was factory-reset.
+void clearAllPWMMappings(bool autoReboot = true);
 void savePWMMappingsToPreferences();
 void loadPWMMappingsFromPreferences();
 void processPWMPassthrough();

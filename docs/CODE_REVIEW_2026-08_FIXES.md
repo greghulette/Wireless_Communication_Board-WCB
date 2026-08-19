@@ -55,7 +55,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-007 | **DONE** | `Code/WCB/WCB_Storage.cpp:352` |  | ?BCAST,RESET does not reset broadcast INPUT blocking at all and leaves RAM stale, so the next unrelated save re-persists the pre-reset values |
 | FIX-008 | **DONE** | `Code/WCB/WCB_Storage.cpp:834` | ⚠FIX | The legacy stored_commands namespace is never cleared and the migration guard lives inside the namespace that IS cleared — ?SEQ,CLEAR,ALL or ?ERASE,NV |
 | FIX-009 | **DONE** | `Code/WCB/WCB_Storage.cpp:1024` | ⚠FIX | ?ERASE,NVS never clears the dfp_cfg namespace — the DFPlayer config and its port claim survive a factory reset, and the adjacent WCB_DFP comment claim |
-| FIX-010 | TODO | `Code/WCB/WCB_Storage.cpp:1078` | ⚠FIX | ?KYBER,CLEAR is emitted in every non-Kyber board's config chain and always resets Serial2's baud + broadcast flags, silently overwriting settings the  |
+| FIX-010 | **DONE** | `Code/WCB/WCB_Storage.cpp:1078` | ⚠FIX | ?KYBER,CLEAR is emitted in every non-Kyber board's config chain and always resets Serial2's baud + broadcast flags, silently overwriting settings the  |
 | FIX-011 | **DONE** | `Code/WCB/WCB.ino:398` | ⚠FIX | Pending-timer-chain queue only closes the WiFi-task half of the commandGroups race — the local-serial path still mutates the vector from serialCommand |
 | FIX-012 | **DONE** | `Code/WCB/WCB.ino:1569` |  | processETMCharAck silently discards ACKs for message index >= 200, and the corresponding sentTime writes are unbounded |
 | FIX-013 | **DONE** | `Code/WCB/WCB.ino:1585` | ⚠FIX | Phase 3 "Loaded Network" is never loaded — the ETMLOAD trigger is sent non-ETM and is dropped by every receiver's ETM-mismatch guard, making processET |
@@ -99,8 +99,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-044 | TODO | `Code/WCB/WCB_Help.cpp:132` |  | ?BAUD help documents the legacy form `?Sx,rate`, which the parser rejects (it needs no comma) |
 | FIX-045 | TODO | `Code/WCB/WCB_Help.cpp:669` | ⚠FIX | ?WLED? help documents only the legacy single-device form — the canonical ID-addressed config and ;L<id> addressing are undocumented |
 | FIX-046 | TODO | `Code/WCB/WCB_Help.cpp:925` |  | ?CMDCHAR? documents `;Px,width` but the parser rejects the comma, and the rejection is silent |
-| FIX-047 | TODO | `Code/WCB/WCB_Storage.cpp:643` |  | ?SEQ,SAVE accepts a key longer than the 15-char NVS limit — value silently discarded but the name is recorded |
-| FIX-048 | TODO | `Code/WCB/WCB_Storage.cpp:1028` | ⚠FIX | eraseNVSFlash() never reaches its own confirmation or restart, and ?ERASE,NVS silently reboots OTHER boards in the fleet |
+| FIX-047 | **DONE** | `Code/WCB/WCB_Storage.cpp:643` |  | ?SEQ,SAVE accepts a key longer than the 15-char NVS limit — value silently discarded but the name is recorded |
+| FIX-048 | **DONE** | `Code/WCB/WCB_Storage.cpp:1028` | ⚠FIX | eraseNVSFlash() never reaches its own confirmation or restart, and ?ERASE,NVS silently reboots OTHER boards in the fleet |
 | FIX-049 | TODO | `Code/WCB/WCB_Storage.cpp:1636` | ⚠FIX | ?MAP,SERIAL appends destinations rather than replacing them, so a destination removed or changed in the Wizard stays live on the board |
 | FIX-050 | TODO | `Code/WCB/WCB_Storage.cpp:1663` |  | Toggling raw mode on an existing serial mapping changes it in RAM but is never persisted — it silently reverts on reboot |
 | FIX-051 | **DONE** | `Code/WCB/WCB_Storage.cpp:2229` |  | etmMissedHeartbeats initializer of 5 is overwritten at boot by an NVS fallback of 3, so the documented 55 s offline window is never in effect |
@@ -122,13 +122,13 @@ and the `volatile` increment — both are themselves findings.
 | FIX-067 | TODO | `Code/WCB/WCB.ino:4342` | ⚠FIX | forwardMaestroDataToRemoteKyber reads and DISCARDS Maestro bytes past 64 — the exact drop the sibling function was fixed to stop doing |
 | FIX-068 | TODO | `Code/WCB/WCB.ino:4402` | ⚠FIX | The endsWith("?") help intercept makes every "set the character back to ?" command impossible — including the exact examples the built-in help prints |
 | FIX-069 | **DONE** | `Code/WCB/WCB.ino:4684` | ⚠FIX | ?ETM,HB with no value silently stores a 0-second heartbeat interval and turns the board into an ESP-NOW broadcast storm |
-| FIX-070 | TODO | `Code/WCB/WCB.ino:5046` | ⚠FIX | ?FUNCCHAR accepts ';' with no conflict check, and handleSingleCommand tests the function identifier first — the entire ';' command family is permanent |
+| FIX-070 | **DONE** | `Code/WCB/WCB.ino:5046` | ⚠FIX | ?FUNCCHAR accepts ';' with no conflict check, and handleSingleCommand tests the function identifier first — the entire ';' command family is permanent |
 | FIX-071 | **DONE** | `Code/WCB/WCB.ino:5279` |  | ?SLS<x>,<label> is completely dead — the caller strips "SLS" and updateSerialLabel() strips it again |
 | FIX-072 | **DONE** | `Code/WCB/WCB.ino:5772` |  | printBackupConfig emits the live-chain checksum as <funcChar>CHK, but both verifiers hard-code "?CHK" — restore integrity checking is silently skipped |
-| FIX-073 | TODO | `Code/WCB/WCB.ino:5894` | ⚠FIX | ;S<port>,<msg> sends a literal leading comma — the separator every sibling runtime verb strips |
-| FIX-074 | TODO | `Code/WCB/WCB.ino:6125` | ⚠FIX | Nested ;C / ;SEQ recalls have no depth or cycle guard — a self-referencing stored sequence loops forever inside loop()'s queue drain |
+| FIX-073 | **DONE** | `Code/WCB/WCB.ino:5894` | ⚠FIX | ;S<port>,<msg> sends a literal leading comma — the separator every sibling runtime verb strips |
+| FIX-074 | **DONE** | `Code/WCB/WCB.ino:6125` | ⚠FIX | Nested ;C / ;SEQ recalls have no depth or cycle guard — a self-referencing stored sequence loops forever inside loop()'s queue drain |
 | FIX-075 | TODO | `Code/WCB/WCB.ino:6191` | ⚠FIX | ;Px,width as documented cannot work, and its rejection is silent because debugPWMEnabled is never assigned anywhere |
-| FIX-076 | TODO | `Code/WCB/WCB.ino:6603` | ⚠FIX | serialCommandTask hard-codes the Kyber/Maestro port skip to S1/S2 while the Kyber and Maestro ports are configurable S1-S5, so both tasks drain the sa |
+| FIX-076 | **DONE** | `Code/WCB/WCB.ino:6603` | ⚠FIX | serialCommandTask hard-codes the Kyber/Maestro port skip to S1/S2 while the Kyber and Maestro ports are configurable S1-S5, so both tasks drain the sa |
 | FIX-077 | TODO | `Code/WCB/WCB.ino:6608` |  | Kyber_Local / Maestro_Remote are settable at runtime but KyberLocalTask / KyberRemoteTask are only created at boot, leaving S1 and S2 with no reader a |
 | FIX-078 | **DONE** | `Code/WCB/WCB.ino:7225` |  | Serial1/Serial2 begin() has no baudRates>0 guard (Serial3-5 does) — a 0 in NVS blocks 20 s in the core's baud auto-detect and the boot guard reboots t |
 | FIX-079 | TODO | `Wizard/app.js:454` | ⚠FIX | reconcileBoardGrid can delete a board slot that is mid-flash, killing the post-flash config restore |
@@ -182,7 +182,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-120 | TODO | `Code/WCB/WCB_Help.cpp:128` | ⚠FIX | ?BAUD? help tells the user to run ?MAESTRO,ENABLE, which is not implemented |
 | FIX-121 | TODO | `Code/WCB/WCB_Help.cpp:364` |  | ?WCB? help caps the board number at 9; the parser accepts 1-20 |
 | FIX-122 | TODO | `Code/WCB/WCB_Help.cpp:1015` |  | Ten implemented ? commands have no help topic and no menu entry; asking for help on them silently prints the generic menu |
-| FIX-123 | TODO | `Code/WCB/WCB.ino:5138` | ⚠FIX | ?LED,PIN re-inits the NeoPixel object while the WiFi task dereferences it, leaking the old object and opening a use-after-free |
+| FIX-123 | **DONE** | `Code/WCB/WCB.ino:5138` | ⚠FIX | ?LED,PIN re-inits the NeoPixel object while the WiFi task dereferences it, leaking the old object and opening a use-after-free |
 | FIX-124 | TODO | `Wizard/flasher.js:720` |  | Post-flash hard reset never runs — `loader.afterFlash` does not exist in the vendored esptool-js 0.4.7 |
 
 ---
@@ -218,3 +218,11 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-064 | `WCB.ino` | ETM-char “no online peers” abort now unwinds the run: restores `debugETM` and clears/answers `etmCharRelayRequesterWCB`, which used to latch so a later LOCAL run frag-sent its results to a board that never asked. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-055, FIX-056 | `WCB.ino` | ETM-char phase 2 is unicast, not broadcast — relabelled in the live log and the results table so the report stops presenting unicast latencies under a broadcast heading. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | F-003, F-004 | `wcb_pin_map.h`, `WCB.ino` | Fixed the include guard (`wcb_pin_map.h` is not a legal macro name) and the non-atomic `volatile` increment on the drop counter (now under its own portMUX). **Both targets now compile with ZERO warnings.** | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-070 | `WCB.ino` | `?FUNCCHAR` now rejects a collision with the command character (setting it to `;` routed the whole `;` device-command family into the local dispatcher, persisted to NVS) and rejects control/space characters. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-073 | `WCB.ino` | `;S<port>,<msg>` stripped one optional `,` separator — every sibling verb strips it, so the comma was going out on the wire to the device. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-074 | `WCB.ino` | Sequence cycle guard. A self-referencing (or A→B→A) sequence re-enqueued forever, so loop() drained an endlessly-refilled queue. A depth counter would NOT have caught it (no stack recursion — the nested recall runs from a later drain), so this tracks the keys expanded during the current chain instead. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-076 | `WCB.ino` | Kyber-owned port skip in `serialCommandTask` was hard-coded to S1/S2 while `kyberLocalPort` is configurable S1-S5 — with the Kyber on S3/S4/S5 two tasks drained the same UART. Now skips the configured port. (Left the S1/S2 skip intact; the Kyber task drains both regardless.) | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-123 | `WCB.ino` | `?LED,PIN` re-init now deletes the previous NeoPixel object instead of leaking it. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-010 | `WCB_Storage.cpp` | `?KYBER,CLEAR` acted on a hard-coded port 2. Since the config chain emits it for EVERY non-Kyber board, every full push reset Serial2 to 9600 and re-enabled its broadcast flags, undoing settings the same push had just applied. Now uses the port the Kyber actually held, and touches nothing when it was never configured (also removes the `[-1]` index on `?KYBER,CLEAR,S0`). | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-047 | `WCB_Storage.cpp` | `?SEQ,SAVE` now rejects a key over the 15-char NVS limit and checks the `putString` result, instead of listing and advertising a sequence whose value was never stored. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-048 | `WCB_Storage.cpp`, `WCB_PWM.{h,cpp}` | `clearAllPWMMappings()` ended in `ESP.restart()`, so `eraseNVSFlash()` never reached its own confirmation or restart — and it broadcast `?REBOOT`, restarting the whole fleet because one board was factory-reset. Added an `autoReboot` parameter; erase passes false. | ESP32 ✅ S3 ✅ |

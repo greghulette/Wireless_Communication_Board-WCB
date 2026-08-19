@@ -451,7 +451,7 @@ void listPWMMappingsBoot() {
     
 }
 
-void clearAllPWMMappings() {
+void clearAllPWMMappings(bool autoReboot) {
     bool remoteBoards[MAX_WCB_COUNT + 1] = {false};   // indexed by WCB number (0 = local), sized to the full peer range
     int remotePorts[MAX_WCB_COUNT + 1][5];
     int remotePortCounts[MAX_WCB_COUNT + 1] = {0};
@@ -487,10 +487,14 @@ void clearAllPWMMappings() {
                     }
                 }
                 
-                delay(50);
-                sendESPNowMessage(wcb, "?REBOOT");
-                if (debugEnabled) {
-                    Serial.printf("Sent reboot command to WCB%d\n", wcb);
+                // Only reboot the remote board when this is a real "clear my PWM mappings"
+                // action. A local factory reset must not restart the rest of the fleet.
+                if (autoReboot) {
+                    delay(50);
+                    sendESPNowMessage(wcb, "?REBOOT");
+                    if (debugEnabled) {
+                        Serial.printf("Sent reboot command to WCB%d\n", wcb);
+                    }
                 }
             }
         }
