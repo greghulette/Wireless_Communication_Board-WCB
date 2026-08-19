@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191729RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191805RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191729RAUG2026";
+String SoftwareVersion = "6.2.0_191805RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2067,14 +2067,32 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
 }
 
 
+// Does `tok` at offset `at` begin with `func` followed by `verbUpper` (case-insensitive on the
+// verb, EXACT on the func char)?
+//
+// The func char is NOT case-normalisable: ?FUNCCHAR accepts any printable non-space character
+// except the command character (WCB.ino, the FUNCCHAR setter), so a lowercase letter such as
+// 'x' is a legal identifier. The old tests uppercased the whole token and compared it against a
+// RAW func char — so on a board whose identifier was a lowercase letter, "xSEQ,SAVE," never
+// matched "XSEQ,SAVE," and the whole-token branches silently stopped firing, splitting a
+// sequence value on every delimiter inside it. Compare the two halves separately.
+static bool tokenHasVerb(const String &tok, int at, char func, const char *verbUpper) {
+  if (at < 0 || at >= (int)tok.length()) return false;
+  if (tok.charAt(at) != func) return false;
+  const int n = (int)strlen(verbUpper);
+  if (at + 1 + n > (int)tok.length()) return false;
+  for (int k = 0; k < n; k++)
+    if (toupper((unsigned char)tok.charAt(at + 1 + k)) != verbUpper[k]) return false;
+  return true;
+}
+
 // If tok is "<curFunc>FUNCCHAR,<c>", return <c> — the character every LATER token in this
 // chain will carry. printBackupConfig flips mid-chain on purpose (WCB.ino, defaultFunc), and
 // the flip has to be mirrored by the splitter or the whole-token branches stop matching.
 static char chainFuncCharAfter(const String &tok, char curFunc) {
-  String u = tok; u.toUpperCase(); u.trim();
-  const String pre = String(curFunc) + "FUNCCHAR,";
-  if (!u.startsWith(pre)) return curFunc;
-  String rest = tok.substring(pre.length()); rest.trim();
+  static const char kVerb[] = "FUNCCHAR,";
+  if (!tokenHasVerb(tok, 0, curFunc, kVerb)) return curFunc;
+  String rest = tok.substring(1 + sizeof(kVerb) - 1); rest.trim();
   return rest.length() == 1 ? rest.charAt(0) : curFunc;
 }
 
@@ -2177,9 +2195,10 @@ static void parseCommandsNoChecksum(const String &data, int sourceID, int origin
   int startIdx = 0;
   while (startIdx < data.length()) {
     // Check if we're at the start of a ?CS command
-    String restOfString = data.substring(startIdx);
-    bool isCSCommand = restOfString.startsWith(String(curFunc) + "CS") || 
-                       restOfString.startsWith(String(curFunc) + "cs");
+    // tokenHasVerb rather than a substring+startsWith: this ran once per token, and each call
+    // copied the ENTIRE remaining chain (~2.9 KB on a config restore) just to test 3 characters —
+    // O(n²) String churn on the restore path. It also only matched "CS"/"cs", not "Cs"/"cS".
+    bool isCSCommand = tokenHasVerb(data, startIdx, curFunc, "CS");
     
     if (isCSCommand) {
       // Find the end of this ?CS command (next ^?CS or end of string)
@@ -2214,9 +2233,7 @@ static void parseCommandsNoChecksum(const String &data, int sourceID, int origin
     // delimiter+funcChar (e.g. "^?"), which begins the NEXT config-level command.
     // "^;" belongs to the sequence value itself — do NOT treat it as a boundary.
     {
-      String restUpper = restOfString;
-      restUpper.toUpperCase();
-      if (restUpper.startsWith(String(curFunc) + "SEQ,SAVE,")) {
+      if (tokenHasVerb(data, startIdx, curFunc, "SEQ,SAVE,")) {
         // Only split at delimiter+funcChar (e.g. "^?") — the start of the next
         // config command.  "^;" inside the value is a unicast command prefix and
         // must be preserved as part of the stored sequence.
@@ -2245,9 +2262,7 @@ static void parseCommandsNoChecksum(const String &data, int sourceID, int origin
     // Special handling for ?MGMT,...: always the final command in the line and
     // must NOT be split on ^ (FRAG payloads contain ^ as config delimiters).
     {
-      String restUpper = restOfString;
-      restUpper.toUpperCase();
-      if (restUpper.startsWith(String(curFunc) + "MGMT,")) {
+      if (tokenHasVerb(data, startIdx, curFunc, "MGMT,")) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
@@ -3311,21 +3326,44 @@ void handleConfigReqPacket(const uint8_t *data) {
 static char s_mgmtOut[MGMT_OUT_SLOTS][MGMT_OUT_BUFSZ];
 static volatile uint8_t s_mgmtOutHead = 0;   // written by the WiFi task
 static volatile uint8_t s_mgmtOutTail = 0;   // written by loop()
+// Mux over the INDICES only, matching the etmAckQ ring above ("the mux makes push/pop
+// mutually exclusive"). volatile alone orders the compiler, not the two cores. The slot
+// payload is deliberately written and read OUTSIDE the lock: the producer owns its slot
+// until it publishes head, the consumer owns its slot until it advances tail, and holding
+// a spinlock across either a 2.9 KB snprintf or a blocking UART write would be far worse
+// than the race it closes.
+static portMUX_TYPE s_mgmtOutMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Queue one already-reassembled MGMT line for loop() to print. Safe from the WiFi task.
 static void mgmtQueueOut(const char *tag, uint8_t srcWCB, const char *body) {
-  uint8_t head = s_mgmtOutHead;
-  uint8_t next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
-  if (next == s_mgmtOutTail) return;   // full — loop() is behind; drop rather than block here
+  portENTER_CRITICAL(&s_mgmtOutMux);
+  const uint8_t head = s_mgmtOutHead;
+  const uint8_t next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
+  const bool    full = (next == s_mgmtOutTail);
+  portEXIT_CRITICAL(&s_mgmtOutMux);
+  if (full) return;                  // loop() is behind — drop rather than block here
+
   snprintf(s_mgmtOut[head], MGMT_OUT_BUFSZ, "[MGMT:%s,%d]%s", tag, (int)srcWCB, body);
-  s_mgmtOutHead = next;                // publish last
+
+  portENTER_CRITICAL(&s_mgmtOutMux);
+  s_mgmtOutHead = next;              // publish only after the slot is fully written
+  portEXIT_CRITICAL(&s_mgmtOutMux);
 }
 
 // Print any queued MGMT results. Called from loop(), where a blocking UART write is fine.
 void drainMgmtOut() {
-  while (s_mgmtOutTail != s_mgmtOutHead) {
-    Serial.println(s_mgmtOut[s_mgmtOutTail]);
-    s_mgmtOutTail = (uint8_t)((s_mgmtOutTail + 1) % MGMT_OUT_SLOTS);
+  for (;;) {
+    portENTER_CRITICAL(&s_mgmtOutMux);
+    const uint8_t tail  = s_mgmtOutTail;
+    const bool    empty = (tail == s_mgmtOutHead);
+    portEXIT_CRITICAL(&s_mgmtOutMux);
+    if (empty) break;
+
+    Serial.println(s_mgmtOut[tail]);   // outside the lock — this is the blocking part
+
+    portENTER_CRITICAL(&s_mgmtOutMux);
+    s_mgmtOutTail = (uint8_t)((tail + 1) % MGMT_OUT_SLOTS);   // free the slot only now
+    portEXIT_CRITICAL(&s_mgmtOutMux);
   }
 }
 
