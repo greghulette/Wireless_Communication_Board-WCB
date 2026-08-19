@@ -119,7 +119,7 @@ function createDefaultBoardConfig() {
       enabled:          true,
       timeoutMs:        500,
       heartbeatSec:     10,
-      missedHeartbeats: 3,
+      missedHeartbeats: 5,   // matches the firmware initialiser (WCB.ino) and NVS default
       bootHeartbeatSec: 2,
       messageCount:     20,
       messageDelayMs:   100,
@@ -173,7 +173,7 @@ function createDefaultSystemConfig() {
         enabled:          true,
         timeoutMs:        500,
         heartbeatSec:     10,
-        missedHeartbeats: 3,
+        missedHeartbeats: 5,   // matches the firmware initialiser (WCB.ino) and NVS default
         bootHeartbeatSec: 2,
         messageCount:     20,
         messageDelayMs:   100,
@@ -825,7 +825,7 @@ function parseToken(body, config) {
         case 'OFF':     config.etm.enabled          = false;                         break;
         case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 500;    break;
         case 'HB':      config.etm.heartbeatSec      = parseInt(parts[2]) || 10;     break;
-        case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 3;      break;
+        case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 5;      break;
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 20;     break;
         case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
