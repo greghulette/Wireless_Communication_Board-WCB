@@ -71,7 +71,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-023 | **DONE** | `Code/WCB/WCB.ino:6490` | ⚠FIX | processSerialCommandHelper calls parseCommandGroups/stopTimerSequence from serialCommandTask, racing loop()'s live reference into the commandGroups ve |
 | FIX-024 | **DONE** | `Code/WCB/WCB.ino:6598` | ⚠FIX | serialCommandTask parses timer chains off the loop task, racing loop()'s live iteration of the commandGroups std::vector |
 | FIX-025 | **DONE** | `Wizard/app.js:1863` |  | Post-OTA ETM-edge replay fires every deferred remote pull in parallel on one relay |
-| FIX-026 | TODO | `Wizard/app.js:3700` | ⚠FIX | Bidirectional-mapping code indexes slot-keyed maps (boardConfigs / boardConnections / boardPull) with a WCB number |
+| FIX-026 | **DONE** | `Wizard/app.js:3700` | ⚠FIX | Bidirectional-mapping code indexes slot-keyed maps (boardConfigs / boardConnections / boardPull) with a WCB number |
 | FIX-027 | **DONE** | `Wizard/app.js:3784` | ⚠FIX | Wizard mapping-destination WCB dropdown is built from the WCBQ floor, so any destination above it is silently rewritten to "Local" |
 | FIX-028 | **DONE** | `Wizard/app.js:3837` |  | `?MAP,SERIAL` appends destinations in firmware, so editing or removing a destination in the Wizard leaves the old one live |
 | FIX-029 | **DONE** | `Wizard/app.js:7039` |  | Push All throws a TypeError on a MgmtRelay slot and silently aborts the remaining stages |
@@ -169,7 +169,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-114 | TODO | `Wizard/parser.js:1143` | ⚠FIX | Two boards that share a WCB number collapse into one on config-file save → reload (whole board config lost) |
 | FIX-115 | **DONE** | `Wizard/parser.js:1321` |  | Clearing a serial-port label never reaches the board, and the stale label resurrects a phantom Kyber Marcuino port on the next pull |
 | FIX-116 | TODO | `Wizard/serial-hub-test.html:93` |  | serial-hub-test.html: "Pick Port" can never be enabled — the shipped test harness is unusable |
-| FIX-117 | TODO | `Wizard/serial-hub.js:325` |  | `_adoptGrantedPort()` takes the first VID/PID match — failover to the WRONG physical WCB when two identical adapters are granted |
+| FIX-117 | **DONE** | `Wizard/serial-hub.js:325` |  | `_adoptGrantedPort()` takes the first VID/PID match — failover to the WRONG physical WCB when two identical adapters are granted |
 | FIX-118 | **DONE** | `Wizard/serial-hub.js:407` | ⚠FIX | Read loop death (unplug) leaves the lock held and the dead port handle open — board unreachable from every tab |
 | FIX-119 | **DONE** | `Wizard/serial-hub.js:501` |  | A promoted leader broadcasts the PREVIOUS leader's port identity, defeating the Wizard's wrong-board guard |
 
@@ -264,3 +264,5 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-091 | `app.js` | PWM mapping save scheduled its verify pull at 2 s, but applying a PWM mapping makes the firmware wait 3 s and **reboot** — the pull hit a board mid-restart. PWM saves now wait past the reboot; serial mappings keep the short delay. | JS ✅ |
 | 2026-08-19 | FIX-094 | `app.js` | Cancelling the shared-port picker left a dead `_shared` connection installed: the card looked disconnected while every send went nowhere, and `_hasSharedPort()` still counted the slot as shared and refused a later direct connect. Now torn down on both the no-port and error paths. | JS ✅ |
 | 2026-08-19 | FIX-096 | `app.js` | `boardPull` parsed a truncated/empty response and committed the resulting mostly-default config over **both** `boardConfigs[n]` and `boardBaselines[n]`. The baseline is what the next Push diffs against, so the next push would have tried to restore those defaults onto a board that never lost them. Now requires the end marker and changes nothing without it. | JS ✅ |
+| 2026-08-19 | FIX-026 | `app.js` | **Slot vs WCB number.** `boardConfigs`/`boardConnections` are keyed by UI SLOT, but the bidirectional-mapping code indexed them with a board NUMBER. First-time auto-connect assigns slots by USB enumeration order, so board 2 can sit in slot 1 — the reverse mapping was then written into, and pushed to, a **different board**. Added a `_slotForWcbNumber()` resolver (the correct pattern already existed once at :4192) and applied it at every site. | JS ✅ |
+| 2026-08-19 | FIX-117 | `serial-hub.js` | `_adoptGrantedPort` took the FIRST VID/PID match. VID/PID identifies the USB-serial chip, not the board, so two same-revision WCBs are indistinguishable — on failover the hub could silently adopt the wrong physical board. Now adopts only when the match is unambiguous, otherwise declines and says why. | JS ✅ |

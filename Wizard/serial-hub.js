@@ -322,10 +322,19 @@
       const want = this._leaderPortInfo;
       let pick = null;
       if (want && (want.usbVendorId != null || want.usbProductId != null)) {
-        pick = ports.find(p => {
+        const matches = ports.filter(p => {
           const i = (p.getInfo && p.getInfo()) || {};
           return i.usbVendorId === want.usbVendorId && i.usbProductId === want.usbProductId;
-        }) || null;
+        });
+        // Take the match ONLY when it is unambiguous. VID/PID identifies the USB-serial chip, not
+        // the board — two same-revision WCBs are indistinguishable by it, so `find()` silently
+        // took the first and could adopt the WRONG physical board on failover, binding this hub
+        // to a different device than the one the previous leader held. With two or more
+        // candidates, decline and let requestPort() ask the user.
+        if (matches.length === 1) pick = matches[0];
+        else if (matches.length > 1)
+          this._log(`${matches.length} granted ports share the leader's VID/PID — cannot tell them ` +
+                    'apart, so not adopting one. Use "Share port" to pick explicitly.');
       }
       if (!pick && ports.length === 1) pick = ports[0];
       if (pick) {

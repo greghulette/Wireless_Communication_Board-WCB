@@ -58,6 +58,15 @@ const _detecting = {};            // { [n]: true/false } — auto-detect active 
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
 const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
 const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
+// boardConfigs / boardConnections / boardBaselines are keyed by UI SLOT, which is NOT the same as
+// a board WCB NUMBER — first-time auto-connect assigns slots by USB enumeration order, so a board
+// numbered 2 can land in slot 1. Indexing a slot map with a WCB number therefore reads (or writes)
+// a DIFFERENT board. Resolve properly; falls back to the number only when no slot claims it.
+function _slotForWcbNumber(wcbNum) {
+  if (!wcbNum) return null;
+  const hit = Object.keys(boardConfigs).find(k => boardConfigs[k]?.wcbNumber === wcbNum);
+  return hit !== undefined ? Number(hit) : (boardConfigs[wcbNum] ? Number(wcbNum) : null);
+}
 const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
                                   // discovery poll must not inject ?WDP,DUMP into that stream:
                                   // a dump line can satisfy a pending read and fake an ACK for
@@ -88,7 +97,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.16:42.R.AUG.2026';
+const UI_VERSION = '19.16:48.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3844,9 +3853,10 @@ function detectBidirMappings(n) {
     let allBidir = true;
 
     for (const dest of mapping.destinations) {
-      if (!dest.wcbNumber || !boardConfigs[dest.wcbNumber]) { allBidir = false; continue; }
+      const destSlot = _slotForWcbNumber(dest.wcbNumber);
+      if (!dest.wcbNumber || destSlot === null) { allBidir = false; continue; }
       hasRemoteDest = true;
-      const hasReverse = boardConfigs[dest.wcbNumber].mappings.some(m =>
+      const hasReverse = boardConfigs[destSlot].mappings.some(m =>
         m.type.toUpperCase() === 'SERIAL' &&
         m.sourcePort === dest.port &&
         m.destinations.some(d => d.wcbNumber === localWCB && d.port === src)
@@ -3988,7 +3998,9 @@ async function saveMappingRow(rowId, n) {
           seenRemote.add(dest.wcbNumber);
           // 4 s: W2 processes MAP → sends OUT,Sx to W3 via ESP-NOW → W3 saves it.
           // Give a bit more runway than the local pull (2 s) to cover the relay hop.
-          setTimeout(() => boardPull(dest.wcbNumber), 4000);
+          // boardPull takes a UI SLOT, not a WCB number — resolve it.
+          const destPullSlot = _slotForWcbNumber(dest.wcbNumber);
+          if (destPullSlot !== null) setTimeout(() => boardPull(destPullSlot), 4000);
         }
       }
     }
@@ -4042,9 +4054,13 @@ async function saveMappingRow(rowId, n) {
     // Bidir: push reverse mapping directly to each remote destination board if online
     if (bidir && type === 'Serial') {
       for (const dest of destinations) {
-        if (dest.wcbNumber > 0 && boardConfigs[dest.wcbNumber]) {
-          const destCfg  = boardConfigs[dest.wcbNumber];
-          const destWcb  = dest.wcbNumber;
+        // destSlot is the UI slot; destWcbNum is the board NUMBER. They differ whenever slots were
+        // assigned by USB enumeration order rather than board number, and mixing them wrote the
+        // reverse mapping into (and pushed it to) a different board entirely.
+        const destSlot = _slotForWcbNumber(dest.wcbNumber);
+        if (dest.wcbNumber > 0 && destSlot !== null) {
+          const destCfg  = boardConfigs[destSlot];
+          const destWcb  = destSlot;
           const srcWcb   = config.wcbNumber || n;
           const alreadyExists = destCfg.mappings.some(m =>
             m.type === 'Serial' && m.sourcePort === dest.port &&
