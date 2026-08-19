@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191512RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191515RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191512RAUG2026";
+String SoftwareVersion = "6.2.0_191515RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4335,6 +4335,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // so String()'s strlen can't run off the end of the received stack struct.
   received.structCommand[sizeof(received.structCommand) - 1] = '\0';
   String receivedCmd = String(received.structCommand);
+
+  // Strip the wizard-origin SOH marker here too. handleMgmtForward prepends '\x01' to every
+  // single-chunk relayed command and sends it with useETM=true — but sendESPNowMessage only takes
+  // the ETM path when ETM is ENABLED, so with ?ETM,OFF the marked payload arrived as an ordinary
+  // 249-byte packet down this path, where nothing removed it. The leading 0x01 then broke every
+  // prefix test (trim() does not strip it) and the command was silently discarded as unknown —
+  // while multi-chunk config push still worked, making the relay look healthy.
+  // Mirrors the ETM branch: a wizard-origin command is NOT mesh-origin, so it may re-broadcast.
+  bool wizardOriginPlain = (receivedCmd.length() > 0 && (uint8_t)receivedCmd[0] == 0x01);
+  if (wizardOriginPlain) {
+    receivedCmd = receivedCmd.substring(1);
+    lastReceivedViaESPNOW = false;
+  }
 
   if (receivedCmd.startsWith("ETMLOAD")) {
     etmLoadRunning = true;

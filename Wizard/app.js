@@ -88,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.15:12.R.AUG.2026';
+const UI_VERSION = '19.15:15.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -984,6 +984,16 @@ function onKyberPortChange(n) {
   updatePortClaimUI(n);
   updateKyberPortDropdown(n);
   updateKyberMarcPortDropdown(n);  // maestro port changed — re-filter marc dropdown
+  // Freeing/claiming a port changes what the OTHER device pickers may offer, so refresh them.
+  // Without this a port released by Kyber stayed greyed out in the MP3/DFP/HCR/WLED/Maestro
+  // dropdowns until something else happened to rebuild them.
+  updateMP3PortDropdown?.(n);
+  updateDFPPortDropdown?.(n);
+  updateHCRPortDropdown?.(n);
+  refreshAllWLEDPortDropdowns?.(n);
+  refreshAllMaestroPortDropdowns?.(n);
+  // This is the only device-port handler that never marked the board unsaved.
+  onBoardFieldChange(n);
 }
 
 function onKyberBaudChange(n) {
@@ -2280,6 +2290,14 @@ function onMP3PortChange(n) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateMP3PortDropdown(n);
+    // A freed/claimed port changes what the OTHER device pickers may offer — refresh them all,
+    // otherwise a port this device released stays greyed out elsewhere until something
+    // unrelated happens to rebuild those dropdowns.
+    updateMP3PortDropdown?.(n);
+    updateDFPPortDropdown?.(n);
+    updateHCRPortDropdown?.(n);
+    refreshAllWLEDPortDropdowns?.(n);
+    refreshAllMaestroPortDropdowns?.(n);
   onBoardFieldChange(n);
 }
 
@@ -2432,6 +2450,14 @@ function onDFPPortChange(n) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateDFPPortDropdown(n);
+    // A freed/claimed port changes what the OTHER device pickers may offer — refresh them all,
+    // otherwise a port this device released stays greyed out elsewhere until something
+    // unrelated happens to rebuild those dropdowns.
+    updateMP3PortDropdown?.(n);
+    updateDFPPortDropdown?.(n);
+    updateHCRPortDropdown?.(n);
+    refreshAllWLEDPortDropdowns?.(n);
+    refreshAllMaestroPortDropdowns?.(n);
   onBoardFieldChange(n);
 }
 
@@ -2639,6 +2665,14 @@ function onHCRPortChange(n) {
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
   updateHCRPortDropdown(n);
+    // A freed/claimed port changes what the OTHER device pickers may offer — refresh them all,
+    // otherwise a port this device released stays greyed out elsewhere until something
+    // unrelated happens to rebuild those dropdowns.
+    updateMP3PortDropdown?.(n);
+    updateDFPPortDropdown?.(n);
+    updateHCRPortDropdown?.(n);
+    refreshAllWLEDPortDropdowns?.(n);
+    refreshAllMaestroPortDropdowns?.(n);
   onBoardFieldChange(n);
 }
 
