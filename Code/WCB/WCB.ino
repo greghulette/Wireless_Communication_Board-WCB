@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191720RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191729RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191720RAUG2026";
+String SoftwareVersion = "6.2.0_191729RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2067,6 +2067,25 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
 }
 
 
+// If tok is "<curFunc>FUNCCHAR,<c>", return <c> — the character every LATER token in this
+// chain will carry. printBackupConfig flips mid-chain on purpose (WCB.ino, defaultFunc), and
+// the flip has to be mirrored by the splitter or the whole-token branches stop matching.
+static char chainFuncCharAfter(const String &tok, char curFunc) {
+  String u = tok; u.toUpperCase(); u.trim();
+  const String pre = String(curFunc) + "FUNCCHAR,";
+  if (!u.startsWith(pre)) return curFunc;
+  String rest = tok.substring(pre.length()); rest.trim();
+  return rest.length() == 1 ? rest.charAt(0) : curFunc;
+}
+
+// Everything AFTER the checksum gate. Split out so the verified-chain path can hand off
+// WITHOUT recursing into parseCommandsAndEnqueue: the recursion re-entered the ?CHK branch,
+// so a chain whose payload legitimately contains an earlier "^?CHK" (a legacy sequence value
+// recovered by migrateOldStoredCommands, or one stored while ?DELIM was non-default) failed
+// the second verification and aborted the whole restore. It also dropped originEspnow /
+// originSeqBody, silently reverting every checksummed chain to the racy global snapshot.
+static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody);
+
 void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Check if this is a restore with checksum
   int firstDelim = data.indexOf(commandDelimiter);
@@ -2116,8 +2135,10 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
         Serial.println("✓ Command checksum VERIFIED - Configuration is intact");
         Serial.println("  Provided:   " + providedChecksum);
         Serial.println("  Calculated: " + calculatedChecksumStr);
-        // Continue processing without the checksum command
-        parseCommandsAndEnqueue(dataWithoutChecksum, sourceID);
+        // Hand off to the worker, NOT back into this function: re-entering the ?CHK branch
+        // would abort a chain whose payload legitimately contains an earlier "^?CHK".
+        // Origin flags must be carried through too, or the chain reverts to the racy global.
+        parseCommandsNoChecksum(dataWithoutChecksum, sourceID, originEspnow, originSeqBody);
         return;
       } else {
         Serial.println("✗ Command checksum FAILED - Configuration may be corrupted!");
@@ -2129,6 +2150,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
     }
   }
   
+  // No checksum token in this chain — parse it as-is.
+  parseCommandsNoChecksum(data, sourceID, originEspnow, originSeqBody);
+}
+
+static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Normal parsing with special handling for ?CS commands.
   //
   // IF gating (chain-local, resolved at invoke time): when a standalone
@@ -2139,18 +2165,27 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
   // reach this logic (the SEQ,SAVE branch swallows its whole value), so
   // stored sequences keep their IFs verbatim and evaluate them at recall.
   bool ifSkipping = false;
+  // Chain-local function identifier, for the same reason ifSkipping is chain-local.
+  // printBackupConfig’s factory-reset chain deliberately flips the func char partway
+  // through (?FUNCCHAR,<new>), so every token AFTER that point carries the NEW char while
+  // the receiving board is still on its own. Matching the three whole-token branches below
+  // against the board’s live LocalFunctionIdentifier therefore missed them: a ?SEQ,SAVE was
+  // split on every "^" inside its value and its tail commands were enqueued as separate
+  // (garbage) commands. Track the emitter’s flip instead. Costs nothing on the common path,
+  // where curFunc never changes.
+  char curFunc = LocalFunctionIdentifier;
   int startIdx = 0;
   while (startIdx < data.length()) {
     // Check if we're at the start of a ?CS command
     String restOfString = data.substring(startIdx);
-    bool isCSCommand = restOfString.startsWith(String(LocalFunctionIdentifier) + "CS") || 
-                       restOfString.startsWith(String(LocalFunctionIdentifier) + "cs");
+    bool isCSCommand = restOfString.startsWith(String(curFunc) + "CS") || 
+                       restOfString.startsWith(String(curFunc) + "cs");
     
     if (isCSCommand) {
       // Find the end of this ?CS command (next ^?CS or end of string)
-      int nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "CS", startIdx + 1);
+      int nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "CS", startIdx + 1);
       if (nextCSPos == -1) {
-        nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "cs", startIdx + 1);
+        nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "cs", startIdx + 1);
       }
       
       // Extract the entire ?CS command including all its sub-commands
@@ -2181,11 +2216,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
     {
       String restUpper = restOfString;
       restUpper.toUpperCase();
-      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "SEQ,SAVE,")) {
+      if (restUpper.startsWith(String(curFunc) + "SEQ,SAVE,")) {
         // Only split at delimiter+funcChar (e.g. "^?") — the start of the next
         // config command.  "^;" inside the value is a unicast command prefix and
         // must be preserved as part of the stored sequence.
-        String nextFuncBoundary = String(commandDelimiter) + String(LocalFunctionIdentifier);
+        String nextFuncBoundary = String(commandDelimiter) + String(curFunc);
 
         int nextFuncPos = data.indexOf(nextFuncBoundary, startIdx + 1);
 
@@ -2212,7 +2247,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
     {
       String restUpper = restOfString;
       restUpper.toUpperCase();
-      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "MGMT,")) {
+      if (restUpper.startsWith(String(curFunc) + "MGMT,")) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
@@ -2240,6 +2275,9 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
         } else {
           enqueueCommand(singleCmd, sourceID, originEspnow, originSeqBody);
         }
+        // Mirror an in-chain func-char change for the REST of this walk. Placed after the
+        // gate so a FUNCCHAR skipped by a false IF does not shift the rest of the chain.
+        if (!ifSkipping) curFunc = chainFuncCharAfter(singleCmd, curFunc);
       }
       if (delimPos == -1) break;
       startIdx = delimPos + 1;
@@ -2509,6 +2547,54 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
   }
 }
+
+// Send an ETM COMMAND frame to one peer WITHOUT registering it for ACK/retry.
+//
+// Why this exists: a reply built inside espNowReceiveCallback runs on the WiFi task, and
+// sendESPNowMessage(..., true) would call etmAddToPendingTable() there — the pending table
+// is loop-task-only (see the comment at its declaration; the shift-eviction racing loop()'s
+// retry scan corrupts it). But sending the reply UNTRACKED as a plain 249-byte packet is not
+// an option either: a peer running ETM only ingests the 252-byte ETM frame, and routes the
+// short one to its raw hook, so the reply is silently never delivered.
+//
+// This is the same carve-out the ETM path already makes for best-effort JSON telemetry
+// (bestEffortTelemetry above), applied to a unicast: correct wire format, no pending-table
+// touch. The peer ACKs it and the ACK finds no pending slot, which is harmless. Kept as a
+// dedicated helper rather than widening bestEffortTelemetry, so ordinary unicast senders
+// keep their delivery guarantee.
+//
+// Callers must be idempotent-tolerant: nothing retries this, and the shared sequence counter
+// is incremented off two tasks, so a rare collision can cost one frame to peer-side dedup.
+static void sendEtmCommandUntracked(uint8_t target, const char *message) {
+  if (target < 1 || target > MAX_WCB_COUNT) return;
+  espnow_struct_message_etm etmMsg;
+  memset(&etmMsg, 0, sizeof(etmMsg));
+  strncpy(etmMsg.structPassword, espnowPassword, sizeof(etmMsg.structPassword) - 1);
+  snprintf(etmMsg.structSenderID, sizeof(etmMsg.structSenderID), "%d", WCB_Number);
+  snprintf(etmMsg.structTargetID, sizeof(etmMsg.structTargetID), "%d", (int)target);
+  etmMsg.structCommandIncluded = 1;
+  if (etmChecksumEnabled) {
+    // Same refusal as the tracked path — a truncated CRC would be ACKed then discarded.
+    if (strlen(message) > ETM_MAX_CMD_WITH_CRC) return;
+    uint32_t crc = calculateCRC32(String(message));
+    char withCRC[210];
+    snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", message, crc);
+    strncpy(etmMsg.structCommand, withCRC, sizeof(etmMsg.structCommand) - 1);
+  } else {
+    strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
+  }
+  etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = ' ';
+  etmMsg.structPacketType = PACKET_TYPE_COMMAND;
+  etmMsg.structSequenceNumber = ++etmSequenceCounter;
+  espnowCommandAttempts++;
+  if (esp_now_send(WCBMacAddresses[target - 1], (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
+    espnowCommandSuccess++;
+    espnowCommandDelivered++;
+  } else {
+    espnowCommandFailed++;
+  }
+}
+
 
 void sendESPNowRaw(const uint8_t *data, size_t len) {
     size_t offset = 0;
@@ -3207,6 +3293,42 @@ void handleConfigReqPacket(const uint8_t *data) {
 }
 
 // Relay side: received a CONFIG_FRAG — reassemble and output to serial when complete
+// ── Deferred MGMT output ────────────────────────────────────────────────────
+// The five *FragPacket handlers all run on the WiFi task (espNowReceiveCallback dispatches
+// them inline), and each ends by printing the reassembled result — up to 2912 bytes. UART0
+// has no TX buffer (the sketch never calls setTxBufferSize), so Serial.printf does not return
+// until every byte is on the wire: ~235 ms for a real 2.7 KB config. HAL locks are enabled,
+// so the WiFi task holds the UART0 mutex for that whole window and any Serial.* from loop()
+// on core 1 blocks behind it too. That is exactly what WCB_RemoteTerm.cpp:14-16 warns about
+// ("caused the WiFi watchdog to fire and restart the board") — this was the one path still
+// doing it. Reassembly stays here (it is cheap); only the delivery is handed to loop().
+//
+// SPSC ring: producer is the WiFi callback (all five handlers), consumer is drainMgmtOut() in
+// loop(). Three slots — the Wizard serializes its pulls, so one would do in practice, but a
+// stats reply landing on top of a config reply must not cost a line.
+#define MGMT_OUT_SLOTS 3
+#define MGMT_OUT_BUFSZ (MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1) + 48)   // 2960
+static char s_mgmtOut[MGMT_OUT_SLOTS][MGMT_OUT_BUFSZ];
+static volatile uint8_t s_mgmtOutHead = 0;   // written by the WiFi task
+static volatile uint8_t s_mgmtOutTail = 0;   // written by loop()
+
+// Queue one already-reassembled MGMT line for loop() to print. Safe from the WiFi task.
+static void mgmtQueueOut(const char *tag, uint8_t srcWCB, const char *body) {
+  uint8_t head = s_mgmtOutHead;
+  uint8_t next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
+  if (next == s_mgmtOutTail) return;   // full — loop() is behind; drop rather than block here
+  snprintf(s_mgmtOut[head], MGMT_OUT_BUFSZ, "[MGMT:%s,%d]%s", tag, (int)srcWCB, body);
+  s_mgmtOutHead = next;                // publish last
+}
+
+// Print any queued MGMT results. Called from loop(), where a blocking UART write is fine.
+void drainMgmtOut() {
+  while (s_mgmtOutTail != s_mgmtOutHead) {
+    Serial.println(s_mgmtOut[s_mgmtOutTail]);
+    s_mgmtOutTail = (uint8_t)((s_mgmtOutTail + 1) % MGMT_OUT_SLOTS);
+  }
+}
+
 void handleConfigFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
@@ -3254,7 +3376,7 @@ void handleConfigFragPacket(const uint8_t *data) {
     lastDeliveredSession = pkt.sessionId;   // suppress the redundant second pass
     memset(&pullSession, 0, sizeof(pullSession));
     // Deliver to webpage — always printed regardless of debugMGMT
-    Serial.printf("[MGMT:CONFIG,%d]%s\n", srcWCB, fullConfig.c_str());
+    mgmtQueueOut("CONFIG", srcWCB, fullConfig.c_str());   // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Config pull complete for WCB%d (%d chars)\n",
                                  srcWCB, fullConfig.length());
   }
@@ -3506,7 +3628,7 @@ void handleStatsFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(statsRelaySession.chunks[i]);
     uint8_t srcWCB = statsRelaySession.sourceWCB;
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
-    Serial.printf("[MGMT:STATS,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("STATS", srcWCB, fullResult.c_str());    // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
@@ -3541,7 +3663,7 @@ void handleSeqFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqRelaySession.chunks[i]);
     uint8_t srcWCB = seqRelaySession.sourceWCB;
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
-    Serial.printf("[MGMT:SEQ,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("SEQ", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
@@ -3576,7 +3698,7 @@ void handleSeqValFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqValRelaySession.chunks[i]);
     uint8_t srcWCB = seqValRelaySession.sourceWCB;
     memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
-    Serial.printf("[MGMT:SEQVAL,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("SEQVAL", srcWCB, fullResult.c_str());   // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
@@ -3611,7 +3733,7 @@ void handleETMFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(etmRelaySession.chunks[i]);
     uint8_t srcWCB = etmRelaySession.sourceWCB;
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
-    Serial.printf("[MGMT:ETM,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("ETM", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] ETM relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
@@ -4164,11 +4286,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 esc.replace("\"", "\\\"");
                 String reply = "{\"type\":\"wcb_alias\",\"id\":" + String(WCB_Number) +
                                ",\"alias\":\"" + esc + "\"}";
-                // Best-effort (useETM=false): this runs on the WiFi recv-callback
-                // task, and an ETM send would insert into the pending table off the
-                // loop task (the race fixed above). It's a JSON reply NaviCore
-                // re-requests anyway, so reliability isn't needed.
-                sendESPNowMessage((uint8_t)senderWCB, reply.c_str(), false);
+                // This runs on the WiFi recv-callback task, so it must NOT go through
+                // sendESPNowMessage(..., true) — that would insert into the loop-task-only
+                // pending table. But a plain non-ETM send is not deliverable either: a peer
+                // running ETM ingests only the 252-byte frame and routes the 249-byte one to
+                // its raw hook, so every reply was silently dropped and the ?WHOAMI fallback
+                // was dead (the alias still arrived via WDP TLV 0x01, but up to 60 s later —
+                // and never at all for a board running ETM with ?WDP,OFF). Send a correctly
+                // shaped ETM frame WITHOUT tracking it; nothing needs the retry, since the
+                // querier re-asks up to 4 times per online session.
+                if (etmEnabled) sendEtmCommandUntracked((uint8_t)senderWCB, reply.c_str());
+                else            sendESPNowMessage((uint8_t)senderWCB, reply.c_str(), false);
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
@@ -6797,19 +6925,42 @@ void processSerialCommandHelper(String &data, int sourceID) {
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
         data.startsWith(String(LocalFunctionIdentifier) + "c")) {
         
-        // Look for delimiter + ?CHK pattern (not just ?CHK)
-        String chkPattern = String(commandDelimiter) + "?CHK";
-        int chkPos = data.indexOf(chkPattern);
+        // Look for delimiter + <funcChar>CHK. Two things this must get right, both of which
+        // this verifier used to get wrong (the sibling gate in parseCommandsAndEnqueue was
+        // fixed in a32e9cb and this copy was left behind):
+        //   * lastIndexOf, not indexOf — the real checksum is the FINAL token, and a stored
+        //     sequence value can legitimately contain an earlier "^?CHK", which truncated the
+        //     command and failed verification.
+        //   * match the LIVE function identifier, not a hard-coded '?' — a board on a custom
+        //     funcChar never matched, so the integrity check was silently skipped and a
+        //     corrupted command applied without complaint. '?' stays accepted so a factory
+        //     chain (always '?') still verifies after the funcChar has been changed.
+        String chkPattern = String(commandDelimiter) + String(LocalFunctionIdentifier) + "CHK";
+        int chkPos = data.lastIndexOf(chkPattern);
+        if (chkPos == -1) {
+            chkPattern = String(commandDelimiter) + String(LocalFunctionIdentifier) + "chk";
+            chkPos = data.lastIndexOf(chkPattern);
+        }
+        if (chkPos == -1) {
+            chkPattern = String(commandDelimiter) + "?CHK";
+            chkPos = data.lastIndexOf(chkPattern);
+        }
         if (chkPos == -1) {
             chkPattern = String(commandDelimiter) + "?chk";
-            chkPos = data.indexOf(chkPattern);
+            chkPos = data.lastIndexOf(chkPattern);
         }
         
         if (chkPos != -1) {
             // Extract the command without checksum (everything before delimiter+?CHK)
             String cmdWithoutChecksum = data.substring(0, chkPos);
-            // Extract checksum (skip delimiter + "?CHK")
-            String providedChecksum = data.substring(chkPos + chkPattern.length());
+            // Extract the checksum token, BOUNDED at the next delimiter. Taking the whole
+            // tail swept up any command that followed the checksum into the hex string, so
+            // a chain with trailing content always failed verification. Matches the bound
+            // the sibling gate in parseCommandsAndEnqueue uses.
+            const int chkValStart = chkPos + chkPattern.length();
+            int chkValEnd = data.indexOf(commandDelimiter, chkValStart);
+            if (chkValEnd == -1) chkValEnd = data.length();
+            String providedChecksum = data.substring(chkValStart, chkValEnd);
             providedChecksum.toUpperCase();
             providedChecksum.trim();
             // LEGACY COMPAT: <=6.0.x wrote checksums unpadded (String(crc,HEX)).
@@ -7884,6 +8035,7 @@ void loop() {
   checkMgmtTimeout();
   checkConfigPullTimeout();
   drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)

@@ -86,6 +86,19 @@ changing before editing.**
    filters.
 10. **WDP is a wire format shared with `WCB_Client`.** New TLVs need both sides, and must not
     break an older peer's parse. See also rule 4 — WDP does not work with ETM off.
+11. **Never restart the board from inside a command handler, and never block the UART from
+    the ESP-NOW receive callback.** Both look local and are not. A config push is a *stream*
+    of commands, so `ESP.restart()` inside one destroys every command still queued behind it —
+    and the pusher cannot tell, because the boot banner satisfies its "did the board answer"
+    test, so nothing retries and the push is scored as fully ACKed. Set a deferred flag and let
+    `loop()` restart once the queue is empty **and quiet** (`pwmRebootPending` /
+    `PWM_REBOOT_QUIET_MS`, `WCB_PWM.cpp`) — quiet matters, because an ACK-paced push empties the
+    queue between every pair of commands. Likewise `espNowReceiveCallback` runs on the WiFi
+    task: UART0 has no TX buffer, so a multi-KB `Serial.printf` there blocks for ~235 ms and,
+    with HAL locks on, holds the UART0 mutex against `loop()` too. That is what fired the WiFi
+    watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
+    (`mgmtQueueOut` / `drainMgmtOut`).
+
 
 ## Verifying
 
