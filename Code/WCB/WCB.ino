@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_172045RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191240RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_172045RAUG2026";
+String SoftwareVersion = "6.2.0_191240RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -572,10 +572,25 @@ struct ETMCharBoardResult {
     unsigned long latencyAccum;
 };
 
-// [phase 0-2][board index 0-7]
+// [phase 0-2][board index 0-(MAX_WCB_COUNT-1)]
 ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
-unsigned long etmCharPhaseSentTimes[3][200];  // [phase][msgIndex]
+
+// Hard cap on messages PER PHASE. This is the row length of etmCharPhaseSentTimes below, and
+// processETMChar() clamps totalMessages to it — do not raise one without the other.
+//
+// Why the clamp exists: totalMessages is etmCharMessageCount * peerCount. ?ETM,COUNT accepts up
+// to 200 and peerCount can reach MAX_WCB_COUNT-1, so the index can reach 3800 against a 200-entry
+// row. Phases 1 and 2 (rows 0/1) would silently clobber the OTHER phases' timestamps; phase 3
+// (row 2) runs off the end of the object entirely — millis()-valued stores into whatever the
+// linker placed next in .bss. A 3-board mesh with ?ETM,COUNT,200 is already enough.
+//
+// The clamp also fixes a second, quieter bug: both readers below discard idx >= this cap, so an
+// unclamped run could never satisfy `totalAcked >= totalMessages` and EVERY phase ran to its full
+// timeout (count 200 / 2 peers ≈ 11.6 minutes of dead wall-clock).
+#define ETM_CHAR_MAX_MSGS 200
+unsigned long etmCharPhaseSentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
 int etmCharPhaseMessageIndex = 0;
+bool etmCharClampWarned = false;   // one-shot notice per run when the sample had to be reduced
 unsigned long etmCharPhaseStartTime = 0;
 unsigned long etmCharLastSendTime = 0;
 
@@ -1246,7 +1261,7 @@ void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs) {
           else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
 
           int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
-          if (phase >= 0 && mIdx >= 0 && mIdx < 200) {
+          if (phase >= 0 && mIdx >= 0 && mIdx < ETM_CHAR_MAX_MSGS) {
             processETMCharAck(senderWCB, originalCmd, etmCharPhaseSentTimes[phase][mIdx], recvMs);
           }
         }
@@ -1423,6 +1438,7 @@ void startETMChar() {
     etmCharRunning = true;
     etmCharPhase = 1;
     etmCharPhaseMessageIndex = 0;
+    etmCharClampWarned = false;   // re-arm the reduced-sample notice for this run
     etmCharPhaseStartTime = millis();
     etmCharLastSendTime = 0;
     memset(etmCharBoardResults, 0, sizeof(etmCharBoardResults));
@@ -1453,7 +1469,20 @@ void processETMChar() {
         return;
     }
 
-    int totalMessages = etmCharMessageCount * peerCount;
+    // Clamp PER BOARD so the phase index can never leave etmCharPhaseSentTimes (see
+    // ETM_CHAR_MAX_MSGS). Clamping per-board rather than truncating the total keeps every peer
+    // equally sampled — truncating the total would starve the boards at the end of peers[].
+    // peerCount <= MAX_WCB_COUNT and ETM_CHAR_MAX_MSGS is 200, so perBoard is always >= 10,
+    // which is also etmCharMessageCount's own floor (constrain at ?ETM,COUNT) — it can never be 0.
+    int perBoard = etmCharMessageCount;
+    if (perBoard * peerCount > ETM_CHAR_MAX_MSGS) perBoard = ETM_CHAR_MAX_MSGS / peerCount;
+    int totalMessages = perBoard * peerCount;   // provably <= ETM_CHAR_MAX_MSGS
+    if (perBoard < etmCharMessageCount && !etmCharClampWarned) {
+        etmCharClampWarned = true;
+        Serial.printf("[ETM CHAR] %d online peers x %d messages exceeds the %d-message phase cap — "
+                      "sampling %d per board instead.\n",
+                      peerCount, etmCharMessageCount, ETM_CHAR_MAX_MSGS, perBoard);
+    }
 
     if (etmCharPhase == 1 || etmCharPhase == 2) {
         unsigned long interDelay = (etmCharPhase == 1) ? 20UL : (unsigned long)etmCharDelayMs;
@@ -1566,7 +1595,7 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     if (phase < 0) return;
 
     int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
-    if (mIdx < 0 || mIdx >= 200) return;  // guard against out-of-bounds sentTime read
+    if (mIdx < 0 || mIdx >= ETM_CHAR_MAX_MSGS) return;  // guard against out-of-bounds sentTime read
 
     unsigned long latency = recvMs - sentTime;   // recvMs = true ACK arrival (WiFi task), not loop-drain time
     
@@ -2606,6 +2635,22 @@ void handleMgmtForward(const String &args) {
   // ── Multi-chunk commands (push config): broadcast each fragment ───────────
   // Push config payloads exceed the 200-byte ETM limit and are reassembled
   // chunk-by-chunk on the target side via handleMgmtPacket().
+  //
+  // REJECT an over-long fragment rather than silently truncating it. pkt.payload is
+  // char[180] and the strncpy below carries sizeof-1 = 179 data chars, so a 180-char
+  // fragment used to lose its last character — corrupting whichever command straddled
+  // the chunk boundary while the sender still reported success. WCB_Client already
+  // documents the correct value (WCB_MGMT_CHUNK_LEN 179, "payload[180] minus NUL");
+  // the Wizard now matches. This guard is deliberately UNGATED (not behind debugMGMT)
+  // so any future sender that gets the arithmetic wrong fails loudly instead of
+  // writing quietly-corrupted config into the target's NVS.
+  if (payload.length() > MGMT_PAYLOAD_SIZE - 1) {
+    Serial.printf("[MGMT] FRAG payload %u > %u chars — REJECTED (sender must fragment at %u)\n",
+                  (unsigned)payload.length(), (unsigned)(MGMT_PAYLOAD_SIZE - 1),
+                  (unsigned)(MGMT_PAYLOAD_SIZE - 1));
+    return;
+  }
+
   espnow_struct_mgmt pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -4399,7 +4444,21 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    if (message.endsWith("?")) {  // no space required
+    // ---- Data-bearing verbs are exempt from the trailing-'?' help shortcut ----
+    // The shortcut below turns ANY command ending in '?' into a help request. That is fine for
+    // hand-typed verbs, but MGMT/SEQ payloads carry arbitrary user data that can legitimately end
+    // in '?': a config chain is a run of '?'-prefixed commands joined by '^', so a fragment
+    // boundary landing just after a '?' produces a FRAG line whose last character is '?'. The
+    // whole fragment was then swallowed as "help for MGMT,FRAG,…", never forwarded, and the push
+    // died silently at the 15 s MGMT_SESSION_TIMEOUT_MS. Same hazard for a stored sequence whose
+    // text ends in a question mark.
+    //
+    // Checked BEFORE the shortcut, and deliberately only for verbs whose tail is opaque data —
+    // everything else keeps the convenient "?VERB?" help form.
+    bool dataBearingVerb = message.startsWith("MGMT,") || message.startsWith("mgmt,") ||
+                           message.startsWith("SEQ,")  || message.startsWith("seq,");
+
+    if (!dataBearingVerb && message.endsWith("?")) {  // no space required
         String cmd = message.substring(0, message.length() - 1);
         cmd.trim();
         printCommandHelp(cmd);

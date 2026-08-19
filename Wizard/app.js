@@ -64,7 +64,17 @@ const _otaInProgress = new Set(); // boards (slots) with an OTA in flight (wirel
 const _suppressedEtmEdges = new Set(); // remote boards whose ETM online/offline edge was swallowed
                                        // during an OTA — replayed once the last OTA finishes so a
                                        // board that rebooted mid-transfer still gets reconciled
-const MGMT_CHUNK_SIZE  = 180;   // max payload chars per ESP-NOW packet
+// 179, NOT 180. The relay copies a FRAG payload with strncpy(pkt.payload, …, sizeof-1) into
+// char payload[180] — see Code/WCB/WCB.ino:2617 — so only 179 data chars survive the hop. At 180
+// the last character of every full chunk was silently dropped, corrupting whichever command
+// straddled the boundary while the push still reported success. WCBClient has always had this
+// right: WCB_MGMT_CHUNK_LEN 179, "payload[180] minus NUL (firmware strncpy)".
+// Do NOT "fix" this by widening payload[180] — the 226-byte espnow_struct_mgmt size is
+// load-bearing for the firmware's size-first receive router (WCB.ino:804-808).
+const MGMT_CHUNK_SIZE  = 179;   // max payload chars per ESP-NOW packet (firmware carries 179)
+const MGMT_MAX_CHUNKS  = 16;    // must match MGMT_MAX_CHUNKS in Code/WCB/WCB.ino:837 — the target
+                                // reassembles into chunks[16][181] and tracks arrival in a
+                                // uint16_t bitmask, so a 17th chunk has nowhere to land
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
 
 // ─── General Settings Baseline ────────────────────────────────────
@@ -74,7 +84,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '17.19:54.R.AUG.2026';
+const UI_VERSION = '19.12:40.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4452,10 +4462,34 @@ async function updateSequence(n, rowId) {
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
       const relayFc   = boardConfigs[relayN]?.funcChar || '?';
       const seqSaveTargetWCB = boardConfigs[n]?.wcbNumber || n;
-      const mgmtCmd = `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`;
       logTarget = relayN;
-      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
-      showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
+      // A sequence is easily longer than one packet. Sending it as chunkIdx 0 of 1 used to hand
+      // the relay a payload it could not carry: the relay's single-chunk ETM shortcut only takes
+      // payload.length() <= 198 (Code/WCB/WCB.ino:2626), and anything longer fell through to the
+      // FRAG path where strncpy truncated it to 179 — storing half a sequence under a green
+      // "updated" toast. Fragment properly when it does not fit the shortcut.
+      if (cmd.length <= 198) {
+        await sendMgmtReliable(relayConn,
+          `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
+        showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
+      } else {
+        const chunks = fragmentString(cmd, MGMT_CHUNK_SIZE);
+        if (chunks.length > MGMT_MAX_CHUNKS) {
+          showToast(`Sequence "${key}" is too long to send via a relay `
+                  + `(${cmd.length} chars, max ${MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE})`, 'error');
+          return;
+        }
+        for (let i = 0; i < chunks.length; i++) {
+          await sendMgmtReliable(relayConn,
+            `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},${i},${chunks.length},${chunks[i]}`,
+            i === 0 ? relayN : null);
+          if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
+        }
+        // The multi-chunk path is broadcast and un-ACKed, so we cannot claim success the way the
+        // single-chunk ETM path can. Say what actually happened rather than showing a green tick.
+        showToast(`Sequence "${key}" sent to WCB ${n} in ${chunks.length} parts — `
+                + `pull the board to confirm it stored`, 'info');
+      }
     } else {
       // Direct connection
       const conn = boardConnections[n];
