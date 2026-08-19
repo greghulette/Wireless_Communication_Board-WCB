@@ -74,11 +74,11 @@ and the `volatile` increment — both are themselves findings.
 | FIX-026 | TODO | `Wizard/app.js:3700` | ⚠FIX | Bidirectional-mapping code indexes slot-keyed maps (boardConfigs / boardConnections / boardPull) with a WCB number |
 | FIX-027 | **DONE** | `Wizard/app.js:3784` | ⚠FIX | Wizard mapping-destination WCB dropdown is built from the WCBQ floor, so any destination above it is silently rewritten to "Local" |
 | FIX-028 | **DONE** | `Wizard/app.js:3837` |  | `?MAP,SERIAL` appends destinations in firmware, so editing or removing a destination in the Wizard leaves the old one live |
-| FIX-029 | TODO | `Wizard/app.js:7039` |  | Push All throws a TypeError on a MgmtRelay slot and silently aborts the remaining stages |
+| FIX-029 | **DONE** | `Wizard/app.js:7039` |  | Push All throws a TypeError on a MgmtRelay slot and silently aborts the remaining stages |
 | FIX-030 | **DONE** | `Wizard/app.js:7447` | ⚠FIX | Changing Local Function Char back to '?' is never sent — the whole push is then mis-dispatched to the broadcast path (and out over ESP-NOW) |
 | FIX-031 | TODO | `Wizard/app.js:7481` |  | A push containing a PWM input mapping makes the firmware auto-reboot mid-push; every command after it is silently lost |
 | FIX-032 | TODO | `Wizard/app.js:7811` | ⚠FIX | boardGoRemote has no funcChar/delimiter/cmdChar bootstrap — changing a command character over a relay sends a payload the target cannot parse |
-| FIX-033 | TODO | `Wizard/app.js:7853` |  | boardGoRemote never checks the 16-chunk MGMT ceiling — an oversized config is rejected wholesale by the relay while the Wizard reports success |
+| FIX-033 | **DONE** | `Wizard/app.js:7853` |  | boardGoRemote never checks the 16-chunk MGMT ceiling — an oversized config is rejected wholesale by the relay while the Wizard reports success |
 | FIX-034 | **DONE** | `Wizard/app.js:7938` |  | Remote-pull listener is not target-filtered — a config reply is written to every board with a pull in flight |
 | FIX-035 | **DONE** | `Wizard/app.js:7946` |  | remoteBoardPull accepts ANY [MGMT:CONFIG,<n>] reply — two overlapping pulls write one board's config onto another board's slot |
 | FIX-036 | **DONE** | `Wizard/app.js:8419` | ⚠FIX | exportSystemFile only walks slots 1..wcbQuantity — any board discovered or relayed at a higher number is silently dropped from the exported file |
@@ -136,7 +136,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-081 | **DONE** | `Wizard/app.js:737` | ⚠FIX | S3-S5 baud dropdown is capped at 57600, so any higher configured baud blanks the select and is silently rewritten to 9600 |
 | FIX-082 | **DONE** | `Wizard/app.js:855` |  | MP3 / HCR / DFPlayer port dropdowns are never refreshed when another feature frees a port |
 | FIX-083 | **DONE** | `Wizard/app.js:962` |  | Changing the Kyber serial port never marks the board unsaved — the only device port handler missing the dirty call |
-| FIX-084 | TODO | `Wizard/app.js:1219` |  | ETM Message Count defaults to 3, below the firmware's clamp floor of 10 — the value can never round-trip |
+| FIX-084 | **DONE** | `Wizard/app.js:1219` |  | ETM Message Count defaults to 3, below the firmware's clamp floor of 10 — the value can never round-trip |
 | FIX-085 | TODO | `Wizard/app.js:1663` |  | boardOtaSerial's post-OTA reboot handling has no `_shared` guard, so a successful OTA on a shared-hub port leaves the board card stuck at "Not connect |
 | FIX-086 | TODO | `Wizard/app.js:2003` |  | populateUIFromConfig calls onHWVersionChange, which silently rewrites the pulled LED pin (HW 3.2 @ GPIO38 → 48) and marks the board dirty |
 | FIX-087 | **DONE** | `Wizard/app.js:2236` | ⚠FIX | MP3 baud picker lets the user set values the firmware rejects outright — the whole `?MP3,…` line is silently dropped |
@@ -150,8 +150,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-095 | TODO | `Wizard/app.js:6136` | ⚠FIX | General-mismatch modal's "Use WCB<n> values" silently ignores the NaviCore rows it just displayed |
 | FIX-096 | TODO | `Wizard/app.js:6800` | ⚠FIX | boardPull commits an empty or truncated backup as a successful pull, overwriting config AND baseline with factory defaults |
 | FIX-097 | TODO | `Wizard/app.js:7140` |  | Failed post-flash / post-erase boot-wait leaves the Push Config button permanently disabled and labelled "Flashing…" |
-| FIX-098 | TODO | `Wizard/app.js:7902` |  | remoteBoardPull leaks its _pullingBoards entry on a retry attempt, permanently locking that board out of all future pulls |
-| FIX-099 | TODO | `Wizard/app.js:8282` | ⚠FIX | Push All includes MgmtRelay slots, whose board section (and Push button) was deleted — boardGo throws and Push All dies before the relay-reboot stage |
+| FIX-098 | **DONE** | `Wizard/app.js:7902` |  | remoteBoardPull leaks its _pullingBoards entry on a retry attempt, permanently locking that board out of all future pulls |
+| FIX-099 | **DONE** | `Wizard/app.js:8282` | ⚠FIX | Push All includes MgmtRelay slots, whose board section (and Push button) was deleted — boardGo throws and Push All dies before the relay-reboot stage |
 | FIX-100 | TODO | `Wizard/app.js:8966` | ⚠FIX | Kyber target baud picker uses the full `BAUD_RATES` list; the firmware's Kyber target parser accepts only six of those rates and silently skips the re |
 | FIX-101 | **DONE** | `Wizard/app.js:9341` |  | Reducing the slot count leaves activeBoardTab out of range — the Board Identity step renders with no visible panel |
 | FIX-102 | TODO | `Wizard/app.js:9520` | ⚠FIX | Re-entering the Connect step after Back discards every later edit and leaves the port panel dead |
@@ -256,3 +256,7 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-082, FIX-083 | `Wizard/app.js` | Device port pickers were never cross-refreshed: a port released by one device stayed greyed out in the others until something unrelated rebuilt them. All four handlers (Kyber/MP3/DFP/HCR) now refresh the full set. `onKyberPortChange` was also the only device-port handler that never marked the board unsaved. | JS ✅ |
 | 2026-08-19 | FIX-018 | `WCB.ino` | Raw-serial sender chunked at **180** while the receiver rejects anything over **177** — a 178-180 byte chunk was transmitted and silently dropped at the far end, diagnostic behind `debugMaestro`. Both now use one `RAW_SERIAL_MAX_CHUNK` constant so they cannot drift apart again. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-019, FIX-057 | `WCB.ino`, `WCB_Storage.h` | `lastReceivedViaESPNOW`/`inSequenceBody` are unsynchronised globals written by **three tasks across two cores**, so a concurrent write can land between one task staging the value and another snapshotting it. `enqueueCommand` and `parseCommandsAndEnqueue` now accept an **explicit** origin (defaulting to the old global-snapshot behaviour), and both WiFi-callback dispatch sites pass it directly instead of routing through the racy global. | ESP32 ✅ S3 ✅ WDP ✅ |
+| 2026-08-19 | FIX-084 | `app.js`, `index.html` | ETM Message Count fell back to **3**, below the firmware’s clamp floor of 10 — pushed as 3, silently raised to 10 by the board, and read back as a diff on the very next pull, so it could never round-trip. Default now 20 (matching every other default in the codebase), clamped 10-200, with `min`/`max` on the input and a tooltip that says what the field actually is. | JS ✅ |
+| 2026-08-19 | FIX-098 | `app.js` | `remoteBoardPull` leaked its `_pullingBoards` entry when the relay was gone on a **retry** — the guard was added by attempt 1, so bailing left the board permanently marked in-flight and every later pull was rejected as a duplicate. A relay dropping between timeout and retry is exactly how that happens. | JS ✅ |
+| 2026-08-19 | FIX-033 | `app.js` | Remote push never checked the 16-chunk MGMT ceiling: an oversized config was streamed in full, discarded **wholesale** by the relay/target, and then reported as success with the baseline advanced. Now refused up front with the actual sizes and what to trim. | JS ✅ |
+| 2026-08-19 | FIX-029, FIX-099 | `app.js` | Push All included MgmtRelay slots, which have no board section or Push button — `boardGo` threw on the missing element, and because that happened inside the staged loop it aborted the remaining stages including the deferred reboots. Relay slots are now excluded. | JS ✅ |

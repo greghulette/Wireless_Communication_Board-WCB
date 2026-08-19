@@ -88,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.15:15.R.AUG.2026';
+const UI_VERSION = '19.16:26.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1249,9 +1249,13 @@ function onETMChecksumToggle() {
 function onGeneralETMChange() {
   const timeout = parseInt(document.getElementById('g-etm-timeout')?.value) || 500;
   const hb      = parseInt(document.getElementById('g-etm-hb')?.value)      || 10;
-  const miss    = parseInt(document.getElementById('g-etm-miss')?.value)     || 3;
+  // Fallbacks must match the firmware defaults AND survive its clamps, or the value can never
+  // round-trip: the board clamps message count to 10-200, so a Wizard fallback of 3 was pushed,
+  // silently raised to 10 by the firmware, and read back as a difference on the very next pull.
+  const miss    = parseInt(document.getElementById('g-etm-miss')?.value)     || 5;
   const boot    = parseInt(document.getElementById('g-etm-boot')?.value)     || 2;
-  const count   = parseInt(document.getElementById('g-etm-count')?.value)    || 3;
+  const count   = Math.min(200, Math.max(10,
+                  parseInt(document.getElementById('g-etm-count')?.value)    || 20));
   const delay   = parseInt(document.getElementById('g-etm-delay')?.value)    || 100;
 
   systemConfig.general.etm.timeoutMs        = timeout;
@@ -7983,6 +7987,19 @@ async function boardGoRemote(n, opts = {}) {
   const chunks = fragmentString(cmdToSend, MGMT_CHUNK_SIZE);
   const total  = chunks.length;
 
+  // The relay rejects a session claiming more than MGMT_MAX_CHUNKS chunks, and the target
+  // reassembles into a fixed 16-slot array with a uint16_t arrival mask — so an oversized push was
+  // discarded WHOLESALE at the far end while this side happily streamed every chunk and then
+  // reported success and advanced the baseline. Refuse up front and say what to trim.
+  if (total > MGMT_MAX_CHUNKS) {
+    const maxChars = MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE;
+    showToast(`WCB ${n}: config is too large to push via a relay (${cmdToSend.length} chars, `
+            + `max ${maxChars}). Push it over USB, or reduce stored sequences/variables.`, 'error', 12000);
+    termLog(relayN, `[Remote] Refusing push for WCB ${n}: ${total} chunks exceeds the `
+                  + `${MGMT_MAX_CHUNKS}-chunk relay limit (${cmdToSend.length} > ${maxChars} chars)`, 'err');
+    return false;
+  }
+
   termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s), session ${sessionId}`, 'sys');
 
   let pushSucceeded = false;
@@ -8030,7 +8047,16 @@ const PULL_RETRY_MS     = 2500;
 // same callback through so it fires only on the final outcome.
 async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_PULL_ATTEMPTS, onComplete = null) {
   const relayConn = boardConnections[relayN];
-  if (!relayConn?.isConnected()) { showToast('Relay board not connected', 'error'); onComplete?.(false); return; }
+  if (!relayConn?.isConnected()) {
+    // Release the in-flight guard. On a RETRY (attempt > 1) the entry was added by attempt 1, so
+    // bailing here without removing it left the board permanently in _pullingBoards — every later
+    // pull was then rejected as a "duplicate" and the slot could never be refreshed again. A relay
+    // that drops between the timeout and the retry is exactly how this happens.
+    _pullingBoards.delete(targetN);
+    showToast('Relay board not connected', 'error');
+    onComplete?.(false);
+    return;
+  }
 
   // Guard against duplicate pulls triggered by the double "[ETM] WCBn came ONLINE" on boot
   if (attempt === 1) {
@@ -8393,8 +8419,12 @@ function confirmNetworkGroupChange(n, cmdString) {
 
 // ─── Push All ─────────────────────────────────────────────────────
 async function boardGoAll() {
+  // Exclude MgmtRelay slots. They have no board section and no Push button, so boardGo() throws
+  // on the missing DOM element — and because that happens inside the staged loop it aborted the
+  // remaining stages, including the deferred reboots that later stages are responsible for
+  // sending. A relay is a transport, not a configurable board.
   const directSlots = Object.keys(boardConnections)
-    .filter(n => boardConnections[n]?.isConnected())
+    .filter(n => boardConnections[n]?.isConnected() && !_relaySlots.has(+n))
     .map(Number);
   // Remote boards that aren't also directly connected
   const remoteSlots = Object.keys(remoteRelayForBoard)
