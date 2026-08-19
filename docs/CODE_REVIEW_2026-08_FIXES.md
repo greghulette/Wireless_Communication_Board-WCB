@@ -96,9 +96,9 @@ and the `volatile` increment — both are themselves findings.
 |---|---|---|---|---|
 | FIX-042 | TODO | `c:/Users/ghulette/Documents/GitHub/WCBClient/src/WCB_Client.cpp:2007` |  | WCB_Client decodes a WDP SOLICIT as an advert, wiping the sending board's neighbor record |
 | FIX-043 | TODO | `Code/bin/build.sh:181` | ⚠FIX | build.sh deletes the committed firmware binaries and exits 0 when the branch name contains a "/" — CI then commits and pushes the deletion as a green  |
-| FIX-044 | TODO | `Code/WCB/WCB_Help.cpp:132` |  | ?BAUD help documents the legacy form `?Sx,rate`, which the parser rejects (it needs no comma) |
-| FIX-045 | TODO | `Code/WCB/WCB_Help.cpp:669` | ⚠FIX | ?WLED? help documents only the legacy single-device form — the canonical ID-addressed config and ;L<id> addressing are undocumented |
-| FIX-046 | TODO | `Code/WCB/WCB_Help.cpp:925` |  | ?CMDCHAR? documents `;Px,width` but the parser rejects the comma, and the rejection is silent |
+| FIX-044 | **DONE** | `Code/WCB/WCB_Help.cpp:132` |  | ?BAUD help documents the legacy form `?Sx,rate`, which the parser rejects (it needs no comma) |
+| FIX-045 | **DONE** | `Code/WCB/WCB_Help.cpp:669` | ⚠FIX | ?WLED? help documents only the legacy single-device form — the canonical ID-addressed config and ;L<id> addressing are undocumented |
+| FIX-046 | **DONE** | `Code/WCB/WCB_Help.cpp:925` |  | ?CMDCHAR? documents `;Px,width` but the parser rejects the comma, and the rejection is silent |
 | FIX-047 | **DONE** | `Code/WCB/WCB_Storage.cpp:643` |  | ?SEQ,SAVE accepts a key longer than the 15-char NVS limit — value silently discarded but the name is recorded |
 | FIX-048 | **DONE** | `Code/WCB/WCB_Storage.cpp:1028` | ⚠FIX | eraseNVSFlash() never reaches its own confirmation or restart, and ?ERASE,NVS silently reboots OTHER boards in the fleet |
 | FIX-049 | TODO | `Code/WCB/WCB_Storage.cpp:1636` | ⚠FIX | ?MAP,SERIAL appends destinations rather than replacing them, so a destination removed or changed in the Wizard stays live on the board |
@@ -179,9 +179,9 @@ and the `volatile` increment — both are themselves findings.
 
 | # | Status | File:line | ⚠ | Finding |
 |---|---|---|---|---|
-| FIX-120 | TODO | `Code/WCB/WCB_Help.cpp:128` | ⚠FIX | ?BAUD? help tells the user to run ?MAESTRO,ENABLE, which is not implemented |
-| FIX-121 | TODO | `Code/WCB/WCB_Help.cpp:364` |  | ?WCB? help caps the board number at 9; the parser accepts 1-20 |
-| FIX-122 | TODO | `Code/WCB/WCB_Help.cpp:1015` |  | Ten implemented ? commands have no help topic and no menu entry; asking for help on them silently prints the generic menu |
+| FIX-120 | **DONE** | `Code/WCB/WCB_Help.cpp:128` | ⚠FIX | ?BAUD? help tells the user to run ?MAESTRO,ENABLE, which is not implemented |
+| FIX-121 | **DONE** | `Code/WCB/WCB_Help.cpp:364` |  | ?WCB? help caps the board number at 9; the parser accepts 1-20 |
+| FIX-122 | **DONE** | `Code/WCB/WCB_Help.cpp:1015` |  | Ten implemented ? commands have no help topic and no menu entry; asking for help on them silently prints the generic menu |
 | FIX-123 | **DONE** | `Code/WCB/WCB.ino:5138` | ⚠FIX | ?LED,PIN re-inits the NeoPixel object while the WiFi task dereferences it, leaking the old object and opening a use-after-free |
 | FIX-124 | TODO | `Wizard/flasher.js:720` |  | Post-flash hard reset never runs — `loader.afterFlash` does not exist in the vendored esptool-js 0.4.7 |
 
@@ -232,3 +232,4 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-088 | `app.js` | `syncMP3ToConfig` re-read the raw volume input, discarding `onMP3VolChange`’s 0-64 clamp on every push. | JS ✅ |
 | 2026-08-19 | FIX-090 | `app.js` | `syncMappingsToConfig` wiped `config.pwmOutputPorts`, which is not derived from local mapping rows at all — the parser fills it from what the BOARD reported about ports a REMOTE mapping drives. Any mapping edit dropped them from the config and the next export. | JS ✅ |
 | 2026-08-19 | FIX-115 | `parser.js` | Clearing a serial label emitted nothing (`cur.label &&` guard), so the board kept the old one — leaving the port showing as claimed and able to resurrect a phantom Kyber Marcuino port. Now emits `LABEL,CLEAR,Sx` (verified accepted at `WCB.ino:4739`). | JS ✅ |
+| 2026-08-19 | FIX-044,045,046,120,121,122 | `WCB_Help.cpp` | **Help-text cluster.** `?BAUD` no longer recommends the non-existent `?MAESTRO,ENABLE` or the comma form the parser rejects; `?WCB` range corrected 1-9 → 1-20; `?CMDCHAR` shows `;Pxnnnn` (the form the firmware itself emits) instead of the unparseable `;Px,width`; `?WLED` rewritten for the ID-addressed syntax (`?WLED,<id>:W<wcb>S<port>:<baud>`, `;L<id>,...`) replacing the superseded single-device form; **added a `?OTA`/`?OTALOCAL` topic** (the branch’s headline feature had none) and put `?DFP` + OTA in the top-level `??` menu. | ESP32 ✅ S3 ✅ |

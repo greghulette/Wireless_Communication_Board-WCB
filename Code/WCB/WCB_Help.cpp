@@ -125,11 +125,11 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Default baud rate for all ports is 9600"));
         Serial.println(F("  - Maestro servo controllers require 57600"));
-        Serial.println(F("  - Use ?MAESTRO,ENABLE as a shortcut for S1 Maestro setup"));
+        Serial.println(F("  - Configure a Maestro with ?MAESTRO,<id>:S<port>:<baud> (see ?MAESTRO)"));
         Serial.println(F("  - Saved to NVS, persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?BAUDSx,rate  (e.g. ?BAUDS1,57600)"));
-        Serial.println(F("  ?Sx,rate      (deprecated, will be removed)"));
+        Serial.println(F("  ?Sxrate       (e.g. ?S157600 - no comma; ?Sx,rate is NOT accepted)"));
 
     // ================================================================
     } else if (c == "LABEL") {
@@ -361,7 +361,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("\nUsage: ?WCB,<number>"));
         Serial.println(F("\nDescription:"));
-        Serial.println(F("  Sets this board's WCB number (1-9). The WCB number determines"));
+        Serial.println(F("  Sets this board's WCB number (1-20). The WCB number determines"));
         Serial.println(F("  the board's MAC address and how it is addressed in unicast"));
         Serial.println(F("  commands. Each board in a system must have a unique number."));
         Serial.println(F("  WCB1 is typically the primary/master board."));
@@ -666,29 +666,61 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  Wire WCB TX -> WLED RX + ground; WLED listens at 115200 on a"));
         Serial.println(F("  build whose LED pin is NOT on GPIO1/3 (GPIO2/16 is fine)."));
         Serial.println(F("\nConfiguration Commands (?WLED,...):"));
-        Serial.println(F("  PORT,Sx:baud      Reserve & configure the WLED port"));
+        Serial.println(F("  <id>:W<wcb>S<port>:<baud>  Configure WLED <id> on a board + port"));
         Serial.println(F("                      use a HARDWARE port (S1/S2) at 115200"));
-        Serial.println(F("  CLEAR             Release the WLED port"));
+        Serial.println(F("  CLEAR             Release all WLED slots"));
+        Serial.println(F("  CLEAR,<id>        Release just WLED <id>"));
         Serial.println(F("  LIST              Show WLED configuration and link status"));
         Serial.println(F("  STATUS            Show status  [WLED:...]"));
-        Serial.println(F("\nRuntime Actions (use ;L,...):"));
-        Serial.println(F("  ;L,ON / ;L,OFF / ;L,TOGGLE   Power"));
-        Serial.println(F("  ;L,BRI,0-255        Master brightness"));
-        Serial.println(F("  ;L,PS,<n>           Recall preset n (primary workflow)"));
-        Serial.println(F("  ;L,COL,RRGGBB       Solid colour (RRGGBBWW for RGBW)"));
-        Serial.println(F("  ;L,FX,<n>[,sx,ix]   Effect by index (+ speed/intensity)"));
-        Serial.println(F("  ;L,PAL,<n>          Palette by index"));
-        Serial.println(F("  ;L,JSON,{...}       Raw /json/state passthrough (escape hatch)"));
+        Serial.println(F("\nRuntime Actions — ID-ADDRESSED (;L<id>,...):"));
+        Serial.println(F("  ;L<id>,ON / OFF / TOGGLE    Power"));
+        Serial.println(F("  ;L<id>,BRI,0-255    Master brightness"));
+        Serial.println(F("  ;L<id>,PS,<n>       Recall preset n (primary workflow)"));
+        Serial.println(F("  ;L<id>,COL,RRGGBB   Solid colour (RRGGBBWW for RGBW)"));
+        Serial.println(F("  ;L<id>,FX,<n>[,sx,ix]  Effect by index (+ speed/intensity)"));
+        Serial.println(F("  ;L<id>,PAL,<n>      Palette by index"));
+        Serial.println(F("  ;L<id>,JSON,{...}   Raw /json/state passthrough (escape hatch)"));
         Serial.println(F("\nExamples:"));
-        Serial.println(F("  ?WLED,PORT,S2:115200          - WLED on S2 at 115200"));
-        Serial.println(F("  ;L,PS,3                       - Fire preset 3"));
-        Serial.println(F("  ;L,COL,FF0000                 - Solid red"));
-        Serial.println(F("  ;W4,;L,PS,2                   - Preset 2 on WCB4's WLED"));
+        Serial.println(F("  ?WLED,1:W3S2:115200           - WLED id 1 on WCB3 port S2"));
+        Serial.println(F("  ;L1,PS,3                      - Fire preset 3 on WLED id 1"));
+        Serial.println(F("  ;L1,COL,FF0000                - Solid red on WLED id 1"));
+        Serial.println(F("  ;W4,;L1,PS,2                  - Preset 2 on WCB4's WLED"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Fire-and-forget: the WCB does not read WLED back"));
-        Serial.println(F("  - One WLED per WCB; reach others by targeting their WCB"));
+        Serial.println(F("  - One slot per WLED ID; ;L<id> routes to whichever board hosts it"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
+    } else if (c == "OTA" || c == "OTALOCAL") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nFirmware Update (OTA)"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Writes a new firmware image to this board's INACTIVE OTA slot"));
+        Serial.println(F("  and reboots into it. Two transports share the same write core:"));
+        Serial.println(F("  ?OTALOCAL over direct USB, and ?OTA which RELAYS a stream over"));
+        Serial.println(F("  ESP-NOW to another WCB. Normally driven by the Wizard, not by"));
+        Serial.println(F("  hand — the commands below are the wire protocol it speaks."));
+        Serial.println(F("\nLocal (this board, over USB) — ?OTALOCAL,...:"));
+        Serial.println(F("  STATUS                    Show OTA slot / session state"));
+        Serial.println(F("  BAUD,<rate>               Raise the USB baud for the transfer"));
+        Serial.println(F("  BEGIN,<imageSize>,<fam>   Start a session (fam: 0=ESP32 1=ESP32-S3)"));
+        Serial.println(F("  DATA,<offset>,<base64>    Write one chunk"));
+        Serial.println(F("  END                       Verify, set boot partition, reboot"));
+        Serial.println(F("  ABORT                     Cancel and roll back the session"));
+        Serial.println(F("\nRelay (drive a REMOTE board over the mesh) — ?OTA,...:"));
+        Serial.println(F("  BEGIN,<target>,<imageSize>,<fam>   Start on target WCB"));
+        Serial.println(F("  DATA,<target>,<offset>,<base64>    Forward one chunk"));
+        Serial.println(F("  END,<target>  /  ABORT,<target>    Finish or cancel"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - The image is written to the inactive slot; a failed or aborted"));
+        Serial.println(F("    session leaves the RUNNING firmware untouched."));
+        Serial.println(F("  - Requires the min_spiffs partition scheme (2 x ~1.9MB OTA slots)."));
+        Serial.println(F("  - Each chunk is acknowledged with [OTA:ACK,...] for flow control."));
+        Serial.println(F("  - RC/telemetry passthrough is paused while chunks are flowing so"));
+        Serial.println(F("    it cannot crowd out those ACK lines."));
+        Serial.println(F("  - Settings in NVS are preserved across an OTA."));
 
     // ================================================================
     } else if (c == "VAR") {
@@ -922,7 +954,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;Ckey         Run stored sequence 'key'"));
         Serial.println(F("  ;M<id><seq>   Trigger Maestro subroutine (;M11, or ;M1,1)"));
         Serial.println(F("  ;M<dev>,verb  Maestro servo verb (see ?MAESTRO for the list)"));
-        Serial.println(F("  ;Px,width     Output PWM pulse on port x"));
+        Serial.println(F("  ;Pxnnnn       Output PWM pulse on port x (no comma, e.g. ;P11500)"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?CMDCHAR,;    - Set to ; (default)"));
         Serial.println(F("  ?CMDCHAR,:    - Set to :"));
@@ -1039,12 +1071,16 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?KYBER          Configure Kyber RC integration"));
         Serial.println(F("    ?MAESTRO        Configure Maestro servo controller(s)"));
         Serial.println(F("    ?MP3            Configure SparkFun MP3 Trigger v2.x"));
+        Serial.println(F("    ?DFP            Configure DFPlayer Mini audio module"));
         Serial.println(F("    ?HCR            Configure Human-Cyborg Relations Vocalizer"));
-        Serial.println(F("    ?WLED           Configure WLED serial control (;L runtime)"));
+        Serial.println(F("    ?WLED           Configure WLED serial control (;L<id> runtime)"));
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
         Serial.println(F("    ?WDP            Mesh discovery + neighbor table (auto-join peers)"));
+        Serial.println(F("\n  FIRMWARE UPDATE:"));
+        Serial.println(F("    ?OTA            Relay a firmware image to another WCB over the mesh"));
+        Serial.println(F("    ?OTALOCAL       Update THIS board over USB"));
         Serial.println(F("\n  COMMAND SEQUENCES:"));
         Serial.println(F("    ?SEQ,SAVE       Save a named command sequence"));
         Serial.println(F("    ?SEQ,LIST       List all saved sequences"));
