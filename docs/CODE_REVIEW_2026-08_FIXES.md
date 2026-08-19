@@ -133,16 +133,16 @@ and the `volatile` increment — both are themselves findings.
 | FIX-078 | **DONE** | `Code/WCB/WCB.ino:7225` |  | Serial1/Serial2 begin() has no baudRates>0 guard (Serial3-5 does) — a 0 in NVS blocks 20 s in the core's baud auto-detect and the boot guard reboots t |
 | FIX-079 | TODO | `Wizard/app.js:454` | ⚠FIX | reconcileBoardGrid can delete a board slot that is mid-flash, killing the post-flash config restore |
 | FIX-080 | TODO | `Wizard/app.js:628` | ⚠FIX | addBoardSection rebuilds a section with factory defaults when a config already exists but the board is not USB-connected |
-| FIX-081 | TODO | `Wizard/app.js:737` | ⚠FIX | S3-S5 baud dropdown is capped at 57600, so any higher configured baud blanks the select and is silently rewritten to 9600 |
+| FIX-081 | **DONE** | `Wizard/app.js:737` | ⚠FIX | S3-S5 baud dropdown is capped at 57600, so any higher configured baud blanks the select and is silently rewritten to 9600 |
 | FIX-082 | TODO | `Wizard/app.js:855` |  | MP3 / HCR / DFPlayer port dropdowns are never refreshed when another feature frees a port |
 | FIX-083 | TODO | `Wizard/app.js:962` |  | Changing the Kyber serial port never marks the board unsaved — the only device port handler missing the dirty call |
 | FIX-084 | TODO | `Wizard/app.js:1219` |  | ETM Message Count defaults to 3, below the firmware's clamp floor of 10 — the value can never round-trip |
 | FIX-085 | TODO | `Wizard/app.js:1663` |  | boardOtaSerial's post-OTA reboot handling has no `_shared` guard, so a successful OTA on a shared-hub port leaves the board card stuck at "Not connect |
 | FIX-086 | TODO | `Wizard/app.js:2003` |  | populateUIFromConfig calls onHWVersionChange, which silently rewrites the pulled LED pin (HW 3.2 @ GPIO38 → 48) and marks the board dirty |
-| FIX-087 | TODO | `Wizard/app.js:2236` | ⚠FIX | MP3 baud picker lets the user set values the firmware rejects outright — the whole `?MP3,…` line is silently dropped |
-| FIX-088 | TODO | `Wizard/app.js:2305` |  | syncMP3ToConfig re-reads the raw MP3 volume input, discarding onMP3VolChange's clamp — an out-of-range value makes the firmware reject the whole MP3 c |
-| FIX-089 | TODO | `Wizard/app.js:3246` |  | Maestro ID dropdown offers 9, which the firmware rejects as a reserved routing target |
-| FIX-090 | TODO | `Wizard/app.js:3594` |  | syncMappingsToConfig() wipes config.pwmOutputPorts and never repopulates it |
+| FIX-087 | **DONE** | `Wizard/app.js:2236` | ⚠FIX | MP3 baud picker lets the user set values the firmware rejects outright — the whole `?MP3,…` line is silently dropped |
+| FIX-088 | **DONE** | `Wizard/app.js:2305` |  | syncMP3ToConfig re-reads the raw MP3 volume input, discarding onMP3VolChange's clamp — an out-of-range value makes the firmware reject the whole MP3 c |
+| FIX-089 | **DONE** | `Wizard/app.js:3246` |  | Maestro ID dropdown offers 9, which the firmware rejects as a reserved routing target |
+| FIX-090 | **DONE** | `Wizard/app.js:3594` |  | syncMappingsToConfig() wipes config.pwmOutputPorts and never repopulates it |
 | FIX-091 | TODO | `Wizard/app.js:3866` |  | PWM mapping Save schedules a config pull at 2 s, but the board blocks 3 s and reboots |
 | FIX-092 | TODO | `Wizard/app.js:4092` |  | seqValueToLines/seqTextareaToValue are not inverses: '^^***' standalone comments collapse, and a plain Push rewrites stored sequences |
 | FIX-093 | TODO | `Wizard/app.js:5541` |  | A relay's transient USB drop tears down every relay-managed remote board and the successful reconnect never rebuilds them |
@@ -162,12 +162,12 @@ and the `volatile` increment — both are themselves findings.
 | FIX-107 | TODO | `Wizard/app.js:12610` |  | The 12 s mesh-discovery poll injects ?WDP,DUMP into an in-flight config push, faking ACKs for dropped settings |
 | FIX-108 | TODO | `Wizard/flasher.js:414` |  | Recognized-but-unsupported chips (ESP32-S2/C2/C3/C5/C6/C61/H2/P4) are flashed with ESP32 or S3 firmware whenever a HW version is selected |
 | FIX-109 | TODO | `Wizard/flasher.js:686` | ⚠FIX | Flash progress bar stalls at ~62% — esptool reports COMPRESSED bytes but the denominator is the uncompressed total |
-| FIX-110 | TODO | `Wizard/index.html:640` |  | Kyber Maestro Baud <select> cannot represent 5 of the 13 firmware-legal baud rates — a pulled 19200 blanks the control and Push silently rewrites the  |
-| FIX-111 | TODO | `Wizard/index.html:809` |  | MP3 baud picker offers values the firmware rejects outright, discarding the whole MP3 config |
+| FIX-110 | **DONE** | `Wizard/index.html:640` |  | Kyber Maestro Baud <select> cannot represent 5 of the 13 firmware-legal baud rates — a pulled 19200 blanks the control and Push silently rewrites the  |
+| FIX-111 | **DONE** | `Wizard/index.html:809` |  | MP3 baud picker offers values the firmware rejects outright, discarding the whole MP3 config |
 | FIX-112 | TODO | `Wizard/parser.js:902` | ⚠FIX | The Wizard drops ?WDP,OFF / ?WDP,AUTOJOIN,OFF from a pulled config and never re-emits them — an export/restore silently re-enables discovery |
 | FIX-113 | TODO | `Wizard/parser.js:905` |  | Parser drops `?WDP,OFF` and `?WDP,AUTOJOIN,OFF` from a board backup — a config export/restore silently re-enables WDP discovery |
 | FIX-114 | TODO | `Wizard/parser.js:1143` | ⚠FIX | Two boards that share a WCB number collapse into one on config-file save → reload (whole board config lost) |
-| FIX-115 | TODO | `Wizard/parser.js:1321` |  | Clearing a serial-port label never reaches the board, and the stale label resurrects a phantom Kyber Marcuino port on the next pull |
+| FIX-115 | **DONE** | `Wizard/parser.js:1321` |  | Clearing a serial-port label never reaches the board, and the stale label resurrects a phantom Kyber Marcuino port on the next pull |
 | FIX-116 | TODO | `Wizard/serial-hub-test.html:93` |  | serial-hub-test.html: "Pick Port" can never be enabled — the shipped test harness is unusable |
 | FIX-117 | TODO | `Wizard/serial-hub.js:325` |  | `_adoptGrantedPort()` takes the first VID/PID match — failover to the WRONG physical WCB when two identical adapters are granted |
 | FIX-118 | TODO | `Wizard/serial-hub.js:407` | ⚠FIX | Read loop death (unplug) leaves the lock held and the dead port handle open — board unreachable from every tab |
@@ -226,3 +226,9 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-010 | `WCB_Storage.cpp` | `?KYBER,CLEAR` acted on a hard-coded port 2. Since the config chain emits it for EVERY non-Kyber board, every full push reset Serial2 to 9600 and re-enabled its broadcast flags, undoing settings the same push had just applied. Now uses the port the Kyber actually held, and touches nothing when it was never configured (also removes the `[-1]` index on `?KYBER,CLEAR,S0`). | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-047 | `WCB_Storage.cpp` | `?SEQ,SAVE` now rejects a key over the 15-char NVS limit and checks the `putString` result, instead of listing and advertising a sequence whose value was never stored. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-048 | `WCB_Storage.cpp`, `WCB_PWM.{h,cpp}` | `clearAllPWMMappings()` ended in `ESP.restart()`, so `eraseNVSFlash()` never reached its own confirmation or restart — and it broadcast `?REBOOT`, restarting the whole fleet because one board was factory-reset. Added an `autoReboot` parameter; erase passes false. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-110, FIX-111, FIX-087 | `index.html` | **Baud pickers vs firmware.** MP3 offered all 13 rates but the firmware accepts only 9600/38400 and rejects the whole `?MP3` line otherwise — now two options. Kyber Maestro offered 4 of 13, so a pulled 19200/128000 blanked the select and the blank was read back as the setting — now the full legal set. | JS ✅ |
+| 2026-08-19 | FIX-081 | `app.js` | S3-S5 baud dropdown capped at 57600 hid an already-configured higher rate, so the select rendered blank and `syncSerialUIToConfig` rewrote it to 9600 on the next push. The configured value is now always present (marked `(!)`), and the readback falls back to the configured value instead of 9600. | JS ✅ |
+| 2026-08-19 | FIX-089 | `app.js` | Maestro ID dropdown offered **9**, which the firmware treats as the reserved all-local routing target and never stores as a slot. Devices are 1-8. | JS ✅ |
+| 2026-08-19 | FIX-088 | `app.js` | `syncMP3ToConfig` re-read the raw volume input, discarding `onMP3VolChange`’s 0-64 clamp on every push. | JS ✅ |
+| 2026-08-19 | FIX-090 | `app.js` | `syncMappingsToConfig` wiped `config.pwmOutputPorts`, which is not derived from local mapping rows at all — the parser fills it from what the BOARD reported about ports a REMOTE mapping drives. Any mapping edit dropped them from the config and the next export. | JS ✅ |
+| 2026-08-19 | FIX-115 | `parser.js` | Clearing a serial label emitted nothing (`cur.label &&` guard), so the board kept the old one — leaving the port showing as claimed and able to resurrect a phantom Kyber Marcuino port. Now emits `LABEL,CLEAR,Sx` (verified accepted at `WCB.ino:4739`). | JS ✅ |

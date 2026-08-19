@@ -1318,8 +1318,15 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (cur.label && (fullPush || !base || base.label !== cur.label))
+    if (cur.label && (fullPush || !base || base.label !== cur.label)) {
       add(`LABEL,S${i+1},${cur.label}`);
+    } else if (!cur.label && base?.label && !fullPush) {
+      // CLEARING a label has to be sent too. The `cur.label &&` guard above meant emptying the
+      // field produced no command at all, so the board kept the old label — and a stale label is
+      // not cosmetic: the port keeps showing as claimed in the device dropdowns and can resurrect
+      // a phantom Kyber Marcuino port on the next pull.
+      add(`LABEL,CLEAR,S${i+1}`);
+    }
   }
 
   // ── Broadcast Settings ──
