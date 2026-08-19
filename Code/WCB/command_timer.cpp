@@ -26,6 +26,20 @@ bool commandGroupsEspnowOrigin = false;
 // inside a TIMER sequence body is not re-fanned out to the mesh.
 bool commandGroupsSequenceBody = false;
 
+// Bumped by EVERY mutation of commandGroups (parseCommandGroups, stopTimerSequence).
+//
+// processCommandGroups() runs on the loop task but yields (vTaskDelay) between the commands of a
+// group, and serialCommandTask — a SEPARATE task, WCB.ino:7439 — can reach parseCommandGroups()
+// (WCB.ino:6490) or stopTimerSequence() (WCB.ino:6431) during that yield. Both clear() the vector,
+// destroying every CommandGroup and freeing every String in it.
+//
+// Holding a reference or a range-for iterator across that yield was therefore a use-after-free.
+// processCommandGroups now copies what it needs before yielding and re-checks this counter
+// afterwards, so a chain replaced mid-flight is abandoned instead of having its indices applied to
+// the new chain. (The rationale comment at WCB.ino:390-399 claimed the serial path runs inside
+// loop() — it does not; only SEQ playback does.)
+uint32_t commandGroupsGeneration = 0;
+
 bool isTimerCommand(const String &input);
 void stopTimerSequence();
 bool checkForTimerStopRequest(const String &input);
@@ -52,6 +66,7 @@ bool isTimerCommand(const String &input) {
 
 void stopTimerSequence() {
   commandGroups.clear();
+  commandGroupsGeneration++;   // invalidate any in-flight processCommandGroups() pass
   commandTimerModeEnabled = false;
   currentGroupIndex = 0;
   waitingForNextGroup = false;
@@ -83,6 +98,7 @@ void parseCommandGroups(const String &input) {
                   (unsigned)(commandGroups.size() - currentGroupIndex));
   }
   commandGroups.clear();
+  commandGroupsGeneration++;   // invalidate any in-flight processCommandGroups() pass
   currentGroupIndex = 0;
   commandTimerModeEnabled = true;
   waitingForNextGroup = false;
@@ -184,31 +200,51 @@ void processCommandGroups() {
     return;
   }
 
-  CommandGroup &group = commandGroups[currentGroupIndex];
+  // Deliberately NO reference into commandGroups — see commandGroupsGeneration above.
+  // A parse or stop from serialCommandTask during the vTaskDelay below frees this vector's
+  // contents, so everything needed must be copied out first.
+  if (commandGroups[currentGroupIndex].commands.empty()) {
+    // A group with no commands cannot be indexed at [0] below and would stall the chain.
+    stopTimerSequence();
+    return;
+  }
+  const unsigned long groupDelay = commandGroups[currentGroupIndex].delayAfterPrevious;
 
-  if (checkForTimerStopRequest(group.commands[0])) {
+  if (checkForTimerStopRequest(commandGroups[currentGroupIndex].commands[0])) {
     stopTimerSequence();
     return;
   }
 
   if (waitingForNextGroup) {
-    if (millis() - lastGroupTime >= group.delayAfterPrevious) {
+    if (millis() - lastGroupTime >= groupDelay) {
       // Re-apply the origin captured when this sequence was parsed so the commands
       // enqueued now inherit the right ESP-NOW semantics. enqueueCommand snapshots
       // the global, so it must hold this group's origin during the enqueue.
+      // Copy this group's commands out of the vector BEFORE executing. parseCommandsAndEnqueue
+      // yields below, and a concurrent parse/stop on serialCommandTask frees the originals.
+      const std::vector<String> cmds = commandGroups[currentGroupIndex].commands;
+      const uint32_t gen            = commandGroupsGeneration;
+      const size_t   groupNumber    = currentGroupIndex + 1;   // for logging only
+
       bool _savedEspNowOrigin = lastReceivedViaESPNOW;
       bool _savedSeqBody       = inSequenceBody;
       lastReceivedViaESPNOW = commandGroupsEspnowOrigin;
       inSequenceBody        = commandGroupsSequenceBody;
-      for (const String &cmd : group.commands) {
+      for (const String &cmd : cmds) {
         if (debugEnabled) {
-          Serial.printf("[TimerGroup %u] Executing command: %s\n", currentGroupIndex + 1, cmd.c_str());
+          Serial.printf("[TimerGroup %u] Executing command: %s\n", (unsigned)groupNumber, cmd.c_str());
         }
         parseCommandsAndEnqueue(cmd, 0);
                 vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
       }
       lastReceivedViaESPNOW = _savedEspNowOrigin;
       inSequenceBody        = _savedSeqBody;
+
+      // If another task replaced or stopped the chain while we were yielding, its state (index,
+      // size, enabled flag) is already correct for the NEW chain — advancing our stale index here
+      // would corrupt it. Abandon this pass instead.
+      if (gen != commandGroupsGeneration) return;
+
       lastGroupTime = millis();
       currentGroupIndex++;
 

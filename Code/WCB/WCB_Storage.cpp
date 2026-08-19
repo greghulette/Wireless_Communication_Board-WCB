@@ -832,6 +832,11 @@ String buildSequenceNamesString() {
 void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
+    // clear() also removes seq_mig_done, which lives in THIS namespace — so without re-setting it
+    // the legacy migration re-armed and re-imported every CMD1..CMD80 from "stored_commands" on
+    // the next boot, resurrecting the sequences the user just deleted. Re-stamp it: this board has
+    // already migrated, and deleting sequences is not a request to import the old ones back.
+    preferences.putBool("seq_mig_done", true);
     preferences.end();
     invalidateSequenceInventoryHash();
 }
@@ -1024,10 +1029,22 @@ void eraseNVSFlash() {
     preferences.begin("hcr_cfg", false);   preferences.clear(); preferences.end();
     preferences.begin("wled_cfg", false);  preferences.clear(); preferences.end();
     preferences.begin("wcb_vars", false);  preferences.clear(); preferences.end();
+    // ...and DFPlayer, missed the same way: a configured DFP re-claimed its UART after the
+    // erase (isSerialPortUsedForDFP makes processIncomingSerial skip that port), so a board
+    // the user believed was blank silently ignored commands on it.
+    preferences.begin("dfp_cfg", false);   preferences.clear(); preferences.end();
+    // The LEGACY sequence namespace. "stored_cmds" (cleared above) holds the seq_mig_done flag,
+    // so clearing that alone re-armed migrateOldStoredCommands() while leaving the old CMD1..CMD80
+    // values here intact — every deleted sequence reappeared on the next boot.
+    preferences.begin("stored_commands", false); preferences.clear(); preferences.end();
 
     clearAllPWMMappings();
 
-    Serial.println("NVS cleared. Restarting...");
+    // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the
+    // Wizard's factory-reset modal both say so). Say what to do about it: until ?HW is set the
+    // board comes up on the hw 0 pin map, where no serial port is usable.
+    Serial.println("NVS cleared — set ?HW,xx before use (serial ports are inactive until then).");
+    Serial.println("Restarting...");
     delay(2000);
     ESP.restart();
 }

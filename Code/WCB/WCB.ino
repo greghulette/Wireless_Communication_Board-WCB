@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191240RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191245RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191240RAUG2026";
+String SoftwareVersion = "6.2.0_191245RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -395,8 +395,15 @@ void otaRelayPrint(const char *line) { enqueueRcJsonRelay(String(line)); }
 //
 // Same pattern as rcJsonRelayQueue above: the callback enqueues the raw
 // chain string; loop() drains and calls parseCommandGroups() for each.
-// The local-serial entry point and SEQ playback both run inside loop()
-// already, so they keep calling parseCommandGroups() directly.
+//
+// SEQ playback keeps calling parseCommandGroups() directly because it really does run inside
+// loop() (recallCommandSlot ← recallStoredCommand ← processCommandCharcter ← handleSingleCommand
+// ← loop()). The LOCAL-SERIAL path does NOT: processIncomingSerial runs on serialCommandTask
+// (WCB.ino:7439), so its calls at :6431/:6490 are cross-task mutations of the same vector.
+// That is handled on the consumer side instead — processCommandGroups() copies each group out
+// before it yields and re-checks commandGroupsGeneration afterwards (command_timer.cpp), which
+// is cheaper than routing the serial path through this queue and also covers stopTimerSequence().
+// An earlier version of this comment claimed the serial path ran inside loop(); it never did.
 //
 // Slot size 220 covers the 200-byte ESP-NOW structCommand plus any CRC
 // suffix that's already been stripped. 8 slots ≈ 1.76 KB heap.
@@ -1521,7 +1528,11 @@ void processETMChar() {
     } else if (etmCharPhase == 3) {
         if (etmCharPhaseMessageIndex == 0) {
             Serial.println("Triggering network load on all peers...");
-            sendESPNowMessage(0, "ETMLOAD", false);
+            // MUST go out under ETM. Sent non-ETM it arrives as a plain 249-byte packet, which
+            // every ETM-enabled peer drops on the ETM-mismatch gate — so no peer ever started
+            // generating load and phase 3 "Loaded Network" measured an idle mesh while claiming
+            // otherwise. (processETMLoad on the receiving side was consequently unreachable.)
+            sendESPNowMessage(0, "ETMLOAD", true);
         }
 
         if (etmCharPhaseMessageIndex < totalMessages) {
@@ -5759,7 +5770,11 @@ void updateWCBNumber(const String &message){
 }
 
 void updateESPNowPassword(const String &message){
-  String newPassword = message.substring(6);
+  // Legacy no-comma form only: `?EPASSsecret`. The modern `?EPASS,secret` is handled earlier by
+  // the rootUpper == "EPASS" branch, which returns before reaching here.
+  // "EPASS" is FIVE characters, so substring(6) ate the first character of the password — a
+  // silently wrong password, which on this mesh means the board simply stops being heard.
+  String newPassword = message.substring(5);
   if (newPassword.length() > 0 && newPassword.length() < sizeof(espnowPassword)) {
     setESPNowPassword(newPassword.c_str());
     Serial.printf("ESP-NOW Password updated to: %s\n", newPassword.c_str());
