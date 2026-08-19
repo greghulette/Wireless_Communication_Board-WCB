@@ -85,8 +85,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-037 | TODO | `Wizard/app.js:11701` | ⚠FIX | A stale boardBaselines[n] satisfies the watcher's readiness gate — the push starts ~500 ms after port open and races the scheduled pull |
 | FIX-038 | TODO | `Wizard/parser.js:1355` | ⚠FIX | `?KYBER,CLEAR` is sent with no port, so the firmware resets Serial 2 to 9600 and re-enables its broadcast — undoing settings from earlier in the same  |
 | FIX-039 | TODO | `Wizard/parser.js:1531` |  | Stored sequences are pushed AFTER the PWM mapping command that reboots the board — they are silently discarded |
-| FIX-040 | TODO | `Wizard/serial-hub.js:114` | ⚠FIX | `_leaderPortOpen` latches true forever — `portOpen` lies, so the Wizard shows "Connected" on a dead share and drops every send |
-| FIX-041 | TODO | `Wizard/serial-hub.js:356` |  | Wizard/serial-hub.js is missing two lock-squat fixes that NaviCore's required-lockstep copy has |
+| FIX-040 | **DONE** | `Wizard/serial-hub.js:114` | ⚠FIX | `_leaderPortOpen` latches true forever — `portOpen` lies, so the Wizard shows "Connected" on a dead share and drops every send |
+| FIX-041 | **DONE** | `Wizard/serial-hub.js:356` |  | Wizard/serial-hub.js is missing two lock-squat fixes that NaviCore's required-lockstep copy has |
 
 ---
 
@@ -95,7 +95,7 @@ and the `volatile` increment — both are themselves findings.
 | # | Status | File:line | ⚠ | Finding |
 |---|---|---|---|---|
 | FIX-042 | TODO | `c:/Users/ghulette/Documents/GitHub/WCBClient/src/WCB_Client.cpp:2007` |  | WCB_Client decodes a WDP SOLICIT as an advert, wiping the sending board's neighbor record |
-| FIX-043 | TODO | `Code/bin/build.sh:181` | ⚠FIX | build.sh deletes the committed firmware binaries and exits 0 when the branch name contains a "/" — CI then commits and pushes the deletion as a green  |
+| FIX-043 | **DONE** | `Code/bin/build.sh:181` | ⚠FIX | build.sh deletes the committed firmware binaries and exits 0 when the branch name contains a "/" — CI then commits and pushes the deletion as a green  |
 | FIX-044 | **DONE** | `Code/WCB/WCB_Help.cpp:132` |  | ?BAUD help documents the legacy form `?Sx,rate`, which the parser rejects (it needs no comma) |
 | FIX-045 | **DONE** | `Code/WCB/WCB_Help.cpp:669` | ⚠FIX | ?WLED? help documents only the legacy single-device form — the canonical ID-addressed config and ;L<id> addressing are undocumented |
 | FIX-046 | **DONE** | `Code/WCB/WCB_Help.cpp:925` |  | ?CMDCHAR? documents `;Px,width` but the parser rejects the comma, and the rejection is silent |
@@ -170,8 +170,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-115 | **DONE** | `Wizard/parser.js:1321` |  | Clearing a serial-port label never reaches the board, and the stale label resurrects a phantom Kyber Marcuino port on the next pull |
 | FIX-116 | TODO | `Wizard/serial-hub-test.html:93` |  | serial-hub-test.html: "Pick Port" can never be enabled — the shipped test harness is unusable |
 | FIX-117 | TODO | `Wizard/serial-hub.js:325` |  | `_adoptGrantedPort()` takes the first VID/PID match — failover to the WRONG physical WCB when two identical adapters are granted |
-| FIX-118 | TODO | `Wizard/serial-hub.js:407` | ⚠FIX | Read loop death (unplug) leaves the lock held and the dead port handle open — board unreachable from every tab |
-| FIX-119 | TODO | `Wizard/serial-hub.js:501` |  | A promoted leader broadcasts the PREVIOUS leader's port identity, defeating the Wizard's wrong-board guard |
+| FIX-118 | **DONE** | `Wizard/serial-hub.js:407` | ⚠FIX | Read loop death (unplug) leaves the lock held and the dead port handle open — board unreachable from every tab |
+| FIX-119 | **DONE** | `Wizard/serial-hub.js:501` |  | A promoted leader broadcasts the PREVIOUS leader's port identity, defeating the Wizard's wrong-board guard |
 
 ---
 
@@ -233,3 +233,5 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-090 | `app.js` | `syncMappingsToConfig` wiped `config.pwmOutputPorts`, which is not derived from local mapping rows at all — the parser fills it from what the BOARD reported about ports a REMOTE mapping drives. Any mapping edit dropped them from the config and the next export. | JS ✅ |
 | 2026-08-19 | FIX-115 | `parser.js` | Clearing a serial label emitted nothing (`cur.label &&` guard), so the board kept the old one — leaving the port showing as claimed and able to resurrect a phantom Kyber Marcuino port. Now emits `LABEL,CLEAR,Sx` (verified accepted at `WCB.ino:4739`). | JS ✅ |
 | 2026-08-19 | FIX-044,045,046,120,121,122 | `WCB_Help.cpp` | **Help-text cluster.** `?BAUD` no longer recommends the non-existent `?MAESTRO,ENABLE` or the comma form the parser rejects; `?WCB` range corrected 1-9 → 1-20; `?CMDCHAR` shows `;Pxnnnn` (the form the firmware itself emits) instead of the unparseable `;Px,width`; `?WLED` rewritten for the ID-addressed syntax (`?WLED,<id>:W<wcb>S<port>:<baud>`, `;L<id>,...`) replacing the superseded single-device form; **added a `?OTA`/`?OTALOCAL` topic** (the branch’s headline feature had none) and put `?DFP` + OTA in the top-level `??` menu. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX-043 | `Code/bin/build.sh` | **Release pipeline.** A branch name containing `/` made every `cp` target a non-existent dir; the exit codes were unchecked so the script still exited 0 *after* `rm -f` had deleted the committed binaries — CI then pushed the deletion as a green build. Branch is now flattened (`/`→`-`), every copy goes through `cp_or_die`, an unparseable VERSION aborts, and a missing python aborts with a real message instead of a bogus header-check failure. | `bash -n` ✅ |
+| 2026-08-19 | FIX-041,118,040,119 | `Wizard/serial-hub.js` | **Reconciled with NaviCore’s required-lockstep copy.** Ported the three behavioural fixes the Wizard was missing: open-failure now `_stepDownPortless()` instead of squatting the exclusive lock; the backoff counter resets on a successful OPEN rather than on promotion; and read-loop death closes the stale handle and steps down instead of only announcing — which had left the board unreachable from every tab on the origin until the user disconnected by hand. Diff is now zero lines in NaviCore’s favour; the Wizard keeps `adoptPort`/`releasePortKeepOpen`, which `app.js` depends on. | JS ✅ |

@@ -288,7 +288,7 @@
       // must NOT grab some random granted port: it may be open in another app entirely
       // (that's exactly the "port is already open" failure). Wait for requestPort() instead.
       if (!this._port && this._sawLeaderPort) await this._adoptGrantedPort();
-      if (this._port)  { this._portlessRetries = 0; await this._openAndRead(); }
+      if (this._port)  await this._openAndRead();
       else             this._stepDownPortless();   // won the lock but have no port (device gone on a failover) → yield, don't squat
     }
 
@@ -353,7 +353,10 @@
           const msg = (e && e.message) || '';
           const alreadyOpen = msg.includes('already open') || msg.includes('already been opened');
           if (alreadyOpen && this._port.readable && !this._port.readable.locked) break;   // usable as-is
-          if (i === attempts - 1) { this._log('open failed: ' + msg); this._announceState(); return; }
+          // Out of retries: we hold the exclusive lock and a port we cannot open. Do NOT stop
+          // here — squatting is the very deadlock _stepDownPortless() exists to prevent (a tab
+          // queued behind us with a WORKING port would never be served). Step down and re-queue.
+          if (i === attempts - 1) { this._log('open failed: ' + msg); this._stepDownPortless(); return; }
           await new Promise(r => setTimeout(r, delayMs));
         }
       }
@@ -365,6 +368,10 @@
       if (this._leaving || this._role !== 'leader') { try { await this._port.close(); } catch (_) {} return; }
       if (this.assertDTR) { try { await this._port.setSignals({ dataTerminalReady: true }); } catch (_) {} }
       this._portOpen = true;
+      // Reset the step-down backoff HERE, not on promotion: a leader that holds a port it can
+      // never open also steps down through _stepDownPortless(), and resetting on promotion would
+      // pin that retry at the 800 ms floor — the leader/follower churn the escalation prevents.
+      this._portlessRetries = 0;
       this._announceState();
       this._readLoop();   // fire-and-forget
     }
@@ -404,10 +411,16 @@
         else if (++emptySessions >= 6) break;   // ~6 empty sessions in a row → port dead, give up
         await new Promise(r => setTimeout(r, 250));   // backoff BETWEEN re-acquires — prevents the tight spin
       }
+      // The port died under us (unplug, or the empty-session cap tripped). Do NOT hold the
+      // exclusive lock with a dead port: close the stale handle so a promoted tab's open() can
+      // succeed, then step down — that announces portOpen:false, releases the lock and re-queues
+      // on the jittered backoff, so the device is picked up again when it returns. Merely
+      // announcing left the board unreachable from EVERY tab on the origin (they all sit in the
+      // lock queue behind us) until the user disconnected this tab by hand.
       if (this._portOpen && !this._leaving && this._role === 'leader') {
-        this._portOpen = false;
-        this._announceState();
         this._log('port read loop ended (unplug?)');
+        await this._closePort();       // clears _portOpen and frees the OS handle
+        this._stepDownPortless();
       }
     }
 

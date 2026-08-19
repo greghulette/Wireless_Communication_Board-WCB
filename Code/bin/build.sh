@@ -49,6 +49,18 @@ BRANCH=$(git -C "$SKETCH_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null)
 if [ "$BRANCH" = "HEAD" ] || [ -z "$BRANCH" ]; then
     BRANCH="${GITHUB_REF_NAME:-unknown}"
 fi
+# A branch name can contain '/' (feature/foo, release/1.2). Unsanitised, every `cp` below targets
+# a directory that does not exist, ALL of them fail, and — because their exit codes were never
+# checked — the script still reported success after the `rm -f` had already deleted the committed
+# binaries. CI then commits and pushes that deletion as a green build. Flatten to '-'.
+BRANCH=$(printf '%s' "$BRANCH" | tr '/' '-')
+
+# VERSION is parsed out of WCB.ino; if that grep ever fails the filenames silently become
+# WCB__<branch>_ESP32.bin and the release carries an unidentifiable artifact. Fail loudly instead.
+if [ -z "$VERSION" ]; then
+    echo "✗ ERROR: could not parse 'String SoftwareVersion' from $SKETCH_PATH/WCB.ino"
+    exit 1
+fi
 
 TMP_ESP32="/tmp/wcb_esp32"
 TMP_S3="/tmp/wcb_s3"
@@ -151,6 +163,12 @@ fi
 CUSTOM_S3_BOOT_16MB="$OUTPUT_DIR/WCB_S3_custom_bootloader_16MB_wdt3s.bin"
 CUSTOM_S3_BOOT_8MB="$OUTPUT_DIR/WCB_S3_custom_bootloader_8MB_wdt3s.bin"
 PY_BIN="$(command -v python3 || command -v python)"
+if [ -z "$PY_BIN" ]; then
+    # Without this the empty "$PY_BIN" produced a "command not found", which check_boot below
+    # reported as "failed header sanity check" — a confusing message for a missing interpreter.
+    echo "✗ ERROR: neither python3 nor python is on PATH; cannot verify the S3 bootloader headers."
+    exit 1
+fi
 
 # check_boot <file> <size-nibble> <label>: exists + magic 0xE9 + declared size
 check_boot() {
@@ -180,26 +198,37 @@ check_boot "$CUSTOM_S3_BOOT_8MB"  3 "8MB"
 # a bare *.bin wipe would also delete the custom bootloader above.
 rm -f "$OUTPUT_DIR"/WCB_*_ESP32*.bin
 
-cp "$TMP_ESP32/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32.bin"
-cp "$TMP_ESP32/WCB.ino.bootloader.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32_boot.bin"
-cp "$TMP_ESP32/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32_part.bin"
-cp "$TMP_ESP32/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32.bin"
-cp "$TMP_ESP32/WCB.ino.bootloader.bin" "$WIZARD_BIN/WCB_ESP32_boot.bin"
-cp "$TMP_ESP32/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32_part.bin"
+# cp_or_die: a failed copy must abort the publish. These copies used to be unchecked, so a bad
+# destination path (e.g. a branch name containing "/") failed silently AFTER the rm -f above had
+# already deleted the committed binaries — and the script still exited 0, so CI committed and
+# pushed the deletion as a green build.
+cp_or_die() {
+    if ! cp "$1" "$2"; then
+        echo "✗ ERROR: failed to copy $1 -> $2"
+        exit 1
+    fi
+}
 
-cp "$TMP_S3/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3.bin"
-cp "$TMP_S3/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_part.bin"
-cp "$TMP_S3/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32S3.bin"
-cp "$TMP_S3/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32S3_part.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.bootloader.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32_boot.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32_part.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.bootloader.bin" "$WIZARD_BIN/WCB_ESP32_boot.bin"
+cp_or_die "$TMP_ESP32/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32_part.bin"
+
+cp_or_die "$TMP_S3/WCB.ino.bin"            "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3.bin"
+cp_or_die "$TMP_S3/WCB.ino.partitions.bin" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_part.bin"
+cp_or_die "$TMP_S3/WCB.ino.bin"            "$WIZARD_BIN/WCB_ESP32S3.bin"
+cp_or_die "$TMP_S3/WCB.ino.partitions.bin" "$WIZARD_BIN/WCB_ESP32S3_part.bin"
 # Per-flash-size bootloaders — the flasher picks by DETECTED chip flash size.
-cp "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_16MB.bin"
-cp "$CUSTOM_S3_BOOT_8MB"  "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_8MB.bin"
-cp "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot_16MB.bin"
-cp "$CUSTOM_S3_BOOT_8MB"  "$WIZARD_BIN/WCB_ESP32S3_boot_8MB.bin"
+cp_or_die "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_16MB.bin"
+cp_or_die "$CUSTOM_S3_BOOT_8MB"  "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot_8MB.bin"
+cp_or_die "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot_16MB.bin"
+cp_or_die "$CUSTOM_S3_BOOT_8MB"  "$WIZARD_BIN/WCB_ESP32S3_boot_8MB.bin"
 # Legacy single-name artifact (16MB) kept so an older cached Wizard / direct
 # downloaders don't 404; the current flasher prefers the sized names.
-cp "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
-cp "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
+cp_or_die "$CUSTOM_S3_BOOT_16MB" "$OUTPUT_DIR/WCB_${VERSION}_${BRANCH}_ESP32S3_boot.bin"
+cp_or_die "$CUSTOM_S3_BOOT_16MB" "$WIZARD_BIN/WCB_ESP32S3_boot.bin"
 echo "✓ S3 _boot artifacts = CUSTOM short-WDT bootloaders (8MB + 16MB variants)"
 
 rm -rf "$TMP_ESP32" "$TMP_S3"
