@@ -103,7 +103,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.17:02.R.AUG.2026';
+const UI_VERSION = '19.17:08.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4250,11 +4250,24 @@ function populateMappingsFromConfig(n, config) {
 
 // Convert textarea lines → stored value string (delimiter-separated)
 // Strips any whitespace between the command and an inline *** comment.
+//
+// A STANDALONE comment line is emitted as a DOUBLE delimiter (`^^***note`), because
+// that is the only form seqValueToLines shows on its own line — a single `^***` is
+// read back as an INLINE comment and folded onto the previous command. Without this
+// the two are not inverses: a comment the user typed on its own line came back glued
+// to the command above it on the next pull, and there was no way to author a
+// standalone comment in the editor that survived a round trip. The firmware is
+// unaffected either way — WCB_Storage.cpp:582-585 cuts each part at `***` and drops
+// empty parts, so `^^` and `^` execute identically.
 function seqTextareaToValue(text, delim) {
-  return text.split('\n')
-    .map(l => l.trim().replace(/\s+(\*\*\*)/, '$1'))
-    .filter(Boolean)
-    .join(delim);
+  const parts = [];
+  for (const raw of text.split('\n')) {
+    const l = raw.trim().replace(/\s+(\*\*\*)/, '$1');
+    if (!l) continue;
+    if (l.startsWith('***') && parts.length) parts.push('');   // force ^^ before an own-line comment
+    parts.push(l);
+  }
+  return parts.join(delim);
 }
 
 // Firmware rejects IF embedded inside a timer payload (";t500,IF,cond") or a
@@ -5724,6 +5737,13 @@ class BoardConnection {
     if (this._connected && !this._rebootManaged) {
       this._connected = false;
       updateConnectionUI(this.boardIndex, false);
+      // Snapshot the boards this relay was managing BEFORE tearing them down. A relay
+      // reboot drops every one of its remote boards, and nothing in the reconnect path
+      // put them back — the cards stayed "Not connected" until the user hit Route All
+      // again, even though the relay itself recovered fine seconds later.
+      const _managed = Object.keys(remoteRelayForBoard)
+        .filter(k => remoteRelayForBoard[k] === this.boardIndex)
+        .map(Number);
       clearRemoteBoardsForRelay(this.boardIndex);   // drop any remote boards using this as relay
       termLog(this.boardIndex, 'Board disconnected — attempting reconnect…', 'sys');
       // Try to reconnect to the same port (board rebooting)
@@ -5732,6 +5752,14 @@ class BoardConnection {
         updateConnectionUI(this.boardIndex, true);
         termLog(this.boardIndex, 'Reconnected after reboot', 'sys');
         showToast(`WCB ${this.boardIndex} reconnected`, 'success');
+        // Re-arm the remote boards this relay was managing. Go through relayManageOne,
+        // NOT setRemoteConnected directly: a user can plug one of these in over direct
+        // USB during the reconnect window, and relayManageOne's guard skips a board that
+        // is now directly connected (calling setRemoteConnected on it would relabel a
+        // live board "Remote via WCB n" and disable its flash radios). This also
+        // re-installs the ETM listener and re-issues RTERM,START, so even if the relay
+        // is still booting and the immediate START is lost, the next ONLINE edge repairs it.
+        for (const bn of _managed) relayManageOne(this.boardIndex, bn, false);
         // In wizard mode wizardWatchForConnect handles the verify pull itself.
         // Auto-pulling here would race with that pull and potentially clobber
         // boardConfigs[n] with factory defaults before the wizard pushes config.
@@ -6356,6 +6384,25 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     onETMToggle();
     onETMChecksumToggle();
     onGeneralETMChange();
+    // NaviCore is one of the 16 fields this modal DIFFS and DISPLAYS (GENERAL_FIELD_LABELS
+    // ends with navicoreEnabled/navicoreId), but nothing above applied it — so a user who
+    // read a NaviCore row and clicked "Use <new> values" got every other field applied and
+    // that one silently ignored, and re-pulling the board re-opened the identical modal
+    // forever. Apply it here, BEFORE updateGeneralBaseline() runs at the tail of the
+    // handlers above/below, so the new baseline is re-derived from the updated values.
+    // controller must be re-derived too: refreshControllerUI/updateRemoteSectionsUI render
+    // from systemConfig.general.controller, and a stale 'navicore' would make the next
+    // _applyControllerToBoards() set specialPeer=true on every board and undo this.
+    systemConfig.general.specialPeer   = newFields.navicoreEnabled;
+    systemConfig.general.specialPeerId = newFields.navicoreId;
+    for (const n in boardConfigs) {
+      if (boardConfigs[n].type === 'client') continue;   // clients don't carry the special peer
+      boardConfigs[n].specialPeer   = newFields.navicoreEnabled;
+      boardConfigs[n].specialPeerId = newFields.navicoreId;
+    }
+    deriveControllerFromBoards();   // re-derive 'navicore' | 'kyber' | 'none'
+    refreshControllerUI();          // chip state + g-navicore-detail + g-navicore-id
+    refreshAllNavicoreStatus();     // per-board section visibility + status text
     // Amber Push Config on every board except newBoard — their boards still have
     // the old values and need a push. newBoard is already in sync (its board has
     // the new values and its baseline was set from the same pulled config).
@@ -7080,6 +7127,22 @@ async function boardPull(n, opts = {}) {
     if (config.wcbQuantity > 1) renderBoards(config.wcbQuantity);
 
     const detected = config.wcbNumber;
+
+    // detected === 1 is excluded from the migrate/warn block below because a factory board
+    // ships as WCB 1, so it is the expected value in any slot until the user renumbers.
+    // Say so once when a SECOND slot claims a number another populated slot already holds:
+    // duplicate numbers survive unnoticed until an export writes two identical [WCB<n>]
+    // sections and the reload silently drops one of the boards.
+    if (detected >= 1 && detected <= WCB_MAX) {
+      const twin = Object.keys(boardConfigs)
+        .map(Number)
+        .find(k => k !== n && boardConfigs[k]?.wcbNumber === detected);
+      if (twin !== undefined) {
+        showToast(`Slot ${n} and slot ${twin} both report WCB ${detected}. Renumber one — ` +
+                  `two boards on one number share a derived MAC and cannot be saved to a config file.`,
+                  'warning', 10000);
+      }
+    }
 
     if (detected !== n && detected >= 2 && detected <= WCB_MAX) {
       // ── Board self-identifies as a different slot ─────────────────
@@ -8730,6 +8793,29 @@ function exportSystemFile() {
     }
   }
 
+  // A system file names each board section `[WCB<n>]` from its wcbNumber, and the parser
+  // keys sections by name — so two populated slots sharing a number write two `[WCB1]`
+  // blocks and only the last survives the reload, taking a whole board config with it.
+  // Two slots CAN legitimately hold the same number for a moment (a fresh board ships as
+  // WCB 1; auto-detect only warns from the second duplicate onward), so refuse at export
+  // rather than silently writing a file that cannot round-trip. Mirrors the wizard guard.
+  const _byNumber = {};
+  for (const b of systemConfig.boards) {
+    const num = b.wcbNumber;
+    if (!num) continue;
+    (_byNumber[num] = _byNumber[num] || []).push(b);
+  }
+  const _dupes = Object.keys(_byNumber).filter(k => _byNumber[k].length > 1);
+  if (_dupes.length) {
+    const detail = _dupes
+      .map(k => `WCB ${k} (${_byNumber[k].map(b => b.alias || b.clientAlias || 'unnamed').join(', ')})`)
+      .join('; ');
+    showToast(`Export aborted — two boards share the same number: ${detail}. ` +
+              `Renumber one of them first, or the saved file will lose a board on reload.`,
+              'error', 12000);
+    return;
+  }
+
   const content  = WCBParser.buildSystemFile(systemConfig);
   const blob     = new Blob([content], { type: 'text/plain' });
   const url      = URL.createObjectURL(blob);
@@ -9824,6 +9910,22 @@ function wizardRenderStep() {
     nextBtn.style.display = 'none';
     if (!wizardState.connectMode) {
       setTimeout(() => wizardSelectConnectMode('seq'), 0);
+    } else {
+      // RE-ENTRY (user hit Back, edited something, came forward again). connectMode
+      // survives for the whole wizard session, so the branch above no longer fires —
+      // and it is the only caller of wizardApplyConfig() and _wizPortOpenPanel(). Without
+      // this branch the post-Back edits never reach boardConfigs (so the push sends the
+      // pre-Back config) and the port panel stays stuck on its "Loading ports…"
+      // placeholder, because wizardRenderStep just replaced the whole step body.
+      const n    = wizardState.connectSeqN;
+      const busy = !!wizardConnectWatchers[n] || !!boardConnections[n]?.isConnected?.();
+      if (!busy) {
+        // Only when this slot is idle: wizardApplyConfig() overwrites boardConfigs from
+        // wizardState, which would clobber a config a live/in-flight board just pulled,
+        // and re-opening the panel under an active watcher would race its own connect.
+        wizardApplyConfig();
+        setTimeout(() => _wizPortOpenPanel(n), 0);
+      }
     }
   } else if (key === 'review') {
     nextBtn.textContent = 'Apply & Connect →';
