@@ -135,6 +135,13 @@ function createDefaultBoardConfig() {
     // PWM Output Ports — array of port numbers that are PWM outputs
     pwmOutputPorts: [],
 
+    // WDP (mesh discovery). The firmware only EMITS these when they are OFF
+    // (Code/WCB/WCB.ino:3023-3024), so a config carrying neither line means both are ON.
+    // Nothing parsed them before, so an export/restore silently re-enabled discovery on a
+    // board where the user had deliberately turned it off.
+    wdpEnabled:  true,
+    wdpAutoJoin: true,
+
     // Firmware version (populated from GitHub Releases, not from board)
     fwVersion: null,
 
@@ -507,6 +514,19 @@ function parseToken(body, config) {
       config.livePeerCount = parseInt(parts[1]);
       if (isNaN(config.livePeerCount)) config.livePeerCount = null;
       break;
+
+    case 'WDP': {
+      // ?WDP,OFF / ?WDP,ON / ?WDP,AUTOJOIN,OFF / ?WDP,AUTOJOIN,ON
+      // Only the OFF forms are ever emitted by the board (both default ON), but accept both
+      // spellings so a hand-edited or older file round-trips too. Every other subcommand
+      // (DUMP/POLL/DETAIL/FORGET/CLEAR) is a query and is ignored on parse.
+      const w1 = (parts[1] || '').trim().toUpperCase();
+      const w2 = (parts[2] || '').trim().toUpperCase();
+      if (w1 === 'AUTOJOIN')               config.wdpAutoJoin = (w2 !== 'OFF' && w2 !== '0');
+      else if (w1 === 'OFF' || w1 === '0') config.wdpEnabled  = false;
+      else if (w1 === 'ON'  || w1 === '1') config.wdpEnabled  = true;
+      break;
+    }
 
     case 'CONTROLLER':
     case 'SPECIAL': {
@@ -1265,6 +1285,18 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
 
   if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
     add(`WCBQ,${config.wcbQuantity}`);
+
+  // WDP discovery. Both default ON and the firmware only emits the OFF lines, so we must emit
+  // the ON forms too — otherwise re-enabling discovery in the Wizard produced no command and the
+  // board stayed off, and a restore of a config captured while OFF silently turned it back on.
+  {
+    const curWdp  = config.wdpEnabled  !== false;
+    const curJoin = config.wdpAutoJoin !== false;
+    if (fullPush || !baseline || (baseline.wdpEnabled !== false) !== curWdp)
+      add(`WDP,${curWdp ? 'ON' : 'OFF'}`);
+    if (fullPush || !baseline || (baseline.wdpAutoJoin !== false) !== curJoin)
+      add(`WDP,AUTOJOIN,${curJoin ? 'ON' : 'OFF'}`);
+  }
 
   // ESP-NOW mesh channel (1–11). Network-wide; the firmware persists it and applies it
   // on reboot, and every board must land on the same channel, so a push moves the whole fleet.
