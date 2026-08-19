@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191413RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191417RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191413RAUG2026";
+String SoftwareVersion = "6.2.0_191417RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3228,7 +3228,18 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
   int totalLen    = data.length();
   int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
   if (totalChunks > MGMT_MAX_CHUNKS) {
-    if (debugMGMT) Serial.printf("[MGMT] Result too large (%d chars) — cannot relay\n", totalLen);
+    // UNGATED. This used to be behind debugMGMT (off by default), so an oversized result — a
+    // ?MGMT,STATS or ?MGMT,ETM on a large fleet, or a config with many stored variables — simply
+    // produced nothing at all, and the requesting end waited out its timeout with no clue why.
+    // Send a short in-band error instead of silence so the operator sees the cause.
+    Serial.printf("[MGMT] Result too large to relay: %d chars needs %d chunks, max %d (%d chars).\n",
+                  totalLen, totalChunks, MGMT_MAX_CHUNKS, MGMT_MAX_CHUNKS * chunkStride);
+    String err = "[ERROR] Result too large to relay (" + String(totalLen) + " chars, max " +
+                 String(MGMT_MAX_CHUNKS * chunkStride) + "). Reduce stored variables/sequences "
+                 "or query this board directly.";
+    // Recurse ONCE with a message that provably fits, so the requester gets a real answer.
+    if (err.length() <= (unsigned)(MGMT_MAX_CHUNKS * chunkStride))
+      sendResultFrags(err, requesterWCB, fragPacketType);
     return;
   }
   uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
@@ -4488,7 +4499,12 @@ void forwardMaestroDataToRemoteKyber() {
     while (maestroSerial.available() > 0) {
       if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
       uint8_t b = (uint8_t)maestroSerial.read();
-      if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+      // FLUSH a full buffer and keep going, rather than reading the byte and throwing it away.
+      // The old `if (remoteLen < sizeof(remoteBuf))` consumed bytes past 64 and discarded them,
+      // truncating any Maestro burst longer than the buffer into a corrupt frame — the exact
+      // drop the sibling forwardDataFromKyber() was already fixed to stop doing.
+      if (remoteLen >= (int)sizeof(remoteBuf)) { sendESPNowRaw(remoteBuf, remoteLen); remoteLen = 0; }
+      remoteBuf[remoteLen++] = b;
     }
   }
 
