@@ -401,6 +401,17 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       try { await transport.disconnect(); } catch (_) {}
       throw new Error(`Could not load the ${binaryType} firmware after chip detection: ${e.message}`);
     }
+  } else if (!detectedType && /ESP32[-_]?(S2|C\d+|H\d+|P\d+)/i.test(chipName)) {
+    // A RECOGNISED but unsupported ESP32 variant (S2/C2/C3/C5/C6/C61/H2/P4). Falling through to
+    // the hwVersion-mapped binary would write ESP32 or S3 firmware onto silicon it was not built
+    // for. The WCB ships no firmware for these, so refuse rather than guess — the fallback below
+    // exists for an UNREADABLE chip id, not for a chip we can positively identify as wrong.
+    const msg = `${chipName} is not a supported WCB chip — refusing to flash`;
+    onLog(`✕ ${msg}`);
+    onLog('  The WCB ships firmware for the classic ESP32 and the ESP32-S3 only.');
+    showToast(msg, 'error', 12000);
+    try { await transport.disconnect(); } catch (_) {}
+    throw new Error(msg);
   } else if (!detectedType) {
     if (!hwVersion) {
       // binaryType is only the '?? ESP32' pre-fetch default — with no user
@@ -682,9 +693,19 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       eraseAll:  false,
       compress:  true,
       reportProgress: (_fileIdx, written, total) => {
-        // esptool-js resets written/total per file; accumulate for overall progress
-        onProgress(bytesWritten + written, totalBytes);
-        if (written === total) bytesWritten += total;
+        // esptool-js resets written/total per file, so accumulate across files. IMPORTANT: with
+        // compress:true the `written`/`total` it reports are COMPRESSED byte counts, while
+        // totalBytes above is the sum of UNCOMPRESSED image sizes — so a raw
+        // (bytesWritten + written) / totalBytes ratio topped out around 62 % and the bar appeared
+        // to stall near the end of a perfectly healthy flash.
+        //
+        // Use each file's own reported total as the per-file denominator and weight it by that
+        // file's uncompressed share, which is correct for both compressed and uncompressed runs.
+        const img      = imagesToFlash[_fileIdx];
+        const imgBytes = img ? img.buf.byteLength : 0;
+        const frac     = total > 0 ? (written / total) : 0;
+        onProgress(Math.min(totalBytes, bytesWritten + Math.round(frac * imgBytes)), totalBytes);
+        if (written === total) bytesWritten += imgBytes;
       },
       calculateMD5Hash: (img) =>
         CryptoJS.MD5(CryptoJS.enc.Latin1.parse(img)).toString(),
@@ -716,9 +737,27 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   onStatus('Resetting…');
   onProgress(totalBytes, totalBytes);
 
-  // esptool-js 0.4.x renamed after_flash → afterFlash
-  const afterFlashFn = loader.afterFlash ?? loader.after_flash;
-  try { if (afterFlashFn) await afterFlashFn.call(loader, 'hard_reset'); } catch (_) {}
+  // esptool-js has renamed this across versions and the vendored 0.4.x copy has NEITHER spelling,
+  // so this used to silently do nothing. Harmless in the normal flow — app.js closes the port and
+  // BoardConnection.reconnect() reopens it, which toggles DTR/RTS and resets the board out of the
+  // download stub — but the reset belongs here for anyone driving flashFirmware directly.
+  // Try every known spelling, then fall back to a manual DTR/RTS pulse via the transport.
+  const afterFlashFn = loader.afterFlash ?? loader.after_flash ?? loader.hardReset ?? loader.hard_reset;
+  let didReset = false;
+  try {
+    if (typeof afterFlashFn === 'function') { await afterFlashFn.call(loader, 'hard_reset'); didReset = true; }
+  } catch (_) {}
+  if (!didReset) {
+    // Manual hard reset: assert RESET (RTS) with the bootstrap pin released, then let go.
+    try {
+      await transport.setDTR(false);
+      await transport.setRTS(true);
+      await new Promise(r => setTimeout(r, 100));
+      await transport.setRTS(false);
+      didReset = true;
+    } catch (_) {}
+  }
+  if (!didReset) onLog('⚠ Could not hard-reset the board; it will reset when the port is reopened.');
   try { await transport.disconnect(); }                                     catch (_) {}
 
   onLog('Flash complete — board rebooting');
