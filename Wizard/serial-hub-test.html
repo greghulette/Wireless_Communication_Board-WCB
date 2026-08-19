@@ -34,9 +34,10 @@
 <body>
 <h1>WcbSerialHub — 2-tab port sharing test</h1>
 <p class="sub">Open this page in <b>two tabs of the same origin</b>. Click <b>Join</b> in both.
-One becomes <b>LEADER</b> — click <b>Pick Port</b> there and choose your MgmtRelay/WCB. The other stays
-<b>FOLLOWER</b>. Type in <i>either</i> tab → it reaches the one port; the board's replies appear in <b>both</b>.
-Close the leader tab → the follower auto-promotes and re-opens the port.</p>
+Then click <b>Pick Port</b> in <i>one</i> tab and choose your MgmtRelay/WCB — that tab becomes the
+<b>LEADER</b> (a tab holding no port never campaigns for the lock, so picking is what promotes it).
+The other stays <b>FOLLOWER</b>. Type in <i>either</i> tab → it reaches the one port; the board's
+replies appear in <b>both</b>. Close the leader tab → the follower auto-promotes and re-opens the port.</p>
 
 <div class="row">
   <button id="join">Join</button>
@@ -89,8 +90,12 @@ Close the leader tab → the follower auto-promotes and re-opens the port.</p>
     const portEl = $('port');
     portEl.textContent = st.portOpen ? 'open' : 'closed';
     portEl.className = 'pill ' + (st.portOpen ? 'open' : 'shut');
-    // Only the leader can pick the physical port.
-    $('pick').disabled = st.role !== 'leader';
+    // Any JOINED tab may pick the port. Gating on role==="leader" made this button
+    // permanently dead: since 581d939 a portless tab never campaigns for the lock, so
+    // no tab can reach leader until one already HAS a port — and picking one is the
+    // only way to get there. requestPort() is safe from a follower; it opens the device
+    // only once this tab actually holds the lock.
+    $('pick').disabled = st.role === 'idle';
     const canSend = st.portOpen && (st.role === 'leader' || st.role === 'follower');
     $('tx').disabled = !canSend;
     $('send').disabled = !canSend;

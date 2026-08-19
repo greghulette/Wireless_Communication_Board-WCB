@@ -67,6 +67,12 @@ function _slotForWcbNumber(wcbNum) {
   const hit = Object.keys(boardConfigs).find(k => boardConfigs[k]?.wcbNumber === wcbNum);
   return hit !== undefined ? Number(hit) : (boardConfigs[wcbNum] ? Number(wcbNum) : null);
 }
+// Last push outcome per SLOT, written by boardGo on every exit path. boardGo cannot report
+// failure through its return value — that slot is taken by _needsReboot, which boardGoAll's
+// relay-reboot staging consumes — and it never throws (its own catch swallows). Without this
+// map the wizard could not tell "pushed and ACKed" from "aborted before sending a byte", and
+// reported a green "Done" for both. { ok, aborted, reason }.
+const boardPushOutcome = {};
 const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
                                   // discovery poll must not inject ?WDP,DUMP into that stream:
                                   // a dump line can satisfy a pending read and fake an ACK for
@@ -97,7 +103,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.16:48.R.AUG.2026';
+const UI_VERSION = '19.17:02.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1629,6 +1635,12 @@ async function boardOtaSerial(n) {
     //     OTA timeout will restore its baud if anything strands the session. The board
     //     acks BAUD at 115200, then switches its UART; we switch ours after the ack.
     //     If the browser can't change baud live, we silently stay at 115200.
+    if (OTA_XFER_BAUD !== 115200 && conn._shared) {
+      // Shared-hub port: setBaud() needs the raw SerialPort, which the hub owns, so the
+      // whole transfer runs at 115200 — minutes, not seconds. Say so up front; a silent
+      // 2.5-minute upload reads as a stall and gets cancelled.
+      termLog(n, '[OTA] shared port — transfer runs at 115200; expect a few minutes', 'sys');
+    }
     if (OTA_XFER_BAUD !== 115200 && conn.port && typeof conn.port.reconfigure === 'function') {
       const br = await conn.sendAndCollect(cmd(`BAUD,${OTA_XFER_BAUD}`), 3000, '[OTA:BAUD,');
       if (/\[OTA:BAUD,OK,/.test(br)) {
@@ -1711,32 +1723,52 @@ async function boardOtaSerial(n) {
     setFlashStatus(n, 'Rebooting…');
     showToast(`WCB ${n}: OTA complete in ${_el} — rebooting`, 'success');
 
-    await conn.closeForReconnect();   // clean teardown so reconnect() reopens fresh
-    updateConnectionUI(n, false);
-    termLog(n, '[OTA] board rebooting — reconnecting…', 'sys');
+    if (conn._shared) {
+      // Shared-hub path: the hub owns the port and this conn's this.port is null, so
+      // reconnect() returns false immediately (its first statement is `if (!this.port)
+      // return false`) and the card would stick at "Not connected" after a SUCCESSFUL
+      // OTA. A UART-bridge WCB keeps USB up through a software reboot anyway, so the
+      // hub's read loop just resumes on the same live port — stay Connected and only
+      // wait for the firmware to answer again. Mirrors boardGo's reboot path.
+      conn._rebootManaged = false;
+      termLog(n, '[OTA] board rebooting on the shared port — waiting for new firmware…', 'sys');
+      (async () => {
+        const ready = await waitForBoardReady(n, conn);
+        if (ready) {
+          showToast(`WCB ${n} back online — new firmware`, 'success');
+          boardPull(n).catch(() => {});
+        } else {
+          termLog(n, '[OTA] board did not answer after reboot — pull manually', 'err');
+        }
+      })();
+    } else {
+      await conn.closeForReconnect();   // clean teardown so reconnect() reopens fresh
+      updateConnectionUI(n, false);
+      termLog(n, '[OTA] board rebooting — reconnecting…', 'sys');
 
-    // Fire-and-forget so the finally block re-enables the button immediately.
-    (async () => {
-      const reconnected = await conn.reconnect(_isWindows ? 14 : 12, 2000);
-      if (!reconnected) {
-        updateConnectionUI(n, false);
-        termLog(n, '[OTA] could not reconnect — reconnect manually', 'err');
-        showToast(`WCB ${n} did not come back after OTA — reconnect manually`, 'error');
-        return;
-      }
-      updateConnectionUI(n, true);
-      termLog(n, '[OTA] reconnected — waiting for new firmware…', 'sys');
-      // OTA keeps NVS, so just verify + refresh the version (no push). waitForBoardReady
-      // re-sends ?backup until the firmware actually answers — absorbs slow S3 boots.
-      const ready = await waitForBoardReady(n, conn);
-      if (ready) {
-        showToast(`WCB ${n} back online — new firmware`, 'success');
-        boardPull(n).catch(() => {});
-      } else {
-        termLog(n, '[OTA] board did not respond after reboot — pull manually', 'err');
-        showToast(`WCB ${n} did not respond after OTA`, 'error');
-      }
-    })();
+      // Fire-and-forget so the finally block re-enables the button immediately.
+      (async () => {
+        const reconnected = await conn.reconnect(_isWindows ? 14 : 12, 2000);
+        if (!reconnected) {
+          updateConnectionUI(n, false);
+          termLog(n, '[OTA] could not reconnect — reconnect manually', 'err');
+          showToast(`WCB ${n} did not come back after OTA — reconnect manually`, 'error');
+          return;
+        }
+        updateConnectionUI(n, true);
+        termLog(n, '[OTA] reconnected — waiting for new firmware…', 'sys');
+        // OTA keeps NVS, so just verify + refresh the version (no push). waitForBoardReady
+        // re-sends ?backup until the firmware actually answers — absorbs slow S3 boots.
+        const ready = await waitForBoardReady(n, conn);
+        if (ready) {
+          showToast(`WCB ${n} back online — new firmware`, 'success');
+          boardPull(n).catch(() => {});
+        } else {
+          termLog(n, '[OTA] board did not respond after reboot — pull manually', 'err');
+          showToast(`WCB ${n} did not respond after OTA`, 'error');
+        }
+      })();
+    }
   } catch (e) {
     termLog(n, `[OTA] ✕ ${e.message}`, 'err');
     showToast(`OTA failed: ${e.message}`, 'error');
@@ -2045,7 +2077,9 @@ function onClientAliasChange(n) {
   onBoardFieldChange(n);
 }
 
-function onHWVersionChange(n) {
+// fromLoad = called by populateUIFromConfig while rendering a pulled config, NOT by the
+// user touching the dropdown. Nothing here may then edit the config or mark it dirty.
+function onHWVersionChange(n, fromLoad = false) {
   const hwVal = parseInt(document.getElementById(`b${n}-hw-version`)?.value);
   if (boardConfigs[n]) boardConfigs[n].hwVersion = hwVal;
 
@@ -2056,20 +2090,19 @@ function onHWVersionChange(n) {
   if (ledGroup)  ledGroup.style.display  = show ? 'flex' : 'none';
   if (ledCustom) ledCustom.style.display = 'none'; // reset custom on HW change
 
-  // Default the onboard-LED pin to the variant's pin (3.1 → GPIO38, 3.2 → GPIO48)
-  // when switching between the S3 boards, unless a custom pin is already chosen.
-  if (boardConfigs[n]) {
-    const cur = boardConfigs[n].statusLedPin;
-    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
-              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
-    if (def !== null) {
-      boardConfigs[n].statusLedPin = def;
-      const sel = document.getElementById(`b${n}-led-pin`);
-      if (sel) sel.value = String(def);
-    }
-  }
+  // NO automatic LED-pin rewrite on HW change. There used to be a "3.1 → GPIO38,
+  // 3.2 → GPIO48" default here, and it had no hardware basis: both PCB/…V3.1 and
+  // PCB/…V3.2 carry the identical ESP32-S3-DEVKITC-1-N8R2 and neither carrier board
+  // routes an LED net at all. Worse, it ran on the LOAD path too (populateUIFromConfig
+  // calls this after a pull), so it silently rewrote the pin the board had just
+  // reported and pushed the change back to NVS — including reverting a HW-3.1 user who
+  // had deliberately set 48 for a v1.0 DevKitC. The firmware default is 38
+  // (WCB_Help.cpp:1009); 48/47 are in the dropdown for anyone who needs them.
 
-  onBoardFieldChange(n);
+  // Only a real user edit is a change. On the load path this fired for EVERY board of
+  // every HW version, raising a spurious "Changes pending" toast right beside the
+  // genuine "Config pulled" one.
+  if (!fromLoad) onBoardFieldChange(n);
 }
 
 function onLEDPinChange(n) {
@@ -3037,7 +3070,7 @@ function populateUIFromConfig(n, config) {
   updateSlotTypeUI(n);   // sets radio, body/client-pane visibility, header
 
   const hwSel = document.getElementById(`b${n}-hw-version`);
-  if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n); }
+  if (hwSel) { hwSel.value = config.hwVersion || 0; onHWVersionChange(n, true); }
 
   // LED pin — only visible for HW 3.1/3.2; handle preset vs custom values
   const ledPinSel    = document.getElementById(`b${n}-led-pin`);
@@ -7172,9 +7205,15 @@ async function boardGo(n, opts = {}) {
   // Delegate to the remote push path when this board is reached via relay
   if (remoteRelayForBoard[n]) return boardGoRemote(n, opts);
   const skipReboot = opts.skipReboot ?? false;
+  // Assume failure; only the paths that actually finish a push clear this. Callers that
+  // gate on the result (the wizard) must never read a stale success from a prior run.
+  boardPushOutcome[n] = { ok: false, aborted: true, reason: 'push did not run' };
 
   const conn = boardConnections[n];
-  if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
+  if (!conn?.isConnected()) {
+    boardPushOutcome[n].reason = 'board not connected';
+    showToast('Board not connected', 'error'); return;
+  }
 
   const mode       = opts.mode ?? boardFlashMode[n] ?? 'configure';
   const isFlash    = mode === 'flash';
@@ -7318,6 +7357,13 @@ async function boardGo(n, opts = {}) {
             if (!ready) {
               termLog(n, '✕ Board did not respond after update — cannot push config', 'err');
               showToast(`WCB ${n} did not respond after update`, 'error');
+              // Restore the button before bailing — this return skips boardGo's tail, which is
+              // the only other place the label/disabled state is reset, so the card would keep
+              // showing a dead 'Flashing…'/'Erasing…' Push button (which also suppresses the
+              // amber unsaved badge, gated on !goBtn.disabled). The board IS reconnected here,
+              // so a manual retry push is exactly what the user should be able to do.
+              btn.disabled    = false;
+              btn.textContent = 'Push Config';
               return;
             }
             if (preFlashConfigSnapshot) {
@@ -7359,6 +7405,13 @@ async function boardGo(n, opts = {}) {
             if (!ready) {
               termLog(n, '✕ Board did not respond after flash — cannot push config', 'err');
               showToast(`WCB ${n} did not respond after flash`, 'error');
+              // Restore the button before bailing — this return skips boardGo's tail, which is
+              // the only other place the label/disabled state is reset, so the card would keep
+              // showing a dead 'Flashing…'/'Erasing…' Push button (which also suppresses the
+              // amber unsaved badge, gated on !goBtn.disabled). The board IS reconnected here,
+              // so a manual retry push is exactly what the user should be able to do.
+              btn.disabled    = false;
+              btn.textContent = 'Push Config';
               return;
             }
             termLog(n, 'Firmware confirmed — pushing config…', 'sys');
@@ -7515,6 +7568,13 @@ async function boardGo(n, opts = {}) {
           if (!ready) {
             termLog(n, '✕ Board did not respond after erase — cannot push config', 'err');
             showToast(`WCB ${n} did not respond after erase`, 'error');
+            // Restore the button before bailing — this return skips boardGo's tail, which is
+            // the only other place the label/disabled state is reset, so the card would keep
+            // showing a dead 'Flashing…'/'Erasing…' Push button (which also suppresses the
+            // amber unsaved badge, gated on !goBtn.disabled). The board IS reconnected here,
+            // so a manual retry push is exactly what the user should be able to do.
+            btn.disabled    = false;
+            btn.textContent = 'Push Config';
             return;
           }
           termLog(n, 'Firmware confirmed — pushing config…', 'sys');
@@ -7583,6 +7643,7 @@ async function boardGo(n, opts = {}) {
       // Invalid variable name — getVariablesFromUI already showed the toast.
       // Abort before building the command string so the diff can't emit a
       // destructive VAR,CLEAR for a row that failed validation.
+      boardPushOutcome[n].reason = 'invalid variable name — nothing was sent';
       btn.disabled = false;
       btn.textContent = 'Push Config';
       return;
@@ -7601,6 +7662,7 @@ async function boardGo(n, opts = {}) {
     const cmdString = WCBParser.buildCommandString(config, boardBaselines[n] ?? null, fullPush);
 
     if (!cmdString) {
+      boardPushOutcome[n] = { ok: true, aborted: false, reason: 'no changes to push' };
       showToast('No changes to push', 'info');
       btn.disabled = false;
       btn.textContent = 'Push Config';
@@ -7677,6 +7739,9 @@ async function boardGo(n, opts = {}) {
       reportPushProgress(n, ++_pushDone, _pushTotal);
     }
     setFlashUI(n, false);                                         // hide the bar once all settings are sent
+    // Every command was sent; _pushFullyAcked says whether the board answered them all.
+    boardPushOutcome[n] = { ok: _pushFullyAcked, aborted: false,
+                            reason: _pushFullyAcked ? '' : 'some settings got no response after retry' };
 
     _needsReboot = commandStringNeedsReboot(cmdString);
     if (_needsReboot) {
@@ -7784,6 +7849,7 @@ async function boardGo(n, opts = {}) {
     }
 
   } catch (e) {
+    boardPushOutcome[n] = { ok: false, aborted: false, reason: e.message };
     showToast(`Push failed: ${e.message}`, 'error');
     termLog(n, `Push error: ${e.message}`, 'err');
   } finally {
@@ -10072,19 +10138,9 @@ function wizardOnHWVerChange(i) {
   // HW 3.2 (S3) has two USB ports — show the flash/monitor port guidance.
   const s3Note = document.getElementById(`wiz-b${i}-s3usb-note`);
   if (s3Note) s3Note.style.display = (hwVal === 32) ? '' : 'none';
-  // Default the onboard-LED pin to the variant's pin (3.1 → 38, 3.2 → 48) when
-  // switching between the S3 boards, unless a custom pin is already chosen.
-  const b = wizardState.boards[i];
-  if (b) {
-    const cur = b.statusLedPin;
-    const def = (hwVal === 32 && (cur === 38 || cur == null)) ? 48
-              : (hwVal === 31 && (cur === 48 || cur == null)) ? 38 : null;
-    if (def !== null) {
-      b.statusLedPin = def;
-      const sel = document.getElementById(`wiz-b${i}-ledpin`);
-      if (sel) sel.value = String(def);
-    }
-  }
+  // No automatic LED-pin default per HW version — see onHWVersionChange for why the
+  // 3.1→38 / 3.2→48 rule was wrong (identical DevKitC on both PCBs, no LED net on
+  // either carrier). The pin stays at whatever the user picked / the firmware default.
 }
 
 // Flip a slot between WCB and Client. Reveals/hides the per-type field
@@ -10784,10 +10840,16 @@ function wizardFillGen(inputId, type) {
 function wizardSwitchBoardTab(step, i) {
   wizardSaveStep(step); // save current tab first
   wizardState.activeBoardTab = i;
-  document.querySelectorAll(`.wizard-board-tab`).forEach((t, ti) =>
-    t.classList.toggle('active', ti === i));
-  document.querySelectorAll(`[id^="wiz-panel-${step}-"]`).forEach((p, pi) =>
-    p.classList.toggle('active', pi === i));
+  // `i` is the BOARD INDEX, which is not the DOM position: every per-board step except
+  // identity filters Client slots out of both the tab strip and the panel list, so one
+  // Client slot ahead of a WCB slot makes index and position diverge and a positional
+  // compare lights the wrong tab and hides every panel. Match on identity instead.
+  // The panel compare must be an exact id, not a prefix — at quantity 10-20 the
+  // `wiz-panel-serial-` prefix selector matches both `-1` and `-1x`.
+  document.querySelectorAll(`.wizard-board-tab`).forEach(t =>
+    t.classList.toggle('active', Number(t.dataset.board) === i));
+  document.querySelectorAll(`[id^="wiz-panel-${step}-"]`).forEach(p =>
+    p.classList.toggle('active', p.id === `wiz-panel-${step}-${i}`));
 }
 
 function wizardBoardTabs(step) {
@@ -10799,6 +10861,7 @@ function wizardBoardTabs(step) {
     ${wizardState.boards.map((b, i) => {
       if (!includeClients && (b.type || 'wcb') === 'client') return '';
       return `<button class="wizard-board-tab ${i === wizardState.activeBoardTab ? 'active' : ''}"
+               data-board="${i}"
                onclick="wizardSwitchBoardTab('${step}',${i})">
         WCB&nbsp;${b.wcbNumber}
       </button>`;
@@ -11171,9 +11234,19 @@ function wizardApplyConfig() {
       cfg.serialPorts[p].label = sp.label;
     });
 
-    // Kyber / Maestro routing only applies to WCB-type slots — Client slots
-    // run their own sketch and don't have the firmware to drive either.
-    if (cfg.type === 'client') return;
+    // Store + render. Client slots stop HERE, but only after committing: the
+    // Kyber/Maestro/ETM block below is WCB-only (a client runs its own sketch),
+    // while type/alias/clientAlias and the user-typed client ID must still land
+    // in boardConfigs or the slot silently reverts to a default WCB card and the
+    // export writes it out as [WCB n]. Committing BEFORE that block instead would
+    // regress every WCB slot — populateUIFromConfig renders the Kyber/Maestro/ETM
+    // fields, so it has to run after they are filled in.
+    const commit = () => {
+      boardConfigs[n] = cfg;
+      populateUIFromConfig(n, cfg);
+      onBoardFieldChange(n);
+    };
+    if (cfg.type === 'client') { commit(); return; }
 
     // Kyber
     if (ws.kyberEnabled) {
@@ -11247,9 +11320,7 @@ function wizardApplyConfig() {
       cfg.etm.enabled = false;
     }
 
-    boardConfigs[n] = cfg;
-    populateUIFromConfig(n, cfg);
-    onBoardFieldChange(n);
+    commit();
 
     // Note: firmware mode radios are stamped in wizardNext when leaving the firmware step
   });
@@ -11990,7 +12061,30 @@ function wizardWatchForConnect(n, preConfigSnapshot, preGeneralSnapshot) {
             await boardPull(n);
           }
         }
-        wizardSetConnectStatus(n, 'ok', '✓ Done');
+        // ── Report the REAL outcome ────────────────────────────────────────
+        // Nothing above can throw for an ordinary failure: boardGo swallows push
+        // errors in its own catch and boardPull is quiet for a non-manual pull. So
+        // the catch below is nearly dead, and an unconditional "✓ Done" here marked
+        // a board green whether it was configured or never sent a byte — and 'ok'
+        // advances the sequencer and can auto-close the wizard. Gate on all three
+        // signals instead, and say which stage failed: "pushed but unverified" and
+        // "never pushed" need very different follow-up from the user.
+        const outcome = boardPushOutcome[n] || { ok: false, aborted: true, reason: 'no result' };
+        const backOnline = !!boardConnections[n]?.isConnected();
+        const verified   = !!boardBaselines[n];
+        if (!outcome.ok) {
+          wizardSetConnectStatus(n, 'err', outcome.aborted ? '✕ Not pushed' : '✕ Push incomplete');
+          termLog(n, `Wizard: push did not succeed — ${outcome.reason || 'unknown'}`, 'err');
+          showToast(`WCB ${n}: ${outcome.aborted ? 'nothing was pushed' : 'push incomplete'} — ${outcome.reason || 'unknown'}`, 'error');
+        } else if (!backOnline) {
+          wizardSetConnectStatus(n, 'err', '✕ No reconnect');
+          termLog(n, 'Wizard: config was pushed but the board never came back after reboot', 'err');
+        } else if (!verified) {
+          wizardSetConnectStatus(n, 'err', '✕ Unverified');
+          termLog(n, 'Wizard: config was pushed and the board reconnected, but ?backup never answered — re-pull to confirm', 'err');
+        } else {
+          wizardSetConnectStatus(n, 'ok', '✓ Done');
+        }
       } catch(e) {
         wizardSetConnectStatus(n, 'err', '✕ Push failed');
       }
