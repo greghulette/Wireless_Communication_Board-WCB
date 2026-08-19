@@ -7,6 +7,10 @@ full reasoning per item is in [_verdicts.md](CODE_REVIEW_2026-08_verdicts.md).
 > **This will cross sessions.** Update the Status column *in place* as each item is done.
 > Never renumber. `FIX-nnn` ids are stable.
 
+> **FIX-042 is committed in `WCBClient` but NOT pushed.** It is a separate GitHub repo whose
+> `master` is what CI clones, and pushing it is outward-facing — it needs an explicit OK. The
+> WCB firmware does not compile `WCB_Client`, so nothing here is blocked by it; NaviCore is.
+
 **Status values:** `TODO` · `DONE` · `PARTIAL` · `SKIP` (with reason) · `BLOCKED` (with reason)
 
 > ⚠ **51 % of the reviewers' proposed fixes were wrong.** Each item below links to a verdict
@@ -94,7 +98,7 @@ and the `volatile` increment — both are themselves findings.
 
 | # | Status | File:line | ⚠ | Finding |
 |---|---|---|---|---|
-| FIX-042 | TODO | `c:/Users/ghulette/Documents/GitHub/WCBClient/src/WCB_Client.cpp:2007` |  | WCB_Client decodes a WDP SOLICIT as an advert, wiping the sending board's neighbor record |
+| FIX-042 | DONE (unpushed — see note) | `c:/Users/ghulette/Documents/GitHub/WCBClient/src/WCB_Client.cpp:2007` |  | WCB_Client decodes a WDP SOLICIT as an advert, wiping the sending board's neighbor record |
 | FIX-043 | **DONE** | `Code/bin/build.sh:181` | ⚠FIX | build.sh deletes the committed firmware binaries and exits 0 when the branch name contains a "/" — CI then commits and pushes the deletion as a green  |
 | FIX-044 | **DONE** | `Code/WCB/WCB_Help.cpp:132` |  | ?BAUD help documents the legacy form `?Sx,rate`, which the parser rejects (it needs no comma) |
 | FIX-045 | **DONE** | `Code/WCB/WCB_Help.cpp:669` | ⚠FIX | ?WLED? help documents only the legacy single-device form — the canonical ID-addressed config and ;L<id> addressing are undocumented |
@@ -288,3 +292,4 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-066 | `WCB.ino` | The `?WHOAMI` alias reply was sent as a 249-byte non-ETM packet, which a peer running ETM routes to its raw hook and never delivers — the whole fallback path was dead (alias still arrived via WDP TLV 0x01, but up to 60 s later, and never at all for a board with `?WDP,OFF`). Cannot simply set `useETM=true`: that call sits inside `espNowReceiveCallback`, and `etmAddToPendingTable` is loop-task-only. Added `sendEtmCommandUntracked()` — correct 252-byte frame, no pending-table touch — the same carve-out the ETM path already makes for best-effort JSON, applied to a unicast. | ESP32 ✅ S3 ✅ WDP ✅ |
 | 2026-08-19 | FIX-059 | `WCB.ino` | `parseCommandsAndEnqueue` **recursed into itself** on the verified-checksum path, re-entering the `?CHK` branch — so a chain whose payload legitimately contains an earlier `^?CHK` failed the second verification and aborted the whole restore. It also dropped `originEspnow`/`originSeqBody`, silently reverting every checksummed chain to the racy global snapshot. Split into a `parseCommandsNoChecksum` worker. Consolidated the sibling verifier on the `?C` path too, which was still the pre-a32e9cb shape: first-occurrence `indexOf`, hardcoded `‘?’` (so a custom funcChar skipped the integrity check silently), and an unbounded checksum tail. | ESP32 ✅ S3 ✅ WDP ✅ |
 | 2026-08-19 | FIX-015 | `WCB.ino` | The factory-reset chain flips the func char partway through on purpose, so every token after `?FUNCCHAR,<new>` carries the NEW char — but the `?CS` / `?SEQ,SAVE` / `?MGMT` whole-token branches matched against the **receiving** board’s live identifier and stopped firing, splitting a `?SEQ,SAVE` on every `^` inside its value. The splitter now tracks a chain-local `curFunc` that mirrors the emitter’s flip (stack state, like `ifSkipping`). The filed fix was a no-op and its stated alternative would have broadcast the whole rest of the restore as raw text — see the verdict. | ESP32 ✅ S3 ✅ WDP ✅ |
+| 2026-08-19 | FIX-042 | **`WCBClient`** (separate repo) + `docs/WDP_DESIGN.md` | `WCB_Client` predated WDP TLV `0x11` SOLICIT and decoded one as an advert. A solicit is byte-identical to an advert at the packet layer but carries no facts, so the decoder’s `memset` + rebuild blanked the **sending** board’s alias, port labels, capability flags, Maestro ids and seqHash in the client’s roster — on every `?WDP,POLL` / "Poll mesh" — until that board’s next real advert, up to 60 s later. Added the solicit-first guard the firmware already has, plus the half the finding omitted: the client now **answers** the poll, arming a jittered advert for `_wdpTick()` instead of sending inline (`_handleWdpAdvert` runs on the WiFi-task receive callback and `_sendWdpAdvert` stack-allocates 252 bytes). `WCB_Client` 1.15.0 → 1.15.1; sketchbook copy synced. Documented the general rule in `WDP_DESIGN.md`: skipping an unknown TLV is only forward-compatible for TLVs that add *facts* — a **structural** one changes what the packet *is*, and skipping it gives a wrong answer, not a partial one. | S3 example ✅ |

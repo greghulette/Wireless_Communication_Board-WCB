@@ -49,6 +49,7 @@ callback runs on the WiFi task and must not do heavy work.
 
 | Trigger | Count | Notes |
 |---|---|---|
+| 2026-08-19 | **A structural TLV is not forward-compatible by skipping.** `WCB_Client` predated `0x11` SOLICIT and decoded one as an empty advert, so every `?WDP,POLL` / "Poll mesh" blanked the sending board’s alias, port labels, capability flags, Maestro ids and seqHash in the client’s roster until that board’s next real advert (up to 60 s). Added the same solicit-first guard the firmware has, plus the missing other half — the client now **answers** a solicit, arming a jittered advert from `_wdpTick()` rather than sending inline (`_handleWdpAdvert` runs on the WiFi-task receive callback). `WCB_Client` 1.15.1. | — |
 | Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce |
 | Periodic backstop | every 60 s | staggered per board (`WCB_Number`‑based phase) so co‑booted boards don't collide |
 | Solicited | 1× on hearing a SOLICIT (or local `?WDP,POLL`) | jittered 0–600 ms by board number so a fleet doesn't reply in lockstep; lets an operator refresh the whole mesh on demand |
@@ -72,7 +73,18 @@ structCommand[200]:
 each TLV:  [ type : 1 ][ len : 1 ][ value : len bytes ]
 ```
 
-Unknown TLV types are skipped via the length prefix — forward compatible in both directions.
+Unknown TLV types are skipped via the length prefix, so an added TLV never breaks an older
+peer’s parse.
+
+**That is not the whole compatibility story, though.** A TLV whose meaning is *structural* —
+one that changes what the packet **is**, rather than adding a fact to it — must be understood
+by every receiver, because skipping it yields a wrong answer rather than a partial one.
+`0x11` **SOLICIT** is the case in point: a solicit is byte-identical to an advert at the packet
+layer (same magic, same proto, same WDP packet type) and carries no TLVs of its own. A receiver
+that skips the unknown `0x11` decodes it as an *empty advert* and, because a board is the sole
+authority for its own facts, replaces that board’s neighbor record with a blank one. Check for
+SOLICIT **before** decoding, and return without touching the table
+(`WCB_WDP.cpp` `wdpOnAdvertReceived`, `WCB_Client.cpp` `_handleWdpAdvert`).
 
 ### TLV registry (as shipped)
 
