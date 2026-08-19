@@ -21,7 +21,7 @@ function createDefaultBoardConfig() {
   return {
     // Board Identity
     hwVersion:    0,       // 0 = not set, 1=1.0, 21=2.1, 23=2.3, 24=2.4, 31=3.1, 32=3.2
-    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
+    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; 38 is the firmware default for both (WCB_Help.cpp:1009). Not auto-changed by HW version.
     wcbNumber:    1,
     wcbQuantity:  1,
     meshChannel:  1,       // ESP-NOW mesh channel (1–13); network-wide, all boards must match
