@@ -2254,7 +2254,11 @@ void loadETMSettings() {
     etmEnabled          = preferences.getBool("etmEnabled", true);
     etmBootHeartbeatSec = preferences.getInt("etmBoot", 2);
     etmHeartbeatSec     = preferences.getInt("etmHB", 10);
-    etmMissedHeartbeats = preferences.getInt("etmMiss", 3);
+    // Default MUST match the compile-time initialiser in WCB.ino (5). It was 3, so every board
+    // that had never explicitly run ?ETM,MISS silently reverted the deliberately-widened 55 s
+    // offline window back to 33 s at every boot — the comment on the initialiser described
+    // behaviour that never shipped. (The Wizard defaults were corrected to match.)
+    etmMissedHeartbeats = preferences.getInt("etmMiss", 5);
     etmTimeoutMs        = preferences.getInt("etmTimeout", 500);
     etmCharMessageCount = preferences.getInt("etmCharCount", 20);
     etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);

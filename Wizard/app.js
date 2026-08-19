@@ -84,7 +84,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.12:57.R.AUG.2026';
+const UI_VERSION = '19.13:43.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1431,7 +1431,7 @@ function extractGeneralFields(config) {
     etmEnabled:     config.etm?.enabled            ?? false,
     etmTimeout:     config.etm?.timeoutMs          ?? 500,
     etmHb:          config.etm?.heartbeatSec       ?? 10,
-    etmMiss:        config.etm?.missedHeartbeats   ?? 3,
+    etmMiss:        config.etm?.missedHeartbeats   ?? 5,
     etmBoot:        config.etm?.bootHeartbeatSec   ?? 2,
     etmCount:       config.etm?.messageCount       ?? 20,
     etmDelay:       config.etm?.messageDelayMs     ?? 100,
@@ -9376,7 +9376,7 @@ function wizardDefaultState() {
     maestroEnabled: null,   // null = not yet chosen; true/false = explicit Yes/No
     maestros:      [],            // [{ boardSlot, id, port, baud }]
     etmEnabled:    true,
-    etmConfig:     { timeoutMs:500, heartbeatSec:10, missedHeartbeats:3,
+    etmConfig:     { timeoutMs:500, heartbeatSec:10, missedHeartbeats:5,
                      bootHeartbeatSec:2, messageCount:20, messageDelayMs:100,
                      checksumEnabled:true },
     needsFirmware:    false,
@@ -10856,7 +10856,7 @@ function wizardSaveStep(key) {
       if (wizardState.etmEnabled) {
         wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 500);
         wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value      ?? 10);
-        wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 3);
+        wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 5);
         wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 2);
       }
       wizardState.etmConfig.checksumEnabled = get('wiz-etm-chksm')?.checked ?? true;

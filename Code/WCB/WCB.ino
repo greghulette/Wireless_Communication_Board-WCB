@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191257RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191343RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191257RAUG2026";
+String SoftwareVersion = "6.2.0_191343RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -344,6 +344,9 @@ QueueHandle_t rcJsonRelayQueue = nullptr;
 // A silent drop makes a browser config-pull time out with no explanation;
 // surfacing the count turns that into a diagnosable event.
 volatile uint32_t rcJsonRelayDrops = 0;
+// Guards the increment above. Reached from the WiFi task and from otaRelayPrint(), so a bare
+// `++` on the volatile is a non-atomic read-modify-write (and a deprecation warning besides).
+static portMUX_TYPE rcJsonDropMux = portMUX_INITIALIZER_UNLOCKED;
 
 // While this board is actively relaying an OTA stream to a target, the per-chunk
 // [OTA:ACK,...] line (the browser's flow-control token) shares the relay queue
@@ -384,9 +387,15 @@ static inline void enqueueRcJsonRelay(const String& jsonLine) {
   // to be invisible.  (Serial.printf is safe here: drops are rare and this
   // is the exceptional path, not the per-packet hot path.)
   if (xQueueSend(rcJsonRelayQueue, &slot, 0) != pdTRUE) {
-    rcJsonRelayDrops++;
+    // Not `rcJsonRelayDrops++`: that is a non-atomic read-modify-write on a volatile, which the
+    // compiler also deprecation-warns about. enqueueRcJsonRelay is reached from the WiFi task AND
+    // from otaRelayPrint(), so two increments could interleave and lose a count — on the one
+    // diagnostic whose entire purpose is that drops must never be invisible.
+    portENTER_CRITICAL(&rcJsonDropMux);
+    uint32_t dropCount = ++rcJsonRelayDrops;
+    portEXIT_CRITICAL(&rcJsonDropMux);
     Serial.printf("[RCBRG] relay queue FULL — dropped a JSON line (total drops=%lu)\n",
-                  (unsigned long)rcJsonRelayDrops);
+                  (unsigned long)dropCount);
   }
 }
 
@@ -1039,8 +1048,15 @@ void scheduleNextHeartbeat(bool isBoot) {
     // Random 1000ms to etmBootHeartbeatSec*1000ms at millisecond resolution
     intervalMs = (unsigned long)random(1000, etmBootHeartbeatSec * 1000UL);
   } else {
-    // Random (etmHeartbeatSec-1)*1000 to (etmHeartbeatSec+1)*1000 at millisecond resolution
-    intervalMs = (unsigned long)random((etmHeartbeatSec - 1) * 1000UL, (etmHeartbeatSec + 1) * 1000UL);
+    // Random (etmHeartbeatSec-1)*1000 to (etmHeartbeatSec+1)*1000 at millisecond resolution.
+    // Clamp defensively: at etmHeartbeatSec <= 0 the low bound went negative, random() returned
+    // a negative long, and the (unsigned long) cast wrapped it so etmNextHeartbeatMs landed in
+    // the PAST — the heartbeat then re-fired immediately, settling at ~4 Hz of unacked 252-byte
+    // broadcasts instead of one per 10 s. The setters below validate too; this is belt-and-braces
+    // for a value restored from an NVS blob written by older firmware.
+    long hb = (long)etmHeartbeatSec;
+    if (hb < 1) hb = 1;
+    intervalMs = (unsigned long)random((hb - 1) * 1000L, (hb + 1) * 1000L);
   }
   etmNextHeartbeatMs = millis() + intervalMs;
   if (debugETM) {
@@ -1426,6 +1442,17 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
   ack.structSequenceNumber = seqNum;
 
   uint8_t *mac = WCBMacAddresses[senderWCB - 1];
+  // Register the sender on demand. A board can legitimately send us an ensured command without
+  // being in our own peer table — a high-numbered relay above our WCBQ floor, or a peer evicted
+  // from the ~20-slot ESP-NOW table. esp_now_send then fails ESP_ERR_ESPNOW_NOT_FOUND and the ACK
+  // is silently dropped, so the sender burns all 3 retries and reports "[ETM] WCBn FAILED" for a
+  // command we actually executed. Mirrors the on-demand registration the retry path already does.
+  if (!esp_now_is_peer_exist(mac)) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, mac, 6);
+    p.channel = 0; p.encrypt = false;
+    esp_now_add_peer(&p);   // best-effort; a truly full table fails the send as before
+  }
   esp_err_t result = esp_now_send(mac, (uint8_t *)&ack, sizeof(ack));
   if (debugETM) {
     Serial.printf("[ETM] Sent ACK seq %d to WCB%d, result: %d\n", seqNum, senderWCB, result);
@@ -1483,6 +1510,18 @@ void processETMChar() {
     if (peerCount == 0) {
         Serial.println("[ETM] Characterization aborted: no online peers.");
         etmCharRunning = false;
+        // printETMCharResults() is the only place that unwinds the rest of the run's state, and
+        // this early return skips it. Unwind here too, or: debugETM stays suppressed for the rest
+        // of the session, and etmCharRelayRequesterWCB stays latched so the NEXT — possibly
+        // purely local — ?ETM,CHAR frag-sends its results to a board that never asked for them.
+        if (etmCharDebugWasSaved) { debugETM = true; etmCharDebugWasSaved = false; }
+        if (etmCharRelayRequesterWCB != 0) {
+            Serial.printf("[ETM] Notifying requesting WCB%d that characterization could not run.\n",
+                          etmCharRelayRequesterWCB);
+            sendResultFrags("ETM characterization aborted: no online peers.",
+                            etmCharRelayRequesterWCB, PACKET_TYPE_ETM_FRAG);
+            etmCharRelayRequesterWCB = 0;
+        }
         return;
     }
 
@@ -1594,7 +1633,10 @@ void advanceETMCharPhase(int* peers, int peerCount) {
     etmCharLastSendTime = 0;
 
     if (etmCharPhase == 2) {
-        Serial.printf("Phase 2 - Broadcast (no load)...\n");
+        // Phase 2 sends UNICAST with a wider gap — phase 3 is the only phase that broadcasts.
+        // The old "Broadcast" label meant the results table reported unicast latencies under a
+        // broadcast heading, so nobody could tell the mesh had never been measured broadcasting.
+        Serial.printf("Phase 2 - Unicast, spaced (no load)...\n");
         // Phase 2 is actually broadcast to all — re-init results for phase 2
         // We'll send to broadcast but track per-board via ACKs
     } else if (etmCharPhase == 3) {
@@ -1845,7 +1887,7 @@ String buildETMCharResultsString(int* peers, int peerCount) {
   out += " ETM Network Characterization ------------\n";
   const char* phaseNames[] = {
     "Individual Baseline (unicast, no load)",
-    "Broadcast (no load)",
+    "Unicast, spaced (no load)",   // phase 2 is unicast; only phase 3 broadcasts
     "Loaded Network (all boards transmitting)"
   };
   unsigned long worstMaxLatency = 0, worstAvgLatency = 0;
@@ -2000,10 +2042,16 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     // is the FINAL token, and a stored sequence value can legitimately contain an
     // earlier "^?CHK" — matching the first occurrence truncated the chain and
     // aborted the whole restore.
-    int chkPos = data.lastIndexOf(String(commandDelimiter) + "?CHK");
-    if (chkPos == -1) {
-      chkPos = data.lastIndexOf(String(commandDelimiter) + "?chk");
-    }
+    // Match the LIVE function identifier, not a hard-coded '?'. printBackupConfig emits the
+    // live chain's checksum as <funcChar>CHK (:2802-ish), so on a board with a custom FUNCCHAR
+    // the token never matched and the integrity check was silently skipped — a corrupted restore
+    // applied without complaint. '?' is still accepted so a factory-reset chain (which always
+    // uses '?') verifies on a board that has since changed its funcChar.
+    const String lfiChk = String(commandDelimiter) + String(LocalFunctionIdentifier);
+    int chkPos = data.lastIndexOf(lfiChk + "CHK");
+    if (chkPos == -1) chkPos = data.lastIndexOf(lfiChk + "chk");
+    if (chkPos == -1) chkPos = data.lastIndexOf(String(commandDelimiter) + "?CHK");
+    if (chkPos == -1) chkPos = data.lastIndexOf(String(commandDelimiter) + "?chk");
     
     if (chkPos != -1) {
       // Extract checksum command
@@ -4796,13 +4844,35 @@ void processLocalCommand(const String &message) {
             saveETMSettings();
             Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
         } else if (etmCmdUpper == "HB") {
-            etmHeartbeatSec = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+            // A bare `?ETM,HB` (no value) is the natural way to ASK what the setting is — help
+            // documents no query form — but etmVal is then "" and toInt() gives 0, which was
+            // written straight to NVS and turned the board into a ~4 Hz heartbeat emitter that
+            // survived reboots. Treat a missing/invalid value as a query, and range-check the rest.
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM heartbeat is %d sec\n", etmHeartbeatSec);
+            } else {
+                int hb = etmVal.toInt();
+                if (hb < 1 || hb > 3600) {
+                    Serial.printf("Invalid ETM heartbeat '%s'. Use 1-3600 seconds.\n", etmVal.c_str());
+                } else {
+                    etmHeartbeatSec = hb;
+                    saveETMSettings();
+                    Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+                }
+            }
         } else if (etmCmdUpper == "MISS") {
-            etmMissedHeartbeats = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM missed heartbeats is %d\n", etmMissedHeartbeats);
+            } else {
+                int mh = etmVal.toInt();
+                if (mh < 1 || mh > 100) {
+                    Serial.printf("Invalid ETM missed-heartbeat count '%s'. Use 1-100.\n", etmVal.c_str());
+                } else {
+                    etmMissedHeartbeats = mh;
+                    saveETMSettings();
+                    Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+                }
+            }
         } else if (etmCmdUpper == "BOOT") {
             etmBootHeartbeatSec = etmVal.toInt();
             saveETMSettings();
@@ -5391,7 +5461,11 @@ void processLocalCommand(const String &message) {
         delay(3000);
         ESP.restart();
     } else if (message.startsWith("sls") || message.startsWith("SLS")) {
-        updateSerialLabel(message.substring(3));
+        // Pass the FULL message. updateSerialLabel() parses "SLSx,label" itself — it checks for
+        // the 'S' prefix and does substring(3, comma) to extract the port — so stripping "SLS"
+        // here too meant it received "1,Dome", failed its own format guard, and the legacy
+        // command could never succeed.
+        updateSerialLabel(message);
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabel(message.substring(4).toInt());
     } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
@@ -5433,9 +5507,15 @@ void processLocalCommand(const String &message) {
         saveETMSettings();
         Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
     } else if (message.startsWith("etmhb") || message.startsWith("ETMHB")) {
-        etmHeartbeatSec = message.substring(5).toInt();
-        saveETMSettings();
-        Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+        // Same 0-writes-to-NVS trap as ?ETM,HB above — the legacy spelling needs the same guard.
+        int hb = message.substring(5).toInt();
+        if (hb < 1 || hb > 3600) {
+            Serial.printf("Invalid ETM heartbeat. Use 1-3600 seconds (currently %d).\n", etmHeartbeatSec);
+        } else {
+            etmHeartbeatSec = hb;
+            saveETMSettings();
+            Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+        }
     } else if (message.startsWith("etmmiss") || message.startsWith("ETMMISS")) {
         etmMissedHeartbeats = message.substring(7).toInt();
         saveETMSettings();
@@ -7336,7 +7416,22 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
    loadSerialMonitorSettings();
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
-  loadBroadcastSettingsFromPreferences(); 
+  loadBroadcastSettingsFromPreferences();
+
+  // Sanitise the loaded baud table BEFORE any begin(). Serial3-5 each had their own
+  // `baudRates[n] > 0` guard but Serial1/Serial2 did not, and a 0 is genuinely reachable: shipped
+  // firmware between 483b4d8 and f5d758f whitelisted `baud == 0` in ?BAUD, and NVS survives a
+  // firmware update — so a board configured back then still has a 0 stored today. HardwareSerial
+  // treats baud 0 as "auto-detect" and blocks for seconds waiting for traffic, long enough for
+  // the boot guard to reset the board, which then does the same thing again: a boot loop with no
+  // console output to explain it. Repair the value instead of skipping the port, so the port
+  // actually works rather than staying dark.
+  for (int i = 0; i < 5; i++) {
+    if (baudRates[i] == 0) {
+      Serial.printf("Serial%d had an invalid baud of 0 in NVS — falling back to 9600.\n", i + 1);
+      baudRates[i] = 9600;
+    }
+  }
   printBaudRates();
 
   if (Kyber_Local) {
