@@ -637,11 +637,23 @@
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
           <label>Kyber Maestro Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with the Kyber Maestro Port.">i</span></label>
+          <!-- Full firmware-legal set (Code/WCB/WCB_Storage.cpp:155-157). A shorter list left this
+               select blank whenever a board reported any other rate, and the blank was then read
+               back as the configured value. -->
           <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
+            <option value="110">110</option>
+            <option value="300">300</option>
+            <option value="600">600</option>
+            <option value="1200">1,200</option>
+            <option value="2400">2,400</option>
             <option value="9600">9,600</option>
+            <option value="14400">14,400</option>
+            <option value="19200">19,200</option>
             <option value="38400">38,400</option>
             <option value="57600">57,600</option>
             <option value="115200" selected>115,200</option>
+            <option value="128000">128,000</option>
+            <option value="256000">256,000</option>
           </select>
         </div>
         <div class="field" id="b{N}-kyber-marc-port-wrap" style="display:none">
@@ -806,20 +818,12 @@
         </div>
         <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
           <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
+          <!-- ONLY 9600 / 38400: the firmware rejects anything else outright and discards the whole
+               ?MP3 config line (Code/WCB/WCB_MP3.cpp:287). S3-S5 are additionally blocked above 9600
+               because they are software serial (:292). -->
           <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
-            <option value="110">110</option>
-            <option value="300">300</option>
-            <option value="600">600</option>
-            <option value="1200">1,200</option>
-            <option value="2400">2,400</option>
             <option value="9600" selected>9,600</option>
-            <option value="14400">14,400</option>
-            <option value="19200">19,200</option>
             <option value="38400">38,400</option>
-            <option value="57600">57,600</option>
-            <option value="115200">115,200</option>
-            <option value="128000">128,000</option>
-            <option value="256000">256,000</option>
           </select>
         </div>
         <div class="field" id="b{N}-mp3-vol-wrap" style="display:none">

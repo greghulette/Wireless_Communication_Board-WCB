@@ -84,7 +84,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.13:43.R.AUG.2026';
+const UI_VERSION = '19.14:09.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -744,9 +744,14 @@ function renderSerialTable(n) {
   tbody.innerHTML = '';
 
   for (let p = 1; p <= 5; p++) {
+    // Software serial (S3-S5) is unreliable above 57600, so the picker discourages it — but the
+    // FIRMWARE accepts the whole table on any port (WCB_Storage.cpp:155). Always include the value
+    // this port is actually configured for, otherwise the select matches no option, renders blank,
+    // and syncSerialUIToConfig reads that blank back as 9600 and pushes it to the board.
     const maxBaud = p >= 3 ? 57600 : Infinity;
-    const baudOptions = BAUD_RATES.filter(b => b <= maxBaud).map(b =>
-      `<option value="${b}" ${b === 9600 ? 'selected' : ''}>${b.toLocaleString()}</option>`
+    const curBaud = boardConfigs[n]?.serialPorts?.[p - 1]?.baud;
+    const baudOptions = BAUD_RATES.filter(b => b <= maxBaud || b === curBaud).map(b =>
+      `<option value="${b}" ${b === (curBaud || 9600) ? 'selected' : ''}>${b.toLocaleString()}${b > maxBaud ? ' (!)' : ''}</option>`
     ).join('');
 
     const row = document.createElement('tr');
@@ -2321,7 +2326,11 @@ function syncMP3ToConfig(n) {
   if (config.mp3.enabled) {
     config.mp3.port    = parseInt(document.getElementById(`b${n}-mp3-port`)?.value) || null;
     config.mp3.baud    = parseInt(document.getElementById(`b${n}-mp3-baud`)?.value) || 9600;
-    config.mp3.volume  = parseInt(document.getElementById(`b${n}-mp3-vol`)?.value) ?? 0;
+    // Clamp here too. onMP3VolChange clamps to 0-64 on edit, but this re-reads the RAW input
+    // and runs on every push, so an out-of-range value typed and left un-blurred (or set by
+    // the browser`s number spinner) went to the board unclamped.
+    { const rawVol = parseInt(document.getElementById(`b${n}-mp3-vol`)?.value);
+      config.mp3.volume = isNaN(rawVol) ? 0 : Math.max(0, Math.min(64, rawVol)); }
     config.mp3.onError = document.getElementById(`b${n}-mp3-onerr`)?.value?.trim() ?? '';
     config.mp3.remoteWCB = 0;   // hosts it locally now — can't also be a remote client
     // Keep serial port baud in sync so ?BAUD is generated correctly
@@ -2695,7 +2704,10 @@ function appendWLEDRow(n, wled) {
   const rowNum = tbody.rows.length + 1;
   const rowId  = `wled-row-${n}-${++_rowIdCounter}`;
 
-  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
+  // Devices are ids 1-8 ONLY. id 9 (all-local) and id 0 (all-Maestros) are reserved ROUTING
+  // targets in the firmware and are never stored as slots, so offering 9 produced a config the
+  // board rejects (WCB_Maestro.cpp). See the slot-identity rules in CLAUDE.md.
+  const idOptions = Array.from({length: 8}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === wled.id ? 'selected' : ''}>${v}</option>`).join('');
 
   const maxBaud  = (wled.port >= 3) ? 9600 : Infinity;   // S3-5 software serial cap
@@ -2924,7 +2936,10 @@ function syncSerialUIToConfig(n) {
   const config = boardConfigs[n];
   if (!config) return;
   for (let p = 1; p <= 5; p++) {
-    config.serialPorts[p - 1].baud = parseInt(document.getElementById(`b${n}-s${p}-baud`)?.value) || 9600;
+    // Fall back to the CONFIGURED value, not 9600: a select that renders blank (no matching
+    // option) would otherwise silently rewrite a good baud to 9600 on the next push.
+    { const rawB = parseInt(document.getElementById(`b${n}-s${p}-baud`)?.value);
+      config.serialPorts[p - 1].baud = rawB || config.serialPorts[p - 1].baud || 9600; }
     // Only read broadcast toggles for unclaimed or soft-claimed (serial-map) ports.
     // Hard claims (pwm/kyber/maestro/mp3) forcibly uncheck those boxes in updatePortClaimUI,
     // so reading them back would corrupt the config with spurious BCAST,OFF commands.
@@ -3262,7 +3277,10 @@ function appendMaestroRow(n, maestro, readOnly = false) {
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
-  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
+  // Devices are ids 1-8 ONLY. id 9 (all-local) and id 0 (all-Maestros) are reserved ROUTING
+  // targets in the firmware and are never stored as slots, so offering 9 produced a config the
+  // board rejects (WCB_Maestro.cpp). See the slot-identity rules in CLAUDE.md.
+  const idOptions = Array.from({length: 8}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === maestro.id ? 'selected' : ''}>${v}</option>`
   ).join('');
 
@@ -3609,8 +3627,12 @@ function syncMappingsToConfig(n) {
     if (sp.claimedBy?.type === 'pwm') sp.claimedBy = null;
   }
 
-  config.mappings       = [];
-  config.pwmOutputPorts = [];
+  config.mappings = [];
+  // Do NOT clear pwmOutputPorts here. It is not derived from this board's mapping rows — it is
+  // populated by the parser from what the BOARD reported (parser.js:885), recording ports that a
+  // REMOTE board's PWM mapping drives on this one. The DOM rows this function rebuilds from
+  // contain only local mappings plus read-only ghost rows, so wiping it on any mapping edit
+  // dropped the remote-driven ports from the config and from the next diff/export.
 
   const container = document.getElementById(`b${n}-mappings-container`);
   if (!container) return;
@@ -9027,7 +9049,10 @@ function appendKyberTargetRow(n, target, readOnly = false) {
   const dis      = readOnly ? 'disabled' : '';
   const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
 
-  const idOptions = Array.from({length: 9}, (_, i) => i + 1).map(v =>
+  // Devices are ids 1-8 ONLY. id 9 (all-local) and id 0 (all-Maestros) are reserved ROUTING
+  // targets in the firmware and are never stored as slots, so offering 9 produced a config the
+  // board rejects (WCB_Maestro.cpp). See the slot-identity rules in CLAUDE.md.
+  const idOptions = Array.from({length: 8}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === target.id ? 'selected' : ''}>${v}</option>`
   ).join('');
   const wcbOptions = Array.from({length: 20}, (_, i) => i + 1).map(v =>
