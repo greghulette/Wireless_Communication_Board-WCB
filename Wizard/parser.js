@@ -1535,7 +1535,27 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (fullPush || !betm || betm.checksumEnabled !== true) add('ETM,CHKSM,ON');
   }
 
+  // ── Stored Sequences (per-key diff) ──
+  // MUST come before the PWM/mapping block below. addPWMMapping() reboots the board when it
+  // applies a PWM input mapping (WCB_PWM.cpp), so anything emitted after it in the same push is
+  // sent into a board that is restarting and is silently lost — sequences were the casualty.
+  // Compare key-by-key so a single UPDATE doesn't re-push every sequence, and send SEQ,CLEAR for
+  // any keys removed since the baseline.
+  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
+  for (const seq of config.sequences) {
+    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
+      add(`SEQ,SAVE,${seq.key},${seq.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [key] of baseSeqMap) {
+      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
+    }
+  }
+
   // ── PWM Output Ports ──
+  // Keep this and the mapping block LAST: applying a PWM input mapping reboots the board.
   const pwmChanged = fullPush || !baseline ||
     JSON.stringify(baseline.pwmOutputPorts) !== JSON.stringify(config.pwmOutputPorts);
   if (pwmChanged) {
@@ -1557,22 +1577,6 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
           : `,W${dest.wcbNumber}S${dest.port}`;
       }
       add(cmd);
-    }
-  }
-
-  // ── Stored Sequences (per-key diff) ──
-  // Compare key-by-key so that a single UPDATE doesn't re-push every sequence.
-  // Also send SEQ,CLEAR for any keys removed since the baseline.
-  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
-  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
-  for (const seq of config.sequences) {
-    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
-      add(`SEQ,SAVE,${seq.key},${seq.value}`);
-    }
-  }
-  if (!fullPush && baseline) {
-    for (const [key] of baseSeqMap) {
-      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
     }
   }
 

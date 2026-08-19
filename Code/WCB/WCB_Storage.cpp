@@ -1690,11 +1690,18 @@ void addSerialMonitorMapping(const String &message) {
         return;
     }
 
-    // Find or create mapping for this input port
+    // Find or create mapping for this input port.
+    //
+    // A ?MAP,SERIAL command carries the COMPLETE destination list the caller wants for this input
+    // port, so it REPLACES the previous list rather than appending to it. Appending meant a
+    // destination the user removed or re-pointed in the Wizard stayed live on the board forever —
+    // the config was pushed, reported success, and the old route kept forwarding.
     SerialMonitorMapping *mapping = nullptr;
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == inputPort) {
             mapping = &serialMonitorMappings[i];
+            mapping->outputCount = 0;      // replace, don't append
+            mapping->rawMode     = inputRawMode;
             break;
         }
     }
@@ -1809,8 +1816,11 @@ void addSerialMonitorMapping(const String &message) {
 
     if (outputsAdded > 0) {
         saveSerialMonitorMappings();
-        Serial.printf("Serial mapping updated: Serial%d%s -> %d new destination(s) added (total: %d)\n",
-                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded, mapping->outputCount);
+        // The list is now REPLACED, not appended, so outputsAdded == the full destination count.
+        // This also persists a raw-mode toggle on an otherwise-unchanged mapping, which used to
+        // change only the RAM copy and silently revert on the next reboot.
+        Serial.printf("Serial mapping set: Serial%d%s -> %d destination(s)\n",
+                      inputPort, inputRawMode ? " (RAW)" : "", mapping->outputCount);
     } else {
         Serial.println("No new destinations added (all were duplicates or invalid)");
     }

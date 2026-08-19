@@ -73,7 +73,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-025 | **DONE** | `Wizard/app.js:1863` |  | Post-OTA ETM-edge replay fires every deferred remote pull in parallel on one relay |
 | FIX-026 | TODO | `Wizard/app.js:3700` | ⚠FIX | Bidirectional-mapping code indexes slot-keyed maps (boardConfigs / boardConnections / boardPull) with a WCB number |
 | FIX-027 | **DONE** | `Wizard/app.js:3784` | ⚠FIX | Wizard mapping-destination WCB dropdown is built from the WCBQ floor, so any destination above it is silently rewritten to "Local" |
-| FIX-028 | TODO | `Wizard/app.js:3837` |  | `?MAP,SERIAL` appends destinations in firmware, so editing or removing a destination in the Wizard leaves the old one live |
+| FIX-028 | **DONE** | `Wizard/app.js:3837` |  | `?MAP,SERIAL` appends destinations in firmware, so editing or removing a destination in the Wizard leaves the old one live |
 | FIX-029 | TODO | `Wizard/app.js:7039` |  | Push All throws a TypeError on a MgmtRelay slot and silently aborts the remaining stages |
 | FIX-030 | TODO | `Wizard/app.js:7447` | ⚠FIX | Changing Local Function Char back to '?' is never sent — the whole push is then mis-dispatched to the broadcast path (and out over ESP-NOW) |
 | FIX-031 | TODO | `Wizard/app.js:7481` |  | A push containing a PWM input mapping makes the firmware auto-reboot mid-push; every command after it is silently lost |
@@ -84,7 +84,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-036 | **DONE** | `Wizard/app.js:8419` | ⚠FIX | exportSystemFile only walks slots 1..wcbQuantity — any board discovered or relayed at a higher number is silently dropped from the exported file |
 | FIX-037 | TODO | `Wizard/app.js:11701` | ⚠FIX | A stale boardBaselines[n] satisfies the watcher's readiness gate — the push starts ~500 ms after port open and races the scheduled pull |
 | FIX-038 | TODO | `Wizard/parser.js:1355` | ⚠FIX | `?KYBER,CLEAR` is sent with no port, so the firmware resets Serial 2 to 9600 and re-enables its broadcast — undoing settings from earlier in the same  |
-| FIX-039 | TODO | `Wizard/parser.js:1531` |  | Stored sequences are pushed AFTER the PWM mapping command that reboots the board — they are silently discarded |
+| FIX-039 | **DONE** | `Wizard/parser.js:1531` |  | Stored sequences are pushed AFTER the PWM mapping command that reboots the board — they are silently discarded |
 | FIX-040 | **DONE** | `Wizard/serial-hub.js:114` | ⚠FIX | `_leaderPortOpen` latches true forever — `portOpen` lies, so the Wizard shows "Connected" on a dead share and drops every send |
 | FIX-041 | **DONE** | `Wizard/serial-hub.js:356` |  | Wizard/serial-hub.js is missing two lock-squat fixes that NaviCore's required-lockstep copy has |
 
@@ -101,8 +101,8 @@ and the `volatile` increment — both are themselves findings.
 | FIX-046 | **DONE** | `Code/WCB/WCB_Help.cpp:925` |  | ?CMDCHAR? documents `;Px,width` but the parser rejects the comma, and the rejection is silent |
 | FIX-047 | **DONE** | `Code/WCB/WCB_Storage.cpp:643` |  | ?SEQ,SAVE accepts a key longer than the 15-char NVS limit — value silently discarded but the name is recorded |
 | FIX-048 | **DONE** | `Code/WCB/WCB_Storage.cpp:1028` | ⚠FIX | eraseNVSFlash() never reaches its own confirmation or restart, and ?ERASE,NVS silently reboots OTHER boards in the fleet |
-| FIX-049 | TODO | `Code/WCB/WCB_Storage.cpp:1636` | ⚠FIX | ?MAP,SERIAL appends destinations rather than replacing them, so a destination removed or changed in the Wizard stays live on the board |
-| FIX-050 | TODO | `Code/WCB/WCB_Storage.cpp:1663` |  | Toggling raw mode on an existing serial mapping changes it in RAM but is never persisted — it silently reverts on reboot |
+| FIX-049 | **DONE** | `Code/WCB/WCB_Storage.cpp:1636` | ⚠FIX | ?MAP,SERIAL appends destinations rather than replacing them, so a destination removed or changed in the Wizard stays live on the board |
+| FIX-050 | **DONE** | `Code/WCB/WCB_Storage.cpp:1663` |  | Toggling raw mode on an existing serial mapping changes it in RAM but is never persisted — it silently reverts on reboot |
 | FIX-051 | **DONE** | `Code/WCB/WCB_Storage.cpp:2229` |  | etmMissedHeartbeats initializer of 5 is overwritten at boot by an NVS fallback of 3, so the documented 55 s offline window is never in effect |
 | FIX-052 | **DONE** | `Code/WCB/WCB.ino:267` |  | etmMissedHeartbeats default 5 is undone at boot by loadETMSettings()'s NVS fallback of 3 — the documented 55 s offline window never applies to a fresh |
 | FIX-053 | **DONE** | `Code/WCB/WCB.ino:1011` | ⚠FIX | scheduleNextHeartbeat computes a wrapped negative interval when etmHeartbeatSec <= 0, causing a heartbeat broadcast every loop iteration |
@@ -238,3 +238,5 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-067 | `WCB.ino` | `forwardMaestroDataToRemoteKyber` read bytes past its 64-byte buffer and **discarded** them, truncating any longer Maestro burst into a corrupt frame — the exact drop the sibling `forwardDataFromKyber` was already fixed to stop doing. Now flushes and continues. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-061, FIX-063 | `WCB.ino` | `sendResultFrags` dropped any oversized relayed result with the only diagnostic behind `debugMGMT` (off by default), so `?MGMT,STATS` / `?MGMT,ETM` on a large fleet returned **nothing** and the requester just timed out. Now logs ungated and relays a short in-band `[ERROR] Result too large` so the operator gets a real answer. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-112, FIX-113 | `Wizard/parser.js` | **WDP settings had no round-trip at all.** The firmware emits `WDP,OFF` / `WDP,AUTOJOIN,OFF` only when they are off (`WCB.ino:3023-3024`); the parser had no `WDP` case, so both were dropped on pull and never re-emitted — an export/restore silently re-enabled mesh discovery on a board where it had been turned off. Added defaults, a parse case accepting both spellings, and emit of the **ON** forms too (verified accepted at `WCB_WDP.cpp:1218-1223`) so re-enabling from the Wizard actually reaches the board. | JS ✅ |
+| 2026-08-19 | FIX-039 | `Wizard/parser.js` | Stored sequences were emitted **after** the PWM/mapping block, and applying a PWM input mapping reboots the board — so every sequence in the same push was sent into a restarting board and silently lost. Sequences now precede that block, which is explicitly marked as must-stay-last. | JS ✅ |
+| 2026-08-19 | FIX-049, FIX-050, FIX-028 | `WCB_Storage.cpp` | `?MAP,SERIAL` **appended** destinations instead of replacing them, so a destination removed or re-pointed in the Wizard stayed live on the board forever while the push reported success. The command carries the complete list, so it now replaces. That also persists a raw-mode toggle on an otherwise-unchanged mapping, which previously changed only RAM and reverted on reboot. | ESP32 ✅ S3 ✅ |
