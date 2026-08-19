@@ -1064,9 +1064,11 @@ void eraseNVSFlash() {
     // values here intact — every deleted sequence reappeared on the next boot.
     preferences.begin("stored_commands", false); preferences.clear(); preferences.end();
 
-    // false = do not restart here and do not broadcast ?REBOOT. clearAllPWMMappings() used to end
-    // in ESP.restart(), so eraseNVSFlash() never reached its own confirmation or restart below —
-    // and it rebooted every other WCB in the fleet as a side effect of one board being erased.
+    // false = do not restart this board and do not broadcast ?REBOOT. clearAllPWMMappings()
+    // ended in an inline ESP.restart(), so eraseNVSFlash() never reached its own confirmation
+    // or restart below — and it rebooted every other WCB in the fleet as a side effect of one
+    // board being erased. Both are now behind autoReboot, and the local restart is deferred to
+    // loop() via pwmRebootPending rather than taken inside the command.
     clearAllPWMMappings(false);
 
     // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the
@@ -1311,8 +1313,17 @@ if (params.startsWith("S") || params.startsWith("s")) {
           if (maestroID >= 1 && maestroID <= 9 &&
               wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT &&
               portNum >= 1 && portNum <= 5 &&
-              (baudRate == 9600 || baudRate == 14400 || baudRate == 19200 || 
-               baudRate == 38400 || baudRate == 57600 || baudRate == 115200)) {
+              // Same 13-rate list configureMaestro() validates against (WCB_Maestro.cpp:610).
+              // This used to accept only six, which meant a Maestro baud that ?MAESTRO took
+              // happily was rejected by ?KYBER,LOCAL for the SAME physical device — and the
+              // Wizard computes its Kyber targets from the Maestro rows, so a legal 2400-baud
+              // Maestro made the whole target line get skipped. Widening is safe: the accept
+              // path calls updateBaudRate() below, which validates the same 13.
+              (baudRate == 110 || baudRate == 300 || baudRate == 600 ||
+               baudRate == 1200 || baudRate == 2400 || baudRate == 9600 ||
+               baudRate == 14400 || baudRate == 19200 || baudRate == 38400 ||
+               baudRate == 57600 || baudRate == 115200 || baudRate == 128000 ||
+               baudRate == 256000)) {
             
             kyberTargets[targetIndex].maestroID = maestroID;
             kyberTargets[targetIndex].targetWCB = wcbNum;
@@ -1389,7 +1400,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
             else if (portNum < 1 || portNum > 5)
               Serial.printf("⚠️  Skipping target '%s': port must be S1-S5\n", targetStr.c_str());
             else
-              Serial.printf("⚠️  Skipping target '%s': baud rate must be 9600/14400/19200/38400/57600/115200\n", targetStr.c_str());
+              Serial.printf("⚠️  Skipping target '%s': baud rate must be one of 110/300/600/1200/2400/9600/14400/19200/38400/57600/115200/128000/256000\n", targetStr.c_str());
           }
         }
       }

@@ -22,6 +22,7 @@ extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-devic
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
+volatile bool pwmRebootPending = false;
 
 // PWM Stability Tracking
 PWMStabilityTracker pwmStability[5] = {
@@ -337,9 +338,13 @@ void addPWMMapping(const String &config, bool autoReboot) {
     }
     
     if (autoReboot) {
-        Serial.println("Rebooting in 3 seconds to apply PWM configuration...");
-        delay(3000);
-        ESP.restart();
+        // DEFER the restart instead of taking it here. A config push arrives as a stream of
+        // commands, so rebooting inside one of them destroys the commands still queued behind
+        // it — and the pusher cannot tell, because the boot banner satisfies its "did the board
+        // answer" test, so no retry fires and the push is scored as fully ACKed. Setting the
+        // flag lets the rest of the queue drain first; loop() restarts once it is empty.
+        pwmRebootPending = true;
+        Serial.println("PWM configuration stored — rebooting once the command queue drains.");
     }
 }
 
@@ -367,9 +372,10 @@ void removePWMMapping(int inputPort) {
             savePWMMappingsToPreferences();
             Serial.printf("Removed PWM mapping for Serial%d\n", inputPort);
             
-            Serial.println("Rebooting in 3 seconds to apply changes...");
-            delay(3000);
-            ESP.restart();
+            // Deferred, like addPWMMapping — see pwmRebootPending in WCB_PWM.h. Restarting
+            // inline here would swallow every command still queued behind this one.
+            pwmRebootPending = true;
+            Serial.println("Mapping removed — rebooting once the command queue drains.");
             return;
         }
     }
@@ -510,9 +516,13 @@ void clearAllPWMMappings(bool autoReboot) {
     
     Serial.println("All PWM mappings cleared");
     
-    Serial.println("Rebooting in 3 seconds to apply changes...");
-    delay(3000);
-    ESP.restart();
+    // Deferred, like addPWMMapping — see pwmRebootPending in WCB_PWM.h. Guarded on
+    // autoReboot for the same reason as the remote ?REBOOT above: eraseNVSFlash() calls
+    // this with false and performs its own restart afterwards.
+    if (autoReboot) {
+        pwmRebootPending = true;
+        Serial.println("Rebooting once the command queue drains.");
+    }
 }
 
 void savePWMMappingsToPreferences() {

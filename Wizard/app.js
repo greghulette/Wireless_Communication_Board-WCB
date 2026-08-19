@@ -73,6 +73,15 @@ function _slotForWcbNumber(wcbNum) {
 // map the wizard could not tell "pushed and ACKed" from "aborted before sending a byte", and
 // reported a green "Done" for both. { ok, aborted, reason }.
 const boardPushOutcome = {};
+// The funcChar to prefix a command sent TO A RELAY BOARD over USB. Must come from the relay’s
+// BASELINE (what the board last reported), never from boardConfigs[relayN]: onGeneralCmdCharChange
+// is wired oninput and rewrites funcChar in EVERY boardConfigs entry the instant the user types a
+// new character — including the relay’s — while the relay board itself still speaks the old one.
+// Using the config value there means the relay never recognises `?MGMT,`, so instead of forwarding
+// the config it splits the line and sprays the fragments out its serial ports and over the mesh.
+function _relayFuncChar(relayN) {
+  return boardBaselines[relayN]?.funcChar || _relayFuncChar(relayN);
+}
 const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
                                   // discovery poll must not inject ?WDP,DUMP into that stream:
                                   // a dump line can satisfy a pending read and fake an ACK for
@@ -103,7 +112,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.17:08.R.AUG.2026';
+const UI_VERSION = '19.17:20.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1810,7 +1819,7 @@ async function boardOtaRelay(n) {
 
   const targetWcb = boardConfigs[n]?.wcbNumber ?? n;
   const session   = Math.floor(Math.random() * 0xFFFE) + 1;   // 1..65535
-  const fc        = boardConfigs[relayN]?.funcChar ?? '?';
+  const fc        = _relayFuncChar(relayN);
   const cmd       = (s) => `${fc}OTA,${s}`;
   const btn       = document.getElementById(`b${n}-btn-ota-serial`);
 
@@ -2998,7 +3007,7 @@ async function wledSend(n, action) {
     const relayConn = boardConnections[relayN];
     if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
     const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const relayFc   = _relayFuncChar(relayN);
     const targetWCB = boardConfigs[n]?.wcbNumber || n;
     const mgmtCmd = `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${cmd}`;
     await sendMgmtReliable(relayConn, mgmtCmd, relayN);
@@ -3779,7 +3788,7 @@ async function removeMappingRow(rowId, n) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const relayFc   = _relayFuncChar(relayN);
       const mgmtTargetWCB = boardConfigs[n]?.wcbNumber || n;
       const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`;
       await sendMgmtReliable(relayConn, mgmtCmd, relayN);
@@ -3998,7 +4007,7 @@ async function saveMappingRow(rowId, n) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast('Relay not connected', 'error'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const relayFc   = _relayFuncChar(relayN);
       const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetN},${sessionId},0,1,${cmd}`;
       await sendMgmtReliable(relayConn, mgmtCmd, relayN);
     } else {
@@ -4454,7 +4463,7 @@ async function removeSequenceRow(n, rowId) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) return;   // relay gone — push will handle it later
       const sessionId   = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc     = boardConfigs[relayN]?.funcChar || '?';
+      const relayFc     = _relayFuncChar(relayN);
       const seqTargetWCB = boardConfigs[n]?.wcbNumber || n;
       const mgmtCmd = `${relayFc}MGMT,FRAG,${seqTargetWCB},${sessionId},0,1,${cmd}`;
       await sendMgmtReliable(relayConn, mgmtCmd, relayN);
@@ -4558,7 +4567,7 @@ async function playSequence(n, rowId) {
     const relayConn = boardConnections[relayN];
     if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
     const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const relayFc   = _relayFuncChar(relayN);
     const seqRunTargetWCB = boardConfigs[n]?.wcbNumber || n;
     const mgmtCmd = `${relayFc}MGMT,FRAG,${seqRunTargetWCB},${sessionId},0,1,${cmd}`;
     await sendMgmtReliable(relayConn, mgmtCmd, relayN);
@@ -4603,7 +4612,7 @@ async function updateSequence(n, rowId) {
         const relayConn = boardConnections[relayN];
         if (relayConn?.isConnected()) {
           const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-          const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+          const relayFc   = _relayFuncChar(relayN);
           const targetWCB = boardConfigs[n]?.wcbNumber || n;
           await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${clearCmd}`, relayN);
         }
@@ -4625,7 +4634,7 @@ async function updateSequence(n, rowId) {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+      const relayFc   = _relayFuncChar(relayN);
       const seqSaveTargetWCB = boardConfigs[n]?.wcbNumber || n;
       logTarget = relayN;
       // A sequence is easily longer than one packet. Sending it as chunkIdx 0 of 1 used to hand
@@ -4714,7 +4723,7 @@ async function sendVariableCommand(n, cmd) {
     const relayConn = boardConnections[relayN];
     if (!relayConn?.isConnected()) return false;
     const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const relayFc   = boardConfigs[relayN]?.funcChar || '?';
+    const relayFc   = _relayFuncChar(relayN);
     const targetWCB = boardConfigs[n]?.wcbNumber || n;
     await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${targetWCB},${sessionId},0,1,${cmd}`, relayN);
     return true;
@@ -6292,7 +6301,7 @@ async function startRemoteTermSession(relayN, targetN) {
     const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
     const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
     const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
-    const relayFc    = boardConfigs[relayN]?.funcChar   || '?';
+    const relayFc    = _relayFuncChar(relayN);
     const targetFc   = boardConfigs[targetN]?.funcChar  || '?';
     const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
     await sendMgmtReliable(relayConn, rtermStartCmd, null, 3, 250);   // 3× for reliable arming — see note above
@@ -6306,7 +6315,7 @@ async function stopRemoteTermSession(relayN, targetN) {
   if (!relayConn?.isConnected()) return;
   try {
     const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const stopRelayFc  = boardConfigs[relayN]?.funcChar  || '?';
+    const stopRelayFc  = _relayFuncChar(relayN);
     const stopTargetFc = boardConfigs[targetN]?.funcChar || '?';
     const stopWCBNum   = boardConfigs[targetN]?.wcbNumber || targetN;
     const rtermStopCmd = `${stopRelayFc}MGMT,FRAG,${stopWCBNum},${sessionId},0,1,${stopTargetFc}RTERM,STOP`;
@@ -8141,6 +8150,44 @@ async function boardGoRemote(n, opts = {}) {
     }
   }
 
+  // ── Bootstrap: char-change commands must reach the target in ITS CURRENT chars ──
+  // The direct path does this at boardGo; the relay path had no equivalent, so changing a
+  // delimiter or funcChar over a relay produced a chain the target could not parse. The
+  // target splits the reassembled chain on its LIVE delimiter and dispatches each command
+  // against its LIVE funcChar, so a chain written in the NEW characters is either taken as
+  // one giant command (delimiter case — everything after the first token is dropped) or
+  // ignored outright. Send DELIM / CMDCHAR / FUNCCHAR first, each as its own single-chunk
+  // MGMT session in the chars the target still speaks; the main chain below then goes out in
+  // the new ones (the chain then re-issues the same values harmlessly). FUNCCHAR goes LAST —
+  // the target switches its parser the moment it lands. Placed AFTER the network-group
+  // confirm so cancelling there cannot leave the board on a character set nothing else knows.
+  {
+    const tgtFuncChar = boardBaselines[n]?.funcChar  ?? '?';
+    const tgtDelim    = boardBaselines[n]?.delimiter ?? '^';
+    const tgtCmdChar  = boardBaselines[n]?.cmdChar   ?? ';';
+    const bootstrap = [];
+    if (config.delimiter !== tgtDelim) bootstrap.push(`${tgtFuncChar}DELIM,${config.delimiter}`);
+    if (config.cmdChar   !== tgtCmdChar) bootstrap.push(`${tgtFuncChar}CMDCHAR,${config.cmdChar}`);
+    if (config.funcChar  !== tgtFuncChar) bootstrap.push(`${tgtFuncChar}FUNCCHAR,${config.funcChar}`);
+    if (bootstrap.length) {
+      const bootTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      termLog(relayN, `[Remote] WCB ${n}: switching command characters before the push`, 'sys');
+      for (const bcmd of bootstrap) {
+        const bSession = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+        const wrapped  = `${_relayFuncChar(relayN)}MGMT,FRAG,${bootTargetWCB},${bSession},0,1,${bcmd}`;
+        await sendMgmtReliable(relayConn, wrapped, relayN, 3, 250);   // unACKed hop — send 3×
+        await sleep(400);   // let the target apply it before the next one changes the parser
+      }
+      // The board now speaks the new chars, so the baseline must say so — otherwise the next
+      // push re-runs this bootstrap with stale "current" chars and none of it lands.
+      if (boardBaselines[n]) {
+        boardBaselines[n].delimiter = config.delimiter;
+        boardBaselines[n].cmdChar   = config.cmdChar;
+        boardBaselines[n].funcChar  = config.funcChar;
+      }
+    }
+  }
+
   if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
 
   const changeCount = cmdString.split('^').filter(Boolean).length;
@@ -8190,7 +8237,7 @@ async function boardGoRemote(n, opts = {}) {
     // this multi-chunk push must match or a mismatched board's config lands on the wrong WCB.
     const pushTargetWCB = boardConfigs[n]?.wcbNumber || n;
     for (let i = 0; i < chunks.length; i++) {
-      const relayFcPush = boardConfigs[relayN]?.funcChar || '?';
+      const relayFcPush = _relayFuncChar(relayN);
       const cmd = `${relayFcPush}MGMT,FRAG,${pushTargetWCB},${sessionId},${i},${total},${chunks[i]}\r`;
       termLog(relayN, cmd.trim(), 'in');
       await relayConn.send(cmd);
@@ -8379,7 +8426,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
 
   // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
   const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;
-  const pullRelayFc = boardConfigs[relayN]?.funcChar || '?';
+  const pullRelayFc = _relayFuncChar(relayN);
   try {
     await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
   } catch (e) {
@@ -8977,7 +9024,7 @@ async function toggleDebug(n, modeKey) {
     termLog(n, cmd, 'in');
     try {
       const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const stateRelayFc = boardConfigs[relayN]?.funcChar || '?';
+      const stateRelayFc = _relayFuncChar(relayN);
       const stateWCBNum  = boardConfigs[n]?.wcbNumber || n;
       const stateMgmt    = `${stateRelayFc}MGMT,FRAG,${stateWCBNum},${sessionId},0,1,${cmd}`;
       await sendMgmtReliable(relayConn, stateMgmt, null);
@@ -9281,7 +9328,7 @@ async function sendTerminalCommandTo(n) {
     try {
       const sessionId   = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
       const wcbNum      = boardConfigs[n]?.wcbNumber || n;
-      const termRelayFc = boardConfigs[relayN]?.funcChar || '?';
+      const termRelayFc = _relayFuncChar(relayN);
       const termMgmt    = `${termRelayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${cmd}`;
       await sendMgmtReliable(relayConn, termMgmt, null);
     } catch (e) { termLog(n, `Send error: ${e.message}`, 'err'); }
@@ -9319,89 +9366,12 @@ function showKyberRepushWarning(kyberBoardNum) {
 }
 
 // ─── Kyber Targets ────────────────────────────────────────────────
-function addKyberTargetRow(n) {
-  appendKyberTargetRow(n, { id: 1, wcb: n, port: 1, baud: 57600 });
-  syncKyberTargetsToConfig(n);
-  onBoardFieldChange(n);
-}
-
-function appendKyberTargetRow(n, target, readOnly = false) {
-  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
-  if (!tbody) return;
-
-  const rowNum   = tbody.rows.length + 1;
-  const rowId    = `kyber-target-row-${n}-${++_rowIdCounter}`;
-  const dis      = readOnly ? 'disabled' : '';
-  const dimStyle = readOnly ? 'style="opacity:0.5"' : '';
-
-  // Devices are ids 1-8 ONLY. id 9 (all-local) and id 0 (all-Maestros) are reserved ROUTING
-  // targets in the firmware and are never stored as slots, so offering 9 produced a config the
-  // board rejects (WCB_Maestro.cpp). See the slot-identity rules in CLAUDE.md.
-  const idOptions = Array.from({length: 8}, (_, i) => i + 1).map(v =>
-    `<option value="${v}" ${v === target.id ? 'selected' : ''}>${v}</option>`
-  ).join('');
-  const wcbOptions = Array.from({length: 20}, (_, i) => i + 1).map(v =>
-    `<option value="${v}" ${v === target.wcb ? 'selected' : ''}>WCB ${v}</option>`
-  ).join('');
-
-  const kyberPort = boardConfigs[n]?.kyber?.port;
-  const portOptions = [1,2,3,4,5]
-    .filter(v => v !== kyberPort)
-    .map(v => `<option value="${v}" ${v === target.port ? 'selected' : ''}>S${v}</option>`)
-    .join('');
-
-  const baudOptions = BAUD_RATES.map(b =>
-    `<option value="${b}" ${b === target.baud ? 'selected' : ''}>${b.toLocaleString()}</option>`
-  ).join('');
-
-  const deleteBtn = readOnly
-    ? `<span title="From board backup" style="opacity:0.4;font-size:18px;padding:0 8px">&#128274;</span>`
-    : `<button class="btn btn-danger btn-sm btn-icon" onclick="removeKyberTargetRow(${n},'${rowId}')">&#128465;</button>`;
-
-  const tr = document.createElement('tr');
-  tr.id = rowId;
-  tr.setAttribute('data-readonly', readOnly ? '1' : '0');
-  tr.innerHTML = `
-    <td style="color:var(--text3)" ${dimStyle}>${rowNum}</td>
-    <td ${dimStyle}><select id="${rowId}-id" ${dis} onchange="onKyberTargetsChange(${n})">${idOptions}</select></td>
-    <td ${dimStyle}><select id="${rowId}-wcb" ${dis} onchange="onKyberTargetsChange(${n})">${wcbOptions}</select></td>
-    <td ${dimStyle}><select id="${rowId}-port" ${dis} onchange="onKyberTargetsChange(${n})">${portOptions}</select></td>
-    <td ${dimStyle}><select id="${rowId}-baud" ${dis} onchange="onKyberTargetsChange(${n})">${baudOptions}</select></td>
-    <td>${deleteBtn}</td>
-  `;
-  tbody.appendChild(tr);
-}
-
-function removeKyberTargetRow(n, rowId) {
-  document.getElementById(rowId)?.remove();
-  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
-  tbody?.querySelectorAll('tr').forEach((row, i) => {
-    row.cells[0].textContent = i + 1;
-  });
-  syncKyberTargetsToConfig(n);
-  onBoardFieldChange(n);
-}
-
-function onKyberTargetsChange(n) {
-  syncKyberTargetsToConfig(n);
-  onBoardFieldChange(n);
-}
-
-function syncKyberTargetsToConfig(n) {
-  const config = boardConfigs[n];
-  if (!config) return;
-  if (!config.kyber) config.kyber = {};
-  config.kyber.targets = [];
-  const tbody = document.getElementById(`b${n}-kyber-target-tbody`);
-  if (!tbody) return;
-  tbody.querySelectorAll('tr').forEach(row => {
-    const id   = parseInt(row.querySelector('[id$="-id"]')?.value);
-    const wcb  = parseInt(row.querySelector('[id$="-wcb"]')?.value);
-    const port = parseInt(row.querySelector('[id$="-port"]')?.value);
-    const baud = parseInt(row.querySelector('[id$="-baud"]')?.value) || 57600;
-    if (id && wcb && port) config.kyber.targets.push({ id, wcb, port, baud });
-  });
-}
+// The editable Kyber-target table was replaced by the read-only auto-computed info div
+// (index.html: b{N}-kyber-targets-info) — targets are derived from every board’s Maestro
+// rows by autoComputeKyberTargets(). The old add/append/remove/sync row helpers were left
+// behind as unreachable code: nothing rendered `b{N}-kyber-target-tbody`, so they were
+// dead, and syncKyberTargetsToConfig() cleared config.kyber.targets BEFORE bailing on the
+// missing tbody — a live hazard if anything had ever called it. Removed.
 
 function populateKyberTargetsFromConfig(n, _config) {
   // The Kyber targets info div is auto-computed from all boards' Maestros.
@@ -9518,7 +9488,7 @@ async function boardIdentify(n) {
     if (!relayConn?.isConnected()) { showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
     try {
       const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const idRelayFc    = boardConfigs[relayN]?.funcChar || '?';
+      const idRelayFc    = _relayFuncChar(relayN);
       const idTargetFc   = boardConfigs[n]?.funcChar      || '?';
       const idTargetWCB  = boardConfigs[n]?.wcbNumber     || n;
       const cmd = `${idRelayFc}MGMT,FRAG,${idTargetWCB},${sessionId},0,1,${idTargetFc}IDENTIFY`;
@@ -12002,6 +11972,13 @@ async function wizPortComplete(n, port) {
       if (boardConnections[n]?.isConnected()) await boardDisconnect(n);
       const conn = await establishConnection(n, port, usedPorts);
       delete remoteRelayForBoard[n];
+      // The watcher's readiness gate is `isConnected() && boardBaselines[n]` — it means "the
+      // post-connect pull finished". A baseline left over from an earlier session satisfies it
+      // immediately, so the push fires ~500 ms after the port opens and races the pull
+      // scheduled below. Nothing else clears it on the recommended Detect flow: wizPortDetect
+      // calls closeForReconnect(), not boardDisconnect(), so the isConnected() test above is
+      // already false by the time we get here and boardDisconnect never runs.
+      delete boardBaselines[n];
       updateConnectionUI(n, true);
       showToast(`WCB ${n} connected — pulling config…`, 'success');
       setTimeout(() => boardPull(n), 3000);
@@ -12419,7 +12396,7 @@ async function fetchStatsData() {
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { output.textContent = 'Relay board not connected.'; return; }
       const targetWCBNum = boardConfigs[n]?.wcbNumber || n;
-      const relayFc      = boardConfigs[relayN]?.funcChar || '?';
+      const relayFc      = _relayFuncChar(relayN);
       const mgmtCmd      = isEtm ? `${relayFc}MGMT,ETM,CHAR,${targetWCBNum}`
                                  : `${relayFc}MGMT,STATS,${targetWCBNum}`;
       const responsePrefix = isEtm ? `[MGMT:ETM,`    : `[MGMT:STATS,`;

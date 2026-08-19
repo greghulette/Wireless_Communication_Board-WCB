@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191525RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191720RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191525RAUG2026";
+String SoftwareVersion = "6.2.0_191720RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -947,6 +947,11 @@ typedef struct {
 } CommandQueueItem;
 
 static QueueHandle_t commandQueue = nullptr;
+// Quiet window for a deferred restart (PWM mapping). A Wizard push is ACK-paced, so the
+// command queue empties briefly between every pair of commands — restarting on "queue is
+// empty" alone would still land mid-push. 4 s comfortably outlasts the pacing gap.
+static const unsigned long PWM_REBOOT_QUIET_MS = 4000;
+static unsigned long lastCommandProcessedMs = 0;
 
 // ============================= Stored Commands =============================
 #define MAX_STORED_COMMANDS 80
@@ -7905,5 +7910,24 @@ void loop() {
     // restore above re-establishes the correct value for the next item; the sources
     // (serial/ETM/MGMT/receive) reset it too, so this just closes the drain-boundary leak.
     inSequenceBody = false;
+    lastCommandProcessedMs = millis();   // deferred-restart quiet-window clock (see below)
+  }
+
+  // A PWM input mapping needs a restart to (re)attach its interrupt, but taking it inside
+  // the command that stored it destroyed every command still queued behind it — and the
+  // pusher never noticed, because the boot banner reads as a valid response, so no retry
+  // fired and the push was scored fully ACKed. Restart here instead: queue provably empty
+  // (the while above only exits on xQueueReceive failing) AND quiet for PWM_REBOOT_QUIET_MS.
+  // The quiet window matters — a Wizard push is ACK-paced, so it sends the NEXT command as
+  // soon as this board answers, and the queue is briefly empty between every pair. Each
+  // command processed pushes the deadline out, so the restart lands after the push ends.
+  if (pwmRebootPending) {
+    if (millis() - lastCommandProcessedMs >= PWM_REBOOT_QUIET_MS) {
+      pwmRebootPending = false;
+      Serial.println("Rebooting now to apply PWM configuration...");
+      Serial.flush();
+      delay(150);              // let the line clear the UART before the reset
+      ESP.restart();
+    }
   }
 }

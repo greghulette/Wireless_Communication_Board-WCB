@@ -35,7 +35,11 @@ struct PWMStabilityTracker {
 extern PWMStabilityTracker pwmStability[5];  // One tracker per serial port
 
 void initPWM();
+// autoReboot=true does NOT restart inline — it sets pwmRebootPending and lets loop() take
+// the restart once the command queue is empty. A config push is a stream of commands, and
+// restarting inside one of them silently destroys the ones still queued behind it.
 void addPWMMapping(const String &config, bool autoReboot = true);
+extern volatile bool pwmRebootPending;   // set by addPWMMapping; honoured in loop()
 void removePWMMapping(int inputPort);
 void listPWMMappings();
 void listPWMMappingsBoot();
