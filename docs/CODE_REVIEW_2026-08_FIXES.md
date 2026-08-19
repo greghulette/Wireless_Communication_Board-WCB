@@ -52,7 +52,7 @@ and the `volatile` increment — both are themselves findings.
 | # | Status | File:line | ⚠ | Finding |
 |---|---|---|---|---|
 | FIX-006 | **DONE** | `Code/WCB/command_timer.cpp:203` | ⚠FIX | Use-after-free: processCommandGroups() holds references into commandGroups across a vTaskDelay() that serialCommandTask can clear |
-| FIX-007 | TODO | `Code/WCB/WCB_Storage.cpp:352` |  | ?BCAST,RESET does not reset broadcast INPUT blocking at all and leaves RAM stale, so the next unrelated save re-persists the pre-reset values |
+| FIX-007 | **DONE** | `Code/WCB/WCB_Storage.cpp:352` |  | ?BCAST,RESET does not reset broadcast INPUT blocking at all and leaves RAM stale, so the next unrelated save re-persists the pre-reset values |
 | FIX-008 | **DONE** | `Code/WCB/WCB_Storage.cpp:834` | ⚠FIX | The legacy stored_commands namespace is never cleared and the migration guard lives inside the namespace that IS cleared — ?SEQ,CLEAR,ALL or ?ERASE,NV |
 | FIX-009 | **DONE** | `Code/WCB/WCB_Storage.cpp:1024` | ⚠FIX | ?ERASE,NVS never clears the dfp_cfg namespace — the DFPlayer config and its port claim survive a factory reset, and the adjacent WCB_DFP comment claim |
 | FIX-010 | TODO | `Code/WCB/WCB_Storage.cpp:1078` | ⚠FIX | ?KYBER,CLEAR is emitted in every non-Kyber board's config chain and always resets Serial2's baud + broadcast flags, silently overwriting settings the  |
@@ -61,27 +61,27 @@ and the `volatile` increment — both are themselves findings.
 | FIX-013 | **DONE** | `Code/WCB/WCB.ino:1585` | ⚠FIX | Phase 3 "Loaded Network" is never loaded — the ETMLOAD trigger is sent non-ETM and is dropped by every receiver's ETM-mismatch guard, making processET |
 | FIX-014 | TODO | `Code/WCB/WCB.ino:1892` | ⚠FIX | applyLiveBaud tears down a live SoftwareSerial (end() then begin()) while other tasks may be reading it — end() leaves m_rxValid true with a freed buf |
 | FIX-015 | TODO | `Code/WCB/WCB.ino:2053` | ⚠FIX | Factory-reset backup chain: tokens after ?FUNCCHAR carry the NEW func char, but the ?SEQ,SAVE / ?CS / ?MGMT splitter matches on the RECEIVING board's  |
-| FIX-016 | TODO | `Code/WCB/WCB.ino:2298` | ⚠FIX | ETM checksum mode silently destroys the CRC for commands over 187 chars — target ACKs, then discards |
+| FIX-016 | **DONE** | `Code/WCB/WCB.ino:2298` | ⚠FIX | ETM checksum mode silently destroys the CRC for commands over 187 chars — target ACKs, then discards |
 | FIX-017 | **DONE** | `Code/WCB/WCB.ino:3706` |  | ?ETM,CHAR phase 3 never loads the network: the ETMLOAD trigger is sent non-ETM and is dropped by the ETM-mismatch filter on every peer |
 | FIX-018 | TODO | `Code/WCB/WCB.ino:4130` |  | Serial3/4/5 (ESPSoftwareSerial) are written from the WiFi callback and three other tasks with no mutual exclusion; the adjacent "write() drains async" |
 | FIX-019 | TODO | `Code/WCB/WCB.ino:4159` | ⚠FIX | The WiFi task rewrites lastReceivedViaESPNOW mid-dispatch, so loop()'s per-item snapshot restore does not survive to the point it is read |
-| FIX-020 | TODO | `Code/WCB/WCB.ino:4269` | ⚠FIX | forwardDataFromKyber writes each Kyber byte once PER TARGET, so two Maestros sharing one serial port receive every byte twice |
+| FIX-020 | **DONE** | `Code/WCB/WCB.ino:4269` | ⚠FIX | forwardDataFromKyber writes each Kyber byte once PER TARGET, so two Maestros sharing one serial port receive every byte twice |
 | FIX-021 | **DONE** | `Code/WCB/WCB.ino:5703` |  | updateESPNowPassword() strips 6 chars off a 5-char "EPASS" prefix — the legacy ?EPASS form silently drops the first password character |
 | FIX-022 | TODO | `Code/WCB/WCB.ino:6193` | ⚠FIX | processPWMOutput will pinMode/drive ANY serial port's TX pin — it never checks the port is a declared PWM output, defeating canUsePWMOnPort's stated g |
 | FIX-023 | **DONE** | `Code/WCB/WCB.ino:6490` | ⚠FIX | processSerialCommandHelper calls parseCommandGroups/stopTimerSequence from serialCommandTask, racing loop()'s live reference into the commandGroups ve |
 | FIX-024 | **DONE** | `Code/WCB/WCB.ino:6598` | ⚠FIX | serialCommandTask parses timer chains off the loop task, racing loop()'s live iteration of the commandGroups std::vector |
-| FIX-025 | TODO | `Wizard/app.js:1863` |  | Post-OTA ETM-edge replay fires every deferred remote pull in parallel on one relay |
+| FIX-025 | **DONE** | `Wizard/app.js:1863` |  | Post-OTA ETM-edge replay fires every deferred remote pull in parallel on one relay |
 | FIX-026 | TODO | `Wizard/app.js:3700` | ⚠FIX | Bidirectional-mapping code indexes slot-keyed maps (boardConfigs / boardConnections / boardPull) with a WCB number |
-| FIX-027 | TODO | `Wizard/app.js:3784` | ⚠FIX | Wizard mapping-destination WCB dropdown is built from the WCBQ floor, so any destination above it is silently rewritten to "Local" |
+| FIX-027 | **DONE** | `Wizard/app.js:3784` | ⚠FIX | Wizard mapping-destination WCB dropdown is built from the WCBQ floor, so any destination above it is silently rewritten to "Local" |
 | FIX-028 | TODO | `Wizard/app.js:3837` |  | `?MAP,SERIAL` appends destinations in firmware, so editing or removing a destination in the Wizard leaves the old one live |
 | FIX-029 | TODO | `Wizard/app.js:7039` |  | Push All throws a TypeError on a MgmtRelay slot and silently aborts the remaining stages |
 | FIX-030 | TODO | `Wizard/app.js:7447` | ⚠FIX | Changing Local Function Char back to '?' is never sent — the whole push is then mis-dispatched to the broadcast path (and out over ESP-NOW) |
 | FIX-031 | TODO | `Wizard/app.js:7481` |  | A push containing a PWM input mapping makes the firmware auto-reboot mid-push; every command after it is silently lost |
 | FIX-032 | TODO | `Wizard/app.js:7811` | ⚠FIX | boardGoRemote has no funcChar/delimiter/cmdChar bootstrap — changing a command character over a relay sends a payload the target cannot parse |
 | FIX-033 | TODO | `Wizard/app.js:7853` |  | boardGoRemote never checks the 16-chunk MGMT ceiling — an oversized config is rejected wholesale by the relay while the Wizard reports success |
-| FIX-034 | TODO | `Wizard/app.js:7938` |  | Remote-pull listener is not target-filtered — a config reply is written to every board with a pull in flight |
-| FIX-035 | TODO | `Wizard/app.js:7946` |  | remoteBoardPull accepts ANY [MGMT:CONFIG,<n>] reply — two overlapping pulls write one board's config onto another board's slot |
-| FIX-036 | TODO | `Wizard/app.js:8419` | ⚠FIX | exportSystemFile only walks slots 1..wcbQuantity — any board discovered or relayed at a higher number is silently dropped from the exported file |
+| FIX-034 | **DONE** | `Wizard/app.js:7938` |  | Remote-pull listener is not target-filtered — a config reply is written to every board with a pull in flight |
+| FIX-035 | **DONE** | `Wizard/app.js:7946` |  | remoteBoardPull accepts ANY [MGMT:CONFIG,<n>] reply — two overlapping pulls write one board's config onto another board's slot |
+| FIX-036 | **DONE** | `Wizard/app.js:8419` | ⚠FIX | exportSystemFile only walks slots 1..wcbQuantity — any board discovered or relayed at a higher number is silently dropped from the exported file |
 | FIX-037 | TODO | `Wizard/app.js:11701` | ⚠FIX | A stale boardBaselines[n] satisfies the watcher's readiness gate — the push starts ~500 ms after port open and races the scheduled pull |
 | FIX-038 | TODO | `Wizard/parser.js:1355` | ⚠FIX | `?KYBER,CLEAR` is sent with no port, so the firmware resets Serial 2 to 9600 and re-enables its broadcast — undoing settings from earlier in the same  |
 | FIX-039 | TODO | `Wizard/parser.js:1531` |  | Stored sequences are pushed AFTER the PWM mapping command that reboots the board — they are silently discarded |
@@ -203,3 +203,9 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | (ETM phase 3) | `WCB.ino` | `ETMLOAD` trigger was sent **non-ETM** and dropped by every peer’s ETM-mismatch gate, so phase 3 “Loaded Network” measured an idle mesh and `processETMLoad` was unreachable. Now sent under ETM. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | (?EPASS legacy) | `WCB.ino` | `updateESPNowPassword` did `substring(6)` on the 5-char `EPASS` prefix, eating the first character of the password on the legacy no-comma form. Now `substring(5)`. | ESP32 ✅ S3 ✅ |
 | 2026-08-19 | FIX-008, FIX-009 | `WCB_Storage.cpp` | **Factory-reset namespace family.** `?ERASE,NVS` now also clears `dfp_cfg` (DFPlayer was re-seizing its UART after a reset) and the legacy `stored_commands` (whose survival re-imported deleted sequences on next boot). `clearAllStoredCommands()` re-stamps `seq_mig_done`, which lives in the namespace it wipes — that was what re-armed the migration. Erase farewell now tells the user to set `?HW,xx`. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | (ETM CHKSM) | `WCB.ino` | Named `ETM_MAX_CMD_WITH_CRC` (187) and **refuse** to send a longer command under `?ETM,CHKSM` instead of emitting a frame whose CRC gets truncated — the receiver ACKed those before verifying, so the sender saw 100 % delivery for commands that never ran. Relay single-chunk gate now uses the reduced ceiling when CHKSM is on. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | (Kyber dup bytes) | `WCB.ino` | `forwardDataFromKyber` wrote each byte once **per target**, so daisy-chained Maestros sharing one port got every byte twice (garbage frames). Added a per-port bitmask in BOTH branches, scoped **per byte** — the verdict warned that hoisting it per drain-pass would deliver only the first byte of a burst. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | FIX (BCAST,RESET) | `WCB_Storage.cpp` | Reset now syncs the live globals, clears input blocking (never reset at all) and `broadcastToS0`. Previously the stale RAM copies were re-persisted over the defaults by the next unrelated save. | ESP32 ✅ S3 ✅ |
+| 2026-08-19 | (remote-pull filter) | `Wizard/app.js` | `remoteBoardPull` listener now filters on the **source** WCB in `[MGMT:CONFIG,n]`. Every live listener on a relay used to consume whichever reply arrived first — one board’s config, baseline and wcbNumber written onto another board’s slot, after which a Push wrote the wrong settings to real hardware. | JS ✅ |
+| 2026-08-19 | (post-OTA replay) | `Wizard/app.js` | Serialised the post-OTA reconciliation pulls (were fired in parallel on one relay, which has a single `pullSession`). | JS ✅ |
+| 2026-08-19 | (board-number domain) | `Wizard/app.js` | Mapping-destination dropdown and `exportSystemFile` both walked only the WCBQ floor, silently retargeting mappings above it and omitting discovered boards from saved system files. Both now cover the real domain (floor ∪ discovered ∪ connected ∪ configured value). | JS ✅ |

@@ -367,7 +367,18 @@ void resetBroadcastSettingsNamespace() {
                       result ? "SUCCESS" : "FAILED");
     }
     preferences.end();
-    Serial.println("Done. Please reboot.");
+
+    // Bring the LIVE globals back in step with what was just written. Without this the RAM copies
+    // kept the pre-reset values, so ?BCAST,RESET appeared to work while the very next unrelated
+    // save (saveBroadcastSettingsToPreferences, called from ?MAESTRO,CLEAR,ALL among others)
+    // re-persisted the old settings straight back over the defaults.
+    for (int i = 0; i < 5; i++) {
+        serialBroadcastEnabled[i] = true;
+        blockBroadcastFrom[i]     = false;   // input blocking was never reset at all
+    }
+    broadcastToS0 = false;                   // matches the load default at :348
+
+    Serial.println("Done. Broadcast output re-enabled on S1-S5, input blocking cleared, S0 echo off.");
 }
 
 // Load MAC address preferences

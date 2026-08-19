@@ -84,7 +84,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.12:40.R.AUG.2026';
+const UI_VERSION = '19.12:57.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1864,15 +1864,24 @@ async function boardOtaRelay(n) {
     if (_otaInProgress.size === 0 && _suppressedEtmEdges.size > 0) {
       const boards = [..._suppressedEtmEdges];
       _suppressedEtmEdges.clear();
-      for (const bn of boards) {
-        if (bn === n || bn === targetWcb) continue;
-        const r = remoteRelayForBoard[bn];
-        if (!r || !boardConnections[r]?.isConnected()) continue;
-        termLog(r, `[ETM] reconciling WCB${bn} after OTA (edge deferred during transfer)…`, 'sys');
-        _pullingBoards.delete(bn);
-        remoteBoardPull(r, bn);
-        startRemoteTermSession(r, bn);
-      }
+      // SERIALISE these. Firing them in a bare loop started one remoteBoardPull per deferred
+      // board with no await, so several listeners sat on the same relay stream at once. The
+      // firmware relay keeps only ONE pullSession (WCB.ino), so overlapping requests thrash it —
+      // and every live listener used to consume whichever reply arrived first. The reply is now
+      // source-filtered, but running them one at a time is what actually makes the relay
+      // answer each request. Fire-and-forget the chain so the finally block still returns
+      // promptly to re-enable the UI.
+      (async () => {
+        for (const bn of boards) {
+          if (bn === n || bn === targetWcb) continue;
+          const r = remoteRelayForBoard[bn];
+          if (!r || !boardConnections[r]?.isConnected()) continue;
+          termLog(r, `[ETM] reconciling WCB${bn} after OTA (edge deferred during transfer)…`, 'sys');
+          _pullingBoards.delete(bn);
+          await remoteBoardPull(r, bn);
+          await startRemoteTermSession(r, bn);
+        }
+      })();
     }
     setFlashUI(n, false);
     if (btn) { btn.disabled = false; btn.textContent = '⬆ OTA'; }
@@ -3789,8 +3798,23 @@ function appendMappingDestination(rowId, n, dest) {
   const mapType  = document.getElementById(`${rowId}-type`)?.value ?? 'Serial';
   const isSerial = mapType === 'Serial';
 
-  const wcbQty    = parseInt(document.getElementById('g-wcbq')?.value) || systemConfig?.general?.wcbQuantity || 1;
+  // The option list must cover the board-number DOMAIN, not the WCBQ floor. The firmware accepts
+  // any destination 1..MAX_WCB_COUNT, and WDP auto-join deliberately admits boards above the
+  // floor — the repo's own ?WCBQ help recommends exactly that. Building only 1..wcbQty meant a
+  // pulled destination above the floor matched no <option>, so the select fell back to its first
+  // entry and syncMappingsToConfig read that back as the real value: the mapping was silently
+  // retargeted (to "Local" when localWCB is 1, otherwise to WCB 1) and the original destination
+  // was lost from both the config and the baseline. populateUIFromConfig already widens the range
+  // this way for the same class of dropdown; this one was missed.
   const localWCB  = boardConfigs[n]?.wcbNumber || n;
+  const wcbQty    = Math.max(
+    parseInt(document.getElementById('g-wcbq')?.value) || 0,
+    systemConfig?.general?.wcbQuantity || 0,
+    dest.wcbNumber || 0,          // always keep the configured value selectable
+    localWCB || 0,
+    ...desiredBoardNumbers(),     // WDP-discovered + live-connected boards
+    1
+  );
   const wcbOptions = Array.from({length: wcbQty}, (_,i) => {
     const num = i + 1;
     if (num === localWCB) return `<option value="0" ${dest.wcbNumber===0?'selected':''}>Local</option>`;
@@ -7969,10 +7993,21 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
     relayConn._dataCallbacks = relayConn._dataCallbacks.filter(cb => cb !== onLine);
   };
 
+  // The WCB number we asked for. The reply carries the SOURCE board's number, and more than one
+  // pull can be in flight on the same relay (post-OTA reconciliation fires one per deferred board
+  // with no await, and the ETM came-ONLINE listener can fire two within a second). Every live
+  // listener sees every line on that relay's stream, so without this check the first reply to
+  // arrive was consumed by ALL of them — one board's config written onto another board's slot,
+  // baseline and wcbNumber included. A later "Push Config" on the victim slot then wrote the
+  // wrong board's settings to real hardware.
+  const wantWCB = boardConfigs[targetN]?.wcbNumber || targetN;
+
   const onLine = (line) => {
     if (done || !line.startsWith(prefixBase)) return;
     const closeIdx = line.indexOf(']', prefixBase.length);
     if (closeIdx < 0) return;
+    const srcWCB = parseInt(line.slice(prefixBase.length, closeIdx), 10);
+    if (Number.isFinite(srcWCB) && srcWCB !== wantWCB) return;   // another board's reply — leave it
     done = true;
     clearTimeout(timer);
     cleanup();
@@ -8449,8 +8484,16 @@ function exportSystemFile() {
   systemConfig.general.etm.checksumEnabled = document.getElementById('g-etm-chksm')?.checked ?? true;
 
   systemConfig.boards = [];
-  const qty = systemConfig.general.wcbQuantity;
-  for (let n = 1; n <= qty; n++) {
+  // Export every board the tool actually knows about, not just the WCBQ floor. WDP auto-join
+  // routinely puts boards above the floor (the firmware's own ?WCBQ help recommends keeping WCBQ
+  // small and letting discovery cover the rest), and those were silently missing from the saved
+  // system file — the user's backup quietly omitted real boards.
+  const exportNumbers = [...new Set([
+    ...Array.from({ length: systemConfig.general.wcbQuantity }, (_, i) => i + 1),
+    ...desiredBoardNumbers(),
+    ...Object.keys(boardConfigs).map(Number).filter(Number.isFinite),
+  ])].filter(n => n >= 1 && n <= WCB_MAX && !_relaySlots.has(n)).sort((a, b) => a - b);
+  for (const n of exportNumbers) {
     if (boardConfigs[n]) {
       syncSerialUIToConfig(n);
       boardConfigs[n].sequences = getSequencesFromUI(n);

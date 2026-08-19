@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191245RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191257RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191245RAUG2026";
+String SoftwareVersion = "6.2.0_191257RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -212,6 +212,16 @@ typedef struct __attribute__((packed)) {
 } espnow_struct_message_etm;
 
 // ETM Packet Types
+// Longest command that still fits alongside the ETM checksum suffix.
+// structCommand is char[200] and the copies into it are strncpy(..., sizeof-1) = 199 chars.
+// The suffix "|CRC" + 8 hex digits is 12 chars, so 199 - 12 = 187.
+//
+// Over this length the CRC was sliced off in transit, and the receiver then rejected the packet
+// at the "missing CRC" / "CRC mismatch" branches — AFTER it had already sent the ACK. The sender
+// therefore recorded a successful delivery, ETM never retried, and ?STATS showed 100%. Silent
+// data loss that actively reported success.
+#define ETM_MAX_CMD_WITH_CRC  187
+
 #define PACKET_TYPE_COMMAND   0
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
@@ -2332,6 +2342,17 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     etmMsg.structCommandIncluded = 1;
     // Build command string, optionally appending CRC
     if (etmChecksumEnabled) {
+        // Refuse rather than emit a frame whose CRC will be truncated off in transit. The
+        // receiver would ACK it (etmSendAck fires before CRC verification) and then silently
+        // discard it, so the caller would see a clean delivery for a command that never ran.
+        // Failing here is loud, ungated, and — unlike the old behaviour — actually visible.
+        if (strlen(message) > ETM_MAX_CMD_WITH_CRC) {
+            Serial.printf("[ETM] Command %u chars exceeds the %d-char limit under ?ETM,CHKSM "
+                          "— NOT SENT (the checksum would be truncated and the target would "
+                          "ACK-then-discard it)\n",
+                          (unsigned)strlen(message), ETM_MAX_CMD_WITH_CRC);
+            return;
+        }
         uint32_t crc = calculateCRC32(String(message));
         char withCRC[210];
         snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", message, crc);
@@ -2634,7 +2655,13 @@ void handleMgmtForward(const String &args) {
   // distinguish wizard-relayed commands from board-to-board ETM and reset
   // lastReceivedViaESPNOW = false, allowing the command to broadcast via
   // ESP-NOW normally (plain-text commands must be able to propagate to peers).
-  if (totalChunks == 1 && payload.length() <= 198) {  // 198 = 200 - 1 (marker) - 1 (null)
+  // 198 = 200 - 1 (SOH marker) - 1 (null). Under ?ETM,CHKSM the frame must ALSO carry the
+  // 12-char "|CRC########" suffix, so the ceiling drops to ETM_MAX_CMD_WITH_CRC minus the marker.
+  // Without this the shortcut handed sendESPNowMessage a string it now (correctly) refuses,
+  // turning a silently-corrupted delivery into a silently-dropped one — so fall through to the
+  // fragmented path instead, which has no such limit.
+  const unsigned singleChunkMax = etmChecksumEnabled ? (unsigned)(ETM_MAX_CMD_WITH_CRC - 1) : 198u;
+  if (totalChunks == 1 && payload.length() <= singleChunkMax) {
     String markedPayload = String("\x01") + payload;
     sendESPNowMessage(targetWCB, markedPayload.c_str(), true);
     if (debugMGMT)
@@ -4316,13 +4343,23 @@ void forwardDataFromKyber() {
       // broadcast packet, so only queue the byte ONCE regardless of how many
       // remote targets are configured.
       bool addedToRemote = false;
+      // One bit per local port 1-5, scoped to THIS BYTE. Two enabled targets that resolve to the
+      // same physical port (legitimate — Maestros daisy-chain on one serial line, so the same
+      // port legitimately carries several device ids) each wrote the byte, so the chain received
+      // every byte twice and every command frame was garbage.
+      // Deliberately declared inside the per-byte loop: hoisting it out of the drain would make
+      // each port receive only the FIRST byte of the burst, which is far worse.
+      uint8_t sentLocalPorts = 0;
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
         if (!kyberTargets[i].enabled) continue;
         if (kyberTargets[i].targetWCB == WCB_Number) {
           // Local — write immediately, byte by byte. Guard the port so a corrupt
           // targetPort of 0 doesn't fall through to the debug Serial console.
-          if (kyberTargets[i].targetPort >= 1 && kyberTargets[i].targetPort <= 5)
-            getSerialStream(kyberTargets[i].targetPort).write(b);
+          uint8_t tp = kyberTargets[i].targetPort;
+          if (tp >= 1 && tp <= 5 && !(sentLocalPorts & (1 << tp))) {
+            sentLocalPorts |= (1 << tp);
+            getSerialStream(tp).write(b);
+          }
         } else {
           // Remote — accumulate once; broadcast reaches all remote boards. If the
           // buffer is full, FLUSH and keep going — don't silently drop bytes past
@@ -4335,10 +4372,18 @@ void forwardDataFromKyber() {
         }
       }
     } else {
-      // No targeting: write to every locally configured Maestro port
+      // No targeting: write to every locally configured Maestro PORT — once each.
+      // Several Maestro ids share one serial line when daisy-chained, so without the
+      // per-port mask each shared port received the byte once per configured id.
+      // Per-byte scope, for the same reason as the targeted branch above.
+      uint8_t sentLocalPorts = 0;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          getSerialStream(maestroConfigs[i].serialPort).write(b);
+          uint8_t sp = maestroConfigs[i].serialPort;
+          if (sp <= 5 && !(sentLocalPorts & (1 << sp))) {
+            sentLocalPorts |= (1 << sp);
+            getSerialStream(sp).write(b);
+          }
         }
       }
       // Broadcast remote — accumulate; flush a full buffer instead of dropping.
