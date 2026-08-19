@@ -88,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.14:55.R.AUG.2026';
+const UI_VERSION = '19.14:57.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -9456,6 +9456,10 @@ function wizardInitBoards(qty) {
     prev[i] ?? wizardDefaultBoard(i + 1)
   );
   if (wizardState.kyberBoard > qty) wizardState.kyberBoard = 1;
+  // Reducing the slot count can leave activeBoardTab pointing past the end, which renders the
+  // Board Identity step with an empty panel and no obviously-selected tab. Clamp it here, where
+  // the array is resized, so every step that reads it stays in range.
+  if (wizardState.activeBoardTab >= qty) wizardState.activeBoardTab = Math.max(0, qty - 1);
 
   // When the board count shrinks, any maestros/kybers that referenced a now-
   // truncated slot would later dereference ws.boards[m.boardSlot-1].wcbNumber
@@ -10936,8 +10940,14 @@ function wizardValidateStep(key) {
         return 'Each slot must have an ID between 1 and 99.';
       if (new Set(ids).size !== ids.length)
         return 'Each slot must have a unique ID (WCBs and Clients share the same address space).';
-      if (wizardState.useSpecialPeer && ids.includes(20))
-        return 'ID 20 is reserved for the special slot — pick a different ID for that slot, or uncheck the special peer option in the previous step.';
+      // Use the CONFIGURED controller id, not a hardcoded 20. The wizard lets the user pick any
+      // NaviCore ID 1-20 (wizardHTMLNavicoreConfig), so hardcoding 20 both missed a real clash on
+      // a non-default id and spuriously rejected 20 when the controller had been moved elsewhere.
+      // A clash matters: the firmware derives each peer's MAC from its id, so two peers sharing
+      // one id share a MAC.
+      const reservedId = wizardState.navicoreId || 20;
+      if (wizardState.useSpecialPeer && ids.includes(reservedId))
+        return `ID ${reservedId} is reserved for the controller/special peer — pick a different ID for that slot, or uncheck the special peer option in the previous step.`;
       // HW version required only for WCB-type slots; clients run their own
       // sketch and don't have a WCB hardware version.
       const missingHw = slotInfo.some((s, i) => {
