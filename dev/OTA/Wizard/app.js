@@ -112,7 +112,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.17:20.R.AUG.2026';
+const UI_VERSION = '19.18:05.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7274,12 +7274,15 @@ async function _reshareAfterFlash(conn, n) {
 }
 
 async function boardGo(n, opts = {}) {
+  // Assume failure until a push actually finishes. Set BEFORE the relay delegation below:
+  // boardGoRemote is a separate function with its own exits, and leaving the reset after the
+  // delegation meant a relay-managed slot never wrote an outcome at all — so a reader saw
+  // either nothing, or a stale success from the last time that slot was pushed over USB.
+  boardPushOutcome[n] = { ok: false, aborted: true, reason: 'push did not run' };
+
   // Delegate to the remote push path when this board is reached via relay
   if (remoteRelayForBoard[n]) return boardGoRemote(n, opts);
   const skipReboot = opts.skipReboot ?? false;
-  // Assume failure; only the paths that actually finish a push clear this. Callers that
-  // gate on the result (the wizard) must never read a stale success from a prior run.
-  boardPushOutcome[n] = { ok: false, aborted: true, reason: 'push did not run' };
 
   const conn = boardConnections[n];
   if (!conn?.isConnected()) {
@@ -8097,9 +8100,13 @@ async function boardGoRemote(n, opts = {}) {
   const btn = document.getElementById(`b${n}-btn-go`);
 
   const relayN = remoteRelayForBoard[n];
-  if (!relayN) { showToast('No relay board set for this board', 'error'); return; }
+  // boardGo already stamped { ok:false, aborted:true }; refine the reason on each abort so a
+  // caller gating on the outcome can say WHICH stage failed.
+  if (!relayN) { boardPushOutcome[n].reason = 'no relay set for this board';
+                 showToast('No relay board set for this board', 'error'); return; }
   const relayConn = boardConnections[relayN];
-  if (!relayConn?.isConnected()) { showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
+  if (!relayConn?.isConnected()) { boardPushOutcome[n].reason = `relay WCB ${relayN} not connected`;
+                                   showToast(`WCB ${relayN} (relay) not connected`, 'error'); return; }
 
   // Sync all UI state into the config object
   syncSerialUIToConfig(n);
@@ -8111,7 +8118,8 @@ async function boardGoRemote(n, opts = {}) {
   syncWLEDsToConfig(n);
   autoComputeKyberTargets(n);
   const config = boardConfigs[n];
-  if (!config) { showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
+  if (!config) { boardPushOutcome[n].reason = 'no config for this board';
+                 showToast('No config for this board', 'error'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
   config.sequences      = getSequencesFromUI(n);
   const uiVariables     = getVariablesFromUI(n);
@@ -8134,7 +8142,9 @@ async function boardGoRemote(n, opts = {}) {
   // Diff-based push: only send commands that differ from the pulled baseline
   const fullPush  = !boardBaselines[n];
   const cmdString = WCBParser.buildCommandString(config, boardBaselines[n] ?? null, fullPush);
-  if (!cmdString) { showToast('Nothing to push — no changes detected', 'info'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
+  // Nothing to send is a legitimate success, not a failure — same as the direct path.
+  if (!cmdString) { boardPushOutcome[n] = { ok: true, aborted: false, reason: 'no changes to push' };
+                    showToast('Nothing to push — no changes detected', 'info'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
 
   // ── Network-group change guard ─────────────────────────────────────
   // MAC octets and password define the ESP-NOW network group.  After our
@@ -8178,13 +8188,12 @@ async function boardGoRemote(n, opts = {}) {
         await sendMgmtReliable(relayConn, wrapped, relayN, 3, 250);   // unACKed hop — send 3×
         await sleep(400);   // let the target apply it before the next one changes the parser
       }
-      // The board now speaks the new chars, so the baseline must say so — otherwise the next
-      // push re-runs this bootstrap with stale "current" chars and none of it lands.
-      if (boardBaselines[n]) {
-        boardBaselines[n].delimiter = config.delimiter;
-        boardBaselines[n].cmdChar   = config.cmdChar;
-        boardBaselines[n].funcChar  = config.funcChar;
-      }
+      // Deliberately do NOT write the new chars into boardBaselines[n] here. On success the
+      // whole baseline is replaced with `config` below anyway; on FAILURE, recording them
+      // would make the baseline claim a character set the board may never have received, and
+      // the next attempt would skip this bootstrap and send a chain the target cannot parse.
+      // Leaving the baseline stale means a failed push simply re-runs the bootstrap, which is
+      // idempotent.
     }
   }
 
@@ -8248,7 +8257,9 @@ async function boardGoRemote(n, opts = {}) {
     // Update baseline so the next push is diff-based against this state
     boardBaselines[n] = JSON.parse(JSON.stringify(config));
     pushSucceeded = true;
+    boardPushOutcome[n] = { ok: true, aborted: false, reason: '' };
   } catch (e) {
+    boardPushOutcome[n] = { ok: false, aborted: false, reason: e.message };
     showToast(`Remote push failed: ${e.message}`, 'error');
     termLog(relayN, `[Remote] Error: ${e.message}`, 'err');
   }
@@ -9887,9 +9898,12 @@ function wizardRenderStep() {
       // this branch the post-Back edits never reach boardConfigs (so the push sends the
       // pre-Back config) and the port panel stays stuck on its "Loading ports…"
       // placeholder, because wizardRenderStep just replaced the whole step body.
+      // connectSeqN runs one past the last slot once every board is done (that is what the
+      // "All boards configured" banner tests), so it is not always a real slot.
       const n    = wizardState.connectSeqN;
       const busy = !!wizardConnectWatchers[n] || !!boardConnections[n]?.isConnected?.();
-      if (!busy) {
+      const inRange = n >= 1 && n <= wizardState.boards.length;
+      if (!busy && inRange) {
         // Only when this slot is idle: wizardApplyConfig() overwrites boardConfigs from
         // wizardState, which would clobber a config a live/in-flight board just pulled,
         // and re-opening the panel under an active watcher would race its own connect.
