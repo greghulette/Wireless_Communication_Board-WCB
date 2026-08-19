@@ -132,7 +132,7 @@ and the `volatile` increment — both are themselves findings.
 | FIX-077 | **DONE** | `Code/WCB/WCB.ino:6608` |  | Kyber_Local / Maestro_Remote are settable at runtime but KyberLocalTask / KyberRemoteTask are only created at boot, leaving S1 and S2 with no reader a |
 | FIX-078 | **DONE** | `Code/WCB/WCB.ino:7225` |  | Serial1/Serial2 begin() has no baudRates>0 guard (Serial3-5 does) — a 0 in NVS blocks 20 s in the core's baud auto-detect and the boot guard reboots t |
 | FIX-079 | **DONE** | `Wizard/app.js:454` | ⚠FIX | reconcileBoardGrid can delete a board slot that is mid-flash, killing the post-flash config restore |
-| FIX-080 | TODO | `Wizard/app.js:628` | ⚠FIX | addBoardSection rebuilds a section with factory defaults when a config already exists but the board is not USB-connected |
+| FIX-080 | **DONE** | `Wizard/app.js:628` | ⚠FIX | addBoardSection rebuilds a section with factory defaults when a config already exists but the board is not USB-connected |
 | FIX-081 | **DONE** | `Wizard/app.js:737` | ⚠FIX | S3-S5 baud dropdown is capped at 57600, so any higher configured baud blanks the select and is silently rewritten to 9600 |
 | FIX-082 | **DONE** | `Wizard/app.js:855` |  | MP3 / HCR / DFPlayer port dropdowns are never refreshed when another feature frees a port |
 | FIX-083 | **DONE** | `Wizard/app.js:962` |  | Changing the Kyber serial port never marks the board unsaved — the only device port handler missing the dirty call |
@@ -143,12 +143,12 @@ and the `volatile` increment — both are themselves findings.
 | FIX-088 | **DONE** | `Wizard/app.js:2305` |  | syncMP3ToConfig re-reads the raw MP3 volume input, discarding onMP3VolChange's clamp — an out-of-range value makes the firmware reject the whole MP3 c |
 | FIX-089 | **DONE** | `Wizard/app.js:3246` |  | Maestro ID dropdown offers 9, which the firmware rejects as a reserved routing target |
 | FIX-090 | **DONE** | `Wizard/app.js:3594` |  | syncMappingsToConfig() wipes config.pwmOutputPorts and never repopulates it |
-| FIX-091 | TODO | `Wizard/app.js:3866` |  | PWM mapping Save schedules a config pull at 2 s, but the board blocks 3 s and reboots |
+| FIX-091 | **DONE** | `Wizard/app.js:3866` |  | PWM mapping Save schedules a config pull at 2 s, but the board blocks 3 s and reboots |
 | FIX-092 | TODO | `Wizard/app.js:4092` |  | seqValueToLines/seqTextareaToValue are not inverses: '^^***' standalone comments collapse, and a plain Push rewrites stored sequences |
 | FIX-093 | TODO | `Wizard/app.js:5541` |  | A relay's transient USB drop tears down every relay-managed remote board and the successful reconnect never rebuilds them |
-| FIX-094 | TODO | `Wizard/app.js:5771` | ⚠FIX | Cancelling the shared-port picker still installs a dead _shared connection, permanently latching _hasSharedPort() and blocking auto-share |
+| FIX-094 | **DONE** | `Wizard/app.js:5771` | ⚠FIX | Cancelling the shared-port picker still installs a dead _shared connection, permanently latching _hasSharedPort() and blocking auto-share |
 | FIX-095 | TODO | `Wizard/app.js:6136` | ⚠FIX | General-mismatch modal's "Use WCB<n> values" silently ignores the NaviCore rows it just displayed |
-| FIX-096 | TODO | `Wizard/app.js:6800` | ⚠FIX | boardPull commits an empty or truncated backup as a successful pull, overwriting config AND baseline with factory defaults |
+| FIX-096 | **DONE** | `Wizard/app.js:6800` | ⚠FIX | boardPull commits an empty or truncated backup as a successful pull, overwriting config AND baseline with factory defaults |
 | FIX-097 | TODO | `Wizard/app.js:7140` |  | Failed post-flash / post-erase boot-wait leaves the Push Config button permanently disabled and labelled "Flashing…" |
 | FIX-098 | **DONE** | `Wizard/app.js:7902` |  | remoteBoardPull leaks its _pullingBoards entry on a retry attempt, permanently locking that board out of all future pulls |
 | FIX-099 | **DONE** | `Wizard/app.js:8282` | ⚠FIX | Push All includes MgmtRelay slots, whose board section (and Push button) was deleted — boardGo throws and Push All dies before the relay-reboot stage |
@@ -260,3 +260,7 @@ Every edit, appended as it happens. One row per commit-worthy change.
 | 2026-08-19 | FIX-098 | `app.js` | `remoteBoardPull` leaked its `_pullingBoards` entry when the relay was gone on a **retry** — the guard was added by attempt 1, so bailing left the board permanently marked in-flight and every later pull was rejected as a duplicate. A relay dropping between timeout and retry is exactly how that happens. | JS ✅ |
 | 2026-08-19 | FIX-033 | `app.js` | Remote push never checked the 16-chunk MGMT ceiling: an oversized config was streamed in full, discarded **wholesale** by the relay/target, and then reported as success with the baseline advanced. Now refused up front with the actual sizes and what to trim. | JS ✅ |
 | 2026-08-19 | FIX-029, FIX-099 | `app.js` | Push All included MgmtRelay slots, which have no board section or Push button — `boardGo` threw on the missing element, and because that happened inside the staged loop it aborted the remaining stages including the deferred reboots. Relay slots are now excluded. | JS ✅ |
+| 2026-08-19 | FIX-080 | `app.js` | `addBoardSection` only rendered an existing config when the board was **connected**, so a slot holding a real pulled config but no live connection (dropped board, or one loaded from a system file) got a section of factory defaults — which the next `sync*ToConfig` then read straight back over the good config. Now renders whenever a config exists. | JS ✅ |
+| 2026-08-19 | FIX-091 | `app.js` | PWM mapping save scheduled its verify pull at 2 s, but applying a PWM mapping makes the firmware wait 3 s and **reboot** — the pull hit a board mid-restart. PWM saves now wait past the reboot; serial mappings keep the short delay. | JS ✅ |
+| 2026-08-19 | FIX-094 | `app.js` | Cancelling the shared-port picker left a dead `_shared` connection installed: the card looked disconnected while every send went nowhere, and `_hasSharedPort()` still counted the slot as shared and refused a later direct connect. Now torn down on both the no-port and error paths. | JS ✅ |
+| 2026-08-19 | FIX-096 | `app.js` | `boardPull` parsed a truncated/empty response and committed the resulting mostly-default config over **both** `boardConfigs[n]` and `boardBaselines[n]`. The baseline is what the next Push diffs against, so the next push would have tried to restore those defaults onto a board that never lost them. Now requires the end marker and changes nothing without it. | JS ✅ |

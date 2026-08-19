@@ -88,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.16:26.R.AUG.2026';
+const UI_VERSION = '19.16:42.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -645,10 +645,13 @@ function addBoardSection(n) {
   // built card shows "Not Connected" for a board that is actually connected
   // (the exact symptom when a USB board auto-migrates into a slot that WDP
   // discovery later renders).
-  if (boardConnections[n]?.isConnected?.()) {
-    populateUIFromConfig(n, boardConfigs[n]);
-    updateConnectionUI(n, true);
-  }
+  // Render whatever config this slot already holds, connected or not. Gating this on
+  // isConnected() meant a slot with a real pulled config but no live connection — a board that
+  // dropped, or one loaded from a system file — got a section full of FACTORY DEFAULTS while
+  // boardConfigs[n] held the real values. The next sync*ToConfig then read that defaulted DOM
+  // straight back over the good config.
+  if (boardConfigs[n]) populateUIFromConfig(n, boardConfigs[n]);
+  if (boardConnections[n]?.isConnected?.()) updateConnectionUI(n, true);
 }
 
 // ─── Device-label combobox (per-port label fields) ────────────────
@@ -3965,9 +3968,15 @@ async function saveMappingRow(rowId, n) {
     // Sync the mapping into the baseline so Push Config won't re-send it as a diff
     if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config.mappings));
     updateBoardStatusBadge(n, 'configured');
-    // Pull config back ~2 s after sending so the tools page reflects the new mapping
-    // (port claim state, PWM output flags, etc.) without requiring a manual pull.
-    setTimeout(() => boardPull(n), 2000);
+    // Pull config back after sending so the tools page reflects the new mapping (port claim
+    // state, PWM output flags, etc.) without a manual pull.
+    //
+    // A PWM mapping makes the firmware reboot: addPWMMapping() prints, waits 3 s, then restarts
+    // (WCB_PWM.cpp). A 2 s pull therefore landed on a board that was about to reset and either
+    // timed out or returned a half-written config. Wait past the reboot AND the boot sequence for
+    // that case; keep the short delay for serial mappings, which do not restart anything.
+    const rebootsBoard = (type || '').toUpperCase() === 'PWM';
+    setTimeout(() => boardPull(n), rebootsBoard ? 9000 : 2000);
 
     // PWM with remote destinations: the firmware on board n sends ?MAP,PWM,OUT,Sx to each
     // remote destination board automatically via ESP-NOW after processing the MAP command.
@@ -5928,10 +5937,21 @@ async function modalSharedConnect() {
       showToast(`WCB ${n} shared (this tab is ${hub.role})`, 'success');
       boardPull(n);
     } else {
+      // No tab ever opened the port — the user cancelled the picker, or the leader has none.
+      // Do NOT leave a dead _shared connection installed for this slot: it reports
+      // isConnected() from hub.portOpen (false), so the card looks disconnected while every send
+      // silently goes nowhere, and _hasSharedPort() still counts this slot as the shared one and
+      // refuses a later direct connect. Tear it down and leave the slot genuinely unconnected.
       showToast(`WCB ${n}: shared — no tab has opened the port yet`, 'warning', 6000);
+      try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
+      delete boardConnections[n];
+      updateConnectionUI(n, false);
     }
   } catch (e) {
     showToast(`Share failed: ${e.message}`, 'error');
+    try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
+    delete boardConnections[n];
+    updateConnectionUI(n, false);
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -6930,6 +6950,22 @@ async function boardPull(n, opts = {}) {
     const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
     termLog(n, `${pullFuncChar}backup`, 'in');
     raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
+  }
+
+  // A backup MUST be terminated by its end marker. Without this check a truncated or empty
+  // response — a board that rebooted mid-pull, a relay that dropped, a timeout that returned a
+  // partial buffer — was parsed anyway, and the resulting mostly-default config was written over
+  // boardConfigs[n] AND boardBaselines[n]. That is the damaging part: the baseline is what the
+  // next Push diffs against, so the very next push would try to "restore" those defaults onto a
+  // board that never lost them.
+  if (!raw || !raw.includes('End of Backup')) {
+    const shown = (raw || '').trim().slice(0, 120);
+    termLog(n, `⚠ Config pull returned no complete backup (${(raw || '').length} chars` +
+               `${shown ? `, starts: "${shown}"` : ''}) — keeping the existing config`, 'err');
+    showToast(`WCB ${n}: config pull incomplete — nothing was changed. Try again.`, 'error', 8000);
+    updateBoardStatusBadge(n, 'error');
+    _boardPullInFlight.delete(n);
+    return;
   }
 
   let migrated = false;
