@@ -58,6 +58,10 @@ const _detecting = {};            // { [n]: true/false } — auto-detect active 
 let remoteRelayForBoard = {};     // { boardSlot: relaySlot } — set when board is reached via relay
 const _etmCallbacks = {};         // { relaySlot: callback } — one ETM listener per relay board
 const _pullingBoards = new Set(); // boards with an active remoteBoardPull in flight — dedup guard
+const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
+                                  // discovery poll must not inject ?WDP,DUMP into that stream:
+                                  // a dump line can satisfy a pending read and fake an ACK for
+                                  // a config command that was actually dropped.
 const _otaInProgress = new Set(); // boards (slots) with an OTA in flight (wireless relay OR direct
                                   // USB) — so the ETM listener + mesh-discovery tick don't fire
                                   // pulls that fight the OTA stream
@@ -84,7 +88,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '19.14:42.R.AUG.2026';
+const UI_VERSION = '19.14:44.R.AUG.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -462,6 +466,12 @@ function reconcileBoardGrid() {
   for (const [n, el] of have) {
     if (wantSet.has(n)) continue;
     if (boardConnections[n]?.isConnected?.()) continue;   // never yank a live board
+    // ...and never yank one that is mid-flash. boardGo hands the port to esptool, so
+    // isConnected() is false for the whole 30-60 s window; evicting the slot there deletes
+    // boardConnections/boardConfigs and the post-flash config restore then dead-ends on
+    // 'Board not connected', leaving a freshly-flashed board with factory-default NVS.
+    // updateConnectionUI already guards on this same flag.
+    if (_boardFlashing[n]) continue;
     el.remove();
     delete boardConnections[n];
     delete boardConfigs[n];
@@ -7118,6 +7128,7 @@ async function boardGo(n, opts = {}) {
 
   btn.disabled = true;
   btn.textContent = (isFlash || isUpdate || isFactory) ? 'Flashing…' : isErase ? 'Erasing…' : 'Pushing…';
+  _pushingBoards.add(n);   // cleared in the finally below
 
   if (isFlash || isUpdate || isFactory) {
     // ── HW version is a hint, not a gate ─────────────────────────
@@ -7365,6 +7376,7 @@ async function boardGo(n, opts = {}) {
     await _reshareAfterFlash(conn, n);   // catch-all: re-share (or clear the borrow flag) on any flash exit
     btn.disabled = false;
     btn.textContent = 'Push Config';
+    _pushingBoards.delete(n);   // early exit — release the mesh-discovery hold
     return;
   }
 
@@ -7451,6 +7463,7 @@ async function boardGo(n, opts = {}) {
     await _reshareAfterFlash(conn, n);   // catch-all: re-share (or clear the borrow flag) on any erase exit
     btn.disabled = false;
     btn.textContent = 'Push Config';
+    _pushingBoards.delete(n);   // early exit — release the mesh-discovery hold
     return;
   }
 
@@ -7681,6 +7694,8 @@ async function boardGo(n, opts = {}) {
   } catch (e) {
     showToast(`Push failed: ${e.message}`, 'error');
     termLog(n, `Push error: ${e.message}`, 'err');
+  } finally {
+    _pushingBoards.delete(n);   // release the mesh-discovery hold on every exit path
   }
 
   btn.disabled = false;
@@ -12710,6 +12725,11 @@ function removeClientCard(n) {
 async function meshAutoDiscoverTick() {
   if (_meshDiscoverBusy) return;
   if (_statsFetchBusy) return;   // don't inject ?WDP,DUMP into an in-flight ETM/stats capture
+  // ...nor into an in-flight config push. The board answers ?WDP,DUMP on the same stream the
+  // push is reading acknowledgements from, so a dump line can satisfy a pending read and fake
+  // an ACK for a config command that was actually dropped.
+  if (_pushingBoards.size > 0) return;
+  if (Object.keys(_boardFlashing).length > 0) return;   // nor into a flash/erase
   if (typeof _otaInProgress !== 'undefined' && _otaInProgress.size > 0) return;  // don't fight an OTA
   const t = _wdpMeshConn();
   if (!t) return;
