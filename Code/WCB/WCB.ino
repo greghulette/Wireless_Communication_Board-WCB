@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191442RAUG2026                                  *****////
+///*****                                          Version 6.2.0_191453RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191442RAUG2026";
+String SoftwareVersion = "6.2.0_191453RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1975,7 +1975,20 @@ Stream &getSerialStream(int port) {
 //   re-begun with the SAME signature setup() uses, otherwise the change only
 //   takes effect on the next boot. PWM-reserved ports are skipped (mirrors
 //   the guards in setup()). Called from updateBaudRate() in WCB_Storage.cpp.
+// Set to the port number while that port is being torn down and re-begun below. Every task that
+// drains a serial port checks this and skips the port for the duration.
+//
+// Without it, SoftwareSerial::end() frees the RX buffer while serialCommandTask (5 ms poll) or
+// RawSerialForwardingTask is inside available()/read() on the same object — a read against a
+// freed buffer. This is reachable from an ordinary ?BAUD,Sx change and from any config push that
+// alters a baud rate; it needs no raw mapping.
+volatile int serialReconfigPort = 0;
+
 void applyLiveBaud(int port, uint32_t baud) {
+  serialReconfigPort = port;
+  // Give any task already inside a drain a chance to finish its pass before the teardown.
+  // serialCommandTask polls every 5 ms and RawSerialForwardingTask every 2 ms.
+  vTaskDelay(pdMS_TO_TICKS(12));
   switch (port) {
     case 1: Serial1.updateBaudRate(baud); break;
     case 2: Serial2.updateBaudRate(baud); break;
@@ -1998,6 +2011,7 @@ void applyLiveBaud(int port, uint32_t baud) {
       }
       break;
   }
+  serialReconfigPort = 0;
 }
 
 // Enqueue commands for asynchronous processing
@@ -3918,6 +3932,14 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                       senderWCB, isBootAnnounce ? " (boot)" : "",
                       info->src_addr[0], info->src_addr[1], info->src_addr[2],
                       info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+      }
+      // A rebooted peer restarts its sequence counter at 1, but our duplicate ring still holds
+      // the seqs it used before the reboot — so its first commands matched a "already seen" entry
+      // and were ACKed and then silently NOT executed. Clear this sender's history on a boot
+      // announce so the reused low seqs are treated as new.
+      if (isBootAnnounce) {
+        for (int h = 0; h < ETM_SEQ_HISTORY; h++) etmSeqHistory[senderIdx][h] = 0;
+        etmSeqHistoryIdx[senderIdx] = 0;
       }
     }
 
@@ -6646,6 +6668,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // bytes and must not have them stolen/mis-parsed as a line command.
   if (sourceID != 0 && sourceID == maestroQueryPort) return;
 
+  // Skip a port that applyLiveBaud is currently tearing down and re-beginning: on S3-S5 that
+  // frees and reallocates the SoftwareSerial RX buffer under us.
+  if (sourceID != 0 && sourceID == serialReconfigPort) return;
+
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
   while (serial.available()) {
@@ -6924,6 +6950,10 @@ void RawSerialForwardingTask(void *pvParameters) {
             }
             
             int inputPort = serialMonitorMappings[i].inputPort;
+
+            // Skip a port applyLiveBaud is tearing down: on S3-S5 that frees and reallocates the
+            // SoftwareSerial RX buffer, and reading it here would touch freed memory.
+            if (inputPort == serialReconfigPort) continue;
 
             // If this board has a local Kyber, skip that specific port — KyberLocalTask
             // owns it.  Reading here would steal bytes from the Kyber forwarding path

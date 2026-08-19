@@ -1204,6 +1204,10 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Kyber_Location = "local";
     kyberLocalPort = kyberPort;   // store globally so forwarding functions use correct port
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
+    // KyberLocalTask / KyberRemoteTask are created ONLY at boot (WCB.ino setup()), so flipping the
+    // mode at runtime leaves the newly-owned ports with no reader at all until a restart. Say so
+    // rather than letting the board look configured-but-deaf.
+    Serial.println("⚠️  Reboot required — the Kyber forwarding task is only started at boot.");
     
     if (kyberPort > 0 && kyberPort <= 5) {
       updateBaudRate(kyberPort, 115200);
@@ -1226,6 +1230,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Maestro_Remote = true;
     Kyber_Location = "remote";
     Serial.println("Kyber is REMOTE (on another WCB)");
+    Serial.println("⚠️  Reboot required — the Maestro-remote forwarding task is only started at boot.");
     
   } else if (baseCommand.equals("clear")) {
     // Act on the port the Kyber was ACTUALLY on, and only if it was configured at all.
