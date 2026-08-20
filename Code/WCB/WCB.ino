@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_191805RAUG2026                                  *****////
+///*****                                          Version 6.2.0_201054RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_191805RAUG2026";
+String SoftwareVersion = "6.2.0_201054RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -958,7 +958,7 @@ static unsigned long lastCommandProcessedMs = 0;
 // String storedCommands[MAX_STORED_COMMANDS];
  
 // ============================= Forward Declarations =============================
-void writeSerialString(Stream &serialPort, String stringData);
+void writeSerialString(Stream &serialPort, const String &stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 // Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
@@ -1962,11 +1962,27 @@ void printETMCharResults(int* peers, int peerCount) {
 
 // String getSerialLabel(int port);
 // Write a string + `\r` to a given Stream
-void writeSerialString(Stream &serialPort, String stringData) {
+// Write one line (plus the trailing CR) to a serial port as a SINGLE bulk write.
+//
+// This used to loop `serialPort.write(completeString[i])` one byte at a time. Every byte was
+// an independent write() call, which is the widest possible interleave window: any other
+// task writing the same port could land its bytes BETWEEN two characters of this string.
+// That is a real topology here, not a theoretical one — RawSerialForwardingTask,
+// KyberLocalTask, KyberRemoteTask and PWMTask all do outputSerial.write(buffer, len) from
+// their own FreeRTOS tasks, while this path runs on the loop task. A device parsing framed
+// commands (e.g. the HCR’s <...> strings) then sees a spliced frame and acts on the wrong
+// value, intermittently and with nothing wrong upstream to find.
+//
+// One bulk write closes that window on S1/S2: HardwareSerial::write(buf,len) goes through
+// uartWriteBuf under the UART mutex (HAL locks are enabled in this core build), so the whole
+// string lands atomically. It also drops the per-byte lock/unlock overhead.
+//
+// S3-S5 are EspSoftwareSerial, which bit-bangs and takes no mutex — a bulk write there is
+// still far tighter than per-byte, but it is NOT atomic. Two tasks writing one software
+// port can still splice; the fix for that is to not share the port.
+void writeSerialString(Stream &serialPort, const String &stringData) {
   String completeString = stringData + '\r';
-  for (int i = 0; i < completeString.length(); i++) {
-    serialPort.write(completeString[i]);
-  }
+  serialPort.write((const uint8_t *)completeString.c_str(), completeString.length());
 }
 
 Stream &getSerialStream(int port) {
