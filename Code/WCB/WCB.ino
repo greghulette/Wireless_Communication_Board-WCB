@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_201054RAUG2026                                  *****////
+///*****                                          Version 6.2.0_201144RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_201054RAUG2026";
+String SoftwareVersion = "6.2.0_201144RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1996,6 +1996,60 @@ Stream &getSerialStream(int port) {
   }
 }
 
+// ── Soft-serial TX timing (S3-S5) ────────────────────────────────────────────
+// EspSoftwareSerial bit-bangs TX in software and busy-waits each bit period against a
+// running anchor (writePeriod/preciseDelay). Its default is m_intTxEnabled = true, which
+// means it NEVER takes a critical section — so an interrupt landing mid-byte pushes the
+// accumulator behind, the remaining bits compress, and the receiver mis-frames. On this
+// board the interrupt is the ESP-NOW radio, and the symptom is a command cut short in
+// flight: an H-CR fed "<CA1021>" plays 0001/0010, i.e. a PREFIX of what was sent, at up
+// to a 45% failure rate under mesh load. Measured on a WCB1 by a user, not theoretical.
+//
+// enableIntTx(false) makes the library wrap each byte in taskENTER_CRITICAL instead.
+// The window is ONE BYTE, not one line: lazyDelay() explicitly restores interrupts at
+// every stop bit ("to avoid other tasks piling up" — SoftwareSerial.cpp:265-283), so the
+// worst case is ~0.94 ms at 9600. It costs no throughput — the bit-bang takes its time
+// from the baud rate either way, and today a preempted byte takes LONGER than nominal.
+//
+// WHY THIS IS GATED. The library’s interrupt mux is STATIC — one spinlock shared by S3,
+// S4 and S5 — and a port with intTx still enabled never touches it. So this is only safe
+// on a port that no CORE 0 task ever writes; otherwise core 0 would spin on the mux (and
+// sit interrupt-disabled) inside the WiFi task. Core-0 writers on this board are PWMTask
+// (pinned to core 0) and espNowReceiveCallback itself, which writes raw mesh data straight
+// to a Maestro port, the Kyber port, and raw-serial-mapping targets. Exclude all of those.
+//
+// RESIDUAL: a raw-serial mapping on a REMOTE board can target a port this board believes
+// is idle — that case is not locally knowable. It is bounded (the mux is released every
+// stop bit) and that path already blocks the WiFi task for the whole bit-bang regardless,
+// so it is not made materially worse. Re-check if raw mesh mappings become common.
+static bool softSerialLoopTaskOnly(int port) {
+  if (port < 3 || port > 5) return false;                 // S1/S2 are real UARTs — N/A
+  if (isSerialPortUsedForPWMInput(port) ||
+      isSerialPortPWMOutput(port))        return false;   // PWMTask is pinned to core 0
+  if (kyberLocalPort == port)             return false;   // RX callback echoes Kyber here
+  if (isSerialPortRawMapped(port))        return false;   // raw-mapping traffic
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++)          // RX callback forwards Maestro here
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
+        maestroConfigs[i].serialPort == port) return false;
+  return true;
+}
+
+// Apply the above to one soft port. Call after EVERY begin() — begin() constructs fresh
+// state, so the setting does not survive a re-begin (which applyLiveBaud does per baud change).
+static void applySoftSerialIntTx(int port) {
+  const bool loopOnly = softSerialLoopTaskOnly(port);
+  switch (port) {
+    case 3: Serial3.enableIntTx(!loopOnly); break;
+    case 4: Serial4.enableIntTx(!loopOnly); break;
+    case 5: Serial5.enableIntTx(!loopOnly); break;
+    default: return;
+  }
+  if (debugEnabled)
+    Serial.printf("[SOFTSERIAL] S%d bit-bang TX: %s\n", port,
+                  loopOnly ? "interrupt-protected (loop-task only)"
+                           : "unprotected (a core-0 task can write this port)");
+}
+
 // Apply a new baud rate to a LIVE serial port without requiring a reboot.
 //   S1/S2 (hardware UART): updateBaudRate() just reprograms the clock divisor.
 //   S3-S5 (EspSoftwareSerial): the software UART must be torn down and
@@ -2023,18 +2077,21 @@ void applyLiveBaud(int port, uint32_t baud) {
       if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
         Serial3.end();
         Serial3.begin(baud, SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+        applySoftSerialIntTx(3);
       }
       break;
     case 4:
       if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
         Serial4.end();
         Serial4.begin(baud, SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+        applySoftSerialIntTx(4);
       }
       break;
     case 5:
       if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
         Serial5.end();
         Serial5.begin(baud, SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+        applySoftSerialIntTx(5);
       }
       break;
   }
@@ -7850,6 +7907,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
       if (baudRates[2] > 0) {
           Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+          applySoftSerialIntTx(3);
       } else {
           Serial.println("Serial3 has invalid baud rate (0) - skipping UART init");
       }
@@ -7860,6 +7918,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
       if (baudRates[3] > 0) {
           Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+          applySoftSerialIntTx(4);
       } else {
           Serial.println("Serial4 has invalid baud rate (0) - skipping UART init");
       }
@@ -7870,6 +7929,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
       if (baudRates[4] > 0) {
           Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+          applySoftSerialIntTx(5);
       } else {
           Serial.println("Serial5 has invalid baud rate (0) - skipping UART init");
       }

@@ -99,6 +99,23 @@ changing before editing.**
     watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
     (`mgmtQueueOut` / `drainMgmtOut`).
 
+12. **S3-S5 are bit-banged software UARTs, and their TX timing is not protected by default.**
+    `SoftwareSerial Serial3/4/5` (`WCB.ino`) is EspSoftwareSerial: TX busy-waits each bit
+    period against a running anchor, and the library default `m_intTxEnabled = true` means it
+    never takes a critical section. An ESP-NOW interrupt landing mid-byte pushes the
+    accumulator behind, the remaining bits compress, and the **receiver mis-frames — the
+    command arrives cut short**, not garbled. A user measured a 45 % failure rate feeding an
+    H-CR on S5 under mesh load: `<CA1021>` played 0001/0010, every failure a *prefix*.
+    `applySoftSerialIntTx()` now flips `enableIntTx(false)` per port, but **only where no
+    core-0 task can write that port** — the library’s interrupt mux is `static` (one spinlock
+    for all three ports), and `espNowReceiveCallback` writes raw mesh data straight to Maestro,
+    Kyber and raw-mapping ports on the WiFi task. Re-check that predicate before adding any new
+    writer. Two things that are NOT fixes: the write being one bulk call instead of per-byte
+    (both take the same path with interrupts live), and lowering the baud (it lengthens the
+    exposure). The durable fix is a hardware UART (S1/S2) or taking the other traffic off the
+    wire — every broadcast is bit-banged to **every** unclaimed port, so one enabled-but-unused
+    port costs real milliseconds of blocked loop task per message.
+
 
 ## Verifying
 
