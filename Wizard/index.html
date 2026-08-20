@@ -784,9 +784,9 @@
       <div class="subsection" style="--rail:#ff8c00">
       <div class="subsection-title">Audio</div>
       <div class="field-group">
-        <div class="field">
+        <div class="field device-toggle-field">
           <label>Audio devices on this board <span class="wiz-hint" data-tip="Enable the audio device(s) physically wired to this WCB. A board can host more than one, on different serial ports. Each enabled device shows its own settings below. Leave all off if another controller drives audio through this WCB via broadcast/serial mapping.">i</span></label>
-          <div class="radio-group">
+          <div class="radio-group device-toggle">
             <label><input type="checkbox" id="b{N}-mp3-enable" onchange="onAudioToggle({N},'mp3')"><span>MP3 Trigger</span></label>
             <label><input type="checkbox" id="b{N}-hcr-enable" onchange="onAudioToggle({N},'hcr')"><span>HCR Vocalizer</span></label>
             <label><input type="checkbox" id="b{N}-dfp-enable" onchange="onAudioToggle({N},'dfp')"><span>DFPlayer</span></label>
@@ -794,7 +794,7 @@
         </div>
 
         <!-- MP3 Trigger block -->
-        <div id="b{N}-mp3-block" style="display:none">
+        <div id="b{N}-mp3-block" class="device-config" style="display:none">
         <div class="field">
           <label>MP3 Trigger mode <span class="wiz-hint" data-tip="Local = the MP3 Trigger is wired to this WCB. Remote = this board routes ;A to the MP3 Trigger on another WCB.">i</span></label>
           <div class="radio-group">
@@ -837,7 +837,7 @@
         </div><!-- /mp3-block -->
 
         <!-- HCR Vocalizer block -->
-        <div id="b{N}-hcr-block" style="display:none">
+        <div id="b{N}-hcr-block" class="device-config" style="display:none">
         <div class="field">
           <label>HCR Vocalizer mode <span class="wiz-hint" data-tip="Local = the HCR Vocalizer is wired to this WCB (it sends ;H and polls status). Remote = this board routes ;H to the HCR on another WCB.">i</span></label>
           <div class="radio-group">
@@ -876,7 +876,7 @@
         </div><!-- /hcr-block -->
 
         <!-- DFPlayer block -->
-        <div id="b{N}-dfp-block" style="display:none">
+        <div id="b{N}-dfp-block" class="device-config" style="display:none">
         <div class="field">
           <label>DFPlayer mode <span class="wiz-hint" data-tip="Local = a DFPlayer Mini is wired to this WCB. Remote = this board routes ;D to the DFPlayer on another WCB. Baud is fixed at 9600 by the module.">i</span></label>
           <div class="radio-group">
