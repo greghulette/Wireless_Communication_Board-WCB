@@ -391,6 +391,35 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   border-color: var(--accent); background: rgba(0,212,255,0.07); color: var(--accent);
 }
 
+/* ─── Device pickers (Audio) ─────────────────────────────────── */
+/* The card IS the control: selection reads as highlight-vs-not, so the checkbox square
+   is redundant chrome. Hidden, NOT removed — the inputs stay the state (onAudioToggle and
+   populateUIFromConfig both read .checked), and keeping them keeps the label click target,
+   keyboard focus and space-to-toggle working for free. The highlight itself already comes
+   from `.radio-group label:has(input:checked)` above. */
+.radio-group.device-toggle input[type="checkbox"] { display: none; }
+.radio-group.device-toggle label { padding: 8px 14px; font-weight: 500; }
+
+/* Give the picker row the full width so the per-device settings land UNDERNEATH it rather
+   than beside it. Overrides `.field:has(> .radio-group)`, which sizes mode selectors to
+   their content — right for a 2-button Local/Remote toggle, wrong for a picker that owns
+   a panel below. Scoped by the extra `.field-group >` so specificity is unambiguous. */
+.field-group > .field.device-toggle-field { width: auto; flex: 1 0 100%; }
+
+/* One panel per enabled device, full-width, stacked under the pickers. Grouped and rail-
+   coloured to match the Audio subsection, because a board can host more than one audio
+   device at once and two ungrouped rows of settings would run together. `display:flex`
+   here (not inline) is what onAudioToggle’s `style.display = ''` falls back to. */
+.field-group > .device-config {
+  flex: 1 0 100%;
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px;
+  padding: 12px 14px;
+  background: rgba(255,140,0,0.04);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--orange);
+  border-radius: var(--radius);
+}
+
 /* ─── Dividers & Subsections ─────────────────────────────────── */
 .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 .subsection-title {
