@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_201144RAUG2026                                  *****////
+///*****                                          Version 6.2.0_261315RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_201144RAUG2026";
+String SoftwareVersion = "6.2.0_261315RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1885,7 +1885,11 @@ void storeReportedStats(const String& rest) {
   r.sent = v[1]; r.ackd = v[2]; r.retries = v[3]; r.failed = v[4];
   r.unguaranteed = v[5]; r.bcast = v[6]; r.recv = v[7];
   r.lastMs = millis();
-  if (debugEnabled)
+  // ?STATS,RPT is high-rate internal telemetry (every board reports periodically),
+  // so its console echo rides ?DEBUG,MGMT with the rest of the relay/mgmt chatter —
+  // NOT general ?DEBUG,ON, where it floods the terminal. (The "Processing ETM input"
+  // mirror in espNowReceiveCallback is gated the same way.)
+  if (debugMGMT)
     Serial.printf("[STATS] RPT from WCB%d: sent=%lu ackd=%lu retries=%lu failed=%lu unguaranteed=%lu bcast=%lu recv=%lu\n",
                   from, r.sent, r.ackd, r.retries, r.failed, r.unguaranteed, r.bcast, r.recv);
 }
@@ -4357,8 +4361,16 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // General-debug visibility: mirror what processIncomingSerial prints
             // for locally-typed commands, so ?DEBUG,ON shows ETM-received
             // commands without needing the more verbose ?DEBUG,ETM,ON.
-            if (debugEnabled)
-                Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+            // Exception: ?STATS,RPT telemetry is high-rate internal chatter (every
+            // board reports its delivery counters periodically) and floods the
+            // terminal under general ?DEBUG,ON — so it rides ?DEBUG,MGMT with the
+            // rest of the relay traffic instead, matching storeReportedStats().
+            {
+                String etmUp = etmCmd; etmUp.toUpperCase();
+                bool isStatsRpt = etmUp.startsWith(String(LocalFunctionIdentifier) + "STATS,RPT");
+                if (isStatsRpt ? debugMGMT : debugEnabled)
+                    Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+            }
 
             // Mirror the local-serial dispatch (WCB.ino:4863) so ETM-received
             // chains behave identically to locally-typed ones:
