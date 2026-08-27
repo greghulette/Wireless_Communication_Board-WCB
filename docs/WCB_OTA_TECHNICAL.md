@@ -181,7 +181,30 @@ Each: `memcpy` the struct, null‑terminate the password, gate, act, ACK.
 The target **always ACKs its current contiguous write cursor**, even on a duplicate or gap:
 - **Lost DATA** → cursor doesn't advance → browser sees a stale cursor → resends from there.
 - **Lost ACK** → re‑sent on the next (resent) DATA.
-- esp_ota verifies the whole image before switching, so a silently‑wrong byte can't ship.
+- esp_ota verifies the whole image (magic + SHA‑256) before switching, so a wrong byte can never
+  *ship*. It can still cost you the entire transfer: verification happens **once, at 100%**, so a
+  single corrupted byte is invisible for the whole multi‑minute stream and then fails everything.
+
+**Loss is handled by the cursor. Silent CORRUPTION was not** — and the two are not the same thing.
+The corrupting path is the USB→relay **serial** hop, not the radio (802.11 CRCs every ESP‑NOW frame
+in hardware and drops bad ones). A UART RX‑ring overflow drops a contiguous run of bytes from the
+**middle** of an arriving line; if that run falls inside the base64 field and the newline survives,
+what remains is *still valid base64* and *still decodes with `rc == 0`* — to a shorter, re‑phased
+byte string. The relay forwards it as a normal fragment at the offset the sender named, the target
+writes it at a legitimate offset and advances its cursor, and nothing anywhere notices until the
+SHA‑256 at 100%. Two changes close it:
+
+- **`Serial.setRxBufferSize(8192)`** (was 2048). The browser sends a window of 8 DATA lines of
+  ~284 B = **2272 B**, which could not fit a 2 KB ring even if `loop()` drained nothing — and during
+  `BEGIN` the target is erasing ~1.2 MB, so it is not draining promptly. `serialRxOverflows`
+  (WCB.ino) now counts overflows instead of losing them silently.
+- **An optional CRC‑32 on the DATA line**, carried as a suffix on the *offset* field —
+  `?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>` — covering `"<offset>,<b64>"` as transmitted. It rides
+  on the offset because `String::toInt()` stops at the `:`, so firmware predating the check reads
+  the offset exactly as before and a sender predating it simply omits the suffix; appending a
+  trailing field instead would have been swept into the base64 and failed **every** packet on old
+  firmware. A mismatch **drops the line**, which converts silent corruption into ordinary loss —
+  the cursor stalls and the existing rewind/resend recovers it.
 
 - **Write error / idle abort** → the session is torn down, and the ACK carries `OTA_ST_ERR` instead of a false `OTA_ST_OK`+`offset=0` (which a host cannot tell from a stale duplicate — it would resend from 0 indefinitely, a hang that looks like success). The Wizard's relay‑OTA loop fast‑fails on `status != 0`. Matches `navicore_ota.h`.
 
@@ -297,4 +320,5 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-08-27 | — | Relay `DATA` accepts an optional CRC‑32 suffix on the offset field (`<offset>:<crc32>` over `"<offset>,<b64>"`) and DROPS a line that fails it; `Serial.setRxBufferSize` 2048 → 8192; new `serialRxOverflows` counter fed by `Serial.onReceiveError`. Backward compatible both directions (`String::toInt()` stops at the `:`). | A UART RX overflow drops a run of bytes from the MIDDLE of a line. Inside the base64 field, with the newline intact, the remainder is still valid base64 and still decodes `rc == 0` — to re‑phased garbage written at a valid offset. The cursor advances and the only symptom is SHA‑256 failing at 100%, after minutes of apparently healthy progress. The 8‑line send window (2272 B) could not fit the old 2 KB ring at all. |
 | 2026-08-06 | — | Target DATA ACK reports the session's real state: `OTA_ST_ERR` once a failed write (image overrun / `esp_ota_write` error / idle abort) has torn the session down, instead of `OTA_ST_OK`+`offset=0`. The Wizard's relay‑OTA loop fast‑fails on `status != 0`. | A false `OK`+`0` is indistinguishable from a stale duplicate to the host — it rewinds, resends from 0, is re‑answered `OK`+`0`, and stalls (looks like success, frozen bar). Parity with `navicore_ota.h`, which already carried the guard. |

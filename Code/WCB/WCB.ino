@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.0_261315RAUG2026                                  *****////
+///*****                                          Version 6.2.0_271521RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -178,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.0_261315RAUG2026";
+String SoftwareVersion = "6.2.0_271521RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -793,6 +793,17 @@ void identifyTask(void *parameter) {
   identifyTaskHandle = NULL;
   vTaskDelete(NULL);
 }
+
+// Serial RX overflow counter. An overflow drops a contiguous RUN of bytes out
+// of the MIDDLE of whatever line is arriving. For a ?OTA,DATA line that is not
+// merely lossy, it is CORRUPTING: if the dropped run falls inside the base64
+// field and the terminating newline survives, what is left is still valid
+// base64 and still decodes with rc == 0 — to a shorter, re-phased byte string
+// that the relay forwards as a normal fragment at the offset the sender named.
+// The target writes it, advances its cursor, and nothing notices until the
+// SHA-256 at 100%. Counted here so it stops being invisible; see the OTA relay
+// DATA handler in WCB_OTA.cpp, which reports it alongside a CRC rejection.
+volatile uint32_t serialRxOverflows = 0;
 
 // CRC32 calculation for verification
 uint32_t calculateCRC32(const String &data) {
@@ -7766,11 +7777,23 @@ void setup() {
   // Config pushes from the web tool arrive as a rapid burst of commands; each
   // setting that hits NVS blocks loop() for tens of ms during the flash commit.
   // With only 256 B of buffer, a burst can overflow while loop() is stalled and
-  // silently drop a command. 2 KB comfortably absorbs a full push burst.
-  // No runtime cost: this is a one-time allocation and only affects Serial
-  // (UART0 / the USB programming port), not the device ports Serial1-5.
-  Serial.setRxBufferSize(2048);
+  // silently drop a command.
+  //
+  // 2 KB was NOT enough for a relayed OTA. That path sends a window of 8 lines
+  // of ~284 B (192 firmware bytes -> 256 base64 chars plus the header) = 2272 B,
+  // which exceeds a 2 KB ring even if loop() drained nothing at all — and during
+  // BEGIN the target is erasing ~1.2 MB, so loop() here is not draining promptly.
+  // The result was a mid-line byte run dropped from a ?OTA,DATA payload, which
+  // corrupts silently rather than failing (see serialRxOverflows above).
+  // 8 KB holds ~28 such lines (~3.5 windows). One-time allocation, and it only
+  // affects Serial (UART0 / the USB programming port), not device ports 1-5.
+  Serial.setRxBufferSize(8192);
   Serial.begin(115200);
+  // Count RX overflows instead of losing them silently. Runs on the UART event
+  // task, so it does NOTHING but increment — no Serial output, no allocation.
+  Serial.onReceiveError([](hardwareSerial_error_t e) {
+    if (e == UART_BUFFER_FULL_ERROR || e == UART_FIFO_OVF_ERROR) serialRxOverflows++;
+  });
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 

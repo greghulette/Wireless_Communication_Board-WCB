@@ -14,6 +14,8 @@ extern String  SoftwareVersion;
 extern char    espnowPassword[40];               // P2: shared-secret gate
 extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6]; // P2: per-WCB MAC table
 extern void    otaRelayPrint(const char *line);  // defer relay-ACK Serial output to loop() (cross-core safe)
+extern uint32_t calculateCRC32(const String &data);   // WCB.ino — reflected CRC-32, poly 0xEDB88320
+extern volatile uint32_t serialRxOverflows;           // WCB.ino — UART RX overflow count
 
 // Struct sizes feed the size-based ESP-NOW router in WCB.ino — they MUST stay
 // distinct from every other packet ({43,204,226,230,249,252}). Lock them here.
@@ -495,9 +497,49 @@ void processOtaRelayCommand(const String &args) {
 
   if (sub == "DATA") {
     int p = r3.indexOf(',');
-    if (p < 0) { Serial.println("[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>,<b64>"); return; }
-    uint32_t offset = (uint32_t)r3.substring(0, p).toInt();
+    if (p < 0) { Serial.println("[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>[:<crc32>],<b64>"); return; }
+    String offField = r3.substring(0, p);
     String   b64    = r3.substring(p + 1); b64.trim();
+    // OPTIONAL integrity suffix on the OFFSET field: "<offset>:<crc32hex>",
+    // the CRC-32 of "<offset>,<b64>" as the sender transmitted it.
+    //
+    // Why it lives here and not as a new trailing field: String::toInt() stops
+    // at the first non-digit, so firmware that predates this reads the offset
+    // exactly as before and never sees the suffix, while a sender that predates
+    // it simply omits the suffix. Appending a field instead would have swept the
+    // CRC into b64 on old firmware and failed EVERY packet. No flag day either way.
+    //
+    // What it catches: a serial RX overflow drops a contiguous run of bytes from
+    // the MIDDLE of the line. If that run falls inside the base64 field and the
+    // newline survives, the remainder is STILL valid base64 and still decodes
+    // with rc == 0 — to a shorter, re-phased byte string. Nothing downstream can
+    // tell: the relay forwards it as a normal fragment, the target writes it at a
+    // legitimate offset and advances its cursor, and the only symptom is the
+    // SHA-256 failing at 100%. Dropping the line instead turns silent corruption
+    // into ordinary loss, which the cursor/ACK protocol already recovers from:
+    // the target does not advance, and the sender rewinds and resends.
+    // 802.11 already CRCs the ESP-NOW hop, so this covers the gap that is real.
+    int cpos = offField.indexOf(':');
+    String crcHex;
+    if (cpos >= 0) { crcHex = offField.substring(cpos + 1); offField = offField.substring(0, cpos); }
+    uint32_t offset = (uint32_t)offField.toInt();
+    if (crcHex.length()) {
+      const uint32_t want = (uint32_t)strtoul(crcHex.c_str(), nullptr, 16);
+      const uint32_t have = calculateCRC32(offField + "," + b64);
+      if (want != have) {
+        Serial.printf("[OTA] relay DATA @%lu DROPPED: crc %08X != %08X (b64 %u chars)%s\n",
+                      (unsigned long)offset, (unsigned)have, (unsigned)want,
+                      (unsigned)b64.length(),
+                      serialRxOverflows ? " — serial RX HAS OVERFLOWED, this is the cause" : "");
+        return;   // sender rewinds to the target's stalled cursor and resends
+      }
+    } else {
+      // Say it once per boot: without the suffix a mid-line overflow is
+      // undetectable and shows up only as a failed verify at 100%.
+      static bool warned = false;
+      if (!warned) { warned = true;
+        Serial.println("[OTA] relay DATA has no crc32 suffix — sender predates it; transfer is UNPROTECTED against serial corruption"); }
+    }
     espnow_struct_ota_data pkt; memset(&pkt, 0, sizeof(pkt));
     strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
     pkt.packetType = PACKET_TYPE_OTA_DATA;
