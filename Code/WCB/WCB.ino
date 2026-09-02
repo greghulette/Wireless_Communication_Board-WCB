@@ -24,9 +24,9 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 */                                                                                                 
                                                                                                                  
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-///*****                                                                                                        *****////
+///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.1.5_290119RJUN2026                                  *****////
+///*****                                          Version 6.2.0_271521RAUG2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -84,9 +84,13 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include <WiFi.h>
 #include <HardwareSerial.h>
 #include "WCB_Storage.h"
+#include <WcbCmd.h>          // shared ;M/;A/;L/;H/;D → native-byte translators (WCBCMD_VERSION); the SAME lib NaviCore compiles
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
+#include "WCB_DFP.h"
 #include "WCB_HCR.h"
+#include "WCB_WLED.h"
+#include "WCB_WDP.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -99,6 +103,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include <freertos/queue.h>
 #include "WCB_PWM.h"
 #include "WCB_Help.h"
+#include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
@@ -132,10 +137,12 @@ int Default_WCB_Quantity = 1;                                       // Default s
 // Special peer: when enabled, WCB_SPECIAL_PEER_ID is always registered as a peer
 // regardless of Default_WCB_Quantity (for future use)
 bool specialPeerEnabled = false;  // Controlled via ?SPECIAL,ON/OFF — saved to preferences
+void enableControllerPeer(uint8_t id);   // enable + persist + live-register the controller (special) peer
 
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
 uint8_t umac_oct3 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
+uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change
 
 // User-defined ESP-NOW password
 char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting. Change to match your setup here or via command line.  Lower case characters only!
@@ -156,7 +163,14 @@ int kyberLocalPort = 0;      // serial port number Kyber is physically connected
 
 // Flag to track if last received message was via ESP-NOW
 bool lastReceivedViaESPNOW = false;
- 
+
+// True while the command currently being dispatched is a command from INSIDE a stored
+// sequence body (as opposed to a top-level command typed at a console or arrived over the
+// mesh). Snapshotted per queue item at enqueue and restored at drain, exactly like
+// espnowOrigin/lastReceivedViaESPNOW. Used so that a top-level `;C`/`;SEQ` recall fans the
+// trigger out to the mesh, but a NESTED `;C` inside a running sequence body does not.
+bool inSequenceBody = false;
+
 // Debugging flag (default: off)
 bool debugEnabled = false; 
 bool debugMaestro = false;
@@ -164,7 +178,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.1.5_290119RJUN2026";
+String SoftwareVersion = "6.2.0_271521RAUG2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -198,9 +212,31 @@ typedef struct __attribute__((packed)) {
 } espnow_struct_message_etm;
 
 // ETM Packet Types
+// Longest command that still fits alongside the ETM checksum suffix.
+// structCommand is char[200] and the copies into it are strncpy(..., sizeof-1) = 199 chars.
+// The suffix "|CRC" + 8 hex digits is 12 chars, so 199 - 12 = 187.
+//
+// Over this length the CRC was sliced off in transit, and the receiver then rejected the packet
+// at the "missing CRC" / "CRC mismatch" branches — AFTER it had already sent the ACK. The sender
+// therefore recorded a successful delivery, ETM never retried, and ?STATS showed 100%. Silent
+// data loss that actively reported success.
+#define ETM_MAX_CMD_WITH_CRC  187
+
+// Max DATA bytes in one WCB_TARGET_RAW_SERIAL chunk. The sender and the receive-side bound must
+// agree: the receiver rejects a larger chunk outright, so a sender using a bigger figure loses
+// those bytes silently. Kept as one constant so the two cannot drift apart again.
+#define RAW_SERIAL_MAX_CHUNK  177
+
 #define PACKET_TYPE_COMMAND   0
 #define PACKET_TYPE_ACK       1
 #define PACKET_TYPE_HEARTBEAT 2
+#define PACKET_TYPE_ETM_BOOT  11  // one-shot "I just (re)booted" announce — shares the
+                                  // espnow_struct_message_etm wire size as HEARTBEAT so it
+                                  // routes to the ETM handler; lets a relay print "came
+                                  // ONLINE" after a fast reboot that never crossed offline.
+#define PACKET_TYPE_WDP       12  // WDP discovery advert — rides the espnow_struct_message_etm
+                                  // wire size (like HEARTBEAT/ETM_BOOT); TLV identity/capability
+                                  // payload in structCommand[200]. See WCB_WDP.{h,cpp}.
 // Remote Management Packet Types
 #define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
@@ -213,6 +249,20 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ETM_REQ     8   // relay → target: request ETM characterization
 #define PACKET_TYPE_STATS_FRAG  9   // target → relay: ?STATS response fragment
 #define PACKET_TYPE_ETM_FRAG    10  // target → relay: ?ETM,CHAR response fragment
+// 11 = ETM_BOOT, 12 = WDP (declared above with the ETM-struct types), 20+ = OTA.
+#define PACKET_TYPE_SEQ_REQ     13  // relay → target: request stored-sequence NAMES
+#define PACKET_TYPE_SEQ_FRAG    14  // target → relay: sequence-name response fragment
+                                    // Names only — deliberately NOT the values. The
+                                    // config pull already carries values and a real
+                                    // sequence set pushes it against the 16-chunk
+                                    // ceiling; an inventory is ~16 bytes per entry.
+#define PACKET_TYPE_SEQVAL_REQ  15  // relay → target: request ONE sequence by key
+#define PACKET_TYPE_SEQVAL_FRAG 16  // target → relay: that sequence's value
+                                    // One at a time, by key. A single value is bounded
+                                    // (~1800 chars ≈ 10 of 16 chunks) whereas the whole
+                                    // set is not — a consumer walks the name list and
+                                    // pulls each key, which has no aggregate ceiling and
+                                    // resumes cleanly if a board drops mid-walk.
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -229,7 +279,7 @@ bool debugETM = false;
 bool etmEnabled = true;   // NVS default is also true — overwritten at boot by loadETMSettings()
 int etmBootHeartbeatSec = 2;
 int etmHeartbeatSec = 10;
-int etmMissedHeartbeats = 3;
+int etmMissedHeartbeats = 5;   // (etmHeartbeatSec+1)*5 = 55s offline window — widened from 3/33s so a few lost broadcast heartbeats on a busy mesh don't flap a live board (mirrors WCBClient _missedBeforeOffline)
 int etmTimeoutMs = 500;
 int etmCharMessageCount = 20;
 int etmCharDelayMs = 100;
@@ -299,6 +349,22 @@ QueueHandle_t rcJsonRelayQueue = nullptr;
 // A silent drop makes a browser config-pull time out with no explanation;
 // surfacing the count turns that into a diagnosable event.
 volatile uint32_t rcJsonRelayDrops = 0;
+// Guards the increment above. Reached from the WiFi task and from otaRelayPrint(), so a bare
+// `++` on the volatile is a non-atomic read-modify-write (and a deprecation warning besides).
+static portMUX_TYPE rcJsonDropMux = portMUX_INITIALIZER_UNLOCKED;
+
+// While this board is actively relaying an OTA stream to a target, the per-chunk
+// [OTA:ACK,...] line (the browser's flow-control token) shares the relay queue
+// above. A chatty controller on the mesh — e.g. NaviCore broadcasting rc_hb /
+// rc_ch JSON continuously — can otherwise flood that 64-slot queue and get an
+// OTA ACK DROPPED on overflow; a single lost ACK stalls the transfer until the
+// target's session timeout (looked like a hang at ~70%). So pause the RC-JSON /
+// ETM passthrough for the duration of a transfer. Refreshed on every ?OTA
+// command; expires a few seconds after the stream ends.
+volatile uint32_t otaRelayForwardUntilMs = 0;
+static inline bool otaRelayForwarding() {
+  return otaRelayForwardUntilMs != 0 && (int32_t)(millis() - otaRelayForwardUntilMs) < 0;
+}
 
 // Drains the relay queue to Serial.  Safe to call frequently from the main
 // loop; runs in bounded time (drains whatever fits in one swing, returns
@@ -326,11 +392,23 @@ static inline void enqueueRcJsonRelay(const String& jsonLine) {
   // to be invisible.  (Serial.printf is safe here: drops are rare and this
   // is the exceptional path, not the per-packet hot path.)
   if (xQueueSend(rcJsonRelayQueue, &slot, 0) != pdTRUE) {
-    rcJsonRelayDrops++;
+    // Not `rcJsonRelayDrops++`: that is a non-atomic read-modify-write on a volatile, which the
+    // compiler also deprecation-warns about. enqueueRcJsonRelay is reached from the WiFi task AND
+    // from otaRelayPrint(), so two increments could interleave and lose a count — on the one
+    // diagnostic whose entire purpose is that drops must never be invisible.
+    portENTER_CRITICAL(&rcJsonDropMux);
+    uint32_t dropCount = ++rcJsonRelayDrops;
+    portEXIT_CRITICAL(&rcJsonDropMux);
     Serial.printf("[RCBRG] relay queue FULL — dropped a JSON line (total drops=%lu)\n",
-                  (unsigned long)rcJsonRelayDrops);
+                  (unsigned long)dropCount);
   }
 }
+
+// Non-static bridge so WCB_OTA.cpp's relay ACK handler can defer its Serial
+// output to loop() too (it runs in the ESP-NOW callback / WiFi task, where a
+// direct Serial write can interleave with Core-1 output and garble the
+// browser's [OTA:ACK,...] flow-control token). Reuses the relay queue above.
+void otaRelayPrint(const char *line) { enqueueRcJsonRelay(String(line)); }
 
 // ── Pending-timer-chain queue ─────────────────────────────────────────────
 // parseCommandGroups() writes the commandGroups std::vector AND mutates
@@ -341,8 +419,15 @@ static inline void enqueueRcJsonRelay(const String& jsonLine) {
 //
 // Same pattern as rcJsonRelayQueue above: the callback enqueues the raw
 // chain string; loop() drains and calls parseCommandGroups() for each.
-// The local-serial entry point and SEQ playback both run inside loop()
-// already, so they keep calling parseCommandGroups() directly.
+//
+// SEQ playback keeps calling parseCommandGroups() directly because it really does run inside
+// loop() (recallCommandSlot ← recallStoredCommand ← processCommandCharcter ← handleSingleCommand
+// ← loop()). The LOCAL-SERIAL path does NOT: processIncomingSerial runs on serialCommandTask
+// (WCB.ino:7439), so its calls at :6431/:6490 are cross-task mutations of the same vector.
+// That is handled on the consumer side instead — processCommandGroups() copies each group out
+// before it yields and re-checks commandGroupsGeneration afterwards (command_timer.cpp), which
+// is cheaper than routing the serial path through this queue and also covers stopTimerSequence().
+// An earlier version of this comment claimed the serial path ran inside loop(); it never did.
 //
 // Slot size 220 covers the 200-byte ESP-NOW structCommand plus any CRC
 // suffix that's already been stripped. 8 slots ≈ 1.76 KB heap.
@@ -352,6 +437,8 @@ struct PendingTimerChainSlot {
   char buf[TIMER_CHAIN_MAX_LEN];
   bool espnowOrigin;   // origin captured at enqueue; restored before parseCommandGroups so
                        // the deferred timer group keeps the right ESP-NOW semantics.
+  bool sequenceBody;   // sequence-body flag captured at enqueue; restored before parse so a
+                       // nested recall inside a TIMER sequence body is not re-fanned out.
 };
 QueueHandle_t pendingTimerChainQueue = nullptr;
 
@@ -362,12 +449,16 @@ static inline void drainPendingTimerChains() {
   if (!pendingTimerChainQueue) return;
   PendingTimerChainSlot slot;
   while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
-    // parseCommandGroups snapshots the current global into commandGroupsEspnowOrigin
-    // for the deferred fire — set it to this chain's captured origin first.
+    // parseCommandGroups snapshots the current globals into commandGroupsEspnowOrigin /
+    // commandGroupsSequenceBody for the deferred fire — set them to this chain's captured
+    // origin + body-flag first.
     bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = slot.espnowOrigin;
+    inSequenceBody        = slot.sequenceBody;
     parseCommandGroups(String(slot.buf));
     lastReceivedViaESPNOW = _savedEspNowOrigin;
+    inSequenceBody        = _savedSeqBody;
   }
 }
 
@@ -377,6 +468,7 @@ static inline void enqueuePendingTimerChain(const String& chain) {
   strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
   slot.buf[sizeof(slot.buf) - 1] = '\0';
   slot.espnowOrigin = lastReceivedViaESPNOW;   // remember origin for the deferred fire
+  slot.sequenceBody = inSequenceBody;          // ...and whether it came from a sequence body
   xQueueSend(pendingTimerChainQueue, &slot, 0);
 }
 // ETM Board Status Table
@@ -388,12 +480,60 @@ struct BoardStatus {
   unsigned long totalRetries;
   unsigned long totalFailed;
 };
-BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, we only use [0..Default_WCB_Quantity-1]
+BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, indexed by (wcbNumber-1)
+
+// ── Dynamic peer membership ──────────────────────────────────────────────────
+// The set of boards this WCB treats as mesh peers. Historically this was exactly
+// the contiguous range 1..Default_WCB_Quantity; it is now an explicit membership
+// set so peers can also be LEARNED from WDP adverts at runtime, no reboot and no
+// need to re-provision every board. Indexed by (wcbNumber-1). The special/
+// controller peer (specialPeerEnabled / WCB_SPECIAL_PEER_ID) is still tracked
+// separately and is NOT reflected in these arrays.
+//   wcbPeerLearned[] — discovered via WDP auto-join (persisted; survives a WCBQ
+//                      change and, once Stage-3 persistence lands, a reboot)
+//   wcbPeerActive[]  — the live union {1..Default_WCB_Quantity floor} ∪ learned,
+//                      minus self. THIS is what every ETM loop iterates.
+// When auto-join is off, wcbPeerLearned[] stays empty so wcbPeerActive[] == the
+// WCBQ floor == today's behavior exactly.
+bool wcbPeerActive[MAX_WCB_COUNT]  = { false };
+bool wcbPeerLearned[MAX_WCB_COUNT] = { false };
+// TEMPORARY peers: registered LIVE so the mesh can reach them, but NEVER
+// persisted (not in learned_peers) and evicted after TEMPORARY_PEER_TTL_MS of silence.
+// A device that advertises the WDP "temporary" flag (WDP_ADVFLAG_TEMPORARY) — e.g. an
+// occasional management relay — is reachable while active, gone on reboot, and
+// self-cleans when it goes quiet, keeping the 20-slot ESP-NOW peer table lean.
+bool wcbPeerTemporary[MAX_WCB_COUNT] = { false };
+#define TEMPORARY_PEER_TTL_MS 50000UL    // silence before a temporary peer is dropped (~50 s =
+                                         // ~3 missed 15 s temp adverts). MATCHES WCB_Client's
+                                         // WCB_WDP_TEMP_NEIGHBOR_TTL_MS so a powered-off temp
+                                         // device (e.g. a mgmt relay) clears from the WCB peer
+                                         // table / ?WDP view as promptly as from a NaviCore roster.
+// millis() when a learned peer was first heard vs. last confirmed; drives the
+// "confirmed reciprocating" gate and stale eviction (Stages 3-4).
+uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT] = { 0 };  // WDP adverts heard (caps at 255)
+bool    wcbPeerReciprocated[MAX_WCB_COUNT] = { false };  // has this learned peer ever ACKed us?
+
+// Learned-peer persistence (NVS namespace "learned_peers"): membership survives
+// reboot so the fleet doesn't re-discover from scratch. A learned peer is
+// PERMANENT — once heard, it is always expected to be on and ready; membership
+// never self-evicts (a bench-tested board must not forget its powered-off
+// fleet). Cleanup is the operator's call: ?WDP,FORGET,<id> / ?WDP,CLEAR.
+// Writes are debounced and happen ONLY on a membership change (never
+// per-advert) to spare flash.
+#define LEARNED_FLUSH_DEBOUNCE_MS 5000UL     // coalesce a burst of changes into one write
+bool          learnedPeersDirty   = false;
+unsigned long learnedPeersFlushMs = 0;
 
 // ETM Heartbeat timing
 unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
 bool etmBootHeartbeatSent = false;
 uint16_t etmSequenceNumber = 0;        // global sequence counter, Layer 3 uses this
+
+// Boot-announce: a few PACKET_TYPE_ETM_BOOT broadcasts right after startup so
+// relays re-mark this board ONLINE even after a reboot too fast to cross their
+// offline window (e.g. an OTA). Lets the wizard auto-re-establish a relay session.
+uint8_t       etmBootAnnouncesLeft  = 0;
+unsigned long etmNextBootAnnounceMs = 0;
 
 // ETM - Pending Message Table
 #define ETM_PENDING_MAX 10
@@ -418,9 +558,37 @@ unsigned long etmStatsAckd[MAX_WCB_COUNT]    = {0};
 unsigned long etmStatsRetries[MAX_WCB_COUNT] = {0};
 unsigned long etmStatsFailed[MAX_WCB_COUNT]  = {0};
 
-// ETM - Duplicate detection (last received seq per board)
-uint16_t etmLastReceivedSeq[MAX_WCB_COUNT] = {0};
-bool etmLastReceivedSeqValid[MAX_WCB_COUNT] = {false};
+// ── Reported stats (?STATS,RPT) ─────────────────────────────────────────────
+// Delivery counters OTHER nodes report about THEMSELVES. Each node measures its
+// own links and pushes its own row here; this board never computes them and
+// never forwards them on. Indexed by the reporting node's id - 1.
+//
+// Deliberately arrives as a LOCAL "?" command, not a ";" one: "?" is handled by
+// processLocalCommand and returns (WCB.ino ≈3964), so a report can never fall
+// through to processBroadcastCommand and get sprayed out this board's serial
+// ports or re-broadcast to the mesh. A ";" verb would have to be excluded from
+// those paths by hand; "?" is that exclusion by construction.
+//
+// RAM-only and never persisted — a reboot clears them, which is intended: these
+// describe the reporters' current session, and a stale row surviving a reboot
+// would read as live data. `used` distinguishes "reported zero" from "never
+// reported"; lastMs ages a row so a dead reporter is visibly stale, not silently
+// frozen at its last good numbers.
+struct ReportedStats {
+  bool          used;
+  unsigned long sent, ackd, retries, failed, unguaranteed, bcast, recv;
+  unsigned long lastMs;      // millis() when this row last updated
+};
+ReportedStats reportedStats[MAX_WCB_COUNT] = {};
+
+// ETM - Duplicate detection. A per-sender RING of recently-seen seqs, not a single
+// slot: retries reuse the original seq and can arrive AFTER a newer seq from the
+// same sender advanced a single-slot record, so a single slot let the old seq's
+// retry re-execute (double-fire). Remembering the last ETM_SEQ_HISTORY seqs catches
+// out-of-order retries within that window. Seq 0 is never sent, so 0 = empty slot.
+static const int ETM_SEQ_HISTORY = 8;
+uint16_t etmSeqHistory[MAX_WCB_COUNT][ETM_SEQ_HISTORY] = {{0}};
+uint8_t  etmSeqHistoryIdx[MAX_WCB_COUNT] = {0};
 // ETM Characterization state
 bool etmCharRunning = false;
 int etmCharPhase = 0;
@@ -435,10 +603,25 @@ struct ETMCharBoardResult {
     unsigned long latencyAccum;
 };
 
-// [phase 0-2][board index 0-7]
+// [phase 0-2][board index 0-(MAX_WCB_COUNT-1)]
 ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
-unsigned long etmCharPhaseSentTimes[3][200];  // [phase][msgIndex]
+
+// Hard cap on messages PER PHASE. This is the row length of etmCharPhaseSentTimes below, and
+// processETMChar() clamps totalMessages to it — do not raise one without the other.
+//
+// Why the clamp exists: totalMessages is etmCharMessageCount * peerCount. ?ETM,COUNT accepts up
+// to 200 and peerCount can reach MAX_WCB_COUNT-1, so the index can reach 3800 against a 200-entry
+// row. Phases 1 and 2 (rows 0/1) would silently clobber the OTHER phases' timestamps; phase 3
+// (row 2) runs off the end of the object entirely — millis()-valued stores into whatever the
+// linker placed next in .bss. A 3-board mesh with ?ETM,COUNT,200 is already enough.
+//
+// The clamp also fixes a second, quieter bug: both readers below discard idx >= this cap, so an
+// unclamped run could never satisfy `totalAcked >= totalMessages` and EVERY phase ran to its full
+// timeout (count 200 / 2 peers ≈ 11.6 minutes of dead wall-clock).
+#define ETM_CHAR_MAX_MSGS 200
+unsigned long etmCharPhaseSentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
 int etmCharPhaseMessageIndex = 0;
+bool etmCharClampWarned = false;   // one-shot notice per run when the sample had to be reduced
 unsigned long etmCharPhaseStartTime = 0;
 unsigned long etmCharLastSendTime = 0;
 
@@ -490,6 +673,7 @@ TaskHandle_t identifyTaskHandle = NULL;  // Prevents overlapping ?IDENTIFY runs
 
 // Broadcast enabled settings for each serial port (modifiable)
 bool serialBroadcastEnabled[5] = {true, true, true, true, true};
+bool broadcastToS0 = false;   // opt-in: also echo broadcast output to S0/USB (incl. when it arrived on S0). Persisted.
 String serialPortLabels[5] = {"", "", "", "", ""};
 
 // Current baud rates (modifiable)
@@ -610,6 +794,17 @@ void identifyTask(void *parameter) {
   vTaskDelete(NULL);
 }
 
+// Serial RX overflow counter. An overflow drops a contiguous RUN of bytes out
+// of the MIDDLE of whatever line is arriving. For a ?OTA,DATA line that is not
+// merely lossy, it is CORRUPTING: if the dropped run falls inside the base64
+// field and the terminating newline survives, what is left is still valid
+// base64 and still decodes with rc == 0 — to a shorter, re-phased byte string
+// that the relay forwards as a normal fragment at the offset the sender named.
+// The target writes it, advances its cursor, and nothing notices until the
+// SHA-256 at 100%. Counted here so it stops being invisible; see the OTA relay
+// DATA handler in WCB_OTA.cpp, which reports it alongside a CRC rejection.
+volatile uint32_t serialRxOverflows = 0;
+
 // CRC32 calculation for verification
 uint32_t calculateCRC32(const String &data) {
     const uint8_t *bytes = (const uint8_t *)data.c_str();
@@ -663,6 +858,26 @@ typedef struct __attribute__((packed)) {
   uint8_t requesterWCB;    // which WCB is asking (relay)
 } espnow_struct_config_req;
 
+// Single-sequence request: relay → target (59 bytes)
+//
+// A separate struct from espnow_struct_config_req because it must carry the KEY,
+// and the 43-byte request has no room. It cannot instead be sent as an ordinary
+// `?SEQ,GET,<key>` command: a command arriving over ESP-NOW does not carry its
+// sender into the handler (sourceID is a SERIAL PORT — 0=USB, 1-5 — and the
+// ESP-NOW origin is only the `lastReceivedViaESPNOW` bool), so the target would
+// have no idea which board to answer.
+//
+// 59 bytes is deliberately distinct from every other packet size (43/55/226/230/
+// 243/249/252) — the receive path routes BY SIZE first. The static_assert in
+// espNowReceiveCallback pins it.
+typedef struct __attribute__((packed)) {
+  char    structPassword[40];
+  uint8_t packetType;      // PACKET_TYPE_SEQVAL_REQ
+  uint8_t targetWCB;       // which WCB holds the sequence
+  uint8_t requesterWCB;    // which WCB is asking
+  char    key[16];         // sequence key, NUL-terminated (15 chars = the NVS key limit)
+} espnow_struct_seqval_req;
+
 // Config pull response fragment: target → relay (230 bytes)
 typedef struct __attribute__((packed)) {
   char     structPassword[40];
@@ -715,6 +930,8 @@ struct ConfigPullSession {
 ConfigPullSession pullSession      = {};  // relay-side reassembly for remote config pull
 ConfigPullSession statsRelaySession = {};  // relay-side reassembly for remote ?STATS
 ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?ETM,CHAR
+ConfigPullSession seqRelaySession    = {};  // relay-side reassembly for remote ?SEQ,NAMES
+ConfigPullSession seqValRelaySession = {};  // relay-side reassembly for remote ?SEQ,GET,<key>
 uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
 
 // ESP-NOW messages
@@ -735,28 +952,37 @@ typedef struct {
                       // THIS command's true origin, not whatever the global held when the
                       // queue happened to be drained (the global races across queue
                       // boundaries — see the IF-gating note in handleSingleCommand).
+  bool sequenceBody;  // snapshot of inSequenceBody at enqueue; restored at dispatch so a
+                      // nested `;C`/`;SEQ` recall inside a sequence body is not re-fanned
+                      // out to the mesh (only the top-level trigger fans out).
 } CommandQueueItem;
 
 static QueueHandle_t commandQueue = nullptr;
+// Quiet window for a deferred restart (PWM mapping). A Wizard push is ACK-paced, so the
+// command queue empties briefly between every pair of commands — restarting on "queue is
+// empty" alone would still land mid-push. 4 s comfortably outlasts the pacing gap.
+static const unsigned long PWM_REBOOT_QUIET_MS = 4000;
+static unsigned long lastCommandProcessedMs = 0;
 
 // ============================= Stored Commands =============================
 #define MAX_STORED_COMMANDS 80
 // String storedCommands[MAX_STORED_COMMANDS];
  
 // ============================= Forward Declarations =============================
-void writeSerialString(Stream &serialPort, String stringData);
+void writeSerialString(Stream &serialPort, const String &stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
-void enqueueCommand(const String &cmd, int sourceID);
+// Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
+void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
 void checkConfigPullTimeout();
 String buildConfigString();
 void processPWMPassthrough();
-void addPWMOutputPort(int port);
+void addPWMOutputPort(int port, uint8_t wdpAutoSrc);  // default (0) lives in WCB_PWM.h; match arity here
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
 void processIncomingSerial(Stream &serial, int sourceID); 
 void etmSendAck(int senderWCB, uint16_t seqNum);
-void etmProcessAck(int senderWCB, uint16_t seqNum);
+void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs);
 int etmAddToPendingTable(uint16_t seqNum, const char* cmd);
 
 
@@ -778,14 +1004,81 @@ void sendETMHeartbeat() {
   }
 }
 
+// Announce "(re)booted" to the mesh. Same wire struct as a heartbeat (so it
+// routes to the ETM handler) but PACKET_TYPE_ETM_BOOT, which makes receivers
+// force a "came ONLINE" edge even if they still thought we were online.
+void sendETMBootAnnounce() {
+  espnow_struct_message_etm bp;
+  memset(&bp, 0, sizeof(bp));
+  strncpy(bp.structPassword, espnowPassword, sizeof(bp.structPassword) - 1);
+  snprintf(bp.structSenderID, sizeof(bp.structSenderID), "%d", WCB_Number);
+  snprintf(bp.structTargetID, sizeof(bp.structTargetID), "0");  // broadcast
+  bp.structCommandIncluded = false;
+  bp.structPacketType      = PACKET_TYPE_ETM_BOOT;
+  bp.structSequenceNumber  = 0;
+
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+  if (debugETM) Serial.printf("[ETM] Boot announce sent (WCB%d)\n", WCB_Number);
+}
+
+// ─── WDP (Wireless Discovery Protocol) transport ─────────────────────────────
+// WCB_WDP owns the neighbor table + TLV payload + commands; the ETM wire struct
+// lives here, so the envelope build/broadcast and the deferred RX decode do too.
+struct WdpPktSlot { espnow_struct_message_etm pkt; };
+static QueueHandle_t wdpPktQueue = nullptr;
+
+// Wrap a WDP TLV payload in the ETM envelope and broadcast it (called by wdpTick).
+void wdpBroadcast(const uint8_t *payload, int len) {
+  espnow_struct_message_etm bp;
+  memset(&bp, 0, sizeof(bp));
+  strncpy(bp.structPassword, espnowPassword, sizeof(bp.structPassword) - 1);
+  snprintf(bp.structSenderID, sizeof(bp.structSenderID), "%d", WCB_Number);
+  snprintf(bp.structTargetID, sizeof(bp.structTargetID), "0");   // broadcast
+  bp.structCommandIncluded = 1;
+  if (len < 0) len = 0;
+  if (len > (int)sizeof(bp.structCommand)) len = sizeof(bp.structCommand);
+  memcpy(bp.structCommand, payload, len);
+  bp.structPacketType     = PACKET_TYPE_WDP;
+  bp.structSequenceNumber = 0;
+  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+}
+
+// Callback-side (WiFi task, Core 0): copy the raw advert into a queue. The TLV
+// decode + neighbor-table write happen in loop() (drainWdpPackets), never inline
+// — same rule as OTA/MGMT to keep the ESP-NOW receive path fast.
+void enqueueWdpPacket(const uint8_t *raw) {
+  if (!wdpPktQueue) return;
+  WdpPktSlot slot;
+  memcpy(&slot.pkt, raw, sizeof(slot.pkt));
+  xQueueSend(wdpPktQueue, &slot, 0);   // drop-if-full — periodic re-adverts recover
+}
+
+// Loop-side: decode queued adverts into the WCB_WDP neighbor table.
+void drainWdpPackets() {
+  if (!wdpPktQueue) return;
+  WdpPktSlot slot;
+  while (xQueueReceive(wdpPktQueue, &slot, 0) == pdTRUE) {
+    slot.pkt.structSenderID[sizeof(slot.pkt.structSenderID) - 1] = '\0';
+    int senderWCB = atoi(slot.pkt.structSenderID);
+    wdpOnAdvertReceived(senderWCB, (const uint8_t *)slot.pkt.structCommand);
+  }
+}
+
 void scheduleNextHeartbeat(bool isBoot) {
   unsigned long intervalMs;
   if (isBoot) {
     // Random 1000ms to etmBootHeartbeatSec*1000ms at millisecond resolution
     intervalMs = (unsigned long)random(1000, etmBootHeartbeatSec * 1000UL);
   } else {
-    // Random (etmHeartbeatSec-1)*1000 to (etmHeartbeatSec+1)*1000 at millisecond resolution
-    intervalMs = (unsigned long)random((etmHeartbeatSec - 1) * 1000UL, (etmHeartbeatSec + 1) * 1000UL);
+    // Random (etmHeartbeatSec-1)*1000 to (etmHeartbeatSec+1)*1000 at millisecond resolution.
+    // Clamp defensively: at etmHeartbeatSec <= 0 the low bound went negative, random() returned
+    // a negative long, and the (unsigned long) cast wrapped it so etmNextHeartbeatMs landed in
+    // the PAST — the heartbeat then re-fired immediately, settling at ~4 Hz of unacked 252-byte
+    // broadcasts instead of one per 10 s. The setters below validate too; this is belt-and-braces
+    // for a value restored from an NVS blob written by older firmware.
+    long hb = (long)etmHeartbeatSec;
+    if (hb < 1) hb = 1;
+    intervalMs = (unsigned long)random((hb - 1) * 1000L, (hb + 1) * 1000L);
   }
   etmNextHeartbeatMs = millis() + intervalMs;
   if (debugETM) {
@@ -796,6 +1089,17 @@ void scheduleNextHeartbeat(bool isBoot) {
 void processETMHeartbeats() {
   if (!etmEnabled) return;
 
+  // Boot announce: a few spaced PACKET_TYPE_ETM_BOOT broadcasts in the first
+  // seconds after startup so relays print "[ETM] WCBn came ONLINE" even when
+  // this board reboots fast enough (e.g. after an OTA) to never cross their
+  // offline threshold — which is what the wizard listens for to re-establish
+  // the relay session. Sent redundantly because broadcast is unacknowledged.
+  if (etmBootAnnouncesLeft > 0 && millis() >= etmNextBootAnnounceMs) {
+    sendETMBootAnnounce();
+    etmBootAnnouncesLeft--;
+    etmNextBootAnnounceMs = millis() + 1200;
+  }
+
   // Send heartbeat when timer fires
   if (millis() >= etmNextHeartbeatMs) {
     sendETMHeartbeat();
@@ -804,7 +1108,8 @@ void processETMHeartbeats() {
 
   // Check for boards that have gone offline
   unsigned long offlineThresholdMs = (unsigned long)(etmHeartbeatSec + 1) * etmMissedHeartbeats * 1000UL;
-  for (int i = 0; i < Default_WCB_Quantity; i++) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerActive[i]) continue;    // only sweep boards we treat as peers
     if (i + 1 == WCB_Number) continue;  // skip ourselves
     if (boardTable[i].online) {
       if (millis() - boardTable[i].lastSeenMs > offlineThresholdMs) {
@@ -826,12 +1131,84 @@ void processETMHeartbeats() {
       }
     }
   }
+
+  // Evict TEMPORARY peers that have gone silent past their TTL: del_peer +
+  // drop membership so the ESP-NOW table doesn't hold a slot for a device that stopped
+  // advertising (e.g. a management relay whose session ended). Temporary peers are
+  // RAM-only + never persisted, so this (plus reboot) is their only cleanup. A much
+  // longer TTL than the ETM offline threshold so a WDP-only device advertising on the
+  // ~60 s cadence isn't dropped between adverts. lastSeenMs is refreshed by ANY packet.
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerTemporary[i] || boardTable[i].lastSeenMs == 0) continue;
+    if (millis() - boardTable[i].lastSeenMs > TEMPORARY_PEER_TTL_MS) {
+      uint8_t id = i + 1;
+      Serial.printf("[PEER] temporary WCB%d evicted — silent for %lus\n",
+                    id, (millis() - boardTable[i].lastSeenMs) / 1000UL);
+      wcbPeerTemporary[i]    = false;
+      wcbPeerAdvertCount[i]  = 0;      // re-vet (>=2 adverts) if it returns
+      wcbPeerReciprocated[i] = false;
+      wdpForgetNeighbor(id);          // also drop its WDP neighbor row so ?WDP,DUMP (and the
+                                      // Wizard) stop showing this ephemeral peer once it's gone
+      rebuildActivePeers();
+      if (!wcbPeerActive[i] && esp_now_is_peer_exist(WCBMacAddresses[i])) {
+        esp_now_del_peer(WCBMacAddresses[i]);
+        boardTable[i].online = false;
+        etmClearPeerFromPending(i);
+      }
+    }
+  }
 }
 
 
 void etmInitPendingTable() {
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
     etmPendingTable[i].active = false;
+  }
+}
+
+// ── Deferred-ACK queue: keep etmPendingTable single-threaded ─────────────────
+// The pending table is scanned + rewritten by the LOOP task (etmAddToPendingTable
+// / processETMAcksAndRetries), but incoming ACKs arrive on the WiFi RECV-CALLBACK
+// task. Mutating the table from both, unsynchronized, corrupts it (shift-eviction
+// racing a held entry reference → dropped/duplicated entries, lost ACKs, retry
+// wedges). So the callback ENQUEUES the ACK here (tiny critical section, no table
+// touch) and loop() drains it into etmProcessAck() — all table access stays on the
+// loop task. SPSC ring: WiFi task produces, loop consumes; the mux makes push/pop
+// mutually exclusive.
+struct EtmAckEvent { int sender; uint16_t seq; unsigned long recvMs; };
+static const int ETM_ACK_QUEUE_MAX = 24;
+static volatile EtmAckEvent etmAckQueue[ETM_ACK_QUEUE_MAX];
+static volatile uint8_t etmAckQHead = 0;   // consumer (loop) index
+static volatile uint8_t etmAckQTail = 0;   // producer (callback) index
+static portMUX_TYPE etmAckQMux = portMUX_INITIALIZER_UNLOCKED;
+
+void etmEnqueueAck(int sender, uint16_t seq) {   // WiFi callback task
+  // Capture the ACK arrival time HERE (on the recv-callback task) so ETM
+  // characterization RTT stays accurate — the loop-drain happens later, so
+  // millis() at drain time would inflate the measured latency.
+  unsigned long recvMs = millis();
+  portENTER_CRITICAL(&etmAckQMux);
+  uint8_t next = (uint8_t)((etmAckQTail + 1) % ETM_ACK_QUEUE_MAX);
+  if (next != etmAckQHead) {                      // drop if full — a retry will re-ACK
+    etmAckQueue[etmAckQTail].sender = sender;
+    etmAckQueue[etmAckQTail].seq    = seq;
+    etmAckQueue[etmAckQTail].recvMs = recvMs;
+    etmAckQTail = next;
+  }
+  portEXIT_CRITICAL(&etmAckQMux);
+}
+
+void etmDrainAckQueue() {                         // loop task, before the retry scan
+  for (;;) {
+    int sender; uint16_t seq; unsigned long recvMs;
+    portENTER_CRITICAL(&etmAckQMux);
+    if (etmAckQHead == etmAckQTail) { portEXIT_CRITICAL(&etmAckQMux); break; }
+    sender = etmAckQueue[etmAckQHead].sender;
+    seq    = etmAckQueue[etmAckQHead].seq;
+    recvMs = etmAckQueue[etmAckQHead].recvMs;
+    etmAckQHead = (uint8_t)((etmAckQHead + 1) % ETM_ACK_QUEUE_MAX);
+    portEXIT_CRITICAL(&etmAckQMux);
+    etmProcessAck(sender, seq, recvMs);           // now runs only on the loop task
   }
 }
 
@@ -847,7 +1224,9 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
   if (slot == -1) {
     if (debugETM) Serial.println("[ETM] Pending table full, evicting oldest entry");
     slot = 0;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    // Tally by the evicted entry's own expected-ACK bitset (the snapshot taken
+    // at send time), NOT live membership — iterate the full range on the bit.
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (etmPendingTable[slot].expectAckFrom[b] && !etmPendingTable[slot].receivedAckFrom[b]) {
         etmStatsFailed[b]++;
       }
@@ -873,13 +1252,34 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
     entry.retryCount[b]      = 0;
   }
 
-  for (int b = 0; b < Default_WCB_Quantity; b++) {
+  for (int b = 0; b < MAX_WCB_COUNT; b++) {
+    // The controller / special peer (NaviCore) is deliberately never wcbPeerActive[] —
+    // addActivePeer rejects it, since it doesn't consume a WCB slot — but it IS a
+    // registered unicast target and it ACKs every COMMAND packet it receives. Without
+    // an exception here its slot is never added to expectAckFrom, so a ;w20 route or a
+    // remote-Maestro forward to it is one best-effort send with no ETM retry, despite
+    // the callers asking for ensured delivery.
+    //
+    // SCOPED TO UNICAST ADDRESSED TO IT — deliberately. Expecting its ACK on BROADCASTS
+    // too costs one extra ACK plus a potential unicast retry burst on EVERY broadcast
+    // the mesh sends, and holds each broadcast's pending slot open longer waiting for
+    // it. That is fleet-wide overhead paid during bulk transfers (config pull, OTA)
+    // which are exactly when the mesh is least able to absorb it. Every send this
+    // exception exists for — ;w20, remote-Maestro forwards — is unicast anyway.
+    bool isSpecialPeerSlot = (specialPeerEnabled && (b + 1) == WCB_SPECIAL_PEER_ID &&
+                              targetWCB == WCB_SPECIAL_PEER_ID);
+    if (!wcbPeerActive[b] && !isSpecialPeerSlot) continue;   // snapshot the expected-ACK set from active members
     int wcbNum = b + 1;
     if (wcbNum == WCB_Number) continue;
     if (!boardTable[b].online) continue;
 
     // For unicast, only expect ACK from the target board
     if (targetWCB != 0 && wcbNum != targetWCB) continue;
+
+    // Mixed-fleet guard: a learned peer that has never ACKed us does NOT block
+    // broadcast completion (it may be a phantom or run non-reciprocating fw).
+    // Unicast still expects its ACK so first-contact retries work normally.
+    if (targetWCB == 0 && wcbPeerLearned[b] && !wcbPeerReciprocated[b]) continue;
 
     entry.expectAckFrom[b] = true;
     etmStatsSent[b]++;
@@ -889,7 +1289,7 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
 }
 
 
-void etmProcessAck(int senderWCB, uint16_t seqNum) {
+void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs) {
   if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   int boardIdx = senderWCB - 1;
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
@@ -899,6 +1299,9 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
     if (!etmPendingTable[i].receivedAckFrom[boardIdx]) {
       etmPendingTable[i].receivedAckFrom[boardIdx] = true;
       etmStatsAckd[boardIdx]++;
+      // A learned peer that ACKs has proven it reciprocates ETM — from now on it
+      // may count toward broadcast completion (see etmAddToPendingTable).
+      if (wcbPeerLearned[boardIdx]) wcbPeerReciprocated[boardIdx] = true;
       if (debugETM) {
         Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
       }
@@ -913,16 +1316,17 @@ void etmProcessAck(int senderWCB, uint16_t seqNum) {
           else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
 
           int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
-          if (phase >= 0 && mIdx >= 0 && mIdx < 200) {
-            processETMCharAck(senderWCB, originalCmd, etmCharPhaseSentTimes[phase][mIdx]);
+          if (phase >= 0 && mIdx >= 0 && mIdx < ETM_CHAR_MAX_MSGS) {
+            processETMCharAck(senderWCB, originalCmd, etmCharPhaseSentTimes[phase][mIdx], recvMs);
           }
         }
       }
     }
 
-    // Check if all expected ACKs received
+    // Check if all expected ACKs received — evaluate the per-entry bitset over
+    // the full range so a peer learned/removed mid-flight can't race this.
     bool allDone = true;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (etmPendingTable[i].expectAckFrom[b] && !etmPendingTable[i].receivedAckFrom[b]) {
         allDone = false;
         break;
@@ -948,7 +1352,9 @@ void processETMAcksAndRetries() {
 
     bool anyStillPending = false;
 
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    // Retry off the per-entry expected-ACK bitset (its send-time snapshot), so
+    // membership changes during the retry window can't add/drop targets here.
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (!entry.expectAckFrom[b]) continue;
       if (entry.receivedAckFrom[b]) continue;
 
@@ -984,6 +1390,16 @@ void processETMAcksAndRetries() {
         retry.structSequenceNumber = entry.sequenceNumber;
 
         uint8_t *mac = WCBMacAddresses[b];
+        // The unicast peer may have been evicted from the ESP-NOW table (~20 cap)
+        // while still appearing online via broadcasts — esp_now_send would then
+        // fail every retry and burn the whole budget. Re-register on demand so the
+        // retry can actually go out.
+        if (!esp_now_is_peer_exist(mac)) {
+          esp_now_peer_info_t p = {};
+          memcpy(p.peer_addr, mac, 6);
+          p.channel = 0; p.encrypt = false;
+          esp_now_add_peer(&p);   // best-effort; if the table is truly full the send just fails as before
+        }
         esp_now_send(mac, (uint8_t *)&retry, sizeof(retry));
 
         entry.retryCount[b]++;
@@ -1005,9 +1421,9 @@ void processETMAcksAndRetries() {
 
     entry.lastSentMs = millis(); // reset timer for next retry window
 
-    // Check if all resolved
+    // Check if all resolved — per-entry bitset over the full range.
     bool allResolved = true;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (entry.expectAckFrom[b] && !entry.receivedAckFrom[b]) {
         allResolved = false;
         break;
@@ -1017,6 +1433,21 @@ void processETMAcksAndRetries() {
       entry.active = false;
       if (debugETM) Serial.printf("[ETM] Seq %d resolved\n", entry.sequenceNumber);
     }
+  }
+}
+
+// Clear a peer from every in-flight pending entry's expected-ACK set. Called
+// when a peer is removed from membership so a departing board can't leave a
+// broadcast waiting forever. Counts one failure per still-open expectation.
+void etmClearPeerFromPending(int boardIdx) {
+  if (boardIdx < 0 || boardIdx >= MAX_WCB_COUNT) return;
+  for (int i = 0; i < ETM_PENDING_MAX; i++) {
+    if (!etmPendingTable[i].active) continue;
+    if (etmPendingTable[i].expectAckFrom[boardIdx] &&
+        !etmPendingTable[i].receivedAckFrom[boardIdx]) {
+      etmStatsFailed[boardIdx]++;
+    }
+    etmPendingTable[i].expectAckFrom[boardIdx] = false;
   }
 }
 
@@ -1033,6 +1464,17 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
   ack.structSequenceNumber = seqNum;
 
   uint8_t *mac = WCBMacAddresses[senderWCB - 1];
+  // Register the sender on demand. A board can legitimately send us an ensured command without
+  // being in our own peer table — a high-numbered relay above our WCBQ floor, or a peer evicted
+  // from the ~20-slot ESP-NOW table. esp_now_send then fails ESP_ERR_ESPNOW_NOT_FOUND and the ACK
+  // is silently dropped, so the sender burns all 3 retries and reports "[ETM] WCBn FAILED" for a
+  // command we actually executed. Mirrors the on-demand registration the retry path already does.
+  if (!esp_now_is_peer_exist(mac)) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, mac, 6);
+    p.channel = 0; p.encrypt = false;
+    esp_now_add_peer(&p);   // best-effort; a truly full table fails the send as before
+  }
   esp_err_t result = esp_now_send(mac, (uint8_t *)&ack, sizeof(ack));
   if (debugETM) {
     Serial.printf("[ETM] Sent ACK seq %d to WCB%d, result: %d\n", seqNum, senderWCB, result);
@@ -1062,6 +1504,7 @@ void startETMChar() {
     etmCharRunning = true;
     etmCharPhase = 1;
     etmCharPhaseMessageIndex = 0;
+    etmCharClampWarned = false;   // re-arm the reduced-sample notice for this run
     etmCharPhaseStartTime = millis();
     etmCharLastSendTime = 0;
     memset(etmCharBoardResults, 0, sizeof(etmCharBoardResults));
@@ -1083,16 +1526,41 @@ void processETMChar() {
 
     int peers[MAX_WCB_COUNT];
     int peerCount = 0;
-    for (int i = 1; i <= Default_WCB_Quantity; i++) {
-        if (i != WCB_Number && boardTable[i - 1].online) peers[peerCount++] = i;
+    for (int i = 1; i <= MAX_WCB_COUNT; i++) {
+        if (wcbPeerActive[i - 1] && boardTable[i - 1].online) peers[peerCount++] = i;
     }
     if (peerCount == 0) {
         Serial.println("[ETM] Characterization aborted: no online peers.");
         etmCharRunning = false;
+        // printETMCharResults() is the only place that unwinds the rest of the run's state, and
+        // this early return skips it. Unwind here too, or: debugETM stays suppressed for the rest
+        // of the session, and etmCharRelayRequesterWCB stays latched so the NEXT — possibly
+        // purely local — ?ETM,CHAR frag-sends its results to a board that never asked for them.
+        if (etmCharDebugWasSaved) { debugETM = true; etmCharDebugWasSaved = false; }
+        if (etmCharRelayRequesterWCB != 0) {
+            Serial.printf("[ETM] Notifying requesting WCB%d that characterization could not run.\n",
+                          etmCharRelayRequesterWCB);
+            sendResultFrags("ETM characterization aborted: no online peers.",
+                            etmCharRelayRequesterWCB, PACKET_TYPE_ETM_FRAG);
+            etmCharRelayRequesterWCB = 0;
+        }
         return;
     }
 
-    int totalMessages = etmCharMessageCount * peerCount;
+    // Clamp PER BOARD so the phase index can never leave etmCharPhaseSentTimes (see
+    // ETM_CHAR_MAX_MSGS). Clamping per-board rather than truncating the total keeps every peer
+    // equally sampled — truncating the total would starve the boards at the end of peers[].
+    // peerCount <= MAX_WCB_COUNT and ETM_CHAR_MAX_MSGS is 200, so perBoard is always >= 10,
+    // which is also etmCharMessageCount's own floor (constrain at ?ETM,COUNT) — it can never be 0.
+    int perBoard = etmCharMessageCount;
+    if (perBoard * peerCount > ETM_CHAR_MAX_MSGS) perBoard = ETM_CHAR_MAX_MSGS / peerCount;
+    int totalMessages = perBoard * peerCount;   // provably <= ETM_CHAR_MAX_MSGS
+    if (perBoard < etmCharMessageCount && !etmCharClampWarned) {
+        etmCharClampWarned = true;
+        Serial.printf("[ETM CHAR] %d online peers x %d messages exceeds the %d-message phase cap — "
+                      "sampling %d per board instead.\n",
+                      peerCount, etmCharMessageCount, ETM_CHAR_MAX_MSGS, perBoard);
+    }
 
     if (etmCharPhase == 1 || etmCharPhase == 2) {
         unsigned long interDelay = (etmCharPhase == 1) ? 20UL : (unsigned long)etmCharDelayMs;
@@ -1131,7 +1599,11 @@ void processETMChar() {
     } else if (etmCharPhase == 3) {
         if (etmCharPhaseMessageIndex == 0) {
             Serial.println("Triggering network load on all peers...");
-            sendESPNowMessage(0, "ETMLOAD", false);
+            // MUST go out under ETM. Sent non-ETM it arrives as a plain 249-byte packet, which
+            // every ETM-enabled peer drops on the ETM-mismatch gate — so no peer ever started
+            // generating load and phase 3 "Loaded Network" measured an idle mesh while claiming
+            // otherwise. (processETMLoad on the receiving side was consequently unreachable.)
+            sendESPNowMessage(0, "ETMLOAD", true);
         }
 
         if (etmCharPhaseMessageIndex < totalMessages) {
@@ -1183,7 +1655,10 @@ void advanceETMCharPhase(int* peers, int peerCount) {
     etmCharLastSendTime = 0;
 
     if (etmCharPhase == 2) {
-        Serial.printf("Phase 2 - Broadcast (no load)...\n");
+        // Phase 2 sends UNICAST with a wider gap — phase 3 is the only phase that broadcasts.
+        // The old "Broadcast" label meant the results table reported unicast latencies under a
+        // broadcast heading, so nobody could tell the mesh had never been measured broadcasting.
+        Serial.printf("Phase 2 - Unicast, spaced (no load)...\n");
         // Phase 2 is actually broadcast to all — re-init results for phase 2
         // We'll send to broadcast but track per-board via ACKs
     } else if (etmCharPhase == 3) {
@@ -1191,7 +1666,7 @@ void advanceETMCharPhase(int* peers, int peerCount) {
     }
 }
 
-void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long sentTime) {
+void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long sentTime, unsigned long recvMs) {
     if (!etmCharRunning) return;
     if (!originalCmd.startsWith("ETMCHAR_")) return;
 
@@ -1205,9 +1680,9 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     if (phase < 0) return;
 
     int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
-    if (mIdx < 0 || mIdx >= 200) return;  // guard against out-of-bounds sentTime read
+    if (mIdx < 0 || mIdx >= ETM_CHAR_MAX_MSGS) return;  // guard against out-of-bounds sentTime read
 
-    unsigned long latency = millis() - sentTime;
+    unsigned long latency = recvMs - sentTime;   // recvMs = true ACK arrival (WiFi task), not loop-drain time
     
     if (debugETM) {
       Serial.printf("[CHAR DEBUG] ACK: cmd=%s phase=%d board=%d latency=%lums sentTime=%lu now=%lu\n",
@@ -1252,13 +1727,21 @@ void processETMLoad() {
         if (sendBcast) {
             sendESPNowMessage(0, payload.c_str(), false);  // broadcast, not ETM
         } else {
-            // Round-robin unicast to peers
-            int target = etmLoadRoundRobinIndex + 1;
-            if (target == WCB_Number) target++;  // skip self
-            if (target > Default_WCB_Quantity) target = 1;
-            if (target == WCB_Number) target++;  // skip self again if WCB1
-            etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % Default_WCB_Quantity;
-            sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+            // Round-robin unicast across the active member peers. Walk the
+            // membership set by index (not raw id arithmetic) so a sparse /
+            // learned peer set never targets a non-existent id.
+            int nPeers = activePeerCount();
+            if (nPeers > 0) {
+                int want = etmLoadRoundRobinIndex % nPeers;
+                int seen = 0, target = 0;
+                for (int i = 0; i < MAX_WCB_COUNT; i++) {
+                    if (!wcbPeerActive[i]) continue;
+                    if (seen == want) { target = i + 1; break; }
+                    seen++;
+                }
+                etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % nPeers;
+                if (target != 0) sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+            }
         }
 
         loadMsgCount++;
@@ -1274,8 +1757,8 @@ String buildStatsString() {
   out += " ESP-NOW Statistics (Since Last Reboot) ---\n";
   if (etmEnabled) {
     unsigned long totalSent = 0, totalAckd = 0, totalRetries = 0, totalFailed = 0;
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
-      if (b + 1 == WCB_Number) continue;
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
+      if (!wcbPeerActive[b]) continue;   // active member peers (incl. learned)
       totalSent    += etmStatsSent[b];    totalAckd    += etmStatsAckd[b];
       totalRetries += etmStatsRetries[b]; totalFailed  += etmStatsFailed[b];
     }
@@ -1318,7 +1801,8 @@ String buildStatsString() {
   }
   if (etmEnabled) {
     out += "\n--------------- ETM Per-Board Statistics ---------------\n";
-    for (int b = 0; b < Default_WCB_Quantity; b++) {
+    for (int b = 0; b < MAX_WCB_COUNT; b++) {
+      if (!wcbPeerActive[b]) continue;   // active member peers (incl. learned)
       int wcbNum = b + 1;
       if (wcbNum == WCB_Number) continue;
       unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
@@ -1342,8 +1826,83 @@ String buildStatsString() {
     }
     out += "--------------------------------------------------------\n";
   }
+  // Rows other nodes reported about THEMSELVES (?STATS,RPT). Kept visually apart
+  // from this board's own numbers above — they are measured elsewhere, by a node
+  // that may be reporting a totally different view of the same link, and reading
+  // them as ours would be badly misleading.
+  {
+    bool any = false;
+    for (int b = 0; b < MAX_WCB_COUNT; b++) if (reportedStats[b].used) { any = true; break; }
+    if (any) {
+      out += "\n------------- Reported by Other Nodes -------------\n";
+      for (int b = 0; b < MAX_WCB_COUNT; b++) {
+        const ReportedStats& r = reportedStats[b];
+        if (!r.used) continue;
+        unsigned long ageS = (millis() - r.lastMs) / 1000;
+        snprintf(buf, sizeof(buf),
+                 "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, Unguaranteed: %lu, "
+                 "Bcast: %lu, Recv: %lu  (%lus ago)\n",
+                 b + 1, r.sent, r.ackd, r.retries, r.failed, r.unguaranteed, r.bcast, r.recv, ageS);
+        out += buf;
+      }
+      out += "---------------------------------------------------\n";
+    }
+  }
   out += "--- End of ESP-NOW Statistics ---\n";
   return out;
+}
+
+// Parse and store one "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv>"
+// report. `rest` is everything after "RPT", i.e. starting at the comma before <from>.
+//
+// The reporter's id travels IN THE PAYLOAD because processLocalCommand() takes no
+// sourceID — "?" commands are dispatched without it (WCB.ino ≈3965). Threading it
+// through would touch every local command; one field costs nothing.
+//
+// Strict: a row is stored only if ALL eight fields are present. A short report is
+// dropped whole rather than written partially, so a truncated packet can never
+// leave a row that looks like real data with zeros in the missing columns.
+void storeReportedStats(const String& rest) {
+  unsigned long v[8] = {0};
+  int found = 0, start = 0;
+  // rest starts with the comma before <from>; skip it, then split on commas.
+  if (rest.length() && rest[0] == ',') start = 1;
+  for (int i = 0; i < 8 && start <= (int)rest.length(); i++) {
+    int c = rest.indexOf(',', start);
+    String f = (c < 0) ? rest.substring(start) : rest.substring(start, c);
+    f.trim();
+    if (!f.length()) break;
+    // strtoul, not toInt(): these are unsigned-long counters. toInt() returns a
+    // signed long and saturates above 2^31, so a large sent/recv count would be
+    // mis-stored (and could read back negative-wrapped) in the "Reported by Other
+    // Nodes" display.
+    v[i] = strtoul(f.c_str(), nullptr, 10);
+    found++;
+    if (c < 0) break;
+    start = c + 1;
+  }
+  if (found < 8) {
+    Serial.printf("[STATS] RPT ignored — need 8 fields (from,sent,ackd,retries,failed,unguaranteed,bcast,recv), got %d\n",
+                  found);
+    return;
+  }
+  int from = (int)v[0];
+  if (from < 1 || from > MAX_WCB_COUNT) {
+    Serial.printf("[STATS] RPT ignored — reporter id %d out of range (1-%d)\n", from, MAX_WCB_COUNT);
+    return;
+  }
+  ReportedStats& r = reportedStats[from - 1];
+  r.used = true;
+  r.sent = v[1]; r.ackd = v[2]; r.retries = v[3]; r.failed = v[4];
+  r.unguaranteed = v[5]; r.bcast = v[6]; r.recv = v[7];
+  r.lastMs = millis();
+  // ?STATS,RPT is high-rate internal telemetry (every board reports periodically),
+  // so its console echo rides ?DEBUG,MGMT with the rest of the relay/mgmt chatter —
+  // NOT general ?DEBUG,ON, where it floods the terminal. (The "Processing ETM input"
+  // mirror in espNowReceiveCallback is gated the same way.)
+  if (debugMGMT)
+    Serial.printf("[STATS] RPT from WCB%d: sent=%lu ackd=%lu retries=%lu failed=%lu unguaranteed=%lu bcast=%lu recv=%lu\n",
+                  from, r.sent, r.ackd, r.retries, r.failed, r.unguaranteed, r.bcast, r.recv);
 }
 
 // Build ETM characterization results as a String (used by printETMCharResults and relay response)
@@ -1354,7 +1913,7 @@ String buildETMCharResultsString(int* peers, int peerCount) {
   out += " ETM Network Characterization ------------\n";
   const char* phaseNames[] = {
     "Individual Baseline (unicast, no load)",
-    "Broadcast (no load)",
+    "Unicast, spaced (no load)",   // phase 2 is unicast; only phase 3 broadcasts
     "Loaded Network (all boards transmitting)"
   };
   unsigned long worstMaxLatency = 0, worstAvgLatency = 0;
@@ -1418,11 +1977,27 @@ void printETMCharResults(int* peers, int peerCount) {
 
 // String getSerialLabel(int port);
 // Write a string + `\r` to a given Stream
-void writeSerialString(Stream &serialPort, String stringData) {
+// Write one line (plus the trailing CR) to a serial port as a SINGLE bulk write.
+//
+// This used to loop `serialPort.write(completeString[i])` one byte at a time. Every byte was
+// an independent write() call, which is the widest possible interleave window: any other
+// task writing the same port could land its bytes BETWEEN two characters of this string.
+// That is a real topology here, not a theoretical one — RawSerialForwardingTask,
+// KyberLocalTask, KyberRemoteTask and PWMTask all do outputSerial.write(buffer, len) from
+// their own FreeRTOS tasks, while this path runs on the loop task. A device parsing framed
+// commands (e.g. the HCR’s <...> strings) then sees a spliced frame and acts on the wrong
+// value, intermittently and with nothing wrong upstream to find.
+//
+// One bulk write closes that window on S1/S2: HardwareSerial::write(buf,len) goes through
+// uartWriteBuf under the UART mutex (HAL locks are enabled in this core build), so the whole
+// string lands atomically. It also drops the per-byte lock/unlock overhead.
+//
+// S3-S5 are EspSoftwareSerial, which bit-bangs and takes no mutex — a bulk write there is
+// still far tighter than per-byte, but it is NOT atomic. Two tasks writing one software
+// port can still splice; the fix for that is to not share the port.
+void writeSerialString(Stream &serialPort, const String &stringData) {
   String completeString = stringData + '\r';
-  for (int i = 0; i < completeString.length(); i++) {
-    serialPort.write(completeString[i]);
-  }
+  serialPort.write((const uint8_t *)completeString.c_str(), completeString.length());
 }
 
 Stream &getSerialStream(int port) {
@@ -1436,13 +2011,80 @@ Stream &getSerialStream(int port) {
   }
 }
 
+// ── Soft-serial TX timing (S3-S5) ────────────────────────────────────────────
+// EspSoftwareSerial bit-bangs TX in software and busy-waits each bit period against a
+// running anchor (writePeriod/preciseDelay). Its default is m_intTxEnabled = true, which
+// means it NEVER takes a critical section — so an interrupt landing mid-byte pushes the
+// accumulator behind, the remaining bits compress, and the receiver mis-frames. On this
+// board the interrupt is the ESP-NOW radio, and the symptom is a command cut short in
+// flight: an H-CR fed "<CA1021>" plays 0001/0010, i.e. a PREFIX of what was sent, at up
+// to a 45% failure rate under mesh load. Measured on a WCB1 by a user, not theoretical.
+//
+// enableIntTx(false) makes the library wrap each byte in taskENTER_CRITICAL instead.
+// The window is ONE BYTE, not one line: lazyDelay() explicitly restores interrupts at
+// every stop bit ("to avoid other tasks piling up" — SoftwareSerial.cpp:265-283), so the
+// worst case is ~0.94 ms at 9600. It costs no throughput — the bit-bang takes its time
+// from the baud rate either way, and today a preempted byte takes LONGER than nominal.
+//
+// WHY THIS IS GATED. The library’s interrupt mux is STATIC — one spinlock shared by S3,
+// S4 and S5 — and a port with intTx still enabled never touches it. So this is only safe
+// on a port that no CORE 0 task ever writes; otherwise core 0 would spin on the mux (and
+// sit interrupt-disabled) inside the WiFi task. Core-0 writers on this board are PWMTask
+// (pinned to core 0) and espNowReceiveCallback itself, which writes raw mesh data straight
+// to a Maestro port, the Kyber port, and raw-serial-mapping targets. Exclude all of those.
+//
+// RESIDUAL: a raw-serial mapping on a REMOTE board can target a port this board believes
+// is idle — that case is not locally knowable. It is bounded (the mux is released every
+// stop bit) and that path already blocks the WiFi task for the whole bit-bang regardless,
+// so it is not made materially worse. Re-check if raw mesh mappings become common.
+static bool softSerialLoopTaskOnly(int port) {
+  if (port < 3 || port > 5) return false;                 // S1/S2 are real UARTs — N/A
+  if (isSerialPortUsedForPWMInput(port) ||
+      isSerialPortPWMOutput(port))        return false;   // PWMTask is pinned to core 0
+  if (kyberLocalPort == port)             return false;   // RX callback echoes Kyber here
+  if (isSerialPortRawMapped(port))        return false;   // raw-mapping traffic
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++)          // RX callback forwards Maestro here
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
+        maestroConfigs[i].serialPort == port) return false;
+  return true;
+}
+
+// Apply the above to one soft port. Call after EVERY begin() — begin() constructs fresh
+// state, so the setting does not survive a re-begin (which applyLiveBaud does per baud change).
+static void applySoftSerialIntTx(int port) {
+  const bool loopOnly = softSerialLoopTaskOnly(port);
+  switch (port) {
+    case 3: Serial3.enableIntTx(!loopOnly); break;
+    case 4: Serial4.enableIntTx(!loopOnly); break;
+    case 5: Serial5.enableIntTx(!loopOnly); break;
+    default: return;
+  }
+  if (debugEnabled)
+    Serial.printf("[SOFTSERIAL] S%d bit-bang TX: %s\n", port,
+                  loopOnly ? "interrupt-protected (loop-task only)"
+                           : "unprotected (a core-0 task can write this port)");
+}
+
 // Apply a new baud rate to a LIVE serial port without requiring a reboot.
 //   S1/S2 (hardware UART): updateBaudRate() just reprograms the clock divisor.
 //   S3-S5 (EspSoftwareSerial): the software UART must be torn down and
 //   re-begun with the SAME signature setup() uses, otherwise the change only
 //   takes effect on the next boot. PWM-reserved ports are skipped (mirrors
 //   the guards in setup()). Called from updateBaudRate() in WCB_Storage.cpp.
+// Set to the port number while that port is being torn down and re-begun below. Every task that
+// drains a serial port checks this and skips the port for the duration.
+//
+// Without it, SoftwareSerial::end() frees the RX buffer while serialCommandTask (5 ms poll) or
+// RawSerialForwardingTask is inside available()/read() on the same object — a read against a
+// freed buffer. This is reachable from an ordinary ?BAUD,Sx change and from any config push that
+// alters a baud rate; it needs no raw mapping.
+volatile int serialReconfigPort = 0;
+
 void applyLiveBaud(int port, uint32_t baud) {
+  serialReconfigPort = port;
+  // Give any task already inside a drain a chance to finish its pass before the teardown.
+  // serialCommandTask polls every 5 ms and RawSerialForwardingTask every 2 ms.
+  vTaskDelay(pdMS_TO_TICKS(12));
   switch (port) {
     case 1: Serial1.updateBaudRate(baud); break;
     case 2: Serial2.updateBaudRate(baud); break;
@@ -1450,33 +2092,48 @@ void applyLiveBaud(int port, uint32_t baud) {
       if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
         Serial3.end();
         Serial3.begin(baud, SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+        applySoftSerialIntTx(3);
       }
       break;
     case 4:
       if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
         Serial4.end();
         Serial4.begin(baud, SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+        applySoftSerialIntTx(4);
       }
       break;
     case 5:
       if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
         Serial5.end();
         Serial5.begin(baud, SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+        applySoftSerialIntTx(5);
       }
       break;
   }
+  serialReconfigPort = 0;
 }
 
 // Enqueue commands for asynchronous processing
-void enqueueCommand(const String &cmd, int sourceID) {
+// originEspnow / originSeqBody: pass 0 or 1 to state this command's origin EXPLICITLY; leave at
+// the -1 default to fall back to the globals.
+//
+// The globals are unsynchronised shared mutable state written by three tasks across two cores —
+// the WiFi receive callback (Core 0), serialCommandTask and the loop task (Core 1) — so a write
+// from one can land between another task setting them and this snapshot reading them, staging the
+// wrong origin for a command. Callers that already know the answer should say so rather than
+// routing it through a global that a concurrent packet can clobber.
+void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody) {
   if (!commandQueue) return;
 
   CommandQueueItem item;
   item.sourceID = sourceID;
-  // Snapshot the ESP-NOW origin NOW (at enqueue), while the global still reflects
-  // the source that produced this command. It is restored just before dispatch so
-  // forwarding decisions are per-command instead of riding a racy global.
-  item.espnowOrigin = lastReceivedViaESPNOW;
+  // Explicit origin wins; otherwise snapshot the global NOW (at enqueue), while it still reflects
+  // the source that produced this command. Restored just before dispatch so forwarding decisions
+  // are per-command instead of riding the global.
+  item.espnowOrigin = (originEspnow >= 0) ? (originEspnow != 0) : lastReceivedViaESPNOW;
+  // Same idea for the sequence-body flag, so a nested recall's mesh-fanout suppression
+  // survives the async queue (see recallStoredCommand / inSequenceBody).
+  item.sequenceBody = (originSeqBody >= 0) ? (originSeqBody != 0) : inSequenceBody;
 
   // Allocate enough space for the command (including null terminator)
   int length = cmd.length() + 1;
@@ -1498,15 +2155,61 @@ void enqueueCommand(const String &cmd, int sourceID) {
 }
 
 
-void parseCommandsAndEnqueue(const String &data, int sourceID) {
+// Does `tok` at offset `at` begin with `func` followed by `verbUpper` (case-insensitive on the
+// verb, EXACT on the func char)?
+//
+// The func char is NOT case-normalisable: ?FUNCCHAR accepts any printable non-space character
+// except the command character (WCB.ino, the FUNCCHAR setter), so a lowercase letter such as
+// 'x' is a legal identifier. The old tests uppercased the whole token and compared it against a
+// RAW func char — so on a board whose identifier was a lowercase letter, "xSEQ,SAVE," never
+// matched "XSEQ,SAVE," and the whole-token branches silently stopped firing, splitting a
+// sequence value on every delimiter inside it. Compare the two halves separately.
+static bool tokenHasVerb(const String &tok, int at, char func, const char *verbUpper) {
+  if (at < 0 || at >= (int)tok.length()) return false;
+  if (tok.charAt(at) != func) return false;
+  const int n = (int)strlen(verbUpper);
+  if (at + 1 + n > (int)tok.length()) return false;
+  for (int k = 0; k < n; k++)
+    if (toupper((unsigned char)tok.charAt(at + 1 + k)) != verbUpper[k]) return false;
+  return true;
+}
+
+// If tok is "<curFunc>FUNCCHAR,<c>", return <c> — the character every LATER token in this
+// chain will carry. printBackupConfig flips mid-chain on purpose (WCB.ino, defaultFunc), and
+// the flip has to be mirrored by the splitter or the whole-token branches stop matching.
+static char chainFuncCharAfter(const String &tok, char curFunc) {
+  static const char kVerb[] = "FUNCCHAR,";
+  if (!tokenHasVerb(tok, 0, curFunc, kVerb)) return curFunc;
+  String rest = tok.substring(1 + sizeof(kVerb) - 1); rest.trim();
+  return rest.length() == 1 ? rest.charAt(0) : curFunc;
+}
+
+// Everything AFTER the checksum gate. Split out so the verified-chain path can hand off
+// WITHOUT recursing into parseCommandsAndEnqueue: the recursion re-entered the ?CHK branch,
+// so a chain whose payload legitimately contains an earlier "^?CHK" (a legacy sequence value
+// recovered by migrateOldStoredCommands, or one stored while ?DELIM was non-default) failed
+// the second verification and aborted the whole restore. It also dropped originEspnow /
+// originSeqBody, silently reverting every checksummed chain to the racy global snapshot.
+static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody);
+
+void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Check if this is a restore with checksum
   int firstDelim = data.indexOf(commandDelimiter);
   if (firstDelim != -1) {
-    // Look for ?CHK command in the chain
-    int chkPos = data.indexOf(String(commandDelimiter) + "?CHK");
-    if (chkPos == -1) {
-      chkPos = data.indexOf(String(commandDelimiter) + "?chk");
-    }
+    // Look for the ?CHK command in the chain. Use lastIndexOf: the real checksum
+    // is the FINAL token, and a stored sequence value can legitimately contain an
+    // earlier "^?CHK" — matching the first occurrence truncated the chain and
+    // aborted the whole restore.
+    // Match the LIVE function identifier, not a hard-coded '?'. printBackupConfig emits the
+    // live chain's checksum as <funcChar>CHK (:2802-ish), so on a board with a custom FUNCCHAR
+    // the token never matched and the integrity check was silently skipped — a corrupted restore
+    // applied without complaint. '?' is still accepted so a factory-reset chain (which always
+    // uses '?') verifies on a board that has since changed its funcChar.
+    const String lfiChk = String(commandDelimiter) + String(LocalFunctionIdentifier);
+    int chkPos = data.lastIndexOf(lfiChk + "CHK");
+    if (chkPos == -1) chkPos = data.lastIndexOf(lfiChk + "chk");
+    if (chkPos == -1) chkPos = data.lastIndexOf(String(commandDelimiter) + "?CHK");
+    if (chkPos == -1) chkPos = data.lastIndexOf(String(commandDelimiter) + "?chk");
     
     if (chkPos != -1) {
       // Extract checksum command
@@ -1538,8 +2241,10 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         Serial.println("✓ Command checksum VERIFIED - Configuration is intact");
         Serial.println("  Provided:   " + providedChecksum);
         Serial.println("  Calculated: " + calculatedChecksumStr);
-        // Continue processing without the checksum command
-        parseCommandsAndEnqueue(dataWithoutChecksum, sourceID);
+        // Hand off to the worker, NOT back into this function: re-entering the ?CHK branch
+        // would abort a chain whose payload legitimately contains an earlier "^?CHK".
+        // Origin flags must be carried through too, or the chain reverts to the racy global.
+        parseCommandsNoChecksum(dataWithoutChecksum, sourceID, originEspnow, originSeqBody);
         return;
       } else {
         Serial.println("✗ Command checksum FAILED - Configuration may be corrupted!");
@@ -1551,6 +2256,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     }
   }
   
+  // No checksum token in this chain — parse it as-is.
+  parseCommandsNoChecksum(data, sourceID, originEspnow, originSeqBody);
+}
+
+static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Normal parsing with special handling for ?CS commands.
   //
   // IF gating (chain-local, resolved at invoke time): when a standalone
@@ -1561,18 +2271,28 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
   // reach this logic (the SEQ,SAVE branch swallows its whole value), so
   // stored sequences keep their IFs verbatim and evaluate them at recall.
   bool ifSkipping = false;
+  // Chain-local function identifier, for the same reason ifSkipping is chain-local.
+  // printBackupConfig’s factory-reset chain deliberately flips the func char partway
+  // through (?FUNCCHAR,<new>), so every token AFTER that point carries the NEW char while
+  // the receiving board is still on its own. Matching the three whole-token branches below
+  // against the board’s live LocalFunctionIdentifier therefore missed them: a ?SEQ,SAVE was
+  // split on every "^" inside its value and its tail commands were enqueued as separate
+  // (garbage) commands. Track the emitter’s flip instead. Costs nothing on the common path,
+  // where curFunc never changes.
+  char curFunc = LocalFunctionIdentifier;
   int startIdx = 0;
   while (startIdx < data.length()) {
     // Check if we're at the start of a ?CS command
-    String restOfString = data.substring(startIdx);
-    bool isCSCommand = restOfString.startsWith(String(LocalFunctionIdentifier) + "CS") || 
-                       restOfString.startsWith(String(LocalFunctionIdentifier) + "cs");
+    // tokenHasVerb rather than a substring+startsWith: this ran once per token, and each call
+    // copied the ENTIRE remaining chain (~2.9 KB on a config restore) just to test 3 characters —
+    // O(n²) String churn on the restore path. It also only matched "CS"/"cs", not "Cs"/"cS".
+    bool isCSCommand = tokenHasVerb(data, startIdx, curFunc, "CS");
     
     if (isCSCommand) {
       // Find the end of this ?CS command (next ^?CS or end of string)
-      int nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "CS", startIdx + 1);
+      int nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "CS", startIdx + 1);
       if (nextCSPos == -1) {
-        nextCSPos = data.indexOf(String(commandDelimiter) + String(LocalFunctionIdentifier) + "cs", startIdx + 1);
+        nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "cs", startIdx + 1);
       }
       
       // Extract the entire ?CS command including all its sub-commands
@@ -1582,7 +2302,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
       
       if (!csCommand.isEmpty() && !csCommand.startsWith(commentDelimiter)) {
         if (!ifGateConsumeToken(csCommand, ifSkipping)) {
-          enqueueCommand(csCommand, sourceID);
+          enqueueCommand(csCommand, sourceID, originEspnow, originSeqBody);
         }
       }
 
@@ -1601,13 +2321,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     // delimiter+funcChar (e.g. "^?"), which begins the NEXT config-level command.
     // "^;" belongs to the sequence value itself — do NOT treat it as a boundary.
     {
-      String restUpper = restOfString;
-      restUpper.toUpperCase();
-      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "SEQ,SAVE,")) {
+      if (tokenHasVerb(data, startIdx, curFunc, "SEQ,SAVE,")) {
         // Only split at delimiter+funcChar (e.g. "^?") — the start of the next
         // config command.  "^;" inside the value is a unicast command prefix and
         // must be preserved as part of the stored sequence.
-        String nextFuncBoundary = String(commandDelimiter) + String(LocalFunctionIdentifier);
+        String nextFuncBoundary = String(commandDelimiter) + String(curFunc);
 
         int nextFuncPos = data.indexOf(nextFuncBoundary, startIdx + 1);
 
@@ -1618,7 +2336,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
         seqSaveCmd.trim();
         if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
           if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
-            enqueueCommand(seqSaveCmd, sourceID);
+            enqueueCommand(seqSaveCmd, sourceID, originEspnow, originSeqBody);
           }
         }
         startIdx = endPos;
@@ -1632,14 +2350,12 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
     // Special handling for ?MGMT,...: always the final command in the line and
     // must NOT be split on ^ (FRAG payloads contain ^ as config delimiters).
     {
-      String restUpper = restOfString;
-      restUpper.toUpperCase();
-      if (restUpper.startsWith(String(LocalFunctionIdentifier) + "MGMT,")) {
+      if (tokenHasVerb(data, startIdx, curFunc, "MGMT,")) {
         String mgmtCmd = data.substring(startIdx);
         mgmtCmd.trim();
         if (!mgmtCmd.isEmpty() && !mgmtCmd.startsWith(commentDelimiter)) {
           if (!ifGateConsumeToken(mgmtCmd, ifSkipping)) {
-            enqueueCommand(mgmtCmd, sourceID);
+            enqueueCommand(mgmtCmd, sourceID, originEspnow, originSeqBody);
           }
         }
         break;  // ?MGMT,... is always the final command in a serial line
@@ -1660,8 +2376,11 @@ void parseCommandsAndEnqueue(const String &data, int sourceID) {
           // pure ;t delay belonging to a gated command). Shared semantics
           // live in ifGateConsumeToken — see WCB_Variables.cpp.
         } else {
-          enqueueCommand(singleCmd, sourceID);
+          enqueueCommand(singleCmd, sourceID, originEspnow, originSeqBody);
         }
+        // Mirror an in-chain func-char change for the REST of this walk. Placed after the
+        // gate so a FUNCCHAR skipped by a false IF does not shift the rest of the chain.
+        if (!ifSkipping) curFunc = chainFuncCharAfter(singleCmd, curFunc);
       }
       if (delimPos == -1) break;
       startIdx = delimPos + 1;
@@ -1728,7 +2447,8 @@ void printConfigInfo() {
                 broadcastMACAddress[0][0], broadcastMACAddress[0][1], broadcastMACAddress[0][2],
                 broadcastMACAddress[0][3], broadcastMACAddress[0][4], broadcastMACAddress[0][5]);
   Serial.println("Peers:");
-  for (int i = 0; i < Default_WCB_Quantity; i++) {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!wcbPeerActive[i] && (i + 1) != WCB_Number) continue;  // members + self
     if (i + 1 == WCB_Number) {
       Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  (this board)\n",
                     i + 1,
@@ -1752,7 +2472,7 @@ void printConfigInfo() {
   if (specialPeerEnabled) {
     int spIdx = WCB_SPECIAL_PEER_ID - 1;
     unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000UL;
-    Serial.printf("  WCB%d (special): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
+    Serial.printf("  WCB%d (controller): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
                   WCB_SPECIAL_PEER_ID,
                   WCBMacAddresses[spIdx][0], WCBMacAddresses[spIdx][1], WCBMacAddresses[spIdx][2],
                   WCBMacAddresses[spIdx][3], WCBMacAddresses[spIdx][4], WCBMacAddresses[spIdx][5],
@@ -1770,7 +2490,7 @@ void printConfigInfo() {
   Serial.printf("Delimiter Character:      %c\n", commandDelimiter);
   Serial.printf("Local Function Identifier: %c\n", LocalFunctionIdentifier);
   Serial.printf("Command Character:         %c\n", CommandCharacter);
-  if (specialPeerEnabled) Serial.printf("Special Peer:              ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
+  if (specialPeerEnabled) Serial.printf("Controller Peer:          ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);
@@ -1844,6 +2564,17 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     etmMsg.structCommandIncluded = 1;
     // Build command string, optionally appending CRC
     if (etmChecksumEnabled) {
+        // Refuse rather than emit a frame whose CRC will be truncated off in transit. The
+        // receiver would ACK it (etmSendAck fires before CRC verification) and then silently
+        // discard it, so the caller would see a clean delivery for a command that never ran.
+        // Failing here is loud, ungated, and — unlike the old behaviour — actually visible.
+        if (strlen(message) > ETM_MAX_CMD_WITH_CRC) {
+            Serial.printf("[ETM] Command %u chars exceeds the %d-char limit under ?ETM,CHKSM "
+                          "— NOT SENT (the checksum would be truncated and the target would "
+                          "ACK-then-discard it)\n",
+                          (unsigned)strlen(message), ETM_MAX_CMD_WITH_CRC);
+            return;
+        }
         uint32_t crc = calculateCRC32(String(message));
         char withCRC[210];
         snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", message, crc);
@@ -1855,7 +2586,12 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     etmMsg.structPacketType = PACKET_TYPE_COMMAND;
     etmMsg.structSequenceNumber = ++etmSequenceCounter;
 
-    etmAddToPendingTable(etmMsg.structSequenceNumber, message, target);
+    // Best-effort JSON telemetry broadcasts (rc_hb / rc_ch etc.) are never ACKed,
+    // so tracking them for retries just burns the retry budget and can evict
+    // genuine ensured commands from the small pending table. Send, but don't track.
+    bool bestEffortTelemetry = (target == 0 && message[0] == '{');
+    if (!bestEffortTelemetry)
+      etmAddToPendingTable(etmMsg.structSequenceNumber, message, target);
 
     uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
 
@@ -1914,6 +2650,54 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     Serial.printf("ESP-NOW send failed! Error code: %d\n", result);
   }
 }
+
+// Send an ETM COMMAND frame to one peer WITHOUT registering it for ACK/retry.
+//
+// Why this exists: a reply built inside espNowReceiveCallback runs on the WiFi task, and
+// sendESPNowMessage(..., true) would call etmAddToPendingTable() there — the pending table
+// is loop-task-only (see the comment at its declaration; the shift-eviction racing loop()'s
+// retry scan corrupts it). But sending the reply UNTRACKED as a plain 249-byte packet is not
+// an option either: a peer running ETM only ingests the 252-byte ETM frame, and routes the
+// short one to its raw hook, so the reply is silently never delivered.
+//
+// This is the same carve-out the ETM path already makes for best-effort JSON telemetry
+// (bestEffortTelemetry above), applied to a unicast: correct wire format, no pending-table
+// touch. The peer ACKs it and the ACK finds no pending slot, which is harmless. Kept as a
+// dedicated helper rather than widening bestEffortTelemetry, so ordinary unicast senders
+// keep their delivery guarantee.
+//
+// Callers must be idempotent-tolerant: nothing retries this, and the shared sequence counter
+// is incremented off two tasks, so a rare collision can cost one frame to peer-side dedup.
+static void sendEtmCommandUntracked(uint8_t target, const char *message) {
+  if (target < 1 || target > MAX_WCB_COUNT) return;
+  espnow_struct_message_etm etmMsg;
+  memset(&etmMsg, 0, sizeof(etmMsg));
+  strncpy(etmMsg.structPassword, espnowPassword, sizeof(etmMsg.structPassword) - 1);
+  snprintf(etmMsg.structSenderID, sizeof(etmMsg.structSenderID), "%d", WCB_Number);
+  snprintf(etmMsg.structTargetID, sizeof(etmMsg.structTargetID), "%d", (int)target);
+  etmMsg.structCommandIncluded = 1;
+  if (etmChecksumEnabled) {
+    // Same refusal as the tracked path — a truncated CRC would be ACKed then discarded.
+    if (strlen(message) > ETM_MAX_CMD_WITH_CRC) return;
+    uint32_t crc = calculateCRC32(String(message));
+    char withCRC[210];
+    snprintf(withCRC, sizeof(withCRC), "%s|CRC%08X", message, crc);
+    strncpy(etmMsg.structCommand, withCRC, sizeof(etmMsg.structCommand) - 1);
+  } else {
+    strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
+  }
+  etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = ' ';
+  etmMsg.structPacketType = PACKET_TYPE_COMMAND;
+  etmMsg.structSequenceNumber = ++etmSequenceCounter;
+  espnowCommandAttempts++;
+  if (esp_now_send(WCBMacAddresses[target - 1], (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
+    espnowCommandSuccess++;
+    espnowCommandDelivered++;
+  } else {
+    espnowCommandFailed++;
+  }
+}
+
 
 void sendESPNowRaw(const uint8_t *data, size_t len) {
     size_t offset = 0;
@@ -2040,7 +2824,12 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
     size_t offset = 0;
     while (offset < len) {
         size_t chunkSize = len - offset;
-        if (chunkSize > 180) chunkSize = 180;
+        // 177, NOT 180 — the receiver rejects anything larger (see the WCB_TARGET_RAW_SERIAL
+        // branch in espNowReceiveCallback). At 180 a chunk of 178-180 bytes was transmitted and
+        // then silently dropped at the far end, with the only diagnostic behind debugMaestro.
+        // Today RawSerialForwardingTask never exceeds its own 64-byte buffer, so this is latent
+        // for WCB-to-WCB traffic, but a WCB_Client or hand-crafted sender can reach it.
+        if (chunkSize > RAW_SERIAL_MAX_CHUNK) chunkSize = RAW_SERIAL_MAX_CHUNK;
 
         espnow_struct_message msg;
         memset(&msg, 0, sizeof(msg));
@@ -2092,6 +2881,14 @@ void handleMgmtForward(const String &args) {
     handleMgmtStatsRequest(args.substring(c1 + 1));
     return;
   }
+  if (type == "SEQ") {
+    handleMgmtSeqRequest(args.substring(c1 + 1));
+    return;
+  }
+  if (type == "SEQGET") {
+    handleMgmtSeqValRequest(args.substring(c1 + 1));   // "<wcb>,<key>"
+    return;
+  }
   if (type == "ETM") {
     // Expect ?MGMT,ETM,CHAR,<targetWCB>
     String etmArgs = args.substring(c1 + 1);  // "CHAR,3"
@@ -2133,7 +2930,13 @@ void handleMgmtForward(const String &args) {
   // distinguish wizard-relayed commands from board-to-board ETM and reset
   // lastReceivedViaESPNOW = false, allowing the command to broadcast via
   // ESP-NOW normally (plain-text commands must be able to propagate to peers).
-  if (totalChunks == 1 && payload.length() <= 198) {  // 198 = 200 - 1 (marker) - 1 (null)
+  // 198 = 200 - 1 (SOH marker) - 1 (null). Under ?ETM,CHKSM the frame must ALSO carry the
+  // 12-char "|CRC########" suffix, so the ceiling drops to ETM_MAX_CMD_WITH_CRC minus the marker.
+  // Without this the shortcut handed sendESPNowMessage a string it now (correctly) refuses,
+  // turning a silently-corrupted delivery into a silently-dropped one — so fall through to the
+  // fragmented path instead, which has no such limit.
+  const unsigned singleChunkMax = etmChecksumEnabled ? (unsigned)(ETM_MAX_CMD_WITH_CRC - 1) : 198u;
+  if (totalChunks == 1 && payload.length() <= singleChunkMax) {
     String markedPayload = String("\x01") + payload;
     sendESPNowMessage(targetWCB, markedPayload.c_str(), true);
     if (debugMGMT)
@@ -2145,6 +2948,22 @@ void handleMgmtForward(const String &args) {
   // ── Multi-chunk commands (push config): broadcast each fragment ───────────
   // Push config payloads exceed the 200-byte ETM limit and are reassembled
   // chunk-by-chunk on the target side via handleMgmtPacket().
+  //
+  // REJECT an over-long fragment rather than silently truncating it. pkt.payload is
+  // char[180] and the strncpy below carries sizeof-1 = 179 data chars, so a 180-char
+  // fragment used to lose its last character — corrupting whichever command straddled
+  // the chunk boundary while the sender still reported success. WCB_Client already
+  // documents the correct value (WCB_MGMT_CHUNK_LEN 179, "payload[180] minus NUL");
+  // the Wizard now matches. This guard is deliberately UNGATED (not behind debugMGMT)
+  // so any future sender that gets the arithmetic wrong fails loudly instead of
+  // writing quietly-corrupted config into the target's NVS.
+  if (payload.length() > MGMT_PAYLOAD_SIZE - 1) {
+    Serial.printf("[MGMT] FRAG payload %u > %u chars — REJECTED (sender must fragment at %u)\n",
+                  (unsigned)payload.length(), (unsigned)(MGMT_PAYLOAD_SIZE - 1),
+                  (unsigned)(MGMT_PAYLOAD_SIZE - 1));
+    return;
+  }
+
   espnow_struct_mgmt pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -2262,6 +3081,7 @@ void handleMgmtPacket(const uint8_t *data) {
     //    otherwise a WCB_Client unicast would silently become a network-wide
     //    broadcast the moment the command crossed the fragmentation threshold.
     lastReceivedViaESPNOW = unicastOrigin;
+    inSequenceBody = false;   // reassembled command is top-level, not a sequence body
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
@@ -2323,6 +3143,14 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
+  emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
+  // Derived live membership count (WCBQ floor ∪ WDP-learned peers). When
+  // auto-join is on this can exceed WCBQ; the Wizard shows it read-only so the
+  // operator sees what the board actually talks to, not just what they typed.
+  // includeInLive=false: it's board-derived telemetry, NOT restorable config —
+  // keep it out of the backup chain (like DELIM/FUNCCHAR) so a restore never
+  // dispatches ?PEERSLIVE,<n>.
+  emit("PEERSLIVE," + String(activePeerCount()), false);
   emit("EPASS," + String(espnowPassword), true);
 
   // Command characters — DELIM/FUNCCHAR are factory-chain-only (includeInLive=false)
@@ -2339,6 +3167,7 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // Broadcast settings
   for (int i = 0; i < 5; i++)
     emit("BCAST,OUT,S" + String(i + 1) + "," + (serialBroadcastEnabled[i] ? "ON" : "OFF"), true);
+  emit("BCAST,OUT,S0," + String(broadcastToS0 ? "ON" : "OFF"), true);   // S0/USB output (opt-in)
   for (int i = 0; i < 5; i++)
     emit("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"), true);
 
@@ -2401,8 +3230,25 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("ETM,DELAY,"   + String(etmCharDelayMs), true);
   emit("ETM,CHKSM,"   + String(etmChecksumEnabled ? "ON" : "OFF"), true);
 
-  // Special peer (NaviCore) — only when enabled
-  if (specialPeerEnabled) emit("SPECIAL,ON," + String(WCB_SPECIAL_PEER_ID), true);
+  // Controller peer (default NaviCore, ID 20) — only when enabled. Canonical token
+  // is CONTROLLER now; firmware + Wizard still accept the legacy SPECIAL on input.
+  if (specialPeerEnabled) {
+    emit("CONTROLLER,ON," + String(WCB_SPECIAL_PEER_ID), true);
+  } else if (WCB_SPECIAL_PEER_ID != 20) {
+    // Preserve a CUSTOM controller id even while the controller is disabled — set
+    // it then turn it back off — so a restore doesn't silently revert it to the
+    // default 20. (Default id + disabled needs nothing.)
+    emit("CONTROLLER,ON," + String(WCB_SPECIAL_PEER_ID), true);
+    emit("CONTROLLER,OFF", true);
+  }
+
+  // WDP settings — both default ON, so only the OFF states need to ride the
+  // config chain (otherwise a restore silently reverts a deliberate ?WDP,OFF /
+  // ?WDP,AUTOJOIN,OFF back to ON on the replacement board). Learned-peer
+  // membership itself is board-derived (NVS, MAC-fingerprinted) and is NOT part
+  // of a portable config, so it is intentionally not emitted here.
+  if (!wdpEnabled)  emit("WDP,OFF", true);
+  if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
 
   // Stored sequences
   preferences.begin("stored_cmds", true);
@@ -2456,7 +3302,9 @@ String buildConfigString() {
     String dummy;
     printMaestroBackup(dummy, out, '^');
     printMP3Backup(dummy, out, '^');
+    printDFPBackup(dummy, out, '^');
     printHCRBackup(dummy, out, '^');
+    printWLEDBackup(dummy, out, '^');
     // User variables — webtool grammar is always the fixed '^?' form.
     printVariablesBackup(dummy, out, '^');
   };
@@ -2483,6 +3331,20 @@ void handleConfigReqPacket(const uint8_t *data) {
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.targetWCB != WCB_Number) return;
 
+  // The relay sends CONFIG_REQ redundantly to survive broadcast loss; answer only
+  // the first of a burst. Ignore a repeat from the same requester within a short
+  // window so we don't fire multiple overlapping config responses. The window is
+  // shorter than the wizard's retry interval, so a genuine retry still gets served.
+  static uint32_t lastConfigReqMs   = 0;
+  static uint8_t  lastConfigReqFrom = 0;
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastConfigReqFrom && (nowMs - lastConfigReqMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate config request from WCB%d ignored\n", pkt.requesterWCB);
+    return;
+  }
+  lastConfigReqFrom = pkt.requesterWCB;
+  lastConfigReqMs   = nowMs;
+
   if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d\n", pkt.requesterWCB);
 
   String configStr = buildConfigString();
@@ -2500,33 +3362,99 @@ void handleConfigReqPacket(const uint8_t *data) {
     return;
   }
 
-  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+  uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
 
-  for (int i = 0; i < totalChunks; i++) {
-    espnow_struct_config_frag frag;
-    memset(&frag, 0, sizeof(frag));
-    strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
-    frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
-    frag.sourceWCB    = WCB_Number;
-    frag.requesterWCB = pkt.requesterWCB;
-    frag.sessionId    = sessionId;
-    frag.chunkIdx     = (uint8_t)i;
-    frag.totalChunks  = (uint8_t)totalChunks;
+  // Send the whole fragmented config TWICE (two spaced passes, same sessionId).
+  // The relay dedups by chunkIdx (receivedMask), so a frame lost in one pass is
+  // recovered by the other. Without this, a single dropped broadcast frag stalls
+  // the entire pull until the wizard's multi-second retry. Two full passes give
+  // each frag's copies temporal separation (better than back-to-back resends).
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < totalChunks; i++) {
+      espnow_struct_config_frag frag;
+      memset(&frag, 0, sizeof(frag));
+      strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+      frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
+      frag.sourceWCB    = WCB_Number;
+      frag.requesterWCB = pkt.requesterWCB;
+      frag.sessionId    = sessionId;
+      frag.chunkIdx     = (uint8_t)i;
+      frag.totalChunks  = (uint8_t)totalChunks;
 
-    int start = i * chunkStride;
-    int end   = min(start + chunkStride, totalLen);
-    String chunk = configStr.substring(start, end);
-    // memset already zeroed the struct — payload[chunk.length()] is '\0'
-    memcpy(frag.payload, chunk.c_str(), chunk.length());
+      int start = i * chunkStride;
+      int end   = min(start + chunkStride, totalLen);
+      String chunk = configStr.substring(start, end);
+      // memset already zeroed the struct — payload[chunk.length()] is '\0'
+      memcpy(frag.payload, chunk.c_str(), chunk.length());
 
-    esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
-    if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X\n",
-                                 i + 1, totalChunks, sessionId);
-    delay(20);
+      esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+      if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X (pass %d)\n",
+                                   i + 1, totalChunks, sessionId, pass + 1);
+      delay(20);
+    }
   }
 }
 
 // Relay side: received a CONFIG_FRAG — reassemble and output to serial when complete
+// ── Deferred MGMT output ────────────────────────────────────────────────────
+// The five *FragPacket handlers all run on the WiFi task (espNowReceiveCallback dispatches
+// them inline), and each ends by printing the reassembled result — up to 2912 bytes. UART0
+// has no TX buffer (the sketch never calls setTxBufferSize), so Serial.printf does not return
+// until every byte is on the wire: ~235 ms for a real 2.7 KB config. HAL locks are enabled,
+// so the WiFi task holds the UART0 mutex for that whole window and any Serial.* from loop()
+// on core 1 blocks behind it too. That is exactly what WCB_RemoteTerm.cpp:14-16 warns about
+// ("caused the WiFi watchdog to fire and restart the board") — this was the one path still
+// doing it. Reassembly stays here (it is cheap); only the delivery is handed to loop().
+//
+// SPSC ring: producer is the WiFi callback (all five handlers), consumer is drainMgmtOut() in
+// loop(). Three slots — the Wizard serializes its pulls, so one would do in practice, but a
+// stats reply landing on top of a config reply must not cost a line.
+#define MGMT_OUT_SLOTS 3
+#define MGMT_OUT_BUFSZ (MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1) + 48)   // 2960
+static char s_mgmtOut[MGMT_OUT_SLOTS][MGMT_OUT_BUFSZ];
+static volatile uint8_t s_mgmtOutHead = 0;   // written by the WiFi task
+static volatile uint8_t s_mgmtOutTail = 0;   // written by loop()
+// Mux over the INDICES only, matching the etmAckQ ring above ("the mux makes push/pop
+// mutually exclusive"). volatile alone orders the compiler, not the two cores. The slot
+// payload is deliberately written and read OUTSIDE the lock: the producer owns its slot
+// until it publishes head, the consumer owns its slot until it advances tail, and holding
+// a spinlock across either a 2.9 KB snprintf or a blocking UART write would be far worse
+// than the race it closes.
+static portMUX_TYPE s_mgmtOutMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Queue one already-reassembled MGMT line for loop() to print. Safe from the WiFi task.
+static void mgmtQueueOut(const char *tag, uint8_t srcWCB, const char *body) {
+  portENTER_CRITICAL(&s_mgmtOutMux);
+  const uint8_t head = s_mgmtOutHead;
+  const uint8_t next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
+  const bool    full = (next == s_mgmtOutTail);
+  portEXIT_CRITICAL(&s_mgmtOutMux);
+  if (full) return;                  // loop() is behind — drop rather than block here
+
+  snprintf(s_mgmtOut[head], MGMT_OUT_BUFSZ, "[MGMT:%s,%d]%s", tag, (int)srcWCB, body);
+
+  portENTER_CRITICAL(&s_mgmtOutMux);
+  s_mgmtOutHead = next;              // publish only after the slot is fully written
+  portEXIT_CRITICAL(&s_mgmtOutMux);
+}
+
+// Print any queued MGMT results. Called from loop(), where a blocking UART write is fine.
+void drainMgmtOut() {
+  for (;;) {
+    portENTER_CRITICAL(&s_mgmtOutMux);
+    const uint8_t tail  = s_mgmtOutTail;
+    const bool    empty = (tail == s_mgmtOutHead);
+    portEXIT_CRITICAL(&s_mgmtOutMux);
+    if (empty) break;
+
+    Serial.println(s_mgmtOut[tail]);   // outside the lock — this is the blocking part
+
+    portENTER_CRITICAL(&s_mgmtOutMux);
+    s_mgmtOutTail = (uint8_t)((tail + 1) % MGMT_OUT_SLOTS);   // free the slot only now
+    portEXIT_CRITICAL(&s_mgmtOutMux);
+  }
+}
+
 void handleConfigFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
@@ -2534,7 +3462,15 @@ void handleConfigFragPacket(const uint8_t *data) {
 
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+
+  // The target sends the config in two passes for loss resilience. Once a session
+  // has been fully reassembled and delivered, ignore any leftover frags bearing
+  // that same sessionId (the second pass) so we don't deliver the config twice or
+  // start a stray never-completing session. (sessionId 0 means "none".)
+  static uint16_t lastDeliveredSession = 0;
+  if (lastDeliveredSession != 0 && pkt.sessionId == lastDeliveredSession) return;
 
   // Start or continue pull session
   if (!pullSession.active || pullSession.sessionId != pkt.sessionId) {
@@ -2563,9 +3499,10 @@ void handleConfigFragPacket(const uint8_t *data) {
     String fullConfig = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullConfig += String(pullSession.chunks[i]);
     uint8_t srcWCB = pullSession.sourceWCB;
+    lastDeliveredSession = pkt.sessionId;   // suppress the redundant second pass
     memset(&pullSession, 0, sizeof(pullSession));
     // Deliver to webpage — always printed regardless of debugMGMT
-    Serial.printf("[MGMT:CONFIG,%d]%s\n", srcWCB, fullConfig.c_str());
+    mgmtQueueOut("CONFIG", srcWCB, fullConfig.c_str());   // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Config pull complete for WCB%d (%d chars)\n",
                                  srcWCB, fullConfig.length());
   }
@@ -2577,10 +3514,21 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
   int totalLen    = data.length();
   int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
   if (totalChunks > MGMT_MAX_CHUNKS) {
-    if (debugMGMT) Serial.printf("[MGMT] Result too large (%d chars) — cannot relay\n", totalLen);
+    // UNGATED. This used to be behind debugMGMT (off by default), so an oversized result — a
+    // ?MGMT,STATS or ?MGMT,ETM on a large fleet, or a config with many stored variables — simply
+    // produced nothing at all, and the requesting end waited out its timeout with no clue why.
+    // Send a short in-band error instead of silence so the operator sees the cause.
+    Serial.printf("[MGMT] Result too large to relay: %d chars needs %d chunks, max %d (%d chars).\n",
+                  totalLen, totalChunks, MGMT_MAX_CHUNKS, MGMT_MAX_CHUNKS * chunkStride);
+    String err = "[ERROR] Result too large to relay (" + String(totalLen) + " chars, max " +
+                 String(MGMT_MAX_CHUNKS * chunkStride) + "). Reduce stored variables/sequences "
+                 "or query this board directly.";
+    // Recurse ONCE with a message that provably fits, so the requester gets a real answer.
+    if (err.length() <= (unsigned)(MGMT_MAX_CHUNKS * chunkStride))
+      sendResultFrags(err, requesterWCB, fragPacketType);
     return;
   }
-  uint16_t sessionId = (uint16_t)random(0, 0xFFFF);
+  uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
   for (int i = 0; i < totalChunks; i++) {
     espnow_struct_config_frag frag;
     memset(&frag, 0, sizeof(frag));
@@ -2614,6 +3562,102 @@ void handleStatsReqPacket(const uint8_t *data) {
   sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_STATS_FRAG);
 }
 
+// ── Target side: handle SEQ_REQ → send this board's sequence NAMES back ──────
+// Reads NVS (key_list + nothing else) and fragments the inventory back to the
+// requester. Deferred out of the WiFi callback via enqueueMgmtReq like its peers.
+void handleSeqReqPacket(const uint8_t *data) {
+  espnow_struct_config_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+
+  // The requester sends SEQ_REQ 3x (see handleMgmtSeqRequest) because a first
+  // broadcast frame is routinely dropped on a busy mesh. Without a dedup window
+  // that would fire THREE full fragmented responses. Same guard, same reasoning
+  // as handleConfigReqPacket — shorter than any sane retry interval, so a genuine
+  // retry is still answered.
+  static uint32_t lastSeqReqMs   = 0;
+  static uint8_t  lastSeqReqFrom = 0;
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastSeqReqFrom && (nowMs - lastSeqReqMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq request from WCB%d ignored\n", pkt.requesterWCB);
+    return;
+  }
+  lastSeqReqFrom = pkt.requesterWCB;
+  lastSeqReqMs   = nowMs;
+
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request from WCB%d\n", pkt.requesterWCB);
+  String result = buildSequenceNamesString();
+  sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_SEQ_FRAG);
+}
+
+// ── Target side: handle SEQVAL_REQ → send ONE sequence's value back ──────────
+// Reply payload is always "<key>,<status>,<value>" so the requester can match the
+// answer to its request and tell the three outcomes apart:
+//   OK       — value follows
+//   NOTFOUND — no such key (value empty)
+//   TOOBIG   — the value exceeds what sendResultFrags can carry (value empty)
+//
+// TOOBIG is reported EXPLICITLY rather than dropped. Silent overflow is precisely
+// what makes the config-pull path unusable for sequences (it sends nothing and logs
+// only under debugMGMT), and reintroducing it here would recreate the bug this whole
+// feature exists to route around.
+void handleSeqValReqPacket(const uint8_t *data) {
+  espnow_struct_seqval_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  pkt.key[sizeof(pkt.key) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.targetWCB != WCB_Number) return;
+
+  String key = String(pkt.key);
+  key.trim();
+  if (key.length() == 0) return;
+
+  // Dedup a repeat of the SAME key from the SAME requester, matching the burst the
+  // requester sends. Keyed on the key too, so a consumer walking a name list back to
+  // back (get "wave", then "park") is never mistaken for a retry of the previous one.
+  static uint32_t lastSeqValMs   = 0;
+  static uint8_t  lastSeqValFrom = 0;
+  static String   lastSeqValKey  = "";
+  uint32_t nowMs = millis();
+  if (pkt.requesterWCB == lastSeqValFrom && key == lastSeqValKey &&
+      (nowMs - lastSeqValMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq-value request '%s' from WCB%d ignored\n",
+                                 key.c_str(), pkt.requesterWCB);
+    return;
+  }
+  lastSeqValFrom = pkt.requesterWCB;
+  lastSeqValKey  = key;
+  lastSeqValMs   = nowMs;
+
+  preferences.begin("stored_cmds", true);
+  bool   exists = preferences.isKey(key.c_str());
+  String value  = preferences.getString(key.c_str(), "");
+  preferences.end();
+
+  String reply;
+  if (!exists && value.length() == 0) {
+    reply = key + ",NOTFOUND,";
+  } else {
+    // Budget check BEFORE sending: sendResultFrags silently refuses anything over
+    // MGMT_MAX_CHUNKS. Account for the "<key>,OK," header we prepend.
+    const int maxPayload = MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1);
+    if ((int)(key.length() + 4 + value.length()) > maxPayload) {
+      Serial.printf("[MGMT] Sequence '%s' is %d chars — too large to relay (max %d)\n",
+                    key.c_str(), value.length(), maxPayload - (int)key.length() - 4);
+      reply = key + ",TOOBIG,";
+    } else {
+      reply = key + ",OK," + value;
+    }
+  }
+
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' from WCB%d (%d chars)\n",
+                               key.c_str(), pkt.requesterWCB, reply.length());
+  sendResultFrags(reply, pkt.requesterWCB, PACKET_TYPE_SEQVAL_FRAG);
+}
+
 // ── Target side: handle ETM_REQ → start ETM char, results sent in printETMCharResults ──
 void handleETMReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
@@ -2630,6 +3674,57 @@ void handleETMReqPacket(const uint8_t *data) {
   startETMChar();
 }
 
+// ── Defer mgmt request responses out of the WiFi receive callback ───────────
+// CONFIG_REQ / STATS_REQ / ETM_REQ each generate a FRAGMENTED response with a
+// delay(20) per fragment (and CONFIG_REQ re-reads NVS via buildConfigString) —
+// hundreds of ms of work. Running that in the ESP-NOW receive callback (WiFi
+// task) stalls ESP-NOW and drops other inbound packets (heartbeats, OTA frags,
+// RC telemetry). So the callback only ENQUEUES the 43-byte request here, and
+// drainMgmtReqs() runs the heavy handler in loop() context — same pattern as the
+// OTA packet queue. Auth (password + targetWCB) is (re)validated inside each
+// handler, so queuing unauthenticated junk is harmless.
+//
+// The slot is sized to the LARGEST request that rides this queue, not to
+// espnow_struct_config_req: SEQVAL_REQ is 59 bytes because it carries a key.
+// `len` is stored so each handler is handed exactly the bytes that arrived — a
+// blind memcpy of the slot size would read past a 43-byte packet's buffer.
+struct MgmtReqSlot {
+  uint8_t len;
+  uint8_t raw[sizeof(espnow_struct_seqval_req)];   // the widest request on this queue
+};
+static QueueHandle_t mgmtReqQueue = nullptr;
+
+void enqueueMgmtReq(const uint8_t *raw, int len) {
+  if (!mgmtReqQueue) return;
+  if (len <= 0 || len > (int)sizeof(((MgmtReqSlot*)0)->raw)) return;
+  MgmtReqSlot slot;
+  memset(&slot, 0, sizeof(slot));
+  slot.len = (uint8_t)len;
+  memcpy(slot.raw, raw, len);
+  xQueueSend(mgmtReqQueue, &slot, 0);   // drop if full → the requester retries (3x REQ + browser retry)
+}
+
+void drainMgmtReqs() {
+  if (!mgmtReqQueue) return;
+  MgmtReqSlot slot;
+  while (xQueueReceive(mgmtReqQueue, &slot, 0) == pdTRUE) {
+    const uint8_t *p = slot.raw;
+    // packetType sits at the same offset in every request struct on this queue
+    // (immediately after structPassword[40]), so one peek routes them all.
+    uint8_t ptype = slot.raw[40];
+    switch (ptype) {
+      case PACKET_TYPE_CONFIG_REQ: handleConfigReqPacket(p); break;
+      case PACKET_TYPE_STATS_REQ:  handleStatsReqPacket(p);  break;
+      case PACKET_TYPE_ETM_REQ:    handleETMReqPacket(p);    break;
+      case PACKET_TYPE_SEQ_REQ:    handleSeqReqPacket(p);    break;
+      case PACKET_TYPE_SEQVAL_REQ:
+        if (slot.len >= (int)sizeof(espnow_struct_seqval_req)) handleSeqValReqPacket(p);
+        break;
+      default: break;
+    }
+  }
+}
+
 // ── Relay side: reassemble ?STATS frags and output [MGMT:STATS,N]<data> ──────
 void handleStatsFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
@@ -2637,6 +3732,7 @@ void handleStatsFragPacket(const uint8_t *data) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
   if (!statsRelaySession.active || statsRelaySession.sessionId != pkt.sessionId) {
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
@@ -2658,8 +3754,78 @@ void handleStatsFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(statsRelaySession.chunks[i]);
     uint8_t srcWCB = statsRelaySession.sourceWCB;
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
-    Serial.printf("[MGMT:STATS,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("STATS", srcWCB, fullResult.c_str());    // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: reassemble sequence-name frags → [MGMT:SEQ,N]<hash>,<count>,... ──
+void handleSeqFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!seqRelaySession.active || seqRelaySession.sessionId != pkt.sessionId) {
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+    seqRelaySession.sourceWCB      = pkt.sourceWCB;
+    seqRelaySession.sessionId      = pkt.sessionId;
+    seqRelaySession.totalChunks    = pkt.totalChunks;
+    seqRelaySession.lastActivityMs = millis();
+    seqRelaySession.active         = true;
+  }
+  if (!(seqRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(seqRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    seqRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    seqRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  seqRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (seqRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqRelaySession.chunks[i]);
+    uint8_t srcWCB = seqRelaySession.sourceWCB;
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+    mgmtQueueOut("SEQ", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
+                                 srcWCB, fullResult.length());
+  }
+}
+
+// ── Relay side: reassemble one sequence → [MGMT:SEQVAL,N]<key>,<status>,<value> ──
+void handleSeqValFragPacket(const uint8_t *data) {
+  espnow_struct_config_frag pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
+  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (!seqValRelaySession.active || seqValRelaySession.sessionId != pkt.sessionId) {
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+    seqValRelaySession.sourceWCB      = pkt.sourceWCB;
+    seqValRelaySession.sessionId      = pkt.sessionId;
+    seqValRelaySession.totalChunks    = pkt.totalChunks;
+    seqValRelaySession.lastActivityMs = millis();
+    seqValRelaySession.active         = true;
+  }
+  if (!(seqValRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
+    strncpy(seqValRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    seqValRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    seqValRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  }
+  seqValRelaySession.lastActivityMs = millis();
+  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  if (seqValRelaySession.receivedMask == expectedMask) {
+    String fullResult = "";
+    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqValRelaySession.chunks[i]);
+    uint8_t srcWCB = seqValRelaySession.sourceWCB;
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+    mgmtQueueOut("SEQVAL", srcWCB, fullResult.c_str());   // printed by drainMgmtOut() in loop()
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
 }
@@ -2671,6 +3837,7 @@ void handleETMFragPacket(const uint8_t *data) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (String(pkt.structPassword) != String(espnowPassword)) return;
   if (pkt.requesterWCB != WCB_Number) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
   if (!etmRelaySession.active || etmRelaySession.sessionId != pkt.sessionId) {
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
@@ -2692,7 +3859,7 @@ void handleETMFragPacket(const uint8_t *data) {
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(etmRelaySession.chunks[i]);
     uint8_t srcWCB = etmRelaySession.sourceWCB;
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
-    Serial.printf("[MGMT:ETM,%d]%s\n", srcWCB, fullResult.c_str());
+    mgmtQueueOut("ETM", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] ETM relay complete for WCB%d (%d chars)\n",
                                  srcWCB, fullResult.length());
   }
@@ -2701,7 +3868,7 @@ void handleETMFragPacket(const uint8_t *data) {
 // ── Relay side: handle ?MGMT,STATS,<n> and ?MGMT,ETM,<n> ────────────────────
 void handleMgmtStatsRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) return;
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -2712,9 +3879,70 @@ void handleMgmtStatsRequest(const String &targetStr) {
   if (debugMGMT) Serial.printf("[MGMT] Stats request sent to WCB%d\n", targetWCB);
 }
 
+// ── Relay side: handle ?MGMT,SEQ,<n> — ask a board for its sequence NAMES ────
+void handleMgmtSeqRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+    if (debugMGMT) Serial.println("[MGMT] SEQ: invalid targetWCB");
+    return;
+  }
+  espnow_struct_config_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_SEQ_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+
+  // Sent 3x for the same reason the config pull is (first broadcast frame to a
+  // board is frequently dropped on a busy mesh). handleSeqReqPacket dedups within
+  // 1.5 s, so this still produces exactly one response.
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    delay(15);
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (x3)\n", targetWCB);
+}
+
+// ── Relay side: handle ?MGMT,SEQGET,<n>,<key> — pull ONE sequence from a board ──
+void handleMgmtSeqValRequest(const String &args) {
+  int c = args.indexOf(',');
+  if (c < 0) {
+    if (debugMGMT) Serial.println("[MGMT] SEQGET: expected ?MGMT,SEQGET,<wcb>,<key>");
+    return;
+  }
+  uint8_t targetWCB = (uint8_t)args.substring(0, c).toInt();
+  String  key       = args.substring(c + 1);
+  key.trim();
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
+    if (debugMGMT) Serial.println("[MGMT] SEQGET: invalid targetWCB");
+    return;
+  }
+  if (key.length() == 0 || key.length() > 15) {   // 15 = the NVS key limit
+    Serial.println("[MGMT] SEQGET: key must be 1-15 chars");
+    return;
+  }
+
+  espnow_struct_seqval_req pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+  pkt.packetType   = PACKET_TYPE_SEQVAL_REQ;
+  pkt.targetWCB    = targetWCB;
+  pkt.requesterWCB = WCB_Number;
+  strncpy(pkt.key, key.c_str(), sizeof(pkt.key) - 1);
+
+  // 3x for the same reason as the config pull; the target dedups on
+  // (requester, key) within 1.5 s so this still produces one response.
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    delay(15);
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' sent to WCB%d (x3)\n",
+                               key.c_str(), targetWCB);
+}
+
 void handleMgmtETMRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) return;
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
@@ -2728,7 +3956,7 @@ void handleMgmtETMRequest(const String &targetStr) {
 // Relay side: handle ?MGMT,PULL,<targetWCB> — send a config pull request
 void handleMgmtPullRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > 8) {
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {   // mesh supports up to MAX_WCB_COUNT boards, not 8
     if (debugMGMT) Serial.println("[MGMT] PULL: invalid targetWCB");
     return;
   }
@@ -2740,10 +3968,20 @@ void handleMgmtPullRequest(const String &targetStr) {
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
 
-  esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  // Send the request redundantly. ESP-NOW broadcast is unacknowledged and the
+  // first frame to a board is frequently dropped on a busy mesh — which used to
+  // cost the wizard a full pull-timeout before it retried ("works on the 2nd
+  // try"). The target dedups repeats within a short window (handleConfigReqPacket),
+  // so these 3 sends still produce exactly one config response.
+  esp_err_t result = ESP_OK;
+  for (int i = 0; i < 3; i++) {
+    esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    if (r != ESP_OK) result = r;
+    delay(15);
+  }
   if (debugMGMT) {
     if (result == ESP_OK)
-      Serial.printf("[MGMT] Config pull request sent for WCB%d\n", targetWCB);
+      Serial.printf("[MGMT] Config pull request sent for WCB%d (x3)\n", targetWCB);
     else
       Serial.printf("[MGMT] Config pull request failed, error: %d\n", result);
   }
@@ -2755,6 +3993,19 @@ void checkConfigPullTimeout() {
       (millis() - pullSession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
     if (debugMGMT) Serial.printf("[MGMT] Config pull session %04X timed out\n", pullSession.sessionId);
     memset(&pullSession, 0, sizeof(pullSession));
+  }
+  // Same reaping for the sequence-name session. Without it a half-received
+  // inventory (target rebooted mid-send) stays "active" until a new sessionId
+  // happens along, and its stale chunks would prefix the next reassembly.
+  if (seqRelaySession.active &&
+      (millis() - seqRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names session %04X timed out\n", seqRelaySession.sessionId);
+    memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+  }
+  if (seqValRelaySession.active &&
+      (millis() - seqValRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-value session %04X timed out\n", seqValRelaySession.sessionId);
+    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
   }
 }
 
@@ -2769,17 +4020,57 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // data plane.
   if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
 
+  // OTA struct sizes must stay distinct from every other ESP-NOW packet — the
+  // router below dispatches by size. WCB_OTA.cpp pins them to 55/243; assert no
+  // clash so a future field edit can't silently route OTA into another handler.
+  static_assert(
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_ota_ctrl) != sizeof(espnow_struct_message) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_ota_data) != sizeof(espnow_struct_message),
+    "OTA ESP-NOW struct size collides with an existing packet — adjust OTA padding");
+
+  // Same rule for the single-sequence request: it exists as its own struct only
+  // because it must carry a 16-byte key, and it is routed purely by its size.
+  static_assert(
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_mgmt) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_config_req) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_config_frag) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_remote_term) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_message_etm) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_message) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_ota_ctrl) &&
+    sizeof(espnow_struct_seqval_req) != sizeof(espnow_struct_ota_data),
+    "espnow_struct_seqval_req size collides with an existing packet — adjust key[] padding");
+
   // Handle known packet sizes
   if (len == sizeof(espnow_struct_mgmt)) {
     handleMgmtPacket(incomingData);
     return;
   }
   if (len == sizeof(espnow_struct_config_req)) {
-    // Dispatch by packetType — STATS_REQ and ETM_REQ share the same struct size
+    // CONFIG/STATS/ETM_REQ generate a blocking fragmented response (delay(20)/frag
+    // + NVS) — DEFER to loop() (drainMgmtReqs) so we don't stall the WiFi task,
+    // exactly like the OTA packets below. (STATS_REQ and ETM_REQ share this size.)
     uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
-    if      (ptype == PACKET_TYPE_CONFIG_REQ) handleConfigReqPacket(incomingData);
-    else if (ptype == PACKET_TYPE_STATS_REQ)  handleStatsReqPacket(incomingData);
-    else if (ptype == PACKET_TYPE_ETM_REQ)    handleETMReqPacket(incomingData);
+    if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_STATS_REQ ||
+        ptype == PACKET_TYPE_ETM_REQ    || ptype == PACKET_TYPE_SEQ_REQ) {
+      enqueueMgmtReq(incomingData, len);
+    }
+    return;
+  }
+  if (len == sizeof(espnow_struct_seqval_req)) {
+    // Reads NVS and fragments a reply — deferred to loop() like its siblings.
+    uint8_t ptype = ((const espnow_struct_seqval_req*)incomingData)->packetType;
+    if (ptype == PACKET_TYPE_SEQVAL_REQ) enqueueMgmtReq(incomingData, len);
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
@@ -2787,7 +4078,22 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t ptype = ((const espnow_struct_config_frag*)incomingData)->packetType;
     if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_SEQ_FRAG)    handleSeqFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_SEQVAL_FRAG) handleSeqValFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
+    return;
+  }
+  // OTA over ESP-NOW (P2). ACK is relay-side + lightweight → handle inline here.
+  // BEGIN/DATA/END/ABORT do BLOCKING flash work on the target → never in the WiFi
+  // callback; enqueue and let drainOtaPackets() run them in loop() context.
+  if (len == sizeof(espnow_struct_ota_ctrl)) {
+    uint8_t ptype = ((const espnow_struct_ota_ctrl*)incomingData)->packetType;
+    if (ptype == PACKET_TYPE_OTA_ACK) handleOtaAckRelay(incomingData);     // relay side, inline
+    else                              enqueueOtaPacket(incomingData, len);  // target side, deferred
+    return;
+  }
+  if (len == sizeof(espnow_struct_ota_data)) {
+    enqueueOtaPacket(incomingData, len);   // target side, deferred to loop()
     return;
   }
   // Remote terminal output from a target board → print [TERM:N] to USB
@@ -2866,30 +4172,68 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       return;
     }
 
+    // ── Bind the claimed sender id to the sender's real MAC ──────────────────
+    // Every WCB and every WCB_Client forces its STA MAC to the derived address
+    // 02:oct2:oct3:00:00:<id>, so the LAST MAC octet IS the board number. A
+    // packet whose structSenderID disagrees with its source MAC is either
+    // spoofed (a rogue in-group node claiming another id) or a misconfigured
+    // board; drop it before it can touch boardTable / ACK state / auto-join.
+    // This closes ghost-ACK (a rogue satisfying an ACK the real board never
+    // sent), phantom-online, and controller-alias spoofing. Safe as a hard rule
+    // because no board on the mesh runs a non-derived MAC.
+    if (info->src_addr[5] != senderWCB) {
+      if (debugETM) Serial.printf("[ETM] Dropped id-spoof: senderWCB=%d but src MAC .%u\n",
+                                  senderWCB, info->src_addr[5]);
+      return;
+    }
+
     // Refresh the sender's online presence on EVERY valid received ETM
     // packet (not just heartbeats). Otherwise if heartbeats are dropped
     // but commands flow, etmAddToPendingTable would skip the peer for
     // ACK-pending tracking, leaving our unicast sends to it un-retried.
-    if (senderIdx < Default_WCB_Quantity || isSpecialPeer) {
-      bool wasOffline = !boardTable[senderIdx].online;
+    if (wcbPeerActive[senderIdx] || isSpecialPeer) {
+      bool wasOffline     = !boardTable[senderIdx].online;
+      bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
       boardTable[senderIdx].online     = true;
       boardTable[senderIdx].lastSeenMs = millis();
-      if (wasOffline) {
-        Serial.printf("[ETM] WCB%d came ONLINE (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
-                      senderWCB,
+      // A boot announce always re-prints "came ONLINE" (even if we still thought
+      // the board was up) so the wizard re-establishes the relay session after a
+      // reboot too fast to have crossed our offline threshold (e.g. an OTA).
+      if (wasOffline || isBootAnnounce) {
+        Serial.printf("[ETM] WCB%d came ONLINE%s (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
+                      senderWCB, isBootAnnounce ? " (boot)" : "",
                       info->src_addr[0], info->src_addr[1], info->src_addr[2],
                       info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
+      // A rebooted peer restarts its sequence counter at 1, but our duplicate ring still holds
+      // the seqs it used before the reboot — so its first commands matched a "already seen" entry
+      // and were ACKed and then silently NOT executed. Clear this sender's history on a boot
+      // announce so the reused low seqs are treated as new.
+      if (isBootAnnounce) {
+        for (int h = 0; h < ETM_SEQ_HISTORY; h++) etmSeqHistory[senderIdx][h] = 0;
+        etmSeqHistoryIdx[senderIdx] = 0;
+      }
     }
 
-    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT) {
-      if (debugETM) Serial.printf("[ETM] Heartbeat from WCB%d\n", senderWCB);
+    // WDP discovery advert — presence already refreshed above; decode the TLV
+    // identity/capabilities into the neighbor table off the WiFi task (loop()).
+    if (etmReceived.structPacketType == PACKET_TYPE_WDP) {
+      enqueueWdpPacket(incomingData);
+      return;
+    }
+
+    if (etmReceived.structPacketType == PACKET_TYPE_HEARTBEAT ||
+        etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT) {
+      if (debugETM) Serial.printf("[ETM] %s from WCB%d\n",
+                    etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT ? "Boot announce" : "Heartbeat",
+                    senderWCB);
       return;
     }
 
     if (etmReceived.structPacketType == PACKET_TYPE_ACK) {
       if (targetWCB == WCB_Number) {
-        etmProcessAck(senderWCB, etmReceived.structSequenceNumber);
+        // Defer to loop() — never mutate the pending table from the WiFi task.
+        etmEnqueueAck(senderWCB, etmReceived.structSequenceNumber);
       }
       return;
     }
@@ -2897,18 +4241,40 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (etmReceived.structPacketType == PACKET_TYPE_COMMAND) {
         if (targetWCB != 0 && targetWCB != WCB_Number) return;
 
-        // Always ACK - even duplicates (so sender stops retrying). Safe now
+        // ACK - even duplicates (so an ensured sender stops retrying). Safe now
         // because senderWCB was validated above.
-        etmSendAck(senderWCB, etmReceived.structSequenceNumber);
+        //
+        // EXCEPTION: best-effort JSON telemetry broadcasts (a chatty controller
+        // such as NaviCore streaming rc_hb / rc_ch at up to 5 Hz, sent with
+        // ensured=false to targetWCB 0) must NOT be ACKed. The sender never tracks
+        // these, so a per-frame unicast ACK back to it is pure waste — worse, the
+        // failing-ACK stream (the controller is busy transmitting and often won't
+        // MAC-ACK them) saturates OUR ESP-NOW TX queue and starves our own
+        // heartbeats/adverts until the mesh marks US offline. Ensured unicast
+        // commands (targetWCB == WCB_Number) and ;-command broadcasts (payload is
+        // not bare JSON) still ACK exactly as before.
+        bool bestEffortTelemetry =
+            (targetWCB == 0 && etmReceived.structCommand[0] == '{');
+        if (!bestEffortTelemetry)
+            etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
-        // Duplicate detection (senderIdx already validated above).
+        // Duplicate detection over a per-sender window (senderIdx validated above).
+        // Checking the last ETM_SEQ_HISTORY seqs (not just the previous one) catches
+        // a retry of an OLDER seq that arrives after a newer seq — which a single
+        // slot missed, re-executing the command.
+        uint16_t rxSeq = etmReceived.structSequenceNumber;
         bool isDuplicate = false;
-        if (etmLastReceivedSeqValid[senderIdx] &&
-            etmLastReceivedSeq[senderIdx] == etmReceived.structSequenceNumber) {
-            isDuplicate = true;
+        for (int h = 0; h < ETM_SEQ_HISTORY; h++) {
+            if (etmSeqHistory[senderIdx][h] == rxSeq) { isDuplicate = true; break; }
         }
-        etmLastReceivedSeq[senderIdx] = etmReceived.structSequenceNumber;
-        etmLastReceivedSeqValid[senderIdx] = true;
+        // Don't let best-effort telemetry (never retried) churn the ring — otherwise
+        // a chatty sender's telemetry evicts a real command's seq before its retry
+        // arrives, and the retry re-executes. Telemetry needs no dedup anyway.
+        if (!isDuplicate && !bestEffortTelemetry) {
+            etmSeqHistory[senderIdx][etmSeqHistoryIdx[senderIdx]] = rxSeq;
+            etmSeqHistoryIdx[senderIdx] =
+                (uint8_t)((etmSeqHistoryIdx[senderIdx] + 1) % ETM_SEQ_HISTORY);
+        }
 
         if (isDuplicate) {
             if (debugETM) {
@@ -2951,6 +4317,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         bool wizardOrigin = (etmCmd.length() > 0 && (uint8_t)etmCmd[0] == 0x01);
         if (wizardOrigin) etmCmd = etmCmd.substring(1);  // strip marker before executing
         lastReceivedViaESPNOW = !wizardOrigin;
+        inSequenceBody = false;   // received command is top-level, not a sequence body
         colorWipeStatus("ES", green, 200);
 
         if (debugETM) {
@@ -2983,16 +4350,20 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 // Serial.println here directly — we're on the WiFi task
                 // (Core 0) and Serial isn't atomic across cores.  The
                 // main loop drains the queue safely on Core 1.
-                if (rcJsonRelaySubscribed()) {
+                // Relay ALL RC JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode) to a
+                // subscribed host. rc_ch (the high-rate channel/stick stream) USED to be
+                // dropped here ("nothing consumes it, floods USB") — but the NaviCore
+                // config tool's live channel monitor now consumes it over Via-WCB. And
+                // the RC only broadcasts rc_ch while a host is actively subscribed to IT
+                // (its own 15s ;w20 gate), so relaying it here can't flood an idle link:
+                // no config tool subscribed ⇒ no rc_ch on the mesh ⇒ nothing to relay.
+                if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
                     enqueueRcJsonRelay(etmCmd);
-                    // Keep the subscription hot for the duration of an
-                    // in-flight transfer.  A multi-fragment CONFIG response
-                    // can take >1 s (ETM ACK round-trips + retries); if the
-                    // 20 s window happened to be near its edge, the tail
-                    // fragments would be dropped at the gate.  Relaying a
-                    // fragment is itself proof a host is actively pulling,
-                    // so push the deadline forward.
-                    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+                    // NB: do NOT renew the subscription here. The window is
+                    // driven SOLELY by explicit host activity — a ;w command or
+                    // the Wizard's bare-;w keep-alive. Self-renewing on the
+                    // controller's own 0.5 Hz rc_hb made the subscription
+                    // immortal, so a single ;w left USB streaming forever.
                 }
                 colorWipeStatus("ES", blue, 10);
                 return;
@@ -3001,8 +4372,16 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // General-debug visibility: mirror what processIncomingSerial prints
             // for locally-typed commands, so ?DEBUG,ON shows ETM-received
             // commands without needing the more verbose ?DEBUG,ETM,ON.
-            if (debugEnabled)
-                Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+            // Exception: ?STATS,RPT telemetry is high-rate internal chatter (every
+            // board reports its delivery counters periodically) and floods the
+            // terminal under general ?DEBUG,ON — so it rides ?DEBUG,MGMT with the
+            // rest of the relay traffic instead, matching storeReportedStats().
+            {
+                String etmUp = etmCmd; etmUp.toUpperCase();
+                bool isStatsRpt = etmUp.startsWith(String(LocalFunctionIdentifier) + "STATS,RPT");
+                if (isStatsRpt ? debugMGMT : debugEnabled)
+                    Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
+            }
 
             // Mirror the local-serial dispatch (WCB.ino:4863) so ETM-received
             // chains behave identically to locally-typed ones:
@@ -3041,17 +4420,34 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                 esc.replace("\"", "\\\"");
                 String reply = "{\"type\":\"wcb_alias\",\"id\":" + String(WCB_Number) +
                                ",\"alias\":\"" + esc + "\"}";
-                sendESPNowMessage((uint8_t)senderWCB, reply.c_str(), true);
+                // This runs on the WiFi recv-callback task, so it must NOT go through
+                // sendESPNowMessage(..., true) — that would insert into the loop-task-only
+                // pending table. But a plain non-ETM send is not deliverable either: a peer
+                // running ETM ingests only the 252-byte frame and routes the 249-byte one to
+                // its raw hook, so every reply was silently dropped and the ?WHOAMI fallback
+                // was dead (the alias still arrived via WDP TLV 0x01, but up to 60 s later —
+                // and never at all for a board running ETM with ?WDP,OFF). Send a correctly
+                // shaped ETM frame WITHOUT tracking it; nothing needs the retry, since the
+                // querier re-asks up to 4 times per online session.
+                if (etmEnabled) sendEtmCommandUntracked((uint8_t)senderWCB, reply.c_str());
+                else            sendESPNowMessage((uint8_t)senderWCB, reply.c_str(), false);
                 colorWipeStatus("ES", blue, 10);
                 return;
             }
+            // A native Maestro read received over the mesh must reply to the SENDER —
+            // rewrite ;M<dev>,getX → ;MG<dev>,<sender>,getX so the get-query path routes
+            // the reply home (:MQR to a controller like NaviCore, ;M! to a peer WCB).
+            maestroRewriteInboundGet(etmCmd, senderWCB);
             if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
                 // parseCommandGroups mutates a std::vector iterated by loop();
                 // defer to loop() via the pendingTimerChainQueue (see comment
                 // at the queue's declaration).
                 enqueuePendingTimerChain(etmCmd);
             } else {
-                parseCommandsAndEnqueue(etmCmd, 0);
+                // Explicit origin: a wizard-relayed command is NOT mesh-origin (so it may
+                // re-broadcast), anything else on this path is. Passing it beats reading the
+                // global, which serialCommandTask or the loop drain can overwrite in between.
+                parseCommandsAndEnqueue(etmCmd, 0, wizardOrigin ? 0 : 1, 0);
             }
         }
         colorWipeStatus("ES", blue, 10);
@@ -3120,7 +4516,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (destWCB == WCB_Number) {
       Stream &targetSerial = getSerialStream(destPort);
       targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
-      targetSerial.flush();
+      // No flush() — we're in the ESP-NOW receive callback (WiFi task). write()
+      // queues into the UART TX buffer and it drains async; flush() would block
+      // the WiFi task until the FIFO empties (~200ms on a SW UART), dropping
+      // inbound ESP-NOW frames. Mirrors WCB_Maestro's deliberate no-flush sends.
     }
     return;
   }
@@ -3174,7 +4573,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   if (targetWCB == WCB_TARGET_RAW_SERIAL) {
     uint8_t targetPort = (uint8_t)received.structCommand[0];
     size_t chunkLen    = (uint8_t)received.structCommand[1] | ((uint8_t)received.structCommand[2] << 8);
-    if (chunkLen > 177 || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
+    if (chunkLen > RAW_SERIAL_MAX_CHUNK || chunkLen == 0 || targetPort < 1 || targetPort > 5) {
       if (debugMaestro)
         Serial.printf("[MAESTRO] Invalid chunk from WCB%d: port=%d, len=%d — rejected\n",
                       senderWCB, targetPort, (int)chunkLen);
@@ -3182,7 +4581,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     }
     Stream &targetSerial = getSerialStream(targetPort);
     targetSerial.write((uint8_t *)(received.structCommand + 3), chunkLen);
-    targetSerial.flush();
+    // No flush() — same reason as the targeted-Kyber path above: flushing here
+    // blocks the WiFi task (ESP-NOW) until the UART drains. write() drains async.
     if (debugMaestro) {
       Serial.printf("[MAESTRO] WCB%d → Serial%d  %d byte%s: ",
                     senderWCB, targetPort, (int)chunkLen, chunkLen == 1 ? "" : "s");
@@ -3210,6 +4610,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
 
   // Normal command for this board
   lastReceivedViaESPNOW = true;
+  inSequenceBody = false;   // received command is top-level, not a sequence body
   colorWipeStatus("ES", green, 200);
 
   if (targetWCB != 0 && targetWCB != WCB_Number) {
@@ -3218,7 +4619,24 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
+  // structCommand is a fixed-size field with no guaranteed NUL terminator (a
+  // malicious/garbled in-group packet can fill all 200 bytes). Force a terminator
+  // so String()'s strlen can't run off the end of the received stack struct.
+  received.structCommand[sizeof(received.structCommand) - 1] = '\0';
   String receivedCmd = String(received.structCommand);
+
+  // Strip the wizard-origin SOH marker here too. handleMgmtForward prepends '\x01' to every
+  // single-chunk relayed command and sends it with useETM=true — but sendESPNowMessage only takes
+  // the ETM path when ETM is ENABLED, so with ?ETM,OFF the marked payload arrived as an ordinary
+  // 249-byte packet down this path, where nothing removed it. The leading 0x01 then broke every
+  // prefix test (trim() does not strip it) and the command was silently discarded as unknown —
+  // while multi-chunk config push still worked, making the relay look healthy.
+  // Mirrors the ETM branch: a wizard-origin command is NOT mesh-origin, so it may re-broadcast.
+  bool wizardOriginPlain = (receivedCmd.length() > 0 && (uint8_t)receivedCmd[0] == 0x01);
+  if (wizardOriginPlain) {
+    receivedCmd = receivedCmd.substring(1);
+    lastReceivedViaESPNOW = false;
+  }
 
   if (receivedCmd.startsWith("ETMLOAD")) {
     etmLoadRunning = true;
@@ -3242,11 +4660,16 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // actively using us as a WCB bridge (see declaration near top of file).
   // Uses the relay queue + main-loop drain pattern for cross-core safety.
   if (receivedCmd.length() > 0 && receivedCmd[0] == '{') {
-    if (rcJsonRelaySubscribed()) {
+    // Relay ALL RC JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode) to a subscribed
+    // host. rc_ch was previously dropped here as "unconsumed / floods USB", but the
+    // config tool's live channel monitor now consumes it, and the RC only broadcasts
+    // rc_ch while a host is subscribed to it (15s ;w20 gate) — so it can't flood an
+    // idle link (no subscriber ⇒ no rc_ch on the mesh ⇒ nothing to relay).
+    if (rcJsonRelaySubscribed() && !otaRelayForwarding()) {
       enqueueRcJsonRelay(receivedCmd);
-      // Keep the subscription hot during an in-flight transfer — see the
-      // matching comment in the ETM passthrough path above.
-      rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+      // Do NOT renew here — the subscription is host-driven only (see the
+      // matching note in the ETM passthrough path above). Self-renewing on
+      // rc_hb made the relay perpetual after a single ;w.
     }
     colorWipeStatus("ES", blue, 10);
     return;
@@ -3260,12 +4683,15 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // would queue the whole chain as one item and break ;t<ms> + ^ chains.
   if (debugEnabled)
       Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
+  // Native Maestro read over the mesh → reply to the SENDER (see the ETM branch above).
+  maestroRewriteInboundGet(receivedCmd, senderWCB);
   if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
     // Same race-avoidance as the ETM branch above: defer parseCommandGroups
     // to loop() via the queue (see pendingTimerChainQueue comment).
     enqueuePendingTimerChain(receivedCmd);
   } else {
-    parseCommandsAndEnqueue(receivedCmd, 0);
+    // Same explicit origin as the ETM branch — see the note there.
+    parseCommandsAndEnqueue(receivedCmd, 0, wizardOriginPlain ? 0 : 1, 0);
   }
   colorWipeStatus("ES", blue, 10);
 }
@@ -3301,28 +4727,52 @@ void forwardDataFromKyber() {
       // broadcast packet, so only queue the byte ONCE regardless of how many
       // remote targets are configured.
       bool addedToRemote = false;
+      // One bit per local port 1-5, scoped to THIS BYTE. Two enabled targets that resolve to the
+      // same physical port (legitimate — Maestros daisy-chain on one serial line, so the same
+      // port legitimately carries several device ids) each wrote the byte, so the chain received
+      // every byte twice and every command frame was garbage.
+      // Deliberately declared inside the per-byte loop: hoisting it out of the drain would make
+      // each port receive only the FIRST byte of the burst, which is far worse.
+      uint8_t sentLocalPorts = 0;
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
         if (!kyberTargets[i].enabled) continue;
         if (kyberTargets[i].targetWCB == WCB_Number) {
-          // Local — write immediately, byte by byte
-          getSerialStream(kyberTargets[i].targetPort).write(b);
+          // Local — write immediately, byte by byte. Guard the port so a corrupt
+          // targetPort of 0 doesn't fall through to the debug Serial console.
+          uint8_t tp = kyberTargets[i].targetPort;
+          if (tp >= 1 && tp <= 5 && !(sentLocalPorts & (1 << tp))) {
+            sentLocalPorts |= (1 << tp);
+            getSerialStream(tp).write(b);
+          }
         } else {
-          // Remote — accumulate once; broadcast reaches all remote boards
-          if (!addedToRemote && remoteLen < (int)sizeof(remoteBuf)) {
+          // Remote — accumulate once; broadcast reaches all remote boards. If the
+          // buffer is full, FLUSH and keep going — don't silently drop bytes past
+          // 64, which truncated a large Maestro burst into a corrupt frame.
+          if (!addedToRemote) {
+            if (remoteLen >= (int)sizeof(remoteBuf)) { sendESPNowRaw(remoteBuf, remoteLen); remoteLen = 0; }
             remoteBuf[remoteLen++] = b;
             addedToRemote = true;
           }
         }
       }
     } else {
-      // No targeting: write to every locally configured Maestro port
+      // No targeting: write to every locally configured Maestro PORT — once each.
+      // Several Maestro ids share one serial line when daisy-chained, so without the
+      // per-port mask each shared port received the byte once per configured id.
+      // Per-byte scope, for the same reason as the targeted branch above.
+      uint8_t sentLocalPorts = 0;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          getSerialStream(maestroConfigs[i].serialPort).write(b);
+          uint8_t sp = maestroConfigs[i].serialPort;
+          if (sp <= 5 && !(sentLocalPorts & (1 << sp))) {
+            sentLocalPorts |= (1 << sp);
+            getSerialStream(sp).write(b);
+          }
         }
       }
-      // Broadcast remote — accumulate
-      if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+      // Broadcast remote — accumulate; flush a full buffer instead of dropping.
+      if (remoteLen >= (int)sizeof(remoteBuf)) { sendESPNowRaw(remoteBuf, remoteLen); remoteLen = 0; }
+      remoteBuf[remoteLen++] = b;
     }
   }
 
@@ -3349,8 +4799,10 @@ void forwardMaestroDataToLocalKyber() {
   // Read from every locally configured Maestro port and forward to Kyber
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
+      if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
       uint8_t b = (uint8_t)maestroSerial.read();
       kyberSerial.write(b);
       if (Maestro_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
@@ -3367,10 +4819,17 @@ void forwardMaestroDataToRemoteKyber() {
   // Read from every locally configured Maestro port and batch for ESP-NOW
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
+    if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
+      if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
       uint8_t b = (uint8_t)maestroSerial.read();
-      if (remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
+      // FLUSH a full buffer and keep going, rather than reading the byte and throwing it away.
+      // The old `if (remoteLen < sizeof(remoteBuf))` consumed bytes past 64 and discarded them,
+      // truncating any Maestro burst longer than the buffer into a corrupt frame — the exact
+      // drop the sibling forwardDataFromKyber() was already fixed to stop doing.
+      if (remoteLen >= (int)sizeof(remoteBuf)) { sendESPNowRaw(remoteBuf, remoteLen); remoteLen = 0; }
+      remoteBuf[remoteLen++] = b;
     }
   }
 
@@ -3430,7 +4889,28 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    if (message.endsWith("?")) {  // no space required
+    // ---- Data-bearing verbs are exempt from the trailing-'?' help shortcut ----
+    // The shortcut below turns ANY command ending in '?' into a help request. That is fine for
+    // hand-typed verbs, but MGMT/SEQ payloads carry arbitrary user data that can legitimately end
+    // in '?': a config chain is a run of '?'-prefixed commands joined by '^', so a fragment
+    // boundary landing just after a '?' produces a FRAG line whose last character is '?'. The
+    // whole fragment was then swallowed as "help for MGMT,FRAG,…", never forwarded, and the push
+    // died silently at the 15 s MGMT_SESSION_TIMEOUT_MS. Same hazard for a stored sequence whose
+    // text ends in a question mark.
+    //
+    // Checked BEFORE the shortcut, and deliberately only for verbs whose tail is opaque data —
+    // everything else keeps the convenient "?VERB?" help form.
+    bool dataBearingVerb = message.startsWith("MGMT,") || message.startsWith("mgmt,") ||
+                           message.startsWith("SEQ,")  || message.startsWith("seq,") ||
+                           // FUNCCHAR/CMDCHAR take a literal character as their argument, and that
+                           // character can be '?'. Without this exemption "set the function char
+                           // back to ?" was unexpressible — the command was eaten as a help
+                           // request whatever prefix carried it — so a board moved to a custom
+                           // funcChar could never be returned to the default except by ?ERASE,NVS.
+                           message.startsWith("FUNCCHAR,") || message.startsWith("funcchar,") ||
+                           message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,");
+
+    if (!dataBearingVerb && message.endsWith("?")) {  // no space required
         String cmd = message.substring(0, message.length() - 1);
         cmd.trim();
         printCommandHelp(cmd);
@@ -3647,13 +5127,21 @@ void processLocalCommand(const String &message) {
             portStr.toUpperCase();
             String state = args.substring(thirdComma + 1);
             state.toUpperCase();
+            bool enable = (state == "ON");
+
+            // S0/USB is an OUTPUT-only target (echoes even when the broadcast came in on S0).
+            if (direction == "OUT" && portStr == "S0") {
+                broadcastToS0 = enable;
+                saveBroadcastSettingsToPreferences();
+                Serial.printf("Broadcast OUTPUT on S0 (USB): %s\n", enable ? "Enabled" : "Disabled");
+                return;
+            }
 
             int port = portStr.substring(1).toInt();
             if (port < 1 || port > 5) {
-                Serial.println("Invalid port. Must be S1-S5");
+                Serial.println("Invalid port. Must be S1-S5 (S0 = OUT only)");
                 return;
             }
-            bool enable = (state == "ON");
 
             if (direction == "IN") {
                 blockBroadcastFrom[port - 1] = !enable;
@@ -3704,13 +5192,35 @@ void processLocalCommand(const String &message) {
             saveETMSettings();
             Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
         } else if (etmCmdUpper == "HB") {
-            etmHeartbeatSec = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+            // A bare `?ETM,HB` (no value) is the natural way to ASK what the setting is — help
+            // documents no query form — but etmVal is then "" and toInt() gives 0, which was
+            // written straight to NVS and turned the board into a ~4 Hz heartbeat emitter that
+            // survived reboots. Treat a missing/invalid value as a query, and range-check the rest.
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM heartbeat is %d sec\n", etmHeartbeatSec);
+            } else {
+                int hb = etmVal.toInt();
+                if (hb < 1 || hb > 3600) {
+                    Serial.printf("Invalid ETM heartbeat '%s'. Use 1-3600 seconds.\n", etmVal.c_str());
+                } else {
+                    etmHeartbeatSec = hb;
+                    saveETMSettings();
+                    Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+                }
+            }
         } else if (etmCmdUpper == "MISS") {
-            etmMissedHeartbeats = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM missed heartbeats is %d\n", etmMissedHeartbeats);
+            } else {
+                int mh = etmVal.toInt();
+                if (mh < 1 || mh > 100) {
+                    Serial.printf("Invalid ETM missed-heartbeat count '%s'. Use 1-100.\n", etmVal.c_str());
+                } else {
+                    etmMissedHeartbeats = mh;
+                    saveETMSettings();
+                    Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+                }
+            }
         } else if (etmCmdUpper == "BOOT") {
             etmBootHeartbeatSec = etmVal.toInt();
             saveETMSettings();
@@ -3799,6 +5309,59 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "WCBQ") {
         int qty = args.toInt();
         saveWCBQuantityPreferences(qty);
+        rebuildActivePeers();            // WCBQ is the membership floor
+        syncActivePeerRegistrations();   // register/free peers live — no reboot needed
+        return;
+    }
+
+    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11) ---
+    // Persisted and applied on the NEXT REBOOT, not live (see saveMeshChannelToPreferences):
+    // a live radio switch would drop this board off the mesh mid-config — fatal for a
+    // relayed ?WCBCH, since the sender stays on the old channel. Range-check the plain
+    // int BEFORE the uint8_t cast so wrap values (e.g. 268→12) can't slip past. Push to
+    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once.
+    if (rootUpper == "WCBCH") {
+        int ch = args.toInt();
+        if (ch < 1 || ch > 11) {
+            Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", ch);
+            return;
+        }
+        saveMeshChannelToPreferences((uint8_t)ch);   // persists; applies on reboot
+        return;
+    }
+
+    // --- ?PEERSLIVE — read-only: derived live peer count (WCBQ floor ∪ learned).
+    // Emitted in config dumps as telemetry; accepting it here (any argument is
+    // ignored) makes a restore that replays the factory chain harmless.
+    if (rootUpper == "PEERSLIVE") {
+        Serial.printf("Live peers: %d (WCBQ floor %d%s)\n", activePeerCount(),
+                      Default_WCB_Quantity, wdpAutoJoin ? " + learned, auto-join ON" : "");
+        return;
+    }
+
+    // --- ?OTALOCAL,* — local USB firmware OTA (Phase 1 of ESP-NOW relay OTA) ---
+    // Writes a streamed image to the INACTIVE OTA slot over direct USB; the
+    // ESP-NOW relay transport (Phase 2) reuses the same write core.
+    if (rootUpper == "OTALOCAL") {
+        // Same suppression as the ?OTA relay path below: during a serial OTA the
+        // [OTA:ACK,...] flow-control lines share USB with the RC-JSON passthrough,
+        // and a chatty controller (NaviCore rc_hb/rc_ch) eats enough serial
+        // bandwidth to slow the ACK round-trips dramatically. Pause the relay of
+        // that telemetry while chunks are flowing (~8 s past the last command).
+        otaRelayForwardUntilMs = millis() + 8000UL;
+        processOtaLocalCommand(args);
+        return;
+    }
+
+    // --- ?OTA,* — RELAY a firmware stream to a TARGET WCB over ESP-NOW (P2) ---
+    // This (USB-connected) board forwards the browser's OTA frames to the target
+    // over the mesh; the target writes its inactive slot and reboots.
+    if (rootUpper == "OTA") {
+        // Mark us as actively forwarding so the RC-JSON/ETM passthrough pauses and
+        // can't crowd the OTA ACK lines out of the shared relay queue. Refreshed
+        // every frame; lasts ~8 s past the last ?OTA command.
+        otaRelayForwardUntilMs = millis() + 8000UL;
+        processOtaRelayCommand(args);
         return;
     }
 
@@ -3820,29 +5383,43 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?SPECIAL,ON/OFF ---
-    // Enables or disables tracking and communication with the special peer (ID 20).
-    // When ON: ID 20 is registered as an ESP-NOW peer, its heartbeats are tracked,
-    // and it appears in ETM stats. Reboot required to apply peer registration.
-    // When OFF: ID 20 is treated as unknown and ignored.
-    if (rootUpper == "SPECIAL") {
+    // --- ?CONTROLLER,ON/OFF   (legacy alias: ?SPECIAL) ---
+    // Enables or disables tracking and communication with the "controller" peer — an
+    // extra pinned ESP-NOW peer that sits OUTSIDE the normal numbered WCB boards
+    // (default ID 20, e.g. NaviCore, but any 1-20 ID for a different controller).
+    // When ON: that ID is registered as an ESP-NOW peer, its heartbeats are tracked,
+    // and it appears in ETM stats. Registered LIVE via enableControllerPeer() — no
+    // reboot needed. When OFF: that ID is treated as unknown and ignored.
+    // ?SPECIAL is kept as a back-compat alias so old configs/backups still parse.
+    if (rootUpper == "CONTROLLER" || rootUpper == "SPECIAL") {
         if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
-            // ?SPECIAL,ON  or  ?SPECIAL,ON,<id>  (NaviCore peer ID; default 20)
+            // ?CONTROLLER,ON  or  ?CONTROLLER,ON,<id>  (controller peer ID; default 20)
             int ci = argsUpper.indexOf(',');
+            uint8_t id = WCB_SPECIAL_PEER_ID;
             if (ci >= 0) {
                 int newId = argsUpper.substring(ci + 1).toInt();
                 if (newId < 1 || newId > 20) {
-                    Serial.printf("Invalid special peer ID %d. Valid range: 1-20.\n", newId);
+                    Serial.printf("Invalid controller peer ID %d. Valid range: 1-20.\n", newId);
                     return;
                 }
-                saveSpecialPeerIDToPreferences((uint8_t)newId);
+                id = (uint8_t)newId;
             }
-            saveSpecialPeerPreferences(true);
+            enableControllerPeer(id);   // persists + registers the peer live (no reboot)
         } else if (argsUpper == "OFF") {
+            // Free the out-of-band ESP-NOW peer slot we registered for the
+            // controller (in-band 1..quantity peers are shared/boot-registered and
+            // must never be deleted; a learned peer keeps its own registration).
+            // Otherwise repeated ON/OFF across different ids leaks slots until the
+            // ~20-peer table fills.
+            if (WCB_SPECIAL_PEER_ID > Default_WCB_Quantity && WCB_SPECIAL_PEER_ID != WCB_Number &&
+                !wcbPeerLearned[WCB_SPECIAL_PEER_ID - 1] &&
+                esp_now_is_peer_exist(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1])) {
+                esp_now_del_peer(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1]);
+            }
             saveSpecialPeerPreferences(false);
         } else {
-            Serial.printf("Special peer (ID %d) is currently %s.\n"
-                          "Use ?SPECIAL,ON[,<id>] (1-20) or ?SPECIAL,OFF\n",
+            Serial.printf("Controller peer (ID %d) is currently %s.\n"
+                          "Use ?CONTROLLER,ON[,<id>] (1-20) or ?CONTROLLER,OFF\n",
                           WCB_SPECIAL_PEER_ID,
                           specialPeerEnabled ? "ENABLED" : "DISABLED");
         }
@@ -3875,9 +5452,27 @@ void processLocalCommand(const String &message) {
         return;
     }
 
+    // --- ?DFP,... (DFPlayer Mini — the other audio device) ---
+    if (rootUpper == "DFP") {
+        configureDFP(args);
+        return;
+    }
+
     // --- ?HCR,... (Human-Cyborg Relations config/query) ---
     if (rootUpper == "HCR") {
         configureHCR(args);
+        return;
+    }
+
+    // --- ?WLED,... (WLED serial control config/query) ---
+    if (rootUpper == "WLED") {
+        configureWLED(args);
+        return;
+    }
+
+    // --- ?WDP,... (Wireless Discovery Protocol — neighbor table query) ---
+    if (rootUpper == "WDP") {
+        processWdpCommand(args);
         return;
     }
 
@@ -3899,6 +5494,27 @@ void processLocalCommand(const String &message) {
 
         if (seqCmdUpper == "LIST") {
             listStoredCommands();
+        } else if (seqCmdUpper == "GET") {
+            // One sequence, in the SAME "<key>,<status>,<value>" shape the mesh
+            // reply uses, so a host needs one parser for local and remote.
+            String gk = seqArgs; gk.trim();
+            if (gk.length() == 0) {
+                Serial.println("Usage: ?SEQ,GET,<key>");
+            } else {
+                preferences.begin("stored_cmds", true);
+                bool   ex = preferences.isKey(gk.c_str());
+                String v  = preferences.getString(gk.c_str(), "");
+                preferences.end();
+                if (!ex && v.length() == 0)
+                    Serial.printf("[MGMT:SEQVAL,%d]%s,NOTFOUND,\n", WCB_Number, gk.c_str());
+                else
+                    Serial.printf("[MGMT:SEQVAL,%d]%s,OK,%s\n", WCB_Number, gk.c_str(), v.c_str());
+            }
+        } else if (seqCmdUpper == "NAMES") {
+            // Machine-readable inventory — names only, one line, same string the
+            // SEQ_REQ mesh path returns. Prefixed like the relay output so a host
+            // parsing this board's console uses ONE parser for local and remote.
+            Serial.printf("[MGMT:SEQ,%d]%s\n", WCB_Number, buildSequenceNamesString().c_str());
         } else if (seqCmdUpper == "CLEAR") {
             String seqArgsUpper = seqArgs;
             seqArgsUpper.toUpperCase();
@@ -3916,10 +5532,15 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?STATS,RESET or ?STATS ---
+    // --- ?STATS,RESET | ?STATS,RPT,... | ?STATS ---
     if (rootUpper == "STATS") {
         if (argsUpper == "RESET") {
             resetESPNowStats();
+        } else if (argsUpper.startsWith("RPT")) {
+            // A peer reporting ITS OWN delivery counters. Store only — never
+            // echo, never forward: this arrives every 30s from every reporting
+            // node, and printing it would bury the console. ?STATS shows it.
+            storeReportedStats(args.substring(3));   // strip "RPT", keep the leading comma
         } else {
             printESPNowStats();
         }
@@ -3956,7 +5577,24 @@ void processLocalCommand(const String &message) {
     // --- ?FUNCCHAR,x ---
     if (rootUpper == "FUNCCHAR") {
         if (args.length() == 1) {
-            LocalFunctionIdentifier = args.charAt(0);
+            char nc = args.charAt(0);
+            // Reject a collision with the command character. handleSingleCommand tests the
+            // function identifier FIRST, so setting funcChar to ';' routed the entire ';' command
+            // family into processLocalCommand — every ;M/;L/;H/;D device command stopped working.
+            // The setting persists to NVS, so it survived reboots too.
+            if (nc == CommandCharacter) {
+                Serial.printf("'%c' is already the command character — the entire '%c' command "
+                              "family would stop working. Pick a different function identifier.\n",
+                              nc, CommandCharacter);
+                return;
+            }
+            // Control/whitespace characters can never be typed as a prefix and would strand
+            // the board's console.
+            if (nc <= ' ' || nc == 0x7F) {
+                Serial.println("Function identifier must be a printable, non-space character.");
+                return;
+            }
+            LocalFunctionIdentifier = nc;
             saveLocalFunctionIdentifierAndCommandCharacter();
             Serial.printf("Local function identifier updated to '%c'\n", LocalFunctionIdentifier);
         } else {
@@ -4013,10 +5651,13 @@ void processLocalCommand(const String &message) {
         rtermCmd.toUpperCase();
         if (rtermCmd.startsWith("START,")) {
             uint8_t relayWCB = (uint8_t)args.substring(6).toInt();
-            if (relayWCB >= 1 && relayWCB <= 8) {
+            // Was hard-capped at 8, which silently rejected a high-numbered relay
+            // (e.g. a MgmtRelay at WCB19) — the mirror never armed and the relayed
+            // terminal returned nothing. Any valid WCB number can be a relay.
+            if (relayWCB >= 1 && relayWCB <= MAX_WCB_COUNT) {
                 WCBDebugSerial.startSession(relayWCB);
             } else {
-                Serial.println("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..8");
+                Serial.printf("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..%d\n", MAX_WCB_COUNT);
             }
         } else if (rtermCmd == "STOP") {
             WCBDebugSerial.stopSession();
@@ -4185,13 +5826,19 @@ void processLocalCommand(const String &message) {
         delay(3000);
         ESP.restart();
     } else if (message.startsWith("sls") || message.startsWith("SLS")) {
-        updateSerialLabel(message.substring(3));
+        // Pass the FULL message. updateSerialLabel() parses "SLSx,label" itself — it checks for
+        // the 'S' prefix and does substring(3, comma) to extract the port — so stripping "SLS"
+        // here too meant it received "1,Dome", failed its own format guard, and the legacy
+        // command could never succeed.
+        updateSerialLabel(message);
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
         clearSerialLabel(message.substring(4).toInt());
     } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
-        updateBroadcastInputSetting(message.substring(3));
+        updateBroadcastInputSetting(message);   // pass FULL "SBISxON" — the fn strips "SBI" itself
+                                                 // (was double-stripped here → whole command was dead)
     } else if (message.startsWith("sbo") || message.startsWith("SBO")) {
-        updateBroadcastOutputSetting(message.substring(3));
+        updateBroadcastOutputSetting(message);  // pass FULL "SBOSxON" — the fn strips "SBO" itself
+                                                 // (was double-stripped here → whole command was dead)
     } else if (message == "reset_broadcast" || message == "RESET_BROADCAST") {
         resetBroadcastSettingsNamespace();
     } else if (message.startsWith("statsreset") || message.startsWith("STATSRESET")) {
@@ -4225,9 +5872,15 @@ void processLocalCommand(const String &message) {
         saveETMSettings();
         Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
     } else if (message.startsWith("etmhb") || message.startsWith("ETMHB")) {
-        etmHeartbeatSec = message.substring(5).toInt();
-        saveETMSettings();
-        Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+        // Same 0-writes-to-NVS trap as ?ETM,HB above — the legacy spelling needs the same guard.
+        int hb = message.substring(5).toInt();
+        if (hb < 1 || hb > 3600) {
+            Serial.printf("Invalid ETM heartbeat. Use 1-3600 seconds (currently %d).\n", etmHeartbeatSec);
+        } else {
+            etmHeartbeatSec = hb;
+            saveETMSettings();
+            Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
+        }
     } else if (message.startsWith("etmmiss") || message.startsWith("ETMMISS")) {
         etmMissedHeartbeats = message.substring(7).toInt();
         saveETMSettings();
@@ -4275,6 +5928,11 @@ void resetESPNowStats() {
         etmStatsAckd[b] = 0;
         etmStatsRetries[b] = 0;
         etmStatsFailed[b] = 0;
+        // Clear the reported rows too: ?STATS,RESET means "the numbers on this
+        // screen start from now", and leaving another node's last report behind
+        // next to freshly-zeroed local counters invites reading them together.
+        // Each reporter re-populates its row on its next push.
+        reportedStats[b] = ReportedStats{};
     }
     Serial.println("ESP-NOW statistics reset.");
 }
@@ -4362,6 +6020,8 @@ void update3rdMACOctet(const String &message){
 void updateWCBQuantity(const String &message){
   int wcbQty = message.substring(4).toInt();
   saveWCBQuantityPreferences(wcbQty);
+  rebuildActivePeers();            // WCBQ is the membership floor
+  syncActivePeerRegistrations();   // register/free peers live — no reboot needed
 }
 
 void updateSerialLabel(const String &message) {
@@ -4520,16 +6180,24 @@ void updateBroadcastOutputSetting(const String &message) {
         enable = true;
     }
     
-    int port = portStr.toInt();
-    
-    if (port < 1 || port > 5) {
-        Serial.println("Invalid port number. Must be 1-5");
+    // S0/USB output (opt-in): echoes even when the broadcast arrived on S0.
+    if (portStr == "0") {
+        broadcastToS0 = enable;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("S0/USB broadcast output: %s\n", enable ? "ENABLED" : "DISABLED");
         return;
     }
-    
+
+    int port = portStr.toInt();
+
+    if (port < 1 || port > 5) {
+        Serial.println("Invalid port number. Must be 0-5 (0 = USB)");
+        return;
+    }
+
     serialBroadcastEnabled[port - 1] = enable;
     saveBroadcastSettingsToPreferences();
-    
+
     Serial.printf("Serial%d broadcast output: %s\n", port, enable ? "ENABLED" : "DISABLED");
 }
 
@@ -4592,7 +6260,11 @@ void updateWCBNumber(const String &message){
 }
 
 void updateESPNowPassword(const String &message){
-  String newPassword = message.substring(6);
+  // Legacy no-comma form only: `?EPASSsecret`. The modern `?EPASS,secret` is handled earlier by
+  // the rootUpper == "EPASS" branch, which returns before reaching here.
+  // "EPASS" is FIVE characters, so substring(6) ate the first character of the password — a
+  // silently wrong password, which on this mesh means the board simply stops being heard.
+  String newPassword = message.substring(5);
   if (newPassword.length() > 0 && newPassword.length() < sizeof(espnowPassword)) {
     setESPNowPassword(newPassword.c_str());
     Serial.printf("ESP-NOW Password updated to: %s\n", newPassword.c_str());
@@ -4646,7 +6318,9 @@ void updateHWVersion(const String &message) {
     auto emitHelpers = [&]() {
         printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printDFPBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
+        printWLEDBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
         printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
     };
     collectConfigCommands(emit, emitHelpers);
@@ -4694,6 +6368,46 @@ void verifyBackupChecksum(const String &message) {
 
 /// Processing Command Character
 //*******************************
+// Route a capability trigger (HCR/MP3) to whichever board HOSTS the device, using
+// PERSISTED routing first and live discovery only as a fallback. Order:
+//   1. arrived over the mesh (lastReceivedViaESPNOW) or we host it locally → run here
+//   2. a stored host is set (auto-learned from WDP / set by hand / restored from a
+//      backup) AND it is currently online → forward the original ";<message>" there
+//      (ETM-ACKed). This makes routing survive reboots + work on cold boot without
+//      waiting for adverts.
+//   3. else (no stored host, OR the pinned host was seen this session and has since
+//      gone dark = genuinely offline) fall back to LIVE capability election
+//      (wdpCapOwner, which only returns an ONLINE owner) so a dead host doesn't
+//      black-hole the trigger when another board still advertises the capability.
+//      A pin that simply hasn't re-advertised yet after a reboot is NOT treated as
+//      dead — it's honored (ETM unicast + retries cover a briefly-unreachable pin),
+//      so an operator's explicit pin survives the boot window instead of losing to
+//      whichever alternate owner happens to be heard first. If election finds no
+//      online owner the stored host stays as a best-effort target; if there is
+//      neither, run local (the handler prints the device's own "not configured").
+// The lastReceivedViaESPNOW short-circuit is the one-hop cap: a command routed to us
+// is executed locally and NEVER re-forwarded — no loops, no duplicate fires. (message
+// is the command WITHOUT the leading command char, e.g. "H,STIM,..." for ;H,STIM.)
+void routeStoredOrCap(bool localHosted, uint8_t storedHost, uint16_t capBit,
+                      const String &message, void (*localHandler)(const String &)) {
+  if (lastReceivedViaESPNOW || localHosted) { localHandler(message); return; }
+  uint8_t target = storedHost;
+  // Fail over ONLY for no-pin or a genuinely-dead pin (seen this session, now offline)
+  // — never for a pin that just hasn't been re-heard since boot. wdpCapOwner() returns
+  // only an ONLINE owner (or 0), and we override just when it finds a real online
+  // alternative; otherwise the stored host stays as the best-effort target.
+  bool pinGenuinelyDead = (target != 0) && wcbPeerEverSeen(target) && !wcbPeerOnline(target);
+  if (target == 0 || pinGenuinelyDead) {
+    int owner = wdpCapOwner(capBit);
+    if (owner > 0 && owner != WCB_Number) target = (uint8_t)owner;
+  }
+  if (target == 0 || target == WCB_Number) { localHandler(message); return; }  // nobody → local
+  String fwd = String(CommandCharacter) + message;                // rebuild ";<cmd>"
+  sendESPNowMessage(target, fwd.c_str());                         // unicast to host (+ETM ACK)
+  if (debugETM || debugEnabled)
+    Serial.printf("[ROUTE] %c%s -> host WCB%d\n", CommandCharacter, message.c_str(), target);
+}
+
 void processCommandCharcter(const String &message, int sourceID) {
     
      if ((message.startsWith("s") || message.startsWith("S")) && (message.length() > 1 && message.charAt(1) != 'e' && message.charAt(1) != 'E')) {
@@ -4701,15 +6415,22 @@ void processCommandCharcter(const String &message, int sourceID) {
     } else if (message.startsWith("w") || message.startsWith("W")) {
         processWCBMessage(message);
     } else if (message.startsWith("c") || message.startsWith("C") || message.startsWith(String("SEQ")) || message.startsWith(String("seq"))) {
-        recallStoredCommand(message, sourceID); 
+        recallStoredCommand(message, sourceID);
     } else if (message.startsWith("m") || message.startsWith("M")) {
         processMaestroCommand(message);
     } else if (message.startsWith("p") || message.startsWith("P")) {
       processPWMOutput(message);
     } else if (message.startsWith("a") || message.startsWith("A")) {
-      processMP3AudioCommand(message);
+      routeStoredOrCap(mp3Config.configured, mp3Config.remoteWCB, WDP_CAP_MP3,
+                       message, processMP3AudioCommand);   // → the MP3 host (stored, then live)
+    } else if (message.startsWith("d") || message.startsWith("D")) {
+      routeStoredOrCap(dfpConfig.configured, dfpConfig.remoteWCB, WDP_CAP_DFPLAYER,
+                       message, processDFPCommand);        // → the DFPlayer host (stored, then live)
     } else if (message.startsWith("h") || message.startsWith("H")) {
-      processHCRRuntimeCommand(message);
+      routeStoredOrCap(hcrConfig.configured, hcrConfig.remoteWCB, WDP_CAP_HCR,
+                       message, processHCRRuntimeCommand); // → the HCR host (stored, then live)
+    } else if (message.startsWith("l") || message.startsWith("L")) {
+      processWLEDRuntimeCommand(message);   // ;L,ON|OFF|BRI|PS|COL|FX|PAL|JSON → WLED
     } else if (message.startsWith("v") || message.startsWith("V")) {
       processSetVariable(message);   // ;V,<name>,<value|TOGGLE|INC[,n]|DEC[,n]|true|false>
     } else {
@@ -4733,8 +6454,13 @@ void processSerialMessage(const String &message) {
         return;
     }
 
-    // Extract message to send
+    // Extract message to send.
+    // Strip ONE optional ',' separator after the port digit. Every sibling runtime verb accepts
+    // `;V<id>,<payload>` style and strips the comma, so `;S3,hello` looked identical — but this
+    // handler kept it, putting a literal leading comma on the wire to the device. Devices that
+    // parse their own framing then saw ",hello".
     String serialMessage = message.substring(2);
+    if (serialMessage.startsWith(",")) serialMessage = serialMessage.substring(1);
     serialMessage.trim();
 
     // Handle USB (Serial0) separately
@@ -4759,6 +6485,17 @@ void processWCBMessage(const String &message){
   int targetWCB;
   String espnow_message;
 
+  // Bare ";w" (just the 'w', no target, no payload) is an incomplete route.
+  // Print usage and return — it does NOT touch RC telemetry. (Nothing in the
+  // ;w family subscribes the RC-JSON relay anymore; telemetry is opt-in only.)
+  {
+    String ka = message; ka.trim();
+    if (ka.length() == 1) {   // dispatch guarantees it starts with 'w'/'W'
+      Serial.println("[;w] usage: ;w<target|alias>,<command>");
+      return;
+    }
+  }
+
   // Parse the target WCB number. RULE (confirmed spec):
   //   * NO comma after the digits  -> exactly ONE digit is the target (1-9),
   //     everything from position 2 on is the payload — even if it starts
@@ -4778,18 +6515,54 @@ void processWCBMessage(const String &message){
   //   ;w13,RA                -> target 13, cmd "RA"      (multi-digit needs comma)
   //   ;w2;s4:PP100,50:W42:P  -> target 2,  cmd ";s4:PP100,50:W42:P" (comma in payload)
   //   ;w13,;s4:cmd,with,commas -> target 13, cmd ";s4:cmd,with,commas"
-  int digitEnd = 1;
-  while (digitEnd < (int)message.length() &&
-         message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
-  if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
-      // Comma-separated form: full digit run is the target (supports 10-20).
-      targetWCB = message.substring(1, digitEnd).toInt();
-      espnow_message = message.substring(digitEnd + 1);
+  // ── Alias form: ;w<alias>,<cmd> ──────────────────────────────────────────
+  // When the character after 'w' is NOT a digit, the token up to the first
+  // comma is a board ALIAS (not a number). Resolve it to a WCB number via the
+  // WDP neighbor table, or to THIS board when it matches our own alias. Any
+  // non-numeric ;w target parsed to 0 ("invalid") before, so this adds no
+  // regression to the numeric forms. Aliases used here should start with a
+  // letter — a digit-leading name still parses as a number.
+  bool aliasForm = (message.length() > 1 &&
+                    !(message[1] >= '0' && message[1] <= '9'));
+  if (aliasForm) {
+      int    commaPos = message.indexOf(',');
+      String alias    = (commaPos >= 1) ? message.substring(1, commaPos) : String("");
+      alias.trim();
+      if (commaPos < 0 || alias.length() == 0) {
+          Serial.println("[;w] alias form: use ;w<alias>,<command>  (e.g. ;wdome,;s2test)");
+          return;
+      }
+      espnow_message = message.substring(commaPos + 1);
+      if (alias.equalsIgnoreCase(wcb_alias)) {
+          targetWCB = WCB_Number;                       // our own alias → run locally
+      } else {
+          int r = wdpResolveAlias(alias.c_str());
+          if (r == 0) {
+              Serial.printf("[;w] No board named \"%s\" is known — see %cWDP,LIST\n",
+                            alias.c_str(), LocalFunctionIdentifier);
+              return;
+          }
+          if (r < 0) {
+              Serial.printf("[;w] Alias \"%s\" is ambiguous (multiple boards) — use the number\n",
+                            alias.c_str());
+              return;
+          }
+          targetWCB = r;
+      }
   } else {
-      // Legacy no-comma form: exactly ONE digit is the target; the rest —
-      // including digits — is the payload.
-      targetWCB = message.substring(1, 2).toInt();
-      espnow_message = message.substring(2);
+      int digitEnd = 1;
+      while (digitEnd < (int)message.length() &&
+             message[digitEnd] >= '0' && message[digitEnd] <= '9') digitEnd++;
+      if (digitEnd < (int)message.length() && message[digitEnd] == ',') {
+          // Comma-separated form: full digit run is the target (supports 10-20).
+          targetWCB = message.substring(1, digitEnd).toInt();
+          espnow_message = message.substring(digitEnd + 1);
+      } else {
+          // Legacy no-comma form: exactly ONE digit is the target; the rest —
+          // including digits — is the payload.
+          targetWCB = message.substring(1, 2).toInt();
+          espnow_message = message.substring(2);
+      }
   }
 
   // An IF cannot ride INSIDE a ;w payload: the chain splitter separates
@@ -4808,14 +6581,22 @@ void processWCBMessage(const String &message){
       }
   }
 
-  // ── RC-Controller-bridge subscription renewal ─────────────────────────────
-  // Any VALID ;w<id>,<cmd> arriving via USB means "a host (config tool's Via
-  // WCB mode, or WCB Wizard) is actively talking through this bridge".  Use
-  // that as the signal to relay inbound JSON broadcasts (rc_hb / rc_ch /
-  // rc_trig / rc_mode) to USB Serial.  Renewed AFTER the rejection checks so
-  // a rejected command doesn't subscribe the host to 20 s of RC JSON spam.
-  // Window is intentionally longer than the config tool's 10 s keep-alive.
-  rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
+  // ── RC-Controller-bridge subscription (Via-WCB management) ────────────────
+  // Turn on the RC-JSON relay ONLY when this ;w carries a JSON payload to the
+  // controller (special peer) — i.e. the NaviCore config tool bridging through
+  // this WCB (;w20,{"type":"PING"} keep-alive every 10 s + JSON commands). That
+  // is a deliberate management session that needs the NaviCore's JSON replies
+  // (rc_hb / rc_trig / rc_mode / PONG / config) mirrored back to USB.
+  //
+  // A plain TEXT route — ;wdome,test / ;wNaviCore,test / ;w20,test — is not JSON
+  // and never turns on telemetry. That's the fix for the bug where ANY routed
+  // command sprayed rc_hb: routing (text) and management-bridging (JSON) are now
+  // told apart by payload type, which matches intent. The config tool's 10 s
+  // JSON PING holds the ~20 s window open for the whole session; when it stops,
+  // relaying stops ~20 s later. (Renewed after the reject checks above.)
+  if (specialPeerEnabled && targetWCB == WCB_SPECIAL_PEER_ID &&
+      espnow_message.length() > 0 && espnow_message[0] == '{')
+    rcJsonRelaySubscribedUntilMs = millis() + 20000UL;
 
   // Check if target is the local WCB
   if (targetWCB == WCB_Number) {
@@ -4829,7 +6610,7 @@ void processWCBMessage(const String &message){
   }
 
   // Remote target - send via ESP-NOW
-  bool isValidTarget = (targetWCB >= 1 && targetWCB <= Default_WCB_Quantity) ||
+  bool isValidTarget = (targetWCB >= 1 && targetWCB <= MAX_WCB_COUNT && wcbPeerActive[targetWCB - 1]) ||
                        (specialPeerEnabled && targetWCB == WCB_SPECIAL_PEER_ID);
   if (isValidTarget) {
       if (debugEnabled) {
@@ -4838,41 +6619,170 @@ void processWCBMessage(const String &message){
       }
       sendESPNowMessage(targetWCB, espnow_message.c_str());
   } else {
-      Serial.printf("Invalid WCB target %d (valid range: 1-%d%s).\n",
-                    targetWCB, Default_WCB_Quantity,
-                    specialPeerEnabled ? ", or 20" : "");
+      // Not a fixed range — a target is valid if it's a configured/learned active
+      // peer (auto-join can add peers well above the WCBQ floor) or the controller.
+      Serial.printf("WCB %d is not a reachable target — it isn't a configured or "
+                    "learned peer%s.\n",
+                    targetWCB, specialPeerEnabled ? " or the controller" : "");
   }
 }
 
+// Recall a stored sequence by name (`;Ckey` or `;SEQkey`).
+//
+// A TOP-LEVEL recall — one typed at a console / sent by the Wizard — fans out across the
+// whole mesh: every board that has a sequence saved under <key> runs its OWN copy, exactly
+// once, no matter which board it was entered on. Names need not be unique (a name shared by
+// several boards fires all of them, each once). This is what makes a stored sequence
+// triggerable "from anywhere".
+//
+// LOCAL-ONLY: append ",L" (or ",LOCAL") to the key — `;Ckey,L` / `;SEQkey,L` — to run ONLY
+// this board and never touch the mesh. Sequence keys never contain a comma (key_list is
+// comma-delimited), so the suffix is unambiguous. The Wizard TEST button uses this so testing
+// a single row stays single-board.
+//
+// NESTED recalls (a `;Ckey` inside a running sequence body) and recalls that ARRIVED over
+// the mesh also do NOT fan out — they run locally only, exactly as before. That keeps a
+// sub-sequence call (`;C` inside a body — a documented, supported pattern) from being
+// re-broadcast N times, and stops the trigger from looping. The distinction rides:
+//   * !localOnly             — the ",L" suffix was NOT present
+//   * !lastReceivedViaESPNOW — this recall did NOT arrive over the mesh
+//   * !inSequenceBody        — this recall is not a command inside a sequence body
+//                              (snapshotted per queue item, just like espnowOrigin)
+// so the one broadcast happens only for a genuine mesh-scoped top-level trigger. "Exactly
+// once per board" is then guaranteed by the ETM per-(sender,seq) dedup ring on receive; the
+// lastReceivedViaESPNOW one-hop cap stops any received copy from being re-broadcast.
 void recallStoredCommand(const String &message, int sourceID) {
     Serial.print("Recall stored command request received:");
     Serial.println(message);
-    if (message.startsWith("SEQ") || message.startsWith("seq")) {
-        // Format: SEQkey
-        Serial.println("Recalling stored sequence command...");
-        String key = message.substring(3);
-        key.trim();
-        if (key.length() > 0) {
-            recallCommandSlot(key, sourceID);
-        } else {
-            Serial.println("Invalid recall command. Use SEQkey to recall a command.");
+
+    // Strip the SEQ/C prefix to get the key.
+    const bool isSeq = message.startsWith("SEQ") || message.startsWith("seq");
+    String key = isSeq ? message.substring(3) : message.substring(1);
+    key.trim();
+
+    // ",L" / ",LOCAL" suffix => local-only (no mesh fan-out).
+    bool localOnly = false;
+    int commaPos = key.indexOf(',');
+    if (commaPos >= 0) {
+        String suffix = key.substring(commaPos + 1);
+        suffix.trim();
+        suffix.toUpperCase();
+        if (suffix == "L" || suffix == "LOCAL") {
+            localOnly = true;
+            key = key.substring(0, commaPos);
+            key.trim();
         }
+    }
+
+    if (key.length() == 0) {
+        Serial.println(isSeq ? "Invalid recall command. Use SEQkey (or SEQkey,L for local-only)."
+                             : "Invalid recall command. Use ;Ckey (or ;Ckey,L for local-only).");
+        return;
+    }
+
+    // Fan the trigger out to the mesh — but ONLY for a genuine mesh-scoped top-level trigger:
+    // not the local-only ",L" form, not one that arrived over the mesh, and not a nested body
+    // command. Reconstruct a clean ;C/;SEQ form (never carrying ",L") so each peer dispatches
+    // straight back through this recall path, where its own lastReceivedViaESPNOW=true
+    // suppresses a re-broadcast. Fires before the local run so peers start in step.
+    if (!localOnly && !lastReceivedViaESPNOW && !inSequenceBody) {
+        String trigger = String(CommandCharacter) + (isSeq ? "SEQ" : "C") + key;
+        sendESPNowMessage(0, trigger.c_str());   // target 0 = broadcast, ETM
+    }
+
+    // Cycle guard. A sequence whose body recalls itself (directly, or via a ring A→B→A) never
+    // recursed on the STACK — recallCommandSlot enqueues and returns, and the nested recall runs
+    // from a later top-level drain — so a depth counter would not catch it. What it did do was
+    // re-enqueue forever, so loop() drained an endlessly-refilled queue and the board serviced
+    // nothing else.
+    //
+    // Track the keys expanded during the CURRENT drain instead. inSequenceBody is already true
+    // for anything a sequence body enqueues, so the chain is identifiable; the set is cleared
+    // whenever a genuine top-level recall starts.
+    static String activeChainKeys[8];
+    static uint8_t activeChainDepth = 0;
+    if (!inSequenceBody) {
+        activeChainDepth = 0;              // fresh top-level trigger — start a new chain
     } else {
-  String key = message.substring(1);
-  key.trim();
-  if (key.length() > 0) {
+        for (uint8_t i = 0; i < activeChainDepth; i++) {
+            if (activeChainKeys[i].equalsIgnoreCase(key)) {
+                Serial.printf("Sequence '%s' recalls itself (directly or in a loop) — refusing to "
+                              "expand it again. Break the cycle in the stored sequence.\n",
+                              key.c_str());
+                return;
+            }
+        }
+        if (activeChainDepth >= (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0]))) {
+            Serial.printf("Sequence nesting deeper than %u — refusing to expand '%s'.\n",
+                          (unsigned)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])),
+                          key.c_str());
+            return;
+        }
+    }
+    if (activeChainDepth < (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])))
+        activeChainKeys[activeChainDepth++] = key;
+
+    if (isSeq) Serial.println("Recalling stored sequence command...");
     recallCommandSlot(key, sourceID);
-  } else {
-    Serial.println("Invalid recall command. Use ;Ckey to recall a command.");
-  }
-}
 }
 
 void processMaestroCommand(const String &message){
-  int message_maestroID = message.substring(1,2).toInt();
-  int message_maestroSeq = message.substring(2).toInt();
-  if (message_maestroSeq < 0 || message_maestroSeq > 255) return;
-  sendMaestroCommand(message_maestroID,message_maestroSeq);
+  // ";M" has two shapes (see WcbMaestro.h grammar). message here is the command with the
+  // CommandCharacter stripped but the leading 'M'/'m' still present — e.g. "M11", "M1,1",
+  // or "M2,setTarget,0,6000".
+
+  // Cross-board get-query wire forms (letter after 'M' — device commands always have a digit):
+  //   ;M!<name>=<value>          a get-result pushed home → store RAM-only
+  //   ;MG<dev>,<replyTo>,<verb>  a get forwarded to us (the host) → read our Maestro + reply
+  if (message.length() > 1 && message[1] == '!') { handleMaestroResult(message.substring(2)); return; }
+  if (message.length() > 2 && (message[1] == 'G' || message[1] == 'g')) {
+    handleMaestroGetForwarded(message.substring(2)); return;
+  }
+
+  int comma = message.indexOf(',');
+
+  // ── SUBROUTINE trigger — the SAME command in two spellings ──
+  //   ;M<id><seq>   (no comma; id = first digit, seq = the rest)
+  //   ;M<dev>,<n>   (comma + a plain integer)
+  // Both route through the identical sendMaestroCommand path so ;M1,1 behaves EXACTLY like
+  // ;M11 — dev-0 broadcast, dev-9 target-local, and remote-forwarding all come for free.
+  if (comma < 0) {
+    if (message.length() < 2 || message[1] < '0' || message[1] > '9') return;   // bare/typo ;M → ignore
+    int id  = message.substring(1, 2).toInt();
+    int seq = message.substring(2).toInt();
+    if (seq < 0 || seq > 255) return;
+    sendMaestroCommand(id, seq);
+    return;
+  }
+  {
+    String devStr = message.substring(1, comma);    // between 'M' and the first comma
+    String after  = message.substring(comma + 1);   // "1" | "goHome" | "1,1000" | "setTarget,0,6000"
+    bool devDigits = devStr.length() > 0;
+    for (int i = 0; i < (int)devStr.length(); i++)
+      if (devStr[i] < '0' || devStr[i] > '9') { devDigits = false; break; }
+    bool pureInt = after.length() > 0;
+    for (int i = 0; i < (int)after.length(); i++)
+      if (after[i] < '0' || after[i] > '9') { pureInt = false; break; }
+    // A real device number + a plain integer → the subroutine trigger; route it like ;M11.
+    // dev 0-9 only (Maestro ids are 1-9, id 0 = broadcast); a 2+ digit dev, a verb, or an
+    // EMPTY device field (";M,5") falls through to the verb path, which builds the frame and
+    // rejects/forwards it — so a missing device number can't silently broadcast.
+    if (devDigits && pureInt) {
+      int  dev = devStr.toInt();
+      long seq = after.toInt();
+      if (dev >= 0 && dev <= 9 && seq >= 0 && seq <= 255) {
+        sendMaestroCommand((uint8_t)dev, (uint8_t)seq);
+        return;
+      }
+    }
+  }
+
+  // ── Native Pololu servo/query verb ──
+  //   ;M<dev>,<verb>[,args]   (also ;M<dev>,<n>,<param> — a numeric sub WITH a parameter)
+  // Build the device-addressed frame with the shared WcbCmd translator and route it the
+  // SAME way as ;M<id><seq>: to the configured LOCAL Maestro port, or forwarded to the
+  // configured REMOTE WCB for processing there. See sendMaestroServoVerb.
+  sendMaestroServoVerb(message.c_str() + 1);   // skip the leading 'M'
 }
 
 void processPWMOutput(const String &message) {
@@ -4882,10 +6792,28 @@ void processPWMOutput(const String &message) {
     unsigned long pulseWidth = message.substring(2).toInt();
     
     if (port < 1 || port > 5 || pulseWidth < 500 || pulseWidth > 2500) {
-        if (debugPWMEnabled) Serial.println("Invalid PWM output command");
+        // Was gated on debugPWMEnabled, which is defined false and assigned NOWHERE — so this
+        // rejection was literally unreachable and a malformed ;P was silently ignored.
+        // debugPWMPassthrough is the flag ?DEBUG,PWM,ON actually sets.
+        if (debugPWMPassthrough)
+            Serial.printf("[PWM] Invalid ;P command '%s' (expected ;Pxnnnn, port 1-5, width 500-2500)\n",
+                          message.c_str());
         return;
     }
-    
+
+    // Refuse to drive a port another device is actively using. This deliberately does NOT require
+    // a positive PWM-output declaration: a receiver driven by a REMOTE board's PWM mapping has no
+    // local declaration, and the unconditional pinMode below is what makes that work. Blocking
+    // only OWNED ports keeps remote PWM functional while stopping a stray ;P from reconfiguring a
+    // live UART's TX pin mid-transfer — which silently kills that device until the next reboot.
+    if (isSerialPortUsedForMP3(port) || isSerialPortUsedForDFP(port) ||
+        isSerialPortUsedForHCR(port) || isSerialPortUsedForWLED(port) ||
+        isSerialPortRawMapped(port)  || (Kyber_Local && port == kyberLocalPort)) {
+        if (debugPWMPassthrough)
+            Serial.printf("[PWM] Ignoring ;P on S%d — the port is in use by another device\n", port);
+        return;
+    }
+
     int txPin = 0;
     switch(port) {
         case 1: txPin = SERIAL1_TX_PIN; break;
@@ -5014,6 +6942,15 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             continue;
         }
 
+        // Skip if a DFPlayer is on this port — its 10-byte frames are the
+        // driver's protocol, and broadcast text would corrupt them.
+        if (isSerialPortUsedForDFP(i)) {
+            if (debugEnabled) {
+                Serial.printf("Skipping S%d (DFPlayer port)\n", i);
+            }
+            continue;
+        }
+
         // Skip if the HCR is on this port (library owns it)
         if (isSerialPortUsedForHCR(i)) {
             if (debugEnabled) {
@@ -5024,6 +6961,14 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
         writeSerialString(getSerialStream(i), cmd);
         if (debugEnabled) { Serial.printf("Sent to Serial%d: %s\n", i, cmd.c_str()); }
+    }
+
+    // Opt-in: also echo the broadcast out S0/USB. UNLIKE S1-S5 this fires even when the
+    // broadcast arrived on S0 (no i==sourceID suppression) — a USB host that injects a
+    // broadcast still sees it echoed back on S0.
+    if (broadcastToS0) {
+        Serial.println(cmd);
+        if (debugEnabled) { Serial.printf("Sent to S0/USB: %s\n", cmd.c_str()); }
     }
 
     // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage)
@@ -5039,17 +6984,39 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // exclusively by processMP3Responses() in loop().
   if (isSerialPortUsedForMP3(sourceID)) return;
 
+  // Same for the DFPlayer port — processDFPResponses() owns those bytes, and
+  // half a 10-byte frame read away here would break ONFIN/error decoding.
+  if (isSerialPortUsedForDFP(sourceID)) return;
+
   // Skip the HCR port — RX is owned exclusively by the HCRVocalizer
   // library (status parsing) via processHCRTick() in loop().
   if (isSerialPortUsedForHCR(sourceID)) return;
 
+  // Skip a port whose Maestro is mid get-query — handleMaestroGet is reading the reply
+  // bytes and must not have them stolen/mis-parsed as a line command.
+  if (sourceID != 0 && sourceID == maestroQueryPort) return;
+
+  // Skip a port that applyLiveBaud is currently tearing down and re-beginning: on S3-S5 that
+  // frees and reallocates the SoftwareSerial RX buffer under us.
+  if (sourceID != 0 && sourceID == serialReconfigPort) return;
+
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
   while (serial.available()) {
+    if (sourceID != 0 && sourceID == maestroQueryPort) break;   // a get-query claimed this port mid-drain
     char c = serial.read();
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
+          // WDP-DA: a device on this port self-identifying with "@WDP1 {json}"
+          // (see docs/WDP_DEVICE_ANNOUNCE.md). Capture its identity instead of
+          // running it through the command parser. (sourceID 0 = USB is ignored
+          // inside wdpDaHandleLine — announces come from ports 1-5.)
+          if (serialBuffer.startsWith("@WDP")) {
+            wdpDaHandleLine(sourceID, serialBuffer.c_str());
+            serialBuffer = "";
+            continue;
+          }
           // MGMT commands are internal relay traffic — gate under debugMGMT, not debugEnabled
           bool _isMgmt = serialBuffer.startsWith(String(LocalFunctionIdentifier) + "MGMT");
           if ((_isMgmt && debugMGMT) || (!_isMgmt && debugEnabled)) {
@@ -5058,6 +7025,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
 
           // Reset last received flag since we are reading from Serial
           lastReceivedViaESPNOW = false;
+          // A console command is always top-level, never a sequence body. Reset here too
+          // (mirrors lastReceivedViaESPNOW) so a value left over from a prior recall's body
+          // drain cannot latch and suppress this recall's mesh fan-out.
+          inSequenceBody = false;
 
           // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
@@ -5088,19 +7059,42 @@ void processSerialCommandHelper(String &data, int sourceID) {
     if (data.startsWith(String(LocalFunctionIdentifier) + "C") || 
         data.startsWith(String(LocalFunctionIdentifier) + "c")) {
         
-        // Look for delimiter + ?CHK pattern (not just ?CHK)
-        String chkPattern = String(commandDelimiter) + "?CHK";
-        int chkPos = data.indexOf(chkPattern);
+        // Look for delimiter + <funcChar>CHK. Two things this must get right, both of which
+        // this verifier used to get wrong (the sibling gate in parseCommandsAndEnqueue was
+        // fixed in a32e9cb and this copy was left behind):
+        //   * lastIndexOf, not indexOf — the real checksum is the FINAL token, and a stored
+        //     sequence value can legitimately contain an earlier "^?CHK", which truncated the
+        //     command and failed verification.
+        //   * match the LIVE function identifier, not a hard-coded '?' — a board on a custom
+        //     funcChar never matched, so the integrity check was silently skipped and a
+        //     corrupted command applied without complaint. '?' stays accepted so a factory
+        //     chain (always '?') still verifies after the funcChar has been changed.
+        String chkPattern = String(commandDelimiter) + String(LocalFunctionIdentifier) + "CHK";
+        int chkPos = data.lastIndexOf(chkPattern);
+        if (chkPos == -1) {
+            chkPattern = String(commandDelimiter) + String(LocalFunctionIdentifier) + "chk";
+            chkPos = data.lastIndexOf(chkPattern);
+        }
+        if (chkPos == -1) {
+            chkPattern = String(commandDelimiter) + "?CHK";
+            chkPos = data.lastIndexOf(chkPattern);
+        }
         if (chkPos == -1) {
             chkPattern = String(commandDelimiter) + "?chk";
-            chkPos = data.indexOf(chkPattern);
+            chkPos = data.lastIndexOf(chkPattern);
         }
         
         if (chkPos != -1) {
             // Extract the command without checksum (everything before delimiter+?CHK)
             String cmdWithoutChecksum = data.substring(0, chkPos);
-            // Extract checksum (skip delimiter + "?CHK")
-            String providedChecksum = data.substring(chkPos + chkPattern.length());
+            // Extract the checksum token, BOUNDED at the next delimiter. Taking the whole
+            // tail swept up any command that followed the checksum into the hex string, so
+            // a chain with trailing content always failed verification. Matches the bound
+            // the sibling gate in parseCommandsAndEnqueue uses.
+            const int chkValStart = chkPos + chkPattern.length();
+            int chkValEnd = data.indexOf(commandDelimiter, chkValStart);
+            if (chkValEnd == -1) chkValEnd = data.length();
+            String providedChecksum = data.substring(chkValStart, chkValEnd);
             providedChecksum.toUpperCase();
             providedChecksum.trim();
             // LEGACY COMPAT: <=6.0.x wrote checksums unpadded (String(crc,HEX)).
@@ -5248,17 +7242,26 @@ void serialCommandTask(void *pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(500));
     while (true) {
         processIncomingSerial(Serial, 0);
-        
+
+        // A port owned by the Kyber task must not be drained here too — two tasks reading one
+        // UART steal bytes from each other and corrupt every frame. The skip below used to be
+        // hard-coded to S1/S2, but kyberLocalPort is configurable S1-S5 (?KYBER,LOCAL,Sx): with
+        // the Kyber on S3/S4/S5 both tasks polled it. S2 is the default, which is why this never
+        // showed on the bench.
+        const int kyberOwned = Kyber_Local ? kyberLocalPort : 0;
+
         // Process serial ports 3-5 only if not raw-mapped
         // (raw-mapped ports are owned by RawSerialForwardingTask — calling
         //  processIncomingSerial on them would race for bytes and corrupt binary data)
-        if (!isSerialPortRawMapped(3)) processIncomingSerial(Serial3, 3);
-        if (!isSerialPortRawMapped(4)) processIncomingSerial(Serial4, 4);
-        if (!isSerialPortRawMapped(5)) processIncomingSerial(Serial5, 5);
+        if (!isSerialPortRawMapped(3) && kyberOwned != 3) processIncomingSerial(Serial3, 3);
+        if (!isSerialPortRawMapped(4) && kyberOwned != 4) processIncomingSerial(Serial4, 4);
+        if (!isSerialPortRawMapped(5) && kyberOwned != 5) processIncomingSerial(Serial5, 5);
 
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
-            // Skip Serial1 and Serial2 - handled by Kyber task
+            // Skip Serial1 and Serial2 — handled by the Kyber task (S1 is the Maestro side,
+            // S2 the historical Kyber port). Deliberately unchanged: the Kyber task drains both
+            // regardless of kyberLocalPort, so draining either here would race it.
         } else if (Maestro_Remote) {
             // Process Serial2 only if not raw-mapped
             if (!isSerialPortRawMapped(2)) {
@@ -5299,20 +7302,27 @@ void RawSerialForwardingTask(void *pvParameters) {
             
             int inputPort = serialMonitorMappings[i].inputPort;
 
+            // Skip a port applyLiveBaud is tearing down: on S3-S5 that frees and reallocates the
+            // SoftwareSerial RX buffer, and reading it here would touch freed memory.
+            if (inputPort == serialReconfigPort) continue;
+
             // If this board has a local Kyber, skip that specific port — KyberLocalTask
             // owns it.  Reading here would steal bytes from the Kyber forwarding path
             // and double-send them.  Note: do NOT use blockBroadcastFrom for this check;
             // addSerialMonitorMapping sets that flag for every mapped port, so using it
             // would silently skip all serial mappings.
             if (Kyber_Local && kyberLocalPort > 0 && inputPort == kyberLocalPort) continue;
+            if (inputPort == maestroQueryPort) continue;   // a Maestro get-query owns this port's reply bytes
 
             Stream &inputSerial = getSerialStream(inputPort);
 
             // Read raw bytes if available - use read() not readBytes()
             if (inputSerial.available() > 0) {
                 int len = 0;
-                // Read all available bytes (up to buffer size)
+                // Read all available bytes (up to buffer size). Re-test the query gate each
+                // byte: a get-query can start under us mid-drain (same-core time-slice).
                 while (inputSerial.available() > 0 && len < sizeof(buffer)) {
+                    if (inputPort == maestroQueryPort) break;
                     buffer[len++] = inputSerial.read();
                 }
                 
@@ -5327,7 +7337,8 @@ void RawSerialForwardingTask(void *pvParameters) {
                           // Local output (either explicitly local or targeting self)
                           Stream &outputSerial = getSerialStream(output.serialPort);
                           outputSerial.write(buffer, len);
-                          outputSerial.flush();
+                          // No flush() — write() queues; the UART drains async.
+                          // Avoids blocking this forwarding task per chunk.
 
                           if (debugEnabled && output.wcbNumber == WCB_Number) {
                               Serial.printf("Mapping target W%dS%d is local - forwarding directly\n",
@@ -5384,7 +7395,12 @@ void initStatusLEDWithRetry(int maxRetries, int delayBetweenMs) {  int attempt =
     digitalWrite(STATUS_LED_PIN, LOW);
     delay(50);  // Reduced from 750ms
     
-    // Try to init
+    // Try to init. Free any previous instance first: ?LED,PIN re-runs this, and assigning over
+    // the old pointer leaked it (~50 bytes plus its RMT/pixel buffer) every time.
+    if (statusLED != nullptr) {
+      delete statusLED;
+      statusLED = nullptr;
+    }
     statusLED = new Adafruit_NeoPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
     delay(50);  // Reduced from 750ms
     statusLED->begin();
@@ -5455,6 +7471,302 @@ static void bootGuardDisarm() {
   }
 }
 
+// Enable the controller (special) peer at `id`: persist it AND register the
+// ESP-NOW peer LIVE, so it takes effect immediately without a reboot. Shared by
+// the ?CONTROLLER,ON command and by WDP auto-config (hearing a NaviCore/Sabé
+// announce). Idempotent — safe to call repeatedly.
+void enableControllerPeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return;
+  // Switching to a DIFFERENT controller id: drop the peer we previously
+  // live-registered for the OLD out-of-band id so the ESP-NOW peer table (cap
+  // 20) doesn't leak stale entries. Only out-of-band peers (> quantity) are
+  // removed — in-band 1..quantity peers are shared and registered at boot, and
+  // must never be deleted here. Done BEFORE saveSpecialPeerIDToPreferences
+  // overwrites WCB_SPECIAL_PEER_ID.
+  if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != id &&
+      WCB_SPECIAL_PEER_ID > Default_WCB_Quantity && WCB_SPECIAL_PEER_ID != WCB_Number &&
+      esp_now_is_peer_exist(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1])) {
+    esp_now_del_peer(WCBMacAddresses[WCB_SPECIAL_PEER_ID - 1]);
+  }
+  if (WCB_SPECIAL_PEER_ID != id) saveSpecialPeerIDToPreferences(id);   // sets var + persists
+  if (!specialPeerEnabled)       saveSpecialPeerPreferences(true);     // sets var + persists
+  // Register the out-of-band peer live (in-band 1..quantity peers are already
+  // registered at boot). Guarded so we never add ourselves or double-add.
+  if (id != WCB_Number && id > Default_WCB_Quantity &&
+      !esp_now_is_peer_exist(WCBMacAddresses[id - 1])) {
+    esp_now_peer_info_t sp = {};
+    memcpy(sp.peer_addr, WCBMacAddresses[id - 1], 6);
+    sp.channel = 0;
+    sp.encrypt = false;
+    if (esp_now_add_peer(&sp) == ESP_OK)
+      Serial.printf("Controller peer WCB%d registered (live).\n", id);
+  }
+
+  // Mutual exclusion with the learned-peer set: an id that is the controller is
+  // the SPECIAL peer, never ALSO a learned peer. If it had been auto-joined as a
+  // learned client earlier (e.g. while the controller was disabled), drop that
+  // learned bit so we don't dual-track it for online/ACK. It re-joins as a
+  // learned client automatically if the controller is later turned off.
+  if (id >= 1 && id <= MAX_WCB_COUNT && wcbPeerLearned[id - 1]) {
+    wcbPeerLearned[id - 1] = false;
+    learnedPeersDirty      = true;
+    learnedPeersFlushMs    = millis() + LEARNED_FLUSH_DEBOUNCE_MS;   // schedule the debounced NVS flush
+    rebuildActivePeers();
+  }
+}
+
+// Recompute wcbPeerActive[] = {WCBQ floor 1..Default_WCB_Quantity} ∪ {learned},
+// minus self. Pure bookkeeping — ESP-NOW (de)registration is done by
+// addActivePeer / removeActivePeer. Call after WCBQ or the learned set changes.
+void rebuildActivePeers() {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    bool floorMember = (i < Default_WCB_Quantity);
+    wcbPeerActive[i] = (floorMember || wcbPeerLearned[i] || wcbPeerTemporary[i]) && (i + 1 != WCB_Number);
+  }
+}
+
+// Is board `id` reachable for routing RIGHT NOW: a registered active member AND
+// currently ETM-online (heartbeat within the offline window). Used by
+// wdpCapOwner() so a capability trigger (;H/;A/...) is never routed to a peer
+// that has gone dark — WDP presence alone (much longer TTL) is not enough.
+bool wcbPeerOnline(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  // The controller / special peer is never in wcbPeerActive[] — addActivePeer rejects
+  // it because it doesn't consume a WCB slot — yet it IS a registered unicast target
+  // that heartbeats like any board. Count it as a member here, the same exception
+  // etmAddToPendingTable, the presence refresh and removeActivePeer already make.
+  // Without it a live, heartbeating controller reads as permanently unreachable, so a
+  // capability pinned to it (?HCR,REMOTE,W20) is judged "genuinely dead" on every
+  // trigger and re-elected away. The online gate below still decides reachability, so
+  // one that has actually gone dark still fails over to election as intended.
+  bool isSpecial = (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID);
+  return (wcbPeerActive[id - 1] || isSpecial) && boardTable[id - 1].online;
+}
+
+// Have we EVER received a packet from board `id` this session (heartbeat/advert/ACK…)?
+// lastSeenMs is 0 until the first packet and is never reset (the offline sweep clears
+// `online` but keeps the timestamp), so nonzero == "seen at least once". Lets routing
+// tell a genuinely-offline host (seen, then dark) from one merely not-yet-reheard after
+// a reboot — so an operator's capability pin is honored across the boot window.
+bool wcbPeerEverSeen(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  return boardTable[id - 1].lastSeenMs != 0;
+}
+
+// Count of active member peers — for status and the Wizard live-peer readout.
+int activePeerCount() {
+  int n = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++) if (wcbPeerActive[i]) n++;
+  return n;
+}
+
+// ── Live peer add/remove (generalizes the controller-peer path to N slots) ───
+// Register board `id` as an ESP-NOW peer immediately (no reboot) and mark it an
+// active member. `learned` = discovered via WDP auto-join (vs a WCBQ floor
+// member). Transactional: membership is only set once the ESP-NOW peer actually
+// exists, so a failed add (e.g. the 20-peer cap) never leaves a tracked-but-
+// unreachable ghost. Returns true if the board is an active registered peer.
+bool addActivePeer(uint8_t id, bool learned) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  if (id == WCB_Number) return false;                 // never a peer to ourselves
+  if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) return false;  // controller is not a regular mesh peer
+  int idx = id - 1;
+
+  if (!esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, WCBMacAddresses[idx], 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) != ESP_OK) {
+      Serial.printf("[PEER] Could not add WCB%d (ESP-NOW peer table full? cap 20)\n", id);
+      return false;                                   // transactional: don't mark active
+    }
+    Serial.printf("[PEER] WCB%d registered (live%s).\n", id, learned ? ", learned" : "");
+  }
+
+  // Only ids ABOVE the WCBQ floor carry the "learned" (persisted) bit. A floor
+  // board is already a member by configuration, so it must never acquire the
+  // learned bit — otherwise a FORGET/CLEAR/reload path would treat it as a
+  // departed peer and tear down its live presence + ACK tracking.
+  if (learned && id > Default_WCB_Quantity) {
+    wcbPeerLearned[idx] = true;
+    learnedPeersDirty   = true;                            // persist membership (debounced)
+    learnedPeersFlushMs = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  }
+  rebuildActivePeers();
+  return wcbPeerActive[idx];
+}
+
+// Register board `id` as a TEMPORARY peer: live ESP-NOW registration so
+// the mesh can reach it, but NOT persisted (never sets wcbPeerLearned / touches NVS)
+// and subject to silence-eviction (see the reaper in processETMHeartbeats). If the id
+// was a persisted learned peer, it is DOWNGRADED (learned bit cleared + re-saved) so a
+// device that flips to advertising "temporary" stops being permanent. Transactional
+// like addActivePeer. Only meaningful ABOVE the WCBQ floor — a floor id is already a
+// permanent member by config. Returns true if it's now an active peer.
+bool addTemporaryPeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return false;
+  if (id == WCB_Number) return false;
+  if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) return false;  // controller path owns it
+  int idx = id - 1;
+  if (id <= Default_WCB_Quantity) return false;   // floor member — already permanent; flag is moot
+
+  if (!esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, WCBMacAddresses[idx], 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) != ESP_OK) {
+      Serial.printf("[PEER] Could not add temporary WCB%d (ESP-NOW peer table full? cap 20)\n", id);
+      return false;                                 // transactional: don't mark active
+    }
+    Serial.printf("[PEER] WCB%d registered (live, TEMPORARY).\n", id);
+  }
+
+  // Downgrade a previously-permanent peer that now advertises temporary.
+  if (wcbPeerLearned[idx]) {
+    wcbPeerLearned[idx] = false;
+    learnedPeersDirty   = true;                             // persist the removal (debounced)
+    learnedPeersFlushMs = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  }
+  wcbPeerTemporary[idx] = true;
+  // Stamp lastSeenMs at adoption so the TTL reaper (processETMHeartbeats) treats this peer
+  // correctly: without it, a peer adopted with no subsequent packet keeps lastSeenMs==0 and
+  // the reaper's "==0" guard skips it forever (leaked slot), and a RE-adopted peer would carry
+  // its stale pre-eviction timestamp and get evicted again within one loop tick (adopt/evict
+  // flap). NOT online=true — a temporary peer must outlive the shorter ETM offline threshold.
+  boardTable[idx].lastSeenMs = millis();
+  rebuildActivePeers();
+  return wcbPeerActive[idx];
+}
+
+// Remove board `id` from membership. Only unregisters the ESP-NOW peer when the
+// board is OUT-OF-BAND (not a 1..Default_WCB_Quantity floor member, not the
+// special peer) — shared in-band peers registered at boot must never be deleted
+// (same rule as enableControllerPeer). Clears in-flight ACK expectations so a
+// removed peer can't wedge a pending broadcast.
+void removeActivePeer(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT) return;
+  if (id == WCB_Number) return;
+  int idx = id - 1;
+
+  wcbPeerLearned[idx]      = false;
+  wcbPeerTemporary[idx]    = false;
+  wcbPeerAdvertCount[idx]  = 0;
+  wcbPeerReciprocated[idx] = false;
+  learnedPeersDirty        = true;                          // persist membership (debounced)
+  learnedPeersFlushMs      = millis() + LEARNED_FLUSH_DEBOUNCE_MS;
+  rebuildActivePeers();
+
+  bool stillFloor = (idx < Default_WCB_Quantity);
+  bool isSpecial  = (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID);
+  if (!stillFloor && !isSpecial && esp_now_is_peer_exist(WCBMacAddresses[idx])) {
+    esp_now_del_peer(WCBMacAddresses[idx]);
+    Serial.printf("[PEER] WCB%d unregistered.\n", id);
+  }
+  // Only tear down presence + in-flight ACK expectations for a board ACTUALLY
+  // leaving membership. rebuildActivePeers() above already restored a floor
+  // member's active flag, so a still-active (floor or special) peer is left
+  // undisturbed — otherwise we'd falsely mark a live peer offline and mis-tally
+  // its pending broadcast ACKs as failures.
+  if (!wcbPeerActive[idx] && !isSpecial) {
+    boardTable[idx].online = false;
+    etmClearPeerFromPending(idx);   // drop any ACK expectations referencing it
+  }
+}
+
+// Reconcile the ESP-NOW peer table with current membership: register any active
+// member (or the special peer) that isn't registered yet, and unregister any
+// out-of-band entry that is no longer a member. Idempotent. Lets a live WCBQ
+// change (the membership floor) take effect without a reboot. Never touches the
+// broadcast peer (a different MAC not in WCBMacAddresses[]).
+void syncActivePeerRegistrations() {
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (i + 1 == WCB_Number) continue;
+    bool isSpecial  = (specialPeerEnabled && (i + 1) == WCB_SPECIAL_PEER_ID);
+    bool shouldHave = wcbPeerActive[i] || isSpecial;
+    bool have       = esp_now_is_peer_exist(WCBMacAddresses[i]);
+    if (shouldHave && !have) {
+      esp_now_peer_info_t p = {};
+      memcpy(p.peer_addr, WCBMacAddresses[i], 6);
+      p.channel = 0;
+      p.encrypt = false;
+      esp_now_add_peer(&p);
+    } else if (!shouldHave && have) {
+      esp_now_del_peer(WCBMacAddresses[i]);
+      boardTable[i].online = false;
+    }
+  }
+}
+
+// ── Learned-peer persistence ─────────────────────────────────────────────────
+// Persist only MEMBERSHIP (which ids are learned) as a 20-bit mask — identity
+// (alias/caps) re-learns from adverts, and MACs are always derived, so there is
+// nothing else to store. Fingerprinted with the MAC octets so a mesh-group
+// change auto-invalidates the table instead of registering wrong-group peers.
+void saveLearnedPeers() {
+  uint32_t mask = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++)
+    if (wcbPeerLearned[i]) mask |= (1UL << i);
+  preferences.begin("learned_peers", false);
+  preferences.putUChar("ver", 1);
+  preferences.putUChar("o2", umac_oct2);
+  preferences.putUChar("o3", umac_oct3);
+  preferences.putUInt("mask", mask);
+  preferences.end();
+}
+
+// Restore the learned membership at boot. Each learned peer is registered LIVE
+// and is a permanent member from that moment — online/offline is tracked by its
+// heartbeats, but membership never self-evicts (only ?WDP,FORGET / ?WDP,CLEAR
+// remove). A blob captured under different MAC octets (a mesh-group change) or
+// an unknown schema version is discarded.
+void loadLearnedPeers() {
+  preferences.begin("learned_peers", true);
+  uint8_t  ver  = preferences.getUChar("ver", 0);
+  uint8_t  o2   = preferences.getUChar("o2", 0);
+  uint8_t  o3   = preferences.getUChar("o3", 0);
+  uint32_t mask = preferences.getUInt("mask", 0);
+  preferences.end();
+
+  if (ver != 1) return;                               // no/older blob → nothing to restore
+  if (o2 != umac_oct2 || o3 != umac_oct3) {           // saved under a different mesh group
+    Serial.println("[PEER] learned-peer table saved under different MAC octets — discarding");
+    preferences.begin("learned_peers", false); preferences.clear(); preferences.end();
+    return;
+  }
+
+  int restored = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (!(mask & (1UL << i))) continue;
+    uint8_t id = i + 1;
+    if (id == WCB_Number) continue;
+    if (specialPeerEnabled && id == WCB_SPECIAL_PEER_ID) continue;
+    if (addActivePeer(id, true)) restored++;
+  }
+  learnedPeersDirty = false;                           // reloaded set already matches NVS
+  if (restored > 0)
+    Serial.printf("[PEER] restored %d learned peer(s) from NVS\n", restored);
+}
+
+// Called every loop(): flush debounced learned-membership changes to NVS.
+void drainLearnedPeerMaintenance() {
+  if (learnedPeersDirty && (long)(millis() - learnedPeersFlushMs) >= 0) {
+    saveLearnedPeers();
+    learnedPeersDirty = false;
+  }
+}
+
+// Drop ALL learned + temporary peers (keeps the WCBQ floor). Backs ?WDP,CLEAR. Persists.
+void clearAllLearnedPeers() {
+  int n = 0;
+  for (int i = 0; i < MAX_WCB_COUNT; i++)
+    if (wcbPeerLearned[i] || wcbPeerTemporary[i]) { removeActivePeer(i + 1); n++; }
+  saveLearnedPeers();
+  learnedPeersDirty = false;
+  if (n > 0) Serial.printf("[PEER] dropped %d learned peer(s)\n", n);
+}
+
 void setup() {
   // Arm the boot guard FIRST so it covers the entire setup() (including the
   // USB-stabilize and RMT delays below). Disarmed at the very end of setup().
@@ -5465,11 +7777,23 @@ void setup() {
   // Config pushes from the web tool arrive as a rapid burst of commands; each
   // setting that hits NVS blocks loop() for tens of ms during the flash commit.
   // With only 256 B of buffer, a burst can overflow while loop() is stalled and
-  // silently drop a command. 2 KB comfortably absorbs a full push burst.
-  // No runtime cost: this is a one-time allocation and only affects Serial
-  // (UART0 / the USB programming port), not the device ports Serial1-5.
-  Serial.setRxBufferSize(2048);
+  // silently drop a command.
+  //
+  // 2 KB was NOT enough for a relayed OTA. That path sends a window of 8 lines
+  // of ~284 B (192 firmware bytes -> 256 base64 chars plus the header) = 2272 B,
+  // which exceeds a 2 KB ring even if loop() drained nothing at all — and during
+  // BEGIN the target is erasing ~1.2 MB, so loop() here is not draining promptly.
+  // The result was a mid-line byte run dropped from a ?OTA,DATA payload, which
+  // corrupts silently rather than failing (see serialRxOverflows above).
+  // 8 KB holds ~28 such lines (~3.5 windows). One-time allocation, and it only
+  // affects Serial (UART0 / the USB programming port), not device ports 1-5.
+  Serial.setRxBufferSize(8192);
   Serial.begin(115200);
+  // Count RX overflows instead of losing them silently. Runs on the UART event
+  // task, so it does NOTHING but increment — no Serial output, no allocation.
+  Serial.onReceiveError([](hardwareSerial_error_t e) {
+    if (e == UART_BUFFER_FULL_ERROR || e == UART_FIFO_OVF_ERROR) serialRxOverflows++;
+  });
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
 
@@ -5477,6 +7801,10 @@ void setup() {
   // first incoming broadcast can be safely enqueued.  See enqueueRcJsonRelay
   // / drainRcJsonRelay comments for the cross-core Serial-output rationale.
   rcJsonRelayQueue = xQueueCreate(RC_JSON_QUEUE_SLOTS, sizeof(RcJsonRelaySlot));
+
+  // Mgmt request queue — CONFIG/STATS/ETM_REQ responses (blocking frag loops +
+  // NVS) are deferred out of the ESP-NOW callback into loop(); see drainMgmtReqs.
+  mgmtReqQueue = xQueueCreate(8, sizeof(MgmtReqSlot));
 
   // Pending-timer-chain queue — keeps parseCommandGroups() off the WiFi
   // task (it mutates a std::vector loop() iterates). See queue's declaration
@@ -5487,17 +7815,26 @@ void setup() {
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
   loadMP3Settings();      // Load MP3 Trigger configuration from NVS
+  loadDFPSettings();      // Load DFPlayer Mini configuration from NVS
   loadHCRSettings();      // Load HCR configuration from NVS
+  loadWLEDSettings();     // Load WLED serial-control configuration from NVS
   loadVariables();        // Build the user-variable RAM mirror from NVS
   beginHCR();             // Bind HCRVocalizer to its port (port opened by normal serial init)
+  beginWLED();            // Bind the WLED write stream to its port (opened by normal serial init)
+  wdpPktQueue = xQueueCreate(8, sizeof(WdpPktSlot));  // received WDP adverts, decoded in loop()
+  wdpBegin();             // WDP discovery: load on/off flag, clear neighbor table, arm advert cadence
   loadKyberSettings();
   initPWM();              // Drive PWM output pins LOW ASAP to prevent servo glitch during boot delays
   loadKyberTargets();
   printResetReason();      // Show the exact cause of reset
   printBootloaderInfo();   // CUSTOM short-WDT bootloader vs stock
   loadWCBNumberFromPreferences();
+  // Repair any legacy remote-to-self Maestro slot now that WCB_Number is known
+  // (loadMaestroSettings() above ran before this, with WCB_Number still default).
+  normalizeMaestroSelfSlots();
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
+  loadMeshChannelFromPreferences();   // must precede WiFi init below (esp_wifi_set_channel)
   loadSpecialPeerPreferences();
   loadSpecialPeerIDFromPreferences();
   loadMACPreferences();
@@ -5546,6 +7883,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("Booting up the %s\n", hostname.c_str());
   printHWversion();
   Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
+  Serial.printf("WcbCmd Library: %s\n", WCBCMD_VERSION);   // shared ;-command translators — MUST match NaviCore's copy
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   // Serial.println("PWM Mappings:");
@@ -5555,7 +7893,22 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
    loadSerialMonitorSettings();
   loadBroadcastBlockSettings();  
   loadSerialMonitorMappings();
-  loadBroadcastSettingsFromPreferences(); 
+  loadBroadcastSettingsFromPreferences();
+
+  // Sanitise the loaded baud table BEFORE any begin(). Serial3-5 each had their own
+  // `baudRates[n] > 0` guard but Serial1/Serial2 did not, and a 0 is genuinely reachable: shipped
+  // firmware between 483b4d8 and f5d758f whitelisted `baud == 0` in ?BAUD, and NVS survives a
+  // firmware update — so a board configured back then still has a 0 stored today. HardwareSerial
+  // treats baud 0 as "auto-detect" and blocks for seconds waiting for traffic, long enough for
+  // the boot guard to reset the board, which then does the same thing again: a boot loop with no
+  // console output to explain it. Repair the value instead of skipping the port, so the port
+  // actually works rather than staying dark.
+  for (int i = 0; i < 5; i++) {
+    if (baudRates[i] == 0) {
+      Serial.printf("Serial%d had an invalid baud of 0 in NVS — falling back to 9600.\n", i + 1);
+      baudRates[i] = 9600;
+    }
+  }
   printBaudRates();
 
   if (Kyber_Local) {
@@ -5589,6 +7942,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
       if (baudRates[2] > 0) {
           Serial3.begin(baudRates[2], SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
+          applySoftSerialIntTx(3);
       } else {
           Serial.println("Serial3 has invalid baud rate (0) - skipping UART init");
       }
@@ -5599,6 +7953,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
       if (baudRates[3] > 0) {
           Serial4.begin(baudRates[3], SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
+          applySoftSerialIntTx(4);
       } else {
           Serial.println("Serial4 has invalid baud rate (0) - skipping UART init");
       }
@@ -5609,6 +7964,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
       if (baudRates[4] > 0) {
           Serial5.begin(baudRates[4], SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
+          applySoftSerialIntTx(5);
       } else {
           Serial.println("Serial5 has invalid baud rate (0) - skipping UART init");
       }
@@ -5617,6 +7973,28 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   }
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
+  // ESP-NOW needs the radio awake to hear the MAC-layer ACK that arrives a few
+  // microseconds after every unicast TX. The Arduino/IDF default in STA mode with
+  // no AP association is WIFI_PS_MIN_MODEM, which dozes the radio between DTIM
+  // windows — so a send can miss its ACK and the send-status callback reports
+  // "MAC-layer FAILED" even though the frame went out. That starves heartbeats,
+  // adverts and unicast ACKs and makes the board look OFFLINE to the rest of the
+  // mesh. Pin power-save OFF so ESP-NOW TX/ACK is reliable. (Costs a few mA of
+  // extra idle current — negligible for a mains/animatronics board.)
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  // Pin the ESP-NOW mesh channel explicitly. Peers are registered with channel 0
+  // ("current channel"), and an unassociated STA otherwise just defaults to 1 — so
+  // channel 1 was only ever an accident, not a guarantee. Make it deterministic and
+  // operator-selectable (?WCBCH / Wizard). One radio = one channel, so every WCB and
+  // WCB_Client must share meshChannel or they silently can't hear each other. Check
+  // the result: a rejected channel (e.g. 12–13 without a country override) would
+  // otherwise leave the radio on the wrong channel with no signal.
+  {
+    esp_err_t chErr = esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
+    if (chErr != ESP_OK)
+      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-11.\n",
+                    meshChannel, chErr);
+  }
   // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
   // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
   // but that silently cut ~11 dB of ESP-NOW link budget for every deployed
@@ -5698,6 +8076,16 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     }
   }
 
+  // Seed the dynamic membership set from the boards we just registered. At this
+  // point that is exactly the WCBQ floor. Keeps wcbPeerActive[] == today's
+  // behavior when nothing has been learned.
+  rebuildActivePeers();
+
+  // Re-inject learned peers persisted from a previous session — registered live
+  // (ESP-NOW is inited above) as permanent members. Discarded only if the MAC
+  // octets changed since they were saved (different mesh group).
+  loadLearnedPeers();
+
   // Add broadcast peer
   esp_now_peer_info_t broadcastPeer = {};
   memcpy(broadcastPeer.peer_addr, broadcastMACAddress, 6);
@@ -5726,6 +8114,8 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     memset(boardTable, 0, sizeof(boardTable));
     scheduleNextHeartbeat(true);  // randomized boot heartbeat
     etmInitPendingTable();
+    etmBootAnnouncesLeft  = 3;              // re-announce presence after this (re)boot
+    etmNextBootAnnounceMs = millis() + 1500;
   }
 
   Serial.println("------ General Settings --------------------------------");
@@ -5784,12 +8174,22 @@ void loop() {
   drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();
   processETMHeartbeats();
+  wdpTick();               // WDP: broadcast our advert on schedule + age the neighbor table
+  wdpDaTick();             // WDP-DA: age out serial-attached devices that stopped announcing
+  drainLearnedPeerMaintenance();  // flush learned-peer NVS writes + post-boot prune
+  etmDrainAckQueue();       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
   processETMAcksAndRetries();
   processETMChar();
   processETMLoad();
   checkMgmtTimeout();
   checkConfigPullTimeout();
+  drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
+  drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
+  drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
+  checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
+  processDFPResponses();   // Read DFPlayer Mini response frames (non-blocking)
   processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
   // splitters — by the time commands reach this queue they are unconditional.)
@@ -5803,6 +8203,32 @@ void loop() {
     // what lets a peer-triggered stored sequence still fan its commands out to the
     // other WCBs (the sequence body is enqueued with espnowOrigin=false).
     lastReceivedViaESPNOW = inItem.espnowOrigin;
+    inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
     handleSingleCommand(commandStr, inItem.sourceID);
+    // A sequence-body item's flag must NOT persist past its own dispatch: a recall's body
+    // commands drain last, so without this the global would latch true and every later
+    // top-level recall would be misread as nested and skip its mesh fan-out. The per-item
+    // restore above re-establishes the correct value for the next item; the sources
+    // (serial/ETM/MGMT/receive) reset it too, so this just closes the drain-boundary leak.
+    inSequenceBody = false;
+    lastCommandProcessedMs = millis();   // deferred-restart quiet-window clock (see below)
+  }
+
+  // A PWM input mapping needs a restart to (re)attach its interrupt, but taking it inside
+  // the command that stored it destroyed every command still queued behind it — and the
+  // pusher never noticed, because the boot banner reads as a valid response, so no retry
+  // fired and the push was scored fully ACKed. Restart here instead: queue provably empty
+  // (the while above only exits on xQueueReceive failing) AND quiet for PWM_REBOOT_QUIET_MS.
+  // The quiet window matters — a Wizard push is ACK-paced, so it sends the NEXT command as
+  // soon as this board answers, and the queue is briefly empty between every pair. Each
+  // command processed pushes the deadline out, so the restart lands after the push ends.
+  if (pwmRebootPending) {
+    if (millis() - lastCommandProcessedMs >= PWM_REBOOT_QUIET_MS) {
+      pwmRebootPending = false;
+      Serial.println("Rebooting now to apply PWM configuration...");
+      Serial.flush();
+      delay(150);              // let the line clear the UART before the reset
+      ESP.restart();
+    }
   }
 }

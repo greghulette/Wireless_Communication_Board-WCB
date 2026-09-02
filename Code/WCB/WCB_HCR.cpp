@@ -4,9 +4,11 @@
 #include <Preferences.h>
 #include <SoftwareSerial.h>
 #include "src/HumanCyborgRelationsAPI/hcr.h"  // WCB-patched HCR, bundled in-sketch (no lib install)
+#include <WcbCmd.h>          // shared ;H translator (HcrCodec) + fade (HcrFade) — same lib NaviCore runs
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
+extern int           Default_WCB_Quantity;   // for validating a ?HCR,REMOTE,W<n> host
 extern bool          debugEnabled;
 extern bool          debugHCR;     // toggled via ?DEBUG,HCR,ON|OFF or dhcron/dhcroff
 extern char          LocalFunctionIdentifier;
@@ -20,6 +22,7 @@ extern Preferences   preferences;
 // / saveSerialLabelToPreferences are declared by WCB_Storage.h (included above).
 extern Stream      &getSerialStream(int port);
 extern void         applyLiveBaud(int port, uint32_t baud);
+extern bool         isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — for the port-conflict guard
 
 // Serial3-5 are EspSoftwareSerial instances defined in WCB.ino.
 // Serial1/Serial2 are the ESP32 core HardwareSerial globals.
@@ -68,105 +71,42 @@ static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
 static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
 static unsigned long _hcrNextPollMs   = 0;  // next scheduled getUpdate() — own timer
 
-// ---- Volume shadow + per-channel fade state -----------------------------
-// HCR has no native fade; we synthesize a non-blocking ramp per channel,
-// stepped from processHCRTick(). _hcrVol holds the last *settled* volume
-// the WCB commanded for each channel (0=V,1=A,2=B) — used as the fade
-// target / restore point because polled getVolume() can be up to pollSec
-// stale. -1 = unknown (seed from poll, else default 100).
-static int _hcrVol[3] = { -1, -1, -1 };
+// ---- Volume + fade → the shared WcbCmd codec / fade module ------------------
+// HcrCodec is the SINGLE source of truth for per-channel commanded volume (0=V,
+// 1=A, 2=B; range 0-99 — the device/library range: HCRVocalizer SetEmotion/
+// SetVolume cap at 99). HcrFade synthesizes the non-blocking ramp the device has
+// no native command for. BOTH are the same code NaviCore runs, so an HCR fades /
+// steps volume identically whichever board drives it — one command source.
+static HcrCodec hcrCodec;
+static HcrFade  hcrFade;
 
-struct HcrFade {
-  bool     active    = false;
-  int      from      = 0;
-  int      to        = 0;
-  uint32_t startMs   = 0;
-  uint32_t durMs     = 0;
-  uint32_t nextStep  = 0;
-  int      lastSent  = -1;
-  bool     stopAtEnd = false;   // fade-out: StopWAV + restore when done
-  int      restoreTo = 0;
-};
-static HcrFade _fade[3];                       // by channel (0=V,1=A,2=B)
-static const uint16_t HCR_FADE_STEP_MS = 150;  // ramp granularity
-
-// Set a channel volume AND record it as the settled shadow (user intent).
+// Set a channel volume through the shared codec (updates its shadow = user intent).
 static void hcrSetVol(int ch, int v) {
-  if (ch < 0 || ch > 2 || !_hcr) return;
-  v = constrain(v, 0, 100);
-  _hcr->SetVolume(ch, v);
-  _hcrVol[ch] = v;
+  if (ch < 0 || ch > 2 || !_hcrPort) return;
+  hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 99));   // fn 17 = SetVolume
 }
 
-// Best-effort "current" volume: settled shadow, else last poll, else 100.
+// Current commanded volume — the codec's shadow (seeded 50, exact after the first
+// SetVolume on this port; matches NaviCore's shared shadow).
 static int hcrCurVol(int ch) {
-  if (ch >= 0 && ch <= 2 && _hcrVol[ch] >= 0) return _hcrVol[ch];
-  if (_hcr) { int v = (int)(_hcr->getVolume(ch) + 0.5f);
-              if (v > 0) return constrain(v, 0, 100); }
-  return 100;
+  int v = hcrCodec.getVol(ch);
+  return (v >= 0) ? v : 50;
 }
 
-static void hcrCancelFade(int ch) {
-  if (ch >= 0 && ch <= 2) _fade[ch].active = false;
-}
+static void hcrCancelFade(int ch) { hcrFade.cancel(ch); }
 
-// Begin a ramp on ch from->to over durSec. stopAtEnd: on reaching the end,
-// StopWAV(ch) then restore volume to restoreTo (fade-out semantics).
+// Begin a ramp on ch from->to over durSec (delegates to the shared HcrFade; every
+// step writes through hcrCodec so its shadow and the emitted bytes stay in sync).
+// stopAtEnd: on reaching the end, StopWAV(ch) then restore volume to restoreTo.
 static void hcrStartFade(int ch, int from, int to, int durSec,
                          bool stopAtEnd, int restoreTo) {
-  if (ch < 0 || ch > 2 || !_hcr) return;
-  from = constrain(from, 0, 100);
-  to   = constrain(to,   0, 100);
-  HcrFade &f = _fade[ch];
-  f.active = false;                       // supersede any in-flight fade
-  if (durSec <= 0) {                      // instant — one write, no anchor
-    _hcr->SetVolume(ch, to);
-    if (stopAtEnd) { _hcr->StopWAV(ch); hcrSetVol(ch, restoreTo); }
-    else           { _hcrVol[ch] = to; }
-    return;
-  }
-  // Anchor the start point only if it differs from current — avoids an
-  // extra packet when from already matches what's on the wire.
-  if (from != hcrCurVol(ch)) _hcr->SetVolume(ch, from);
-  f.from = from; f.to = to;
-  f.startMs = millis(); f.durMs = (uint32_t)durSec * 1000UL;
-  f.nextStep = 0; f.lastSent = from;
-  f.stopAtEnd = stopAtEnd; f.restoreTo = restoreTo;
-  f.active = true;
-  if (debugHCR) Serial.printf("[HCR-DBG] fade start ch=%d %d->%d %ds%s\n",
-                              ch, from, to, durSec,
-                              stopAtEnd ? " (stop+restore)" : "");
+  if (!_hcrPort) return;
+  hcrFade.start(hcrCodec, *_hcrPort, ch, from, to, durSec, stopAtEnd, restoreTo);
 }
 
 // Step all active fades — called every loop tick (non-blocking).
 static void hcrStepFades() {
-  if (!_hcr) return;
-  uint32_t now = millis();
-  for (int ch = 0; ch < 3; ch++) {
-    HcrFade &f = _fade[ch];
-    if (!f.active) continue;
-    uint32_t elapsed = now - f.startMs;
-    if (elapsed >= f.durMs) {                 // done
-      _hcr->SetVolume(ch, f.to);
-      if (f.stopAtEnd) {
-        _hcr->StopWAV(ch);
-        _hcr->SetVolume(ch, f.restoreTo);
-        _hcrVol[ch] = f.restoreTo;
-      } else {
-        _hcrVol[ch] = f.to;
-      }
-      f.active = false;
-      if (debugHCR) Serial.printf("[HCR-DBG] fade done ch=%d -> %d%s\n",
-                                  ch, f.stopAtEnd ? f.restoreTo : f.to,
-                                  f.stopAtEnd ? " (stopped+restored)" : "");
-      continue;
-    }
-    if (now < f.nextStep) continue;
-    f.nextStep = now + HCR_FADE_STEP_MS;
-    int v = f.from + (int)((long)(f.to - f.from) * (long)elapsed / (long)f.durMs);
-    v = constrain(v, 0, 100);
-    if (v != f.lastSent) { _hcr->SetVolume(ch, v); f.lastSent = v; }
-  }
+  if (_hcrPort) hcrFade.tick(hcrCodec, *_hcrPort);
 }
 
 // ==================== Port-conflict Query ================================
@@ -324,19 +264,23 @@ void processHCRRuntimeCommand(const String &message) {
     int fn    = hcrField(body, 1).toInt();
     int chan  = hcrField(body, 2).toInt();
     int track = hcrField(body, 3).toInt();
-    switch (fn) {
-      case 2:  _hcr->SetEmotion(chan, track);   _hcr->update(); break;
-      case 3:  _hcr->Trigger(chan, track);                      break;
-      case 4:  _hcr->Stimulate(chan, track);                    break;
-      case 5:  _hcr->Overload();                                break;
-      case 6:  _hcr->Muse();                                    break;
-      case 8:  _hcr->Stop();                                    break;
-      case 9:  _hcr->StopEmote();                               break;
-      case 11: _hcr->ResetEmotions();                           break;
-      case 14: _hcr->PlayWAV(chan, track);      _hcr->update(); break;
-      case 16: _hcr->StopWAV(chan);                             break;
-      case 17: _hcr->SetVolume(chan, track);                    break;
-      default: Serial.printf("[HCR] Unknown fn=%d\n", fn);      return;
+    // Route the numeric RC-Controller convention through the shared HcrCodec — one
+    // source of truth with NaviCore (both compile WcbHcr.cpp). normalize() owns the
+    // per-fn ranges (rejects out-of-range chan/track, emotion chan 4, track>99) and
+    // covers fns 2-13, 16, 17, 18, 19. fn 14 (PlayWAV) stays on the HCRVocalizer
+    // library to keep its 150 ms per-channel debounce — its bytes are identical to
+    // the codec's PlayWAV.
+    if (fn == 14) {
+      if (chan < 0 || chan > 2) {
+        Serial.printf("[HCR] FN 14 channel %d out of range (0-2)\n", chan);
+        return;
+      }
+      if (_hcr) { _hcr->PlayWAV(chan, track); _hcr->update(); }
+    } else if (_hcrPort && hcrCodec.emit(*_hcrPort, (uint8_t)fn, chan, track)) {
+      if (fn == 2 && _hcr) _hcr->update();   // SetEmotion: nudge an immediate status refresh (matches old)
+    } else {
+      Serial.printf("[HCR] FN %d,%d,%d rejected (unknown fn or out-of-range)\n", fn, chan, track);
+      return;
     }
     if (debugHCR || debugEnabled) Serial.printf("[HCR-DBG] FN %d,%d,%d\n", fn, chan, track);
     return;
@@ -419,11 +363,27 @@ void processHCRRuntimeCommand(const String &message) {
     return;
   }
   if (vU == "VOL" || vU == "VOLUME") {
-    int ch = hcrChan(hcrField(body, 1));            // V|A|B
-    int v  = hcrField(body, 2).toInt();
-    if (ch < 0 || v < 0 || v > 100) { Serial.println("[HCR] Usage: ;H,VOL,<V|A|B>,<0-100>"); return; }
-    hcrCancelFade(ch);
-    hcrSetVol(ch, v);
+    // ;H,VOL[,<V|A|B>],<0-100>
+    // Channel is OPTIONAL: omit it to set ALL channels (V, A and B) to the value,
+    // mirroring VOLUP/VOLDN. Field 1 is the channel when it names one; otherwise
+    // field 1 is the value itself (no channel given -> apply to all).
+    String f1  = hcrField(body, 1);
+    int    ch  = hcrChan(f1);                        // V|A|B -> index, -1 if not a channel
+    bool   all = (ch < 0);                           // no/invalid channel -> all channels
+    String vStr = all ? f1 : hcrField(body, 2);
+    int    v    = vStr.toInt();
+    if (!vStr.length() || v < 0 || v > 100) {
+      Serial.println("[HCR] Usage: ;H,VOL[,<V|A|B>],<0-100>");
+      return;
+    }
+    const int chans[3] = { CH_V, CH_A, CH_B };
+    const int n = all ? 3 : 1;
+    for (int i = 0; i < n; i++) {
+      const int c = all ? chans[i] : ch;
+      hcrCancelFade(c);
+      hcrSetVol(c, v);
+      if (debugHCR) Serial.printf("[HCR-DBG] VOL ch=%d -> %d\n", c, v);
+    }
     return;
   }
   if (vU == "VOLUP" || vU == "VOLDN" || vU == "VOLDOWN") {
@@ -474,7 +434,12 @@ void processHCRRuntimeCommand(const String &message) {
 // ==================== Configuration (?HCR,...) ==========================
 
 void clearHCRConfig() {
-  uint8_t freedPort = hcrConfig.serialPort;
+  uint8_t freedPort   = hcrConfig.serialPort;
+  // ?HCR,CLEAR removes the LOCAL host only. The auto-learned remote route is a
+  // separate axis (cleared by ?HCR,REMOTE,OFF or a factory reset), so a Wizard
+  // full-push CLEAR on a board it models as "no HCR" can't silently wipe a route
+  // the Wizard never observed. Preserve it across the memset.
+  uint8_t savedRemote = hcrConfig.remoteWCB;
 
   if (_hcr) { delete _hcr; _hcr = nullptr; }
   _hcrPort = nullptr;
@@ -483,9 +448,13 @@ void clearHCRConfig() {
   hcrConfig.configured = false;
   hcrConfig.baudRate   = 9600;
   hcrConfig.pollSec    = 10;
+  hcrConfig.remoteWCB  = savedRemote;
 
   saveHCRSettings();
-  Serial.println("[HCR] Configuration cleared");
+  Serial.println("[HCR] Local configuration cleared");
+  if (hcrConfig.remoteWCB > 0)
+    Serial.printf("  (still routing ;H to WCB%d — %cHCR,REMOTE,OFF to stop)\n",
+                  hcrConfig.remoteWCB, LocalFunctionIdentifier);
 
   if (freedPort > 0) {
     if (!serialBroadcastEnabled[freedPort - 1]) {
@@ -544,6 +513,7 @@ static void hcrReservePort(int serialPort, int baudRate) {
   hcrConfig.serialPort = (uint8_t)serialPort;
   hcrConfig.baudRate   = (uint32_t)baudRate;
   hcrConfig.configured = true;
+  hcrConfig.remoteWCB  = 0;   // we host it now — not a client of another board
   // pollSec is preserved from NVS/POLL command (default 10, 0 = user set OFF).
 
   saveHCRSettings();
@@ -561,6 +531,36 @@ void configureHCR(const String &args) {
   if (aU == "REFRESH")         {
     if (_hcr) { _hcr->getUpdate(); Serial.println("[HCR] Refresh requested"); }
     else      Serial.println("[HCR] Not configured");
+    return;
+  }
+
+  // ---- REMOTE,W<n> | REMOTE,OFF — route ;H to the HCR on another board ----
+  // Persisted routing (auto-learned from WDP, or set by hand / restored from a
+  // backup). A board that HOSTS an HCR locally never needs this.
+  if (aU.startsWith("REMOTE")) {
+    String v = (a.indexOf(',') >= 0) ? a.substring(a.indexOf(',') + 1) : "";
+    v.trim(); String vU = v; vU.toUpperCase();
+    if (vU == "" || vU == "OFF" || vU == "0") {
+      hcrConfig.remoteWCB = 0;
+      saveHCRSettings();
+      Serial.println("[HCR] Remote routing cleared");
+      return;
+    }
+    int wIdx = vU.indexOf('W');
+    int host = (wIdx >= 0) ? v.substring(wIdx + 1).toInt() : v.toInt();
+    // Bound MUST match what auto-learn + routing accept (1..MAX_WCB_COUNT, incl.
+    // learned peers ABOVE the WCBQ floor) — else an auto-learned host above the
+    // floor round-trips into the backup but is rejected on restore, silently
+    // dropping the persisted route.
+    if (host < 1 || host > MAX_WCB_COUNT || host == WCB_Number) {
+      Serial.printf("[HCR] Invalid host. Use %cHCR,REMOTE,W<n> (1-%d, not this board)\n",
+                    LocalFunctionIdentifier, MAX_WCB_COUNT);
+      return;
+    }
+    if (hcrConfig.configured) clearHCRConfig();   // was a local host — release the port
+    hcrConfig.remoteWCB = (uint8_t)host;
+    saveHCRSettings();
+    Serial.printf("[HCR] Routing ;H to WCB%d\n", host);
     return;
   }
 
@@ -647,10 +647,10 @@ void configureHCR(const String &args) {
   // share one UART. Does NOT check HCR itself, so re-configuring HCR on its
   // own port is still allowed.
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
-      isSerialPortUsedForMP3(serialPort) ||
+      isSerialPortUsedForMP3(serialPort) || isSerialPortUsedForWLED(serialPort) ||
       (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
       (serialPort == 2 && Kyber_Local)) {
-    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3 - config blocked\n", serialPort);
+    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3/WLED - config blocked\n", serialPort);
     return;
   }
 
@@ -662,7 +662,10 @@ void configureHCR(const String &args) {
 void printHCRSettings() {
   Serial.println("---- HCR Configuration ----");
   if (!hcrConfig.configured) {
-    Serial.println("  Not configured.  Use ?HCR,PORT,S<port>:<baud>");
+    if (hcrConfig.remoteWCB > 0)
+      Serial.printf("  Routes ;H to WCB%d (remote host)\n", hcrConfig.remoteWCB);
+    else
+      Serial.println("  Not configured.  Use ?HCR,PORT,S<port>:<baud>");
     return;
   }
   Serial.printf("  Port:  S%d\n", hcrConfig.serialPort);
@@ -703,7 +706,17 @@ void printHCRStatus() {
 void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
                     char delimiter, bool printToSerial,
                     const String &defSep, const String &defFunc) {
-  if (!hcrConfig.configured) return;
+  // Client board (no local HCR, routes ;H to a remote host): persist the route.
+  if (!hcrConfig.configured) {
+    if (hcrConfig.remoteWCB > 0) {
+      String suffix = "HCR,REMOTE,W" + String(hcrConfig.remoteWCB);
+      String cmd = String(LocalFunctionIdentifier) + suffix;
+      if (printToSerial) Serial.println(cmd);
+      chainedConfig        += String(delimiter) + cmd;
+      chainedConfigDefault += defSep + defFunc + suffix;
+    }
+    return;
+  }
 
   String suffix = "HCR,PORT,S" + String(hcrConfig.serialPort) +
                   ":" + String(hcrConfig.baudRate);
@@ -727,6 +740,7 @@ void saveHCRSettings() {
   preferences.putUInt ("baud", hcrConfig.baudRate);
   preferences.putBool ("en",   hcrConfig.configured);
   preferences.putUShort("poll", hcrConfig.pollSec);
+  preferences.putUChar("rwcb", hcrConfig.remoteWCB);
   preferences.end();
 }
 
@@ -736,6 +750,7 @@ void loadHCRSettings() {
   hcrConfig.baudRate   = preferences.getUInt  ("baud", 9600);
   hcrConfig.configured = preferences.getBool  ("en",   false);
   hcrConfig.pollSec    = preferences.getUShort("poll", 10);
+  hcrConfig.remoteWCB  = preferences.getUChar ("rwcb", 0);
   preferences.end();
 
   if (hcrConfig.configured) {
@@ -743,5 +758,20 @@ void loadHCRSettings() {
                   hcrConfig.serialPort,
                   (unsigned long)hcrConfig.baudRate,
                   (unsigned)hcrConfig.pollSec);
+  } else if (hcrConfig.remoteWCB > 0) {
+    Serial.printf("[HCR] Loaded: routes ;H to WCB%d\n", hcrConfig.remoteWCB);
   }
+}
+
+// Auto-learn the HCR host from a WDP advert. First-host-wins + persisted: never
+// override a local host or an already-stored host (a physical move is re-set by
+// hand / ?HCR,REMOTE). Returns true if a host was newly stored.
+bool hcrAutoAddRemote(uint8_t hostWCB) {
+  if (hostWCB == 0 || hostWCB == WCB_Number) return false;
+  if (hcrConfig.configured)                  return false;   // we host it locally
+  if (hcrConfig.remoteWCB != 0)              return false;   // already have a host
+  hcrConfig.remoteWCB = hostWCB;
+  saveHCRSettings();
+  Serial.printf("[WDP] HCR host learned — routing ;H to WCB%d\n", hostWCB);
+  return true;
 }

@@ -4,6 +4,7 @@
 
 extern char        LocalFunctionIdentifier;
 extern char        CommandCharacter;
+extern bool        debugEnabled;   // ?DEBUG,ON — gates the runtime ;V set-confirmation echo
 
 // Dedicated NVS handle for variables. Using our OWN Preferences object (rather
 // than the shared global) means our begin()/end() can never collide with a
@@ -21,6 +22,7 @@ struct WcbVar {
   char    name[WCB_VAR_NAME_MAX + 1];
   int32_t value;
   bool    used;
+  bool    persist;   // false = RAM-only (e.g. live Maestro telemetry) — never written to NVS
 };
 static WcbVar vars[WCB_MAX_VARIABLES];
 static int    varCount = 0;
@@ -33,6 +35,14 @@ static int findVarSlot(const String &name) {            // case-sensitive exact 
 }
 static int findFreeSlot() {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) if (!vars[i].used) return i;
+  return -1;
+}
+// Reclaim one RAM-only (telemetry) slot so a new variable can be created. Persistent vars
+// are NEVER evicted — this stops accumulated Maestro get-telemetry from starving persistent
+// ;V / ?VAR vars (and config-restore) out of the shared fixed table.
+static int evictOneRamSlot() {
+  for (int i = 0; i < WCB_MAX_VARIABLES; i++)
+    if (vars[i].used && !vars[i].persist) { vars[i].used = false; varCount--; return i; }
   return -1;
 }
 
@@ -66,7 +76,7 @@ bool isValidVariableName(const String &name) {
 static void saveVarsToNVS() {
   String blob;
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
-    if (!vars[i].used) continue;
+    if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars never touch flash
     blob += vars[i].name;
     blob += '=';
     blob += String((long)vars[i].value);
@@ -108,8 +118,9 @@ void loadVariables() {
         if (slot >= 0 && isValidVariableName(nm)) {
           strncpy(vars[slot].name, nm.c_str(), WCB_VAR_NAME_MAX);
           vars[slot].name[WCB_VAR_NAME_MAX] = '\0';
-          vars[slot].value = v;
-          vars[slot].used  = true;
+          vars[slot].value   = v;
+          vars[slot].used    = true;
+          vars[slot].persist = true;   // anything loaded from NVS is persistent
           varCount++;
         }
       }
@@ -121,31 +132,51 @@ void loadVariables() {
 }
 
 // ---- core store ---------------------------------------------------------
-bool setVariable(const String &name, int32_t value) {
+static bool setVariableImpl(const String &name, int32_t value, bool persist) {
   if (!isValidVariableName(name)) return false;
   int idx = findVarSlot(name);
   if (idx < 0) {
-    if (varCount >= WCB_MAX_VARIABLES) {
-      Serial.printf("[VAR] Variable limit (%d) reached — cannot create '%s'\n",
+    idx = findFreeSlot();
+    if (idx < 0) idx = evictOneRamSlot();   // table full → recycle a RAM/telemetry slot so a
+                                            // persistent var (or fresh telemetry) is never starved
+    if (idx < 0) {
+      Serial.printf("[VAR] table full (%d persistent vars) — cannot create '%s'\n",
                     WCB_MAX_VARIABLES, name.c_str());
       return false;
     }
-    idx = findFreeSlot();
-    if (idx < 0) return false;
     strncpy(vars[idx].name, name.c_str(), WCB_VAR_NAME_MAX);
     vars[idx].name[WCB_VAR_NAME_MAX] = '\0';
     vars[idx].used = true;
     varCount++;
-  } else if (vars[idx].value == value) {
-    // Unchanged — skip the NVS commit entirely. Every save rewrites the whole
-    // variable blob to flash (loop() stalls ms per write + erase-cycle wear on
-    // the 20 KB NVS partition), so repeated identical sets from sequences must
-    // not touch flash. RAM mirror is already correct.
+  } else if (!persist && vars[idx].persist) {
+    // A RAM-only set must NEVER demote an existing PERSISTENT variable to RAM-only — that
+    // would drop it from NVS on the next save and from backups. Refuse (e.g. live Maestro
+    // telemetry whose name collides with a user ;V variable): keep the persistent var intact.
+    return false;
+  } else if (vars[idx].value == value && vars[idx].persist == persist) {
+    // Unchanged (value AND persistence) — skip the NVS commit entirely. Every save
+    // rewrites the whole variable blob to flash (loop() stalls ms per write +
+    // erase-cycle wear on the 20 KB NVS partition), so repeated identical sets from
+    // sequences (or live telemetry polls) must not touch flash. RAM mirror is already
+    // correct.
     return true;
   }
-  vars[idx].value = value;
-  saveVarsToNVS();
+  vars[idx].value   = value;
+  vars[idx].persist = persist;
+  if (persist) saveVarsToNVS();   // RAM-only sets never write flash
   return true;
+}
+
+// Persistent set (?VAR,SET, backup restore, and the ;VP promote path): RAM mirror + NVS.
+// Promotes an existing volatile variable to persistent.
+bool setVariable(const String &name, int32_t value) {
+  return setVariableImpl(name, value, true);
+}
+
+// RAM-only set (live Maestro get-replies): readable by IF/;V, never persisted, gone on
+// reboot. Safe to poll at any rate — no flash wear. See WCB_Maestro get-query handling.
+bool setVariableRAM(const String &name, int32_t value) {
+  return setVariableImpl(name, value, false);
 }
 
 int32_t getVariable(const String &name, int32_t defVal) {
@@ -170,17 +201,32 @@ void clearAllVariables() {
   saveVarsToNVS();
 }
 
-// ---- ;V,<name>,<value|verb>[,<amount>] ----------------------------------
+// ---- ;V,<name>,<value|verb>[,<amount>]  /  ;VP,<name>,...  ---------------
+//  ;V  = VOLATILE (RAM-only, the default): no flash write on value churn, gone on
+//        reboot. Safe to hammer from a sequence/feed at any rate.
+//  ;VP = PERSISTENT (saved to NVS): survives reboot, in ?backup.
+//  The comma after V / VP is REQUIRED — the old no-comma ";Vname" shorthand is gone.
 void processSetVariable(const String &message) {
-  String body = message; body.trim();
-  // strip leading "V" / "V,"
-  if (body.length() && (body[0] == 'V' || body[0] == 'v'))
-    body = (body.length() > 1 && body[1] == ',') ? body.substring(2) : body.substring(1);
+  String m = message; m.trim();
+
+  // Persistence comes from the COMMAND, not a field: "VP," -> persistent, "V," -> volatile.
+  bool cmdPersist;
+  String body;
+  if (m.length() >= 3 && (m[1] == 'P' || m[1] == 'p') && m[2] == ',') {
+    cmdPersist = true;  body = m.substring(3);
+  } else if (m.length() >= 2 && m[1] == ',') {
+    cmdPersist = false; body = m.substring(2);
+  } else {
+    Serial.printf("[VAR] usage: %cV,<name>,<value>  (volatile)  |  %cVP,<name>,<value>  (persistent)\n",
+                  CommandCharacter, CommandCharacter);
+    return;
+  }
   body.trim();
 
   String name = vField(body, 0);
   String f1   = vField(body, 1);
   String f2   = vField(body, 2);
+  const char *verb = cmdPersist ? "VP" : "V";
 
   if (!isValidVariableName(name)) {
     Serial.printf("[VAR] Invalid name '%s' — 1-%d chars, letters/digits/underscore only\n",
@@ -188,8 +234,8 @@ void processSetVariable(const String &message) {
     return;
   }
   if (f1.length() == 0) {
-    Serial.printf("[VAR] %cV needs a value: %cV,%s,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>\n",
-                  CommandCharacter, CommandCharacter, name.c_str());
+    Serial.printf("[VAR] %c%s needs a value: %c%s,%s,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>\n",
+                  CommandCharacter, verb, CommandCharacter, verb, name.c_str());
     return;
   }
 
@@ -207,8 +253,21 @@ void processSetVariable(const String &message) {
     newVal = (int32_t)f1.toInt();   // integer literal (non-numeric -> 0)
   }
 
-  if (setVariable(name, newVal))
-    Serial.printf("[VAR] %s = %ld\n", name.c_str(), (long)newVal);
+  // Persistence rule: ;VP forces persistent (creating OR promoting a volatile var).
+  // ;V keeps an EXISTING variable's current persistence and makes NEW ones volatile —
+  // so a plain ;V never silently drops a persistent variable's NVS backing, and the
+  // unaware "counter in a tight loop" case stays RAM-only and never wears the flash.
+  int slot = findVarSlot(name);
+  bool effPersist = cmdPersist ? true : (slot >= 0 ? vars[slot].persist : false);
+
+  // The ;V/;VP set-confirmation echo is DEBUG-ONLY (?DEBUG,ON). ;V is a routine runtime
+  // command — a controller (NaviCore) re-broadcasting ;V,MODE,{mode} every 60 s would
+  // otherwise print a line a minute forever, and it isn't debug the user asked for. Off
+  // by default (silent); enable debugging to watch variables change. (setVariableImpl is
+  // still called unconditionally — only the echo is gated.)
+  if (setVariableImpl(name, newVal, effPersist) && debugEnabled)
+    Serial.printf("[VAR] %s = %ld  [%s]\n", name.c_str(), (long)newVal,
+                  effPersist ? "persistent" : "volatile");
 }
 
 // ---- ?VAR,...  (args = text after "VAR") --------------------------------
@@ -216,7 +275,8 @@ static void listVariables() {
   Serial.println("---- Variables ----");
   if (varCount == 0) { Serial.println("  (none)"); return; }
   for (int i = 0; i < WCB_MAX_VARIABLES; i++)
-    if (vars[i].used) Serial.printf("  %s = %ld\n", vars[i].name, (long)vars[i].value);
+    if (vars[i].used) Serial.printf("  %s = %ld  [%s]\n", vars[i].name, (long)vars[i].value,
+                                    vars[i].persist ? "persistent" : "volatile");
   Serial.printf("  %d/%d used\n", varCount, WCB_MAX_VARIABLES);
 }
 
@@ -247,7 +307,10 @@ void processVarConfig(const String &args) {
     }
     String vU = vStr; vU.toUpperCase();
     int32_t v = (vU == "TRUE") ? 1 : (vU == "FALSE") ? 0 : (int32_t)vStr.toInt();
-    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld\n", name.c_str(), (long)v);
+    // ?VAR,SET is a deliberate config/tool command (not the mesh ;V spam path), and this
+    // echo is the Wizard's push-ack line (sendAndAwaitIdle waits for it), so it ALWAYS
+    // prints — do not gate it behind debug.
+    if (setVariable(name, v)) Serial.printf("[VAR] %s = %ld  [persistent]\n", name.c_str(), (long)v);
     return;
   }
 
@@ -413,7 +476,7 @@ void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
                           char delimiter, bool printToSerial,
                           const String &defSep, const String &defFunc) {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
-    if (!vars[i].used) continue;
+    if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars (live telemetry) are not backed up
     // Emit as a CONFIG command (?VAR,SET,name,value), not runtime ";V":
     //  - flows through the Wizard's '^?' chain grammar and per-line parser
     //  - restores via processVarConfig exactly like every other ? entry

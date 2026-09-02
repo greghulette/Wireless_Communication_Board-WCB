@@ -15,17 +15,23 @@
 
 struct MP3Config {
   uint8_t  serialPort;    // 1-5 (local UART port); 0 = not configured
-  bool     configured;
+  bool     configured;    // true = this board HOSTS the MP3 Trigger locally
   uint32_t baudRate;      // 9600 or 38400
   uint8_t  volume;        // default volume (0=loudest, 64=inaudible); sent before every play
   char     onErrCmd[24];  // stored-command key to run when error ('E')
+  uint8_t  remoteWCB;     // 0 = none; else the WCB that HOSTS the MP3 (this board routes
+                          // ;A there). Persisted + backed up (mirrors HCR/WLED/Maestro).
 };
 
 extern MP3Config mp3Config;
+
+// Auto-learn the MP3 host from a WDP advert (first-host-wins, persisted). Returns
+// true if a host was newly stored.
+bool mp3AutoAddRemote(uint8_t hostWCB);
 extern uint8_t   mp3Volume;  // current tracked volume (0=loudest, 64=inaudible ceiling)
 
 // ---- Core ---------------------------------------------------------------
-void sendMP3Raw(uint8_t byte1, int8_t byte2 = -1);   // send 1 or 2-byte protocol msg
+void sendMP3Raw(uint8_t byte1, int byte2 = -1);   // send 1 or 2-byte protocol msg (byte2 0-255, -1=none)
 void processMP3AudioCommand(const String &message);   // dispatch ;A,... commands
 
 // ---- Configuration (?MP3,...) -------------------------------------------

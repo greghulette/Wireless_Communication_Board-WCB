@@ -1,0 +1,30 @@
+name: WDP wire tests
+
+# Host-side unit tests for the WDP wire format + election logic. Pure C++11, no
+# Arduino toolchain — compiles and runs in seconds on the GitHub runner's g++.
+# Independent of the firmware build workflow so it can never block a firmware push.
+
+on:
+  push:
+    paths:
+      - 'tests/wdp_wire_test.cpp'
+      - 'Code/WCB/WCB_WDP.cpp'
+      - 'Code/WCB/WCB_WDP.h'
+      - '.github/workflows/wdp-tests.yml'
+  pull_request:
+    paths:
+      - 'tests/wdp_wire_test.cpp'
+      - 'Code/WCB/WCB_WDP.cpp'
+      - 'Code/WCB/WCB_WDP.h'
+      - '.github/workflows/wdp-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  wdp-wire-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test
+      - name: Run
+        run: ./wdp_wire_test

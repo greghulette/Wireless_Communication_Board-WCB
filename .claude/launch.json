@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wizard-static",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8777",
+        "--directory",
+        "C:/Users/ghulette/Documents/GitHub/Wireless_Communication_Board-WCB"
+      ],
+      "port": 8777
+    }
+  ]
+}

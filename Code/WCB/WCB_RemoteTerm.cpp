@@ -98,6 +98,16 @@ void WCBSerial::_sendPacket(const char *data, uint8_t len) {
 
   // Unicast to the relay board's pre-computed MAC address.
   // WCBMacAddresses is indexed 0-based (WCB1 → index 0).
+  // Ensure the relay is a registered ESP-NOW peer first: a relay numbered above
+  // this board's WCBQ (e.g. a high-numbered MgmtRelay) may not be in the peer
+  // table, and esp_now_send would then fail ESP_ERR_ESPNOW_NOT_FOUND and silently
+  // drop every mirrored line. Mirrors the on-demand registration the ETM retry uses.
+  if (!esp_now_is_peer_exist(WCBMacAddresses[_relayWCB - 1])) {
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, WCBMacAddresses[_relayWCB - 1], 6);
+    p.channel = 0; p.encrypt = false;
+    esp_now_add_peer(&p);   // best-effort; if the peer table is full the send fails as before
+  }
   esp_now_send(WCBMacAddresses[_relayWCB - 1], (uint8_t *)&pkt, sizeof(pkt));
 }
 

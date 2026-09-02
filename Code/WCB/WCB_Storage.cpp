@@ -5,6 +5,7 @@
 #include "WCB_PWM.h"
 #include "WCB_Maestro.h"  // For MAX_MAESTROS_PER_WCB and maestroConfigs
 // Declare the external variables that are defined in the main sketch
+extern bool inSequenceBody;   // WCB.ino — nested-recall mesh-fanout suppression flag
 extern Preferences preferences;
 extern unsigned long baudRates[5];
 extern bool serialBroadcastEnabled[5];
@@ -15,6 +16,7 @@ extern String commentDelimiter;
 extern int Default_WCB_Quantity;
 extern int WCB_Number;
 extern bool specialPeerEnabled;
+extern bool wcbPeerActive[];   // dynamic peer membership (WCB.ino): floor ∪ learned
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern char espnowPassword[40];
@@ -23,6 +25,9 @@ extern int wcb_hw_version;
 extern char espnowPassword[40];
 extern void updatePinMap();
 extern void applyLiveBaud(int port, uint32_t baud);  // defined in WCB.ino — live re-init incl. SW serial S3-S5
+extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+// isSerialPortUsedForMP3 + isSerialPortPWMOutput/Input come from WCB_Storage.h / WCB_PWM.h.
 extern int SERIAL1_TX_PIN;        //  // Serial 1 Tx Pin
 extern int SERIAL1_RX_PIN;       //  // Serial 1 Rx Pin
 extern int SERIAL2_TX_PIN;       //  // Serial 2 Tx Pin
@@ -329,6 +334,7 @@ void saveBroadcastSettingsToPreferences() {
         String key = "S" + String(i + 1);
         preferences.putInt(key.c_str(), serialBroadcastEnabled[i] ? 1 : 0);
     }
+    preferences.putInt("S0", broadcastToS0 ? 1 : 0);   // S0/USB broadcast output (opt-in)
     preferences.end();
 }
 
@@ -339,6 +345,7 @@ void loadBroadcastSettingsFromPreferences() {
         int value = preferences.getInt(key.c_str(), 1);  // default = 1 (enabled)
         serialBroadcastEnabled[i] = (value == 1);
     }
+    broadcastToS0 = (preferences.getInt("S0", 0) == 1);   // S0/USB output defaults OFF
     preferences.end();
 }
 
@@ -360,7 +367,18 @@ void resetBroadcastSettingsNamespace() {
                       result ? "SUCCESS" : "FAILED");
     }
     preferences.end();
-    Serial.println("Done. Please reboot.");
+
+    // Bring the LIVE globals back in step with what was just written. Without this the RAM copies
+    // kept the pre-reset values, so ?BCAST,RESET appeared to work while the very next unrelated
+    // save (saveBroadcastSettingsToPreferences, called from ?MAESTRO,CLEAR,ALL among others)
+    // re-persisted the old settings straight back over the defaults.
+    for (int i = 0; i < 5; i++) {
+        serialBroadcastEnabled[i] = true;
+        blockBroadcastFrom[i]     = false;   // input blocking was never reset at all
+    }
+    broadcastToS0 = false;                   // matches the load default at :348
+
+    Serial.println("Done. Broadcast output re-enabled on S1-S5, input blocking cleared, S0 echo off.");
 }
 
 // Load MAC address preferences
@@ -400,7 +418,7 @@ void saveSpecialPeerPreferences(bool enabled) {
     preferences.putBool("special_peer", enabled);
     preferences.end();
     specialPeerEnabled = enabled;
-    Serial.printf("Special peer (ID %d) %s. Reboot to apply peer registration.\n",
+    Serial.printf("Controller peer (ID %d) %s.\n",
                   WCB_SPECIAL_PEER_ID, enabled ? "ENABLED" : "DISABLED");
 }
 
@@ -422,7 +440,7 @@ void saveSpecialPeerIDToPreferences(uint8_t id) {
     preferences.putUChar("special_peer_id", id);
     preferences.end();
     WCB_SPECIAL_PEER_ID = id;
-    Serial.printf("Special peer ID set to %d. Reboot to apply peer registration.\n", id);
+    Serial.printf("Controller peer ID set to %d.\n", id);
 }
 
 // Save the WCB quantity to preferences
@@ -435,7 +453,39 @@ void saveWCBQuantityPreferences(int quantity) {
     preferences.putInt("wcb_quantity", quantity);
     preferences.end();
     Default_WCB_Quantity = quantity;
-    Serial.printf("Saved new WCB Quantities to: %d.  Please reboot to take effect\n", Default_WCB_Quantity);
+    // The ?WCBQ callers reconcile peer registrations live (rebuildActivePeers +
+    // syncActivePeerRegistrations) right after this, so no reboot is required.
+    Serial.printf("Saved WCB quantity: %d. Peer registrations reconciled live (no reboot needed).\n", Default_WCB_Quantity);
+}
+
+// Load the ESP-NOW mesh channel from preferences (default WCB_MESH_CHANNEL_DEFAULT).
+// A stale or out-of-range value falls back to the default so a corrupt NVS blob
+// can't strand the board off-channel.
+void loadMeshChannelFromPreferences() {
+    preferences.begin("wcb_config", true);
+    meshChannel = preferences.getUChar("mesh_channel", WCB_MESH_CHANNEL_DEFAULT);
+    preferences.end();
+    if (meshChannel < 1 || meshChannel > 11) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
+}
+
+// Save the ESP-NOW mesh channel to preferences. Applied on the NEXT REBOOT, NOT
+// live: switching the radio immediately would drop this board off the mesh mid-
+// configuration — fatal when the ?WCBCH arrived over ESP-NOW (Wizard relay / client
+// unicast), because the sender stays on the old channel and can no longer reach
+// this board to confirm or retry. Deferring keeps the whole fleet reachable on the
+// old channel until a coordinated reboot moves everyone at once. The boot path
+// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it.
+void saveMeshChannelToPreferences(uint8_t channel) {
+    if (channel < 1 || channel > 11) {
+        Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", channel);
+        return;
+    }
+    preferences.begin("wcb_config", false);
+    preferences.putUChar("mesh_channel", channel);
+    preferences.end();
+    meshChannel = channel;
+    Serial.printf("Mesh channel saved as %d — reboot to apply. Move ALL WCBs + clients "
+                  "to this channel together (one radio = one channel).\n", meshChannel);
 }
 
 // Load ESP-NOW password from preferences
@@ -565,14 +615,20 @@ void recallCommandSlot(const String &key, int sourceID) {
     // in enqueueCommand (and commandGroupsEspnowOrigin for timer sequences)
     // carries it through to dispatch. Restore afterward so the rest of the queue
     // drain is unaffected.
+    // Also mark these as INSIDE a sequence body: a nested `;C`/`;SEQ` recall in this body
+    // must run locally only, NOT re-fan the trigger out to the mesh (see recallStoredCommand).
+    // Carried per-item exactly like the origin flag above.
     bool _savedEspNowOrigin = lastReceivedViaESPNOW;
+    bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = false;
+    inSequenceBody        = true;
     if (isTimerCommand(stripped)) {
         parseCommandGroups(stripped);
     } else {
         parseCommandsAndEnqueue(stripped, sourceID);
     }
     lastReceivedViaESPNOW = _savedEspNowOrigin;
+    inSequenceBody        = _savedSeqBody;
 
 }
 
@@ -594,8 +650,23 @@ void saveStoredCommandsToPreferences(const String &message) {
     return;
   }
 
+  // An ESP32 NVS key is capped at 15 characters. A longer one makes putString fail while the name
+  // was still appended to key_list below — so the sequence was listed, reported as "Stored:", and
+  // advertised to peers, but recalling it found nothing. Both shipping clients already enforce 15
+  // (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
+  if (key.length() > 15) {
+    Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
+                  key.c_str(), (unsigned)key.length());
+    return;
+  }
+
   preferences.begin("stored_cmds", false);
-  preferences.putString(key.c_str(), value);
+  if (!preferences.putString(key.c_str(), value)) {
+    preferences.end();
+    Serial.printf("Failed to store sequence '%s' (NVS write rejected). Not added to the list.\n",
+                  key.c_str());
+    return;
+  }
 
   String existingKeys = preferences.getString("key_list", "");
   bool alreadyExists = false;
@@ -614,6 +685,7 @@ void saveStoredCommandsToPreferences(const String &message) {
   }
 
   preferences.end();
+  invalidateSequenceInventoryHash();   // WDP re-advertises the new fingerprint within ~500 ms
   Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
 }
 
@@ -654,6 +726,7 @@ void eraseStoredCommandByName(const String &name) {
 
     preferences.putString("key_list", updatedList);
     preferences.end();
+    invalidateSequenceInventoryHash();
 
     if (removed) {
         Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
@@ -697,11 +770,101 @@ while (startIdx < keyList.length()) {
     Serial.println("--- End of Stored Commands ---");
 }
 
+// ── Stored-sequence inventory (names only) ─────────────────────────────────
+// See WCB_Storage.h for the format and why names-only exists as a separate path
+// from ?SEQ,LIST / the config pull.
+
+// Cached inventory hash. Recomputed lazily, and ONLY after a write — the WDP
+// dirty-check rebuilds the whole advert payload twice a second (WCB_WDP.cpp), and
+// hashing values there uncached would mean N NVS reads at 2 Hz forever.
+static uint32_t seqInvHashCache  = 0;
+static bool     seqInvHashValid  = false;
+
+void invalidateSequenceInventoryHash() { seqInvHashValid = false; }
+
+uint32_t sequenceInventoryHash() {
+    if (seqInvHashValid) return seqInvHashCache;
+
+    preferences.begin("stored_cmds", true);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+
+    uint32_t h = 2166136261u;                     // FNV-1a 32-bit offset basis
+    auto feed = [&h](const String &s) {
+        for (unsigned i = 0; i < s.length(); i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+        h ^= 0xFF; h *= 16777619u;                // record separator — "ab"+"c" != "a"+"bc"
+    };
+
+    feed(keyList);
+
+    // Hash the VALUES too, not just the names. Editing a sequence in place doesn't
+    // touch key_list, so a keys-only hash would leave every peer believing its
+    // cached copy was still current — the exact failure this fingerprint exists to
+    // prevent. Walked in key_list order so the result is stable.
+    int startIdx = 0;
+    while (startIdx < (int)keyList.length()) {
+        int commaIndex = keyList.indexOf(',', startIdx);
+        if (commaIndex == -1) commaIndex = keyList.length();
+        String key = keyList.substring(startIdx, commaIndex);
+        key.trim();
+        if (key.length() > 0) {
+            preferences.begin("stored_cmds", true);
+            String value = preferences.getString(key.c_str(), "");
+            preferences.end();
+            feed(value);
+        }
+        startIdx = commaIndex + 1;
+    }
+
+    seqInvHashCache = h;
+    seqInvHashValid = true;
+    return h;
+}
+
+String buildSequenceNamesString() {
+    preferences.begin("stored_cmds", true);
+    String keyList = preferences.getString("key_list", "");
+    preferences.end();
+
+    // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
+    // the two directly, so they must never be computed two different ways.
+    uint32_t h = sequenceInventoryHash();
+
+    // Walk key_list exactly as listStoredCommands does — trailing comma, possible
+    // empty entries from a legacy erase — but emit only the names.
+    String names = "";
+    int    count = 0;
+    int    startIdx = 0;
+    while (startIdx < (int)keyList.length()) {
+        int commaIndex = keyList.indexOf(',', startIdx);
+        if (commaIndex == -1) commaIndex = keyList.length();
+
+        String key = keyList.substring(startIdx, commaIndex);
+        key.trim();
+        if (key.length() > 0) {
+            names += ",";
+            names += key;
+            count++;
+        }
+        startIdx = commaIndex + 1;
+    }
+
+    char hdr[16];
+    snprintf(hdr, sizeof(hdr), "%08X,%d", h, count);
+    return String(hdr) + names;
+}
+
 // Clear all stored commands
 void clearAllStoredCommands() {
   preferences.begin("stored_cmds", false);
     preferences.clear();
+    // clear() also removes seq_mig_done, which lives in THIS namespace — so without re-setting it
+    // the legacy migration re-armed and re-imported every CMD1..CMD80 from "stored_commands" on
+    // the next boot, resurrecting the sequences the user just deleted. Re-stamp it: this board has
+    // already migrated, and deleting sequences is not a request to import the old ones back.
+    preferences.putBool("seq_mig_done", true);
     preferences.end();
+    invalidateSequenceInventoryHash();
 }
 
 // Normalise legacy ^*** inline-comment markers in a stored sequence value.
@@ -793,6 +956,10 @@ void migrateOldStoredCommands() {
     preferences.begin("stored_cmds", false);
     preferences.putBool("seq_mig_done", true);
     preferences.end();
+    // Migration rewrites values (comment-marker normalisation), so the fingerprint
+    // must not survive it. Runs before the first advert anyway — this is belt-and-
+    // braces against a future reorder of setup().
+    invalidateSequenceInventoryHash();
 
     if (recovered > 0) {
         Serial.printf("[MIGRATION] Sequence recovery complete — %d sequence(s) restored.\n", recovered);
@@ -871,11 +1038,83 @@ void eraseNVSFlash() {
     preferences.clear();
     preferences.end();
 
-    clearAllPWMMappings();
+    preferences.begin("led_config", false);
+    preferences.clear();
+    preferences.end();
 
-    Serial.println("NVS cleared. Restarting...");
+    preferences.begin("wdp_cfg", false);
+    preferences.clear();
+    preferences.end();
+
+    preferences.begin("learned_peers", false);
+    preferences.clear();
+    preferences.end();
+
+    // Previously MISSED by factory reset — HCR, WLED, and user-variable configs
+    // survived an erase and re-seized their ports / reappeared after reboot.
+    preferences.begin("hcr_cfg", false);   preferences.clear(); preferences.end();
+    preferences.begin("wled_cfg", false);  preferences.clear(); preferences.end();
+    preferences.begin("wcb_vars", false);  preferences.clear(); preferences.end();
+    // ...and DFPlayer, missed the same way: a configured DFP re-claimed its UART after the
+    // erase (isSerialPortUsedForDFP makes processIncomingSerial skip that port), so a board
+    // the user believed was blank silently ignored commands on it.
+    preferences.begin("dfp_cfg", false);   preferences.clear(); preferences.end();
+    // The LEGACY sequence namespace. "stored_cmds" (cleared above) holds the seq_mig_done flag,
+    // so clearing that alone re-armed migrateOldStoredCommands() while leaving the old CMD1..CMD80
+    // values here intact — every deleted sequence reappeared on the next boot.
+    preferences.begin("stored_commands", false); preferences.clear(); preferences.end();
+
+    // false = do not restart this board and do not broadcast ?REBOOT. clearAllPWMMappings()
+    // ended in an inline ESP.restart(), so eraseNVSFlash() never reached its own confirmation
+    // or restart below — and it rebooted every other WCB in the fleet as a side effect of one
+    // board being erased. Both are now behind autoReboot, and the local restart is deferred to
+    // loop() via pwmRebootPending rather than taken inside the command.
+    clearAllPWMMappings(false);
+
+    // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the
+    // Wizard's factory-reset modal both say so). Say what to do about it: until ?HW is set the
+    // board comes up on the hw 0 pin map, where no serial port is usable.
+    Serial.println("NVS cleared — set ?HW,xx before use (serial ports are inactive until then).");
+    Serial.println("Restarting...");
     delay(2000);
     ESP.restart();
+}
+
+// Add-only reconcile of kyberTargets[] from the current maestroConfigs[]. Unlike
+// the ?KYBER,LOCAL,Sx empty-params auto-populate (which wipes and rebuilds), this
+// PRESERVES every existing enabled target — including a manually-documented remote
+// port — and only adds a new enabled slot for a configured Maestro that has no
+// target yet. Remote proxies (serialPort==0) get targetPort=1, which is unused at
+// runtime for remote targets (forwardDataFromKyber broadcasts; the remote board
+// owns its port). Returns the number of NEW targets added. Does NOT persist —
+// callers save when the return is > 0.
+int reconcileKyberTargetsFromMaestroConfigs() {
+  int added = 0;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (!maestroConfigs[i].configured) continue;
+    uint8_t id = maestroConfigs[i].maestroID;
+
+    bool have = false;
+    for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+      if (kyberTargets[j].enabled && kyberTargets[j].maestroID == id) { have = true; break; }
+    }
+    if (have) continue;
+
+    int slot = -1;
+    for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+      if (!kyberTargets[j].enabled) { slot = j; break; }
+    }
+    if (slot < 0) break;   // table full — nothing more we can add
+
+    kyberTargets[slot].maestroID  = id;
+    kyberTargets[slot].targetWCB  = maestroConfigs[i].remoteWCB > 0
+                                    ? maestroConfigs[i].remoteWCB : WCB_Number;
+    kyberTargets[slot].targetPort = maestroConfigs[i].serialPort > 0
+                                    ? maestroConfigs[i].serialPort : 1;
+    kyberTargets[slot].enabled    = true;
+    added++;
+  }
+  return added;
 }
 
 void storeKyberSettings(const String &message) {
@@ -951,11 +1190,26 @@ if (params.startsWith("S") || params.startsWith("s")) {
   }
   
   if (baseCommand.equals("local")) {
+    // Don't seize a UART another subsystem already owns. Symmetric with the
+    // HCR/MP3/WLED/PWM guards so two subsystems can't silently share one port.
+    // (Config-time only — loadKyberSettings() reads NVS directly, never replays
+    // this, so a saved config is never rejected at boot.)
+    if (kyberPort >= 1 && kyberPort <= 5 &&
+        (isSerialPortUsedForWLED(kyberPort) || isSerialPortUsedForHCR(kyberPort) ||
+         isSerialPortUsedForMP3(kyberPort)  || isSerialPortPWMOutput(kyberPort) ||
+         isSerialPortUsedForPWMInput(kyberPort))) {
+      Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - reserved by HCR/MP3/WLED/PWM\n", kyberPort);
+      return;
+    }
     Kyber_Local = true;
     Maestro_Remote = false;
     Kyber_Location = "local";
     kyberLocalPort = kyberPort;   // store globally so forwarding functions use correct port
     Serial.printf("Kyber is LOCAL on Serial%d\n", kyberPort);
+    // KyberLocalTask / KyberRemoteTask are created ONLY at boot (WCB.ino setup()), so flipping the
+    // mode at runtime leaves the newly-owned ports with no reader at all until a restart. Say so
+    // rather than letting the board look configured-but-deaf.
+    Serial.println("⚠️  Reboot required — the Kyber forwarding task is only started at boot.");
     
     if (kyberPort > 0 && kyberPort <= 5) {
       updateBaudRate(kyberPort, 115200);
@@ -978,32 +1232,45 @@ if (params.startsWith("S") || params.startsWith("s")) {
     Maestro_Remote = true;
     Kyber_Location = "remote";
     Serial.println("Kyber is REMOTE (on another WCB)");
+    Serial.println("⚠️  Reboot required — the Maestro-remote forwarding task is only started at boot.");
     
   } else if (baseCommand.equals("clear")) {
+    // Act on the port the Kyber was ACTUALLY on, and only if it was configured at all.
+    //
+    // This used to operate on `kyberPort`, which the bare `?KYBER,CLEAR` path hard-codes to 2.
+    // Because collectConfigCommands emits ?KYBER,CLEAR in EVERY non-Kyber board's config chain,
+    // every full push to every plain board reset Serial2 to 9600 and re-enabled its broadcast
+    // flags — silently undoing settings the same push had just applied a few commands earlier.
+    const int clearPort = (kyberLocalPort >= 1 && kyberLocalPort <= 5) ? kyberLocalPort : 0;
+
     Kyber_Location = " ";
     Kyber_Local = false;
     Maestro_Remote = false;
     kyberLocalPort = 0;
     kyberUseTargeting = false;
-    
-    if (kyberPort > 0) {
-      updateBaudRate(kyberPort, 9600);
-      Serial.printf("✓ Reset S%d baud rate to 9600 (Kyber port)\n", kyberPort);
+
+    if (clearPort > 0) {
+      updateBaudRate(clearPort, 9600);
+      Serial.printf("✓ Reset S%d baud rate to 9600 (was the Kyber port)\n", clearPort);
     }
-    
+
     preferences.begin("kyber_settings", false);
     preferences.putString("K_Location", Kyber_Location);
     preferences.end();
 
-    if (!serialBroadcastEnabled[kyberPort - 1]) {
-      serialBroadcastEnabled[kyberPort - 1] = true;
-      saveBroadcastSettingsToPreferences();
-      Serial.printf("✓ Re-enabled broadcast output on S%d\n", kyberPort);
-    }
-    if (blockBroadcastFrom[kyberPort - 1]) {
-      blockBroadcastFrom[kyberPort - 1] = false;
-      saveBroadcastBlockSettings();
-      Serial.printf("✓ Re-enabled broadcast input on S%d\n", kyberPort);
+    // Only touch broadcast flags for a port the Kyber actually held. Indexing with the
+    // hard-coded 2 also meant `?KYBER,CLEAR,S0` wrote serialBroadcastEnabled[-1].
+    if (clearPort > 0) {
+      if (!serialBroadcastEnabled[clearPort - 1]) {
+        serialBroadcastEnabled[clearPort - 1] = true;
+        saveBroadcastSettingsToPreferences();
+        Serial.printf("✓ Re-enabled broadcast output on S%d\n", clearPort);
+      }
+      if (blockBroadcastFrom[clearPort - 1]) {
+        blockBroadcastFrom[clearPort - 1] = false;
+        saveBroadcastBlockSettings();
+        Serial.printf("✓ Re-enabled broadcast input on S%d\n", clearPort);
+      }
     }
     saveKyberTargets();
     Serial.println("Kyber cleared. Run ?MAESTRO_DEFAULT to clear Maestro configs.");
@@ -1046,8 +1313,17 @@ if (params.startsWith("S") || params.startsWith("s")) {
           if (maestroID >= 1 && maestroID <= 9 &&
               wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT &&
               portNum >= 1 && portNum <= 5 &&
-              (baudRate == 9600 || baudRate == 14400 || baudRate == 19200 || 
-               baudRate == 38400 || baudRate == 57600 || baudRate == 115200)) {
+              // Same 13-rate list configureMaestro() validates against (WCB_Maestro.cpp:610).
+              // This used to accept only six, which meant a Maestro baud that ?MAESTRO took
+              // happily was rejected by ?KYBER,LOCAL for the SAME physical device — and the
+              // Wizard computes its Kyber targets from the Maestro rows, so a legal 2400-baud
+              // Maestro made the whole target line get skipped. Widening is safe: the accept
+              // path calls updateBaudRate() below, which validates the same 13.
+              (baudRate == 110 || baudRate == 300 || baudRate == 600 ||
+               baudRate == 1200 || baudRate == 2400 || baudRate == 9600 ||
+               baudRate == 14400 || baudRate == 19200 || baudRate == 38400 ||
+               baudRate == 57600 || baudRate == 115200 || baudRate == 128000 ||
+               baudRate == 256000)) {
             
             kyberTargets[targetIndex].maestroID = maestroID;
             kyberTargets[targetIndex].targetWCB = wcbNum;
@@ -1056,10 +1332,15 @@ if (params.startsWith("S") || params.startsWith("s")) {
             
             Serial.printf("Kyber target %d: Maestro %d → WCB%d S%d (%d baud)\n",
                           targetIndex + 1, maestroID, wcbNum, portNum, baudRate);
-            if (wcbNum > Default_WCB_Quantity)
-              Serial.printf("⚠️  Warning: WCB%d is not in your neighbor list (?WCBQ is %d). "
-                            "Run ?WCBQ,%d and reboot to add it, or this target will not be reachable.\n",
-                            wcbNum, Default_WCB_Quantity, wcbNum > Default_WCB_Quantity ? wcbNum : Default_WCB_Quantity);
+            // Warn only if the target board isn't a current mesh peer (floor OR
+            // WDP-learned). With auto-join on, a board above WCBQ may already be a
+            // member — don't cry wolf, and don't tell anyone to reboot.
+            if (wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT && !wcbPeerActive[wcbNum - 1] &&
+                !(specialPeerEnabled && wcbNum == WCB_Number))
+              Serial.printf("⚠️  Warning: WCB%d is not a current mesh peer (WCBQ floor is %d, "
+                            "and it hasn't been auto-joined). Add it with ?WDP,ADD,%d (or raise "
+                            "?WCBQ), or this target won't be reachable.\n",
+                            wcbNum, Default_WCB_Quantity, wcbNum);
             
             // Auto-configure Maestro. Use the SAME slot key as the ?MAESTRO
             // handler — (maestroID, serialPort, remoteWCB) — so the two config
@@ -1119,7 +1400,7 @@ if (params.startsWith("S") || params.startsWith("s")) {
             else if (portNum < 1 || portNum > 5)
               Serial.printf("⚠️  Skipping target '%s': port must be S1-S5\n", targetStr.c_str());
             else
-              Serial.printf("⚠️  Skipping target '%s': baud rate must be 9600/14400/19200/38400/57600/115200\n", targetStr.c_str());
+              Serial.printf("⚠️  Skipping target '%s': baud rate must be one of 110/300/600/1200/2400/9600/14400/19200/38400/57600/115200/128000/256000\n", targetStr.c_str());
           }
         }
       }
@@ -1425,11 +1706,18 @@ void addSerialMonitorMapping(const String &message) {
         return;
     }
 
-    // Find or create mapping for this input port
+    // Find or create mapping for this input port.
+    //
+    // A ?MAP,SERIAL command carries the COMPLETE destination list the caller wants for this input
+    // port, so it REPLACES the previous list rather than appending to it. Appending meant a
+    // destination the user removed or re-pointed in the Wizard stayed live on the board forever —
+    // the config was pushed, reported success, and the old route kept forwarding.
     SerialMonitorMapping *mapping = nullptr;
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == inputPort) {
             mapping = &serialMonitorMappings[i];
+            mapping->outputCount = 0;      // replace, don't append
+            mapping->rawMode     = inputRawMode;
             break;
         }
     }
@@ -1507,7 +1795,7 @@ void addSerialMonitorMapping(const String &message) {
             continue;
         }
 
-            if (wcbNum > 9 || serialPort < 0 || serialPort > 5) {
+            if (wcbNum > MAX_WCB_COUNT || serialPort < 0 || serialPort > 5) {
                 Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
                 continue;
             }
@@ -1544,8 +1832,11 @@ void addSerialMonitorMapping(const String &message) {
 
     if (outputsAdded > 0) {
         saveSerialMonitorMappings();
-        Serial.printf("Serial mapping updated: Serial%d%s -> %d new destination(s) added (total: %d)\n",
-                      inputPort, inputRawMode ? " (RAW)" : "", outputsAdded, mapping->outputCount);
+        // The list is now REPLACED, not appended, so outputsAdded == the full destination count.
+        // This also persists a raw-mode toggle on an otherwise-unchanged mapping, which used to
+        // change only the RAM copy and silently revert on the next reboot.
+        Serial.printf("Serial mapping set: Serial%d%s -> %d destination(s)\n",
+                      inputPort, inputRawMode ? " (RAW)" : "", mapping->outputCount);
     } else {
         Serial.println("No new destinations added (all were duplicates or invalid)");
     }
@@ -1796,8 +2087,33 @@ void loadMaestroSettings() {
     maestroConfigs[i].configured = preferences.getBool(keyEn.c_str(),    false);
     maestroConfigs[i].baudRate   = preferences.getUInt(keyBaud.c_str(),  9600);
   }
-  
+
   preferences.end();
+  // NOTE: cannot normalize remote-to-self slots here — this runs before
+  // loadWCBNumberFromPreferences() at boot, so WCB_Number is still the default.
+  // normalizeMaestroSelfSlots() is called from setup() once WCB_Number is known.
+}
+
+// Repair a legacy "remote-to-self" Maestro slot (remoteWCB == this board's own
+// WCB number). No current config path can create one, but older firmware could
+// persist it — and it breaks the Wizard's CLEAR-then-re-add cycle: the backup
+// emits it as a local M:W<self>S1, but its stored key is {serialPort=0,
+// remoteWCB=self} while CLEAR searches for {serialPort=1, remoteWCB=0}, so CLEAR
+// never matches and every push stacks another duplicate Maestro. Collapse it to a
+// plain local slot so it obeys the same invariant configure/clear enforce.
+// MUST be called AFTER loadWCBNumberFromPreferences(). Persists the one-time repair.
+void normalizeMaestroSelfSlots() {
+  bool changed = false;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == WCB_Number) {
+      maestroConfigs[i].serialPort = maestroConfigs[i].serialPort ? maestroConfigs[i].serialPort : 1;
+      maestroConfigs[i].remoteWCB  = 0;
+      changed = true;
+      Serial.printf("[MAESTRO] repaired legacy remote-to-self slot: M%d → local S%d\n",
+                    maestroConfigs[i].maestroID, maestroConfigs[i].serialPort);
+    }
+  }
+  if (changed) saveMaestroSettings();
 }
 
 void printMaestroSettings() {
@@ -1994,7 +2310,11 @@ void loadETMSettings() {
     etmEnabled          = preferences.getBool("etmEnabled", true);
     etmBootHeartbeatSec = preferences.getInt("etmBoot", 2);
     etmHeartbeatSec     = preferences.getInt("etmHB", 10);
-    etmMissedHeartbeats = preferences.getInt("etmMiss", 3);
+    // Default MUST match the compile-time initialiser in WCB.ino (5). It was 3, so every board
+    // that had never explicitly run ?ETM,MISS silently reverted the deliberately-widened 55 s
+    // offline window back to 33 s at every boot — the comment on the initialiser described
+    // behaviour that never shipped. (The Wizard defaults were corrected to match.)
+    etmMissedHeartbeats = preferences.getInt("etmMiss", 5);
     etmTimeoutMs        = preferences.getInt("etmTimeout", 500);
     etmCharMessageCount = preferences.getInt("etmCharCount", 20);
     etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);

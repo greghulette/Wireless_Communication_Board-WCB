@@ -6,15 +6,22 @@
 // ---------------------------------------------------------------------------
 // WCB user variables + conditional execution.  See docs/VARIABLES_DESIGN.md.
 //
-//   Set/mutate (runtime):  ;V,<name>,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>
-//   Manage (config):       ?VAR,LIST | ?VAR,GET,<name> | ?VAR,CLEAR,<name|ALL>
+//   Set/mutate (runtime):
+//     ;V,<name>,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>   volatile — RAM-only, DEFAULT
+//     ;VP,<name>,<...same verbs...>                        persistent — saved to NVS
+//   Manage (config):       ?VAR,LIST | ?VAR,GET,<name> | ?VAR,SET,<name>,<v> (persistent)
+//                          | ?VAR,CLEAR,<name|ALL>
 //   Conditional (runtime): IF,<name><op><int>[,AND|OR,<name><op><int> ...]
 //                          op = =  !=  <  >  <=  >=   (gates the next ^ command)
 //
 //   - signed 32-bit int values; "boolean" is just 0 / non-zero.
 //   - names 1-15 chars, case-sensitive, [A-Za-z0-9_] only.
 //   - undefined variable reads as 0.
-//   - RAM-mirrored: reads hit RAM, writes update RAM + NVS (namespace wcb_vars).
+//   - VOLATILE (;V): RAM-only — no flash wear, gone on reboot, absent from ?backup.
+//     PERSISTENT (;VP / ?VAR,SET): RAM-mirrored + saved to NVS (namespace wcb_vars),
+//     included in ?backup. A name is ONE variable; ;VP promotes an existing volatile
+//     one, ;V never demotes a persistent one (demote = ?VAR,CLEAR + recreate). Use
+//     volatile for fast-changing values (counters, live feeds) to spare the flash.
 // ---------------------------------------------------------------------------
 
 #define WCB_MAX_VARIABLES   100
@@ -25,6 +32,7 @@ void loadVariables();             // call once in setup(): build RAM mirror from
 
 // ---- Core store (RAM-mirrored, NVS-backed) ------------------------------
 bool    setVariable(const String &name, int32_t value);   // false on bad name / table full
+bool    setVariableRAM(const String &name, int32_t value);// RAM-only (not persisted; no flash wear)
 int32_t getVariable(const String &name, int32_t defVal = 0);
 bool    variableExists(const String &name);
 bool    clearVariable(const String &name);                 // false if not found
@@ -32,7 +40,9 @@ void    clearAllVariables();
 bool    isValidVariableName(const String &name);           // 1-15 chars, [A-Za-z0-9_]
 
 // ---- Command handlers ---------------------------------------------------
-// ;V,<name>,<value-or-verb>[,<amount>]   (body = everything after ";V," or "V,")
+// ;V,<name>,<value-or-verb>[,<amount>]  (volatile) or ;VP,... (persistent).
+// `message` includes the leading V/VP; the comma after V/VP is REQUIRED (the old
+// no-comma ";Vname" shorthand was removed).
 void processSetVariable(const String &message);
 
 // ?VAR,...   (args = everything after "VAR")

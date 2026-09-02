@@ -16,9 +16,13 @@ extern void saveBroadcastBlockSettings();
 extern bool Kyber_Local;
 extern bool Maestro_Remote;
 extern bool debugPWMPassthrough;
+extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+// isSerialPortUsedForMP3 comes from WCB_Storage.h (included above).
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
 int activePWMCount = 0;
+volatile bool pwmRebootPending = false;
 
 // PWM Stability Tracking
 PWMStabilityTracker pwmStability[5] = {
@@ -35,6 +39,7 @@ const int PWM_STABILITY_RANGE = 6;   // μs range for stability
 
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;
+uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};  // see WCB_PWM.h
 
 // PWM reading variables for each port
 volatile unsigned long pwmRiseTime[5] = {0};
@@ -60,7 +65,15 @@ bool canUsePWMOnPort(int port) {
         Serial.println("❌ Cannot use PWM on Serial2 - reserved for Kyber");
         return false;
     }
-    
+
+    // Reject ports already claimed by a serial-device module (HCR/MP3/WLED).
+    // Symmetric with those modules' own guards, which reject PWM ports — so two
+    // subsystems can never silently drive the same UART.
+    if (isSerialPortUsedForHCR(port) || isSerialPortUsedForMP3(port) || isSerialPortUsedForWLED(port)) {
+        Serial.printf("❌ Cannot use PWM on Serial%d - reserved for HCR/MP3/WLED\n", port);
+        return false;
+    }
+
     return true;
 }
 
@@ -237,7 +250,7 @@ void addPWMMapping(const String &config, bool autoReboot) {
             }
         }
         
-        if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
+        if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
             // Validate local output ports aren't in use by Kyber
             if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                 Serial.printf("⚠️  Skipping output Serial%d - reserved for Kyber\n", serialPort);
@@ -325,9 +338,13 @@ void addPWMMapping(const String &config, bool autoReboot) {
     }
     
     if (autoReboot) {
-        Serial.println("Rebooting in 3 seconds to apply PWM configuration...");
-        delay(3000);
-        ESP.restart();
+        // DEFER the restart instead of taking it here. A config push arrives as a stream of
+        // commands, so rebooting inside one of them destroys the commands still queued behind
+        // it — and the pusher cannot tell, because the boot banner satisfies its "did the board
+        // answer" test, so no retry fires and the push is scored as fully ACKed. Setting the
+        // flag lets the rest of the queue drain first; loop() restarts once it is empty.
+        pwmRebootPending = true;
+        Serial.println("PWM configuration stored — rebooting once the command queue drains.");
     }
 }
 
@@ -355,9 +372,10 @@ void removePWMMapping(int inputPort) {
             savePWMMappingsToPreferences();
             Serial.printf("Removed PWM mapping for Serial%d\n", inputPort);
             
-            Serial.println("Rebooting in 3 seconds to apply changes...");
-            delay(3000);
-            ESP.restart();
+            // Deferred, like addPWMMapping — see pwmRebootPending in WCB_PWM.h. Restarting
+            // inline here would swallow every command still queued behind this one.
+            pwmRebootPending = true;
+            Serial.println("Mapping removed — rebooting once the command queue drains.");
             return;
         }
     }
@@ -439,10 +457,10 @@ void listPWMMappingsBoot() {
     
 }
 
-void clearAllPWMMappings() {
-    bool remoteBoards[10] = {false};
-    int remotePorts[10][5];
-    int remotePortCounts[10] = {0};
+void clearAllPWMMappings(bool autoReboot) {
+    bool remoteBoards[MAX_WCB_COUNT + 1] = {false};   // indexed by WCB number (0 = local), sized to the full peer range
+    int remotePorts[MAX_WCB_COUNT + 1][5];
+    int remotePortCounts[MAX_WCB_COUNT + 1] = {0};
     
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
@@ -463,7 +481,7 @@ void clearAllPWMMappings() {
     }
     
     if (canSendESPNow()) {
-        for (int wcb = 1; wcb <= 9; wcb++) {
+        for (int wcb = 1; wcb <= MAX_WCB_COUNT; wcb++) {
             if (remoteBoards[wcb]) {
                 for (int p = 0; p < remotePortCounts[wcb]; p++) {
                     char remoteCmd[32];
@@ -475,10 +493,14 @@ void clearAllPWMMappings() {
                     }
                 }
                 
-                delay(50);
-                sendESPNowMessage(wcb, "?REBOOT");
-                if (debugEnabled) {
-                    Serial.printf("Sent reboot command to WCB%d\n", wcb);
+                // Only reboot the remote board when this is a real "clear my PWM mappings"
+                // action. A local factory reset must not restart the rest of the fleet.
+                if (autoReboot) {
+                    delay(50);
+                    sendESPNowMessage(wcb, "?REBOOT");
+                    if (debugEnabled) {
+                        Serial.printf("Sent reboot command to WCB%d\n", wcb);
+                    }
                 }
             }
         }
@@ -494,9 +516,13 @@ void clearAllPWMMappings() {
     
     Serial.println("All PWM mappings cleared");
     
-    Serial.println("Rebooting in 3 seconds to apply changes...");
-    delay(3000);
-    ESP.restart();
+    // Deferred, like addPWMMapping — see pwmRebootPending in WCB_PWM.h. Guarded on
+    // autoReboot for the same reason as the remote ?REBOOT above: eraseNVSFlash() calls
+    // this with false and performs its own restart afterwards.
+    if (autoReboot) {
+        pwmRebootPending = true;
+        Serial.println("Rebooting once the command queue drains.");
+    }
 }
 
 void savePWMMappingsToPreferences() {
@@ -566,7 +592,7 @@ void loadPWMMappingsFromPreferences() {
                     }
                 }
                 
-                if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= 9) {
+                if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
                     if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                         // Skip local outputs that conflict with Kyber
                     } else {
@@ -776,33 +802,61 @@ bool isSerialPortPWMOutput(int port) {
     return false;
 }
 
-void addPWMOutputPort(int port) {
+void addPWMOutputPort(int port, uint8_t wdpAutoSrc) {
     if (port < 1 || port > 5) {
         Serial.println("Invalid port number. Must be 1-5");
         return;
     }
-    
+
     // Check if port can be used for PWM
     if (!canUsePWMOnPort(port)) {
         return;
     }
-    
+
     if (isSerialPortPWMOutput(port)) {
         Serial.printf("Serial%d already configured as PWM output\n", port);
-        return;
+        return;   // already an output — DON'T retag (a manual port stays manual so it
+                  // can never be auto-removed, and the first WDP source keeps ownership)
     }
-    
+
     if (pwmOutputCount >= MAX_PWM_OUTPUT_PORTS) {
         Serial.println("Maximum PWM output ports reached");
         return;
     }
-    
+
+    pwmOutputAutoSrc[pwmOutputCount] = wdpAutoSrc;   // 0 = manual, >0 = WDP self-config source
     pwmOutputPorts[pwmOutputCount++] = port;
-    
+
     configureRemotePWMOutput(port);
-    
+
     savePWMOutputPortsToPreferences();
     Serial.printf("Serial%d configured as PWM output port\n", port);
+}
+
+void reconcileWdpAutoPWMOutputs(uint8_t srcWCB, const uint8_t *wantPorts, uint8_t wantCount) {
+    if (srcWCB == 0) return;
+    // KNOWN LIMITATION (misconfiguration only): a port is cleared purely on the tagging
+    // source dropping it. If TWO boards drive the same receiver port (a config error —
+    // their ;P streams already fight one pin), and the tag-owner drops it while the other
+    // still wants it, the port is briefly cleared (broadcasts re-enable on it) until the
+    // other board's next advert re-adds it (<=60 s backstop). Not hardened deliberately:
+    // checking "does any other neighbor still name this port" would pull the WDP neighbor
+    // table into WCB_PWM, and two sources on one output port is itself the real bug to fix.
+    // removePWMOutputPort() compacts the arrays, so don't blindly advance the index.
+    for (int i = 0; i < pwmOutputCount; ) {
+        if (pwmOutputAutoSrc[i] == srcWCB) {
+            int p = pwmOutputPorts[i];
+            bool wanted = false;
+            for (int k = 0; k < wantCount; k++) if (wantPorts[k] == p) { wanted = true; break; }
+            if (!wanted) {
+                Serial.printf("[WDP] WCB%d no longer drives our S%d - clearing auto-configured PWM output\n",
+                              srcWCB, p);
+                removePWMOutputPort(p);   // shuffles this slot out; re-examine same index
+                continue;
+            }
+        }
+        i++;
+    }
 }
 
 void removePWMOutputPort(int port) {
@@ -810,8 +864,10 @@ void removePWMOutputPort(int port) {
         if (pwmOutputPorts[i] == port) {
             for (int j = i; j < pwmOutputCount - 1; j++) {
                 pwmOutputPorts[j] = pwmOutputPorts[j + 1];
+                pwmOutputAutoSrc[j] = pwmOutputAutoSrc[j + 1];
             }
             pwmOutputPorts[--pwmOutputCount] = 0;
+            pwmOutputAutoSrc[pwmOutputCount] = 0;
             savePWMOutputPortsToPreferences();
             // Re-enable broadcasts for this port — they were suppressed while it was a PWM output.
             // (If a Push Config was sent while the port was claimed, its NVS broadcast values
@@ -836,6 +892,8 @@ void savePWMOutputPortsToPreferences() {
     for (int i = 0; i < pwmOutputCount; i++) {
         String key = "port" + String(i);
         preferences.putInt(key.c_str(), pwmOutputPorts[i]);
+        String akey = "auto" + String(i);         // WDP self-config source (0 = manual)
+        preferences.putUChar(akey.c_str(), pwmOutputAutoSrc[i]);
     }
     preferences.end();
 }
@@ -855,11 +913,14 @@ void loadPWMOutputPortsFromPreferences() {
     for (int i = 0; i < savedCount; i++) {
         String key = "port" + String(i);
         int port = preferences.getInt(key.c_str(), 0);
-        
+        String akey = "auto" + String(i);
+        uint8_t autoSrc = preferences.getUChar(akey.c_str(), 0);  // 0 for pre-tag NVS = manual
+
         if (port > 0) {
             // Check if this port conflicts with Kyber
             if (canUsePWMOnPort(port)) {
-                pwmOutputPorts[pwmOutputCount++] = port;
+                pwmOutputAutoSrc[pwmOutputCount] = autoSrc;   // keep provenance aligned to the
+                pwmOutputPorts[pwmOutputCount++] = port;      // compacted (Kyber-skipped) list
                 configureRemotePWMOutput(port);
             } else {
                 Serial.printf("⚠️  Skipping PWM output port Serial%d - conflicts with Kyber\n", port);

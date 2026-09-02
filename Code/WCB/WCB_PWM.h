@@ -35,24 +35,41 @@ struct PWMStabilityTracker {
 extern PWMStabilityTracker pwmStability[5];  // One tracker per serial port
 
 void initPWM();
+// autoReboot=true does NOT restart inline — it sets pwmRebootPending and lets loop() take
+// the restart once the command queue is empty. A config push is a stream of commands, and
+// restarting inside one of them silently destroys the ones still queued behind it.
 void addPWMMapping(const String &config, bool autoReboot = true);
+extern volatile bool pwmRebootPending;   // set by addPWMMapping; honoured in loop()
 void removePWMMapping(int inputPort);
 void listPWMMappings();
 void listPWMMappingsBoot();
-void clearAllPWMMappings();
+// autoReboot=false: clear locally WITHOUT restarting this board and WITHOUT broadcasting ?REBOOT
+// to the fleet. Used by eraseNVSFlash(), which has its own restart to perform afterwards and must
+// not reboot every other WCB just because this one was factory-reset.
+void clearAllPWMMappings(bool autoReboot = true);
 void savePWMMappingsToPreferences();
 void loadPWMMappingsFromPreferences();
 void processPWMPassthrough();
 void configureRemotePWMOutput(int serialPort);
 bool isSerialPortUsedForPWMInput(int port);
+bool canUsePWMOnPort(int port);   // false if the port is reserved (e.g. Kyber) and can't do PWM
 
 
 extern int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS];  // Ports configured as PWM output only
 extern int pwmOutputCount;
+// Provenance parallel to pwmOutputPorts[]: 0 = manually configured (never auto-removed);
+// >0 = auto-configured by a WDP PWMTARGET advert from that source WCB. Only a WDP-tagged
+// port is eligible for self-heal removal when its driver stops advertising it.
+extern uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS];
 
-void addPWMOutputPort(int port);
+void addPWMOutputPort(int port, uint8_t wdpAutoSrc = 0);  // wdpAutoSrc>0 tags a WDP self-config
 void removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
+// Reconcile the WDP-auto output ports tagged to srcWCB against the ports it still
+// advertises (wantPorts): clear any this board auto-configured for srcWCB that are no
+// longer in its advert — the mapping was removed on the source. Add-only ports become
+// self-healing. Never touches a manual (tag 0) port or one owned by another source.
+void reconcileWdpAutoPWMOutputs(uint8_t srcWCB, const uint8_t *wantPorts, uint8_t wantCount);
 void savePWMOutputPortsToPreferences();
 void loadPWMOutputPortsFromPreferences();
 

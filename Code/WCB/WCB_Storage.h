@@ -15,6 +15,16 @@
 #define WCB_TARGET_KYBER      98
 #endif
 
+// ESP-NOW mesh channel (1–11). The whole mesh AND every WCB_Client device must
+// share this channel — the ESP32 has one radio, so a board on a different channel
+// is silently unreachable. 1–11 only: 12–13 need a WiFi-country override the firmware
+// doesn't set (and aren't US-legal), so esp_wifi_set_channel would silently reject them.
+// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config).
+// Own guard so both WCB.ino and WCB_Storage.cpp see it.
+#ifndef WCB_MESH_CHANNEL_DEFAULT
+#define WCB_MESH_CHANNEL_DEFAULT 1
+#endif
+
 // =============== Global Variables ===============
 extern Preferences preferences;
 
@@ -22,6 +32,7 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
+extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–11); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
 extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
@@ -29,6 +40,7 @@ extern uint8_t WCB_SPECIAL_PEER_ID;   // special peer ID (NaviCore), default 20,
 extern char espnowPassword[40];
 extern bool debugEnabled;
 extern bool serialBroadcastEnabled[5];
+extern bool broadcastToS0;   // echo broadcast output to S0/USB (opt-in, persisted)
 extern unsigned long baudRates[5];
 extern char CommandCharacter;
 extern char commandDelimiter;
@@ -59,8 +71,14 @@ extern int etmCharDelayMs;
 
 extern String storedCommands[MAX_STORED_COMMANDS];
 
-extern void enqueueCommand(const String &cmd, int sourceID);  // Declare it as an external function
-extern void parseCommandsAndEnqueue(const String &data, int sourceID);
+// Signature must match WCB.ino's definition exactly, defaults included — a second declaration
+// without the defaults makes every two-argument call ambiguous.
+extern void enqueueCommand(const String &cmd, int sourceID,
+                           int originEspnow = -1, int originSeqBody = -1);
+// originEspnow/originSeqBody: pass 0 or 1 to state the origin explicitly instead of relying on the
+// cross-task globals (see enqueueCommand above). -1 = use the globals.
+extern void parseCommandsAndEnqueue(const String &data, int sourceID,
+                                    int originEspnow = -1, int originSeqBody = -1);
 
 struct SerialMonitorOutput {
     uint8_t wcbNumber;    // 0 = local, 1-9 = remote WCB
@@ -111,6 +129,8 @@ void loadWCBAlias();
 void saveWCBAlias(const String &alias);
 void loadWCBQuantitiesFromPreferences();
 void saveWCBQuantityPreferences(int quantity);
+void loadMeshChannelFromPreferences();
+void saveMeshChannelToPreferences(uint8_t channel);
 void loadSpecialPeerPreferences();
 void saveSpecialPeerPreferences(bool enabled);
 void loadSpecialPeerIDFromPreferences();
@@ -126,6 +146,40 @@ void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
 void saveStoredCommandsToPreferences(const String &message);
 void listStoredCommands();
+
+// ── Stored-sequence INVENTORY (names only, no values) ──────────────────────
+// The full ?SEQ,LIST print and the config-pull chain both carry sequence VALUES,
+// which blows past the 16-chunk (2912 char) relay ceiling on a board with a real
+// sequence set. A consumer that only needs to know WHAT exists (NaviCore's command
+// picker, a web UI) wants names alone — ~16 bytes per entry instead of hundreds.
+//
+// buildSequenceNamesString() is the single source of truth for that inventory and
+// is used by BOTH ?SEQ,NAMES (console) and the SEQ_REQ/SEQ_FRAG mesh request, so
+// the two can never disagree. Format:
+//
+//     <hash8hex>,<count>[,<key1>,<key2>,...]
+//
+// Comma separation is safe: saveStoredCommandsToPreferences() takes the key as
+// everything BEFORE the first comma, so a stored key can never contain one.
+// The empty case is "811C9DC5,0" — the FNV offset basis and a zero count, so a
+// parser needs no special case for "board has no sequences".
+String   buildSequenceNamesString();
+
+// FNV-1a over the NVS key_list AND every stored value. Cheap content fingerprint of
+// "what sequences this board has" — NOT security, and order-sensitive (key_list
+// preserves save order), which is what we want: it answers "did MY inventory
+// change", not "do two boards match".
+//
+// It covers VALUES, not just names, because editing a sequence in place never
+// touches key_list — a keys-only hash would leave every peer holding a stale copy
+// while believing it current. That is the whole point of the fingerprint.
+//
+// Advertised as WDP_TLV_SEQHASH, so a peer re-pulls only when something actually
+// changed. CACHED: the WDP dirty-check rebuilds the advert twice a second, and
+// hashing values uncached would mean N NVS reads at 2 Hz forever. Every write path
+// must call invalidateSequenceInventoryHash().
+uint32_t sequenceInventoryHash();
+void     invalidateSequenceInventoryHash();
 void eraseStoredCommandByName(const String &name);
 
 void clearAllStoredCommands();
@@ -136,6 +190,11 @@ void loadKyberSettings();
 void printKyberSettings();
 void saveKyberTargets();
 void loadKyberTargets();
+// Add-only reconcile: give every configured Maestro that lacks one an enabled
+// kyberTargets[] entry, WITHOUT disturbing existing entries (or their documented
+// remote ports). Used when WDP auto-learns a remote Maestro so a Kyber-LOCAL host
+// begins forwarding to it with no manual ?KYBER,LOCAL re-issue. Returns # added.
+int reconcileKyberTargetsFromMaestroConfigs();
 void printKyberList();
 
 
@@ -188,6 +247,7 @@ void setSerialMappingRawMode(int inputPort, bool raw);
 // Maestro configuration storage
 void saveMaestroSettings();
 void loadMaestroSettings();
+void normalizeMaestroSelfSlots();   // repair legacy remote-to-self slots (call after WCB_Number is loaded)
 void printMaestroSettings();
 void saveETMSettings();
 void loadETMSettings();

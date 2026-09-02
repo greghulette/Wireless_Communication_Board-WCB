@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WCB Configuration Tool</title>
+  <title>WCB Config Tool</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -67,12 +67,13 @@
         <div class="subsection-title">Network Identity</div>
         <div class="field-group">
           <div class="field">
-            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options.">i</span></label>
+            <label>Total WCB Quantity <span class="wiz-hint" data-tip="How many WCB boards are in your system. Determines the board sections shown and limits mapping destination options. With WDP auto-join, boards heard on the mesh beyond this floor join automatically — the live badge shows what the board actually talks to.">i</span></label>
             <select id="g-wcbq" onchange="onWCBQuantityChange()">
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
               <option value="_more">More…</option>
             </select>
+            <span id="g-peerslive" class="peers-live-badge" style="display:none" title="Peers this board is actually meshed with right now (WCBQ floor + WDP auto-joined). Read-only — reported by the board on config pull."></span>
           </div>
           <div class="field">
             <label>ESP-NOW Password <span class="wiz-hint" data-tip="Shared passphrase for the ESP-NOW wireless mesh. Every board in the system must use the same password to communicate.">i</span></label>
@@ -90,6 +91,15 @@
             <input type="text" id="g-mac3" placeholder="00" maxlength="2"
               oninput="onGeneralMacChange()" onblur="validateMacOctet(this)"
               style="text-transform:uppercase" spellcheck="false">
+          </div>
+          <div class="field advanced-only reserve-space hidden">
+            <label>Mesh Channel <span class="wiz-hint tip-left" data-tip="ESP-NOW radio channel (1–11) for the whole mesh. The ESP32 has one radio, so every WCB and WCB_Client device must be on this channel or it can't hear the mesh. Leave at 1 unless channel 1 is congested or you must match a hosted access point — then move the ENTIRE fleet together: a push stages the change, and each board applies it on its next reboot. (12–13 are omitted — they need a WiFi-country override the firmware doesn't set.)">i</span></label>
+            <select id="g-meshch" onchange="onMeshChannelChange()">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+              <option value="10">10</option><option value="11">11</option>
+            </select>
           </div>
         </div>
 
@@ -150,26 +160,6 @@
 
         <hr class="divider advanced-only hidden">
 
-        <div class="subsection-title advanced-only hidden">Firmware Source <span class="text-muted">— advanced / testing only</span></div>
-        <div class="field-group advanced-only hidden">
-          <div class="field">
-            <label>Firmware Branch <span class="wiz-hint" data-tip="Which GitHub branch the flasher pulls firmware binaries from. Leave on 'main' for released firmware. Other branches are unreleased / in development — for testing only.">i</span></label>
-            <select id="g-fw-branch" onchange="onFwBranchChange()">
-              <option value="main">main (released)</option>
-            </select>
-          </div>
-          <div id="fw-branch-warn"
-               style="display:none;flex:1 1 100%;margin-top:6px;padding:8px 10px;border-radius:6px;
-                      background:rgba(220,80,40,0.15);border:1px solid rgba(220,80,40,0.5);
-                      color:var(--text2);font-size:12px;line-height:1.4">
-            ⚠ Flashing from branch <strong><span id="fw-branch-warn-name"></span></strong> —
-            this is <strong>NOT released firmware</strong>. Unreleased branches may be unstable
-            or incompatible. Use only for testing, then switch back to <strong>main</strong>.
-          </div>
-        </div>
-
-        <hr class="divider advanced-only hidden">
-
         <div class="subsection-title advanced-only hidden">Ensured Transmission Mode (ETM)</div>
         <div class="toggle-wrap mb-12 advanced-only hidden">
           <label class="toggle">
@@ -184,7 +174,7 @@
             <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="2" oninput="onGeneralETMChange()"></div>
-            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="How many times to repeat the offline alert message when a board is detected as unresponsive.">i</span></label><input type="number" id="g-etm-count" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Message Count <span class="wiz-hint" data-tip="?ETM,CHAR benchmark only: messages sent per board per phase. The firmware clamps this to 10-200.">i</span></label><input type="number" id="g-etm-count" value="20" min="10" max="200" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100" oninput="onGeneralETMChange()"></div>
           </div>
           <div class="toggle-wrap mt-8">
@@ -198,6 +188,9 @@
 
       </div>
     </div>
+
+    <!-- ═══ MANAGEMENT RELAYS (USB conduit into the mesh — not board slots) ═══ -->
+    <div id="relay-cards"></div>
 
     <!-- ═══ BOARD SECTIONS (dynamically generated) ═════════════════ -->
     <div id="boards-container"></div>
@@ -214,6 +207,19 @@
       <div class="rc-devices-note">
         Showing RC-Controllers heartbeating on the WCB network.
         <a href="#" id="rc-tool-url-edit" style="color:var(--text-secondary)">edit Config Tool URL</a>
+      </div>
+    </div>
+
+    <!-- ═══ WDP MESH (device inventory across the droid) ═══════════════════
+         wdpMeshRefresh() sends ?WDP,DUMP to a connected board and renders every
+         WCB + client device + serial-attached device the mesh has discovered. -->
+    <div id="wdp-mesh-section" class="rc-devices-section">
+      <h2 class="section-title">🕸️ WDP Mesh
+        <button type="button" id="wdp-mesh-refresh" class="btn btn-ghost"
+                onclick="wdpMeshRefresh()" style="float:right;font-size:13px">↻ Refresh</button>
+      </h2>
+      <div id="wdp-mesh-body">
+        <div class="rc-devices-note">Connect a board and click <strong>Refresh</strong> to see every WCB and device the mesh has discovered.</div>
       </div>
     </div>
 
@@ -463,15 +469,18 @@
          Hidden when type='wcb'. -->
     <div class="section-body" id="b{N}-client-pane" style="display:none">
       <div class="field-group">
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 200px">
           <label>Client Alias <span class="wiz-hint" data-tip="Friendly name for this client device (e.g. Dome Sensor). Wizard-only — the client device has no Wizard-config of its own. ≤24 chars.">i</span></label>
           <input type="text" id="b{N}-client-alias" maxlength="24" placeholder="e.g. Dome Sensor" oninput="onClientAliasChange({N})">
         </div>
         <div class="field" style="flex:1 1 100%;opacity:0.7;font-size:12px;padding-top:6px">
-          This slot is a WCB_Client device — the Wizard observes it but can't
-          configure it. Live status / online indicator coming next.
+          This slot is a WCB_Client device — the Wizard observes it over the mesh
+          but can't configure it.
         </div>
       </div>
+      <!-- Live mesh status + advertised capabilities, filled by upsertClientCard()
+           from the WDP dump. Empty until the client is heard on the mesh. -->
+      <div id="b{N}-client-status" class="client-status"></div>
     </div>
 
     <div class="section-body" id="b{N}-section-body">
@@ -502,11 +511,12 @@
       </div>
 
       <!-- Board Identity — flex row so HW version stays fixed width regardless of LED pin visibility -->
+      <div class="subsection" style="--rail:#4f8cff">
       <div class="subsection-title">Board Identity</div>
       <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px">
 
         <!-- WCB # (narrow fixed) -->
-        <div class="field" style="width:120px;flex-shrink:0">
+        <div class="field" style="flex:0 0 96px">
           <label>WCB # <span class="wiz-hint" data-tip="This board's unique ID in the system. Limited to current WCB Quantity.">i</span></label>
           <select id="b{N}-wcb-number" onchange="onWCBNumberChange({N})">
             <!-- populated dynamically -->
@@ -514,13 +524,13 @@
         </div>
 
         <!-- Alias (friendly name, e.g. "Body" / "Dome") -->
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 180px">
           <label>Alias <span class="wiz-hint" data-tip="Friendly name for this WCB (e.g. Body, Dome). Shown in the header next to the WCB number. ≤24 chars. Leave blank for none.">i</span></label>
           <input type="text" id="b{N}-alias" maxlength="24" placeholder="e.g. Body" oninput="onAliasChange({N})">
         </div>
 
         <!-- Hardware Version (fixed width — never resizes) -->
-        <div class="field" style="width:200px;flex-shrink:0">
+        <div class="field" style="flex:0 0 210px">
           <label>Hardware Version <span class="wiz-hint" data-tip="Physical board revision. Determines which pins the serial ports and LED utilize.">i</span></label>
           <select id="b{N}-hw-version" onchange="onHWVersionChange({N})">
             <option value="0">— Select —</option>
@@ -560,23 +570,30 @@
         </div>
 
         <!-- Software Version (fills remaining space) -->
-        <div class="field" style="flex:1;min-width:180px">
+        <div class="field" style="flex:1 1 300px;min-width:300px">
           <label>Software Version <span class="wiz-hint" data-tip="Firmware version currently running on this board. Retrieved automatically when the board connects.">i</span></label>
           <div style="display:flex;align-items:center;gap:8px">
             <span id="b{N}-sw-version"
                   style="display:inline-flex;align-items:center;padding:7px 10px;background:var(--bg3);
                          border:1px solid var(--border);border-radius:var(--radius);
                          color:var(--text3);font-family:var(--mono);font-size:12px;min-height:36px">—</span>
+            <button class="btn btn-ghost btn-sm" id="b{N}-btn-check-fw"
+                    onclick="boardCheckFwUpdate({N})"
+                    title="Check GitHub for a newer firmware version (no page reload)">↻</button>
             <button class="btn btn-warning btn-sm" id="b{N}-btn-update-fw"
                     onclick="boardUpdateFW({N})" style="display:none" title="A newer firmware version is available">⬆ Update FW</button>
+            <button class="btn btn-ghost btn-sm" id="b{N}-btn-ota-serial"
+                    onclick="boardOta({N})"
+                    title="OTA firmware update — over USB serial if connected directly, or wirelessly over ESP-NOW via a relay. No BOOT button / reset / download mode needed.">⬆ OTA</button>
           </div>
         </div>
 
       </div>
 
-      <hr class="divider">
+      </div>
 
       <!-- Serial Ports -->
+      <div class="subsection" style="--rail:#45d6e0">
       <div class="subsection-title">Serial Ports</div>
       <table class="serial-table" id="b{N}-serial-table">
         <thead>
@@ -591,9 +608,10 @@
         </thead>
         <tbody id="b{N}-serial-tbody"></tbody>
       </table>
+      </div>
 
       <!-- Kyber section (shown only when Controller = Kyber) -->
-      <div id="b{N}-kyber-section" style="display:none">
+      <div id="b{N}-kyber-section" class="subsection" style="--rail:#ff5d6c;display:none">
       <hr class="divider">
 
       <!-- Kyber -->
@@ -619,11 +637,23 @@
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
           <label>Kyber Maestro Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with the Kyber Maestro Port.">i</span></label>
+          <!-- Full firmware-legal set (Code/WCB/WCB_Storage.cpp:155-157). A shorter list left this
+               select blank whenever a board reported any other rate, and the blank was then read
+               back as the configured value. -->
           <select id="b{N}-kyber-baud" onchange="onKyberBaudChange({N})">
+            <option value="110">110</option>
+            <option value="300">300</option>
+            <option value="600">600</option>
+            <option value="1200">1,200</option>
+            <option value="2400">2,400</option>
             <option value="9600">9,600</option>
+            <option value="14400">14,400</option>
+            <option value="19200">19,200</option>
             <option value="38400">38,400</option>
             <option value="57600">57,600</option>
             <option value="115200" selected>115,200</option>
+            <option value="128000">128,000</option>
+            <option value="256000">256,000</option>
           </select>
         </div>
         <div class="field" id="b{N}-kyber-marc-port-wrap" style="display:none">
@@ -649,7 +679,7 @@
       </div><!-- /b{N}-kyber-section -->
 
       <!-- NaviCore section (shown only when Controller = NaviCore) -->
-      <div id="b{N}-navicore-section" style="display:none">
+      <div id="b{N}-navicore-section" class="subsection" style="--rail:#60a5fa;display:none">
       <hr class="divider">
 
       <!-- NaviCore (per-board) — which boards follow NaviCore -->
@@ -669,7 +699,7 @@
       <hr class="divider">
 
       <!-- Maestro -->
-      <div>
+      <div class="subsection" style="--rail:#3ecf8e">
         <div class="flex items-center gap-8 mb-12">
           <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Maestro</div>
           <button class="btn btn-ghost btn-sm" onclick="addMaestroRow({N})">+ Add</button>
@@ -678,7 +708,7 @@
           <thead>
             <tr>
               <th style="width:60px">#</th>
-              <th>Maestro ID <span class="wiz-hint" data-tip="Numeric ID for this Maestro controller. Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
+              <th>Maestro ID <span class="wiz-hint" data-tip="Maestro device ID 1-8 (set in the Pololu Maestro Control Center). Multiple boards can share the same ID to trigger them simultaneously.">i</span></th>
               <th>Port <span class="wiz-hint" data-tip="Serial port this Maestro is connected to on this board.">i</span></th>
               <th>Baud <span class="wiz-hint" data-tip="Baud rate for serial communication with this Maestro controller.">i</span></th>
               <th style="width:60px"></th>
@@ -692,7 +722,7 @@
       <hr class="divider">
 
       <!-- Mappings -->
-      <div>
+      <div class="subsection" style="--rail:#ffc107">
         <div class="flex items-center gap-8 mb-12">
           <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Mappings</div>
           <button class="btn btn-ghost btn-sm" onclick="addMappingRow({N})">+ Add Mapping</button>
@@ -707,12 +737,15 @@
         <div id="b{N}-mappings-container"></div>
       </div>
 
-      <hr class="divider">
-
       <!-- Stored Sequences -->
+      <div class="subsection" style="--rail:#b07cff">
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <label class="seq-test-scope" style="margin-left:auto">
+          <input type="checkbox" id="b{N}-seq-test-mesh"> Test mesh-wide
+          <span class="wiz-hint tip-left" data-tip="Off (default): TEST fires this board only (;SEQkey,L). On: TEST fires the sequence on EVERY board that has the same key (;SEQkey) — the real mesh-wide trigger.">i</span>
+        </label>
       </div>
       <table class="seq-table">
         <thead>
@@ -724,36 +757,54 @@
         </thead>
         <tbody id="b{N}-seq-tbody"></tbody>
       </table>
-
-      <hr class="divider">
+      </div>
 
       <!-- Variables -->
+      <div class="subsection" style="--rail:#ff7ac6">
       <div class="flex items-center gap-8 mb-12">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Variables</div>
-        <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})">+ Add</button>
+        <button class="btn btn-ghost btn-sm" onclick="addVariableRow({N})" title="Add a persistent variable — saved to the board's NVS, survives reboots">+ Persistent</button>
+        <button class="btn btn-ghost btn-sm" onclick="addTemporaryVariableRow({N})" title="Add a temporary variable — runtime-only (set with ;V), not saved with the config, gone on reboot">+ Temporary</button>
+        <button class="btn btn-ghost btn-sm" id="b{N}-var-refresh" onclick="refreshVariablesFromBoard({N})" title="Query the board for its live variables — shows persistent (editable) and temporary (editable, runtime-only) ones">↻ Refresh</button>
       </div>
       <table class="seq-table">
         <thead>
           <tr>
             <th style="width:150px">Name <span class="wiz-hint" data-tip="Variable name (1-15 chars, letters/digits/underscore, case-sensitive). Reference it with ;V commands or IF conditions inside stored sequences.">i</span></th>
-            <th style="width:150px">Value <span class="wiz-hint" data-tip="Integer value stored persistently on the board — survives reboots.">i</span></th>
+            <th style="width:120px">Value <span class="wiz-hint" data-tip="Signed 32-bit integer. Persistent variables are saved to the board (survive reboots); temporary ones are runtime-only.">i</span></th>
+            <th style="width:110px">Type <span class="wiz-hint" data-tip="Persistent = saved to the board's NVS and editable here. Temporary = runtime-only (created by ;V or a sequence); shown read-only after a Refresh.">i</span></th>
             <th style="width:80px">Actions</th>
           </tr>
         </thead>
         <tbody id="b{N}-var-tbody"></tbody>
       </table>
+      </div>
 
-      <hr class="divider">
-
-      <!-- MP3 Trigger -->
-      <div class="subsection-title">MP3 Trigger</div>
+      <!-- Audio (MP3 Trigger / HCR Vocalizer / DFPlayer) -->
+      <div class="subsection" style="--rail:#ff8c00">
+      <div class="subsection-title">Audio</div>
       <div class="field-group">
-        <div class="field">
-          <label>MP3 Trigger <span class="wiz-hint" data-tip="Only use this if the WCB itself is sending play/stop commands directly to the MP3 Trigger. If another controller (e.g. Marcduino) is driving the MP3 Trigger through the WCB via broadcast or serial mapping, leave this None and just set the baud rate with the Serial Ports table.">i</span></label>
-          <div class="radio-group">
-            <label><input type="radio" name="b{N}-mp3" value="none" checked onchange="onMP3Change({N})"><span>None</span></label>
-            <label><input type="radio" name="b{N}-mp3" value="local" onchange="onMP3Change({N})"><span>Enabled</span></label>
+        <div class="field device-toggle-field">
+          <label>Audio devices on this board <span class="wiz-hint" data-tip="Enable the audio device(s) physically wired to this WCB. A board can host more than one, on different serial ports. Each enabled device shows its own settings below. Leave all off if another controller drives audio through this WCB via broadcast/serial mapping.">i</span></label>
+          <div class="radio-group device-toggle">
+            <label><input type="checkbox" id="b{N}-mp3-enable" onchange="onAudioToggle({N},'mp3')"><span>MP3 Trigger</span></label>
+            <label><input type="checkbox" id="b{N}-hcr-enable" onchange="onAudioToggle({N},'hcr')"><span>HCR Vocalizer</span></label>
+            <label><input type="checkbox" id="b{N}-dfp-enable" onchange="onAudioToggle({N},'dfp')"><span>DFPlayer</span></label>
           </div>
+        </div>
+
+        <!-- MP3 Trigger block -->
+        <div id="b{N}-mp3-block" class="device-config" style="display:none">
+        <div class="field">
+          <label>MP3 Trigger mode <span class="wiz-hint" data-tip="Local = the MP3 Trigger is wired to this WCB. Remote = this board routes ;A to the MP3 Trigger on another WCB.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-mp3" value="local" checked onchange="onMP3Change({N})"><span>Local</span></label>
+            <label title="This board has no local MP3 Trigger; it routes ;A to the MP3 on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-mp3" value="remote" onchange="onMP3Change({N})"><span>Remote</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-mp3-remote-wrap" style="display:none">
+          <label>MP3 Host <span class="wiz-hint" data-tip="The WCB that physically hosts the MP3 Trigger. This board routes ;A there over the mesh. Auto-learned from WDP when a board announces its MP3 — pin a specific host here.">i</span></label>
+          <select id="b{N}-mp3-remote-wcb" onchange="onMP3Change({N})"></select>
         </div>
         <div class="field" id="b{N}-mp3-port-wrap" style="display:none">
           <label>MP3 Port <span class="wiz-hint" data-tip="Serial port the MP3 Trigger is wired to on this board. Reserved exclusively — will not broadcast.">i</span></label>
@@ -767,20 +818,12 @@
         </div>
         <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
           <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
+          <!-- ONLY 9600 / 38400: the firmware rejects anything else outright and discards the whole
+               ?MP3 config line (Code/WCB/WCB_MP3.cpp:287). S3-S5 are additionally blocked above 9600
+               because they are software serial (:292). -->
           <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
-            <option value="110">110</option>
-            <option value="300">300</option>
-            <option value="600">600</option>
-            <option value="1200">1,200</option>
-            <option value="2400">2,400</option>
             <option value="9600" selected>9,600</option>
-            <option value="14400">14,400</option>
-            <option value="19200">19,200</option>
             <option value="38400">38,400</option>
-            <option value="57600">57,600</option>
-            <option value="115200">115,200</option>
-            <option value="128000">128,000</option>
-            <option value="256000">256,000</option>
           </select>
         </div>
         <div class="field" id="b{N}-mp3-vol-wrap" style="display:none">
@@ -791,17 +834,20 @@
           <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the MP3 Trigger reports an error. Leave blank to disable. Example: errhandler">i</span></label>
           <input type="text" id="b{N}-mp3-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onMP3OnErrChange({N})">
         </div>
-      </div>
+        </div><!-- /mp3-block -->
 
-      <!-- HCR Vocalizer -->
-      <div class="subsection-title">HCR Vocalizer</div>
-      <div class="field-group">
+        <!-- HCR Vocalizer block -->
+        <div id="b{N}-hcr-block" class="device-config" style="display:none">
         <div class="field">
-          <label>HCR Vocalizer <span class="wiz-hint" data-tip="Enable if this WCB talks directly to a Human-Cyborg Relations (HCR) Vocalizer on one of its serial ports. The port is reserved exclusively; the WCB sends ;H commands and polls status. Leave None if another controller drives the HCR through the WCB.">i</span></label>
+          <label>HCR Vocalizer mode <span class="wiz-hint" data-tip="Local = the HCR Vocalizer is wired to this WCB (it sends ;H and polls status). Remote = this board routes ;H to the HCR on another WCB.">i</span></label>
           <div class="radio-group">
-            <label><input type="radio" name="b{N}-hcr" value="none" checked onchange="onHCRChange({N})"><span>None</span></label>
-            <label><input type="radio" name="b{N}-hcr" value="local" onchange="onHCRChange({N})"><span>Enabled</span></label>
+            <label><input type="radio" name="b{N}-hcr" value="local" checked onchange="onHCRChange({N})"><span>Local</span></label>
+            <label title="This board has no local HCR; it routes ;H to the HCR on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-hcr" value="remote" onchange="onHCRChange({N})"><span>Remote</span></label>
           </div>
+        </div>
+        <div class="field" id="b{N}-hcr-remote-wrap" style="display:none">
+          <label>HCR Host <span class="wiz-hint" data-tip="The WCB that physically hosts the HCR Vocalizer. This board routes ;H there over the mesh. Auto-learned from WDP when a board announces its HCR — pin a specific host here.">i</span></label>
+          <select id="b{N}-hcr-remote-wcb" onchange="onHCRChange({N})"></select>
         </div>
         <div class="field" id="b{N}-hcr-port-wrap" style="display:none">
           <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 9600 baud.">i</span></label>
@@ -827,6 +873,88 @@
           <label>Status Poll (sec) <span class="wiz-hint tip-left" data-tip="How often the WCB polls the HCR for status. Minimum 3 seconds (keeps every serial port safe). Default 10. Set 0 to disable automatic polling.">i</span></label>
           <input type="number" id="b{N}-hcr-poll" min="0" max="3600" value="10" onchange="onHCRPollChange({N})">
         </div>
+        </div><!-- /hcr-block -->
+
+        <!-- DFPlayer block -->
+        <div id="b{N}-dfp-block" class="device-config" style="display:none">
+        <div class="field">
+          <label>DFPlayer mode <span class="wiz-hint" data-tip="Local = a DFPlayer Mini is wired to this WCB. Remote = this board routes ;D to the DFPlayer on another WCB. Baud is fixed at 9600 by the module.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-dfp" value="local" checked onchange="onDFPChange({N})"><span>Local</span></label>
+            <label title="This board has no local DFPlayer; it routes ;D to the DFPlayer on another board (auto-learned from the mesh, or pinned here)."><input type="radio" name="b{N}-dfp" value="remote" onchange="onDFPChange({N})"><span>Remote</span></label>
+          </div>
+        </div>
+        <div class="field" id="b{N}-dfp-remote-wrap" style="display:none">
+          <label>DFPlayer Host <span class="wiz-hint" data-tip="The WCB that physically hosts the DFPlayer. This board routes ;D there over the mesh. Auto-learned from WDP when a board announces its DFPlayer — pin a specific host here.">i</span></label>
+          <select id="b{N}-dfp-remote-wcb" onchange="onDFPChange({N})"></select>
+        </div>
+        <div class="field" id="b{N}-dfp-port-wrap" style="display:none">
+          <label>DFPlayer Port <span class="wiz-hint" data-tip="Serial port the DFPlayer Mini is wired to on this board. Reserved exclusively — will not broadcast. Baud is fixed at 9600 by the module.">i</span></label>
+          <select id="b{N}-dfp-port" onchange="onDFPPortChange({N})">
+            <option value="1">Serial 1</option>
+            <option value="2">Serial 2</option>
+            <option value="3">Serial 3</option>
+            <option value="4">Serial 4</option>
+            <option value="5">Serial 5</option>
+          </select>
+        </div>
+        <div class="field" id="b{N}-dfp-vol-wrap" style="display:none">
+          <label>Default Volume <span class="wiz-hint tip-left" data-tip="0 = silent, 30 = loudest (the inverse of the MP3 Trigger's scale). Applied before playback so volume stays consistent.">i</span></label>
+          <input type="number" id="b{N}-dfp-vol" min="0" max="30" value="15" onchange="onDFPVolChange({N})">
+        </div>
+        <div class="field" id="b{N}-dfp-onerr-wrap" style="display:none">
+          <label>On Error Callback <span class="wiz-hint tip-left" data-tip="Stored sequence key to run when the DFPlayer reports a module error. Leave blank to disable. Example: errhandler">i</span></label>
+          <input type="text" id="b{N}-dfp-onerr" maxlength="15" placeholder="sequence key (optional)" onchange="onDFPOnErrChange({N})">
+        </div>
+        </div><!-- /dfp-block -->
+      </div>
+      </div>
+
+      <!-- WLED (serial lighting) — ID-addressed, multiple per board -->
+      <div class="subsection" style="--rail:#7ee787">
+        <div class="subsection-title">WLED
+          <button class="btn btn-ghost btn-sm" onclick="addWLEDRow({N})" style="margin-left:6px">+ Add</button>
+        </div>
+        <table class="serial-table" id="b{N}-wled-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>WLED ID <span class="wiz-hint" data-tip="System-wide WLED identifier (1-9). Address it from anywhere with ;L<id>,… — the command routes to whichever board hosts it. Must be UNIQUE across the whole network.">i</span></th>
+              <th>Port <span class="wiz-hint" data-tip="Serial port the WLED node's RX is wired to on this board. Reserved exclusively (broadcast disabled). WLED wants 115200 — use a hardware port (S1/S2); S3–S5 are software serial and cap at 9,600.">i</span></th>
+              <th>Baud <span class="wiz-hint" data-tip="WLED serial baud. Default 115200 — leave it unless you changed it in WLED's settings.">i</span></th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="b{N}-wled-tbody"></tbody>
+        </table>
+        <p class="text-muted mt-8">Each WLED needs a unique ID across the network. Fire from sequences with &#59;L&lt;id&gt;,PS,n (or bare &#59;L for this board's WLED).</p>
+
+      <!-- WLED live controls (shown when >=1 WLED is configured on this board) -->
+      <div class="field-group" id="b{N}-wled-controls" style="display:none">
+        <div class="field" style="flex:1 1 100%">
+          <label>WLED Controls <span class="wiz-hint" data-tip="Fire live commands to a WLED on this board. Presets are the primary workflow — build looks in WLED's web UI, then recall them by number here or from sequences with ;L<id>,PS,n. Requires the board connected (directly or via a relay) and WLED already pushed.">i</span></label>
+          <div class="flex items-center gap-8" style="flex-wrap:wrap">
+            <label style="margin:0">Target</label>
+            <select id="b{N}-wled-target" style="width:90px"></select>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'ON')">On</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'OFF')">Off</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledSend({N},'TOGGLE')">Toggle</button>
+          </div>
+          <div class="flex items-center gap-8" style="flex-wrap:wrap;margin-top:8px">
+            <label style="margin:0">Preset</label>
+            <input type="number" id="b{N}-wled-ps" min="1" max="250" value="1" style="width:70px">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="wledFirePreset({N})">Fire</button>
+          </div>
+          <div style="margin-top:8px">
+            <label style="margin:0 0 5px 0;display:block">Brightness</label>
+            <div class="flex items-center gap-8">
+              <input type="range" id="b{N}-wled-bri" min="0" max="255" value="128" style="width:220px;flex:0 0 auto" oninput="document.getElementById('b{N}-wled-bri-val').textContent=this.value">
+              <span id="b{N}-wled-bri-val">128</span>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="wledSetBri({N})">Set</button>
+            </div>
+          </div>
+        </div>
+      </div>
       </div>
 
     </div>
@@ -924,6 +1052,8 @@
 <!-- ─── Scripts ──────────────────────────────────────────────────── -->
 <script src="parser.js"></script>
 <script src="flasher.js"></script>
+<script src="device-labels.js"></script>
+<script src="serial-hub.js"></script>
 <script src="app.js"></script>
 
 </body>
