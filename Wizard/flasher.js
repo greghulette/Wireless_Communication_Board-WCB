@@ -38,35 +38,46 @@ const CRYPTOJS_SRC = _VENDOR_BASE + 'crypto-js/crypto-js-4.2.0.min.js';
 //   WCB_6.0_271328RFEB2026_multi_maestro_ESP32S3.bin
 // The suffix (_ESP32.bin / _ESP32S3.bin) is stable; the prefix changes each build.
 // We use the GitHub Contents API to find the right file, then fetch it.
-// The branch is resolved at fetch time by getFirmwareBranch() (defaults to
-// 'main'; overridable via the Advanced → Firmware Source selector).
+// The branch is resolved at fetch time by getFirmwareBranch(), which derives it
+// from the URL the Wizard is served from (/dev/<branch>/Wizard → that branch;
+// /Wizard, localhost, file:// → 'main').
 const GITHUB_OWNER  = 'greghulette';
 const GITHUB_REPO   = 'Wireless_Communication_Board-WCB';
 const GITHUB_BRANCH_DEFAULT = 'main';
 const GITHUB_BIN_PATH = 'Code/bin';
 
-// Branch the flasher pulls binaries from. Defaults to 'main' (released
-// firmware). The Advanced → Firmware Source selector overrides this via
-// localStorage for testing unreleased branches. Never hard-code anything
-// but 'main' as the default — production must always pull released firmware.
+// Which branch's binaries the flasher pulls. The URL is the source of truth:
+// the deploy publishes branch previews to gh-pages:/dev/<branch>/Wizard (see
+// .github/workflows/pages-deploy.yml), so a Wizard served from there pulls THAT
+// branch's firmware, while production at /Wizard (and localhost / file://) pulls
+// 'main' (released). Never default to anything but 'main' — the public tool must
+// always pull released firmware.
 //
 // Whitelist what counts as a valid branch name: alphanumerics, '.', '_',
 // '-', '/'. This is the safe subset of Git ref names AND keeps the value
 // from being able to inject URL operators (?, &, #, =, /../) into the
-// GitHub Contents API request when interpolated. A malformed localStorage
-// value (manually edited, or stuffed by a malicious page hosting this
-// tool in an iframe) is dropped silently and the default is used instead.
+// GitHub Contents API request when interpolated. Anything outside it is
+// dropped silently and the default is used instead.
 const FW_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
 function isValidFwBranch(b) {
   return typeof b === 'string' && b.length > 0 && b.length <= 100 && FW_BRANCH_RE.test(b);
 }
 function getFirmwareBranch() {
+  // URL wins: a /dev/<branch>/Wizard preview always flashes its own branch.
+  // <branch> is the exact git ref name (slashes preserved, e.g. feature/x),
+  // which is also what the GitHub Contents API ?ref= expects.
+  try {
+    const m = location.pathname.match(/\/dev\/(.+)\/Wizard(?:\/|$)/);
+    if (m && isValidFwBranch(m[1])) return m[1];
+  } catch (_) { /* no location (non-browser) — fall through */ }
+  // Escape hatch (no UI): from prod/localhost you can force a branch by setting
+  // localStorage 'wcb_fw_branch' in the console; remove it to go back to 'main'.
+  // Ignored on a /dev/ preview URL above, so previews stay true to their path.
   try {
     const b = (localStorage.getItem('wcb_fw_branch') || '').trim();
-    return isValidFwBranch(b) ? b : GITHUB_BRANCH_DEFAULT;
-  } catch (_) {
-    return GITHUB_BRANCH_DEFAULT;
-  }
+    if (isValidFwBranch(b)) return b;
+  } catch (_) { /* localStorage unavailable — fall through */ }
+  return GITHUB_BRANCH_DEFAULT;
 }
 
 // ─── Script loader ────────────────────────────────────────────────
@@ -390,6 +401,17 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       try { await transport.disconnect(); } catch (_) {}
       throw new Error(`Could not load the ${binaryType} firmware after chip detection: ${e.message}`);
     }
+  } else if (!detectedType && /ESP32[-_]?(S2|C\d+|H\d+|P\d+)/i.test(chipName)) {
+    // A RECOGNISED but unsupported ESP32 variant (S2/C2/C3/C5/C6/C61/H2/P4). Falling through to
+    // the hwVersion-mapped binary would write ESP32 or S3 firmware onto silicon it was not built
+    // for. The WCB ships no firmware for these, so refuse rather than guess — the fallback below
+    // exists for an UNREADABLE chip id, not for a chip we can positively identify as wrong.
+    const msg = `${chipName} is not a supported WCB chip — refusing to flash`;
+    onLog(`✕ ${msg}`);
+    onLog('  The WCB ships firmware for the classic ESP32 and the ESP32-S3 only.');
+    showToast(msg, 'error', 12000);
+    try { await transport.disconnect(); } catch (_) {}
+    throw new Error(msg);
   } else if (!detectedType) {
     if (!hwVersion) {
       // binaryType is only the '?? ESP32' pre-fetch default — with no user
@@ -597,33 +619,38 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     throw new Error(msg);
   }
 
-  // ── Step 3c: Optionally prepend NVS + otadata erase images ────
+  // ── Step 3c: reset the OTA boot selector (ALWAYS) + erase NVS (factory only) ──
   // WCB partition layout (PartitionScheme=min_spiffs):
-  //   nvs     @ 0x9000,  size 0x5000 (20 KB)
+  //   nvs     @ 0x9000,  size 0x5000  (20 KB)
   //   otadata @ 0xE000,  size 0x2000  (8 KB — two 4 KB flash sectors)
   //   ota_0   @ 0x10000, size 0x1E0000 (~1.9 MB)
   //   ota_1   @ 0x1F0000
-  // (nvs & otadata offsets are identical to the old `default` scheme, so the
-  //  erase addresses below are unchanged across the scheme transition.)
   //
-  // Writing 0xFF buffers causes esptool to erase then rewrite those sectors.
-  // Both otadata sectors MUST be erased: if either sector still holds a valid
-  // OTA state pointing to ota_1 (e.g. from a previous OTA update), the
-  // bootloader will try to boot ota_1, fail (nothing there after a flash to
-  // ota_0), and the OTA rollback watchdog fires — causing an endless reboot loop.
+  // ALWAYS erase otadata on an esptool flash. esptool writes the app to ota_0
+  // (0x10000), so the boot selector MUST point at ota_0 afterward — otherwise a
+  // board that a prior OTA (?OTA / ?OTALOCAL) switched to ota_1 keeps booting
+  // ota_1 ("flashed but the version didn't change"), or hits the rollback
+  // reboot-loop if ota_1 is empty. This mirrors what the Arduino IDE upload does
+  // (it writes boot_app0.bin to 0xE000 every time), so IDE / esptool / OTA all
+  // agree on which slot boots. Writing a 0xFF buffer makes esptool erase the
+  // sector → bootloader defaults to ota_0. NVS (saved config) is left untouched
+  // here; wiping it is the opt-in factory-reset path below.
+  const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000
+  new Uint8Array(otadataBlank).fill(0xFF);
+  imagesToFlash = [...imagesToFlash, { buf: otadataBlank, address: 0xE000 }];
+
   if (eraseNvs) {
-    const nvsBlank     = new ArrayBuffer(0x5000);  // NVS: 20 KB @ 0x9000
-    const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000
+    const nvsBlank = new ArrayBuffer(0x5000);    // NVS: 20 KB @ 0x9000
     new Uint8Array(nvsBlank).fill(0xFF);
-    new Uint8Array(otadataBlank).fill(0xFF);
-    // Insert in ascending address order, before the app images
-    imagesToFlash = [
-      { buf: nvsBlank,     address: 0x9000 },  // erase NVS
-      { buf: otadataBlank, address: 0xE000 },  // erase OTA data → bootloader defaults to ota_0
-      ...imagesToFlash,
-    ];
-    onLog('Factory reset — NVS (0x9000, 20 KB) and OTA data (0xE000, 8 KB) will be erased');
+    imagesToFlash = [...imagesToFlash, { buf: nvsBlank, address: 0x9000 }];
+    onLog('Factory reset — NVS (0x9000, 20 KB) and OTA boot selector (0xE000) will be erased');
+  } else {
+    onLog('Reset OTA boot selector (0xE000) → board boots the freshly-flashed app (ota_0); NVS/config preserved');
   }
+
+  // Flash regions in ascending address order (bootloader → partitions → nvs →
+  // otadata → app), regardless of the order they were appended above.
+  imagesToFlash.sort((a, b) => a.address - b.address);
 
   const totalBytes = imagesToFlash.reduce((sum, img) => sum + img.buf.byteLength, 0);
 
@@ -666,9 +693,19 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
       eraseAll:  false,
       compress:  true,
       reportProgress: (_fileIdx, written, total) => {
-        // esptool-js resets written/total per file; accumulate for overall progress
-        onProgress(bytesWritten + written, totalBytes);
-        if (written === total) bytesWritten += total;
+        // esptool-js resets written/total per file, so accumulate across files. IMPORTANT: with
+        // compress:true the `written`/`total` it reports are COMPRESSED byte counts, while
+        // totalBytes above is the sum of UNCOMPRESSED image sizes — so a raw
+        // (bytesWritten + written) / totalBytes ratio topped out around 62 % and the bar appeared
+        // to stall near the end of a perfectly healthy flash.
+        //
+        // Use each file's own reported total as the per-file denominator and weight it by that
+        // file's uncompressed share, which is correct for both compressed and uncompressed runs.
+        const img      = imagesToFlash[_fileIdx];
+        const imgBytes = img ? img.buf.byteLength : 0;
+        const frac     = total > 0 ? (written / total) : 0;
+        onProgress(Math.min(totalBytes, bytesWritten + Math.round(frac * imgBytes)), totalBytes);
+        if (written === total) bytesWritten += imgBytes;
       },
       calculateMD5Hash: (img) =>
         CryptoJS.MD5(CryptoJS.enc.Latin1.parse(img)).toString(),
@@ -700,9 +737,27 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   onStatus('Resetting…');
   onProgress(totalBytes, totalBytes);
 
-  // esptool-js 0.4.x renamed after_flash → afterFlash
-  const afterFlashFn = loader.afterFlash ?? loader.after_flash;
-  try { if (afterFlashFn) await afterFlashFn.call(loader, 'hard_reset'); } catch (_) {}
+  // esptool-js has renamed this across versions and the vendored 0.4.x copy has NEITHER spelling,
+  // so this used to silently do nothing. Harmless in the normal flow — app.js closes the port and
+  // BoardConnection.reconnect() reopens it, which toggles DTR/RTS and resets the board out of the
+  // download stub — but the reset belongs here for anyone driving flashFirmware directly.
+  // Try every known spelling, then fall back to a manual DTR/RTS pulse via the transport.
+  const afterFlashFn = loader.afterFlash ?? loader.after_flash ?? loader.hardReset ?? loader.hard_reset;
+  let didReset = false;
+  try {
+    if (typeof afterFlashFn === 'function') { await afterFlashFn.call(loader, 'hard_reset'); didReset = true; }
+  } catch (_) {}
+  if (!didReset) {
+    // Manual hard reset: assert RESET (RTS) with the bootstrap pin released, then let go.
+    try {
+      await transport.setDTR(false);
+      await transport.setRTS(true);
+      await new Promise(r => setTimeout(r, 100));
+      await transport.setRTS(false);
+      didReset = true;
+    } catch (_) {}
+  }
+  if (!didReset) onLog('⚠ Could not hard-reset the board; it will reset when the port is reopened.');
   try { await transport.disconnect(); }                                     catch (_) {}
 
   onLog('Flash complete — board rebooting');

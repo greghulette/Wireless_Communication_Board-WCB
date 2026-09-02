@@ -21,9 +21,11 @@ function createDefaultBoardConfig() {
   return {
     // Board Identity
     hwVersion:    0,       // 0 = not set, 1=1.0, 21=2.1, 23=2.3, 24=2.4, 31=3.1, 32=3.2
-    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; default 38 (3.1), 48 applied on HW-version select for 3.2
+    statusLedPin: 38,      // GPIO pin for onboard NeoPixel — HW 3.1/3.2 only; 38 is the firmware default for both (WCB_Help.cpp:1009). Not auto-changed by HW version.
     wcbNumber:    1,
     wcbQuantity:  1,
+    meshChannel:  1,       // ESP-NOW mesh channel (1–13); network-wide, all boards must match
+    livePeerCount: null,   // PEERSLIVE telemetry (read-only; null = not reported)
     alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
     specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
     specialPeerId: 20,     // special peer ID (1-20); used only when specialPeer is true
@@ -32,6 +34,7 @@ function createDefaultBoardConfig() {
     // client view). Flipping does NOT alter what's on the physical board.
     type:         'wcb',
     clientAlias:  '',      // Friendly name for the client device at this slot
+    isRelay:      false,   // true when the device's backup carried ?RELAY,1 (a MgmtRelay)
 
 
     // Network
@@ -53,6 +56,10 @@ function createDefaultBoardConfig() {
       { baud: 9600, broadcastIn: true,  broadcastOut: true, label: '', claimedBy: null },
     ],
 
+    // S0/USB broadcast output — global opt-in (NOT a per-serial-port setting). Round-tripped
+    // through backup import/export; set on the board via ?SBOS0 / ?BCAST,OUT,S0. No UI toggle.
+    broadcastToS0: false,
+
     // Kyber
     kyber: {
       mode:          'none',  // 'none' | 'local' | 'remote'
@@ -63,20 +70,43 @@ function createDefaultBoardConfig() {
 
     // MP3 Trigger
     mp3: {
-      enabled: false,
-      port:    null,   // 1-5 — serial port the MP3 Trigger is wired to
-      baud:    9600,
-      volume:  0,      // 0 = loudest, 64 = inaudible
-      onError: '',     // stored sequence key to run on error (optional)
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the MP3 Trigger is wired to
+      baud:      9600,
+      volume:    0,      // 0 = loudest, 64 = inaudible
+      onError:   '',     // stored sequence key to run on error (optional)
+      remoteWCB: 0,      // 0 = none; else this board routes ;A to the MP3 on WCB<n>
     },
 
     // HCR (Human-Cyborg Relations) Vocalizer
     hcr: {
-      enabled: false,
-      port:    null,   // 1-5 — serial port the HCR is wired to
-      baud:    9600,
-      poll:    10,     // status auto-poll interval (s); 0 = off
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the HCR is wired to
+      baud:      9600,
+      poll:      10,     // status auto-poll interval (s); 0 = off
+      remoteWCB: 0,      // 0 = none; else this board routes ;H to the HCR on WCB<n>
     },
+
+    // DFPlayer Mini (alternate audio device) — baud fixed at 9600 by the module;
+    // volume 0 = silent .. 30 = loudest (the INVERSE of the MP3 Trigger's scale).
+    dfp: {
+      enabled:   false,
+      port:      null,   // 1-5 — serial port the DFPlayer is wired to
+      baud:      9600,   // fixed by the module — not user-adjustable
+      volume:    15,     // 0 = silent .. 30 = loudest
+      onError:   '',     // stored sequence key to run on a module error (optional)
+      remoteWCB: 0,      // 0 = none; else this board routes ;D to the DFPlayer on WCB<n>
+    },
+
+    // WLED (serial lighting) — array of { id, port, baud }. LOCAL WLED nodes on
+    // this board, each with a system-wide ID (1-9). ID-addressed, mirrors maestros;
+    // reach a WLED on another board with ;L<id> (firmware routes it).
+    wleds: [],
+
+    // Remote WLEDs this board auto-learned from other boards (display-only, read-only
+    // in the UI, never pushed). { id, host, baud }. Populated from the ?WLED,<id>:
+    // W<host>S0 lines the firmware puts in the backup.
+    wledRemotes: [],
 
     // Maestros — array of { id, port, baud }
     maestros: [],
@@ -89,7 +119,7 @@ function createDefaultBoardConfig() {
       enabled:          true,
       timeoutMs:        500,
       heartbeatSec:     10,
-      missedHeartbeats: 3,
+      missedHeartbeats: 5,   // matches the firmware initialiser (WCB.ino) and NVS default
       bootHeartbeatSec: 2,
       messageCount:     20,
       messageDelayMs:   100,
@@ -104,6 +134,13 @@ function createDefaultBoardConfig() {
 
     // PWM Output Ports — array of port numbers that are PWM outputs
     pwmOutputPorts: [],
+
+    // WDP (mesh discovery). The firmware only EMITS these when they are OFF
+    // (Code/WCB/WCB.ino:3023-3024), so a config carrying neither line means both are ON.
+    // Nothing parsed them before, so an export/restore silently re-enabled discovery on a
+    // board where the user had deliberately turned it off.
+    wdpEnabled:  true,
+    wdpAutoJoin: true,
 
     // Firmware version (populated from GitHub Releases, not from board)
     fwVersion: null,
@@ -125,6 +162,7 @@ function createDefaultSystemConfig() {
     // General settings — must match across all boards
     general: {
       wcbQuantity:    1,
+      meshChannel:    1,
       espnowPassword: 'change_me_or_risk_takeover',
       macOctet2:      '00',
       macOctet3:      '00',
@@ -142,7 +180,7 @@ function createDefaultSystemConfig() {
         enabled:          true,
         timeoutMs:        500,
         heartbeatSec:     10,
-        missedHeartbeats: 3,
+        missedHeartbeats: 5,   // matches the firmware initialiser (WCB.ino) and NVS default
         bootHeartbeatSec: 2,
         messageCount:     20,
         messageDelayMs:   100,
@@ -441,6 +479,12 @@ function parseToken(body, config) {
       config.hwVersion = parseInt(parts[1]) || 0;
       break;
 
+    case 'RELAY':
+      // ?RELAY,1 — device is a management relay (MgmtRelay); render a dedicated
+      // relay card outside the numbered WCB grid instead of a board section.
+      config.isRelay = (parseInt(parts[1]) || 0) === 1;
+      break;
+
     case 'LED':
       if (upperParts[1] === 'PIN') config.statusLedPin = parseInt(parts[2]) || 38;
       break;
@@ -456,8 +500,38 @@ function parseToken(body, config) {
       config.wcbQuantity = parseInt(parts[1]) || 1;
       break;
 
+    case 'WCBCH': {
+      // ESP-NOW mesh channel (1–11). Clamp out-of-range to the default so a
+      // malformed line can't push an invalid channel back to the fleet.
+      const ch = parseInt(parts[1]);
+      config.meshChannel = (ch >= 1 && ch <= 11) ? ch : 1;
+      break;
+    }
+
+    case 'PEERSLIVE':
+      // Read-only telemetry from the board: live mesh membership (WCBQ floor +
+      // WDP auto-joined peers). Displayed, never re-emitted as a command.
+      config.livePeerCount = parseInt(parts[1]);
+      if (isNaN(config.livePeerCount)) config.livePeerCount = null;
+      break;
+
+    case 'WDP': {
+      // ?WDP,OFF / ?WDP,ON / ?WDP,AUTOJOIN,OFF / ?WDP,AUTOJOIN,ON
+      // Only the OFF forms are ever emitted by the board (both default ON), but accept both
+      // spellings so a hand-edited or older file round-trips too. Every other subcommand
+      // (DUMP/POLL/DETAIL/FORGET/CLEAR) is a query and is ignored on parse.
+      const w1 = (parts[1] || '').trim().toUpperCase();
+      const w2 = (parts[2] || '').trim().toUpperCase();
+      if (w1 === 'AUTOJOIN')               config.wdpAutoJoin = (w2 !== 'OFF' && w2 !== '0');
+      else if (w1 === 'OFF' || w1 === '0') config.wdpEnabled  = false;
+      else if (w1 === 'ON'  || w1 === '1') config.wdpEnabled  = true;
+      break;
+    }
+
+    case 'CONTROLLER':
     case 'SPECIAL': {
-      // ?SPECIAL,ON[,<id>] / ?SPECIAL,OFF — enable/disable the special peer (NaviCore).
+      // ?CONTROLLER,ON[,<id>] / ?CONTROLLER,OFF — enable/disable the controller peer
+      // (default NaviCore, ID 20). SPECIAL is the legacy alias kept for old configs.
       const sub = (parts[1] || '').trim().toUpperCase();
       config.specialPeer = (sub === 'ON' || sub === '1' || sub === 'TRUE');
       if (config.specialPeer && parts[2]) {
@@ -532,13 +606,17 @@ function parseToken(body, config) {
 
     // ── Broadcast Output ──
     case 'BCAST': {
-      // ?BCAST,OUT,S1,ON  or  ?BCAST,IN,S1,OFF
+      // ?BCAST,OUT,S1,ON  or  ?BCAST,IN,S1,OFF   (S0 = OUT only — USB echo)
       const direction = upperParts[1]; // 'OUT' or 'IN'
-      const portStr   = upperParts[2]; // 'S1' - 'S5'
+      const portStr   = upperParts[2]; // 'S0' - 'S5'
       const state     = upperParts[3]; // 'ON' or 'OFF'
+      const enabled   = state === 'ON';
+      if (direction === 'OUT' && portStr === 'S0') {
+        config.broadcastToS0 = enabled;   // global USB echo — no per-port slot
+        break;
+      }
       const portIdx   = parseInt(portStr?.replace('S', '')) - 1;
       if (portIdx >= 0 && portIdx < 5) {
-        const enabled = state === 'ON';
         if (direction === 'OUT') config.serialPorts[portIdx].broadcastOut = enabled;
         if (direction === 'IN')  config.serialPorts[portIdx].broadcastIn  = enabled;
       }
@@ -592,16 +670,24 @@ function parseToken(body, config) {
         // ?MP3,S2:9600:V0
         const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
         if (m) {
-          config.mp3.enabled = true;
-          config.mp3.port    = parseInt(m[1]);
-          config.mp3.baud    = parseInt(m[2]);
-          config.mp3.volume  = parseInt(m[3]);
+          config.mp3.enabled   = true;
+          config.mp3.port      = parseInt(m[1]);
+          config.mp3.baud      = parseInt(m[2]);
+          config.mp3.volume    = parseInt(m[3]);
+          config.mp3.remoteWCB = 0;   // local host — not a client
         }
       } else if (sub === 'ONERR') {
         config.mp3.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'REMOTE') {
+        // ?MP3,REMOTE,W<n> | OFF — this board routes ;A to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.mp3.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.mp3.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
         config.mp3.enabled = false;
         config.mp3.port    = null;
+        // remoteWCB (the route) is a separate axis — ?MP3,CLEAR clears only the
+        // local host, matching the firmware. Use REMOTE,OFF to drop the route.
       }
       break;
     }
@@ -612,15 +698,95 @@ function parseToken(body, config) {
         // ?HCR,PORT,S1:9600
         const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
         if (m) {
-          config.hcr.enabled = true;
-          config.hcr.port    = parseInt(m[1]);
-          config.hcr.baud    = parseInt(m[2]);
+          config.hcr.enabled   = true;
+          config.hcr.port      = parseInt(m[1]);
+          config.hcr.baud      = parseInt(m[2]);
+          config.hcr.remoteWCB = 0;   // local host — not a client
         }
       } else if (sub === 'POLL') {
         config.hcr.poll = parseInt(parts[2]) || 0;
+      } else if (sub === 'REMOTE') {
+        // ?HCR,REMOTE,W<n> | OFF — this board routes ;H to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.hcr.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.hcr.remoteWCB = parseInt(m[1]); }
       } else if (sub === 'CLEAR') {
         config.hcr.enabled = false;
         config.hcr.port    = null;
+        // remoteWCB (the route) is a separate axis — ?HCR,CLEAR clears only the
+        // local host, matching the firmware. Use REMOTE,OFF to drop the route.
+      }
+      break;
+    }
+
+    case 'DFP': {
+      const sub = upperParts[1];
+      if (sub && /^S\d/.test(sub)) {
+        // ?DFP,S3:9600:V15 — local host (baud fixed 9600 by the module, volume 0-30)
+        const m = sub.match(/^S(\d+):(\d+):V(\d+)$/i);
+        if (m) {
+          config.dfp.enabled   = true;
+          config.dfp.port      = parseInt(m[1]);
+          config.dfp.baud      = parseInt(m[2]);
+          config.dfp.volume    = parseInt(m[3]);
+          config.dfp.remoteWCB = 0;   // local host — not a client
+        }
+      } else if (sub === 'ONERR') {
+        config.dfp.onError = parts[2] || '';  // preserve original case
+      } else if (sub === 'REMOTE') {
+        // ?DFP,REMOTE,W<n> | OFF — this board routes ;D to WCB<n>
+        const v = upperParts[2] || '';
+        if (v === 'OFF' || v === '0' || v === '') config.dfp.remoteWCB = 0;
+        else { const m = v.match(/W?(\d+)/); if (m) config.dfp.remoteWCB = parseInt(m[1]); }
+      } else if (sub === 'CLEAR') {
+        config.dfp.enabled = false;
+        config.dfp.port    = null;
+        // remoteWCB (the route) is a separate axis — ?DFP,CLEAR clears only the local host.
+      }
+      break;
+    }
+
+    // ── WLED (serial lighting) — ID-addressed, mirrors Maestro ──
+    case 'WLED': {
+      // Upsert a LOCAL WLED by id (one slot per id, matching the firmware).
+      const upsertWled = (id, port, baud) => {
+        if (!config.wleds) config.wleds = [];
+        const ex = config.wleds.find(w => w.id === id);
+        if (ex) { ex.port = port; ex.baud = baud; }
+        else    config.wleds.push({ id, port, baud });
+      };
+      const sub = upperParts[1];
+      if (sub === 'CLEAR') {
+        // ?WLED,CLEAR (all)  |  ?WLED,CLEAR,<id> (one)
+        if (parts[2] != null && parts[2] !== '') {
+          const id = parseInt(parts[2]);
+          config.wleds = (config.wleds ?? []).filter(w => w.id !== id);
+        } else {
+          config.wleds = [];
+        }
+        break;
+      }
+      if (sub === 'LIST' || sub === 'STATUS') break;
+      if (sub === 'PORT') {
+        // Legacy ?WLED,PORT,S<port>:<baud>  →  local WLED id 1
+        const m = (parts[2] || '').match(/^S(\d+):(\d+)$/i);
+        if (m) upsertWled(1, parseInt(m[1]), parseInt(m[2]));
+        break;
+      }
+      // New ?WLED,<id>:W<wcb>S<port>:<baud>  (chained entries allowed)
+      for (let i = 1; i < parts.length; i++) {
+        const wm = parts[i].toUpperCase().match(/^(\d+):W(\d+)S(\d+):(\d+)$/);
+        if (!wm) continue;
+        const id = parseInt(wm[1]), wcb = parseInt(wm[2]), port = parseInt(wm[3]), baud = parseInt(wm[4]);
+        if (wcb === config.wcbNumber) {
+          upsertWled(id, port, baud);                 // LOCAL — editable
+        } else {
+          // Remote proxy (W<host>S0) — auto-learned; display-only, never pushed.
+          if (!config.wledRemotes) config.wledRemotes = [];
+          const ex = config.wledRemotes.find(w => w.id === id);
+          if (ex) { ex.host = wcb; ex.baud = baud; }
+          else    config.wledRemotes.push({ id, host: wcb, baud });
+        }
       }
       break;
     }
@@ -679,7 +845,7 @@ function parseToken(body, config) {
         case 'OFF':     config.etm.enabled          = false;                         break;
         case 'TIMEOUT': config.etm.timeoutMs         = parseInt(parts[2]) || 500;    break;
         case 'HB':      config.etm.heartbeatSec      = parseInt(parts[2]) || 10;     break;
-        case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 3;      break;
+        case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 5;      break;
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 20;     break;
         case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
@@ -871,6 +1037,20 @@ function evaluatePortClaims(config) {
       config.serialPorts[idx].claimedBy = { type: 'hcr' };
   }
 
+  // DFPlayer Mini claims its port
+  if (config.dfp && config.dfp.enabled && config.dfp.port) {
+    const idx = config.dfp.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'dfp' };
+  }
+
+  // WLED nodes claim their ports (one per local WLED, keyed by id)
+  for (const w of (config.wleds ?? [])) {
+    const idx = w.port - 1;
+    if (idx >= 0 && idx < 5)
+      config.serialPorts[idx].claimedBy = { type: 'wled', id: w.id };
+  }
+
   // Maestros claim their ports
   for (const maestro of config.maestros) {
     const idx = maestro.port - 1;
@@ -918,6 +1098,23 @@ function evaluatePortClaims(config) {
         };
       }
     }
+  }
+
+  // Kyber/Maestro MODE reservations — mirror the firmware's device-port guards:
+  // with a local Kyber, ?WLED/?HCR/?MP3 configs are rejected on BOTH S1 and S2;
+  // with remote Maestro (NaviCore-driven), they are rejected on S1 (see the
+  // identical guards in WCB_WLED.cpp / WCB_HCR.cpp / WCB_MP3.cpp). Without this,
+  // device dropdowns offer ports the board will refuse and the push fails
+  // silently. Applied LAST with a no-clobber guard so a real claim (maestro,
+  // kyber.port, serial-map, …) always keeps its more specific type — this only
+  // fills otherwise-empty slots to keep them out of the device dropdowns.
+  if (config.kyber) {
+    const reserve = (idx) => {
+      if (!config.serialPorts[idx].claimedBy)
+        config.serialPorts[idx].claimedBy = { type: 'kyber-reserved' };
+    };
+    if (config.kyber.mode === 'local')  { reserve(0); reserve(1); }
+    if (config.kyber.mode === 'remote') { reserve(0); }
   }
 }
 
@@ -979,6 +1176,7 @@ function parseSystemFile(fileContent) {
   if (sections['GENERAL']) {
     const generalConfig = parseBackupString(sections['GENERAL']);
     system.general.wcbQuantity    = generalConfig.wcbQuantity;
+    system.general.meshChannel    = generalConfig.meshChannel ?? 1;
     system.general.espnowPassword = generalConfig.espnowPassword;
     system.general.macOctet2      = generalConfig.macOctet2;
     system.general.macOctet3      = generalConfig.macOctet3;
@@ -1020,6 +1218,7 @@ function parseSystemFile(fileContent) {
 // ─────────────────────────────────────────────
 function applyGeneralToBoard(general, board) {
   board.wcbQuantity    = general.wcbQuantity;
+  board.meshChannel    = general.meshChannel ?? 1;
   board.espnowPassword = general.espnowPassword;
   board.macOctet2      = general.macOctet2;
   board.macOctet3      = general.macOctet3;
@@ -1087,13 +1286,31 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || !baseline || baseline.wcbQuantity !== config.wcbQuantity)
     add(`WCBQ,${config.wcbQuantity}`);
 
-  // Special peer (ID 20): emit on diff. Every WCB in the network needs the
-  // same value so peer tables stay consistent.
+  // WDP discovery. Both default ON and the firmware only emits the OFF lines, so we must emit
+  // the ON forms too — otherwise re-enabling discovery in the Wizard produced no command and the
+  // board stayed off, and a restore of a config captured while OFF silently turned it back on.
+  {
+    const curWdp  = config.wdpEnabled  !== false;
+    const curJoin = config.wdpAutoJoin !== false;
+    if (fullPush || !baseline || (baseline.wdpEnabled !== false) !== curWdp)
+      add(`WDP,${curWdp ? 'ON' : 'OFF'}`);
+    if (fullPush || !baseline || (baseline.wdpAutoJoin !== false) !== curJoin)
+      add(`WDP,AUTOJOIN,${curJoin ? 'ON' : 'OFF'}`);
+  }
+
+  // ESP-NOW mesh channel (1–11). Network-wide; the firmware persists it and applies it
+  // on reboot, and every board must land on the same channel, so a push moves the whole fleet.
+  if (fullPush || !baseline || (baseline.meshChannel ?? 1) !== (config.meshChannel ?? 1))
+    add(`WCBCH,${config.meshChannel ?? 1}`);
+
+  // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
+  // network needs the same value so peer tables stay consistent. Canonical token
+  // is CONTROLLER; firmware still accepts the legacy SPECIAL on input.
   const curSpecial  = !!config.specialPeer;
   const baseSpecial = !!baseline?.specialPeer;
   if (fullPush || !baseline || curSpecial !== baseSpecial ||
       (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
-    add(curSpecial ? `SPECIAL,ON,${config.specialPeerId ?? 20}` : `SPECIAL,OFF`);
+    add(curSpecial ? `CONTROLLER,ON,${config.specialPeerId ?? 20}` : `CONTROLLER,OFF`);
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
@@ -1113,10 +1330,8 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // function-character invocation by the firmware, so the command is unparseable.
   // Since '?' is the factory default the board already uses it; only send when
   // the user has chosen a different character.
-  if (config.funcChar !== '?') {
-    if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
-      add(`FUNCCHAR,${config.funcChar}`);
-  }
+  if (fullPush || !baseline || baseline.funcChar !== config.funcChar)
+    add(`FUNCCHAR,${config.funcChar}`);
 
   if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
     add(`CMDCHAR,${config.cmdChar}`);
@@ -1133,8 +1348,15 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (cur.label && (fullPush || !base || base.label !== cur.label))
+    if (cur.label && (fullPush || !base || base.label !== cur.label)) {
       add(`LABEL,S${i+1},${cur.label}`);
+    } else if (!cur.label && base?.label && !fullPush) {
+      // CLEARING a label has to be sent too. The `cur.label &&` guard above meant emptying the
+      // field produced no command at all, so the board kept the old label — and a stale label is
+      // not cosmetic: the port keeps showing as claimed in the device dropdowns and can resurrect
+      // a phantom Kyber Marcuino port on the next pull.
+      add(`LABEL,CLEAR,S${i+1}`);
+    }
   }
 
   // ── Broadcast Settings ──
@@ -1146,6 +1368,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (fullPush || !base || base.broadcastIn !== cur.broadcastIn)
       add(`BCAST,IN,S${i+1},${cur.broadcastIn ? 'ON' : 'OFF'}`);
   }
+  // S0/USB broadcast output — global (no per-port slot). Preserve on round-trip.
+  if (fullPush || (baseline?.broadcastToS0 ?? false) !== (config.broadcastToS0 ?? false))
+    add(`BCAST,OUT,S0,${config.broadcastToS0 ? 'ON' : 'OFF'}`);
 
   // ── Kyber ──
   // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
@@ -1175,7 +1400,13 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.mp3.enabled && config.mp3.port) {
       add(`MP3,S${config.mp3.port}:${config.mp3.baud}:V${config.mp3.volume}`);
       if (config.mp3.onError) add(`MP3,ONERR,${config.mp3.onError}`);
+    } else if (config.mp3.remoteWCB && config.mp3.remoteWCB !== config.wcbNumber) {
+      add(`MP3,REMOTE,W${config.mp3.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
+      // No local host, no route. Explicitly drop a route ONLY on a delta where the
+      // baseline had one (user switched Remote→None) — never on a full push, so we
+      // can't clobber a firmware auto-learned route the Wizard never observed.
+      if (baseline?.mp3?.remoteWCB && !fullPush) add('MP3,REMOTE,OFF');
       add('MP3,CLEAR');
     }
   }
@@ -1187,8 +1418,47 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (config.hcr.enabled && config.hcr.port) {
       add(`HCR,PORT,S${config.hcr.port}:${config.hcr.baud}`);
       add(`HCR,POLL,${config.hcr.poll}`);
+    } else if (config.hcr.remoteWCB && config.hcr.remoteWCB !== config.wcbNumber) {
+      add(`HCR,REMOTE,W${config.hcr.remoteWCB}`);   // client: persist the route, don't wipe it
     } else {
+      // See MP3 above: a route is dropped only on a delta where the baseline had one.
+      if (baseline?.hcr?.remoteWCB && !fullPush) add('HCR,REMOTE,OFF');
       add('HCR,CLEAR');
+    }
+  }
+
+  // ── DFPlayer Mini (mirrors MP3: baud fixed 9600, volume 0-30) ──
+  if (config.dfp) {
+    const dfpChanged = fullPush || !baseline ||
+      JSON.stringify(baseline.dfp) !== JSON.stringify(config.dfp);
+    if (dfpChanged) {
+      if (config.dfp.enabled && config.dfp.port) {
+        add(`DFP,S${config.dfp.port}:${config.dfp.baud}:V${config.dfp.volume}`);
+        if (config.dfp.onError) add(`DFP,ONERR,${config.dfp.onError}`);
+      } else if (config.dfp.remoteWCB && config.dfp.remoteWCB !== config.wcbNumber) {
+        add(`DFP,REMOTE,W${config.dfp.remoteWCB}`);   // client: persist the route, don't wipe it
+      } else {
+        if (baseline?.dfp?.remoteWCB && !fullPush) add('DFP,REMOTE,OFF');
+        add('DFP,CLEAR');
+      }
+    }
+  }
+
+  // ── WLED (serial lighting) — local WLED nodes, ID-addressed ──
+  const wledTable  = config.wleds ?? [];
+  const bWledTable = baseline?.wleds ?? [];
+  const wledChanged = fullPush || !baseline ||
+    JSON.stringify(bWledTable) !== JSON.stringify(wledTable);
+  if (wledChanged) {
+    // Targeted clears for local WLEDs removed since the baseline (keyed by id —
+    // one slot per id in the firmware). NEVER a blanket ?WLED,CLEAR: that would
+    // also wipe firmware-managed remote proxies. A moved/re-bauded id needs no
+    // clear — the firmware reuses that id's slot on the next ?WLED,<id>:… .
+    for (const b of bWledTable) {
+      if (!wledTable.some(e => e.id === b.id)) add(`WLED,CLEAR,${b.id}`);
+    }
+    for (const w of wledTable) {
+      add(`WLED,${w.id}:W${config.wcbNumber}S${w.port}:${w.baud}`);
     }
   }
 
@@ -1263,7 +1533,27 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     if (fullPush || !betm || betm.checksumEnabled !== true) add('ETM,CHKSM,ON');
   }
 
+  // ── Stored Sequences (per-key diff) ──
+  // MUST come before the PWM/mapping block below. addPWMMapping() reboots the board when it
+  // applies a PWM input mapping (WCB_PWM.cpp), so anything emitted after it in the same push is
+  // sent into a board that is restarting and is silently lost — sequences were the casualty.
+  // Compare key-by-key so a single UPDATE doesn't re-push every sequence, and send SEQ,CLEAR for
+  // any keys removed since the baseline.
+  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
+  for (const seq of config.sequences) {
+    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
+      add(`SEQ,SAVE,${seq.key},${seq.value}`);
+    }
+  }
+  if (!fullPush && baseline) {
+    for (const [key] of baseSeqMap) {
+      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
+    }
+  }
+
   // ── PWM Output Ports ──
+  // Keep this and the mapping block LAST: applying a PWM input mapping reboots the board.
   const pwmChanged = fullPush || !baseline ||
     JSON.stringify(baseline.pwmOutputPorts) !== JSON.stringify(config.pwmOutputPorts);
   if (pwmChanged) {
@@ -1285,22 +1575,6 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
           : `,W${dest.wcbNumber}S${dest.port}`;
       }
       add(cmd);
-    }
-  }
-
-  // ── Stored Sequences (per-key diff) ──
-  // Compare key-by-key so that a single UPDATE doesn't re-push every sequence.
-  // Also send SEQ,CLEAR for any keys removed since the baseline.
-  const baseSeqMap = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
-  const curSeqMap  = new Map(config.sequences.map(s => [s.key, s.value]));
-  for (const seq of config.sequences) {
-    if (fullPush || !baseline || baseSeqMap.get(seq.key) !== seq.value) {
-      add(`SEQ,SAVE,${seq.key},${seq.value}`);
-    }
-  }
-  if (!fullPush && baseline) {
-    for (const [key] of baseSeqMap) {
-      if (!curSeqMap.has(key)) add(`SEQ,CLEAR,${key}`);
     }
   }
 
@@ -1371,6 +1645,7 @@ function diffConfigs(configA, configB) {
   check('hwVersion',      configA.hwVersion,      configB.hwVersion);
   check('wcbNumber',      configA.wcbNumber,       configB.wcbNumber);
   check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
+  check('meshChannel',    configA.meshChannel ?? 1, configB.meshChannel ?? 1);
   check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
   check('macOctet2',      configA.macOctet2,       configB.macOctet2);
   check('macOctet3',      configA.macOctet3,       configB.macOctet3);
@@ -1379,12 +1654,15 @@ function diffConfigs(configA, configB) {
   check('cmdChar',        configA.cmdChar,         configB.cmdChar);
   check('kyber',          configA.kyber,           configB.kyber);
   check('mp3',            configA.mp3,             configB.mp3);
+  check('hcr',            configA.hcr,             configB.hcr);
+  check('wleds',          configA.wleds,           configB.wleds);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
   check('mappings',       configA.mappings,        configB.mappings);
   check('sequences',      configA.sequences,       configB.sequences);
   check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
+  check('broadcastToS0',  configA.broadcastToS0 ?? false, configB.broadcastToS0 ?? false);
 
   for (let i = 0; i < 5; i++) {
     const pa = configA.serialPorts[i];
