@@ -13,6 +13,7 @@ changing before editing.**
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
 | Sequence inventory — `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
+| WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
 | Device command translation | it's in [`WcbCmd`](https://github.com/greghulette/WcbCmd), not here |

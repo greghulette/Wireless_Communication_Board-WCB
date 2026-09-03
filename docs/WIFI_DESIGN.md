@@ -1,0 +1,219 @@
+# WCB WiFi — hosting an access point, or joining one
+
+Status: **in development on branch `WIFI`.** Not in a release.
+
+A WCB can optionally bring up an IP interface — hosting its own access point, or
+joining an existing one — so the mesh can be managed from a phone with no USB cable
+and no extra hardware. It is **off by default**, and with it off the firmware behaves
+exactly as it did before.
+
+---
+
+## 1. Why this lives on the boards
+
+A phone cannot open a serial port. The Web Serial API is desktop-only — not Android
+Chrome, never iOS — so a mobile client has no way to reach the mesh except over a
+network. That single platform limit is what forces this design.
+
+The alternatives were both rejected:
+
+| Option | Why not |
+|---|---|
+| A dedicated relay board (`MgmtRelay` in `WCBClient`) | An extra ESP32, an extra power tap and an extra thing to fail, in every droid, whose only job is management. Fine as a bench tool; not something to ask every builder to install. |
+| Require a NaviCore | Only a small subset of WCB users have one. Its AP cannot be assumed to exist. |
+
+So the boards have to be able to carry it themselves. The relay and NaviCore paths
+still work and are still useful — they are simply not the answer for most builders.
+
+---
+
+## 2. The one rule: the radio has one channel
+
+The ESP32 has a **single radio**. An access point we host, or one we associate with,
+shares its channel with ESP-NOW. Therefore:
+
+> **The WiFi channel is always `meshChannel` (`?WCBCH`) and is deliberately not
+> separately configurable.**
+
+This is not a simplification for convenience. A WiFi channel that disagrees with the
+mesh is a *silent, total* blackout: every ESP-NOW packet dropped, nothing logged on
+the other boards, no fault indication anywhere. Offering the choice would mean
+offering a way to brick the mesh with no symptom. Every entry point passes
+`meshChannel` explicitly:
+
+- `WiFi.softAP(ssid, pass, meshChannel, …)` — the channel argument **defaults to 1**.
+  Once an AP owns the radio nothing later moves it, so a defaulted channel against a
+  mesh on any other channel is exactly the blackout above.
+- `WiFi.begin(ssid, pass, meshChannel)` — pins the association attempt to one channel.
+- After associating, JOIN mode **verifies** the channel with `esp_wifi_get_channel()`
+  and disconnects if it landed elsewhere. Being deaf is worse than having no WiFi.
+
+---
+
+## 3. Modes
+
+| Mode | Behaviour |
+|---|---|
+| `OFF` | ESP-NOW only. The default. Byte-for-byte the previous behaviour. |
+| `AP` | Host a SoftAP on `meshChannel`, `WIFI_AP_STA` so ESP-NOW keeps its interface. Self-contained: no infrastructure, and nothing external can move the radio. The field mode. |
+| `JOIN` | Associate with an existing AP (a NaviCore's, typically). One network reaches everything and the phone keeps its internet. |
+
+**JOIN never falls back to hosting.** A board that quietly became an access point
+because it could not find its network is precisely the rogue-AP surprise this design
+avoids — and with several boards configured that way you would get several. It
+retries every 5 s indefinitely, logs occasionally, and stays a station.
+
+---
+
+## 4. Ordering constraints
+
+Two orderings are load-bearing, and they pull in opposite directions.
+
+**`wcbWifiStart()` is called from `setup()` after `esp_wifi_set_mac()` and before
+`esp_now_init()`.** That is the only point that satisfies both:
+
+- *After* `esp_wifi_set_mac()`, so the ESP-NOW MAC is stamped on a plain `WIFI_STA`
+  interface before an AP is added alongside it.
+- *Before* `esp_now_init()`, because in AP mode the SoftAP must own the radio channel
+  first. Once ESP-NOW is initialised nothing later moves the radio, and an AP raised
+  afterwards fights it.
+
+This mirrors what `WCB_Client` had to handle when NaviCore began hosting an AP:
+`WCB_Client::begin()` inspects `WiFi.getMode()` and preserves an existing AP as
+`WIFI_AP_STA` rather than forcing `WIFI_STA` and tearing it down.
+
+**Settings apply at the next boot, not live.** Same discipline as
+`saveMeshChannelToPreferences()`. Bringing an interface up or down re-enters the WiFi
+driver underneath a running `esp_now`, and a config push arrives as a *stream* of
+commands — losing the radio midway would strand everything still queued behind it.
+
+---
+
+## 5. Interaction with bit-banged serial (S3–S5) — **open**
+
+This is the unresolved risk, and it is tracked here so it is not rediscovered.
+
+S3–S5 are `EspSoftwareSerial`. TX busy-waits each bit period, so an interrupt landing
+mid-byte compresses the remaining bits and the **receiver mis-frames** — the command
+arrives cut short, not garbled. `enableIntTx(false)` fixes this by taking a critical
+section, bounded to one byte (~0.94 ms at 9600) because `lazyDelay()` restores
+interrupts at every stop bit.
+
+`softSerialLoopTaskOnly()` (`WCB.ino`) only enables that protection where **no core-0
+task writes the port**, because the library's interrupt mux is a single `static`
+spinlock shared by all three ports — core 0 would otherwise spin on it with its own
+interrupts disabled, inside the WiFi task. Ports excluded today:
+
+- PWM input or output (`PWMTask` is pinned to core 0)
+- the local Kyber port
+- raw-mapped ports
+- ports hosting a locally-attached Maestro
+
+…all four because `espNowReceiveCallback` writes them directly from the WiFi task.
+
+**Hosting an AP adds radio interrupt load** — beacons, associated stations, TCP — on
+exactly those unprotected ports. Telling users "only enable WiFi on a board with none
+of those configured" is not a deployable constraint.
+
+The fix is to remove core-0 writers so every port qualifies for protection:
+
+1. **`PWMTask`** is pinned to core 0 by choice (`WCB.ino`, `xTaskCreatePinnedToCore(…, 0)`).
+   Every other task is already on core 1. Re-pinning removes the PWM exclusion — but
+   it runs at priority 2 against the others' 1, so this needs measuring, not flipping.
+2. **`espNowReceiveCallback`** cannot move; it is the WiFi task. Its direct writes to
+   Maestro, Kyber and raw-mapping ports must be handed to core 1 instead. The pattern
+   and the consumer already exist — `mgmtQueueOut`/`drainMgmtOut`, and
+   `RawSerialForwardingTask` polls every 2 ms — so the added latency is ≤2 ms.
+
+Doing both also closes the residual noted in the source: a raw-serial mapping on a
+*remote* board can target a port this board believes is idle, which is not locally
+knowable and so cannot be handled by the predicate.
+
+**Sequencing:** close the soft-serial timing first and confirm it on the bench, then
+enable the AP on top. Doing them together leaves you unable to tell which change
+caused a regression.
+
+---
+
+## 6. Commands
+
+```
+?WIFI                       Status: mode, SSID, IP, radio channel, free heap
+?WIFI,OFF                   ESP-NOW only (default)
+?WIFI,AP,<ssid>,<pass>      Host an access point
+?WIFI,JOIN,<ssid>,<pass>    Join an existing one
+```
+
+All changes persist immediately and apply on the next reboot.
+
+- The **AP password is mandatory, 8 characters minimum, and fails closed.**
+  `WiFi.softAP()` with an empty passphrase creates an *open* network, and this
+  interface accepts commands for the whole mesh with no credential of its own — a
+  bare `?RESTART` carries none. It is rejected at both the command and at bring-up.
+- **Default AP SSID** is `WCB-<alias>`, falling back to `WCB-<number>`. Two droids in
+  one room must not advertise the same name.
+- The password field is **not** trimmed: a trailing space is legal in a WPA2
+  passphrase, and eating it would lock the operator out of their own AP.
+
+### NVS
+
+Namespace `wifi_cfg`: `mode` (u8), `ap_ssid`, `ap_pass`, `jn_ssid`, `jn_pass`.
+
+### Config round-trip
+
+`?WIFI` is emitted in the config dump (`WIFI,AP,<ssid>,<pass>` / `WIFI,JOIN,…` /
+`WIFI,OFF`) so a backup captures it and a restore replays it. The password is
+included deliberately: a restore that brought the AP back *without* its passphrase
+would fail closed at boot, and the board would come up with no AP and nothing saying
+why. `OFF` is emitted too, so restoring a WiFi-off backup actively turns it off
+rather than leaving whatever was there.
+
+---
+
+## 7. Browser tool
+
+`Wizard/wifi-tool.html` — a standalone single-file page beside the Setup Wizard,
+configuring `?WIFI` over **Web Serial**.
+
+It is a USB tool by necessity. The page is served from GitHub Pages over HTTPS, and a
+browser will not let an HTTPS page open a plaintext `ws://` or `http://` connection —
+mixed content is a hard block with no click-through. Web Serial, conversely, *requires*
+a secure context. That is an acceptable fit, because enabling WiFi is inherently
+first-contact: you cannot configure the access point over the access point that does
+not exist yet.
+
+The same constraint means the **Setup Wizard cannot manage boards over WiFi** from its
+published URL either. Network management is for a native app, or for a page served
+from `http://localhost`.
+
+---
+
+## 8. Measured cost
+
+Baseline is 6.2.1 (`66845b9`), `PartitionScheme=min_spiffs`, core `esp32:esp32@3.3.4`.
+
+| Target | Flash before | Flash after | Static RAM before | after |
+|---|---|---|---|---|
+| ESP32 | 1,299,367 (66%) | 1,309,559 (66%) | 95,664 (29%) | 95,744 (29%) |
+| ESP32-S3 | 1,265,247 (64%) | 1,275,559 (64%) | 93,912 (28%) | 94,000 (28%) |
+
+So the module itself costs ~10 KB of flash and under 100 bytes of static RAM on both
+targets — neither percentage moved.
+
+That is the WiFi module only — no web server yet. For reference, the WebSocket
+endpoint in `MgmtRelay` measured **+37 KB flash / +4.7 KB static RAM**, which would
+take the ESP32 to roughly 68%.
+
+**Runtime heap is the number that actually decides this**, and it needs hardware —
+`httpd` plus the TCP stack want tens of KB, and AP+STA costs more than STA alone.
+`?WIFI` reports `ESP.getFreeHeap()` and `getMinFreeHeap()` so it can be measured on a
+board rather than guessed at. Static analysis says it fits; that is not the same
+claim.
+
+---
+
+## Revision log
+
+| Date | Commit | Change |
+|---|---|---|
+| 2026-09-02 | _(pending)_ | Initial design and implementation on branch `WIFI`. `?WIFI` with OFF/AP/JOIN modes, channel locked to `?WCBCH`, fail-closed AP password, non-blocking JOIN with channel verification and no AP fallback, NVS `wifi_cfg`, config round-trip, and `Wizard/wifi-tool.html`. Section 5 records the open soft-serial interaction, which gates enabling this on a board with PWM / Kyber / raw-mapped / local-Maestro ports. |

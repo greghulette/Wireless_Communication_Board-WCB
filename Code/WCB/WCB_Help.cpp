@@ -863,6 +863,39 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?STATSRESET    - Reset stats"));
 
     // ================================================================
+    } else if (c == "WIFI") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?WIFI[,<mode>[,<ssid>,<password>]]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Give this board an IP presence so a phone or desktop app can"));
+        Serial.println(F("  manage the mesh with no USB cable. OFF by default."));
+        Serial.println(F("\nModes:"));
+        Serial.println(F("  ?WIFI                    Show status (mode, IP, channel, free heap)"));
+        Serial.println(F("  ?WIFI,OFF                ESP-NOW only (the default)"));
+        Serial.println(F("  ?WIFI,AP,<ssid>,<pass>   Host an access point"));
+        Serial.println(F("  ?WIFI,JOIN,<ssid>,<pass> Join an existing one (e.g. a NaviCore's)"));
+        Serial.println(F("\nTHE CHANNEL IS NOT SEPARATELY CONFIGURABLE:"));
+        Serial.println(F("  The ESP32 has ONE radio, so WiFi and ESP-NOW share a channel."));
+        Serial.println(F("  It always follows ?WCBCH. A WiFi channel that disagreed with the"));
+        Serial.println(F("  mesh would be a SILENT blackout — every packet dropped, nothing"));
+        Serial.println(F("  logged on the other boards — so it is not offered as a choice."));
+        Serial.println(F("  In JOIN mode the channel is VERIFIED after associating; if the"));
+        Serial.println(F("  AP put us elsewhere the board disconnects rather than go deaf."));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Settings apply on the NEXT REBOOT, like ?WCBCH."));
+        Serial.println(F("  - The AP password is MANDATORY (8+ chars). This interface accepts"));
+        Serial.println(F("    commands for the whole mesh with no credential of its own, so an"));
+        Serial.println(F("    open AP would hand the droid to anyone in range."));
+        Serial.println(F("  - Default AP SSID is WCB-<alias> (or WCB-<number> with no alias)."));
+        Serial.println(F("  - JOIN retries forever and never falls back to hosting — a board"));
+        Serial.println(F("    that quietly became an AP is a surprise nobody wants."));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?WIFI,AP,R2-Dome,astromech1"));
+        Serial.println(F("  ?WIFI,JOIN,NaviCore-20,mypassword"));
+        Serial.println(F("  ?WIFI,OFF"));
+
+    // ================================================================
     } else if (c == "WDP") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));

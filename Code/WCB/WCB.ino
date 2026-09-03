@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_021242RSEP2026                                  *****////
+///*****                                          Version 6.2.1_022200RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -91,6 +91,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_HCR.h"
 #include "WCB_WLED.h"
 #include "WCB_WDP.h"
+#include "WCB_WiFi.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -178,7 +179,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_021242RSEP2026";
+String SoftwareVersion = "6.2.1_022200RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3144,6 +3145,17 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
   emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
+  // WiFi (?WIFI). Emitted so a backup captures it and a restore replays it. The
+  // password rides along because a restore that brought the AP back WITHOUT its
+  // passphrase would silently fail closed at boot — the board would come up with
+  // no AP and nothing saying why. OFF is emitted too, so restoring a backup taken
+  // with WiFi off actively turns it off rather than leaving whatever was there.
+  if (wcbWifiMode == WCB_WIFI_AP)
+    emit("WIFI,AP," + wcbWifiApSsid + "," + wcbWifiApPass, true);
+  else if (wcbWifiMode == WCB_WIFI_JOIN)
+    emit("WIFI,JOIN," + wcbWifiJoinSsid + "," + wcbWifiJoinPass, true);
+  else
+    emit("WIFI,OFF", true);
   // Derived live membership count (WCBQ floor ∪ WDP-learned peers). When
   // auto-join is on this can exceed WCBQ; the Wizard shows it read-only so the
   // operator sees what the board actually talks to, not just what they typed.
@@ -5327,6 +5339,15 @@ void processLocalCommand(const String &message) {
             return;
         }
         saveMeshChannelToPreferences((uint8_t)ch);   // persists; applies on reboot
+        return;
+    }
+
+    // --- ?WIFI — host an AP, or join one, on the mesh channel (see WCB_WiFi.h) ---
+    // Persisted and applied on the NEXT REBOOT, for the same reason ?WCBCH is:
+    // re-entering the WiFi driver underneath a running esp_now would strand the
+    // rest of a config push, which arrives as a stream of commands.
+    if (rootUpper == "WIFI") {
+        processWifiCommand(args);
         return;
     }
 
@@ -7835,6 +7856,7 @@ void setup() {
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
   loadMeshChannelFromPreferences();   // must precede WiFi init below (esp_wifi_set_channel)
+  loadWifiSettings();                 // ditto — wcbWifiStart() hosts/joins on meshChannel
   loadSpecialPeerPreferences();
   loadSpecialPeerIDFromPreferences();
   loadMACPreferences();
@@ -8033,6 +8055,18 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 
 
+  // Optional WiFi (?WIFI — OFF by default). ORDER IS LOAD-BEARING and this is the
+  // only spot that satisfies both ends of it:
+  //   AFTER  esp_wifi_set_mac(), so the ESP-NOW MAC is stamped on a plain WIFI_STA
+  //          interface before an AP is added alongside it.
+  //   BEFORE esp_now_init(), because in AP mode the SoftAP has to own the radio
+  //          channel first — once ESP-NOW is initialised, nothing later moves the
+  //          radio, and an AP raised afterwards would fight it. Same ordering
+  //          WCB_Client had to discover hosting NaviCore's AP.
+  // Does nothing at all when the mode is OFF: the radio stays exactly as the block
+  // above left it.
+  wcbWifiStart();
+
   // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
@@ -8187,6 +8221,7 @@ void loop() {
   drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
+  wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processDFPResponses();   // Read DFPlayer Mini response frames (non-blocking)
