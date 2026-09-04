@@ -112,7 +112,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '02.22:00.R.SEP.2026';
+const UI_VERSION = '04.13:06.R.SEP.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -909,6 +909,58 @@ function updatePortClaimUI(n) {
 }
 
 // ─── Kyber ────────────────────────────────────────────────────────
+// ─── WiFi (per board) ──────────────────────────────────────────────
+// Shows/hides the credential fields for the selected mode and writes the
+// standing advice into the note line. The channel is deliberately absent from
+// this UI: the ESP32 has one radio, so WiFi always runs on the mesh channel and
+// offering it here would be offering a way to take the board off the mesh with
+// no visible symptom.
+function updateWifiVisibility(n, mode) {
+  const ap   = document.getElementById(`b${n}-wifi-ap`);
+  const join = document.getElementById(`b${n}-wifi-join`);
+  const note = document.getElementById(`b${n}-wifi-note`);
+  if (ap)   ap.style.display   = mode === 'ap'   ? '' : 'none';
+  if (join) join.style.display = mode === 'join' ? '' : 'none';
+  if (!note) return;
+  const ch = systemConfig?.general?.meshChannel ?? 1;
+  if (mode === 'ap') {
+    note.style.display = '';
+    note.innerHTML = `Runs on <b>channel ${ch}</b> — the mesh channel. One radio means WiFi and ` +
+      `ESP&#8209;NOW share it, so it follows the mesh and cannot be set separately. ` +
+      `Takes effect after a reboot.`;
+  } else if (mode === 'join') {
+    note.style.display = '';
+    note.innerHTML = `That network <b>must be on channel ${ch}</b> — the mesh channel. A NaviCore ` +
+      `hosts its AP on its own mesh channel, so it matches by construction. If the board lands ` +
+      `elsewhere it disconnects on purpose rather than go deaf, and says so. Takes effect after a reboot.`;
+  } else {
+    note.style.display = 'none';
+    note.innerHTML = '';
+  }
+}
+
+function onWifiModeChange(n) {
+  const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value ?? 'off';
+  updateWifiVisibility(n, mode);
+  const config = boardConfigs[n];
+  if (!config) return;
+  if (!config.wifi) config.wifi = { mode: 'off', apSsid: '', apPass: '', joinSsid: '', joinPass: '' };
+  config.wifi.mode = mode;
+  onBoardFieldChange(n);   // mark the board unsaved (WiFi needs a reboot to apply)
+}
+
+function onWifiFieldChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  if (!config.wifi) config.wifi = { mode: 'off', apSsid: '', apPass: '', joinSsid: '', joinPass: '' };
+  const val = id => document.getElementById(`b${n}-wifi-${id}`)?.value ?? '';
+  config.wifi.apSsid   = val('ap-ssid');
+  config.wifi.apPass   = val('ap-pass');
+  config.wifi.joinSsid = val('join-ssid');
+  config.wifi.joinPass = val('join-pass');
+  onBoardFieldChange(n);   // mark the board unsaved (WiFi needs a reboot to apply)
+}
+
 function onKyberChange(n) {
   const mode        = document.querySelector(`input[name="b${n}-kyber"]:checked`)?.value ?? 'none';
   const portWrap    = document.getElementById(`b${n}-kyber-port-wrap`);
@@ -3107,6 +3159,18 @@ function populateUIFromConfig(n, config) {
     if (el('bcout')) el('bcout').checked = sp.broadcastOut;
     if (el('label')) el('label').value  = sp.label;
   }
+
+  // WiFi — per board. Tolerate a config from an older backup that has no wifi
+  // block at all rather than throwing half-way through populating the card.
+  const w = config.wifi ?? { mode: 'off' };
+  const wifiInput = document.querySelector(`input[name="b${n}-wifi"][value="${w.mode ?? 'off'}"]`);
+  if (wifiInput) wifiInput.checked = true;
+  const setVal = (id, v) => { const e = document.getElementById(`b${n}-wifi-${id}`); if (e) e.value = v ?? ''; };
+  setVal('ap-ssid',   w.apSsid);
+  setVal('ap-pass',   w.apPass);
+  setVal('join-ssid', w.joinSsid);
+  setVal('join-pass', w.joinPass);
+  updateWifiVisibility(n, w.mode ?? 'off');
 
   // Kyber — None / Local / Remote are all directly selectable. "Remote" means
   // this board has no local Kyber but listens for Maestro/Pololu broadcasts
@@ -8595,6 +8659,7 @@ function commandStringNeedsReboot(cmdString) {
   if (u.includes('WCB,'))   return true;   // Board number or quantity (WCBQ also matches)
   if (u.includes('MAC,'))   return true;   // MAC octets — ESP-NOW identity
   if (u.includes('WCBCH,')) return true;   // Mesh channel — firmware applies it on reboot, not live
+  if (u.includes('WIFI,'))  return true;   // WiFi mode/SSID — firmware applies it on reboot, not live
   if (u.includes('KYBER,')) return true;   // Kyber mode — serial port reservation
   // PWM INPUT mapping (MAP,PWM,Sx,...) — firmware auto-reboots, but we signal it too
   // PWM OUTPUT declaration (MAP,PWM,OUT,Sx) does NOT need a reboot

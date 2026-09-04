@@ -170,21 +170,56 @@ rather than leaving whatever was there.
 
 ---
 
-## 7. Browser tool
+## 7. Wizard integration
 
-`Wizard/wifi-tool.html` — a standalone single-file page beside the Setup Wizard,
-configuring `?WIFI` over **Web Serial**.
+WiFi is configured from the **board card** in the Setup Wizard, under an
+`advanced-only` subsection — most builders never need it, and putting an access point
+on a droid is a decision worth making deliberately.
 
-It is a USB tool by necessity. The page is served from GitHub Pages over HTTPS, and a
-browser will not let an HTTPS page open a plaintext `ws://` or `http://` connection —
-mixed content is a hard block with no click-through. Web Serial, conversely, *requires*
-a secure context. That is an acceptable fit, because enabling WiFi is inherently
-first-contact: you cannot configure the access point over the access point that does
-not exist yet.
+It is a **per-board** field, unlike `meshChannel` which is system-wide, so it lives in
+`boardConfigs[n].wifi` rather than in general settings. Four integration points in
+`Wizard/parser.js`, all of which must move together:
 
-The same constraint means the **Setup Wizard cannot manage boards over WiFi** from its
-published URL either. Network management is for a native app, or for a page served
-from `http://localhost`.
+| Point | What |
+|---|---|
+| defaults | `wifi: { mode, apSsid, apPass, joinSsid, joinPass }` |
+| `case 'WIFI'` | parses `WIFI,OFF` / `WIFI,AP,<ssid>,<pass>` / `WIFI,JOIN,…` |
+| command generation | emits one `WIFI,…` line, only when something changed |
+| `check('wifi', …)` | so the diff engine sees an edit as unsaved |
+
+The password is split off manually rather than taken from `parts[]`: a WPA2 passphrase
+may contain commas, so everything after the SSID field is password.
+
+`commandStringNeedsReboot()` in `app.js` lists `WIFI,`. Without that entry a push
+applies the setting and never prompts for the restart that makes it take effect — the
+board would silently keep its old WiFi state. The generator only emits the line when
+something actually changed, so unrelated edits do not nag for a reboot.
+
+**The channel is deliberately absent from this UI.** Offering it would be offering a
+way to take the board off the mesh with no visible symptom. The note line instead
+states which channel WiFi will run on, read from the live `meshChannel`.
+
+### Why there is no separate WiFi tool
+
+An earlier cut of this work shipped `Wizard/wifi-tool.html`, a standalone Web Serial
+page. It was removed. Two reasons, both concrete:
+
+- `?WIFI` is already in the **restorable config chain**, so the Wizard has to
+  understand it regardless — a tool that set it independently would be silently
+  undone by the next config push or restore.
+- Two same-origin tabs cannot both hold a serial port.
+
+### The transport constraint, and why it is already solved
+
+A page served over **HTTPS cannot open a plaintext `ws://` or `http://`** connection to
+a board. Mixed content is a hard block with no click-through, so the Wizard's published
+GitHub Pages URL can never talk to a board over WiFi.
+
+**NaviLink already routes around this** by serving the config-tool UI itself over
+`http://127.0.0.1:PORT` and putting its WebSocket on that same origin. The host process
+decides whether the far end is a COM port or the droid's AP, so serial and WiFi become
+one code path in the page. Any browser-based network management has to be served that
+way — from the host, not from Pages.
 
 ---
 
@@ -216,4 +251,5 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-03 | _(pending)_ | WiFi moved into the Wizard board card (advanced-only) and the standalone `wifi-tool.html` removed — `?WIFI` is in the restorable config chain, so the Wizard has to own it or a push would silently undo an external tool. Wired through all four `parser.js` points, and `WIFI,` added to `commandStringNeedsReboot()`; without it a push applied the setting and never asked for the reboot that makes it real. |
 | 2026-09-02 | _(pending)_ | Initial design and implementation on branch `WIFI`. `?WIFI` with OFF/AP/JOIN modes, channel locked to `?WCBCH`, fail-closed AP password, non-blocking JOIN with channel verification and no AP fallback, NVS `wifi_cfg`, config round-trip, and `Wizard/wifi-tool.html`. Section 5 records the open soft-serial interaction, which gates enabling this on a board with PWM / Kyber / raw-mapped / local-Maestro ports. |

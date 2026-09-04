@@ -60,6 +60,20 @@ function createDefaultBoardConfig() {
     // through backup import/export; set on the board via ?SBOS0 / ?BCAST,OUT,S0. No UI toggle.
     broadcastToS0: false,
 
+    // WiFi (?WIFI) — PER BOARD, unlike meshChannel which is system-wide. Each board
+    // independently hosts an AP, joins one, or stays off; the CHANNEL is not part of
+    // this because the radio only has one and it always follows meshChannel.
+    // The password is carried so a restore can bring an AP back working — a restore
+    // that replayed the SSID without the passphrase would fail closed at boot and the
+    // board would come up with no AP and nothing saying why.
+    wifi: {
+      mode:     'off',   // 'off' | 'ap' | 'join'
+      apSsid:   '',      // '' = firmware derives WCB-<alias> / WCB-<number>
+      apPass:   '',      // >= 8 chars or the firmware refuses to start the AP
+      joinSsid: '',
+      joinPass: '',
+    },
+
     // Kyber
     kyber: {
       mode:          'none',  // 'none' | 'local' | 'remote'
@@ -619,6 +633,33 @@ function parseToken(body, config) {
       if (portIdx >= 0 && portIdx < 5) {
         if (direction === 'OUT') config.serialPorts[portIdx].broadcastOut = enabled;
         if (direction === 'IN')  config.serialPorts[portIdx].broadcastIn  = enabled;
+      }
+      break;
+    }
+
+    // ── WiFi ──
+    case 'WIFI': {
+      // ?WIFI,OFF
+      // ?WIFI,AP,<ssid>,<pass>
+      // ?WIFI,JOIN,<ssid>,<pass>
+      // Split manually rather than trusting parts[]: a WPA2 passphrase may contain
+      // commas, so everything after the SSID field is password, not more fields.
+      const mode = upperParts[1];
+      if (mode === 'OFF' || !mode) {
+        config.wifi.mode = 'off';
+        break;
+      }
+      if (mode !== 'AP' && mode !== 'JOIN') break;   // unknown subcommand — ignore
+      const ssid = (parts[2] || '').trim();
+      const pass = parts.length > 3 ? parts.slice(3).join(',') : '';
+      if (mode === 'AP') {
+        config.wifi.mode   = 'ap';
+        config.wifi.apSsid = ssid;
+        config.wifi.apPass = pass;
+      } else {
+        config.wifi.mode     = 'join';
+        config.wifi.joinSsid = ssid;
+        config.wifi.joinPass = pass;
       }
       break;
     }
@@ -1372,6 +1413,27 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || (baseline?.broadcastToS0 ?? false) !== (config.broadcastToS0 ?? false))
     add(`BCAST,OUT,S0,${config.broadcastToS0 ? 'ON' : 'OFF'}`);
 
+  // ── WiFi ──
+  // Emitted as ONE line carrying mode + credentials together, because that is the
+  // shape the firmware command takes. Only when something actually changed: this
+  // needs a reboot to take effect (commandStringNeedsReboot in app.js lists WIFI,),
+  // so pushing it on every unrelated edit would nag for a restart that changes nothing.
+  {
+    const w  = config.wifi  ?? { mode: 'off' };
+    const bw = baseline?.wifi ?? { mode: 'off' };
+    const changed = fullPush ||
+      (bw.mode ?? 'off')     !== (w.mode ?? 'off')     ||
+      (bw.apSsid ?? '')      !== (w.apSsid ?? '')      ||
+      (bw.apPass ?? '')      !== (w.apPass ?? '')      ||
+      (bw.joinSsid ?? '')    !== (w.joinSsid ?? '')    ||
+      (bw.joinPass ?? '')    !== (w.joinPass ?? '');
+    if (changed) {
+      if (w.mode === 'ap')        add(`WIFI,AP,${w.apSsid ?? ''},${w.apPass ?? ''}`);
+      else if (w.mode === 'join') add(`WIFI,JOIN,${w.joinSsid ?? ''},${w.joinPass ?? ''}`);
+      else                        add('WIFI,OFF');
+    }
+  }
+
   // ── Kyber ──
   // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
   const kyberChanged = fullPush || !baseline ||
@@ -1663,6 +1725,7 @@ function diffConfigs(configA, configB) {
   check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
   check('broadcastToS0',  configA.broadcastToS0 ?? false, configB.broadcastToS0 ?? false);
+  check('wifi',           configA.wifi ?? { mode: 'off' }, configB.wifi ?? { mode: 'off' });
 
   for (let i = 0; i < 5; i++) {
     const pa = configA.serialPorts[i];

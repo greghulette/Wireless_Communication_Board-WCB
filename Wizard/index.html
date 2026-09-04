@@ -610,6 +610,44 @@
       </table>
       </div>
 
+      <!-- WiFi — PER BOARD. Advanced-only: most builders never need it, and an
+           access point on a droid is a decision worth making deliberately. -->
+      <div class="subsection advanced-only hidden" style="--rail:#00d4ff">
+      <hr class="divider">
+      <div class="subsection-title">WiFi <span class="wiz-hint" data-tip="Optional. Lets this board host an access point, or join one, so the mesh can be managed without a USB cable. Off by default.">i</span></div>
+      <div class="field-group">
+        <div class="field">
+          <label>Mode <span class="wiz-hint" data-tip="Off: ESP-NOW only (default). Host AP: this board runs its own access point. Join: this board connects to an existing network, e.g. a NaviCore's AP.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-wifi" value="off" checked onchange="onWifiModeChange({N})"><span>Off</span></label>
+            <label><input type="radio" name="b{N}-wifi" value="ap" onchange="onWifiModeChange({N})"><span>Host AP</span></label>
+            <label><input type="radio" name="b{N}-wifi" value="join" onchange="onWifiModeChange({N})"><span>Join</span></label>
+          </div>
+        </div>
+      </div>
+      <div id="b{N}-wifi-ap" class="field-group" style="display:none">
+        <div class="field">
+          <label>Network Name (SSID) <span class="wiz-hint" data-tip="Leave blank and the board derives WCB-<alias>, or WCB-<number> if it has no alias.">i</span></label>
+          <input type="text" id="b{N}-wifi-ap-ssid" maxlength="32" placeholder="blank = WCB-&lt;alias&gt;" oninput="onWifiFieldChange({N})">
+        </div>
+        <div class="field">
+          <label>Password <span class="wiz-hint" data-tip="Required, 8 characters minimum. This interface accepts commands for the whole mesh with no credential of its own, so the firmware refuses to start an open access point.">i</span></label>
+          <input type="password" id="b{N}-wifi-ap-pass" maxlength="63" placeholder="required, 8+ characters" oninput="onWifiFieldChange({N})">
+        </div>
+      </div>
+      <div id="b{N}-wifi-join" class="field-group" style="display:none">
+        <div class="field">
+          <label>Network to Join</label>
+          <input type="text" id="b{N}-wifi-join-ssid" maxlength="32" placeholder="e.g. NaviCore-20" oninput="onWifiFieldChange({N})">
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="b{N}-wifi-join-pass" maxlength="63" oninput="onWifiFieldChange({N})">
+        </div>
+      </div>
+      <div id="b{N}-wifi-note" class="hint" style="display:none"></div>
+      </div>
+
       <!-- Kyber section (shown only when Controller = Kyber) -->
       <div id="b{N}-kyber-section" class="subsection" style="--rail:#ff5d6c;display:none">
       <hr class="divider">
