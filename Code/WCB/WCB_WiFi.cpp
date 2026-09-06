@@ -1,3 +1,4 @@
+#include "WCB_RemoteTerm.h"   // Must be first — redirects Serial -> WCBDebugSerial
 #include "WCB_WiFi.h"
 #include "WCB_Storage.h"
 

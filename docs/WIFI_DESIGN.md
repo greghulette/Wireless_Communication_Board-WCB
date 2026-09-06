@@ -251,5 +251,6 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-05 | _(pending)_ | **`WCB_WiFi.cpp` was printing into an unopened port.** It omitted `#include "WCB_RemoteTerm.h"`, which ends in `#define Serial WCBDebugSerial`; `setup()` only calls `begin()` on that wrapper, so the core's raw `Serial` is never opened. `?WIFI` matched, ran and printed nothing — a *dead command* with no error, because the command was known. Recorded as rule 12 in `CLAUDE.md`, since it applies to any new subsystem file. |
 | 2026-09-03 | _(pending)_ | WiFi moved into the Wizard board card (advanced-only) and the standalone `wifi-tool.html` removed — `?WIFI` is in the restorable config chain, so the Wizard has to own it or a push would silently undo an external tool. Wired through all four `parser.js` points, and `WIFI,` added to `commandStringNeedsReboot()`; without it a push applied the setting and never asked for the reboot that makes it real. |
 | 2026-09-02 | _(pending)_ | Initial design and implementation on branch `WIFI`. `?WIFI` with OFF/AP/JOIN modes, channel locked to `?WCBCH`, fail-closed AP password, non-blocking JOIN with channel verification and no AP fallback, NVS `wifi_cfg`, config round-trip, and `Wizard/wifi-tool.html`. Section 5 records the open soft-serial interaction, which gates enabling this on a board with PWM / Kyber / raw-mapped / local-Maestro ports. |

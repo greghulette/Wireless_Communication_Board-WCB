@@ -100,7 +100,19 @@ changing before editing.**
     watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
     (`mgmtQueueOut` / `drainMgmtOut`).
 
-12. **S3-S5 are bit-banged software UARTs, and their TX timing is not protected by default.**
+12. **Every new `WCB_<area>.cpp` must `#include "WCB_RemoteTerm.h"` FIRST, or its output
+    vanishes silently.** That header ends with `#define Serial WCBDebugSerial`, and
+    `setup()` only ever calls `begin()` on the wrapper — the core's raw `Serial` object is
+    never opened. A subsystem file that omits the include still compiles, still runs, and
+    prints every line into an unopened port. The failure looks like a **dead command**: the
+    dispatcher matches, the handler executes, state changes, and the operator sees nothing
+    at all — not even "Unknown command", because the command *was* known. Cost a debugging
+    session on `?WIFI`. Every existing subsystem file has the include on line 1; the only
+    exemptions are `WCB_RemoteTerm.cpp` (it *is* the wrapper) and `wcb_pin_map.cpp` (all its
+    prints are commented out). Check with:
+    `for f in Code/WCB/*.cpp; do head -3 "$f" | grep -q WCB_RemoteTerm.h || echo "$f"; done`
+
+13. **S3-S5 are bit-banged software UARTs, and their TX timing is not protected by default.**
     `SoftwareSerial Serial3/4/5` (`WCB.ino`) is EspSoftwareSerial: TX busy-waits each bit
     period against a running anchor, and the library default `m_intTxEnabled = true` means it
     never takes a critical section. An ESP-NOW interrupt landing mid-byte pushes the
