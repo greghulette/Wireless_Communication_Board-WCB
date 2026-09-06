@@ -1,5 +1,6 @@
 #include "WCB_RemoteTerm.h"   // Must be first — redirects Serial -> WCBDebugSerial
 #include "WCB_WiFi.h"
+#include "WCB_WS.h"           // wcbWsClientCount() for the status block
 #include "WCB_Storage.h"
 
 #include <WiFi.h>
@@ -106,6 +107,23 @@ static void wcbWifiStartAP() {
     // AP_STA, not AP: ESP-NOW rides the STA interface, and tearing that down
     // would take the mesh with it.
     WiFi.mode(WIFI_AP_STA);
+
+    // Sit at 192.168.4.<board number> rather than the default .1.
+    //
+    // .1 is what EVERY ESP32 SoftAP defaults to, including NaviCore's — so a host
+    // app probing .1 finds *something* and cannot tell what answered. Deriving the
+    // address from the board number makes the address itself the identity: WCB3 is
+    // always 192.168.4.3, and .1 stays unambiguously NaviCore.
+    //
+    // Safe against our own DHCP pool: the core leases exactly eleven addresses
+    // starting one above the AP's own IP (NetworkInterface.cpp — start = AP+1,
+    // end = start+10), so the pool moves with us and can never contain us.
+    {
+      const IPAddress apIp(192, 168, 4, (uint8_t)WCB_Number);
+      if (!WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0)))
+        Serial.printf("[WIFI] softAPConfig(%s) failed — falling back to the default address.\n",
+                      apIp.toString().c_str());
+    }
 
     // CHANNEL IS THE THIRD PARAMETER AND DEFAULTS TO 1. Pass meshChannel
     // explicitly. Once an AP owns the radio, nothing later moves it — the
@@ -272,6 +290,13 @@ static void wcbWifiPrintStatus() {
                   (ch && ch != meshChannel) ? "   *** MISMATCH — OFF-MESH ***" : "");
     // Free heap is the number that decides whether a web server can live here at
     // all, so make it observable rather than something you have to guess at.
+    // "up with nobody connected" and "never started" both show 0 clients but want
+    // completely different fixes, so say which one this is.
+    if (wcbWsRunning())
+        Serial.printf("WS endpoint   : ws://%s/ws  (%d client(s) connected)\n",
+                      ip.c_str(), wcbWsClientCount());
+    else
+        Serial.println("WS endpoint   : NOT RUNNING");
     Serial.printf("Free heap     : %u bytes (min since boot %u)\n",
                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
     Serial.println("------------------------------------------------------");

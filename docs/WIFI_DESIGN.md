@@ -170,6 +170,45 @@ rather than leaving whatever was there.
 
 ---
 
+## 6a. The WebSocket endpoint (`WCB_WS.{h,cpp}`)
+
+`ws://<board-ip>/ws` — a second mouth for the same line protocol the USB port
+speaks. Lines go to `processSerialCommandHelper()`, the identical dispatcher the
+Serial0 reader feeds, so the two transports cannot drift. Starts automatically on
+the first `loop()` pass where `wcbWifiReady()` is true, latched so a failed start
+is not retried forever.
+
+**Concurrency.** The httpd task is Core 0, beside the ESP-NOW receive callback. The
+handler may only copy, enqueue and return — `processSerialCommandHelper()` writes
+NVS, drives bit-banged SoftwareSerial and blocks on ETM retries. `wcbWsService()`
+runs one command per pass from `loop()` on Core 1. The handler also **never
+prints**: UART0 has no TX buffer, so a print there blocks the httpd task and holds
+the UART0 mutex against `loop()`. Drops are counted and reported from `loop()`.
+
+**Output tee.** `WCBSerial::write()` gains a third destination alongside USB and the
+mesh relay. Teeing at that one point rather than at each print site is what keeps
+the transports identical — handlers go on printing exactly as they always have.
+`wcbWsSinkWrite()` only appends to a buffer: no print (that would recurse straight
+back into the tee), no allocation, no TCP send.
+
+**Per-command flags.** The drain resets `lastReceivedViaESPNOW` and `inSequenceBody`
+before dispatching, exactly as the Serial0 reader does. They are snapshotted per
+queue item, so a value left from a prior mesh recall's body drain would otherwise
+latch and suppress this command's fan-out.
+
+**Line cap is 1536, not MgmtRelay's 384.** The relay's socket only carries
+`?OTA,DATA` with a 192-byte firmware chunk. This endpoint is the one an OTA over
+WiFi uses, and that is the *direct* path — `?OTALOCAL,DATA,<base64>` with a
+1024-byte chunk (`const CHUNK = 1024` in the Wizard), which encodes to ~1368 chars
+plus prefix. At 384 every DATA frame would hit the line-too-long guard, and the
+transfer would ACK the BEGIN and then move nothing.
+
+**AP address.** The board sits at `192.168.4.<board number>`, not the `.1` every
+ESP32 SoftAP defaults to — including NaviCore's. Deriving it from the board number
+makes the address the identity: WCB3 is always `192.168.4.3` and `.1` stays
+unambiguously NaviCore. Safe against the DHCP pool, which is eleven leases starting
+at AP+1 and therefore moves with us.
+
 ## 7. Wizard integration
 
 WiFi is configured from the **board card** in the Setup Wizard, under an
@@ -232,8 +271,30 @@ Baseline is 6.2.1 (`66845b9`), `PartitionScheme=min_spiffs`, core `esp32:esp32@3
 | ESP32 | 1,299,367 (66%) | 1,309,559 (66%) | 95,664 (29%) | 95,744 (29%) |
 | ESP32-S3 | 1,265,247 (64%) | 1,275,559 (64%) | 93,912 (28%) | 94,000 (28%) |
 
-So the module itself costs ~10 KB of flash and under 100 bytes of static RAM on both
-targets — neither percentage moved.
+So the WiFi module itself costs ~10 KB of flash and under 100 bytes of static RAM on
+both targets — neither percentage moved.
+
+Adding the WebSocket endpoint (`WCB_WS`) on top:
+
+| Target | Flash | Static RAM |
+|---|---|---|
+| ESP32 | 1,345,847 (68%) — **+36.3 KB** | 105,552 (32%) — **+9.8 KB** |
+| ESP32-S3 | 1,311,099 (66%) — **+35.5 KB** | 103,808 (31%) — **+9.8 KB** |
+
+The static growth is the three per-socket accumulators (3 × 1536 B), the 2 KB output
+sink and the 3 KB static receive buffer. The command queue is *heap*-allocated
+(6 × 1540 B ≈ 9.2 KB) and so comes out of runtime free heap, not this figure.
+
+**Measured on hardware**, WCB1 with the AP up and no client attached:
+
+```
+Free heap : 110588 bytes (min since boot 109828)
+```
+
+A 760-byte spread between current and minimum means a flat, unfragmented heap — this
+is headroom, not a lucky sample. Against ~9 KB for the queue plus httpd's own socket
+and TCP allocations, that leaves comfortable margin on the *classic* ESP32, which is
+the tighter of the two targets.
 
 That is the WiFi module only — no web server yet. For reference, the WebSocket
 endpoint in `MgmtRelay` measured **+37 KB flash / +4.7 KB static RAM**, which would
@@ -251,6 +312,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-06 | _(pending)_ | **Added the WebSocket endpoint** (`WCB_WS.{h,cpp}`, `ws://<ip>/ws`), which is what makes the AP useful — until now the radio was up with nothing listening. Feeds `processSerialCommandHelper()`, so it is the same command surface as USB. Handler copy-enqueue-returns on Core 0 and never prints; commands run from `loop()`; output tees through `WCBSerial::write()`. Line cap 1536 B, not MgmtRelay's 384, because `?OTALOCAL` uses 1 KB chunks. The AP also moved to `192.168.4.<board number>` so it stops colliding with NaviCore's default `.1`. Measured free heap before this landed: 110,588 B. |
 | 2026-09-05 | _(pending)_ | **`WCB_WiFi.cpp` was printing into an unopened port.** It omitted `#include "WCB_RemoteTerm.h"`, which ends in `#define Serial WCBDebugSerial`; `setup()` only calls `begin()` on that wrapper, so the core's raw `Serial` is never opened. `?WIFI` matched, ran and printed nothing — a *dead command* with no error, because the command was known. Recorded as rule 12 in `CLAUDE.md`, since it applies to any new subsystem file. |
 | 2026-09-03 | _(pending)_ | WiFi moved into the Wizard board card (advanced-only) and the standalone `wifi-tool.html` removed — `?WIFI` is in the restorable config chain, so the Wizard has to own it or a push would silently undo an external tool. Wired through all four `parser.js` points, and `WIFI,` added to `commandStringNeedsReboot()`; without it a push applied the setting and never asked for the reboot that makes it real. |
 | 2026-09-02 | _(pending)_ | Initial design and implementation on branch `WIFI`. `?WIFI` with OFF/AP/JOIN modes, channel locked to `?WCBCH`, fail-closed AP password, non-blocking JOIN with channel verification and no AP fallback, NVS `wifi_cfg`, config round-trip, and `Wizard/wifi-tool.html`. Section 5 records the open soft-serial interaction, which gates enabling this on a board with PWM / Kyber / raw-mapped / local-Maestro ports. |

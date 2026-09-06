@@ -5,6 +5,7 @@
 
 #include "WCB_RemoteTerm.h"
 #include "WCB_Storage.h"
+#include "WCB_WS.h"           // WebSocket output tee — see write() below
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -46,9 +47,15 @@ WCBSerial WCBDebugSerial(0);
 //  write() overrides — pass-through + optional line buffering
 // ════════════════════════════════════════════════════════════════
 
+// A WebSocket client is a THIRD destination alongside USB and the mesh relay.
+// Teeing here rather than at each print site is what keeps the three transports
+// from drifting — every handler goes on printing exactly as it always has.
+// wcbWsSinkWrite() only appends to a buffer: no print (that would recurse
+// straight back into here), no allocation, no TCP send.
 size_t WCBSerial::write(uint8_t c) {
   size_t r = HardwareSerial::write(c);    // always send to USB
   if (_relayWCB) _bufChar(c);
+  if (wcbWsSinkLive()) wcbWsSinkWrite(c);
   return r;
 }
 
@@ -56,6 +63,9 @@ size_t WCBSerial::write(const uint8_t *buf, size_t size) {
   size_t r = HardwareSerial::write(buf, size);  // always send to USB
   if (_relayWCB) {
     for (size_t i = 0; i < size; i++) _bufChar(buf[i]);
+  }
+  if (wcbWsSinkLive()) {
+    for (size_t i = 0; i < size; i++) wcbWsSinkWrite(buf[i]);
   }
   return r;
 }

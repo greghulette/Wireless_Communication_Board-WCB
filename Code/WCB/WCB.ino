@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_052229RSEP2026                                  *****////
+///*****                                          Version 6.2.1_061852RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -92,6 +92,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_WLED.h"
 #include "WCB_WDP.h"
 #include "WCB_WiFi.h"
+#include "WCB_WS.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -179,7 +180,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_052229RSEP2026";
+String SoftwareVersion = "6.2.1_061852RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -8222,6 +8223,7 @@ void loop() {
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
+  wcbWsService();          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
   checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
   processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
   processDFPResponses();   // Read DFPlayer Mini response frames (non-blocking)
