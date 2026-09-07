@@ -49,6 +49,9 @@ static size_t   sinkLen      = 0;
 static bool     sinkDropping = false;
 static uint32_t sinkDrops    = 0;     // whole lines dropped; reported from loop()
 static uint32_t cmdDrops     = 0;     // commands refused at the queue
+// The loop task, captured the first time wcbWsService() runs. wcbWsSinkWrite() may
+// only flush inline while running on THIS task — see the note there.
+static TaskHandle_t sinkLoopTask = nullptr;
 
 bool wcbWsSinkLive() {
   for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] >= 0) return true;
@@ -127,9 +130,20 @@ void wcbWsSinkWrite(uint8_t c) {
   if (!wcbWsSinkLive()) return;
   if (sinkDropping) { if (c == '\n') sinkDropping = false; return; }
   if (sinkLen >= WS_SINK_BUF) {
-    // Full between pumps. Drop to end-of-line and count it — we cannot flush
-    // here, because a TCP send on this task is exactly what this function
-    // exists to avoid.
+    // FULL. A bulk reply — ?CONFIG dumps ~3 KB — is emitted as a tight run of
+    // Serial.println() calls with no loop() iteration between them, so waiting for
+    // the next wcbWsService() means discarding most of it. Measured: pulling a
+    // config over the socket lost a line mid-dump.
+    //
+    // So flush inline, but ONLY on the loop task. That is the whole reason this
+    // check exists: on any other task — above all the ESP-NOW receive callback —
+    // a TCP send here would block the WiFi task, which is the failure this file is
+    // built to avoid. Off the loop task we still drop, because dropping a
+    // telemetry line is survivable and stalling the radio is not.
+    if (xTaskGetCurrentTaskHandle() == sinkLoopTask && sinkPump() && sinkLen < WS_SINK_BUF) {
+      sinkBuf[sinkLen++] = (char)c;
+      return;
+    }
     sinkDropping = true;
     sinkDrops++;
     return;
@@ -272,6 +286,10 @@ void wcbWsService() {
   // no single point in boot where "the network is up" is true for both modes.
   // Latched — a failed start is not retried every pass, which would spam the log
   // forever on a board where httpd genuinely cannot come up.
+  // We are on the loop task here, by definition. Capture it so the output tee can
+  // tell "safe to flush inline" from "this is the WiFi task, drop instead".
+  if (!sinkLoopTask) sinkLoopTask = xTaskGetCurrentTaskHandle();
+
   static bool startTried = false;
   if (!wsServer) {
     if (startTried || !wcbWifiReady()) return;

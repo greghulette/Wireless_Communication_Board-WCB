@@ -203,21 +203,25 @@ WiFi uses, and that is the *direct* path — `?OTALOCAL,DATA,<base64>` with a
 plus prefix. At 384 every DATA frame would hit the line-too-long guard, and the
 transfer would ACK the BEGIN and then move nothing.
 
-**AP address.** The board sits at `192.168.4.<board number>`, not the `.1` every
-ESP32 SoftAP defaults to — including NaviCore's. Deriving it from the board number
-makes the address the identity: WCB3 is always `192.168.4.3` and `.1` stays
-unambiguously NaviCore. Safe against the DHCP pool, which is eleven leases starting
-at AP+1 and therefore moves with us.
+**AP address: the stock `192.168.4.1`. Do not call `softAPConfig()`.**
 
-> **`softAPConfig()` MUST be called AFTER `softAP()`, never before.** It ends by
-> starting the DHCP server, but `softAP()` then reconfigures the interface and never
-> restarts it — the only `esp_netif_dhcps_start()` in the core's `AP.cpp` lives in
-> `enableDhcpCaptivePortal()`, which nothing here calls. Configure first and the AP
-> comes up with the correct IP and a **dead DHCP server**: clients associate happily,
-> get no lease, fall back to `169.254.x` and cannot reach the board at all. Confirmed
-> on hardware — Windows reported *"unable to contact your DHCP server"*, and the same
-> board leased `192.168.4.2` immediately once the order was swapped. The AP address
-> looks right in `?WIFI` either way, so nothing about the symptom points at the cause.
+The plan was `192.168.4.<board number>`, so a host could tell a WCB from a NaviCore
+by address — every ESP32 SoftAP defaults to `.1`, so probing it finds *something*
+and cannot say what. It was tried **both before and after `softAP()` and breaks DHCP
+either way**: the AP comes up, clients associate, `?WIFI` reports the correct IP, and
+no lease ever arrives, so every client falls back to `169.254.x` and cannot reach the
+board at all.
+
+Measured repeatedly on hardware — Windows reports *"unable to contact your DHCP
+server"* — and it is **not** a startup race: it still failed on a board that had been
+up for minutes. It appeared to work once, which makes it worse than useless. An
+intermittent DHCP failure costs far more to own than a duplicate default address.
+
+Nothing about the symptom points at the cause: the address looks right in `?WIFI`
+either way, and the AP is plainly up because clients associate to it.
+
+**Identity belongs in the protocol, not the address.** A host should ask — one
+command over the socket names the board — rather than infer from an IP.
 
 ## 7. Wizard integration
 
@@ -322,7 +326,9 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-07 | _(pending)_ | **VERIFIED ON HARDWARE**, and fixed a DHCP regression found doing it. `softAPConfig()` was being called *before* `softAP()`, which leaves the DHCP server stopped — clients associated, got no lease, fell back to `169.254.x` and could not reach the board. Moved it after. Confirmed end to end on WCB1 (ESP32-D0WD): lease `192.168.4.2`, WebSocket connected to `ws://192.168.4.1/ws`, `?WIFI` and `?VERSION` answered over the socket, and an unsolicited `[ETM] WCB19 came ONLINE` streamed through — so the output tee carries events, not just command replies. Free heap 77,044 with a client attached (min 61,236). |
+| 2026-09-07 | _(pending)_ | **Bulk replies were being truncated over the socket.** `wcbWsSinkWrite()` dropped whole lines once the 2 KB staging buffer filled, and it only drained once per `loop()` pass — but a config dump is a tight run of `Serial.println()` with no `loop()` iteration between them, so most of a ~3 KB reply was discarded. It now flushes **inline, but only while running on the loop task** (handle captured in `wcbWsService()`); off that task — above all the ESP-NOW callback — it still drops, because a TCP send there would stall the WiFi task. Verified: `WCB_WEBTOOL_CONFIG_PULL` over the socket returns 3,024 bytes / 67 lines with **0 drops**, ending in its checksum, `WIFI,` line included. |
+| 2026-09-07 | _(pending)_ | **`softAPConfig()` removed entirely — it breaks DHCP in either position.** See §6a; the board stays on the stock `192.168.4.1` and identity moves into the protocol. |
+| 2026-09-07 | _(pending)_ | **VERIFIED ON HARDWARE.** `softAPConfig()` was being called *before* `softAP()`, which leaves the DHCP server stopped — clients associated, got no lease, fell back to `169.254.x` and could not reach the board. Moved it after. Confirmed end to end on WCB1 (ESP32-D0WD): lease `192.168.4.2`, WebSocket connected to `ws://192.168.4.1/ws`, `?WIFI` and `?VERSION` answered over the socket, and an unsolicited `[ETM] WCB19 came ONLINE` streamed through — so the output tee carries events, not just command replies. Free heap 77,044 with a client attached (min 61,236). |
 | 2026-09-06 | _(pending)_ | **Added the WebSocket endpoint** (`WCB_WS.{h,cpp}`, `ws://<ip>/ws`), which is what makes the AP useful — until now the radio was up with nothing listening. Feeds `processSerialCommandHelper()`, so it is the same command surface as USB. Handler copy-enqueue-returns on Core 0 and never prints; commands run from `loop()`; output tees through `WCBSerial::write()`. Line cap 1536 B, not MgmtRelay's 384, because `?OTALOCAL` uses 1 KB chunks. The AP also moved to `192.168.4.<board number>` so it stops colliding with NaviCore's default `.1`. Measured free heap before this landed: 110,588 B. |
 | 2026-09-05 | _(pending)_ | **`WCB_WiFi.cpp` was printing into an unopened port.** It omitted `#include "WCB_RemoteTerm.h"`, which ends in `#define Serial WCBDebugSerial`; `setup()` only calls `begin()` on that wrapper, so the core's raw `Serial` is never opened. `?WIFI` matched, ran and printed nothing — a *dead command* with no error, because the command was known. Recorded as rule 12 in `CLAUDE.md`, since it applies to any new subsystem file. |
 | 2026-09-03 | _(pending)_ | WiFi moved into the Wizard board card (advanced-only) and the standalone `wifi-tool.html` removed — `?WIFI` is in the restorable config chain, so the Wizard has to own it or a push would silently undo an external tool. Wired through all four `parser.js` points, and `WIFI,` added to `commandStringNeedsReboot()`; without it a push applied the setting and never asked for the reboot that makes it real. |
