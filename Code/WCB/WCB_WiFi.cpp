@@ -108,22 +108,8 @@ static void wcbWifiStartAP() {
     // would take the mesh with it.
     WiFi.mode(WIFI_AP_STA);
 
-    // Sit at 192.168.4.<board number> rather than the default .1.
-    //
-    // .1 is what EVERY ESP32 SoftAP defaults to, including NaviCore's — so a host
-    // app probing .1 finds *something* and cannot tell what answered. Deriving the
-    // address from the board number makes the address itself the identity: WCB3 is
-    // always 192.168.4.3, and .1 stays unambiguously NaviCore.
-    //
-    // Safe against our own DHCP pool: the core leases exactly eleven addresses
-    // starting one above the AP's own IP (NetworkInterface.cpp — start = AP+1,
-    // end = start+10), so the pool moves with us and can never contain us.
-    {
-      const IPAddress apIp(192, 168, 4, (uint8_t)WCB_Number);
-      if (!WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0)))
-        Serial.printf("[WIFI] softAPConfig(%s) failed — falling back to the default address.\n",
-                      apIp.toString().c_str());
-    }
+    // NOTE: the address is set AFTER softAP() below, not here. See the comment
+    // there — configuring first leaves the DHCP server stopped.
 
     // CHANNEL IS THE THIRD PARAMETER AND DEFAULTS TO 1. Pass meshChannel
     // explicitly. Once an AP owns the radio, nothing later moves it — the
@@ -132,6 +118,31 @@ static void wcbWifiStartAP() {
     // blackout. max_connection 4: this is a config channel, not a hotspot.
     if (WiFi.softAP(ssid.c_str(), wcbWifiApPass.c_str(), meshChannel, /*hidden=*/0, /*max_conn=*/4)) {
         wifiUp = true;
+
+        // Sit at 192.168.4.<board number> rather than the default .1.
+        //
+        // .1 is what EVERY ESP32 SoftAP defaults to, NaviCore's included — so a host
+        // probing .1 finds something and cannot tell what answered. Deriving the
+        // address from the board number makes the address the identity: WCB3 is
+        // always 192.168.4.3, and .1 stays unambiguously NaviCore.
+        //
+        // THIS MUST COME AFTER softAP(), NOT BEFORE. softAPConfig() ends by starting
+        // the DHCP server, but softAP() then reconfigures the interface and never
+        // restarts it — the only dhcps_start() in AP.cpp is inside
+        // enableDhcpCaptivePortal(), which nothing here calls. Configure first and
+        // the AP comes up with the right IP and a DEAD DHCP server: clients
+        // associate, get no lease, fall back to 169.254.x and cannot reach the board
+        // at all. Measured on hardware — "unable to contact your DHCP server".
+        //
+        // The lease pool follows the AP address (eleven leases from AP+1;
+        // NetworkInterface.cpp), so it moves with us and can never contain us.
+        {
+          const IPAddress apIp(192, 168, 4, (uint8_t)WCB_Number);
+          if (!WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0)))
+            Serial.printf("[WIFI] softAPConfig(%s) failed — staying on the default address.\n",
+                          apIp.toString().c_str());
+        }
+
         Serial.printf("[WIFI] SoftAP \"%s\" up on channel %u — http://%s/\n",
                       ssid.c_str(), meshChannel, WiFi.softAPIP().toString().c_str());
         Serial.println("[WIFI] ESP-NOW shares this channel (WIFI_AP_STA).");
