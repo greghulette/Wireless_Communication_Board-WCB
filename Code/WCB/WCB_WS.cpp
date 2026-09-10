@@ -52,6 +52,9 @@ static uint32_t cmdDrops     = 0;     // commands refused at the queue
 // The loop task, captured the first time wcbWsService() runs. wcbWsSinkWrite() may
 // only flush inline while running on THIS task — see the note there.
 static TaskHandle_t sinkLoopTask = nullptr;
+// Guards sinkBuf/sinkLen/sinkDropping. The tee runs on whatever task is printing
+// and sinkPump() runs on loop — see the locking note above sinkPump().
+static portMUX_TYPE sinkMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool wcbWsSinkLive() {
   for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] >= 0) return true;
@@ -102,10 +105,30 @@ static size_t utf8SafeLen(const char *b, size_t n) {
 }
 
 // Flush the staging buffer to every connected client. Called ONLY from loop().
+//
+// THE LOCKING RULE. sinkBuf/sinkLen are written from whatever task is printing —
+// including the ESP-NOW receive callback on the WiFi task — while this function
+// rewrites them on the loop task. Unsynchronised, a print landing during the
+// memmove below has its byte relocated out from under it and sinkLen then
+// clobbered: torn output a host parser cannot tell from a real reply.
+//
+// The critical sections are deliberately tiny and never span the TCP send. That
+// is safe because appends only ever write at sinkBuf[sinkLen] and sinkLen only
+// grows, so the region [0, send) handed to httpd cannot be touched by a
+// concurrent writer — only the tail moves, and the tail is re-read under the lock
+// afterwards. Holding a spinlock across httpd_ws_send_frame_async() would disable
+// interrupts on this core for the whole of a network write, which is exactly the
+// stall this file exists to prevent.
 static bool sinkPump() {
-  if (!sinkLen || !wsServer) return wcbWsSinkLive();
-  size_t send = utf8SafeLen(sinkBuf, sinkLen);
-  if (!send) send = sinkLen;                 // cannot improve it — send rather than stall
+  if (!wsServer) return wcbWsSinkLive();
+
+  size_t send;
+  taskENTER_CRITICAL(&sinkMux);
+  send = sinkLen ? utf8SafeLen(sinkBuf, sinkLen) : 0;
+  if (!send && sinkLen) send = sinkLen;      // cannot improve it — send rather than stall
+  taskEXIT_CRITICAL(&sinkMux);
+  if (!send) return wcbWsSinkLive();
+
   httpd_ws_frame_t f = {};
   f.final   = true;
   f.type    = HTTPD_WS_TYPE_TEXT;
@@ -115,9 +138,13 @@ static bool sinkPump() {
     if (wsFds[i] < 0) continue;
     if (httpd_ws_send_frame_async(wsServer, wsFds[i], &f) != ESP_OK) wsFds[i] = -1;
   }
-  const size_t left = sinkLen - send;
+
+  // Re-read sinkLen: a writer may have appended while the send was in flight.
+  taskENTER_CRITICAL(&sinkMux);
+  const size_t left = (sinkLen > send) ? (sinkLen - send) : 0;
   if (left) memmove(sinkBuf, sinkBuf + send, left);
   sinkLen = left;
+  taskEXIT_CRITICAL(&sinkMux);
   return wcbWsSinkLive();
 }
 
@@ -128,27 +155,51 @@ static bool sinkPump() {
 // JSON object breaks a host tool's parser while a lost line is just a lost line.
 void wcbWsSinkWrite(uint8_t c) {
   if (!wcbWsSinkLive()) return;
-  if (sinkDropping) { if (c == '\n') sinkDropping = false; return; }
-  if (sinkLen >= WS_SINK_BUF) {
-    // FULL. A bulk reply — ?CONFIG dumps ~3 KB — is emitted as a tight run of
-    // Serial.println() calls with no loop() iteration between them, so waiting for
-    // the next wcbWsService() means discarding most of it. Measured: pulling a
-    // config over the socket lost a line mid-dump.
-    //
-    // So flush inline, but ONLY on the loop task. That is the whole reason this
-    // check exists: on any other task — above all the ESP-NOW receive callback —
-    // a TCP send here would block the WiFi task, which is the failure this file is
-    // built to avoid. Off the loop task we still drop, because dropping a
-    // telemetry line is survivable and stalling the radio is not.
-    if (xTaskGetCurrentTaskHandle() == sinkLoopTask && sinkPump() && sinkLen < WS_SINK_BUF) {
-      sinkBuf[sinkLen++] = (char)c;
-      return;
-    }
-    sinkDropping = true;
-    sinkDrops++;
+
+  // Fast path under the lock: the common case is a byte into free space, and that
+  // costs one short critical section. Only the FULL case falls through to the
+  // slower handling below, which must not run with interrupts disabled.
+  taskENTER_CRITICAL(&sinkMux);
+  if (sinkDropping) {
+    if (c == '\n') sinkDropping = false;
+    taskEXIT_CRITICAL(&sinkMux);
     return;
   }
-  sinkBuf[sinkLen++] = (char)c;
+  if (sinkLen < WS_SINK_BUF) {
+    sinkBuf[sinkLen++] = (char)c;
+    taskEXIT_CRITICAL(&sinkMux);
+    return;
+  }
+  taskEXIT_CRITICAL(&sinkMux);
+
+  // FULL. A bulk reply — a config pull is ~3 KB — is emitted as a tight run of
+  // Serial.println() calls with no loop() iteration between them, so waiting for
+  // the next wcbWsService() means discarding most of it. Measured: pulling a
+  // config over the socket lost a line mid-dump.
+  //
+  // So flush inline, but ONLY on the loop task. That is the whole reason this
+  // check exists: on any other task — above all the ESP-NOW receive callback — a
+  // TCP send here would block the WiFi task, which is the failure this file is
+  // built to avoid. Off the loop task we still drop, because dropping a telemetry
+  // line is survivable and stalling the radio is not.
+  //
+  // sinkPump() takes the lock itself, so it must be called OUTSIDE the critical
+  // section — taskENTER_CRITICAL does not nest across a network write.
+  if (xTaskGetCurrentTaskHandle() == sinkLoopTask) {
+    sinkPump();
+    taskENTER_CRITICAL(&sinkMux);
+    if (sinkLen < WS_SINK_BUF) {
+      sinkBuf[sinkLen++] = (char)c;
+      taskEXIT_CRITICAL(&sinkMux);
+      return;
+    }
+    taskEXIT_CRITICAL(&sinkMux);
+  }
+
+  taskENTER_CRITICAL(&sinkMux);
+  sinkDropping = true;
+  sinkDrops++;
+  taskEXIT_CRITICAL(&sinkMux);
 }
 
 // ---- Per-socket line accumulator ------------------------------------------
@@ -208,17 +259,34 @@ static esp_err_t wsHandler(httpd_req_t *req) {
   }
 
   httpd_ws_frame_t frame = {};
+  // static, not a stack array: 3 KB would blow the httpd task stack. Safe because
+  // esp_http_server services every socket from ONE task, so two invocations of
+  // this handler can never overlap. Declared before the length probe so the
+  // oversize check below can size itself against the real buffer.
+  static uint8_t rxBuf[WS_LINE_MAX * 2];
+
   frame.type = HTTPD_WS_TYPE_TEXT;
   esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);   // length probe
   if (err != ESP_OK) return err;
   if (frame.type == HTTPD_WS_TYPE_CLOSE) { accRelease(fd); sinkDrop(fd); return ESP_OK; }
   if (frame.len == 0) return ESP_OK;
-  if (frame.len > WS_LINE_MAX * 2) { cmdDrops++; return ESP_OK; }
 
-  // static, not a stack array: 3 KB would blow the httpd task stack. Safe because
-  // esp_http_server services every socket from ONE task, so two invocations of
-  // this handler can never overlap.
-  static uint8_t rxBuf[WS_LINE_MAX * 2];
+  // OVERSIZED: we cannot read it, and we must not leave it unread. The call above
+  // is a LENGTH PROBE — esp_http_server has parsed the header but the payload is
+  // still sitting in the socket, and httpd_ws_recv_frame() refuses to read into a
+  // buffer smaller than the frame (ESP_ERR_INVALID_SIZE) rather than draining part
+  // of it. Returning ESP_OK here leaves those bytes to be parsed as the NEXT frame
+  // header: garbage opcode, garbage length, and a session that is desynchronised
+  // for good while the log calls it a benign dropped command.
+  //
+  // So fail the request instead. httpd closes the socket, wsClose() releases the
+  // slot, and the client sees a clean disconnect it can retry — a bounded, visible
+  // failure rather than a silently corrupted stream.
+  if (frame.len > sizeof(rxBuf)) {
+    cmdDrops++;
+    return ESP_FAIL;
+  }
+
   frame.payload = rxBuf;
   err = httpd_ws_recv_frame(req, &frame, sizeof(rxBuf));
   if (err != ESP_OK) return err;
@@ -309,7 +377,14 @@ void wcbWsService() {
       lastReceivedViaESPNOW = false;
       inSequenceBody        = false;
       String line(cmd.line);        // named: the dispatcher takes a non-const ref
-      processSerialCommandHelper(line, WS_SOURCE_ID);
+      // TRIM, exactly as the Serial0 reader does (processIncomingSerial, WCB.ino).
+      // processSerialCommandHelper() does NOT trim, and a line with a leading space
+      // fails the startsWith(LocalFunctionIdentifier) test — so it is not recognised
+      // as a local command and falls through to the UNPREFIXED path, which is a
+      // mesh-wide BROADCAST. One stray space from a paste would push raw text to
+      // every serial port on every board.
+      line.trim();
+      if (line.length()) processSerialCommandHelper(line, WS_SOURCE_ID);
     }
   }
 

@@ -135,7 +135,10 @@ static void wcbWifiStartAP() {
         //
         // Identity belongs in the protocol, not the address. A host should ASK — one
         // command over the socket names the board — rather than infer from an IP.
-        Serial.printf("[WIFI] SoftAP \"%s\" up on channel %u — http://%s/\n",
+        // ws://…/ws, not http://…/ — the only URI ever registered is the WebSocket
+        // one (wcbWsBegin). Printing http:// sent operators to a 404 and reads as
+        // "the AP is broken" when it is working perfectly.
+        Serial.printf("[WIFI] SoftAP \"%s\" up on channel %u — ws://%s/ws\n",
                       ssid.c_str(), meshChannel, WiFi.softAPIP().toString().c_str());
         Serial.println("[WIFI] ESP-NOW shares this channel (WIFI_AP_STA).");
     } else {
@@ -188,6 +191,12 @@ void wcbWifiService() {
     const unsigned long now = millis();
 
     // ---- JOIN state machine ------------------------------------------------
+    // joinSettled means "stop trying FOREVER", and only the off-mesh case sets it:
+    // that one needs an operator to fix one end, so retrying would just thrash.
+    // A NORMAL disconnect must NOT settle — the AP rebooting, or the droid driving
+    // out of range, has to heal itself. Auto-reconnect is off (it would sweep the
+    // band), so if this loop stops retrying nothing else will, and the board is off
+    // the network until someone power-cycles it.
     if (wcbWifiMode == WCB_WIFI_JOIN && !joinSettled) {
         if (WiFi.status() == WL_CONNECTED) {
             // VERIFY WHERE THE ASSOCIATION ACTUALLY LEFT US. An AP owns the
@@ -201,16 +210,32 @@ void wcbWifiService() {
                               "that is OFF-MESH. Disconnecting.\n",
                               wcbWifiJoinSsid.c_str(), ch, meshChannel);
                 Serial.println("[WIFI] Move that AP to the mesh channel, or change ?WCBCH to match it.");
-                WiFi.disconnect(true);
+                // NOT disconnect(true). The bool is `wifioff`, and with the radio in
+                // STA-only mode it runs STA.end() -> WIFI_MODE_NULL, which stops WiFi
+                // outright and takes ESP-NOW with it: no peers, no heartbeats, no WDP,
+                // until a power cycle. This guard exists to keep the board ON the mesh;
+                // passing true made it the one thing that reliably killed it.
+                WiFi.disconnect();
+                wifiUp      = false;
                 joinSettled = true;      // do not thrash: the operator must fix one end
                 return;
             }
-            wifiUp      = true;
-            joinSettled = true;
-            Serial.printf("[WIFI] joined \"%s\" on channel %u after %u attempt(s) — http://%s/\n",
-                          wcbWifiJoinSsid.c_str(), ch, joinAttempts,
-                          WiFi.localIP().toString().c_str());
+            if (!wifiUp) {               // edge — announce once, not every pass
+                wifiUp = true;
+                Serial.printf("[WIFI] joined \"%s\" on channel %u after %u attempt(s) — ws://%s/ws\n",
+                              wcbWifiJoinSsid.c_str(), ch, joinAttempts,
+                              WiFi.localIP().toString().c_str());
+            }
             return;
+        }
+
+        // Not connected. If we WERE, the association just dropped: say so, clear the
+        // status so ?WIFI stops claiming "up" with no address, and fall through to
+        // the retry below rather than latching.
+        if (wifiUp) {
+            wifiUp = false;
+            Serial.printf("[WIFI] lost \"%s\" — retrying every %lu s\n",
+                          wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_RETRY_MS / 1000));
         }
         if (now >= joinNextAttempt) {
             wcbWifiJoinTry();

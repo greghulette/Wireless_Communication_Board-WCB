@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_071610RSEP2026                                  *****////
+///*****                                          Version 6.2.1_100925RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -180,7 +180,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_071610RSEP2026";
+String SoftwareVersion = "6.2.1_100925RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4921,7 +4921,13 @@ void processLocalCommand(const String &message) {
                            // request whatever prefix carried it — so a board moved to a custom
                            // funcChar could never be returned to the default except by ?ERASE,NVS.
                            message.startsWith("FUNCCHAR,") || message.startsWith("funcchar,") ||
-                           message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,");
+                           message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,") ||
+                           // WIFI carries an SSID and a WPA2 passphrase, both of which may
+                           // legally end in '?' (ASCII 32-126 is all valid). Without this,
+                           // "?WIFI,AP,R2,letmein?" is eaten as a help request: the operator
+                           // gets a help dump, saveWifiSettings() is never reached, and the
+                           // board reboots with no AP and nothing saying why.
+                           message.startsWith("WIFI,")     || message.startsWith("wifi,");
 
     if (!dataBearingVerb && message.endsWith("?")) {  // no space required
         String cmd = message.substring(0, message.length() - 1);
