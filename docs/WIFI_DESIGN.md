@@ -223,6 +223,25 @@ either way, and the AP is plainly up because clients associate to it.
 **Identity belongs in the protocol, not the address.** A host should ask — one
 command over the socket names the board — rather than infer from an IP.
 
+**No default gateway.** The AP's DHCP server hands out an address and a subnet but
+**no router** (DHCP option 3). This AP is a local management link with no upstream,
+so advertising itself as the default gateway only invites a client to send
+internet-bound traffic to a board that cannot deliver it: a laptop with a second
+adapter ends up with two competing default routes, and a phone may decide the whole
+network is broken. With no router offered, the client reaches `192.168.4.1` on-link
+and keeps its existing default route for everything else.
+
+It is done by clearing `OFFER_ROUTER` from the DHCP server's offer mask with
+`esp_netif_dhcps_option(…, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, …)`. That option is
+only accepted while the server is stopped, so the sequence is stop → set → start — the
+same one the core's own `APClass::enableDhcpCaptivePortal()` uses. **The server is
+restarted unconditionally, even if the set fails**: a stopped DHCP server is exactly
+the dead-AP failure `softAPConfig()` produced, and nothing about that symptom points at
+the cause. If the current mask cannot be read, the step is skipped entirely rather
+than guessed at, leaving the stock behaviour in place.
+
+*Not yet verified on hardware.*
+
 ## 7. Wizard integration
 
 WiFi is configured from the **board card** in the Setup Wizard, under an
@@ -326,6 +345,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(pending)_ | **The AP no longer offers a default gateway.** DHCP option 3 is cleared through `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS`, so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream advertising itself as the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Stop → set → start with an unconditional restart, and skipped entirely if the offer mask can't be read; see §6a. Compile-only. |
 | 2026-09-10 | _(pending)_ | **Code review — five defects fixed, three of which defeated their own purpose.** (1) `WiFi.disconnect(true)` in the JOIN off-mesh guard: the bool is `wifioff`, and in STA-only mode it runs `STA.end()` → `WIFI_MODE_NULL`, stopping WiFi and **taking ESP-NOW with it** — the guard that exists to keep the board on the mesh was the one thing reliably killing it. Now `WiFi.disconnect()`. (2) The output sink was mutated from the printing task (including the ESP-NOW callback) while `sinkPump()` memmoved it on the loop task, with no lock — torn output indistinguishable from a real reply. Now guarded by a `portMUX`, with the critical sections deliberately never spanning the TCP send. (3) JOIN latched `joinSettled` on **success**, so with auto-reconnect off nothing ever retried after the AP rebooted or the droid drove out of range, and `wifiUp` never cleared so `?WIFI` reported "up" with no address. Only the off-mesh case settles now. (4) An oversized inbound frame returned without draining the payload, leaving it to be parsed as the next frame header and desynchronising the session permanently; it now returns `ESP_FAIL` so httpd closes cleanly. (5) `WIFI,` was missing from `dataBearingVerb`, so a passphrase ending in `?` was eaten by the trailing-`?` help shortcut and never saved. Also: the WS drain now `trim()`s like the Serial0 reader (a leading space made a line unprefixed, i.e. a mesh-wide broadcast), and bring-up prints `ws://…/ws` instead of a `http://…/` that was always a 404. |
 | 2026-09-07 | _(pending)_ | **Bulk replies were being truncated over the socket.** `wcbWsSinkWrite()` dropped whole lines once the 2 KB staging buffer filled, and it only drained once per `loop()` pass — but a config dump is a tight run of `Serial.println()` with no `loop()` iteration between them, so most of a ~3 KB reply was discarded. It now flushes **inline, but only while running on the loop task** (handle captured in `wcbWsService()`); off that task — above all the ESP-NOW callback — it still drops, because a TCP send there would stall the WiFi task. Verified: `WCB_WEBTOOL_CONFIG_PULL` over the socket returns 3,024 bytes / 67 lines with **0 drops**, ending in its checksum, `WIFI,` line included. |
 | 2026-09-07 | _(pending)_ | **`softAPConfig()` removed entirely — it breaks DHCP in either position.** See §6a; the board stays on the stock `192.168.4.1` and identity moves into the protocol. |

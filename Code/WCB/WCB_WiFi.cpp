@@ -5,6 +5,8 @@
 
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_netif.h>                 // esp_netif_dhcps_option / _stop / _start
+#include "dhcpserver/dhcpserver.h"     // dhcps_offer_t, OFFER_ROUTER
 
 // Defined in WCB.ino.
 extern uint8_t meshChannel;
@@ -108,9 +110,6 @@ static void wcbWifiStartAP() {
     // would take the mesh with it.
     WiFi.mode(WIFI_AP_STA);
 
-    // NOTE: the address is set AFTER softAP() below, not here. See the comment
-    // there — configuring first leaves the DHCP server stopped.
-
     // CHANNEL IS THE THIRD PARAMETER AND DEFAULTS TO 1. Pass meshChannel
     // explicitly. Once an AP owns the radio, nothing later moves it — the
     // esp_wifi_set_channel() call in setup() cannot override an AP — so a
@@ -118,6 +117,45 @@ static void wcbWifiStartAP() {
     // blackout. max_connection 4: this is a config channel, not a hotspot.
     if (WiFi.softAP(ssid.c_str(), wcbWifiApPass.c_str(), meshChannel, /*hidden=*/0, /*max_conn=*/4)) {
         wifiUp = true;
+
+        // NO DEFAULT GATEWAY. This AP is a local management link with no upstream,
+        // so it must not advertise itself as the router (DHCP option 3). If it does,
+        // a laptop with a second adapter gets two competing default routes and may
+        // send internet traffic here to die, and a phone may decide the network is
+        // broken. Without it, clients reach 192.168.4.1 on-link and keep their real
+        // default route for everything else.
+        //
+        // The option is only settable while the DHCP server is STOPPED, so this is
+        // stop -> set -> start: the same sequence the core's own
+        // APClass::enableDhcpCaptivePortal() uses once the AP is up.
+        //
+        // THE RESTART IS UNCONDITIONAL. A stopped DHCP server is precisely the dead
+        // AP that softAPConfig() produced — clients associate, get no lease, and land
+        // on 169.254.x with nothing pointing at the cause. So once stopped, it is
+        // restarted whatever the set returned. And if the current mask cannot even be
+        // read, the server is never touched at all: stock behaviour beats a guess.
+        {
+            esp_netif_t  *apNetif = WiFi.AP.netif();
+            dhcps_offer_t offer   = 0;
+            if (!apNetif || !WiFi.AP.started()) {
+                Serial.println("[WIFI] AP netif not ready — leaving the DHCP gateway option at its default.");
+            } else if (esp_netif_dhcps_option(apNetif, ESP_NETIF_OP_GET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS,
+                                              &offer, sizeof(offer)) != ESP_OK) {
+                Serial.println("[WIFI] could not read the DHCP offer mask — leaving the gateway option at its default.");
+            } else {
+                offer &= (dhcps_offer_t)~OFFER_ROUTER;   // clear ONLY the router bit
+                esp_netif_dhcps_stop(apNetif);           // ALREADY_STOPPED is harmless
+                const esp_err_t setErr   = esp_netif_dhcps_option(apNetif, ESP_NETIF_OP_SET,
+                                               ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &offer, sizeof(offer));
+                const esp_err_t startErr = esp_netif_dhcps_start(apNetif);
+                if (startErr != ESP_OK && startErr != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED)
+                    Serial.printf("[WIFI] *** DHCP server FAILED to restart (0x%x) — clients will get NO address. ***\n",
+                                  (unsigned)startErr);
+                else if (setErr != ESP_OK)
+                    Serial.printf("[WIFI] could not clear the DHCP gateway option (0x%x) — clients will be offered a router.\n",
+                                  (unsigned)setErr);
+            }
+        }
 
         // WE DELIBERATELY DO NOT CALL softAPConfig(). The board stays on the stock
         // 192.168.4.1.
