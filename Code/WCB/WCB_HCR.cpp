@@ -51,6 +51,13 @@ public:
   // schedules hcrPoll() on its own millis() timer instead, which natively
   // supports the documented 3-3600 s range.
 
+  // A volume the WCB commands shows in STATUS/GET at once (Volume_* is otherwise
+  // written only by a parsed HCR reply). A poll sent after the set replaces it with
+  // what the HCR itself reports; replies already in flight can't (onFrame).
+  void cacheVolume(int ch, int v) {
+    if (ch == CH_V) Volume_V = v; else if (ch == CH_A) Volume_A = v; else if (ch == CH_B) Volume_B = v;
+  }
+
 protected:
   void onFrame(const char *frame, bool parsed) override;   // defined below the module globals
 
@@ -77,6 +84,7 @@ static unsigned long _hcrNextPollMs   = 0;  // next scheduled hcrPoll() — own 
 static unsigned long _hcrPollTxMs     = 0;  // millis() the last poll was sent; 0 = none since beginHCR()
 static unsigned long _hcrQueryTxMs    = 0;  // millis() of the last TX that can bring QVx replies back (poll, GET,VOL, ;H,RAW); 0 = none
 static unsigned long _hcrVolRxMs[3]   = { 0, 0, 0 };  // per channel: millis() the HCR last confirmed it (STATUS vage); 0 = never
+static uint8_t       _hcrVolCopied    = 0;  // bit ch set = cache holds a commanded value no clean poll has confirmed yet
 static bool          _hcrSeedOk       = false;  // replies may seed the shadow: no volume write since the last clean poll
 static int8_t        _hcrVolCand[3]   = { -1, -1, -1 };  // last reported volume per channel, awaiting a 2nd agreeing reply
 static uint8_t       _hcrVolSeeded    = 0;  // bit ch set = shadow seeded from the HCR since beginHCR()
@@ -100,11 +108,23 @@ static void hcrNoteVolWrite(int ch) {
   for (int c = CH_V; c <= CH_B; c++) if (ch < 0 || ch == c) _hcrVolCand[c] = -1;
 }
 
+// Show what we just commanded (the codec's shadow, i.e. the value actually sent,
+// clamped 0-99) for the written channels only (ch -1 = all) — the others keep the
+// HCR's own report. ;H,RAW payloads are opaque and show after the next poll.
+static void hcrCacheCommanded(int ch) {
+  if (!_hcr) return;
+  for (int c = CH_V; c <= CH_B; c++) if (ch < 0 || ch == c) {
+    _hcr->cacheVolume(c, hcrCodec.getVol(c));
+    _hcrVolCopied |= (uint8_t)(1 << c);
+  }
+}
+
 // Set a channel volume through the shared codec (updates its shadow = user intent).
 static void hcrSetVol(int ch, int v) {
   if (ch < 0 || ch > 2 || !_hcrPort) return;
   hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 99));   // fn 17 = SetVolume
   hcrNoteVolWrite(ch);
+  hcrCacheCommanded(ch);
 }
 
 // Current commanded volume — the codec's shadow. Starts at 50; seeded from the
@@ -123,16 +143,30 @@ static void hcrCancelFade(int ch) { hcrFade.cancel(ch); }
 static void hcrStartFade(int ch, int from, int to, int durSec,
                          bool stopAtEnd, int restoreTo) {
   if (!_hcrPort) return;
+  // HcrFade::start writes now only for an instant fade or to anchor a start point
+  // that differs from the shadow; otherwise the first ramp step is the first write
+  // (hcrStepFades copies it). Don't show an unsent value, e.g. the default 50.
+  const bool writesNow = (durSec <= 0) || (from != hcrCodec.getVol(ch));
   hcrFade.start(hcrCodec, *_hcrPort, ch, from, to, durSec, stopAtEnd, restoreTo);
   hcrNoteVolWrite(ch);
+  if (writesNow) hcrCacheCommanded(ch);
 }
 
 // Step all active fades — called every loop tick (non-blocking).
 static void hcrStepFades() {
   if (!_hcrPort) return;
-  for (int c = CH_V; c <= CH_B; c++)
-    if (hcrFade.active(c)) hcrNoteVolWrite(c);   // a ramp step (or its final write) may go out now
+  bool was[3]; int before[3];
+  for (int c = CH_V; c <= CH_B; c++) {
+    was[c]    = hcrFade.active(c);
+    before[c] = hcrCodec.getVol(c);
+    if (was[c]) hcrNoteVolWrite(c);   // a ramp step (or its final write) may go out now
+  }
   hcrFade.tick(hcrCodec, *_hcrPort);
+  // Copy only what this tick actually wrote: a step moves the shadow, and the end of a
+  // fade always writes (the final level; StopWAV + restore for a fade-out). A tick with
+  // no step must not copy an unsent value (e.g. the default 50 before seeding).
+  for (int c = CH_V; c <= CH_B; c++)
+    if (was[c] && (hcrCodec.getVol(c) != before[c] || !hcrFade.active(c))) hcrCacheCommanded(c);
 }
 
 // Status poll — ONE container, ONE write. The HCR answers each query in its own
@@ -155,6 +189,7 @@ static void hcrPoll() {
   // Re-arm seeding — unless replies to an earlier poll, GET or RAW query may still be
   // arriving: they could predate a volume write made since, and would pass the gate.
   _hcrSeedOk = hcrRepliesQuiet();
+  if (_hcrSeedOk) _hcrVolCopied = 0;   // this poll's replies postdate every copy so far
   _hcrPort->print(HCR_POLL_FRAME);   // Print::print -> one write(buf,len) call
   _hcrPollTxMs = _hcrQueryTxMs = millis();
   if (debugHCR) Serial.printf("[HCR-DBG] TX poll -> %s", HCR_POLL_FRAME);   // frame ends in \n
@@ -179,6 +214,14 @@ void WcbHCR::onFrame(const char *frame, bool parsed) {
   // (numeric, 0-100). Clamped 0-99 by setVol.
   if (frame[0] == 'Q' && frame[1] == 'V' && frame[3] == ',') {
     int ch = (frame[2] == 'V') ? CH_V : (frame[2] == 'A') ? CH_A : (frame[2] == 'B') ? CH_B : -1;
+    if (ch >= 0 && (_hcrVolCopied & (1 << ch))) {
+      // The WCB set this channel after the last clean poll went out, so this reply
+      // may predate the write (it was already on the wire). Keep showing what we
+      // commanded, and don't count it as a confirmation. Seeding is off anyway: every
+      // copy follows a volume write, which clears _hcrSeedOk.
+      cacheVolume(ch, hcrCodec.getVol(ch));
+      return;
+    }
     if (ch >= 0) _hcrVolRxMs[ch] = millis();   // the HCR confirmed this channel (STATUS vage)
     if (ch >= 0 && _hcrSeedOk && !hcrFade.active(ch)) {
       int v = (int)GetVolume(ch);
@@ -232,6 +275,7 @@ void beginHCR() {
   _hcrPollTxMs   = 0;
   _hcrQueryTxMs  = 0;
   _hcrVolRxMs[0] = _hcrVolRxMs[1] = _hcrVolRxMs[2] = 0;
+  _hcrVolCopied  = 0;
   _hcrSeedOk     = false;
   _hcrVolCand[0] = _hcrVolCand[1] = _hcrVolCand[2] = -1;
   _hcrVolSeeded  = 0;  // re-seed the volume shadow from the next agreeing poll replies
@@ -390,8 +434,8 @@ void processHCRRuntimeCommand(const String &message) {
       if (_hcr) { _hcr->PlayWAV(chan, track); _hcr->update(); }
     } else if (_hcrPort && hcrCodec.emit(*_hcrPort, (uint8_t)fn, chan, track)) {
       if (fn == 2 && _hcr) _hcr->update();   // SetEmotion: nudge an immediate status refresh (matches old)
-      if (fn == 17 && chan >= 0 && chan <= 2) hcrNoteVolWrite(chan);   // SetVolume(ch)
-      else if (fn >= 17 && fn <= 19)          hcrNoteVolWrite(-1);     // SetVolume ALL / VolumeUp/DownAll
+      if (fn == 17 && chan >= 0 && chan <= 2) { hcrNoteVolWrite(chan); hcrCacheCommanded(chan); }  // SetVolume(ch)
+      else if (fn >= 17 && fn <= 19)          { hcrNoteVolWrite(-1);   hcrCacheCommanded(-1); }    // ALL / Up/DownAll
     } else {
       Serial.printf("[HCR] FN %d,%d,%d rejected (unknown fn or out-of-range)\n", fn, chan, track);
       return;
@@ -462,6 +506,8 @@ void processHCRRuntimeCommand(const String &message) {
       hcrCancelFade(ch);
       _hcr->SetVolume(ch, 0);                       // silent BEFORE play (no blip)
       hcrNoteVolWrite(ch);
+      _hcr->cacheVolume(ch, 0);
+      _hcrVolCopied |= (uint8_t)(1 << ch);
       _hcr->PlayWAV(ch, fl); _hcr->update();
       hcrStartFade(ch, 0, target, sec, false, 0);   // 0 -> target
     } else {
@@ -718,6 +764,10 @@ void configureHCR(const String &args) {
                                   // STATUS, for it). QM first: its reply absorbs the overlap with
                                   // our trailing '\n', which loses a bare query's reply ~6 in 10.
                                   if (c >= 0 && _hcrPort) {
+                                    // No poll reply in flight (as hcrPoll's rule): this query's
+                                    // answer postdates any copy, so let it confirm the channel.
+                                    if (hcrRepliesQuiet())
+                                      _hcrVolCopied &= (uint8_t)~(1 << c);
                                     _hcrPort->print(c == CH_V ? "<QM,QVV>\n" : c == CH_A ? "<QM,QVA>\n" : "<QM,QVB>\n");
                                     _hcrQueryTxMs = millis();
                                   }

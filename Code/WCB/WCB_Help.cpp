@@ -652,6 +652,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
         Serial.println(F("      (age = s since the HCR last answered, -1 = never; rx = replies;"));
         Serial.println(F("       vage = s since it last confirmed all of vV/vA/vB, -1 = not yet)"));
+        Serial.println(F("  - A volume set via ;H,VOL/VOLUP/VOLDN/fades/FN shows in STATUS at"));
+        Serial.println(F("      once; the next poll after it replaces it with the HCR's report"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
         Serial.println(F("      every reply as [HCR-RX]; ?DEBUG,HCR,OFF / dhcroff"));
