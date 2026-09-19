@@ -110,11 +110,16 @@ changing before editing.**
     core-0 task can write that port** — the library’s interrupt mux is `static` (one spinlock
     for all three ports), and `espNowReceiveCallback` writes raw mesh data straight to Maestro,
     Kyber and raw-mapping ports on the WiFi task. Re-check that predicate before adding any new
-    writer. Two things that are NOT fixes: the write being one bulk call instead of per-byte
-    (both take the same path with interrupts live), and lowering the baud (it lengthens the
-    exposure). The durable fix is a hardware UART (S1/S2) or taking the other traffic off the
-    wire — every broadcast is bit-banged to **every** unclaimed port, so one enabled-but-unused
-    port costs real milliseconds of blocked loop task per message.
+    writer. A port with `enableIntTx(false)` also **cannot receive while it transmits** (the
+    library README says so): RX edges that land inside the write's critical section are lost.
+    A device that answers, like the HCR, must therefore be asked in **one** write, so its
+    replies arrive after the WCB goes quiet (`hcrPoll()`); queries sent back to back
+    (`<QVV>\n<QVA>\n<QVB>\n`) lose every reply but the last. Two things that are NOT fixes:
+    the write being one bulk call instead of per-byte (both take the same path with interrupts
+    live), and lowering the baud (it lengthens the exposure). The durable fix is a hardware UART
+    (S1/S2) or taking the other traffic off the wire — every broadcast is bit-banged to
+    **every** unclaimed port, so one enabled-but-unused port costs real milliseconds of blocked
+    loop task per message.
 
 
 ## Verifying
