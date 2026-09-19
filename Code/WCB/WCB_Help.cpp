@@ -615,7 +615,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  REFRESH           Poll the HCR immediately"));
         Serial.println(F("  GET,<field>       Show one cached value (EMOTION,H|S|M|C /"));
         Serial.println(F("                      DURATION / OVERRIDE / MUSE / WAVCOUNT /"));
-        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B)"));
+        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B). VOL also"));
+        Serial.println(F("                      asks the HCR; the answer shows next time"));
         Serial.println(F("\nRuntime Actions (use ;H,...):"));
         Serial.println(F("  ;H,STIM,e,lvl       Stimulate  e=H|S|M|C  lvl=MOD|STRONG"));
         Serial.println(F("  ;H,TRIGGER,e,lvl    Trigger (same payload as STIM)"));

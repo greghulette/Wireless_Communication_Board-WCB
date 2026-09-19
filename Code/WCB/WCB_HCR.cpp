@@ -75,7 +75,7 @@ static unsigned long _hcrLastRxMs     = 0;  // millis() of the last parsed HCR f
 static uint32_t      _hcrRxFrames     = 0;  // parsed HCR frames since beginHCR() (STATUS rx)
 static unsigned long _hcrNextPollMs   = 0;  // next scheduled hcrPoll() — own timer
 static unsigned long _hcrPollTxMs     = 0;  // millis() the last poll was sent; 0 = none since beginHCR()
-static unsigned long _hcrQueryTxMs    = 0;  // millis() of the last TX that can bring QVx replies back (poll, ;H,RAW); 0 = none
+static unsigned long _hcrQueryTxMs    = 0;  // millis() of the last TX that can bring QVx replies back (poll, GET,VOL, ;H,RAW); 0 = none
 static unsigned long _hcrVolRxMs[3]   = { 0, 0, 0 };  // per channel: millis() the HCR last confirmed it (STATUS vage); 0 = never
 static bool          _hcrSeedOk       = false;  // replies may seed the shadow: no volume write since the last clean poll
 static int8_t        _hcrVolCand[3]   = { -1, -1, -1 };  // last reported volume per channel, awaiting a 2nd agreeing reply
@@ -145,14 +145,14 @@ static void hcrStepFades() {
 static const char HCR_POLL_FRAME[] = "<QM,QD,QVV,QVA,QVB>\n";
 
 // True when no reply can still be on its way: nothing that asks the HCR a question
-// (poll, ;H,RAW) went out in the last 250 ms (a reply set takes ~100 ms).
+// (poll, GET,VOL, ;H,RAW) went out in the last 250 ms (a reply set takes ~100 ms).
 static bool hcrRepliesQuiet() {
   return _hcrQueryTxMs == 0 || (millis() - _hcrQueryTxMs >= 250UL);
 }
 
 static void hcrPoll() {
   if (!_hcrPort) return;
-  // Re-arm seeding — unless replies to an earlier poll or RAW query may still be
+  // Re-arm seeding — unless replies to an earlier poll, GET or RAW query may still be
   // arriving: they could predate a volume write made since, and would pass the gate.
   _hcrSeedOk = hcrRepliesQuiet();
   _hcrPort->print(HCR_POLL_FRAME);   // Print::print -> one write(buf,len) call
@@ -712,7 +712,15 @@ void configureHCR(const String &args) {
     else if (key == "PLAYING")  { int c = hcrChan(hcrField(fU,1));
                                   Serial.printf("[HCR] PLAYING %s = %d\n", f.c_str(),
                                                 c >= 0 ? _hcr->GetPlayingWAV(c) : -1); }
-    else if (key == "VOL")      { int c = hcrChan(hcrField(fU,1));   // cached — no query
+    else if (key == "VOL")      { int c = hcrChan(hcrField(fU,1));
+                                  // Ask the HCR, then print what is cached now: like stock, one
+                                  // call behind (the reply lands ~50 ms later; GET again, or read
+                                  // STATUS, for it). QM first: its reply absorbs the overlap with
+                                  // our trailing '\n', which loses a bare query's reply ~6 in 10.
+                                  if (c >= 0 && _hcrPort) {
+                                    _hcrPort->print(c == CH_V ? "<QM,QVV>\n" : c == CH_A ? "<QM,QVA>\n" : "<QM,QVB>\n");
+                                    _hcrQueryTxMs = millis();
+                                  }
                                   Serial.printf("[HCR] VOL %s = %.0f\n", f.c_str(),
                                                 c >= 0 ? _hcr->GetVolume(c) : -1.0f); }
     else Serial.println("[HCR] GET fields: EMOTION,H|S|M|C / DURATION / OVERRIDE / "
