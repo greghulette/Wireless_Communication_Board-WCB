@@ -13,9 +13,25 @@
 >   every I2C constructor / transfer in `hcr.cpp` is commented out.
 > - **`<String.h>` → `<string.h>`** (lowercase) so the build works on
 >   case-sensitive filesystems (Linux CI), not just Windows/macOS.
+> - **`PlayWAV()` debounce** is per channel and 150 ms (upstream: one global 5 s).
+> - **`GetVolume(ch)`** added — the cached volume, no transmit. `getVolume()`
+>   still sends `<QVx>` and returns the value cached before the reply.
+> - **Dataframe key `QD`** accepted (the documented reply to `<QD>`); upstream
+>   matched only `DF`, so the dataframe never parsed. Needs exactly 11 values.
+> - **Receive framing:** `HCR_BUFFER_SIZE` 32 → 64, `<` resets the frame, only `>`
+>   commits one (a CR/LF/NUL before it discards the partial frame), and an
+>   over-long frame is dropped instead of parsed truncated.
+> - **Reply validation:** every value field must be numeric, the field count must
+>   match the key (2; `QE` 5; `QD`/`DF` 12), and `QVx` must be 0-100; anything else
+>   is rejected (`onFrame(..., false)`) without touching the cache.
+> - **`receive()` drains** up to `HCR_BUFFER_SIZE` waiting bytes per `update()`
+>   (upstream: one byte), so a full reply set can't overflow the soft-serial buffer.
+> - **`onFrame(frame, parsed)`** — protected virtual hook called after every
+>   received frame. The library's own `Serial` prints never reach USB on the WCB.
+> - **Virtual destructor** — the class now has a virtual hook, so it gets one.
 >
 > Upstream license is preserved in `LICENSE`. To pull a newer upstream, re-apply
-> the two patches above rather than dropping a stock copy in place.
+> the patches above rather than dropping a stock copy in place.
 
 ---
 

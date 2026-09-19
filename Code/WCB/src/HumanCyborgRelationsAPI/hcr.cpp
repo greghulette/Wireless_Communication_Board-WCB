@@ -190,17 +190,21 @@ void HCRVocalizer::transmit(String command, bool retry)
 
 void HCRVocalizer::receive(void)
 {
+    // WCB patch: drain what has arrived (bounded) instead of one byte per call.
+    // A poll's reply set is ~60-90 bytes against a 95-byte soft-serial RX buffer
+    // (WCB.ino begin(..., 95)); at one byte per loop() pass a busy loop can let it
+    // overflow and lose the tail of a frame.
     switch (connectionType)
     {
         case 0x01:
-            if (_serial->available())
+            for (int n = 0; n < HCR_BUFFER_SIZE && _serial->available(); n++)
             {
                 char ch = _serial->read();
                 receiveData(ch);
             }
             break;
         case 0x02:
-            if (_softserial->available())
+            for (int n = 0; n < HCR_BUFFER_SIZE && _softserial->available(); n++)
             {
                 char ch = _softserial->read();
                 receiveData(ch);
@@ -232,26 +236,37 @@ void HCRVocalizer::receive(void)
 
 void HCRVocalizer::receiveData(char ch)
 {
-    if (ch == '<')
+    // WCB patch: '<' opens a new frame. Discard any partial frame whose '>' was
+    // lost, so it cannot splice into this one ("QVA,10" + "QVB,100" parsed as
+    // QVA=10). Upstream ignored '<' and kept accumulating.
+    if (ch == '<') {
+        cmdPos = 0;
         return;
+    }
 
-    if (ch == '>' || ch == '\r' || ch == '\n' || ch == 0) {
+    if (ch == '>') {
         cmdBuffer[cmdPos] = '\0';
         cmdPos = 0;
         if (*cmdBuffer != '\0') {
             processCommands(cmdBuffer);
         }
     }
+    else if (ch == '\r' || ch == '\n' || ch == 0) {
+        // WCB patch: only '>' commits a frame. A CR/LF/NUL before the '>' means the
+        // frame's tail was lost (or a byte was garbled into a terminator), so discard
+        // it instead of parsing a cut value ("QVA,1" from "QVA,100"). Upstream also
+        // committed on CR/LF/NUL. A terminator after the '>' finds cmdPos == 0.
+        cmdPos = 0;
+    }
     else if (cmdPos < (int)sizeof(cmdBuffer)) {
         cmdBuffer[cmdPos++] = ch;
     }
 
     if (cmdPos == (int)sizeof(cmdBuffer)) {
-        cmdBuffer[cmdPos-1] = '\0';
+        // WCB patch: drop an over-long frame instead of parsing its first
+        // HCR_BUFFER_SIZE-1 characters — a cut dataframe would store wrong values.
+        // The rest of it arrives as a frame with no known key and is ignored.
         cmdPos = 0;
-        if (*cmdBuffer != '\0') {
-            processCommands(cmdBuffer);
-        }
     }
 }
 
@@ -265,6 +280,40 @@ void HCRVocalizer::processCommands(char* input)
     Serial.println(input);
     String response = ToString(input);
     String qC = getValue(response,',',0);
+    bool parsed = true;   // WCB patch: reported to onFrame()
+
+    // WCB patch: every HCR reply is KEY,<number>[,<number>...]. Reject a frame
+    // whose value fields are not strictly numeric (one optional '-' and one '.'),
+    // whose field count is wrong for its key (2; QE 5; QD/DF 12), or whose volume
+    // is outside 0-100 — instead of letting toInt() stop at the first bad byte and
+    // store a wrong value. On a soft-serial port a reply can be garbled mid-frame,
+    // and the WCB seeds its volume shadow from these values (WCB_HCR.cpp onFrame).
+    {
+        int nf = 1;
+        for (unsigned i = 0; i < response.length(); i++) if (response.charAt(i) == ',') nf++;
+        bool ok = true;
+        for (int k = 1; k < nf && ok; k++) {
+            String f = getValue(response, ',', k);
+            unsigned n = f.length(), i = 0;
+            bool digit = false, dot = false;
+            if (n && f.charAt(0) == '-') i = 1;
+            for (; i < n && ok; i++) {
+                char c = f.charAt(i);
+                if (c >= '0' && c <= '9') digit = true;
+                else if (c == '.' && !dot) dot = true;
+                else ok = false;
+            }
+            if (!digit) ok = false;
+        }
+        int want = (qC.equals((String)"QD") || qC.equals((String)"DF")) ? 12
+                 : qC.equals((String)"QE") ? 5 : 2;
+        if (nf != want) ok = false;
+        if (ok && qC.length() == 3 && qC.charAt(0) == 'Q' && qC.charAt(1) == 'V') {
+            long v = getValue(response, ',', 1).toInt();
+            if (v < 0 || v > 100) ok = false;
+        }
+        if (!ok) { onFrame(input, false); return; }
+    }
 
     if (qC.equals((String)"QE"))
     {
@@ -343,7 +392,14 @@ void HCRVocalizer::processCommands(char* input)
         Serial.print("QVB::"); Serial.println(getValue(response,',',1).toInt());
         Volume_B = getValue(response,',',1).toInt();
     }
-    else if (qC.equals((String)"DF"))
+    // WCB patch: the vocalizer answers <QD> with <QD,#,...,#> — 11 values in the
+    // order QEH,QES,QEM,QEC,QO,QM,QF,QT,QPV,QPA,QPB (HCR command reference,
+    // docs.humancyborgrelations.com/r2d2/platforms/embedded/commands). Upstream
+    // matched only "DF", so the dataframe never parsed; "DF" is kept for safety.
+    // Its 11 values are field-count and numeric checked above.
+    else if ((qC.equals((String)"QD") || qC.equals((String)"DF")) &&
+             getValue(response,',',11).length() > 0 &&
+             getValue(response,',',12).length() == 0)
     {
         emote_happy = getValue(response,',',1).toInt();
         emote_sad = getValue(response,',',2).toInt();
@@ -357,6 +413,11 @@ void HCRVocalizer::processCommands(char* input)
         state_cha = getValue(response,',',10).toInt();
         state_chb = getValue(response,',',11).toInt();
     }
+    else
+    {
+        parsed = false;
+    }
+    onFrame(input, parsed);   // WCB patch
 }
 
 //----------------------------------------------------
@@ -573,6 +634,15 @@ float HCRVocalizer::getVolume(int ch)
         volume = Volume_V;
     };
     return volume;
+}
+
+// WCB patch: cached read, no transmit — see GetVolume() in hcr.h.
+float HCRVocalizer::GetVolume(int ch)
+{
+    if (ch == 1) return Volume_A;
+    if (ch == 2) return Volume_B;
+    if (ch == 0) return Volume_V;
+    return 0;
 }
 
 String HCRVocalizer::getValue(String data, char separator, int index)
