@@ -6475,7 +6475,11 @@ void processSerialMessage(const String &message) {
     // Send to selected serial port (1-5)
     Stream &targetSerial = getSerialStream(target);
     writeSerialString(targetSerial, serialMessage);
-    targetSerial.flush(); // Ensure it's sent immediately
+    // flush() only on the hardware UARTs, where it waits for the TX FIFO to drain.
+    // On S3-S5 (EspSoftwareSerial) write() is already synchronous, so there is
+    // nothing to wait for: flush() only discards bytes the port has received but
+    // nothing has read yet (EspSoftwareSerial 8.1.0 flush() clears its RX buffer).
+    if (target <= 2) targetSerial.flush();
 
     if (debugEnabled) {
       Serial.printf("Sent to %s: %s\n", getSerialLabel(target).c_str(), serialMessage.c_str());
