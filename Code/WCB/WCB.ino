@@ -6978,7 +6978,11 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-  if (!serial.available()) return;  // Exit if no data available
+  // The ownership checks below come BEFORE available(): on S3-S5 available() runs
+  // EspSoftwareSerial's rxBits(), which assembles bytes from the RX edge buffer and
+  // is not re-entrant. This task and the loop task (the port's real owner) are both
+  // priority 1 on core 1, so a time-slice switch inside rxBits() corrupts the
+  // owner's bytes even though this function then returns without reading.
 
   // Skip ports reserved for the MP3 Trigger — responses are consumed
   // exclusively by processMP3Responses() in loop().
@@ -6999,6 +7003,8 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // Skip a port that applyLiveBaud is currently tearing down and re-beginning: on S3-S5 that
   // frees and reallocates the SoftwareSerial RX buffer under us.
   if (sourceID != 0 && sourceID == serialReconfigPort) return;
+
+  if (!serial.available()) return;  // Exit if no data available
 
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
