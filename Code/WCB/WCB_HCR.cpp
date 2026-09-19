@@ -41,15 +41,18 @@ extern SoftwareSerial Serial5;
 //  indeterminate — and (b) set the poll refresh rate. Both are reachable here
 //  because those members are `protected` in hcr.h.
 // ---------------------------------------------------------------------------
-class WcbHCR : public HCRVocalizer {
+class WcbHCR final : public HCRVocalizer {   // final: deleted via WcbHCR* only
 public:
   WcbHCR(HardwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
   WcbHCR(SoftwareSerial *s, int baud) : HCRVocalizer(s, baud)  { _init(); }
 
   // We do NOT use the library's built-in refreshSpeed auto-poll because it's
   // a uint16_t (ms) and overflows for any pollSec >= 66 s. processHCRTick()
-  // schedules getUpdate() on its own millis() timer instead, which natively
+  // schedules hcrPoll() on its own millis() timer instead, which natively
   // supports the documented 3-3600 s range.
+
+protected:
+  void onFrame(const char *frame, bool parsed) override;   // defined below the module globals
 
 private:
   void _init() {
@@ -68,8 +71,16 @@ HCRConfig hcrConfig = {};
 
 static WcbHCR  *_hcr     = nullptr;   // live instance (heap; rebuilt on port change)
 static Stream  *_hcrPort = nullptr;   // concrete port stream — used by ;H,RAW
-static unsigned long _hcrLastRxPollMs = 0;  // coarse bookkeeping for ?HCR,LIST
-static unsigned long _hcrNextPollMs   = 0;  // next scheduled getUpdate() — own timer
+static unsigned long _hcrLastRxMs     = 0;  // millis() of the last parsed HCR frame (STATUS age); 0 = none
+static uint32_t      _hcrRxFrames     = 0;  // parsed HCR frames since beginHCR() (STATUS rx)
+static unsigned long _hcrNextPollMs   = 0;  // next scheduled hcrPoll() — own timer
+static unsigned long _hcrPollTxMs     = 0;  // millis() the last poll was sent; 0 = none since beginHCR()
+static unsigned long _hcrQueryTxMs    = 0;  // millis() of the last TX that can bring QVx replies back (poll, ;H,RAW); 0 = none
+static unsigned long _hcrVolRxMs[3]   = { 0, 0, 0 };  // per channel: millis() the HCR last confirmed it (STATUS vage); 0 = never
+static bool          _hcrSeedOk       = false;  // replies may seed the shadow: no volume write since the last clean poll
+static int8_t        _hcrVolCand[3]   = { -1, -1, -1 };  // last reported volume per channel, awaiting a 2nd agreeing reply
+static uint8_t       _hcrVolSeeded    = 0;  // bit ch set = shadow seeded from the HCR since beginHCR()
+static uint8_t       _hcrFastPolls    = 0;  // 3 s re-polls left while not all three volumes are seeded
 
 // ---- Volume + fade → the shared WcbCmd codec / fade module ------------------
 // HcrCodec is the SINGLE source of truth for per-channel commanded volume (0=V,
@@ -80,14 +91,25 @@ static unsigned long _hcrNextPollMs   = 0;  // next scheduled getUpdate() — ow
 static HcrCodec hcrCodec;
 static HcrFade  hcrFade;
 
+// A volume write (ours, or an opaque ;H,RAW payload) makes every reply already in
+// flight stale: it reports the volume from before the write. Seeding stops until
+// the next poll, and the written channels (ch -1 = all) need two fresh agreeing
+// replies again. A flag rather than timestamps: nothing here can wrap.
+static void hcrNoteVolWrite(int ch) {
+  _hcrSeedOk = false;
+  for (int c = CH_V; c <= CH_B; c++) if (ch < 0 || ch == c) _hcrVolCand[c] = -1;
+}
+
 // Set a channel volume through the shared codec (updates its shadow = user intent).
 static void hcrSetVol(int ch, int v) {
   if (ch < 0 || ch > 2 || !_hcrPort) return;
   hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 99));   // fn 17 = SetVolume
+  hcrNoteVolWrite(ch);
 }
 
-// Current commanded volume — the codec's shadow (seeded 50, exact after the first
-// SetVolume on this port; matches NaviCore's shared shadow).
+// Current commanded volume — the codec's shadow. Starts at 50; seeded from the
+// HCR's own reported volume once two consecutive poll replies agree (WcbHCR::onFrame,
+// re-checked on every poll), and exact after any SetVolume on this port.
 static int hcrCurVol(int ch) {
   int v = hcrCodec.getVol(ch);
   return (v >= 0) ? v : 50;
@@ -102,11 +124,71 @@ static void hcrStartFade(int ch, int from, int to, int durSec,
                          bool stopAtEnd, int restoreTo) {
   if (!_hcrPort) return;
   hcrFade.start(hcrCodec, *_hcrPort, ch, from, to, durSec, stopAtEnd, restoreTo);
+  hcrNoteVolWrite(ch);
 }
 
 // Step all active fades — called every loop tick (non-blocking).
 static void hcrStepFades() {
-  if (_hcrPort) hcrFade.tick(hcrCodec, *_hcrPort);
+  if (!_hcrPort) return;
+  for (int c = CH_V; c <= CH_B; c++)
+    if (hcrFade.active(c)) hcrNoteVolWrite(c);   // a ramp step (or its final write) may go out now
+  hcrFade.tick(hcrCodec, *_hcrPort);
+}
+
+// Status poll — ONE container, ONE write. The HCR answers each query in its own
+// <...> frame, so every reply arrives after the WCB has gone quiet. Queries sent
+// back to back (<QVV>\n<QVA>\n...) lose all but the last reply on S3-S5, whose RX
+// edge ISR is masked while we transmit (enableIntTx(false), WCB.ino
+// applySoftSerialIntTx). The leading QM is sacrificial: its reply absorbs any
+// overlap with our trailing '\n'. QD = emotions/override/muse/WAV count/duration/
+// playing (11 values); QVV/QVA/QVB = the three volumes, which QD does not carry.
+static const char HCR_POLL_FRAME[] = "<QM,QD,QVV,QVA,QVB>\n";
+
+// True when no reply can still be on its way: nothing that asks the HCR a question
+// (poll, ;H,RAW) went out in the last 250 ms (a reply set takes ~100 ms).
+static bool hcrRepliesQuiet() {
+  return _hcrQueryTxMs == 0 || (millis() - _hcrQueryTxMs >= 250UL);
+}
+
+static void hcrPoll() {
+  if (!_hcrPort) return;
+  // Re-arm seeding — unless replies to an earlier poll or RAW query may still be
+  // arriving: they could predate a volume write made since, and would pass the gate.
+  _hcrSeedOk = hcrRepliesQuiet();
+  _hcrPort->print(HCR_POLL_FRAME);   // Print::print -> one write(buf,len) call
+  _hcrPollTxMs = _hcrQueryTxMs = millis();
+  if (debugHCR) Serial.printf("[HCR-DBG] TX poll -> %s", HCR_POLL_FRAME);   // frame ends in \n
+}
+
+// Every frame the library receives lands here once it is parsed (loop task,
+// from _hcr->update()). This is what STATUS age/rx report, and — with
+// ?DEBUG,HCR,ON — the only visible trace of what the HCR actually sent.
+void WcbHCR::onFrame(const char *frame, bool parsed) {
+  if (debugHCR) Serial.printf("[HCR-RX] <%s>%s\n", frame, parsed ? "" : "  (ignored)");
+  if (!parsed) return;
+  _hcrLastRxMs = millis();
+  _hcrRxFrames++;
+
+  // Seed the codec's volume shadow (the VOLUP/VOLDN/FADE start point, else 50
+  // after every boot) from what the HCR reports — only while no volume write has
+  // happened since the last poll (_hcrSeedOk), never mid-fade, and only when two
+  // consecutive replies for the channel agree, so one reply that survived
+  // validation but lost a digit ("QVA,10" for 100) can't move it. A wrong shadow
+  // matters: VOLUP/VOLDN and fade restores write it back to the HCR, which
+  // persists PV* in its Config.txt. The library has already validated the frame
+  // (numeric, 0-100). Clamped 0-99 by setVol.
+  if (frame[0] == 'Q' && frame[1] == 'V' && frame[3] == ',') {
+    int ch = (frame[2] == 'V') ? CH_V : (frame[2] == 'A') ? CH_A : (frame[2] == 'B') ? CH_B : -1;
+    if (ch >= 0) _hcrVolRxMs[ch] = millis();   // the HCR confirmed this channel (STATUS vage)
+    if (ch >= 0 && _hcrSeedOk && !hcrFade.active(ch)) {
+      int v = (int)GetVolume(ch);
+      if (_hcrVolCand[ch] == v) {
+        hcrCodec.setVol(ch, v);
+        _hcrVolSeeded |= (uint8_t)(1 << ch);
+      }
+      _hcrVolCand[ch] = (int8_t)v;
+    }
+  }
 }
 
 // ==================== Port-conflict Query ================================
@@ -121,6 +203,9 @@ void beginHCR() {
   // Tear down any previous instance.
   if (_hcr) { delete _hcr; _hcr = nullptr; }
   _hcrPort = nullptr;
+  // A fade from the previous binding (paused while ?HCR,CLEAR left no port) must not
+  // resume on the new one.
+  for (int c = CH_V; c <= CH_B; c++) hcrCancelFade(c);
 
   if (!hcrConfig.configured ||
       hcrConfig.serialPort < 1 || hcrConfig.serialPort > 5) {
@@ -138,29 +223,54 @@ void beginHCR() {
   }
   // Auto-poll is driven by processHCRTick() on its own millis() timer
   // (handles full 3-3600 s range, unlike library's uint16_t refreshSpeed).
-  // pollSec 0 = off (no auto <QD>). update() still parses incoming RX.
-  _hcrNextPollMs = 0;  // first tick will fire poll immediately if pollSec>0
+  // pollSec 0 = off (no auto poll). update() still parses incoming RX.
+  // First tick polls immediately if pollSec>0. millis(), not 0: (long)(now - 0) is
+  // negative once uptime passes 2^31 ms (~24.8 days), and no poll would ever fire.
+  _hcrNextPollMs = millis();
+  _hcrLastRxMs   = 0;  // fresh instance, empty cache — nothing received yet
+  _hcrRxFrames   = 0;
+  _hcrPollTxMs   = 0;
+  _hcrQueryTxMs  = 0;
+  _hcrVolRxMs[0] = _hcrVolRxMs[1] = _hcrVolRxMs[2] = 0;
+  _hcrSeedOk     = false;
+  _hcrVolCand[0] = _hcrVolCand[1] = _hcrVolCand[2] = -1;
+  _hcrVolSeeded  = 0;  // re-seed the volume shadow from the next agreeing poll replies
+  _hcrFastPolls  = 10; // up to 10 polls 3 s apart (~30 s) while not seeded, then pollSec
   Serial.printf("[HCR] Active on S%d at %lu baud, poll=%us\n",
                 hcrConfig.serialPort,
                 (unsigned long)hcrConfig.baudRate,
                 (unsigned)hcrConfig.pollSec);
 }
 
-// Call once per loop() tick. Non-blocking: HCRVocalizer::update() parses one
-// RX byte per call. We schedule getUpdate() ourselves on a millis() timer so
-// pollSec can be the full documented 3-3600s range (library's refreshSpeed
-// is uint16_t and would overflow at >=66s).
+// Call once per loop() tick. Non-blocking: HCRVocalizer::update() parses up to
+// HCR_BUFFER_SIZE waiting RX bytes per call. We schedule hcrPoll() ourselves on
+// a millis() timer so pollSec can be the full documented 3-3600s range
+// (library's refreshSpeed is uint16_t and would overflow at >=66s).
 void processHCRTick() {
   if (!_hcr) return;
   _hcr->update();
   hcrStepFades();                 // non-blocking volume ramps
 
   // Own-timer auto-poll. pollSec==0 -> off; user can still ?HCR,REFRESH.
+  // Held while a fade runs: it writes a <PVx..> step every 150 ms, which would land
+  // inside the poll's ~60-90 ms reply window and garble it. Polls when the fade ends,
+  // or once the poll is a whole pollSec overdue, so a long or looping fade can't stop
+  // polling (a garbled reply is rejected by the library's validation).
   unsigned long now = millis();
-  if (hcrConfig.pollSec > 0 && (long)(now - _hcrNextPollMs) >= 0) {
-    _hcr->getUpdate();
-    _hcrLastRxPollMs = now;
-    _hcrNextPollMs   = now + (unsigned long)hcrConfig.pollSec * 1000UL;
+  bool fading = hcrFade.active(CH_V) || hcrFade.active(CH_A) || hcrFade.active(CH_B);
+  long overdueMs = (long)(now - _hcrNextPollMs);
+  bool hold = fading && overdueMs < (long)((unsigned long)hcrConfig.pollSec * 1000UL);
+  if (hcrConfig.pollSec > 0 && !hold && overdueMs >= 0) {
+    hcrPoll();
+    // Until all three volumes have been seeded from the HCR (e.g. it was still
+    // booting when the first poll went out), retry every 3 s instead of pollSec so
+    // VOLUP/VOLDN/FADE stop stepping from the default 50 as soon as it answers.
+    // Bounded (_hcrFastPolls): an HCR that never answers all three (unpowered,
+    // TX-only wiring, firmware before v5 has no QVx) falls back to pollSec.
+    bool fast = (_hcrVolSeeded != 0x07) && _hcrFastPolls > 0;
+    if (fast) _hcrFastPolls--;
+    uint16_t sec = fast ? min<uint16_t>(hcrConfig.pollSec, 3) : hcrConfig.pollSec;
+    _hcrNextPollMs   = now + (unsigned long)sec * 1000UL;
   }
 
   // When HCR debug is on, periodically dump the parsed status so the user
@@ -254,6 +364,8 @@ void processHCRRuntimeCommand(const String &message) {
     if (_hcrPort) {
       _hcrPort->print(payload);
       if (!payload.endsWith("\n")) _hcrPort->print('\n');
+      hcrNoteVolWrite(-1);   // opaque payload may carry a <PV..> — don't seed from older replies
+      _hcrQueryTxMs = millis();   // ...or a <Q..>: its replies are in flight for the next ~100 ms
     }
     if (debugHCR || debugEnabled) Serial.printf("[HCR-DBG] TX raw -> %s\n", payload.c_str());
     return;
@@ -278,6 +390,8 @@ void processHCRRuntimeCommand(const String &message) {
       if (_hcr) { _hcr->PlayWAV(chan, track); _hcr->update(); }
     } else if (_hcrPort && hcrCodec.emit(*_hcrPort, (uint8_t)fn, chan, track)) {
       if (fn == 2 && _hcr) _hcr->update();   // SetEmotion: nudge an immediate status refresh (matches old)
+      if (fn == 17 && chan >= 0 && chan <= 2) hcrNoteVolWrite(chan);   // SetVolume(ch)
+      else if (fn >= 17 && fn <= 19)          hcrNoteVolWrite(-1);     // SetVolume ALL / VolumeUp/DownAll
     } else {
       Serial.printf("[HCR] FN %d,%d,%d rejected (unknown fn or out-of-range)\n", fn, chan, track);
       return;
@@ -347,6 +461,7 @@ void processHCRRuntimeCommand(const String &message) {
       int target = hcrCurVol(ch);                   // capture intended level
       hcrCancelFade(ch);
       _hcr->SetVolume(ch, 0);                       // silent BEFORE play (no blip)
+      hcrNoteVolWrite(ch);
       _hcr->PlayWAV(ch, fl); _hcr->update();
       hcrStartFade(ch, 0, target, sec, false, 0);   // 0 -> target
     } else {
@@ -405,9 +520,9 @@ void processHCRRuntimeCommand(const String &message) {
       const int cur = hcrCurVol(c);
       const int nv  = up ? cur + step : cur - step;
       hcrCancelFade(c);
-      hcrSetVol(c, nv);                              // hcrSetVol clamps 0-100
+      hcrSetVol(c, nv);                              // hcrSetVol clamps 0-99
       if (debugHCR) Serial.printf("[HCR-DBG] %s ch=%d %d->%d\n",
-                                  vU.c_str(), c, cur, constrain(nv, 0, 100));
+                                  vU.c_str(), c, cur, hcrCurVol(c));   // the value actually sent
     }
     return;
   }
@@ -529,7 +644,7 @@ void configureHCR(const String &args) {
   if (aU == "CLEAR")           { clearHCRConfig();   return; }
   if (aU == "STATUS")          { printHCRStatus();   return; }
   if (aU == "REFRESH")         {
-    if (_hcr) { _hcr->getUpdate(); Serial.println("[HCR] Refresh requested"); }
+    if (_hcr) { hcrPoll(); Serial.println("[HCR] Refresh requested"); }
     else      Serial.println("[HCR] Not configured");
     return;
   }
@@ -597,9 +712,9 @@ void configureHCR(const String &args) {
     else if (key == "PLAYING")  { int c = hcrChan(hcrField(fU,1));
                                   Serial.printf("[HCR] PLAYING %s = %d\n", f.c_str(),
                                                 c >= 0 ? _hcr->GetPlayingWAV(c) : -1); }
-    else if (key == "VOL")      { int c = hcrChan(hcrField(fU,1));
+    else if (key == "VOL")      { int c = hcrChan(hcrField(fU,1));   // cached — no query
                                   Serial.printf("[HCR] VOL %s = %.0f\n", f.c_str(),
-                                                c >= 0 ? _hcr->getVolume(c) : -1.0f); }
+                                                c >= 0 ? _hcr->GetVolume(c) : -1.0f); }
     else Serial.println("[HCR] GET fields: EMOTION,H|S|M|C / DURATION / OVERRIDE / "
                         "MUSE / WAVCOUNT / PLAYING,V|A|B / VOL,V|A|B");
     return;
@@ -680,15 +795,33 @@ void printHCRStatus() {
     Serial.println("[HCR:cfg=0]");
     return;
   }
-  // Age only meaningful when we've actually polled. Off / pre-first-poll -> -1.
+  // age = seconds since the HCR's last parsed frame (-1 = nothing received since
+  // the port was bound). It used to be the time since the poll was SENT, which
+  // cycled 0..pollSec whether or not the HCR ever answered. rx = frames parsed.
   long ageSec = -1;
-  if (hcrConfig.pollSec > 0 && _hcrLastRxPollMs != 0) {
-    ageSec = (long)((millis() - _hcrLastRxPollMs) / 1000UL);
+  if (_hcrLastRxMs != 0) {
+    ageSec = (long)((millis() - _hcrLastRxMs) / 1000UL);
   }
+  // vage = seconds since the HCR last confirmed the LEAST recently confirmed of
+  // vV/vA/vB (a parsed QVx reply; -1 = one of them never has since the port was
+  // bound). A channel the WCB just set stays unconfirmed until a later poll answers,
+  // so vage keeps growing meanwhile. age alone can't say how fresh vV/vA/vB are:
+  // replies to PLAY/STIM keep it near 0 while no poll has landed.
+  long vageSec = 0;
+  unsigned long nowMs = millis();
+  for (int c = CH_V; c <= CH_B; c++) {
+    if (_hcrVolRxMs[c] == 0) { vageSec = -1; break; }
+    long a = (long)((nowMs - _hcrVolRxMs[c]) / 1000UL);
+    if (a > vageSec) vageSec = a;
+  }
+  // Cached values only — this must never transmit. It used to call getVolume()
+  // x3, which sent <QVV><QVA><QVB> back to back; on S3-S5 the port can't receive
+  // while it transmits (enableIntTx(false)), so only vB ever refreshed. It also
+  // runs from the ?DEBUG,HCR dump, which then perturbed the link it reported on.
   char line[256];
   snprintf(line, sizeof(line),
     "[HCR:cfg=1,port=%d,poll=%u,age=%ld,H=%d,S=%d,M=%d,C=%d,dur=%.2f,"
-    "ovr=%d,muse=%d,wav=%d,pV=%d,pA=%d,pB=%d,vV=%.0f,vA=%.0f,vB=%.0f]",
+    "ovr=%d,muse=%d,wav=%d,pV=%d,pA=%d,pB=%d,vV=%.0f,vA=%.0f,vB=%.0f,rx=%lu,vage=%ld]",
     hcrConfig.serialPort,
     (unsigned)hcrConfig.pollSec,
     ageSec,
@@ -699,7 +832,8 @@ void printHCRStatus() {
     _hcr->GetMuse(),
     _hcr->GetWAVCount(),
     _hcr->GetPlayingWAV(CH_V), _hcr->GetPlayingWAV(CH_A), _hcr->GetPlayingWAV(CH_B),
-    _hcr->getVolume(CH_V), _hcr->getVolume(CH_A), _hcr->getVolume(CH_B));
+    _hcr->GetVolume(CH_V), _hcr->GetVolume(CH_A), _hcr->GetVolume(CH_B),
+    (unsigned long)_hcrRxFrames, vageSec);
   Serial.println(line);
 }
 
