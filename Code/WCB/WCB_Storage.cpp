@@ -565,6 +565,10 @@ void setCommandDelimiter(char c) {
 // }
 // Recall a Stored Command
 void recallCommandSlot(const String &key, int sourceID) {
+    if (key.length() > SEQ_KEY_MAX_LEN) {   // never stored; NVS would match the shorter key's first 15 characters
+        Serial.printf("No command stored under key: '%s'\n", key.c_str());
+        return;
+    }
     preferences.begin("stored_cmds", true);
     String recalledCommand = preferences.getString(key.c_str(), "");
     preferences.end();
@@ -654,7 +658,7 @@ void saveStoredCommandsToPreferences(const String &message) {
   // was still appended to key_list below — so the sequence was listed, reported as "Stored:", and
   // advertised to peers, but recalling it found nothing. Both shipping clients already enforce 15
   // (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
-  if (key.length() > 15) {
+  if (key.length() > SEQ_KEY_MAX_LEN) {
     Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
                   key.c_str(), (unsigned)key.length());
     return;
@@ -695,11 +699,13 @@ void eraseStoredCommandByName(const String &name) {
         Serial.println("Command name cannot be empty.");
         return;
     }
-
     preferences.begin("stored_cmds", false);
 
-    // Step 1: Remove the key from NVS
-    bool removed = preferences.remove(name.c_str());
+    // Step 1: Remove the key from NVS — but never by a key longer than SEQ_KEY_MAX_LEN. No such key can be stored,
+    // and NVS compares only its first 15 characters, so the remove would delete the shorter key's sequence. The
+    // key_list rewrite below still runs: firmware before d83042e listed an over-long key it had failed to store, and
+    // erasing by that name is the only way to drop the phantom from the list.
+    bool removed = (name.length() <= SEQ_KEY_MAX_LEN) && preferences.remove(name.c_str());
 
     // Step 2: Retrieve and split key_list safely
     String existingKeys = preferences.getString("key_list", "");

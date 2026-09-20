@@ -226,7 +226,13 @@ already use. Don't add one.
 **Key rules** (enforced client-side so a bad write fails loudly instead of silently):
 1–15 chars (NVS key limit), and **no comma** — `saveStoredCommandsToPreferences()`
 takes the key as everything before the first comma, so a comma would truncate it on
-save and then never match on read.
+save and then never match on read. The firmware refuses a longer key on **every** path, not
+only on save (`SEQ_KEY_MAX_LEN`, `WCB_Storage.h`): NVS compares only the first 15 characters of
+a lookup, so `?SEQ,GET`, `;C` recall, the `SEQGET` relay and `?SEQ,CLEAR` would otherwise read,
+run or erase the sequence stored under the 15-character prefix. A longer key is reported as not
+found and never reaches NVS; erasing by such a name still drops it from `key_list`, where
+firmware before d83042e could list a key it had failed to store. The MP3 and DFPlayer
+`ONERR` callback key is held to the same 15 characters.
 
 ### Confirming a write
 
@@ -349,5 +355,6 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-15 | Keys longer than 15 characters are refused on read, recall, the `SEQGET` relay and erase, not only on save. NVS matches a lookup on its first 15 characters, so `?SEQ,GET,HILABCDEFGHIJKLM` returned the value stored under `HILABCDEFGHIJKL`, and a clear by the long key would have erased it (found by the HIL test `seq.key_len_15`). | _(pending)_ |
 | 2026-08-17 | Added the **read-one** and **write** halves: `PACKET_TYPE_SEQVAL_REQ`/`SEQVAL_FRAG` (15/16) with a 59-byte keyed request struct, `?SEQ,GET,<key>`, `?MGMT,SEQGET,<n>,<key>`, and `requestSequence`/`onSequenceValue`/`saveSequence`/`deleteSequence` in `WCB_Client`. `TOOBIG`/`NOTFOUND` are explicit statuses rather than silence. Writes reuse the existing `?SEQ,SAVE` command path — no new wire format. **SEQHASH now covers stored values**, so an in-place edit is visible to peers (see `WDP_DESIGN.md`). `MgmtReqSlot` widened to the largest request on that queue and given a `len`, since SEQVAL_REQ is 59 B against the previous 43. | `80f44d9` |
 | 2026-08-17 | Initial version. `PACKET_TYPE_SEQ_REQ`/`SEQ_FRAG` (13/14), `?SEQ,NAMES`, `?MGMT,SEQ,<n>`, WDP TLV `0x13` SEQHASH, `[WDPSEQ:]` dump record, and the `WCB_Client` `onSequenceNames`/`requestSequenceNames` API. | `bbd6bdf` |

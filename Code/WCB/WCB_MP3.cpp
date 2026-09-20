@@ -239,8 +239,8 @@ void configureMP3(const String &args) {
       memset(mp3Config.onErrCmd, 0, sizeof(mp3Config.onErrCmd));
       saveMP3Settings();
       Serial.println("[MP3] Error callback cleared");
-    } else if (key.length() == 0 || key.length() > 23) {
-      Serial.println("[MP3] ONERR: key must be 1-23 characters");
+    } else if (key.length() == 0 || key.length() > SEQ_KEY_MAX_LEN) {   // a sequence key: a longer one is never stored
+      Serial.println("[MP3] ONERR: key must be 1-15 characters");
     } else {
       strncpy(mp3Config.onErrCmd, key.c_str(), sizeof(mp3Config.onErrCmd) - 1);
       mp3Config.onErrCmd[sizeof(mp3Config.onErrCmd) - 1] = '\0';

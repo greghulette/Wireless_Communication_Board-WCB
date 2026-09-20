@@ -63,7 +63,9 @@ extern int pwmOutputCount;
 extern uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS];
 
 void addPWMOutputPort(int port, uint8_t wdpAutoSrc = 0);  // wdpAutoSrc>0 tags a WDP self-config
-void removePWMOutputPort(int port);
+// Returns true when the port really was a PWM output and has been removed. Callers use that to
+// decide whether a reboot is needed at all — a miss must never restart the board.
+bool removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 // Reconcile the WDP-auto output ports tagged to srcWCB against the ports it still
 // advertises (wantPorts): clear any this board auto-configured for srcWCB that are no

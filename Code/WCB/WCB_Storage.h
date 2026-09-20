@@ -142,6 +142,11 @@ void resetBroadcastSettingsNamespace();
 void printBaudRates();
 bool isTimerCommand(const String &input);
 
+// A stored-sequence key is at most this long: the ESP32 NVS key limit. NVS also compares only this many characters
+// of a lookup, so every path that reads, recalls or erases by a user-given key must refuse a longer one — otherwise
+// "HILABCDEFGHIJKLM" reads, runs or erases the sequence stored under "HILABCDEFGHIJKL".
+#define SEQ_KEY_MAX_LEN 15
+
 void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
 void saveStoredCommandsToPreferences(const String &message);

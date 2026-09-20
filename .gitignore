@@ -11,3 +11,7 @@ Code/WCB/.claude/
 Library/
 
 PCB/Wireless Communication Board (WCB)V3.2/.history/
+
+# Hardware-in-the-loop test runs (tests/hil) — per-run logs and reports, local only
+tests/hil/results/
+__pycache__/

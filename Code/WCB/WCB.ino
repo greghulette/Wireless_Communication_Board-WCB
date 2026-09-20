@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_101034RSEP2026                                  *****////
+///*****                                          Version 6.2.1_201600RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -180,7 +180,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_101034RSEP2026";
+String SoftwareVersion = "6.2.1_201600RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -590,7 +590,9 @@ ReportedStats reportedStats[MAX_WCB_COUNT] = {};
 // out-of-order retries within that window. Seq 0 is never sent, so 0 = empty slot.
 static const int ETM_SEQ_HISTORY = 8;
 uint16_t etmSeqHistory[MAX_WCB_COUNT][ETM_SEQ_HISTORY] = {{0}};
+bool espNowInitialized = false;   // true once esp_now_init() succeeds in setup(); WCB_PWM.cpp gates remote sends on it
 uint8_t  etmSeqHistoryIdx[MAX_WCB_COUNT] = {0};
+unsigned long etmBootClearMs[MAX_WCB_COUNT] = {0};   // millis() of each sender's last boot-announce ring clear (0 = never)
 // ETM Characterization state
 bool etmCharRunning = false;
 int etmCharPhase = 0;
@@ -979,7 +981,7 @@ void checkConfigPullTimeout();
 String buildConfigString();
 void processPWMPassthrough();
 void addPWMOutputPort(int port, uint8_t wdpAutoSrc);  // default (0) lives in WCB_PWM.h; match arity here
-void removePWMOutputPort(int port);
+bool removePWMOutputPort(int port);
 bool isSerialPortPWMOutput(int port);
 void initStatusLEDWithRetry(int maxRetries = 10, int delayBetweenMs = 100);
 void processIncomingSerial(Stream &serial, int sourceID); 
@@ -2035,10 +2037,20 @@ Stream &getSerialStream(int port) {
 // (pinned to core 0) and espNowReceiveCallback itself, which writes raw mesh data straight
 // to a Maestro port, the Kyber port, and raw-serial-mapping targets. Exclude all of those.
 //
-// RESIDUAL: a raw-serial mapping on a REMOTE board can target a port this board believes
-// is idle — that case is not locally knowable. It is bounded (the mux is released every
-// stop bit) and that path already blocks the WiFi task for the whole bit-bang regardless,
-// so it is not made materially worse. Re-check if raw mesh mappings become common.
+// A raw-serial mapping on a REMOTE board can target a port this board believes is idle, and that
+// is not locally knowable — so espNowReceiveCallback writes no soft port at all: meshSerialWrite()
+// (after applyLiveBaud) queues every S3-S5 chunk for MeshSerialOutTask, on core 1. A core-0 writer
+// is not merely delayed by the mux: lazyDelay() re-anchors the bit clock BEFORE disableInterrupts()
+// waits for it (SoftwareSerial.cpp:265-292), so the waiting port's next start bit comes out short by
+// the wait and the receiver mis-frames — on BOTH ports, the loop task's as well. Measured on the HIL
+// bench (input.softserial_core0_contention): 0 of 10 raw blocks to S3 arrived exact, and the ;S4
+// lines written alongside them corrupted too.
+//
+// So the exclusions below no longer guard against a core-0 writer — there is none left, PWMTask
+// writes no serial port — they keep the interrupt blackout off the ports carrying continuous device
+// traffic. Every soft-serial writer that remains (loop, serialCommandTask, the Kyber tasks,
+// RawSerialForwardingTask, MeshSerialOutTask) is on core 1, where taskENTER_CRITICAL cannot spin:
+// holding the mux disables that core's interrupts, so no other task on it can run meanwhile.
 static bool softSerialLoopTaskOnly(int port) {
   if (port < 3 || port > 5) return false;                 // S1/S2 are real UARTs — N/A
   if (isSerialPortUsedForPWMInput(port) ||
@@ -2088,8 +2100,9 @@ void applyLiveBaud(int port, uint32_t baud) {
   // serialCommandTask polls every 5 ms and RawSerialForwardingTask every 2 ms.
   vTaskDelay(pdMS_TO_TICKS(12));
   switch (port) {
-    case 1: Serial1.updateBaudRate(baud); break;
-    case 2: Serial2.updateBaudRate(baud); break;
+    // Drain queued TX first (;S no longer flushes), so a ";S2...^?BAUD,S2,..." chain's bytes go out at the old rate.
+    case 1: Serial1.flush(); Serial1.updateBaudRate(baud); break;
+    case 2: Serial2.flush(); Serial2.updateBaudRate(baud); break;
     case 3:
       if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
         Serial3.end();
@@ -2113,6 +2126,62 @@ void applyLiveBaud(int port, uint32_t baud) {
       break;
   }
   serialReconfigPort = 0;
+}
+
+// ── Mesh bytes for a local port (espNowReceiveCallback, WiFi task) ──────────────────────────
+// The callback writes Maestro and Kyber passthrough and raw-serial-mapping chunks to local ports.
+// S1/S2 it writes in place. S3-S5 it never writes: a bit-banged byte takes ~1 ms and the library
+// holds the shared TX mux for nearly all of it (lazyDelay frees it only for the stop bit, and
+// optimistic_yield is a no-op on ESP32), so a core-0 write either stalls the WiFi task for a whole
+// chunk (~200 ms at 9600) or collides with core 1's soft-serial writes and mis-frames both ports
+// (see softSerialLoopTaskOnly). Those chunks are queued here for MeshSerialOutTask instead.
+constexpr size_t MESH_SERIAL_OUT_SLOTS = 16;
+constexpr size_t MESH_SERIAL_OUT_MAX   = 196;   // the largest callback chunk (targeted Kyber)
+struct MeshSerialOutSlot {
+  uint8_t port;
+  uint8_t len;
+  uint8_t data[MESH_SERIAL_OUT_MAX];
+};
+QueueHandle_t meshSerialOutQueue = nullptr;
+volatile uint32_t meshSerialOutDrops = 0;   // written only by the WiFi task, the queue's one producer
+
+static void meshSerialWrite(int port, const uint8_t *data, size_t len) {
+  if (port < 3 || port > 5 || !meshSerialOutQueue) {   // a hardware UART, or the queue never came up
+    getSerialStream(port).write(data, len);
+    return;
+  }
+  if (len == 0 || len > MESH_SERIAL_OUT_MAX) return;   // callers bound their chunks below this
+  MeshSerialOutSlot slot;
+  slot.port = (uint8_t)port;
+  slot.len  = (uint8_t)len;
+  memcpy(slot.data, data, len);
+  // Non-blocking: a full queue drops the chunk rather than block the WiFi task, which services no
+  // incoming frame while blocked. The drop is counted and MeshSerialOutTask reports it.
+  if (xQueueSend(meshSerialOutQueue, &slot, 0) != pdTRUE)
+    meshSerialOutDrops = meshSerialOutDrops + 1;
+}
+
+// Core 1, beside the Kyber and raw-forwarding tasks: bit-bangs what the callback queued. Not done
+// in loop(), because a 196-byte chunk holds the port for ~200 ms and loop() paces ETM retries, the
+// command queue and the device polls.
+void MeshSerialOutTask(void *parameter) {
+  uint32_t reportedDrops = 0;
+  for (;;) {
+    MeshSerialOutSlot slot;
+    if (xQueuePeek(meshSerialOutQueue, &slot, portMAX_DELAY) != pdTRUE) continue;
+    if (serialReconfigPort == slot.port) {        // being torn down and re-begun: hold the chunk
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    xQueueReceive(meshSerialOutQueue, &slot, 0);  // ours alone: this task is the only consumer
+    getSerialStream(slot.port).write(slot.data, slot.len);
+    const uint32_t drops = meshSerialOutDrops;
+    if (drops != reportedDrops) {
+      Serial.printf("[SOFTSERIAL] mesh-to-port queue full: dropped %lu chunk(s), %lu in total\n",
+                    (unsigned long)(drops - reportedDrops), (unsigned long)drops);
+      reportedDrops = drops;
+    }
+  }
 }
 
 // Enqueue commands for asynchronous processing
@@ -3412,7 +3481,7 @@ void handleConfigReqPacket(const uint8_t *data) {
 // ── Deferred MGMT output ────────────────────────────────────────────────────
 // The five *FragPacket handlers all run on the WiFi task (espNowReceiveCallback dispatches
 // them inline), and each ends by printing the reassembled result — up to 2912 bytes. UART0
-// has no TX buffer (the sketch never calls setTxBufferSize), so Serial.printf does not return
+// has no TX buffer (setTxBufferSize is only called for Serial1/Serial2), so Serial.printf does not return
 // until every byte is on the wire: ~235 ms for a real 2.7 KB config. HAL locks are enabled,
 // so the WiFi task holds the UART0 mutex for that whole window and any Serial.* from loop()
 // on core 1 blocks behind it too. That is exactly what WCB_RemoteTerm.cpp:14-16 warns about
@@ -3645,10 +3714,15 @@ void handleSeqValReqPacket(const uint8_t *data) {
   lastSeqValKey  = key;
   lastSeqValMs   = nowMs;
 
-  preferences.begin("stored_cmds", true);
-  bool   exists = preferences.isKey(key.c_str());
-  String value  = preferences.getString(key.c_str(), "");
-  preferences.end();
+  // A key longer than SEQ_KEY_MAX_LEN is never stored, and NVS would match its first 15 characters.
+  bool   exists = false;
+  String value  = "";
+  if (key.length() <= SEQ_KEY_MAX_LEN) {
+    preferences.begin("stored_cmds", true);
+    exists = preferences.isKey(key.c_str());
+    value  = preferences.getString(key.c_str(), "");
+    preferences.end();
+  }
 
   String reply;
   if (!exists && value.length() == 0) {
@@ -4222,9 +4296,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       // the seqs it used before the reboot — so its first commands matched a "already seen" entry
       // and were ACKed and then silently NOT executed. Clear this sender's history on a boot
       // announce so the reused low seqs are treated as new.
-      if (isBootAnnounce) {
+      // Once per boot: a board sends three announces ~1.2 s apart, and clearing on each one would let the retry of a
+      // command it sent between them (ACK lost) run a second time. Later announces within 4 s are presence only.
+      if (isBootAnnounce && (etmBootClearMs[senderIdx] == 0 || millis() - etmBootClearMs[senderIdx] > 4000)) {
         for (int h = 0; h < ETM_SEQ_HISTORY; h++) etmSeqHistory[senderIdx][h] = 0;
         etmSeqHistoryIdx[senderIdx] = 0;
+        etmBootClearMs[senderIdx] = millis() | 1;
       }
     }
 
@@ -4329,8 +4406,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         // loop prevention stays intact.
         bool wizardOrigin = (etmCmd.length() > 0 && (uint8_t)etmCmd[0] == 0x01);
         if (wizardOrigin) etmCmd = etmCmd.substring(1);  // strip marker before executing
-        lastReceivedViaESPNOW = !wizardOrigin;
-        inSequenceBody = false;   // received command is top-level, not a sequence body
+        // JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode / PONG) is consumed by the relay branch
+        // below and NEVER runs as a command, so it must not touch the origin flags. A controller on the
+        // mesh broadcasts rc_ch at 5 Hz; between those packets lastReceivedViaESPNOW stayed true, so the
+        // next locally-typed broadcast looked mesh-originated — its origin is snapshotted when it is
+        // enqueued (WCB.ino:2204) — and the loop-prevention gate in sendESPNowMessage() dropped it
+        // silently. The board's own ports still printed the line, so only the mesh copy went missing,
+        // at random: input.bcast_fanout / input.bcast_too_long_local_only / etm.char_loaded on the bench.
+        if (etmCmd.length() == 0 || etmCmd[0] != '{') {
+            lastReceivedViaESPNOW = !wizardOrigin;
+            inSequenceBody = false;   // received command is top-level, not a sequence body
+        }
         colorWipeStatus("ES", green, 200);
 
         if (debugETM) {
@@ -4527,8 +4613,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     }
 
     if (destWCB == WCB_Number) {
-      Stream &targetSerial = getSerialStream(destPort);
-      targetSerial.write((uint8_t *)(received.structCommand + 4), chunkLen);
+      meshSerialWrite(destPort, (uint8_t *)(received.structCommand + 4), chunkLen);
       // No flush() — we're in the ESP-NOW receive callback (WiFi task). write()
       // queues into the UART TX buffer and it drains async; flush() would block
       // the WiFi task until the FIFO empties (~200ms on a SW UART), dropping
@@ -4560,17 +4645,17 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       // Write to every locally configured Maestro port
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          getSerialStream(maestroConfigs[i].serialPort).write(dataPtr, chunkLen);
+          meshSerialWrite(maestroConfigs[i].serialPort, dataPtr, chunkLen);
         }
       }
       // Also echo back to the local Kyber port
-      if (kyberLocalPort > 0) getSerialStream(kyberLocalPort).write(dataPtr, chunkLen);
+      if (kyberLocalPort > 0) meshSerialWrite(kyberLocalPort, dataPtr, chunkLen);
     } else if (Maestro_Remote) {
       // Write to every locally configured Maestro port
       bool wroteAny = false;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          getSerialStream(maestroConfigs[i].serialPort).write(dataPtr, chunkLen);
+          meshSerialWrite(maestroConfigs[i].serialPort, dataPtr, chunkLen);
           wroteAny = true;
         }
       }
@@ -4592,8 +4677,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                       senderWCB, targetPort, (int)chunkLen);
       return;
     }
-    Stream &targetSerial = getSerialStream(targetPort);
-    targetSerial.write((uint8_t *)(received.structCommand + 3), chunkLen);
+    meshSerialWrite(targetPort, (uint8_t *)(received.structCommand + 3), chunkLen);
     // No flush() — same reason as the targeted-Kyber path above: flushing here
     // blocks the WiFi task (ESP-NOW) until the UART drains. write() drains async.
     if (debugMaestro) {
@@ -4621,9 +4705,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  // Normal command for this board
-  lastReceivedViaESPNOW = true;
-  inSequenceBody = false;   // received command is top-level, not a sequence body
+  // Normal command for this board. JSON telemetry is consumed by the relay branch below without ever
+  // running as a command, so it leaves the origin flags alone — same reason as the ETM path above.
+  if (received.structCommand[0] != '{') {
+    lastReceivedViaESPNOW = true;
+    inSequenceBody = false;   // received command is top-level, not a sequence body
+  }
   colorWipeStatus("ES", green, 200);
 
   if (targetWCB != 0 && targetWCB != WCB_Number) {
@@ -5528,6 +5615,8 @@ void processLocalCommand(const String &message) {
             String gk = seqArgs; gk.trim();
             if (gk.length() == 0) {
                 Serial.println("Usage: ?SEQ,GET,<key>");
+            } else if (gk.length() > SEQ_KEY_MAX_LEN) {   // never stored; NVS would match its first 15 characters
+                Serial.printf("[MGMT:SEQVAL,%d]%s,NOTFOUND,\n", WCB_Number, gk.c_str());
             } else {
                 preferences.begin("stored_cmds", true);
                 bool   ex = preferences.isKey(gk.c_str());
@@ -6503,7 +6592,11 @@ void processSerialMessage(const String &message) {
     // Send to selected serial port (1-5)
     Stream &targetSerial = getSerialStream(target);
     writeSerialString(targetSerial, serialMessage);
-    targetSerial.flush(); // Ensure it's sent immediately
+    // No flush(). It never made the bytes leave sooner: S1/S2 write() queues into the UART, which drains on its own,
+    // and S3-S5 write() is already synchronous. On S1/S2 flush() busy-waits for the TX line to go idle while holding
+    // the UART lock (~17 ms per 16-byte line at 9600), which stalled serialCommandTask on the same core and lost input
+    // arriving on the soft ports meanwhile; on S3-S5 SoftwareSerial::flush() throws away unread RX. The one place that
+    // needs the queue drained, a live baud change, flushes there (applyLiveBaud).
 
     if (debugEnabled) {
       Serial.printf("Sent to %s: %s\n", getSerialLabel(target).c_str(), serialMessage.c_str());
@@ -6705,6 +6798,12 @@ void recallStoredCommand(const String &message, int sourceID) {
     if (key.length() == 0) {
         Serial.println(isSeq ? "Invalid recall command. Use SEQkey (or SEQkey,L for local-only)."
                              : "Invalid recall command. Use ;Ckey (or ;Ckey,L for local-only).");
+        return;
+    }
+    // No key longer than SEQ_KEY_MAX_LEN can be stored, but NVS compares only that many characters, so the lookup
+    // would recall the shorter key's sequence. Refuse it here, before the mesh fan-out too.
+    if (key.length() > SEQ_KEY_MAX_LEN) {
+        Serial.printf("No command stored under key: '%s'\n", key.c_str());
         return;
     }
 
@@ -7006,7 +7105,13 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
 
 // processIncomingSerial for each serial port
 void processIncomingSerial(Stream &serial, int sourceID) {
-  if (!serial.available()) return;  // Exit if no data available
+  // The ownership checks below come BEFORE available(): on S3-S5 available() runs
+  // EspSoftwareSerial's rxBits(), which assembles bytes from the RX edge buffer and
+  // is not re-entrant. This task and the loop task (the port's real owner) are both
+  // priority 1 on core 1, so a time-slice switch inside rxBits() corrupts the
+  // owner's bytes even though this function then returns without reading. The early
+  // available() also defeated the serialReconfigPort guard below, whose whole point
+  // is that a re-begin frees the RX buffer under the reader.
 
   // Skip ports reserved for the MP3 Trigger — responses are consumed
   // exclusively by processMP3Responses() in loop().
@@ -7027,6 +7132,8 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // Skip a port that applyLiveBaud is currently tearing down and re-beginning: on S3-S5 that
   // frees and reallocates the SoftwareSerial RX buffer under us.
   if (sourceID != 0 && sourceID == serialReconfigPort) return;
+
+  if (!serial.available()) return;  // Exit if no data available
 
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
   String &serialBuffer = serialBuffers[sourceID];
@@ -7839,6 +7946,9 @@ void setup() {
   // comment for the cross-thread rationale.
   pendingTimerChainQueue = xQueueCreate(TIMER_CHAIN_QUEUE_SLOTS, sizeof(PendingTimerChainSlot));
 
+  // Mesh bytes for protected soft ports: written by loop(), never the WiFi task (meshSerialWrite).
+  meshSerialOutQueue = xQueueCreate(MESH_SERIAL_OUT_SLOTS, sizeof(MeshSerialOutSlot));
+
   loadHWversion();
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
@@ -7939,6 +8049,16 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     }
   }
   printBaudRates();
+
+  // Give S1/S2 a TX buffer before begin(). The core default is none (_txBufferSize(0), HardwareSerial.cpp:123),
+  // and uartWriteBuf holds the UART lock for the whole uart_write_bytes call (esp32-hal-uart.c:1165-1167), which
+  // with no buffer waits for FIFO space. A burst of ;S2 output that filled the 128-byte FIFO therefore held the lock
+  // while S2 drained at 9600, serialCommandTask blocked on Serial2.available() behind it, and input arriving on a
+  // soft port overflowed its 95-byte buffer (HIL input.soft_rx_baud_sweep lost lines at 38400). The ESP-NOW receive
+  // callback also writes Maestro bytes to S1/S2 on the WiFi task, where a write that cannot block matters too.
+  // setTxBufferSize only takes effect before begin(); applyLiveBaud changes the rate without re-beginning.
+  Serial1.setTxBufferSize(1024);
+  Serial2.setTxBufferSize(1024);
 
   if (Kyber_Local) {
       // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
@@ -8079,6 +8199,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     Serial.println("Error initializing ESP-NOW");
     return;
   }
+  espNowInitialized = true;
 
   // Add peers
   for (int i = 0; i < Default_WCB_Quantity; i++) {
@@ -8198,6 +8319,10 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // Create raw serial forwarding task
   xTaskCreatePinnedToCore(RawSerialForwardingTask, "Raw Serial Task", 4096, NULL, 1, NULL, 1);
   Serial.println("Raw Serial Forwarding Task Created");
+
+  // Mesh bytes for S3-S5, queued by meshSerialWrite() on the WiFi task. Core 1 like every other
+  // soft-serial writer, so the library's one shared TX mux is never contended across cores.
+  xTaskCreatePinnedToCore(MeshSerialOutTask, "Mesh Serial Out", 3072, NULL, 1, NULL, 1);
   
   delay(150);
   turnOffLED();

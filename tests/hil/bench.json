@@ -1,0 +1,68 @@
+{
+  "_comment": "Greg's bench. COM numbers are this PC's. Wires are NOT listed here — they are auto-detected (GUI or run.py --discover) and saved to results/links.json. wiring_plan says which probe each WCB's ports should go to; taps are listen-only wires onto a line a real device already uses.",
+  "devices": {
+    "wcb1": {
+      "port": "COM6",
+      "kind": "wcb",
+      "wcb": 1,
+      "note": "HW 1.0 (LilyGO T7), CH9102"
+    },
+    "probe1": {
+      "port": "COM16",
+      "kind": "probe",
+      "note": "V2.4 board, formerly the MgmtRelay (WCB19)",
+      "mac": "0C:8B:95:B4:01:00"
+    },
+    "probe2": {
+      "port": "COM11",
+      "kind": "probe",
+      "note": "V2.4 board, formerly WLED2",
+      "mac": "0C:8B:95:B3:37:48"
+    },
+    "navicore": {
+      "port": "COM5",
+      "kind": "navicore"
+    },
+    "sbus": {
+      "port": "COM4",
+      "kind": "sbus"
+    },
+    "wcb2": {
+      "port": "COM15",
+      "kind": "wcb",
+      "wcb": 2
+    }
+  },
+  "mesh_only_wcbs": [],
+  "wiring_plan": {
+    "1": "probe1",
+    "2": "probe2"
+  },
+  "taps": [
+    {
+      "wcb": 2,
+      "port": "S1",
+      "why": "Real Maestro 2 is on this port — the probe only listens, so the Maestro keeps working."
+    }
+  ],
+  "port_stimulus": {
+    "W2S1": {
+      "send": ";M2,getErrors",
+      "expect": "AA0221"
+    }
+  },
+  "maestros": [
+    {
+      "where": "wcb2",
+      "port": "S1"
+    },
+    {
+      "where": "navicore"
+    }
+  ],
+  "port_devices": {
+    "W2S1": {
+      "kind": "maestro"
+    }
+  }
+}

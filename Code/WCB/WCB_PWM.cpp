@@ -47,9 +47,15 @@ volatile unsigned long pwmPulseWidth[5] = {0};
 volatile bool pwmNewData[5] = {false};
 extern bool espNowInitialized;
 
-// Helper function
+// Remote PWM configuration may go out once ESP-NOW is running. This used to be "uptime > 5 s", but nothing at boot
+// sends remote PWM config — only commands do — so the gate only ever bit a command that arrived in the first five
+// seconds after a reboot (a config push, a test): it cleared or changed the local mapping, saved it and printed
+// success, while the remote board was never told. setup() registers the peers right after esp_now_init(), and an
+// ETM send to a peer not yet seen online still goes out and retries.
 bool canSendESPNow() {
-    return (millis() > 5000);
+    if (espNowInitialized) return true;
+    Serial.println("⚠️  ESP-NOW is not running — remote PWM configuration was NOT sent");
+    return false;
 }
 
 // Validation function to prevent PWM conflicts with Kyber
@@ -859,7 +865,7 @@ void reconcileWdpAutoPWMOutputs(uint8_t srcWCB, const uint8_t *wantPorts, uint8_
     }
 }
 
-void removePWMOutputPort(int port) {
+bool removePWMOutputPort(int port) {
     for (int i = 0; i < pwmOutputCount; i++) {
         if (pwmOutputPorts[i] == port) {
             for (int j = i; j < pwmOutputCount - 1; j++) {
@@ -880,10 +886,11 @@ void removePWMOutputPort(int port) {
                 saveBroadcastBlockSettings();
             }
             Serial.printf("Serial%d removed from PWM output ports; broadcasts re-enabled\n", port);
-            return;
+            return true;
         }
     }
     Serial.printf("Serial%d was not configured as PWM output\n", port);
+    return false;   // nothing changed — callers must not reboot on a miss (WCB_PWM.h)
 }
 
 void savePWMOutputPortsToPreferences() {

@@ -190,8 +190,8 @@ void configureDFP(const String &args) {
       memset(dfpConfig.onErrCmd, 0, sizeof(dfpConfig.onErrCmd));
       saveDFPSettings();
       Serial.println("[DFP] Error callback cleared");
-    } else if (key.length() == 0 || key.length() > 23) {
-      Serial.println("[DFP] ONERR: key must be 1-23 characters");
+    } else if (key.length() == 0 || key.length() > SEQ_KEY_MAX_LEN) {   // a sequence key: a longer one is never stored
+      Serial.println("[DFP] ONERR: key must be 1-15 characters");
     } else {
       strncpy(dfpConfig.onErrCmd, key.c_str(), sizeof(dfpConfig.onErrCmd) - 1);
       dfpConfig.onErrCmd[sizeof(dfpConfig.onErrCmd) - 1] = '\0';
