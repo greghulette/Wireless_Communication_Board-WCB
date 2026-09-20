@@ -197,9 +197,11 @@ public:
     /**
     * @brief Stops all wavs playing, and the emote GRACEFULLY.
     *
-    * WCB patch. As Stop(), but the vocalizer gets <PSG> instead of <PSV>. The
-    * A/B WAV channels still stop at once: the protocol has no graceful WAV stop
-    * (use ;H,FADEOUT to ramp one down before stopping it).
+    * WCB patch. As Stop(), but the vocalizer gets <PSG> instead of <PSV>, and
+    * channel V is NOT also sent StopWAV — channel V is the vocalizer, and
+    * StopWAV(0) is <PSV,QPV>, which would cut it off right after PSG asked it to
+    * wind down. Only the A/B WAV channels stop at once: the protocol has no
+    * graceful WAV stop (use ;H,FADEOUT to ramp one down before stopping it).
     */
     void StopGraceful(void);
 

@@ -122,7 +122,7 @@ static void hcrCacheCommanded(int ch) {
 // Set a channel volume through the shared codec (updates its shadow = user intent).
 static void hcrSetVol(int ch, int v) {
   if (ch < 0 || ch > 2 || !_hcrPort) return;
-  hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 99));   // fn 17 = SetVolume
+  hcrCodec.emit(*_hcrPort, 17, ch, constrain(v, 0, 100));  // fn 17 = SetVolume (HCR range 0-100)
   hcrNoteVolWrite(ch);
   hcrCacheCommanded(ch);
 }
@@ -594,7 +594,7 @@ void processHCRRuntimeCommand(const String &message) {
       const int cur = hcrCurVol(c);
       const int nv  = up ? cur + step : cur - step;
       hcrCancelFade(c);
-      hcrSetVol(c, nv);                              // hcrSetVol clamps 0-99
+      hcrSetVol(c, nv);                              // hcrSetVol clamps 0-100
       if (debugHCR) Serial.printf("[HCR-DBG] %s ch=%d %d->%d\n",
                                   vU.c_str(), c, cur, hcrCurVol(c));   // the value actually sent
     }

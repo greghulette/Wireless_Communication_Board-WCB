@@ -484,12 +484,16 @@ void HCRVocalizer::StopEmoteGraceful(void) {
     sendCommand(msg);
 }
 
-// WCB patch: Stop(), but the vocalizer stops gracefully. WAV channels are
-// unchanged — the protocol has no graceful WAV stop.
+// WCB patch: Stop(), but the vocalizer stops gracefully.
+//
+// NOTE the missing StopWAV(0). Channel V IS the vocalizer, and StopWAV(0) emits
+// <PSV,QPV> — the same abrupt stop PSG was asked to avoid. Sending it here would
+// cut the vocalizer off a millisecond after telling it to wind down, making the
+// whole graceful path a no-op. Only the A/B WAV channels are stopped outright;
+// the protocol has no graceful WAV stop (use ;H,FADEOUT to ramp one down first).
 void HCRVocalizer::StopGraceful(void)
 {
     StopEmoteGraceful();
-    StopWAV(0);
     StopWAV(1);
     StopWAV(2);
 }

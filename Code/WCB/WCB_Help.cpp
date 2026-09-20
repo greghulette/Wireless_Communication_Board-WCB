@@ -644,6 +644,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      applies to the vocalizer only — WAV"));
         Serial.println(F("                      channels always stop at once"));
         Serial.println(F("  ;H,FN,fn,chan,track Numeric dispatch (RC fn/chan/track)"));
+        Serial.println(F("                      fn 20 = graceful emote stop, 21 = graceful"));
+        Serial.println(F("                      stop all (same bytes as ;H,STOP*,GRACEFUL)"));
         Serial.println(F("  ;H,RAW,<string>     Send a literal HCR string verbatim"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?HCR,PORT,S1:9600             - HCR on S1 at 9600 baud"));
