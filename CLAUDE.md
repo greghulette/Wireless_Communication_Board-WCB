@@ -17,6 +17,7 @@ changing before editing.**
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
 | Device command translation | it's in [`WcbCmd`](https://github.com/greghulette/WcbCmd), not here |
+| Hardware-in-the-loop tests — `tests/hil`, the `wcb_probe` firmware | [docs/HIL_TESTING.md](docs/HIL_TESTING.md) |
 
 ---
 
@@ -40,11 +41,18 @@ changing before editing.**
    any explicit `sendESPNowMessage(0, …, false)` (`WCB.ino:1549`). "Broadcast is
    unacknowledged" and "every broadcast is acknowledged" are both true here, of different
    paths — check which one you're on before assuming delivery.
+   **Loop prevention gates every broadcast on one global.** `sendESPNowMessage()` drops a
+   broadcast outright when `lastReceivedViaESPNOW` is set (`WCB.ino:2618`), and a queued command
+   carries the value it snapshotted at enqueue (`:2204`). Only a received *command* may set it:
+   JSON telemetry is consumed without ever running, so both receive paths skip the flag for a `{`
+   payload (`:4409`, `:4700`). Set it from a packet that never executes and a controller's 5 Hz
+   `rc_ch` silences locally-typed broadcasts at random — local ports still print them.
 4. **ETM is all-or-nothing across the fleet.** Every board must have ETM set the same way or
    messages are **silently ignored** — same for `?ETM,CHKSM`, where a mismatch rejects all
    packets. **WDP requires ETM enabled**: it rides the 252-byte ETM struct and gate
    (`WCB_WDP.h:20`), so turning ETM off also kills discovery. ETM packets are 252 bytes vs 249
-   normal; CHKSM adds 12 bytes and drops the max command to 188 chars.
+   normal; CHKSM adds 12 bytes and drops the max command to 187 chars (`ETM_MAX_CMD_WITH_CRC`,
+   `WCB.ino:225`).
 5. **The same Maestro ID can legitimately exist more than once in the mesh** — on one WCB
    (different serial ports) or across several WCBs. **Slot identity is
    `(maestroID, serialPort, remoteWCB)`, not the ID alone** (`WCB_Maestro.h`), so the same ID
@@ -121,12 +129,21 @@ changing before editing.**
     H-CR on S5 under mesh load: `<CA1021>` played 0001/0010, every failure a *prefix*.
     `applySoftSerialIntTx()` now flips `enableIntTx(false)` per port, but **only where no
     core-0 task can write that port** — the library’s interrupt mux is `static` (one spinlock
-    for all three ports), and `espNowReceiveCallback` writes raw mesh data straight to Maestro,
-    Kyber and raw-mapping ports on the WiFi task. Re-check that predicate before adding any new
-    writer. Two things that are NOT fixes: the write being one bulk call instead of per-byte
-    (both take the same path with interrupts live), and lowering the baud (it lengthens the
-    exposure). The durable fix is a hardware UART (S1/S2) or taking the other traffic off the
-    wire — every broadcast is bit-banged to **every** unclaimed port, so one enabled-but-unused
+    for all three ports), and a core-0 writer waiting on it shortens its next start bit, so *both*
+    ports mis-frame. `espNowReceiveCallback` writes Maestro, Kyber and raw-mapping ports
+    only through `meshSerialWrite()`, which queues every S3-S5 chunk for `MeshSerialOutTask` on
+    core 1 — a remote board's raw mapping can target any port, so the predicate cannot see it.
+    Keep every new soft-serial writer on core 1.
+    **A port with `enableIntTx(false)` also cannot RECEIVE while it transmits** — the RX edge
+    ISR is masked for the whole write (the library README says so). So a device that answers
+    must be asked in **one** write, and its replies read after the WCB goes quiet. Queries sent
+    back to back lose every reply but the last: `?HCR,STATUS` called `getVolume()` three times,
+    putting `<QVV>\n<QVA>\n<QVB>\n` on the wire, and only vB ever came back on S3-S5.
+    That is why the HCR poll is one container frame (`HCR_POLL_FRAME`, `WCB_HCR.cpp`) and why status
+    readers must never transmit. Two things that are NOT fixes: the write being one bulk call
+    instead of per-byte (both take the same path with interrupts live), and lowering the baud
+    (it lengthens the exposure). The durable fix is a hardware UART (S1/S2) or taking the
+    other traffic off the wire — every broadcast is bit-banged to **every** unclaimed port, so one enabled-but-unused
     port costs real milliseconds of blocked loop task per message.
 
 
@@ -139,13 +156,22 @@ Code/bin/build.sh
 #   ESP32-S3  : esp32:esp32:esp32s3:PartitionScheme=min_spiffs
 #   core pinned to esp32:esp32@3.3.4
 
-# The only automated test in the ecosystem — WDP wire format + election, pure C++11
+# Host test — WDP wire format + election, pure C++11
 g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./wdp_wire_test
+
+# Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
+python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log
+python tests/hil/run.py                  # everything; or globs: "maestro.*" "wled.*"
+python tests/hil/run.py --discover       # re-detect which probe header is wired to which WCB port
+python tests/hil/run.py --list | --plan
 ```
 
-The WDP test is independent of the firmware build so it can never block a push. Everything
-outside WDP is covered only by the compiler and by `TestConfigs/` (a manual bench plan —
-`TestPlan.md`, `steps.md`, and per-board config fixtures).
+The WDP test is independent of the firmware build so it can never block a push. The HIL
+suite needs the physical bench (`tests/hil/bench.json`), so no CI runs it — it changes saved
+config, moves servos and reboots boards, and fails any test that leaves a board's config
+different from how it found it. Close the Arduino IDE monitor and Wizard tabs first: a COM
+port has one owner. What neither covers is left to the compiler and `TestConfigs/` (a manual
+bench plan — `TestPlan.md`, `steps.md`, and per-board config fixtures).
 
 The Wizard has no build step, so a syntax slip silently breaks all event wiring:
 
@@ -154,8 +180,7 @@ node C:\Users\ghulette\tools\jscheck.js Wizard/index.html
 ```
 
 A static Wizard server is configured as launch config `wizard-static` (port 8777). It runs
-`python -m http.server`, and **Python is not currently on PATH on this machine** — the config
-needs a working interpreter before it will start.
+`python -m http.server` (Python 3.14 with pyserial is on PATH via PyManager).
 
 ## Layout
 
@@ -167,7 +192,7 @@ needs a working interpreter before it will start.
 | `Wizard/` | browser config tool — `app.js`, `parser.js`, `flasher.js`, `device-labels.js` |
 | `PCB/` | KiCad hardware, V2.4 / V3.1 / V3.2 |
 | `TestConfigs/` | bench test plan and fixtures |
-| `tests/` | `wdp_wire_test.cpp` |
+| `tests/` | `wdp_wire_test.cpp` (host) · `hil/` hardware-in-the-loop harness, `hil/gui.py`, and `hil/wcb_probe/` instrument firmware |
 
 `wcb_pin_map.{h,cpp}` maps hardware revisions to pins — hardware differences belong there,
 not in `#ifdef`s scattered through the subsystems.

@@ -23,7 +23,9 @@
 #include <SoftwareSerial.h>
 #include <Wire.h>
 
-#define HCR_BUFFER_SIZE 32
+// WCB patch: was 32. A <QD,...> dataframe body with 3-digit emotions, a 4-digit
+// WAV count, a float duration and two playing file numbers runs ~50 characters.
+#define HCR_BUFFER_SIZE 64
 
 #ifndef HCR_BAUD_RATE
 #define HCR_BAUD_RATE 9600
@@ -97,6 +99,8 @@ public:
      * @param baud the baud rate
      */
     HCRVocalizer(SoftwareSerial *conn,int baud);
+    // WCB patch: the class has a virtual hook (onFrame), so give it a virtual destructor.
+    virtual ~HCRVocalizer() {}
 
     /**
      * @brief Configure the HCRVocalizer for Serial with specific rx and tx pins
@@ -174,6 +178,30 @@ public:
     * 
     */
     void StopEmote(void);
+
+    /**
+    * @brief Stops the vocalizer GRACEFULLY: it finishes the sound it is making
+    * and falls silent, instead of being cut off mid-utterance.
+    *
+    * WCB patch. Upstream has no graceful stop: every stop path here emits PSV,
+    * so a port declared with ?HCR,PORT could only ever stop abruptly (the port
+    * leaves the broadcast loop, so raw <PSG> frames no longer reach it either).
+    * Emits <PSG> — bare, with no trailing query: unlike PSV, the vocalizer is
+    * still speaking when it acknowledges, so a chained QT would report a
+    * duration that is about to change. The next poll picks it up.
+    * Reported by Travis Cook, issue #15; <PSG> verified on his hardware via
+    * ;H,RAW before this existed.
+    */
+    void StopEmoteGraceful(void);
+
+    /**
+    * @brief Stops all wavs playing, and the emote GRACEFULLY.
+    *
+    * WCB patch. As Stop(), but the vocalizer gets <PSG> instead of <PSV>. The
+    * A/B WAV channels still stop at once: the protocol has no graceful WAV stop
+    * (use ;H,FADEOUT to ramp one down before stopping it).
+    */
+    void StopGraceful(void);
 
     /**
      * @brief Overrides normalization of emotional state
@@ -314,6 +342,20 @@ public:
      * @return float 
      */
     float getVolume(int e);
+
+    /**
+     * @brief Returns the volume the vocalizer last reported for the specified
+     * channel WITHOUT sending a query (getVolume() transmits <QVx> and returns
+     * the value cached before that query was answered).
+     *
+     * WCB patch: status readers must not transmit. Three getVolume() calls in a
+     * row put <QVV><QVA><QVB> on the wire back to back; on a soft-serial port
+     * that cannot receive while it transmits, only the last reply survived.
+     *
+     * @param e the audio channel (CH_V|CH_A|CH_B)
+     * @return float
+     */
+    float GetVolume(int e);
     void getUpdate(void);
 
     void dfPlayer();
@@ -336,6 +378,12 @@ private:
     String getValue(String data, char separator, int index);
 
 protected:
+    // WCB patch: called once per received frame, after it is parsed. frame = the
+    // text between '<' and '>'; parsed = its key was recognised and the cache
+    // updated. The library's own Serial prints go to an un-begun UART on the WCB,
+    // so this is the only way a sketch can see replies. Default: no-op.
+    virtual void onFrame(const char * /*frame*/, bool /*parsed*/) {}
+
     char hcrstartMarker = '<';
     char hcrendMarker = '>';
     char cmdBuffer[HCR_BUFFER_SIZE];

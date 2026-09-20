@@ -613,9 +613,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
         Serial.println(F("  STATUS            Show cached HCR status  [HCR:...]"));
         Serial.println(F("  REFRESH           Poll the HCR immediately"));
-        Serial.println(F("  GET,<field>       Query one value (EMOTION,H|S|M|C /"));
+        Serial.println(F("  GET,<field>       Show one cached value (EMOTION,H|S|M|C /"));
         Serial.println(F("                      DURATION / OVERRIDE / MUSE / WAVCOUNT /"));
-        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B)"));
+        Serial.println(F("                      PLAYING,V|A|B / VOL,V|A|B). VOL also"));
+        Serial.println(F("                      asks the HCR; the answer shows next time"));
         Serial.println(F("\nRuntime Actions (use ;H,...):"));
         Serial.println(F("  ;H,STIM,e,lvl       Stimulate  e=H|S|M|C  lvl=MOD|STRONG"));
         Serial.println(F("  ;H,TRIGGER,e,lvl    Trigger (same payload as STIM)"));
@@ -623,7 +624,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;H,SETEMOTION,e,0-100  Set an emotion level directly"));
         Serial.println(F("  ;H,RESETEMOTIONS    Reset all emotions to 0"));
         Serial.println(F("  ;H,OVERRIDE,0|1     Personality-chip emotion override"));
-        Serial.println(F("  ;H,STOPEMOTE        Stop the current emote"));
+        Serial.println(F("  ;H,STOPEMOTE[,NOW|GRACEFUL]"));
+        Serial.println(F("                      Stop the current emote. NOW (default)"));
+        Serial.println(F("                      cuts it off; GRACEFUL lets the vocalizer"));
+        Serial.println(F("                      finish the sound it is making"));
         Serial.println(F("  ;H,MUSE             Trigger one muse"));
         Serial.println(F("  ;H,MUSE,0|1|TOGGLE  Disable / enable / toggle muse"));
         Serial.println(F("  ;H,MUSE,GAP,min,max Set muse gap range (seconds)"));
@@ -635,7 +639,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;H,VOLDN[,V|A|B][,step]  Volume down (no channel = all; step default 5)"));
         Serial.println(F("  ;H,FADEIN,A|B,sec   Ramp 0 -> current volume"));
         Serial.println(F("  ;H,FADEOUT,A|B,sec  Ramp -> 0, StopWAV, restore vol"));
-        Serial.println(F("  ;H,STOP             Stop all audio and emotes"));
+        Serial.println(F("  ;H,STOP[,NOW|GRACEFUL]"));
+        Serial.println(F("                      Stop all audio and emotes. GRACEFUL"));
+        Serial.println(F("                      applies to the vocalizer only — WAV"));
+        Serial.println(F("                      channels always stop at once"));
         Serial.println(F("  ;H,FN,fn,chan,track Numeric dispatch (RC fn/chan/track)"));
         Serial.println(F("  ;H,RAW,<string>     Send a literal HCR string verbatim"));
         Serial.println(F("\nExamples:"));
@@ -649,9 +656,13 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;W2,;H,STIM,M,STRONG          - Stimulate WCB2's HCR"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - HCR status is poll-based; STATUS reflects the last poll"));
+        Serial.println(F("      (age = s since the HCR last answered, -1 = never; rx = replies;"));
+        Serial.println(F("       vage = s since it last confirmed all of vV/vA/vB, -1 = not yet)"));
+        Serial.println(F("  - A volume set via ;H,VOL/VOLUP/VOLDN/fades/FN shows in STATUS at"));
+        Serial.println(F("      once; the next poll after it replaces it with the HCR's report"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Debug: ?DEBUG,HCR,ON (or dhcron) logs commands sent +"));
-        Serial.println(F("      periodic received status; ?DEBUG,HCR,OFF / dhcroff"));
+        Serial.println(F("      every reply as [HCR-RX]; ?DEBUG,HCR,OFF / dhcroff"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
 
     // ================================================================
