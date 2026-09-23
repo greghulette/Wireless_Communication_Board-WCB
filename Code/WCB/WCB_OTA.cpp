@@ -50,8 +50,9 @@ static struct {
 static uint32_t s_otaXferBaud = 0;
 
 // Return the USB serial to the default baud if a transfer bumped it. Idempotent.
-// Called from otaAbortSession (covers ABORT + the 30 s idle timeout); the END path
-// reboots instead, which resets the baud in setup().
+// Called from otaAbortSession (ABORT, the 30 s idle timeout, a remote abort), from the
+// session-ending failures in otaWrite and otaEnd, and after the local [OTA:END,ERR] and
+// [OTA:BEGIN,ERR] markers. END OK reboots instead, which resets the baud in setup().
 static void otaRestoreLocalBaud() {
   if (s_otaXferBaud) {
     Serial.flush();                                // drain anything still queued
@@ -238,7 +239,7 @@ void processOtaLocalCommand(const String &args) {
     // rest = "<baud>" — temporarily raise THIS board's USB serial rate for the transfer.
     // Handshake: ACK at the CURRENT baud + flush so the host reads it, THEN switch our
     // UART; the host switches its side after the ACK. Auto-restored to 115200 on reboot
-    // (END OK), on END failure, or via otaAbortSession (ABORT/timeout).
+    // (END OK), on END failure, on a rejected BEGIN, or via otaAbortSession (ABORT/timeout).
     //
     // REQUIRE an active session: the only restore paths are tied to the session
     // (END reboot / END-fail restore / otaAbortSession from ABORT or the ota.active-gated
@@ -270,6 +271,13 @@ void processOtaLocalCommand(const String &args) {
     uint8_t  family = (uint8_t)  rest.substring(p + 1).toInt();
     bool ok = otaBegin(OTA_LOCAL_SESSION, size, family);   // logs its own detail
     Serial.printf("[OTA:BEGIN,%s,%u]\n", ok ? "OK" : "ERR", otaWrittenOffset());
+    // otaBegin supersedes a live session BEFORE its guards run, so a rejected BEGIN leaves
+    // no session: the ota.active-gated idle reaper and BAUD can no longer undo a raised
+    // rate, and the board stayed at 921600 until reset (HIL ota.local_baud_rejected_rebegin_
+    // restores). Restore it here, AFTER the ERR marker has flushed at the rate the host is on
+    // (same contract as END,ERR). No-op at 115200, i.e. every Wizard BEGIN (it bumps only
+    // after BEGIN,OK). A re-BEGIN that succeeds keeps the rate: the new session owns it.
+    if (!ok) otaRestoreLocalBaud();
     return;
   }
 
@@ -321,7 +329,7 @@ void processOtaLocalCommand(const String &args) {
 
   if (sub == "ABORT") { otaAbortSession("local abort command"); return; }
 
-  Serial.printf("[OTA] unknown subcommand '%s' (use STATUS|BEGIN|DATA|END|ABORT)\n", sub.c_str());
+  Serial.printf("[OTA] unknown subcommand '%s' (use STATUS|BAUD|BEGIN|DATA|END|ABORT)\n", sub.c_str());
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -411,8 +419,13 @@ void handleOtaDataPacket(const uint8_t *raw) {
   // times out, rewinds, resends from 0, is re-answered OK+0 — a genuine infinite hang
   // that looks like success with a frozen progress bar. OTA_ST_ERR on a no-longer-active
   // session makes it fail loudly instead. A frame for a DIFFERENT session gets its own id
-  // back, which the browser filters out. (Matches navicore_ota.h, which already carries this.)
-  sendOtaAck(pkt.sourceWCB, pkt.sessionId, inSession ? OTA_ST_OK : OTA_ST_ERR,
+  // back, which the browser filters out. The state is read AFTER the write: otaWrite itself
+  // ends the session on an overrun or write error, so reusing the pre-write `inSession` ACKed
+  // the very frame that tore it down OK+0 and only the frames after it ERR (HIL
+  // ota.relay_teardown_frame_err, tracker #70). A dup/gap write returns false WITHOUT ending the
+  // session, so it still ACKs OK with the cursor. navicore_ota.h reads it the same way.
+  const bool live = (ota.active && pkt.sessionId == ota.sessionId);
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, live ? OTA_ST_OK : OTA_ST_ERR,
              otaWrittenOffset());
 }
 

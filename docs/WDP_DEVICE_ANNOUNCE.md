@@ -20,7 +20,7 @@ The config tool (the "Wizard") reads that same picture, so plugging in a board a
 Today WDP knows about the WCBs and whatever a person has *typed in* about each serial port. Your device — a smart board with its own microcontroller — can do better: it can **introduce itself.** When it does:
 
 - It shows up automatically, everywhere on the droid, with the **right name** — nobody has to know or type "port 2 is a Flthy HP Controller."
-- Its **firmware version** becomes visible across the whole droid, so anyone maintaining it can see at a glance whether it's current — without unplugging anything or opening your device up.
+- Its **firmware version** can be read from the WCB it's plugged into (`?WDP,DA`, and by tools through `?WDP,DUMP`), so anyone maintaining it can check whether it's current — without unplugging anything or opening your device up.
 
 A few lines in your sketch make your device a self‑describing part of the droid instead of an anonymous thing on a wire.
 
@@ -39,7 +39,7 @@ One line, ending in a newline:
 ```
 
 - It **must** begin with `@WDP1` — that marker is how the WCB picks your announcement out of ordinary serial traffic. `1` is the format version.
-- One space, then a single JSON object.
+- One space, then a single JSON object — and nothing after its closing `}`.
 - End with `\n` (a trailing `\r` is fine).
 - Text is UTF‑8. Keep the whole line **200 characters or under**.
 - Anything the WCB can't recognize as a `@WDP` line is simply ignored, so announcing is always safe.
@@ -53,7 +53,7 @@ One line, ending in a newline:
 | `hw` | no | Hardware **revision**, if your board has them: `"revB"`, `"1.2"`. |
 | `caps` | no | Capability tags — a list of what your device does (see below). |
 
-Only send facts your device is the authority on — what it is, its firmware, its hardware. **Don't send an instance name** like "Front HP": your device has no way to know whether it's the front or rear one. That's assigned by the person setting up the droid, in the config tool.
+Only send facts your device is the authority on — what it is, its firmware, its hardware. **Don't send an instance name** like "Front HP": your device has no way to know whether it's the front or rear one. That's assigned by the person setting up the droid, in the config tool. The exception is a board that is *configured* for its role — a PSI set up as the front one does know it — and the shared list has role‑specific types for that (`PSI Front`, `PSI Rear`).
 
 ```
 minimum:  @WDP1 {"type":"Flthy HP Controller","fw":"2.3.0"}
@@ -159,9 +159,9 @@ void wdpAnnounce(Stream& wcb) {
 
 You don't implement any of this — it's just so you know what to expect:
 
-1. It records, for that port, what your device announced: its type, firmware, and any hardware rev / capabilities.
-2. That information rides up into the mesh, so the config tool and other boards show, per port: `S2  Flthy HP Controller  fw 2.3.0`.
-3. If nobody has manually labeled that port, your `type` fills it in automatically. If someone *has* set a label, theirs is shown, but your details are still recorded alongside it.
+1. It records what your device announced — type, firmware, and any hardware rev / capabilities — as one record per port **and type**, so several devices can share a port (see the questions below). A record is forgotten 90 s after its device last announced.
+2. Your `type` rides up into the mesh as that port's name, so the config tool and other boards show what's on each port. The rest of the record stays on the WCB you're plugged into: `?WDP,DA` prints `S2  Flthy HP Controller  fw 2.3.0`, and tools read every field from `?WDP,DUMP`.
+3. If nobody has manually labeled that port, your `type` fills it in automatically — when several devices announce on one port, the one the WCB heard first names it, and it stays put while they take turns. If someone *has* set a label, theirs is shown, but your details are still recorded alongside it.
 
 ## Checklist
 
@@ -179,4 +179,19 @@ You don't implement any of this — it's just so you know what to expect:
 
 **Two of my devices are the same type on different ports — is that a problem?** No. Each port is tracked separately; telling them apart ("front" vs "rear") is the user's job in the config tool.
 
-**Will this break anything on an older WCB that doesn't know about this yet?** No — it just sees an unrecognized line and ignores it.
+**Several of my boards share one WCB serial port. Can they all announce?** Yes. The WCB keeps a separate record for each `type` it hears on a port, up to four per port; a fifth replaces the one heard from least recently. Each record ages out on its own. Two boards of the *same* type on one port share a record, so a board that knows its role should announce the role‑specific type (`PSI Front` / `PSI Rear`). Two things to get right:
+
+- **Seed the random interval per board** (see *When to send it*). Chained boards that power up together otherwise announce in lockstep and talk over each other every time.
+- **Combining several TX lines onto the WCB's one RX wire is a hardware question** — two outputs wired straight together fight each other. Solve it on your side before relying on announcements from every board.
+
+If two boards do talk at once, the WCB drops the garbled line when it can tell — one that doesn't end in `}`, or that runs into a second `@WDP` — and the next announcement fills in. A garbled line that still looks whole shows up as an extra device until it ages out, 90 s later.
+
+**Will this break anything on an older WCB that doesn't know about this yet?** No — it just sees an unrecognized line and ignores it. An older WCB keeps one record per port, so of several boards sharing a port it shows whichever announced last.
+
+---
+
+## Revision log
+
+| Date | Change | Commit |
+|---|---|---|
+| 2026-09-22 | Several devices may announce on one port: the WCB keeps one record per port and type (up to four per port), and the first one heard names the port (issue #19). An announce must now end at its JSON object's closing `}` and contain a single `@WDP`, so a line two boards garble by talking at once is dropped. Added the role‑specific‑type exception (`PSI Front` / `PSI Rear`) to "don't send an instance name", and the shared‑port questions. Corrected the claim that a device's firmware version is visible across the droid: only its `type` crosses the mesh (as the port's name); fw/hw/caps are read from the WCB it's plugged into. | _(pending)_ |

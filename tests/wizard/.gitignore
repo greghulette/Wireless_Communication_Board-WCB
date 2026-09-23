@@ -1,0 +1,5 @@
+node_modules/
+# Chrome profiles holding each bench board's Web Serial grant — this PC's, never commit
+.profiles/
+test-results/
+playwright-report/

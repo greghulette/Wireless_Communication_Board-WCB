@@ -60,6 +60,15 @@ static String vField(const String &s, int idx) {
   return v;
 }
 
+// Reserved because ?VAR,CLEAR,<this> means 'clear everything'. Kept OUT of
+// isValidVariableName on purpose: loadVariables() runs that over NVS at boot, and rejecting
+// there would silently drop a legacy variable actually named 'all' - along with any chance of
+// clearing it. New ones simply cannot be created.
+bool isReservedVariableName(const String &name) {
+  String u = name; u.toUpperCase();
+  return u == "ALL";
+}
+
 bool isValidVariableName(const String &name) {
   int n = name.length();
   if (n < 1 || n > WCB_VAR_NAME_MAX) return false;
@@ -233,6 +242,11 @@ void processSetVariable(const String &message) {
                   name.c_str(), WCB_VAR_NAME_MAX);
     return;
   }
+  if (isReservedVariableName(name)) {
+    Serial.printf("[VAR] '%s' is reserved: %cVAR,CLEAR,ALL clears the whole table\n",
+                  name.c_str(), LocalFunctionIdentifier);
+    return;
+  }
   if (f1.length() == 0) {
     Serial.printf("[VAR] %c%s needs a value: %c%s,%s,<int|true|false|TOGGLE|INC[,n]|DEC[,n]>\n",
                   CommandCharacter, verb, CommandCharacter, verb, name.c_str());
@@ -301,6 +315,11 @@ void processVarConfig(const String &args) {
                     name.c_str(), WCB_VAR_NAME_MAX);
       return;
     }
+    if (isReservedVariableName(name)) {
+      Serial.printf("[VAR] '%s' is reserved: %cVAR,CLEAR,ALL clears the whole table\n",
+                    name.c_str(), LocalFunctionIdentifier);
+      return;
+    }
     if (!vStr.length()) {
       Serial.printf("[VAR] Usage: %cVAR,SET,<name>,<value>\n", LocalFunctionIdentifier);
       return;
@@ -325,7 +344,11 @@ void processVarConfig(const String &args) {
   if (aU.startsWith("CLEAR")) {
     String target = vField(a, 1);
     String targetU = target; targetU.toUpperCase();
-    if (targetU == "ALL") { clearAllVariables(); Serial.println("[VAR] All variables cleared"); return; }
+    // An existing variable of that exact name wins: a board carrying a legacy 'all' (created
+    // before the name was reserved) must still be able to clear it rather than wipe the table.
+    if (targetU == "ALL" && findVarSlot(target) < 0) {
+      clearAllVariables(); Serial.println("[VAR] All variables cleared"); return;
+    }
     if (!target.length()) { Serial.printf("[VAR] Usage: %cVAR,CLEAR,<name|ALL>\n", LocalFunctionIdentifier); return; }
     if (clearVariable(target)) Serial.printf("[VAR] Cleared '%s'\n", target.c_str());
     else                       Serial.printf("[VAR] '%s' not found\n", target.c_str());
@@ -338,7 +361,10 @@ void processVarConfig(const String &args) {
 
 // ---- IF evaluator -------------------------------------------------------
 // One condition: "<name><op><int>", op = =  !=  <  >  <=  >=
-static bool evalOneCondition(const String &cond) {
+// bad=true means the TERM was malformed, which is not the same as evaluating false. The caller
+// must fail the whole expression: folding a malformed term in as plain false let
+// `IF,junk,OR,x=1` run the gated command, the opposite of the fail-safe WCB_Variables.h promises.
+static bool evalOneCondition(const String &cond, bool &bad) {
   int p = -1; String op;
   for (int i = 0; i < (int)cond.length(); i++) {
     char c  = cond[i];
@@ -350,11 +376,11 @@ static bool evalOneCondition(const String &cond) {
     if (c == '<')              { op = "<";  p = i; break; }
     if (c == '>')              { op = ">";  p = i; break; }
   }
-  if (p < 0) { Serial.printf("[VAR] IF: no operator in '%s'\n", cond.c_str()); return false; }
+  if (p < 0) { Serial.printf("[VAR] IF: no operator in '%s'\n", cond.c_str()); bad = true; return false; }
 
   String name = cond.substring(0, p);            name.trim();
   String vStr = cond.substring(p + op.length()); vStr.trim();
-  if (!name.length()) { Serial.printf("[VAR] IF: missing variable in '%s'\n", cond.c_str()); return false; }
+  if (!name.length()) { Serial.printf("[VAR] IF: missing variable in '%s'\n", cond.c_str()); bad = true; return false; }
 
   int32_t lhs = getVariable(name, 0);
   int32_t rhs = (int32_t)vStr.toInt();
@@ -453,7 +479,9 @@ bool evaluateIfCondition(const String &expr) {
       }
       pendingOp = tokU;
     } else if (tok.length()) {
-      bool c = evalOneCondition(tok);
+      bool bad = false;
+      bool c = evalOneCondition(tok, bad);
+      if (bad) return false;   // malformed term: fail the expression, do not fold it in as false
       if (!haveFirst) { result = c; haveFirst = true; }
       else if (pendingOp == "AND") { result = result && c; pendingOp = ""; }
       else if (pendingOp == "OR")  { result = result || c; pendingOp = ""; }

@@ -1,0 +1,62 @@
+name: Wizard tests
+
+# The Wizard has no build step, so nothing but these tests catches a syntax slip or a config-shape
+# regression before it reaches the browser tool users flash from.
+#
+# Two jobs, both host-only:
+#   parser — Wizard/parser.js under `node --test`. This is where config LOSS lives: the Wizard pushes
+#            the diff against the baseline it pulled, so a dropped field silently rewrites a good board.
+#   smoke  — the Wizard loaded in Chromium (Playwright), failing on any uncaught page error.
+#
+# Deliberately separate from build.yml, and filtered to the Wizard's own paths: build.yml stamps a fresh
+# timestamp into every firmware image it compiles and auto-commits the binaries, so a Wizard-only change
+# must never reach it (CLAUDE.md rule 9). Nothing here touches Code/**, publishes a release, or deploys —
+# Pages deploys stay with pages-deploy.yml. The board tests in tests/wizard/specs need real hardware and
+# never run in CI; they run on Greg's bench through tests/hil (docs/HIL_TESTING.md §8).
+
+on:
+  push:
+    paths:
+      - 'Wizard/**'
+      - 'tests/wizard/**'
+      - '.github/workflows/wizard-tests.yml'
+  pull_request:
+    paths:
+      - 'Wizard/**'
+      - 'tests/wizard/**'
+      - '.github/workflows/wizard-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Parser unit tests
+        working-directory: tests/wizard
+        run: npm run unit          # no dependencies needed — node:test only
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install
+        working-directory: tests/wizard
+        run: npm ci
+      - name: Install Chromium
+        working-directory: tests/wizard
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test
+        working-directory: tests/wizard
+        # The board tests skip themselves without HIL_BRIDGE, so this runs wizard.smoke alone.
+        # Headless here: no port dialog is possible on a runner, and no board is present.
+        env:
+          WIZ_HEADLESS: '1'
+          WIZ_NO_AUTHORIZE: '1'
+        run: npx playwright test

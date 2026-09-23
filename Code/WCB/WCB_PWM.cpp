@@ -3,10 +3,18 @@
 #include "WCB_Storage.h"
 #include "wcb_pin_map.h"
 #include <Preferences.h>
+#include <sdkconfig.h>
+#if CONFIG_IDF_TARGET_ESP32
+#include "hal/gpio_ll.h"   // level-emulated PWM input edges (erratum GPIO-3.14) - see pwmEdge()
+#endif
 
 extern Preferences preferences;
 extern int WCB_Number;
-extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = false);
+// NO default here on purpose: WCB.ino:977 defaults useETM to true, and a second default in this
+// file silently won the 2-argument calls below - clearAllPWMMappings' remote commands went out
+// as plain packets that every ETM receiver drops (WCB.ino:4203-4225), while this board still
+// printed success. State it at every call site instead.
+extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM);
 extern bool debugEnabled;
 extern char LocalFunctionIdentifier;
 extern bool serialBroadcastEnabled[5];
@@ -18,10 +26,11 @@ extern bool Maestro_Remote;
 extern bool debugPWMPassthrough;
 extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
 extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+extern bool isSerialPortUsedForMaestro(int port);  // WCB_Maestro.cpp — local Maestro slots only
+extern bool isSerialPortUsedForDFP(int port);      // WCB_DFP.cpp    — serial-device port reservation
 // isSerialPortUsedForMP3 comes from WCB_Storage.h (included above).
 
 PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
-int activePWMCount = 0;
 volatile bool pwmRebootPending = false;
 
 // PWM Stability Tracking
@@ -40,11 +49,16 @@ const int PWM_STABILITY_RANGE = 6;   // μs range for stability
 int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};
 int pwmOutputCount = 0;
 uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS] = {0, 0, 0, 0, 0};  // see WCB_PWM.h
+bool pwmOutputPrevBcstOut[MAX_PWM_OUTPUT_PORTS] = {true, true, true, true, true};   // see WCB_PWM.h
+bool pwmOutputPrevBlockIn[MAX_PWM_OUTPUT_PORTS] = {false, false, false, false, false};
 
 // PWM reading variables for each port
 volatile unsigned long pwmRiseTime[5] = {0};
 volatile unsigned long pwmPulseWidth[5] = {0};
 volatile bool pwmNewData[5] = {false};
+#if CONFIG_IDF_TARGET_ESP32
+static volatile uint8_t pwmLastLevel[5];   // pad level pwmEdge() last recorded per input port (level emulation)
+#endif
 extern bool espNowInitialized;
 
 // Remote PWM configuration may go out once ESP-NOW is running. This used to be "uptime > 5 s", but nothing at boot
@@ -59,75 +73,83 @@ bool canSendESPNow() {
 }
 
 // Validation function to prevent PWM conflicts with Kyber
-bool canUsePWMOnPort(int port) {
-    // Serial1 is reserved when Kyber_Local or Maestro_Remote
-    if (port == 1 && (Kyber_Local || Maestro_Remote)) {
-        Serial.println("❌ Cannot use PWM on Serial1 - reserved for Maestro/Kyber");
-        return false;
-    }
-    
-    // Serial2 is reserved when Kyber_Local
-    if (port == 2 && Kyber_Local) {
-        Serial.println("❌ Cannot use PWM on Serial2 - reserved for Kyber");
+// quiet=true suppresses the refusal lines for callers that skip a reserved port as a matter of
+// course - the WDP auto-config loop sees the same neighbour advert every 60 s forever, and its
+// comment already claimed the skip was silent.
+bool canUsePWMOnPort(int port, bool quiet) {
+    // Only the port a Kyber mode owns: the Kyber's own port on Kyber LOCAL, S1 on Maestro REMOTE
+    // (kyberModeReservesPort, WCB_Storage.cpp - see there for why). The other hardware port of a Kyber
+    // LOCAL board is an ordinary port; reserving it too dropped a PWM output saved there from NVS at the
+    // next boot (loadPWMOutputPortsFromPreferences) while ;P kept driving the pin (tracker #73 D4).
+    // Every caller comes through here: ?MAP,PWM, both boot loaders and WDP PWMTARGET auto-config.
+    // The REMOTE S1 text is pinned by HIL pwm.out_port_lines_and_guards / pwm.map_validation.
+    if (kyberModeReservesPort(port)) {
+        if (!quiet) Serial.printf("❌ Cannot use PWM on Serial%d - reserved for %s\n", port,
+                                  Maestro_Remote ? "Maestro/Kyber" : "Kyber");
         return false;
     }
 
     // Reject ports already claimed by a serial-device module (HCR/MP3/WLED).
     // Symmetric with those modules' own guards, which reject PWM ports — so two
     // subsystems can never silently drive the same UART.
-    if (isSerialPortUsedForHCR(port) || isSerialPortUsedForMP3(port) || isSerialPortUsedForWLED(port)) {
-        Serial.printf("❌ Cannot use PWM on Serial%d - reserved for HCR/MP3/WLED\n", port);
+    // Maestro added 2026-09-20: a local Maestro slot owns its port just as firmly as an HCR or
+    // WLED does, and ;P had no term for it at all (WCB.ino processPWMOutput).
+    if (isSerialPortUsedForHCR(port) || isSerialPortUsedForMP3(port) || isSerialPortUsedForWLED(port) ||
+        isSerialPortUsedForMaestro(port) || isSerialPortUsedForDFP(port)) {
+        if (!quiet) Serial.printf("❌ Cannot use PWM on Serial%d - reserved for HCR/MP3/WLED/Maestro/DFP\n", port);
         return false;
     }
 
     return true;
 }
 
-// ISR handlers for each input port
-void IRAM_ATTR pwmISR1() {
-    if (digitalRead(SERIAL1_RX_PIN) == HIGH) {
-        pwmRiseTime[0] = micros();
-    } else {
-        pwmPulseWidth[0] = micros() - pwmRiseTime[0];
-        pwmNewData[0] = true;
+// ISR handlers for each input port.
+//
+// Classic ESP32: LEVEL-emulated edges (tracker #78). ESP32 erratum GPIO-3.14 loses an EDGE interrupt on GPIO0-31
+// when the GPIO ISR's STATUS / W1TC handling of another pin lands on it - measured on a WCB's soft-serial RX pins
+// (HIL softrx.erratum_pairs, 2026-09-23), and a PWM input shares the same interrupt status register with them, so a
+// lost edge here is a lost or doubled pulse width. The pin is armed for the level it is NOT at (attachPWMInterrupt);
+// each entry re-arms the opposite level FIRST, records a rise or fall only when the level differs from the one last
+// recorded (the same level is the erratum's spurious entry: no edge), then re-reads the pad and re-arms if it moved,
+// so it rarely returns armed for a level the line already has; the guard exit and the tail before the IDF's
+// post-handler W1TC rely on the level status re-asserting while its condition holds, which re-fires the ISR at once.
+// The same scheme as the vendored EspSoftwareSerial's rxBitISR.
+// The int_type write is a read-modify-write of GPIO_PINn_REG from core 1's GPIO ISR: attach/detach these pins only
+// from core 1 (setup / loop command handlers) - never from PWMTask or any other core-0 task (CLAUDE.md rule 13).
+// ESP32-S3: the stock CHANGE-interrupt body, unchanged (no such erratum).
+static inline void IRAM_ATTR pwmEdge(int idx, int pin) {
+#if CONFIG_IDF_TARGET_ESP32
+    bool high = gpio_ll_get_level(&GPIO, pin);
+    for (int guard = 0; ; ++guard) {
+        gpio_ll_set_intr_type(&GPIO, pin, high ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+        if (high != (bool)pwmLastLevel[idx]) {
+            pwmLastLevel[idx] = high;
+            if (high) {
+                pwmRiseTime[idx] = micros();
+            } else {
+                pwmPulseWidth[idx] = micros() - pwmRiseTime[idx];
+                pwmNewData[idx] = true;
+            }
+        }
+        const bool now = gpio_ll_get_level(&GPIO, pin);
+        if (now == high || guard >= 3) break;   // cap: a glitch train must not hold the ISR
+        high = now;
     }
+#else
+    if (digitalRead(pin) == HIGH) {
+        pwmRiseTime[idx] = micros();
+    } else {
+        pwmPulseWidth[idx] = micros() - pwmRiseTime[idx];
+        pwmNewData[idx] = true;
+    }
+#endif
 }
 
-void IRAM_ATTR pwmISR2() {
-    if (digitalRead(SERIAL2_RX_PIN) == HIGH) {
-        pwmRiseTime[1] = micros();
-    } else {
-        pwmPulseWidth[1] = micros() - pwmRiseTime[1];
-        pwmNewData[1] = true;
-    }
-}
-
-void IRAM_ATTR pwmISR3() {
-    if (digitalRead(SERIAL3_RX_PIN) == HIGH) {
-        pwmRiseTime[2] = micros();
-    } else {
-        pwmPulseWidth[2] = micros() - pwmRiseTime[2];
-        pwmNewData[2] = true;
-    }
-}
-
-void IRAM_ATTR pwmISR4() {
-    if (digitalRead(SERIAL4_RX_PIN) == HIGH) {
-        pwmRiseTime[3] = micros();
-    } else {
-        pwmPulseWidth[3] = micros() - pwmRiseTime[3];
-        pwmNewData[3] = true;
-    }
-}
-
-void IRAM_ATTR pwmISR5() {
-    if (digitalRead(SERIAL5_RX_PIN) == HIGH) {
-        pwmRiseTime[4] = micros();
-    } else {
-        pwmPulseWidth[4] = micros() - pwmRiseTime[4];
-        pwmNewData[4] = true;
-    }
-}
+void IRAM_ATTR pwmISR1() { pwmEdge(0, SERIAL1_RX_PIN); }
+void IRAM_ATTR pwmISR2() { pwmEdge(1, SERIAL2_RX_PIN); }
+void IRAM_ATTR pwmISR3() { pwmEdge(2, SERIAL3_RX_PIN); }
+void IRAM_ATTR pwmISR4() { pwmEdge(3, SERIAL4_RX_PIN); }
+void IRAM_ATTR pwmISR5() { pwmEdge(4, SERIAL5_RX_PIN); }
 
 void initPWM() {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
@@ -158,7 +180,14 @@ void attachPWMInterrupt(int port) {
     }
     
     pinMode(pin, INPUT);
+#if CONFIG_IDF_TARGET_ESP32
+    // Level-emulated edges (see pwmEdge): arm for the level the line is NOT at; the ISR flips it after every edge.
+    const bool high = gpio_ll_get_level(&GPIO, pin);
+    pwmLastLevel[port - 1] = high;
+    attachInterrupt(digitalPinToInterrupt(pin), isr, high ? ONLOW : ONHIGH);
+#else
     attachInterrupt(digitalPinToInterrupt(pin), isr, CHANGE);
+#endif
 }
 
 void detachPWMInterrupt(int port) {
@@ -229,9 +258,16 @@ void addPWMMapping(const String &config, bool autoReboot) {
     }
 
     working = working.substring(commaPos + 1);
-    PWMMapping &mapping = pwmMappings[slot];
-    mapping.inputPort = inputPort;
-    mapping.outputCount = 0;
+    // Staged, not live. This used to take a reference to the slot and zero its outputCount before
+    // parsing a single destination, so an invalid re-map ("No valid outputs specified") left the slot
+    // ACTIVE with zero outputs: passthrough drove nothing, ?MAP,PWM,LIST printed an input with an
+    // empty output list, and ?backup emitted a bare "?MAP,PWM,S3" that cannot be replayed - while NVS
+    // still held the good list, so a reboot resurrected it. Parse into a local, commit on success.
+    PWMMapping cand = {};
+    cand.inputPort   = inputPort;
+    cand.outputCount = 0;
+    cand.active      = false;
+    PWMMapping &mapping = cand;
     
     int startIdx = 0;
     while (startIdx < working.length() && mapping.outputCount < 5) {
@@ -256,6 +292,10 @@ void addPWMMapping(const String &config, bool autoReboot) {
             }
         }
         
+        // This board's own number IS local. Left as W<n>, the passthrough treated it as local
+        // (so it skipped the UART init) while only wcbNumber==0 outputs got pinMode(OUTPUT) -
+        // the pin never drove anything, and ?backup emitted a self-addressed token.
+        if (wcbNum == WCB_Number) wcbNum = 0;
         if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
             // Validate local output ports aren't in use by Kyber
             if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
@@ -273,10 +313,11 @@ void addPWMMapping(const String &config, bool autoReboot) {
     
     if (mapping.outputCount == 0) {
         Serial.println("No valid outputs specified");
-        return;
+        return;                 // slot untouched: the previous mapping still stands
     }
     
     mapping.active = true;
+    pwmMappings[slot] = cand;   // commit: everything below reads the same values either way
     attachPWMInterrupt(inputPort);
     
     bool hasRemoteOutputs = false;
@@ -490,9 +531,10 @@ void clearAllPWMMappings(bool autoReboot) {
         for (int wcb = 1; wcb <= MAX_WCB_COUNT; wcb++) {
             if (remoteBoards[wcb]) {
                 for (int p = 0; p < remotePortCounts[wcb]; p++) {
-                    char remoteCmd[32];
-                    snprintf(remoteCmd, sizeof(remoteCmd), "?PX%d", remotePorts[wcb][p]);
-                    sendESPNowMessage(wcb, remoteCmd);
+                    char remoteCmd[40];
+                    snprintf(remoteCmd, sizeof(remoteCmd), "%cMAP,PWM,CLEAR,OUT,S%d",
+                             LocalFunctionIdentifier, remotePorts[wcb][p]);
+                    sendESPNowMessage(wcb, remoteCmd, true);   // ETM: a plain packet is dropped
                     delay(50);
                     if (debugEnabled) {
                         Serial.printf("Sent PWM output removal to WCB%d: %s\n", wcb, remoteCmd);
@@ -503,7 +545,9 @@ void clearAllPWMMappings(bool autoReboot) {
                 // action. A local factory reset must not restart the rest of the fleet.
                 if (autoReboot) {
                     delay(50);
-                    sendESPNowMessage(wcb, "?REBOOT");
+                    char rebootCmd[16];
+                    snprintf(rebootCmd, sizeof(rebootCmd), "%cREBOOT", LocalFunctionIdentifier);
+                    sendESPNowMessage(wcb, rebootCmd, true);   // ETM: a plain packet is dropped
                     if (debugEnabled) {
                         Serial.printf("Sent reboot command to WCB%d\n", wcb);
                     }
@@ -598,6 +642,7 @@ void loadPWMMappingsFromPreferences() {
                     }
                 }
                 
+                if (wcbNum == WCB_Number) wcbNum = 0;   // same normalization as the parse path
                 if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
                     if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                         // Skip local outputs that conflict with Kyber
@@ -830,8 +875,10 @@ void addPWMOutputPort(int port, uint8_t wdpAutoSrc) {
         return;
     }
 
-    pwmOutputAutoSrc[pwmOutputCount] = wdpAutoSrc;   // 0 = manual, >0 = WDP self-config source
-    pwmOutputPorts[pwmOutputCount++] = port;
+    pwmOutputAutoSrc[pwmOutputCount]     = wdpAutoSrc;   // 0 = manual, >0 = WDP self-config source
+    pwmOutputPrevBcstOut[pwmOutputCount] = serialBroadcastEnabled[port - 1];  // restore these on release
+    pwmOutputPrevBlockIn[pwmOutputCount] = blockBroadcastFrom[port - 1];
+    pwmOutputPorts[pwmOutputCount++]     = port;
 
     configureRemotePWMOutput(port);
 
@@ -868,21 +915,27 @@ void reconcileWdpAutoPWMOutputs(uint8_t srcWCB, const uint8_t *wantPorts, uint8_
 bool removePWMOutputPort(int port) {
     for (int i = 0; i < pwmOutputCount; i++) {
         if (pwmOutputPorts[i] == port) {
+            // Read the recorded flags BEFORE the shuffle below moves them.
+            const bool prevOut = pwmOutputPrevBcstOut[i];
+            const bool prevIn  = pwmOutputPrevBlockIn[i];
             for (int j = i; j < pwmOutputCount - 1; j++) {
                 pwmOutputPorts[j] = pwmOutputPorts[j + 1];
-                pwmOutputAutoSrc[j] = pwmOutputAutoSrc[j + 1];
+                pwmOutputAutoSrc[j]     = pwmOutputAutoSrc[j + 1];
+                pwmOutputPrevBcstOut[j] = pwmOutputPrevBcstOut[j + 1];
+                pwmOutputPrevBlockIn[j] = pwmOutputPrevBlockIn[j + 1];
             }
             pwmOutputPorts[--pwmOutputCount] = 0;
-            pwmOutputAutoSrc[pwmOutputCount] = 0;
+            pwmOutputAutoSrc[pwmOutputCount]     = 0;
+            pwmOutputPrevBcstOut[pwmOutputCount] = true;
+            pwmOutputPrevBlockIn[pwmOutputCount] = false;
             savePWMOutputPortsToPreferences();
-            // Re-enable broadcasts for this port — they were suppressed while it was a PWM output.
-            // (If a Push Config was sent while the port was claimed, its NVS broadcast values
-            // were written as OFF/blocked.  Restoring them here ensures the port comes back
-            // fully functional after the reboot that follows this call.)
+            // Put the port's broadcast flags back the way they were when PWM claimed it. This
+            // used to force ON/unblocked, which wiped a deliberate OFF and persisted the wipe -
+            // and WDP self-heal reaches this path with no user action at all.
             if (port >= 1 && port <= 5) {
-                serialBroadcastEnabled[port - 1] = true;
+                serialBroadcastEnabled[port - 1] = prevOut;
                 saveBroadcastSettingsToPreferences();
-                blockBroadcastFrom[port - 1] = false;
+                blockBroadcastFrom[port - 1] = prevIn;
                 saveBroadcastBlockSettings();
             }
             Serial.printf("Serial%d removed from PWM output ports; broadcasts re-enabled\n", port);
@@ -901,6 +954,8 @@ void savePWMOutputPortsToPreferences() {
         preferences.putInt(key.c_str(), pwmOutputPorts[i]);
         String akey = "auto" + String(i);         // WDP self-config source (0 = manual)
         preferences.putUChar(akey.c_str(), pwmOutputAutoSrc[i]);
+        preferences.putBool(("pbo" + String(i)).c_str(), pwmOutputPrevBcstOut[i]);
+        preferences.putBool(("pbi" + String(i)).c_str(), pwmOutputPrevBlockIn[i]);
     }
     preferences.end();
 }
@@ -926,8 +981,10 @@ void loadPWMOutputPortsFromPreferences() {
         if (port > 0) {
             // Check if this port conflicts with Kyber
             if (canUsePWMOnPort(port)) {
-                pwmOutputAutoSrc[pwmOutputCount] = autoSrc;   // keep provenance aligned to the
-                pwmOutputPorts[pwmOutputCount++] = port;      // compacted (Kyber-skipped) list
+                pwmOutputAutoSrc[pwmOutputCount]     = autoSrc;   // keep provenance aligned to the
+                pwmOutputPrevBcstOut[pwmOutputCount] = preferences.getBool(("pbo" + String(i)).c_str(), true);
+                pwmOutputPrevBlockIn[pwmOutputCount] = preferences.getBool(("pbi" + String(i)).c_str(), false);
+                pwmOutputPorts[pwmOutputCount++]     = port;      // compacted (Kyber-skipped) list
                 configureRemotePWMOutput(port);
             } else {
                 Serial.printf("⚠️  Skipping PWM output port Serial%d - conflicts with Kyber\n", port);

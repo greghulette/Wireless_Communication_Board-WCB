@@ -6,7 +6,7 @@
 #include "WCB_DFP.h"          // dfpConfig
 #include "WCB_WLED.h"         // wledConfig
 #include "WCB_Maestro.h"      // maestroConfigs[], MAX_MAESTROS_PER_WCB
-#include "WCB_PWM.h"          // pwmOutputCount, activePWMCount
+#include "WCB_PWM.h"          // pwmOutputCount, pwmMappings[]
 #include <Preferences.h>
 
 // ---- Externs provided by WCB.ino ----------------------------------------
@@ -109,7 +109,14 @@ static uint16_t wdpCapFlags() {
   if (dfpConfig.configured)  f |= WDP_CAP_DFPLAYER;
   if (Kyber_Local)           f |= WDP_CAP_KYBER_LOCAL;
   if (Maestro_Remote)        f |= WDP_CAP_MAESTRO_REM;
-  if (pwmOutputCount > 0 || activePWMCount > 0) f |= WDP_CAP_PWM;
+  // activePWMCount used to stand in for 'has an input mapping' - it was declared, read here,
+  // and assigned nowhere, so a board whose PWM is input mappings only never advertised the
+  // capability. Ask the mappings directly; there is nothing to keep in step.
+  bool anyPwmMapping = false;
+  for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
+    if (pwmMappings[i].active) { anyPwmMapping = true; break; }
+  }
+  if (pwmOutputCount > 0 || anyPwmMapping) f |= WDP_CAP_PWM;
   if (specialPeerEnabled)    f |= WDP_CAP_CONTROLLER;
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
@@ -743,9 +750,12 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     for (int i = 0; i < nb.pwmSelfCount; i++) {
       uint8_t prt = nb.pwmSelfPorts[i];
       if (isSerialPortPWMOutput(prt)) continue;   // already an output — nothing to do
-      if (!canUsePWMOnPort(prt))      continue;   // reserved (e.g. Kyber): can't configure — skip
-                                                  // SILENTLY so we don't re-log/re-attempt every
-                                                  // advert (the guard above would never flip).
+      if (!canUsePWMOnPort(prt, true)) continue;  // reserved (the Kyber's own port, a REMOTE board's
+                                                  // S1, a device or local-Maestro port): skip SILENTLY
+                                                  // so we don't re-log every 60 s advert. It can flip
+                                                  // (a Kyber move, a device clear); the next advert
+                                                  // then retries. A Kyber LOCAL board's other hardware
+                                                  // port is NOT reserved (tracker #73 D4).
       Serial.printf("[WDP] WCB%d drives our S%d — auto-configuring PWM output\n",
                     senderWCB, prt);
       addPWMOutputPort(prt, (uint8_t)senderWCB);  // tag the source so it can self-heal on removal
@@ -784,9 +794,11 @@ int wdpResolveAlias(const char *alias) {
 // ==================== WDP-DA: serial-attached device announces ============
 // A device wired to a serial port self-identifies with "@WDP1 {json}" (see
 // docs/WDP_DEVICE_ANNOUNCE.md). processIncomingSerial routes any line starting
-// with "@WDP" here. RAM-only, TTL-aged; feeds the advert port label + ?WDP,DA.
+// with "@WDP" here. One record per (port, type), up to WDP_DA_PER_PORT per port.
+// RAM-only, TTL-aged per record; feeds the advert port label, ?WDP,DA and ?WDP,DUMP.
 
-static WdpDaDevice wdpDaDevices[5];
+static WdpDaDevice wdpDaDevices[5][WDP_DA_PER_PORT];
+static uint32_t    wdpDaNextFirstHeard = 1;
 static const unsigned long WDP_DA_TTL_MS = 90000UL;   // ~3 missed 25-30 s announces
 
 // Pull a "key":"value" string out of a flat JSON object. out is always
@@ -825,43 +837,94 @@ void wdpDaHandleLine(int port, const char *line) {
   if (port < 1 || port > 5 || !line) return;
   String s = line; s.trim();
   if (!s.startsWith("@WDP1")) return;          // only protocol version 1
+  // One whole announce per line. Boards chained on one port share its RX wire, and two
+  // announcing at once garble each other: a line cut short, or run into the next one,
+  // would otherwise become a phantom record that lingers for the whole TTL.
+  if (!s.endsWith("}") || s.indexOf("@WDP", 1) >= 0) return;
   int brace = s.indexOf('{'); if (brace < 0) return;
   String json = s.substring(brace);
 
-  char type[25] = "";
-  if (!wdpDaExtractStr(json, "type", type, sizeof(type)) || !type[0]) return;  // type required
+  // Build the record aside, then copy it in whole. This runs on the serial task, which
+  // time-slices with loop() on core 1, and loop() reads the table for the advert's port
+  // label. Clearing a live record and refilling it in place would leave a gap in which
+  // the label moves for one advert. Wire strings are unsanitized — scrub bytes that
+  // would corrupt the port label / ?WDP,DUMP (matches the neighbor-decode scrub). The
+  // type is scrubbed before matching, so it compares equal to the stored key.
+  WdpDaDevice nd;
+  memset(&nd, 0, sizeof(nd));
+  if (!wdpDaExtractStr(json, "type", nd.type, sizeof(nd.type)) || !nd.type[0]) return;  // type required
+  wdpDaExtractStr(json, "fw", nd.fw,    sizeof(nd.fw));
+  wdpDaExtractStr(json, "hw", nd.hwRev, sizeof(nd.hwRev));
+  wdpDaExtractCaps(json,      nd.capTags, sizeof(nd.capTags));
+  wdpScrub(nd.type); wdpScrub(nd.fw); wdpScrub(nd.hwRev); wdpScrub(nd.capTags);
+  nd.present    = true;
+  nd.lastSeenMs = millis();
 
-  WdpDaDevice &d = wdpDaDevices[port - 1];
-  bool wasPresent = d.present;
-  memset(&d, 0, sizeof(d));
-  d.present    = true;
-  d.lastSeenMs = millis();
-  strncpy(d.type, type, sizeof(d.type) - 1);
-  wdpDaExtractStr(json, "fw", d.fw,    sizeof(d.fw));
-  wdpDaExtractStr(json, "hw", d.hwRev, sizeof(d.hwRev));
-  wdpDaExtractCaps(json,      d.capTags, sizeof(d.capTags));
-  // Wire strings are unsanitized — neutralize bytes that would corrupt the
-  // advertised port label / ?WDP,DUMP (matches the neighbor-decode scrub).
-  wdpScrub(d.type); wdpScrub(d.fw); wdpScrub(d.hwRev); wdpScrub(d.capTags);
+  // This type's record, else a free slot, else the one heard from least recently.
+  WdpDaDevice *row = wdpDaDevices[port - 1];
+  int slot = -1, freeSlot = -1, stalest = 0;
+  for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+    if (row[k].present && strcmp(row[k].type, nd.type) == 0) { slot = k; break; }
+    if (!row[k].present) { if (freeSlot < 0) freeSlot = k; }
+    else if ((nd.lastSeenMs - row[k].lastSeenMs) > (nd.lastSeenMs - row[stalest].lastSeenMs)) stalest = k;
+  }
 
-  if (!wasPresent)
-    Serial.printf("[WDP-DA] S%d: %s%s%s\n", port, d.type, d.fw[0] ? " fw " : "", d.fw);
+  if (slot >= 0) {
+    // A refresh rewrites present, type and firstHeard with the bytes they already hold,
+    // so a label read in the middle of the copy sees no change.
+    nd.firstHeard = row[slot].firstHeard;
+    row[slot] = nd;
+    return;
+  }
+  slot = (freeSlot >= 0) ? freeSlot : stalest;
+  if (freeSlot < 0)
+    Serial.printf("[WDP-DA] S%d: %s dropped, port full (%d devices)\n", port, row[slot].type, WDP_DA_PER_PORT);
+  nd.firstHeard = wdpDaNextFirstHeard++;
+  row[slot] = nd;
+  Serial.printf("[WDP-DA] S%d: %s%s%s\n", port, nd.type, nd.fw[0] ? " fw " : "", nd.fw);
 }
 
 void wdpDaTick() {
   unsigned long now = millis();
-  for (int i = 0; i < 5; i++) {
-    WdpDaDevice &d = wdpDaDevices[i];
-    if (d.present && (now - d.lastSeenMs) > WDP_DA_TTL_MS) {
-      Serial.printf("[WDP-DA] S%d: %s stopped announcing\n", i + 1, d.type);
-      d.present = false;
+  for (int p = 0; p < 5; p++) {
+    for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+      WdpDaDevice &d = wdpDaDevices[p][k];
+      // Signed: the serial task can refresh a record after `now` was read, leaving
+      // lastSeenMs a millisecond ahead. Unsigned, that wraps huge and expires a device
+      // that has just announced — and its next announce re-creates it behind the others,
+      // moving the port label.
+      if (d.present && (long)(now - d.lastSeenMs) > (long)WDP_DA_TTL_MS) {
+        Serial.printf("[WDP-DA] S%d: %s stopped announcing\n", p + 1, d.type);
+        d.present = false;
+      }
     }
   }
 }
 
+// The port's (1-5) live records in the order they were first heard, as slot indices
+// into idx[]; returns the count. idx[0] is the one that labels the port.
+static int wdpDaOrder(int port, int idx[WDP_DA_PER_PORT]) {
+  const WdpDaDevice *row = wdpDaDevices[port - 1];
+  int n = 0;
+  for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+    if (!row[k].present) continue;
+    int j = n++;
+    while (j > 0 && row[idx[j - 1]].firstHeard > row[k].firstHeard) { idx[j] = idx[j - 1]; j--; }
+    idx[j] = k;
+  }
+  return n;
+}
+
+// Seconds since the record was last heard. Clamped at 0: the serial task can refresh it
+// after the caller read millis().
+static unsigned long wdpDaAgeS(const WdpDaDevice &d, unsigned long now) {
+  return (long)(now - d.lastSeenMs) > 0 ? (now - d.lastSeenMs) / 1000 : 0;
+}
+
 const char *wdpDaType(int port) {
   if (port < 1 || port > 5) return "";
-  return wdpDaDevices[port - 1].present ? wdpDaDevices[port - 1].type : "";
+  int idx[WDP_DA_PER_PORT];
+  return wdpDaOrder(port, idx) > 0 ? wdpDaDevices[port - 1][idx[0]].type : "";
 }
 
 void wdpDaPrint() {
@@ -869,17 +932,36 @@ void wdpDaPrint() {
   Serial.println("Serial-attached devices (WDP-DA announces):");
   unsigned long now = millis();
   int n = 0;
-  for (int i = 0; i < 5; i++) {
-    WdpDaDevice &d = wdpDaDevices[i];
-    if (!d.present) continue;
-    n++;
-    Serial.printf("  S%d  %-24.24s  fw %-14.14s  %lus ago\n",
-                  i + 1, d.type, d.fw[0] ? d.fw : "?", (now - d.lastSeenMs) / 1000);
-    if (d.hwRev[0])   Serial.printf("       hw %s\n", d.hwRev);
-    if (d.capTags[0]) Serial.printf("       caps: %s\n", d.capTags);
+  for (int p = 1; p <= 5; p++) {
+    int idx[WDP_DA_PER_PORT];
+    int c = wdpDaOrder(p, idx);
+    for (int j = 0; j < c; j++) {
+      const WdpDaDevice &d = wdpDaDevices[p - 1][idx[j]];
+      n++;
+      Serial.printf("  S%d  %-24.24s  fw %-14.14s  %lus ago\n",
+                    p, d.type, d.fw[0] ? d.fw : "?", wdpDaAgeS(d, now));
+      if (d.hwRev[0])   Serial.printf("       hw %s\n", d.hwRev);
+      if (d.capTags[0]) Serial.printf("       caps: %s\n", d.capTags);
+    }
   }
   if (n == 0) Serial.println("  (none — a wired device self-identifies by sending @WDP1)");
   Serial.println();
+}
+
+// ?WDP,DUMP: one [WDPDA:...] line per live record, in port then first-heard order. Its own
+// record type, not fields on [WDPIF:...], so older Wizards ignore it. Only this board's
+// devices: the mesh carries just one label per port (PORTLABEL).
+static void wdpDaDump(int selfNum) {
+  unsigned long now = millis();
+  for (int p = 1; p <= 5; p++) {
+    int idx[WDP_DA_PER_PORT];
+    int c = wdpDaOrder(p, idx);
+    for (int j = 0; j < c; j++) {
+      const WdpDaDevice &d = wdpDaDevices[p - 1][idx[j]];
+      Serial.printf("[WDPDA:N=%d,S=%d,TYPE=%s,FW=%s,HW=%s,CAPS=%s,AGE=%lu]\n",
+                    selfNum, p, d.type, d.fw, d.hwRev, d.capTags, wdpDaAgeS(d, now));
+    }
+  }
 }
 
 // ==================== Command / query ====================================
@@ -1130,6 +1212,7 @@ static void printWdpDump() {
     for (int p = 0; p < 5; p++)
       if (self.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", self.wcbNumber, p + 1, self.portLabels[p]);
+    wdpDaDump(self.wcbNumber);               // every announcing device, several per port
     wdpEmitDumpX(self);                      // MB=/WL= (Maestro+WLED id@baud)
     // Sequence-inventory fingerprint as its OWN record, not a new field on the
     // [WDP:...] line — that line's field order is load-bearing for older Wizard

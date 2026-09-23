@@ -32,6 +32,13 @@
 > - **`StopEmoteGraceful()` / `StopGraceful()`** added — emit `<PSG>`, the
 >   vocalizer's graceful stop. Upstream emits `PSV` from every stop path, so a
 >   port owned by the library could only ever stop abruptly (issue #15).
+> - **`<SoftwareSerial.h>` → `"../EspSoftwareSerial/SoftwareSerial.h"`** (`hcr.h`, and the
+>   AVR/PIC32-only branches in `hcr.cpp`): the WCB's vendored, patched EspSoftwareSerial
+>   (tracker #78, CLAUDE.md rule 7). Never use the angle-bracket include. CI installs no
+>   stock copy, so the build would fail there; locally it would pull in the stock copy, and
+>   the vendored header's `#error` or a class redefinition would stop the build.
+> - **`SetEmotion(e, v)` accepts 0-100** (upstream accepted 0-99), to match `SetVolume`
+>   and the range `;H,SETEMOTION` accepts. Upstream silently dropped v = 100.
 >
 > Upstream license is preserved in `LICENSE`. To pull a newer upstream, re-apply
 > the patches above rather than dropping a stock copy in place.

@@ -3,7 +3,7 @@
 #include "WCB_Storage.h"
 #include <WcbCmd.h>          // shared ;L → WLED-JSON translator (WcbWled::build) — same lib NaviCore runs
 #include <Preferences.h>
-#include <SoftwareSerial.h>
+#include "src/EspSoftwareSerial/SoftwareSerial.h"   // vendored (tracker #78)
 
 // ---- Externs provided by WCB.ino / WCB_Storage.cpp ---------------------
 extern int           WCB_Number;
@@ -19,10 +19,11 @@ extern Preferences   preferences;
 
 // updateBaudRate / saveBroadcastSettingsToPreferences / saveBroadcastBlockSettings
 // / saveSerialLabelToPreferences are declared by WCB_Storage.h (included above).
-// PWM/MP3 predicates + Kyber_Local / Maestro_Remote also come from WCB_Storage.h.
+// PWM/MP3 predicates + kyberModeReservesPort also come from WCB_Storage.h.
 extern Stream &getSerialStream(int port);          // write target for the configured port
 extern void    applyLiveBaud(int port, uint32_t baud);
 extern bool    isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp — for the conflict guard
+extern bool    isSerialPortUsedForDFP(int port);   // WCB_DFP.cpp — for the conflict guard
 extern void    sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 
 // ---- Module globals -----------------------------------------------------
@@ -323,11 +324,11 @@ void configureWLED(const String &args) {
   // Reject a port already claimed by PWM / Kyber / MP3 / HCR. Mirrors the HCR/MP3
   // guards so two subsystems can't silently share a UART. Does NOT check WLED
   // itself, so re-configuring a WLED on its own port is fine.
+  // Kyber: only the port a Kyber mode owns - kyberModeReservesPort (WCB_Storage.cpp, tracker #73 D4).
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
       isSerialPortUsedForMP3(serialPort) || isSerialPortUsedForHCR(serialPort) ||
-      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
-      (serialPort == 2 && Kyber_Local)) {
-    Serial.printf("[WLED] S%d already in use by PWM/Kyber/MP3/HCR - config blocked\n", serialPort);
+      isSerialPortUsedForDFP(serialPort) || kyberModeReservesPort(serialPort)) {
+    Serial.printf("[WLED] S%d already in use by PWM/Kyber/MP3/HCR/DFP - config blocked\n", serialPort);
     return;
   }
 

@@ -264,11 +264,10 @@ void configureDFP(const String &args) {
   // ---- Reject a port already claimed by PWM / Kyber / HCR / MP3 / WLED ----
   // Does NOT check DFP itself, so re-configuring the DFPlayer on its own port
   // (e.g. just changing volume) is still allowed.
+  // Kyber: only the port a Kyber mode owns - kyberModeReservesPort (WCB_Storage.cpp, tracker #73 D4).
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
       isSerialPortUsedForHCR(serialPort) || isSerialPortUsedForWLED(serialPort) ||
-      isSerialPortUsedForMP3(serialPort) ||
-      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
-      (serialPort == 2 && Kyber_Local)) {
+      isSerialPortUsedForMP3(serialPort) || kyberModeReservesPort(serialPort)) {
     Serial.printf("[DFP] S%d already in use by PWM/Kyber/HCR/MP3/WLED - config blocked\n", serialPort);
     return;
   }

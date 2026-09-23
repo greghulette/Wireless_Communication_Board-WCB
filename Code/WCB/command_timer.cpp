@@ -25,6 +25,15 @@ bool commandGroupsEspnowOrigin = false;
 // enqueuing each group's commands (parallel to commandGroupsEspnowOrigin) so a nested `;C`
 // inside a TIMER sequence body is not re-fanned out to the mesh.
 bool commandGroupsSequenceBody = false;
+// Source port captured when the active timer sequence was parsed, re-applied while enqueuing
+// each group's commands (parallel to the two above). Without it every group fired as sourceID 0:
+// the chain echoed its own broadcast back to the port it was typed on, ignored that port's input
+// blocking, and skipped its serial mapping entirely.
+int commandGroupsSourceID = 0;
+// Sequence lineage captured when the active timer chain was parsed (SeqPath, WCB_Storage.h), re-applied as each
+// group fires so a ;C in a later group is checked against THIS chain's callers across the ;t delay - otherwise a
+// ;t-paced self-recall (;S1x^;t200^;CSELF) would re-arm its own chain forever (tracker #47, seq.cycle_guard_reuse).
+SeqPath commandGroupsPath = {};
 
 // Bumped by EVERY mutation of commandGroups (parseCommandGroups, stopTimerSequence).
 //
@@ -86,7 +95,7 @@ void printTimerDebugInfo(const String &delayStr, unsigned long parsedDelay, unsi
   Serial.printf("===================\n");
 }
 
-void parseCommandGroups(const String &input) {
+void parseCommandGroups(const String &input, int sourceID) {
   // Single global timer state — only one timer sequence runs at a time. If one is
   // still in flight (e.g. a running sequence recalled another timer-bearing stored
   // sequence, or a new ;t… was issued mid-run) this replaces it. That used to be
@@ -105,6 +114,11 @@ void parseCommandGroups(const String &input) {
   // Capture the origin now; it's re-applied as each group fires (see processCommandGroups).
   commandGroupsEspnowOrigin = lastReceivedViaESPNOW;
   commandGroupsSequenceBody = inSequenceBody;   // same, for nested-recall fanout suppression
+  commandGroupsSourceID     = sourceID;         // same, so each group keeps the source port
+  // Only the loop task has a lineage; a chain typed on serialCommandTask is top-level. Off the loop task write the
+  // depth byte ALONE - processCommandGroups may be copying this struct on the loop task right now, and a depth of 0
+  // makes any copy of it a consistent (empty) path.
+  if (seqOnLoopTask()) commandGroupsPath = seqCurPath; else commandGroupsPath.depth = 0;
 
   String working = input;
   working.replace("\r", "");
@@ -223,22 +237,26 @@ void processCommandGroups() {
       // Copy this group's commands out of the vector BEFORE executing. parseCommandsAndEnqueue
       // yields below, and a concurrent parse/stop on serialCommandTask frees the originals.
       const std::vector<String> cmds = commandGroups[currentGroupIndex].commands;
+      const SeqPath  groupPath      = commandGroupsPath;   // copied before the first yield, like cmds
       const uint32_t gen            = commandGroupsGeneration;
       const size_t   groupNumber    = currentGroupIndex + 1;   // for logging only
 
       bool _savedEspNowOrigin = lastReceivedViaESPNOW;
       bool _savedSeqBody       = inSequenceBody;
+      const SeqPath _savedPath = seqCurPath;
       lastReceivedViaESPNOW = commandGroupsEspnowOrigin;
       inSequenceBody        = commandGroupsSequenceBody;
+      seqCurPath            = groupPath;   // enqueueCommand stamps it onto this group's items
       for (const String &cmd : cmds) {
         if (debugEnabled) {
           Serial.printf("[TimerGroup %u] Executing command: %s\n", (unsigned)groupNumber, cmd.c_str());
         }
-        parseCommandsAndEnqueue(cmd, 0);
+        parseCommandsAndEnqueue(cmd, commandGroupsSourceID);
                 vTaskDelay(pdMS_TO_TICKS(1)); // ← Give queue time to breathe
       }
       lastReceivedViaESPNOW = _savedEspNowOrigin;
       inSequenceBody        = _savedSeqBody;
+      seqCurPath            = _savedPath;
 
       // If another task replaced or stopped the chain while we were yielding, its state (index,
       // size, enabled flag) is already correct for the NEW chain — advancing our stale index here

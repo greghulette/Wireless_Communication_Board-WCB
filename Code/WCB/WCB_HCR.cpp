@@ -2,7 +2,7 @@
 #include "WCB_HCR.h"
 #include "WCB_Storage.h"
 #include <Preferences.h>
-#include <SoftwareSerial.h>
+#include "src/EspSoftwareSerial/SoftwareSerial.h"   // vendored (tracker #78)
 #include "src/HumanCyborgRelationsAPI/hcr.h"  // WCB-patched HCR, bundled in-sketch (no lib install)
 #include <WcbCmd.h>          // shared ;H translator (HcrCodec) + fade (HcrFade) — same lib NaviCore runs
 
@@ -23,12 +23,11 @@ extern Preferences   preferences;
 extern Stream      &getSerialStream(int port);
 extern void         applyLiveBaud(int port, uint32_t baud);
 extern bool         isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — for the port-conflict guard
+extern bool         isSerialPortUsedForDFP(int port);   // WCB_DFP.cpp  — for the port-conflict guard
 
-// Serial3-5 are EspSoftwareSerial instances defined in WCB.ino.
+// Serial3-5 are WcbSoftSerial instances defined in WCB.ino (library RX + RMT TX).
 // Serial1/Serial2 are the ESP32 core HardwareSerial globals.
-extern SoftwareSerial Serial3;
-extern SoftwareSerial Serial4;
-extern SoftwareSerial Serial5;
+#include "WCB_SoftSerial.h"
 
 // ---------------------------------------------------------------------------
 //  WcbHCR — thin subclass of HCRVocalizer.
@@ -430,6 +429,12 @@ void processHCRRuntimeCommand(const String &message) {
     int fn    = hcrField(body, 1).toInt();
     int chan  = hcrField(body, 2).toInt();
     int track = hcrField(body, 3).toInt();
+    // fn reaches the codec as a uint8_t, so 260 silently became fn 4 - a DIFFERENT function ran
+    // and the command reported success. Reject it before the cast rather than after.
+    if (fn < 0 || fn > 255) {
+      Serial.printf("[HCR] FN %d out of range (0-255)\n", fn);
+      return;
+    }
     // Route the numeric RC-Controller convention through the shared HcrCodec — one
     // source of truth with NaviCore (both compile WcbHcr.cpp). normalize() owns the
     // per-fn ranges (rejects out-of-range chan/track, emotion chan 4, track>99) and
@@ -439,6 +444,12 @@ void processHCRRuntimeCommand(const String &message) {
     if (fn == 14) {
       if (chan < 0 || chan > 2) {
         Serial.printf("[HCR] FN 14 channel %d out of range (0-2)\n", chan);
+        return;
+      }
+      // fn 14 goes straight to the library for its 150 ms debounce, so it misses the track
+      // range check HcrCodec applies to every other fn. Apply the same bound here.
+      if (track < 0 || track > 9999) {
+        Serial.printf("[HCR] FN 14 track %d out of range (0-9999)\n", track);
         return;
       }
       if (_hcr) { _hcr->PlayWAV(chan, track); _hcr->update(); }
@@ -485,6 +496,14 @@ void processHCRRuntimeCommand(const String &message) {
       return;
     }
     const bool graceful = (st == "GRACEFUL");
+    // Cancel any ramp in flight FIRST. HcrFade keeps writing after the stop otherwise: a FADEOUT
+    // lands its final StopWAV and volume restore ~dur later and a FADEIN keeps raising the
+    // volume, both after the user asked for silence. ;H,STOPWAV and ;H,VOL already cancel.
+    if (vU == "STOPEMOTE") {
+      hcrCancelFade(0);                                // the vocalizer channel
+    } else {
+      for (int c = 0; c < 3; c++) hcrCancelFade(c);    // STOP silences all three
+    }
     if (vU == "STOPEMOTE") { if (graceful) _hcr->StopEmoteGraceful(); else _hcr->StopEmote(); }
     else                   { if (graceful) _hcr->StopGraceful();      else _hcr->Stop();      }
     if (debugHCR) Serial.printf("[HCR-DBG] %s %s\n", vU.c_str(), st.c_str());
@@ -558,7 +577,18 @@ void processHCRRuntimeCommand(const String &message) {
     // field 1 is the value itself (no channel given -> apply to all).
     String f1  = hcrField(body, 1);
     int    ch  = hcrChan(f1);                        // V|A|B -> index, -1 if not a channel
-    bool   all = (ch < 0);                           // no/invalid channel -> all channels
+    bool   all = (ch < 0);                           // numeric field 1 -> all channels
+    // A non-channel, non-numeric field 1 is a TYPO, not a request to set every channel:
+    // ";H,VOL,X,40" and ";H,VOL,ALL,40" used to take that word as the value, toInt() it to 0,
+    // and mute V, A and B - reported as success. Only digits mean "all channels".
+    bool f1Numeric = f1.length() > 0;
+    for (int i = 0; i < (int)f1.length(); i++) {
+      if (!isdigit((unsigned char)f1.charAt(i))) { f1Numeric = false; break; }
+    }
+    if (all && !f1Numeric) {
+      Serial.println("[HCR] Usage: ;H,VOL[,<V|A|B>],<0-100>  (a channel is V, A or B)");
+      return;
+    }
     String vStr = all ? f1 : hcrField(body, 2);
     int    v    = vStr.toInt();
     if (!vStr.length() || v < 0 || v > 100) {
@@ -847,11 +877,11 @@ void configureHCR(const String &args) {
   // Mirrors canUsePWMOnPort (WCB_PWM.cpp) so two subsystems can't silently
   // share one UART. Does NOT check HCR itself, so re-configuring HCR on its
   // own port is still allowed.
+  // Kyber: only the port a Kyber mode owns - kyberModeReservesPort (WCB_Storage.cpp, tracker #73 D4).
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
       isSerialPortUsedForMP3(serialPort) || isSerialPortUsedForWLED(serialPort) ||
-      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
-      (serialPort == 2 && Kyber_Local)) {
-    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3/WLED - config blocked\n", serialPort);
+      isSerialPortUsedForDFP(serialPort) || kyberModeReservesPort(serialPort)) {
+    Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3/WLED/DFP - config blocked\n", serialPort);
     return;
   }
 

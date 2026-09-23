@@ -1,5 +1,6 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include <sys/_types.h>
+#include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
 #include <Preferences.h>
 #include "WCB_PWM.h"
@@ -25,8 +26,11 @@ extern int wcb_hw_version;
 extern char espnowPassword[40];
 extern void updatePinMap();
 extern void applyLiveBaud(int port, uint32_t baud);  // defined in WCB.ino — live re-init incl. SW serial S3-S5
+extern volatile bool rebootPending;                 // defined in WCB.ino — loop() takes the restart
 extern bool isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — serial-device port reservation
 extern bool isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — serial-device port reservation
+extern bool isSerialPortUsedForDFP(int port);   // WCB_DFP.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForMaestro(int port);  // WCB_Maestro.cpp — local Maestro slots only
 // isSerialPortUsedForMP3 + isSerialPortPWMOutput/Input come from WCB_Storage.h / WCB_PWM.h.
 extern int SERIAL1_TX_PIN;        //  // Serial 1 Tx Pin
 extern int SERIAL1_RX_PIN;       //  // Serial 1 Rx Pin
@@ -157,6 +161,18 @@ void updateBaudRate(int port, int baud) {
         baud == 57600 || baud == 115200 || baud == 128000 || baud == 256000)) {
     Serial.println("Invalid baud rate");
     return;
+  }
+  // S3-S5 have no UART: RX is EspSoftwareSerial (a GPIO ISR: level-emulated on the classic ESP32, tracker #78), TX an RMT channel
+  // (WCB_SoftSerial.h). The library caps the supported speed at 115200 - 128000 and 256000 were
+  // accepted, applied and confirmed on a port that cannot carry them. With RMT TX and the GPIO
+  // ISR at level 3 the bench measures RX exact through 57600 (20/20 lines at 19200, 38400 and
+  // 57600, three runs each) and 0/20 at 115200, so warn only for 115200.
+  if (port >= 3 && baud > 115200) {
+    Serial.printf("S%d is a software UART - %d baud is above the 115200 it supports. Use S1 or S2 for this device.\n", port, baud);
+    return;
+  }
+  if (port >= 3 && baud > 57600) {
+    Serial.printf("Warning: S%d is a software UART - input at %d baud is not received reliably (measured exact through 57600, none at 115200). Output is fine.\n", port, baud);
   }
 
   // Apply to the live port immediately — no reboot required. S1/S2 reprogram
@@ -309,19 +325,13 @@ void printBaudRates() {
         if (serialPortLabels[i].length() > 0) {
             Serial.printf(" (%s)", serialPortLabels[i].c_str());
         }
-        // Auto-detected labels for Kyber/Maestro if no user label
-        else if (i == 0 && (Kyber_Local || Maestro_Remote)) {
-            bool hasMaestroOnS1 = false;
-            for (int m = 0; m < MAX_MAESTROS_PER_WCB; m++) {
-                if (maestroConfigs[m].configured && maestroConfigs[m].serialPort == 1) {
-                    hasMaestroOnS1 = true;
-                    break;
-                }
-            }
-            if (hasMaestroOnS1) Serial.print(" (Maestro)");
-        }
-        else if (i == 1 && Kyber_Local) {
+        // No user label: name what owns the port. These were hard-wired to S1 = Maestro / S2 = Kyber, so
+        // with the Kyber on S1 the S2 row said "(Kyber)" (tracker #73 D8).
+        else if (Kyber_Local && (i + 1) == kyberLocalPort) {
             Serial.print(" (Kyber)");
+        }
+        else if (isSerialPortUsedForMaestro(i + 1)) {   // local slots only
+            Serial.print(" (Maestro)");
         }
 
         Serial.println();
@@ -378,7 +388,17 @@ void resetBroadcastSettingsNamespace() {
     }
     broadcastToS0 = false;                   // matches the load default at :348
 
-    Serial.println("Done. Broadcast output re-enabled on S1-S5, input blocking cleared, S0 echo off.");
+    // RESET means every port: S1-S5 all come back open, device-owned ports included (Greg's call,
+    // 2026-09-21). A port an HCR / MP3 / DFPlayer / WLED / Maestro / PWM / Kyber owns will now
+    // receive broadcasts and feed its device's output to the command parser until its flags are
+    // set again - re-issue that device's config (or ?BCAST,OUT/IN,Sx,OFF) to put them back.
+
+    // Persist BOTH namespaces. Only bdcst_set was written before, so the cleared input blocking
+    // lived in RAM alone and ?config (or the next reboot) reloaded bcast_block over the top.
+    saveBroadcastSettingsToPreferences();
+    saveBroadcastBlockSettings();
+
+    Serial.println("Done. Broadcast output re-enabled and input blocking cleared on S1-S5 (device ports included), S0 echo off.");
 }
 
 // Load MAC address preferences
@@ -563,6 +583,14 @@ void setCommandDelimiter(char c) {
 //     preferences.end();
 
 // }
+// FNV-1a 32 of the EXACT key bytes - a sequence lineage entry (SeqPath, WCB_Storage.h). Case-sensitive like the
+// NVS lookup below; a collision can only make the cycle guard over-refuse, never miss a cycle.
+uint32_t seqKeyHash(const String &key) {
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < key.length(); i++) { h ^= (uint8_t)key[i]; h *= 16777619u; }
+    return h;
+}
+
 // Recall a Stored Command
 void recallCommandSlot(const String &key, int sourceID) {
     if (key.length() > SEQ_KEY_MAX_LEN) {   // never stored; NVS would match the shorter key's first 15 characters
@@ -578,7 +606,8 @@ void recallCommandSlot(const String &key, int sourceID) {
         return;
     }
 
-    Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
+    // "Recalling command for key ..." is printed below, once the queue reserve has accepted the expansion: a refused
+    // nested recall must print ONE short line, not echo its whole (up to 2000-character) body to UART0 as well.
 
     // Strip inline comments (everything from commentDelimiter onward in each
     // delimiter-separated part) so stored annotations are not executed.
@@ -604,9 +633,34 @@ void recallCommandSlot(const String &key, int sourceID) {
     }
 
     if (stripped.isEmpty()) {
+        Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
         Serial.println("Sequence contained only comments — nothing to execute.");
         return;
     }
+
+    // A recalled body may itself be a ?SEQ,SAVE / ?CS / ?MGMT chain whose value holds ';t'.
+    const bool viaTimer = isTimerCommand(stripped) && !chainCarriesValueVerb(stripped);
+    const bool onLoop   = seqOnLoopTask();
+
+    // A NESTED recall (a ;C inside a running body) must not partly fill the command queue. Reusing a sub-sequence
+    // back-to-back expands every call before any leaf drains (FIFO), and a full queue then printed one "Command
+    // queue is full! Discarding command." line per dropped token on UART0 - which has no TX buffer - stalling
+    // loop() for tens of seconds, dropping console commands (?reboot included) and silently cutting bodies short
+    // (tracker #47). Refuse the whole expansion, once, instead: a refused ;C enqueues nothing, so the cascade
+    // shrinks the queue rather than growing it. The token count is an upper bound (IF gating and value verbs only
+    // make the real count smaller). Top-level recalls (depth 0, incl. ONFIN/ONERR) and timer-chain bodies, which
+    // enqueue one group at a time, are unchanged.
+    if (onLoop && seqCurPath.depth > 0 && !viaTimer) {
+        unsigned need = 1;
+        for (unsigned i = 0; i < stripped.length(); i++) if (stripped[i] == commandDelimiter) need++;
+        if (commandQueueSpaces() < need + SEQ_QUEUE_RESERVE) {
+            Serial.printf("Command queue nearly full — not expanding nested sequence '%s'. "
+                          "Space repeated calls with ;T.\n", key.c_str());
+            return;
+        }
+    }
+
+    Serial.printf("Recalling command for key '%s': %s\n", key.c_str(), recalledCommand.c_str());
 
     // Enqueue for execution.
     //
@@ -626,14 +680,22 @@ void recallCommandSlot(const String &key, int sourceID) {
     bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = false;
     inSequenceBody        = true;
-    if (isTimerCommand(stripped)) {
+    // Push this key onto the lineage the body's items (and its timer chain) carry; recallStoredCommand has already
+    // refused a repeat or depth 8 (tracker #47). An MP3/DFPlayer ONFIN/ONERR recall lands here directly, from
+    // loop() outside any dispatch, so it starts a fresh lineage. Off the loop task there is no lineage to push.
+    SeqPath _savedPath = {};
+    if (onLoop) {
+        _savedPath = seqCurPath;
+        if (seqCurPath.depth < SEQ_MAX_NESTING) seqCurPath.key[seqCurPath.depth++] = seqKeyHash(key);
+    }
+    if (viaTimer) {
         parseCommandGroups(stripped);
     } else {
         parseCommandsAndEnqueue(stripped, sourceID);
     }
     lastReceivedViaESPNOW = _savedEspNowOrigin;
     inSequenceBody        = _savedSeqBody;
-
+    if (onLoop) seqCurPath = _savedPath;
 }
 
 // Save stored commands to preferences
@@ -646,6 +708,14 @@ void saveStoredCommandsToPreferences(const String &message) {
 
   String key = message.substring(0, commaIndex);
   String value = message.substring(commaIndex + 1);
+  // An Arduino String whose allocation fails comes back EMPTY, not as an error - so a long value
+  // on a busy heap fell through to 'Key or value cannot be empty', naming the wrong problem.
+  if (value.length() == 0 && message.length() > (unsigned)commaIndex + 1) {
+    Serial.printf("Out of memory: could not copy a %u-character value (largest free block %u bytes). Not stored.\n",
+                  (unsigned)(message.length() - commaIndex - 1),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));   // not ESP.getMaxAllocHeap(): see ?STATS
+    return;
+  }
   key.trim();
   value.trim();
 
@@ -1081,9 +1151,10 @@ void eraseNVSFlash() {
     // Wizard's factory-reset modal both say so). Say what to do about it: until ?HW is set the
     // board comes up on the hw 0 pin map, where no serial port is usable.
     Serial.println("NVS cleared — set ?HW,xx before use (serial ports are inactive until then).");
-    Serial.println("Restarting...");
-    delay(2000);
-    ESP.restart();
+    // Deferred like every other restart (CLAUDE.md rule 11): ?ERASE,NVS can arrive mid-chain, and
+    // an inline restart drops whatever was queued behind it while the sender counts it delivered.
+    Serial.println("Restart queued - restarting once the command queue is quiet");
+    rebootPending = true;
 }
 
 // Add-only reconcile of kyberTargets[] from the current maestroConfigs[]. Unlike
@@ -1123,18 +1194,140 @@ int reconcileKyberTargetsFromMaestroConfigs() {
   return added;
 }
 
+// The one serial port a Kyber mode takes from every other subsystem: the HCR/MP3/DFP/WLED guards,
+// canUsePWMOnPort (so ?MAP,PWM, the boot-time PWM load and WDP PWMTARGET auto-config) and ;P.
+// Kyber LOCAL owns only kyberLocalPort - the other hardware port has been a normal command port since #14,
+// and reserving it too dropped a PWM output saved there from NVS at the next boot (tracker #73 D4, HIL
+// kyber.local_free_port_takes_pwm). Maestro REMOTE keeps S1: the parser never reads it, broadcasts skip it,
+// and the receive path's legacy fallback writes Maestro bytes there (WCB.ino). Reads the live globals, as
+// KyberLocalTask does, so a runtime ?KYBER,LOCAL,S<n> move is seen by every guard at once.
+bool kyberModeReservesPort(int port) {
+  if (port < 1 || port > 5) return false;
+  if (Kyber_Local) return port == kyberLocalPort;
+  return Maestro_Remote && port == 1;
+}
+
+// ?KYBER,LOCAL refusals, checked BEFORE storeKyberSettings touches any live state. They used to run
+// after kyberUseTargeting was set and the targets were auto-populated (or, on the bare form, wiped),
+// so a refused ?KYBER,LOCAL,S3 still switched a broadcast-mode board to targeting - #6's leak again,
+// through the #28 refusal (HIL kyber.config_negatives / kyber.local_rejected_port_keeps_forwarding).
+static bool kyberPortOwnedByOther(int port) {
+  return isSerialPortUsedForWLED(port) || isSerialPortUsedForHCR(port) ||
+         isSerialPortUsedForMP3(port)  || isSerialPortPWMOutput(port) ||
+         isSerialPortUsedForDFP(port)  || isSerialPortUsedForPWMInput(port);
+}
+
+// The hardware ports a refused ?KYBER,LOCAL can honestly suggest: neither owned by another subsystem
+// nor hosting a local Maestro. Printed as the "use ..." hint, or a note that neither is free.
+static void kyberPrintFreeHwPorts() {
+  const bool f1 = !kyberPortOwnedByOther(1) && !isSerialPortUsedForMaestro(1);
+  const bool f2 = !kyberPortOwnedByOther(2) && !isSerialPortUsedForMaestro(2);
+  if (f1 && f2)  Serial.println("   Use \"?KYBER,LOCAL,S1\" or \"?KYBER,LOCAL,S2\".");
+  else if (f1)   Serial.println("   Use \"?KYBER,LOCAL,S1\" - S2 is taken.");
+  else if (f2)   Serial.println("   Use \"?KYBER,LOCAL,S2\" - S1 is taken.");
+  else           Serial.println("   Neither hardware port (S1, S2) is free - move a device off one first.");
+}
+
+// The Maestro id an explicit ?KYBER,LOCAL target list would put LOCALLY on `port` (the Kyber's own
+// port), or 0. Parses each "M<id>:W<wcb>S<port>:<baud>" token exactly as the target loop below does.
+// The target loop creates a local slot for such a token - after kyberLocalPortRefused has passed,
+// because no slot exists yet - and re-bauds the Kyber port under it. That is the form ?backup and the
+// Wizard emit, so without this the local-Maestro refusal was bypassed by every config push.
+static int kyberTargetOnKyberPort(const String &params, int port) {
+  int startIdx = 0;
+  while (startIdx < (int)params.length()) {
+    int nextComma = params.indexOf(',', startIdx);
+    if (nextComma == -1) nextComma = params.length();
+    String t = params.substring(startIdx, nextComma);
+    startIdx = nextComma + 1;
+    t.trim();
+    t.toUpperCase();
+    const int c1 = t.indexOf(':'), c2 = t.indexOf(':', c1 + 1);
+    if (c1 == -1 || c2 == -1 || !t.startsWith("M")) continue;
+    const String wp = t.substring(c1 + 1, c2);
+    const int wIdx = wp.indexOf('W'), sIdx = wp.indexOf('S');
+    if (wIdx == -1 || sIdx == -1) continue;
+    if (wp.substring(wIdx + 1, sIdx).toInt() == WCB_Number && wp.substring(sIdx + 1).toInt() == port)
+      return t.substring(1, c1).toInt();
+  }
+  return 0;
+}
+
+static bool kyberLocalPortRefused(int port) {
+  // Don't seize a UART another subsystem already owns. Symmetric with the
+  // HCR/MP3/WLED/PWM guards so two subsystems can't silently share one port.
+  // (Config-time only — loadKyberSettings() reads NVS directly, never replays
+  // this, so a saved config is never rejected at boot.)
+  if (port >= 1 && port <= 5 && kyberPortOwnedByOther(port)) {
+    Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - reserved by HCR/MP3/WLED/PWM/DFP\n", port);
+    return true;
+  }
+  // The Kyber's rate is fixed at 115200 and S3-S5 receive in software, so a soft-serial Kyber port
+  // has no working configuration - configureMaestro refuses the same ports for the same
+  // reason. This used to call updateBaudRate(port, 115200) and report success.
+  if (port >= 3 && port <= 5) {
+    Serial.printf("❌ S%d is SOFTWARE SERIAL - the Kyber runs at 115200, which needs a hardware port.\n", port);
+    kyberPrintFreeHwPorts();
+    return true;
+  }
+  // A local Maestro on the port (Greg, 2026-09-22): accepting it moved the Maestro's port to 115200,
+  // and KyberLocalTask's forwardMaestroDataToLocalKyber then wrote the Maestro's bytes back into the
+  // same port, echoing it into itself. Local slots only - a remote proxy owns no local port.
+  if (port >= 1 && port <= 2 && isSerialPortUsedForMaestro(port)) {
+    Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - a local Maestro is configured there. "
+                  "Clear it (?MAESTRO,CLEAR,M<id>:W%dS%d) or use the other hardware port.\n", port, WCB_Number, port);
+    kyberPrintFreeHwPorts();
+    return true;
+  }
+  return false;
+}
+
+// Give a port back when the Kyber leaves it: 9600 baud, ?BCAST output and input on - the reverse of what the
+// LOCAL branch took (115200, both flags off). ?KYBER,CLEAR, a ?KYBER,LOCAL port move and ?MAESTRO,REMOTE
+// (?KYBER,REMOTE) all release through here (tracker #73 D5/D9 - the move and REMOTE used to leave the old port
+// at 115200 with broadcasts off). A port a local Maestro or another subsystem uses NOW keeps its settings:
+// a swap target list puts a Maestro on the port the Kyber just left, and resetting it would re-baud that
+// Maestro. Call only once kyberLocalPort no longer names the port, so KyberLocalTask is off it before
+// applyLiveBaud re-begins it.
+static void kyberReleasePort(int port) {
+  if (port < 1 || port > 5) return;
+  if (kyberPortOwnedByOther(port) || isSerialPortUsedForMaestro(port)) {
+    Serial.printf("S%d keeps its settings - a Maestro or another device is configured there (was the Kyber port)\n", port);
+    return;
+  }
+  updateBaudRate(port, 9600);
+  Serial.printf("✓ Reset S%d baud rate to 9600 (was the Kyber port)\n", port);
+  if (!serialBroadcastEnabled[port - 1]) {
+    serialBroadcastEnabled[port - 1] = true;
+    saveBroadcastSettingsToPreferences();
+    Serial.printf("✓ Re-enabled broadcast output on S%d\n", port);
+  }
+  if (blockBroadcastFrom[port - 1]) {
+    blockBroadcastFrom[port - 1] = false;
+    saveBroadcastBlockSettings();
+    Serial.printf("✓ Re-enabled broadcast input on S%d\n", port);
+  }
+}
+
 void storeKyberSettings(const String &message) {
   int firstComma = message.indexOf(',');
   String baseCommand;
   String params = "";
   int kyberPort = 0;
-  
+  int releasePort = 0;   // the port the Kyber gives up; released after the target loop
+
   if (firstComma == -1) {
     baseCommand = message;
     baseCommand.toLowerCase();
+    // Bare LOCAL keeps a local Kyber where it is and only switches to broadcast mode; S2 is the default for a
+    // board that is not Kyber local yet. Hard-coding S2 re-pointed a Kyber on S1 at S2 (refused outright with a
+    // Maestro there) and left S1 claimed (#73 D5). S1/S2 only: a legacy S3-S5 Kyber moves to S2 and its old port
+    // is released. REMOTE and CLEAR keep 2, so their stored K_Port bytes are unchanged.
+    kyberPort = (baseCommand.equals("local") && Kyber_Local && kyberLocalPort >= 1 && kyberLocalPort <= 2)
+                ? kyberLocalPort : 2;
+    if (baseCommand.equals("local") && kyberLocalPortRefused(kyberPort)) return;   // before the target wipe
     kyberUseTargeting = false;
-    kyberPort = 2;
-    
+
     for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
       kyberTargets[i].enabled = false;
       kyberTargets[i].maestroID = 0;
@@ -1156,18 +1349,34 @@ if (params.startsWith("S") || params.startsWith("s")) {
     portStr = params.substring(1);  // port only, no maestro targets
     params = "";
   }
-  kyberPort = portStr.toInt();
+  // Validate BEFORE touching live state. kyberUseTargeting used to be set here with the port
+  // range checked afterwards, so a refused ?KYBER,LOCAL,S6 left targeting ENABLED on a board that
+  // had been broadcasting: forwardDataFromKyber then took the targeted branch and walked a
+  // kyberTargets[] the rejected command never populated, dropping every sabre byte with no
+  // message. The check covers REMOTE too now - it was gated on "local", so ?KYBER,REMOTE,S9
+  // skipped it entirely.
+  const int wantPort = portStr.toInt();
+  if (wantPort < 1 || wantPort > 5) {
+    Serial.println("Invalid Kyber port. Must be S1-S5");
+    return;
+  }
+  if (baseCommand.equals("local") && kyberLocalPortRefused(wantPort)) return;
+  if (baseCommand.equals("local")) {
+    const int onKyberPort = kyberTargetOnKyberPort(params, wantPort);
+    if (onKyberPort) {
+      Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - target M%d puts a local Maestro on the Kyber port.\n",
+                    wantPort, onKyberPort);
+      kyberPrintFreeHwPorts();
+      return;
+    }
+  }
+  kyberPort = wantPort;
   kyberUseTargeting = true;
 } else {
   Serial.println("Invalid format. Use: ?KYBER,LOCAL,Sx or ?KYBER,LOCAL,Sx,M1:W1S1:57600");
   return;
 }
   } 
-  if (baseCommand.equals("local") && kyberUseTargeting && (kyberPort < 1 || kyberPort > 5)) {
-    Serial.println("Invalid Kyber port. Must be S1-S5");
-    return;
-  }
-  
    // If port specified but no targets provided, auto-populate from existing maestro configs
   if (kyberUseTargeting && params.length() == 0) {
       int targetIndex = 0;
@@ -1196,17 +1405,10 @@ if (params.startsWith("S") || params.startsWith("s")) {
   }
   
   if (baseCommand.equals("local")) {
-    // Don't seize a UART another subsystem already owns. Symmetric with the
-    // HCR/MP3/WLED/PWM guards so two subsystems can't silently share one port.
-    // (Config-time only — loadKyberSettings() reads NVS directly, never replays
-    // this, so a saved config is never rejected at boot.)
-    if (kyberPort >= 1 && kyberPort <= 5 &&
-        (isSerialPortUsedForWLED(kyberPort) || isSerialPortUsedForHCR(kyberPort) ||
-         isSerialPortUsedForMP3(kyberPort)  || isSerialPortPWMOutput(kyberPort) ||
-         isSerialPortUsedForPWMInput(kyberPort))) {
-      Serial.printf("❌ Cannot set Kyber LOCAL on Serial%d - reserved by HCR/MP3/WLED/PWM\n", kyberPort);
-      return;
-    }
+    // Port refusals ran above, before any live state changed (kyberLocalPortRefused).
+    // A move to the other port releases the old one after the target loop below (it may put a Maestro there).
+    // Re-pointing kyberLocalPort first moves a running KyberLocalTask off the old port on its next pass.
+    if (kyberLocalPort >= 1 && kyberLocalPort <= 5 && kyberLocalPort != kyberPort) releasePort = kyberLocalPort;
     Kyber_Local = true;
     Maestro_Remote = false;
     Kyber_Location = "local";
@@ -1234,6 +1436,13 @@ if (params.startsWith("S") || params.startsWith("s")) {
     }
     
   } else if (baseCommand.equals("remote")) {
+    // Leaving Kyber LOCAL gives the Kyber port up, as ?KYBER,CLEAR does (#73 D9). KyberLocalTask is boot-only and
+    // gates on kyberLocalPort alone (forwardDataFromKyber / forwardMaestroDataToLocalKyber, WCB.ino), so leaving it
+    // set kept a Kyber_Local-booted board bridging the old port - beside the Maestro_Remote parser branch, which
+    // reads S2 - and echoing its Maestro ports into it until reboot. Zero means the task idles and
+    // maestroPortOwnedByKyberBridge hands the ports back.
+    if (kyberLocalPort >= 1 && kyberLocalPort <= 5) releasePort = kyberLocalPort;
+    kyberLocalPort = 0;
     Kyber_Local = false;
     Maestro_Remote = true;
     Kyber_Location = "remote";
@@ -1248,6 +1457,9 @@ if (params.startsWith("S") || params.startsWith("s")) {
     // every full push to every plain board reset Serial2 to 9600 and re-enabled its broadcast
     // flags — silently undoing settings the same push had just applied a few commands earlier.
     const int clearPort = (kyberLocalPort >= 1 && kyberLocalPort <= 5) ? kyberLocalPort : 0;
+    // Only a board that WAS in a Kyber mode needs the reboot notice below: collectConfigCommands and
+    // the Wizard send ?KYBER,CLEAR in every plain board's config push, which must stay quiet.
+    const bool wasKyberMode = Kyber_Local || Maestro_Remote;
 
     Kyber_Location = " ";
     Kyber_Local = false;
@@ -1255,31 +1467,18 @@ if (params.startsWith("S") || params.startsWith("s")) {
     kyberLocalPort = 0;
     kyberUseTargeting = false;
 
-    if (clearPort > 0) {
-      updateBaudRate(clearPort, 9600);
-      Serial.printf("✓ Reset S%d baud rate to 9600 (was the Kyber port)\n", clearPort);
-    }
-
     preferences.begin("kyber_settings", false);
     preferences.putString("K_Location", Kyber_Location);
     preferences.end();
 
-    // Only touch broadcast flags for a port the Kyber actually held. Indexing with the
-    // hard-coded 2 also meant `?KYBER,CLEAR,S0` wrote serialBroadcastEnabled[-1].
-    if (clearPort > 0) {
-      if (!serialBroadcastEnabled[clearPort - 1]) {
-        serialBroadcastEnabled[clearPort - 1] = true;
-        saveBroadcastSettingsToPreferences();
-        Serial.printf("✓ Re-enabled broadcast output on S%d\n", clearPort);
-      }
-      if (blockBroadcastFrom[clearPort - 1]) {
-        blockBroadcastFrom[clearPort - 1] = false;
-        saveBroadcastBlockSettings();
-        Serial.printf("✓ Re-enabled broadcast input on S%d\n", clearPort);
-      }
-    }
+    // Only the port the Kyber actually held (0 = none). Indexing with the hard-coded 2 also meant
+    // `?KYBER,CLEAR,S0` wrote serialBroadcastEnabled[-1].
+    kyberReleasePort(clearPort);
     saveKyberTargets();
     Serial.println("Kyber cleared. Run ?MAESTRO_DEFAULT to clear Maestro configs.");
+    if (wasKyberMode)   // same wording as the LOCAL/REMOTE branches; the S1/S2 setup and the Kyber
+                        // tasks are chosen at boot (the bridge task idles until then - WCB.ino)
+      Serial.println("⚠️  Reboot required — Serial1/Serial2 setup and the Kyber forwarding tasks are only chosen at boot.");
     return; 
   }
   
@@ -1316,7 +1515,11 @@ if (params.startsWith("S") || params.startsWith("s")) {
           int wcbNum = wcbPortStr.substring(wIdx + 1, sIdx).toInt();
           int portNum = wcbPortStr.substring(sIdx + 1).toInt();
           
-          if (maestroID >= 1 && maestroID <= 9 &&
+          // 1-8, not 1-9: id 9 is the reserved "all local Maestros" routing target and must never
+          // become a slot (CLAUDE.md rule 5). configureMaestro and WDP auto-add both refuse it; this
+          // path did not, and an id-9 slot then matched ;M9 in the config loop and returned before
+          // the fan-out, writing a literal device-9 frame instead of re-addressing each Maestro.
+          if (maestroID >= 1 && maestroID <= 8 &&
               wcbNum >= 1 && wcbNum <= MAX_WCB_COUNT &&
               portNum >= 1 && portNum <= 5 &&
               // Same 13-rate list configureMaestro() validates against (WCB_Maestro.cpp:610).
@@ -1399,8 +1602,8 @@ if (params.startsWith("S") || params.startsWith("s")) {
             targetIndex++;
           } else {
             // Print a clear reason so the user knows why a target was rejected
-            if (maestroID < 1 || maestroID > 9)
-              Serial.printf("⚠️  Skipping target '%s': Maestro ID must be 1-9\n", targetStr.c_str());
+            if (maestroID < 1 || maestroID > 8)
+              Serial.printf("⚠️  Skipping target '%s': Maestro ID must be 1-8 (9 = all local Maestros)\n", targetStr.c_str());
             else if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT)
               Serial.printf("⚠️  Skipping target '%s': WCB number out of range (1-%d)\n", targetStr.c_str(), MAX_WCB_COUNT);
             else if (portNum < 1 || portNum > 5)
@@ -1509,7 +1712,11 @@ if (params.startsWith("S") || params.startsWith("s")) {
       Serial.println("─────────────────────────────────────────────────────\n");
     }
   }
-  
+
+  // After the target loop: a target it just put on the released port makes that port a Maestro's, and
+  // kyberReleasePort then leaves it alone.
+  kyberReleasePort(releasePort);   // no-op for 0
+
   preferences.begin("kyber_settings", false);
   preferences.putString("K_Location", Kyber_Location);
   preferences.putInt("K_Port", kyberPort);   // persist so kyberLocalPort is correct after reboot
@@ -1558,10 +1765,20 @@ void printKyberSettings() {
 
   Serial.printf("Kyber is %s\n", temp.c_str());
 
+  // The actual ports. This used to name "Serial1 & Serial2" whatever kyberLocalPort was, and said
+  // "Initialized" after every ?KYBER command too, where nothing changes until the reboot (tracker #73 D8).
   if (Kyber_Local) {
-    Serial.println("Initialized Serial1 & Serial2 for Kyber Local mode");
+    if (kyberLocalPort >= 1 && kyberLocalPort <= 5)
+      Serial.printf("Kyber port: Serial%d (%lu baud)\n", kyberLocalPort, baudRates[kyberLocalPort - 1]);
+    else
+      Serial.println("Kyber port: not set");
   } else if (Maestro_Remote) {
-    Serial.println("Initialized Serial1 for Kyber Remote mode");
+    // Mirrors the target-98 receive path (WCB.ino espNowReceiveCallback): every local Maestro port, else S1.
+    String ports;
+    for (int p = 1; p <= 5; p++)
+      if (isSerialPortUsedForMaestro(p)) ports += String(ports.length() ? ", S" : "S") + String(p);
+    Serial.printf("Maestro data from the mesh goes to: %s\n",
+                  ports.length() ? ports.c_str() : "S1 (no local Maestro configured - legacy default)");
   }
 
   printMaestroSettings();
@@ -1627,6 +1844,12 @@ void loadSerialMonitorMappings() {
             serialMonitorMappings[i].inputPort = preferences.getUChar(keyInput.c_str(), 0);
             serialMonitorMappings[i].outputCount = preferences.getUChar(keyCount.c_str(), 0);
             serialMonitorMappings[i].rawMode = preferences.getBool(keyRaw.c_str(), false);
+            // Defaults ON/unblocked: a mapping stored before these keys existed restores the
+            // way it always did, so upgrading changes nothing for an existing config.
+            serialMonitorMappings[i].prevBroadcastOut =
+                preferences.getBool(("sm" + String(i) + "_pbo").c_str(), true);
+            serialMonitorMappings[i].prevBlockIn =
+                preferences.getBool(("sm" + String(i) + "_pbi").c_str(), false);
             
             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                 String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
@@ -1718,38 +1941,35 @@ void addSerialMonitorMapping(const String &message) {
     // port, so it REPLACES the previous list rather than appending to it. Appending meant a
     // destination the user removed or re-pointed in the Wizard stayed live on the board forever —
     // the config was pushed, reported success, and the old route kept forwarding.
-    SerialMonitorMapping *mapping = nullptr;
+    // Staged, not live. This used to zero the existing mapping's outputCount (or allocate a slot
+    // with active=true) BEFORE parsing a single destination, while the commit below only saves when
+    // outputsAdded > 0 - so a command whose destinations were all invalid left an ACTIVE mapping
+    // holding zero outputs. In text mode that silently swallowed every line arriving on the port;
+    // in raw mode serialCommandTask stopped reading the port at all, so it stopped executing
+    // commands, and ?backup emitted a token that could not be replayed. Parse into a local and
+    // replace the slot only once something valid came out of it.
+    SerialMonitorMapping *slot = nullptr;
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active && serialMonitorMappings[i].inputPort == inputPort) {
-            mapping = &serialMonitorMappings[i];
-            mapping->outputCount = 0;      // replace, don't append
-            mapping->rawMode     = inputRawMode;
+            slot = &serialMonitorMappings[i];
             break;
         }
     }
-
-    if (!mapping) {
+    if (!slot) {
         for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-            if (!serialMonitorMappings[i].active) {
-                mapping = &serialMonitorMappings[i];
-                mapping->active = true;
-                mapping->inputPort = inputPort;
-                mapping->outputCount = 0;
-                mapping->rawMode = inputRawMode;
-                break;
-            }
+            if (!serialMonitorMappings[i].active) { slot = &serialMonitorMappings[i]; break; }
         }
     }
-
-    if (!mapping) {
+    if (!slot) {
         Serial.println("Maximum serial mappings reached");
         return;
     }
 
-    // Update raw mode if different
-    if (mapping->rawMode != inputRawMode) {
-        mapping->rawMode = inputRawMode;
-    }
+    SerialMonitorMapping staged = {};
+    staged.active      = true;
+    staged.inputPort   = inputPort;
+    staged.rawMode     = inputRawMode;
+    staged.outputCount = 0;
 
     // Parse outputs
     String remaining = message.substring(firstComma + 1);
@@ -1801,13 +2021,21 @@ void addSerialMonitorMapping(const String &message) {
             continue;
         }
 
-            if (wcbNum > MAX_WCB_COUNT || serialPort < 0 || serialPort > 5) {
+            if (wcbNum > MAX_WCB_COUNT || serialPort > 5) {
                 Serial.printf("Invalid destination: WCB %d Serial %d\n", wcbNum, serialPort);
+                continue;
+            }
+            // A remote S0 can never receive a raw chunk: the receiving board drops every
+            // WCB_TARGET_RAW_SERIAL frame whose port is < 1, so the mapping would be accepted,
+            // reported as set, and silently deliver nothing. (S0 is fine for a TEXT mapping -
+            // that is the remote board's USB console.)
+            if (inputRawMode && wcbNum != 0 && serialPort == 0) {
+                Serial.printf("Invalid destination: raw mappings cannot target a remote S0 (W%dS0)\n", wcbNum);
                 continue;
             }
 
             // Check for duplicate before adding
-            if (mappingDestinationExists(mapping, wcbNum, serialPort)) {
+            if (mappingDestinationExists(&staged, wcbNum, serialPort)) {
                 Serial.printf("Mapping already exists: Serial%d -> %s%d - skipping duplicate\n",
                              inputPort,
                              wcbNum == 0 ? "S" : ("W" + String(wcbNum) + "S").c_str(),
@@ -1815,36 +2043,54 @@ void addSerialMonitorMapping(const String &message) {
                 continue;  // Skip this destination
             }
 
-        // Add output
-        if (mapping->outputCount < 10) {
-            mapping->outputs[mapping->outputCount].wcbNumber = wcbNum;
-            mapping->outputs[mapping->outputCount].serialPort = serialPort;
-            mapping->outputCount++;
+        // Add to the STAGED copy. The port's broadcast flags are only touched at commit, so a
+        // mapping that parses to nothing cannot leave them flipped on its way to changing nothing.
+        if (staged.outputCount < 10) {
+            staged.outputs[staged.outputCount].wcbNumber = wcbNum;
+            staged.outputs[staged.outputCount].serialPort = serialPort;
+            staged.outputCount++;
             outputsAdded++;
-
-            // Automatically disable BOTH broadcast input and output for this port
-            if (!blockBroadcastFrom[inputPort - 1]) {
-                blockBroadcastFrom[inputPort - 1] = true;
-                saveBroadcastBlockSettings();
-                Serial.printf("Auto-enabled broadcast input blocking on Serial%d\n", inputPort);
-            }
-            if (serialBroadcastEnabled[inputPort - 1]) {
-                serialBroadcastEnabled[inputPort - 1] = false;
-                saveBroadcastSettingsToPreferences();
-                Serial.printf("Auto-disabled broadcast output on Serial%d\n", inputPort);
-            }
         }
     }
 
     if (outputsAdded > 0) {
+        // Record the port's pre-mapping flags ONLY when this claims the slot. A re-issue of an
+        // existing mapping (idempotent by design - a Wizard push re-sends it) finds the flags
+        // already disabled BY the mapping; recording those made CLEAR restore OFF/blocked and
+        // leave the port dark. Keep the values captured when the mapping first appeared.
+        const bool wasMapped = slot->active && slot->inputPort == inputPort;
+        const bool keptOut   = slot->prevBroadcastOut;
+        const bool keptIn    = slot->prevBlockIn;
+        *slot = staged;          // replace, don't append - see the staging comment above
+        if (wasMapped) {
+            slot->prevBroadcastOut = keptOut;
+            slot->prevBlockIn      = keptIn;
+        } else {
+            slot->prevBroadcastOut = serialBroadcastEnabled[inputPort - 1];
+            slot->prevBlockIn      = blockBroadcastFrom[inputPort - 1];
+        }
+
+        // Auto-disable both broadcast directions for the port, now that the mapping is real.
+        if (!blockBroadcastFrom[inputPort - 1]) {
+            blockBroadcastFrom[inputPort - 1] = true;
+            saveBroadcastBlockSettings();
+            Serial.printf("Auto-enabled broadcast input blocking on Serial%d\n", inputPort);
+        }
+        if (serialBroadcastEnabled[inputPort - 1]) {
+            serialBroadcastEnabled[inputPort - 1] = false;
+            saveBroadcastSettingsToPreferences();
+            Serial.printf("Auto-disabled broadcast output on Serial%d\n", inputPort);
+        }
+
         saveSerialMonitorMappings();
-        // The list is now REPLACED, not appended, so outputsAdded == the full destination count.
+        // The list is REPLACED, not appended, so outputsAdded == the full destination count.
         // This also persists a raw-mode toggle on an otherwise-unchanged mapping, which used to
         // change only the RAM copy and silently revert on the next reboot.
         Serial.printf("Serial mapping set: Serial%d%s -> %d destination(s)\n",
-                      inputPort, inputRawMode ? " (RAW)" : "", mapping->outputCount);
+                      inputPort, inputRawMode ? " (RAW)" : "", staged.outputCount);
     } else {
-        Serial.println("No new destinations added (all were duplicates or invalid)");
+        // Nothing valid parsed: the existing mapping (if any) is untouched, and no slot was taken.
+        Serial.printf("No valid destinations - Serial%d mapping left unchanged\n", inputPort);
     }
 }
 
@@ -1928,10 +2174,14 @@ void saveSerialMonitorMappings() {
             String keyInput = "sm" + String(i) + "_in";
             String keyCount = "sm" + String(i) + "_cnt";
             String keyRaw = "sm" + String(i) + "_raw";
+            String keyPrO = "sm" + String(i) + "_pbo";   // broadcast OUT before the mapping
+            String keyPrI = "sm" + String(i) + "_pbi";   // input blocking before the mapping
             
             preferences.putUChar(keyInput.c_str(), serialMonitorMappings[i].inputPort);
             preferences.putUChar(keyCount.c_str(), serialMonitorMappings[i].outputCount);
             preferences.putBool(keyRaw.c_str(), serialMonitorMappings[i].rawMode);
+            preferences.putBool(keyPrO.c_str(), serialMonitorMappings[i].prevBroadcastOut);
+            preferences.putBool(keyPrI.c_str(), serialMonitorMappings[i].prevBlockIn);
             
             for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
                 String keyWCB = "sm" + String(i) + "_" + String(j) + "w";
@@ -1973,18 +2223,20 @@ void removeSerialMonitorMapping(const String &portStr) {
             
             found = true;
             
-            // Re-enable broadcast input for this port
-            if (blockBroadcastFrom[port - 1]) {
-                blockBroadcastFrom[port - 1] = false;
+            // Put the flags back the way the port had them, not the way the defaults say.
+            const bool wantBlockIn = serialMonitorMappings[i].prevBlockIn;
+            const bool wantBcstOut = serialMonitorMappings[i].prevBroadcastOut;
+            if (blockBroadcastFrom[port - 1] != wantBlockIn) {
+                blockBroadcastFrom[port - 1] = wantBlockIn;
                 saveBroadcastBlockSettings();
-                Serial.printf("Auto-disabled broadcast input blocking on Serial%d\n", port);
+                Serial.printf("Restored broadcast input blocking on Serial%d: %s\n",
+                              port, wantBlockIn ? "blocked" : "allowed");
             }
-            
-            // Re-enable broadcast output for this port
-            if (!serialBroadcastEnabled[port - 1]) {
-                serialBroadcastEnabled[port - 1] = true;
+            if (serialBroadcastEnabled[port - 1] != wantBcstOut) {
+                serialBroadcastEnabled[port - 1] = wantBcstOut;
                 saveBroadcastSettingsToPreferences();
-                Serial.printf("Auto-enabled broadcast output on Serial%d\n", port);
+                Serial.printf("Restored broadcast output on Serial%d: %s\n",
+                              port, wantBcstOut ? "enabled" : "disabled");
             }
             
             break;
@@ -2003,10 +2255,23 @@ void clearAllSerialMonitorMappings() {
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
         if (serialMonitorMappings[i].active) {
             int port = serialMonitorMappings[i].inputPort;
-            
-            // Re-enable broadcast for each port
-            if (blockBroadcastFrom[port - 1]) {
-                blockBroadcastFrom[port - 1] = false;
+
+            // Same restore as the single-port CLEAR: put back the flags the mapping overrode,
+            // both directions. This used to clear input blocking only, so every port it
+            // released stayed silent on broadcast OUTPUT until someone re-enabled it by hand.
+            if (port >= 1 && port <= 5) {
+                const bool wantBlockIn = serialMonitorMappings[i].prevBlockIn;
+                const bool wantBcstOut = serialMonitorMappings[i].prevBroadcastOut;
+                if (blockBroadcastFrom[port - 1] != wantBlockIn) {
+                    blockBroadcastFrom[port - 1] = wantBlockIn;
+                    Serial.printf("Restored broadcast input blocking on Serial%d: %s\n",
+                                  port, wantBlockIn ? "blocked" : "allowed");
+                }
+                if (serialBroadcastEnabled[port - 1] != wantBcstOut) {
+                    serialBroadcastEnabled[port - 1] = wantBcstOut;
+                    Serial.printf("Restored broadcast output on Serial%d: %s\n",
+                                  port, wantBcstOut ? "enabled" : "disabled");
+                }
             }
         }
         
@@ -2017,6 +2282,7 @@ void clearAllSerialMonitorMappings() {
     }
     
     saveBroadcastBlockSettings();
+    saveBroadcastSettingsToPreferences();
     saveSerialMonitorMappings();
     Serial.println("All serial mappings cleared");
 }
@@ -2326,6 +2592,15 @@ void loadETMSettings() {
     etmCharDelayMs      = preferences.getInt("etmCharDelay", 100);
     etmChecksumEnabled = preferences.getBool("etmChksm", true);
     preferences.end();
+
+    // Heal a board that already holds a value written before the setters were range-checked:
+    // a bare ?ETM,TIMEOUT / ?ETM,BOOT / ?ETMMISS used to persist 0, and 0 here means no retry
+    // window, no boot window, and every peer permanently offline. Same belt-and-braces the
+    // heartbeat path already carries for a value restored from an older NVS blob.
+    if (etmTimeoutMs        < 50 || etmTimeoutMs        > 10000) etmTimeoutMs        = 500;
+    if (etmBootHeartbeatSec < 1  || etmBootHeartbeatSec > 30)    etmBootHeartbeatSec = 2;
+    if (etmMissedHeartbeats < 1  || etmMissedHeartbeats > 100)   etmMissedHeartbeats = 5;
+    if (etmCharDelayMs      < 0  || etmCharDelayMs      > 5000)  etmCharDelayMs      = 100;
     if (etmEnabled) {
         Serial.println("ETM: ENABLED ⚠️  Ensure all boards match firmware!");
     }

@@ -106,16 +106,26 @@ A line‑oriented command driver over any `Serial` stream (UART bridge *or* nati
   base64‑inflated app image over 115200 takes minutes. After `BEGIN`, the host may send
   `?OTALOCAL,BAUD,<baud>` (allowed: 230400/460800/**921600**/1000000, or 115200 to restore).
   Handshake: the board prints `[OTA:BAUD,OK,<baud>]` **at the current baud**, `Serial.flush()`es,
-  then `Serial.updateBaudRate()`s; the host switches its side after reading the ACK. Bumped
-  **only after `BEGIN`** so the 30 s idle timeout owns the restore if the session strands.
-  Auto‑restored to 115200 on **reboot** (`END`) or in `otaAbortSession` (**ABORT / timeout**).
+  then `Serial.updateBaudRate()`s; the host switches its side after reading the ACK. `BAUD` is
+  refused with no session in flight, so the host bumps **only after `BEGIN,OK`**. Every way a
+  session ends returns the board to 115200:
+  - a **reboot** (`END` OK);
+  - `otaAbortSession` (**ABORT**, the 30 s idle timeout, a remote abort);
+  - a write failure that ends the session (overrun, `esp_ota_write` error), or an incomplete `END`;
+  - a local `[OTA:END,ERR]`;
+  - a **rejected `BEGIN`**. `otaBegin` supersedes a live session *before* its guards run, so a
+    refused re‑`BEGIN` leaves no session, and without this nothing would ever restore the rate.
+
+  On a failure the `ERR` marker goes out at the raised rate, then the board flushes and switches,
+  and the host drops to 115200 itself. A `BEGIN` sent at 115200 never changes the rate. A
+  re‑`BEGIN` that succeeds keeps the raised rate for the new session.
   A too‑fast bridge just corrupts bytes → `END` SHA verify fails → retry (never bricks). Host
   side uses `SerialPort.reconfigure()` (no DTR toggle, so no reset mid‑OTA); it stays at 115200
   if the browser lacks `reconfigure()`. At 921600 the transfer drops from minutes to ~30 s.
 
 - **Chunking:** base64 text per `DATA` line; decoded chunk ≤ `OTA_LOCAL_MAX_CHUNK = 1024` B into a static scratch buffer via `mbedtls_base64_decode` (no per‑call malloc). The host picks a chunk size ≤ 1024.
 - **Machine‑readable markers** (the host parses these, not the human log):
-  - `[OTA:BEGIN,OK|ERR,<cursor>]`
+  - `[OTA:BEGIN,OK|ERR,<cursor>]` — an `ERR` at a raised rate is followed by the board returning to 115200
   - `[OTA:ACK,<cursor>]` — emitted after every accepted `DATA`
   - `[OTA:NAK,<cursor>]` — `DATA` rejected (gap/dup); host resends from `<cursor>`
   - `[OTA:END,OK|ERR]`
@@ -173,7 +183,7 @@ The WCB's ESP‑NOW receive callback routes packets **by total `len`**, not by r
 Each: `memcpy` the struct, null‑terminate the password, gate, act, ACK.
 - Gate `otaPktAuth(pw, targetWCB)` = `password == espnowPassword && targetWCB == myWCB`. (The mesh‑wide MAC‑group gate runs earlier in the callback.)
 - `handleOtaBeginPacket` → `otaBegin` → ACK (OK/ERR, cursor).
-- `handleOtaDataPacket` → `otaWrite(sessionId, fragOffset, data, dataLen)` (no‑op on gap/dup) → ACK the *current* cursor — status `OTA_ST_OK` while the session is live, `OTA_ST_ERR` once a failed write has torn it down (so a collapsed `offset=0` reads as a real error, not a rewind).
+- `handleOtaDataPacket` → `otaWrite(sessionId, fragOffset, data, dataLen)` (no‑op on gap/dup) → ACK the *current* cursor. The status is read **after** the write: `OTA_ST_OK` while the session is live, `OTA_ST_ERR` once a failed write has torn it down, including the frame whose own write tore it down. So a collapsed `offset=0` reads as a real error, not a rewind.
 - `handleOtaEndPacket` → `otaEnd` → ACK → on success `delay(300)` (let the ACK transmit before the radio drops) → `ESP.restart()`.
 - `handleOtaAbortPacket` → abort → ACK.
 
@@ -320,5 +330,7 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-09-22 | — | Relay `DATA`: the ACK status is read after `otaWrite`, so the frame whose own write tears the session down (image overrun, `esp_ota_write` error) is ACKed `OTA_ST_ERR`+`0`, not `OTA_ST_OK`+`0`. Same change in `navicore_ota.h`. | HIL `ota.relay_teardown_frame_err` (tracker #70). The 2026-08-06 change captured the in-session flag before the write and reused it for the status, so only the frames after the teardown got `ERR`. Hosts recovered one round trip late: the Wizard by resending, NaviCore's tool by treating `OK`+`0` as stale. Trap: a status that the call itself can change must be read after the call. |
+| 2026-09-22 | — | A rejected local `BEGIN` restores the USB rate to 115200 after its `[OTA:BEGIN,ERR]` marker (`processOtaLocalCommand`), and the transfer‑baud bullet lists every restore path. | HIL `ota.local_baud_rejected_rebegin_restores` (tracker #61): `otaBegin` tears a live session down before its guards run, so a refused re‑`BEGIN` at 921600 left no session. The idle reaper and `BAUD` both need one, so W1 stayed at 921600 until reset. The earlier claim that "the 30 s idle timeout owns the restore" was false on that path. |
 | 2026-08-27 | — | Relay `DATA` accepts an optional CRC‑32 suffix on the offset field (`<offset>:<crc32>` over `"<offset>,<b64>"`) and DROPS a line that fails it; `Serial.setRxBufferSize` 2048 → 8192; new `serialRxOverflows` counter fed by `Serial.onReceiveError`. Backward compatible both directions (`String::toInt()` stops at the `:`). | A UART RX overflow drops a run of bytes from the MIDDLE of a line. Inside the base64 field, with the newline intact, the remainder is still valid base64 and still decodes `rc == 0` — to re‑phased garbage written at a valid offset. The cursor advances and the only symptom is SHA‑256 failing at 100%, after minutes of apparently healthy progress. The 8‑line send window (2272 B) could not fit the old 2 KB ring at all. |
 | 2026-08-06 | — | Target DATA ACK reports the session's real state: `OTA_ST_ERR` once a failed write (image overrun / `esp_ota_write` error / idle abort) has torn the session down, instead of `OTA_ST_OK`+`offset=0`. The Wizard's relay‑OTA loop fast‑fails on `status != 0`. | A false `OK`+`0` is indistinguishable from a stale duplicate to the host — it rewinds, resends from 0, is re‑answered `OK`+`0`, and stalls (looks like success, frozen bar). Parity with `navicore_ota.h`, which already carried the guard. |

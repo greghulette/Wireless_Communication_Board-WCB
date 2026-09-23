@@ -12,9 +12,11 @@
 # Requirements:
 #   - Arduino CLI installed and in PATH
 #   - ESP32 platform installed at v3.3.4
-#   - EspSoftwareSerial and Adafruit NeoPixel libraries installed
-#   - HumanCyborgRelationsAPI (HCRVocalizer) is bundled in the sketch at
-#     Code/WCB/src/HumanCyborgRelationsAPI — no separate install needed
+#   - Adafruit NeoPixel library installed
+#   - HumanCyborgRelationsAPI (HCRVocalizer) and EspSoftwareSerial are bundled in
+#     the sketch at Code/WCB/src/HumanCyborgRelationsAPI and
+#     Code/WCB/src/EspSoftwareSerial (WCB-patched 8.1.0, tracker #78) — no
+#     separate install needed, and an installed copy of either is ignored
 #
 # Output (only written when BOTH targets compile successfully):
 #   Code/bin/WCB_<version>_<branch>_ESP32.bin    (v1.0, v2.1, v2.3, v2.4)

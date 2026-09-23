@@ -127,27 +127,33 @@ void saveWdpSettings();
 
 // ---- WDP-DA: serial-attached device announces (@WDP1) --------------------
 // A device wired to a WCB serial port periodically sends "@WDP1 {json}" to
-// self-identify (see docs/WDP_DEVICE_ANNOUNCE.md). We capture its identity per
-// port; it fills this board's advertised port label (when unlabeled) and lists
-// under ?WDP,DA. RAM-only, TTL-aged; never persisted.
+// self-identify (see docs/WDP_DEVICE_ANNOUNCE.md). We keep one record per
+// (port, type): boards chained on one port (a front and a rear PSI) each get
+// their own, up to WDP_DA_PER_PORT; two devices of the same type on one port
+// share a record. The first-heard live record fills this board's advertised
+// port label (when unlabeled). Lists under ?WDP,DA and ?WDP,DUMP ([WDPDA:...]).
+// RAM-only, TTL-aged per record; never persisted.
+#define WDP_DA_PER_PORT 4
 struct WdpDaDevice {
   bool          present;       // heard an announce within the TTL
-  char          type[25];      // device type (from the shared vocabulary)
+  char          type[25];      // device type (from the shared vocabulary) — the record's key
   char          fw[28];        // device firmware version ("" = none)
   char          hwRev[16];     // hardware revision ("" = none)
   char          capTags[49];   // space-separated capability tags ("" = none)
   unsigned long lastSeenMs;
+  uint32_t      firstHeard;    // creation order: the lowest live one labels the port. A counter,
+                               // not a millis() stamp, so the label can't flip when millis wraps.
 };
 
 // Handle a serial line that begins with "@WDP" on port (1-5): validate the
-// @WDP1 marker, parse the JSON identity, update the per-port record.
+// @WDP1 marker, parse the JSON identity, update that port's record for the type.
 void wdpDaHandleLine(int port, const char *line);
 // Age out serial devices not heard within the TTL. Call each loop().
 void wdpDaTick();
 // ?WDP,DA — print this board's detected serial-attached devices.
 void wdpDaPrint();
-// Detected device type for port (1-5), or "" if none — used to fill the port's
-// advertised label when the user hasn't set one.
+// Type of the port's longest-live record (1-5), or "" if none — fills the port's
+// advertised label when the user hasn't set one. Stable while devices share a port.
 const char *wdpDaType(int port);
 
 #endif

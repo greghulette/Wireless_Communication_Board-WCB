@@ -1050,13 +1050,14 @@ function evaluatePortClaims(config) {
     port.claimedBy = null;
   }
 
-  // Kyber claims its ports (local mode only)
+  // Kyber claims its ports (local mode only). A bare or legacy ?KYBER,LOCAL (no port) is S2 - the
+  // firmware's loadKyberSettings fallback and the `|| 2` of the ?KYBER,LOCAL emit below. Since
+  // tracker #73 D4 this is the ONLY port a local Kyber takes from devices/PWM, so without the
+  // fallback the real Kyber port would be offered to them.
   if (config.kyber.mode === 'local') {
-    if (config.kyber.port) {
-      const idx = config.kyber.port - 1;
-      if (idx >= 0 && idx < 5)
-        config.serialPorts[idx].claimedBy = { type: 'kyber' };
-    }
+    const kyberIdx = (config.kyber.port || 2) - 1;
+    if (kyberIdx >= 0 && kyberIdx < 5)
+      config.serialPorts[kyberIdx].claimedBy = { type: 'kyber' };
     if (config.kyber.marcduinoPort) {
       const idx = config.kyber.marcduinoPort - 1;
       if (idx >= 0 && idx < 5)
@@ -1141,22 +1142,17 @@ function evaluatePortClaims(config) {
     }
   }
 
-  // Kyber/Maestro MODE reservations — mirror the firmware's device-port guards:
-  // with a local Kyber, ?WLED/?HCR/?MP3 configs are rejected on BOTH S1 and S2;
-  // with remote Maestro (NaviCore-driven), they are rejected on S1 (see the
-  // identical guards in WCB_WLED.cpp / WCB_HCR.cpp / WCB_MP3.cpp). Without this,
-  // device dropdowns offer ports the board will refuse and the push fails
-  // silently. Applied LAST with a no-clobber guard so a real claim (maestro,
-  // kyber.port, serial-map, …) always keeps its more specific type — this only
-  // fills otherwise-empty slots to keep them out of the device dropdowns.
-  if (config.kyber) {
-    const reserve = (idx) => {
-      if (!config.serialPorts[idx].claimedBy)
-        config.serialPorts[idx].claimedBy = { type: 'kyber-reserved' };
-    };
-    if (config.kyber.mode === 'local')  { reserve(0); reserve(1); }
-    if (config.kyber.mode === 'remote') { reserve(0); }
-  }
+  // Maestro REMOTE reservation — mirrors the firmware's kyberModeReservesPort (WCB_Storage.cpp),
+  // which the HCR/MP3/DFP/WLED guards and canUsePWMOnPort all call: remote Maestro (Kyber or
+  // NaviCore elsewhere) keeps S1 for the Maestro. Without this, device and PWM dropdowns offer a
+  // port the board will refuse and the push fails silently. A local Kyber reserves only its own
+  // port, which the 'kyber' claim above already covers; its other hardware port takes a device or
+  // PWM like any port (tracker #73 D4 - both used to be reserved here). Applied LAST with a
+  // no-clobber guard so a real claim (maestro, serial-map, …) keeps its more specific type — this
+  // only fills an otherwise-empty S1 to keep it out of the device dropdowns. The Kyber-port and
+  // Maestro dropdowns (app.js) deliberately ignore it: S1 is still where REMOTE's Maestro goes.
+  if (config.kyber && config.kyber.mode === 'remote' && !config.serialPorts[0].claimedBy)
+    config.serialPorts[0].claimedBy = { type: 'kyber-reserved' };
 }
 
 // ─────────────────────────────────────────────
@@ -1377,11 +1373,51 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
     add(`CMDCHAR,${config.cmdChar}`);
 
+  // ── Kyber: release the old port first (Kyber LOCAL port move, or leaving Kyber LOCAL) ──
+  // A board already in Kyber LOCAL refuses ?MAESTRO on its current Kyber port (configureMaestro,
+  // WCB_Maestro.cpp), so swapping the two (Kyber S2 -> S1, Maestro S1 -> S2) lost the Maestro move
+  // to the stale Kyber port. ?KYBER,CLEAR drops it; the ?KYBER,LOCAL after the Maestro block below
+  // claims the new one. Leaving Kyber LOCAL releases the port too: ?MAESTRO,REMOTE and ?KYBER,CLEAR
+  // both put it back (kyberReleasePort, WCB_Storage.cpp; tracker #73 D9). Either release is sent
+  // ahead of the BAUD/BCAST lines because it puts the port back to 9600 with broadcasts on - this
+  // push's own settings for that port must land after it, not be undone by it. A full push can't
+  // see the board's current Kyber port, so it always releases first. The `|| 2` mirrors the
+  // ?KYBER,LOCAL emit below.
+  // A delta push must then re-send the released port's BAUD/BCAST even when unchanged: the
+  // baseline becomes this config after the push, so leaving the board on the release's 9600 /
+  // broadcasts-on while the Wizard shows the old values would hide that port from every later diff.
+  // A board going from Maestro REMOTE to Kyber LOCAL is released early too: REMOTE still reserves S1
+  // (kyberModeReservesPort, WCB_Storage.cpp) until something clears it, and the MP3/HCR/DFP/WLED
+  // blocks run before the claim-late ?KYBER,LOCAL - so a device the Wizard now offers on S1 of a
+  // local-Kyber board (tracker #73 D4) was refused, while the baseline recorded it as configured.
+  // CLEAR on a REMOTE board releases no port (kyberLocalPort is 0), so kyberReleasedIdx stays -1.
+  // kyberChanged also gates the claim-late ?KYBER,LOCAL below.
+  const kyberChanged = fullPush || !baseline ||
+    baseline.kyber.mode !== config.kyber.mode ||
+    baseline.kyber.port !== config.kyber.port ||
+    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
+  const baseKyberPort = baseline?.kyber?.mode === 'local' ? (baseline.kyber.port || 2) : 0;
+  let kyberReleasedIdx = -1;
+  if (config.kyber.mode === 'local') {
+    if (fullPush || !baseline || baseline.kyber?.mode === 'remote' ||
+        (baseKyberPort && baseKyberPort !== (config.kyber.port || 2))) {
+      add('KYBER,CLEAR');
+      if (baseline && !fullPush) kyberReleasedIdx = baseKyberPort - 1;
+    }
+  } else if (fullPush || !baseline || baseline.kyber.mode !== config.kyber.mode) {
+    // Leaving LOCAL (or a mode change / full push). Not on a targets-only diff of a remote/none
+    // board: remote mode never reads kyberTargets (those are the proxy ?MAESTRO lines, pushed by the
+    // Maestro block), and a needless MAESTRO,REMOTE would trip commandStringNeedsReboot (app.js).
+    // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
+    add(config.kyber.mode === 'remote' ? 'MAESTRO,REMOTE' : 'KYBER,CLEAR');
+    if (baseKyberPort && !fullPush) kyberReleasedIdx = baseKyberPort - 1;
+  }
+
   // ── Serial Baud Rates ──
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (fullPush || !base || base.baud !== cur.baud)
+    if (fullPush || !base || base.baud !== cur.baud || i === kyberReleasedIdx)
       add(`BAUD,S${i+1},${cur.baud}`);
   }
 
@@ -1404,9 +1440,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (fullPush || !base || base.broadcastOut !== cur.broadcastOut)
+    if (fullPush || !base || base.broadcastOut !== cur.broadcastOut || i === kyberReleasedIdx)
       add(`BCAST,OUT,S${i+1},${cur.broadcastOut ? 'ON' : 'OFF'}`);
-    if (fullPush || !base || base.broadcastIn !== cur.broadcastIn)
+    if (fullPush || !base || base.broadcastIn !== cur.broadcastIn || i === kyberReleasedIdx)
       add(`BCAST,IN,S${i+1},${cur.broadcastIn ? 'ON' : 'OFF'}`);
   }
   // S0/USB broadcast output — global (no per-port slot). Preserve on round-trip.
@@ -1431,27 +1467,6 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
       if (w.mode === 'ap')        add(`WIFI,AP,${w.apSsid ?? ''},${w.apPass ?? ''}`);
       else if (w.mode === 'join') add(`WIFI,JOIN,${w.joinSsid ?? ''},${w.joinPass ?? ''}`);
       else                        add('WIFI,OFF');
-    }
-  }
-
-  // ── Kyber ──
-  // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
-  const kyberChanged = fullPush || !baseline ||
-    baseline.kyber.mode !== config.kyber.mode ||
-    baseline.kyber.port !== config.kyber.port ||
-    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
-
-  if (kyberChanged) {
-    if (config.kyber.mode === 'local') {
-      let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
-      if (config.kyber.targets?.length > 0)
-        cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
-      add(cmd);
-    } else if (config.kyber.mode === 'remote') {
-      // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
-      add('MAESTRO,REMOTE');
-    } else {
-      add('KYBER,CLEAR');
     }
   }
 
@@ -1577,6 +1592,19 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
         .join(',');
       add(`MAESTRO,${chain}`);
     }
+  }
+
+  // ── Kyber LOCAL (claim late) ──
+  // After the Maestro and MP3/HCR/DFP/WLED blocks: ?KYBER,LOCAL refuses a port that still hosts a
+  // local Maestro (kyberLocalPortRefused, WCB_Storage.cpp), and a Maestro moving off the new Kyber
+  // port is only cleared by the Maestro block above. Sent first, the claim was refused and the board
+  // came out of the push with no Kyber. Still ahead of the PWM/mapping block, which can reboot the
+  // board mid-push. Targets are embedded in the KYBER,LOCAL command, not in MAESTRO.
+  if (kyberChanged && config.kyber.mode === 'local') {
+    let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
+    if (config.kyber.targets?.length > 0)
+      cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
+    add(cmd);
   }
 
   // ── ETM ──

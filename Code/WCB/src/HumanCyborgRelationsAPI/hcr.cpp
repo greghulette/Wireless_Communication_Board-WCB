@@ -11,11 +11,11 @@
 #endif
 
 #ifdef ARDUINO_ARCH_AVR
-#include <SoftwareSerial.h>
+#include "../EspSoftwareSerial/SoftwareSerial.h"   // WCB: vendored path (AVR/PIC32-only branch)
 #endif
 
 #ifdef ARDUINO_ARCH_PIC32
-#include <SoftwareSerial.h>
+#include "../EspSoftwareSerial/SoftwareSerial.h"   // WCB: vendored path (AVR/PIC32-only branch)
 #endif
 
 /*!
@@ -511,7 +511,9 @@ void HCRVocalizer::ResetEmotions(void) {
 
 void HCRVocalizer::SetEmotion(int e,int v) {
     if (e < 0 || e > 3) return;
-    if (v < 0 || v > 99) return;
+    // 0-100, matching SetVolume and the range ;H,SETEMOTION advertises and accepts. At 99 this
+    // dropped a documented, accepted value on the floor: no bytes, no message, nothing to see.
+    if (v < 0 || v > 100) return;
     char emoteprefix[] = "HSMC";
     String msg = "O" + ToString((char) emoteprefix[e]) + ToString(v) + ",QE" + ToString((char) emoteprefix[e]);
     sendCommand(msg);

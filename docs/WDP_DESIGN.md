@@ -142,9 +142,13 @@ peer **membership** (§6).
    (`onNeighbor`/`getNeighbor`/`neighborCount`), and since 1.9.0 they **auto‑join** boards they
    hear (§6) — the client twin of everything in this document.
 3. **Serial‑attached devices** — anything wired to a WCB serial port announces with a one‑line
-   `@WDP1 {json}` every 25–30 s (see `WDP_DEVICE_ANNOUNCE.md`). The WCB stores a per‑port record
-   (TTL 90 s, `?WDP,DA` to inspect) and folds the detected type into its own PORTLABEL adverts —
-   so a Maestro plugged into WCB 4 shows up mesh‑wide with zero config.
+   `@WDP1 {json}` every 25–30 s (see `WDP_DEVICE_ANNOUNCE.md`). The WCB keeps one record per
+   port **and type** — up to `WDP_DA_PER_PORT` (4) per port, so boards chained on one port are each
+   tracked, and each record ages out on its own (TTL 90 s; `?WDP,DA` to inspect). It folds the type
+   of the port's **first‑heard** live record into its own PORTLABEL adverts, so the label holds
+   still while several devices take turns announcing — a Maestro plugged into WCB 4 shows up
+   mesh‑wide with zero config. Only that one label per port crosses the mesh; the full per‑device
+   list is local (`[WDPDA:…]` in the board's own dump).
 
 ---
 
@@ -217,15 +221,19 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 ```
 [WDP:N=..,CLIENT=..,ALIAS=..,HW=..,HWREV=..,FW=..,CAP=....,CTRL=..,CAPTAGS=..,MAESTRO=..,AGE=..,SEEN=..,PEER=..]
 [WDPIF:N=..,S=<port>,DEV=<label>]          ← one per labeled/detected port
+[WDPDA:N=<self>,S=<port>,TYPE=..,FW=..,HW=..,CAPS=<tags>,AGE=<s>]
+                                           ← self row only: one per device announcing on a port (WDP-DA),
+                                             in first-heard order; "" = not sent, CAPS space-separated
 [WDPX:N=..,MB=<id@baud.…>,WL=<id@baud.…>]  ← per board hosting Maestro/WLED: the per-device baud the
                                              main line omits, plus the full WLED list (`-` = none)
+[WDPSEQ:N=..,HASH=<8 hex>]                 ← stored-sequence fingerprint (see SEQUENCE_INVENTORY.md)
 [WDPPWM:N=<src>,DST=<dst>,S=<port>]         ← a remote-PWM drive edge: board <src> drives WCB <dst>'s S<port>
-[WDPCFG:AUTOJOIN=..,PEERS=..]
+[WDPCFG:EN=..,AUTOJOIN=..,PEERS=..]
 [WDP:END,count=..]
 ```
 
-The self row is emitted first, flagged `PEER=3`. `WDPX`/`WDPPWM` are separate lines (not new
-fields on `[WDP:...]`) so older Wizards ignore them instead of failing to parse the record; only
+The self row is emitted first, flagged `PEER=3`. `WDPDA`/`WDPX`/`WDPSEQ`/`WDPPWM` are separate
+lines (not new fields on `[WDP:...]`) so older Wizards ignore them instead of failing to parse the record; only
 edges *touching the queried board* are reconstructable from one dump (a board keeps just the
 `PWMTARGET` entries that name itself), so the full graph is assembled across per‑board pulls.
 
@@ -269,7 +277,8 @@ On **first learn** of a client device whose DEVTYPE is a controller (`NaviCore`,
 
 On **every advert** from a confirmed peer whose `PWMTARGET` TLV (§3) names this board as a
 remote **PWM output** target: if that port isn't already a PWM output and isn't reserved
-(e.g. Kyber), reserve/configure it live — pin set + persisted to NVS, no reboot. Receiver-side
+(`canUsePWMOnPort`: a local Kyber's own port, a Maestro‑remote board's S1, or a device or
+local‑Maestro port), reserve/configure it live — pin set + persisted to NVS, no reboot. Receiver-side
 (the target owns its own config), so a board that was powered off when the mapping was created
 still self-configures the instant it hears the advert. Idempotent and **self-healing**: the
 auto-configured port is tagged (persisted) with its driving board, and when that board's *fresh*
@@ -279,7 +288,10 @@ a deletion made while the receiver was offline no longer strands the port foreve
 `;MAP,PWM,CLEAR,OUT` push it may have missed. As with the manual clear (which reboots), the pin is
 fully returned to plain serial on the next reboot; the self-heal deliberately does **not** force
 one — a board shouldn't reboot itself because a *peer* dropped a mapping. Only WDP-tagged ports
-self-heal; a manually configured PWM output is never auto-removed.
+self-heal; a manually configured PWM output is never auto-removed. The other hardware port of a
+Kyber‑local board is not reserved, so an advert configures it like any port. A refused port is
+skipped silently and retried on every advert, so a peer mapping that still names a port the Kyber
+has just moved off re-claims it at that peer's next advert (the ~60 s backstop at the latest).
 
 On **every** `;H` / `;A` / `;D` trigger, **single‑owner capability routing** (`routeStoredOrCap` →
 `wdpCapOwner`) resolves the command to exactly one host: a persisted/pinned host if it is set and
@@ -336,5 +348,7 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-23 | **PWMTARGET auto-config can claim the free hardware port of a Kyber‑local board.** `canUsePWMOnPort` now reserves only the port a Kyber mode owns (the Kyber's own port; S1 under Maestro REMOTE — `kyberModeReservesPort`, WCB_Storage.cpp), so the other hardware port takes an auto-configured PWM output like any port; before, it was refused along with the Kyber port (tracker #73 D4, HIL `kyber.local_free_port_takes_pwm`). Nothing changes on the wire. | _(pending)_ |
+| 2026-09-22 | **WDP‑DA keeps one record per port *and type*, up to 4 per port** (issue #19). One record per port meant boards chained on one port overwrote each other: `?WDP,DA` showed whoever announced last, and an unlabeled port's PORTLABEL flipped on every announce (~every 14 s for two boards), each flip costing an advert plus a re‑send. The label now comes from the port's first‑heard live record, so it holds still; a full port replaces the record heard from least recently. New self‑only `[WDPDA:…]` dump record with each device's type/fw/hw/caps/age. Announces must now be one whole line (end in `}`, no second `@WDP`) so a collision‑garbled line can't leave a phantom record. Also fixed in passing: TTL expiry compared ages unsigned, so a refresh landing just after `wdpDaTick` read `millis()` expired a device that had just announced. Nothing changes on the wire. The DUMP block above also gained the missing `WDPSEQ` line and `WDPCFG`'s `EN=`. | _(pending)_ |
 | 2026-08-17 | **SEQHASH now covers stored VALUES, not just `key_list`.** A keys-only hash never moved when a sequence was edited in place, so every peer kept a stale copy while believing it current — the exact failure the fingerprint exists to prevent. Cached in RAM and invalidated at each write path, because the WDP dirty-check rebuilds the advert twice a second and hashing values uncached would mean N NVS reads at 2 Hz. Mixed fleets are fine: the contract is only "if it changes, re-pull", so an older board simply doesn't signal value edits. | `80f44d9` |
 | 2026-08-17 | Added TLV `0x13` **SEQHASH** — 4-byte stored-sequence inventory fingerprint, advertised before PORTLABEL so it survives a full payload. Names themselves are **not** advertised (~16 B each would evict the port labels from the fixed 200 B payload); they are pulled on demand — see [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md). Decoder + `WdpNeighbor::seqHash` in firmware and `WCB_Client`; new `[WDPSEQ:N=,HASH=]` record in `?WDP,DUMP`; round-trip and absence-semantics coverage in `tests/wdp_wire_test.cpp`. | `bbd6bdf` |

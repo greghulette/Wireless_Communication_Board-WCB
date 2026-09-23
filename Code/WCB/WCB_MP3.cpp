@@ -21,7 +21,8 @@ extern void         saveBroadcastBlockSettings();
 extern void         recallCommandSlot(const String &key, int sourceID);
 extern bool         isSerialPortUsedForHCR(int port);  // WCB_HCR.cpp — for the port-conflict guard
 extern bool         isSerialPortUsedForWLED(int port); // WCB_WLED.cpp — for the port-conflict guard
-// PWM/MP3 predicates + Kyber_Local/Maestro_Remote come from WCB_Storage.h.
+extern bool         isSerialPortUsedForDFP(int port);  // WCB_DFP.cpp  — for the port-conflict guard
+// PWM/MP3 predicates + kyberModeReservesPort come from WCB_Storage.h.
 
 // ---- Module globals -----------------------------------------------------
 MP3Config mp3Config = {};
@@ -311,11 +312,11 @@ void configureMP3(const String &args) {
   // Mirrors canUsePWMOnPort (WCB_PWM.cpp) so two subsystems can't silently
   // share one UART. Does NOT check MP3 itself, so re-configuring MP3 on its
   // own port (e.g. just changing baud/volume) is still allowed.
+  // Kyber: only the port a Kyber mode owns - kyberModeReservesPort (WCB_Storage.cpp, tracker #73 D4).
   if (isSerialPortPWMOutput(serialPort) || isSerialPortUsedForPWMInput(serialPort) ||
       isSerialPortUsedForHCR(serialPort) || isSerialPortUsedForWLED(serialPort) ||
-      (serialPort == 1 && (Kyber_Local || Maestro_Remote)) ||
-      (serialPort == 2 && Kyber_Local)) {
-    Serial.printf("[MP3] S%d already in use by PWM/Kyber/HCR/WLED - config blocked\n", serialPort);
+      isSerialPortUsedForDFP(serialPort) || kyberModeReservesPort(serialPort)) {
+    Serial.printf("[MP3] S%d already in use by PWM/Kyber/HCR/WLED/DFP - config blocked\n", serialPort);
     return;
   }
 

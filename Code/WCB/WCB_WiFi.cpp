@@ -4,6 +4,7 @@
 #include "WCB_Storage.h"
 
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>                 // esp_netif_dhcps_option / _stop / _start
 #include "dhcpserver/dhcpserver.h"     // dhcps_offer_t, OFFER_ROUTER
@@ -364,7 +365,8 @@ static void wcbWifiPrintStatus() {
     else
         Serial.println("WS endpoint   : NOT RUNNING");
     Serial.printf("Free heap     : %u bytes (min since boot %u)\n",
-                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),       // byte-addressable only: see ?STATS
+                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
     Serial.println("------------------------------------------------------");
 }
 

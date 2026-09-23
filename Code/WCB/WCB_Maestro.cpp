@@ -24,6 +24,11 @@ extern unsigned long baudRates[5];
 extern void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 extern Stream &getSerialStream(int port);
 extern void updateBaudRate(int port, int baud);
+extern bool isSerialPortUsedForHCR(int port);    // WCB_HCR.cpp  — serial-device port reservation
+extern bool isSerialPortUsedForWLED(int port);   // WCB_WLED.cpp — serial-device port reservation
+extern bool isSerialPortUsedForDFP(int port);    // WCB_DFP.cpp  — serial-device port reservation
+// isSerialPortUsedForMP3, isSerialPortPWMOutput/Input, Kyber_Local, kyberLocalPort, kyberTargets,
+// kyberUseTargeting and saveKyberTargets come from WCB_Storage.h.
 
 MaestroConfig maestroConfigs[MAX_MAESTROS_PER_WCB];
 
@@ -82,6 +87,91 @@ int8_t findEmptySlot() {
 
 bool isMaestroConfigured(uint8_t maestroID) {
   return findSlotByMaestroID(maestroID) >= 0;
+}
+
+// Port reservation, mirroring isSerialPortUsedForHCR/MP3/WLED. Only LOCAL slots count: a remote
+// proxy stores the REMOTE board's port number (CLAUDE.md rule 5 - slot identity is
+// (id, serialPort, remoteWCB)), so matching one here would reserve a local port that no local
+// device owns. The ESP-NOW receive path tests the same three fields before writing a port.
+bool isSerialPortUsedForMaestro(int port) {
+  if (port < 1 || port > 5) return false;
+  for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
+    if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 &&
+        maestroConfigs[i].serialPort == port) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Legacy default Maestro = Pololu id WCB_Number on S1 (predates ?MAESTRO). The no-slot fallbacks below
+// write it only while S1 is nobody else's port: they used to put 0xAA frames into the Kyber's own port or
+// an HCR/MP3/DFP/WLED on every board a ;M0 reached, and a get on the own id read its "reply" out of that
+// device's stream (tracker #73 D6, HIL kyber.local_s1_legacy_fallback_skips_kyber_port). Returns S1's
+// owner, or nullptr when S1 is free.
+static const char *legacyS1Owner() {
+  if (Kyber_Local && kyberLocalPort == 1) return "the Kyber port";
+  if (isSerialPortUsedForHCR(1))           return "the HCR port";
+  if (isSerialPortUsedForMP3(1))           return "the MP3 Trigger port";
+  if (isSerialPortUsedForDFP(1))           return "the DFPlayer port";
+  if (isSerialPortUsedForWLED(1))          return "the WLED port";
+  if (isSerialPortPWMOutput(1))            return "a PWM output";
+  if (isSerialPortUsedForPWMInput(1))      return "a PWM input";
+  return nullptr;
+}
+
+// Kyber_Local + targeted: a LOCAL Kyber target follows its local slot (tracker #73 D7, HIL
+// kyber.local_clear_maestro_drops_target). forwardDataFromKyber writes kyberTargets[].targetPort with or
+// without a slot, but the broadcast skip, the parser's bridge ownership and the Maestro->Kyber return path
+// all key on the slot - so a target left behind by ?MAESTRO,CLEAR kept the Kyber writing a port the clear
+// had handed back (at the 9600 it forced), and ?backup's KYBER,LOCAL line re-created the cleared slot on
+// restore. Keyed (id, this board, port), never the id alone (CLAUDE.md rule 5). Remote targets stay with
+// ?KYBER / WDP. Neither helper saves: the caller calls saveKyberTargets() once, only when one changed.
+static bool kyberTracksLocalSlots() { return Kyber_Local && kyberUseTargeting; }
+
+// Drop the local target (maestroID, WCB_Number, port); with portFreed (no local slot left on the port)
+// drop every local target on it. Returns how many were dropped.
+static int dropLocalKyberTargets(uint8_t maestroID, uint8_t port, bool portFreed) {
+  if (!kyberTracksLocalSlots() || port < 1 || port > 5) return 0;
+  int dropped = 0;
+  for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+    KyberTarget &t = kyberTargets[j];
+    if (!t.enabled || t.targetWCB != (uint8_t)WCB_Number || t.targetPort != port) continue;
+    if (!portFreed && t.maestroID != maestroID) continue;   // another Maestro on this line keeps its target
+    Serial.printf("✓ Removed Kyber target M%d → WCB%d S%d (no Maestro slot left for it)\n",
+                  t.maestroID, WCB_Number, port);
+    t.enabled = false;       // one bool store: KyberLocalTask sees the target whole or not at all
+    dropped++;
+  }
+  return dropped;
+}
+
+// Add the local target (maestroID, WCB_Number, port) unless it is already there. Only for a slot
+// configureMaestro has just CLAIMED: re-issuing ?MAESTRO for an existing slot (a baud change, the full
+// MAESTRO chain every Wizard delta push re-sends) must leave an explicit ?KYBER,LOCAL target list alone.
+static bool addLocalKyberTarget(uint8_t maestroID, uint8_t port) {
+  if (!kyberTracksLocalSlots()) return false;
+  int freeIdx = -1;
+  for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+    const KyberTarget &t = kyberTargets[j];
+    if (t.enabled && t.maestroID == maestroID && t.targetWCB == (uint8_t)WCB_Number && t.targetPort == port) return false;
+    if (!t.enabled && freeIdx < 0) freeIdx = j;
+  }
+  if (freeIdx < 0) {
+    Serial.printf("⚠️  Kyber target table is full (%d) - Maestro %d on S%d gets no Kyber data\n",
+                  MAX_KYBER_TARGETS, maestroID, port);
+    return false;
+  }
+  kyberTargets[freeIdx].maestroID  = maestroID;
+  kyberTargets[freeIdx].targetWCB  = (uint8_t)WCB_Number;
+  kyberTargets[freeIdx].targetPort = port;
+  // KyberLocalTask walks kyberTargets[] on the same core at the same priority and can be time-sliced in
+  // here. The table is not volatile, so without a barrier the compiler may sink the field stores below
+  // the enabling one and the task could write a Kyber byte to a half-written target.
+  __asm__ __volatile__("" ::: "memory");
+  kyberTargets[freeIdx].enabled    = true;   // enabled last
+  Serial.printf("✓ Kyber target added: Maestro %d → WCB%d S%d\n", maestroID, WCB_Number, port);
+  return true;
 }
 
 // ==================== Command Sending ====================
@@ -168,8 +258,12 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     }
     
     if (!isMaestroConfigured(WCB_Number)) {
-      uint8_t command[4]; WcbMaestro::buildSubroutineFrame(WCB_Number, scriptNumber, command);
-      Serial1.write(command, sizeof(command)); // no flush — UART drains async
+      if (const char *owner = legacyS1Owner()) {   // S1 is another device's port (tracker #73 D6)
+        if (debugEnabled) Serial.printf("→ Maestro Broadcast: legacy S1 frame skipped - S1 is %s\n", owner);
+      } else {
+        uint8_t command[4]; WcbMaestro::buildSubroutineFrame(WCB_Number, scriptNumber, command);
+        Serial1.write(command, sizeof(command)); // no flush — UART drains async
+      }
     }
     
     if (!lastReceivedViaESPNOW) {
@@ -202,6 +296,11 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
     // Backward-compat: no local Maestro configured yet → legacy S1 + WCB number
     // so boards that haven't been reconfigured still respond to target 9.
     if (!wroteLocal) {
+      if (const char *owner = legacyS1Owner()) {   // never into another device's port (tracker #73 D6)
+        Serial.printf("→ Maestro (local, target 9): no local Maestro, and S1 is %s - not sent, Script %d\n",
+                      owner, scriptNumber);
+        return;
+      }
       uint8_t command[4]; WcbMaestro::buildSubroutineFrame(WCB_Number, scriptNumber, command);
       Serial1.write(command, sizeof(command)); // no flush — UART drains async
       Serial.printf("→ Maestro (local, target 9): legacy S1 fallback, dev %d, Script %d\n",
@@ -213,6 +312,12 @@ void sendMaestroCommand(uint8_t maestroID, uint8_t scriptNumber) {
   // Legacy: targeting this board's own WCB number with nothing configured for
   // that ID — keep the old hardcoded S1 write for backward compatibility.
   if (maestroID == WCB_Number) {
+    // Owned S1: say so and stop. Still returns before the unconfigured fallback - never self-forward.
+    if (const char *owner = legacyS1Owner()) {
+      Serial.printf("→ Maestro %d: no slot, and S1 is %s - not sent (configure it with %cMAESTRO), Script %d\n",
+                    maestroID, owner, LocalFunctionIdentifier, scriptNumber);
+      return;
+    }
     uint8_t command[4]; WcbMaestro::buildSubroutineFrame(maestroID, scriptNumber, command);
     Serial1.write(command, sizeof(command)); // no flush — UART drains async
     Serial.printf("→ Maestro %d: Legacy S1, Script %d\n", maestroID, scriptNumber);
@@ -333,8 +438,14 @@ void sendMaestroServoVerb(const char *verbBody) {
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++)
       if (maestroConfigs[i].configured && maestroConfigs[i].serialPort > 0)
         writeVerbFrameTo(getSerialStream(maestroConfigs[i].serialPort), maestroConfigs[i].maestroID, payload);
-    if (!isMaestroConfigured(WCB_Number))
-      writeVerbFrameTo(Serial1, WCB_Number, payload);
+    if (!isMaestroConfigured(WCB_Number)) {
+      // Traces stay debugMaestro-gated: verbs can be streamed. Owned S1 -> no frame (tracker #73 D6).
+      if (const char *owner = legacyS1Owner()) {
+        if (debugMaestro) Serial.printf("→ Maestro Broadcast verb '%s': legacy S1 frame skipped - S1 is %s\n", verbBody, owner);
+      } else {
+        writeVerbFrameTo(Serial1, WCB_Number, payload);
+      }
+    }
     if (!lastReceivedViaESPNOW)
       sendESPNowMessage(0, maestroVerbForwardText(0, payload).c_str());
     if (debugMaestro) Serial.printf("→ Maestro Broadcast verb '%s'\n", verbBody);
@@ -349,7 +460,14 @@ void sendMaestroServoVerb(const char *verbBody) {
         writeVerbFrameTo(getSerialStream(maestroConfigs[i].serialPort), maestroConfigs[i].maestroID, payload);
         wroteLocal = true;
       }
-    if (!wroteLocal) writeVerbFrameTo(Serial1, WCB_Number, payload);   // legacy S1 fallback
+    if (!wroteLocal) {                                               // legacy S1 fallback
+      if (const char *owner = legacyS1Owner()) {                     // ...unless S1 is owned (tracker #73 D6)
+        if (debugMaestro) Serial.printf("→ Maestro (local, target 9) verb '%s': no local Maestro, and S1 is %s - not sent\n",
+                                        verbBody, owner);
+        return;
+      }
+      writeVerbFrameTo(Serial1, WCB_Number, payload);
+    }
     if (debugMaestro) Serial.printf("→ Maestro (local, target 9) verb '%s'\n", verbBody);
     return;
   }
@@ -357,6 +475,10 @@ void sendMaestroServoVerb(const char *verbBody) {
   // dev == this board's own number, nothing configured → legacy local S1 write. This is the
   // case that must NOT self-forward over ESP-NOW (a board can't ESP-NOW its own MAC).
   if (dev == WCB_Number) {
+    if (const char *owner = legacyS1Owner()) {   // owned S1 (tracker #73 D6): stop here, still no self-forward
+      if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': no slot, and S1 is %s - not sent\n", dev, verbBody, owner);
+      return;
+    }
     Serial1.write(frame, n);   // no flush — UART drains async
     if (debugMaestro) Serial.printf("→ Maestro %d verb '%s': Legacy S1\n", dev, verbBody);
     return;
@@ -396,15 +518,20 @@ static bool maestroGetInfo(int dev, const String &verb, const String &ch,
 void handleMaestroGet(int dev, const String &verb, const String &ch, int replyToWCB) {
   if (dev < 1 || dev > 8) { if (debugEnabled) Serial.printf("[MAESTRO] get: bad device %d (1-8 only)\n", dev); return; }
 
+  // Normalise the channel ONCE. The variable name used to come from the raw text while the
+  // frame used the parsed integer, so ',05' stored m1pos05 for a frame that asked channel 5,
+  // and ',0,99' produced the name 'm1pos0,99' - an invalid name whose failed store was ignored.
+  const String chNorm = ch.length() ? String(ch.toInt()) : String();
+
   int expectedBytes; String varName;
-  if (!maestroGetInfo(dev, verb, ch, expectedBytes, varName)) {
+  if (!maestroGetInfo(dev, verb, chNorm, expectedBytes, varName)) {
     if (debugEnabled) Serial.printf("[MAESTRO] get: unknown query '%s'\n", verb.c_str());
     return;
   }
   if (varName.length() > 15) { if (debugEnabled) Serial.printf("[MAESTRO] get: var name too long: %s\n", varName.c_str()); return; }
 
   // Build the Pololu request frame from the reconstructed verb body.
-  String  verbBody = String(dev) + "," + verb + (ch.length() ? ("," + ch) : "");
+  String  verbBody = String(dev) + "," + verb + (chNorm.length() ? ("," + chNorm) : "");
   uint8_t frame[WcbMaestro::MAX_FRAME];
   size_t  n = WcbMaestro::build(verbBody.c_str(), frame, sizeof(frame));
   if (n == 0) { if (debugEnabled) Serial.printf("[MAESTRO] get: bad query %s\n", verbBody.c_str()); return; }
@@ -420,17 +547,33 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
   // Legacy default (no ?MAESTRO config): this board's OWN Maestro is device == WCB_Number on
   // S1 — mirror the ;M<id><seq> / ;M<dev>,goHome fallback so a get on it reads S1 locally
   // instead of broadcasting an unanswerable ;MG into the mesh.
-  if (localPort == 0 && hostWCB == 0 && dev == WCB_Number) localPort = 1;
+  if (localPort == 0 && hostWCB == 0 && dev == WCB_Number) {
+    // Never read a "reply" out of another device's stream (tracker #73 D6), and never forward: only this
+    // board could answer, and falling into the REMOTE branch below would unicast ;MG to our own number.
+    if (const char *owner = legacyS1Owner()) {
+      if (debugMaestro) Serial.printf("[MAESTRO] get %d '%s': no slot, and S1 is %s - not sent\n", dev, verb.c_str(), owner);
+      return;                                    // value kept, like a timeout
+    }
+    localPort = 1;
+  }
 
   // REMOTE: forward the query to the hosting board, carrying the originator so it replies
   // home. Never bounce a query we ourselves received over ESP-NOW (a ;MG we can't service).
   if (localPort == 0) {
     if (lastReceivedViaESPNOW) return;
     String fwd = String(CommandCharacter) + "MG" + String(dev) + "," + String(replyToWCB) + "," + verb
-                 + (ch.length() ? ("," + ch) : "");
-    if (hostWCB > 0) sendESPNowMessage((uint8_t)hostWCB, fwd.c_str());       // unicast to the host
-    else             sendESPNowMessage(0, fwd.c_str());                     // unconfigured → let the host find it
-    if (debugMaestro) Serial.printf("→ Maestro %d get '%s' -> WCB%d (reply to %d)\n", dev, verb.c_str(), hostWCB, replyToWCB);
+                 + (chNorm.length() ? ("," + chNorm) : "");
+    // No slot for dev: unicast to WCB<dev> when that board exists, exactly as the subroutine and verb
+    // fallbacks do (a Maestro's id is its host's number by default), and broadcast only outside
+    // WCBQ. It used to broadcast always, so ;M5,getErrors and ;M5,goHome took different routes and
+    // every poll cost one ETM ACK per board. Greg's call, 2026-09-22 (HIL tracker #52). A host whose
+    // number is NOT the Maestro id (e.g. a NaviCore-hosted Maestro) is reached through its slot -
+    // configured, or auto-added from its WDP advert - which is the hostWCB branch above.
+    const uint8_t target = hostWCB > 0 ? (uint8_t)hostWCB
+                         : (dev >= 1 && dev <= Default_WCB_Quantity) ? (uint8_t)dev : 0;
+    sendESPNowMessage(target, fwd.c_str());
+    if (debugMaestro) Serial.printf("→ Maestro %d get '%s' -> %s%d (reply to %d)\n", dev, verb.c_str(),
+                                    target ? "WCB" : "broadcast, id ", target ? target : dev, replyToWCB);
     return;
   }
 
@@ -453,6 +596,10 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
     return;                                      // leave the previous value in place
   }
   int32_t value = (expectedBytes == 1) ? reply[0] : (int32_t)(reply[0] | (reply[1] << 8));
+  // getMovingState is a FLAG: the Maestro answers non-zero while moving, and both the comment
+  // on maestroGetInfo and WcbCmd's decodeReply (what NaviCore uses) define the stored value as
+  // 0/1. Storing the raw byte meant an IF written against 1 failed on a board answering 5.
+  if (verb.equalsIgnoreCase("getMovingState")) value = value ? 1 : 0;
 
   setVariableRAM(varName, value);                // THIS board's IF can now read it
   if (debugMaestro) Serial.printf("[MAESTRO] get %d '%s' -> %s=%ld\n", dev, verb.c_str(), varName.c_str(), (long)value);
@@ -468,7 +615,7 @@ void handleMaestroGet(int dev, const String &verb, const String &ch, int replyTo
       const char *kind = verb.equalsIgnoreCase("getPosition")    ? "POS"
                        : verb.equalsIgnoreCase("getMovingState") ? "MOV"
                        : verb.equalsIgnoreCase("getErrors")      ? "ERR" : "";
-      res = String(":MQR,") + String(dev) + "," + (ch.length() ? ch : String("0"))
+      res = String(":MQR,") + String(dev) + "," + (chNorm.length() ? chNorm : String("0"))
           + "," + kind + "," + String((long)value);
     } else {
       res = String(CommandCharacter) + "M!" + varName + "=" + String((long)value);
@@ -626,6 +773,7 @@ String remaining = message;
     uint8_t effectiveRemoteWCB = (targetWCB == WCB_Number) ? 0 : targetWCB;
     uint8_t keyPort            = (targetWCB == WCB_Number) ? (uint8_t)serialPort : 0;
     int8_t slot = findSlotByMaestroIDPortTarget(maestroID, keyPort, effectiveRemoteWCB);
+    const bool newSlot = (slot < 0);   // only a newly claimed local slot adds its Kyber target (below)
     if (slot < 0) {
       slot = findEmptySlot();
       if (slot < 0) {
@@ -639,6 +787,28 @@ String remaining = message;
     if (targetWCB == WCB_Number) {
       // LOCAL CONFIGURATION
       
+      // Baud 0 is legal for a REMOTE slot (the host board owns the rate), but not for a local
+      // one: updateBaudRate() refuses it, prints "Invalid baud rate" and returns, and execution
+      // used to fall straight through - flipping the port's broadcast flags and saving a slot
+      // that claims 0 baud for a port still running its old rate, which ?backup then reports.
+      if (baudRate == 0) {
+        Serial.printf("❌ Maestro %d: a LOCAL slot needs a real baud rate (S%d is still at %d).\n",
+                      maestroID, serialPort, baudRates[serialPort - 1]);
+        startIdx = nextComma + 1;
+        continue;
+      }
+
+      // The Kyber's own port can't also host a local Maestro (Greg, 2026-09-22 - the #28 follow-up):
+      // the Maestro's baud would replace the Kyber's 115200, and KyberLocalTask writes a local
+      // Maestro's bytes to the Kyber port, i.e. back into the same port. ?KYBER,LOCAL refuses the same
+      // layout from its side (kyberLocalPortRefused / kyberTargetOnKyberPort, WCB_Storage.cpp).
+      if (Kyber_Local && serialPort == kyberLocalPort) {
+        Serial.printf("❌ Maestro %d: S%d is the Kyber port - use another port, or move the Kyber first.\n",
+                      maestroID, serialPort);
+        startIdx = nextComma + 1;
+        continue;
+      }
+
       // Software serial warning
       if (serialPort >= 3 && serialPort <= 5 && baudRate > 57600) {
         Serial.println("\n⚠️  =============== WARNING ===============");
@@ -681,9 +851,12 @@ String remaining = message;
       maestroConfigs[slot].baudRate = baudRate;
       
       saveMaestroSettings();
-      Serial.printf("✓ Maestro %d: Local S%d at %d baud (slot %d)\n", 
+      Serial.printf("✓ Maestro %d: Local S%d at %d baud (slot %d)\n",
                     maestroID, serialPort, baudRate, slot + 1);
-                    
+      // The other half of _clearMaestroSlot's target drop (tracker #73 D7), so clear-then-re-add ends where
+      // it started. New slots only: a re-issued ?MAESTRO for an existing slot never touches the target table.
+      if (newSlot && addLocalKyberTarget((uint8_t)maestroID, (uint8_t)serialPort)) saveKyberTargets();
+
     } else {
       // REMOTE CONFIGURATION
       maestroConfigs[slot].maestroID = maestroID;
@@ -758,12 +931,16 @@ bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
 }
 
 // Clear one slot and do the port housekeeping (broadcast re-enable, baud
-// reset). Does NOT call saveMaestroSettings() — the caller saves once after
-// clearing one or more slots.
-static void _clearMaestroSlot(int8_t slot) {
-  if (slot < 0) return;
+// reset, and on a targeted Kyber_Local board the slot's local Kyber target).
+// Returns the number of Kyber targets dropped. Does NOT call saveMaestroSettings()
+// or saveKyberTargets() — the caller saves slots and targets once after clearing
+// one or more slots.
+static int _clearMaestroSlot(int8_t slot) {
+  if (slot < 0) return 0;
 
   uint8_t freedPort = maestroConfigs[slot].serialPort;
+  uint8_t freedId   = maestroConfigs[slot].maestroID;
+  int     dropped   = 0;
 
   maestroConfigs[slot].configured = false;
   maestroConfigs[slot].maestroID  = 0;
@@ -794,7 +971,10 @@ static void _clearMaestroSlot(int8_t slot) {
       updateBaudRate(freedPort, 9600);
       Serial.printf("✓ Reset S%d baud rate to 9600\n", freedPort);
     }
+    // Remote slots store serialPort 0, so only a local slot gets here (tracker #73 D7).
+    dropped = dropLocalKyberTargets(freedId, freedPort, !portStillUsed);
   }
+  return dropped;
 }
 
 void clearMaestroByID(const String &message) {
@@ -818,10 +998,10 @@ void clearMaestroByID(const String &message) {
       Serial.printf("Invalid Maestro ID. Must be M1-M8 (9=all local, 0=all are reserved)\n");
       return;
     }
-    int cleared = 0;
+    int cleared = 0, dropped = 0;
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
       if (maestroConfigs[i].configured && maestroConfigs[i].maestroID == maestroID) {
-        _clearMaestroSlot(i);
+        dropped += _clearMaestroSlot(i);
         cleared++;
       }
     }
@@ -829,6 +1009,7 @@ void clearMaestroByID(const String &message) {
       Serial.printf("Maestro ID %d is not configured\n", maestroID);
     } else {
       saveMaestroSettings();
+      if (dropped) saveKyberTargets();
       Serial.printf("Cleared Maestro ID %d (%d slot%s)\n",
                     maestroID, cleared, cleared == 1 ? "" : "s");
     }
@@ -859,7 +1040,7 @@ void clearMaestroByID(const String &message) {
     Serial.printf("Maestro M%d:W%dS%d is not configured\n", maestroID, wcb, port);
     return;
   }
-  _clearMaestroSlot(slot);
+  if (_clearMaestroSlot(slot)) saveKyberTargets();
   saveMaestroSettings();
   Serial.printf("Cleared Maestro M%d:W%dS%d (freed slot %d)\n",
                 maestroID, wcb, port, slot + 1);
@@ -886,10 +1067,18 @@ void clearAllMaestroConfigs() {
     maestroConfigs[i].serialPort = 0;
     maestroConfigs[i].remoteWCB = 0;
   }
-  
+
   saveMaestroSettings();
   Serial.println("All Maestro configurations cleared");
-  Serial.println("Reverted to legacy routing (Maestro ID = WCB Number on S1)");
+  // No local slot is left anywhere, so every local Kyber target is stale (tracker #73 D7).
+  int droppedTargets = 0;
+  for (int p = 1; p <= 5; p++) droppedTargets += dropLocalKyberTargets(0, (uint8_t)p, true);
+  if (droppedTargets) saveKyberTargets();
+  // The legacy fallbacks skip an owned S1 (tracker #73 D6) - don't promise routing that won't happen.
+  if (const char *owner = legacyS1Owner())
+    Serial.printf("Legacy routing (Maestro ID = WCB Number on S1) is off - S1 is %s\n", owner);
+  else
+    Serial.println("Reverted to legacy routing (Maestro ID = WCB Number on S1)");
   
   // **AUTO RE-ENABLE BROADCAST ON ALL FREED PORTS**
   Serial.println("\nRe-enabling broadcasts on freed ports:");

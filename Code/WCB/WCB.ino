@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_201933RSEP2026                                  *****////
+///*****                                          Version 6.2.1_231928RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -73,7 +73,8 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_RemoteTerm.h"
 
 //You must install these into your Arduino IDE
-#include <SoftwareSerial.h>                 // ESPSoftwareSerial library by Dirk Kaar, Peter Lerup V8.1.0
+#include "src/EspSoftwareSerial/SoftwareSerial.h"   // EspSoftwareSerial 8.1.0, vendored + level-RX patch (tracker #78) - no install
+#include "WCB_SoftSerial.h"                 // S3-S5: library RX + RMT hardware-timed TX (tracker #16)
 #include <Adafruit_NeoPixel.h>              // Adafruit NeoPixel library by Adafruit V1.15.3
 
 //  All of these librarires are included in the ESP32 by Espressif board library V3.3.4
@@ -98,6 +99,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "command_timer_queue.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h" // ?STATS Heap line: byte-addressable heap (MALLOC_CAP_8BIT)
 #include "esp_timer.h"   // one-shot boot-guard timer (cold-boot auto-recovery)
 #include "esp_ota_ops.h" // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"     // rtc_get_reset_reason (low-level per-core boot telemetry)
@@ -106,6 +108,8 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_PWM.h"
 #include "WCB_Help.h"
 #include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
+#include "driver/gpio.h"  // clearStaleGpioInterrupts (boot): gpio_intr_disable / gpio_set_intr_type
+#include "hal/gpio_ll.h"  // ...and the GPIO register block it inspects
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                        *****////
@@ -161,7 +165,12 @@ bool maestroEnabled = false;
 bool Kyber_Local = false;    // this tracks if the Kyber is plugged into this board directly
 bool Maestro_Remote = false;  // board hosts a Maestro driven remotely (Kyber/NaviCore elsewhere): accepts Pololu/Maestro packets over the ESP-NOW mesh and relays to the local Maestro. Set by ?MAESTRO,REMOTE (alias: ?KYBER,REMOTE).
 String Kyber_Location;
-int kyberLocalPort = 0;      // serial port number Kyber is physically connected to (0 = not configured)
+int kyberLocalPort = 0;      // serial port number Kyber is physically connected to; 0 whenever Kyber_Local is false (?KYBER,CLEAR/REMOTE and loadKyberSettings zero it) - KyberLocalTask and maestroPortOwnedByKyberBridge gate on it alone
+// Which Kyber bridge tasks setup() created. They are never deleted, and ?KYBER / ?MAESTRO / WDP change
+// the mode flags above at runtime, so "is a task reading this port" is these AND the live flags - see
+// maestroPortOwnedByKyberBridge(). Written once in setup() before any task starts, read-only after.
+bool kyberLocalTaskStarted  = false;
+bool kyberRemoteTaskStarted = false;
 
 // Flag to track if last received message was via ESP-NOW
 bool lastReceivedViaESPNOW = false;
@@ -173,6 +182,13 @@ bool lastReceivedViaESPNOW = false;
 // trigger out to the mesh, but a NESTED `;C` inside a running sequence body does not.
 bool inSequenceBody = false;
 
+// Lineage of the command being dispatched (see SeqPath, WCB_Storage.h). Restored per item at drain like
+// inSequenceBody, but read and written ONLY on the loop task, so serialCommandTask cannot clobber it the way it
+// can inSequenceBody (it resets that flag while loop() may be mid-way through a sequence item).
+SeqPath seqCurPath = {};
+static TaskHandle_t seqLoopTask = nullptr;   // captured first thing in setup(): setup() and loop() share the loop task
+bool seqOnLoopTask() { return seqLoopTask && xTaskGetCurrentTaskHandle() == seqLoopTask; }
+
 // Debugging flag (default: off)
 bool debugEnabled = false; 
 bool debugMaestro = false;
@@ -180,7 +196,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_201933RSEP2026";
+String SoftwareVersion = "6.2.1_231928RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -484,6 +500,76 @@ struct BoardStatus {
 };
 BoardStatus boardTable[MAX_WCB_COUNT];  // sized to max, indexed by (wcbNumber-1)
 
+// boardTable[].online / .lastSeenMs are written from TWO cores: espNowReceiveCallback (WiFi task,
+// core 0) marks a sender present, and loop() (core 1) sweeps it offline, evicts it, or clears it.
+// Unlocked, the sweep could land between the callback's two stores, read online==true with the
+// stale lastSeenMs, print a false "went OFFLINE" at the very moment the packet arrived, and leave a
+// live peer offline until its next packet — which silently drops ETM ACK tracking to it (HIL #80).
+// Merely reordering the stores isn't enough: the sweep's check-and-clear can still overwrite a
+// concurrent online=true (lost update), and `millis() - lastSeenMs` wraps to ~49 days when
+// lastSeenMs is stored after millis() was read. So every read-modify-write of the pair goes
+// through these helpers, which hold boardTableMux. Rules: millis() is read BEFORE the lock (no
+// call nests inside it), ages use a signed difference, and nothing prints or blocks inside it.
+static portMUX_TYPE boardTableMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Signed age: a lastSeenMs stamped after `now` was read counts as 0 ms, never as a wrap.
+static inline unsigned long boardAgeMs(unsigned long now, unsigned long seen) {
+  long d = (long)(now - seen);
+  return d > 0 ? (unsigned long)d : 0UL;
+}
+
+// A valid packet from board idx arrived: mark it present. Returns true on the offline->online edge.
+static inline bool boardMarkSeen(int idx) {
+  unsigned long now = millis();
+  portENTER_CRITICAL(&boardTableMux);
+  bool wasOffline = !boardTable[idx].online;
+  boardTable[idx].lastSeenMs = now;
+  boardTable[idx].online     = true;
+  portEXIT_CRITICAL(&boardTableMux);
+  return wasOffline;
+}
+
+// Offline sweep for one board: clears online iff it is online and silent past thrMs.
+// Returns true when it cleared it (the caller prints, outside the lock).
+static inline bool boardSweepOffline(int idx, unsigned long thrMs) {
+  unsigned long now = millis();
+  bool went = false;
+  portENTER_CRITICAL(&boardTableMux);
+  if (boardTable[idx].online && boardAgeMs(now, boardTable[idx].lastSeenMs) > thrMs) {
+    boardTable[idx].online = false;
+    went = true;
+  }
+  portEXIT_CRITICAL(&boardTableMux);
+  return went;
+}
+
+static inline void boardMarkOffline(int idx) {
+  portENTER_CRITICAL(&boardTableMux);
+  boardTable[idx].online = false;
+  portEXIT_CRITICAL(&boardTableMux);
+}
+
+// Stamp lastSeenMs without touching online (temporary-peer adoption).
+static inline void boardStampSeen(int idx) {
+  unsigned long now = millis();
+  portENTER_CRITICAL(&boardTableMux);
+  boardTable[idx].lastSeenMs = now;
+  portEXIT_CRITICAL(&boardTableMux);
+}
+
+// Consistent snapshot of one board's presence. *ageMs = ms since its last packet (0 if never seen);
+// *everSeen = lastSeenMs != 0. Returns online.
+static inline bool boardPresence(int idx, unsigned long *ageMs, bool *everSeen = nullptr) {
+  unsigned long now = millis();
+  portENTER_CRITICAL(&boardTableMux);
+  bool          on   = boardTable[idx].online;
+  unsigned long seen = boardTable[idx].lastSeenMs;
+  portEXIT_CRITICAL(&boardTableMux);
+  if (ageMs)    *ageMs    = seen ? boardAgeMs(now, seen) : 0UL;
+  if (everSeen) *everSeen = (seen != 0);
+  return on;
+}
+
 // ── Dynamic peer membership ──────────────────────────────────────────────────
 // The set of boards this WCB treats as mesh peers. Historically this was exactly
 // the contiguous range 1..Default_WCB_Quantity; it is now an explicit membership
@@ -588,7 +674,15 @@ ReportedStats reportedStats[MAX_WCB_COUNT] = {};
 // same sender advanced a single-slot record, so a single slot let the old seq's
 // retry re-execute (double-fire). Remembering the last ETM_SEQ_HISTORY seqs catches
 // out-of-order retries within that window. Seq 0 is never sent, so 0 = empty slot.
-static const int ETM_SEQ_HISTORY = 8;
+//
+// The ring MUST outlast every seq the sender can still retry, which is why it is sized from
+// ETM_PENDING_MAX rather than picked. It used to be a flat 8 against a pending table of 10: a
+// 9th in-flight seq evicted the 1st, that one's retry read as new and ran again, and since each
+// retry re-inserted its own seq the ring stayed one short and every round re-executed every
+// command (bench: 9 commands executed 4x each, the 8-command control exactly once).
+static const int ETM_SEQ_HISTORY = ETM_PENDING_MAX + 6;
+static_assert(ETM_SEQ_HISTORY > ETM_PENDING_MAX,
+              "dedup ring must outlast every retryable in-flight seq, or retries re-execute");
 uint16_t etmSeqHistory[MAX_WCB_COUNT][ETM_SEQ_HISTORY] = {{0}};
 bool espNowInitialized = false;   // true once esp_now_init() succeeds in setup(); WCB_PWM.cpp gates remote sends on it
 uint8_t  etmSeqHistoryIdx[MAX_WCB_COUNT] = {0};
@@ -823,11 +917,39 @@ uint32_t calculateCRC32(const String &data) {
     }
     return ~crc;
 }
-// Simple reboot helper
+// Reboot helper. Deferred, never inline - CLAUDE.md rule 11. An ETM-received ?reboot is ACKed on
+// the WiFi task before loop() ever dequeues it, and the old delay(2000) + ESP.restart() ran on
+// core 1 while core 0 kept accepting, ACKing and dedup-recording commands that the restart then
+// threw away. The sender saw "fully acknowledged" and never retried. loop() takes the restart once
+// the command queue is empty and quiet (PWM_REBOOT_QUIET_MS), which is also what a config push
+// needs: it is ACK-paced, so the queue is briefly empty between every pair of commands.
+// One validator for all four prefix setters (?FUNCCHAR, ?CMDCHAR and the legacy ?LFx / ?CCx).
+// isFunc: true when setting the function identifier, false for the command character. Rejecting
+// the collision matters because handleSingleCommand tests the function identifier FIRST, so the
+// two being equal swallows the entire command family - and it persists to NVS, so the board
+// comes back broken. Recovery is the other setter, which is why neither character is reserved:
+// only the COLLISION is refused.
+static bool prefixCharOk(char nc, bool isFunc) {
+  const char other = isFunc ? CommandCharacter : LocalFunctionIdentifier;
+  if (nc == other) {
+    // Wording kept from the original ?FUNCCHAR message (em dash included): tests and users match it.
+    Serial.printf("'%c' is already the %s — the entire '%c' command family would stop working. "
+                  "Pick a different %s.\n",
+                  nc, isFunc ? "command character" : "function identifier", nc,
+                  isFunc ? "function identifier" : "command character");
+    return false;
+  }
+  if (nc <= ' ' || nc == 0x7F) {
+    Serial.println("Prefix characters must be printable, non-space characters.");
+    return false;
+  }
+  return true;
+}
+
+volatile bool rebootPending = false;
 void reboot(){
-  Serial.println("Rebooting in 2 seconds");
-  delay(2000);
-  ESP.restart();
+  Serial.println("Reboot queued - restarting once the command queue is quiet");
+  rebootPending = true;
 }
 
 // Define WCB MAC addresses
@@ -943,9 +1065,10 @@ espnow_struct_message commandsToSend[10]; // Includes 1-9 and broadcast
 espnow_struct_message commandsToReceive[10];
 
 // SoftwareSerial objects
-SoftwareSerial Serial3(SERIAL3_RX_PIN, SERIAL3_TX_PIN);
-SoftwareSerial Serial4(SERIAL4_RX_PIN, SERIAL4_TX_PIN);
-SoftwareSerial Serial5(SERIAL5_RX_PIN, SERIAL5_TX_PIN);
+// Pins are passed at begin() (the pin map is only known at runtime) - see WCB_SoftSerial.h.
+WcbSoftSerial Serial3(3);
+WcbSoftSerial Serial4(4);
+WcbSoftSerial Serial5(5);
 
 // ============================= FreeRTOS Queue Setup =============================
 typedef struct {
@@ -959,7 +1082,14 @@ typedef struct {
   bool sequenceBody;  // snapshot of inSequenceBody at enqueue; restored at dispatch so a
                       // nested `;C`/`;SEQ` recall inside a sequence body is not re-fanned
                       // out to the mesh (only the top-level trigger fans out).
+  uint8_t seqDepth;   // entries in this command's sequence lineage (0 = top-level). The lineage itself -
+                      // seqDepth uint32_t hashes - sits IN FRONT of cmd in the same allocation, so whatever
+                      // dequeues an item frees commandItemBlock(), NEVER item.cmd.
 } CommandQueueItem;
+static_assert(sizeof(CommandQueueItem) <= 12, "commandQueue has 200 slots - every byte here costs 200");
+// Start of an item's allocation: the lineage hashes sit IN FRONT of cmd (enqueueCommand). Plain parameters, not
+// CommandQueueItem& - the .ino prototype generator would emit a prototype above this typedef and fail to compile.
+static inline char *commandItemBlock(char *cmd, uint8_t depth) { return cmd - (size_t)depth * sizeof(uint32_t); }
 
 static QueueHandle_t commandQueue = nullptr;
 // Quiet window for a deferred restart (PWM mapping). A Wizard push is ACK-paced, so the
@@ -1115,24 +1245,19 @@ void processETMHeartbeats() {
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     if (!wcbPeerActive[i]) continue;    // only sweep boards we treat as peers
     if (i + 1 == WCB_Number) continue;  // skip ourselves
-    if (boardTable[i].online) {
-      if (millis() - boardTable[i].lastSeenMs > offlineThresholdMs) {
-        boardTable[i].online = false;
-        Serial.printf("[ETM] WCB%d went OFFLINE (no heartbeat for %lus)\n",
-                      i + 1, offlineThresholdMs / 1000UL);
-      }
+    // Check-and-clear under boardTableMux: the receive callback sets online on core 0 (#80).
+    if (boardSweepOffline(i, offlineThresholdMs)) {
+      Serial.printf("[ETM] WCB%d went OFFLINE (no heartbeat for %lus)\n",
+                    i + 1, offlineThresholdMs / 1000UL);
     }
   }
 
   // Also track the special peer (ID 20) when enabled
   if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
     int spIdx = WCB_SPECIAL_PEER_ID - 1;
-    if (boardTable[spIdx].online) {
-      if (millis() - boardTable[spIdx].lastSeenMs > offlineThresholdMs) {
-        boardTable[spIdx].online = false;
-        Serial.printf("[ETM] WCB%d (special peer) went OFFLINE (no heartbeat for %lus)\n",
-                      WCB_SPECIAL_PEER_ID, offlineThresholdMs / 1000UL);
-      }
+    if (boardSweepOffline(spIdx, offlineThresholdMs)) {
+      Serial.printf("[ETM] WCB%d (special peer) went OFFLINE (no heartbeat for %lus)\n",
+                    WCB_SPECIAL_PEER_ID, offlineThresholdMs / 1000UL);
     }
   }
 
@@ -1143,11 +1268,15 @@ void processETMHeartbeats() {
   // longer TTL than the ETM offline threshold so a WDP-only device advertising on the
   // ~60 s cadence isn't dropped between adverts. lastSeenMs is refreshed by ANY packet.
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
-    if (!wcbPeerTemporary[i] || boardTable[i].lastSeenMs == 0) continue;
-    if (millis() - boardTable[i].lastSeenMs > TEMPORARY_PEER_TTL_MS) {
+    if (!wcbPeerTemporary[i]) continue;
+    unsigned long silentMs;
+    bool          everSeen;
+    boardPresence(i, &silentMs, &everSeen);   // locked snapshot: an unlocked read can wrap and evict a live peer (#80)
+    if (!everSeen) continue;
+    if (silentMs > TEMPORARY_PEER_TTL_MS) {
       uint8_t id = i + 1;
       Serial.printf("[PEER] temporary WCB%d evicted — silent for %lus\n",
-                    id, (millis() - boardTable[i].lastSeenMs) / 1000UL);
+                    id, silentMs / 1000UL);
       wcbPeerTemporary[i]    = false;
       wcbPeerAdvertCount[i]  = 0;      // re-vet (>=2 adverts) if it returns
       wcbPeerReciprocated[i] = false;
@@ -1156,7 +1285,7 @@ void processETMHeartbeats() {
       rebuildActivePeers();
       if (!wcbPeerActive[i] && esp_now_is_peer_exist(WCBMacAddresses[i])) {
         esp_now_del_peer(WCBMacAddresses[i]);
-        boardTable[i].online = false;
+        boardMarkOffline(i);
         etmClearPeerFromPending(i);
       }
     }
@@ -1302,7 +1431,12 @@ void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs) {
 
     if (!etmPendingTable[i].receivedAckFrom[boardIdx]) {
       etmPendingTable[i].receivedAckFrom[boardIdx] = true;
-      etmStatsAckd[boardIdx]++;
+      // Only an ACK this send ASKED for counts as delivered. A WCB_Client controller ACKs every
+      // broadcast even though expectAckFrom never included it (see etmAddToPendingTable), so the
+      // unguarded counter pushed Delivered above Attempts and the success rate above 100%.
+      // receivedAckFrom and the reciprocation promotion below stay OUTSIDE the gate: both are
+      // reachability facts, and an unexpected ACK still proves the peer is alive and answering.
+      if (etmPendingTable[i].expectAckFrom[boardIdx]) etmStatsAckd[boardIdx]++;
       // A learned peer that ACKs has proven it reciprocates ETM — from now on it
       // may count toward broadcast completion (see etmAddToPendingTable).
       if (wcbPeerLearned[boardIdx]) wcbPeerReciprocated[boardIdx] = true;
@@ -1487,6 +1621,18 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
 
 
 
+// Broadcast that this board ORIGINATES from loop() - the ETM characterisation and its load
+// generator. They run outside any command snapshot, so sendESPNowMessage's loop-prevention gate
+// would read whatever lastReceivedViaESPNOW the last received command left behind. Phase 3 is
+// exactly when peers send commands back (LOAD_* unicasts), so the characterisation's own
+// broadcast third was dropped and reported as a 30% miss. Local origin for this one send only.
+static void sendOwnBroadcast(const char *message, bool useETM) {
+    bool saved = lastReceivedViaESPNOW;
+    lastReceivedViaESPNOW = false;
+    sendESPNowMessage(0, message, useETM);
+    lastReceivedViaESPNOW = saved;
+}
+
 void startETMChar() {
     if (!etmEnabled) {
         Serial.println("ETM is not enabled. Use ?ETMON first.");
@@ -1607,7 +1753,7 @@ void processETMChar() {
             // every ETM-enabled peer drops on the ETM-mismatch gate — so no peer ever started
             // generating load and phase 3 "Loaded Network" measured an idle mesh while claiming
             // otherwise. (processETMLoad on the receiving side was consequently unreachable.)
-            sendESPNowMessage(0, "ETMLOAD", true);
+            sendOwnBroadcast("ETMLOAD", true);
         }
 
         if (etmCharPhaseMessageIndex < totalMessages) {
@@ -1621,7 +1767,7 @@ void processETMChar() {
                     etmCharPhaseSentTimes[2][msgIdx] = now;
                     for (int b = 0; b < peerCount; b++)
                         etmCharBoardResults[2][peers[b] - 1].sent++;
-                    sendESPNowMessage(0, payload.c_str(), true);
+                    sendOwnBroadcast(payload.c_str(), true);
                 } else {
                     int peerIdx = msgIdx % peerCount;
                     int targetWCB = peers[peerIdx];
@@ -1729,7 +1875,7 @@ void processETMLoad() {
         String payload = payloads[loadMsgCount % 6];
 
         if (sendBcast) {
-            sendESPNowMessage(0, payload.c_str(), false);  // broadcast, not ETM
+            sendOwnBroadcast(payload.c_str(), false);  // broadcast, not ETM
         } else {
             // Round-robin unicast across the active member peers. Walk the
             // membership set by index (not raw id arithmetic) so a sparse /
@@ -1803,28 +1949,51 @@ String buildStatsString() {
              espnowRawAttempts, espnowRawSuccess, espnowRawFailed);
     out += buf;
   }
+  // Heap: the LARGEST free block is what decides whether a long command can be copied at all - an
+  // Arduino String whose allocation fails becomes EMPTY rather than erroring, so a big ?SEQ,SAVE
+  // on a fragmented heap reports "cannot be empty" instead of "out of memory".
+  // Byte-addressable (MALLOC_CAP_8BIT) heap only - the only kind malloc/String can use. ESP.getFreeHeap()
+  // and friends measure MALLOC_CAP_INTERNAL, which on the classic ESP32 also counts the ~39 KB
+  // 32-bit-only IRAM heap: they reported a constant "largest block 38900" that no String could ever
+  // get, which hid tracker #58's real cause.
+  snprintf(buf, sizeof(buf), "Heap: %u free, largest block %u, min free since boot %u\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+  out += buf;
+  if (serialRxOverflows > 0) {
+    // Counted by the onReceiveError hook in setup(): bytes the USB/S0 input lost to a full FIFO or
+    // ring. Printed only when non-zero - a lost byte mid-command otherwise corrupts silently.
+    snprintf(buf, sizeof(buf), "USB/S0 input: %lu RX overflow(s) - bytes were lost\n",
+             (unsigned long)serialRxOverflows);
+    out += buf;
+  }
   if (etmEnabled) {
     out += "\n--------------- ETM Per-Board Statistics ---------------\n";
     for (int b = 0; b < MAX_WCB_COUNT; b++) {
       if (!wcbPeerActive[b]) continue;   // active member peers (incl. learned)
       int wcbNum = b + 1;
       if (wcbNum == WCB_Number) continue;
-      unsigned long ago = (millis() - boardTable[b].lastSeenMs) / 1000;
+      unsigned long ago;
+      bool on = boardPresence(b, &ago);   // locked snapshot (#80)
+      ago /= 1000;
       snprintf(buf, sizeof(buf), "WCB%d: Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, ",
                wcbNum, etmStatsSent[b], etmStatsAckd[b], etmStatsRetries[b], etmStatsFailed[b]);
       out += buf;
-      out += boardTable[b].online
+      out += on
         ? ("Online (last seen " + String(ago) + "s ago)\n")
         : "OFFLINE\n";
     }
     if (specialPeerEnabled && WCB_SPECIAL_PEER_ID != WCB_Number) {
       int spIdx = WCB_SPECIAL_PEER_ID - 1;
-      unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000;
+      unsigned long ago;
+      bool on = boardPresence(spIdx, &ago);
+      ago /= 1000;
       snprintf(buf, sizeof(buf), "WCB%d (special): Sent: %lu, ACKd: %lu, Retries: %lu, Failed: %lu, ",
                WCB_SPECIAL_PEER_ID, etmStatsSent[spIdx], etmStatsAckd[spIdx],
                etmStatsRetries[spIdx], etmStatsFailed[spIdx]);
       out += buf;
-      out += boardTable[spIdx].online
+      out += on
         ? ("Online (last seen " + String(ago) + "s ago)\n")
         : "OFFLINE\n";
     }
@@ -1996,9 +2165,10 @@ void printETMCharResults(int* peers, int peerCount) {
 // uartWriteBuf under the UART mutex (HAL locks are enabled in this core build), so the whole
 // string lands atomically. It also drops the per-byte lock/unlock overhead.
 //
-// S3-S5 are EspSoftwareSerial, which bit-bangs and takes no mutex — a bulk write there is
-// still far tighter than per-byte, but it is NOT atomic. Two tasks writing one software
-// port can still splice; the fix for that is to not share the port.
+// S3-S5 are WcbSoftSerial: write() sends on an RMT channel under a per-port mutex, so one bulk
+// write is atomic there too (WCB_SoftSerial.cpp). The exception is a port that got no RMT channel
+// and fell back to bit-banged EspSoftwareSerial, which takes no mutex — two tasks writing that
+// port can still splice, and the fix there is to not share the port.
 void writeSerialString(Stream &serialPort, const String &stringData) {
   String completeString = stringData + '\r';
   serialPort.write((const uint8_t *)completeString.c_str(), completeString.length());
@@ -2066,6 +2236,25 @@ static bool softSerialLoopTaskOnly(int port) {
 // Apply the above to one soft port. Call after EVERY begin() — begin() constructs fresh
 // state, so the setting does not survive a re-begin (which applyLiveBaud does per baud change).
 static void applySoftSerialIntTx(int port) {
+  // Receive side, reported first (tracker #78): on the classic ESP32 the vendored EspSoftwareSerial receives on a
+  // level interrupt whose polarity its ISR flips (erratum GPIO-3.14 loses EDGE interrupts on GPIO0-31); the S3, and
+  // any port above ~74880 baud, stays edge-triggered. HIL input.softserial_tx_rmt pins these strings.
+  if (debugEnabled && port >= 3 && port <= 5) {
+    WcbSoftSerial &ss = (port == 3) ? Serial3 : (port == 4) ? Serial4 : Serial5;
+    Serial.printf("[SOFTSERIAL] S%d RX: %s\n", port,
+                  !ss.isListening()      ? "off"
+                  : ss.rxLevelTriggered() ? "level-triggered GPIO interrupt (ESP32 erratum GPIO-3.14)"
+                                          : "edge-triggered GPIO interrupt");
+  }
+  // RMT-driven TX (the normal case, WCB_SoftSerial.h) never masks an interrupt, so there is
+  // nothing to protect - and nothing here may turn masking on for it. Only a port that fell back
+  // to the bit-banged library TX (no free RMT channel) still needs the decision below.
+  const bool rmt = (port == 3) ? Serial3.rmtTx() : (port == 4) ? Serial4.rmtTx()
+                 : (port == 5) ? Serial5.rmtTx() : false;
+  if (rmt) {
+    if (debugEnabled) Serial.printf("[SOFTSERIAL] S%d TX: RMT (hardware-timed)\n", port);
+    return;
+  }
   const bool loopOnly = softSerialLoopTaskOnly(port);
   switch (port) {
     case 3: Serial3.enableIntTx(!loopOnly); break;
@@ -2206,24 +2395,37 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
   // survives the async queue (see recallStoredCommand / inSequenceBody).
   item.sequenceBody = (originSeqBody >= 0) ? (originSeqBody != 0) : inSequenceBody;
 
-  // Allocate enough space for the command (including null terminator)
-  int length = cmd.length() + 1;
-  item.cmd = (char *)malloc(length);
-  if (!item.cmd) {
+  // Lineage (recallStoredCommand's cycle guard). Only the loop task expands sequences, so a command enqueued by
+  // serialCommandTask or the WiFi callback is top-level by construction - never read seqCurPath there. A caller
+  // stating originSeqBody=0 is top-level too.
+  const uint8_t depth = (originSeqBody != 0 && seqOnLoopTask()) ? seqCurPath.depth : 0;
+  const size_t pathBytes = (size_t)depth * sizeof(uint32_t);
+
+  // One allocation: the lineage hashes, then the command (including null terminator). A top-level command
+  // (depth 0) costs exactly what it did before.
+  const size_t length = cmd.length() + 1;
+  char *block = (char *)malloc(pathBytes + length);
+  if (!block) {
     Serial.println("Out of memory while enqueuing command!");
     return;
   }
+  if (pathBytes) memcpy(block, seqCurPath.key, pathBytes);
+  item.seqDepth = depth;
+  item.cmd = block + pathBytes;
 
   strncpy(item.cmd, cmd.c_str(), length);
   item.cmd[length - 1] = '\0';
 
   // Attempt to enqueue
   if (xQueueSend(commandQueue, &item, 0) != pdTRUE) {
-    // If queue is full, free memory
+    // If queue is full, free memory - the block, not item.cmd (it points past the lineage)
     Serial.println("Command queue is full! Discarding command.");
-    free(item.cmd);
+    free(block);
   }
 }
+
+// recallCommandSlot's nested-expansion reserve check (WCB_Storage.h, SEQ_QUEUE_RESERVE).
+unsigned commandQueueSpaces() { return commandQueue ? (unsigned)uxQueueSpacesAvailable(commandQueue) : 0; }
 
 
 // Does `tok` at offset `at` begin with `func` followed by `verbUpper` (case-insensitive on the
@@ -2245,6 +2447,27 @@ static bool tokenHasVerb(const String &tok, int at, char func, const char *verbU
   return true;
 }
 
+// True when this chain carries a token whose VALUE may itself contain the delimiter and a ';t' -
+// ?SEQ,SAVE, ?CS and ?MGMT,. Those values are closed only by delimiter+funcChar, which
+// parseCommandsNoChecksum understands and parseCommandGroups does not, so such a chain must never
+// reach the timer splitter. The test this replaced looked at the FIRST CHARACTER of the whole
+// line, so a chain merely STARTING with something else still went to the naive walker and had its
+// stored value cut at the first ;t, with the tail executed as live commands.
+bool chainCarriesValueVerb(const String &data) {
+  const char func = LocalFunctionIdentifier;
+  for (int i = 0; i <= (int)data.length(); ) {
+    if (tokenHasVerb(data, i, func, "SEQ,SAVE,") ||
+        tokenHasVerb(data, i, func, "CS")        ||
+        tokenHasVerb(data, i, func, "MGMT,")) {
+      return true;
+    }
+    const int nxt = data.indexOf(commandDelimiter, i);
+    if (nxt < 0) break;
+    i = nxt + 1;
+  }
+  return false;
+}
+
 // If tok is "<curFunc>FUNCCHAR,<c>", return <c> — the character every LATER token in this
 // chain will carry. printBackupConfig flips mid-chain on purpose (WCB.ino, defaultFunc), and
 // the flip has to be mirrored by the splitter or the whole-token branches stop matching.
@@ -2261,7 +2484,8 @@ static char chainFuncCharAfter(const String &tok, char curFunc) {
 // recovered by migrateOldStoredCommands, or one stored while ?DELIM was non-default) failed
 // the second verification and aborted the whole restore. It also dropped originEspnow /
 // originSeqBody, silently reverting every checksummed chain to the racy global snapshot.
-static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody);
+// Not static: the legacy ?C checksum branch in processSerialCommandHelper hands off to it too.
+void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody);
 
 void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Check if this is a restore with checksum
@@ -2331,7 +2555,7 @@ void parseCommandsAndEnqueue(const String &data, int sourceID, int originEspnow,
   parseCommandsNoChecksum(data, sourceID, originEspnow, originSeqBody);
 }
 
-static void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody) {
+void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow, int originSeqBody) {
   // Normal parsing with special handling for ?CS commands.
   //
   // IF gating (chain-local, resolved at invoke time): when a standalone
@@ -2360,11 +2584,11 @@ static void parseCommandsNoChecksum(const String &data, int sourceID, int origin
     bool isCSCommand = tokenHasVerb(data, startIdx, curFunc, "CS");
     
     if (isCSCommand) {
-      // Find the end of this ?CS command (next ^?CS or end of string)
-      int nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "CS", startIdx + 1);
-      if (nextCSPos == -1) {
-        nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc) + "cs", startIdx + 1);
-      }
+      // The value ends at delimiter+funcChar - the SAME boundary ?SEQ,SAVE uses below, and the
+      // one printBackupConfig and the Wizard's parser both assume. Ending it only at '^?CS'
+      // meant a value containing '^?' (e.g. "?CSkey,a^?VERSION") was stored WHOLE here but cut
+      // at '^?' on the backup/restore path, so the same input round-tripped to different bytes.
+      int nextCSPos = data.indexOf(String(commandDelimiter) + String(curFunc), startIdx + 1);
       
       // Extract the entire ?CS command including all its sub-commands
       int endPos = (nextCSPos == -1) ? data.length() : nextCSPos;
@@ -2520,13 +2744,14 @@ void printConfigInfo() {
   Serial.println("Peers:");
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     if (!wcbPeerActive[i] && (i + 1) != WCB_Number) continue;  // members + self
+    unsigned long secsAgo = 0;
     if (i + 1 == WCB_Number) {
       Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  (this board)\n",
                     i + 1,
                     WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
                     WCBMacAddresses[i][3], WCBMacAddresses[i][4], WCBMacAddresses[i][5]);
-    } else if (etmEnabled && boardTable[i].online) {
-      unsigned long secsAgo = (millis() - boardTable[i].lastSeenMs) / 1000UL;
+    } else if (etmEnabled && boardPresence(i, &secsAgo)) {   // locked snapshot (#80)
+      secsAgo /= 1000UL;
       Serial.printf("  WCB%d: %02X:%02X:%02X:%02X:%02X:%02X  Online (last seen %lus ago)\n",
                     i + 1,
                     WCBMacAddresses[i][0], WCBMacAddresses[i][1], WCBMacAddresses[i][2],
@@ -2542,12 +2767,14 @@ void printConfigInfo() {
   }
   if (specialPeerEnabled) {
     int spIdx = WCB_SPECIAL_PEER_ID - 1;
-    unsigned long ago = (millis() - boardTable[spIdx].lastSeenMs) / 1000UL;
+    unsigned long ago;
+    bool on = boardPresence(spIdx, &ago);   // locked snapshot (#80)
+    ago /= 1000UL;
     Serial.printf("  WCB%d (controller): %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
                   WCB_SPECIAL_PEER_ID,
                   WCBMacAddresses[spIdx][0], WCBMacAddresses[spIdx][1], WCBMacAddresses[spIdx][2],
                   WCBMacAddresses[spIdx][3], WCBMacAddresses[spIdx][4], WCBMacAddresses[spIdx][5],
-                  boardTable[spIdx].online ? ("Online (last seen " + String(ago) + "s ago)").c_str() : "Not yet seen");
+                  on ? ("Online (last seen " + String(ago) + "s ago)").c_str() : "Not yet seen");
   }
 
   // ---- Mappings ----
@@ -2614,6 +2841,7 @@ void printESPNowStats() {
 //*******************************
 // Send an ESP-NOW message (unicast or broadcast)
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
+  if (!message || !*message) return;   // an out-of-memory String's c_str() is NULL (tracker #58)
   // Skip broadcast if last was from ESP-NOW (loop prevention)
   if (target == 0 && lastReceivedViaESPNOW) return;
 
@@ -3240,6 +3468,13 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   if (LocalFunctionIdentifier != '?') emit("FUNCCHAR," + String(LocalFunctionIdentifier), false);
   emit("CMDCHAR," + String(CommandCharacter), true);
 
+  // Kyber release FIRST, ahead of BAUD/BCAST: every way out of Kyber LOCAL (?KYBER,CLEAR, ?MAESTRO,REMOTE, a
+  // ?KYBER,LOCAL port move) puts the port it gives up back to 9600 with broadcasts on (kyberReleasePort,
+  // WCB_Storage.cpp). Replayed onto a board whose Kyber sits elsewhere, a later release would undo this chain's
+  // own BAUD/BCAST lines for that port. A backup can't see the target board's Kyber port, so a Kyber_Local board
+  // releases too and claims again with KYBER,LOCAL after emitHelpers() - as the Wizard's full push does (#73 D5/D9).
+  emit(Maestro_Remote ? "MAESTRO,REMOTE" : "KYBER,CLEAR", true);
+
   // Baud rates and labels
   for (int i = 0; i < 5; i++) emit("BAUD,S" + String(i + 1) + "," + String(baudRates[i]), true);
   for (int i = 0; i < 5; i++)
@@ -3269,12 +3504,16 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
     emit(cmd, true);
   }
 
-  // Kyber / Maestro-remote
+  // Kyber LOCAL: claim late (the release is emitted before the BAUD lines). A Kyber_Local board's
+  // KYBER,LOCAL line goes out AFTER emitHelpers() (the Maestro/MP3/HCR/DFP/WLED lines). ?KYBER,LOCAL
+  // refuses a port that hosts a local Maestro, and ?MAESTRO refuses the current Kyber port, so a
+  // restore that moves the two must place the Maestros first (tracker #28 follow-up).
+  String kyberCmd;
   if (Kyber_Local) {
     preferences.begin("kyber_settings", true);
     int kPort = preferences.getInt("K_Port", 2);
     preferences.end();
-    String kyberCmd = "KYBER,LOCAL,S" + String(kPort);
+    kyberCmd = "KYBER,LOCAL,S" + String(kPort);
     // Append all enabled Kyber targets so the backup fully restores the routing table
     for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
       if (!kyberTargets[i].enabled) continue;
@@ -3292,15 +3531,11 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
                   "S" + String(kyberTargets[i].targetPort) +
                   ":" + String(baud);
     }
-    emit(kyberCmd, true);
-  } else if (Maestro_Remote) {
-    emit("MAESTRO,REMOTE", true);
-  } else {
-    emit("KYBER,CLEAR", true);
   }
 
   // Maestro / MP3 / HCR / Variable sub-emitters (routed to the caller's target)
   emitHelpers();
+  if (kyberCmd.length()) emit(kyberCmd, true);   // Kyber_Local: claimed after the Maestros (see above)
 
   // ETM settings
   emit(etmEnabled ? "ETM,ON" : "ETM,OFF", true);
@@ -4279,10 +4514,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // but commands flow, etmAddToPendingTable would skip the peer for
     // ACK-pending tracking, leaving our unicast sends to it un-retried.
     if (wcbPeerActive[senderIdx] || isSpecialPeer) {
-      bool wasOffline     = !boardTable[senderIdx].online;
+      // WiFi task, core 0: the loop() sweep clears the same pair on core 1, so both stores and
+      // the edge test go through boardTableMux (boardMarkSeen); the print stays outside it (#80).
+      bool wasOffline     = boardMarkSeen(senderIdx);
       bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
-      boardTable[senderIdx].online     = true;
-      boardTable[senderIdx].lastSeenMs = millis();
       // A boot announce always re-prints "came ONLINE" (even if we still thought
       // the board was up) so the wizard re-establishes the relay session after a
       // reboot too fast to have crossed our offline threshold (e.g. an OTA).
@@ -4537,7 +4772,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // rewrite ;M<dev>,getX → ;MG<dev>,<sender>,getX so the get-query path routes
             // the reply home (:MQR to a controller like NaviCore, ;M! to a peer WCB).
             maestroRewriteInboundGet(etmCmd, senderWCB);
-            if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd)) {
+            if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd) &&
+                !chainCarriesValueVerb(etmCmd)) {
                 // parseCommandGroups mutates a std::vector iterated by loop();
                 // defer to loop() via the pendingTimerChainQueue (see comment
                 // at the queue's declaration).
@@ -4785,7 +5021,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
   // Native Maestro read over the mesh → reply to the SENDER (see the ETM branch above).
   maestroRewriteInboundGet(receivedCmd, senderWCB);
-  if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd)) {
+  if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd) &&
+      !chainCarriesValueVerb(receivedCmd)) {
     // Same race-avoidance as the ETM branch above: defer parseCommandGroups
     // to loop() via the queue (see pendingTimerChainQueue comment).
     enqueuePendingTimerChain(receivedCmd);
@@ -4819,6 +5056,22 @@ void forwardDataFromKyber() {
   int remoteLen = 0;
 
   Stream &kyberSerial = getSerialStream(kyberLocalPort);
+
+  // Ports an HCR/MP3/DFP/WLED or a PWM output owns (one bit per port 1-5), once per drain; only the targeted branch reads it.
+  // A local Kyber target normally follows its Maestro slot (tracker #73 D7), but one can still exist without a
+  // slot - kyberTargets saved in NVS before D7, or an explicit ?KYBER,LOCAL target list with all slots full,
+  // which adds the target and no slot. Since #73 D4 the other hardware port of a Kyber LOCAL board can host a
+  // device or PWM, so such a target would otherwise write the sabre stream into it.
+  // Return early on an empty buffer and build the mask unconditionally after it: gating the mask on its own
+  // available() check left a byte landing between that check and the drain loop's to go out with an empty mask.
+  if (kyberSerial.available() <= 0) return;
+  uint8_t deviceOwnedPorts = 0;
+  for (int p = 1; p <= 5; p++) {
+    if (isSerialPortUsedForHCR(p) || isSerialPortUsedForMP3(p) || isSerialPortUsedForDFP(p) ||
+        isSerialPortUsedForWLED(p) || isSerialPortPWMOutput(p))
+      deviceOwnedPorts |= (1 << p);
+  }
+
   while (kyberSerial.available() > 0) {
     uint8_t b = (uint8_t)kyberSerial.read();
 
@@ -4840,7 +5093,7 @@ void forwardDataFromKyber() {
           // Local — write immediately, byte by byte. Guard the port so a corrupt
           // targetPort of 0 doesn't fall through to the debug Serial console.
           uint8_t tp = kyberTargets[i].targetPort;
-          if (tp >= 1 && tp <= 5 && !(sentLocalPorts & (1 << tp))) {
+          if (tp >= 1 && tp <= 5 && !(sentLocalPorts & (1 << tp)) && !(deviceOwnedPorts & (1 << tp))) {
             sentLocalPorts |= (1 << tp);
             getSerialStream(tp).write(b);
           }
@@ -4913,6 +5166,13 @@ void forwardMaestroDataToLocalKyber() {
 }
 
 void forwardMaestroDataToRemoteKyber() {
+  // KyberRemoteTask is boot-only and never deleted. When NEITHER Kyber mode is live (after
+  // ?KYBER,CLEAR), serialCommandTask's normal-mode branch reads S1/S2 again, so draining here too
+  // split every line between the parser and the mesh (HIL kyber.clear_warns_reboot_single_reader).
+  // Not gated on Maestro_Remote alone: a runtime ?KYBER,LOCAL clears it while the parser still skips
+  // S1/S2 until reboot, and this task must keep bridging through that window (kyber.local_mode_s2).
+  // maestroPortOwnedByKyberBridge() mirrors this condition - keep them identical.
+  if (!Maestro_Remote && !Kyber_Local) return;
   static uint8_t remoteBuf[64];
   int remoteLen = 0;
 
@@ -4941,7 +5201,9 @@ void forwardMaestroDataToRemoteKyber() {
 //*******************************
 /// Processing Input Functions
 //*******************************
-void handleSingleCommand(String cmd, int sourceID) {
+// By const reference: a by-value String was one more full-length copy of every command, and a
+// ?SEQ,SAVE line already costs ~7x its length in heap while it runs (tracker #58).
+void handleSingleCommand(const String &cmd, int sourceID) {
     // Serial.printf("handleSingleCommand called with: [%s] from source %d\n", cmd.c_str(), sourceID);
 
     // IF gating is resolved at INVOKE time inside the chain splitters
@@ -5116,7 +5378,14 @@ void processLocalCommand(const String &message) {
                 remainderUpper.toUpperCase();
 
                 String legacyStr;
-                if (remainderUpper.startsWith("R,") || remainderUpper == "R") {
+                if (remainderUpper == "R") {
+                    // Bare 'R' with no destination. This used to build "S2R," and create a raw
+                    // mapping with an empty destination list: serialCommandTask then stopped
+                    // reading the port, so it stopped executing commands, with no error shown.
+                    Serial.println("Invalid format. Use: ?MAP,SERIAL,Sx,R,dest - raw mode needs a destination");
+                    return;
+                }
+                if (remainderUpper.startsWith("R,")) {
                     String dest = remainder.substring(2);
                     legacyStr = portStr + "R," + dest;
                 } else {
@@ -5134,10 +5403,15 @@ void processLocalCommand(const String &message) {
                 String afterClear = mapArgs.substring(mapArgs.indexOf(',') + 1); // "OUT,S5"
                 String portPart   = afterClear.substring(afterClear.indexOf(',') + 1); // "S5"
                 int port = portPart.substring(1).toInt();
-                removePWMOutputPort(port);
-                Serial.println("Rebooting in 3 seconds to apply changes...");
-                delay(3000);
-                ESP.restart();
+                // Deferred, never inline. This command arrives mid-chain - the Wizard sends one
+                // CLEAR,OUT per removed destination back to back, and removePWMMapping does the same
+                // over the mesh - so restarting here destroys every command still queued behind it
+                // while the sender counts them ACKed (CLAUDE.md rule 11). loop() takes the restart
+                // once the queue is empty and quiet. Nothing removed means nothing to apply: no reboot.
+                if (removePWMOutputPort(port)) {
+                  pwmRebootPending = true;
+                  Serial.println("PWM output cleared - rebooting once the command queue is quiet...");
+                }
             } else if (mapArgsUpper.startsWith("CLEAR,S")) {
                 String portPart = mapArgs.substring(mapArgs.indexOf(',') + 1);
                 int port = portPart.substring(1).toInt();
@@ -5294,9 +5568,20 @@ void processLocalCommand(const String &message) {
             saveETMSettings();
             Serial.println("ETM disabled");
         } else if (etmCmdUpper == "TIMEOUT") {
-            etmTimeoutMs = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
+            // Same trap the ?ETM,HB comment below describes: a bare ?ETM,TIMEOUT is the natural
+            // way to ASK, toInt() on "" gives 0, and 0 went straight to NVS.
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM timeout is %d ms\n", etmTimeoutMs);
+            } else {
+                int v = etmVal.toInt();
+                if (v < 50 || v > 10000) {
+                    Serial.printf("Invalid ETM timeout '%s'. Use 50-10000 ms.\n", etmVal.c_str());
+                } else {
+                    etmTimeoutMs = v;
+                    saveETMSettings();
+                    Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
+                }
+            }
         } else if (etmCmdUpper == "HB") {
             // A bare `?ETM,HB` (no value) is the natural way to ASK what the setting is — help
             // documents no query form — but etmVal is then "" and toInt() gives 0, which was
@@ -5328,17 +5613,37 @@ void processLocalCommand(const String &message) {
                 }
             }
         } else if (etmCmdUpper == "BOOT") {
-            etmBootHeartbeatSec = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM boot window is %d sec\n", etmBootHeartbeatSec);
+            } else {
+                int v = etmVal.toInt();
+                if (v < 1 || v > 30) {
+                    Serial.printf("Invalid ETM boot window '%s'. Use 1-30 sec.\n", etmVal.c_str());
+                } else {
+                    etmBootHeartbeatSec = v;
+                    saveETMSettings();
+                    Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
+                }
+            }
         } else if (etmCmdUpper == "COUNT") {
             etmCharMessageCount = constrain(etmVal.toInt(), 10, 200);
             saveETMSettings();
             Serial.printf("ETM char message count set to %d\n", etmCharMessageCount);
         } else if (etmCmdUpper == "DELAY") {
-            etmCharDelayMs = etmVal.toInt();
-            saveETMSettings();
-            Serial.printf("ETM char delay set to %d ms\n", etmCharDelayMs);
+            // 0 is a legitimate delay, so the BARE form is what must not write - hence the
+            // empty-string query rather than leaning on the range check.
+            if (etmVal.length() == 0) {
+                Serial.printf("ETM char delay is %d ms\n", etmCharDelayMs);
+            } else {
+                int v = etmVal.toInt();
+                if (v < 0 || v > 5000) {
+                    Serial.printf("Invalid ETM char delay '%s'. Use 0-5000 ms.\n", etmVal.c_str());
+                } else {
+                    etmCharDelayMs = v;
+                    saveETMSettings();
+                    Serial.printf("ETM char delay set to %d ms\n", etmCharDelayMs);
+                }
+            }
         } else if (etmCmdUpper == "CHAR") {
             startETMChar();
         } else if (etmCmdUpper == "CHKSM") {
@@ -5504,7 +5809,11 @@ void processLocalCommand(const String &message) {
     // (default ID 20, e.g. NaviCore, but any 1-20 ID for a different controller).
     // When ON: that ID is registered as an ESP-NOW peer, its heartbeats are tracked,
     // and it appears in ETM stats. Registered LIVE via enableControllerPeer() — no
-    // reboot needed. When OFF: that ID is treated as unknown and ignored.
+    // reboot needed. When OFF: its heartbeats are no longer tracked, it leaves ETM stats and
+    // ;W<id> refuses it as unreachable, and its out-of-band peer slot is freed. It is NOT
+    // ignored on receive: an ETM command it still sends is ACKed and executed, and the ACK
+    // path (etmSendAck) re-adds its peer entry on demand — so a controller that keeps
+    // talking re-occupies the slot OFF freed.
     // ?SPECIAL is kept as a back-compat alias so old configs/backups still parse.
     if (rootUpper == "CONTROLLER" || rootUpper == "SPECIAL") {
         if (argsUpper == "ON" || argsUpper.startsWith("ON,")) {
@@ -5695,22 +6004,7 @@ void processLocalCommand(const String &message) {
     if (rootUpper == "FUNCCHAR") {
         if (args.length() == 1) {
             char nc = args.charAt(0);
-            // Reject a collision with the command character. handleSingleCommand tests the
-            // function identifier FIRST, so setting funcChar to ';' routed the entire ';' command
-            // family into processLocalCommand — every ;M/;L/;H/;D device command stopped working.
-            // The setting persists to NVS, so it survived reboots too.
-            if (nc == CommandCharacter) {
-                Serial.printf("'%c' is already the command character — the entire '%c' command "
-                              "family would stop working. Pick a different function identifier.\n",
-                              nc, CommandCharacter);
-                return;
-            }
-            // Control/whitespace characters can never be typed as a prefix and would strand
-            // the board's console.
-            if (nc <= ' ' || nc == 0x7F) {
-                Serial.println("Function identifier must be a printable, non-space character.");
-                return;
-            }
+            if (!prefixCharOk(nc, true)) return;
             LocalFunctionIdentifier = nc;
             saveLocalFunctionIdentifierAndCommandCharacter();
             Serial.printf("Local function identifier updated to '%c'\n", LocalFunctionIdentifier);
@@ -5723,6 +6017,7 @@ void processLocalCommand(const String &message) {
     // --- ?CMDCHAR,x ---
     if (rootUpper == "CMDCHAR") {
         if (args.length() == 1) {
+            if (!prefixCharOk(args.charAt(0), false)) return;
             CommandCharacter = args.charAt(0);
             saveLocalFunctionIdentifierAndCommandCharacter();
             Serial.printf("Command character updated to '%c'\n", CommandCharacter);
@@ -5882,7 +6177,10 @@ void processLocalCommand(const String &message) {
         updateESPNowPassword(message);
     } else if (message == "maestro_list" || message == "MAESTRO_LIST") {
         printMaestroSettings();
-    } else if (message.startsWith("maestro_clear") || message.startsWith("MAESTRO_CLEAR")) {
+    // Exact match, like the legacy handlers either side of it: startsWith meant
+    // '?MAESTRO_CLEAR,M5' - a plausible clear-one spelling - prefix-matched here and wiped the
+    // whole table instead of reaching the clear-by-id handler.
+    } else if (message == "maestro_clear" || message == "MAESTRO_CLEAR") {
         clearAllMaestroConfigs();
     } else if (message == "maestro_default" || message == "MAESTRO_DEFAULT") {
         clearAllMaestroConfigs();
@@ -5938,10 +6236,12 @@ void processLocalCommand(const String &message) {
         // Legacy alias for ?PX<n> — sent by older firmware to clear a remote PWM output port.
         // Equivalent to the current ?MAP,PWM,CLEAR,OUT,S<n> command.
         int port = message.substring(2).toInt();
-        removePWMOutputPort(port);
-        Serial.println("Rebooting in 3 seconds to apply changes...");
-        delay(3000);
-        ESP.restart();
+        // Same deferral as ?MAP,PWM,CLEAR,OUT above (CLAUDE.md rule 11): a remote board chains
+        // several of these, and an inline restart drops the ones still queued behind this one.
+        if (removePWMOutputPort(port)) {
+          pwmRebootPending = true;
+          Serial.println("PWM output cleared - rebooting once the command queue is quiet...");
+        }
     } else if (message.startsWith("sls") || message.startsWith("SLS")) {
         // Pass the FULL message. updateSerialLabel() parses "SLSx,label" itself — it checks for
         // the 'S' prefix and does substring(3, comma) to extract the port — so stripping "SLS"
@@ -5975,19 +6275,41 @@ void processLocalCommand(const String &message) {
         saveETMSettings();
         Serial.printf("ETM char count set to %d\n", etmCharMessageCount);
     } else if (message.startsWith("etmchardelay") || message.startsWith("ETMCHARDELAY")) {
-        etmCharDelayMs = message.substring(12).toInt();
-        saveETMSettings();
-        Serial.printf("ETM char delay set to %d ms\n", etmCharDelayMs);
+        // Same guard as ?ETMHB below - the legacy spellings were missed when the checks went in.
+        String v = message.substring(12);
+        if (v.length() == 0) {
+            Serial.printf("ETM char delay is %d ms\n", etmCharDelayMs);
+        } else if (v.toInt() < 0 || v.toInt() > 5000) {
+            Serial.printf("Invalid ETM char delay. Use 0-5000 ms (currently %d).\n", etmCharDelayMs);
+        } else {
+            etmCharDelayMs = v.toInt();
+            saveETMSettings();
+            Serial.printf("ETM char delay set to %d ms\n", etmCharDelayMs);
+        }
     } else if (message == "etmchar" || message == "ETMCHAR") {
         startETMChar();
     } else if (message.startsWith("etmtimeout") || message.startsWith("ETMTIMEOUT")) {
-        etmTimeoutMs = message.substring(10).toInt();
-        saveETMSettings();
-        Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
+        String v = message.substring(10);
+        if (v.length() == 0) {
+            Serial.printf("ETM timeout is %d ms\n", etmTimeoutMs);
+        } else if (v.toInt() < 50 || v.toInt() > 10000) {
+            Serial.printf("Invalid ETM timeout. Use 50-10000 ms (currently %d).\n", etmTimeoutMs);
+        } else {
+            etmTimeoutMs = v.toInt();
+            saveETMSettings();
+            Serial.printf("ETM timeout set to %d ms\n", etmTimeoutMs);
+        }
     } else if (message.startsWith("etmboot") || message.startsWith("ETMBOOT")) {
-        etmBootHeartbeatSec = message.substring(7).toInt();
-        saveETMSettings();
-        Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
+        String v = message.substring(7);
+        if (v.length() == 0) {
+            Serial.printf("ETM boot window is %d sec\n", etmBootHeartbeatSec);
+        } else if (v.toInt() < 1 || v.toInt() > 30) {
+            Serial.printf("Invalid ETM boot window. Use 1-30 seconds (currently %d).\n", etmBootHeartbeatSec);
+        } else {
+            etmBootHeartbeatSec = v.toInt();
+            saveETMSettings();
+            Serial.printf("ETM boot window set to %d sec\n", etmBootHeartbeatSec);
+        }
     } else if (message.startsWith("etmhb") || message.startsWith("ETMHB")) {
         // Same 0-writes-to-NVS trap as ?ETM,HB above — the legacy spelling needs the same guard.
         int hb = message.substring(5).toInt();
@@ -5999,9 +6321,17 @@ void processLocalCommand(const String &message) {
             Serial.printf("ETM heartbeat set to %d sec\n", etmHeartbeatSec);
         }
     } else if (message.startsWith("etmmiss") || message.startsWith("ETMMISS")) {
-        etmMissedHeartbeats = message.substring(7).toInt();
-        saveETMSettings();
-        Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+        // MISS 0 makes every peer look offline and turns ensured sends into fire-once.
+        String v = message.substring(7);
+        if (v.length() == 0) {
+            Serial.printf("ETM missed heartbeats is %d\n", etmMissedHeartbeats);
+        } else if (v.toInt() < 1 || v.toInt() > 100) {
+            Serial.printf("Invalid ETM missed-heartbeat count. Use 1-100 (currently %d).\n", etmMissedHeartbeats);
+        } else {
+            etmMissedHeartbeats = v.toInt();
+            saveETMSettings();
+            Serial.printf("ETM missed heartbeats set to %d\n", etmMissedHeartbeats);
+        }
     } else if (message == "etmon" || message == "ETMON") {
         etmEnabled = true;
         saveETMSettings();
@@ -6064,6 +6394,7 @@ void printTrackingStatus() {
 //*******************************
 void updateLocalFunctionIdentifier(const String &message){
   if (message.length() >= 3) {
+    if (!prefixCharOk(message.charAt(2), true)) return;   // same guard as ?FUNCCHAR
     LocalFunctionIdentifier = message.charAt(2);
     saveLocalFunctionIdentifierAndCommandCharacter();
     Serial.printf("LocalFunctionIdentifier updated to '%c'\n", LocalFunctionIdentifier);
@@ -6074,6 +6405,7 @@ void updateLocalFunctionIdentifier(const String &message){
 
 void updateCommandCharacter(const String &message){
   if (message.length() >= 3) {
+    if (!prefixCharOk(message.charAt(2), false)) return;  // same guard as ?CMDCHAR
     CommandCharacter = message.charAt(2);
     saveLocalFunctionIdentifierAndCommandCharacter();
     Serial.printf("CommandCharacter updated to '%c'\n", CommandCharacter);
@@ -6823,34 +7155,34 @@ void recallStoredCommand(const String &message, int sourceID) {
     // re-enqueue forever, so loop() drained an endlessly-refilled queue and the board serviced
     // nothing else.
     //
-    // Track the keys expanded during the CURRENT drain instead. inSequenceBody is already true
-    // for anything a sequence body enqueues, so the chain is identifiable; the set is cleared
-    // whenever a genuine top-level recall starts.
-    static String activeChainKeys[8];
-    static uint8_t activeChainDepth = 0;
-    if (!inSequenceBody) {
-        activeChainDepth = 0;              // fresh top-level trigger — start a new chain
-    } else {
-        for (uint8_t i = 0; i < activeChainDepth; i++) {
-            if (activeChainKeys[i].equalsIgnoreCase(key)) {
-                Serial.printf("Sequence '%s' recalls itself (directly or in a loop) — refusing to "
-                              "expand it again. Break the cycle in the stored sequence.\n",
-                              key.c_str());
-                return;
-            }
-        }
-        if (activeChainDepth >= (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0]))) {
-            Serial.printf("Sequence nesting deeper than %u — refusing to expand '%s'.\n",
-                          (unsigned)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])),
+    // The call stack rides the QUEUE: every item carries the lineage of the expansion that enqueued it
+    // (enqueueCommand), and the drain restores it into seqCurPath. So refuse only a key already on THIS item's
+    // lineage - a sub-sequence called twice in one body is two siblings with the caller's lineage and runs both
+    // times (tracker #47; HIL seq.cycle_guard_reuse). Do NOT go back to a global set, and do not pop one "when an
+    // expansion drains": the queue is FIFO, so in ;CBEEP^;CBEEP the first BEEP's body is still queued BEHIND the
+    // second call. The old never-popped set refused every repeat, and counted every expansion in the run toward
+    // the depth limit, so a flat body calling 8 different sub-sequences had its 8th refused as "too deep".
+    // Every endless expansion repeats a key on some lineage or passes SEQ_MAX_NESTING, so the queue can no longer
+    // refill forever. Hash of the EXACT bytes: sequence keys are case-SENSITIVE everywhere else (the NVS lookup
+    // included), and a loose compare refused ;Chilrx inside HILRX as recursion although no 'hilrx' exists
+    // (tracker #40). A hash collision can only over-refuse, never miss a cycle.
+    const uint32_t keyHash = seqKeyHash(key);
+    for (uint8_t i = 0; i < seqCurPath.depth; i++) {
+        if (seqCurPath.key[i] == keyHash) {
+            Serial.printf("Sequence '%s' recalls itself (directly or in a loop) — refusing to "
+                          "expand it again. Break the cycle in the stored sequence.\n",
                           key.c_str());
             return;
         }
     }
-    if (activeChainDepth < (uint8_t)(sizeof(activeChainKeys) / sizeof(activeChainKeys[0])))
-        activeChainKeys[activeChainDepth++] = key;
+    if (seqCurPath.depth >= SEQ_MAX_NESTING) {
+        Serial.printf("Sequence nesting deeper than %u — refusing to expand '%s'.\n",
+                      (unsigned)SEQ_MAX_NESTING, key.c_str());
+        return;
+    }
 
     if (isSeq) Serial.println("Recalling stored sequence command...");
-    recallCommandSlot(key, sourceID);
+    recallCommandSlot(key, sourceID);   // pushes key onto seqCurPath for the body it enqueues
 }
 
 void processMaestroCommand(const String &message){
@@ -6933,9 +7265,14 @@ void processPWMOutput(const String &message) {
     // local declaration, and the unconditional pinMode below is what makes that work. Blocking
     // only OWNED ports keeps remote PWM functional while stopping a stray ;P from reconfiguring a
     // live UART's TX pin mid-transfer — which silently kills that device until the next reboot.
+    // Maestro terms added 2026-09-20: without them a stray ;P1<width> ran pinMode(OUTPUT) on the
+    // Maestro's TX pin and killed that Maestro until the next reboot, while ;M kept reporting
+    // success. canUsePWMOnPort() rejects the same ports for ?MAP,PWM but is not on the ;P path.
+    // kyberModeReservesPort (WCB_Storage.cpp) is the one definition of the Kyber-mode port both use.
     if (isSerialPortUsedForMP3(port) || isSerialPortUsedForDFP(port) ||
         isSerialPortUsedForHCR(port) || isSerialPortUsedForWLED(port) ||
-        isSerialPortRawMapped(port)  || (Kyber_Local && port == kyberLocalPort)) {
+        isSerialPortUsedForMaestro(port) || kyberModeReservesPort(port) ||
+        isSerialPortRawMapped(port)) {
         if (debugPWMPassthrough)
             Serial.printf("[PWM] Ignoring ;P on S%d — the port is in use by another device\n", port);
         return;
@@ -6955,6 +7292,11 @@ void processPWMOutput(const String &message) {
         digitalWrite(txPin, HIGH);
         delayMicroseconds(pulseWidth);
         digitalWrite(txPin, LOW);
+        // pinMode just took an S3-S5 TX pin away from its RMT channel; the next serial write on
+        // that port routes it back (WcbSoftSerial::write).
+        if (port == 3) Serial3.noteTxPinBorrowed();
+        else if (port == 4) Serial4.noteTxPinBorrowed();
+        else if (port == 5) Serial5.noteTxPinBorrowed();
     }
     // Serial.printf("processPWMOutput: port=%d pulse=%lu txPin=%d\n", port, pulseWidth, SERIAL5_TX_PIN);
 
@@ -7007,7 +7349,10 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
             uint8_t destWCB = serialMonitorMappings[mappingIndex].outputs[j].wcbNumber;
             uint8_t destPort = serialMonitorMappings[mappingIndex].outputs[j].serialPort;
             
-            if (destWCB == 0) {
+            // destWCB == WCB_Number is US: the raw path already treats it as local, but the text
+            // path sent it over the air to this board's own MAC, where ESP-NOW drops it - the
+            // mapping looked set and delivered nothing.
+            if (destWCB == 0 || destWCB == WCB_Number) {
                 // Local destination
                 if (destPort == 0) {
                     Serial.println(cmd);  // USB
@@ -7018,7 +7363,11 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
                 }
             } else {
                 // Remote destination via ESP-NOW
-                String espnowCmd = ";S" + String(destPort) + cmd;
+                // Separator ONLY when the payload itself starts with ',': the receiver strips one
+                // comma after the port digit, so without it ",X" arrived as "X". Adding it to every
+                // line changed the wire bytes of all mapped text and spent a character of the
+                // 187-char CHKSM budget, refusing a line that sat exactly at the limit.
+                String espnowCmd = ";S" + String(destPort) + (cmd.startsWith(",") ? "," : "") + cmd;
                 sendESPNowMessage(destWCB, espnowCmd.c_str());
                 if (debugEnabled) {
                     Serial.printf("Sent to WCB%d Serial%d via ESP-NOW: %s\n", 
@@ -7036,10 +7385,17 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
         return;
     }
 
-    // Normal broadcast behavior - send to all serial ports except restricted ones
+    // Normal broadcast behavior - send to all serial ports except restricted ones.
+    // On a Kyber_Local board only the Kyber's own port is skipped: configured Maestro ports are
+    // excluded one by one below. Skipping S1+S2 wholesale overrode a persisted ?BCAST,OUT,S2,ON
+    // with the Kyber on S1 (tracker #14). A real Maestro on S1 with NO ?MAESTRO slot now gets
+    // broadcasts - configure its slot (or ?BCAST,OUT,S1,OFF).
+    // Kyber targets are deliberately NOT consulted: ?MAESTRO,CLEAR drops a local slot's Kyber target
+    // with it (WCB_Maestro.cpp dropLocalKyberTargets), so a freed port is a normal port, and a skip keyed
+    // on kyberTargets would override its ?BCAST flags the way #14 did (tracker #73 D7).
     for (int i = 1; i <= 5; i++) {
-        if ((i == 1 && Maestro_Remote) || 
-            (i <= 2 && Kyber_Local) || 
+        if ((i == 1 && Maestro_Remote) ||
+            (Kyber_Local && i == kyberLocalPort) ||
             isSerialPortPWMOutput(i) ||
             i == sourceID || !serialBroadcastEnabled[i - 1]) {
             continue;
@@ -7098,12 +7454,39 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
         if (debugEnabled) { Serial.printf("Sent to S0/USB: %s\n", cmd.c_str()); }
     }
 
-    // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage)
+    // Always send via ESP-NOW broadcast (loop prevention is inside sendESPNowMessage).
+    // A '{' payload needs no special case here: sendESPNowMessage already sends target-0 JSON
+    // as an ETM frame but UNTRACKED (bestEffortTelemetry), so it is never retried. The
+    // double-processing seen on the bench came from WCB_Client's ensured broadcast, and is
+    // fixed there - forcing useETM=false here only changed the frame format.
     sendESPNowMessage(0, cmd.c_str());
     if (debugEnabled && !lastReceivedViaESPNOW) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
 }
 
 // processIncomingSerial for each serial port
+// True while a Kyber bridge task is draining this LOCAL Maestro port: forwardMaestroDataToRemoteKyber
+// and forwardMaestroDataToLocalKyber read EVERY local Maestro port, not a fixed one. The parser must
+// then stay off it, or each Maestro frame is split between two readers - a local Maestro on S2 of a
+// Maestro_Remote board lost ~22% of its bytes to the parser (HIL kyber.maestro_s2_single_reader). The
+// terms mirror the tasks' own gates exactly, so once no task is reading (e.g. after ?KYBER,CLEAR) the
+// port goes back to the parser instead of going unread. Remote proxy slots never count
+// (isSerialPortUsedForMaestro checks local slots only), and USB (port 0) never does.
+static bool maestroPortOwnedByKyberBridge(int port) {
+  if (port < 1 || port > 5 || !isSerialPortUsedForMaestro(port)) return false;
+  const bool remoteDraining = kyberRemoteTaskStarted && (Maestro_Remote || Kyber_Local);
+  const bool localDraining  = kyberLocalTaskStarted && kyberLocalPort != 0;
+  return remoteDraining || localDraining;
+}
+
+// Clear a port's line buffer after a line. A String keeps its capacity through `= ""`, so one long
+// line (a Wizard push chain, a ?SEQ,SAVE, a pasted backup) used to pin that much heap per port for
+// the rest of the boot - ~3 KB on the classic ESP32's ~24 KB of byte-addressable heap. Assigning
+// NULL frees it (WString copy(nullptr) -> invalidate()); every use below is safe on the empty String.
+static inline void releaseLineBuffer(String &buf) {
+  if (buf.length() > 512) buf = (const char *)nullptr;
+  else buf = "";
+}
+
 void processIncomingSerial(Stream &serial, int sourceID) {
   // The ownership checks below come BEFORE available(): on S3-S5 available() runs
   // EspSoftwareSerial's rxBits(), which assembles bytes from the RX edge buffer and
@@ -7125,6 +7508,9 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   // library (status parsing) via processHCRTick() in loop().
   if (isSerialPortUsedForHCR(sourceID)) return;
 
+  // Skip a local Maestro port while a Kyber bridge task drains it - one reader per port.
+  if (maestroPortOwnedByKyberBridge(sourceID)) return;
+
   // Skip a port whose Maestro is mid get-query — handleMaestroGet is reading the reply
   // bytes and must not have them stolen/mis-parsed as a line command.
   if (sourceID != 0 && sourceID == maestroQueryPort) return;
@@ -7140,6 +7526,11 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   while (serial.available()) {
     if (sourceID != 0 && sourceID == maestroQueryPort) break;   // a get-query claimed this port mid-drain
     char c = serial.read();
+    // A NUL is never part of a command, but it is what a UART reads from a break - a line pulled low by a
+    // device resetting, a cable being plugged, or a sender re-configuring its pin. Kept, it made the whole
+    // next line invisible: String counts it, every c_str() consumer stops at it, so the line was broadcast
+    // to every port and the mesh as an EMPTY command and the real command was lost (tracker #79).
+    if (c == '\0') continue;
     if (c == '\r' || c == '\n') {  // End of command
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
@@ -7149,7 +7540,7 @@ void processIncomingSerial(Stream &serial, int sourceID) {
           // inside wdpDaHandleLine — announces come from ports 1-5.)
           if (serialBuffer.startsWith("@WDP")) {
             wdpDaHandleLine(sourceID, serialBuffer.c_str());
-            serialBuffer = "";
+            releaseLineBuffer(serialBuffer);
             continue;
           }
           // MGMT commands are internal relay traffic — gate under debugMGMT, not debugEnabled
@@ -7168,8 +7559,8 @@ void processIncomingSerial(Stream &serial, int sourceID) {
           // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
 
-            // Clear buffer for next command
-          serialBuffer = "";
+            // Clear buffer for next command (and give a long line's heap back)
+          releaseLineBuffer(serialBuffer);
       }
     } else {
       serialBuffer += c;
@@ -7242,8 +7633,12 @@ void processSerialCommandHelper(String &data, int sourceID) {
             
             if (providedChecksum.equals(calculatedChecksumStr)) {
                 Serial.println("✓ Command checksum VERIFIED");
-                // Enqueue the command WITHOUT the checksum
-                enqueueCommand(cmdWithoutChecksum, sourceID);
+                // Split the verified chain, do not enqueue it whole: a chain whose FIRST command
+                // starts with ?C landed here instead of in the other checksum branch, and
+                // enqueueCommand ran the lot as a single mangled command. Hand off to the worker
+                // (NOT parseCommandsAndEnqueue, which would re-enter the checksum gate and abort a
+                // payload legitimately containing an earlier checksum token).
+                parseCommandsNoChecksum(cmdWithoutChecksum, sourceID, -1, -1);
             } else {
                 Serial.println("✗ Command checksum FAILED!");
                 Serial.println("  Provided:   " + providedChecksum);
@@ -7267,8 +7662,9 @@ void processSerialCommandHelper(String &data, int sourceID) {
     // the rest as independent commands.  All ?-prefixed commands go through
     // parseCommandsAndEnqueue which has proper ?SEQ,SAVE boundary logic.
     // isTimerCommand() uses the live CommandCharacter variable — no hardcoding.
-    if (!data.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(data)) {
-        parseCommandGroups(data);
+    if (!data.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(data) &&
+        !chainCarriesValueVerb(data)) {
+        parseCommandGroups(data, sourceID);   // keep the source port across the timer path
         return;
     }
 
@@ -7394,9 +7790,16 @@ void serialCommandTask(void *pvParameters) {
 
         // Handle Serial1 and Serial2 based on mode
         if (Kyber_Local) {
-            // Skip Serial1 and Serial2 — handled by the Kyber task (S1 is the Maestro side,
-            // S2 the historical Kyber port). Deliberately unchanged: the Kyber task drains both
-            // regardless of kyberLocalPort, so draining either here would race it.
+            // Only the Kyber's own port belongs to the Kyber task. KyberLocalTask reads exactly
+            // kyberLocalPort plus the local Maestro ports (forwardDataFromKyber /
+            // forwardMaestroDataToLocalKyber), and processIncomingSerial already drops a Maestro
+            // port a bridge task drains (maestroPortOwnedByKyberBridge). Skipping S1 AND S2 here
+            // regardless left the other hardware port with no reader at all: Kyber on S1 made S2 a
+            // dead command port, and Kyber on S2 with the Maestro elsewhere did the same to S1
+            // (tracker #14, HIL kyber.local_port_s1_frees_s2). Before the reboot that starts
+            // KyberLocalTask, kyberOwned still keeps the parser off the Kyber port (the deaf window).
+            if (kyberOwned != 1 && !isSerialPortRawMapped(1)) processIncomingSerial(Serial1, 1);
+            if (kyberOwned != 2 && !isSerialPortRawMapped(2)) processIncomingSerial(Serial2, 2);
         } else if (Maestro_Remote) {
             // Process Serial2 only if not raw-mapped
             if (!isSerialPortRawMapped(2)) {
@@ -7770,7 +8173,7 @@ bool addTemporaryPeer(uint8_t id) {
   // the reaper's "==0" guard skips it forever (leaked slot), and a RE-adopted peer would carry
   // its stale pre-eviction timestamp and get evicted again within one loop tick (adopt/evict
   // flap). NOT online=true — a temporary peer must outlive the shorter ETM offline threshold.
-  boardTable[idx].lastSeenMs = millis();
+  boardStampSeen(idx);
   rebuildActivePeers();
   return wcbPeerActive[idx];
 }
@@ -7805,7 +8208,7 @@ void removeActivePeer(uint8_t id) {
   // undisturbed — otherwise we'd falsely mark a live peer offline and mis-tally
   // its pending broadcast ACKs as failures.
   if (!wcbPeerActive[idx] && !isSpecial) {
-    boardTable[idx].online = false;
+    boardMarkOffline(idx);
     etmClearPeerFromPending(idx);   // drop any ACK expectations referencing it
   }
 }
@@ -7829,7 +8232,7 @@ void syncActivePeerRegistrations() {
       esp_now_add_peer(&p);
     } else if (!shouldHave && have) {
       esp_now_del_peer(WCBMacAddresses[i]);
-      boardTable[i].online = false;
+      boardMarkOffline(i);
     }
   }
 }
@@ -7902,7 +8305,64 @@ void clearAllLearnedPeers() {
   if (n > 0) Serial.printf("[PEER] dropped %d learned peer(s)\n", n);
 }
 
+// Install the UART0 (USB/S0) driver from a task pinned to CORE 0, so its RX interrupt is
+// allocated there (uart_driver_install passes intr_alloc_flags 0 = the calling core,
+// esp32-hal-uart.c). setup() runs on core 1, and core 1 is where every protected soft-serial
+// write masks interrupts, one byte at a time (applySoftSerialIntTx, CLAUDE.md rule 13). With the
+// UART0 ISR held off there while a line streams in, the classic ESP32 RX FIFO count - which the
+// IDF itself calls "not credible" and rebuilds from the read/write pointers (uart_ll.h,
+// uart_ll_get_rxfifo_len) - can resolve wrong, and the driver reads stale FIFO slots: bytes of an
+// EARLIER line at the same FIFO offset. Measured on the HIL bench (tracker #57): a ';S4,...'
+// typed while W1 bit-banged a mesh raw block to protected S3 arrived as '7S4,...' / '784,...'
+// and was broadcast as text to every port, in about half of all runs; with S3 unprotected, 0 of 6.
+// updateBaudRate() (the OTA baud switch) only reprograms the divisor, so the ISR stays on core 0.
+static void beginUsbSerialOnCore0(unsigned long baud) {
+  struct Req { unsigned long baud; SemaphoreHandle_t done; };
+  Req req = { baud, xSemaphoreCreateBinary() };
+  if (!req.done ||
+      xTaskCreatePinnedToCore([](void *p) {
+          Req *r = (Req *)p;
+          Serial.begin(r->baud);
+          xSemaphoreGive(r->done);
+          vTaskDelete(NULL);
+        }, "usbSerialBegin", 4096, &req, 5, NULL, 0) != pdPASS) {
+    Serial.begin(baud);   // could not make the task: begin here, on core 1, as before
+  } else {
+    xSemaphoreTake(req.done, portMAX_DELAY);
+  }
+  if (req.done) vSemaphoreDelete(req.done);
+}
+
+// A CPU-only reset - ESP.restart() from ?reboot, an OTA, a config push's deferred restart, or a
+// panic (SW_CPU_RESET / *_PANIC) - leaves the GPIO peripheral as it was, including each pin's
+// interrupt TYPE and ENABLE bits. S3-S5 soft RX and ESP32 PWM input arm LEVEL interrupts (#78). A
+// restart that catches one armed leaves it armed at boot with no handler behind it: once
+// gpio_install_isr_service() routes the GPIO interrupt, the IDF dispatcher finds no callback, nothing
+// flips the level, the status re-asserts at once, and the interrupt watchdog panics - a CPU reset
+// again, so the board boot-loops until the wire changes level. Arduino's pinMode would re-arm it on
+// its own: __pinMode copies the pin's current int_type into gpio_config (esp32-hal-gpio.c), which
+// then enables it. That exact loop hit wcb_probe 6 on the HIL bench (#78). Nothing has attached a
+// GPIO interrupt when this runs, so any pin with a type or enable set is stale by definition; it
+// clears every valid pin rather than this revision's RX pins, because the pin map is not loaded yet
+// and a ?HW change moves them. Must run BEFORE gpio_install_isr_service and before any pinMode.
+// Returns a mask of the pins it cleared (printed once Serial has settled).
+static uint64_t clearStaleGpioInterrupts() {
+  uint64_t cleared = 0;
+  for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
+    if (!GPIO_IS_VALID_GPIO(pin)) continue;
+    if (GPIO.pin[pin].int_type == 0 && GPIO.pin[pin].int_ena == 0) continue;
+    gpio_intr_disable((gpio_num_t)pin);
+    gpio_set_intr_type((gpio_num_t)pin, GPIO_INTR_DISABLE);
+    cleared |= (1ULL << pin);
+  }
+  return cleared;
+}
+
 void setup() {
+  // The sequence-lineage owner (seqOnLoopTask): enqueueCommand stamps a lineage only on this task, so capture it
+  // before anything can enqueue. One handle read - the boot guard below still covers all of setup() that matters.
+  seqLoopTask = xTaskGetCurrentTaskHandle();
+
   // Arm the boot guard FIRST so it covers the entire setup() (including the
   // USB-stabilize and RMT delays below). Disarmed at the very end of setup().
   bootGuardArm();
@@ -7923,7 +8383,26 @@ void setup() {
   // 8 KB holds ~28 such lines (~3.5 windows). One-time allocation, and it only
   // affects Serial (UART0 / the USB programming port), not device ports 1-5.
   Serial.setRxBufferSize(8192);
-  Serial.begin(115200);
+  beginUsbSerialOnCore0(115200);   // RX ISR on core 0 - see the helper above (tracker #57)
+  // Soft-serial RX (S3-S5) decodes bits from the TIME each edge's GPIO interrupt starts, so a
+  // late edge is a wrong bit. Arduino installs the GPIO ISR service at level 1, the same level as
+  // the UART and RMT interrupts, so an S1/S2 UART or RMT interrupt in progress held an edge back:
+  // 19200 in measured 18-19 of 20 lines exact. Installed here first at level 3, edges pre-empt
+  // those; Arduino's attachInterrupt accepts an already-installed service (esp32-hal-gpio.c).
+  // Runs on core 1, like the soft ports themselves - keep it before any attachInterrupt / Serial3.begin.
+  // NOT ESP_INTR_FLAG_IRAM: that keeps the service live while the flash cache is off (every NVS
+  // write), and every attachInterrupt handler is reached through Arduino's __onPinInterrupt, which
+  // is in FLASH (esp32-hal-gpio.c:194, no IRAM_ATTR unless CONFIG_ARDUINO_ISR_IRAM; the map puts it
+  // at 0x401a....). rxBitISR and pwmISR* being IRAM does not help - an S3-S5 RX or PWM-input edge
+  // during an NVS write would panic ("Cache disabled but cached memory region accessed"), and a PWM
+  // input pulses every 20 ms. Without the flag, edges wait out the write, as before this service.
+  // Disarm any level interrupt a CPU-only restart left behind FIRST - see clearStaleGpioInterrupts.
+  const uint64_t staleGpioIrqs = clearStaleGpioInterrupts();
+  gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
+  // Arduino's first attachInterrupt tries to install the service again, gets INVALID_STATE (which it
+  // accepts) and the IDF logs it as an ERROR on every boot. Mute the gpio tag until setup() ends.
+  const esp_log_level_t gpioLogLevel = esp_log_level_get("gpio");
+  esp_log_level_set("gpio", ESP_LOG_NONE);
   // Count RX overflows instead of losing them silently. Runs on the UART event
   // task, so it does NOTHING but increment — no Serial output, no allocation.
   Serial.onReceiveError([](hardwareSerial_error_t e) {
@@ -7931,6 +8410,11 @@ void setup() {
   });
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
+  if (staleGpioIrqs) {
+    Serial.print("[BOOT] Cleared a stale GPIO interrupt left armed by the restart on GPIO");
+    for (int pin = 0; pin < 64; pin++) if (staleGpioIrqs & (1ULL << pin)) Serial.printf(" %d", pin);
+    Serial.println();
+  }
 
   // Create the RC-Controller JSON relay queue before ESP-NOW starts so the
   // first incoming broadcast can be safely enqueued.  See enqueueRcJsonRelay
@@ -8061,9 +8545,21 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial2.setTxBufferSize(1024);
 
   if (Kyber_Local) {
-      // Kyber Local REQUIRES both Serial1 (Maestro) and Serial2 (Kyber)
-      Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
-      Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+      // kyberLocalPort (S1 or S2 - S3-S5 are refused) carries the Kyber and always begins: canUsePWMOnPort
+      // refuses PWM there, and initPWM() above has already dropped any saved PWM on it. The other hardware port
+      // is an ordinary port - a Maestro, a device, a command port or PWM (tracker #14, #73 D4) - so it begins
+      // unless a PWM input/output owns its pins, exactly as in the no-Kyber branch. Beginning it anyway would
+      // re-attach the UART over the pin initPWM() had just made a PWM pin (HIL kyber.local_free_port_takes_pwm).
+      if (kyberLocalPort == 1 || (!isSerialPortUsedForPWMInput(1) && !isSerialPortPWMOutput(1))) {
+          Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+      } else {
+          Serial.println("Serial1 reserved for PWM - skipping UART init");
+      }
+      if (kyberLocalPort == 2 || (!isSerialPortUsedForPWMInput(2) && !isSerialPortPWMOutput(2))) {
+          Serial2.begin(baudRates[1], SERIAL_8N1, SERIAL2_RX_PIN, SERIAL2_TX_PIN);
+      } else {
+          Serial.println("Serial2 reserved for PWM - skipping UART init");
+      }
   } else if (Maestro_Remote) {
       // Kyber Remote REQUIRES Serial1 (Maestro only)
       Serial1.begin(baudRates[0], SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
@@ -8292,14 +8788,17 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   esp_now_register_send_cb(espNowSendCallback);
   // Serial.println("ESP-NOW send callback registered");
   // Create FreeRTOS Tasks-
+  // Record the bridge tasks FIRST: serialCommandTask consults these on its first pass.
+  kyberLocalTaskStarted  = Kyber_Local;
+  kyberRemoteTaskStarted = Maestro_Remote;
   xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
 
   // If bridging is enabled, create the bridging task
-  if (Kyber_Local) {
+  if (kyberLocalTaskStarted) {
       xTaskCreatePinnedToCore(KyberLocalTask, "Kyber Local Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Kyber_Local Task Created");
   }    
-  if (Maestro_Remote) {
+  if (kyberRemoteTaskStarted) {
       xTaskCreatePinnedToCore(KyberRemoteTask, "Kyber Remote Task", 4096, NULL, 1, NULL, 1);
       Serial.println("Maestro_Remote Task Created");
   }
@@ -8330,6 +8829,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // setup() reached the end successfully — cancel the boot guard so the
   // running board can never be reset by it. (loop() only starts after this
   // returns, so from here on a healthy board is never watched by the guard.)
+  esp_log_level_set("gpio", gpioLogLevel);   // see gpio_install_isr_service above
   bootGuardDisarm();
   // Serial.println("------------- Setup Complete-----------------");
 }
@@ -8364,21 +8864,37 @@ void loop() {
   if (!commandQueue) return;
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
+    const size_t cmdLen = inItem.cmd ? strlen(inItem.cmd) : 0;
     String commandStr(inItem.cmd);
-    free(inItem.cmd);
+    SeqPath itemPath = {};                  // this item's lineage sits in front of its text (enqueueCommand)
+    if (inItem.cmd) {
+      itemPath.depth = inItem.seqDepth;
+      if (itemPath.depth)
+        memcpy(itemPath.key, commandItemBlock(inItem.cmd, inItem.seqDepth), itemPath.depth * sizeof(uint32_t));
+      free(commandItemBlock(inItem.cmd, inItem.seqDepth));   // NOT inItem.cmd - it points past the lineage
+    }
+    // A String whose allocation fails comes back EMPTY (and c_str() NULL), not as an error. On an
+    // exhausted heap that empty command fell through to processBroadcastCommand and on into
+    // sendESPNowMessage, which reads message[0]. Drop it and say so instead.
+    if (cmdLen > 0 && commandStr.length() == 0) {
+      Serial.printf("Out of memory: dropped a %u-character command.\n", (unsigned)cmdLen);
+      continue;
+    }
     // Restore the origin captured at enqueue so this command's ESP-NOW re-broadcast
     // decision is correct regardless of what else touched the global since. This is
     // what lets a peer-triggered stored sequence still fan its commands out to the
     // other WCBs (the sequence body is enqueued with espnowOrigin=false).
     lastReceivedViaESPNOW = inItem.espnowOrigin;
     inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
+    seqCurPath     = itemPath;              // this item's call stack, for recallStoredCommand's cycle guard
     handleSingleCommand(commandStr, inItem.sourceID);
     // A sequence-body item's flag must NOT persist past its own dispatch: a recall's body
     // commands drain last, so without this the global would latch true and every later
     // top-level recall would be misread as nested and skip its mesh fan-out. The per-item
     // restore above re-establishes the correct value for the next item; the sources
     // (serial/ETM/MGMT/receive) reset it too, so this just closes the drain-boundary leak.
-    inSequenceBody = false;
+    inSequenceBody   = false;
+    seqCurPath.depth = 0;                   // same drain-boundary reason: nothing outside a dispatch has a lineage
     lastCommandProcessedMs = millis();   // deferred-restart quiet-window clock (see below)
   }
 
@@ -8390,10 +8906,13 @@ void loop() {
   // The quiet window matters — a Wizard push is ACK-paced, so it sends the NEXT command as
   // soon as this board answers, and the queue is briefly empty between every pair. Each
   // command processed pushes the deadline out, so the restart lands after the push ends.
-  if (pwmRebootPending) {
+  if (pwmRebootPending || rebootPending) {
     if (millis() - lastCommandProcessedMs >= PWM_REBOOT_QUIET_MS) {
+      const bool forPWM = pwmRebootPending;
       pwmRebootPending = false;
-      Serial.println("Rebooting now to apply PWM configuration...");
+      rebootPending    = false;
+      Serial.println(forPWM ? "Rebooting now to apply PWM configuration..."
+                            : "Rebooting now...");
       Serial.flush();
       delay(150);              // let the line clear the UART before the reset
       ESP.restart();

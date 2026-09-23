@@ -21,7 +21,7 @@ struct PWMMapping {
 };
 
 extern PWMMapping pwmMappings[MAX_PWM_MAPPINGS];
-extern int activePWMCount;
+
 
 // PWM stability tracking (one per input port)
 struct PWMStabilityTracker {
@@ -52,7 +52,8 @@ void loadPWMMappingsFromPreferences();
 void processPWMPassthrough();
 void configureRemotePWMOutput(int serialPort);
 bool isSerialPortUsedForPWMInput(int port);
-bool canUsePWMOnPort(int port);   // false if the port is reserved (e.g. Kyber) and can't do PWM
+// quiet=true skips the refusal print - for callers that pass over a reserved port routinely.
+bool canUsePWMOnPort(int port, bool quiet = false);   // false if the port is reserved (e.g. Kyber)
 
 
 extern int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS];  // Ports configured as PWM output only
@@ -61,6 +62,11 @@ extern int pwmOutputCount;
 // >0 = auto-configured by a WDP PWMTARGET advert from that source WCB. Only a WDP-tagged
 // port is eligible for self-heal removal when its driver stops advertising it.
 extern uint8_t pwmOutputAutoSrc[MAX_PWM_OUTPUT_PORTS];
+// What the port's broadcast flags were when PWM claimed it. Releasing the port used to force
+// them to ON/unblocked, wiping a deliberate OFF and persisting that - and WDP self-heal did it
+// with no user action. Parallel to pwmOutputAutoSrc: same index, same compaction.
+extern bool pwmOutputPrevBcstOut[MAX_PWM_OUTPUT_PORTS];
+extern bool pwmOutputPrevBlockIn[MAX_PWM_OUTPUT_PORTS];
 
 void addPWMOutputPort(int port, uint8_t wdpAutoSrc = 0);  // wdpAutoSrc>0 tags a WDP self-config
 // Returns true when the port really was a PWM output and has been removed. Callers use that to

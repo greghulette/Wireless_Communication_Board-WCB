@@ -63,13 +63,19 @@ jobs:
               sleep $((n*10)); n=$((n+1))
             done
           }
-          retry arduino-cli lib install "EspSoftwareSerial@8.1.0"
           retry arduino-cli lib install "Adafruit NeoPixel@1.12.5"
           # HumanCyborgRelationsAPI (HCRVocalizer) is NOT installed as a library.
           # The WCB-patched, serial-only copy is bundled directly inside the
           # sketch at Code/WCB/src/HumanCyborgRelationsAPI and pulled in with a
           # relative #include, so it compiles with no install step here — and can
           # never be shadowed by a different copy on the build machine.
+          #
+          # EspSoftwareSerial is NOT installed either, for the same reason: a
+          # WCB-patched 8.1.0 (level-triggered soft-serial RX on the classic ESP32,
+          # ESP32 erratum GPIO-3.14, tracker #78) is bundled at
+          # Code/WCB/src/EspSoftwareSerial. Installing the stock one would let a
+          # stray angle-bracket SoftwareSerial.h include compile it next to the
+          # patched copy; without it, such an include fails this build loudly.
           #
           # WcbCmd (shared ;-command translators, compiled by BOTH this firmware and
           # NaviCore) is CLONED straight from GitHub — NOT `arduino-cli lib install` —

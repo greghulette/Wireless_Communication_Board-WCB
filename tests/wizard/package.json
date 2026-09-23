@@ -1,0 +1,12 @@
+{
+  "name": "wcb-wizard-tests",
+  "private": true,
+  "description": "Playwright tests for the WCB Wizard. Board tests run under the HIL harness: python tests/hil/run.py \"wizard.*\"",
+  "scripts": {
+    "test": "playwright test",
+    "unit": "node --test \"unit/*.test.js\""
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

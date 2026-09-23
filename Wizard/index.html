@@ -664,13 +664,11 @@
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
-          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to.">i</span></label>
+          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to. Serial 1 or 2 only: Serial 3-5 are software serial and cannot receive the Kyber at 115,200, and a port with a local Maestro can't also be the Kyber port.">i</span></label>
+          <!-- Rebuilt by updateKyberPortDropdown() (app.js), which offers S1/S2 minus claimed ports. -->
           <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2" selected>Serial 2</option>
-            <option value="3">Serial 3</option>
-            <option value="4">Serial 4</option>
-            <option value="5">Serial 5</option>
           </select>
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">

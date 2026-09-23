@@ -20,7 +20,7 @@
                       // breaks the case-sensitive Linux CI build. Lowercased to
                       // compile everywhere — identical to what Windows/macOS
                       // already resolve it to.
-#include <SoftwareSerial.h>
+#include "../EspSoftwareSerial/SoftwareSerial.h"   // WCB: the vendored copy (tracker #78)
 #include <Wire.h>
 
 // WCB patch: was 32. A <QD,...> dataframe body with 3-digit emotions, a 4-digit

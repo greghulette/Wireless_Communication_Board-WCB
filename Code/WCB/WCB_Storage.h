@@ -96,7 +96,13 @@ struct SerialMonitorMapping {
     uint8_t inputPort;
     uint8_t outputCount;
     SerialMonitorOutput outputs[10];
-    bool rawMode;  // ← ADD THIS
+    bool rawMode;
+    // What the port's broadcast flags were BEFORE this mapping claimed it. Creating a mapping
+    // auto-disables both; removing it used to force them back to ON/unblocked whatever the user
+    // had set, and ?backup then reported a state the board was not in. Defaults match that old
+    // behaviour, so a mapping saved by earlier firmware restores exactly as it always did.
+    bool prevBroadcastOut;   // serialBroadcastEnabled[port-1] before the mapping
+    bool prevBlockIn;        // blockBroadcastFrom[port-1]     before the mapping
 };
 
 // Kyber target structure
@@ -141,11 +147,28 @@ void loadBaudRatesFromPreferences();
 void resetBroadcastSettingsNamespace();
 void printBaudRates();
 bool isTimerCommand(const String &input);
+// Defined in WCB.ino: true when a chain carries a verb whose value may contain the delimiter
+// (?SEQ,SAVE / ?CS / ?MGMT,), which must keep it away from the timer splitter.
+bool chainCarriesValueVerb(const String &data);
 
 // A stored-sequence key is at most this long: the ESP32 NVS key limit. NVS also compares only this many characters
 // of a lookup, so every path that reads, recalls or erases by a user-given key must refuse a longer one — otherwise
 // "HILABCDEFGHIJKLM" reads, runs or erases the sequence stored under "HILABCDEFGHIJKL".
 #define SEQ_KEY_MAX_LEN 15
+
+// Sequence recall lineage - the cycle guard's call stack (recallStoredCommand, WCB.ino). Each queued command
+// carries the keys whose expansion produced it (FNV-1a 32 of the EXACT key, outermost first), so a recall is
+// refused only when its key is on its OWN lineage (A->A, A->B->A), never because a sibling call to the same
+// sub-sequence ran earlier (tracker #47). depth is the nesting depth; SEQ_MAX_NESTING caps it.
+#define SEQ_MAX_NESTING 8
+struct SeqPath { uint8_t depth; uint32_t key[SEQ_MAX_NESTING]; };
+extern SeqPath seqCurPath;                // WCB.ino - LOOP TASK ONLY
+bool     seqOnLoopTask();                 // WCB.ino - true on the Arduino loop task (setup()/loop())
+uint32_t seqKeyHash(const String &key);   // WCB_Storage.cpp
+// Free commandQueue slots right now (WCB.ino). A NESTED expansion must leave SEQ_QUEUE_RESERVE of them free for
+// console/mesh commands, or recallCommandSlot refuses it whole (see there).
+unsigned commandQueueSpaces();
+#define SEQ_QUEUE_RESERVE 16
 
 void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
@@ -195,6 +218,7 @@ void loadKyberSettings();
 void printKyberSettings();
 void saveKyberTargets();
 void loadKyberTargets();
+bool kyberModeReservesPort(int port);   // the one port a Kyber mode takes from devices/PWM (WCB_Storage.cpp)
 // Add-only reconcile: give every configured Maestro that lacks one an enabled
 // kyberTargets[] entry, WITHOUT disturbing existing entries (or their documented
 // remote ports). Used when WDP auto-learns a remote Maestro so a Kyber-LOCAL host

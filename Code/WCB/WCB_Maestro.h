@@ -63,6 +63,9 @@ int8_t findSlotByMaestroIDAndTarget(uint8_t maestroID, uint8_t remoteWCB);
 int8_t findSlotByMaestroIDPortTarget(uint8_t maestroID, uint8_t serialPort, uint8_t remoteWCB);
 int8_t findEmptySlot();
 bool isMaestroConfigured(uint8_t maestroID);
+// True when a LOCAL Maestro slot owns this serial port. Used by the PWM guards so a ;P or a
+// ?MAP,PWM cannot reconfigure a live Maestro UART's TX pin out from under it.
+bool isSerialPortUsedForMaestro(int port);
 // defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
 void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
                         char delimiter, bool printToSerial = false,

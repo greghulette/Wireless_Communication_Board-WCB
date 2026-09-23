@@ -7,7 +7,8 @@ and new sequences back.
 The problem it solves: anything that offers "run a sequence" needs the list of sequences.
 Hard-coding it goes stale silently the first time someone saves one from the Wizard.
 
-Three operations, covered in §3 (list), §3a (fetch one), §3b (write).
+Three operations, covered in §3 (list), §3a (fetch one), §3b (write). §3c covers how a
+recalled sequence runs: nested recall and the cycle guard.
 
 ---
 
@@ -180,10 +181,23 @@ Same 230-byte frag struct, through the same `sendResultFrags()`. Payload:
 `status` is `OK`, `NOTFOUND`, or `TOOBIG`. The value may itself contain commas, so a
 parser takes everything after the **second** comma verbatim.
 
+**The reply is sent once and nothing acknowledges it.** Every chunk is one ESP-NOW
+broadcast, 20 ms apart, with no second pass (unlike the config pull, which sends two).
+Lose one chunk and the requester gets nothing: no partial value, no error. Its
+half-built session is cleared silently after 10 s. So a requester must retry on
+timeout, at least 1.5 s after its last request for the same key, or the dedup above
+eats the retry. On the HIL bench, about 1 in 4 replies of 5-7 chunks was lost on the
+first try.
+
 **`TOOBIG` is reported explicitly.** `sendResultFrags()` silently refuses anything
 over 16 chunks, so the handler checks the budget first and answers with a status
 instead of nothing. Silence is what makes the config pull unusable here (§1) and
 reintroducing it in the replacement would recreate the very bug this routes around.
+In practice `TOOBIG` is rare. The budget allows a 2,903-character value, but NVS on a
+configured board refuses long values well before that, and the limit falls as NVS fills. On
+2026-09-22 bench board W1 refused 1,400 characters and stored 1,200. So `TOOBIG` only appears
+if a board once stored a longer value. HIL `inv.seqget_largest` finds the largest value a
+board actually stores and round-trips it.
 
 ### Why one at a time
 
@@ -223,6 +237,16 @@ is receive-only (it parses inbound `bb`/`bc`/`bd` and NACKs; there is no `sendBu
 A second, bespoke write path would drift from the one the Wizard and the console
 already use. Don't add one.
 
+**A long save costs about 7× its length in heap while it runs.** The line is copied at
+almost every layer of the dispatcher before `saveStoredCommandsToPreferences()` takes its
+own copy: the port's line buffer, the queue item, `args`, its upper-cased twin and the SEQ
+arguments. A classic-ESP32 board has about 24 KB of byte-addressable heap after boot, so
+a value of about 2,400 characters or more either fails with "Out of memory: could not copy"
+or reaches NVS with little heap left. In practice NVS refuses such values anyway (§3a).
+`?STATS`'s "min free since boot" is the sum of each heap region's own low point, not one
+moment's free heap. After such a save it can read near 0 until the next reboot, without the
+board ever having been out of memory (tracker #75).
+
 **Key rules** (enforced client-side so a bad write fails loudly instead of silently):
 1–15 chars (NVS key limit), and **no comma** — `saveStoredCommandsToPreferences()`
 takes the key as everything before the first comma, so a comma would truncate it on
@@ -233,6 +257,17 @@ run or erase the sequence stored under the 15-character prefix. A longer key is 
 found and never reaches NVS; erasing by such a name still drops it from `key_list`, where
 firmware before d83042e could list a key it had failed to store. The MP3 and DFPlayer
 `ONERR` callback key is held to the same 15 characters.
+
+**A stored value ends only at delimiter + function identifier.** `?SEQ,SAVE`, `?CS` and `?MGMT,`
+carry values that may themselves contain the command delimiter and a `;t` token, so only the
+splitter that knows that boundary (`parseCommandsNoChecksum`) may walk such a chain. The timer
+splitter (`parseCommandGroups`) does not: it cuts on the bare delimiter and reads any `;t` as an
+inter-group delay, which truncated the stored value and ran its tail as live commands. Chains
+carrying one of those verbs are kept off the timer path by `chainCarriesValueVerb()` (`WCB.ino`) at
+all four routing gates - local serial, ETM receive, plain receive, and sequence recall. The test
+this replaced looked only at the chain's FIRST character, so a chain that merely began with
+something else still went to the naive walker. The cost is deliberate: a chain mixing a real `;t`
+timer with a `?SEQ,SAVE` loses its inter-group timing, traded against a truncated value in NVS.
 
 ### Confirming a write
 
@@ -260,6 +295,72 @@ distinction.
 
 The hash is **order-sensitive** (`key_list` preserves save order). That is intended: it
 answers "did *my* inventory change", not "do two boards match".
+
+---
+
+## 3c. Running sequences: nested recall and the cycle guard
+
+**A nested `;C` is enqueued, not run on the C++ stack.** `recallCommandSlot()` expands a body
+into the command queue and returns, so a recall inside a body runs when its queue item is
+dispatched, and the body it expands drains *behind* whatever was already queued. A body's
+own commands therefore run before the bodies it calls: `;CBEEP^;S1x` prints `x` first.
+
+**Each queued command carries its lineage**: the keys whose expansion produced it, outermost
+first. `CommandQueueItem::seqDepth` counts them, and the entries themselves are FNV-1a 32
+hashes of the exact key bytes (`seqKeyHash()`), stored in front of the command text in the
+same allocation. The `loop()` drain restores an item's lineage into `seqCurPath` before
+dispatching it. `recallStoredCommand()` then:
+
+- refuses a key already on that lineage: `Sequence '<key>' recalls itself (directly or in a loop) — refusing to expand it again. Break the cycle in the stored sequence.`
+- refuses at depth 8 (`SEQ_MAX_NESTING`): `Sequence nesting deeper than 8 — refusing to expand '<key>'.`
+
+`recallCommandSlot()` pushes the key while it enqueues the body. A body containing `;t` goes
+to the timer splitter, which captures the lineage in `commandGroupsPath` and re-applies it as
+each group fires, so the lineage survives the delay.
+
+As a result, `A→A`, `A→B→A` and a `;t`-paced self-recall (`;S1x^;t200^;CSELF`) are refused,
+while the same sub-sequence can be called any number of times, at any depth. The key compare is
+case-sensitive like the NVS lookup, and a hash collision can only over-refuse, never miss a cycle.
+Every endless expansion either repeats a key on some lineage or passes depth 8, so the
+guard also stops the queue refilling forever.
+
+A top-level recall, a recall received over the mesh, and an MP3/DFPlayer `ONFIN`/`ONERR` body
+each start a fresh lineage. A ring that crosses boards (`;W2,;C…` on both sides) is invisible
+to any one board's guard.
+
+**A nested expansion must fit, whole.** Back-to-back calls with no `;t` between them expand
+every call before any leaf runs, because the queue is FIFO. `recallCommandSlot()` therefore
+refuses a *nested* expansion (lineage depth > 0, no `;t` in the body) when its token count plus
+`SEQ_QUEUE_RESERVE` (16) exceeds the free slots of the 200-slot queue. It prints one line,
+`Command queue nearly full — not expanding nested sequence '<key>'. Space repeated calls with ;T.`,
+and enqueues nothing. Without that check a full queue printed `Command queue is full!
+Discarding command.` once per dropped token on UART0, which has no TX buffer. That stalled
+`loop()`, dropped console commands and cut bodies short. Top-level recalls and timer-chain
+bodies are not checked, since the second enqueues one group at a time.
+
+**Only one timer chain runs per board.** A called sequence that contains `;t` replaces the chain
+that is running (`parseCommandGroups()`, "Timer sequence replaced mid-run"), so the caller's
+remaining timed steps are dropped. Reused sub-sequences should not contain `;t`; the caller
+should hold the delays.
+
+Constraints:
+
+- `seqCurPath` is **loop-task only**. `enqueueCommand()` stamps a lineage only when
+  `seqOnLoopTask()` is true, and `seqLoopTask` is captured first thing in `setup()`. A command
+  enqueued by `serialCommandTask` or the WiFi callback is top-level by construction. Off the
+  loop task, `parseCommandGroups()` writes only `commandGroupsPath.depth` (0), so a concurrent
+  copy on the loop task is always a consistent path. Moving the drain, the recall or timer firing
+  off the loop task would empty every lineage, and `A→A` would run away again.
+- Anything that dequeues `commandQueue` frees `commandItemBlock(item.cmd, item.seqDepth)`,
+  **never** `item.cmd`, which points past the lineage.
+  `grep -n "free(.*\.cmd)" Code/WCB/WCB.ino` must find nothing.
+- Never go back to a global key set, and never pop one "when an expansion drains". In
+  `;CBEEP^;CBEEP` the second call is dispatched while the first BEEP's body is still queued
+  behind it, so it would still be refused. The stack has to belong to each queued item.
+
+HIL: `seq.cycle_guard` (refusals and the depth limit), `seq.cycle_guard_case`,
+`seq.cycle_guard_reuse` (reuse at every shape, plus a `;t`-paced self-recall), and
+`seq.reuse_queue_reserve` (the nested-expansion reserve).
 
 ---
 
@@ -348,6 +449,12 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 - Client library: `WCBClient` repo, `src/WCB_Client.{h,cpp}` — `onSequenceNames`,
   `requestSequenceNames`, `sequenceNamesPending`, `WCBNeighbor::seqHash`.
 - Wire test: `tests/wdp_wire_test.cpp` → `test_seqhash()`.
+- Nested recall and the cycle guard (§3c): `Code/WCB/WCB.ino` — `recallStoredCommand()` (the
+  guard), `enqueueCommand()` (stamps the lineage), `CommandQueueItem::seqDepth` +
+  `commandItemBlock()`, the `commandQueue` drain in `loop()` (restores `seqCurPath`),
+  `seqOnLoopTask()`; `Code/WCB/WCB_Storage.cpp` — `recallCommandSlot()` (push, queue reserve),
+  `seqKeyHash()`; `Code/WCB/WCB_Storage.h` — `SeqPath`, `SEQ_MAX_NESTING`,
+  `SEQ_QUEUE_RESERVE`; `Code/WCB/command_timer.cpp` — `commandGroupsPath`.
 
 ---
 
@@ -355,6 +462,9 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-23 | New §3c: the cycle guard is a per-item lineage (`seqDepth` + hashes in front of the queued text, restored into `seqCurPath` at drain, pushed by `recallCommandSlot()`, carried across `;t` by `commandGroupsPath`). It replaces the never-popped `activeChainKeys` set, which refused every second call to a sub-sequence in one run and counted a flat body's calls toward the depth limit (tracker #47). A nested expansion that would leave fewer than 16 queue slots free is refused whole, with one line, rather than flooding UART0 with one "queue is full" line per token. Refusal texts and the 8-level limit are unchanged. HIL `seq.cycle_guard_reuse`, `seq.reuse_queue_reserve`. | _(pending)_ |
+| 2026-09-22 | §3a says the SEQVAL reply is sent once and unacknowledged, so a requester must retry on timeout. The first run of `inv.seqget_largest` lost a 7-chunk reply that way (tracker #71). §3a also notes how rarely `TOOBIG` can occur. NVS refuses values long before the 2,903-character relay budget, and a ~2,950-character `?SEQ,SAVE` fails even earlier, on heap. The "38,900-byte largest block" that made that look like a mystery was the classic ESP32's 32-bit-only IRAM heap. ?STATS and the out-of-memory line now report byte-addressable heap (tracker #58). | — |
+| 2026-09-20 | A chain carrying `?SEQ,SAVE`, `?CS` or `?MGMT,` never reaches the timer splitter: the exemption is token-aware (`chainCarriesValueVerb`) instead of a first-character test, so a chain beginning with any other token no longer has its stored value cut at the first `;t` with the tail executed. |
 | 2026-09-15 | Keys longer than 15 characters are refused on read, recall, the `SEQGET` relay and erase, not only on save. NVS matches a lookup on its first 15 characters, so `?SEQ,GET,HILABCDEFGHIJKLM` returned the value stored under `HILABCDEFGHIJKL`, and a clear by the long key would have erased it (found by the HIL test `seq.key_len_15`). | _(pending)_ |
 | 2026-08-17 | Added the **read-one** and **write** halves: `PACKET_TYPE_SEQVAL_REQ`/`SEQVAL_FRAG` (15/16) with a 59-byte keyed request struct, `?SEQ,GET,<key>`, `?MGMT,SEQGET,<n>,<key>`, and `requestSequence`/`onSequenceValue`/`saveSequence`/`deleteSequence` in `WCB_Client`. `TOOBIG`/`NOTFOUND` are explicit statuses rather than silence. Writes reuse the existing `?SEQ,SAVE` command path — no new wire format. **SEQHASH now covers stored values**, so an in-place edit is visible to peers (see `WDP_DESIGN.md`). `MgmtReqSlot` widened to the largest request on that queue and given a `len`, since SEQVAL_REQ is 59 B against the previous 43. | `80f44d9` |
 | 2026-08-17 | Initial version. `PACKET_TYPE_SEQ_REQ`/`SEQ_FRAG` (13/14), `?SEQ,NAMES`, `?MGMT,SEQ,<n>`, WDP TLV `0x13` SEQHASH, `[WDPSEQ:]` dump record, and the `WCB_Client` `onSequenceNames`/`requestSequenceNames` API. | `bbd6bdf` |
