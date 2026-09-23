@@ -112,7 +112,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.13:06.R.SEP.2026';
+const UI_VERSION = '23.19:28.R.SEP.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -883,10 +883,12 @@ function updatePortClaimUI(n) {
       bcout.disabled = true;  bcout.checked = false;
       label.disabled = true;
     } else if (claim.type === 'kyber-reserved') {
-      // Mode-level reservation (Kyber local / remote Maestro): the firmware
-      // refuses WLED/HCR/MP3 configs on this port, so it's hidden from those
-      // dropdowns — but the port itself stays user-configurable (soft claim).
-      claimNote.textContent = 'Reserved: Kyber/Maestro mode';
+      // Maestro REMOTE's reservation of S1 (parser.js evaluatePortClaims; a local Kyber
+      // reserves only its own port, the 'kyber' claim - tracker #73 D4): the firmware
+      // refuses HCR/MP3/DFP/WLED and PWM there (kyberModeReservesPort), so it's hidden
+      // from those dropdowns. It is where REMOTE's Maestro goes (the parser never reads S1 and
+      // broadcasts skip it on a REMOTE board, WCB.ino), so its baud and label stay live (soft claim).
+      claimNote.textContent = 'Maestro remote — S1 kept for the Maestro (no HCR/MP3/DFP/WLED/PWM)';
       baudSel.disabled = false; label.disabled = false;
       bcin.disabled  = false;  bcin.checked  = config.serialPorts[p - 1].broadcastIn  ?? true;
       bcout.disabled = false;  bcout.checked = config.serialPorts[p - 1].broadcastOut ?? true;
@@ -1097,17 +1099,39 @@ function updateKyberPortDropdown(n) {
   const config      = boardConfigs[n];
   const currentPort = config?.kyber?.port;
 
+  // Hardware ports only: the Kyber runs at 115200 and S3-S5 receive in software, so the firmware
+  // refuses ?KYBER,LOCAL there (kyberLocalPortRefused, WCB_Storage.cpp). 'kyber-reserved' is Maestro
+  // REMOTE's reservation of S1, not a claim against the Kyber: onKyberChange re-renders this select
+  // before evaluatePortClaims, so for one render after switching remote -> local S1 still carries it,
+  // and excluding it would hide S1 from the Kyber. Any other claim (a local Maestro, which the
+  // firmware also refuses, HCR/MP3/DFP/WLED, PWM, the Marcduino port, a serial map) filters the port
+  // out, except the port the Kyber is on now: this select is read back on push (syncKyberToConfig),
+  // so hiding the current port would silently move the Kyber. With nothing chosen yet, S2 is the
+  // default, like the bare ?KYBER,LOCAL on a board that is not Kyber local yet and the push's `|| 2`
+  // fallback (parser.js).
   portSel.innerHTML = '';
-  for (let p = 1; p <= 5; p++) {
+  for (let p = 1; p <= 2; p++) {
     const claim = config?.serialPorts?.[p - 1]?.claimedBy;
-    // Exclude ports claimed by anything except the Kyber Maestro port itself
-    if (!claim || claim.type === 'kyber') {
-      const opt = document.createElement('option');
-      opt.value = p;
-      opt.textContent = `Serial ${p}`;
-      if (p === currentPort) opt.selected = true;
-      portSel.appendChild(opt);
-    }
+    if (p !== currentPort && claim && claim.type !== 'kyber' && claim.type !== 'kyber-reserved') continue;
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = `Serial ${p}`;
+    if (p === currentPort || (!currentPort && p === 2)) opt.selected = true;
+    portSel.appendChild(opt);
+  }
+  if (currentPort >= 3 && currentPort <= 5) {
+    // A board set up before the refusal can still hold its Kyber on S3-S5 (boot reads NVS, it never
+    // replays the command). Show it, for the same read-back reason, but it can't be chosen again.
+    const opt = document.createElement('option');
+    opt.value = currentPort;
+    opt.textContent = `Serial ${currentPort} — software serial, move to S1/S2`;
+    opt.disabled = true;
+    opt.selected = true;
+    portSel.appendChild(opt);
+  }
+  if (!portSel.options.length) {
+    // Both hardware ports are taken. An empty select reads back as "no port"; say why instead.
+    portSel.innerHTML = '<option value="" disabled selected>— S1 and S2 both in use —</option>';
   }
 }
 
@@ -3500,7 +3524,10 @@ function refreshMaestroPortDropdown(n, rowId, selectedPort) {
     // it is a stray Maestro claim (not another live row). Anything held by HCR,
     // MP3, WLED, Kyber, PWM or a serial map — or by a DIFFERENT Maestro row — is
     // filtered out so two features can't fight over the same UART.
-    const heldByOtherFeature = claim && claim.type !== 'maestro';
+    // 'kyber-reserved' is not a hold: it keeps devices and PWM off S1 of a remote-Maestro
+    // board, while that board's Maestro belongs there. The firmware refuses a Maestro only
+    // on a local Kyber's own port (the 'kyber' claim).
+    const heldByOtherFeature = claim && claim.type !== 'maestro' && claim.type !== 'kyber-reserved';
     const heldByOtherMaestro = otherClaims.has(p);
     const offer = (p === selectedPort) || (!heldByOtherFeature && !heldByOtherMaestro);
     if (!offer) continue;
@@ -8650,7 +8677,7 @@ function restoreGeneralDOMSnapshot(snap) {
 // Returns true if any command in the built string requires a board reboot
 // to take effect, based on WCB firmware documentation and source code.
 //
-// Reboot-required:  HW, WCB/WCBQ, MAC, KYBER, MAP PWM input (not OUT)
+// Reboot-required:  HW, WCB/WCBQ, MAC, KYBER, MAESTRO,REMOTE, MAP PWM input (not OUT)
 // Immediate effect: EPASS, DELIM, FUNCCHAR, CMDCHAR, BAUD, LABEL, BCAST,
 //                   MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ
 function commandStringNeedsReboot(cmdString) {
@@ -8660,7 +8687,10 @@ function commandStringNeedsReboot(cmdString) {
   if (u.includes('MAC,'))   return true;   // MAC octets — ESP-NOW identity
   if (u.includes('WCBCH,')) return true;   // Mesh channel — firmware applies it on reboot, not live
   if (u.includes('WIFI,'))  return true;   // WiFi mode/SSID — firmware applies it on reboot, not live
-  if (u.includes('KYBER,')) return true;   // Kyber mode — serial port reservation
+  // Kyber mode — serial port reservation. MAESTRO,REMOTE too: it is how a push leaves Kyber LOCAL for remote,
+  // and the Maestro-remote bridge task only starts at boot. buildCommandString (parser.js) sends it only on a
+  // real mode change or a full push, so a delta push of Maestro lines alone doesn't ask for a reboot.
+  if (u.includes('KYBER,') || u.includes('MAESTRO,REMOTE')) return true;
   // PWM INPUT mapping (MAP,PWM,Sx,...) — firmware auto-reboots, but we signal it too
   // PWM OUTPUT declaration (MAP,PWM,OUT,Sx) does NOT need a reboot
   if (/MAP,PWM,S\d/i.test(cmdString)) return true;
@@ -10461,8 +10491,11 @@ function wizardHTMLKyberConfig() {
     if ((wizardState.boards[i]?.type || 'wcb') === 'client') return '';
     return `<option value="${i+1}" ${(i+1) === kyberBoard ? 'selected' : ''}>Board ${i+1} (WCB ${wizardState.boards[i].wcbNumber})</option>`;
   }).filter(Boolean).join('');
-  const maestroPortOpts = Array.from({length: 5}, (_, p) =>
-    `<option value="${p+1}" ${(p+1) === kyberPort ? 'selected' : ''}>Serial ${p+1}</option>`
+  // S1/S2 only: the firmware refuses ?KYBER,LOCAL on S3-S5 (software serial can't receive the
+  // Kyber's 115200). kyberPort is always 1 or 2 here - it defaults to 2 and is only ever read
+  // back from this select.
+  const maestroPortOpts = [1, 2].map(p =>
+    `<option value="${p}" ${p === kyberPort ? 'selected' : ''}>Serial ${p}</option>`
   ).join('');
   const kyberBaudRates = [9600, 38400, 57600, 115200];
   const baudOpts = kyberBaudRates.map(r =>
@@ -10486,7 +10519,7 @@ function wizardHTMLKyberConfig() {
 
     <div class="wizard-subsection-title">Kyber&#39;s Maestro Port</div>
     <div class="wizard-field-row">
-      <label>Serial Port ${wizHint('Which serial port on that board the Kyber TX/RX wires are connected to from the Maestro port on the Kyber.')}</label>
+      <label>Serial Port ${wizHint('Which serial port on that board the Kyber TX/RX wires are connected to from the Maestro port on the Kyber. Serial 1 or 2 only: Serial 3-5 are software serial and cannot receive the Kyber at 115,200.')}</label>
       <select id="wiz-kyber-port" onchange="onWizKyberPortChange()">${maestroPortOpts}</select>
     </div>
     <div class="wizard-field-row">
