@@ -86,7 +86,10 @@ def set_flags_list_backup(bench):
             assert _has(again, "Serial mapping set: Serial3 -> 1 destination(s)") and not _has(again, "Auto-") \
                 and not _has(again, "already exists"), f"re-issue was not idempotent: {again}"
             out = w.run("?MAP,SERIAL,CLEAR,S3")
-            for want in ("Auto-disabled broadcast input blocking on Serial3", "Auto-enabled broadcast output on Serial3",
+            # The mapping records the flags it overrode and restores them, so CLEAR reports what it
+            # put back rather than announcing a forced default (tracker #46).
+            for want in ("Restored broadcast input blocking on Serial3: allowed",
+                         "Restored broadcast output on Serial3: enabled",
                          "Serial mapping removed for Serial3"):
                 assert _has(out, want), f"CLEAR lacks {want!r}: {out}"
             assert _has(_list(w), "No serial mappings configured")

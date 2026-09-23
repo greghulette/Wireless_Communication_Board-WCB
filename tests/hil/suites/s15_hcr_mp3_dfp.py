@@ -10,7 +10,9 @@ Rules from the specs:
 - MP3 or DFP hosted anywhere, or HCR hosted on W1, make the other board PERSIST a learned route (first-host-wins,
   never evicted, WCB_WDP.cpp:704-735). _unlearn() is the only order that undoes it.
 - W1 already stores ?HCR,REMOTE,W2, so HCR hosted on W2 changes nothing on W1.
-- ?HCR,POLL,OFF goes before ?HCR,PORT: the next loop pass polls with <QD> (WCB_HCR.cpp:142, 160).
+- ?HCR,POLL,OFF goes before ?HCR,PORT: the next loop pass polls with POLL (WCB_HCR.cpp hcrPoll).
+- The poll is ONE container frame, POLL below: soft-serial RX is masked while the WCB transmits (rule 13), so
+  back-to-back queries lost every reply but the last. ?HCR,STATUS and ?DEBUG,HCR never transmit.
 - Recalled ONFIN/ONERR sequences run with local origin, so they hold ;S3 markers only.
 """
 import re
@@ -90,6 +92,10 @@ def _steps(l, send, steps, settle=0.35):
         if got != want:
             bad.append(f"{cmd}: expected {want!r}, got {got!r}")
     return bad
+
+
+POLL = b"<QM,QD,QVV,QVA,QVB>\n"   # WCB_HCR.cpp HCR_POLL_FRAME
+POLL_HEX = POLL.hex().upper()
 
 
 def _frame_times(l, since, frame):
@@ -226,7 +232,7 @@ HCR_RELEASE_S4 = ["[HCR] Local configuration cleared", "  ✓ Re-enabled broadca
                   "Serial4 label set to: ''", "  ✓ Released S4 (old HCR port)"]
 
 
-@test("hcr.config_softport", "?HCR,PORT on W2 S4 (soft serial): console lines, reserved port, immediate then 10 s <QD> poll, exact restore (~45 s)", needs=["wcb1"])
+@test("hcr.config_softport", "?HCR,PORT on W2 S4 (soft serial): console lines, reserved port, immediate poll, 3 s retries until the volumes seed, then 10 s, exact restore (~45 s)", needs=["wcb1"])
 def config_softport(bench):
     s4 = link(bench, 2, "S4")
     require_tokens(bench, 1, "?HCR,REMOTE,W2")
@@ -234,13 +240,16 @@ def config_softport(bench):
     if _device_tokens(bench, 2):
         raise Skip("W2 has HCR/MP3/DFP config")
     w = usb_wcb(bench)
-    qd = b"<QD>\n"
+    qd = POLL
     clear = []
     with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
         configured = False
         try:
             m = c2.send("?HCR,POLL,10")
             c2.expect(r"\[HCR\] Poll interval = 10s", since=m)
+            # Answer every poll with all three volumes: seeding needs two agreeing replies per channel, so the
+            # WCB retries every 3 s until then (at most 10 times) and only then settles on pollSec.
+            s4.rule(1, POLL_HEX, b"<QVV,50>\n<QVA,50>\n<QVB,50>\n", delay_ms=50)
             pm, wm = s4.mark(), w.dev.mark()
             cm = c2.send("?HCR,PORT,S4:9600")
             configured = True
@@ -266,11 +275,16 @@ def config_softport(bench):
             time.sleep(max(0.0, 25 - (time.monotonic() - t0)))
             stream, times = _frame_times(s4, pm, qd)
             gaps = [b - a for a, b in zip(times, times[1:])]
-            bench.note(f"<QD> gaps on the probe clock: {gaps}")
-            assert stream == qd * len(times), f"bytes other than <QD> on W2 S4: {stream!r}"
-            assert len(times) >= 3 and all(9950 <= g <= 10400 for g in gaps), f"<QD> gaps {gaps} (expected 10000 +0..+300)"
+            bench.note(f"poll gaps on the probe clock: {gaps}")
+            assert stream == qd * len(times), f"bytes other than the poll on W2 S4: {stream!r}"
+            fast = [g for g in gaps if 2950 <= g <= 3400]
+            slow = [g for g in gaps if 9950 <= g <= 10400]
+            # 3 s retries first (one per garbled/unseeded round), then the 10 s cadence and never back.
+            assert len(fast) + len(slow) == len(gaps) and gaps == fast + slow, f"poll gaps {gaps}"
+            assert fast and slow, f"poll gaps {gaps}: expected 3 s retries until seeded, then 10 s"
             assert not s4.errors(pm), f"RXERR on W2 S4: {s4.errors(pm)}"
         finally:
+            s4.probe.rule_del(1)
             if configured:
                 m = c2.send("?HCR,CLEAR")
                 c2.expect(r"  ✓ Released S4 \(old HCR port\)", since=m)
@@ -278,7 +292,7 @@ def config_softport(bench):
                 _relabel(c2, before[2], "S4")
         pm = s4.mark()
         time.sleep(12)
-        assert qd not in s4.received(pm), "<QD> is still polled after CLEAR"
+        assert qd not in s4.received(pm), "still polled after CLEAR"
         miss = _in_order(clear, HCR_RELEASE_S4)
         assert miss is None, f"CLEAR output lacks {miss!r}: {clear}"
 
@@ -322,11 +336,11 @@ def verbs_emote_raw(bench):
     assert not lines, f"W2 printed HCR errors: {lines}"
 
 
-@test("hcr.verbs_audio_volume", "PLAY/STOPWAV/VOL/VOLUP/VOLDN exact frames, the codec volume shadow and the 0-99 clamps", needs=["wcb1"], links=["W2S4"])
+@test("hcr.verbs_audio_volume", "PLAY/STOPWAV/VOL/VOLUP/VOLDN exact frames, the codec volume shadow and the 0-100 range", needs=["wcb1"], links=["W2S4"])
 def verbs_audio_volume(bench):
     bad, errs, lines = _routed_verbs(bench, [
         (";H,PLAY,A,5", _lf("<CA0005,QPA>")), (";H,PLAY,B,9999", _lf("<CB9999,QPB>")), (";H,STOPWAV,B", _lf("<PSB,QPB>")),
-        (";H,VOL,A,40", _lf("<PVA40>")), (";H,VOL,40", _vol3(40)), (";H,VOL,100", _vol3(99)), (";H,VOL,50", _vol3(50)),
+        (";H,VOL,A,40", _lf("<PVA40>")), (";H,VOL,40", _vol3(40)), (";H,VOL,100", _vol3(100)), (";H,VOL,50", _vol3(50)),
         (";H,VOLUP", _vol3(55)), (";H,VOLDN,A,10", _lf("<PVA45>")), (";H,VOLUP,7", _lf("<PVV62>", "<PVA52>", "<PVB62>")),
         (";H,VOLDOWN,B", _lf("<PVB57>")), (";H,VOL,3", _vol3(3)), (";H,VOLDN", _vol3(0)), (";H,VOLUP,0", _vol3(5)),
     ])
@@ -337,16 +351,16 @@ def verbs_audio_volume(bench):
 
 @test("hcr.fn_codec", ";H,FN numeric convention: every accepted fn's exact bytes and the rejection messages", needs=["wcb1"], links=["W2S4"])
 def fn_codec(bench):
-    rejects = [";H,FN,4,4,0", ";H,FN,2,1,100", ";H,FN,1", ";H,FN,12", ";H,FN,10,2", ";H,FN,17,0,100", ";H,FN,14,3,5"]
+    rejects = [";H,FN,4,4,0", ";H,FN,2,1,100", ";H,FN,1", ";H,FN,12", ";H,FN,10,2", ";H,FN,17,0,101", ";H,FN,14,3,5"]
     bad, errs, lines = _routed_verbs(bench, [
         (";H,FN,4,0,50", _lf("<SH50,QEH,QT>")), (";H,FN,3,2,1", _lf("<SM1,QEM,QT>")), (";H,FN,2,1,99", _lf("<OS99,QES>")),
         (";H,FN,5", _lf("<SE,QT>")), (";H,FN,6", _lf("<MM>")), (";H,FN,7,5,30", _lf("<MN5,MX30>")), (";H,FN,8", STOP_BURST),
         (";H,FN,9", _lf("<PSV,QT>")), (";H,FN,10,1", _lf("<O1,QO>")), (";H,FN,11", _lf("<OR,QE>")),
         (";H,FN,13,0,1", _lf("<M1,QM>")), (";H,FN,14,0,5", _lf("<CV0005,QPV>")), (";H,FN,16,2", _lf("<PSB,QPB>")),
         (";H,FN,17,1,42", _lf("<PVA42>")), (";H,FN,17,3,42", _vol3(42)), (";H,FN,18,0,0", _vol3(47)),
-        (";H,FN,19,0,10", _vol3(37)),
+        (";H,FN,19,0,10", _vol3(37)), (";H,FN,17,0,100", _lf("<PVV100>")),
     ] + [(r, b"") for r in rejects])
-    want = [f"[HCR] FN {x} rejected (unknown fn or out-of-range)" for x in ("4,4,0", "2,1,100", "1,0,0", "12,0,0", "10,2,0", "17,0,100")]
+    want = [f"[HCR] FN {x} rejected (unknown fn or out-of-range)" for x in ("4,4,0", "2,1,100", "1,0,0", "12,0,0", "10,2,0", "17,0,101")]
     want.append("[HCR] FN 14 channel 3 out of range (0-2)")
     assert not bad, "; ".join(bad)
     assert not errs, f"RXERR: {errs}"
@@ -534,7 +548,7 @@ def stop_cancels_fade(bench):
 @test("hcr.poll_refresh", "?HCR,POLL cadence, bounds, OFF and REFRESH; the POLL value round-trips into the config (~35 s)", needs=["wcb1"], links=["W2S4"])
 def poll_refresh(bench):
     s4 = link(bench, 2, "S4")
-    qd = b"<QD>\n"
+    qd = POLL
     with _hcr_w2(bench) as c2:
         pm = s4.mark()
         cm = c2.send("?HCR,POLL,3")
@@ -544,7 +558,7 @@ def poll_refresh(bench):
         stream, times = _frame_times(s4, pm, qd)
         gaps = [b - a for a, b in zip(times, times[1:])]
         assert stream == qd * len(times) and len(times) >= 5, f"POLL,3 wrote {stream!r}"
-        assert all(2950 <= g <= 3300 for g in gaps), f"<QD> gaps {gaps} (expected 3000 +0..+200)"
+        assert all(2950 <= g <= 3300 for g in gaps), f"poll gaps {gaps} (expected 3000 +0..+200)"
         assert "?HCR,POLL,3" in snapshot(bench, 2), "W2 config lacks ?HCR,POLL,3"
         for bad in ("2", "3601"):
             assert _has(_run(c2, f"?HCR,POLL,{bad}"), "[HCR] POLL must be 3-3600 s, or OFF (min 3s keeps any serial port safe)")
@@ -564,7 +578,7 @@ def poll_refresh(bench):
         assert "?HCR,POLL,0" in snapshot(bench, 2), "W2 config lacks ?HCR,POLL,0"
 
 
-@test("hcr.status_reply_parse", "Probe plays HCR replies: DF status, QVA and QEH are parsed into ?HCR,STATUS/GET; STATUS sends three <QVx> queries", needs=["wcb1"], links=["W2S4"])
+@test("hcr.status_reply_parse", "Probe plays HCR replies to the one-frame poll: DF status, QVA and QEH are parsed into ?HCR,STATUS/GET; STATUS never transmits", needs=["wcb1"], links=["W2S4"])
 def status_reply_parse(bench):
     s4 = link(bench, 2, "S4")
     w = usb_wcb(bench)
@@ -574,23 +588,25 @@ def status_reply_parse(bench):
         try:
             # Replies wait 50 ms: W2's soft-serial TX is critical-sectioned per byte and would clobber an overlapping
             # reply's RX edges. Bodies stay under the 32-byte parser buffer (hcr.h:26).
-            s4.rule(1, "3C51443E0A", b"<DF,1,2,3,4,1,1,9,2.5,0,5,0>\n", delay_ms=50)
-            s4.rule(2, "3C5156413E0A", b"<QVA,42>\n", delay_ms=50)
+            s4.rule(1, POLL_HEX, b"<DF,1,2,3,4,1,1,9,2.5,0,5,0>\n<QVA,42>\n", delay_ms=50)
+            s4.rule(2, b"<QM,QVA>\n".hex().upper(), b"<QVA,42>\n", delay_ms=50)
             pm = s4.mark()
             if not _has(_run(c2, "?HCR,REFRESH", 1.0), "[HCR] Refresh requested"):
                 problems.append("REFRESH printed nothing")
             if not probe.rule_hits(1, pm):
-                problems.append("the <QD> reply rule never fired")
-            want = "[HCR:cfg=1,port=4,poll=0,age=*,H=1,S=2,M=3,C=4,dur=2.50,ovr=1,muse=1,wav=9,pV=0,pA=5,pB=0,vV=0,vA={},vB=0]"
-            for va in (0, 42):   # vA is 0 first: getVolume() returns the cache before the query is answered
+                problems.append("the poll reply rule never fired")
+            want = "[HCR:cfg=1,port=4,poll=0,age=*,H=1,S=2,M=3,C=4,dur=2.50,ovr=1,muse=1,wav=9,pV=0,pA=5,pB=0,vV=0,vA={},vB=0,rx=2,vage=-1]"   # rx: the DF + QVA replies; vage -1: V and B never confirmed (WCB_HCR.cpp printHCRStatus)
+            time.sleep(0.5)      # the replies trail the poll by ~50 ms + transmit time
+            for va in (42,):     # the poll itself carries QVA, so the value is there on the first STATUS
                 pm = s4.mark()
                 got = next((x for x in _run(c2, "?HCR,STATUS", 1.0) if x.startswith("[HCR:cfg=")), "")
                 bench.note(f"STATUS: {got}")
-                if re.sub(r"age=-?\d+", "age=*", got) != want.format(va):
+                # \b: the wildcard must not also swallow the vage= field
+                if re.sub(r"\bage=-?\d+", "age=*", got) != want.format(va):
                     problems.append(f"STATUS {got!r}, expected {want.format(va)!r} (age not compared)")
-                sent = sorted(t for _, t in _timed_frames(s4, pm))
-                if sent != ["<QVA>", "<QVB>", "<QVV>"]:     # the order is argument-evaluation order: compare the set
-                    problems.append(f"STATUS queried {sent}")
+                sent = [t for _, t in _timed_frames(s4, pm)]
+                if sent:     # a status reader must never transmit (rule 13): its query would mask the reply
+                    problems.append(f"STATUS transmitted {sent}")
             gets = [("VOL,A", "[HCR] VOL VOL,A = 42"), ("EMOTION,M", "[HCR] EMOTION EMOTION,M = 3"),
                     ("DURATION", "[HCR] DURATION = 2.50"), ("OVERRIDE", "[HCR] OVERRIDE = 1"), ("MUSE", "[HCR] MUSE = 1"),
                     ("WAVCOUNT", "[HCR] WAVCOUNT = 9"), ("PLAYING,A", "[HCR] PLAYING PLAYING,A = 5"),
@@ -602,7 +618,7 @@ def status_reply_parse(bench):
                 if line not in out:
                     problems.append(f"GET,{field}: {out}")
                 sent = [t for _, t in _timed_frames(s4, pm)]
-                if field in ("VOL,A", "VOL,X") and sent != (["<QVA>"] if field == "VOL,A" else []):
+                if field in ("VOL,A", "VOL,X") and sent != (["<QM,QVA>"] if field == "VOL,A" else []):
                     problems.append(f"GET,{field} queried {sent}")
             s4.send(b"<QEH,77>\n")
             time.sleep(0.5)
@@ -615,7 +631,7 @@ def status_reply_parse(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("hcr.debug_periodic", "?DEBUG,HCR prints periodic status (adding <QVx> traffic) and per-command lines; OFF stops both (~25 s)", needs=["wcb1"], links=["W2S4"])
+@test("hcr.debug_periodic", "?DEBUG,HCR prints periodic status and per-command lines without adding wire traffic; OFF stops both (~25 s)", needs=["wcb1"], links=["W2S4"])
 def debug_periodic(bench):
     s4 = link(bench, 2, "S4")
     w = usb_wcb(bench)
@@ -641,9 +657,10 @@ def debug_periodic(bench):
         dbg_after = [x for x in c2.lines(cm) if x.startswith("[HCR-DBG]")]
     # The first dump may lag up to one interval: _dbgNext is a function static (WCB_HCR.cpp:170).
     assert 2 <= len(dumps) <= 5, f"{len(dumps)} status dumps in 10 s at poll=3"
-    assert {"<QVV>", "<QVA>", "<QVB>", "<QD>"} <= set(sent), f"debug-on traffic {sent}"
+    poll = POLL.decode().rstrip("\n")
+    assert sent and set(sent) == {poll}, f"debug-on traffic {sent} (only the poll expected)"
     assert _has(cmd_lines, "[HCR-DBG] cmd in: ;H,VOL,A,40") and _has(cmd_lines, "[HCR-DBG] VOL ch=1 -> 40"), cmd_lines
-    assert quiet and set(quiet) == {"<QD>"}, f"after debug off the wire carried {quiet}"
+    assert quiet and set(quiet) == {poll}, f"after debug off the wire carried {quiet}"
     assert not dbg_after, f"debug lines after OFF: {dbg_after}"
 
 
@@ -666,9 +683,9 @@ def hcr_config_rejects(bench):
     # Only send the S1/S2 lines when the owner that blocks them is there: an accepted ?HCR,PORT,S1 would take over
     # the real Maestro line, and its CLEAR would force the port to 9600.
     if "?WLED,1:W2S2:115200" in have:
-        checks.append(("?HCR,PORT,S2:115200", ["[HCR] S2 already in use by PWM/Kyber/MP3/WLED - config blocked"]))
+        checks.append(("?HCR,PORT,S2:115200", ["[HCR] S2 already in use by PWM/Kyber/MP3/WLED/DFP - config blocked"]))
     if "?MAESTRO,REMOTE" in have:
-        checks.append(("?HCR,PORT,S1:115200", ["[HCR] S1 already in use by PWM/Kyber/MP3/WLED - config blocked"]))
+        checks.append(("?HCR,PORT,S1:115200", ["[HCR] S1 already in use by PWM/Kyber/MP3/WLED/DFP - config blocked"]))
     bad = []
     with config_guard(bench, 2), Console(bench, 2) as c2:
         for cmd, wants in checks:
@@ -713,13 +730,14 @@ def port_isolation_broadcast(bench):
 
 @test("hcr.softserial_integrity_mesh_load", "Rule-13 regression: 300 HCR frames on soft-serial W2 S5 arrive intact under ~1800 mesh commands (slow, ~85 s)", needs=["wcb1"], links=["W2S5", "W2S2"])
 def softserial_integrity_mesh_load(bench):
-    """CLAUDE.md rule 13: an ESP-NOW interrupt mid-byte compressed the remaining bits, so the receiver saw a PREFIX
-    of the command. applySoftSerialIntTx() protects S5 only while no core-0 task writes it (WCB.ino:2016-2068)."""
+    """CLAUDE.md rule 13: with bit-banged TX an ESP-NOW interrupt mid-byte compressed the remaining bits, so the
+    receiver saw a PREFIX of the command. S3-S5 now transmit through RMT (WCB_SoftSerial.h), so the timing no longer
+    depends on the CPU at all; this keeps the original load as the regression bar."""
     s5, s2 = link(bench, 2, "S5"), link(bench, 2, "S2")
     require_tokens(bench, 2, "?WLED,1:W2S2:115200")   # W2 S2 is WLED 1's port; there is no real WLED on the bench
     w = usb_wcb(bench)
     with _hcr_w2(bench, port="S5", debug=True) as c2:
-        protected = _has(c2.config_lines, "[SOFTSERIAL] S5 bit-bang TX: interrupt-protected (loop-task only)")
+        protected = _has(c2.config_lines, "[SOFTSERIAL] S5 TX: RMT (hardware-timed)")
         s5.listen(9600, hw=True)   # a hardware probe channel, so a probe-side soft-RX error cannot pass for a WCB mis-frame
         pm5, pm2 = s5.mark(), s2.mark()
         sent, n, next_h = [], 0, time.monotonic()
@@ -739,7 +757,7 @@ def softserial_integrity_mesh_load(bench):
     lost = [t for t in sent if f"{t}\r".encode() not in got2]
     wrong = [(i, g) for i, (g, x) in enumerate(zip(frames, want)) if g != x]
     bench.note(f"soft-serial load: {len(frames)} frames, {len(wrong)} wrong, RXERR S5 {len(errs5)}, S2 lost {len(lost)}/{len(sent)}")
-    assert protected, "configuring HCR on S5 did not report the port as interrupt-protected"
+    assert protected, "configuring HCR on S5 did not report RMT TX for the port"
     assert frames == want, f"{len(frames)} frames on S5, first differences {wrong[:5]}"
     assert not errs5, f"RXERR on S5: {errs5[:5]}"
     assert not lost and not errs2, f"W2 S2 lost {len(lost)} of {len(sent)} markers, RXERR {errs2[:5]}"
@@ -1014,7 +1032,7 @@ def mp3_config_rejects(bench):
         ("?MP3,ONERR,ABCDEFGHIJKLMNOP", ["[MP3] ONERR: key must be 1-15 characters"]),   # a sequence key's limit
     ]
     if "?WLED,1:W2S2:115200" in bench.config_tokens(2):
-        checks.append(("?MP3,S2:9600:V20", ["[MP3] S2 already in use by PWM/Kyber/HCR/WLED - config blocked"]))
+        checks.append(("?MP3,S2:9600:V20", ["[MP3] S2 already in use by PWM/Kyber/HCR/WLED/DFP - config blocked"]))
     _rejects(bench, 2, checks)
 
 

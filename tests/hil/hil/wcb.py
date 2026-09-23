@@ -42,7 +42,9 @@ def split_checked_chain(text):
     """'<chain>^?CHK<8hex>' -> (tokens, provided, calculated)."""
     m = re.match(r"^(.*)\^[?]CHK([0-9A-Fa-f]{8})$", text)
     if not m:
-        raise AssertionError(f"not a checksummed chain: {text[:120]}...")
+        # The tail, not the head: the head is where ?WIFI and ?EPASS sit (collectConfigCommands), and the tail is what
+        # shows why ^?CHK is not last - e.g. an interleaved "[ETM] WCBn came ONLINE".
+        raise AssertionError(f"not a checksummed chain ({len(text)} chars): ...{text[-80:]}")
     chain, provided = m.group(1), m.group(2).upper()
     return chain.split("^"), provided, chain_crc(chain)
 
@@ -66,7 +68,12 @@ class WCB:
         self.dev.send(f";S0,{end}")
         self.dev.expect(rf"^{end}$", timeout=timeout, since=m)
         lines = self.dev.since(m)
-        return lines[:lines.index(end)]
+        # Drop relayed telemetry. While a host holds W1's RC relay window open (any ;W20,{json} does, for
+        # 20 s), NaviCore's rc_ch/rc_hb/rc_trig arrive on W1's USB at up to 5 Hz, tagged {"sys":1,...}, and
+        # land in the middle of whatever command is running - ?KYBER,LIST once came back with an rc_ch line
+        # as its first line (maestro.list_and_legacy_spellings, 2026-09-22). They are never a command's own
+        # output; tests that want them read self.dev directly.
+        return [x for x in lines[:lines.index(end)] if not x.startswith('{"sys":1')]
 
     def send(self, command):
         m = self.dev.mark()
@@ -86,7 +93,10 @@ class WCB:
     def reboot(self, timeout=20.0):
         m = self.dev.mark()
         self.dev.send("?reboot")
-        self.dev.expect(r"^Rebooting in 2 seconds", timeout=3, since=m)
+        # ?reboot is deferred now (CLAUDE.md rule 11): the board acknowledges, then restarts once
+        # the command queue has been quiet for PWM_REBOOT_QUIET_MS.
+        self.dev.expect(r"^Reboot queued", timeout=3, since=m)
+        self.dev.expect(r"^Rebooting now", timeout=10, since=m)
         self.wait_boot(m, timeout)
         return m
 

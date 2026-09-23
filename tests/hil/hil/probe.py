@@ -6,6 +6,8 @@ from .serialdev import ExpectTimeout
 
 PROBE_BAUD = 921600
 PROBE_MIN_VERSION = 2
+PROBE_TXSKEW_VERSION = 4        # TXSKEW (tracker #78); only softrx.* needs it, and skips on an older probe
+PROBE_LEVELRX_VERSION = 6       # soft channels on level-triggered RX (tracker #78): two receiving at once are exact
 HW_CHANNELS = ("A", "B")        # hardware UART1 / UART2
 SW_CHANNELS = ("C", "D", "E")   # EspSoftwareSerial
 HEADERS = ("S1", "S2", "S3", "S4", "S5")
@@ -16,6 +18,28 @@ HEADERS = ("S1", "S2", "S3", "S4", "S5")
 # is TX 20 / RX 7, so neither works in either orientation; S3-S5 (25/4, 14/27, 13/26) are fine.
 HW_ONLY_HEADERS = ("S1", "S2")
 
+# A probe line that means it restarted: its own boot banner, or a panic on the way down. Substring matches, never
+# ^-anchored: the ESP32 ROM prints its reset banner at 115200, which lands at 921600 as NULs glued to the front of
+# 'BOOT wcb_probe ...' (see mesh_leave). A restart forgets every channel binding, so the harness must too - wcb_probe
+# 6 once panic-looped on an interrupt-WDT reset and the tests went on reading channels it no longer had (tracker #78).
+#
+# '<<reopened ' (serialdev.py _reopen) counts too. The probe is powered only by its own USB (hil/wiring.py leaves 5V
+# unconnected), so a USB drop resets it - and its BOOT line lands a few hundred ms later, while the port is still closed
+# (the reader retries every 0.5 s, Windows re-enumerates slower, and pyserial's open() purges RX anyway). No BOOT line is
+# ever seen. And even if the chip kept running, whatever it printed during the gap is lost. Either way the bindings and
+# the captures through them can no longer be trusted. Never counts for MESH LEAVE: a CPU reset keeps the port.
+REOPEN_MARKER = "<<reopened "
+REBOOT_MARKERS = ("BOOT wcb_probe", "Guru Meditation", REOPEN_MARKER)
+
+
+def restart_what(text):
+    """The words for one REBOOT_MARKERS line: 'panicked', 'lost its USB port' or 'rebooted'."""
+    if "Guru Meditation" in text:
+        return "panicked"
+    if text.startswith(REOPEN_MARKER):
+        return "lost its USB port (a restart then prints no BOOT line)"
+    return "rebooted"
+
 
 class Probe:
     def __init__(self, dev):
@@ -23,13 +47,19 @@ class Probe:
         self.bound = {}   # channel -> dict(header, baud, fmt, invert, swap, rx_only)
         self.version = None
         self.mesh_id = 0
+        # Reboot bookkeeping for unplanned_reboots(). Lines before _clean_from belong to before this object took the
+        # probe over (its first RESET wipes everything anyway); _leave_marks are where a deliberate MESH LEAVE began.
+        self._clean_from = dev.mark()
+        self._reset_done = False
+        self._leave_marks = []
 
     def _cmd(self, cmd, timeout=2.0):
         m = self.dev.mark()
         self.dev.send(cmd)
         got = self.dev.expect(r"^(OK|ERR)\b.*", timeout=timeout, since=m)
         if got.group(1) == "ERR":
-            raise AssertionError(f"{self.dev.name}: '{cmd}' -> {got.group(0)}")
+            shown = re.sub(r"(PASS=)\S+", r"\1***", cmd)   # MESH JOIN carries the mesh password; never quote it
+            raise AssertionError(f"{self.dev.name}: '{shown}' -> {got.group(0)}")
         return got.group(0)
 
     # ------------------------------------------------------------ identity / state
@@ -53,6 +83,34 @@ class Probe:
         self.require_version()
         self._cmd("RESET")
         self.bound.clear()
+        if not self._reset_done:          # the first-use RESET: anything the probe printed before it is not a test's
+            self._reset_done = True
+            self._clean_from = self.dev.mark()
+
+    # ------------------------------------------------------------ reboots
+    def reboots(self, since=0, upto=None):
+        """[(line index, monotonic time, text)] of every REBOOT_MARKERS line in [since, upto), planned or not."""
+        lines = list(self.dev.lines[since:upto])
+        return [(since + i, t, text) for i, (t, text) in enumerate(lines) if any(k in text for k in REBOOT_MARKERS)]
+
+    def _first_boot(self, since):
+        """Index of the first 'BOOT wcb_probe' line at or after `since`, or None - stops there, so a MESH LEAVE long
+        ago costs only the second or two of lines up to its own boot."""
+        for i in range(since, self.dev.mark()):
+            if "BOOT wcb_probe" in self.dev.lines[i][1]:
+                return i
+        return None
+
+    def unplanned_reboots(self, since=0):
+        """The boot/panic/port-reopen lines at or after `since` that nothing the harness did explains. Planned: the
+        first 'BOOT wcb_probe' after each MESH LEAVE (mesh_leave), and anything before this object's first RESET (first
+        use, and the resume/outage path, which opens a fresh Probe). A 'Guru Meditation' or a '<<reopened' is never
+        planned."""
+        hits = self.reboots(max(since, self._clean_from))
+        if not hits:
+            return []
+        planned = {self._first_boot(leave) for leave in self._leave_marks} - {None}
+        return [h for h in hits if h[0] not in planned]
 
     def scan(self):
         m = self.dev.mark()
@@ -78,6 +136,20 @@ class Probe:
 
     def tx(self, ch, data: bytes):
         self._cmd(f"TX {ch} {data.hex().upper()}", timeout=5.0)
+
+    def tx_skew(self, baud, lines):
+        """Bit-bang up to three 8N1 lines at once, each onto a pin held high with level(header, which, 1) first.
+        lines = [(header, "TX"|"RX", skew_ns, data), ...]: every line after the first starts skew_ns after the
+        first one's start (negative: before it); the first line's skew is ignored. The probe plays the waveform with
+        its interrupts masked and cycle-counter timing, so the skew reaches the pins to a few tens of ns - which two
+        hardware UARTs, each starting a frame on its own baud tick, cannot do. Needs wcb_probe v4 (TXSKEW)."""
+        parts = [f"TXSKEW {int(baud)}"]
+        for i, (header, which, skew_ns, data) in enumerate(lines):
+            parts.append(f"{header}:{which.upper()}")
+            if i:
+                parts.append(str(int(skew_ns)))
+            parts.append(data.hex().upper())
+        return self._cmd(" ".join(parts), timeout=3.0)
 
     def bursts(self, ch, since):
         """[(probe_ms, bytes)] received on `ch` after `since`."""
@@ -211,6 +283,7 @@ class Probe:
         already left once it answers, so local state is cleared before the wait: a timeout must not make
         probe_in_mesh send a second LEAVE."""
         m = self.dev.mark()
+        self._leave_marks.append(m)       # the reboot this causes is planned (unplanned_reboots)
         self.dev.send("MESH LEAVE")
         self.bound.clear()
         self.mesh_id = 0

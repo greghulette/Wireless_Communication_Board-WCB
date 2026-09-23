@@ -329,10 +329,8 @@ def cap_volatile_evicts(bench):
     assert after[-1] == "  100/100 used", f"LIST footer {after[-1:]}"
 
 
-@test("var.cap_persistent_full", "OPT-IN (nvs_wear): with 100 persistent variables, ;VP and ?VAR,SET print 'table full'", needs=["wcb1"], links=[])
+@test("var.cap_persistent_full", "OPT-IN (nvs_wear): with 100 persistent variables, ;VP and ?VAR,SET print 'table full'", needs=["wcb1"], links=[], opt_in="nvs_wear")
 def cap_persistent_full(bench):
-    if "nvs_wear" not in bench.cfg.get("opt_in", []):
-        raise Skip('opt-in: add "nvs_wear" to bench.json "opt_in" (about 100 whole-blob NVS writes)')
     w = usb_wcb(bench)
     bad = []
     with config_guard(bench, 1):
@@ -835,7 +833,10 @@ def if_stored_seq_recall_time(bench):
                 s1.expect(t.encode() + b"\r", timeout=2, since=pm)
             except AssertionError:
                 bad.append("recall 2 did not run the command")
-            if "[IF] hilu=1 -> true" not in [x.rstrip() for x in w.dev.since(wm)]:
+            # The echo can print AFTER the command's bytes reach S1 (93 ms later on 2026-09-21), so wait for it.
+            try:
+                w.dev.expect(r"^\[IF\] hilu=1 -> true", timeout=2, since=wm)
+            except AssertionError:
                 bad.append("recall 2 printed no true echo")
         finally:
             w.run("?SEQ,CLEAR,HILIF")

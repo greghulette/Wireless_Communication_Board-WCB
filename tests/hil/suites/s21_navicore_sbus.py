@@ -9,12 +9,15 @@ Built from the verified navicore_sbus specs. Rules from the specs:
 - NaviCore's ?MAE markers print without a line end, so each command is followed by a harmless #L12 to flush it.
 - Any ;W20,{json} from W1 opens a 20 s relay window: W1 USB then carries '"sys":1' lines; checks match by substring.
 - SBUS channels are moved only when NaviCore's config binds nothing to them (_safe_channels); a bound channel can fire
-  real actions.
+  real actions. The one exception is the matrix channel, pressed only onto a slot with no mapping in the active mode
+  (_matrix_button, sbus.trim_exact), which emits rc_trig and runs nothing.
 """
 import json
 import re
 import time
 from contextlib import contextmanager
+
+import serial
 
 from hil.navicore import NaviCore
 from hil.runner import Skip, test
@@ -83,6 +86,24 @@ def _usable_slot(nc, cfg, channel=0):
     raise Skip("NaviCore has no local Maestro slot that answers ?MAE,GET")
 
 
+def _undriven_channel(nc, cfg):
+    """(slot, device, channel, position) on a local Maestro slot for a channel NO Maestro-passthrough knob output drives,
+    or Skip. A passthrough output re-dispatches on every global mode change, and one with releaseIdleMs > 0 then arms
+    NaviCore's idle auto-release for that channel (NaviCore.ino processKnobs / maestroIdleReleaseTick): any later mesh
+    setTarget there goes limp releaseIdleMs after it, and the arm lasts in RAM until reboot or SET_CONFIG. On this bench
+    J2 drives slot 1 ch 0 with a 1500 ms release, and a SET_MODE from sbus.trim_exact in an earlier run armed it
+    (full run 20260922-215719). A driven channel can also be moved by the stick at any time."""
+    for slot, dev in _local_slots(cfg):
+        driven = {o.get("maestroCh") for k in _entries(cfg.get("knobs")) if k.get("function") == 1
+                  for key in ("outputs", "outputs2", "outputs3") for o in (k.get(key) or []) if o.get("target") == slot}
+        for ch in sorted(set(range(0, 24)) - driven):
+            pos = _mae_get(nc, slot, ch)   # not an int: timeout, or a channel not in servo mode
+            if isinstance(pos, int):
+                return slot, dev, ch, pos
+            break                          # the slot does not answer - try the next one
+    raise Skip("NaviCore has no local Maestro channel, free of passthrough knobs, that answers ?MAE,GET")
+
+
 def _nc_lines(nc, since, pattern):
     rx = re.compile(pattern)
     return [x for x in nc.dev.since(since) if rx.search(x)]
@@ -133,31 +154,31 @@ def mae_cli_local(bench):
 def maestro_mesh_settarget_readback(bench):
     w1s1 = link(bench, 1, "S1")
     nc, w = _nc(bench), usb_wcb(bench)
-    slot, dev, p0 = _usable_slot(nc, _config(nc))
+    slot, dev, ch, p0 = _undriven_channel(nc, _config(nc))
     target = 6400 if abs(p0 - 6400) > 200 else 5600
     bad = []
     with _debug(nc, DBG_MAESTRO):
         try:
             nm, pm, wm = nc.dev.mark(), w1s1.mark(), w.dev.mark()
-            w.send(f";W20,;M{dev},setTarget,0,{target}")
+            w.send(f";W20,;M{dev},setTarget,{ch},{target}")
             time.sleep(3)
             dispatch = _nc_lines(nc, nm, rf"^\[DISPATCH\] Maestro slot {slot} \(device {dev}\) <- mesh  cmd 0x04$")
             if len(dispatch) != 1:
                 bad.append(f"{len(dispatch)} dispatch lines for the setTarget")
             reached = False
             for _ in range(17):
-                if _mae_get(nc, slot, 0) == target:
+                if _mae_get(nc, slot, ch) == target:
                     reached = True
                     break
                 time.sleep(0.3)
             if not reached:
-                bad.append(f"channel 0 never read back {target}")
+                bad.append(f"channel {ch} never read back {target}")
             if _has(w.dev.since(wm), "is not a reachable target"):
                 bad.append("W1 said WCB20 is unreachable")
             if w1s1.received(pm):
                 bad.append("W1 put the ;M on its own Maestro port")
         finally:
-            w.send(f";W20,;M{dev},setTarget,0,{p0}")
+            w.send(f";W20,;M{dev},setTarget,{ch},{p0}")
             time.sleep(2)
     assert not bad, "; ".join(bad)
 
@@ -228,8 +249,10 @@ def maestro_mesh_rejects(bench):
 def maestro_skip_not_logged_as_dispatch(bench):
     """Two problems with one command. The WcbCmd hosts fork: WcbMaestro (the WCB) accepts channels 0-127 and puts the
     frame on the wire, while NaviCore's maestroChanOk skips anything above 31 (NaviCore.ino:925-929), against the
-    'same ;M, same bytes' premise. And maeInboundActuate logs '<- mesh  cmd 0x04' after the guard skipped the write
-    (NaviCore.ino:5065-5083), so the trace claims a dispatch that never happened."""
+    'same ;M, same bytes' premise. And maeInboundActuate logged '<- mesh  cmd 0x04' after the guard skipped the write
+    (the wrappers are void, so the dlog could not tell), so the trace claimed a dispatch that never happened; the source
+    now runs maestroChanOk before each channel-bearing case (NaviCore.ino:5081-5102), which needs a reflash. Exactly one of the two lines must appear: neither means the ;W20 never reached NaviCore or its debug
+    output was lost, which must not pass; 'dispatched' alone is right if the guard is ever widened to 0-127."""
     nc, w = _nc(bench), usb_wcb(bench)
     slot, dev, _ = _usable_slot(nc, _config(nc))
     with _debug(nc, DBG_MAESTRO):
@@ -241,6 +264,7 @@ def maestro_skip_not_logged_as_dispatch(bench):
     claimed = f"[DISPATCH] Maestro slot {slot} (device {dev}) <- mesh  cmd 0x04" in lines
     bench.note(f"channel 32: skipped {skipped}, logged as dispatched {claimed}")
     assert not (skipped and claimed), "NaviCore logged a dispatch for a write its guard skipped"
+    assert skipped != claimed, "NaviCore printed neither the skip nor the dispatch line: the ;M never reached it"
 
 
 @test("navicore.maestro_mesh_fanout_0_9", ";W20,;M9 and ;W20,;M0 fire each local NaviCore Maestro once per distinct device", needs=["navicore", "wcb1"])
@@ -309,18 +333,24 @@ def _ack(nc, obj, timeout=3.0):
 
 def _expected_ports(bench):
     """{link key: (link, receives a plain broadcast)} from each board's config: broadcast OUT on, and not a Maestro /
-    MP3 / DFPlayer / HCR / PWM-output port, not S1 under ?MAESTRO,REMOTE, not S1/S2 under Kyber local. A WLED port is
-    covered by its OUT flag, which configuring WLED turns off (WCB_WLED.cpp:164-172)."""
+    MP3 / DFPlayer / HCR / PWM-output port, not S1 under ?MAESTRO,REMOTE, not the Kyber's own port under Kyber local.
+    Only that one port: processBroadcastCommand (WCB.ino) skips kyberLocalPort, and the other hardware port follows its
+    ?BCAST flags like any other (tracker #14). The backup always writes the S form, ?KYBER,LOCAL,S<n>[,targets]; a bare
+    ?KYBER,LOCAL keeps the current Kyber port, S2 on a board that is not Kyber local (storeKyberSettings,
+    WCB_Storage.cpp), which is the fallback below. A WLED port is covered by its OUT flag, which configuring WLED turns
+    off (WCB_WLED.cpp:164-172)."""
     out = {}
     for wcb in (1, 2):
         tokens = [t.upper() for t in snapshot(bench, wcb)]
+        kyber = next((t for t in tokens if t.startswith("?KYBER,LOCAL")), None)
+        kport = None if kyber is None else "S" + (re.match(r"^\?KYBER,LOCAL(?:,S(\d))?", kyber).group(1) or "2")
         for p in ("S1", "S2", "S3", "S4", "S5"):
             l = bench.links.get(wcb, p)
             if not l:
                 continue
             device = any(re.search(rf"(?:\b|W{wcb}){p}\b", t) for t in tokens
                          if t.startswith(("?MAESTRO,M", "?MP3,", "?DFP,", "?HCR,PORT", "?MAP,PWM,OUT")))
-            reserved = ("?MAESTRO,REMOTE" in tokens and p == "S1") or ("?KYBER,LOCAL" in tokens and p in ("S1", "S2"))
+            reserved = ("?MAESTRO,REMOTE" in tokens and p == "S1") or p == kport
             out[l.key] = (l, f"?BCAST,OUT,{p},ON" in tokens and not device and not reserved)
     return out
 
@@ -515,9 +545,27 @@ def mesh_json_declined(bench):
 @test("navicore.mesh_stats_counts", "After RESET_MESH_STATS, NaviCore's per-peer sent/ackd for unicasts and an ensured broadcast, and per-sender recv, are exact", needs=["navicore", "wcb1"], links=[],
       drives=["W1S2", "W1S3", "W2S3"])   # WCB_SEND ;S2 to W1, and an ensured broadcast of ;S3 that every WCB writes
 def mesh_stats_counts(bench):
-    """Exact only while nothing else sends from NaviCore to W1 in the window (a configured modeReport or statsReport
-    would add to it). ;W20,?version replies travel as RTERM raw packets and add nothing to 'sent'."""
+    """Exact only while nothing else sends from NaviCore in the ~7 s window, and NaviCore sends two periodic tracked
+    unicasts of its own (tracker #76): its mesh-stats report to statsReport.wcb every 30 s (reportMeshStats,
+    rc_telemetry.h), and ;V,MODE to modeReport.wcb every 60 s, re-timed by every mode change. On this bench those are W1
+    and W2, and a report inside the window failed this test in full run 20260922-215719 (W1 sent 5, not 4). W1 prints the
+    last stats report's age (?STATS 'Reported by Other Nodes'), so the window starts right after one. The mode report's
+    phase can't be read, so its target may show exactly one extra send. ;W20,?version replies travel as RTERM raw
+    packets and add nothing to 'sent'."""
     nc, w = _nc(bench), usb_wcb(bench)
+    cfg = _config(nc)
+
+    def _report_to(key):
+        r = cfg.get(key) or {}
+        return r.get("wcb") if r.get("enabled") else None
+    stats_to, mode_to = _report_to("statsReport"), _report_to("modeReport")
+    if stats_to == 1:
+        for _ in range(2):
+            age = next((int(mm.group(1)) for x in w.run("?STATS")
+                        for mm in [re.match(r"^WCB20: Sent: .*\((\d+)s ago\)$", x.rstrip())] if mm), None)
+            if age is None or age < 20:   # none yet this boot, or the next is >= 10 s away
+                break
+            time.sleep(31 - age)          # let the next one land, then start the window
     st = nc.wcb_status()
     known = {i + 1 for i, v in enumerate(st.get("known", [])) if v}
     online = {i + 1 for i, v in enumerate(st.get("online", [])) if v}
@@ -544,11 +592,14 @@ def mesh_stats_counts(bench):
     assert pages and pages[0].get("self") == 20, "no MESH_STATS page 0 for self 20"
     assert set(rows) == {i for i in known if i != 20}, f"rows for {sorted(rows)}, known {sorted(known)}"
     r1 = rows.get(1)
-    assert r1 and r1[1] == 4 and r1[4] == 0 and r1[2] + r1[5] == 4 and r1[6] == 2, \
-        f"W1 row [id,sent,ackd,rty,fail,ung,recv] = {r1} (expected sent 4, fail 0, ackd+ung 4, recv 2)"
+    w1_sent = (4, 5) if mode_to == 1 else (4,)
+    assert r1 and r1[1] in w1_sent and r1[4] == 0 and r1[2] + r1[5] == r1[1] and r1[6] == 2, \
+        f"W1 row [id,sent,ackd,rty,fail,ung,recv] = {r1} (expected sent {w1_sent}, fail 0, ackd+ung = sent, recv 2)"
     for i in sorted(online - {1, 20}):
         if i in rows and st.get("clients", [0] * 20)[i - 1] == 0:
-            assert rows[i][1] == 1 and rows[i][2] == 1, f"WCB{i} row {rows[i]} (expected the one broadcast, ACKed)"
+            sent_ok = (1, 2) if i in (mode_to, stats_to) else (1,)
+            assert rows[i][1] in sent_ok and rows[i][2] == rows[i][1], \
+                f"WCB{i} row {rows[i]} (expected the one broadcast{' plus at most one periodic report' if len(sent_ok) > 1 else ''}, all ACKed)"
     assert agg.get("recv", 0) >= 2 and agg.get("bcast", 0) >= 1, agg
 
 
@@ -700,11 +751,6 @@ def test_action_bad_target_not_ok(bench):
 
 
 # ============================================================ TRIGGER, record/replay, #L diagnostics, a temporary probe
-def _opt_in(bench, flag, why):
-    if flag not in bench.cfg.get("opt_in", []):
-        raise Skip(f'opt-in: add "{flag}" to bench.json "opt_in" ({why})')
-
-
 @test("navicore.trigger_bounds_usb_vs_mesh", "TRIGGER ranges: USB rejects a bad button or tap; the mesh clamps tap (9 -> 4, 0 -> 1) and drops a bad button", needs=["navicore", "wcb1"], links=[])
 def trigger_bounds_usb_vs_mesh(bench):
     nc, w = _nc(bench), usb_wcb(bench)
@@ -810,11 +856,10 @@ def rec_info_list(bench):
     assert after == before, f"INFO changed: {before} -> {after}"
 
 
-@test("navicore.rec_play_clip", "OPT-IN (navicore_clip, attended): play a saved clip of up to 30 s; the start line, REPLAYING state and completion timing", needs=["navicore", "wcb1"], links=[])
+@test("navicore.rec_play_clip", "OPT-IN (navicore_clip, attended): play a saved clip of up to 30 s; the start line, REPLAYING state and completion timing", needs=["navicore", "wcb1"], links=[], opt_in="navicore_clip")
 def rec_play_clip(bench):
     """Drives every Maestro channel in the clip and re-fires its recorded actions, possibly WCB commands (hence
     config_guard). The clip must hold no record/play/stop action: a recorded record would start a take that saves."""
-    _opt_in(bench, "navicore_clip", "replays a saved clip: servo motion and recorded actions")
     nc = _nc(bench)
     state = _rec_info(nc)
     if state[0] != "idle" or state[1] != "0":
@@ -865,7 +910,8 @@ def cli_codes(bench):
         bad.append("#L99")
     if not any(re.match(r"^Mode=\d+  matrixBtn=\S+  matrixVal=\S+$", x) for x in _cli(nc, "#l12", r"Mode=\d+")):
         bad.append("#l12")
-    if "NaviCore — WCB HW 3.2" not in _cli(nc, "#L1", r"NaviCore — "):
+    # #L1 names the booted profile (navicore.l1_names_board_profile), so either name is correct here.
+    if not any(x in ("NaviCore — WCB HW 3.2", "NaviCore — NaviCore v2") for x in _cli(nc, "#L1", r"NaviCore — ")):
         bad.append("#L1")
     l11 = _cli(nc, "#L11", r"Board status: ")
     if f"WCB device ID: 20  quantity: {st.get('quantity')}" not in l11:
@@ -874,7 +920,8 @@ def cli_codes(bench):
     boards = {int(i): up for i, up, _ in re.findall(r"WCB(\d+)=(UP|dn)(\*?)", status)}
     if set(boards) != set(known):
         bad.append(f"#L11 lists {sorted(boards)}, GET_WCB_STATUS knows {known}")
-    bad += [f"#L11 WCB{i}={up} vs online {online[i - 1]}" for i, up in boards.items() if not clients[i - 1] and (up == "UP") != bool(online[i - 1])]
+    bad += [f"#L11 WCB{i}={up} vs online {online[i - 1]}" for i, up in boards.items()
+            if i <= len(online) and not clients[i - 1] and (up == "UP") != bool(online[i - 1])]   # arrays end at the highest known id
     raw = _cli(nc, "#L13", r"^---- SBUS RAW ---- \(\d+ bytes, SBUS-\d+\)")
     if "---- SBUS RAW ---- (36 bytes, SBUS-24)" in raw:
         for want in ("  bytes 23-33  = CH17-24 data  ← check these", "  byte 34      = flags", "  byte 35      = footer (expect 00)"):
@@ -934,7 +981,8 @@ def probe_temp_peer_not_learned(bench):
     ages out after 180 s (WCB_Client.h:108). The WCBs forget the probe when it leaves; NaviCore is left to age it out."""
     nc = _nc(bench)
     known = nc.wcb_status().get("known", [])
-    pid = next((p for p in (16, 15, 13, 12, 11, 10) if not known[p - 1]), None)
+    # known[] runs only up to the highest id NaviCore knows (NaviCore.ino WCB_STATUS), so an id past its end is unknown.
+    pid = next((p for p in (16, 15, 13, 12, 11, 10) if not (p <= len(known) and known[p - 1])), None)
     if pid is None:
         raise Skip("no candidate probe id is unknown to NaviCore")
 
@@ -955,7 +1003,8 @@ def probe_temp_peer_not_learned(bench):
     gone, deadline = False, time.monotonic() + 240
     while time.monotonic() < deadline:
         time.sleep(20)
-        if not nc.wcb_status().get("known", [])[pid - 1]:
+        now_known = nc.wcb_status().get("known", [])
+        if not (pid <= len(now_known) and now_known[pid - 1]):   # the array shrinks once the probe ages out
             gone = True
             break
     lines = nc.dev.since(nm)
@@ -994,6 +1043,15 @@ def _sbus_cfg(dev):
     m = dev.mark()
     _sbus_send(dev, {"t": "getcfg"})
     return json.loads(dev.expect(r'^\{"e":"cfg"', timeout=5, since=m).string)
+
+
+def _sbus_bootlog(dev):
+    """The controller's RTC boot record (SBUSController.ino:1090-1096, 1699-1727): n counts boots since the last power
+    loss (RTC_NOINIT, :1571-1678) and up is this boot's millis(). The reply is not gated on a ping."""
+    _sbus_ping(dev)
+    m = dev.mark()
+    _sbus_send(dev, {"t": "bootlog"})
+    return json.loads(dev.expect(r'^\{"e":"bootlog"', timeout=5, since=m).string)
 
 
 def _l09(nc):
@@ -1062,8 +1120,10 @@ def _matrix_button(bench, nc, cfg, ncfg, mode):
     raise Skip("no controller button on the matrix channel decodes to an unmapped slot")
 
 
-def _rc_trigs(nc, since, slot):
-    return [(ts, json.loads(x)) for ts, x in list(nc.dev.lines[since:]) if '"type":"rc_trig"' in x and f'"btn":{slot},' in x]
+def _rc_trigs(nc, since, slot=None):
+    """(timestamp, rc_trig object) for <slot>, or for every slot when <slot> is None."""
+    return [(ts, json.loads(x)) for ts, x in list(nc.dev.lines[since:])
+            if '"type":"rc_trig"' in x and (slot is None or f'"btn":{slot},' in x)]
 
 
 @test("sbus.discover", "SBUS controller config and NaviCore bindings read back; the safe channels are computed; NaviCore sees SBUS-24 at full rate", needs=["sbus", "navicore"], links=[])
@@ -1236,14 +1296,45 @@ def slider_exact(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("sbus.trim_exact", "A controller trim's step and button modes produce exact channel values at NaviCore", needs=["sbus", "navicore"], links=[])
+@test("sbus.trim_exact", "A controller trim gives exact channel values at NaviCore: button mode on the matrix channel, under a mode where both of its slots are unmapped; step mode only when a step trim sits on an unbound channel (unreachable on this bench without a flash write)", needs=["sbus", "navicore", "wcb1"], links=[])
 def trim_exact(bench):
+    """A trim on a channel NaviCore leaves unbound is used first. This bench has none: all six trims are button-mode
+    trims on the matrix channel (the X18 layout wires T1-T6 into the button matrix), and only the controller's 'cfg'
+    moves a trim's channel or mode, which saves to flash (SBUSController.ino:1285-1289, :1343), so the step-mode branch
+    never runs here. The fallback presses a matrix trim only under a mode where neither of its slots has a mapping key,
+    so nothing can run (rc_config.h:1255-1262; rcDispatch then only emits rc_trig, NaviCore.ino:2213-2285), switching
+    to that mode with a mesh SET_MODE from W1 as sbus.mode_sets_trigger_mode does. SET_MODE saves nothing, but it is not
+    free of side effects: every mode-aware knob re-dispatches, so J2 moves the real servo on NaviCore's Maestro slot 1
+    ch 0, and that channel's 1500 ms auto-release stays armed in RAM until reboot (why
+    navicore.maestro_mesh_settarget_readback avoids knob-driven channels). Pressing the other slot commits the first
+    one's tap (NaviCore.ino:2302-2308), so the rc_trig lines must be exactly one tap 1 per slot."""
     dev, nc, cfg, ncfg = _sbus_setup(bench)
     safe = _safe_channels(ncfg)
     t, tr = next(((t, x) for t, x in enumerate(cfg.get("tr", [])) if x.get("c") in safe), (None, None))
+    mc, maps = ncfg.get("matrixChannel"), ncfg.get("mappings", {})
+    m0 = _mode(nc)
+    m1, sR, sL = m0, None, None
     if tr is None:
-        raise Skip("no controller trim on a channel NaviCore leaves unbound")
+        if not mc:
+            raise Skip("NaviCore's GET_CONFIG names no matrix channel")
+        if _band(ncfg, _l09(nc)["channels"][mc - 1]) or _band(ncfg, SBUS_CENTER):
+            raise Skip("the matrix channel's resting or release value already decodes to a slot")
+        for m in [m0] + [x for x in (1, 2, 3) if x != m0]:
+            for i, x in enumerate(cfg.get("tr", [])):
+                if x.get("c") != mc or x.get("m", 0) != 1:
+                    continue
+                # Both directions must decode, to two different slots: a None slot or a repeat has no exact rc_trig list.
+                a, b = _band(ncfg, x.get("vR", 0)), _band(ncfg, x.get("vL", 0))
+                if a and b and a != b and str(m * 100 + a) not in maps and str(m * 100 + b) not in maps:
+                    t, tr, m1, sR, sL = i, x, m, a, b
+                    break
+            if tr is not None:
+                break
+        if tr is None:
+            raise Skip("no trim on an unbound channel, and no matrix trim whose two slots are unmapped in any mode")
     c, mode, step, cur0 = tr["c"], tr.get("m", 0), tr.get("s", 0), tr.get("cur", SBUS_CENTER)
+    w = usb_wcb(bench)
+    got = trigs = None
 
     def read(cmd):
         _sbus_send(dev, cmd)
@@ -1251,6 +1342,12 @@ def trim_exact(bench):
         return _l09(nc)["channels"][c - 1]
 
     try:
+        if m1 != m0:
+            w.send(f';W20,{{"type":"SET_MODE","mode":{m1}}}')
+            time.sleep(2)
+            if _mode(nc) != m1:
+                raise AssertionError("the mesh SET_MODE did not take")
+        nm = nc.dev.mark()
         if mode == 0:
             up, down = read({"t": "tr", "i": t, "d": 1}), read({"t": "tr", "i": t, "d": -1})
             assert up == min(cur0 + step, SBUS_MAX), f"step up: CH{c} = {up}"
@@ -1259,28 +1356,48 @@ def trim_exact(bench):
         else:
             got = [read({"t": "tr", "i": t, "d": 1, "p": True}), read({"t": "tr", "i": t, "d": 1, "p": False}),
                    read({"t": "tr", "i": t, "d": -1, "p": True}), read({"t": "tr", "i": t, "d": -1, "p": False})]
-            assert got == [tr.get("vR"), SBUS_CENTER, tr.get("vL"), SBUS_CENTER], f"button-mode trim values {got}"
+            if sR:
+                time.sleep(ncfg.get("tapWindowMs", 500) / 1000 + 1.0)    # the last tap fires tapWindowMs after release
+                trigs = [(x["mode"], x["btn"], x["tap"]) for _, x in _rc_trigs(nc, nm)]   # every slot, not just these
     finally:
         if mode == 1:
-            _sbus_send(dev, {"t": "tr", "i": t, "d": 1, "p": False})
+            _sbus_send(dev, {"t": "tr", "i": t, "d": 1, "p": False})    # a release centres the trim either way
+        if m1 != m0:
+            w.send(f';W20,{{"type":"SET_MODE","mode":{m0}}}')
+            time.sleep(2)
+    assert _mode(nc) == m0, "the original mode was not restored"
+    if mode == 1:
+        assert got == [tr.get("vR"), SBUS_CENTER, tr.get("vL"), SBUS_CENTER], f"button-mode trim values {got}"
+    if sR:
+        assert trigs == [(m1, sR, 1), (m1, sL, 1)], f"rc_trig (mode, btn, tap) {trigs}, expected slots {sR} then {sL} in mode {m1}"
 
 
-@test("sbus.signal_loss_controller_reset", "OPT-IN (sbus_reset): resetting the controller stops SBUS frames; NaviCore's fps drops to 0 with flags unchanged and no dispatch, then recovers", needs=["sbus", "navicore"], links=[])
+@test("sbus.signal_loss_controller_reset", "OPT-IN (sbus_reset): resetting the controller stops SBUS frames; NaviCore's fps drops to 0 with flags unchanged and no dispatch, then recovers", needs=["sbus", "navicore"], links=[], opt_in="sbus_reset")
 def signal_loss_controller_reset(bench):
-    """The reset pulses RTS on the controller's USB-Serial/JTAG port (the esptool hard-reset pattern: an inference, not
-    verified on this board); its USB re-enumerates, so the port is reopened. The controller's boot resets its runtime
-    state, so the test only runs when that state already equals the boot defaults."""
-    _opt_in(bench, "sbus_reset", "reboots the SBUS controller")
+    """The reset is RTS=1/DTR=0 on the controller's USB-Serial/JTAG port, which resets the chip. On Windows, usbser.sys
+    sends SET_CONTROL_LINE_STATE only when DTR is written, so an RTS change alone never reaches the board: DTR is
+    re-written after every RTS change, as esptool's _setRTS does (esptool/reset.py:72-77). DTR stays 0, so the chip
+    boots the app, not download mode. The controller's boot record proves the reset happened before NaviCore is blamed.
+    Its boot resets its runtime state, so the test only runs when that state already equals the boot defaults."""
     dev, nc, cfg, ncfg = _sbus_setup(bench)
     if (any(s.get("pos") != s.get("d") for s in cfg.get("sw", [])) or any(s.get("pct") != 50 for s in cfg.get("sl", []))
             or any(x.get("cur") != SBUS_CENTER for x in cfg.get("tr", []))):
         raise Skip("the controller is not in its boot state; a reset would move channels")
     base = _l09(nc)
+    b0 = _sbus_bootlog(dev)
     nm = nc.dev.mark()
-    dev._ser.dtr = False
-    dev._ser.rts = True
-    time.sleep(0.1)
-    dev._ser.rts = False
+    t_pulse = time.monotonic()
+    # A local handle: if the USB re-enumerates, the reader's _reopen() sets dev._ser = None before the release below.
+    # A closed handle is harmless - pyserial skips the hardware call once is_open is false.
+    s = dev._ser
+    s.rts = True
+    s.dtr = False
+    time.sleep(0.2)
+    try:
+        s.rts = False
+        s.dtr = False
+    except (serial.SerialException, OSError):
+        pass    # the port went away with the reset; it is reopened below
     lost, deadline = None, time.monotonic() + 3
     while time.monotonic() < deadline:
         state = _l09(nc)
@@ -1302,9 +1419,13 @@ def signal_loss_controller_reset(bench):
     assert reopened is not None, "the SBUS controller's port did not come back within 60 s"
     boot = reopened.since(0)
     _sbus_ping(reopened)
+    b1 = _sbus_bootlog(reopened)
     time.sleep(3)
     recovered = _l09(nc)
     assert not _has(boot, "WiFi section missing from config — upgrading file."), "the controller rewrote its config on boot: report it"
+    # Not the reset reason: which RTC code this reset reports is unverified here, and n counts it whatever it is.
+    assert b1["n"] > b0["n"] or b1["up"] < (time.monotonic() - t_pulse) * 1000, (
+        f"the controller did not reset: boot count {b0['n']}->{b1['n']}, up {b1['up']} ms ({b1.get('rstn')}, {b1.get('rtcn')})")
     assert lost, "NaviCore's fps never dropped to 0 after the reset"
     assert "lost=no" in lost["text"] and "failsafe=no" in lost["text"], "the frame flags changed without a decoded frame"
     assert later["age"] > lost["age"], f"ageMs did not grow: {lost['age']} -> {later['age']}"

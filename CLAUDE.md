@@ -11,7 +11,7 @@ changing before editing.**
 |---|---|
 | WDP — discovery, device announce, election | [docs/WDP_DESIGN.md](docs/WDP_DESIGN.md), [docs/WDP_DEVICE_ANNOUNCE.md](docs/WDP_DEVICE_ANNOUNCE.md) |
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
-| Sequence inventory — `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| Stored sequences — nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
@@ -42,11 +42,14 @@ changing before editing.**
    unacknowledged" and "every broadcast is acknowledged" are both true here, of different
    paths — check which one you're on before assuming delivery.
    **Loop prevention gates every broadcast on one global.** `sendESPNowMessage()` drops a
-   broadcast outright when `lastReceivedViaESPNOW` is set (`WCB.ino:2618`), and a queued command
-   carries the value it snapshotted at enqueue (`:2204`). Only a received *command* may set it:
+   broadcast outright when `lastReceivedViaESPNOW` is set (`WCB.ino:2722`), and a queued command
+   carries the value it snapshotted at enqueue (`:2286`). Only a received *command* may set it:
    JSON telemetry is consumed without ever running, so both receive paths skip the flag for a `{`
-   payload (`:4409`, `:4700`). Set it from a packet that never executes and a controller's 5 Hz
+   payload (`:4520`, `:4815`). Set it from a packet that never executes and a controller's 5 Hz
    `rc_ch` silences locally-typed broadcasts at random — local ports still print them.
+   A broadcast the board **originates from `loop()`** (no command around it) reads whatever the
+   last received command left, so it must clear the flag for its own send — `sendOwnBroadcast()`
+   in `WCB.ino`. `?ETM,CHAR` phase 3 lost its whole broadcast third to this.
 4. **ETM is all-or-nothing across the fleet.** Every board must have ETM set the same way or
    messages are **silently ignored** — same for `?ETM,CHKSM`, where a mismatch rejects all
    packets. **WDP requires ETM enabled**: it rides the 252-byte ETM struct and gate
@@ -78,10 +81,18 @@ changing before editing.**
      new adverts are skipped). WLED, by contrast, stays strictly one-slot-per-ID.
 6. **CI clones `WcbCmd` from GitHub** — not `arduino-cli lib install` — so builds pick up the
    latest push with no Library Manager indexing lag. Nothing here pins a `WcbCmd` version.
-7. **`HumanCyborgRelationsAPI` is vendored, not installed.** A WCB-patched, serial-only copy
-   sits at `Code/WCB/src/HumanCyborgRelationsAPI` and is pulled in by relative `#include`
-   precisely so no differently-patched copy on a build machine can shadow it. Don't "fix"
-   this by adding it as a library dependency.
+7. **`HumanCyborgRelationsAPI` and `EspSoftwareSerial` are vendored, not installed.** WCB-patched
+   copies sit at `Code/WCB/src/HumanCyborgRelationsAPI` (serial-only) and
+   `Code/WCB/src/EspSoftwareSerial` (8.1.0, level-triggered RX on the classic ESP32, rule 13), and
+   are pulled in by relative `#include` precisely so no differently-patched copy on a build machine
+   can shadow them. Each has a README listing its patches. Don't "fix" this by adding either as a
+   library dependency. CI installs neither, so a stray angle-bracket `SoftwareSerial.h` include
+   fails the build there; locally it would compile the sketchbook's stock copy beside the patched
+   one. This must print nothing (sources only: the READMEs name the include):
+   `grep -rn --include="*.h" --include="*.cpp" --include="*.ino" "<SoftwareSerial.h>" Code/WCB`.
+   The probe firmware bundles a byte-identical copy (`tests/hil/wcb_probe/src/EspSoftwareSerial`;
+   `tests/hil/selftest.py` fails if they differ) - change both together. The Arduino-Code sketchbook
+   keeps the stock library.
 8. **A push to `main` touching `Code/**` publishes a release.** It auto-bumps the patch,
    stamps `String SoftwareVersion` in `WCB.ino` with a DTG (`6.1.1_241530RJUN2026`, US
    Eastern), compiles both targets, commits binaries, tags, and publishes a GitHub Release
@@ -100,9 +111,14 @@ changing before editing.**
     of commands, so `ESP.restart()` inside one destroys every command still queued behind it —
     and the pusher cannot tell, because the boot banner satisfies its "did the board answer"
     test, so nothing retries and the push is scored as fully ACKed. Set a deferred flag and let
-    `loop()` restart once the queue is empty **and quiet** (`pwmRebootPending` /
-    `PWM_REBOOT_QUIET_MS`, `WCB_PWM.cpp`) — quiet matters, because an ACK-paced push empties the
-    queue between every pair of commands. Likewise `espNowReceiveCallback` runs on the WiFi
+    `loop()` restart once the queue is empty **and quiet** (`PWM_REBOOT_QUIET_MS`) — quiet
+    matters, because an ACK-paced push empties the queue between every pair of commands. Two flags
+    feed that one restart point: `pwmRebootPending` (`WCB_PWM.cpp`) and the general `rebootPending`
+    (`WCB.ino`), which `reboot()` and `eraseNVSFlash()` set. **Every restart reached from a command
+    handler uses one of them** — `?reboot`, `?ERASE,NVS`, `?MAP,PWM,CLEAR,OUT` and `?PX` each took
+    it inline until 2026-09-20, and an ETM-received one is ACKed on the WiFi task before `loop()`
+    ever dequeues it, so a whole delay window of commands was ACKed and then thrown away. The OTA
+    post-flash restarts (`WCB_OTA.cpp`) and the boot guard are not command handlers and stay inline. Likewise `espNowReceiveCallback` runs on the WiFi
     task: UART0 has no TX buffer, so a multi-KB `Serial.printf` there blocks for ~235 ms and,
     with HAL locks on, holds the UART0 mutex against `loop()` too. That is what fired the WiFi
     watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
@@ -120,32 +136,67 @@ changing before editing.**
     prints are commented out). Check with:
     `for f in Code/WCB/*.cpp; do head -3 "$f" | grep -q WCB_RemoteTerm.h || echo "$f"; done`
 
-13. **S3-S5 are bit-banged software UARTs, and their TX timing is not protected by default.**
-    `SoftwareSerial Serial3/4/5` (`WCB.ino`) is EspSoftwareSerial: TX busy-waits each bit
-    period against a running anchor, and the library default `m_intTxEnabled = true` means it
-    never takes a critical section. An ESP-NOW interrupt landing mid-byte pushes the
-    accumulator behind, the remaining bits compress, and the **receiver mis-frames — the
-    command arrives cut short**, not garbled. A user measured a 45 % failure rate feeding an
-    H-CR on S5 under mesh load: `<CA1021>` played 0001/0010, every failure a *prefix*.
-    `applySoftSerialIntTx()` now flips `enableIntTx(false)` per port, but **only where no
-    core-0 task can write that port** — the library’s interrupt mux is `static` (one spinlock
-    for all three ports), and a core-0 writer waiting on it shortens its next start bit, so *both*
-    ports mis-frame. `espNowReceiveCallback` writes Maestro, Kyber and raw-mapping ports
-    only through `meshSerialWrite()`, which queues every S3-S5 chunk for `MeshSerialOutTask` on
-    core 1 — a remote board's raw mapping can target any port, so the predicate cannot see it.
-    Keep every new soft-serial writer on core 1.
-    **A port with `enableIntTx(false)` also cannot RECEIVE while it transmits** — the RX edge
-    ISR is masked for the whole write (the library README says so). So a device that answers
-    must be asked in **one** write, and its replies read after the WCB goes quiet. Queries sent
-    back to back lose every reply but the last: `?HCR,STATUS` called `getVolume()` three times,
-    putting `<QVV>\n<QVA>\n<QVB>\n` on the wire, and only vB ever came back on S3-S5.
-    That is why the HCR poll is one container frame (`HCR_POLL_FRAME`, `WCB_HCR.cpp`) and why status
-    readers must never transmit. Two things that are NOT fixes: the write being one bulk call
-    instead of per-byte (both take the same path with interrupts live), and lowering the baud
-    (it lengthens the exposure). The durable fix is a hardware UART (S1/S2) or taking the
-    other traffic off the wire — every broadcast is bit-banged to **every** unclaimed port, so one enabled-but-unused
-    port costs real milliseconds of blocked loop task per message.
-
+13. **S3-S5 have no UART: RX is EspSoftwareSerial (vendored, rule 7), TX is an RMT channel** (`WcbSoftSerial`,
+    `WCB_SoftSerial.{h,cpp}`). Don't put TX back on the library. Bit-banged TX was the root of a
+    whole family of bugs: an interrupt mid-byte compressed the remaining bits (a user measured 45 %
+    of H-CR commands on S5 arriving *cut short* under mesh load). The fix for that,
+    `enableIntTx(false)`, masked core 1's interrupts for ~90 % of every byte, which blinded
+    soft-serial RX on **all three** ports while any of them transmitted (tracker #16), starved the
+    UART0 ISR into reading stale FIFO slots (#57), and needed a core-affinity rule for every writer.
+    RMT clocks the bits out in hardware, so none of that applies. Measured: every TX arm 200/200 exact
+    under mesh load, including the port that used to be "unprotected" (60-73/200), and soft RX
+    while soft TX runs, 40/40.
+    - `write()` blocks until the bytes are on the wire, but it sleeps on the driver instead of
+      busy-waiting. It sends in chunks sized to fit the channel memory, so a transmission never
+      waits on the RMT refill ISR. That ISR isn't IRAM-safe and is held off during every NVS
+      write; a starved channel would put stale symbols on the wire.
+    - **Channel budget:** ESP32 has 8 TX-capable RMT channels, ESP32-S3 has 4. The status LED
+      (NeoPixel) takes one and S3-S5 one each, which **fills the S3 exactly**. Anything else that
+      wants RMT on the S3 makes a soft port fall back to bit-banged TX. It prints
+      `[SOFTSERIAL] S<n>: no RMT channel` at boot, and the old `applySoftSerialIntTx()` rules then
+      govern that port again.
+    - `;P` borrows a soft TX pin with `pinMode`; `noteTxPinBorrowed()` makes the next serial write
+      route it back to RMT. A declared PWM-output port drops serial writes.
+    - **Receive is a GPIO ISR**, which decodes from the time each edge's interrupt
+      starts. So the GPIO ISR service is installed at **level 3** in `setup()`, ahead of any
+      `attachInterrupt`, to pre-empt the level-1 UART/RMT interrupts. That took 19200-57600 from
+      15-19/20 lines exact to 20/20; 115200 is still 0/20 (`?BAUD` warns). Keep it first. **Never
+      add `ESP_INTR_FLAG_IRAM`** to it. Every handler is reached through Arduino's `__onPinInterrupt`,
+      which is in flash (and so is the `micros()` the ISRs call), so an IRAM service runs flash code
+      with the cache off during any NVS write and panics. A PWM input pulses every 20 ms, so that
+      board would crash on its next save.
+    - **On the classic ESP32, S3-S5 RX and PWM inputs are level-triggered** (tracker #78). ESP32
+      erratum GPIO-3.14 (every revision, no fix) loses an *edge* interrupt on GPIO0-31 when the GPIO
+      ISR's STATUS/W1TC handling of another pin lands on it. Measured on W1 with the edge ISR: 227 of
+      10125 lines lost when two or three soft ports took edges ~1.5-3 µs apart, every single-port line
+      exact. So the vendored library's `rxBitISR` and `pwmEdge()` (`WCB_PWM.cpp`) run on
+      `ONLOW`/`ONHIGH` armed for the level the line is *not* at. They re-arm the opposite level first,
+      record a transition only when the level changed, and re-read the pad before returning. **Never
+      attach a `CHANGE`/`RISING`/`FALLING` interrupt on GPIO0-31 on the classic ESP32**: it is lost
+      the same way and can steal the others' edges. The ESP32-S3 keeps edges, and has no such erratum.
+      A soft port above ~74880 baud (115200) runs `rxBitSyncISR` on its FALLING edge on both chips.
+      It busy-waits a frame, so a level trigger there would re-fire forever on a line held low. It
+      stays exposed. `?DEBUG` prints each soft port's mode at begin (`[SOFTSERIAL] S<n> RX: ...`).
+    - **A level arm survives `ESP.restart()` and a panic** (CPU-only resets), and armed with no handler it
+      interrupt-WDT boot-loops the board, so `clearStaleGpioInterrupts()` disarms every pin *before*
+      `gpio_install_isr_service` in `setup()` - keep it first (tracker #78; it looped wcb_probe 6).
+    - **Reconfigure S3-S5 RX and PWM-input pins only from core 1** (`setup()`, `loop()`, the
+      command handlers, `applyLiveBaud()`). The level ISR rewrites `GPIO_PINn_REG`'s `int_type`
+      without the IDF spinlock, a read-modify-write that a core-0 `attachInterrupt`/`detachInterrupt`
+      /`pinMode`/`gpio_config` on the same pin could interleave with. Never from `PWMTask`, the ESP-NOW
+      callback or any other core-0 task.
+    - **Soft-port reads suspend the scheduler** (`WcbSoftSerial::available/read/peek`).
+      EspSoftwareSerial's `rxBits()` checks that its edge buffer is empty, and only then reads `micros()`.
+      A core-1 time slice landing between the two injects a faux stop bit mid-byte: the byte's tail reads
+      as 1s, and the bytes after it are framed from mid-byte. That lost 3 of 40 lines while S4 transmitted
+      (tracker #63). Call these from task context only, and don't read S3-S5 with `readBytes()`, which
+      isn't wrapped.
+    - **Keep the UART0 (USB) interrupt on core 0** (`beginUsbSerialOnCore0()`). That was #57's fix,
+      and it stays correct for the fallback path.
+    - Some older mitigations still stand and are now merely harmless: `meshSerialWrite()` queueing
+      S3-S5 chunks to core 1, and the HCR poll as one container frame (`HCR_POLL_FRAME`). Keep the
+      poll as one frame anyway: status readers must never transmit, because a reply that overlaps a
+      query is still lost on the device side.
 
 ## Verifying
 
@@ -164,6 +215,12 @@ python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, t
 python tests/hil/run.py                  # everything; or globs: "maestro.*" "wled.*"
 python tests/hil/run.py --discover       # re-detect which probe header is wired to which WCB port
 python tests/hil/run.py --list | --plan
+python tests/hil/run.py "wizard.*"       # the Wizard in Chrome over real Web Serial (tests/wizard, Playwright)
+python tests/hil/run.py --resume          # continue the last paused run (Ctrl+C once pauses)
+python tests/hil/selftest.py             # harness self-test, no hardware
+
+# Wizard parser — no browser, no board; also run in CI by .github/workflows/wizard-tests.yml
+cd tests/wizard && npm run unit
 ```
 
 The WDP test is independent of the firmware build so it can never block a push. The HIL
@@ -192,7 +249,7 @@ A static Wizard server is configured as launch config `wizard-static` (port 8777
 | `Wizard/` | browser config tool — `app.js`, `parser.js`, `flasher.js`, `device-labels.js` |
 | `PCB/` | KiCad hardware, V2.4 / V3.1 / V3.2 |
 | `TestConfigs/` | bench test plan and fixtures |
-| `tests/` | `wdp_wire_test.cpp` (host) · `hil/` hardware-in-the-loop harness, `hil/gui.py`, and `hil/wcb_probe/` instrument firmware |
+| `tests/` | `wdp_wire_test.cpp` (host) · `hil/` hardware-in-the-loop harness, `hil/gui.py`, and `hil/wcb_probe/` instrument firmware · `wizard/` Playwright specs the harness runs (docs/HIL_TESTING.md §8) |
 
 `wcb_pin_map.{h,cpp}` maps hardware revisions to pins — hardware differences belong there,
 not in `#ifdef`s scattered through the subsystems.

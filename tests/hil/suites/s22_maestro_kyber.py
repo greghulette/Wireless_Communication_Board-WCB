@@ -22,7 +22,7 @@ Built from the maestro_kyber specs, re-verified against the code (several map li
 import json
 import re
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from hil.runner import Skip, test
 from suites.common import (Watch, config_guard, link, marker, nonce, padded, probe_in_mesh, require_tokens, snapshot,
@@ -127,6 +127,17 @@ def _require_kyber_broadcast_remote(w):
 def _port_tokens(tokens, port):
     """The saved ?BAUD / ?BCAST tokens of one port — what ?KYBER,CLEAR and a Maestro clear reset to defaults."""
     return [t for t in tokens if re.match(rf"^\?(BAUD,{port},|BCAST,(IN|OUT),{port},)", t, re.I)]
+
+
+def _port_devices(tokens, port, wcb=1):
+    """The saved lines that put a device on W<wcb> <port> ('S2'): a local Maestro, HCR, MP3, DFPlayer, WLED or a PWM
+    input/output — what kyberLocalPortRefused (WCB_Storage.cpp) checks. Matched by line prefix, never by scanning every
+    token for the port name: a sequence body or the alias can hold 'S2' too, and so can ?EPASS, which must never reach a
+    note or a failure message. A mapping's local outputs count too: isSerialPortPWMOutput (WCB_PWM.cpp) reads them, and
+    the backup writes them on the ?MAP,PWM,S<in>,... line as S<n> or W<self>S<n>, with no ?MAP,PWM,OUT line."""
+    pats = (rf"^\?MAESTRO,M\d:W{wcb}{port}:", rf"^\?HCR,PORT,{port}\b", rf"^\?MP3,{port}\b", rf"^\?DFP,{port}\b",
+            rf"^\?WLED,\d+:W{wcb}{port}\b", rf"^\?MAP,PWM,(OUT,)?{port}\b", rf"^\?MAP,PWM,S\d.*,(W{wcb})?{port}(,|$)")
+    return [t for t in tokens if any(re.match(p, t, re.I) for p in pats)]
 
 
 def _raw_stats(w):
@@ -371,18 +382,25 @@ def get_edge_cases(bench):
             w.run("?DEBUG,ON")
             w.run("?DEBUG,MAESTRO,ON")
             m, wm = s1.mark(), w.dev.mark()
-            for cmd in (";M1,getPosition", ";M1,getPosition,128", ";M1,getPosition,00000000005", ";M9,getErrors",
+            for cmd in (";M1,getPosition", ";M1,getPosition,128", ";M9,getErrors",
                         ";M0,getErrors", ";MG1,1,getFoo"):
                 w.run(cmd)
             lines = w.dev.since(wm)
             for want in ("[MAESTRO] bad verb, ignored: 1,getPosition", "[MAESTRO] bad verb, ignored: 1,getPosition,128",
-                         "[MAESTRO] get: var name too long: m1pos00000000005", "[MAESTRO] get: bad device 9 (1-8 only)",
+                         "[MAESTRO] get: bad device 9 (1-8 only)",
                          "[MAESTRO] get: bad device 0 (1-8 only)", "[MAESTRO] get: unknown query 'getFoo'"):
                 if want not in lines:
                     bad.append(f"no '{want}'")
             time.sleep(1.0)
             if s1.received(m):
                 bad.append(f"a rejected query reached W1 S1: {s1.received(m).hex(' ')}")
+            # The channel is normalised once (tracker #29): ',00000000005' IS channel 5, so it is a legal query named
+            # m1pos5 - the old 'var name too long' rejection came from building the name from the raw text.
+            m = s1.mark()
+            w.run(";M1,getPosition,00000000005")
+            time.sleep(0.5)
+            if s1.received(m) != bytes.fromhex("AA011005"):
+                bad.append(f";M1,getPosition,00000000005 wrote {s1.received(m).hex(' ')}, expected aa 01 10 05")
             if not _has(w.run("?VAR,SET,m1err,77"), "[VAR] m1err = 77  [persistent]"):
                 bad.append("?VAR,SET,m1err,77 did not confirm")
             s1.rule(3, "AA0121", bytes.fromhex("0400"))
@@ -397,7 +415,7 @@ def get_edge_cases(bench):
         finally:
             s1.probe.rule_clear()
             w.run("?VAR,CLEAR,m1err")
-            w.run("?VAR,CLEAR,m1pos00000000005")
+            w.run("?VAR,CLEAR,m1pos5")
             w.run("?DEBUG,OFF")
             w.run("?DEBUG,MAESTRO,OFF")
     assert not bad, "; ".join(bad)
@@ -504,7 +522,7 @@ def fallback_broadcast_unconfigured(bench):
                 (f";M{a}1", f";M{a}1", f"→ Maestro {a}: Fallback broadcast, Script 1"),
                 (f";M{a},goHome", f";M{a},goHome", f"→ Maestro {a} verb '{a},goHome': Fallback broadcast"),
                 (f";M{a},1,500", f";M{a},1,500", f"→ Maestro {a} verb '{a},1,500': Fallback broadcast"),
-                (f";M{a},getMovingState", f";MG{a},1,getMovingState", f"→ Maestro {a} get 'getMovingState' -> WCB0 (reply to 1)"),
+                (f";M{a},getMovingState", f";MG{a},1,getMovingState", f"→ Maestro {a} get 'getMovingState' -> broadcast, id {a} (reply to 1)"),
                 (f";M{b},99", f";M{b}99", f"→ Maestro {b}: Fallback broadcast, Script 99")):
             wm = w.dev.mark()
             w.send(cmd)
@@ -523,7 +541,9 @@ def fallback_broadcast_unconfigured(bench):
         wm = w.dev.mark()
         w.send(f";M{a}256")
         time.sleep(1.0)
-        noise = [x for x in w.dev.since(wm) if f"Maestro {a}" in x or f": ;M{a}256" in x]
+        # Any SEND or routing line counts; W1's own "Processing input from Serial0: ;M<a>256" echo (debug is on) does not.
+        noise = [x for x in w.dev.since(wm) if not x.startswith("Processing input from")
+                 and (f"Maestro {a}" in x or f": ;M{a}256" in x)]
         if noise:
             bad.append(f";M{a}256 was not ignored: {noise}")
         try:
@@ -746,11 +766,11 @@ def mesh_get_rewrite_probe(bench):
 
 
 # ============================================================ the slot table
-@test("maestro.clear_all_legacy_routing", "?MAESTRO,CLEAR,ALL output, then legacy routing (own id and target 9 on S1, the dev-0 extra S1 frame, unicast fallback to the real Maestro 2, a broadcast get); the table is rebuilt in backup order", needs=NEEDS)
+@test("maestro.clear_all_legacy_routing", "?MAESTRO,CLEAR,ALL output, then legacy routing (own id and target 9 on S1, the dev-0 extra S1 frame, unicast fallback to the real Maestro 2, a unicast get); the table is rebuilt in backup order", needs=NEEDS)
 def clear_all_legacy_routing(bench):
     """clearAllMaestroConfigs WCB_Maestro.cpp:869-922; legacy branches :204-219 and :345-363; the dev-0 extra S1 frame
-    :336-337; fallbacks :367-372; a get on the board's own number reads S1 (:423) and any other unhosted get broadcasts
-    (:432). The clear resets S1 to 9600 (:912-918) although legacy routing still writes a Maestro there — noted only."""
+    :336-337; fallbacks :367-372; a get on the board's own number reads S1 (:423) and any other unhosted get unicasts to
+    WCB<id> inside WCBQ like the verb fallback, broadcasting only above it (handleMaestroGet; tracker #52). The clear resets S1 to 9600 (:912-918) although legacy routing still writes a Maestro there — noted only."""
     s1, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -789,7 +809,7 @@ def clear_all_legacy_routing(bench):
                         (";M1,getErrors", "AA0121", "", "[MAESTRO] get 1 'getErrors' -> m1err=2", None),
                         (";M0,stopScript", "AA0124", "AA0224", "→ Maestro Broadcast verb '0,stopScript'", ";M0,stopScript"),
                         (";M2,stopScript", "", "AA0224", "→ Maestro 2 verb '2,stopScript': Fallback unicast", ";M2,stopScript"),
-                        (";M2,getErrors", "", "AA0221", "→ Maestro 2 get 'getErrors' -> WCB0 (reply to 1)", ";MG2,1,getErrors"),
+                        (";M2,getErrors", "", "AA0221", "→ Maestro 2 get 'getErrors' -> WCB2 (reply to 1)", ";MG2,1,getErrors"),
                         (";M3,stopScript", "", "", "→ Maestro 3 verb '3,stopScript': Fallback broadcast", ";M3,stopScript")):
                     m1, mt, wm = s1.mark(), tap.mark(), w.dev.mark()
                     w.send(cmd)
@@ -809,7 +829,7 @@ def clear_all_legacy_routing(bench):
                     bad.append(f"legacy S1 get: {_get(w, 'm1err')}")
                 got = _get(w, "m2err") or ""
                 if not re.match(r"^\[VAR\] m2err = \d+$", got):
-                    bad.append(f"the broadcast get was not answered by W2: {got}")
+                    bad.append(f"the unicast get was not answered by W2: {got}")
                 bench.note("after CLEAR,ALL the legacy S1 routing writes at 9600, the rate the clear forced (WCB_Maestro.cpp:912-918)")
             finally:
                 s1.probe.rule_clear()
@@ -978,11 +998,17 @@ def _wait_bytes(watch, links, n, timeout):
         time.sleep(0.1)
 
 
-@test("kyber.remote_roundtrip", "Maestro_Remote both ways: a getErrors frame into W1 S1 reaches W2's real Maestro and its reply comes back out of W1 S1; 64 bytes arrive in order with no failed raw send", needs=NEEDS)
+@test("kyber.remote_roundtrip", "Maestro_Remote both ways: a getErrors frame into W1 S1 reaches W2's real Maestro and its reply comes back out of W1 S1; 64 bytes arrive in order (up to 3 tries on the best-effort channel) with no failed raw send", needs=NEEDS)
 def remote_roundtrip(bench):
-    """W1's KyberRemoteTask drains its Maestro port into non-ETM target-98 broadcasts (WCB.ino:4828-4850, 2704-2748); W2
-    writes them to its Maestro port, bridges the reply back, and W1 writes it to its own Maestro port (WCB.ino:4568-4580).
-    The debug dump prints from the receive callback (WCB.ino:4548-4555), so payloads stay small while it is on."""
+    """W1's KyberRemoteTask drains its Maestro port into non-ETM target-98 broadcasts (forwardMaestroDataToRemoteKyber,
+    sendESPNowRaw); W2 writes them to its Maestro port, bridges the reply back, and W1 writes it to its own Maestro port
+    (the target-98 branch of espNowReceiveCallback). The debug dump prints from the receive callback, so payloads stay
+    small while it is on.
+
+    The channel is best-effort by design (docs/WCB_KYBER_PASSTHROUGH_PARAMS.md §2): no ACK, no retry, and about 1 % of
+    frames are lost on this bench, so the ~11-frame 64-byte burst loses a piece ~10 % of the time (tracker #74). It gets
+    up to 3 tries. What a firmware bug would do - duplicate, reorder or corrupt a byte - fails at once: a lossy try must
+    still be an in-order subsequence of the payload, whose bytes are all distinct."""
     s1, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -1011,12 +1037,25 @@ def remote_roundtrip(bench):
             bad.append(f"the debug dump {dump.group(0)} does not match the bytes on W1 S1 {back.hex(' ')}")
         w.run("?DEBUG,MAESTRO,OFF")
         payload = bytes(range(1, 65))
-        watch = Watch(tap)
-        s1.send(payload)
-        try:
-            watch.expect(tap, payload, timeout=4)
-        except AssertionError:
-            bad.append(f"64 bytes: W2 S1 got {watch.got(tap).hex(' ')}")
+        lossy = []
+        for attempt in range(1, 4):
+            watch = Watch(tap)   # fresh mark per try: expect() waits its full 4 s, so W1's queue has drained
+            s1.send(payload)
+            try:
+                watch.expect(tap, payload, timeout=4)
+                break
+            except AssertionError:
+                got = watch.got(tap)
+                it = iter(payload)
+                if not all(b in it for b in got):
+                    bad.append(f"64 bytes, try {attempt}: W2 S1 got bytes out of order, duplicated or foreign - "
+                               f"not frame loss: {got.hex(' ')}")
+                    break
+                lossy.append(64 - len(got))
+                bench.note(f"64-byte burst try {attempt}: lost {64 - len(got)} byte(s) on the best-effort channel")
+                time.sleep(0.5)
+        else:
+            bad.append(f"64 bytes: every one of 3 tries lost bytes ({lossy}) - far above the ~1 % frame loss")
         attempts, success, failed = _raw_stats(w)
         if attempts < 1 or failed:
             bad.append(f"raw bridging stats: attempts {attempts}, success {success}, failed {failed}")
@@ -1026,30 +1065,95 @@ def remote_roundtrip(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("kyber.config_negatives", "(should) ?KYBER parse errors leave the board as it was; a rejected port does not switch RAM targeting on", needs=["wcb1"], links=[])
+@test("kyber.config_negatives", "(should) ?KYBER parse errors leave the board as it was; a rejected port - out of range, software serial S3-S5, a local Maestro's port, or an explicit target that puts a local Maestro on the Kyber port (tracker #28) - does not switch RAM targeting on, rewrite the target table or add a slot", needs=["wcb1"], links=[])
 def kyber_config_negatives(bench):
-    """storeKyberSettings sets kyberUseTargeting in its 'S' branch (WCB_Storage.cpp:1154) before the port range check returns (:1160-1162), so a rejected
-    ?KYBER,LOCAL,S6 leaves targeting on in RAM until reboot — invisible to ?backup on a Remote board, and fatal to
-    forwarding on a Kyber_Local one (kyber.local_rejected_port_keeps_forwarding). The dispatcher prints the settings
-    block after every LOCAL/REMOTE/CLEAR, refused or not (WCB.ino:5184-5186)."""
+    """storeKyberSettings' 'S' branch sets kyberUseTargeting and then auto-populates kyberTargets[] from the Maestro
+    slots, so every refusal has to come before it: the port range check, the ownership, soft-serial and local-Maestro
+    refusals (kyberLocalPortRefused, WCB_Storage.cpp), and the scan of an explicit target list. The ownership and
+    soft-serial refusals used to run after the auto-populate, so a refused ?KYBER,LOCAL,S3 printed 'Auto-populated' and
+    left targeting on in RAM until reboot — invisible to ?backup on a Remote board, and a silent switch out of broadcast
+    mode on a Kyber_Local one (kyber.local_rejected_port_keeps_forwarding). The dispatcher prints the settings block after
+    every LOCAL/REMOTE/CLEAR, refused or not (WCB.ino:5405-5406).
+    Greg's #28 decision (2026-09-22) also refuses the port of a local Maestro — accepting it moved the Maestro to 115200
+    and KyberLocalTask echoed its bytes back into the same port — and a target that would put one there:
+    ?KYBER,LOCAL,S2,M8:W1S2:57600 has no slot on S2 yet, so only the target scan catches it before the target loop
+    creates one. Each of those two arms runs only when its precondition holds on W1 (a local Maestro and nothing else on
+    S1; S2 free and no Maestro 8), and both run with WDP off: firmware that still accepts them makes W1 Kyber_Local and
+    adds a local Maestro 8, which W2 and NaviCore would persist as a never-evicted proxy (module docstring). An accepted
+    arm is undone with the full Kyber restore before WDP comes back."""
     w = usb_wcb(bench)
     _require_kyber_broadcast_remote(w)
     bad = []
-    leaked = False
-    with config_guard(bench, 1):
+    leaked = accepted = restored = False
+
+    def arm(cmd, needles):
+        nonlocal leaked, accepted
+        out = w.run(cmd)
+        bad.extend(_in_order(out, needles, cmd))
+        accepted = accepted or _has(out, "Kyber is LOCAL on Serial")
+        # The refusal must come before any live state changes: an auto-populate (or its 'no Maestro configs'
+        # warning, which wipes the table too) or a parsed target means the table was rewritten first.
+        touched = [x for x in out if re.search(r"auto-populate", x, re.I) or "Kyber target " in x]
+        if touched:
+            bad.append(f"the refused {cmd} rewrote the Kyber targets before refusing: {touched}")
+        mode = [x for x in _kyber_list(w) if x.startswith("Targeting mode:")]
+        if mode != ["Targeting mode: Disabled (Broadcast Mode)"]:
+            leaked = True
+            bad.append(f"after the refused {cmd}: {mode}")
+
+    with config_guard(bench, 1) as before:
+        # (command, needles, the port whose saved ?BAUD/?BCAST tokens it must leave alone)
+        maestro_arms = []
+        s1 = _port_devices(before[1], "S1")
+        if s1 and all(t.upper().startswith("?MAESTRO,") for t in s1):
+            maestro_arms.append(("?KYBER,LOCAL,S1", ["Cannot set Kyber LOCAL on Serial1 - a local Maestro is configured there",
+                                                     "Kyber is Remote"], "S1"))
+        else:
+            bench.note("local-Maestro arm skipped: W1 S1 does not carry a local Maestro alone")
+        if _port_devices(before[1], "S2") or [t for t in _m_lines(before[1]) if re.match(r"^\?MAESTRO,M8:", t, re.I)]:
+            bench.note("explicit-target arm skipped: W1 S2 carries a device or W1 already has a Maestro 8")
+        else:
+            maestro_arms.append(("?KYBER,LOCAL,S2,M8:W1S2:57600",
+                                 ["Cannot set Kyber LOCAL on Serial2 - target M8 puts a local Maestro on the Kyber port",
+                                  "Kyber is Remote"], "S2"))
         try:
             for cmd, needles in (
                     ("?KYBER,LOCAL,X2", ["Invalid format. Use: ?KYBER,LOCAL,Sx or ?KYBER,LOCAL,Sx,M1:W1S1:57600", "Kyber is Remote"]),
                     ("?KYBER,LOCAL,S6", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"]),
-                    ("?KYBER,LOCAL,S0", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"])):
-                bad += _in_order(w.run(cmd), needles, cmd)
-                mode = [x for x in _kyber_list(w) if x.startswith("Targeting mode:")]
-                if mode != ["Targeting mode: Disabled (Broadcast Mode)"]:
-                    leaked = True
-                    bad.append(f"after the refused {cmd}: {mode}")
+                    ("?KYBER,LOCAL,S0", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"]),
+                    ("?KYBER,LOCAL,S3", ["S3 is SOFTWARE SERIAL", "Kyber is Remote"]),
+                    ("?KYBER,LOCAL,S4", ["S4 is SOFTWARE SERIAL", "Kyber is Remote"]),
+                    ("?KYBER,LOCAL,S5,M1:W1S1:57600", ["S5 is SOFTWARE SERIAL", "Kyber is Remote"])):
+                arm(cmd, needles)
+            if maestro_arms:
+                # WDP already off: nothing is advertised, and _wdp_off would refuse to toggle it.
+                with nullcontext() if "?WDP,OFF" in before[1] else _wdp_off(w, before[1]):
+                    try:
+                        for cmd, needles, _ in maestro_arms:
+                            arm(cmd, needles)
+                        toks = snapshot(bench, 1)
+                        for cmd, _, port in maestro_arms:
+                            was, now = _port_tokens(before[1], port), _port_tokens(toks, port)
+                            if was != now:
+                                bad.append(f"after the refused {cmd} {port}'s saved settings are {now}, not {was}")
+                        if any(",M8:" in cmd for cmd, _, _ in maestro_arms):
+                            m8 = [x.rstrip() for x in w.run("?MAESTRO,LIST") if x.startswith("  Maestro 8 ")]
+                            m8 += [t for t in toks if re.match(r"^\?MAESTRO,M8:", t, re.I)]
+                            if m8:
+                                bad.append(f"the refused explicit target still created a Maestro 8 slot: {m8}")
+                    finally:
+                        if accepted:    # undo it here, while WDP is still off, so a Maestro 8 is never advertised
+                            if any(x.startswith("  Maestro 8 ") for x in w.run("?MAESTRO,LIST")):
+                                w.run("?MAESTRO,CLEAR,M8:W1S2")
+                            _restore_remote(w, _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2"))
+                            restored = True
         finally:
-            if leaked:
-                w.reboot()
+            if leaked or accepted:
+                # An accepted arm left W1 Kyber_Local in NVS, so a bare reboot would boot it into that mode.
+                if accepted and not restored:
+                    _restore_remote(w, _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2"))
+                elif not restored:
+                    w.reboot()
                 if "Targeting mode: Disabled (Broadcast Mode)" not in _kyber_list(w):
                     bad.append("targeting was still on after a reboot")
     assert not bad, "; ".join(bad)
@@ -1079,7 +1183,7 @@ def local_mode_s2(bench):
                                    "Reboot required — the Kyber forwarding task is only started at boot.",
                                    "Baud rate for Serial2 updated to 115200", "Set Serial2 to 115200 baud (Kyber standard)",
                                    "Kyber local with targeted forwarding configured", "--------Kyber Settings", "Kyber is Local",
-                                   "Initialized Serial1 & Serial2 for Kyber Local mode", "------- Maestro Settings"], "LOCAL,S2")
+                                   "Kyber port: Serial2 (115200 baud)", "------- Maestro Settings"], "LOCAL,S2")
             s1.listen()
             s2.listen(115200)
             tap.listen()
@@ -1165,10 +1269,14 @@ def local_mode_s2(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("kyber.local_rejected_port_keeps_forwarding", "(should) On a Kyber_Local board in broadcast mode a rejected ?KYBER,LOCAL,S6 leaves forwarding working, instead of switching targeting on with an empty table that drops every Kyber byte until reboot", needs=NEEDS)
+@test("kyber.local_rejected_port_keeps_forwarding", "(should) On a Kyber_Local board in broadcast mode a rejected ?KYBER,LOCAL,S6 leaves forwarding working, instead of switching targeting on with an empty table that drops every Kyber byte until reboot; a refused ?KYBER,LOCAL,S3 leaves broadcast mode and the saved ?KYBER line alone", needs=NEEDS)
 def local_rejected_port_keeps_forwarding(bench):
-    """kyberUseTargeting is set before the port check returns (kyber.config_negatives); forwardDataFromKyber then takes
-    the targeted branch with no enabled target (WCB.ino:4738-4772)."""
+    """Tracker #6 / #28. A refusal that runs after the 'S' branch has set kyberUseTargeting (kyber.config_negatives)
+    sends forwardDataFromKyber down its targeted branch (WCB.ino:4939): with the S6 range refusal the table is empty
+    and every Kyber byte is dropped. The S3 soft-serial refusal also ran after the auto-populate, so the table is W1's
+    Maestro slots and forwarding survives — that arm checks the mode and the ?backup line instead, which on a
+    Kyber_Local board carries every enabled target (collectConfigCommands, WCB.ino). Only the ?KYBER,LOCAL line is compared: the
+    backup also releases early with a ?KYBER,CLEAR ahead of the ?BAUD lines (#73 D5/D9, collectConfigCommands)."""
     s1, s2, tap = link(bench, 1, "S1"), link(bench, 1, "S2"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -1201,38 +1309,90 @@ def local_rejected_port_keeps_forwarding(bench):
                 except AssertionError:
                     bad.append(f"after the refused port {l.key} no longer receives Kyber bytes")
             time.sleep(1.0)
+            out = w.run("?KYBER,LOCAL,S3", timeout=8)
+            if not _has(out, "S3 is SOFTWARE SERIAL"):
+                bad.append(f"?KYBER,LOCAL,S3 was not refused: {out}")
+            if "Targeting mode: Disabled (Broadcast Mode)" not in _kyber_list(w):
+                bad.append("the refused ?KYBER,LOCAL,S3 switched the board out of broadcast mode")
+            kyber = [t for t in snapshot(bench, 1) if t.upper().startswith("?KYBER,LOCAL")]
+            if kyber != ["?KYBER,LOCAL,S2"]:
+                bad.append(f"after the refused ?KYBER,LOCAL,S3 the backup holds {kyber}, not ['?KYBER,LOCAL,S2']")
         finally:
             _restore_remote(w, ports)
     assert not bad, "; ".join(bad)
 
 
-@test("kyber.local_port_s3_frees_s2", "(should) With the Kyber on S3, W1 S2 still has a reader and still gets broadcasts, and ?KYBER does not force 115200 on a software-serial port (?MAESTRO blocks it)", needs=NEEDS)
-def local_port_s3_frees_s2(bench):
-    """In Kyber_Local, serialCommandTask skips S1 and S2 outright (WCB.ino:7289-7292) while the Kyber task reads only
-    kyberLocalPort and the Maestro ports (WCB.ino:4734-4736, 4813-4820) — the comment there says it drains both; it does
-    not. processBroadcastCommand skips S1/S2 whenever Kyber_Local (WCB.ino:6943). storeKyberSettings sets 115200 on S3-S5
-    with no software-serial guard (configureMaestro has one, WCB_Maestro.cpp:643)."""
-    s2, s4 = link(bench, 1, "S2"), link(bench, 1, "S4")
+@test("kyber.local_port_s1_frees_s2", "(should) With the Kyber on S1 (Maestro moved off it), W1 S2 still has a command reader and still gets broadcasts; S1 has one reader", needs=NEEDS)
+def local_port_s1_frees_s2(bench):
+    """Tracker #14 (fixed), through the other hardware port. On a Kyber_Local board the Kyber owns only kyberLocalPort:
+    serialCommandTask skips just that port (and raw-mapped ones), and processBroadcastCommand skips just that port plus
+    the configured Maestro ports (both WCB.ino), so the other hardware port is a normal command port that follows its
+    ?BCAST flags. Both used to skip S1 AND S2 whatever kyberLocalPort was, so with the Kyber on S1 and no Maestro on S2
+    nothing read S2 and a saved ?BCAST,OUT,S2,ON was overridden. KyberLocalTask reads kyberLocalPort
+    (forwardDataFromKyber) and the local Maestro ports (forwardMaestroDataToLocalKyber); the parser stays off a Maestro
+    port a bridge task drains (maestroPortOwnedByKyberBridge). Maestro 1 is cleared off S1 BEFORE ?KYBER,LOCAL,S1,
+    because ?KYBER,LOCAL refuses a local Maestro's port (#28, kyber.config_negatives). While W1 is Kyber_Local every byte
+    into S1 is broadcast to W2's real Maestro 2 (and NaviCore), so only GET_ERRORS_2 goes into S1, never a CR flush. WDP
+    is off for the slot rebuild (module docstring)."""
+    s1, s2, s4, tap = link(bench, 1, "S1"), link(bench, 1, "S2"), link(bench, 1, "S4"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
     _require_kyber_broadcast_remote(w)
     require_tokens(bench, 1, "?BCAST,OUT,S2,ON", "?BCAST,OUT,S4,ON")
     bad = []
     with config_guard(bench, 1) as before:
-        ports = _port_tokens(before[1], "S3")
-        try:
-            out = w.run("?KYBER,LOCAL,S3", timeout=8)
-            if _has(out, "Cannot set Kyber LOCAL"):
-                raise Skip(f"W1 S3 is owned by another subsystem: {out}")
-            if _has(out, "Kyber is LOCAL on Serial3"):
-                if _has(out, "Set Serial3 to 115200 baud (Kyber standard)"):
-                    bad.append("S3 is software serial, yet ?KYBER,LOCAL,S3 set it to 115200 with no guard")
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        # ?EPASS / ?WIFI are excluded so a password that happens to contain 'S2' never reaches the Skip message.
+        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t)
+                  and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS|EPASS|WIFI)", t, re.I)]
+        if owners:
+            raise Skip(f"W1 S2 is configured for something else: {owners}")
+        # Clearing M1 must free S1, and the auto-populated targets need a remote slot, or nothing the Kyber sends
+        # reaches the mesh and the tap control below fails for a reason that is not the firmware's.
+        shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
+        if shared:
+            raise Skip(f"W1 S1 carries more Maestros than M1, so clearing M1 would not free it: {shared}")
+        if all(re.match(r"^\?MAESTRO,M\d:W1S", t, re.I) for t in lines):
+            raise Skip("W1 has no remote Maestro slot, so the Kyber's auto-populated targets would never reach the mesh")
+        ports = _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2")
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?MAESTRO,CLEAR,M1:W1S1")
+                if not _has(out, "Cleared Maestro M1:W1S1"):
+                    raise AssertionError(f"?MAESTRO,CLEAR,M1:W1S1 printed {out}")
+                out = w.run("?KYBER,LOCAL,S1", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S1 is owned by another subsystem: {out}")
+                bad += _in_order(out, ["Kyber is LOCAL on Serial1", "Reboot required", "Baud rate for Serial1 updated to 115200",
+                                       "Set Serial1 to 115200 baud (Kyber standard)",
+                                       "Kyber local with targeted forwarding configured"], "LOCAL,S1")
                 bm = w.reboot()
-                if not _has(w.dev.since(bm), "Kyber_Local Task Created"):
-                    raise AssertionError("W1 did not boot with the Kyber_Local task")
+                boot = w.dev.since(bm)
+                if not _has(boot, "Kyber_Local Task Created") or _has(boot, "Maestro_Remote Task Created"):
+                    raise AssertionError("the reboot did not start the Kyber_Local task in place of Maestro_Remote")
                 w.run("?DEBUG,ON")
+                s1.listen(115200)
                 s2.listen()
                 s4.listen()
+                tap.listen()
+
+                # Control: the Kyber owns S1. The parser logs a line only at its CR, which never goes into S1, so a
+                # second reader would show mostly as a short copy on the tap; the log check catches the rest.
+                watch, wm = Watch(s1, tap), w.dev.mark()
+                s1.send(GET_ERRORS_2)
+                try:
+                    watch.expect(tap, GET_ERRORS_2, timeout=2)
+                except AssertionError:
+                    raise AssertionError(f"control: GET_ERRORS_2 from the Kyber on W1 S1 never reached W2 S1 whole, got {watch.got(tap).hex(' ') or 'nothing'}")
+                time.sleep(1.0)
+                parsed = [x for x in w.dev.since(wm)
+                          if x.startswith("Processing input from Serial1:") or x.startswith("Broadcast blocked from Serial1")]
+                if parsed:
+                    bad.append(f"the serial parser also read the Kyber port S1: {parsed[:3]}")
+                if GET_ERRORS_2 in watch.got(s1):
+                    bad.append(f"the Kyber's own bytes came back out of W1 S1: {watch.got(s1).hex(' ')}")
+
                 t4 = marker("S4")
                 watch = Watch(s2)
                 s4.send(f";S2{t4}\r".encode())
@@ -1245,7 +1405,7 @@ def local_port_s3_frees_s2(bench):
                 s2.send(f";S4{t2}\r".encode())
                 time.sleep(2.0)
                 if t2.encode() not in watch.got(s4):
-                    bad.append("W1 S2 has no reader with the Kyber on S3: a ;S4 command typed there never ran")
+                    bad.append("W1 S2 has no reader with the Kyber on S1: a ;S4 command typed there never ran")
                 tb = marker("B")
                 watch = Watch(s2, s4)
                 w.send(tb)
@@ -1255,18 +1415,575 @@ def local_port_s3_frees_s2(bench):
                     raise AssertionError("control: a USB broadcast never reached W1 S4")
                 time.sleep(1.0)
                 if tb.encode() not in watch.got(s2):
-                    bad.append("broadcasts skip W1 S2 although the Kyber is on S3")
-        finally:
-            _restore_remote(w, ports)
+                    bad.append("broadcasts skip W1 S2 although ?BCAST,OUT,S2 is ON")
+            finally:
+                s2.send(b"\r")
+                w.run("?KYBER,CLEAR", timeout=6)
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                bad += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                bm = w.reboot()
+                if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                    bad.append("W1 did not boot with the Maestro_Remote task after the restore")
+                w.run("?DEBUG,OFF")
+                _settle_maestro2(w)
+    assert not bad, "; ".join(bad)
+
+
+def _clear_pwm_out(w, port):
+    """?MAP,PWM,CLEAR,OUT,<port> and wait out its deferred reboot (s14's _inline_clear_out). Returns a problem or None.
+    The reboot fires once the queue is quiet, so nothing may be sent until the board is back."""
+    m = w.send(f"?MAP,PWM,CLEAR,OUT,{port}")
+    try:
+        w.dev.expect(r"^PWM output cleared", timeout=5, since=m)
+        w.dev.expect(r"^Rebooting now to apply PWM configuration", timeout=30, since=m)
+        w.wait_boot(m, timeout=30)
+    except AssertionError as e:
+        return f"clearing the PWM output on {port}: {e}"
+    return None
+
+
+@test("kyber.local_free_port_takes_pwm", "(should) With the Kyber on S1, W1 S2 takes a WLED and a PWM output like any port and boots with its UART off; the Kyber port S1 refuses both, and ?KYBER,LOCAL cannot move onto the PWM port (3 reboots)", needs=NEEDS)
+def local_free_port_takes_pwm(bench):
+    """Tracker #73 D4. A Kyber_Local board reserves only kyberLocalPort (kyberModeReservesPort, WCB_Storage.cpp) in
+    the HCR/MP3/DFP/WLED guards and canUsePWMOnPort; both hardware ports used to be reserved, although since #14 the
+    other one is a normal command port - and a PWM output saved there was dropped from NVS at the next boot. The boot
+    init no longer begins that port's UART when a PWM input/output owns it (setup(), WCB.ino), so S2 must idle LOW:
+    a guard change without the boot change would re-attach the UART and idle HIGH. Today's firmware fails first at
+    the WLED S2 arm. Setup is local_port_s1_frees_s2's: Maestro 1 is cleared off S1 with WDP off (which also keeps
+    peer PWMTARGET adverts out), and nothing is ever sent into S1 - while W1 is Kyber_Local every byte there is
+    bridged to W2's real Maestro 2. S2 is a probe header only: the WLED and PWM arms put nothing on it but a LOW line
+    and one pulse. Every refusal arm runs before any live change (kyberLocalPortRefused), and an arm the firmware
+    wrongly accepts is undone in the finally."""
+    s2 = link(bench, 1, "S2")
+    _require_remote_pair(bench)
+    w = usb_wcb(bench)
+    _require_kyber_broadcast_remote(w)
+    bad = []
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        if any(t.upper().startswith("?MAP,PWM") for t in before[1]):
+            raise Skip("W1 already has PWM configuration")
+        # ?EPASS / ?WIFI are excluded so a password that happens to contain 'S2' never reaches the Skip message.
+        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t)
+                  and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS|EPASS|WIFI)", t, re.I)]
+        if owners:
+            raise Skip(f"W1 S2 is configured for something else: {owners}")
+        shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
+        if shared:
+            raise Skip(f"W1 S1 carries more Maestros than M1, so clearing M1 would not free it: {shared}")
+        wid = next((i for i in range(1, 10) if not any(t.upper().startswith(f"?WLED,{i}:") for t in before[1])), None)
+        if wid is None:
+            raise Skip("W1 has a WLED on every id 1-9")
+        # WLED reserve/release rewrite the port's baud, BCAST flags and label (WCB_WLED.cpp wledReserveLocalPort).
+        ports = (_port_tokens(before[1], "S1") + _port_tokens(before[1], "S2") +
+                 [t for t in before[1] if re.match(r"^\?LABEL,S[12],", t, re.I)])
+        s1_out = s2_out = False
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?MAESTRO,CLEAR,M1:W1S1")
+                if not _has(out, "Cleared Maestro M1:W1S1"):
+                    raise AssertionError(f"?MAESTRO,CLEAR,M1:W1S1 printed {out}")
+                out = w.run("?KYBER,LOCAL,S1", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S1 is owned by another subsystem: {out}")
+
+                # The guards read the live globals, so no reboot is needed for these. Stop at the first miss. The S1
+                # refusals are matched by prefix: their wording differs between images ("Maestro/Kyber", "/DFP"), and
+                # only the refusal itself is under test.
+                out = w.run("?MAP,PWM,OUT,S1")
+                s1_out = _has(out, "configured as PWM output port")
+                if not _has(out, "Cannot use PWM on Serial1 - reserved for"):
+                    raise AssertionError(f"?MAP,PWM,OUT,S1 on the Kyber port printed {out}")
+                out = w.run(f"?WLED,{wid}:W1S1:115200")
+                if not _has(out, "[WLED] S1 already in use by"):
+                    raise AssertionError(f"?WLED,{wid}:W1S1 on the Kyber port printed {out}")
+                out = w.run(f"?WLED,{wid}:W1S2:115200")
+                if not _has(out, f"[WLED] WLED {wid}: local S2 at 115200 baud") or _has(out, "already in use"):
+                    raise AssertionError(f"the free port S2 refused a WLED: {out}")
+                out = w.run(f"?WLED,CLEAR,{wid}")
+                if not _has(out, f"[WLED] WLED {wid} cleared"):
+                    raise AssertionError(f"?WLED,CLEAR,{wid} printed {out}")
+                out = w.run("?MAP,PWM,OUT,S2")
+                s2_out = _has(out, "Serial2 configured as PWM output port")
+                if not s2_out:
+                    raise AssertionError(f"the free port S2 refused a PWM output: {out}")
+                out = w.run("?KYBER,LOCAL,S2", timeout=8)
+                if not _has(out, "Cannot set Kyber LOCAL on Serial2 - reserved by HCR/MP3/WLED/PWM/DFP"):
+                    raise AssertionError(f"?KYBER,LOCAL,S2 moved the Kyber onto the PWM port: {out}")
+
+                # Boot as Kyber_Local on S1 with the PWM output on S2: kept in NVS, and S2's UART never begun.
+                bm = w.reboot()
+                boot = w.dev.since(bm)
+                if not _has(boot, "Kyber_Local Task Created"):
+                    raise AssertionError("the reboot did not start the Kyber_Local task")
+                if _has(boot, "Skipping PWM output port Serial2") or _has(boot, "Cannot use PWM on Serial2"):
+                    bad.append("the boot dropped the PWM output on the free port S2")
+                if not _has(boot, "Serial2 reserved for PWM - skipping UART init"):
+                    bad.append("the boot began S2's UART although S2 is a PWM output")
+                lst = [x.rstrip() for x in w.run("?MAP,PWM,LIST")]
+                if "Configured outputs: S2" not in lst:
+                    bad.append(f"after the reboot ?MAP,PWM,LIST lacks 'Configured outputs: S2': {lst}")
+                if s2.line_level() != 0:
+                    bad.append("W1 S2 does not idle LOW after the boot: its UART was begun over the PWM pin")
+                s2.pwm_in()
+                time.sleep(0.6)
+                m = s2.probe.dev.mark()
+                w.send(";P21500")
+                time.sleep(0.6)
+                got = s2.pulses(m)
+                if len(got) != 1 or got[0][1] != 1 or abs(got[0][0] - 1500) > 40:
+                    bad.append(f";P21500 on the free port S2 gave {got}, not one 1500 us pulse")
+            finally:
+                s2.pwm_stop()
+                w.run(f"?WLED,CLEAR,{wid}")   # idempotent: "not configured" writes nothing
+                # One deferred PWM reboot at a time, each waited out before anything else is sent.
+                for port, was_set in (("S1", s1_out), ("S2", s2_out)):
+                    if was_set:
+                        problem = _clear_pwm_out(w, port)
+                        if problem:
+                            bad.append(problem)
+                w.run("?KYBER,CLEAR", timeout=6)
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                bad += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                bm = w.reboot()
+                if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                    bad.append("W1 did not boot with the Maestro_Remote task after the restore")
+                w.run("?DEBUG,OFF")
+                _settle_maestro2(w)
+    assert not bad, "; ".join(bad)
+
+
+def _usb_lines_equal(w, since, text, timeout=3.0, settle=1.0):
+    """How many USB console lines since `since` are exactly `text` — waits up to `timeout` for the first, then
+    `settle` more so a second (split or duplicated) copy has time to show."""
+    try:
+        w.dev.expect(rf"^{re.escape(text)}$", timeout=timeout, since=since)
+    except AssertionError:
+        pass
+    time.sleep(settle)
+    return sum(1 for x in w.dev.since(since) if x.strip() == text)
+
+
+@test("kyber.local_port_move_releases_old", "(should) Moving the Kyber between S1 and S2 gives the old port back (9600, broadcasts in and out on), a bare ?KYBER,LOCAL keeps the current port, a live move on a Kyber_Local board takes effect without a reboot, and ?MAESTRO,REMOTE releases the port and stops the Kyber task reading it (two reboots)", needs=NEEDS)
+def local_port_move_releases_old(bench):
+    """Tracker #73 D5/D9. Every way out of Kyber LOCAL releases the port through kyberReleasePort (WCB_Storage.cpp): a
+    ?KYBER,LOCAL move and ?MAESTRO,REMOTE used to leave the old port at 115200 with broadcasts off, and the bare
+    ?KYBER,LOCAL hard-coded S2, re-pointing a Kyber on S1. REMOTE never zeroed kyberLocalPort, which KyberLocalTask
+    gates on alone (forwardDataFromKyber, WCB.ino), so a Kyber_Local-booted board kept draining the old Kyber port
+    beside the Maestro_Remote parser branch (serialCommandTask, WCB.ino) until reboot. Setup is local_port_s1_frees_s2's: Maestro 1
+    is cleared off S1 with WDP off, and while a port is the Kyber's only GET_ERRORS_2 goes into it. ASCII ;S0 lines go
+    into a port only after its release has printed and the wire is re-bound at 9600, so older firmware (which fails at
+    step b, before any injection) never has mis-baud bytes bridged into W2's Maestro. The ;S0 checks read USB, not a
+    W1 S4 wire (tracker #78)."""
+    s1, s2, tap = link(bench, 1, "S1"), link(bench, 1, "S2"), link(bench, 2, "S1")
+    _require_remote_pair(bench)
+    w = usb_wcb(bench)
+    _require_kyber_broadcast_remote(w)
+    released_s2 = ["?BAUD,S2,9600", "?BCAST,OUT,S2,ON", "?BCAST,IN,S2,ON"]
+    bad = []
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        # ?EPASS / ?WIFI are excluded so a password that happens to contain 'S2' never reaches the Skip message.
+        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t)
+                  and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS|EPASS|WIFI)", t, re.I)]
+        if owners:
+            raise Skip(f"W1 S2 is configured for something else: {owners}")
+        shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
+        if shared:
+            raise Skip(f"W1 S1 carries more Maestros than M1, so clearing M1 would not free it: {shared}")
+        if all(re.match(r"^\?MAESTRO,M\d:W1S", t, re.I) for t in lines):
+            raise Skip("W1 has no remote Maestro slot, so the Kyber's auto-populated targets would never reach the mesh")
+        ports = _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2")
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?MAESTRO,CLEAR,M1:W1S1")
+                if not _has(out, "Cleared Maestro M1:W1S1"):
+                    raise AssertionError(f"?MAESTRO,CLEAR,M1:W1S1 printed {out}")
+
+                # (a) Kyber on S2.
+                out = w.run("?KYBER,LOCAL,S2", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S2 is owned by another subsystem: {out}")
+                problems = _in_order(out, ["Kyber is LOCAL on Serial2", "Set Serial2 to 115200 baud (Kyber standard)"], "LOCAL,S2")
+                if problems:
+                    raise AssertionError(problems[0])
+
+                # (b) Move it to S1 (not yet a Kyber_Local boot): S2 is given back. Stop at the first miss.
+                out = w.run("?KYBER,LOCAL,S1", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S1 is owned by another subsystem: {out}")
+                problems = _in_order(out, ["Kyber is LOCAL on Serial1", "Set Serial1 to 115200 baud (Kyber standard)",
+                                           "Reset S2 baud rate to 9600 (was the Kyber port)"], "move S2 -> S1")
+                if problems:
+                    raise AssertionError(problems[0])
+                toks = snapshot(bench, 1)
+                missing = [t for t in released_s2 if t not in toks]
+                if missing:
+                    raise AssertionError(f"after the move S2 is not released in ?backup: missing {missing}")
+
+                # (c) Bare ?KYBER,LOCAL keeps the Kyber on S1 and only switches to broadcast mode.
+                out = w.run("?KYBER,LOCAL", timeout=8)
+                problems = _in_order(out, ["Kyber is LOCAL on Serial1", "Kyber local with broadcast mode"], "bare LOCAL")
+                if problems:
+                    raise AssertionError(problems[0])
+                if _has(out, "Set Serial2 to 115200"):
+                    raise AssertionError(f"the bare ?KYBER,LOCAL re-claimed S2: {out}")
+                toks = snapshot(bench, 1)
+                kyber = token(toks, "?KYBER,LOCAL") or ""
+                if not kyber.upper().startswith("?KYBER,LOCAL,S1"):
+                    raise AssertionError(f"after the bare ?KYBER,LOCAL the backup's Kyber line is {kyber!r}, not ?KYBER,LOCAL,S1")
+                missing = [t for t in released_s2 if t not in toks]
+                if missing:
+                    raise AssertionError(f"the bare ?KYBER,LOCAL undid S2's release: missing {missing}")
+
+                # (d) Boot as Kyber_Local on S1. Control: the Kyber's bytes reach W2's Maestro.
+                bm = w.reboot()
+                boot = w.dev.since(bm)
+                if not _has(boot, "Kyber_Local Task Created") or _has(boot, "Maestro_Remote Task Created"):
+                    raise AssertionError("the reboot did not start the Kyber_Local task in place of Maestro_Remote")
+                s1.listen(115200)
+                s2.listen(9600)
+                tap.listen()
+                watch = Watch(tap)
+                s1.send(GET_ERRORS_2)
+                try:
+                    watch.expect(tap, GET_ERRORS_2, timeout=2)
+                except AssertionError:
+                    raise AssertionError(f"control: GET_ERRORS_2 from the Kyber on W1 S1 never reached W2 S1 whole, got {watch.got(tap).hex(' ') or 'nothing'}")
+                time.sleep(1.0)
+
+                # (e) Live move back to S2 on the running KyberLocalTask: S1 is released, the task follows.
+                out = w.run("?KYBER,LOCAL,S2", timeout=8)
+                problems = _in_order(out, ["Kyber is LOCAL on Serial2", "Set Serial2 to 115200 baud (Kyber standard)",
+                                           "Reset S1 baud rate to 9600 (was the Kyber port)"], "live move S1 -> S2")
+                if problems:
+                    raise AssertionError(problems[0])   # no release: never type ASCII into S1
+                s1.listen(9600)
+                s2.listen(115200)
+                watch = Watch(tap)
+                s2.send(GET_ERRORS_2)
+                try:
+                    watch.expect(tap, GET_ERRORS_2, timeout=2)
+                except AssertionError:
+                    bad.append(f"after the live move the Kyber task did not follow to S2 without a reboot: W2 S1 got {watch.got(tap).hex(' ') or 'nothing'}")
+                time.sleep(1.0)
+                m1 = marker("MV")
+                wm, watch = w.dev.mark(), Watch(tap)
+                s1.send(f";S0,{m1}\r".encode())
+                n = _usb_lines_equal(w, wm, m1)
+                if n != 1:
+                    bad.append(f"the released S1 should be a command port with one reader: ';S0,{m1}' printed {n} whole line(s)")
+                if watch.got(tap):
+                    bad.append(f"bytes typed into the released S1 still reached the mesh: W2 S1 got {watch.got(tap).hex(' ')}")
+
+                # (f) ?MAESTRO,REMOTE releases S2 and stops the Kyber task reading it before any reboot (D9).
+                out = w.run("?MAESTRO,REMOTE", timeout=8)
+                problems = _in_order(out, ["Kyber is REMOTE (on another WCB)", "Reboot required",
+                                           "Reset S2 baud rate to 9600 (was the Kyber port)"], "?MAESTRO,REMOTE")
+                if problems:
+                    raise AssertionError(problems[0])   # no release: never type ASCII into S2
+                s2.listen(9600)
+                m2 = marker("RM")
+                wm, watch = w.dev.mark(), Watch(tap)
+                s2.send(f";S0,{m2}\r".encode())
+                n = _usb_lines_equal(w, wm, m2, settle=2.0)
+                if n != 1:
+                    bad.append(f"after ?MAESTRO,REMOTE S2 should have one reader (the parser): ';S0,{m2}' printed {n} whole line(s)")
+                if watch.got(tap):
+                    bad.append(f"after ?MAESTRO,REMOTE the Kyber task still drained S2 into the mesh: W2 S1 got {watch.got(tap).hex(' ')}")
+                toks = snapshot(bench, 1)
+                missing = [t for t in released_s2 + ["?MAESTRO,REMOTE"] if t not in toks]
+                if missing:
+                    bad.append(f"after ?MAESTRO,REMOTE the backup lacks {missing}")
+                elif toks.index("?MAESTRO,REMOTE") > next((i for i, t in enumerate(toks) if t.startswith("?BAUD,")), len(toks)):
+                    bad.append("?backup emits ?MAESTRO,REMOTE after the ?BAUD lines, so a replayed release would undo them")
+            finally:
+                w.run("?KYBER,CLEAR", timeout=6)
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                bad += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                bm = w.reboot()
+                if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                    bad.append("W1 did not boot with the Maestro_Remote task after the restore")
+                _settle_maestro2(w)
+    assert not bad, "; ".join(bad)
+
+
+def _w2_online(w, wait=30):
+    """True once W1's ?STATS shows WCB2 online (it is back at W2's next heartbeat after W1 reboots), False after
+    `wait` s. A board W1 still thinks offline gets no expected-ACK slot, which muddies an ACK check."""
+    deadline = time.monotonic() + wait
+    while not any(x.startswith("WCB2: ") and "Online" in x for x in w.run("?STATS")):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(2)
+    return True
+
+
+@test("kyber.local_s1_legacy_fallback_skips_kyber_port", "(should) With the Kyber on S1 and no Maestro slot for W1's own id, the legacy S1 fallbacks (;M<own id>, ;M9, the ;M0 extra frame, a get on the own id) write nothing into the Kyber's port and never self-forward; ?KYBER and ?config name the real Kyber port", needs=NEEDS)
+def local_s1_legacy_fallback_skips_kyber_port(bench):
+    """Tracker #73 D6 + D8. With no slot for its own number a board treats a Maestro on S1 with device id = its WCB
+    number as its own (WCB_Maestro.cpp sendMaestroCommand / sendMaestroServoVerb / handleMaestroGet). Those writes had
+    no ownership check, so they put 0xAA frames into whatever owns S1 - here the Kyber - and a get on the own id read
+    its "reply" out of the Kyber's stream. legacyS1Owner() now gates all seven sites. ;M0 still goes to the mesh: only
+    its extra local S1 frame is skipped. ?MAESTRO,CLEAR,M1 clears every M1 slot (including a NaviCore proxy), so ;M1
+    reaches the legacy branch. The subroutine arms (;M95, ;M12) never leave W1 - the target-9 and own-id branches do
+    not forward - so even on firmware without the gate they reach only the S1 probe. D8: printKyberSettings prints the
+    real port and baud, and printBaudRates' auto label follows kyberLocalPort; W1 labels every port, so its S1/S2
+    labels are cleared for one ?config and replayed from its own tokens. Setup and restore mirror
+    kyber.local_port_s1_frees_s2; WDP is off for the slot rebuild (module docstring)."""
+    s1, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
+    _require_remote_pair(bench)          # W1 is WCB1: the arms use ;M12, AA01 and "Maestro 1" literally
+    w = usb_wcb(bench)
+    _require_kyber_broadcast_remote(w)
+    bad = []
+    with config_guard(bench, 1, 2) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        # ?EPASS / ?WIFI are excluded so a password that happens to contain 'S2' never reaches the Skip message.
+        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t)
+                  and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS|EPASS|WIFI)", t, re.I)]
+        if owners:
+            raise Skip(f"W1 S2 is configured for something else: {owners}")
+        others = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S", t, re.I)]
+        if others:
+            raise Skip(f"W1 has a local Maestro other than M1, so ;M9 would not take the legacy S1 branch: {others}")
+        if all(re.match(r"^\?MAESTRO,M1:", t, re.I) for t in lines):
+            raise Skip("W1 has no Maestro slot other than M1, so the Kyber's auto-populated targets would be empty")
+        labels = [t for t in before[1] if re.match(r"^\?LABEL,S[12],", t, re.I)]
+        ports = _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2")
+        bench.note("restore if aborted: ?KYBER,CLEAR, ?MAESTRO,REMOTE, ?WDP,OFF, ?MAESTRO,CLEAR,ALL, then "
+                   + " , ".join(lines + ports + labels) + " , ?WDP,ON, ?reboot")
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?MAESTRO,CLEAR,M1")
+                if not _has(out, "Cleared Maestro ID 1"):
+                    raise AssertionError(f"?MAESTRO,CLEAR,M1 printed {out}")
+                out = w.run("?KYBER,LOCAL,S1", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S1 is owned by another subsystem: {out}")
+                bad += _in_order(out, ["Kyber is LOCAL on Serial1", "--------Kyber Settings", "Kyber is Local",
+                                       "Kyber port: Serial1 (115200 baud)"], "LOCAL,S1")
+                if _has(out, "Initialized Serial1"):
+                    bad.append("?KYBER still prints the hard-coded 'Initialized Serial1 & Serial2' line")
+                bm = w.reboot()
+                boot = w.dev.since(bm)
+                if not _has(boot, "Kyber_Local Task Created") or _has(boot, "Maestro_Remote Task Created"):
+                    raise AssertionError("the reboot did not start the Kyber_Local task in place of Maestro_Remote")
+                if not _has(boot, "Kyber port: Serial1 (115200 baud)"):
+                    bad.append("the boot banner does not name the Kyber port as Serial1 (115200 baud)")
+                for kind in ("", "MAESTRO,", "ETM,"):
+                    w.run(f"?DEBUG,{kind}ON")
+                s1.listen(115200)
+                tap.listen()
+                s1.probe.rule_clear()
+                w.run("?VAR,CLEAR,m1err")
+                if not _w2_online(w):
+                    bench.note("W1's ?STATS never showed WCB2 online after the reboot; the ;M0 ACK check may fail for that")
+
+                watch, sent = Watch(s1), []
+                for cmd, line in (
+                        (";M95", "→ Maestro (local, target 9): no local Maestro, and S1 is the Kyber port - not sent, Script 5"),
+                        (";M9,stopScript", "→ Maestro (local, target 9) verb '9,stopScript': no local Maestro, and S1 is the Kyber port - not sent"),
+                        (";M12", "→ Maestro 1: no slot, and S1 is the Kyber port - not sent"),
+                        (";M1,stopScript", "→ Maestro 1 verb '1,stopScript': no slot, and S1 is the Kyber port - not sent"),
+                        (";M1,getErrors", "[MAESTRO] get 1 'getErrors': no slot, and S1 is the Kyber port - not sent")):
+                    wm = w.dev.mark()
+                    w.send(cmd)
+                    time.sleep(1.0)
+                    got = w.dev.since(wm)
+                    sent += got
+                    if not _has(got, line):
+                        bad.append(f"{cmd}: no '{line}'")
+                if _get(w, "m1err") != _not_set("m1err"):
+                    bad.append(f"the own-id get read a reply out of the Kyber port: {_get(w, 'm1err')}")
+
+                # Control: ;M0 still broadcasts - only its extra local S1 frame is skipped.
+                mt, wm = tap.mark(), w.dev.mark()
+                w.send(";M0,stopScript")
+                problem = _exact(tap, mt, bytes.fromhex("AA0224"), settle=1.8)
+                if problem:
+                    bad.append(f";M0,stopScript: {problem}")
+                got = w.dev.since(wm)
+                sent += got
+                if not _has(got, "→ Maestro Broadcast verb '0,stopScript': legacy S1 frame skipped - S1 is the Kyber port"):
+                    bad.append(";M0,stopScript: no 'legacy S1 frame skipped - S1 is the Kyber port' line")
+                seqs = _sent_seq(got, ";M0,stopScript")
+                if len(seqs) != 1 or not _acked_by(got, 2, seqs[0]):
+                    bad.append(f";M0,stopScript: expected one '[ETM] Sent seq N: ;M0,stopScript' ACKed by WCB2, got {seqs}")
+
+                try:
+                    watch.silent(s1, window=1.5)
+                except AssertionError as e:
+                    bad.append(f"a legacy fallback wrote into the Kyber port S1: {e}")
+                forwards = [x for x in sent if x.startswith("[ETM] Sent seq") and ": ;M" in x and ": ;M0," not in x]
+                if forwards:
+                    bad.append(f"a legacy command went to the mesh (a board cannot unicast itself): {forwards}")
+
+                # D8: with no user label the Kyber's row says so, and only that row.
+                try:
+                    for p in ("S1", "S2"):
+                        w.run(f"?LABEL,CLEAR,{p}")
+                    cfg = [x.rstrip() for x in w.run("?config")]
+                    row1 = next((x.strip() for x in cfg if x.strip().startswith("Serial1 Baud:")), "")
+                    row2 = next((x.strip() for x in cfg if x.strip().startswith("Serial2 Baud:")), "")
+                    if not row1.startswith("Serial1 Baud: 115200,") or not row1.endswith("(Kyber)"):
+                        bad.append(f"?config: the Kyber's row is not labelled (Kyber): '{row1}'")
+                    if not row2 or "(Kyber)" in row2:
+                        bad.append(f"?config: the Serial2 row is missing or says (Kyber): '{row2}'")
+                finally:
+                    for t in labels:
+                        w.run(t)
+            finally:
+                s1.probe.rule_clear()
+                w.run("?VAR,CLEAR,m1err")
+                w.run("?KYBER,CLEAR", timeout=6)
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                bad += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                bm = w.reboot()
+                if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                    bad.append("W1 did not boot with the Maestro_Remote task after the restore")
+                for kind in ("", "MAESTRO,", "ETM,"):
+                    w.run(f"?DEBUG,{kind}OFF")
+                _settle_maestro2(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("kyber.local_clear_maestro_drops_target", "(should) On a Kyber_Local board in targeted mode ?MAESTRO,CLEAR of a local Maestro drops its Kyber target, so the Kyber stops writing the freed port and ?backup no longer re-creates the slot; the freed port follows its ?BCAST flags; re-adding the Maestro restores the target", needs=NEEDS)
+def local_clear_maestro_drops_target(bench):
+    """Tracker #73 D7. forwardDataFromKyber writes every enabled local kyberTargets[] port whether or not a Maestro slot
+    is still there, and ?backup's KYBER,LOCAL target list re-creates a slot for each target on restore
+    (storeKyberSettings). So a cleared Maestro left the Kyber writing a port the clear had handed back (at the 9600 it
+    forced), and a restore brought the Maestro back. _clearMaestroSlot now drops the (id, W1, port) target and a newly
+    claimed ?MAESTRO slot adds it. Deliberately NOT a broadcast skip keyed on Kyber targets (#14's rule: ?BCAST flags
+    decide): the USB broadcast arm locks that in. ;M9 then takes the legacy S1 branch on the freed, unowned S1 - the
+    D6 gate must not over-block it. S1 is a probe wire; the only real Maestro (W2's M2) receives only getErrors and
+    stopScript frames. WDP is off around every slot change (module docstring)."""
+    s1, s2, tap = link(bench, 1, "S1"), link(bench, 1, "S2"), link(bench, 2, "S1")
+    l1, _ = _require_remote_pair(bench)  # W1 is WCB1 with M1 on S1
+    w = usb_wcb(bench)
+    _require_kyber_broadcast_remote(w)
+    b1 = _slot(l1, 1, 1)[1]
+    bad = []
+    with config_guard(bench, 1, 2) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        # ;M9 takes the legacy S1 branch only with no local Maestro left, and the drop frees S1 only when M1 was the
+        # last slot on it - the same checks maestro.clear_all_legacy_routing and kyber.local_port_s1_frees_s2 make.
+        if [t for t in lines if re.match(r"^\?MAESTRO,M\d:W1S[2-5]:", t, re.I)]:
+            raise Skip("W1 has a local Maestro off S1, so ;M9 would not take the legacy S1 branch")
+        shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
+        if shared:
+            raise Skip(f"W1 S1 carries more Maestros than M1, so clearing M1 would not free it: {shared}")
+        if all(re.match(r"^\?MAESTRO,M\d:W1S", t, re.I) for t in lines):
+            raise Skip("W1 has no remote Maestro slot, so the Kyber's auto-populated targets would never reach the mesh")
+        ports = _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2")
+        bench.note("restore if aborted: ?KYBER,CLEAR, ?MAESTRO,REMOTE, ?WDP,OFF, ?MAESTRO,CLEAR,ALL, then "
+                   + " , ".join(lines + ports) + " , ?WDP,ON, ?reboot")
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?KYBER,LOCAL,S2", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S2 is owned by another subsystem: {out}")
+                bad += _in_order(out, ["Auto-populated", "Kyber is LOCAL on Serial2", "Kyber port: Serial2 (115200 baud)"], "LOCAL,S2")
+                bm = w.reboot()
+                boot = w.dev.since(bm)
+                if not _has(boot, "Kyber_Local Task Created") or _has(boot, "Maestro_Remote Task Created"):
+                    raise AssertionError("the reboot did not start the Kyber_Local task in place of Maestro_Remote")
+                if "  Maestro 1 → WCB1 S1" not in _kyber_list(w):
+                    raise AssertionError(f"control: the auto-populated targets have no Maestro 1 → WCB1 S1: {_kyber_list(w)}")
+                s1.listen(b1)
+                s2.listen(115200)
+                tap.listen()
+                s1.probe.rule_clear()
+
+                # Control: the Kyber's bytes reach the local target and the remote one.
+                watch = Watch(s1, tap)
+                s2.send(GET_ERRORS_2)
+                for l in (s1, tap):
+                    try:
+                        watch.expect(l, GET_ERRORS_2, timeout=2)
+                    except AssertionError:
+                        raise AssertionError(f"control: {l.key} never got the Kyber's AA 02 21, got {watch.got(l).hex(' ') or 'nothing'}")
+                time.sleep(1.0)
+
+                out = w.run("?MAESTRO,CLEAR,M1:W1S1")
+                bad += _in_order(out, ["✓ Reset S1 baud rate to 9600", "✓ Removed Kyber target M1 → WCB1 S1",
+                                       "Cleared Maestro M1:W1S1"], "CLEAR,M1:W1S1")
+                if "  Maestro 1 → WCB1 S1" in _kyber_list(w):
+                    bad.append("?KYBER,LIST still holds Maestro 1 → WCB1 S1 after its slot was cleared")
+                kyber = token(snapshot(bench, 1), "?KYBER,LOCAL") or ""
+                if not kyber.upper().startswith("?KYBER,LOCAL,S2") or ",M1:W1S1:" in kyber.upper():
+                    bad.append(f"?backup's Kyber line would re-create the cleared Maestro on restore: '{kyber}'")
+
+                # The freed S1 (now 9600): no Kyber bytes, but it does follow its ?BCAST flags.
+                s1.listen(9600)
+                watch = Watch(s1, tap)
+                s2.send(GET_ERRORS_2)
+                try:
+                    watch.expect(tap, GET_ERRORS_2, timeout=2)
+                except AssertionError:
+                    bad.append(f"after the clear the remote target lost the Kyber's bytes, W2 S1 got {watch.got(tap).hex(' ') or 'nothing'}")
+                try:
+                    watch.silent(s1, window=1.5)
+                except AssertionError as e:
+                    bad.append(f"the Kyber still writes the freed port S1: {e}")
+                tb = marker("B")
+                watch = Watch(s1)
+                w.send(tb)
+                try:
+                    watch.expect(s1, tb.encode() + b"\r", timeout=3)
+                except AssertionError:
+                    bad.append("a USB broadcast skipped the freed W1 S1, whose ?BCAST,OUT the clear re-enabled")
+                time.sleep(0.5)
+                m1 = s1.mark()
+                w.send(";M9,stopScript")
+                problem = _exact(s1, m1, bytes.fromhex("AA0124"), settle=0.8)
+                if problem:
+                    bad.append(f";M9,stopScript on the free S1 (the D6 gate must not block it): {problem}")
+
+                out = w.run(f"?MAESTRO,M1:W1S1:{b1}")
+                if not _has(out, "✓ Kyber target added: Maestro 1 → WCB1 S1"):
+                    bad.append(f"re-adding M1:W1S1 did not restore its Kyber target: {out}")
+                s1.listen(b1)
+                watch = Watch(s1)
+                s2.send(GET_ERRORS_2)
+                try:
+                    watch.expect(s1, GET_ERRORS_2, timeout=2)
+                except AssertionError:
+                    bad.append(f"after the re-add W1 S1 never got the Kyber's AA 02 21, got {watch.got(s1).hex(' ') or 'nothing'}")
+                time.sleep(1.0)
+            finally:
+                s1.probe.rule_clear()
+                w.run("?KYBER,CLEAR", timeout=6)
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                bad += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                bm = w.reboot()
+                if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                    bad.append("W1 did not boot with the Maestro_Remote task after the restore")
+                w.run("?DEBUG,OFF")
+                _settle_maestro2(w)
     assert not bad, "; ".join(bad)
 
 
 @test("kyber.clear_warns_reboot_single_reader", "(should) ?KYBER,CLEAR on a Maestro_Remote board says a reboot is needed, and until then S1 is not read by both the serial parser and the still-running Kyber task", needs=NEEDS)
 def clear_warns_reboot_single_reader(bench):
-    """storeKyberSettings('clear') prints no reboot notice while LOCAL and REMOTE do. The Kyber tasks are never deleted
-    (WCB.ino:8177-8184), so after CLEAR serialCommandTask reads S1 again (WCB.ino:7298-7302) while KyberRemoteTask still drains
-    it — the two-reader corruption the serialCommandTask comment warns about. WDP is off so an advert cannot flip W1
-    back mid-test (kyber.wdp_auto_remote_revert). Bytes are [0-9A-Z] only: S1 input stays blocked, nothing executes."""
+    """Tracker #59. The Kyber tasks are created in setup() and never deleted, so after CLEAR the serial parser reads S1
+    again while KyberRemoteTask is still running: forwardMaestroDataToRemoteKyber must idle once neither Kyber mode is
+    live, or the two readers split every frame. CLEAR on a board that was in a Kyber mode prints the same reboot notice
+    as LOCAL and REMOTE. WDP is off so an advert cannot flip W1 back mid-test (kyber.wdp_auto_remote_revert). Bytes are
+    [0-9A-Z] only: S1 input stays blocked, nothing executes."""
     s1, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -1307,10 +2024,10 @@ def clear_warns_reboot_single_reader(bench):
 
 @test("kyber.maestro_s2_single_reader", "(should) A local Maestro on S2 of a Maestro_Remote board has one reader: its bytes go to the Kyber bridge, not also to the serial parser", needs=NEEDS)
 def maestro_s2_single_reader(bench):
-    """serialCommandTask reads S2 in Maestro_Remote mode (WCB.ino:7293-7297) and processIncomingSerial skips MP3/DFP/HCR and the query port
-    but never a Maestro port, while KyberRemoteTask drains every local Maestro port (WCB.ino:4828-4845). Any local
-    Maestro on S3-S5 is split the same way. WDP goes off before the add, so the new local id is never advertised and W2
-    never persists a never-evicted proxy for it (WCB_WDP.cpp:708-711)."""
+    """Tracker #59. KyberRemoteTask drains every local Maestro port, not a fixed one, so processIncomingSerial must skip
+    such a port while a bridge task reads it (maestroPortOwnedByKyberBridge), or the parser takes a share of each Maestro
+    frame. A local Maestro on S3-S5 follows the same rule. WDP goes off before the add, so the new local id is never
+    advertised and W2 never persists a never-evicted proxy for it."""
     s2, tap = link(bench, 1, "S2"), link(bench, 2, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -1319,7 +2036,9 @@ def maestro_s2_single_reader(bench):
         lines = _m_lines(before[1])
         if len(lines) > 8 or any(t.upper().startswith("?MAESTRO,M5:") for t in lines):
             raise Skip("W1 needs a free slot and no Maestro 5")
-        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t) and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS)", t, re.I)]
+        # ?EPASS / ?WIFI are excluded so a password that happens to contain 'S2' never reaches the Skip message.
+        owners = [t for t in before[1] if re.search(r"(?:\b|W1)S2\b", t)
+                  and not re.match(r"^\?(BAUD|BCAST|LABEL|SLS|EPASS|WIFI)", t, re.I)]
         if owners:
             raise Skip(f"W1 S2 is configured for something else: {owners}")
         ports = _port_tokens(before[1], "S2")
@@ -1407,9 +2126,15 @@ def wdp_auto_remote_revert(bench):
     with config_guard(bench, 1) as before:
         if "?WDP,OFF" in before[1]:
             raise Skip("W1's WDP is off")
-        row = next((x for x in w.run("?WDP,DUMP", timeout=8) if x.startswith("[WDP:N=20,")), "")
+        # A reboot earlier in the run (kyber.local_mode_s2 takes two) can leave W1 without NaviCore's row until the
+        # next periodic advert, up to 60 s away. ?WDP,POLL solicits every board and client to advertise now.
+        row, deadline = "", time.monotonic() + 20
+        while "navicore" not in row.lower() and time.monotonic() < deadline:
+            w.run("?WDP,POLL")
+            time.sleep(3)
+            row = next((x for x in w.run("?WDP,DUMP", timeout=8) if x.startswith("[WDP:N=20,")), "")
         if "navicore" not in row.lower():
-            raise Skip("W1's WDP table has no NaviCore at 20")
+            raise Skip("W1's WDP table has no NaviCore at 20, 20 s after soliciting adverts - is NaviCore on the mesh?")
         reverted = False
         try:
             wm = w.dev.mark()

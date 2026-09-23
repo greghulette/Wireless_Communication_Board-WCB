@@ -277,9 +277,14 @@ def _first(entries, pattern):
     return next((t for t, x in entries if rx.search(x)), None)
 
 
-def _require_w2_online(w):
-    if not any(x.startswith("WCB2: ") and "Online" in x for x in w.run("?STATS")):
-        raise Skip("W1's ?STATS does not show WCB2 online")
+def _require_w2_online(w, wait=30):
+    """W2 is often still rebooting from the test before (or from a config push); it is back online at its boot
+    announce or next ETM heartbeat, so wait for that before giving up."""
+    deadline = time.monotonic() + wait
+    while not any(x.startswith("WCB2: ") and "Online" in x for x in w.run("?STATS")):
+        if time.monotonic() > deadline:
+            raise Skip(f"W1's ?STATS does not show WCB2 online after {wait} s")
+        time.sleep(2)
 
 
 @contextmanager
@@ -746,7 +751,14 @@ def wcbq_live(bench):
 @test("peers.controller_off_on", "?CONTROLLER status and validation; OFF makes WCB20 unreachable; ON,20 re-registers live (auto-join held off)", needs=["wcb1"], links=[])
 def controller_off_on(bench):
     """Auto-join is turned off first: NaviCore advertises non-temporary, so with auto-join on and the controller off it
-    would join as a persisted learned peer. The OFF window stays under 30 s."""
+    would join as a persisted learned peer. The OFF window stays under 30 s.
+
+    ON,20 prints "registered (live)" only when WCB20 is not already an ESP-NOW peer (enableControllerPeer, WCB.ino).
+    OFF deletes that peer, but a disabled controller is not ignored on receive: an ETM command NaviCore sends during
+    the OFF window (its 30 s ?STATS,RPT) is still ACKed, and etmSendAck re-adds the sender on demand. Then the line is
+    rightly missing (run 20260923-154611). ETM debug is on so that ACK is visible: the missing line is excused only
+    when an "[ETM] Sent ACK seq N to WCB20" falls between OFF's confirmation and ON - otherwise it still fails, since
+    that line is the test's only check that OFF freed the slot."""
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
     bad = []
@@ -755,6 +767,7 @@ def controller_off_on(bench):
             raise Skip("controller 20 is not enabled, or NaviCore is not in W1's WDP table")
         try:
             w.run("?WDP,AUTOJOIN,OFF")
+            w.run("?DEBUG,ETM,ON")          # shows an ACK to WCB20 inside the OFF window (see the docstring)
             for cmd in ("?CONTROLLER", "?SPECIAL"):
                 out = [x.rstrip() for x in w.run(cmd)]
                 if "Controller peer (ID 20) is currently ENABLED." not in out or "Use ?CONTROLLER,ON[,<id>] (1-20) or ?CONTROLLER,OFF" not in out:
@@ -762,6 +775,7 @@ def controller_off_on(bench):
             for bad_id in (21, 0):
                 if not _has(w.run(f"?CONTROLLER,ON,{bad_id}"), f"Invalid controller peer ID {bad_id}. Valid range: 1-20."):
                     bad.append(f"ON,{bad_id} accepted")
+            off_mark = w.dev.mark()
             if not _has(w.run("?CONTROLLER,OFF"), "Controller peer (ID 20) DISABLED."):
                 bad.append("OFF did not confirm")
             out = [x.rstrip() for x in w.run(";W20,?version")]
@@ -773,9 +787,21 @@ def controller_off_on(bench):
             self_row = _row(dump, me)
             if _field(self_row, "CTRL") != "0" or int(_field(self_row, "CAP") or "0", 16) & 0x0040 or _field(_row(dump, 20), "PEER") != "0":
                 bad.append(f"DUMP while off: {self_row} / {_row(dump, 20)}")
+            on_mark = w.dev.mark()
             out = w.run("?CONTROLLER,ON,20")
-            if not (_has(out, "Controller peer (ID 20) ENABLED.") and _has(out, "Controller peer WCB20 registered (live).")):
+            if not _has(out, "Controller peer (ID 20) ENABLED."):
                 bad.append(f"ON,20 printed {out}")
+            elif not _has(out, "Controller peer WCB20 registered (live)."):
+                window = w.dev.since(off_mark)[:on_mark - off_mark]
+                start = next((i for i, x in enumerate(window) if "Controller peer (ID 20) DISABLED." in x), None)
+                acks = [x for x in (window[start:] if start is not None else [])
+                        if re.search(r"\[ETM\] Sent ACK seq \d+ to WCB20\b", x)]
+                if acks:
+                    bench.note(f"ON,20: WCB20 was already an ESP-NOW peer - re-added by an ETM ACK during the OFF "
+                               f"window ({acks[0].strip()})")
+                else:
+                    bad.append(f"ON,20 printed {out} and no ACK to WCB20 during the OFF window re-added the peer - "
+                               f"OFF may not have freed it")
             wm = w.dev.mark()
             w.send(";W20,?version")
             try:
@@ -785,6 +811,7 @@ def controller_off_on(bench):
         finally:
             if not _has(w.run("?CONTROLLER"), "is currently ENABLED"):
                 w.run("?CONTROLLER,ON,20")
+            w.run("?DEBUG,ETM,OFF")
             w.run("?WDP,AUTOJOIN,ON")
     assert not bad, "; ".join(bad)
 
@@ -799,8 +826,47 @@ def controller_auto_enable(bench):
         try:
             wm = w.dev.mark()
             w.send("?WDP,AUTOJOIN,OFF^?CONTROLLER,OFF^?WDP,FORGET,20^?WDP,POLL")    # one drain: no advert lands between
-            time.sleep(3)
+            first = last = time.monotonic()
+            # The solicit and NaviCore's one solicited reply are each a single unacknowledged broadcast
+            # (WCB_WDP.cpp:339-358, WCB_Client.cpp:2062-2077). NaviCore's next unsolicited advert is up to
+            # 60 s away, so losing either frame leaves a 3 s window empty (full runs 09-21 and 09-22).
+            # Re-polling changes nothing under test: WCB20 stays forgotten and the controller stays OFF
+            # until an advert is actually decoded.
+            lost = False
+            for attempt in range(3):
+                try:
+                    w.dev.expect(r"Controller peer WCB20 registered \(live\)\.", timeout=3, since=wm)
+                    if attempt:
+                        bench.note(f"NaviCore was learned on poll {attempt + 1} of 3")
+                    break
+                except AssertionError:
+                    if attempt < 2:
+                        w.send("?WDP,POLL")
+                        last = time.monotonic()
+            else:
+                lost = True
+            time.sleep(0.3)
             lines = [x.rstrip() for x in w.dev.since(wm)]
+            if lost:
+                # Which frame was lost: W2 hears the same broadcasts. A NaviCore advert decoded by W2 inside
+                # the polling window means NaviCore answered and W1 missed it; none means NaviCore never
+                # answered (lost solicit, or the client no longer answers). A diagnostic only: never fails.
+                age, window = "unread", None
+                try:
+                    with Console(bench, 2) as c2:
+                        cm = c2.send("?WDP,DUMP")
+                        window = time.monotonic() - first    # W2 stamps AGE as it prints; a relayed dump's END lands seconds later
+                        try:
+                            c2.expect(r"\[WDP:END,", timeout=8, since=cm)
+                        except AssertionError:
+                            pass
+                        age = _field(_row([x.rstrip() for x in c2.lines(cm)], 20), "AGE") or "no N=20 row"
+                except AssertionError as e:
+                    age = f"unread ({str(e).splitlines()[0]})"
+                bench.note(f"no NaviCore advert after 3 polls; W2's N=20 AGE={age}{' s' if age.isdigit() else ''}"
+                           + (f", first POLL {window:.1f} s / last {window - (last - first):.1f} s before W2's DUMP"
+                              " (AGE within that window: NaviCore answered and W1 missed it; older: NaviCore never answered)"
+                              if window is not None else ""))
             query, dump = w.run("?CONTROLLER"), _dump(w)
         finally:
             if not _has(w.run("?CONTROLLER"), "is currently ENABLED"):
@@ -1043,7 +1109,7 @@ def _expected_cap(tokens, n):
     cap |= 0x0040 if any(t.startswith("?CONTROLLER,ON") for t in up) else 0
     cap |= 0x0020 if any(t.startswith("?MAP,PWM") for t in up) else 0
     cap |= 0x0010 if "?MAESTRO,REMOTE" in up else 0
-    cap |= 0x0008 if "?KYBER,LOCAL" in up else 0
+    cap |= 0x0008 if any(t.startswith("?KYBER,LOCAL") for t in up) else 0   # the backup writes ?KYBER,LOCAL,S<n>[,targets]
     cap |= 0x0004 if any(re.match(rf"^\?WLED,\d+:W{n}S\d", t) for t in up) else 0
     cap |= 0x0001 if any(t.startswith("?HCR,PORT") for t in up) else 0
     cap |= 0x0002 if any(re.match(r"^\?MP3,S\d", t) for t in up) else 0

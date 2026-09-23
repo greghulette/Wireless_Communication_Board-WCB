@@ -48,17 +48,22 @@ def _session_id():
     return int(nonce(), 16) % 60000 + 1
 
 
-def _opt_in(bench, flag, why):
-    if flag not in bench.cfg.get("opt_in", []):
-        raise Skip(f'opt-in: add "{flag}" to bench.json "opt_in" ({why})')
-
-
 def _image(w, chip="ESP32"):
-    """The release image in Code/bin for the firmware the board is running (Skip if absent), sanity-checked."""
+    """The image the board is running (Skip if none is found), sanity-checked.
+
+    First the bench build the harness flashes from (results/builds/wcb-esp32-meshq, see its FLASHED.md), then the CI
+    release in Code/bin. A local build keeps the committed version string, so the bench boards report a version with
+    no release file of that name. And even a release with a matching name would not be the image they run, so a
+    full 'same image' OTA from Code/bin would change their firmware. The firmware reports nothing more specific than
+    its version string, so this relies on the bench convention that W1/W2 are flashed from the builds folder."""
     version = w.version()
-    paths = [p for p in glob.glob(os.path.join(REPO, "Code", "bin", f"WCB_{version}_*.bin")) if p.endswith(f"_{chip}.bin")]
+    bench_build = os.path.join(REPO, "tests", "hil", "results", "builds", "wcb-esp32-meshq", "WCB.ino.bin")
+    paths = [bench_build] if chip == "ESP32" and os.path.exists(bench_build) \
+        and version.encode() in open(bench_build, "rb").read() else []
+    paths += [p for p in glob.glob(os.path.join(REPO, "Code", "bin", f"WCB_{version}_*.bin")) if p.endswith(f"_{chip}.bin")]
     if not paths:
-        raise Skip(f"no Code/bin/WCB_{version}_*_{chip}.bin for the running firmware")
+        raise Skip(f"no image of the running firmware {version}: neither the bench build "
+                   f"(results/builds/wcb-esp32-meshq) nor Code/bin/WCB_{version}_*_{chip}.bin carries it")
     data = open(paths[0], "rb").read()
     if data[:1] != b"\xe9" or version.encode() not in data or len(data) > SLOT_SIZE:
         raise AssertionError(f"{os.path.basename(paths[0])} does not look like a {chip} image of {version}")
@@ -150,7 +155,7 @@ def local_parse_help_unknown(bench):
     for cmd in ("?otalocal", "?OtaLocal,status", "?OTALOCAL,"):
         assert _status(w.run(cmd))["session"] == "idle", f"{cmd} did not print an idle STATUS"
     foo = _ota(w.run("?OTALOCAL,foo"))
-    assert foo == ["[OTA] unknown subcommand 'FOO' (use STATUS|BEGIN|DATA|END|ABORT)"], foo
+    assert foo == ["[OTA] unknown subcommand 'FOO' (use STATUS|BAUD|BEGIN|DATA|END|ABORT)"], foo   # BAUD listed since tracker #30
     helped = [x.rstrip() for x in w.run("?OTALOCAL?")]
     for want in ("Firmware Update (OTA)", "  STATUS                    Show OTA slot / session state"):
         assert _has(helped, want), f"?OTALOCAL? lacks {want!r}"
@@ -292,7 +297,6 @@ def relay_navicore_brick_guard(bench):
 
 
 # ============================================================ OPT-IN ota_erase: small local sessions on W1
-ERASE_WHY = "every accepted BEGIN erases at least 4 KB of the inactive app slot, which nothing can restore"
 ABORTED = "[OTA] aborted: local abort command (current app intact)"
 
 
@@ -312,9 +316,8 @@ def _data(w, offset, chunk):
     return _ota(w.run(f"?OTALOCAL,DATA,{offset},{_b64(chunk)}"))
 
 
-@test("ota.local_begin_abort", "OPT-IN (ota_erase): a small BEGIN opens session 1 on the inactive slot; ABORT closes it with no boot switch", needs=["wcb1"], links=[])
+@test("ota.local_begin_abort", "OPT-IN (ota_erase): a small BEGIN opens session 1 on the inactive slot; ABORT closes it with no boot switch", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_begin_abort(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     with _local(w):
         before = _local_status(w)
@@ -329,9 +332,8 @@ def local_begin_abort(bench):
     assert after["session"] == "idle" and after["running"] == before["running"], after
 
 
-@test("ota.local_begin_supersede", "OPT-IN (ota_erase): a second BEGIN silently replaces a live session: no abort line, cursor back to 0, old offsets NAK", needs=["wcb1"], links=[])
+@test("ota.local_begin_supersede", "OPT-IN (ota_erase): a second BEGIN silently replaces a live session: no abort line, cursor back to 0, old offsets NAK", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_begin_supersede(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -350,9 +352,8 @@ def local_begin_supersede(bench):
     assert abort == [ABORTED], abort
 
 
-@test("ota.local_cursor_nak_incomplete", "OPT-IN (ota_erase): the in-order cursor ACKs, NAKs a duplicate and a gap, shows in STATUS, and END refuses an incomplete image", needs=["wcb1"], links=[])
+@test("ota.local_cursor_nak_incomplete", "OPT-IN (ota_erase): the in-order cursor ACKs, NAKs a duplicate and a gap, shows in STATUS, and END refuses an incomplete image", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_cursor_nak_incomplete(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     a, b = img[0:1024], img[1024:2048]
@@ -373,10 +374,9 @@ def local_cursor_nak_incomplete(bench):
     assert not rebooted and after["session"] == "idle", after
 
 
-@test("ota.local_truncated_verify_fail", "OPT-IN (ota_erase): a complete but truncated image (the real image's first 2 KB) fails verify at END; no reboot, no slot change", needs=["wcb1"], links=[])
+@test("ota.local_truncated_verify_fail", "OPT-IN (ota_erase): a complete but truncated image (the real image's first 2 KB) fails verify at END; no reboot, no slot change", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_truncated_verify_fail(bench):
     """If END ever printed [OTA:END,OK] the board would reboot into a 2 KB non-image; recovery is a USB reflash of W1."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -396,9 +396,8 @@ def local_truncated_verify_fail(bench):
     assert after["running"] == before["running"] and after["session"] == "idle", after
 
 
-@test("ota.local_bad_magic", "OPT-IN (ota_erase): a first chunk without the 0xE9 image magic is refused and ends the session; resending from 0 NAKs forever", needs=["wcb1"], links=[])
+@test("ota.local_bad_magic", "OPT-IN (ota_erase): a first chunk without the 0xE9 image magic is refused and ends the session; resending from 0 NAKs forever", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_bad_magic(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -412,9 +411,8 @@ def local_bad_magic(bench):
     assert retry == ["[OTA] DATA rejected at offset 0 (write cursor at 0)", "[OTA:NAK,0]"], retry
 
 
-@test("ota.local_overrun", "OPT-IN (ota_erase): a chunk that overruns the declared image size aborts the session", needs=["wcb1"], links=[])
+@test("ota.local_overrun", "OPT-IN (ota_erase): a chunk that overruns the declared image size aborts the session", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_overrun(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -425,10 +423,9 @@ def local_overrun(bench):
     assert after["session"] == "idle", after
 
 
-@test("ota.local_base64_errors", "OPT-IN (ota_erase): base64 errors keep the session alive and print no ACK/NAK marker", needs=["wcb1"], links=[])
+@test("ota.local_base64_errors", "OPT-IN (ota_erase): base64 errors keep the session alive and print no ACK/NAK marker", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_base64_errors(bench):
     """A host that waits only for '[OTA:' hangs to its per-chunk timeout on these (the Wizard's is 6 s, app.js:1733)."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -443,10 +440,9 @@ def local_base64_errors(bench):
     assert ok == ["[OTA:ACK,1024]"], ok
 
 
-@test("ota.local_idle_timeout_nak_no_refresh", "OPT-IN (ota_erase): the 30 s idle reaper fires even while rejected chunks keep arriving (~35 s)", needs=["wcb1"], links=[])
+@test("ota.local_idle_timeout_nak_no_refresh", "OPT-IN (ota_erase): the 30 s idle reaper fires even while rejected chunks keep arriving (~35 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_idle_timeout_nak_no_refresh(bench):
     """The offset check returns before lastActivityMs is refreshed (WCB_OTA.cpp:148 vs 165): a NAK is no keep-alive."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     with _local(w):
         m0 = w.dev.mark()
@@ -465,9 +461,8 @@ def local_idle_timeout_nak_no_refresh(bench):
     assert after["session"] == "idle", after
 
 
-@test("ota.local_write_refreshes_timeout", "OPT-IN (ota_erase): an accepted chunk restarts the 30 s idle window (~55 s)", needs=["wcb1"], links=[])
+@test("ota.local_write_refreshes_timeout", "OPT-IN (ota_erase): an accepted chunk restarts the 30 s idle window (~55 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_write_refreshes_timeout(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w):
@@ -500,9 +495,8 @@ def _bump(w, rate=921600):
     time.sleep(0.1)
 
 
-@test("ota.local_baud_bump_abort", "OPT-IN (ota_erase): the BAUD 921600 handshake, commands at the raised rate, and ABORT restoring 115200", needs=["wcb1"], links=[])
+@test("ota.local_baud_bump_abort", "OPT-IN (ota_erase): the BAUD 921600 handshake, commands at the raised rate, and ABORT restoring 115200", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_bump_abort(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     with _local(w):
         _begin(w, 4096)
@@ -520,9 +514,8 @@ def local_baud_bump_abort(bench):
     assert active["session"] == "ACTIVE id=1  0 / 4096 B", active["session"]
 
 
-@test("ota.local_baud_invalid", "OPT-IN (ota_erase): BAUD accepts only 115200/230400/460800/921600/1000000; the error marker always names 115200", needs=["wcb1"], links=[])
+@test("ota.local_baud_invalid", "OPT-IN (ota_erase): BAUD accepts only 115200/230400/460800/921600/1000000; the error marker always names 115200", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_invalid(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     with _local(w):
         _begin(w, 4096)
@@ -537,9 +530,8 @@ def local_baud_invalid(bench):
     assert active["session"] == "ACTIVE id=1  0 / 4096 B", "BAUD touched the session"
 
 
-@test("ota.local_baud_timeout_restore", "OPT-IN (ota_erase): the idle timeout at a raised baud restores the board to 115200; BAUD does not refresh the window (~35 s)", needs=["wcb1"], links=[])
+@test("ota.local_baud_timeout_restore", "OPT-IN (ota_erase): the idle timeout at a raised baud restores the board to 115200; BAUD does not refresh the window (~35 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_timeout_restore(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     with _local(w):
         m0 = w.dev.mark()
@@ -556,13 +548,12 @@ def local_baud_timeout_restore(bench):
     assert 29.5 <= fired <= 33, f"timeout {fired:.1f} s after BEGIN (the window runs from BEGIN, not from BAUD)"
 
 
-@test("ota.local_baud_rejected_rebegin_restores", "(should) OPT-IN (ota_erase): a rejected re-BEGIN at a raised baud restores USB to 115200 instead of stranding it with no session", needs=["wcb1"], links=[])
+@test("ota.local_baud_rejected_rebegin_restores", "(should) OPT-IN (ota_erase): a rejected re-BEGIN at a raised baud restores USB to 115200 instead of stranding it with no session", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_rejected_rebegin_restores(bench):
-    """Probable bug: otaBegin tears the live session down silently (WCB_OTA.cpp:106) without otaRestoreLocalBaud, and each
-    later reject (:109-131) leaves the raised rate set. With no session neither the idle reaper (:99) nor BAUD (:247-250)
-    can restore it, so USB stays at 921600 until ABORT or a reboot; docs/WCB_OTA_TECHNICAL.md:110-111 says the 30 s
-    timeout owns the restore. The likely (stranded) state is probed first, at 921600."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
+    """Tracker #61. otaBegin tears a live session down before its guards run, so a rejected re-BEGIN leaves no session,
+    and neither the ota.active-gated idle reaper nor BAUD can undo a raised rate. The BEGIN handler restores 115200
+    itself, after the [OTA:BEGIN,ERR] marker has gone out at the raised rate. The stranded state is probed first, at
+    921600; if the fix holds, that probe arrives at 115200 as line-less junk, which the empty line below flushes."""
     w = usb_wcb(bench)
     with _local(w):
         _begin(w, 4096)
@@ -581,6 +572,10 @@ def local_baud_rejected_rebegin_restores(bench):
             time.sleep(0.2)
         w.dev.set_baud(115200)
         time.sleep(0.1)
+        # A 921600 probe reaches a board already back at 115200 as a few bytes with no CR/LF, and
+        # processIncomingSerial would prefix them to the next ?VERSION, which then runs as text. End that line first.
+        w.dev.send("")
+        time.sleep(0.2)
         w.version()
     assert not stranded, "W1 stayed at 921600 with no session after the rejected re-BEGIN"
 
@@ -600,9 +595,8 @@ def _relay_session(w, session, target=2):
         time.sleep(1.0)
 
 
-@test("ota.relay_cursor_dup_gap_wrong_session_abort", "OPT-IN (ota_erase): relay session on W2: cursor ACKs, duplicate and gap re-ACK, a wrong session gets ERR with the real cursor, ABORT ignores the id", needs=["wcb1"], links=[])
+@test("ota.relay_cursor_dup_gap_wrong_session_abort", "OPT-IN (ota_erase): relay session on W2: cursor ACKs, duplicate and gap re-ACK, a wrong session gets ERR with the real cursor, ABORT ignores the id", needs=["wcb1"], links=[], opt_in="ota_erase")
 def relay_cursor_dup_gap_wrong_session_abort(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     s = _session_id()
@@ -623,12 +617,11 @@ def relay_cursor_dup_gap_wrong_session_abort(bench):
     assert _has(lines, f"[OTA] BEGIN ok: session {s}, 2048 B → partition '{nxt2}'"), "no BEGIN ok line on W2"
 
 
-@test("ota.relay_teardown_frame_err", "(should) OPT-IN (ota_erase): the relay DATA frame that tears W2's session down is ACKed ERR, not OK", needs=["wcb1"], links=[])
+@test("ota.relay_teardown_frame_err", "(should) OPT-IN (ota_erase): the relay DATA frame that tears W2's session down is ACKed ERR, not OK", needs=["wcb1"], links=[], opt_in="ota_erase")
 def relay_teardown_frame_err(bench):
-    """The comment at WCB_OTA.cpp:408-414 and docs/WCB_OTA_TECHNICAL.md:176, :209, :291 say a write that tears the session
-    down is ACKed OTA_ST_ERR, but inSession is captured before otaWrite (WCB_OTA.cpp:402 vs 407) and reused for the
-    status (:415): that frame gets OK with offset 0 and only later frames get ERR. navicore_ota.h:367-380 does the same."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
+    """Tracker #70. A relay DATA ACK's status is read AFTER otaWrite (WCB_OTA.cpp handleOtaDataPacket), so the frame
+    whose own write ends the session (here an overrun of the declared 100 B) is ACKed ERR with offset 0, as
+    docs/WCB_OTA_TECHNICAL.md §4 and §8 say. Before the fix only the frames after it got ERR."""
     w = usb_wcb(bench)
     img = _image(w)
     s = _session_id()
@@ -641,12 +634,11 @@ def relay_teardown_frame_err(bench):
         lines = c2.lines(cm)
     assert begin == (0, 0) and resend == (0, 1), (begin, resend)
     assert _has(lines, "[OTA] write overruns image (0 + 192 > 100) — aborting"), "no overrun line on W2"
-    assert tear[1] == 1, f"the frame that tore the session down was ACKed {tear}"
+    assert tear == (0, 1), f"the frame that tore the session down was ACKed {tear}, not ERR with offset 0"
 
 
-@test("ota.relay_end_incomplete_and_verify_fail", "OPT-IN (ota_erase): relay END on W2: incomplete is refused, complete-but-truncated fails verify; END ACK offset is 0; no reboot", needs=["wcb1"], links=[])
+@test("ota.relay_end_incomplete_and_verify_fail", "OPT-IN (ota_erase): relay END on W2: incomplete is refused, complete-but-truncated fails verify; END ACK offset is 0; no reboot", needs=["wcb1"], links=[], opt_in="ota_erase")
 def relay_end_incomplete_and_verify_fail(bench):
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     s1, s2 = _session_id(), _session_id()
@@ -667,11 +659,10 @@ def relay_end_incomplete_and_verify_fail(bench):
     assert not rebooted, "W2 rebooted after a failed END"
 
 
-@test("ota.relay_timeout_keepalive", "OPT-IN (ota_erase): in-session no-op relay frames keep W2's 30 s timeout alive; the timeout itself sends no ACK (~80 s)", needs=["wcb1"], links=[])
+@test("ota.relay_timeout_keepalive", "OPT-IN (ota_erase): in-session no-op relay frames keep W2's 30 s timeout alive; the timeout itself sends no ACK (~80 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def relay_timeout_keepalive(bench):
     """The local path has no such keep-alive (ota.local_idle_timeout_nak_no_refresh): in-session relay frames refresh
     lastActivityMs before the offset check (WCB_OTA.cpp:402-403)."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     s = _session_id()
@@ -696,11 +687,10 @@ def relay_timeout_keepalive(bench):
     assert final == (0, 1), final
 
 
-@test("ota.cross_transport_remote_abort_kills_local", "OPT-IN (ota_erase): an ?OTA,ABORT relayed by W2 (any session id) kills W1's local USB session", needs=["wcb1"], links=[])
+@test("ota.cross_transport_remote_abort_kills_local", "OPT-IN (ota_erase): an ?OTA,ABORT relayed by W2 (any session id) kills W1's local USB session", needs=["wcb1"], links=[], opt_in="ota_erase")
 def cross_transport_remote_abort_kills_local(bench):
     """One session per board across transports: the relay abort handler never checks the id (WCB_OTA.cpp:433-440), and
     W2 runs a mesh-delivered ?OTA (WCB.ino:5387-5393). Any board with the mesh password can cancel a USB OTA."""
-    _opt_in(bench, "ota_erase", ERASE_WHY)
     w = usb_wcb(bench)
     img = _image(w)
     with _local(w), Console(bench, 2) as c2:
@@ -762,9 +752,8 @@ def _stream_local(w, image, baud=921600):
     return m_end, progress, overflow, time.monotonic() - started
 
 
-@test("ota.local_sha_corrupt_full", "OPT-IN (ota_full): the full image with one flipped byte streams to 100 % and fails verify at END; no reboot, no slot change, nothing leaks onto S2-S5", needs=["wcb1"], links=["W1S2", "W1S3", "W1S4", "W1S5"])
+@test("ota.local_sha_corrupt_full", "OPT-IN (ota_full): the full image with one flipped byte streams to 100 % and fails verify at END; no reboot, no slot change, nothing leaks onto S2-S5", needs=["wcb1"], links=["W1S2", "W1S3", "W1S4", "W1S5"], opt_in="ota_full")
 def local_sha_corrupt_full(bench):
-    _opt_in(bench, "ota_full", "erases the whole inactive app slot")
     w = usb_wcb(bench)
     img = _image(w)
     corrupt = bytearray(img)
@@ -791,12 +780,11 @@ def local_sha_corrupt_full(bench):
     assert not leaks, f"OTA traffic leaked onto {leaks}"
 
 
-@test("ota.local_full_same_image_wcb1", "OPT-IN (ota_full): re-flash W1 over USB with the image it runs, twice; each pass reboots into the other slot with the same version and config (2 reboots)", needs=["wcb1"], links=[])
+@test("ota.local_full_same_image_wcb1", "OPT-IN (ota_full): re-flash W1 over USB with the image it runs, twice; each pass reboots into the other slot with the same version and config (2 reboots)", needs=["wcb1"], links=[], opt_in="ota_full", opt_in_why="erases and rewrites W1's inactive app slot and switches its boot slot twice")
 def local_full_same_image_wcb1(bench):
     """END OK switches otadata, which ?backup cannot see, so there are always two passes and W1 ends on its original slot.
     Rollback only rescues an image that dies before initArduino (esp32-hal-misc.c:277-292). If W1 does not come back, the
     recovery is a USB reflash by the operator: the harness never runs esptool."""
-    _opt_in(bench, "ota_full", "erases and rewrites W1's inactive app slot and switches its boot slot twice")
     w = usb_wcb(bench)
     img, fw = _image(w), w.version()
     passes = []
@@ -823,13 +811,12 @@ def local_full_same_image_wcb1(bench):
     assert len(passes) == 2 and passes[-1]["after"]["running"] == start["running"], "W1 did not end on its original slot"
 
 
-@test("ota.local_wrong_chip_image", "OPT-IN (ota_wrong_chip, attended): an ESP32-S3 image declared as family 0 passes BEGIN and must fail verify at END", needs=["wcb1"], links=[])
+@test("ota.local_wrong_chip_image", "OPT-IN (ota_wrong_chip, attended): an ESP32-S3 image declared as family 0 passes BEGIN and must fail verify at END", needs=["wcb1"], links=[], opt_in="ota_wrong_chip")
 def local_wrong_chip_image(bench):
     """Design gap vs docs/WCB_OTA_TECHNICAL.md:288 ('chip-family mismatch -> BEGIN rejected'): the brick guard compares
     only the host-declared family (WCB_OTA.cpp:108-113), never the image header's chip id, so only IDF verify at END
     stops a wrong image with a correct declared family. If END ever succeeded W1 would reboot into an S3 image: stop
     and reflash it by USB."""
-    _opt_in(bench, "ota_wrong_chip", "streams an S3 image to W1; only IDF verify stands between it and the boot slot")
     w = usb_wcb(bench)
     s3_image = _image(w, chip="ESP32S3")
     with _local(w):
@@ -846,13 +833,12 @@ def local_wrong_chip_image(bench):
     assert not rebooted and after["running"] == before["running"], after
 
 
-@test("ota.relay_full_same_image_wcb2", "OPT-IN (ota_full_wcb2): relay-OTA W2 with the image it runs, twice; each pass reboots W2 into the other slot with the same version and config (slow: ~7000 frames per pass at 115200)", needs=["wcb1"], links=["W2S1"])
+@test("ota.relay_full_same_image_wcb2", "OPT-IN (ota_full_wcb2): relay-OTA W2 with the image it runs, twice; each pass reboots W2 into the other slot with the same version and config (slow: ~7000 frames per pass at 115200)", needs=["wcb1"], links=["W2S1"], opt_in="ota_full_wcb2")
 def relay_full_same_image_wcb2(bench):
     """Run only after ota.local_full_same_image_wcb1 passed with the same file (one ESP32 image serves HW 1.0 and 2.4;
     pin maps are runtime). The relay has no baud bump (?OTALOCAL,BAUD needs a local session, WCB_OTA.cpp:247). W2
     sends its END ACK once, 300 ms before restarting (WCB_OTA.cpp:425-429), so its boot line also counts as success.
     W2's own USB cable is the recovery path if the new image fails to run."""
-    _opt_in(bench, "ota_full_wcb2", "erases and rewrites W2's inactive app slot and switches its boot slot twice")
     w = usb_wcb(bench)
     img = _image(w)
     tap = bench.links.get(2, "S1")

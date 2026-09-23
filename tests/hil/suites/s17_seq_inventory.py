@@ -67,11 +67,6 @@ def _clear_seq(w, *keys):
         w.run(f"?SEQ,CLEAR,{k}")
 
 
-def _opt_in(bench, flag, why):
-    if flag not in bench.cfg.get("opt_in", []):
-        raise Skip(f'opt-in: add "{flag}" to bench.json "opt_in" ({why})')
-
-
 # ============================================================ ?SEQ commands
 @test("seq.command_formats", "?SEQ SAVE/GET/CLEAR success and error literals; unknown subcommand", needs=["wcb1"], links=[])
 def command_formats(bench):
@@ -150,12 +145,11 @@ def list_format(bench):
     assert [x for x in lst if x.startswith("---")][-1] == "--- End of Stored Commands ---", lst[-3:]
 
 
-@test("seq.clear_all_empty_hash", "OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences; an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[])
+@test("seq.clear_all_empty_hash", "OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences; an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[], opt_in="seq_wipe")
 def clear_all_empty_hash(bench):
     """Doc bug: docs/SEQUENCE_INVENTORY.md:137 and :249, docs/WDP_DESIGN.md:109, WCB_Storage.h:164, WCB_WDP.h:89,
     tests/wdp_wire_test.cpp:69 and WCBClient (WCB_Client.h:404, README.md:536) give the empty hash as 811C9DC5, but
     sequenceInventoryHash() applies the 0xFF separator even to an empty key_list (WCB_Storage.cpp:792-798)."""
-    _opt_in(bench, "seq_wipe", "wipes W1's sequences and replays them")
     w = usb_wcb(bench)
     problems = []
     with config_guard(bench, 1):
@@ -381,8 +375,8 @@ def cycle_guard(bench):
 
 @test("seq.cycle_guard_case", "(should) A body recalling a different-case key that does not exist reports it missing, not a cycle", needs=["wcb1"])
 def cycle_guard_case(bench):
-    """Quirk: the guard compares keys with equalsIgnoreCase (WCB.ino:6736) while NVS keys are case-sensitive, so ;Chilrx
-    inside HILRX is refused as recursion although no 'hilrx' exists."""
+    """Tracker #40: the guard compares the exact key bytes (seqKeyHash, recallStoredCommand in WCB.ino), like the
+    case-sensitive NVS lookup, so a wrong-case key that does not exist reports missing instead of a cycle."""
     s1 = link(bench, 1, "S1")
     w = usb_wcb(bench)
     e = marker("e")
@@ -398,6 +392,81 @@ def cycle_guard_case(bench):
     assert got == e.encode() + b"\r", f"W1 S1 got {got!r}"
     assert "No command stored under key: 'hilrx'" in lines and REFUSE.format("hilrx") not in lines, \
         f"lines {[x for x in lines if 'hilrx' in x]}"
+
+
+@test("seq.cycle_guard_reuse", "(should) A sub-sequence reused in one run expands every time: back-to-back, across a ;t delay, at two depths, nine calls under one trigger; a ;t-delayed self-recall is still refused", needs=["wcb1"])
+def cycle_guard_reuse(bench):
+    """Tracker #47: the guard's key set was never popped, so a second call to the same sub-sequence was refused as
+    recursion, and a flat body calling 8 different ones hit 'nesting deeper than 8'. S1 order is FIFO: a body's own
+    tokens drain before the bodies they recall (recallCommandSlot enqueues, it does not recurse)."""
+    s1 = link(bench, 1, "S1")
+    w = usb_wcb(bench)
+    leaf = [marker(f"l{i}") for i in range(1, 9)]
+    r = marker("r")
+    saves = [(f"HILL{i}", f";S1{leaf[i - 1]}") for i in range(1, 9)]
+    saves += [("HILUW", "^".join(f";CHILL{i}" for i in range(1, 9)) + "^;CHILL1"),  # 8 distinct, then a repeat
+              ("HILUT", ";CHILL2^;t300^;CHILL2"),                                       # reuse across a ;t delay
+              ("HILUM", ";CHILL3"), ("HILUN", ";CHILUM^;CHILL3"),                        # one leaf at depth 2 and 1
+              ("HILUR", f";S1{r}^;t200^;CHILUR")]                                        # paced self-recall: a cycle
+    with config_guard(bench, 1):
+        try:
+            for k, v in saves:
+                w.run(f"?SEQ,SAVE,{k},{v}")
+            pm, wm = s1.mark(), w.dev.mark()
+            for cmd in (";CHILUW,L", ";CHILUT,L", ";CHILUN,L", ";CHILUR,L"):
+                w.send(cmd)
+                time.sleep(2)
+            try:
+                w.version()      # a guard that lost the lineage would refill the queue forever
+            except AssertionError:
+                w.reboot()
+                raise
+            got, lines = s1.received(pm), [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            w.send("?STOP")      # a lineage lost across ;t would leave HILUR re-arming its own timer chain
+            _clear_seq(w, *(k for k, _ in saves))
+    want = b"".join(x.encode() + b"\r" for x in leaf + [leaf[0], leaf[1], leaf[1], leaf[2], leaf[2], r])
+    assert got == want, f"W1 S1 got {got!r}, expected {want!r}"
+    refused = [x for x in lines if "recalls itself" in x or "nesting deeper" in x]
+    assert refused == [REFUSE.format("HILUR")], f"refusal lines {refused}"
+    assert not any("No command stored under key" in x for x in lines), "a recall missed its key"
+    assert not any("queue is full" in x or "nearly full" in x for x in lines), "a small reuse ran into the queue limit"
+
+
+@test("seq.reuse_queue_reserve", "(should) Back-to-back reuse that would overflow the command queue refuses whole nested expansions with one line each, never cuts a body short, and the board keeps answering", needs=["wcb1"])
+def reuse_queue_reserve(bench):
+    """Tracker #47 follow-on: once reuse runs, 12 back-to-back calls of a 20-command sub-sequence expand every call
+    before any leaf drains (FIFO), ~240 tokens against the 200-slot queue. recallCommandSlot refuses a NESTED
+    expansion that would leave fewer than SEQ_QUEUE_RESERVE (16) slots free, so the tail calls print one 'nearly
+    full' line each instead of one 'queue is full' line per dropped token (UART0 has no TX buffer). The model
+    predicts 9 expanded + 3 refused; the test asserts only that every call is accounted for, whole."""
+    s1 = link(bench, 1, "S1")
+    w = usb_wcb(bench)
+    q = marker("q")
+    calls = 12
+    with config_guard(bench, 1):
+        try:
+            w.run("?SEQ,SAVE,HILQL," + "^".join([f";S1{q}"] * 20))
+            w.run("?SEQ,SAVE,HILQW," + "^".join([";CHILQL"] * calls))
+            pm, wm = s1.mark(), w.dev.mark()
+            w.send(";CHILQW,L")
+            time.sleep(6)
+            try:
+                w.version()      # the board must still answer: no flood of queue-full lines on UART0
+            except AssertionError:
+                w.reboot()
+                raise
+            got, lines = s1.received(pm), [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            _clear_seq(w, "HILQL", "HILQW")
+    block = (q.encode() + b"\r") * 20
+    whole, rest = divmod(len(got), len(block))
+    assert not rest and got == block * whole, f"W1 S1 got a partial body ({len(got)} bytes, block {len(block)})"
+    nearly = [x for x in lines if x.startswith("Command queue nearly full") and "'HILQL'" in x]
+    assert nearly, "no 'nearly full' refusal: the queue reserve did not engage"
+    assert whole + len(nearly) == calls, f"{whole} expanded + {len(nearly)} refused != {calls} calls"
+    assert not any("Command queue is full" in x for x in lines), "tokens were dropped one by one"
+    assert not any("recalls itself" in x or "nesting deeper" in x for x in lines), "reuse was refused as a cycle"
 
 
 @test("seq.local_suffix_and_seq_fanout", ",L keeps a recall off the mesh; top-level ;C<key> and ;SEQ<key> both run W2's copy", needs=["wcb1"])
@@ -534,20 +603,28 @@ _LAST_REQ = {}
 RELAY_SPACING_S = 2.0   # the target ignores a repeat for 1500 ms after it ANSWERED, not after we asked
 
 
-def _relay(w, cmd, pattern, space_key, timeout=3.0):
+def _relay(w, cmd, pattern, space_key, timeout=3.0, tries=3):
     """Send a relay request at least RELAY_SPACING_S after the last one with the same dedup key; return every matching
-    W1 line (first match plus 0.5 s)."""
-    last = _LAST_REQ.get(space_key)
-    if last is not None:
-        wait = RELAY_SPACING_S - (time.monotonic() - last)
-        if wait > 0:
-            time.sleep(wait)
-    m = w.dev.mark()
-    w.send(cmd)
-    _LAST_REQ[space_key] = time.monotonic()
-    w.dev.expect(pattern, timeout=timeout, since=m)
-    time.sleep(0.5)
-    return [x.rstrip() for x in w.dev.since(m) if re.search(pattern, x)]
+    W1 line of the answered try (first match plus 0.5 s). The answer comes back as unacknowledged broadcast frags sent
+    ONCE (sendResultFrags; only the request is sent 3x), so one lost frag means no line and no error, and the requester
+    is expected to retry (docs/SEQUENCE_INVENTORY.md §3a; inv.mgmt_seq_remote missed one on 2026-09-23, tracker #77)."""
+    for attempt in range(1, tries + 1):
+        last = _LAST_REQ.get(space_key)
+        if last is not None:
+            wait = RELAY_SPACING_S - (time.monotonic() - last)
+            if wait > 0:
+                time.sleep(wait)
+        m = w.dev.mark()
+        w.send(cmd)
+        _LAST_REQ[space_key] = time.monotonic()
+        try:
+            w.dev.expect(pattern, timeout=timeout, since=m)
+        except AssertionError:
+            if attempt == tries:
+                raise
+            continue
+        time.sleep(0.5)
+        return [x.rstrip() for x in w.dev.since(m) if re.search(pattern, x)]
 
 
 def _inventory_of(w, wcb):
@@ -749,10 +826,19 @@ def seqget_multichunk(bench):
         try:
             push()
             line = _seqget_line(w, 2, "HILMC", timeout=4)
-            if line is None or ",NOTFOUND," in line:
-                bench.note("multi-chunk push not stored on the first try (fragments are unACKed broadcasts); pushing again")
-                push()
-                time.sleep(RELAY_SPACING_S)
+            # Both legs are broadcast frags sent once, and each is lost on its own: no line means the request or W2's
+            # 5-frag reply was lost (the value may well be stored; the 4 s wait already cleared W2's 1.5 s dedup),
+            # NOTFOUND means the push was. A re-fetch after a lost reply can come back NOTFOUND, so rounds loop.
+            for retry in range(1, 4):
+                if line is not None and ",NOTFOUND," not in line:
+                    break
+                if line is None:
+                    bench.note(f"multi-chunk retry {retry}/3: no [MGMT:SEQVAL,2] line (the request or W2's reply frags "
+                               "were lost); fetching again")
+                else:
+                    bench.note(f"multi-chunk retry {retry}/3: W2 answered NOTFOUND (the ?MGMT,FRAG push was lost); pushing again")
+                    push()
+                    time.sleep(RELAY_SPACING_S)
                 line = _seqget_line(w, 2, "HILMC", timeout=4)
         finally:
             w.send(";W2,?SEQ,CLEAR,HILMC")      # before the guard's snapshot: W2's config grows ~920 chars while stored
@@ -760,21 +846,115 @@ def seqget_multichunk(bench):
     assert line == f"[MGMT:SEQVAL,2]HILMC,OK,{value}", f"got {len(line or '')} chars: {(line or '')[:80]}..."
 
 
-@test("inv.seqget_toobig", "TOOBIG is reported explicitly: W2 relaying a >2903-character W1 value", needs=["wcb1"], links=[])
-def seqget_toobig(bench):
+RELAY_MAX_PAYLOAD = 2912   # MGMT_MAX_CHUNKS 16 x (CONFIG_PAYLOAD_SIZE 183 - 1); '<key>,OK,<value>' must fit (WCB.ino:3845)
+SEQ_LADDER = (2950, 2400, 2000, 1800, 1600, 1400, 1200, 1000, 900)
+SEQGET_TRIES = 4           # ~1 in 4 multi-frag replies was lost on the bench (small sample): 4 tries leave ~1 %
+
+
+@test("inv.seqget_largest", "The longest W1 sequence on a 2950..900 ladder round-trips exactly, locally and via W2 (TOOBIG past 2903); refusals are clean", needs=["wcb1"], links=[])
+def seqget_largest(bench):
+    """Replaces inv.seqget_toobig, whose >2903-character stored value W1 cannot hold (tracker #58). Two walls, neither
+    a defect: ?SEQ,SAVE holds ~7 full-length String copies while it makes the 8th (WCB_Storage.cpp:675) against
+    ~27 KB of byte-addressable heap (the old 'largest block 38900' was the 32-bit-only IRAM heap), and an NVS string
+    cannot span a page, so a configured board refuses long values (WCB_Storage.cpp:703-706). The largest storable
+    length moves as NVS fills, so this asserts behaviour, not a number: each refusal names its cause and leaves no
+    phantom key, the stored value comes back byte-exact, and TOOBIG (WCB.ino:3845-3849) is checked by this same test
+    on the day a value over 2903 characters stores."""
     w = usb_wcb(bench)
-    head = f";S1{marker('a')}^***"
-    value = head + "x" * (2950 - len(head))
+    key = "HILTB"
+    head = f";S1{marker('a')}^***"      # a recall would send only the marker; the filler is a comment
+    stored, refused, bad = None, [], []
     with config_guard(bench, 1), Console(bench, 2) as c2:
+        _clear_seq(w, key)
         try:
-            if _has(w.run(f"?SEQ,SAVE,HILTB,{value}", timeout=8), "Failed to store sequence 'HILTB'"):
-                raise Skip("NVS rejected the 2950-character value")
-            wm, cm = w.dev.mark(), c2.mark()
-            w.send(";W2,?MGMT,SEQGET,1,HILTB")
-            w.dev.expect(r"\[MGMT\] Sequence 'HILTB' is 2950 chars — too large to relay \(max 2903\)", timeout=5, since=wm)
-            c2.expect(r"\[MGMT:SEQVAL,1\]HILTB,TOOBIG,", timeout=5, since=cm)
+            for n in SEQ_LADDER:
+                value = head + "x" * (n - len(head))
+                out = w.run(f"?SEQ,SAVE,{key},{value}", timeout=8)
+                if _has(out, f"Stored: Key='{key}'"):
+                    stored = (n, value)
+                    break
+                cause = ("NVS" if _has(out, f"Failed to store sequence '{key}'") else
+                         "out of memory" if _has(out, "Out of memory: could not copy") else None)
+                refused.append(f"{n} ({cause or 'no cause'})")
+                if cause is None or _has(out, "cannot be empty"):   # an OOM copy used to read as an empty value
+                    bad.append(f"{n}: the refusal does not name its cause: {[x[:100] for x in out]}")
+                if key in _names(w)[2]:
+                    bad.append(f"{n}: the refused save left {key} in ?SEQ,NAMES")
+            bench.note(f"W1 stored {f'{stored[0]} characters' if stored else 'nothing'}; refused {', '.join(refused) or 'none'}")
+            if stored:
+                n, value = stored
+                if _seqval(w, key) != f"[MGMT:SEQVAL,1]{key},OK,{value}":
+                    bad.append(f"?SEQ,GET,{key} did not return the {n}-character value exactly")
+                wm = w.dev.mark()
+                if n + len(key) + 4 <= RELAY_MAX_PAYLOAD:
+                    want, got = f"[MGMT:SEQVAL,1]{key},OK,{value}", None
+                    # W1 answers in ceil((n + 9) / 182) broadcast frags sent ONCE, unACKed (sendResultFrags; only the
+                    # config pull sends a second pass), and W2 prints nothing until every frag is in: one lost frame
+                    # is a silent miss by design, and the requester retries. 3 s a try clears W1's 1.5 s (requester,
+                    # key) dedup (handleSeqValReqPacket). ?DEBUG,MGMT is RAM-only, so config_guard never sees it; its
+                    # lines tell a lost request from lost frags when every try misses.
+                    try:
+                        # inside the try: a W1 timeout here must still turn W2's debug back off (its [WDP] chatter
+                        # would otherwise land in later tests' output)
+                        c2.send("?DEBUG,MGMT,ON")
+                        w1_debug = _has(w.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled")
+                        c0 = c2.mark()
+                        for attempt in range(1, SEQGET_TRIES + 1):
+                            cm = c2.mark()
+                            w.send(f";W2,?MGMT,SEQGET,1,{key}")
+                            try:
+                                got = c2.expect(rf"\[MGMT:SEQVAL,1\]{key},", timeout=3, since=cm).string[len(c2.prefix):].rstrip()
+                                break
+                            except AssertionError:
+                                bench.note(f"relayed fetch {attempt}/{SEQGET_TRIES}: W2 printed no [MGMT:SEQVAL,1] line"
+                                           + ("; retrying" if attempt < SEQGET_TRIES else ""))
+                        if got is None:
+                            # W2 reaps a half-built session after CONFIG_SESSION_TIMEOUT_MS (10 s) and says so only
+                            # under debug; each retry's new sessionId wiped the earlier ones silently
+                            time.sleep(11)
+                    finally:
+                        c2.send("?DEBUG,MGMT,OFF")
+                        w.run("?DEBUG,MGMT,OFF")
+                    if got is None:
+                        w1 = [x.rstrip() for x in w.dev.since(wm)]      # unprefixed: a relayed W2 line starts [TERM:2]
+                        heard = sum(x.startswith(f"[MGMT] Sequence-value request '{key}' from WCB2 ") for x in w1)
+                        sent = [x for x in w1 if x.startswith("[MGMT] Sent result frags (") and x.endswith(" to WCB2")]
+                        reaped = any(x.startswith("[MGMT] Sequence-value session ") and "timed out" in x for x in c2.lines(c0))
+                        if not w1_debug:
+                            why = "W1 did not confirm ?DEBUG,MGMT,ON, so which side stopped is unknown"
+                        elif sent:
+                            why = (f"W1 heard {heard} of the {SEQGET_TRIES} requests and answered {len(sent)} ('{sent[-1]}'): "
+                                   "the frags were lost on the air (the bench)"
+                                   + ("; W2 reaped a half-built session, so some did arrive" if reaped else ""))
+                        elif heard:
+                            why = f"W1 heard {heard} of the {SEQGET_TRIES} requests but logged no 'Sent result frags' line (look at the firmware)"
+                        elif any(x.startswith("[ETM] WCB2 failed to ACK ") for x in w1):     # ungated (WCB.ino ETM retry path)
+                            why = "W1 logged no request from WCB2, and the ;W2 command itself was never ACKed: W2 never got it"
+                        else:
+                            why = "W1 logged no request from WCB2: the request never reached W1 (look at the firmware)"
+                        bad.append(f"W2 printed no [MGMT:SEQVAL,1] line for the {n}-character value in {SEQGET_TRIES} tries; {why}")
+                    # ?RTERM relays 160-character pieces (WCB_RemoteTerm.h:52): only the first can be compared,
+                    # and it must be a whole piece - a bare '[MGMT:SEQVAL,1]HILTB,' would otherwise pass
+                    elif got != want and not (c2.remote and len(got) >= min(len(want), 150) and want.startswith(got)):
+                        bad.append(f"W2 relayed {len(got)} chars, not the {n}-character value: {got[:80]}...")
+                else:
+                    top = RELAY_MAX_PAYLOAD - len(key) - 4      # 2903
+                    cm = c2.mark()
+                    w.send(f";W2,?MGMT,SEQGET,1,{key}")
+                    try:
+                        w.dev.expect(rf"^\[MGMT\] Sequence '{key}' is {n} chars — too large to relay \(max {top}\)", timeout=5, since=wm)
+                    except AssertionError:
+                        bad.append(f"W1 did not report the {n}-character value too large to relay (max {top})")
+                    try:
+                        got = c2.expect(rf"\[MGMT:SEQVAL,1\]{key},", timeout=6, since=cm).string[len(c2.prefix):].rstrip()
+                        if got != f"[MGMT:SEQVAL,1]{key},TOOBIG,":
+                            bad.append(f"W2 printed {got[:80]!r}, not {key},TOOBIG,")
+                    except AssertionError:
+                        bad.append(f"W2 printed no [MGMT:SEQVAL,1] line for the {n}-character value")
         finally:
-            _clear_seq(w, "HILTB")
+            _clear_seq(w, key)      # before the guard's snapshot, which would report the stored value as a leak
+    assert stored and stored[0] >= 900, f"no length on the ladder stored; refused {', '.join(refused)}"
+    assert not bad, "; ".join(bad)
 
 
 @test("inv.mgmt_seq_w2_relay", "W2 as relay: ;W2,?MGMT,SEQ,1 yields W1's inventory, matching W1's ?SEQ,NAMES", needs=["wcb1"], links=[])
@@ -782,6 +962,13 @@ def mgmt_seq_w2_relay(bench):
     w = usb_wcb(bench)
     h1, n1, _ = _names(w)
     with Console(bench, 2) as c2:
-        cm = c2.mark()
-        w.send(";W2,?MGMT,SEQ,1")
-        c2.expect(rf"\[MGMT:SEQ,1\]{h1},{n1}\b", timeout=5, since=cm)
+        for attempt in range(1, 4):   # the reply frags are sent once, unacknowledged - retry like a requester (see _relay)
+            cm = c2.mark()
+            w.send(";W2,?MGMT,SEQ,1")
+            try:
+                c2.expect(rf"\[MGMT:SEQ,1\]{h1},{n1}\b", timeout=5, since=cm)
+                break
+            except AssertionError:
+                if attempt == 3:
+                    raise
+                bench.note(f";W2,?MGMT,SEQ,1 try {attempt}: no reply (a lost frag); retrying")

@@ -4,14 +4,17 @@
 
 Devices  find which COM port is which board, and check each one
 Wiring   what to connect; auto-detect the wires, or click a WCB port then a probe header
-Tests    run one test (double-click), an area, everything, or only what failed
+Tests    run one test (double-click), an area, everything, or only what failed; tick the opt-in tests;
+         each test's expected time, and the time left in a run
 Log      every serial line in and out
 
 All bench work runs on one worker thread, in order, so two actions never fight over a COM
-port. The window only reads results from a queue.
+port. The window only reads results from a queue. Past runs' durations (hil/durations.py) are read on a
+thread of their own, since they touch no port and must not wait behind a run.
 """
 import ctypes
 import importlib
+import json
 import os
 import pkgutil
 import queue
@@ -44,68 +47,57 @@ except ImportError:
     print(msg)
     sys.exit(1)
 
-from hil import runner, wiring  # noqa: E402
+from hil import checkpoint, durations, optin, runner, wiring, wizard  # noqa: E402
+from hil.checkpoint import CheckpointError, RunBusy  # noqa: E402
+from hil.identify import ESP_VIDS, identify_port, usb_fingerprint  # noqa: E402
 from hil.navicore import NaviCore  # noqa: E402
+from hil.resume import ResumeAborted, ResumeBlocked  # noqa: E402
 from hil.runner import DEVICE_KINDS, describe_device, fmt_duration  # noqa: E402
 from hil.probe import HEADERS  # noqa: E402
-from hil.serialdev import ExpectTimeout, SerialDevice  # noqa: E402
+from hil.serialdev import ExpectTimeout  # noqa: E402
 from hil.wcb import WCB  # noqa: E402
 import suites  # noqa: E402
 
 for _mod in pkgutil.iter_modules(suites.__path__):
     importlib.import_module(f"suites.{_mod.name}")
+checkpoint.freeze_harness(HERE)   # the sources this process runs, for the resume's "test code changed" check
 
 BENCH_PATH = os.path.join(HERE, "bench.json")
 RESULTS = os.path.join(HERE, "results")
-ESP_VIDS = {0x10C4, 0x1A86, 0x303A, 0x0403, 0x067B}   # CP210x, CH34x/CH9102, Espressif native, FTDI, PL2303
 
 FONT = ("Segoe UI", 10)
 BOLD = ("Segoe UI", 10, "bold")
 MONO = ("Consolas", 9)
-GREEN, AMBER, RED, BLUE, GREY = "#1a7f37", "#bf8700", "#cf222e", "#0969da", "#8c959f"
-STATUS_COLOR = {"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE}
+
+# Two palettes, same keys. DARK is the default — the bench GUI sits open for hour-long runs and the
+# white one is tiring; `gui.py --light` restores the original. Status colours are picked per palette
+# so they stay legible on their own background (the light greens/reds vanish on dark).
+LIGHT = dict(bg="#f6f8fa", panel="#ffffff", card="#f6f8fa", edge="#d0d7de", fg="#1f2328", mute="#57606a",
+             sel="#dbeafe", entry="#ffffff", logbg="#0d1117", logfg="#c9d1d9", probe="#fff8f0",
+             green="#1a7f37", amber="#bf8700", red="#cf222e", blue="#0969da", grey="#8c959f")
+DARK = dict(bg="#11161d", panel="#161b22", card="#1c232c", edge="#30363d", fg="#d7dee6", mute="#8b949e",
+            sel="#243044", entry="#0d1117", logbg="#0d1117", logfg="#c9d1d9", probe="#241f16",
+            green="#3fb950", amber="#d29922", red="#f85149", blue="#58a6ff", grey="#8b949e")
+THEME = DARK   # main() swaps in LIGHT for --light, before any widget is built
+
+GREEN, AMBER, RED, BLUE, GREY = THEME["green"], THEME["amber"], THEME["red"], THEME["blue"], THEME["grey"]
+STATUS_COLOR = {"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE, "RETRY": AMBER}
 
 
-# ---------------------------------------------------------------------------- identification
-def identify_port(port):
-    """What is on this COM port? -> dict(kind=..., ...) or None. Never resets a board (DTR/RTS low).
-
-    115200 first: a WCB and NaviCore both answer ?VERSION (NaviCore's version starts with 'v');
-    the SBUS controller treats '?' as its status key and prints '[SBUS] Mode:'. Only then 921600,
-    where a probe answers HELLO. No free text is sent anywhere: an unprefixed line on a WCB would
-    be broadcast to the whole mesh."""
+def _dark_titlebar(win):
+    """The Windows title bar is OS chrome, not Tk: it stays white unless the window asks for the dark
+    one. DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on current Windows 10/11 and 19 on early 1809-1903
+    builds; both are set and failures ignored (older Windows, or a non-DWM session)."""
+    if THEME is not DARK:
+        return
     try:
-        with SerialDevice("scan", port, 115200) as d:
-            time.sleep(0.3)
-            m = d.mark()
-            d.send("?VERSION")
-            try:
-                got = d.expect(r"Software Version: (\S+)|\[SBUS\] (Mode:|Ready)", timeout=2.0, since=m)
-            except ExpectTimeout:
-                got = None
-            if got:
-                if got.group(0).startswith("[SBUS]"):
-                    return {"kind": "sbus"}
-                ver = got.group(1)
-                if ver.startswith("v"):
-                    return {"kind": "navicore", "version": ver}
-                num = None
-                for line in WCB(d).run("?config"):
-                    hit = re.search(r"Configuration: Wireless Communication Board (\d+)", line)
-                    if hit:
-                        num = int(hit.group(1))
-                return {"kind": "wcb", "version": ver, "wcb": num}
-        with SerialDevice("scan", port, 921600) as d:
-            time.sleep(0.2)
-            m = d.mark()
-            d.send("HELLO")
-            try:
-                got = d.expect(r"^HELLO wcb_probe (\S+) mac=(\S+)", timeout=2.0, since=m)
-                return {"kind": "probe", "version": got.group(1), "mac": got.group(2)}
-            except ExpectTimeout:
-                return None
-    except Exception as e:   # port busy, vanished, access denied
-        return {"kind": "error", "error": str(e).splitlines()[0]}
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        flag = ctypes.c_int(1)
+        for attr in (20, 19):
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(flag), ctypes.sizeof(flag))
+    except Exception:
+        pass
 
 
 class Worker(threading.Thread):
@@ -124,6 +116,7 @@ class Worker(threading.Thread):
             try:
                 fn(*args)
             except Exception:
+                self.app.run_active = False   # a crashed run must not lock the button out
                 self.app.emit("error", f"{name} failed:\n{traceback.format_exc()}")
             finally:
                 self.app.emit("idle", name)
@@ -134,7 +127,16 @@ class App:
     def __init__(self, root):
         self.root = root
         self.events = queue.Queue()
-        self.stop_flag = threading.Event()
+        # Stop and Pause are one pending request under a lock, so the last one pressed wins even if the worker reads
+        # between the two presses. Cross-thread state is only this, the event queue, run_active and closing.
+        self.control = runner.RunControl()
+        self.closing = False             # the window is going away: ask_user answers No, nothing waits on the user
+        self.current_ckpt = None         # the checkpoint of the run on the worker (closing "now" freezes it)
+        # Tk-thread only:
+        self.resumable = None            # summary of the run the banner offers
+        self.resumable_all = []          # every paused / interrupted / stopped run, for the picker
+        self.run_base = 0.0              # active time before this segment, for the elapsed timer
+        self.close_after_pause = False
         self.bench = runner.Bench(BENCH_PATH, RESULTS, log_sink=lambda line: self.emit("log", line))
         self.results = {}       # test id -> (status, detail, dur)
         self.identities = {}    # device name -> text
@@ -145,6 +147,12 @@ class App:
         self.last_job = None     # (name, seconds) of the last job that finished
         self.run_total = self.run_done_n = 0
         self.test_now = None     # (test id, start) while a test runs
+        self.run_active = False  # a run is on the worker right now - see run_tests()
+        self.run_ids = []        # the test ids of the run on the worker, in order, for the time-left estimate
+        self.history = {}        # test id -> (median seconds, samples) of past runs, from hil/durations.py
+        self.durations_busy = self.durations_again = False
+        self.optin_vars = {}     # opt-in key -> BooleanVar of its checkbox
+        self.skip_now = {}       # test id -> skipped at once for a missing wire or device (set by refresh_tests)
         self.worker = Worker(self)
         self.worker.start()
         self.build_ui()
@@ -152,6 +160,10 @@ class App:
         self.root.after(500, self.tick)
         self.refresh_wiring()
         self.refresh_tests()
+        self.scan_resumable()
+        self.load_durations()
+        if self.resumable:
+            self.status("A paused run can be resumed — see the Tests tab")
 
     def emit(self, kind, *data):
         self.events.put((kind, data))
@@ -168,12 +180,40 @@ class App:
         self.root.title("WCB Bench")
         self.root.geometry("1320x860")
         style = ttk.Style()
+        # "clam" is the only built-in theme whose element colours are fully settable — "vista" ignores
+        # most of them, so a dark palette needs it.
         try:
-            style.theme_use("vista")
+            style.theme_use("clam" if THEME is DARK else "vista")
         except tk.TclError:
             pass
-        style.configure(".", font=FONT)
-        style.configure("Treeview", rowheight=24)
+        t = THEME
+        self.root.configure(bg=t["bg"])
+        style.configure(".", font=FONT, background=t["bg"], foreground=t["fg"],
+                        fieldbackground=t["entry"], bordercolor=t["edge"],
+                        lightcolor=t["edge"], darkcolor=t["edge"])
+        style.configure("TFrame", background=t["bg"])
+        style.configure("TLabel", background=t["bg"], foreground=t["fg"])
+        style.configure("TLabelframe", background=t["bg"], foreground=t["fg"])
+        style.configure("TLabelframe.Label", background=t["bg"], foreground=t["fg"])
+        style.configure("TCheckbutton", background=t["bg"], foreground=t["fg"], indicatorbackground=t["entry"],
+                        indicatorforeground=t["fg"])
+        # clam lightens a hovered checkbox's background to its own grey; keep it on the palette
+        style.map("TCheckbutton", background=[("active", t["bg"])], foreground=[("disabled", t["mute"])],
+                  indicatorbackground=[("disabled", t["card"]), ("pressed", t["sel"])])
+        style.configure("TButton", background=t["card"], foreground=t["fg"], padding=4)
+        style.map("TButton", background=[("active", t["sel"]), ("pressed", t["sel"])])
+        style.configure("TNotebook", background=t["bg"], bordercolor=t["edge"])
+        style.configure("TNotebook.Tab", background=t["card"], foreground=t["mute"], padding=(14, 6))
+        style.map("TNotebook.Tab", background=[("selected", t["panel"])], foreground=[("selected", t["fg"])])
+        style.configure("TCombobox", fieldbackground=t["entry"], background=t["card"], foreground=t["fg"],
+                        arrowcolor=t["fg"])
+        style.configure("TEntry", fieldbackground=t["entry"], foreground=t["fg"], insertcolor=t["fg"])
+        style.configure("Vertical.TScrollbar", background=t["card"], troughcolor=t["bg"], arrowcolor=t["fg"])
+        style.configure("Horizontal.TScrollbar", background=t["card"], troughcolor=t["bg"], arrowcolor=t["fg"])
+        style.configure("Treeview", rowheight=24, background=t["panel"], fieldbackground=t["panel"],
+                        foreground=t["fg"])
+        style.configure("Treeview.Heading", background=t["card"], foreground=t["fg"])
+        style.map("Treeview", background=[("selected", t["sel"])], foreground=[("selected", t["fg"])])
 
         top = ttk.Frame(self.root, padding=(12, 8))
         top.pack(fill="x")
@@ -181,8 +221,18 @@ class App:
         ttk.Button(top, text="Close all ports",
                    command=lambda: self.submit("close ports", self.job_close_ports)).pack(side="right", padx=6)
         ttk.Button(top, text="Stop after this test", command=self.stop).pack(side="right")
+        # Pause is only for a run in progress; a paused run is resumed from the Tests tab's banner, never from here,
+        # so a click as a run ends cannot resume some other paused run.
+        self.pause_btn = ttk.Button(top, text="Pause after this test", width=22, command=self.on_pause_button)
+        self.pause_btn.pack(side="right", padx=(0, 6))
+        self.pause_btn.state(["disabled"])
         self.timer_var = tk.StringVar(value="")
         ttk.Label(top, textvariable=self.timer_var, font=BOLD, foreground=BLUE).pack(side="top", anchor="w")
+        # The time left and finish clock get a line of their own: appended to the timer they were clipped off it at
+        # the default width (the four buttons on the right leave the timer ~630 px).
+        self.eta_var = tk.StringVar(value="")
+        self.eta_label = ttk.Label(top, textvariable=self.eta_var, foreground=BLUE)
+        self.eta_label.pack(side="top", anchor="w")
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(top, textvariable=self.status_var).pack(side="top", anchor="w")
 
@@ -199,7 +249,8 @@ class App:
         self.nb.add(f, text="  Devices  ")
         bar = ttk.Frame(f)
         bar.pack(fill="x")
-        ttk.Button(bar, text="Find devices", command=lambda: self.submit("find devices", self.job_find_devices)).pack(side="left")
+        ttk.Button(bar, text="Find devices", command=lambda: self.submit("find devices", self.job_find_devices,
+                                                                         self.paused_path())).pack(side="left")
         ttk.Label(bar, text="   Scans the ESP32 USB ports and works out which board is on each one. "
                             "Pick a port by hand below if you prefer.").pack(side="left")
         add = ttk.Frame(f)
@@ -221,7 +272,9 @@ class App:
     def render_devices(self):
         for w in self.dev_grid.winfo_children():
             w.destroy()
-        ports = sorted(p.device for p in list_ports.comports())
+        # USB serial ports only. Every bench device is a USB board; a Bluetooth SPP port (no VID) blocks writes
+        # indefinitely when nothing is paired, and on 2026-09-22 sbus ended up on COM19 that way and hung a run.
+        ports = sorted(p.device for p in list_ports.comports() if p.vid is not None)
         self.add_port_cb.configure(values=ports)
         for col, h in enumerate(("Device", "Kind", "COM port", "Status", "", "")):
             ttk.Label(self.dev_grid, text=h, font=BOLD).grid(row=0, column=col, sticky="w", padx=8, pady=4)
@@ -236,8 +289,11 @@ class App:
                            command=lambda n=name: self.submit(f"remove {n}", self.job_remove_device, n)).grid(row=r, column=5, padx=4)
             ttk.Label(self.dev_grid, text=kind).grid(row=r, column=1, sticky="w", padx=8)
             var = tk.StringVar(value=d.get("port", ""))
-            cb = ttk.Combobox(self.dev_grid, textvariable=var, values=ports, width=10)
+            cb = ttk.Combobox(self.dev_grid, textvariable=var, values=ports, width=10, state="readonly")
             cb.grid(row=r, column=2, sticky="w", padx=8)
+            # A Tk combobox steps through its values on the mouse wheel and fires <<ComboboxSelected>>, which SAVES
+            # the port - so scrolling the tab with the pointer over a row silently re-assigned a board. Wheel off.
+            cb.bind("<MouseWheel>", lambda e: "break")
             cb.bind("<<ComboboxSelected>>",
                     lambda e, n=name, v=var: self.submit(f"set {n} port", self.job_set_port, n, v.get()))
             sv = tk.StringVar(value=self.identities.get(name, "not checked yet"))
@@ -255,7 +311,36 @@ class App:
         if not port:
             self.status("Pick the COM port to add first")
             return
-        self.submit(f"add device on {port}", self.job_add_device, port)
+        self.submit(f"add device on {port}", self.job_add_device, port, self.paused_path())
+
+    def paused_path(self):
+        """Tk thread: the run the banner offers, handed to a job at submit time."""
+        return self.resumable["path"] if self.resumable else None
+
+    # Called on the worker thread by Find devices and Add, before they save bench.json.
+    def paused_serial_ok(self, before, paused_path):
+        """A paused run pins each board by the USB serial it recorded. Moving a device name onto a board with another
+        serial is asked about here, before it is saved - the resume would ask again anyway."""
+        if not paused_path:
+            return True
+        try:
+            rec = checkpoint.Checkpoint.load(paused_path).data.get("devices") or {}
+        except CheckpointError:
+            return True
+        warn = []
+        for name, d in self.bench.cfg["devices"].items():
+            was = (rec.get(name) or {}).get("serial")
+            if not was or before.get(name) == d.get("port"):
+                continue
+            now = usb_fingerprint(d.get("port"))["serial"]
+            if now != was:
+                warn.append(f"{name} -> {d.get('port')}: USB serial {now}, but the paused run recorded {was}")
+        if not warn:
+            return True
+        return self.ask_user("Not the paused run's boards",
+                             "These boards are not the ones the paused run " + os.path.basename(paused_path) +
+                             " recorded:\n\n" + "\n".join(warn) + "\n\nSave them to bench.json anyway? "
+                             "(Resuming that run asks about them again.)")
 
     # Called on the worker thread by Find devices and Add.
     def assign_device(self, port, info):
@@ -293,7 +378,7 @@ class App:
             return f"{name} = {port}"
         return f"{port}: could not open — {info.get('error', 'unknown')}"
 
-    def job_add_device(self, port):
+    def job_add_device(self, port, paused_path=None):
         b = self.bench
         for name, d in list(b.cfg["devices"].items()):
             if d.get("port") == port:
@@ -302,7 +387,13 @@ class App:
         if not info:
             self.emit("status", f"{port}: nothing answered — is it an ESP32 board running WCB, probe, NaviCore or SBUS firmware?")
             return
+        before = {n: d.get("port") for n, d in b.cfg["devices"].items()}
         text = self.assign_device(port, info)
+        if not self.paused_serial_ok(before, paused_path):
+            b.reload_config()
+            self.emit("devices_changed")
+            self.emit("status", f"Add {port}: not saved")
+            return
         b.save_config()
         self.emit("devices_changed")
         self.emit("status", "Added: " + text)
@@ -357,7 +448,8 @@ class App:
 
         left = ttk.Frame(body)
         left.pack(side="left", fill="both", expand=True)
-        self.canvas = tk.Canvas(left, width=600, height=600, bg="white", highlightthickness=1, highlightbackground="#d0d7de")
+        self.canvas = tk.Canvas(left, width=600, height=600, bg=THEME["panel"], highlightthickness=1,
+                                highlightbackground=THEME["edge"])
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         ttk.Label(left, foreground=GREY, wraplength=600, justify="left",
@@ -379,7 +471,8 @@ class App:
         self.plan_tree.pack(fill="x")
         self.plan_tree.bind("<<TreeviewSelect>>", self.on_plan_select)
 
-        self.plan_text = tk.Text(right, height=8, width=48, wrap="word", font=FONT, relief="flat", bg="#f6f8fa")
+        self.plan_text = tk.Text(right, height=8, width=48, wrap="word", font=FONT, relief="flat",
+                                 bg=THEME["card"], fg=THEME["fg"], insertbackground=THEME["fg"])
         self.plan_text.pack(fill="x", pady=8)
         row = ttk.Frame(right)
         row.pack(fill="x")
@@ -473,38 +566,38 @@ class App:
         usb = self.bench.usb_wcbs()
         for i, w in enumerate(wcbs):
             x, y = 24, 16 + i * (box_h + pitch)
-            c.create_rectangle(x, y, x + 210, y + box_h, fill="#f6f8fa", outline="#d0d7de", width=2)
-            c.create_text(x + 12, y + 16, anchor="w", font=BOLD, text=f"WCB{w}  " + ("(USB)" if w in usb else "(mesh)"))
+            c.create_rectangle(x, y, x + 210, y + box_h, fill=THEME["card"], outline=THEME["edge"], width=2)
+            c.create_text(x + 12, y + 16, anchor="w", font=BOLD, text=f"WCB{w}  " + ("(USB)" if w in usb else "(mesh)"), fill=THEME["fg"])
             labels = self.port_labels(w)
             for k, port in enumerate(HEADERS):
                 py = y + 46 + k * 36
                 px = x + 210
                 key = f"W{w}{port}"
                 hl = self.pending_port == key or self.selected_key == key
-                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=BLUE if hl else "white", outline="#57606a",
+                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=BLUE if hl else THEME["panel"], outline=THEME["mute"],
                               width=2, tags=("wport", key))
                 dev = self.bench.port_devices().get(key)
                 if dev:
                     c.create_text(x + 14, py, anchor="w", text=f"{port}  {describe_device(dev)}"[:28], fill=BLUE)
                 else:
-                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26])
+                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26], fill=THEME["fg"])
                 self.xy[("W", key)] = (px, py)
         for j, pn in enumerate(probes):
             x, y = 460, 16 + j * (box_h + pitch)
-            c.create_rectangle(x, y, x + 210, y + box_h, fill="#fff8f0", outline="#d0d7de", width=2)
+            c.create_rectangle(x, y, x + 210, y + box_h, fill=THEME["probe"], outline=THEME["edge"], width=2)
             port = self.bench.cfg["devices"][pn].get("port", "?")
-            c.create_text(x + 24, y + 16, anchor="w", font=BOLD, text=f"{pn}  ({port})")
+            c.create_text(x + 24, y + 16, anchor="w", font=BOLD, text=f"{pn}  ({port})", fill=THEME["fg"])
             for k, header in enumerate(HEADERS):
                 py = y + 46 + k * 36
                 px = x
-                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill="white", outline="#57606a", width=2,
+                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=THEME["panel"], outline=THEME["mute"], width=2,
                               tags=("pport", f"{pn}:{header}"))
-                c.create_text(x + 24, py, anchor="w", text=f"header {header}")
+                c.create_text(x + 24, py, anchor="w", text=f"header {header}", fill=THEME["fg"])
                 self.xy[("P", f"{pn}:{header}")] = (px, py)
         for r in wiring.plan(self.bench):
             if r["status"] == "to do" and r["probe"] in probes:
                 a, b = self.xy[("W", r["key"])], self.xy[("P", f"{r['probe']}:{r['header']}")]
-                c.create_line(*a, *b, fill="#d0d7de", width=2, dash=(2, 4))
+                c.create_line(*a, *b, fill=THEME["edge"], width=2, dash=(2, 4))
         for link in self.bench.links.all():
             a = self.xy.get(("W", link.key))
             b = self.xy.get(("P", f"{link.probe_name}:{link.header}"))
@@ -647,33 +740,208 @@ class App:
         self.nb.add(f, text="  Tests  ")
         bar = ttk.Frame(f)
         bar.pack(fill="x")
-        ttk.Button(bar, text="Run selected", command=self.run_selected).pack(side="left")
-        ttk.Button(bar, text="Run everything", command=lambda: self.run_tests(list(runner.REGISTRY), "everything")).pack(side="left", padx=6)
+        # The run buttons carry the selection's expected time (update_estimates), so it is known before starting.
+        self.run_sel_btn = ttk.Button(bar, text="Run selected", command=self.run_selected)
+        self.run_sel_btn.pack(side="left")
+        self.run_all_btn = ttk.Button(bar, text="Run everything", command=lambda: self.run_tests(
+            list(runner.REGISTRY), "everything", selectors=[]))
+        self.run_all_btn.pack(side="left", padx=6)
         ttk.Button(bar, text="Run what failed", command=self.run_failed).pack(side="left")
         ttk.Button(bar, text="Open last report", command=self.open_report).pack(side="left", padx=6)
         self.summary_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.summary_var, font=BOLD).pack(side="right")
         ttk.Label(f, foreground=GREY, text="Double-click a test to run just that one. Select an area row to run the whole area. "
-                                           "Tests whose wire or device is missing are skipped and say what they need.").pack(anchor="w", pady=(6, 0))
+                                           "Tests whose wire or device is missing are skipped and say what they need. "
+                                           "Expected: the median of recent runs, ~ an estimate, ? not known yet.").pack(anchor="w", pady=(6, 0))
+        self.build_optins(f)
 
         pane = ttk.Panedwindow(f, orient="vertical") if hasattr(ttk, "Panedwindow") else ttk.Frame(f)
         pane = ttk.Frame(f)
         pane.pack(fill="both", expand=True, pady=(8, 0))
-        self.test_tree = ttk.Treeview(pane, columns=("status", "time", "needs", "title"), show="tree headings")
+        self.tests_pane = pane
+        # The paused-run banner: packed above the table only while a run is on offer (render_resume_bar).
+        self.resume_bar = ttk.Frame(f, padding=(0, 8, 0, 0))
+        self.resume_var = tk.StringVar(value="")
+        ttk.Label(self.resume_bar, textvariable=self.resume_var, font=BOLD, foreground=AMBER, wraplength=1200,
+                  justify="left").pack(side="top", anchor="w")
+        rb = ttk.Frame(self.resume_bar)
+        rb.pack(side="top", anchor="w", pady=(4, 0))
+        self.rb_resume = ttk.Button(rb, text="Resume",
+                                    command=lambda: self.resume(self.resumable["path"]) if self.resumable else None)
+        self.rb_resume.pack(side="left")
+        self.other_runs_btn = ttk.Button(rb, text="Other runs…", command=self.open_picker)
+        self.other_runs_btn.pack(side="left", padx=6)
+        self.rb_report = ttk.Button(rb, text="Open its report", command=lambda: self.open_run_report(self.resumable))
+        self.rb_report.pack(side="left")
+        self.rb_discard = ttk.Button(rb, text="Discard", command=lambda: self.discard(self.resumable))
+        self.rb_discard.pack(side="left", padx=6)
+        self.resume_bar_shown = False
+        self.test_tree = ttk.Treeview(pane, columns=("status", "time", "expected", "needs", "title"),
+                                      show="tree headings")
         for col, text, width in (("#0", "Test", 230), ("status", "Result", 80), ("time", "Time", 70),
-                                 ("needs", "Needs", 260), ("title", "What it checks", 560)):
+                                 ("expected", "Expected", 100), ("needs", "Needs", 240), ("title", "What it checks", 520)):
             self.test_tree.heading(col, text=text)
             self.test_tree.column(col, width=width, anchor="w")
         for s, col in STATUS_COLOR.items():
             self.test_tree.tag_configure(s, foreground=col)
         self.test_tree.tag_configure("missing", foreground=GREY)
+        self.test_tree.tag_configure("optoff", foreground=GREY)
         ys = ttk.Scrollbar(pane, orient="vertical", command=self.test_tree.yview)
         self.test_tree.configure(yscrollcommand=ys.set)
         self.test_tree.pack(side="top", fill="both", expand=True)
         self.test_tree.bind("<Double-1>", self.on_test_double)
         self.test_tree.bind("<<TreeviewSelect>>", self.on_test_select)
-        self.test_detail = tk.Text(f, height=10, wrap="word", font=MONO, relief="flat", bg="#f6f8fa")
+        self.test_detail = tk.Text(f, height=10, wrap="word", font=MONO, relief="flat",
+                                   bg=THEME["card"], fg=THEME["fg"], insertbackground=THEME["fg"])
         self.test_detail.pack(fill="x", pady=(8, 0))
+
+    def build_optins(self, parent):
+        """One checkbox per hil/optin.py entry: its title, what it adds to a full run, and what it does. Ticking one
+        writes bench.json "opt_in" on the worker (job_set_opt_in); all of them are disabled while a run is going."""
+        box = ttk.Frame(parent, padding=(0, 8, 0, 0))
+        box.pack(fill="x")
+        head = ttk.Frame(box)
+        head.pack(fill="x")
+        # Folded by default: open, the panel takes most of the table's height at 1320x860 and pushes the detail pane
+        # off the tab. The header line below still says how many are on and what they add; Show unfolds it.
+        self.optin_open = False
+        self.optin_toggle_btn = ttk.Button(head, text="Show", width=6, command=self.toggle_optins)
+        self.optin_toggle_btn.pack(side="left")
+        self.optin_head_var = tk.StringVar(value="Opt-in tests")
+        ttk.Label(head, textvariable=self.optin_head_var, font=BOLD).pack(side="left", padx=(8, 0))
+        self.optin_body = ttk.Frame(box, padding=(4, 4, 0, 0))
+        self.optin_checks, self.optin_cost_vars = {}, {}
+        on = optin.enabled(self.bench.cfg)
+        # Two columns, each entry a checkbox and its cost over a small grey line saying what it does: ten full-width
+        # rows took a third of the tab from the test table.
+        for c in (0, 1):
+            self.optin_body.columnconfigure(c, weight=1, uniform="optin")
+        for i, (key, o) in enumerate(optin.OPT_INS.items()):
+            cell = ttk.Frame(self.optin_body, padding=(0, 0, 16, 4))
+            cell.grid(row=i // 2, column=i % 2, sticky="nw")
+            var = tk.BooleanVar(value=key in on)
+            self.optin_vars[key] = var
+            cb = ttk.Checkbutton(cell, text=o["title"], variable=var, command=lambda k=key: self.on_optin_toggle(k))
+            cb.grid(row=0, column=0, sticky="w")
+            self.optin_checks[key] = cb
+            cv = tk.StringVar(value="")
+            self.optin_cost_vars[key] = cv
+            ttk.Label(cell, textvariable=cv, foreground=BLUE).grid(row=0, column=1, sticky="w", padx=(10, 0))
+            ttk.Label(cell, text=f"{key}: {o['what']}", foreground=GREY, font=("Segoe UI", 9), wraplength=600,
+                      justify="left").grid(row=1, column=0, columnspan=2, sticky="w", padx=(22, 0))
+
+    def toggle_optins(self):
+        self.optin_open = not self.optin_open
+        if self.optin_open:
+            self.optin_body.pack(fill="x")
+        else:
+            self.optin_body.pack_forget()
+        self.optin_toggle_btn.configure(text="Hide" if self.optin_open else "Show")
+
+    def on_optin_toggle(self, key):
+        var = self.optin_vars[key]
+        if self.run_active:        # the checkboxes are disabled during a run; this covers a click that raced it
+            var.set(key in optin.enabled(self.bench.cfg))
+            self.status("Opt-ins cannot change while a run is going")
+            return
+        self.submit(f"opt-in {key} {'on' if var.get() else 'off'}", self.job_set_opt_in, key, bool(var.get()))
+
+    # ---- expected durations (Tk thread; the history itself is read by _durations_job)
+    def load_durations(self):
+        """Re-read past runs' durations on a thread of its own; the pump applies them."""
+        if self.durations_busy:
+            self.durations_again = True
+            return
+        self.durations_busy, self.durations_again = True, False
+        threading.Thread(target=self._durations_job, name="durations", daemon=True).start()
+
+    def _durations_job(self):
+        try:
+            history = durations.load(RESULTS)
+        except Exception:  # noqa: BLE001 - no history is no worse than before
+            history = None
+        self.emit("durations", history)
+
+    def opted_off(self, t):
+        key = t.get("opt_in")
+        return bool(key) and key not in optin.enabled(self.bench.cfg)
+
+    def expected_of(self, t):
+        return durations.expected(t, self.history, self.bench.cfg)
+
+    def expected_text(self, t):
+        return "opt-in off" if self.opted_off(t) else durations.fmt_expected(*self.expected_of(t))
+
+    def cost(self, t):
+        """(seconds this test adds to a run, kind): 0 for one the runner skips at once (a missing wire or device, or
+        its opt-in off); (None, None) when nothing is known."""
+        if self.skip_now.get(t["id"]) or self.opted_off(t):
+            return 0.0, "skip"
+        return self.expected_of(t)
+
+    def estimate_tests(self, tests):
+        """(seconds, any unknown) for running `tests` now."""
+        total, unknown = 0.0, False
+        for t in tests:
+            sec, _ = self.cost(t)
+            if sec is None:
+                unknown = True
+            else:
+                total += sec
+        return total, unknown
+
+    @staticmethod
+    def fmt_total(sec, unknown):
+        return "~" + durations.fmt_span(sec) + ("+?" if unknown else "")
+
+    def update_estimates(self):
+        """Every expected time on the Tests tab: each row's Expected cell and grey mark, the area sums, the opt-in
+        costs and the run buttons. The running row's cell belongs to tick()."""
+        running = self.test_now[0] if self.test_now else None
+        areas = {}
+        for t in runner.REGISTRY:
+            tid = t["id"]
+            areas.setdefault(runner.area_of(t), []).append(t)
+            if not self.test_tree.exists(tid) or tid == running:
+                continue
+            self.test_tree.set(tid, "expected", self.expected_text(t))
+            if not self.results.get(tid, ("",))[0]:
+                tag = "missing" if self.skip_now.get(tid) else "optoff" if self.opted_off(t) else ""
+                self.test_tree.item(tid, tags=(tag,))
+        for a, tests in areas.items():
+            if self.test_tree.exists(f"area:{a}"):
+                sec, unknown = self.estimate_tests(tests)
+                self.test_tree.set(f"area:{a}", "expected", self.fmt_total(sec, unknown) if sec or unknown else "—")
+        on = optin.enabled(self.bench.cfg)
+        adds = 0.0
+        for key, cv in self.optin_cost_vars.items():
+            tests = [t for t in runner.REGISTRY if t.get("opt_in") == key]
+            sec, est = 0.0, False
+            for t in tests:
+                s, kind = self.expected_of(t)
+                sec += s or 0.0
+                est = est or kind != "history"
+            cv.set(f"+{'~' if est else ''}{checkpoint.fmt_duration(round(sec))}, {len(tests)} test"
+                   f"{'' if len(tests) == 1 else 's'}")
+            if key in on:
+                adds += sum(self.cost(t)[0] or 0.0 for t in tests)   # as Run everything counts it: 0 for a missing wire
+            if self.optin_vars[key].get() != (key in on):
+                self.optin_vars[key].set(key in on)
+        self.optin_head_var.set(f"Opt-in tests: {len(on)} of {len(optin.OPT_INS)} on"
+                                + (f", adding ~{durations.fmt_span(adds)} to Run everything" if on else ""))
+        sec, unknown = self.estimate_tests(runner.REGISTRY)
+        self.run_all_btn.configure(text=f"Run everything ({self.fmt_total(sec, unknown)})")
+        self.update_selection_estimate()
+
+    def update_selection_estimate(self):
+        tests = []
+        for iid in self.test_tree.selection():
+            tests += [t for t in self.tests_for(iid) if t not in tests]
+        if tests:
+            sec, unknown = self.estimate_tests(tests)
+            self.run_sel_btn.configure(text=f"Run selected ({self.fmt_total(sec, unknown)})")
+        else:
+            self.run_sel_btn.configure(text="Run selected")
 
     def refresh_tests(self):
         open_areas = {i for i in self.test_tree.get_children() if self.test_tree.item(i, "open")}
@@ -686,18 +954,22 @@ class App:
                 areas.append(a)
                 self.test_tree.insert("", "end", iid=f"area:{a}", text=a, open=first or f"area:{a}" in open_areas)
         counts = {}
+        self.skip_now = {}      # test id -> the runner would skip it for a missing wire or device (for the estimates)
         for t in runner.REGISTRY:
             miss = runner.missing(self.bench, t)
+            self.skip_now[t["id"]] = bool(miss)
             needs = ", ".join(t["needs"] + runner.links_of(t)) or "—"
             status, detail, dur = self.results.get(t["id"], ("", "", None))
-            tag = status or ("missing" if miss else "")
+            tag = status or ("missing" if miss else "optoff" if self.opted_off(t) else "")
             if miss and not status:
                 needs = "missing: " + ", ".join(miss)
             self.test_tree.insert(f"area:{runner.area_of(t)}", "end", iid=t["id"], text=t["id"],
-                                  values=(status, f"{dur:.1f}s" if dur else "", needs, t["title"]), tags=(tag,))
+                                  values=(status, f"{dur:.1f}s" if dur else "", self.expected_text(t), needs,
+                                          t["title"]), tags=(tag,))
             if status:
                 counts[status] = counts.get(status, 0) + 1
         self.summary_var.set("   ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+        self.update_estimates()
 
     def tests_for(self, iid):
         if iid.startswith("area:"):
@@ -712,7 +984,9 @@ class App:
         if not tests:
             self.status("Select a test or an area first")
             return
-        self.run_tests(tests, f"{len(tests)} test(s)")
+        # an area row is '<area>.*' (area_of splits the id at its first '.'); a test row is its exact id
+        sels = [iid[5:] + ".*" if iid.startswith("area:") else iid for iid in self.test_tree.selection()]
+        self.run_tests(tests, f"{len(tests)} test(s)", selectors=sels)
 
     def run_failed(self):
         tests = [t for t in runner.REGISTRY if self.results.get(t["id"], ("",))[0] in ("FAIL", "ERROR")]
@@ -727,6 +1001,8 @@ class App:
             self.run_tests(self.tests_for(iid), iid)
 
     def on_test_select(self, _e):
+        if _e is not None:
+            self.update_selection_estimate()
         sel = self.test_tree.selection()
         if not sel or sel[0].startswith("area:"):
             return
@@ -734,6 +1010,21 @@ class App:
         status, detail, dur = self.results.get(t["id"], ("not run", "", None))
         miss = runner.missing(self.bench, t)
         text = f"{t['id']} — {t['title']}\nResult: {status}" + (f" in {dur:.1f}s" if dur else "") + "\n"
+        sec, kind = self.expected_of(t)
+        h = self.history.get(t["id"])
+        exp = durations.fmt_expected(sec, kind)
+        if kind == "history" and h:
+            exp += f" (median of the last {h[1]} real result{'' if h[1] == 1 else 's'})"
+        elif kind == "estimate":
+            follows = t.get("opt_in") and optin.OPT_INS[t["opt_in"]].get("minutes_key")
+            exp += (f" (estimated from bench.json {follows})" if follows else " (an estimate: no real result yet)")
+        else:
+            exp += " (no real result yet)"
+        text += f"Expected: {exp}\n"
+        if t.get("opt_in"):
+            key = t["opt_in"]
+            text += (f"Opt-in: {key} ({'on' if key in optin.enabled(self.bench.cfg) else 'OFF - it is skipped'}) — "
+                     f"{optin.OPT_INS[key]['what']}\n")
         text += f"Devices: {', '.join(t['needs']) or '—'}   Wires: {', '.join(runner.links_of(t)) or '— (uses whatever is wired)'}\n"
         if miss:
             text += f"Missing: {', '.join(miss)}\n"
@@ -742,17 +1033,186 @@ class App:
         self.test_detail.delete("1.0", "end")
         self.test_detail.insert("1.0", text)
 
-    def run_tests(self, tests, label):
-        # The stop flag is cleared when the run starts on the worker (job_run), not here: clearing it while an
-        # earlier run is still going would cancel the Stop pressed for that run.
+    def run_tests(self, tests, label, confirm=True, selectors=None):
+        """selectors: the globs the selection came from ([] = everything), recorded in the checkpoint so a resumed
+        run's report can list tests added to the suite since; None when no glob describes it (failed tests, one
+        double-clicked test)."""
+        # One run at a time. A double-click on a test row lands here, and while a run was going it used to queue a
+        # SECOND run - starting when the first ended, in its own results folder - and blank those tests' results in
+        # the table on the spot, so a stray double-click quietly threw away what you were reading.
+        if self.run_active:
+            self.status(f"A run is already going - press Stop first (ignored: run {label})")
+            return
+        if self.resumable and confirm and not messagebox.askyesno(
+                "WCB Bench", f"A paused run exists ({self.resumable['name']}: {self.resumable['done']} of "
+                             f"{self.resumable['total']} done).\n\nStart a new run anyway? The paused one stays "
+                             f"resumable.", parent=self.root):
+            return
+        # Cleared here, on the Tk thread: the run_active guard above means no earlier run can still be going, so this
+        # cannot cancel a Stop or Pause meant for it.
+        self.control.clear()
         for t in tests:
             self.results.pop(t["id"], None)
+        self.run_ids = [t["id"] for t in tests]
         self.refresh_tests()
-        self.submit(f"run {label}", self.job_run, tests)
+        self.run_active = True
+        self.update_run_buttons()
+        self.submit(f"run {label}", self.job_run, tests, label, selectors)
+
+    def resume(self, path):
+        if self.run_active:
+            self.status("A run is already going - press Stop or Pause first")
+            return
+        self.control.clear()
+        self.run_active = True
+        self.update_run_buttons()
+        self.submit(f"resume {os.path.basename(path)}", self.job_resume, path)
 
     def stop(self):
-        self.stop_flag.set()
+        self.control.request_stop()     # replaces a pending pause: the last press wins
         self.status("Stopping after the current test…")
+        self.update_run_buttons()
+
+    def on_pause_button(self):
+        if not self.run_active:
+            return
+        if self.control.pausing:
+            self.control.cancel_pause()
+            # A pause asked for by closing the window takes the close with it: otherwise the run's end, hours later,
+            # would still close the window unasked.
+            closing = self.close_after_pause
+            self.close_after_pause = False
+            self.status("Pause cancelled - the run carries on" + (" and the window stays open" if closing else ""))
+        else:
+            self.control.request_pause("user")   # replaces a pending stop: the last press wins
+            now = ""
+            if self.test_now:
+                now = f" (now {self.test_now[0]}, {fmt_duration(time.monotonic() - self.test_now[1])})"
+            self.status(f"Pausing after the current test…{now}")
+        self.update_run_buttons()
+
+    def update_run_buttons(self):
+        if self.run_active:
+            self.pause_btn.configure(text="Cancel pause" if self.control.pausing else "Pause after this test")
+            self.pause_btn.state(["!disabled"])
+        else:
+            self.pause_btn.configure(text="Pause after this test")
+            self.pause_btn.state(["disabled"])
+        # The runner reads bench.json opt_in before each test, so a tick mid-run would change the rest of the run.
+        for cb in getattr(self, "optin_checks", {}).values():
+            cb.state(["disabled"] if self.run_active else ["!disabled"])
+
+    # ------------------------------------------------------------------ paused runs (Tk thread)
+    def scan_resumable(self, prefer=None):
+        """Read the results folder for runs that can be resumed. Files only; no port is touched."""
+        try:
+            runs = checkpoint.find_resumable(RESULTS, include_stopped=True)
+        except Exception:  # noqa: BLE001 - a bad folder must not stop the GUI
+            runs = []
+        self.resumable_all = runs
+        offered = [s for s in runs if s["state"] != "stopped"]
+        pick = next((s for s in offered if prefer and os.path.normcase(s["path"]) == os.path.normcase(prefer)), None)
+        self.resumable = pick or (offered[0] if offered else None)
+        self.render_resume_bar()
+        self.update_run_buttons()
+
+    def render_resume_bar(self):
+        # Shown for stopped runs too: the picker is the GUI's only way to one, and it lives in this bar. With only
+        # stopped runs the bar is a one-line notice and just Other runs… is enabled - the banner never offers a
+        # stopped run itself.
+        if (self.resumable or self.resumable_all) and not self.run_active:
+            if self.resumable:
+                self.resume_var.set(checkpoint.summary_text(self.resumable))
+                others = len(self.resumable_all) - 1
+            else:
+                self.resume_var.set(f"{len(self.resumable_all)} stopped run(s) can be resumed - pick one from "
+                                    f"Other runs…")
+                others = len(self.resumable_all)
+            for b in (self.rb_resume, self.rb_report, self.rb_discard):
+                b.state(["!disabled"] if self.resumable else ["disabled"])
+            self.other_runs_btn.configure(text=f"Other runs… ({others})")
+            if others > 0:
+                self.other_runs_btn.state(["!disabled"])
+            else:
+                self.other_runs_btn.state(["disabled"])
+            if not self.resume_bar_shown:
+                self.resume_bar.pack(fill="x", before=self.tests_pane)
+                self.resume_bar_shown = True
+        elif self.resume_bar_shown:
+            self.resume_bar.pack_forget()
+            self.resume_bar_shown = False
+
+    def open_run_report(self, s):
+        if not s:
+            return
+        path = os.path.join(s["path"], "report.md")
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            self.status(f"{s['name']} has no report yet")
+
+    def discard(self, s, parent=None):
+        if not s:
+            return
+        if not messagebox.askyesno("WCB Bench", f"Discard {s['name']} ({s['done']} of {s['total']} done)?\n\nIts "
+                                                f"results and report stay in the folder; it is just no longer offered "
+                                                f"for resuming.", parent=parent or self.root):
+            return
+        try:
+            checkpoint.Checkpoint.load(s["path"]).abandon()
+            self.status(f"Discarded {s['name']}")
+        except (CheckpointError, RunBusy) as e:
+            self.status(f"Could not discard {s['name']}: {e}")
+        self.scan_resumable()
+
+    def open_picker(self):
+        runs = self.resumable_all
+        if not runs:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Paused runs")
+        win.configure(bg=THEME["bg"])
+        win.transient(self.root)
+        tree = ttk.Treeview(win, columns=("what", "done", "when", "why", "state"), show="tree headings", height=10)
+        for col, text, width in (("#0", "Run", 170), ("what", "What", 160), ("done", "Done", 80),
+                                 ("when", "When", 150), ("why", "Why", 380), ("state", "State", 90)):
+            tree.heading(col, text=text)
+            tree.column(col, width=width, anchor="w")
+        tree.tag_configure("stopped", foreground=GREY)
+        for s in runs:
+            state = "interrupted" if s["interrupted"] else s["state"]
+            why = (f"during {s['in_flight']}" if s["interrupted"] and s.get("in_flight") else
+                   s.get("reason_text") or "")
+            if s.get("last_resume_error"):
+                why += " · blocked: " + s["last_resume_error"].splitlines()[0]
+            tree.insert("", "end", iid=s["path"], text=s["name"], values=(
+                s.get("label") or "", f"{s['done']} / {s['total']}", (s.get("updated") or "")[:16].replace("T", " "),
+                why, state), tags=(s["state"],))
+        tree.pack(fill="both", expand=True, padx=12, pady=12)
+        bar = ttk.Frame(win, padding=(12, 0, 12, 12))
+        bar.pack(fill="x")
+
+        def chosen():
+            sel = tree.selection()
+            return next((s for s in runs if sel and s["path"] == sel[0]), None)
+
+        def do_resume():
+            s = chosen()
+            if s:
+                win.destroy()
+                self.resume(s["path"])
+
+        def do_discard():
+            s = chosen()
+            if s:
+                self.discard(s, parent=win)
+                win.destroy()
+
+        ttk.Button(bar, text="Resume", command=do_resume).pack(side="left")
+        ttk.Button(bar, text="Discard", command=do_discard).pack(side="left", padx=6)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        _dark_titlebar(win)
+        win.grab_set()
 
     # ------------------------------------------------------------------ Log tab
     def build_log(self):
@@ -765,16 +1225,18 @@ class App:
         ttk.Checkbutton(bar, text="Follow", variable=self.follow).pack(side="left", padx=8)
         frame = ttk.Frame(f)
         frame.pack(fill="both", expand=True, pady=(8, 0))
-        self.log_text = tk.Text(frame, wrap="none", font=MONO, bg="#0d1117", fg="#c9d1d9", insertbackground="white")
+        self.log_text = tk.Text(frame, wrap="none", font=MONO, bg=THEME["logbg"], fg=THEME["logfg"],
+                                insertbackground=THEME["logfg"])
         ys = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=ys.set)
         ys.pack(side="right", fill="y")
         self.log_text.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------ jobs (worker thread)
-    def job_find_devices(self):
+    def job_find_devices(self, paused_path=None):
         b = self.bench
         b.close()
+        before = {n: d.get("port") for n, d in b.cfg["devices"].items()}
         ports = [p for p in list_ports.comports() if p.vid in ESP_VIDS]
         self.emit("status", f"Scanning {len(ports)} ESP32 port(s)…")
         found = {}
@@ -818,6 +1280,11 @@ class App:
         for port, info in found.items():
             if info["kind"] == "error":
                 report.append(f"{port}: could not open — {info['error']}")
+        if not self.paused_serial_ok(before, paused_path):
+            b.reload_config()
+            self.emit("devices_changed")
+            self.emit("status", "Find devices: nothing saved")
+            return
         b.save_config()
         self.emit("devices_changed")
         self.emit("status", "Found: " + ("; ".join(report) if report else "no boards answered"))
@@ -950,24 +1417,128 @@ class App:
         self.emit("links_changed")
         self.emit("status", text)
 
-    def job_run(self, tests):
+    def job_set_opt_in(self, key, on):
+        """Tick or untick one opt-in in bench.json "opt_in" (Bench.save_config: atomic, every other key kept in its
+        order). On the worker, like every bench.json write, so it never interleaves with Find devices' save."""
         b = self.bench
-        self.stop_flag.clear()
-        out_dir = b.new_session()
-        self.emit("run_start", len(tests))
-        start = time.monotonic()
-        results = runner.run_tests(
-            b, tests,
-            on_start=lambda t: self.emit("test_start", t["id"]),
-            on_result=lambda t, s, d, dur: self.emit("test_result", t["id"], s, d, dur),
-            should_stop=self.stop_flag.is_set)
-        elapsed = time.monotonic() - start
-        runner.write_report(out_dir, results, elapsed)
+        # A run live in another process (a second GUI, run.py in a terminal) recorded opt_in in its checkpoint's bench
+        # canon; changing it under that run turns its automatic outage recovery into a pause (resume.check_bench).
+        # This process's own run cannot get here: run_active disables the boxes and the worker is serial.
+        try:
+            names = sorted(os.listdir(RESULTS), reverse=True)
+        except OSError:
+            names = []
+        live = next((n for n in names if checkpoint.RunLock.held(os.path.join(RESULTS, n))), None)
+        if live:
+            self.emit("optin_changed")   # update_estimates puts the checkbox back to match cfg
+            self.emit("status", f"A run is live in another window or terminal (results/{live}): opt-ins not changed")
+            return
+        # Tick onto the file, not the copy loaded at start: bench.json may have been edited since (opt_in and
+        # soak_minutes are edited by hand), and saving the stale dict would silently undo that. Only opt_in, and the
+        # soak length its estimate reads, are copied back into memory: open ports and devices are left alone.
+        try:
+            with open(b.bench_path, encoding="utf-8") as f:
+                fresh = json.load(f)
+            if not isinstance(fresh, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            self.emit("optin_changed")
+            self.emit("status", f"Opt-in {key}: bench.json could not be read ({e}), nothing saved")
+            return
+        optin.set_enabled(fresh, key, on)
+        checkpoint.atomic_write_json(b.bench_path, fresh)            # Bench.save_config's own path; key order kept
+        b.cfg["opt_in"] = fresh["opt_in"]                            # memory changes only once the write succeeded
+        for o in optin.OPT_INS.values():
+            mk = o.get("minutes_key")
+            if mk and mk in fresh:
+                b.cfg[mk] = fresh[mk]
+            elif mk:
+                b.cfg.pop(mk, None)
+        self.emit("optin_changed")
+        self.emit("status", f"Opt-in {key} {'on' if on else 'off'}: {optin.OPT_INS[key]['title']} "
+                            f"{'will run' if on else 'is skipped'} (bench.json saved)")
+
+    def job_run(self, tests, label="tests", selectors=None):
+        b = self.bench
+        self.run_active = True    # also set in run_tests(); the pump clears it on run_done / run_paused
+        ckpt = runner.start_run(b, tests, label, selectors=selectors)
+        self.current_ckpt = ckpt
+        self.emit("run_start", len(tests), 0, 0.0, ckpt.name, os.path.join(ckpt.out_dir, "report.md"))
+        self._drive(ckpt, resuming=False)
+
+    def job_resume(self, path):
+        self.run_active = True
+        try:
+            ckpt = checkpoint.Checkpoint.load(path)
+        except CheckpointError:
+            self.emit("resume_blocked", path, f"The paused run's folder is gone (results/{os.path.basename(path)}) — "
+                                              f"nothing to resume")
+            return
+        if ckpt.state in ("done", "abandoned"):
+            self.emit("resume_blocked", path, f"{ckpt.name} is {ckpt.state} — nothing to resume")
+            return
+        self.current_ckpt = ckpt
+        self.emit("run_start", ckpt.total, ckpt.done_count, ckpt.active_s, ckpt.name,
+                  os.path.join(ckpt.out_dir, "report.md"))
+        self.emit("run_restore", list(ckpt.data["tests"]),
+                  [(r["id"], r["status"], r["detail"], r["dur"]) for r in ckpt.data["results"]])
+        self._drive(ckpt, resuming=True)
+
+    def _drive(self, ckpt, resuming):
+        """continue_run for a new or resumed run, and one terminal event for the pump: run_done, run_paused or
+        resume_blocked. A harness error is also reported as run_paused (the run IS paused) before the Worker's own
+        error line."""
+        report = os.path.join(ckpt.out_dir, "report.md")
+        try:
+            runner.continue_run(
+                self.bench, ckpt, resuming=resuming, ask=self.ask_user,
+                on_start=lambda t: self.emit("test_start", t["id"]),
+                on_result=lambda t, s, d, dur: self.emit("test_result", t["id"], s, d, dur),
+                on_requeue=lambda t, d: self.emit("test_requeued", t["id"], d),
+                should_stop=self.control.should_stop, should_pause=self.control.should_pause,
+                on_bench_changed=lambda: self.emit("devices_changed"))
+        except ResumeAborted as e:
+            self.emit("run_paused", ckpt.out_dir, f"Resume cancelled ({e}) — {ckpt.name} is still paused")
+            return
+        except ResumeBlocked as e:
+            self.emit("resume_blocked", ckpt.out_dir, str(e))
+            return
+        except RunBusy:
+            self.emit("resume_blocked", ckpt.out_dir, f"{ckpt.name} is being resumed by another process")
+            return
+        except Exception as e:
+            self.emit("run_paused", ckpt.out_dir, f"Paused by a harness error: {type(e).__name__}: "
+                                                  f"{(str(e).splitlines() or [''])[0]} — fix it, restart, then Resume")
+            raise
+        finally:
+            self.current_ckpt = None
+        if ckpt.state == "paused":
+            self.emit("run_paused", ckpt.out_dir, ckpt.pause_message())
+            return
         counts = {}
-        for _, s, _, _ in results:
-            counts[s] = counts.get(s, 0) + 1
-        self.emit("run_done", os.path.join(out_dir, "report.md"),
-                  (", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "nothing ran") + f" in {fmt_duration(elapsed)}")
+        for r in ckpt.data["results"]:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        self.emit("run_done", report, (", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "nothing ran")
+                  + f" in {fmt_duration(ckpt.active_s)}")
+
+    def ask_user(self, title, text, default=False):
+        """Worker thread: ask on the Tk thread and wait for the answer. No (False) once the window is closing."""
+        if self.closing:
+            return False
+        ev, box = threading.Event(), {"yes": False}
+        self.emit("ask", title, text, ev, box, default)
+        while not ev.wait(0.25):
+            if self.closing:
+                return False
+        return box["yes"]
+
+    def _answer(self, title, text, ev, box, default):
+        """Tk thread, from after_idle - never from inside pump(): a modal dialog runs a nested event loop, and inside
+        pump() that would start a second pump chain."""
+        try:
+            box["yes"] = messagebox.askyesno(title, text, default="yes" if default else "no", parent=self.root)
+        finally:
+            ev.set()
 
     # ------------------------------------------------------------------ event pump (UI thread)
     def pump(self):
@@ -989,7 +1560,46 @@ class App:
                         self.job = None
                         self.test_now = None
                 elif kind == "run_start":
-                    self.run_total, self.run_done_n = data[0], 0
+                    self.run_total, self.run_done_n, self.run_base = data[0], data[1], data[2]
+                    self.last_report = data[4]
+                    self.render_resume_bar()
+                    self.update_run_buttons()
+                elif kind == "run_restore":
+                    ids, rows = data
+                    self.run_ids = list(ids)
+                    for tid in ids:
+                        self.results.pop(tid, None)
+                    for tid, status, detail, dur in rows:
+                        self.results[tid] = (status, detail, dur)
+                    self.refresh_tests()
+                elif kind == "test_requeued":
+                    tid, detail = data
+                    self.test_now = None
+                    self.results[tid] = ("RETRY", detail, None)
+                    self.set_test_row(tid)
+                elif kind == "ask":
+                    self.root.after_idle(self._answer, *data)
+                elif kind == "run_paused":
+                    self.run_active = False
+                    self.control.clear()
+                    self.test_now = None
+                    self.scan_resumable(prefer=data[0])
+                    self.refresh_tests()
+                    self.load_durations()
+                    self.status(data[1])
+                    if self.close_after_pause:
+                        self.root.after(200, self._close_now)
+                elif kind == "resume_blocked":
+                    self.run_active = False
+                    self.control.clear()
+                    self.scan_resumable(prefer=data[0])
+                    self.status("Resume blocked — " + data[1].splitlines()[0])
+                    if self.close_after_pause:
+                        self.root.after(200, self._close_now)
+                    else:
+                        msg = data[1]
+                        self.root.after_idle(lambda m=msg: messagebox.showwarning(
+                            "Resume blocked", m + "\n\nThe run is still paused.", parent=self.root))
                 elif kind == "identity":
                     self.identities[data[0]] = data[1]
                     if data[0] in self.dev_status:
@@ -1001,6 +1611,18 @@ class App:
                 elif kind == "links_changed":
                     self.refresh_wiring()
                     self.refresh_tests()
+                elif kind == "optin_changed":
+                    self.update_estimates()
+                    sel = self.test_tree.selection()
+                    if sel and not sel[0].startswith("area:"):
+                        self.on_test_select(None)
+                elif kind == "durations":
+                    self.durations_busy = False
+                    if data[0] is not None:
+                        self.history = data[0]
+                        self.update_estimates()
+                    if self.durations_again:
+                        self.load_durations()
                 elif kind == "test_start":
                     self.test_now = (data[0], time.monotonic())
                     self.results[data[0]] = ("RUNNING", "", None)
@@ -1012,12 +1634,21 @@ class App:
                     self.results[tid] = (status, detail, dur)
                     self.set_test_row(tid)
                 elif kind == "run_done":
+                    self.run_active = False
+                    self.control.clear()
                     self.last_report = data[0]
                     self.refresh_tests()
+                    self.scan_resumable()
+                    self.load_durations()
                     self.status(f"Run finished: {data[1]}")
+                    if self.close_after_pause:
+                        self.root.after(200, self._close_now)
                 elif kind == "error":
                     self.status(data[0].splitlines()[0])
                     log_lines.append(data[0])
+                    self.scan_resumable()
+                    if self.close_after_pause:
+                        self.root.after(200, self._close_now)
         except queue.Empty:
             pass
         if log_lines:
@@ -1034,15 +1665,87 @@ class App:
         now = time.monotonic()
         if self.job:
             name, start = self.job
-            text = f"Elapsed {fmt_duration(now - start)}   {name}"
+            # a resumed run's timer continues from its active time before this segment (run_base is 0 for a new run)
+            base = self.run_base if self.run_total else 0.0
+            text = f"Elapsed {fmt_duration(base + now - start)}   {name}"
             if self.run_total:
                 text += f"   ·   {self.run_done_n} of {self.run_total} done"
                 if self.test_now:
                     text += f"   ·   now {self.test_now[0]} ({fmt_duration(now - self.test_now[1])})"
+                    self.show_running_expected(now)
+            extra = []
+            left = self.time_left(now)
+            if left is not None:
+                sec, unknown = left
+                extra.append(f"{self.fmt_total(sec, unknown)} left, done ≈ "
+                             f"{time.strftime('%H:%M', time.localtime(time.time() + sec))}")
+            if self.run_total and self.control.pausing:
+                extra.append("pausing after this test")
             self.timer_var.set(text)
+            self.eta_var.set("   ·   ".join(extra))
+        elif self.resumable:
+            s = self.resumable
+            try:
+                since = time.time() - checkpoint.iso_ts(s.get("updated"))
+            except Exception:  # noqa: BLE001
+                since = 0
+            self.timer_var.set(f"{'Interrupted' if s['interrupted'] else 'Paused'}: {s['name']}   ·   {s['done']} of "
+                               f"{s['total']} done   ·   active {fmt_duration(s.get('active_s') or 0)}   ·   "
+                               f"paused for {fmt_duration(max(0, since))}")
+            self.eta_var.set("")
         elif self.last_job:
             self.timer_var.set(f"Last: {self.last_job[0]} took {fmt_duration(self.last_job[1])}")
+            self.eta_var.set("")
+        else:
+            self.eta_var.set("")
         self.root.after(500, self.tick)
+
+    def show_running_expected(self, now):
+        """The running test's Expected cell: 'elapsed / expected', live."""
+        tid, start = self.test_now
+        t = self.test_by_id(tid)
+        if t and self.test_tree.exists(tid):
+            self.test_tree.set(tid, "expected",
+                               f"{fmt_duration(now - start)} / {durations.fmt_expected(*self.expected_of(t))}")
+
+    def time_left(self, now):
+        """(seconds, any unknown) still to run in this run: the expected time of every test without a result yet (0
+        for one the runner will skip at once), less the running test's elapsed time. None outside a run."""
+        if not self.run_ids:
+            return None
+        if self.control.pausing or self.control.should_stop():
+            # Pause/Stop after this test: the run ends when the running test does, whatever is left in run_ids.
+            # Cancel pause clears the request, and the full estimate comes back on the next tick.
+            if not self.test_now:
+                return 0.0, False
+            t = self.test_by_id(self.test_now[0])
+            sec = self.cost(t)[0] if t is not None else None
+            if sec is None:
+                return 0.0, True
+            return max(0.0, sec - (now - self.test_now[1])), False
+        total, unknown = 0.0, False
+        running = self.test_now[0] if self.test_now else None
+        for tid in self.run_ids:
+            status = self.results.get(tid, ("",))[0]
+            if status not in ("", "RUNNING", "RETRY"):
+                continue
+            t = self.test_by_id(tid)
+            if t is None:
+                continue
+            sec, _ = self.cost(t)
+            if sec is None:
+                unknown = True
+                continue
+            if tid == running:
+                sec = max(0.0, sec - (now - self.test_now[1]))
+            total += sec
+        return total, unknown
+
+    def test_by_id(self, tid):
+        if getattr(self, "_by_id_n", None) != len(runner.REGISTRY):
+            self._by_id = {t["id"]: t for t in runner.REGISTRY}
+            self._by_id_n = len(runner.REGISTRY)
+        return self._by_id.get(tid)
 
     def set_test_row(self, tid):
         if not self.test_tree.exists(tid):
@@ -1051,6 +1754,9 @@ class App:
         vals = list(self.test_tree.item(tid, "values"))
         vals[0] = status
         vals[1] = f"{dur:.1f}s" if dur else ""
+        t = self.test_by_id(tid)
+        if t is not None and status != "RUNNING":
+            vals[2] = self.expected_text(t)
         self.test_tree.item(tid, values=vals, tags=(status,))
         if status == "RUNNING":
             self.test_tree.see(tid)
@@ -1059,7 +1765,7 @@ class App:
             self.on_test_select(None)
         counts = {}
         for s, _, _ in self.results.values():
-            if s != "RUNNING":
+            if s not in ("RUNNING", "RETRY"):
                 counts[s] = counts.get(s, 0) + 1
         self.summary_var.set("   ".join(f"{k} {v}" for k, v in sorted(counts.items())))
 
@@ -1075,7 +1781,48 @@ class App:
             self.status("No report yet — run some tests first")
 
     def on_close(self):
-        self.stop_flag.set()
+        if self.run_active:
+            ans = messagebox.askyesnocancel(
+                "WCB Bench", "A run is going.\n\n"
+                             "Yes — pause after the current test, then close. The run stays resumable.\n"
+                             "No — close now. The current test is cut off; the run stays resumable and that test "
+                             "runs again first.\n"
+                             "Cancel — keep running.", parent=self.root)
+            if ans is None:
+                return
+            if not self.run_active:
+                # The run ended (run_done / run_paused / resume_blocked / a crash) while the dialog was open - its
+                # nested event loop keeps the pump going. No terminal event is left to act on the answer, so close now.
+                self._close_now()
+                return
+            if ans:
+                self.close_after_pause = True
+                self.control.request_pause("closing")
+                self.update_run_buttons()
+                self.status("Pausing after the current test, then closing…")
+                return
+            # Close now. Not bench.close() and not Stop: closing ports under the worker could turn the test in flight
+            # into a recorded FAIL, and a stop landing now would make the run final. The checkpoint is frozen so
+            # nothing more is written; the daemon worker dies with the process and the OS frees the run lock, so the
+            # run is left interrupted - resumable, with that test re-run first.
+            self.closing = True
+            ckpt = self.current_ckpt
+            if ckpt is not None:
+                ckpt.freeze()
+            # A Wizard test's node and Chrome are in their own process group and outlive this process: end them, or
+            # they keep W1's COM port and keep driving the board. After the freeze, so the FAIL their exit causes in
+            # the worker is never recorded and the test still re-runs first.
+            try:
+                wizard.kill_live()
+            except Exception:
+                pass
+            self.root.destroy()
+            return
+        self._close_now()
+
+    def _close_now(self):
+        self.closing = True
+        self.control.request_stop()
         try:
             self.bench.close()
         except Exception:
@@ -1084,13 +1831,41 @@ class App:
 
 
 def main():
+    global THEME, GREEN, AMBER, RED, BLUE, GREY, STATUS_COLOR
+    if "--light" in sys.argv[1:]:
+        THEME = LIGHT
+        GREEN, AMBER, RED, BLUE, GREY = (THEME[k] for k in ("green", "amber", "red", "blue", "grey"))
+        STATUS_COLOR.update({"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE, "RETRY": AMBER})
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
     root = tk.Tk()
     app = App(root)
+    _dark_titlebar(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
+    # gui.py --run <glob> [<glob> ...] opens with those tests queued and starts them, so a run launched
+    # from a script (or by Claude) can be watched live instead of only read afterwards. Same globs as run.py.
+    # It never stops to ask about a paused run (confirm=False); that run stays resumable.
+    if "--run" in sys.argv[1:]:
+        sels = sys.argv[sys.argv.index("--run") + 1:]
+        tests = runner.select(sels)
+        if tests:
+            root.after(1500, lambda: app.run_tests(tests, f"{len(tests)} test(s) from --run", confirm=False,
+                                                   selectors=sels))
+    # gui.py --resume [<run>] opens and resumes the newest paused or interrupted run, or the one named.
+    elif "--resume" in sys.argv[1:]:
+        rest = sys.argv[sys.argv.index("--resume") + 1:]
+        name = rest[0] if rest and not rest[0].startswith("--") else None
+
+        def start_resume():
+            if name:
+                app.resume(name if os.path.isdir(name) else os.path.join(RESULTS, name))
+            elif app.resumable:
+                app.resume(app.resumable["path"])
+            else:
+                app.status("--resume: no paused or interrupted run to resume")
+        root.after(1500, start_resume)
     root.mainloop()
 
 

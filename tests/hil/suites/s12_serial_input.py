@@ -12,9 +12,11 @@ import threading
 import time
 import zlib
 
+from hil.links import SW_MAX_BAUD
+from hil.probe import HW_ONLY_HEADERS, PROBE_LEVELRX_VERSION, SW_CHANNELS
 from hil.runner import Skip, test
 from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, quiet_lines,
-                           require_tokens, send_chunked, token, usb_wcb)
+                           require_tokens, send_chunked, token, usb_wcb, usb_wcb_number)
 
 
 def _has(lines, text):
@@ -138,6 +140,29 @@ def trim_and_blank(bench):
     assert not quiet_lines(usb, m), f"a blank line produced output: {quiet_lines(usb, m)}"
 
 
+@test("input.nul_ignored", "(should) A NUL (a break on the line) is dropped: the command after it still runs, and a NUL-only line broadcasts nothing", needs=["wcb1"])
+def nul_ignored(bench):
+    """Tracker #79. A UART reads a break - the line held low by a device resetting, a cable being plugged, or a sender
+    re-configuring its pin - as 0x00. processIncomingSerial (WCB.ino) used to append it to the line: String counts it,
+    but every c_str() consumer stops at it, so '<NUL>;S4<t>' went to every port and the mesh as an EMPTY broadcast (a
+    lone CR on S2, S4 and S5) and the command was lost. The probe's own re-bind glitch hit this in
+    kyber.local_port_move_releases_old until wcb_probe 5 held the line high."""
+    s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")
+    require_tokens(bench, 1, "?BCAST,OUT,S2,ON", "?BCAST,OUT,S4,ON", "?BCAST,OUT,S5,ON", "?BCAST,IN,S3,ON")
+    prime(s3)
+    time.sleep(0.3)
+    t = marker()
+    w = Watch(s2, s4, s5)
+    s3.send(b"\x00\x00;S4" + t.encode() + b"\r")
+    w.expect(s4, t.encode() + b"\r", timeout=2)
+    time.sleep(0.5)
+    assert w.got(s4) == t.encode() + b"\r", f"expected exactly <t>CR on S4, got {w.got(s4)!r}"
+    assert not w.got(s2) and not w.got(s5), f"the NUL-led line was broadcast: S2 {w.got(s2)!r}, S5 {w.got(s5)!r}"
+    w = Watch(s2, s4, s5)
+    s3.send(b"\x00\r")
+    w.silent(s2, s4, s5, window=1.5)
+
+
 @test("input.multi_line_and_chain", "Several lines in one burst, and a ^ chain typed on a port, all run in order", needs=["wcb1"])
 def multi_line_and_chain(bench):
     s2, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S4"), link(bench, 1, "S5")
@@ -232,6 +257,127 @@ def bcast_fanout(bench):
         w.silent(*([src] if src != "usb" else []), w1s1, *remote_quiet, window=1.5)
         assert not any(x.strip() == t for x in usb.dev.since(m)), "the broadcast was echoed on USB with S0 echo off"
         time.sleep(0.5)
+
+
+def _bind_soft_in_order(bench, *wires):
+    """Bind `wires` to probe SOFTWARE channels in the order given; returns {wire key: channel}. LinkManager.bind()
+    hands out the first free letter of SW_CHANNELS, so with every soft channel on those probes released first the
+    first wire gets C and the next D. That is the only handle a test has on which channel serves which wire."""
+    probes = {l.probe_name for l in wires}
+    for l in bench.links.all():
+        if l.probe_name in probes and l.channel in SW_CHANNELS:
+            l.release()
+    for l in wires:
+        l.listen(hw=False)
+    return {l.key: l.channel for l in wires}
+
+
+def _fanout_lines(src, wires, count, period, width):
+    """Type `count` unique plain lines into `src`, one every `period` s. Returns (lines, {wire key: (lines that did
+    not arrive exact, up to 3 received lines that match none of them, RXERR lines)})."""
+    prime(src)
+    time.sleep(0.3)
+    lines = [padded(f"Q{i:03d}", width).encode() for i in range(count)]
+    watch = Watch(*wires)
+    t0 = time.monotonic()
+    for i, x in enumerate(lines):
+        time.sleep(max(0.0, t0 + i * period - time.monotonic()))
+        src.send(x + b"\r")
+    time.sleep(2.0)   # the last fan-out, and W2 writing out its mesh copies before the next pass or test
+    out = {}
+    for l in watch.links:
+        got = set(watch.got(l).split(b"\r"))
+        out[l.key] = ([x for x in lines if x not in got], sorted(g for g in got - set(lines) if g)[:3],
+                      l.errors(watch.marks[l.key]))
+    return lines, out
+
+
+@test("probe.soft_concurrent_rx", "W1 S3's broadcast fans out to S2 + S4 at once: exact with one probe soft channel receiving (control) and with two (wcb_probe 6's level-triggered RX, ESP32 erratum GPIO-3.14)", needs=["wcb1"])
+def soft_concurrent_rx(bench):
+    """Instrument check, not a firmware test. A broadcast typed on W1 S3 goes to S2, a hardware UART that queues it
+    and returns, then to S4, whose RMT write blocks until sent (the fan-out loop in processBroadcastCommand,
+    WcbSoftSerial::write), so both lines are on the wire at once.
+
+    Onto two probe SOFTWARE channels, that moment used to lose ~0.2-1 % of lines. The probe's soft RX pins all sit
+    in GPIO0-31, which share one interrupt status register, and per ESP32 erratum GPIO-3.14 (all revisions, no fix)
+    the dispatcher's W1TC clear for one pin's edge swallows another pin's edge arriving at that moment - about the
+    ISR latency after it. Each bad byte was exactly one lost edge: a flipped run of bits, a merged line when the
+    lost edge was in the CR, or a slipped frame for the rest of the burst (tracker #78). wcb_probe 6 receives on
+    level-triggered, polarity-flipping interrupts - the WCB's own patched EspSoftwareSerial - which the erratum
+    cannot lose.
+
+    So: (1) CONTROL - W1S2 on a probe HARDWARE channel, W1S4 on a soft one. W1 does exactly the same work, but only
+    one probe pin takes edge interrupts. Every line must be exact: that rules the WCB and the wire in or out (with
+    1000 lines, P(0 wrong) is ~0.7 % if they caused a 0.5 %/line loss). (2) TWO SOFT - both on soft channels, the
+    erratum's case. On wcb_probe 6 every line must be exact too; an older probe skips this arm (its edge-triggered
+    soft RX would measure itself, not W1). W1 S5, written after S4 finishes, is recorded as a lone-soft-channel
+    control and not asserted."""
+    s2, s3, s4 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4")
+    require_tokens(bench, 1, "?BCAST,IN,S3,ON", "?BCAST,OUT,S2,ON", "?BCAST,OUT,S4,ON", "?BCAST,OUT,S0,OFF")
+    tokens = bench.config_tokens(1)
+    if token(tokens, "?MAP,SERIAL,S3"):
+        raise Skip("W1 S3 has a serial mapping, which replaces its broadcast")
+    if s2.probe_name != s4.probe_name or s2.header in HW_ONLY_HEADERS or s4.header in HW_ONLY_HEADERS:
+        raise Skip(f"{s2} and {s4} are not two soft-capable headers of one probe, so no two probe soft channels "
+                   f"receive the fan-out at once")
+    bauds = [bench.port_baud(1, p) for p in ("S2", "S4")]
+    if max(bauds) > SW_MAX_BAUD:
+        raise Skip(f"W1 S2/S4 run at {bauds} baud, above what a probe soft channel receives ({SW_MAX_BAUD})")
+    if bench.port_baud(1, "S3") > SW_MAX_BAUD:   # W1's own soft RX is not exact there (input.soft_rx_baud_sweep)
+        raise Skip(f"W1 S3 runs above {SW_MAX_BAUD} baud, so W1's own soft RX would lose lines before the fan-out")
+    s5 = bench.links.get(1, "S5")
+    if not (s5 and s5.probe_name == s2.probe_name and s5.header not in HW_ONLY_HEADERS
+            and token(tokens, "?BCAST,OUT,S5,ON") and bench.port_baud(1, "S5") <= SW_MAX_BAUD):
+        s5 = None
+    width = 20
+    frame = (width + 1) * 10 / min(bauds)
+    # W1 writes S5 after the S2/S4 pair, and W2 writes its mesh copy to three soft ports one after another. Four
+    # frame-times per line keeps every board ahead of the stream: at 9600 that is 0.1 s per line.
+    period = max(0.1, 4 * frame)
+    ctl_count, soft_count = min(1000, int(100 / period)), min(300, int(30 / period))
+    notes, bad = [], []
+
+    def run_arm(label, count):
+        s3.listen(hw=True)   # inject from a probe hardware UART, so the probe's own soft TX is not in question
+        lines, res = _fanout_lines(s3, [s2, s4, s5], count, period, width)
+        chans = {l.key: l.channel for l in (s2, s4, s5) if l}
+        lost = {key: set(v[0]) for key, v in res.items()}
+        notes.append(f"{label}: " + ", ".join(f"{key} ch {chans[key]} {len(lines) - len(lost[key])}/{len(lines)}"
+                                              + (" alone" if s5 and key == s5.key else "") for key in res))
+        return lines, res, lost, chans
+
+    # (1) control: W1S2 on a hardware channel, W1S4 alone on a soft one
+    for l in bench.links.all():
+        if l.probe_name == s2.probe_name and l.channel in SW_CHANNELS:
+            l.release()
+    s2.listen(hw=True)
+    s4.listen(hw=False)
+    if s5:
+        s5.listen(hw=False)
+    lines, res, lost, chans = run_arm("control (one probe edge-interrupt pin)", ctl_count)
+    for key in (s2.key, s4.key):
+        if lost[key]:
+            bad.append(f"control {key} ch {chans[key]}: {len(lost[key])} of {len(lines)} lines not exact with only one "
+                       f"probe edge-interrupt pin receiving - so NOT the probe's GPIO-3.14; W1 or the wire, got e.g. "
+                       f"{res[key][1]}")
+
+    # (2) two soft channels at once: the erratum's case, exact on level-triggered soft RX (wcb_probe 6)
+    probe = s2.probe
+    probe.hello()
+    if probe.version.isdigit() and int(probe.version) >= PROBE_LEVELRX_VERSION:
+        s2.release()
+        _bind_soft_in_order(bench, s2, s4, *([s5] if s5 else []))
+        lines, res, lost, chans = run_arm("two soft channels", soft_count)
+        for key in (s2.key, s4.key):
+            if lost[key]:
+                bad.append(f"two soft {key} ch {chans[key]}: {len(lost[key])} of {len(lines)} lines not exact with two "
+                           f"level-triggered probe soft channels receiving at once, got e.g. {res[key][1]}")
+    else:
+        notes.append(f"two soft channels: skipped - {s2.probe_name} runs wcb_probe v{probe.version}, whose "
+                     f"edge-triggered soft RX loses edges to GPIO-3.14 itself; flash tests/hil/wcb_probe "
+                     f"(v{PROBE_LEVELRX_VERSION})")
+    bench.note("soft concurrent RX exact lines: " + " | ".join(notes))
+    assert not bad, "; ".join(bad) + " || " + " | ".join(notes)
 
 
 @test("input.bcast_in_block", "?BCAST,IN,S3,OFF blocks broadcasts from S3 but not ; commands", needs=["wcb1"])
@@ -669,9 +815,15 @@ def bcast_dfp_port_excluded(bench):
 # ============================================================ soft-serial behaviour
 @test("input.soft_rx_under_soft_tx", "(should) A soft port's input stays intact while the loop task writes soft ports", needs=["wcb1"])
 def soft_rx_under_soft_tx(bench):
-    """Probable firmware bug: applySoftSerialIntTx (WCB.ino:2056-2068) turns every S3-S5 TX byte into a core-1
-    critical section, masking the soft-RX edge ISR; ;S3 also flush()es unread S3 input away (WCB.ino:6506).
-    Arms C (no load) and B (hardware-port load) are controls."""
+    """Guards a soft-RX decoder race: EspSoftwareSerial 8.1.0's rxBits() tests "ISR edge buffer empty" and only
+    THEN reads micros() (SoftwareSerial.cpp:483-486). A core-1 task switch between the two leaves the edges that
+    arrive meanwhile unseen, so it injects a faux stop bit mid-byte: the byte's tail reads as 1s and the bytes after
+    it are framed from mid-byte until an idle gap. The S3 reader, serialCommandTask, shares core 1 with other
+    priority-1 tasks (loopTask never blocks), so a 1 ms time slice can land in that window; arm A4h (;S4
+    near-continuously) exposed it.
+    The firmware closes it by suspending the scheduler around WcbSoftSerial available/read/peek (WCB_SoftSerial.h;
+    docs/HIL_FIX_TRACKER.md #63). One corrupted line is a broadcast of garbage under the default config, so the bar
+    stays 40/40. Arms C (no load) and B (hardware-port load) are controls."""
     s2, s3, s4 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4")
     w = usb_wcb(bench)
     s3.listen(hw=True)   # inject from a probe hardware UART so the probe's own TX timing is not in question
@@ -695,11 +847,13 @@ def soft_rx_under_soft_tx(bench):
             m = w.dev.mark()
             if th:
                 th.start()
-            for i in range(0, 40, 10):
-                s3.send(b"".join(x.encode() + b"\r" for x in lines[i:i + 10]))
-            if th:
-                stop.set()
-                th.join()
+            try:
+                for i in range(0, 40, 10):
+                    s3.send(b"".join(x.encode() + b"\r" for x in lines[i:i + 10]))
+            finally:   # a failed send must not leave the loader typing ;S into W1 through every later test
+                if th:
+                    stop.set()
+                    th.join()
             time.sleep(1.5)
             got = {x[len("Ignored chain command: "):] for x in w.dev.since(m) if x.startswith("Ignored chain command: ")}
             results[arm] = sum(1 for x in lines if x in got)
@@ -730,7 +884,12 @@ def soft_rx_baud_sweep(bench):
         s3.listen()
     bench.note(f"soft RX exact lines of 20 per baud: {counts}")
     # The counts are lines that arrived EXACT, out of 20 — not lines lost.
-    assert counts[19200] == 20 and counts[38400] == 20, f"soft RX exact lines of 20 per baud: {counts}"
+    # 19200 is the bar a bit-banged RX actually holds under mesh load: measured 20/20 every run.
+    # 38400 is NOT — it has measured 15-19 of 20 across seven runs on unchanged firmware, so
+    # asserting it made this test a coin flip rather than a regression signal. It is recorded
+    # instead, alongside 57600/115200. The firmware half of this (?BAUD accepting rates the port
+    # cannot receive at) is fixed separately; see docs/HIL_FIX_TRACKER.md #34.
+    assert counts[19200] == 20, f"soft RX exact lines of 20 per baud: {counts}"
 
 
 @test("input.framing_variants", "8N2 input is accepted on hardware and soft ports; wrong-baud input never executes", needs=["wcb1"])
@@ -769,32 +928,43 @@ def framing_variants(bench):
             w.run("?BCAST,IN,S3,ON")
 
 
-@test("input.softserial_inttx_state", "Soft-port TX protection is reported per port and recomputed at ?BAUD, not when a port's role changes", needs=["wcb1"], links=[])
-def softserial_inttx_state(bench):
+@test("input.softserial_tx_rmt", "S3-S5 transmit through RMT and receive on the chip's interrupt mode (level-triggered on a classic ESP32, tracker #78): reported at ?BAUD for every soft port, and unchanged by a raw mapping", needs=["wcb1"], links=[])
+def softserial_tx_rmt(bench):
+    """WcbSoftSerial (WCB_SoftSerial.h) hands S3-S5 TX to an RMT channel; applySoftSerialIntTx() then only reports it.
+    A port falling back to bit-banging (no free RMT channel) would print '[SOFTSERIAL] S<n>: no RMT channel' at begin
+    and report its old protection state here instead - which is exactly what this test would catch.
+    It also reports the receive side (tracker #78): on a classic ESP32 (?HW 1/21/23/24) the vendored EspSoftwareSerial
+    receives on a level-emulated interrupt (ESP32 erratum GPIO-3.14), on an ESP32-S3 (?HW 31/32) on the stock edge
+    interrupt. Checked for each port ?BAUD re-begins here, at 9600 (below ~74880 baud, where the level path applies)."""
     w = usb_wcb(bench)
-    if token(bench.config_tokens(1, refresh=True), "?MAP,SERIAL,S5"):
+    tokens = bench.config_tokens(1, refresh=True)
+    if token(tokens, "?MAP,SERIAL,S5"):
         raise Skip("W1 S5 already has a serial mapping")
-    protected = "bit-bang TX: interrupt-protected (loop-task only)"
+    hw = (token(tokens, "?HW,") or "?HW,?").split(",")[1]
+    rx_mode = ("level-triggered" if hw in ("1", "21", "23", "24") else
+               "edge-triggered" if hw in ("31", "32") else None)   # None: unknown board, any RX line will do
+    rmt = "[SOFTSERIAL] S{} TX: RMT (hardware-timed)"
     problems = []
     with config_guard(bench, 1):
         try:
             w.run("?DEBUG,ON")
             for n in "345":
                 out = w.run(f"?BAUD,S{n},9600")
-                if not _has(out, f"[SOFTSERIAL] S{n} {protected}"):
+                if not _has(out, rmt.format(n)):
                     problems.append(f"?BAUD,S{n}: {out}")
+                rx = f"[SOFTSERIAL] S{n} RX: " + (rx_mode or "")
+                if not _has(out, rx):
+                    problems.append(f"?BAUD,S{n} on ?HW,{hw}: no '{rx}' line: {out}")
             if any("[SOFTSERIAL]" in x for x in w.run("?BAUD,S2,9600")):
                 problems.append("?BAUD,S2 printed a [SOFTSERIAL] line for a hardware port")
             out = w.run("?MAP,SERIAL,S5,R,S4")
-            if not _has(out, "Serial mapping set: Serial5 (RAW) -> 1 destination(s)") or _has(out, "[SOFTSERIAL]"):
+            if not _has(out, "Serial mapping set: Serial5 (RAW) -> 1 destination(s)"):
                 problems.append(f"?MAP,SERIAL,S5,R,S4: {out}")
-            if not _has(w.run("?BAUD,S5,9600"), "[SOFTSERIAL] S5 bit-bang TX: unprotected (a core-0 task can write this port)"):
-                problems.append("a raw-mapped S5 was not reported unprotected after ?BAUD")
+            if not _has(w.run("?BAUD,S5,9600"), rmt.format(5)):
+                problems.append("a raw-mapped S5 no longer reports RMT TX")
             out = w.run("?MAP,SERIAL,CLEAR,S5")
             if not _has(out, "Serial mapping removed for Serial5"):
                 problems.append(f"?MAP,SERIAL,CLEAR,S5: {out}")
-            if not _has(w.run("?BAUD,S5,9600"), f"[SOFTSERIAL] S5 {protected}"):
-                problems.append("S5 was not protected again after the mapping was cleared")
         finally:
             w.run("?DEBUG,OFF")
     assert not problems, "; ".join(problems)
@@ -807,6 +977,24 @@ def _da_rows(w):
 
 def _da_present(w, port):
     return any(re.match(rf"^\s+{port}\s", x) for x in _da_rows(w))
+
+
+def _da_types(w, port):
+    """The types ?WDP,DA lists on <port>, in its order (first heard first)."""
+    return [x.split()[1] for x in _da_rows(w) if re.match(rf"^\s+{port}\s", x)]
+
+
+def _da_wait_clear(w, port):
+    """Wait out the 90 s TTL of an earlier test's announces on <port>."""
+    deadline = time.monotonic() + 100
+    while _da_present(w, port):
+        if time.monotonic() > deadline:
+            raise Skip(f"{port}'s WDP-DA entries did not expire in 100 s (90 s TTL)")
+        time.sleep(5)
+
+
+def _unlabelled(bench, port):
+    return token(bench.config_tokens(1, refresh=True), f"?LABEL,{port},") is None
 
 
 @test("input.wdpda_basic", "An @WDP1 announce on a port is recorded, printed once, and never broadcast", needs=["wcb1"])
@@ -831,6 +1019,35 @@ def wdpda_basic(bench):
     watch.silent(s2, s4, w2s3, window=0.5)
     rows = _da_rows(w)
     assert any(re.match(rf"^\s+S3\s+{name}\s+fw 9\.8\.7", x) for x in rows), f"?WDP,DA: {rows}"
+
+
+# Run order is decoration order, and every accepted announce holds its port for the 90 s TTL. wdpda_basic, _fields
+# and _usb_and_blocked_port skip on a live entry and _rejects waits one out, so they go first, each on a port no
+# earlier test left an entry on. wdpda_propagation (W2 only, ~100 s) then outlasts their entries, so wdpda_ttl and the
+# shared-port tests after it find S3-S5 empty instead of each waiting out a TTL.
+@test("input.wdpda_rejects", "Malformed or foreign @WDP lines vanish; lowercase @wdp1 is ordinary text", needs=["wcb1"])
+def wdpda_rejects(bench):
+    s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")
+    require_tokens(bench, 1, "?BCAST,IN,S5,ON", "?BCAST,OUT,S2,ON", "?BCAST,OUT,S3,ON", "?BCAST,OUT,S4,ON")
+    w = usb_wcb(bench)
+    _da_wait_clear(w, "S5")   # already empty in a full run, which reaches this before wdpda_fields; a rerun may wait
+    prime(s5)
+    time.sleep(0.3)
+    watch = Watch(s2, s3, s4)
+    m = w.dev.mark()
+    for bad in (b'@WDP1 {"fw":"1"}\n', b'@WDP1 {"type":""}\n', b"@WDP1 nojson\n", b'@WDP2 {"type":"HILX"}\n', b"@WDPjunk\n"):
+        s5.send(bad)
+        time.sleep(0.3)
+    watch.silent(s2, s3, s4, window=1.0)
+    # S5's lines only: another port's entry can reach its TTL inside this window - '[WDP-DA] S2: HILDV stopped
+    # announcing' failed a full run that way. S5 had no entry at the mark, so an accept there always prints.
+    hits = [x for x in w.dev.since(m) if x.startswith("[WDP-DA] S5:")]
+    assert not hits, f"a malformed announce was accepted: {hits}"
+    assert not _da_present(w, "S5"), "S5 was recorded from a malformed announce"
+    watch = Watch(s2, s3, s4)
+    s5.send(b'@wdp1 {"type":"HILDF"}\n')
+    for l in (s2, s3, s4):
+        watch.expect(l, b'@wdp1 {"type":"HILDF"}\r', timeout=2)
 
 
 @test("input.wdpda_fields", "WDP-DA optional hw/caps, 24/27-char truncation, and ',' ']' scrubbing", needs=["wcb1"])
@@ -863,7 +1080,9 @@ def wdpda_usb_and_blocked_port(bench):
         m = w.dev.mark()
         w.send('@WDP1 {"type":"HILDU","fw":"1"}')
         watch.silent(s3, s4, s5, window=1.5)
-        assert not any(x.startswith("[WDP-DA]") for x in w.dev.since(m)), "a USB @WDP1 line was accepted"
+        # An earlier test's entry expiring is not an accept; a rerun ~90 s after one can land on it.
+        hits = [x for x in w.dev.since(m) if x.startswith("[WDP-DA]") and not x.endswith(" stopped announcing")]
+        assert not hits, f"a USB @WDP1 line was accepted: {hits}"
         prime(s2)
         time.sleep(0.3)
         m = w.dev.mark()
@@ -874,27 +1093,79 @@ def wdpda_usb_and_blocked_port(bench):
         w.run("?BCAST,IN,S2,ON")
 
 
-@test("input.wdpda_rejects", "Malformed or foreign @WDP lines vanish; lowercase @wdp1 is ordinary text", needs=["wcb1"])
-def wdpda_rejects(bench):
-    s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")
-    require_tokens(bench, 1, "?BCAST,IN,S5,ON", "?BCAST,OUT,S2,ON", "?BCAST,OUT,S3,ON", "?BCAST,OUT,S4,ON")
+@test("input.wdpda_propagation", "A WDP-DA type on W2's unlabeled S4 appears in W1's WDP dump and clears on expiry (~100 s)", needs=["wcb1"])
+def wdpda_propagation(bench):
+    s4 = link(bench, 2, "S4")
+    tokens = bench.config_tokens(2, refresh=True)
+    if token(tokens, "?LABEL,S4,") or token(tokens, "?WDP,OFF"):
+        raise Skip("W2 S4 is labelled or W2 has WDP off")
     w = usb_wcb(bench)
-    if _da_present(w, "S5"):
-        raise Skip("S5 still has a WDP-DA entry (90 s TTL)")
-    prime(s5)
-    time.sleep(0.3)
-    watch = Watch(s2, s3, s4)
-    m = w.dev.mark()
-    for bad in (b'@WDP1 {"fw":"1"}\n', b'@WDP1 {"type":""}\n', b"@WDP1 nojson\n", b'@WDP2 {"type":"HILX"}\n', b"@WDPjunk\n"):
-        s5.send(bad)
+    name = "HILDP" + marker()[3:7]
+    with Console(bench, 2) as c2:
+        prime(s4)
         time.sleep(0.3)
-    watch.silent(s2, s3, s4, window=1.0)
-    assert not any(x.startswith("[WDP-DA]") for x in w.dev.since(m)), "a malformed announce was accepted"
-    assert not _da_present(w, "S5"), "S5 was recorded from a malformed announce"
-    watch = Watch(s2, s3, s4)
-    s5.send(b'@wdp1 {"type":"HILDF"}\n')
-    for l in (s2, s3, s4):
-        watch.expect(l, b'@wdp1 {"type":"HILDF"}\r', timeout=2)
+        m = c2.mark()
+        s4.send(f'@WDP1 {{"type":"{name}","fw":"1.0"}}\n'.encode())
+        c2.expect(rf"\[WDP-DA\] S4: {name} fw 1\.0", timeout=4, since=m)
+        time.sleep(3)
+        dump = w.run("?WDP,DUMP", timeout=8)
+        assert any(f"[WDPIF:N=2,S=4,DEV={name}]" in x for x in dump), "W1's WDP dump does not show W2 S4's announced type"
+        c2.expect(rf"\[WDP-DA\] S4: {name} stopped announcing", timeout=100, since=m)
+        time.sleep(3)
+        dump = w.run("?WDP,DUMP", timeout=8)
+        assert not any("[WDPIF:N=2,S=4," in x for x in dump), "W2 S4 still labelled in W1's dump after expiry"
+
+
+def _da_clear_on(c, port):
+    """Wait out an earlier announce on <port> of the board behind Console c (90 s TTL)."""
+    deadline = time.monotonic() + 100
+    while True:
+        m = c.send("?WDP,DA")
+        time.sleep(0.6)
+        if not any(re.match(rf"^\s+{port}\s", x) for x in c.lines(m)):
+            return
+        if time.monotonic() > deadline:
+            raise Skip(f"{port}'s WDP-DA entries did not expire in 100 s (90 s TTL)")
+        time.sleep(5)
+
+
+@test("input.wdpda_shared_label_mesh", "Two @WDP1 types taking turns on W2's unlabelled S4: W1 keeps seeing the first as the port label, and W2 sends no extra adverts", needs=["wcb1"])
+def wdpda_shared_label_mesh(bench):
+    s4 = link(bench, 2, "S4")
+    tokens = bench.config_tokens(2, refresh=True)
+    if token(tokens, "?LABEL,S4,") or token(tokens, "?WDP,OFF"):
+        raise Skip("W2 S4 is labelled or W2 has WDP off")
+    w = usb_wcb(bench)
+    a, b = "HILMA" + marker()[3:7], "HILMB" + marker()[3:7]
+    la = f'@WDP1 {{"type":"{a}","fw":"1"}}\n'.encode()
+    lb = f'@WDP1 {{"type":"{b}","fw":"2"}}\n'.encode()
+    with Console(bench, 2) as c2:
+        _da_clear_on(c2, "S4")
+        prime(s4)
+        time.sleep(0.3)
+        m = c2.mark()
+        s4.send(la)
+        c2.expect(rf"\[WDP-DA\] S4: {a} fw 1", timeout=4, since=m)
+        s4.send(lb)
+        c2.expect(rf"\[WDP-DA\] S4: {b} fw 2", timeout=4, since=m)
+        time.sleep(3)   # A's arrival changed W2's advert: let it and its re-send reach W1
+        assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N=2,S=4,DEV={a}]"), "W1 does not see the first-heard type as W2 S4's label"
+        # A label that followed the latest announce would move on every one of these, and each
+        # move costs W2 an advert plus a re-send (the on-change check in wdpTick).
+        c2.expect(r"MGMT debugging enabled", timeout=3, since=c2.send("?DEBUG,MGMT,ON"))
+        try:
+            m = c2.mark()
+            for _ in range(3):
+                s4.send(lb)
+                time.sleep(1.0)
+                s4.send(la)
+                time.sleep(1.0)
+            time.sleep(1.0)
+            sent = [x for x in c2.lines(m) if x.startswith("[WDP] advert sent")]
+        finally:
+            c2.send("?DEBUG,MGMT,OFF")
+        assert len(sent) <= 2, f"W2 sent {len(sent)} adverts in 7 s while two devices took turns on S4"
+        assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N=2,S=4,DEV={a}]"), "W2 S4's label moved in W1's view while the devices took turns"
 
 
 @test("input.wdpda_ttl", "A WDP-DA entry expires 90 s after the last announce; re-announcing refreshes it (~3 min)", needs=["wcb1"])
@@ -921,27 +1192,119 @@ def wdpda_ttl(bench):
     assert 148 <= elapsed <= 156, f"expired {elapsed:.1f} s after the first announce, expected ~150 (60 + 90)"
 
 
-@test("input.wdpda_propagation", "A WDP-DA type on W2's unlabeled S4 appears in W1's WDP dump and clears on expiry (~100 s)", needs=["wcb1"])
-def wdpda_propagation(bench):
-    s4 = link(bench, 2, "S4")
-    tokens = bench.config_tokens(2, refresh=True)
-    if token(tokens, "?LABEL,S4,") or token(tokens, "?WDP,OFF"):
-        raise Skip("W2 S4 is labelled or W2 has WDP off")
+@test("input.wdpda_shared_port", "Two @WDP1 types on one port each keep a record; the first heard keeps the port label, so taking turns sends no adverts", needs=["wcb1"])
+def wdpda_shared_port(bench):
+    s3 = link(bench, 1, "S3")
     w = usb_wcb(bench)
-    name = "HILDP" + marker()[3:7]
-    with Console(bench, 2) as c2:
-        prime(s4)
+    me = usb_wcb_number(bench)
+    _da_wait_clear(w, "S3")
+    a, b = "HILSA" + marker()[3:7], "HILSB" + marker()[3:7]
+    la = f'@WDP1 {{"type":"{a}","fw":"1.1"}}\n'.encode()
+    lb = f'@WDP1 {{"type":"{b}","fw":"2.2","hw":"revC","caps":["hil.x"]}}\n'.encode()
+    prime(s3)
+    time.sleep(0.3)
+    m = w.dev.mark()
+    s3.send(la)
+    w.dev.expect(rf"^\[WDP-DA\] S3: {a} fw 1\.1$", timeout=3, since=m)
+    s3.send(lb)
+    w.dev.expect(rf"^\[WDP-DA\] S3: {b} fw 2\.2$", timeout=3, since=m)
+    m = w.dev.mark()
+    s3.send(la)
+    time.sleep(0.5)
+    s3.send(lb)
+    time.sleep(1.0)
+    again = [x for x in w.dev.since(m) if x.startswith("[WDP-DA]")]
+    assert not again, f"a re-announce printed again: {again}"
+    assert _da_types(w, "S3") == [a, b], f"?WDP,DA: {_da_rows(w)}"
+    dump = w.run("?WDP,DUMP", timeout=8)
+    da = [x.rstrip() for x in dump if x.startswith(f"[WDPDA:N={me},S=3,")]
+    assert len(da) == 2, f"expected two WDPDA records on S3: {da}"
+    assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={a},FW=1\.1,HW=,CAPS=,AGE=\d+\]$", da[0]), da[0]
+    assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={b},FW=2\.2,HW=revC,CAPS=hil\.x,AGE=\d+\]$", da[1]), da[1]
+    if not _unlabelled(bench, "S3"):
+        raise Skip("record checks passed; the port-label checks need W1 S3 unlabelled (input.wdpda_shared_label_mesh covers them on W2 S4)")
+    assert _has(dump, f"[WDPIF:N={me},S=3,DEV={a}]"), f"S3's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
+    # A label that followed the latest announce would move on every one of these, and each
+    # move costs an advert plus a re-send (the on-change check in wdpTick).
+    try:
+        assert _has(w.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled")
+        m = w.dev.mark()
+        for _ in range(3):
+            s3.send(lb)
+            time.sleep(1.0)
+            s3.send(la)
+            time.sleep(1.0)
+        time.sleep(1.0)
+        sent = [x for x in w.dev.since(m) if x.startswith("[WDP] advert sent")]
+    finally:
+        w.run("?DEBUG,MGMT,OFF")
+    assert len(sent) <= 2, f"{len(sent)} adverts in 7 s while two devices took turns announcing"
+    assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N={me},S=3,DEV={a}]"), "S3's label moved while the devices took turns"
+
+
+@test("input.wdpda_port_full", "A fifth type on a full port replaces the one heard from least recently; the first heard keeps the label", needs=["wcb1"])
+def wdpda_port_full(bench):
+    s4 = link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    me = usb_wcb_number(bench)
+    _da_wait_clear(w, "S4")
+    tag = marker()[3:7]
+    names = [f"HILF{i}{tag}" for i in range(5)]
+    lines = [f'@WDP1 {{"type":"{n}","fw":"{i}"}}\n'.encode() for i, n in enumerate(names)]
+    prime(s4)
+    time.sleep(0.3)
+    m = w.dev.mark()
+    for i in range(4):
+        s4.send(lines[i])
+        w.dev.expect(rf"^\[WDP-DA\] S4: {names[i]} fw {i}$", timeout=3, since=m)
         time.sleep(0.3)
-        m = c2.mark()
-        s4.send(f'@WDP1 {{"type":"{name}","fw":"1.0"}}\n'.encode())
-        c2.expect(rf"\[WDP-DA\] S4: {name} fw 1\.0", timeout=4, since=m)
-        time.sleep(3)
-        dump = w.run("?WDP,DUMP", timeout=8)
-        assert any(f"[WDPIF:N=2,S=4,DEV={name}]" in x for x in dump), "W1's WDP dump does not show W2 S4's announced type"
-        c2.expect(rf"\[WDP-DA\] S4: {name} stopped announcing", timeout=100, since=m)
-        time.sleep(3)
-        dump = w.run("?WDP,DUMP", timeout=8)
-        assert not any("[WDPIF:N=2,S=4," in x for x in dump), "W2 S4 still labelled in W1's dump after expiry"
+    s4.send(lines[0])   # the first is now the most recently heard, so the second is the least
+    time.sleep(0.5)
+    m = w.dev.mark()
+    s4.send(lines[4])
+    w.dev.expect(rf"^\[WDP-DA\] S4: {names[1]} dropped, port full \(4 devices\)$", timeout=3, since=m)
+    w.dev.expect(rf"^\[WDP-DA\] S4: {names[4]} fw 4$", timeout=3, since=m)
+    assert _da_types(w, "S4") == [names[0], names[2], names[3], names[4]], f"?WDP,DA: {_da_rows(w)}"
+    if not _unlabelled(bench, "S4"):
+        raise Skip("record checks passed; the port-label check needs W1 S4 unlabelled")
+    dump = w.run("?WDP,DUMP", timeout=8)
+    assert _has(dump, f"[WDPIF:N={me},S=4,DEV={names[0]}]"), f"S4's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
+
+
+@test("input.wdpda_shared_ttl", "Records on a shared port expire one at a time, and the label passes to the next-oldest (~100 s)", needs=["wcb1"])
+def wdpda_shared_ttl(bench):
+    s5 = link(bench, 1, "S5")
+    w = usb_wcb(bench)
+    me = usb_wcb_number(bench)
+    _da_wait_clear(w, "S5")
+    a, b = "HILTA" + marker()[3:7], "HILTB" + marker()[3:7]
+    la = f'@WDP1 {{"type":"{a}"}}\n'.encode()
+    lb = f'@WDP1 {{"type":"{b}"}}\n'.encode()
+    prime(s5)
+    time.sleep(0.3)
+    m = w.dev.mark()
+    s5.send(la)
+    t0 = time.monotonic()
+    w.dev.expect(rf"^\[WDP-DA\] S5: {a}$", timeout=3, since=m)
+    time.sleep(30)
+    s5.send(lb)
+    w.dev.expect(rf"^\[WDP-DA\] S5: {b}$", timeout=3, since=m)
+    next_b, gone = time.monotonic() + 20, None
+    while gone is None and time.monotonic() - t0 < 110:
+        if time.monotonic() >= next_b:
+            s5.send(lb)   # only the first device goes quiet
+            next_b += 20
+        gone = next((x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S5: {a} stopped announcing")), None)
+        time.sleep(0.25)
+    elapsed = time.monotonic() - t0
+    assert gone, f"{a} did not expire within 110 s"
+    bench.note(f"first record on a shared port expired {elapsed:.1f} s after its only announce")
+    assert 88 <= elapsed <= 96, f"{a} expired {elapsed:.1f} s after its only announce, expected ~90"
+    assert not any(x.startswith(f"[WDP-DA] S5: {b} stopped") for x in w.dev.since(m)), f"{b} expired while it kept announcing"
+    assert _da_types(w, "S5") == [b], f"?WDP,DA: {_da_rows(w)}"
+    if not _unlabelled(bench, "S5"):
+        raise Skip("record checks passed; the port-label check needs W1 S5 unlabelled")
+    assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N={me},S=5,DEV={b}]"), "S5's label did not pass to the device still announcing"
 
 
 # ============================================================ probable bugs, asserted as intended

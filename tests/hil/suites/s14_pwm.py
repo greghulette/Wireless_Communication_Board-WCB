@@ -33,9 +33,10 @@ def _pwm_reboot(w, since, timeout=30):
 
 
 def _inline_clear_out(w, port):
+    """Clear a PWM output port and wait out its reboot - deferred now, not taken inline."""
     m = w.send(f"?MAP,PWM,CLEAR,OUT,{port}")
-    w.dev.expect(r"^Rebooting in 3 seconds", timeout=5, since=m)
-    w.wait_boot(m, timeout=30)
+    w.dev.expect(r"^PWM output cleared", timeout=5, since=m)
+    _pwm_reboot(w, m)
     return m
 
 
@@ -125,7 +126,7 @@ def p_output_port(bench):
             _inline_clear_out(w, "S4")
 
 
-@test("pwm.p_undeclared_softport", ";P on an ordinary soft-serial port parks the line LOW; the port still transmits afterwards", needs=["wcb1"])
+@test("pwm.p_undeclared_softport", ";P on an ordinary soft-serial port gives a real pulse from the first call and parks the line LOW; the port still transmits afterwards", needs=["wcb1"])
 def p_undeclared_softport(bench):
     s4 = link(bench, 1, "S4")
     w = usb_wcb(bench)
@@ -146,7 +147,9 @@ def p_undeclared_softport(bench):
         w.send(";P41500")
         time.sleep(0.6)
         second = s4.pulses(m)
-        assert not first, f"the first ;P counted a pulse from an idle-high line: {first}"
+        # S3-S5 TX is RMT (WCB_SoftSerial.h): the pin's GPIO latch was never written, so pinMode drives it LOW and the
+        # FIRST ;P is already a real pulse. (Bit-banged TX left the latch HIGH, so the first ;P had no rising edge.)
+        assert len(first) == 1 and abs(first[0][0] - 1500) <= 40, f"first ;P: {first}"
         assert len(second) == 1 and abs(second[0][0] - 1500) <= 40, f"second ;P: {second}"
     finally:
         s4.pwm_stop()
@@ -263,7 +266,8 @@ def p_forwarded_stats(bench):
         second = w2s3.pulses(m)
         stats = _stats_pwm(w)
         sent = [x for x in w.dev.since(wm) if re.search(r"\[ETM\] Sent seq \d+: ;P31500", x)]
-        assert not first, f"first ;P counted a pulse from an idle-high line: {first}"
+        # With RMT TX the first ;P is a real pulse too - see pwm.p_undeclared_softport.
+        assert len(first) == 1 and abs(first[0][0] - 1500) <= 50, f"first ;P: {first}"
         assert len(second) == 1 and abs(second[0][0] - 1500) <= 50, f"second ;P: {second}"
         assert stats == (2, 2, 0), f"PWM Passthrough stats {stats}, expected Attempts 2 Success 2 Failed 0"
         assert not sent, f";P went over ETM: {sent}"
@@ -323,7 +327,7 @@ def clear_out_restores_flags(bench):
             w.run("?BCAST,IN,S4,ON")
 
 
-@test("pwm.bcast_and_serial_on_output_port", "Broadcasts skip a PWM output port; ;S writes to it live but not after reboot, and it boots LOW (2 reboots)", needs=["wcb1"])
+@test("pwm.bcast_and_serial_on_output_port", "Broadcasts skip a PWM output port; ;S never writes serial bytes onto it, live or after reboot, and it boots LOW (2 reboots)", needs=["wcb1"])
 def bcast_and_serial_on_output_port(bench):
     s4, s5 = link(bench, 1, "S4"), link(bench, 1, "S5")
     w = usb_wcb(bench)
@@ -338,12 +342,13 @@ def bcast_and_serial_on_output_port(bench):
             watch.expect(s5, b.encode() + b"\r", timeout=2)
             time.sleep(1.0)
             assert b.encode() not in watch.got(s4), "a broadcast reached the PWM output port"
+            # A declared PWM output carries servo pulses, so serial bytes must never land on it. With bit-banged TX a
+            # live-declared port still took ;S bytes until the next reboot; WcbSoftSerial::write drops them (RMT TX).
             m1 = marker("m")
-            w.send(";S4U")      # the output port idles LOW (WCB_PWM.cpp:772-773), which misframes a whole burst;
-            time.sleep(0.5)     # this throwaway line's stop bit leaves it idling HIGH for the marker
             watch = Watch(s4)
             w.send(f";S4,{m1}")
-            watch.expect(s4, m1.encode() + b"\r", timeout=2)
+            time.sleep(2.0)
+            assert m1.encode() not in watch.got(s4), ";S4 wrote serial bytes onto a live PWM output port"
             m = w.reboot()
             boot = w.dev.since(m)
             assert any(re.match(r"^  Serial4: Reserved for PWM Output", x) for x in boot), "boot banner lacks the reserved row"
@@ -396,7 +401,10 @@ def clear_out_keeps_queue(bench):
         m = w.send(f"{cmd}^;S0,{t}")
         rebooted = False
         try:
-            w.dev.expect(r"^Rebooting in 3 seconds", timeout=4, since=m)
+            # Any reboot form fails this test: the old inline one, or a deferred one that should
+            # never have been armed because nothing was removed.
+            w.dev.expect(r"^(Rebooting in 3 seconds|PWM output cleared|Rebooting now to apply PWM)",
+                         timeout=6, since=m)
             rebooted = True
             w.wait_boot(m, timeout=30)
         except AssertionError:
@@ -659,6 +667,7 @@ def remote_refusal_logged_once(bench):
             w.run("?WDP,POLL")
             time.sleep(3.0)
             refusals = [x for x in c2.lines(cm) if "Cannot use PWM on Serial2 - reserved for HCR/MP3/WLED" in x]
+            # (the message now reads ".../WLED/Maestro/DFP" - the prefix above still matches it)
             assert "?MAP,PWM,OUT,S2" not in snapshot(bench, 2), "W2 accepted a PWM output on its WLED port"
             watch = Watch(w2s2)
             w.send(f";W2,;S2,{t}")
@@ -736,7 +745,7 @@ def clear_all_reaches_remote(bench):
             s3.pwm_stop()
 
 
-@test("pwm.wdp_autoconfig_and_selfheal", "WDP PWMTARGET auto-configures a remote output W2 lacks, and self-heal clears it without a reboot (several reboots)", needs=["wcb1"], links=["W1S3"])
+@test("pwm.wdp_autoconfig_and_selfheal", "WDP PWMTARGET auto-configures a remote output W2 lacks, and CLEAR,ALL leaves W2 without it (explicit clear or self-heal; several reboots)", needs=["wcb1"], links=["W1S3"])
 def wdp_autoconfig_and_selfheal(bench):
     s3 = link(bench, 1, "S3")
     w = usb_wcb(bench)
@@ -748,7 +757,14 @@ def wdp_autoconfig_and_selfheal(bench):
             m = w.send("?MAP,PWM,S3,W2S3")
             _pwm_reboot(w, m)
             assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2)
-            _clear_remote_out(w, "S3")
+            # W1 still drives W2 S3, so any W1 advert that lands in W2's quiet window before its deferred reboot
+            # (rule 11) re-auto-configures the output - by design. Let W1's boot burst (~4.2 s after reset) finish
+            # first, and retry if a periodic advert still wins the race.
+            time.sleep(5.0)
+            for _ in range(3):
+                _clear_remote_out(w, "S3")
+                if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
+                    break
             assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "setup: W2 still declares S3"
             with Console(bench, 2) as c2:
                 cm = c2.mark()
@@ -760,10 +776,18 @@ def wdp_autoconfig_and_selfheal(bench):
                 cm = c2.mark()
                 m = w.send("?MAP,PWM,CLEAR,ALL")
                 _pwm_reboot(w, m)
-                c2.expect(r"\[WDP\] WCB1 no longer drives our S3 - clearing auto-configured PWM output", timeout=40, since=cm)
-                time.sleep(3.0)
-                assert not any("WCB2 came ONLINE (boot)" in x for x in w.dev.since(wm)), "self-heal rebooted W2"
-                assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "self-heal left W2 S3 declared"
+                # CLEAR,ALL now tells W2 directly (?MAP,PWM,CLEAR,OUT + ?REBOOT under ETM - tracker, and
+                # pwm.clear_all_reaches_remote), so W2 normally loses S3 by that route and reboots. WDP self-heal
+                # is the backstop for a target that missed the message; the bench cannot make W2 miss it without
+                # breaking the mesh, so either route passes and the log says which one ran.
+                deadline = time.monotonic() + 40
+                while time.monotonic() < deadline and "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
+                    time.sleep(3.0)
+                healed = any("no longer drives our S3" in x for x in c2.lines(cm))
+                bench.note("W2 S3 cleared by " + ("WDP self-heal" if healed else "the explicit remote clear"))
+                if healed:
+                    assert not any("WCB2 came ONLINE (boot)" in x for x in w.dev.since(wm)), "self-heal rebooted W2"
+                assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "W2 S3 still declared after CLEAR,ALL"
         finally:
             s3.pwm_out(0)
             if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):

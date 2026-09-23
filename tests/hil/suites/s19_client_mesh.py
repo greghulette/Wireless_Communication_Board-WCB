@@ -100,7 +100,8 @@ def adopt_identity_route(bench):
                      f"[WDP] temporarily joined WCB{cid} HILProbe (temporary)"):
             if not _has(lines, want):
                 bad.append(f"no {want!r}")
-        if not any(re.search(rf"\[ETM\] WCB{cid} came ONLINE \(src MAC: 02:[0-9A-F]{{2}}:[0-9A-F]{{2}}:00:00:{cid:02X}\)", x) for x in lines):
+        if not any(re.search(rf"\[ETM\] WCB{cid} came ONLINE (?:\(boot\) )?\(src MAC: 02:[0-9A-F]{{2}}:[0-9A-F]{{2}}:00:00:{cid:02X}\)", x) for x in lines):
+            # "(boot)" appears since WCB_Client sends boot announces like a WCB (tracker #11).
             bad.append("the ONLINE line has the wrong MAC")
         dump = _dump(w)
         row = _row(dump, cid)
@@ -535,11 +536,11 @@ def _chain_run(w, l, port, tag, probe=None):
     return exact, 200 - exact, len(l.errors(m))
 
 
-@test("input.softserial_tx_integrity", "Rule 13: a protected soft port's TX stays byte-exact with and without mesh load; an unprotected port is measured for comparison (slow, ~2 min)", needs=["wcb1", "probe2"])
+@test("input.softserial_tx_integrity", "Rule 13: soft-port TX (RMT) stays byte-exact with and without mesh load, raw-mapped port included (slow, ~2 min)", needs=["wcb1", "probe2"])
 def softserial_tx_integrity(bench):
-    """applySoftSerialIntTx protects S3-S5 only where no core-0 task writes the port (WCB.ino:2016-2068); a raw mapping
-    makes S5 unprotected. What disturbs an unprotected byte is not established (tick, time-slicing with other
-    priority-1 core-1 tasks), so the unprotected arm is recorded, not asserted."""
+    """S3-S5 transmit through RMT (WCB_SoftSerial.h), so a port's role no longer changes its TX timing. The raw-mapped
+    S5 arm used to be the bit-banged "unprotected" port (60-73 of 200 exact under mesh load) and was only recorded;
+    with RMT it is held to the same bar as the others."""
     s3, s5 = link(bench, 1, "S3"), link(bench, 1, "S5")
     require_tokens(bench, 1, "?BAUD,S3,9600", "?BAUD,S5,9600", "?BCAST,OUT,S5,ON", "?BCAST,IN,S5,ON")
     w = usb_wcb(bench)
@@ -551,16 +552,16 @@ def softserial_tx_integrity(bench):
             try:
                 w.run("?DEBUG,ON")
                 w.run("?MAP,SERIAL,S5,R,S4")
-                unprotected = _has(w.run("?BAUD,S5,9600"), "[SOFTSERIAL] S5 bit-bang TX: unprotected (a core-0 task can write this port)")
+                rmt_s5 = _has(w.run("?BAUD,S5,9600"), "[SOFTSERIAL] S5 TX: RMT (hardware-timed)")
                 w.run("?DEBUG,OFF")
-                results["unprotected, mesh load"] = _chain_run(w, s5, 5, "C", probe)
+                results["raw-mapped S5, mesh load"] = _chain_run(w, s5, 5, "C", probe)
             finally:
                 w.run("?DEBUG,OFF")
                 w.run("?MAP,SERIAL,CLEAR,S5")
                 w.run("?BAUD,S5,9600")
     bench.note("soft-serial TX (exact, wrong, RXERR): " + "; ".join(f"{k}: {v}" for k, v in results.items()))
-    assert unprotected, "the raw mapping did not report S5 as unprotected"
-    for arm in ("protected, mesh load", "protected, no load"):
+    assert rmt_s5, "a raw-mapped S5 did not report RMT TX"
+    for arm in ("protected, mesh load", "protected, no load", "raw-mapped S5, mesh load"):
         assert results[arm][1:] == (0, 0), f"{arm}: {results[arm]}"
 
 

@@ -35,6 +35,46 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-23 | **Full run 20260923-154611 (probe 6): 4 FAIL, all diagnosed and adversarially verified.** `etm.offline_detection_timing` = a pre-existing cross-core race on `boardTable` presence, filed and fixed as **#80** (spinlock helpers). `peers.controller_off_on` = test bug (an ACK during the OFF window re-adds WCB20; now excused only when that ACK is logged). `client_mesh.rejoin_seq_reuse` + `input.mesh_bcast_to_ports` = the probe: wcb_probe 6 boot-looped on interrupt-WDT panics after a CPU-only reset left a soft-RX level arm with no handler, and the harness kept reading its lost channel - #78's new failure mode, fixed in wcb_probe 7, hardened in WCB `setup()` (`clearStaleGpioInterrupts`), and the harness now re-binds after any probe restart (a dropped-and-reopened port included) and fails the test in which an unplanned one happens; a review pass made the forget selective and the end-of-test incident `RESET` the probe, so probe and host never disagree on which headers are held. ESP32, S3 and probe compile; `selftest.py` 39/39. Nothing flashed. |
+| 2026-09-23 | #78 CONFIRMED and fixed (FIXED, unverified; compiled, not flashed). `softrx.erratum_pairs` on W1 (run 20260923-113109): 227 of 10125 two/three-port lines lost at -1.5 to -3 µs skew, all 10125 single-port lines exact; every attributable one-byte corruption is exactly one lost edge. Fix: EspSoftwareSerial 8.1.0 vendored at `Code/WCB/src/EspSoftwareSerial` with level-triggered, polarity-flipping RX on the classic ESP32 (S3 untouched), PWM input ISRs converted the same way, CI no longer installs the library, `?DEBUG` reports each soft port's RX mode. New test `softrx.level_irq_stuck_line`; `input.softserial_tx_rmt` asserts the RX mode. ESP32 69 % / S3 67 %, ISRs in IRAM, no stock library in the build. Next: flash W1/W2, run `softrx.*` and `input.softserial_tx_rmt`, then the soft-port and PWM suites. |
+| 2026-09-23 | Targeted run 20260923-095057 on the 09:49 images (#47, #73 D4-D9, probe 4): **139/140**. The one failure, `kyber.local_port_move_releases_old` step (e), was not the Kyber change: every probe channel re-bind pulled the WCB's RX line low, W1 read a NUL at the front of the next line, and its parser broadcast that line as an EMPTY command (a lone CR on S4) and lost it. Fixed on both sides (#79): wcb_probe 5 holds a re-bound channel's TX high, and the WCB line reader drops NUL bytes. New (should) test `input.nul_ignored` failed on the 09:49 image as predicted; with probe 5 and the new image `input.*` is 50/50 (3 known WDP-DA label skips) and the Kyber test passes (20260923-111854). #47 and #73 D4-D9 VERIFIED. |
+| 2026-09-23 | #78 measurement built (harness only; not run, nothing flashed): probe verb `TXSKEW` (wcb_probe 4, compiled) sets a sub-microsecond skew between up to three bit-banged lines, and new opt-in suite s23 has `softrx.erratum_pairs` (does W1 lose soft-port input to GPIO-3.14? pairs and triples at a swept skew against single-port controls) and `soak.w1s4_wire` (the W1S4 episode: hardware vs soft receiver, S4 alone vs with S2, crosstalk into idle S4). The level-triggered EspSoftwareSerial fix waits for a "confirmed". To run: flash probe1, add `softrx_erratum` / `w1s4_soak` to `opt_in`. |
+| 2026-09-23 | #47 applied (FIXED, unverified; compiled, not flashed): the cycle guard's never-popped `activeChainKeys` set is replaced by a per-item lineage (seqDepth + key hashes in front of the queued text, restored into `seqCurPath` at drain, pushed in `recallCommandSlot`, carried across `;t` by `commandGroupsPath`), plus a 16-slot queue reserve for nested expansions. New (should) tests `seq.cycle_guard_reuse` (should fail on the current images: DEPTH HILL8, REFUSE HILL1-3) and `seq.reuse_queue_reserve`; `seq.cycle_guard` unchanged. ESP32 compiles at 69% / 108120 B RAM. Wiki self-loop / state-machine examples rewritten. |
+| 2026-09-23 | #73 D4 applied (FIXED, unverified; compiled, not flashed): `kyberModeReservesPort()` - Kyber LOCAL reserves only its own port, REMOTE still S1 - in the HCR/MP3/WLED/DFP guards, `canUsePWMOnPort` and `;P`; the Kyber_Local boot skips the other port's UART when PWM owns it; the targeted Kyber bridge skips a device/PWM-owned port; the Wizard claims only the Kyber port and releases REMOTE's S1 (`KYBER,CLEAR`) before the device lines of a REMOTE -> local push. New (should) tests `kyber.local_free_port_takes_pwm` (should fail at the WLED S2 arm on the current images) and `wizard.kyber_local_frees_other_port` (no board). D4b filed (device guards lack a Maestro term; a skipped PWM mapping comes back). ESP32 compiles at 69%. |
+| 2026-09-23 | #73 D5 + D9 applied (FIXED, unverified; compiled, not flashed): one `kyberReleasePort()` for CLEAR, a `?KYBER,LOCAL` port move and `?MAESTRO,REMOTE`; REMOTE zeroes `kyberLocalPort`; the bare `?KYBER,LOCAL` keeps the current port; `?backup` and the Wizard release before BAUD/BCAST (Wizard also re-sends the released port's rows and asks for a reboot on MAESTRO,REMOTE). #28's note on a refused `?MAESTRO` during a restore corrected. New (should) tests `kyber.local_port_move_releases_old` (fails at step b on the current images, before any injection) and `wizard.kyber_release_order` (no board; passes standalone, and failed on the old parser.js - which is how the Wizard tests' persistent Chrome profile was found serving a stale cached parser.js; `openWizard()` now disables the HTTP cache); `kyber.local_rejected_port_keeps_forwarding` compares only the `?KYBER,LOCAL` line. ESP32 compiles at 69%. |
+| 2026-09-23 | #73 D6-D8 applied (FIXED, unverified; compiled, not flashed): the legacy S1 Maestro fallbacks skip an owned S1, a local Kyber target follows its Maestro slot (no broadcast skip, by decision), and ?KYBER/?config name the real Kyber port. New (should) tests `kyber.local_s1_legacy_fallback_skips_kyber_port` and `kyber.local_clear_maestro_drops_target` (both should fail on the current images); `kyber.local_mode_s2`'s needle updated. D6b and D7b filed open. ESP32 compiles at 69%. |
+| 2026-09-23 | Reconciled: 14 FIXED items promoted to VERIFIED because every named test passes on the current images (runs from 20260922-211114 on): #14, #28, #58, #61-#63, #65-#72. Still open: #47 (cycle guard), #64 (IRAM flag - no test reproduces it; the whole full run ran on the fix), #73 (Kyber D4-D9), #78 (soft RX). Design workflow for #47/#73/#78 running. |
+| 2026-09-23 | probe.soft_concurrent_rx residual: a verified diagnosis blamed ESP32 erratum GPIO-3.14 (lost edges, pins 0-31 share one interrupt status register). The rewritten self-check's control arm then caught an INTERMITTENT ~3.5 % W1S4 corruption with only one probe edge pin active (20260923-012123), which rules the erratum out for that episode. Minutes later everything was clean: W1S4 on a hardware UART 500/500, the control repeated 500/500, the full self-check 1000/1000 + 300/300 (20260923-012735). Filed #78 (open: bench check of the W1S4 lead/ground; inferred WCB exposure to the erratum) and corrected #66. |
+| 2026-09-23 | **Full run 20260922-215719 (21:01/21:02 images): 401 PASS / 2 FAIL / 4 SKIP in 1:39:11** - skips = 3 WDP-DA label checks (need an unlabelled W1 port) + ota_wrong_chip (opt-out). Both FAILs were NaviCore test bugs (#76). Then: W1/W2 flashed with the #75 heap hardening (23:58); regression 20260922-235913 (172 tests on the changed paths): 2 FAIL - inv.mgmt_seq_remote (lost once-sent SEQ reply, #77) and probe.soft_concurrent_rx (probe instrument, ~0.17% of lines when two soft channels receive at once; diagnosis running). Verification 20260923-002254: 18/18 PASS incl. sbus.trim_exact then the NaviCore readback (#76), mesh_stats_counts, all inv.* (#77), kyber.remote_roundtrip (retried once: try 1 lost one 6-byte frame, #74). #74-#77 VERIFIED. |
+| 2026-09-22 | **Rerun 20260922-193306 (69 tests): 64 PASS / 4 FAIL / 1 SKIP** — all 9 input.wdpda_* PASS (session wcb-ce's issue #19). Greg decided #14 (apply) and the #28 follow-up (refuse a local-Maestro port); both applied, and a verified review closed two bypasses (the backup/Wizard target form, a later ?MAESTRO) and the push-order regression (?backup and Wizard now claim KYBER,LOCAL after the Maestros; the Wizard sends KYBER,CLEAR first on a port move and re-sends the released port's BAUD/BCAST). #70 OTA teardown ACK (WCB + NaviCore), #71 seqget retry, #72 host hibernate on critical battery (laptop on battery since 15:59) + awake-time detector, #73 Kyber follow-ups filed, not applied. W1/W2/NaviCore reflashed 21:01; targeted GUI rerun of 62 tests started. |
+| 2026-09-22 | **Triage of full run 20260922-151421 applied** (8 diagnoses, all adversarially verified; test rewrites by a per-file workflow, each diff adversarially reviewed). Firmware: #63 soft-port reads suspend the scheduler, #64 GPIO ISR service without ESP_INTR_FLAG_IRAM (crash risk found by two agents, confirmed from the map: __onPinInterrupt is in flash), #58 heap metric MALLOC_CAP_8BIT (explained), #28 reopened and fixed (refusal before any state change); NaviCore #65; probe #66 (wcb_probe 3). Tests #67-#69, plus inv.seqget_largest and kyber.local_port_s1_frees_s2. W1/W2 had been flashed by session wcb-ce at 19:25 from the same tree (it added WDP-DA per-port-and-type, issue #19, and three input.wdpda_* tests); NaviCore and both probes flashed 19:3x. Combined GUI rerun of 69 tests started. Awaiting Greg: #14 (who reads S1/S2 on Kyber_Local boards) and the #28 follow-up (refuse ?KYBER,LOCAL on a local-Maestro port). |
+| 2026-09-22 | **Opt-in run 20260922-185238** (Greg enabled ota_erase, ota_full, ota_full_wcb2, nvs_wear, seq_wipe, sbus_reset, navicore_clip): 8 PASS / 2 FAIL / 15 SKIP. The 15 OTA skips were the image lookup (Code/bin only; the bench build keeps the committed version string): _image now prefers results/builds/wcb-esp32-meshq. Opened and fixed #61 (firmware: a rejected re-BEGIN strands USB at 921600) and #62 (test: an RTS-only pulse never reset the SBUS controller on Windows). Both diagnoses adversarially verified. Not yet flashed or rerun. |
+| 2026-09-22 | **Full run 20260922-151421 (GUI, post-rewire): 357 PASS / 16 FAIL / 29 SKIP.** 12 of the 16 FAILs are one host event: Windows logged a power-source change at 15:59:03 and slept at 15:59:09; all seven bench ports errored in the same 12 ms; resumed 18:26 (so auth_mismatch_silent 'took' 8841 s). Harness now keeps the PC from idle-sleeping during a run, and reports an all-ports-at-once loss as ERROR 'NOT A RESULT' and waits for the ports (runner.host_usb_loss). Greg's rerun of the 16 (20260922-183613): 15 PASS; navicore.maestro_skip_not_logged_as_dispatch fails consistently (the first run in which it ran at all: every earlier run skipped it with 'NaviCore has no local Maestro slot that answers ?MAE,GET'). Remaining 4 real FAILs + 3 non-opt-in SKIPs under diagnosis (workflow). Skips: 26 of 29 are opt-ins. |
+| 2026-09-22 | Greg rewired probe2 (W2S1 tap -> header S2, W2S5 -> header S5); --discover found all 10 wires verified. navicore.plain_broadcast_both_ways + input.bcast_fanout PASS, and every tap-dependent test still PASSes (20260922-150647): #60 VERIFIED. The three timing tests that skipped now wait and PASS on their own (20260922-145506). All three failures of full run 20260922-125537 are resolved. |
+| 2026-09-22 | Kyber single-reader fix (#59) + probe hand-off guard (#60). Workflow diagnosis of the last 3 full-run failures, adversarially verified: two firmware (a local Maestro port on a Kyber board read by both the parser and the bridge task; ?KYBER,CLEAR leaving S1 double-read and printing no reboot notice), one harness (probe2 needs 3 hardware channels at once, and LRU eviction silently misattributed bytes). W1+W2 flashed; run 20260922-144915: every kyber.* and maestro.* PASS except two SKIPs (local_port_s3_frees_s2 by design; wdp_auto_remote_revert timing, being changed to wait). plain_broadcast_both_ways + bcast_fanout now fail with the guard's rewire message. |
+| 2026-09-22 | Tracker reconciled against the bench: every FIXED item whose named tests all PASS in full run 20260922-125537 or a later rerun is now VERIFIED (47 promoted). Totals: 52 VERIFIED, 1 FIXED (#28 - its test skips by design since ?KYBER,LOCAL,S3 is refused), 2 DEFERRED (#14, #47), 2 OBSOLETE (#33, #55 - bit-banged TX is gone), 1 OPEN (#58). |
+| 2026-09-22 | #52 decided (Greg): Maestro get with no slot unicasts to WCB<dev> within WCBQ, like the other two fallbacks. Both targets compile (69% / S3 67%), W1+W2 flashed. Maestro+Kyber suites 20 PASS / 12 SKIP (skips = bench wiring), NaviCore-hosted Maestro inventory PASS. |
+| 2026-09-22 | **Full run 20260922-125537: 347 PASS / 3 FAIL / 52 SKIP, 0 serial events** (best yet; every NaviCore test passed). input.bcast_out_block = W1 S4 config drift from the aborted run (and a double-click-queued rerun, closed 1 s after starting, re-left S4 OUT OFF) - restored W1 to baseline, test PASS x2. maestro.list_and_legacy_spellings = relayed {"sys":1} rc_ch line inside ?KYBER,LIST output - WCB.run() now filters sys lines, PASS x2. maestro.get_fallback_unicast_within_wcbq = #52, still DEFERRED (needs Greg's call). |
+| 2026-09-22 | GUI: dark theme by default (--light restores the bright one; palettes at the top of gui.py, DWM dark title bar) and a guard so a double-click during a run no longer queues a second run / clears results. Full run 20260922-125139 was aborted after 6 failures that were all one loose wire (W1S2 -> probe1 S4, knocked out during the unplug); rediscovered and restarted as 20260922-125537. |
+| 2026-09-22 | NaviCore USB output stall: HWCDC (esp32 3.3.4) drops to 'disconnected' after one 50 ms TX stall and only host INPUT reconnects it - replies arrived a command late (~2 % of back-to-back commands). NaviCore loop() now kickUsbCdcTx(): txfifo_flush + re-arm IN_EMPTY every 20 ms (0/800 stalls). NaviCore docs ARCHITECTURE/TROUBLESHOOTING updated. navicore.probe_temp_peer_not_learned ran for the first time (index guard) and found WCB_Client marking ANY heartbeat/boot-announce sender online while the offline sweep only covers floor/learned/special - a temporary client stayed 'known' forever (boot half introduced by my #11). Both handlers now gate on tracked senders; both WCB_Client copies identical; README 1.17.1 changelog. Test PASS. Two navicore tests (mesh_json_declined lost-output, mesh_stats_counts extra send) fail only on a SECOND consecutive navicore+sbus run; pass 4/4 alone and after sbus.* - open. |
+| 2026-09-22 | Bench contention: 4 orphaned headless Edge instances (from 2026-09-20) killed; sessions wcb-4f/-cf/-b7 asked to stay off the ports (all acked, none had touched them today). Real cause of the SBUS hang: bench.json sbus had been changed to COM19 (Bluetooth SPP) at 09:11 - likely the GUI port dropdown (lists all ports, wheel-scroll saves); restored COM4, dropdowns now USB-only / read-only / wheel-off. Own regression caught: setting write_timeout per send re-ran pyserial's SetCommState under the reader and delayed GET_CONFIG ~10 s on NaviCore - now set once at open (GET_CONFIG 10/10 in 0.1 s). sbus.* 9 PASS / 2 expected SKIP, twice. |
+| 2026-09-22 | Harness: SBUS rerun hung 10 min holding COM4 - its second ping's write() blocked forever (no write_timeout) while the controller was not draining its USB endpoint; a concurrent wizard.* run from another session was also on the bench. hil/serialdev.py now bounds every write (raises ExpectTimeout) and reopens a vanished port from the reader thread (the cause of the 8 sbus.* ERRORs in 20260921-143814). Verified offline against a fake pyserial: drop->reopen after 2 failed opens, send after reopen, stalled write fails in 0.1 s, close stops the reader. |
+| 2026-09-22 | Full run 20260921-143814 on the RMT image: 332 PASS / 9 FAIL / 8 ERROR, all classified - 8 sbus.* ERROR = the SBUS board's USB dropped mid-run and the harness never reopens a vanished port (not firmware); navicore x2 late replies; 3 pwm tests asserted bit-bang quirks (first ;P invisible; ;S bytes onto a live PWM output) - updated; inv.seqget_toobig opened #58; soft_rx 1 byte/~1000 lines once (3/3 clean after). Reflashed W1/W2 (the bench had gone offline mid-flash). Rerun 20260922-085933: 11 PASS + 1 expected skip, incl. every RMT test, the updated pwm tests, rejoin_seq_reuse and both navicore. **ESP32-S3 (WCB 3.2 / SBUS board) RMT check**: full 16 MB flash backed up, probe flashed: GPIO ISR L3 ESP_OK; S3/S4/S5 all rmt=yes alongside the NeoPixel (the whole 4-channel budget); 100-byte writes 104.7 ms @9600 (104.2 theoretical), 9.2 ms @115200 (8.7 - chunk gaps, 9 bytes/chunk on the S3's 48-word channels), 417.4 ms @2400; LED updated after. Backup written back, SBUS answers fwver 20260811-fae0af6. |
+| 2026-09-21 | **Option 4 (Greg): S3-S5 TX on RMT.** New WcbSoftSerial (subclass of the library: RX stays EspSoftwareSerial, write() goes to an RMT channel via a simple encoder, 10 MHz >= 4800 baud / 1 MHz below, chunked to fit channel memory so the non-IRAM refill ISR is never needed mid-frame, falls back to bit-bang if no channel). ;P reclaims the pin via rmt_tx_switch_gpio. Results: soft_rx_under_soft_tx PASS, baud_on_raw_mapped_port PASS, core0_contention PASS, tx_integrity 200/200 on every arm incl. the old unprotected port (was 60-73/200). Then GPIO ISR service at level 3 (setup, before any attachInterrupt): soft_rx_baud_sweep 19200/38400/57600 20/20 x3 (was 15-19). ?BAUD S3-S5 now warns only above 57600. Tests rewritten: input.softserial_inttx_state -> input.softserial_tx_rmt; hcr.softserial_integrity_mesh_load and input.softserial_tx_integrity assert RMT (all arms). CLAUDE.md rule 13 rewritten. Both targets compile (69% / S3 67%). Full run 20260921-143814 started. |
+| 2026-09-21 | **#57 fixed**: UART0 driver installed from a core-0 task (beginUsbSerialOnCore0). A/B on W1: protected S3 mangled USB lines in ~half of runs; unprotected 0/6 (but 0/10 S3 blocks); protected + core-0 ISR 0/8 and 8/8 PASS. ?STATS prints serialRxOverflows when non-zero. Both targets compile (69% / S3 67%); W1+W2 flashed. Regression run 20260921-121337 (input/ota/chars/map/wcb, GUI): 94 PASS, 3 known #16 fails, plus input.softserial_tx_integrity 1/200 wrong once (S3 output burst mis-framed, the #55 residual) - then 3/3 PASS, 1200/1200 protected lines exact. CLAUDE.md rule 13 records the core-0 constraint. |
+| 2026-09-21 | Rerun 20260921-115338: chars.funcchar_change_restore + if.stored_seq_recall_time PASS. input.softserial_core0_contention reproduces (3 of 4 runs, GUI and CLI): opened **#57** - a USB command arriving during a mesh raw block to protected S3 loses its ';' ('7S4,…'/'784,…') and is broadcast; mechanism not proven, next steps listed there. |
+| 2026-09-21 | **Full run 20260921-105657 (GUI): 6 FAIL / 341 PASS / 51 SKIP** (morning: 27 FAIL). Known: input.soft_rx_under_soft_tx + map.baud_on_raw_mapped_port (#16), maestro.get_fallback_unicast_within_wcbq (#52). New: chars.funcchar_change_restore - my shared prefixCharOk validator reworded the collision refusal; original wording restored ('— … Pick a different function identifier.'), compiled. if.stored_seq_recall_time - harness race (the [IF] true echo printed 93 ms after the command reached S1; test now waits for it). input.softserial_core0_contention - 8/10: R9 two corrupt bytes (#55 residual) and R4 interleaved with a BROADCAST line: W1's USB input received ';S4,HILL12…' as '7S4,…' (0x3B->0x37, one bit), so the line lost its prefix and was broadcast as text to every port. Single occurrence, not reproduced; recorded, no fix. soft_rx_baud_sweep passed this run. Wiki draft (7 pages) done, uncommitted. |
+| 2026-09-21 | Decision (Greg): ?BCAST,RESET opens every port, device-owned ones included. Removed the device-port re-block (#41); message now says '(device ports included)'. Reflashed W1/W2; full run 20260921-105657 started in the GUI. hcr.status_reply_parse PASS after its age= wildcard stopped swallowing vage=. |
+| 2026-09-21 | Reruns on the final image: CLI 20260921-102109 (63 tests: 61 PASS; only bcast_reset_persists [awaiting decision] and baud_on_raw_mapped_port [#16]) + GUI 20260921-102817 (36 tests: 35 PASS). Every regression fix, #56, #32, all 6 hcr.* test updates, the ota/#L1/maestro/client_mesh/pwm test updates PASS; wcb.mgmt_pull, wdp.controller_auto_enable and dfp.config_frames pass on rerun (one-off misses). Last red: hcr.status_reply_parse - STATUS gained rx=/vage= (other session); test updated, not yet rerun. gui.py gained --run <globs> (opens + auto-starts); run.py forces UTF-8 stdout. |
+| 2026-09-21 | Rerun 20260921-100408 crashed on a cp1252 console encode (runner, not a test; rerun with PYTHONIOENCODING=utf-8). Up to the crash: mgmt_pull + map.text_* + clear_all_reaches_remote PASS. Found: #46 CLEAR,ALL never restored OUTPUT (fixed); W1 **S3** flags also left OFF by the 09-21 #46 regression (restored ON/ON - caused bcast_json_local_only + input_port_loses_output + a set_flags skip); pwm.wdp_autoconfig: CLEAR,ALL now clears W2 directly, so the self-heal step accepts either route. WcbCmd.h WCBCMD_VERSION still said 0.8.0 after the 0.9.0 commit - bumped in both copies. Reflashed W1/W2. |
+| 2026-09-21 | **Full run 20260921-085938: 27 FAIL / 312 PASS / 59 SKIP** (09-16: 66 fail+error; (should) fails 53 -> 4). Classified all 27. **Firmware:** #56 new (ETM CHAR loop-time broadcasts gated by lastReceivedViaESPNOW), #32 re-fixed (quiet param was never applied). **Tests out of date with deliberate changes:** 6 hcr.* (one-frame poll <QM,QD,QVV,QVA,QVB>, 3 s unseeded retries, STATUS/debug never transmit, volume 0-100 - the other session's HCR/WcbCmd 0.9.0 work), ota.local_parse_help_unknown (#30 hint), navicore.cli_codes (#L1 profile), maestro.get_edge_cases (#29 normalises ',00000000005' to channel 5), client_mesh.adopt_identity_route ('(boot)' since #11), pwm.wdp_autoconfig_and_selfheal (deferred reboot opens a window for W1's PWMTARGET advert - setup now waits + retries). **Already fixed mid-run:** 5 map.* + input.bcast_json_local_only (#46/#37/#50 regressions). **Known/deferred:** soft_rx_under_soft_tx, soft_rx_baud_sweep, map.baud_on_raw_mapped_port (#16), get_fallback_unicast_within_wcbq (#52). **Open:** input.bcast_reset_persists (needs Greg's call), wcb.mgmt_pull + wdp.controller_auto_enable + dfp.config_frames (single misses, rerunning). Reflashed W1/W2, restored W1 S2 BCAST ON/ON. |
+| 2026-09-21 | **Bench run on the new images caught three of my own fixes.** #46 (config-corrupting): re-issuing a mapping recorded the mapping's own disabled flags as 'previous', so CLEAR restored OFF and left the port dark - now records only when the slot is first claimed. #37: the separator was added to every remote line, changing wire bytes and spending a CHKSM char - now only when the payload starts with ','. #50 WCB half REVERTED: the WCB already sends target-0 JSON as an untracked ETM frame (bestEffortTelemetry); the double-processing was WCB_Client-only. Open: input.bcast_reset_persists is a design choice (device ports kept blocked vs RESET = all open) - Greg to decide; wcb.mgmt_pull got no reply at t=3.8 s but passed in 4 prior runs and MGMT works later in the same run, so re-run alone before calling it. |
+| 2026-09-21 | Worked the whole list. **49 of 55 fixed**, 6 DEFERRED with reasons (#14, #16, #33, #47, #52, #55 - each needs the bench or a decision, see its entry). All three repos compile clean: WCB 69% flash / 106032 B RAM, NaviCore 6% of 16 MB, WcbCmd + WCB_Client via both. **Nothing hardware-verified - the bench was powered down for this session and the previous one.** Cross-repo: WcbCmd (#2, #21) and WCB_Client (#11, #50) are changed in BOTH the canonical repo and the Arduino-Code sketchbook copy; per CLAUDE.md rule 1 push WcbCmd before the firmware, since CI clones it. |
+| 2026-09-20 | Third pass: #13 (ETM setters validated in both spellings + load-time clamp) and #18 (token-aware timer-splitter exemption, documented in SEQUENCE_INVENTORY.md). Thirteen defects fixed, all compile clean (68% flash / 106008 B RAM). Bench still powered down all session - nothing hardware-verified. |
+| 2026-09-20 | Second pass, bench still offline: fixed #4 (one prefixCharOk validator for all four prefix setters), #5 + #6 (Kyber ids 1-8; port validated before kyberPort/kyberUseTargeting are assigned, REMOTE included), #17 (staged serial mapping + bare ,R refused) and #15 (staged PWM mapping). Eleven defects fixed in total, all compile clean at 68% flash / 106008 B RAM. Still none hardware-verified. |
+| 2026-09-20 | Also fixed #1 (DFP port guard, five sites + three missing externs) and updated CLAUDE.md rule 11 to name both deferred-restart flags. Final build: 68% flash / 106008 B RAM, zero warnings. Six defects fixed, none hardware-verified. |
+| 2026-09-20 | Fixed #9, #8, #10, #12, #3 — all compile clean (68% flash, 106008 B RAM). **None verified on hardware:** the bench was powered down (all five COM ports FileNotFoundError), so the flash failed silently and a `pwm.*` run errored on port-open. Boards still run pre-session firmware. When the bench is back: flash both from `tests/hil/results/builds/wcb-esp32-meshq`, then run `pwm.*` (#8/#9/#10) and `etm.acked_not_executed_reboot`, `etm.dedup_ring_covers_pending`, `etm.pending_table_evict` (#12/#3). The harness changed with the firmware in three places (`_inline_clear_out`, `clear_out_keeps_queue`, `hil/wcb.py reboot()`), so those fail against old firmware until the boards are flashed. |
+| 2026-09-20 | Resumed. Greg had committed the harness plus the half-done #9 (WCB_PWM.{h,cpp} returned bool, but WCB.ino still rebooted inline) as `eb82f29`, and fixed HCR readback/graceful stop in `0fed82b` + `6aeee6a` — recheck #19/#20/#24 against those before touching them. Completed #9. |
 | 2026-09-16 | Analysis complete: 57 failures → 55 defects, ranked below. Nothing fixed yet. |
 
 
@@ -48,7 +88,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — conflict.dfp_port_unguarded PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `conflict.dfp_port_unguarded` |
@@ -69,7 +109,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — dfp.partial_frame_resync PASS on the bench (20260922-125537) |
 | **Owner** | `WcbCmd` |
 | **Effort** | S |
 | **Tests** | `dfp.partial_frame_resync` |
@@ -90,7 +130,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — etm.dedup_ring_covers_pending PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `etm.dedup_ring_covers_pending` |
@@ -111,7 +151,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — chars.cmdchar_lfi_guard, chars.legacy_lf_guard PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `chars.cmdchar_lfi_guard`, `chars.legacy_lf_guard` |
@@ -132,7 +172,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — kyber.target_id9_rejected PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `kyber.target_id9_rejected` |
@@ -153,7 +193,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — kyber.config_negatives PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `kyber.config_negatives` |
@@ -174,7 +214,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — navicore.wcb_send_ack_reflects_refusal PASS on the bench (20260922-125537) |
 | **Owner** | `NaviCore` |
 | **Effort** | S |
 | **Tests** | `navicore.wcb_send_ack_reflects_refusal` |
@@ -195,7 +235,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.clear_all_reaches_remote PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `pwm.clear_all_reaches_remote` |
@@ -216,7 +256,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.clear_out_keeps_queue, pwm.remove_clears_all_remote_outputs PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `pwm.clear_out_keeps_queue`, `pwm.remove_clears_all_remote_outputs` |
@@ -237,7 +277,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.p_refused_on_maestro_port PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `pwm.p_refused_on_maestro_port` |
@@ -258,7 +298,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — client_mesh.rejoin_seq_reuse PASS on the bench (20260922-125537) |
 | **Owner** | `unclear` |
 | **Effort** | M |
 | **Tests** | `client_mesh.rejoin_seq_reuse` |
@@ -279,7 +319,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — etm.acked_not_executed_reboot PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `etm.acked_not_executed_reboot` |
@@ -300,7 +340,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — etm.unvalidated_setters, etm.legacy_miss0_rejected PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `etm.unvalidated_setters`, `etm.legacy_miss0_rejected` |
@@ -321,10 +361,10 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — kyber.local_port_s1_frees_s2 (the replacement test) PASS in 20260922-211114 and 20260922-215719 |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
-| **Tests** | `kyber.local_port_s3_frees_s2` |
+| **Tests** | `kyber.local_port_s1_frees_s2` (replaces `kyber.local_port_s3_frees_s2`, which can never run now that #28 refuses S3-S5) |
 | **Subsystem** | maestro-kyber |
 
 **Mechanism.** `serialCommandTask` computes the right predicate at WCB.ino:7378 (`const int kyberOwned = Kyber_Local ? kyberLocalPort : 0;`) and uses it correctly for S3-S5 at :7383-7385 — but the S1/S2 branch at :7388-7391 is still a bare `if (Kyber_Local) { /* skip both */ }`. Its comment ("the Kyber task drains both regardless of kyberLocalPort") is factually wrong: `forwardDataFromKyber` returns at WCB.ino:4812 unless `kyberLocalPort` is set and then reads only that one port (:4821-4822), and `forwardMaestroDataToLocalKyber` reads only configured LOCAL Maestro ports (:4900-4910). So with `kyberLocalPort == 3` and no Maestro on S2, S2 has no reader at all: serialCommandTask skips it, KyberLocalTask never touches it, RawSerialForwardingTask only handles raw-mapped ports (:7425-7426). Separately, `processBroadcastCommand` skips `(i <= 2 && Kyber_Local)` at WCB.ino:7042, so broadcast OUTPUT to S1 and S2 is suppressed too — overriding the user's persisted `?BCAST,OUT,S2,ON`, which `?backup` still reports as ON. Bench evidence: results/20260916-122250/session.log lines 99363-100219 — `?KYBER,LOCAL,S3` accepted, then a `;S4` typed into W1 S2 never executed and a USB broadcast never reached S2, while the S4 control paths both worked. Same code has a sibling hole: :7383-7385 skips only `kyberOwned`, not local Maestro ports, so a Maestro on S4 with the Kyber on S3 is drained by BOTH serialCommandTask and forwardMaestroDataToLocalKyber (`processIncomingSerial` filters MP3/DFP/HCR/query/reconfig at WCB.ino:7112-7128 but not Maestro ports) — byte-stealing, confirmable in source, not exercised by this run.
@@ -337,12 +377,15 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 **Risk.** This changes who reads S1/S2 on every Kyber_Local board in the field, so the single-reader invariant must hold exactly: verify on the bench with the Kyber on S2 (the common case) that S2 is still read only by the Kyber task and S1 only by the Maestro bridge, before and after. The Maestro-port skip added to S3-S5 is the riskier half — get the 'is this a local Maestro port' helper right or you will silently stop parsing commands on a port that used to work.
 
+**Update (2026-09-22).** #28 now refuses S3-S5, but #14 is still reachable through the other hardware port. With `?KYBER,LOCAL,S1` and no Maestro on S2, serialCommandTask still skips S1 AND S2 for any Kyber_Local board (WCB.ino ~:7620-7624, whose comment is still wrong). KyberLocalTask reads only `kyberLocalPort` and the local Maestro ports, so nothing reads S2. `processBroadcastCommand` also skips every port <= 2 whenever Kyber_Local is set (~:7240), overriding a persisted `?BCAST,OUT,S2,ON`. The mirror case is live too: Kyber on S2 with the Maestro on S3-S5 leaves S1 unread. **Designed fix (not applied, needs Greg's OK):** read S1/S2 when `kyberOwned != port` and the port is not raw-mapped (processIncomingSerial already drops bridge-owned Maestro ports, #59), fix the false comment, and change the broadcast skip to `(Kyber_Local && i == kyberLocalPort)`. The per-slot Maestro exclusion in the broadcast loop still protects configured Maestro ports. **Caveat:** a board with a real Maestro on S1 but NO `?MAESTRO` slot would start receiving ASCII broadcasts on S1. The new test `kyber.local_port_s1_frees_s2` pins the bug and fails until this is fixed.
+
+**Applied (2026-09-22, Greg: "apply it").** serialCommandTask reads S1/S2 on a Kyber_Local board unless the port is `kyberLocalPort` or raw-mapped, and processBroadcastCommand skips only `kyberLocalPort`. A review confirmed the reader logic in every mode and transition, including `kyber.local_mode_s2`'s pre-reboot deaf window (the Kyber port stays unread until the reboot). Follow-ups it found are #73.
 
 #### 15. An invalid re-map of a live PWM input wipes its output list in RAM: passthrough stops, ?MAP,PWM,LIST goes blank, and ?backup emits an unrestorable token
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.invalid_remap_keeps_mapping PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `pwm.invalid_remap_keeps_mapping` |
@@ -363,7 +406,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.soft_rx_under_soft_tx, map.baud_on_raw_mapped_port PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `input.soft_rx_under_soft_tx`, `map.baud_on_raw_mapped_port` |
@@ -384,7 +427,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.failed_update_keeps_mapping, map.bare_raw_flag PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `map.failed_update_keeps_mapping`, `map.bare_raw_flag` |
@@ -405,7 +448,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — if.timer_split_trap PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `if.timer_split_trap` |
@@ -429,7 +472,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — hcr.input_validation_gaps PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `hcr.input_validation_gaps` |
@@ -450,7 +493,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — hcr.stop_cancels_fade PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `hcr.stop_cancels_fade` |
@@ -471,7 +514,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — dfp.device_verb PASS on the bench (20260922-125537) |
 | **Owner** | `WcbCmd` |
 | **Effort** | S |
 | **Tests** | `dfp.device_verb` |
@@ -492,7 +535,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — stats.delivered_not_above_attempts PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `stats.delivered_not_above_attempts` |
@@ -513,7 +556,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.timer_keeps_source PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `input.timer_keeps_source` |
@@ -534,7 +577,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — legacy.cs_caret_lfi_roundtrip PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `legacy.cs_caret_lfi_roundtrip` |
@@ -555,7 +598,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.checksum_c_chain PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `input.checksum_c_chain` |
@@ -576,7 +619,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — maestro.legacy_clear_suffix_keeps_slots PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `maestro.legacy_clear_suffix_keeps_slots` |
@@ -597,7 +640,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — maestro.local_baud_zero_rejected PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `maestro.local_baud_zero_rejected` |
@@ -618,10 +661,10 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) — refusal before any state change (2026-09-22) + Greg's follow-up: ?KYBER,LOCAL is also refused on S1 |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
-| **Tests** | `kyber.local_port_s3_frees_s2` |
+| **Tests** | `kyber.config_negatives`, `kyber.local_rejected_port_keeps_forwarding` |
 | **Subsystem** | maestro-kyber |
 
 **Mechanism.** `storeKyberSettings` calls `updateBaudRate(kyberPort, 115200)` for any port 1-5 (WCB_Storage.cpp:1220-1222) and prints 'Set Serial%d to 115200 baud (Kyber standard)'. 115200 is on `updateBaudRate`'s whitelist (WCB_Storage.cpp:157), so it is really applied — `applyLiveBaud` tears down and re-begins the SoftwareSerial at :166. `configureMaestro` blocks exactly this for the same ports: 'S%d is SOFTWARE SERIAL / Baud rate (%d) is TOO HIGH for software serial / ❌ CONFIGURATION BLOCKED!' at WCB_Maestro.cpp:643-656, with `>57600` as the threshold. Bench evidence (session.log, kyber.local_port_s3_frees_s2 slice): `?KYBER,LOCAL,S3` printed 'Kyber is LOCAL on Serial3' and 'Set Serial3 to 115200 baud (Kyber standard)' with no warning of any kind, and also flipped S3's broadcast out/in flags (:1224-1233) on the way. CLAUDE.md rule 13 is the standing constraint here: S3-S5 are bit-banged, TX busy-waits per bit, and an ESP-NOW interrupt mid-byte mis-frames the receiver — at 115200 the per-bit budget is ~8.7 µs.
@@ -634,12 +677,15 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 **Risk.** It is a new refusal. If anyone in the field has a Kyber on S3-S5 today it stops being accepted — but at 115200 on bit-banged serial it cannot have been working, so the refusal is the diagnosis. Note the refusal must come BEFORE the Kyber_Local/kyberLocalPort assignment at :1210-1213, or you reproduce defect 3's leak in a new place.
 
+**Reopened (2026-09-22).** The #28 soft-serial refusal, and the older ownership refusal, ran only after `storeKyberSettings` had set `kyberUseTargeting = true` and auto-populated `kyberTargets[]`. The bare `?KYBER,LOCAL` form had also already wiped them. So a refused `?KYBER,LOCAL,S3` still switched a broadcast-mode Kyber_Local board to targeting, which is #6's leak again (session.log 101489: "Auto-populated 5 Kyber targets" printed before the refusal at 101490). It was invisible on W1, a Remote board. **Fix:** both refusals moved into `kyberLocalPortRefused()` (WCB_Storage.cpp), which runs before any live state changes: on the bare path before the target wipe, and on the S path right after the range check. The tests now cover S3/S4/S5 in `kyber.config_negatives` (no "Auto-populated" allowed) and an S3 arm in `kyber.local_rejected_port_keeps_forwarding`. **Open decision for Greg:** also refuse `?KYBER,LOCAL,S1` while S1 hosts a local Maestro, and reword the refusal to name only a free hardware port. Today it is accepted, S1's baud goes to 115200, and KyberLocalTask echoes S1 back into itself.
+
+**Follow-up applied (2026-09-22, Greg: "refuse if already configured on s1").** `?KYBER,LOCAL` is refused on S1/S2 when a LOCAL Maestro slot is there. The refusal names only a hardware port that is actually free. A review then found two bypasses, both closed: (1) the explicit target form `?KYBER,LOCAL,S1,M1:W<self>S1:<baud>`, which is what `?backup` and the Wizard emit, created the slot itself after the check (now `kyberTargetOnKyberPort` refuses it first); (2) a later `?MAESTRO` onto the Kyber port (`configureMaestro` now refuses it). The refusals made push order matter, because `KYBER,LOCAL` used to go out before the Maestro lines. So `?backup` and the Wizard now emit it after the Maestro and device lines, and the Wizard sends `KYBER,CLEAR` first when the Kyber port changes. `?backup` now also releases first (`KYBER,CLEAR` / `MAESTRO,REMOTE` ahead of the `BAUD` lines, #73 D5/D9), so on either path Kyber_Local is off while the Maestro lines run and the `?MAESTRO` refusal does not fire on a restore.
 
 #### 29. getPosition names its RAM variable from the raw channel text, not the parsed channel — so ',05' fills m1pos05 and a trailing field produces an invalid name that is silently dropped
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — maestro.get_var_name_from_parsed_channel PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `maestro.get_var_name_from_parsed_channel` |
@@ -660,7 +706,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — ota.help_matches_parser PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `ota.help_matches_parser` |
@@ -681,7 +727,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — navicore.l1_names_board_profile PASS on the bench (20260922-125537) |
 | **Owner** | `NaviCore` |
 | **Effort** | S |
 | **Tests** | `navicore.l1_names_board_profile` |
@@ -702,7 +748,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.remote_refusal_logged_once PASS 2026-09-21 (20260921-102817) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `pwm.remote_refusal_logged_once` |
@@ -723,7 +769,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | OBSOLETE — bit-banged TX is gone from S3-S5 (RMT, see #16); the path this defect lived in now runs only as a no-RMT-channel fallback |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `input.softserial_inttx_state` |
@@ -744,7 +790,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.soft_rx_baud_sweep PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `input.soft_rx_baud_sweep` |
@@ -765,7 +811,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.text_self_wcb PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `map.text_self_wcb` |
@@ -786,7 +832,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.raw_remote_s0_refused PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `map.raw_remote_s0_refused` |
@@ -807,7 +853,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.remote_leading_comma PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `map.remote_leading_comma` |
@@ -828,7 +874,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — if.malformed_or_passes PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `if.malformed_or_passes` |
@@ -849,7 +895,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — var.clear_all_name_collision PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `var.clear_all_name_collision` |
@@ -870,7 +916,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — seq.cycle_guard_case PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `seq.cycle_guard_case` |
@@ -891,7 +937,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.bcast_reset_persists PASS 2026-09-21 (20260921-105657) with RESET opening every port |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `input.bcast_reset_persists` |
@@ -912,7 +958,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — navicore.test_action_bad_target_not_ok PASS on the bench (20260922-125537) |
 | **Owner** | `NaviCore` |
 | **Effort** | M |
 | **Tests** | `navicore.test_action_bad_target_not_ok` |
@@ -933,7 +979,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.self_wcb_output PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `pwm.self_wcb_output` |
@@ -954,7 +1000,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.clear_out_restores_flags PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `pwm.clear_out_restores_flags` |
@@ -975,7 +1021,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.timer_line_obeys_mapping, input.timer_keeps_source PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `map.timer_line_obeys_mapping`, `input.timer_keeps_source` |
@@ -996,7 +1042,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — map.set_flags_list_backup, replace_not_append, clear_one_restores_flags, clear_all_restores_output, input_port_loses_output PASS 2026-09-21 (20260921-102109) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `map.clear_one_restores_flags`, `map.clear_all_restores_output` |
@@ -1017,21 +1063,25 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — `seq.cycle_guard_reuse` and `seq.reuse_queue_reserve` failed on the 09-22 image (baseline 20260923-094621) and pass on the 09:49 image, with every other `seq.*`, `if.*` and `legacy.*` test (targeted run 20260923-095057) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
-| **Tests** | _(no failing test — found while looking)_ |
+| **Tests** | `seq.cycle_guard_reuse`, `seq.reuse_queue_reserve`, `seq.cycle_guard` (must stay green, unchanged) |
 | **Subsystem** | vars-if-seq |
 
-**Mechanism.** activeChainKeys/activeChainDepth (WCB.ino:6829-6850) is a membership set over every key expanded since the last top-level recall, not a stack: depth is reset only when !inSequenceBody (:6831-6832) and is never decremented on the way back out. Every token a body enqueues carries sequenceBody=true (WCB_Storage.cpp:628, snapshotted per item at WCB.ino:2207 and restored at dispatch at :8366), so a body like `;CBEEP^;t500^;CBEEP` takes the else-branch both times: the first call adds BEEP, the second matches at :6835 and returns at :6839 with the 'recalls itself (directly or in a loop)' message. Nothing about the second call is recursive — BEEP had already finished expanding.
+**Mechanism.** activeChainKeys/activeChainDepth (WCB.ino:6829-6850 when filed; :7014-7050 before the fix) was a membership set over every key expanded since the last top-level recall, not a stack: depth is reset only when !inSequenceBody (:6831-6832) and is never decremented on the way back out. Every token a body enqueues carries sequenceBody=true (WCB_Storage.cpp:628, snapshotted per item at WCB.ino:2207 and restored at dispatch at :8366), so a body like `;CBEEP^;t500^;CBEEP` takes the else-branch both times: the first call adds BEEP, the second matches at :6835 and returns at :6839 with the 'recalls itself (directly or in a loop)' message. Nothing about the second call is recursive — BEEP had already finished expanding. Two more failures from the same set: every expansion in a run counted toward the "nesting deeper than 8" limit, so a flat body calling 8 different sub-sequences had its 8th refused as too deep; and MP3/DFPlayer ONFIN/ONERR bodies (recallCommandSlot called directly, WCB_MP3.cpp:51-52, WCB_DFP.cpp:47-48) checked their nested ;C against a stale set left by the last top-level recall.
 
 **How it is reached.** Reusing a sub-sequence twice in one sequence — a beep, a head-turn, a light flash used at two points in a routine. It is the documented sub-sequence pattern (WCB.ino:6766) applied twice.
 
 **Why it matters.** The second call is silently dropped from the routine (only a refusal line on the console, which a droid running untethered has nobody reading), and the message blames a loop the user does not have. Half a sequence runs and the diagnostic points at the wrong thing.
 
-**Fix.** Make it a real stack: push the key before recallCommandSlot (WCB.ino:6849-6850) and pop it when that expansion's items have drained — or, since recallCommandSlot enqueues rather than recursing, track (key, generation) and clear an entry once the queue no longer holds items from that expansion. The cheap interim that keeps cycle protection and unblocks reuse is to cap repeats instead of forbidding them (refuse only on the Nth re-expansion of the same key within one chain, N small), since a true cycle re-enters unboundedly while legitimate reuse does not. Do not just delete the check — it is what stops the endlessly-refilled queue described at WCB.ino:6820-6824. Verify against seq.cycle_guard, which asserts the refusal fires for HILRR/HILRS and the A→B→A ring.
+**Fix (applied 2026-09-23).** Each queued command carries its own lineage: `CommandQueueItem::seqDepth` (in the struct's existing padding, still 12 bytes × 200 slots, static_assert) plus that many FNV-1a 32 key hashes in front of the command text in the same malloc (`commandItemBlock()` is the block start; both free sites use it). `enqueueCommand` stamps `seqCurPath` only on the loop task (`seqOnLoopTask()`, handle captured first in `setup()`), so serialCommandTask/WiFi-callback commands are always top-level. The drain restores the item's lineage into `seqCurPath` like `inSequenceBody`; `recallStoredCommand` refuses a key already on it, or depth 8, with the unchanged refusal texts; `recallCommandSlot` pushes the key while it enqueues the body (so ONFIN/ONERR bodies are fresh roots); `commandGroupsPath` carries it across `;t` groups (off the loop task `parseCommandGroups` writes only the depth byte). New containment the old guard never needed: a NESTED expansion that would leave fewer than `SEQ_QUEUE_RESERVE` (16) of the 200 queue slots free is refused whole with one "Command queue nearly full" line — back-to-back reuse expands every call before any leaf drains (FIFO), and the per-token "queue is full" flood on UART0 would stall loop(). docs/SEQUENCE_INVENTORY.md §3c, wiki Stored-Commands + Timer-Commands (the self-loop and state-machine ring examples were refused before and after).
 
-**Risk.** Any loosening risks reopening the runaway-queue failure the guard was written for, so it needs the seq.cycle_guard test run on the bench before and after. I found this by reading the guard, not from a failing test — no HIL test covers a body calling one sub-sequence twice, which is worth adding alongside the fix.
+**Rejected: "pop when that expansion's items have drained".** The queue is FIFO: in `;CBEEP^;CBEEP` the second call dispatches while the first BEEP's body is still queued BEHIND it, so a global stack popped on drain (or a key→generation table) still refuses it. The stack has to belong to each queued item.
+
+**Original proposal (superseded).** Make it a real stack: push the key before recallCommandSlot (WCB.ino:6849-6850) and pop it when that expansion's items have drained — or, since recallCommandSlot enqueues rather than recursing, track (key, generation) and clear an entry once the queue no longer holds items from that expansion. The cheap interim that keeps cycle protection and unblocks reuse is to cap repeats instead of forbidding them (refuse only on the Nth re-expansion of the same key within one chain, N small), since a true cycle re-enters unboundedly while legitimate reuse does not. Do not just delete the check — it is what stops the endlessly-refilled queue described at WCB.ino:6820-6824. Verify against seq.cycle_guard, which asserts the refusal fires for HILRR/HILRS and the A→B→A ring.
+
+**Risk.** Any loosening risks reopening the runaway-queue failure the guard was written for, so it needs the seq.cycle_guard test run on the bench before and after. I found this by reading the guard, not from a failing test — no HIL test covers a body calling one sub-sequence twice, which is worth adding alongside the fix. (Now `seq.cycle_guard_reuse`.) Remaining exposure: a user-built wide, deep tree of distinct keys is finite but can do far more work than the old 8-expansion cap; paced loops and rings that sometimes ran by accident under the old guard (any top-level recall between groups cleared the set) are now refused every time.
 
 
 ### Low impact (8)
@@ -1041,7 +1091,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — hcr.setemotion_100_not_silent PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `hcr.setemotion_100_not_silent` |
@@ -1062,7 +1112,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — hcr.input_validation_gaps PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `hcr.input_validation_gaps` |
@@ -1083,7 +1133,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — client_mesh.json_broadcast_once PASS on the bench (20260922-125537) |
 | **Owner** | `unclear` |
 | **Effort** | S |
 | **Tests** | `client_mesh.json_broadcast_once` |
@@ -1104,7 +1154,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — maestro.get_moving_state_normalised PASS on the bench (20260922-135805) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `maestro.get_moving_state_normalised` |
@@ -1125,7 +1175,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — Greg 2026-09-22: switch to unicast. A get with no slot now unicasts to WCB<dev> inside WCBQ (broadcast only above it), same rule as the subroutine and verb fallbacks (WCB_Maestro.cpp handleMaestroGet); debug line no longer prints WCB0. maestro.get_fallback_unicast_within_wcbq PASS; navicore.maestro_inventory PASS; maestro.* + kyber.* 20 PASS / 12 SKIP |
 | **Owner** | `unclear` |
 | **Effort** | S |
 | **Tests** | `maestro.get_fallback_unicast_within_wcbq` |
@@ -1146,7 +1196,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — pwm.input_only_advertises_cap PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
 | **Tests** | `pwm.input_only_advertises_cap` |
@@ -1167,7 +1217,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | VERIFIED — input.soft_rx_baud_sweep PASS on the bench (20260922-125537) |
 | **Owner** | `test_is_wrong` |
 | **Effort** | S |
 | **Tests** | `input.soft_rx_baud_sweep` |
@@ -1188,7 +1238,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | TODO |
+| **Status** | OBSOLETE — bit-banged TX is gone from S3-S5 (RMT, see #16); the path this defect lived in now runs only as a no-RMT-channel fallback |
 | **Owner** | `WCB_firmware` |
 | **Effort** | M |
 | **Tests** | `hcr.softserial_integrity_mesh_load` |
@@ -1203,3 +1253,425 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 **Fix.** Do not chase this in WCB code — the race is in the library. Two honest options. (a) Accept it and document the number: soft ports are ~99.7% per frame under mesh load, hardware S1/S2 are exact; put that in docs/HIL_TESTING.md §6 and the wiki so nobody re-debugs it. (b) If Greg wants it closed: vendor EspSoftwareSerial 8.1.0 under Code/WCB/src/ the way HumanCyborgRelationsAPI is vendored (CLAUDE.md rule 7) and reorder lazyDelay() so disableInterrupts() runs BEFORE the final preciseDelay() rather than after it — the sub-millisecond remainder is then busy-waited with interrupts already off, costing at most one extra bit period of blackout per byte. Then re-run the test to see whether the rate actually moves. The durable structural answer, if soft ports are ever to be first class, is RMT-driven TX on S3-S5: hardware-timed waveforms need no interrupt blackout at all and would fix this AND the defect above together, at the cost of a real project.
 
 **Risk.** Vendoring EspSoftwareSerial means the sketchbook copy no longer shadows it for the WCB build but still does for tests/hil/wcb_probe and every other sketch — two copies to keep in step, and build.sh's prerequisite comment (Code/bin/build.sh:15) needs updating. The lazyDelay reorder lengthens the interrupt blackout slightly, which makes defect 1 marginally worse on any port that is protected. Do defect 1 first.
+
+#### 56. ?ETM,CHAR phase 3 drops its own broadcasts whenever a peer's load traffic has just arrived
+
+| | |
+|---|---|
+| **Status** | VERIFIED — etm.char_loaded PASS 2026-09-21 (20260921-102817) |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | `etm.char_loaded` |
+| **Subsystem** | etm |
+
+**Mechanism.** `processETMChar()` and `processETMLoad()` send from `loop()`, outside any command snapshot, so their broadcasts go through `sendESPNowMessage`'s loop-prevention gate (`if (target == 0 && lastReceivedViaESPNOW) return;`) with whatever value the last received command left. Phase 3 is the one phase where peers send commands back — the load generator's `LOAD_*` unicasts — and each one sets the flag, so the characterisation's broadcast third was dropped and reported as a 30 % miss. Passed on 09-16 on timing alone.
+
+**Fix.** `sendOwnBroadcast()` (WCB.ino, above `startETMChar`) clears the flag for the one send and restores it, the same pattern `recallStoredCommand` uses (WCB_Storage.cpp). Used by the ETMLOAD kick-off, the phase-3 broadcasts and the load generator's own broadcasts.
+
+**Risk.** None beyond the three call sites: these payloads are board-originated test traffic, never a relayed command, so there is no loop to prevent.
+
+#### 57. USB commands arriving while W1 bit-bangs a mesh raw block onto S3 are corrupted — the line loses its ';' and is broadcast as text
+
+| | |
+|---|---|
+| **Status** | VERIFIED — input.softserial_core0_contention PASS on the bench (20260922-125537) |
+| **Owner** | `WCB_firmware` (or hardware — see below) |
+| **Effort** | M (needs a bench session) |
+| **Tests** | `input.softserial_core0_contention` |
+| **Subsystem** | soft-serial / UART0 input |
+
+**Evidence.** 2026-09-21: 3 failures in 4 runs of the test (the GUI full run, a GUI rerun, and 1 of 2 CLI single runs; it passed in the 09-16 and 09-21 morning full runs). Every time, the FIRST `;S4,<64 chars>` sent over W1's USB right after the probe's MRAW (a 151-byte raw block W1 writes to protected S3 at 9600, ~157 ms) arrives mangled: `;S4,HILL21…` became `7S4,HILL21…`, another `;S4,HILL24…` became `784,HILL24…`, and the line before each is one byte short (63 of 64). With no leading `;` the line is plain text, so W1 broadcasts it to every port — which is what corrupts the S3 block (interleaved) and shows up on S2/S5. In the CLI failure S3's own output was also badly mistimed (bytes doubled: `11 11 15 15 19 19 …`).
+
+**What is known.** `;` 0x3B -> `7` 0x37 is the same bit pattern shifted by one position, which looks like a mistimed sample rather than noise. But W1's console is hardware UART0, and EspSoftwareSerial re-enables interrupts after every stop bit (`lazyDelay`, SoftwareSerial.cpp:265), so the UART0 RX ISR is serviced about every millisecond — well inside its 128-byte FIFO. So the obvious "interrupts masked for the whole write" explanation (CLAUDE.md rule 13's README note) does NOT fit on its own.
+
+**Next steps.** (1) Repeat with S3 UNprotected (`enableIntTx(true)`) — if the USB corruption vanishes, the masking is involved after all. (2) Repeat with the USB lines sent slower (e.g. 20 ms apart) — distinguishes loss from corruption. (3) Capture W1's UART0 RX with ?DEBUG to see the raw line as parsed. (4) Check whether the pattern follows W1's hardware (swap the roles of W1/W2).
+
+**Why it matters.** Any host (Wizard, NaviCore bridge, a Pi) feeding a WCB over USB while that WCB is driving a soft port from the mesh can have a command silently turned into a broadcast to every port.
+
+**Resolution (2026-09-21).** Proven by A/B on W1 with the contention test: protected S3 (normal) mangled USB lines in 2 of 5 runs; S3 UNprotected, 0 of 6 (but 0/10 S3 blocks exact — the rule-13 trade); protected S3 with the UART0 driver installed from a core-0 task, **0 of 8, 10/10 blocks, 8/8 PASS**. Mechanism: the missing byte in the line after each mangled one sat at index 55-58, exactly the '7'/'8' that replaced ';S' — stale FIFO slots, not bit errors. The UART0 RX ISR was allocated on core 1 (uart_driver_install intr_alloc_flags 0 = calling core; setup() is on core 1), the core where every protected soft-serial byte masks interrupts; the classic ESP32's rxfifo count is "not credible" (the IDF's words, uart_ll_get_rxfifo_len rebuilds it from rd/wr pointers) and a held-off ISR reads stale slots. Fix: beginUsbSerialOnCore0() in WCB.ino. ?STATS also prints the previously invisible serialRxOverflows counter when non-zero.
+
+#### 58. A ~2950-character ?SEQ,SAVE value fails to copy even with a 38.9 KB contiguous block free
+
+| | |
+|---|---|
+| **Status** | VERIFIED — EXPLAINED; inv.seqget_largest (the replacement test) PASS in 20260922-215719 and 20260923-002254; heap metric fixed |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S to report (done), M to explain |
+| **Tests** | `inv.seqget_largest` (replaces `inv.seqget_toobig`, whose premise was unreachable) |
+| **Subsystem** | storage |
+
+**Evidence (2026-09-21).** `?SEQ,SAVE,HILTB,<2950 chars>` intermittently reached saveStoredCommandsToPreferences with `message.substring(commaIndex + 1)` coming back EMPTY, and printed "Key or value cannot be empty". The line itself arrived intact (debug: 2966 characters parsed) and long chains (268 commands, 2679 chars) run fine, so it is not USB input. Arduino String's copy() empties the string when reserve()/realloc fails — but ?STATS (new heap line) showed the largest free block at 38,900 bytes at the moment of failure, so plain exhaustion does not explain it. 2600-character values never fail; they reach NVS and are rejected there (as are 1500+).
+
+**Done.** The save path now reports "Out of memory: could not copy a <n>-character value (largest free block <m> bytes)" instead of the misleading empty-value line; ?STATS prints free heap, largest block and minimum since boot.
+
+**Why it is low priority.** NVS already rejects sequence values from ~1500 characters, so a value large enough to hit this can never be stored anyway.
+
+**Resolution (2026-09-22, run 20260922-151421 triage, adversarially verified).** The "38,900-byte largest block" was the wrong heap. `ESP.getMaxAllocHeap()` measures `MALLOC_CAP_INTERNAL`, which on the classic ESP32 includes the ~39 KB IRAM heap. That heap is 32-bit only, and malloc/String never use it. The value was exactly 38,900 in all 105 Heap lines across every run and boot. The byte-addressable DRAM actually free was about 26.8 KB, fragmented, and the ?SEQ,SAVE path holds about 7 full-length copies of a ~2,960-character line when it asks for an 8th. So this is ordinary exhaustion, not a bug. NVS then rejects values from about 1,500 characters on a configured board anyway, so a value over 2,903 characters (the TOOBIG threshold) cannot be stored on this bench. **Fix:** ?STATS, the out-of-memory line and ?WIFI now report byte-addressable heap (`heap_caps_*(MALLOC_CAP_8BIT)`). The comment at the ?STATS Heap line records the trap. The test became `inv.seqget_largest`: it walks down a length ladder to the largest value that stores, requires a clean refusal (never "cannot be empty") and no phantom key on each step, round-trips the stored value, and checks TOOBIG only if the length ever allows it.
+
+#### 59. A Maestro port on a Kyber board has two readers: the serial parser takes bytes the Kyber bridge should forward
+
+| | |
+|---|---|
+| **Status** | VERIFIED — both tests PASS 2026-09-22 (run 20260922-144915), with kyber.local_mode_s2, remote_roundtrip, local_rejected_port_keeps_forwarding and all 21 maestro.* still PASS |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | `kyber.maestro_s2_single_reader`, `kyber.clear_warns_reboot_single_reader` |
+| **Subsystem** | maestro-kyber |
+
+**Evidence (full run 20260922-125537 and the 2026-09-22 rerun).** With a local Maestro on S2 of a Maestro_Remote board, W1 logged `Processing input from Serial2: H9138DHMH2413789EJN` and `MA16AFKL015AFKN` — Maestro reply bytes parsed as command text. After `?KYBER,CLEAR` on a Maestro_Remote board, the same S1 traffic was split: 6 fragments parsed and 567 bytes bridged. `?KYBER,CLEAR` printed no reboot notice.
+
+**Mechanism.** `forwardMaestroDataToRemoteKyber()` and `forwardMaestroDataToLocalKyber()` read EVERY local Maestro port, not one fixed port. But `serialCommandTask` skipped only S1/S2, and only by mode flag, so a Maestro on another port was also read by `processIncomingSerial`. Two readers split each frame between them. Separately, `KyberRemoteTask` is created in `setup()` and never deleted. `?KYBER,CLEAR` clears `Maestro_Remote`, so the parser's normal-mode branch reads S1 again while the still-running task keeps draining it.
+
+**Fix.** WCB.ino: `setup()` records which bridge tasks it created (`kyberLocalTaskStarted` / `kyberRemoteTaskStarted`) before `serialCommandTask` starts. `maestroPortOwnedByKyberBridge(port)` is true for a local Maestro port while a started task's live gate is open, and `processIncomingSerial` returns early for such a port. That is one reader per port, and no port is left unread. `forwardMaestroDataToRemoteKyber()` returns when neither Kyber mode is live, so after a CLEAR the port goes back to the parser. It is gated on `!Maestro_Remote && !Kyber_Local`, not on `Maestro_Remote` alone, because a runtime `?KYBER,LOCAL` clears `Maestro_Remote` while the task must keep bridging until the reboot (`kyber.local_mode_s2`, which a workflow verify caught). WCB_Storage.cpp: `?KYBER,CLEAR` prints the reboot notice, but only on a board that was in a Kyber mode, because every plain config push sends `?KYBER,CLEAR`. Both targets compile (ESP32 69% / S3 67%).
+
+**Risk.** It changes who reads a Maestro port on every Kyber board. `kyber.local_mode_s2`, `kyber.remote_roundtrip` and `kyber.wdp_auto_remote_revert` cover the paths that must still bridge. **Not fixed, same family:** a runtime LOCAL -> REMOTE switch leaves `kyberLocalPort` set, so `KyberLocalTask` keeps draining the Kyber port until reboot. That window already requires a reboot and says so.
+
+#### 60. Harness: a probe with more hardware-only wires than hardware channels silently reads one wire's bytes under another's name
+
+| | |
+|---|---|
+| **Status** | VERIFIED — probe2 rewired (W2S1 tap -> header S2, W2S5 -> header S5) and rediscovered; both tests PASS with the six tap-dependent tests (20260922-150647) |
+| **Owner** | `harness` |
+| **Effort** | S (guard) + bench rewire |
+| **Tests** | `navicore.plain_broadcast_both_ways`, `input.bcast_fanout` |
+| **Subsystem** | hil/links.py |
+
+**Evidence.** In `navicore.plain_broadcast_both_ways`, W2S2 "received" 1 copy where silence was expected, and W2S5 "received" 0 where 1 was expected, in both directions.
+
+**Mechanism.** Probe2 has two hardware channels (A/B). It carries three wires that each need one at once: the W2S1 tap at 115200 (above `SW_MAX_BAUD` 38400), W2S2 on header S1 and W2S5 on header S2 (both in `HW_ONLY_HEADERS`). `LinkManager.bind()` evicts the least recently used link. But the probe keeps RX history per channel LETTER, so a read with a `since` older than the eviction returned the previous owner's bytes as this wire's.
+
+**Fix.** `hil/links.py`: `LinkManager.handoff` records the probe log mark when a channel passes to a DIFFERENT link. A re-bind of the same link (a baud change) is not a hand-off. `Link._since_ok()` raises a named `AssertionError` when a read's `since` predates that mark, and every `since` read goes through it. **Bench:** on probe2, move the W2S1 tap to header S2 and W2S5 to header S5, then run `python tests/hil/run.py --discover`. W2S5 then sits on a soft-capable header, which leaves A/B for the tap and W2S2.
+
+#### 61. A rejected local OTA re-BEGIN at a raised rate leaves W1's USB stuck at 921600 with no session
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | `ota.local_baud_rejected_rebegin_restores` |
+| **Subsystem** | ota |
+
+**Evidence (opt-in run 20260922-185238).** BEGIN,4096,0 OK, then BAUD,921600 OK, then BEGIN,4096,1 is rejected by the chip-family guard with `[OTA:BEGIN,ERR,0]`. 0.3 s later a ?VERSION sent at 921600 is answered at 921600: the board is stranded. Only an explicit ABORT sent at 921600 recovered it.
+
+**Mechanism.** `otaBegin` tears down a live session before any of its guards run. The guard then rejects, and the BEGIN handler printed ERR and returned. The session is gone, so neither the idle reaper (gated on `ota.active`) nor `?OTALOCAL,BAUD` (refused without a session) can restore the rate. Every other session-ending failure already restored it. The same stranding follows the other rejects after the teardown: no inactive slot, bad size, `esp_ota_begin` failure. WCB_OTA_TECHNICAL.md claimed "the 30 s idle timeout owns the restore", which was false on this path.
+
+**Fix.** `processOtaLocalCommand`, BEGIN branch: `if (!ok) otaRestoreLocalBaud();` AFTER the ERR marker, so the marker still goes out at the rate the host is on (the END,ERR contract). It is a no-op at 115200, which covers every Wizard BEGIN (the Wizard bumps only after BEGIN,OK). A re-BEGIN that succeeds keeps the rate. The test flushes the junk its 921600 probe leaves on a board already back at 115200. Diagnosis adversarially verified (workflow wf_c426e268-fb7).
+
+**Risk.** Low: only a host that sends BEGIN at a raised rate sees a change, and no shipped host does. **Left alone on purpose:** a rejected relay BEGIN that supersedes a raised local session still leaves the rate raised. The Wizard recovers from that cleanly: it gets a readable NAK at its rate and then ABORTs, which restores the rate. Restoring on the board instead would garble its next DATA.
+
+#### 62. The SBUS signal-loss test never reset the controller: an RTS-only pulse does not reach a native-USB board on Windows
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `sbus.signal_loss_controller_reset` |
+| **Subsystem** | hil / s21 |
+
+**Evidence (opt-in run 20260922-185238, its first run: every earlier run skipped it as opt-in).** "NaviCore's fps never dropped to 0 after the reset". NaviCore's frame counter ran 179999 -> 181138 over 10.3 s, 110.7 frames/s against a nominal 111.1, with ageMs 0-7 throughout. The SBUS port never dropped, and the ping after the test got an immediate pong with no boot banner. The controller did not reboot.
+
+**Mechanism.** The test wrote DTR=0 and then toggled RTS. On the ESP32-S3's USB-Serial/JTAG port, RTS=1/DTR=0 is the chip reset. But Windows' usbser.sys sends SET_CONTROL_LINE_STATE only on a DTR write, and pyserial's `rts` setter only calls EscapeCommFunction. So both RTS changes were dropped. esptool works around exactly this (`_setRTS` in reset.py). NaviCore is not at fault: its fps is a tumbling one-second frame count, and a real reboot of this controller is about 6 s of silence (its STA WiFi timeout, then the AP fallback).
+
+**Fix.** The test re-writes DTR (still 0) after each RTS change, through a local handle, because the reader may swap `dev._ser` if the USB re-enumerates. It holds the pulse 0.2 s, like esptool. It reads the controller's `bootlog` before and after the pulse and asserts the reset happened (boot count up, or uptime shorter than the time since the pulse) before it judges NaviCore. It does not assert the RTC reason code, which is unverified on this board. HIL_TESTING.md §2 records the trap. Diagnosis adversarially verified; the verifier corrected the first fix, which could crash on a re-enumeration.
+
+#### 63. Soft-serial RX (S3-S5) injects a faux stop bit when a core-1 time slice lands inside EspSoftwareSerial's rxBits()
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-235913); was: FIXED (unverified) |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | `input.soft_rx_under_soft_tx` |
+| **Subsystem** | soft-serial RX |
+
+**Evidence (run 20260922-151421).** The A4h arm got 37 of 40 lines exact: 40 lines of 61 bytes at 9600 into W1 S3 from a probe hardware UART, while S4 transmitted about 87 % of the time. One line decoded `2` as 0xF2 followed by a spurious 0x82, and two others each lost one byte. 9600 is well inside the documented reliable range.
+
+**Mechanism.** In `UARTBase::rxBits()` (EspSoftwareSerial 8.1.0, SoftwareSerial.cpp:483), a byte in progress is closed when the ISR edge buffer is empty AND `micros() - m_isrLastTick > detectionTicks`. The emptiness test comes first and the clock read second, and the two are not atomic. If the reader is preempted between them for more than about a bit, edges queue up unseen, but on resume the check sees a stale "empty" and a fresh clock. It then injects a faux stop bit (:486): the byte's remaining bits read as 1s, and the queued real edges play back with a negative delta, so the bytes that follow are framed from mid-byte. A hand trace of 0x32 -> 0xF2 + 0x82 fits exactly. No interrupt-latency model produces both bytes. Several priority-1 tasks share core 1 with serialCommandTask (loopTask, KyberRemoteTask, MeshSerialOutTask), and FreeRTOS time-slices at 1 kHz.
+
+**Fix.** `WcbSoftSerial` overrides `available()`, `read()` and `peek()` to run the library call with the scheduler suspended (`vTaskSuspendAll` / `xTaskResumeAll`). ISRs keep running, so no edge is lost. Recorded in CLAUDE.md rule 13. The root-cause fix belongs upstream: read the clock before testing the buffer. That would also cover preemption by a long ISR and `readBytes()`, which is not wrapped.
+
+**Risk.** The scheduler is held for microseconds per call. Suspend/resume briefly masks interrupts on the core, so edges are delayed, not lost. Re-check `input.soft_rx_baud_sweep` at 57600. Verify with about 20 repeats of the test (800 A4h lines, zero allowed).
+
+#### 64. The level-3 GPIO ISR service was installed with ESP_INTR_FLAG_IRAM although every handler goes through a flash-resident dispatcher
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) — self-inflicted this session, never shipped |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | none reproduces it yet (it needs an S3-S5 RX or PWM-input edge during an NVS write) |
+| **Subsystem** | interrupts |
+
+**Mechanism.** setup() installed the GPIO ISR service with `ESP_INTR_FLAG_LEVEL3 | ESP_INTR_FLAG_IRAM`, on the belief that every handler is IRAM-resident. `rxBitISR` and `pwmISR*` are (0x4008....). But `attachInterrupt` registers Arduino's `__onPinInterrupt` dispatcher, which is in flash (0x401a68b0 in the map; no `IRAM_ATTR` unless CONFIG_ARDUINO_ISR_IRAM). An IRAM service stays live while the flash cache is off, so an edge during any NVS write would run flash code: "Cache disabled but cached memory region accessed". A board with an RC PWM input takes an edge every 20 ms, so any save could panic it. Found by two independent triage agents; confirmed from the core source and the linker map, not reproduced on the bench.
+
+**Fix.** Level 3 without the IRAM flag. Edges wait out a flash write, as they did before this service existed. The level-3 benefit for soft-serial RX timing stays. The comment and CLAUDE.md rule 13 record why the flag must never come back.
+
+#### 65. NaviCore logs a Maestro dispatch for a write its channel guard skipped
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260923-002254); was: FIXED (unverified) |
+| **Owner** | `NaviCore` |
+| **Effort** | S |
+| **Tests** | `navicore.maestro_skip_not_logged_as_dispatch` |
+| **Subsystem** | NaviCore / Maestro |
+
+**Evidence.** It failed deterministically in the full run and in both reruns. `[DISPATCH] Maestro 1: channel 32 out of range (0-31) — skipped` was followed 0 ms later by `[DISPATCH] Maestro slot 1 (device 1) <- mesh  cmd 0x04`. Every earlier run skipped this test ("NaviCore has no local Maestro slot that answers ?MAE,GET"). NaviCore's own Maestro started answering between 13:56 and 15:14 on 09-22 (a physical change; the firmware and config were identical), so this is the first time it ran.
+
+**Mechanism and fix.** `maeInboundActuate` called the void wrappers `maestroSetTarget/Speed/Accel`, which return early on `maestroChanOk`, and then printed the dispatch line unconditionally. It now runs the guard first in each channel-bearing case and returns on a skip. The guard prints its one "skipped" line, and nothing reaches Serial2, as before. No wire bytes change and WcbCmd is untouched. The test now requires exactly one of the two lines, so it cannot pass vacuously.
+
+#### 66. A probe soft channel mis-decodes a byte when two probe soft channels receive at once
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-235913, 20260923-012735); was: FIXED (unverified) |
+| **Owner** | `probe firmware` |
+| **Effort** | S |
+| **Tests** | `input.bcast_fanout` (where it showed); `probe.soft_concurrent_rx` (new: reproduces it at volume) |
+| **Subsystem** | hil / wcb_probe |
+
+**Evidence.** Probe1 ch D (a soft channel on header S3 = W1S4, 9600) read `HILFC394` for `HILFC3294`, while ch C (W1S2) received the same line in the same millisecond, intact. An earlier run (20260921-085938 :8453) had ch D read 0x15 as 0x1D in the same situation. Both are late-edge signatures: an edge timestamped 52-104 us late, respectively a dropped frame and a flipped bit. Out of 227 such concurrent C+D pairs across all runs, those are the only 2 mismatches. The WCB side is ruled out: its line is one RMT transaction, and that build's RMT TX was 600/600 exact on a hardware receiver.
+
+**Mechanism and fix.** EspSoftwareSerial decodes from the time each edge's ISR starts, and the probe's GPIO ISR service ran at Arduino's default level 1, beside the UART and RMT interrupts. The probe now installs it at level 3 first thing in setup() (without the IRAM flag; see #64), which is the WCB's own fix, and mutes the gpio log tag for good because the re-install error would land mid-protocol. PROBE_VERSION 2 -> 3 (the protocol is unchanged). The new `probe.soft_concurrent_rx` makes the concurrency happen about 300 times and must be exact on both channels. If it still loses bytes, move W1S2 onto a hardware-only header.
+
+**Correction (2026-09-23).** Level 3 did not cure these mis-decodes. The two recorded bytes are LOST edges, not late ones, which fits ESP32 erratum GPIO-3.14 (see #78); a late edge could not produce them. Level 3 stays, since it is harmless. The letter-swap reasoning in the original self-check was wrong: this kind of loss follows the lagging wire, not the channel letter.
+
+#### 67. input.wdpda_rejects counted another port's normal WDP-DA expiry as a malformed announce being accepted
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-235913); was: FIXED (unverified) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `input.wdpda_rejects`, `input.wdpda_usb_and_blocked_port` |
+| **Subsystem** | hil / s12 |
+
+**Mechanism.** The check was `any(x.startswith("[WDP-DA]") ...)` over the whole window. In the full run, the S2 entry that `wdpda_usb_and_blocked_port` created expired at 90 s (`[WDP-DA] S2: HILDV stopped announcing`) inside the window. None of the five malformed S5 announces was accepted: the firmware rejects all five. It is a race on the poll phase of the new wait loop (this session's change), at about a 40 % chance per full run. **Fix:** scope the check to `[WDP-DA] S5:` (a real accept on an absent port always prints one) and ignore expiry lines in the sibling test's check. `wdpda_rejects` now runs before `wdpda_fields`, so in a full run S5 is empty and the wait costs nothing.
+
+#### 68. wdp.controller_auto_enable rests on one unacknowledged solicit/advert exchange
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `wdp.controller_auto_enable` |
+| **Subsystem** | hil / s18 |
+
+**Mechanism.** The test forgets NaviCore, turns the controller off and sends `?WDP,POLL`, then gives NaviCore 3 s to answer. The solicit and NaviCore's one solicited advert are each a single broadcast. ESP-NOW broadcasts get no MAC ACK or retry, and neither side repeats. NaviCore's next unsolicited advert can be up to 60 s away. So one lost frame leaves the window empty (full runs 09-21 and 09-22). The firmware state was correct both times. **Fix:** up to three 3 s waits, re-polling after each miss. Re-polling cannot mask a regression, because WCB20 stays forgotten and the controller stays off until an advert is actually decoded. On a final miss the test notes W2's N=20 AGE, which tells which direction lost the frame. Not done: optional firmware hardening, a second solicit about 800 ms after POLL (it would need WDP_DESIGN.md changes).
+
+#### 69. sbus.trim_exact could never run: every trim on this bench is a button on NaviCore's matrix channel
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260923-002245); was: FIXED (unverified) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | M |
+| **Tests** | `sbus.trim_exact` |
+| **Subsystem** | hil / s21 |
+
+**Mechanism.** The test only accepted a trim on a channel NaviCore leaves unbound. All six controller trims are on CH7 in button mode, which is the X18 layout, and CH7 is NaviCore's matrix channel, so it skipped in every recorded run. Moving a trim needs the controller's `cfg` command, which saves to flash, or NaviCore SET_CONFIG. Both are forbidden. **Fix:** if no trim sits on an unbound channel, the test uses a button-mode matrix trim under a mode where both of its slots are unmapped. From mode 1 today that is T6 in mode 2 (slots 16/15). It switches the mode with a mesh SET_MODE, exactly as `sbus.mode_sets_trigger_mode` does. It asserts the exact values, and that the only rc_trig lines are the two intended taps, then restores the mode and asserts it. The step-mode half remains unreachable on this bench without a flash write, and the description says so.
+
+#### 70. The relay DATA frame that tears an OTA session down is ACKed OK+0; only the frames after it get ERR
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) |
+| **Owner** | `WCB_firmware` (+ `NaviCore` twin) |
+| **Effort** | S |
+| **Tests** | `ota.relay_teardown_frame_err` |
+| **Subsystem** | ota |
+
+**Evidence (rerun 20260922-193306; the first run ever, since it was opt-in until today).** W2 printed "write overruns image (0 + 192 > 100) — aborting", and that same frame was ACKed `[OTA:ACK,2,22388,0,0]` (status OK). Only the resend got `...,0,1`.
+
+**Mechanism and fix.** `handleOtaDataPacket` captured `inSession` before `otaWrite`, and reused it for the ACK status. `otaWrite` itself tears the session down on an image overrun or an `esp_ota_write` error, so the tearing frame was ACKed OK with offset 0, which a host cannot tell from a stale duplicate. The 2026-08-06 fix only covered frames after the teardown. The status is now read after the write. Dup and gap frames still ACK OK with the cursor, and the keep-alive still uses the pre-write flag. `navicore_ota.h` had the identical pattern and got the same one-expression fix. Hosts recovered one round trip late before (the Wizard resent, NaviCore's tool treated OK+0 as stale), and now fail at once. No wire-format change.
+
+#### 71. inv.seqget_largest fetched once, but the SEQVAL reply is sent once and unacknowledged
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260923-002254); was: FIXED (unverified) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `inv.seqget_largest`, `inv.seqget_multichunk` |
+| **Subsystem** | hil / s17 |
+
+**Evidence.** W1 walked the ladder correctly: 2950 was refused on heap (largest block 1012 B), 2400-1400 were refused by NVS, and 1200 was stored and read back exactly. W2's relayed `?MGMT,SEQGET` then printed nothing. The reply is ceil(1209/182) = 7 raw broadcast frames sent once, with no ACK, no second pass and no resend (`sendResultFrags`). W2 prints only when every frame is in. The command did reach W2 (no ETM failure line), and neither size-refusal line appeared. Earlier runs show the same thing on 5-6 frame bursts: about 1 lost in 4 on this bench.
+
+**Fix.** The test retries the fetch like a real requester: up to 4 tries, 3 s apart to clear the 1.5 s dedup, each miss noted. On a final miss, W1's MGMT debug lines tell a lost request from lost frames. `inv.seqget_multichunk` now tells a lost reply (re-fetch) from a lost push (re-push). SEQUENCE_INVENTORY.md §3a records the trap. **Not done (optional, cross-repo):** a second pass in `sendResultFrags`, which would need a `lastDeliveredSession` guard in WCB_Client too.
+
+#### 72. A critical-battery hibernate mid-run was scored as a firmware failure
+
+| | |
+|---|---|
+| **Status** | VERIFIED — all named tests PASS on the current images (20260922-215719); was: FIXED (unverified) |
+| **Owner** | `harness` / bench |
+| **Effort** | S |
+| **Tests** | `ota.relay_full_same_image_wcb2` (where it showed) |
+| **Subsystem** | hil/runner.py |
+
+**Evidence.** The relayed full OTA of W2 ran cleanly to offset 226176 (16.6 %). Then Windows logged Kernel-Power 524 "Critical Battery Trigger Met" at 19:58:43 and "entering sleep" at 19:58:47; the laptop's critical-battery action is Hibernate. It resumed at 20:08:16 when AC came back. W2's 30 s idle reaper ended the session as designed, and the next frame got the designed "no session" answer, ERR + offset 0. The laptop had been on battery since the 15:59:03 power-source change, the same event behind run 20260922-151421's sleep. After the resume only W1's CH9102 port errored, so `host_usb_loss()` (all ports within 2 s) did not fire, and the result was scored FAIL.
+
+**Fix.** The runner compares each test's monotonic duration with Windows' sleep-excluding interrupt time (`_awake_s()`, QueryUnbiasedInterruptTime). A FAIL or ERROR during which the host slept more than 5 s becomes ERROR "NOT A RESULT", followed by the usual wait for the ports. A run that starts on battery logs a WARNING. **Bench:** keep the laptop on AC. The END/reboot half of this test has still never run on hardware.
+
+#### 73. Kyber_Local follow-ups from the #14 / #28 review (D4-D9 applied)
+
+| | |
+|---|---|
+| **Status** | OPEN — D4-D9 VERIFIED on hardware: all five new kyber tests failed on the 09-22 image (baseline 20260923-094621) and pass on the 09:49 image with the rest of `kyber.*`, `maestro.*`, `pwm.*` and the device guards (20260923-095057; `kyber.local_port_move_releases_old` once probe 5 fixed #79, 20260923-111854). The two `wizard.kyber_*` tests run in the next full run. D4b, D6b, D7b open. Pre-existing or consistency items; none blocks a test |
+| **Owner** | `WCB_firmware` (+ Wizard) |
+| **Effort** | M |
+| **Tests** | `kyber.local_s1_legacy_fallback_skips_kyber_port` (D6, D8), `kyber.local_clear_maestro_drops_target` (D7, plus D6's free-S1 control), `kyber.local_mode_s2` (D8 needle), `kyber.local_port_move_releases_old` (D5, D9), `wizard.kyber_release_order` (D5, D9 push order), `kyber.local_free_port_takes_pwm` (D4), `wizard.kyber_local_frees_other_port` (D4 claims and REMOTE -> local push order); `kyber.local_rejected_port_keeps_forwarding` now compares only the `?KYBER,LOCAL` line |
+| **Subsystem** | maestro-kyber |
+
+From the adversarially verified review of the #14/#28 change (workflow wf_3dab4584-264):
+- **D4. FIXED (unverified).** The HCR/MP3/WLED/DFP guards, `canUsePWMOnPort` and the Kyber_Local boot UART init reserved BOTH S1 and S2, although since #14 the other hardware port is a working command port. It was not even consistent: devices load before the Kyber settings and were kept, a PWM output saved on the other port was dropped from NVS at the next boot (`loadPWMOutputPortsFromPreferences`), and `;P` (already per port) still drove that pin. **Fix:** one helper, `kyberModeReservesPort()` (WCB_Storage.cpp): Kyber LOCAL reserves only `kyberLocalPort`, Maestro REMOTE still S1. The four device guards, `canUsePWMOnPort` (so `?MAP,PWM`, both boot loaders and WDP PWMTARGET auto-config) and the `;P` guard all call it; every refusal message is unchanged except PWM on a local Kyber's port, which now says "reserved for Kyber" on S1 too. The Kyber_Local boot branch always begins the Kyber port and begins the other one unless a PWM input/output owns it, like the no-Kyber branch (beginning it anyway re-attached the UART over the PWM pin). Bundled, because D4 lets a device sit on the freed port: in targeted mode `forwardDataFromKyber` skips a local target on a port an HCR/MP3/DFP/WLED or PWM output owns - a target can still lack a slot after D7 (a table saved by older firmware, or an explicit `?KYBER,LOCAL` target list with all nine slots full, which adds the target and no slot). Wizard: evaluatePortClaims claims only the Kyber's port (a bare/legacy `?KYBER,LOCAL` = S2) and keeps `kyber-reserved` for REMOTE's S1 alone; a delta push from REMOTE to local now sends `KYBER,CLEAR` early (the verdict's A), because REMOTE's S1 reservation otherwise refused a device the Wizard now offers on S1 while the baseline recorded it. `?backup` needed nothing: since D5 a Kyber_Local board's backup emits `KYBER,CLEAR` ahead of the device lines, which also ends Maestro REMOTE on the board being restored. Help, WCB_KYBER_PASSTHROUGH_PARAMS.md §7, WDP_DESIGN.md §9 and the wiki updated. ESP32 compiles at 69%.
+- **D4b (open, accepted).** (1) The HCR/MP3/DFP/WLED guards never check a local Maestro (on every board). The old S1+S2 reservation hid that on the usual Kyber layout (Kyber S2, Maestro S1); now a typed `?HCR,PORT,S1` there is accepted and re-bauds the Maestro's port. The Wizard hides the port behind its `maestro` claim, so it is a CLI-only trap. Adding the term needs care: the Wizard pushes devices before the Maestro block, so a delta push that moves a device onto a port a Maestro is leaving would then be refused. (2) A PWM mapping saved on the other port before the board went Kyber local was skipped at every boot but never removed from NVS (`loadPWMMappingsFromPreferences` only skips); it loads again at the first boot of this firmware - visible in `?MAP,PWM,LIST` and the boot banner, removable with `?MAP,PWM,CLEAR,S<n>`. (3) Switching a board that has a device or PWM on S1 to `?MAESTRO,REMOTE` makes S1 reserved while occupied (same root as D6b).
+- **D5. FIXED (unverified).** Moving the Kyber from one port to the other never released the old port: it stayed at 115200 with broadcasts off both ways; only `?KYBER,CLEAR` gave a port back. The bare `?KYBER,LOCAL` hard-coded S2, so with the Kyber on S1 it re-pointed the bridge at S2 (refused outright with a Maestro there) and left S1 claimed. **Fix:** one release helper, `kyberReleasePort()` (WCB_Storage.cpp), holds CLEAR's old code (9600, `?BCAST` in/out on) and skips a port a local Maestro or another subsystem owns at release time. A `?KYBER,LOCAL` move re-points `kyberLocalPort` first (a running KyberLocalTask follows on its next pass, so an S1<->S2 move on a Kyber_Local-booted board is live) and releases the old port after the target loop, so a swap list that puts a Maestro there leaves it alone. The bare form keeps the current S1/S2 port (S2 when not Kyber local yet). Because a release now follows every way out of LOCAL, `?backup` emits `KYBER,CLEAR` / `MAESTRO,REMOTE` ahead of the `BAUD`/`BCAST` lines (KYBER,LOCAL still claims late), and the Wizard sends the leave-LOCAL release there too and re-sends the released port's rows - otherwise the release undid the chain's own settings for that port.
+- **D6. FIXED (unverified).** The legacy Maestro fallbacks (no slot for the own id: `;M<own id>`, `;M9`, the `;M0` extra frame, a get on the own id) wrote Serial1 even when S1 was the Kyber's or another device's port, and the get read its "reply" out of that device. **Fix:** `legacyS1Owner()` (WCB_Maestro.cpp) gates all seven sites; an owned S1 (Kyber port, HCR/MP3/DFP/WLED, PWM in/out) gets nothing, the own-id and get paths still return without an ESP-NOW self-forward, and `?MAESTRO,CLEAR,ALL` no longer claims legacy routing on an owned S1. The bench exercises only the Kyber-on-S1 owner; the HCR/MP3/DFP/WLED/PWM owners are covered by code review.
+- **D6b (open).** WCB.ino:4813 (`espNowReceiveCallback`), the Maestro_Remote raw fallback to Serial1 (target-98 data with no local Maestro slot, on the WiFi task), has the same shape. Reachable when a device was put on S1 before `?MAESTRO,REMOTE`; the cleaner fix is for `?MAESTRO,REMOTE` to refuse an owned S1.
+- **D7. FIXED (unverified).** A local Kyber target outlived its Maestro slot after `?MAESTRO,CLEAR`: forwardDataFromKyber kept writing the freed port (now at 9600), and `?backup`'s KYBER,LOCAL target list re-created the cleared slot on restore. **Decision:** no broadcast skip keyed on kyberTargets - it would override the freed port's `?BCAST` flags the way #14 did, and would stop neither the Kyber writes nor the restore. **Fix:** on a Kyber_Local board in targeted mode local targets follow local slots. `_clearMaestroSlot` / `clearAllMaestroConfigs` drop the (id, self, port) target, or every local target on the port once no slot is left there; a newly claimed `?MAESTRO` local slot adds it (a re-issued existing slot does not, so an explicit `?KYBER,LOCAL` list survives a baud change). Keyed (id, port), never the id alone (rule 5). processBroadcastCommand carries a comment recording the non-fix.
+- **D7b (open).** Remote targets are not dropped with their proxy, so `?backup` re-creates a cleared remote slot, and `reconcileKyberTargetsFromMaestroConfigs` (WCB_Storage.cpp:1164) is keyed by id only.
+- **D8. FIXED (unverified).** `printBaudRates` hard-wired S1 = "(Maestro)" / S2 = "(Kyber)", and `printKyberSettings` printed "Initialized Serial1 & Serial2" whatever `kyberLocalPort` was. **Fix:** with no user label the row says "(Kyber)" on `kyberLocalPort` and "(Maestro)" on any port with a local slot; `printKyberSettings` prints "Kyber port: Serial<n> (<baud> baud)", or on Maestro_Remote "Maestro data from the mesh goes to: S<n>[, ...]" (else "S1 (no local Maestro configured - legacy default)"). The stale boot comment (WCB.ino Serial1/Serial2 begin) is corrected. Only `kyber.local_mode_s2`'s needle changed.
+- **D9. FIXED (unverified).** The REMOTE branch of `storeKyberSettings` did not zero `kyberLocalPort`, which KyberLocalTask gates on alone, so `?MAESTRO,REMOTE` on a Kyber_Local-booted board kept the task bridging the old Kyber port (S2 then had two readers with the Maestro_Remote parser branch) and echoing the local Maestro ports into it until reboot; the port also kept 115200 / broadcasts off. **Fix:** REMOTE releases the port through `kyberReleasePort()` and zeroes `kyberLocalPort`, so `kyberLocalPort != 0` only while Kyber_Local and `maestroPortOwnedByKyberBridge` still mirrors the task gates. The Wizard now asks for a reboot on `MAESTRO,REMOTE` (commandStringNeedsReboot), and sends it only on a real mode change or a full push.
+
+#### 74. kyber.remote_roundtrip asserted exact delivery on a best-effort channel
+
+| | |
+|---|---|
+| **Status** | VERIFIED — PASS in 20260923-002254 (after sbus.trim_exact armed NaviCore's ch 0 release, for #76) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `kyber.remote_roundtrip` (and optionally a loss-rate floor in `kyber.maestro_s2_single_reader`) |
+| **Subsystem** | hil / s22 |
+
+**Evidence (run 20260922-211114).** 64 bytes into W1 S1 arrived on W2's Maestro line as 28 bytes, a >4 ms gap, then 30 bytes: exactly one ~6-byte frame (1d..22) of ~11 was missing. W1 counted 12 raw sends accepted and 0 failed, but for a broadcast "Success" only means the driver queued the frame. The same run's `kyber.maestro_s2_single_reader` delivered 733 of 740 bytes, with the losses scattered single bytes in different lines. Across three runs that is 21 of ~2,081 frames, about 1 %, on the older build as well. At 1 % per frame an 11-frame burst loses a piece about 10 % of the time, which matches this test's record today (5 passes, 1 fail). W2's receive path has nowhere to drop a good frame, and none of today's firmware changes is on this path. The Kyber doc has always said the channel is best-effort (§2).
+
+**Fix (to apply).** Up to 3 attempts, each with a fresh Watch about 0.5 s apart; stop at the first exact delivery. A lossy attempt must still be an in-order subsequence of the payload (the bytes are all distinct, so a duplicate, reordered or foreign byte, which is what a firmware bug looks like, fails at once), and each lossy attempt is noted. Fail if that check fails or if all 3 attempts lose bytes (~0.1 %). Keep the Failed == 0 and getErrors checks, and update the docstring's stale line refs. **To decide where the frame dies:** a per-sender receive counter for target-98 frames on W2, compared with W1's accepted sends.
+
+#### 75. Heap hardening: a command copied on an exhausted heap, a by-value copy of every command, and a line buffer that kept a long line's heap
+
+| | |
+|---|---|
+| **Status** | VERIFIED — flashed 23:58; regression run 20260922-235913: 172 tests on the changed paths (input/map/var/if/seq/inv/maestro), the only failures unrelated (#77, probe instrument) |
+| **Owner** | `WCB_firmware` |
+| **Effort** | S |
+| **Tests** | `inv.seqget_largest` (drives W1 to the OOM refusal), `seq.*`, `if.*`, `maestro.*` for regressions |
+| **Subsystem** | command dispatch / heap |
+
+**Evidence.** W1's ?STATS read "min free since boot 280" (byte-addressable heap). The low point came from `inv.seqget_largest`'s deliberate 2,966-character ?SEQ,SAVE: about 7 full-length copies were live when the 8th allocation failed and was reported cleanly (#58). Nothing crashed, and all 307 marker lines echoed. "Min free since boot" is the sum of each heap region's own low point (esp_heap_caps.h), so 280 is a worst-case bound, not one moment's free heap.
+
+**Latent paths found and fixed.** (1) A queue item copied into a String while the heap was exhausted came back empty with a NULL `c_str()`. It then fell through to processBroadcastCommand and `sendESPNowMessage`, which reads `message[0]`. The drain now drops it with "Out of memory: dropped a N-character command", and `sendESPNowMessage` returns on a NULL or empty message. (2) `handleSingleCommand` took the command by value, one more full-length copy of every command; it now takes a const reference. (3) `processIncomingSerial`'s per-port line buffer kept its capacity through `= ""`, so one long line (a Wizard push chain, a ?SEQ,SAVE, a pasted backup) pinned that much heap for the rest of the boot. After any line over 512 characters it is now released (`= (const char*)nullptr`, which frees it). **Deliberately not done:** a line-length cap. A pasted `?backup` restore line can legitimately exceed 3 KB, so any cap needs a measured maximum first. Also not done: cutting the dispatcher's copies of `args`/`argsUpper`/`seqArgs`, which touches every command path and needs a full run. SEQUENCE_INVENTORY.md §3b records the ~7x cost and what "min free" means.
+
+#### 76. Two NaviCore tests assumed NaviCore sends nothing on its own and that a Maestro channel holds a mesh setTarget
+
+| | |
+|---|---|
+| **Status** | VERIFIED — PASS in 20260923-002254 (after sbus.trim_exact armed NaviCore's ch 0 release, for #76) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `navicore.maestro_mesh_settarget_readback`, `navicore.mesh_stats_counts` |
+| **Subsystem** | hil / s21 |
+
+**Evidence (full run 20260922-215719: 401 PASS / 2 FAIL).** (1) The readback test's mesh setTarget of slot 1 ch 0 was dispatched once. NaviCore printed "[RELEASE] Maestro 1 ch 0 idle 1500ms → servo off" 1.495 s later, and every readback returned 0 promptly. (2) W1's row read sent 5 where the test expected 4. The fifth message was NaviCore's `?STATS,RPT,20,...` mesh-stats report, which it sends to its configured target (W1) every 30 s.
+
+**Mechanism.** (1) Knob J2 is a mode-aware Maestro passthrough on slot 1 ch 0 with releaseIdleMs 1500. A global mode change re-dispatches it, and that arms the release for that channel in RAM until reboot or SET_CONFIG. From then on, any move of ch 0, mesh ones included, restarts the 1.5 s idle timer. The previous run's `sbus.trim_exact` SET_MODE armed it, and NaviCore was not rebooted between runs. The same test passed earlier in that boot, before the mode flip. (2) The ~7 s window catches the 30 s report about a fifth of the time. NaviCore's 60 s `;V,MODE` report to W2 is the same kind of hazard, and it explains the earlier "WCB2 row [2, 2, 2, ...]" failures (09-22 12:24, 12:45). Neither is a firmware change: the NaviCore changes tonight (#65, #70) are not on either path.
+
+**Fix.** (1) The readback test uses a channel no Maestro-passthrough knob output drives on that slot (`_undriven_channel`; on this bench slot 1 ch 1). (2) The stats test reads W1's ?STATS "Reported by Other Nodes" age for WCB20 and starts its window right after a report. The modeReport target, whose phase can't be read, may show exactly one extra, ACKed send. HIL_TESTING.md §6 records both NaviCore behaviours, and the `sbus.trim_exact` docstring no longer calls SET_MODE side-effect free.
+
+#### 77. inv.mgmt_seq_remote fetched W2's inventory once, but the SEQ reply is sent once and unacknowledged
+
+| | |
+|---|---|
+| **Status** | VERIFIED — PASS in 20260923-002254 (after sbus.trim_exact armed NaviCore's ch 0 release, for #76) |
+| **Owner** | `test_is_wrong` |
+| **Effort** | S |
+| **Tests** | `inv.mgmt_seq_remote`, `inv.hash_matches_wdp`, `inv.mgmt_seq_w2_relay` |
+| **Subsystem** | hil / s17 |
+
+**Evidence (regression run 20260922-235913 on the 23:58 hardening image).** W1 sent `?MGMT,SEQ,2` at 970.462 and printed nothing in 3 s: no reply, no error. The test passed in the full run just before and in every earlier run, and nothing in #75 is on this path: the request and reply use raw packets, not `sendESPNowMessage`, and no out-of-memory line appeared.
+
+**Mechanism and fix.** The SEQ request is sent 3 times, but W2's reply goes out once as unacknowledged broadcast frags through `sendResultFrags` (WCB.ino `handleSeqReqPacket`). That is the same pattern as the SEQVAL reply in #71, so a lost frag means silence, and SEQUENCE_INVENTORY.md §3a already says the requester must retry. The shared `_relay` helper now tries up to 3 times, spaced past W2's 1.5 s duplicate filter, and `inv.mgmt_seq_w2_relay` retries the same way.
+
+#### 78. Soft-serial RX loses edges when two soft pins receive at once (ESP32 erratum GPIO-3.14) - probe and WCB alike - and one intermittent W1S4 corruption episode
+
+| | |
+|---|---|
+| **Status** | VERIFIED on W1 - the erratum was CONFIRMED by `softrx.erratum_pairs` on the edge-triggered image (227 of 10125 multi-port lines lost, run 20260923-113109); on the level-triggered image (flashed 14:36) it lost **0 of 10125** (95 % upper bound 0.03 %/line), `softrx.level_irq_stuck_line` and `input.softserial_tx_rmt` pass, and every soft-port, map, HCR/MP3/DFP, WLED and PWM test passes (run 20260923-144022, 139 PASS). The W1S4 episode (2 below) did not recur in a 20-minute `soak.w1s4_wire` (38 blocks exact). The probe gets the same RX in wcb_probe 6 (below). **New failure mode, FIXED (unverified; compiled, not flashed): the stale level arm after a CPU-only reset** (below) - wcb_probe 7, the WCB boot-time clear, and the harness now fails a test when a probe restarts unplanned |
+| **Owner** | `WCB_firmware` (vendored EspSoftwareSerial, `WCB_PWM.cpp`) / `probe firmware` / `hil` / bench |
+| **Effort** | M (level-triggered soft RX, done) / S (bench inspection of W1S4) |
+| **Tests** | `softrx.erratum_pairs` (opt-in; the fix's regression guard), `softrx.level_irq_stuck_line` (new), `input.softserial_tx_rmt` (RX-mode line added), `probe.soft_concurrent_rx` (rewritten as a control arm + a rated two-soft arm), `input.bcast_fanout`, `soak.w1s4_wire` (opt-in) |
+| **Subsystem** | soft-serial RX / PWM input / hil / wcb_probe / s23 |
+
+**Two different things, measured apart (2026-09-23).**
+1. **Rare lost edges, two soft channels at once.** Earlier runs saw ~0.2 % of lines wrong on the wire that lags (W1S4) when W1's S3 fan-out lands on two probe soft channels together: 0x35 read as 0x37, and 0x34 read as 0xF4 with the next byte's stop edge lost. A decoder replay (EspSoftwareSerial rxBits) shows each is exactly one or two LOST edges. ESP32 erratum GPIO-3.14 (all revisions, no fix scheduled) explains that: pins 0-31 share one interrupt status register, and the W1TC clear of one pin's edge can swallow another pin's edge in the same clock. The probe's soft RX pins are all in that group. A diagnosis and its verifier agreed; the erratum was not reproduced on demand.
+2. **An intermittent episode (run 20260923-012123, 01:21).** For a few minutes W1S4 lost ~3.5 % of lines (35 of 1000) EVEN WITH W1S2 on a probe hardware channel, so only one probe pin was taking edge interrupts. The errors were spread evenly over time, mostly 1->0 flips and dropped bytes, and hit W1S2 too when both were soft. That rules out the erratum for that episode. Minutes later every arrangement was clean: W1S4 on a hardware UART 500/500, a repeat of the control 500/500, then the full self-check 1000/1000 and 300/300. The cause is unknown: W1's S4 output, or the W1S4 wire or its ground (W1S4 goes to probe1 header S3, next to W1S2's header S4). It only showed while S2 and S4 transmitted together. W1S5, written alone, stayed clean throughout.
+
+**Done.** The self-check has a control arm, with W1S2 on a hardware channel, that must be exact (1000 lines). It has a two-soft arm that allows the erratum's rare loss up to a 2 % ceiling, but fails a line lost on both wires, or any mangled line that is not a near-miss of a sent one. So it catches the episode above if it comes back. The probe comment (`probe_main.cpp`, setup) now names the erratum.
+
+**For Greg at the bench.** Reseat the W1S4 -> probe1 header S3 lead and its ground, and check it isn't bundled tightly against W1S2's lead. If the self-check's control arm ever fails again, a scope on W1S4 during the S2+S4 fan-out decides W1 against the wire. To run the measurements: flash probe1 with `tests/hil/wcb_probe` (v4, `TXSKEW`), add `softrx_erratum` and `w1s4_soak` to `bench.json` `opt_in` (optionally `soak_minutes`), then `python run.py "softrx.*" "soak.*"`.
+
+**Measured: the WCB is exposed (run 20260923-113109).** `softrx.erratum_pairs` on W1 (HW 1.0, S3-S5 RX on GPIO 25/21/23, 9600 baud, the edge-triggered image) lost **227 of 10125** two- and three-port lines (2.2 %) while **every one of 10125** single-port control lines arrived exact. By the nearest other line's skew (0.5 µs bins) the losses sit at -1.5 to -3 µs (57/84/57 lines at -2.5/-2.0/-1.5, a handful elsewhere): the second pin's edge arrives while the GPIO ISR is still handling the first pin's, which is the erratum's STATUS/W1TC mechanism. Every one-byte corruption whose line could be attributed (55 of 55) is exactly ONE lost edge, a whole bit run taking its neighbours' level, rising (39) and falling (16) alike, at every bit boundary from data bit 0 to data bit 6 (`softrx_pairs.csv`). A PWM input shares the same status register, so it is exposed too.
+
+**Fix (2026-09-23, FIXED unverified: compiled, not flashed).** Espressif's workaround for GPIO-3.14: emulate edges with level interrupts and flip the level after each one.
+- **EspSoftwareSerial 8.1.0 is vendored** at `Code/WCB/src/EspSoftwareSerial` (the way HumanCyborgRelationsAPI is, CLAUDE.md rule 7), with the patches listed in its README and the LGPL `LICENSE`. Every include in `Code/WCB` is the relative path; CI (`build.yml`) no longer installs the library, and `build.sh`'s prerequisites say so.
+- **Classic ESP32 only** (`ESPSWSERIAL_LEVEL_RX` from `CONFIG_IDF_TARGET_ESP32`): `enableRx()` attaches `rxBitISR` as `ONLOW`/`ONHIGH` for the level the line is not at. `rxBitISR` re-arms the opposite level first (`gpio_ll_set_intr_type`), pushes a transition only when the level differs from the last one recorded (the same level is a spurious entry), then re-reads the pad and loops, capped, which narrows the window in which the pin can be left armed for the level it is at; that window (up to the IDF's post-handler status clear) and the cap exit rely on the level status re-asserting while its condition holds, which it does. The ESP32-S3 compiles the stock edge path and class layout.
+- **PWM inputs the same way** (`WCB_PWM.cpp` `pwmEdge()` behind `pwmISR1-5`, armed by `attachPWMInterrupt`); the S3 keeps the stock CHANGE body.
+- **Left exposed:** `rxBitSyncISR` (a soft port above ~74880 baud, i.e. 115200) stays on its FALLING edge on both chips: it busy-waits a frame in the ISR, so a level trigger would re-fire forever on a line held low. `?BAUD` already warns that 115200 soft input is unreliable.
+- **New constraint (CLAUDE.md rule 13):** the ISR rewrites `GPIO_PINn_REG`'s `int_type` without the IDF spinlock, so S3-S5 RX and PWM-input pins are (re)configured only from core 1. Today `applyLiveBaud`, `attachPWMInterrupt` and `detachPWMInterrupt` all run from `setup()` or command handlers on core 1.
+- **Checks:** `grep -rn --include="*.h" --include="*.cpp" --include="*.ino" "<SoftwareSerial.h>" Code/WCB` prints nothing; neither compile lists a stock EspSoftwareSerial under "Used library"; `rxBitISR`, `rxBitSyncISR`, `pwmEdge` and `pwmISR1-5` are at 0x40081xxx (IRAM) in the ESP32 ELF. `micros()` (0x4010ffe8) and `__onPinInterrupt` are in flash, as before, which is why the GPIO ISR service must stay without `ESP_INTR_FLAG_IRAM` (#64). ESP32 69 % / 108136 B RAM, S3 67 %, no new warnings.
+- `?DEBUG` prints `[SOFTSERIAL] S<n> RX: level-triggered GPIO interrupt (ESP32 erratum GPIO-3.14)` / `edge-triggered GPIO interrupt` / `off` at every soft-port begin (`applySoftSerialIntTx`); `input.softserial_tx_rmt` asserts the mode against `?HW`. The new `softrx.level_irq_stuck_line` holds W1's S4 RX low for 2 s: W1 must keep answering `?VERSION` within 1 s, must not reboot, and S4 must read text exactly afterwards. A wrong arm would show there as an interrupt storm.
+- **Related:** #63's root cause (rxBits reads the clock after testing the buffer) could now be fixed in the vendored copy. It is not done here, and the scheduler-suspend wrapper stays. The sketchbook keeps the stock library.
+
+**The probe (wcb_probe 6).** With W1 fixed, `probe.soft_concurrent_rx` still failed (run 20260923-144022): its control arm was exact (1000/1000 on every wire, so W1 and the wires are clean), but the probe's own two soft channels lost 3 of 300 lines each, and the test's near-miss rule rejected two of them - a lost edge in a CR merges two lines, and one mid-byte slips the frame for the rest of the burst. That is the same erratum in the instrument. wcb_probe 6 bundles a byte-identical copy of the WCB's patched library at `tests/hil/wcb_probe/src/EspSoftwareSerial` (Arduino copies a sketch into its build folder, so a relative include of the WCB's cannot work); `selftest.py` fails if the two copies differ. `probe.soft_concurrent_rx` now requires both arms exact on wcb_probe 6, and on an older probe runs the control arm and skips the two-soft one. Flashed to both probes at 15:38: `probe.soft_concurrent_rx` read 300/300 on every wire in the two-soft arm (it was 297/300) and 1000/1000 in the control arm, and every `probe.*` and soft-channel input test passed (run 20260923-154032, 7/7).
+
+**The stale level arm after a CPU-only reset (full run 20260923-154611; VERIFIED).** On wcb_probe 6, channel C bound on header S3 then MESH LEAVE, three W1 reboots gave 6 probe panics; on wcb_probe 7 the same sequence (5 W1 reboots) and two bound channels (5 more) gave none. W1 on the 19:17 image prints "[BOOT] Cleared a stale GPIO interrupt left armed by the restart on GPIO 21 23 25" (its S3-S5 RX pins) after every `?reboot` - the WCB carried the same state. `client_mesh.rejoin_seq_reuse` and `input.mesh_bcast_to_ports` PASS (20260923-192715). Level-triggered RX added a boot trap. `ESP.restart()` and a panic reset only the CPU; the GPIO peripheral keeps each pin's interrupt TYPE and ENABLE. A soft-RX (or ESP32 PWM-input) pin armed at that moment stays armed through the boot with no handler behind it. Once `gpio_install_isr_service()` routes the GPIO interrupt, the IDF dispatcher finds no callback, nothing flips the level, the status re-asserts at once, and the interrupt watchdog panics - another CPU reset, so it loops until the wire changes level. Arduino's `pinMode` re-arms it on its own: `__pinMode` copies the pin's current `int_type` into `gpio_config` (esp32-hal-gpio.c:134), which enables it.
+- **What it did (wcb_probe 6).** probe1's pin 4 was left armed by a `MESH LEAVE` (5480.033, `ESP.restart()` without `resetAll()`) while channel C was bound. Each later W1 reboot (5570.624, 5596.038) let W1's TX line drop and set off three interrupt-WDT panics on probe1 (5571.441-5573.187, 5596.868-5598.558), which stopped only once W1 booted and drove the line again. probe2 did the same after W2's two OTA restarts (7388.183, 8144.171). The panicked PCs decode (ELF SHA 970036c40) into the IDF GPIO dispatcher (`gpio_isr_loop` gpio.c:491, `gpio_intr_service` gpio.c:514/519), not `rxBitISR`. About 40 W1 reboots with only handler-attached soft RX caused none; runs on probe 2, 3 and 5 (edge-triggered) had none. The harness never noticed (`links.py` `bind()` returned early on the cached channel), so `client_mesh.rejoin_seq_reuse` read [0,0,0] and `input.mesh_bcast_to_ports` read `b''` from a channel the probe no longer had - two of the run's four FAILs, both HARNESS.
+- **Probe fix (wcb_probe 7).** `setup()` disarms every header pin (`disarmPinIrq`: `gpio_intr_disable` + `gpio_set_intr_type(DISABLE)`) before `gpio_install_isr_service` and before its `pinMode` loop; `MESH LEAVE` calls `resetAll()` before `ESP.restart()`; `releasePin()` disarms too. `UNBIND` was already clean: `end()` -> `enableRx(false)` -> `detachInterrupt`, which removes the handler (disabling the pin) and sets the type to DISABLE (esp32-hal-gpio.c `__detachInterrupt`), so the vendored library needs no change.
+- **WCB hardening (not observed on a WCB, same trap).** `setup()` calls `clearStaleGpioInterrupts()` before `gpio_install_isr_service`: every valid GPIO with a type or enable set is disarmed (nothing has attached one yet, so any such pin is stale), and `[BOOT] Cleared a stale GPIO interrupt left armed by the restart on GPIO <n>` is printed. It clears all pins, not this revision's RX pins, because the pin map is not loaded yet and `?HW` moves them. Before this, any software restart (`?reboot`, OTA, a config push's deferred restart, a PWM mapping change) that caught a soft-RX or PWM-input pin armed could boot-loop the board if that line changed level before its handler was attached again - and a PWM input pulses every 20 ms. The runtime paths leave no armed pin without a handler: `applyLiveBaud` ends S3-S5 through `detachInterrupt`, `detachPWMInterrupt` is `detachInterrupt`, `WcbSoftSerial::end()` is the library's `end()`, and `;P` borrows TX pins, which never carry an interrupt.
+- **Harness.** A bind records a mark; `bind()`, and any read or send on a bound link, re-binds when the probe has printed `BOOT wcb_probe` or `Guru Meditation` since (substring match: the ROM banner lands glued to the BOOT line), or its port dropped and reopened (`<<reopened`; the probe runs on USB power alone, so a drop resets it and its BOOT line lands while the port is closed). A read whose mark is older than the restart fails with the reason. The re-bind forgets only the bindings older than the restart, each with a best-effort `UNBIND`: a wire bound after it stays bound on the probe, and forgetting it host-side made the next bind pick a letter whose header was still held (`ERR pin in use`, found in review with a pin-ownership simulation). After each test the runner scans every open probe for a restart nothing planned (`MESH LEAVE`, the first-use `RESET` and the resume/outage reopen are planned), fails THAT test with `probe<n> panicked at t=...`, then `RESET`s the probe and forgets all its channels (only the lost ones if the `RESET` fails). `selftest.py` covers all of it with a fake probe that enforces pin ownership.
+- **Bench check.** Bind a soft channel on probe1 to a W1 TX wire, `MESH LEAVE` while bound (v6's trigger), then `?reboot` W1 five times: no `Guru Meditation` on probe1. Then `client_mesh.rejoin_seq_reuse` and `input.mesh_bcast_to_ports`.
+
+**Measurement (built 2026-09-23; `softrx.erratum_pairs` run 20260923-113109, `soak.w1s4_wire` not yet run).** Two opt-in tests in `tests/hil/suites/s23_softrx_measure.py`, harness only.
+1. `softrx.erratum_pairs` (`softrx_erratum`, ~15 min). The probe's new `TXSKEW` verb (wcb_probe 4) bit-bangs two or three lines at once onto W1's S3-S5 RX pins from an IRAM loop on the cycle counter, the later lines starting a chosen number of nanoseconds after the first. The hardware channels cannot do this: each UART starts a frame on its own baud tick, so one re-bind gives one skew for a whole batch. 4500 rounds rotate the pairs (S3,S4), (S4,S5), (S3,S5), with every 4th a triple, and each is followed by one single-port line per port as the control. Skews are seeded, 60 % within +-15 us, 40 % within half a bit, ~5 % zero. Lines start `***` and W1 only prints "Ignored chain command", with `?BCAST,IN` off on S3-S5, so W1 transmits nothing. Verdict: any single lost -> inconclusive (W1's one-port RX, see 2); >= 6 multi-port lines lost with every single exact -> **confirmed**, which is the go for the fix; none lost with >= 2500 pairs inside +-15 us -> refuted at the stated bound (PASS). After the fix the same test must PASS.
+2. `soak.w1s4_wire` (`w1s4_soak`, `soak_minutes`, default 20; probe v3 is enough). It repeats the episode's load (S3 fan-out, so S2 and S4 transmit together; `;S4` alone; `;S2` alone with W1S4/W1S5 checked for induced bytes). It alternates W1S4 between a probe hardware and soft receiver in 30 s blocks, zooming to 10 s after an error, and reads the W1 heap every 5 min. A recurrence is classified as W1's content (same corruption on S2 and S4), W1's S4 waveform or lead (the hardware receiver sees it too, or FRAME errors), sub-bit glitches (soft receiver only), needing S2 activity, or S2 coupling.
+
+#### 79. A NUL on a port's line (a break) made the whole next line an empty broadcast; the probe's own channel re-bind produced one
+
+| | |
+|---|---|
+| **Status** | VERIFIED - probe 5 + the 11:14 W1/W2 image: `input.nul_ignored` and `kyber.local_port_move_releases_old` PASS in 20260923-111854 (50/50 of `input.*`, the 3 known WDP-DA label skips aside) |
+| **Owner** | `WCB_firmware` + `probe firmware` |
+| **Effort** | S |
+| **Tests** | `input.nul_ignored` (new, should), `kyber.local_port_move_releases_old` |
+| **Subsystem** | serial input / wcb_probe |
+
+**Evidence (targeted run 20260923-095057 on the 09:49 images, 139/140).** `kyber.local_port_move_releases_old` step (e): after the live `?KYBER,LOCAL,S2` on a board booted Kyber_Local on S1, `;S0,<marker>` typed into the released S1 printed nothing on USB, and W1 sent a lone CR out of S4. With `?DEBUG` on W1 printed `Processing input from Serial1: ` (empty) and `Broadcasting command: ` (empty). Diagnostics, all on the bench: the Kyber forwarders never read S1 after the move; W1 in plain mode with S1 booted at 9600 read every line (3/3) until probe1 re-bound channel A (9600 -> 19200 -> 9600), after which it read 0/3; a CR sent first cleared it. W2 had also received `00 00 00` bytes during the test's Kyber control check.
+
+**Two causes.**
+1. **Probe (harness).** `unbindChannel` ended the UART and left the TX pin a floating input until the next `begin()`. That pulled the WCB's RX line low (a break), which the WCB's UART reads as 0x00. Every re-bind (any baud change) did it, on the hardware channels at least. wcb_probe 5 latches the pin's GPIO output high before `end()` and leaves a released TX pin pulled up. With probe 5 and the unchanged W1 image the same re-binds read 3/3, and the Kyber test passes.
+2. **WCB (firmware).** `processIncomingSerial` appended the 0x00 to the port's line buffer. `String` counts it, but every `c_str()` consumer stops at it, so the line was neither empty nor a command: it went to every port and the mesh as an EMPTY broadcast, and the real command was lost. Anything that breaks the line does this in a droid, not just the probe: a device resetting, a cable plugged in, a sender re-configuring its pin. The reader now skips NUL bytes (WCB.ino `processIncomingSerial`), which can never be part of a command. Raw-mapped and device-owned ports never reach this reader, so binary pass-through is unaffected.
+
+**Test.** `input.nul_ignored` sends `<NUL><NUL>;S4<t>` then `<NUL>` + CR into W1 S3: S4 must get exactly `<t>`, and S2/S4/S5 nothing else. On the 09:49 image it failed as predicted (S4 got a lone CR).
+
+#### 80. The ETM offline sweep races the receive callback on boardTable: a peer coming back is logged OFFLINE the moment it arrives and left offline until its next packet
+
+| | |
+|---|---|
+| **Status** | VERIFIED - flashed 19:17; `etm.offline_detection_timing` 10/10 PASS, and across its 45 OFFLINE events not one second OFFLINE without an ONLINE between (the race's fingerprint; 1 in 5 in the full run before the fix). The two ~9 s gaps measured from the last printed heartbeat were refreshed by unprinted WCB2 packets, not the race. `peers.controller_off_on` PASS (20260923-192715) |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `etm.offline_detection_timing` (unchanged - its assertion is sound and it is the only thing that catches this) |
+| **Subsystem** | ETM presence / boardTable |
+
+**Evidence (full run 20260923-154611).** The test sets W1 to HB 4 / MISS 1 (offline after 5 s) while W2 keeps HB 10, so W2 goes offline and comes back every heartbeat, and asserts the median heartbeat-to-OFFLINE gap is at most 6.5 s. Gaps: 4.99 and 5.01 s (correct), then at 5081.112 and 5090.777 `[ETM] WCB2 went OFFLINE`, `WCB2 came ONLINE` and `Heartbeat from WCB2` arrived in the same batch, with no online edge since the previous OFFLINE (gaps 10.44 and 9.66 s). At 5096.709 `came ONLINE` printed with no OFFLINE before it, although the threshold was still 5 s: W2 had been left marked offline with a fresh timestamp. Pre-existing (the code dates from 2026-02-24 / 05-27 / 06-26; today's diff does not touch it): the same same-batch pattern is in 6 of the 14 recorded runs of this test, 8 edges in all (20260915-174757, -194910, -222653 x2, 20260916-122250, 20260922-151421, today x2), and the test fails exactly when 2 of its 4 gaps are hit (20260915-222653 and today). About 1 edge in 7.
+
+**Mechanism.** `espNowReceiveCallback` (WiFi task, core 0) did `wasOffline = !online; online = true; lastSeenMs = millis();` and `processETMHeartbeats` (loop(), core 1) did an unlocked `if (online && millis() - lastSeenMs > thr) online = false`. When an offline peer's packet arrived, the sweep could land between the callback's two stores, read `online == true` with the old `lastSeenMs`, print a false OFFLINE and clear `online` - then the callback stored the fresh time and printed ONLINE. Two rarer forms: a lost update (the sweep clears a just-set `online` with no print), and an unsigned wrap (`millis()` read before a concurrent, later `lastSeenMs` store makes the age ~49 days). Consequence outside the test: for up to one heartbeat interval a live peer is offline, so `etmAddToPendingTable` skips it and ensured sends to it drop to fire-once with no ACK tracking, and `?config` shows it offline. The temporary-peer eviction could also wrap and evict a live temporary peer.
+
+**Fix.** One `portMUX_TYPE boardTableMux` (WCB.ino, beside `boardTable`) and helpers that are the only read-modify-writers of `online` / `lastSeenMs`: `boardMarkSeen` (the callback: edge test and both stores), `boardSweepOffline` (both sweeps: check-and-clear), `boardMarkOffline` (the eviction, `removeActivePeer`, `syncActivePeerRegistrations`), `boardStampSeen` (temporary-peer adoption) and `boardPresence` (a consistent snapshot for the eviction TTL and the `?STATS` / `?config` rows). `millis()` is read before the lock, ages use a signed difference, and every print is outside it. Reordering the two stores alone would leave the lost update and the wrap. Single-field reads (`wcbPeerOnline`, `etmAddToPendingTable`) stay unlocked; an aligned 32-bit load is atomic.
+
+**Bench check.** `python run.py "etm.offline_detection_timing"` about 10 times: every gap 4.95-5.05 s, no `went OFFLINE` in the same batch as `came ONLINE`, and every OFFLINE preceded by its own online edge.
+
+**Also from that run (TEST_BUG, fixed in the test).** `peers.controller_off_on` failed because `?CONTROLLER,ON,20` printed no `registered (live)`: NaviCore's 30 s `?STATS,RPT` landed inside the 0.64 s OFF window, W1 ACKed it, and `etmSendAck` re-added WCB20 as an ESP-NOW peer on demand, so ON found the peer present. The firmware ended correct (NaviCore answered `;W20,?version`). The test now runs with `?DEBUG,ETM,ON` and excuses the missing line only when an `[ETM] Sent ACK seq N to WCB20` falls between OFF's confirmation and ON; otherwise it still fails, since that line is its only check that OFF frees the slot. The `?CONTROLLER` comment in WCB.ino that said a disabled controller is "ignored" now says what happens.

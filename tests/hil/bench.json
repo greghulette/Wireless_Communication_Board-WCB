@@ -64,5 +64,15 @@
     "W2S1": {
       "kind": "maestro"
     }
-  }
+  },
+  "opt_in": [
+    "ota_erase",
+    "ota_full",
+    "ota_full_wcb2",
+    "nvs_wear",
+    "seq_wipe",
+    "sbus_reset",
+    "navicore_clip",
+    "softrx_erratum"
+  ]
 }

@@ -1,10 +1,11 @@
 // WCB bench probe v2 — test-instrument firmware for a WCB V2.4 board (ESP32-PICO-V3-02).
 //
 // This is NOT WCB firmware. It turns a spare V2.4 board into a general bench instrument that the
-// PC app (tests/hil) reconfigures at runtime, so a new test never needs new probe firmware:
+// PC app (tests/hil) reconfigures at runtime, so a new test almost never needs new probe firmware
+// (TXSKEW is the exception: sub-microsecond timing between two lines cannot come over USB):
 //   - five serial channels on any S1-S5 header, any baud / format / inversion
 //       A, B = hardware UART1 / UART2 (use these above 38400 baud)
-//       C, D, E = EspSoftwareSerial (the same library the WCB uses for its S3-S5)
+//       C, D, E = EspSoftwareSerial (the WCB's patched copy, src/EspSoftwareSerial: level-triggered RX)
 //   - capture the bytes a WCB puts on a port, timestamped, with framing / parity / overflow
 //     errors; inject bytes into a WCB port
 //   - reply rules: answer a device query on the probe itself, faster than a USB round trip
@@ -13,7 +14,8 @@
 //     (how the app discovers which header is wired to which WCB port)
 //   - mesh mode: join the ESP-NOW mesh as a WCB_Client with parameters sent at runtime
 //
-// Build/flash (classic ESP32; EspSoftwareSerial + WCB_Client come from the Arduino-Code sketchbook):
+// Build/flash (classic ESP32; WCB_Client comes from the Arduino-Code sketchbook, EspSoftwareSerial is bundled in
+// src/EspSoftwareSerial - a byte-identical copy of Code/WCB/src/EspSoftwareSerial, kept in lockstep by selftest.py):
 //   arduino-cli compile --fqbn esp32:esp32:esp32 --build-path <dir> tests/hil/wcb_probe
 //   arduino-cli upload  --fqbn esp32:esp32:esp32 --input-dir <dir> -p COMx
 //
@@ -29,6 +31,10 @@
 //   BIND <A-E> <S1-S5> <baud> [FMT=8N1] [INV] [SWAP] [RXONLY]
 //   UNBIND <A-E>
 //   TX <A-E> <hex>
+//   TXSKEW <baud> <Sx>:<TX|RX> <hex> [<Sy>:<TX|RX> <skew_ns> <hex>] [<Sz>:<TX|RX> <skew_ns> <hex>]
+//                                          bit-bang up to 3 8N1 lines at once onto pins held with LEVEL .. 1;
+//                                          line y/z starts skew_ns after line x (negative: before), |skew| <= 1
+//                                          bit, 1-40 bytes each, 1200-57600 baud, <= 60 ms -> OK TXSKEW n=<lines> span_us=<n>
 //   RULE ADD <id 0-255> <A-E> <pattern hex, ?? = any byte> <reply hex> [DELAY=<ms>] [ONCE]
 //   RULE DEL <id> | RULE CLEAR
 //   PWMIN <S1-S5> [SWAP] | PWMIN OFF [<S1-S5>]
@@ -51,10 +57,20 @@
 
 #include <Arduino.h>
 #include <atomic>
-#include <SoftwareSerial.h>
+#include "src/EspSoftwareSerial/SoftwareSerial.h"   // the WCB's patched copy (tracker #78), not the stock library
 #include <WCB_Client.h>
+#include "driver/gpio.h"   // gpio_install_isr_service - soft-channel edge priority, see setup()
+#include "esp_cpu.h"       // esp_cpu_get_cycle_count - TXSKEW timing
+#include "esp_log.h"
+#include "soc/gpio_struct.h"   // GPIO.out_w1ts / out_w1tc - TXSKEW writes both pins in one store
 
-static const char *PROBE_VERSION = "2";
+// 7: setup() disarms every header pin's interrupt before the ISR service goes in, MESH LEAVE unbinds everything before
+// it restarts, and a released pin is left disarmed - v6 boot-looped on interrupt-WDT panics after a CPU-only reset left
+// a soft-RX level arm with no handler (disarmPinIrq, tracker #78). 6: soft channels receive on level-triggered
+// interrupts (the WCB's patched EspSoftwareSerial, tracker #78). 5: an unbound channel's TX line stays high
+// (unbindChannel, tracker #79). 4: TXSKEW (tracker #78). 3: GPIO ISR service at level 3 (setup()). Otherwise the USB
+// protocol is unchanged from 2.
+static const char *PROBE_VERSION = "7";
 
 // V2.4 header pins — must match wcb_hw_version 24 in Code/WCB/wcb_pin_map.cpp.
 static const int8_t HDR_TX[6] = {-1, 8, 20, 25, 14, 13};
@@ -68,9 +84,24 @@ static uint8_t pinOwner[40];
 
 static bool pinFree(int p) { return p >= 0 && p < 40 && pinOwner[p] == OWN_NONE; }
 static void claimPin(int p, Owner o) { if (p >= 0 && p < 40) pinOwner[p] = o; }
+
+// Clear a pin's interrupt ENABLE and TYPE. A CPU-only reset (ESP.restart(), or a panic) keeps both in the GPIO
+// registers, and a soft channel arms a LEVEL type (v6, tracker #78). Left armed with no handler, it re-asserts for as
+// long as the line sits at the armed level: once gpio_install_isr_service() routes the GPIO interrupt, the IDF
+// dispatcher finds no callback and re-enters until the interrupt watchdog panics - another CPU reset, so v6 looped
+// 2-3 panics deep until the wired WCB booted and drove its TX line again. Arduino's pinMode would re-arm it on its
+// own: __pinMode copies the pin's current int_type into gpio_config (esp32-hal-gpio.c), which enables it.
+// Only for a pin with no handler attached (detachInterrupt already does this; calling it again is harmless).
+static void disarmPinIrq(int p) {
+  if (p < 0 || p >= 40) return;
+  gpio_intr_disable((gpio_num_t)p);
+  gpio_set_intr_type((gpio_num_t)p, GPIO_INTR_DISABLE);
+}
+
 static void releasePin(int p) {
   if (p < 0 || p >= 40) return;
   pinOwner[p] = OWN_NONE;
+  disarmPinIrq(p);   // every owner detaches first; this just guarantees pinMode below can't re-arm a stale type
   pinMode(p, INPUT);
 }
 
@@ -232,10 +263,19 @@ static void flushChannel(Channel &c) {
 static void unbindChannel(Channel &c) {
   if (!c.header) return;
   flushChannel(c);
+  // A UART line idles HIGH, and the TX pin drives a WCB's RX. Re-binding a channel (every baud change) used to
+  // pull that line low between end() and the next begin(): the WCB read a break, i.e. a NUL at the front of its
+  // next line, which its parser then broadcast as an empty command and the real line was lost (tracker #79,
+  // kyber.local_port_move_releases_old). Latch the pin's GPIO output high before end() detaches it from the UART,
+  // and leave the released pin pulled up rather than floating.
+  if (c.txPin >= 0) gpio_set_level((gpio_num_t)c.txPin, 1);
   if (c.hw) c.hw->end();
   else c.sw->end();
   releasePin(c.rxPin);
-  if (c.txPin >= 0) releasePin(c.txPin);
+  if (c.txPin >= 0) {
+    releasePin(c.txPin);
+    pinMode(c.txPin, INPUT_PULLUP);
+  }
   c.header = 0;
   c.rxPin = c.txPin = -1;
   c.rxOnly = false;
@@ -570,6 +610,132 @@ static bool decodeHexText(const String &hex, char *out, size_t cap) {
   return true;
 }
 
+// ---------------------------------------------------------------- TXSKEW (tracker #78)
+// Asks whether a classic-ESP32 WCB loses soft-port input when two of its S3-S5 pins take an edge at
+// nearly the same moment (erratum GPIO-3.14, see setup()). That needs one line's start placed a chosen
+// fraction of a microsecond after another's, on two WCB inputs at once. The hardware channels cannot do
+// it: a UART starts a frame on its own baud tick, not on the FIFO write, so the skew between A and B is
+// whatever their phases happen to be. Instead the whole waveform is built as a list of level changes and
+// played from IRAM with this core's interrupts masked, timed on the CPU cycle counter. Changes that fall
+// on the same cycle go out in ONE store, so a zero skew is truly simultaneous (a rise and a fall on the
+// same cycle are two stores, a few APB cycles apart). The pins must be LEVEL-held (OWN_LEVEL, idle high),
+// so no bound channel can share one; LEVEL .. Z hands them back.
+struct SkewEv {
+  uint32_t at;         // CPU cycles after the start
+  uint32_t set, clr;   // GPIO.out_w1ts / out_w1tc masks (pins 0-31)
+};
+struct SkewRaw {
+  uint32_t at;
+  bool high;
+};
+static const int SKEW_MAX_LINES = 3, SKEW_MAX_BYTES = 40, SKEW_MAX_MS = 60;
+static SkewRaw skewRaw[SKEW_MAX_LINES][SKEW_MAX_BYTES * 10];   // an 8N1 byte changes level at most 10 times
+static SkewEv skewEv[SKEW_MAX_LINES * SKEW_MAX_BYTES * 10];
+
+// Masked for up to SKEW_MAX_MS, well inside the 300 ms interrupt watchdog. Nothing else may need this
+// core meanwhile: TXSKEW is refused in mesh mode (WiFi, NVS writes) and while EDGES counts, and the host
+// sends nothing until the OK. A probe channel still bound would lose what it receives in the window, so
+// the test releases every wire on this probe first. noinline: with one caller GCC inlines it into
+// txSkew, whose copy runs from flash, and a cache miss inside the loop would stall an edge.
+static void IRAM_ATTR __attribute__((noinline)) playSkew(const SkewEv *ev, int n) {
+  portDISABLE_INTERRUPTS();
+  const uint32_t t0 = esp_cpu_get_cycle_count() + 2000;   // lead time, so the first change is not late
+  for (int i = 0; i < n; i++) {
+    while ((int32_t)(esp_cpu_get_cycle_count() - (t0 + ev[i].at)) < 0) {
+    }
+    if (ev[i].set) GPIO.out_w1ts = ev[i].set;
+    if (ev[i].clr) GPIO.out_w1tc = ev[i].clr;
+  }
+  portENABLE_INTERRUPTS();
+}
+
+static void txSkew(String tok[], int nt) {
+  static const char *USAGE =
+      "ERR usage: TXSKEW <baud> <Sx>:<TX|RX> <hex> [<Sy>:<TX|RX> <skew_ns> <hex>] [<Sz>:<TX|RX> <skew_ns> <hex>]";
+  const long baud = tok[1].toInt();
+  if (baud < 1200 || baud > 57600 || (nt != 4 && nt != 7 && nt != 10)) { Serial.println(USAGE); return; }
+  if (mesh) { Serial.println("ERR TXSKEW masks interrupts - not in mesh mode"); return; }
+  if (edgesOn) { Serial.println("ERR EDGES active"); return; }
+  const int nLines = (nt - 1) / 3;
+  const uint32_t mhz = ESP.getCpuFreqMHz();
+  const uint64_t cpuHz = (uint64_t)mhz * 1000000ULL;
+  const long bitNs = 1000000000L / baud;
+  static uint8_t data[SKEW_MAX_LINES][SKEW_MAX_BYTES];
+  size_t len[SKEW_MAX_LINES];
+  uint32_t mask[SKEW_MAX_LINES], allPins = 0;
+  int32_t skewCyc[SKEW_MAX_LINES], minSkew = 0;
+  for (int i = 0; i < nLines; i++) {
+    // line 0: tok[2] pin, tok[3] hex; line i >= 1: tok[3i+1] pin, tok[3i+2] skew, tok[3i+3] hex
+    const String &pinTok = tok[i ? 3 * i + 1 : 2];
+    const String &hexTok = tok[i ? 3 * i + 3 : 3];
+    const long skewNs = i ? tok[3 * i + 2].toInt() : 0;
+    const int colon = pinTok.indexOf(':');
+    const int h = colon > 0 ? parseHeader(pinTok.substring(0, colon)) : 0;
+    String which = colon > 0 ? pinTok.substring(colon + 1) : String();
+    which.toUpperCase();
+    if (!h || (which != "TX" && which != "RX")) { Serial.println(USAGE); return; }
+    const int pin = (which == "TX") ? HDR_TX[h] : HDR_RX[h];
+    if (pin < 0 || pin >= 32) { Serial.printf("ERR S%d %s is GPIO%d - TXSKEW drives GPIO0-31 only\n", h, which.c_str(), pin); return; }
+    if (pinOwner[pin] != OWN_LEVEL || !((GPIO.out >> pin) & 1)) {
+      Serial.printf("ERR S%d %s is not held high - LEVEL S%d %s 1 first\n", h, which.c_str(), h, which.c_str());
+      return;
+    }
+    if (allPins & (1UL << pin)) { Serial.println("ERR TXSKEW names a pin twice"); return; }
+    if (!parseHex(hexTok, data[i], SKEW_MAX_BYTES, len[i]) || !len[i]) {
+      Serial.printf("ERR TXSKEW takes 1-%d bytes of hex per line\n", SKEW_MAX_BYTES);
+      return;
+    }
+    if ((skewNs < 0 ? -skewNs : skewNs) > bitNs) {
+      Serial.printf("ERR TXSKEW skew must be within one bit (%ld ns at %ld baud)\n", bitNs, baud);
+      return;
+    }
+    mask[i] = 1UL << pin;
+    allPins |= mask[i];
+    skewCyc[i] = (int32_t)((int64_t)skewNs * mhz / 1000);
+    if (skewCyc[i] < minSkew) minSkew = skewCyc[i];
+  }
+
+  // Each line's level changes, on its own timeline shifted so the earliest line starts at 0. Bit k is
+  // placed at k * cpuHz / baud from the line's start, so rounding never accumulates along the line.
+  int rawN[SKEW_MAX_LINES] = {0};
+  uint32_t spanCyc = 0;
+  for (int i = 0; i < nLines; i++) {
+    const uint32_t off = (uint32_t)(skewCyc[i] - minSkew);
+    const uint32_t bits = len[i] * 10;   // 8N1: start, 8 data bits LSB first, stop
+    bool level = true;                   // idle high
+    for (uint32_t k = 0; k < bits; k++) {
+      const uint8_t b = data[i][k / 10];
+      const uint32_t j = k % 10;
+      const bool bit = (j == 0) ? false : (j == 9) ? true : ((b >> (j - 1)) & 1);
+      if (bit == level) continue;
+      skewRaw[i][rawN[i]++] = {off + (uint32_t)(k * cpuHz / baud), bit};
+      level = bit;
+    }
+    const uint32_t end = off + (uint32_t)(bits * cpuHz / baud);
+    if (end > spanCyc) spanCyc = end;
+  }
+  if (spanCyc > (uint32_t)SKEW_MAX_MS * 1000UL * mhz) {
+    Serial.printf("ERR TXSKEW lasts %lu us - %d ms max\n", (unsigned long)(spanCyc / mhz), SKEW_MAX_MS);
+    return;
+  }
+
+  // Merge the lines into one time-ordered list; changes on the same cycle share an entry.
+  int n = 0, head[SKEW_MAX_LINES] = {0};
+  for (;;) {
+    int best = -1;
+    for (int i = 0; i < nLines; i++)
+      if (head[i] < rawN[i] && (best < 0 || skewRaw[i][head[i]].at < skewRaw[best][head[best]].at)) best = i;
+    if (best < 0) break;
+    const SkewRaw &e = skewRaw[best][head[best]++];
+    if (!n || skewEv[n - 1].at != e.at) skewEv[n++] = {e.at, 0, 0};
+    if (e.high) skewEv[n - 1].set |= mask[best];
+    else skewEv[n - 1].clr |= mask[best];
+  }
+  playSkew(skewEv, n);
+  delayMicroseconds(bitNs / 1000 + 1);   // let the last stop bit finish before the host can send the next
+  Serial.printf("OK TXSKEW n=%d span_us=%lu\n", nLines, (unsigned long)(spanCyc / mhz));
+}
+
 // ---------------------------------------------------------------- misc
 static String macString() {
   uint64_t m = ESP.getEfuseMac();
@@ -657,6 +823,9 @@ static void handleLine(String line) {
     c->stream()->write(bytes, n);
     c->stream()->flush();
     Serial.printf("OK TX %c %u\n", c->name, (unsigned)n);
+
+  } else if (verb == "TXSKEW") {
+    txSkew(tok, nt);
 
   } else if (verb == "RULE") {
     String sub = tok[1];
@@ -868,6 +1037,10 @@ static void handleLine(String line) {
       ledIdle();
       Serial.printf("OK MESH JOIN ID=%u\n", meshId);
     } else if (sub == "LEAVE") {
+      // Unbind and detach everything first: ESP.restart() is a CPU-only reset that keeps each pin's interrupt
+      // type and enable, and a soft channel's level arm surviving it boot-looped v6 (disarmPinIrq). setup()
+      // disarms the header pins as well; this keeps the deliberate reboot clean on its own.
+      resetAll();
       Serial.println("OK MESH LEAVE rebooting");
       Serial.flush();
       delay(50);
@@ -915,6 +1088,30 @@ void setup() {
   Serial.setRxBufferSize(4096);
   Serial.setTxBufferSize(16384);
   Serial.begin(921600);
+
+  // Soft channels C-E decode bits from the TIME each edge's GPIO interrupt starts, so a late edge
+  // is a wrong bit. Level 3 lets edges pre-empt the level-1 UART and RMT (LED) interrupts, the same
+  // as the WCB's own S3-S5. It did NOT cure the mis-decodes seen when two soft channels receive at
+  // once: those were LOST edges, ESP32 erratum GPIO-3.14 (pins 0-31 share one interrupt status
+  // register, and the dispatcher's W1TC clear for one pin's edge can swallow another pin's edge
+  // arriving at that moment; all revisions, no fix). Since v6 the soft channels receive on
+  // level-triggered, polarity-flipping interrupts (the WCB's patched library, src/EspSoftwareSerial),
+  // which the erratum cannot lose (WCB tracker #78). TXSKEW (v4) turns the same question on a WCB: it starts lines on two
+  // or three of the WCB's soft RX pins with a set sub-microsecond skew (tests/hil
+  // softrx.erratum_pairs). NOT ESP_INTR_FLAG_IRAM: Arduino's __onPinInterrupt dispatcher is in
+  // flash, and in mesh mode this probe writes NVS. Must run before any attachInterrupt (BIND).
+  // v7: disarm every header pin FIRST - a CPU-only reset (MESH LEAVE, a panic) can leave a soft channel's level arm
+  // behind with no handler, and the service below would route it straight into an interrupt-WDT boot loop
+  // (disarmPinIrq). This must also precede the pinMode loop further down, which would otherwise re-enable it.
+  for (int h = 1; h <= 5; h++) {
+    disarmPinIrq(HDR_TX[h]);
+    disarmPinIrq(HDR_RX[h]);
+  }
+  gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
+  // Arduino's first attachInterrupt then re-installs, gets INVALID_STATE (which it accepts) and the
+  // IDF logs an ERROR line. Here that would land mid-protocol at the first BIND, not at boot, so the
+  // gpio tag stays muted for good on this instrument.
+  esp_log_level_set("gpio", ESP_LOG_NONE);
 
   memset(pinOwner, 0, sizeof(pinOwner));
   HardwareSerial *hws[2] = {&Serial1, &Serial2};
