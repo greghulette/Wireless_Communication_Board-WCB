@@ -1451,6 +1451,9 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
 .wdp-mesh-table th { color: var(--text-secondary, #9aa3b0); font-weight: 600; }
 .wdp-mesh-table tr.wdp-stale { opacity: 0.5; }
 .wdp-if  { white-space: nowrap; }
+/* A serial-attached (WDP-DA) device, listed under its port. Quiet = saved but not heard lately. */
+.wdp-da  { padding-left: 14px; white-space: nowrap; }
+.wdp-da.wdp-quiet { opacity: 0.6; }
 .wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
 .wdp-live { color: var(--green); }
 /* The querying board's own row (PEER=3) — highlighted so the view shows the whole mesh. */
