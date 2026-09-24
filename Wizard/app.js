@@ -79,8 +79,9 @@ const boardPushOutcome = {};
 // new character — including the relay’s — while the relay board itself still speaks the old one.
 // Using the config value there means the relay never recognises `?MGMT,`, so instead of forwarding
 // the config it splits the line and sprays the fragments out its serial ports and over the mesh.
+// No baseline yet: what the board itself printed at boot, else the factory '?'.
 function _relayFuncChar(relayN) {
-  return boardBaselines[relayN]?.funcChar || _relayFuncChar(relayN);
+  return boardBaselines[relayN]?.funcChar || boardBootChars[relayN]?.funcChar || '?';
 }
 const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
                                   // discovery poll must not inject ?WDP,DUMP into that stream:
@@ -112,7 +113,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '23.19:28.R.SEP.2026';
+const UI_VERSION = '23.23:16.R.SEP.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -12819,6 +12820,10 @@ function _wdpEsc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+// For a double-quoted HTML attribute value.
+function _wdpAttr(s) {
+  return _wdpEsc(s).replace(/"/g, '&quot;');
+}
 
 // Parse the ?WDP,DUMP response. String fields are scrubbed of ',' and ']' on the
 // board, so [^,] / [^\]] field matching is safe. PEER= (membership: 0 none,
@@ -12837,12 +12842,22 @@ function parseWdpDump(raw) {
                    fw: m[6], cap: parseInt(m[7], 16), ctrl: +m[8], capTags: m[9],
                    maestro: m[10], age: +m[11], live: m[12] === '1',
                    peer: m[13] !== undefined ? +m[13] : null,
-                   mb: '', wl: '', pwm: [], ifs: [] };
+                   mb: '', wl: '', pwm: [], ifs: [], da: [] };
       order.push(n);
       continue;
     }
     m = t.match(/^\[WDPIF:N=(\d+),S=(\d+),DEV=([^\]]*)\]$/);
     if (m) { const n = +m[1]; if (nodes[n]) nodes[n].ifs.push({ s: +m[2], dev: m[3] }); continue; }
+    // [WDPDA:...] — one device announcing on board N's serial port S (WDP-DA). Every board's
+    // devices, not just the queried one's. SEEN=0 = saved but not heard lately; a dump from
+    // firmware before SEEN (it dropped quiet devices instead) counts as heard.
+    m = t.match(/^\[WDPDA:N=(\d+),S=(\d+),TYPE=([^,]*),FW=([^,]*),HW=([^,]*),CAPS=([^,]*)(?:,SEEN=(\d))?(?:,AGE=([^\]]*))?\]$/);
+    if (m) {
+      const n = +m[1];
+      if (nodes[n]) nodes[n].da.push({ s: +m[2], type: m[3], fw: m[4], hw: m[5], caps: m[6],
+                                       seen: m[7] === undefined ? true : m[7] === '1' });
+      continue;
+    }
     // Supplementary [WDPX:...] — per-device Maestro/WLED baud (id@baud dot-lists)
     // the terse main record drops. New line type; older dumps simply omit it.
     m = t.match(/^\[WDPX:N=(\d+),MB=([^,]*),WL=([^\]]*)\]$/);
@@ -12942,7 +12957,23 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
                   : ((nd.maestro && nd.maestro !== '-') ? _wdpEsc(nd.maestro) : '&mdash;');
     // Devices cell = advertised port interfaces + remote WLED nodes + remote-PWM
     // wiring (edges "this board drives WCB<dst> S<port>"), all previously invisible.
-    const devParts = nd.ifs.map(i => `<div class="wdp-if">S${i.s} ${_wdpEsc(i.dev)}</div>`);
+    // Under each port, the devices announcing on it (WDP-DA), each with a Forget button.
+    const ports = new Map();
+    for (const i of nd.ifs) ports.set(i.s, { dev: i.dev, da: [] });
+    for (const d of (nd.da || [])) {
+      if (!ports.has(d.s)) ports.set(d.s, { dev: '', da: [] });
+      ports.get(d.s).da.push(d);
+    }
+    const devParts = [...ports.entries()].sort((a, b) => a[0] - b[0]).map(([s, p]) => {
+      const devs = p.da.map(d =>
+        `<div class="wdp-da${d.seen ? '' : ' wdp-quiet'}">${_wdpEsc(d.type)}` +
+        (d.fw ? ` <span class="wdp-sub">fw ${_wdpEsc(d.fw)}</span>` : '') +
+        (d.seen ? '' : ' <span class="wdp-sub">(not heard)</span>') +
+        `<button class="wdp-btn-forget" data-n="${nd.n}" data-s="${s}" data-type="${_wdpAttr(d.type)}" ` +
+        `onclick="wdpForgetDevice(this)" title="Forget this device on WCB ${nd.n} S${s}. ` +
+        `If it is still announcing it comes back within about 30 seconds.">✕</button></div>`).join('');
+      return `<div class="wdp-if">S${s} ${_wdpEsc(p.dev)}${devs}</div>`;
+    });
     if (nd.wl && nd.wl !== '-')
       devParts.push(`<div class="wdp-if">WLED ${_wdpEsc(nd.wl)}</div>`);
     for (const e of (nd.pwm || []))
@@ -13036,6 +13067,25 @@ function wdpForgetPeer(n) {
 function wdpClearLearned() {
   if (!confirm('Forget ALL auto-joined peers on this board?\n\nConfigured peers (1..WCBQ) are kept. Boards still advertising will re-join if auto-join stays on.')) return;
   _wdpMeshCommand('CLEAR');
+}
+
+// Forget one serial-attached (WDP-DA) device from the board it is wired to. Devices are
+// kept until forgotten, so this is how a removed or replaced board leaves the list. On the
+// board the panel talks to it is a plain ?WDP,DA,FORGET; on any other board the command is
+// relayed through that one (MGMT FRAG, as wledSend does), and the other boards drop the
+// device when its board re-sends its list, so the refresh waits a little longer.
+function wdpForgetDevice(btn) {
+  const n = +btn.dataset.n, s = +btn.dataset.s, type = btn.dataset.type;
+  if (!confirm(`Forget "${type}" on WCB ${n} S${s}?\n\nRemoves it from that board's saved device list. If the device is still announcing, it comes back within about 30 seconds.`)) return;
+  const t = _wdpMeshConn();
+  if (!t) return;
+  const sub = `DA,FORGET,S${s},${type}`;
+  if (n === +t.wcbNum) { _wdpMeshCommand(sub); return; }
+  const targetFc  = Object.values(boardConfigs).find(c => +c?.wcbNumber === n)?.funcChar || '?';
+  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  sendMgmtReliable(t.conn, `${t.fc}MGMT,FRAG,${n},${sessionId},0,1,${targetFc}WDP,${sub}`, t.slot)
+    .catch(() => {})
+    .finally(() => setTimeout(wdpMeshRefresh, 1500));
 }
 
 // ?WDP,POLL — ask every board to advertise now, then re-pull. Solicited replies are

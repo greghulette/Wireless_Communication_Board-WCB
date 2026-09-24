@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_231928RSEP2026                                  *****////
+///*****                                          Version 6.2.1_232316RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -196,7 +196,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_231928RSEP2026";
+String SoftwareVersion = "6.2.1_232316RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -255,6 +255,12 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_WDP       12  // WDP discovery advert — rides the espnow_struct_message_etm
                                   // wire size (like HEARTBEAT/ETM_BOOT); TLV identity/capability
                                   // payload in structCommand[200]. See WCB_WDP.{h,cpp}.
+#define PACKET_TYPE_WDP_DA    17  // WDP-DA device-list frame: the devices announcing on this
+                                  // board's serial ports, same struct as the advert. Its own type
+                                  // on purpose: released firmware and WCB_Client drop an ETM
+                                  // packet type they don't know (the fall-through return at the
+                                  // end of the ETM receive path), whereas on type 12 an older
+                                  // board would decode it as an empty advert and blank the sender.
 // Remote Management Packet Types
 #define PACKET_TYPE_MGMT_FRAG   3   // config chunk from relay → target (wizard origin)
 #define PACKET_TYPE_MGMT_ACK    4   // execution ACK from target → relay
@@ -267,7 +273,7 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ETM_REQ     8   // relay → target: request ETM characterization
 #define PACKET_TYPE_STATS_FRAG  9   // target → relay: ?STATS response fragment
 #define PACKET_TYPE_ETM_FRAG    10  // target → relay: ?ETM,CHAR response fragment
-// 11 = ETM_BOOT, 12 = WDP (declared above with the ETM-struct types), 20+ = OTA.
+// 11 = ETM_BOOT, 12 = WDP, 17 = WDP_DA (declared above with the ETM-struct types), 20+ = OTA.
 #define PACKET_TYPE_SEQ_REQ     13  // relay → target: request stored-sequence NAMES
 #define PACKET_TYPE_SEQ_FRAG    14  // target → relay: sequence-name response fragment
                                     // Names only — deliberately NOT the values. The
@@ -1161,8 +1167,9 @@ void sendETMBootAnnounce() {
 struct WdpPktSlot { espnow_struct_message_etm pkt; };
 static QueueHandle_t wdpPktQueue = nullptr;
 
-// Wrap a WDP TLV payload in the ETM envelope and broadcast it (called by wdpTick).
-void wdpBroadcast(const uint8_t *payload, int len) {
+// Wrap a WDP payload in the ETM envelope and broadcast it: an advert (called by wdpTick) or,
+// on PACKET_TYPE_WDP_DA, one frame of the WDP-DA device list.
+static void wdpBroadcastAs(const uint8_t *payload, int len, uint8_t packetType) {
   espnow_struct_message_etm bp;
   memset(&bp, 0, sizeof(bp));
   strncpy(bp.structPassword, espnowPassword, sizeof(bp.structPassword) - 1);
@@ -1172,10 +1179,12 @@ void wdpBroadcast(const uint8_t *payload, int len) {
   if (len < 0) len = 0;
   if (len > (int)sizeof(bp.structCommand)) len = sizeof(bp.structCommand);
   memcpy(bp.structCommand, payload, len);
-  bp.structPacketType     = PACKET_TYPE_WDP;
+  bp.structPacketType     = packetType;
   bp.structSequenceNumber = 0;
   esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
 }
+void wdpBroadcast(const uint8_t *payload, int len)   { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP); }
+void wdpDaBroadcast(const uint8_t *payload, int len) { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP_DA); }
 
 // Callback-side (WiFi task, Core 0): copy the raw advert into a queue. The TLV
 // decode + neighbor-table write happen in loop() (drainWdpPackets), never inline
@@ -1187,14 +1196,18 @@ void enqueueWdpPacket(const uint8_t *raw) {
   xQueueSend(wdpPktQueue, &slot, 0);   // drop-if-full — periodic re-adverts recover
 }
 
-// Loop-side: decode queued adverts into the WCB_WDP neighbor table.
+// Loop-side: decode queued adverts into the WCB_WDP neighbor table, and device-list frames
+// into its per-neighbor WDP-DA lists.
 void drainWdpPackets() {
   if (!wdpPktQueue) return;
   WdpPktSlot slot;
   while (xQueueReceive(wdpPktQueue, &slot, 0) == pdTRUE) {
     slot.pkt.structSenderID[sizeof(slot.pkt.structSenderID) - 1] = '\0';
     int senderWCB = atoi(slot.pkt.structSenderID);
-    wdpOnAdvertReceived(senderWCB, (const uint8_t *)slot.pkt.structCommand);
+    if (slot.pkt.structPacketType == PACKET_TYPE_WDP_DA)
+      wdpDaOnFrameReceived(senderWCB, (const uint8_t *)slot.pkt.structCommand);
+    else
+      wdpOnAdvertReceived(senderWCB, (const uint8_t *)slot.pkt.structCommand);
   }
 }
 
@@ -4540,9 +4553,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       }
     }
 
-    // WDP discovery advert — presence already refreshed above; decode the TLV
-    // identity/capabilities into the neighbor table off the WiFi task (loop()).
-    if (etmReceived.structPacketType == PACKET_TYPE_WDP) {
+    // WDP discovery advert, or a WDP-DA device-list frame — presence already refreshed
+    // above; decode off the WiFi task (loop(), drainWdpPackets).
+    if (etmReceived.structPacketType == PACKET_TYPE_WDP ||
+        etmReceived.structPacketType == PACKET_TYPE_WDP_DA) {
       enqueueWdpPacket(incomingData);
       return;
     }

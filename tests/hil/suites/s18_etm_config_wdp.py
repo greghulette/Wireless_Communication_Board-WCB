@@ -1181,8 +1181,8 @@ def list_detail_errors(bench):
         bad.append(f"?WDP,DETAIL,20 {d20[:3]}")
     if not _has(w.run("?WDP,19"), "[WDP] no neighbor WCB19 — see ?WDP,LIST"):
         bad.append("?WDP,19")
-    # Never probe unknown subcommands starting ADD/FORGET/CLEAR/AUTOJOIN/DETAIL or a digit: they are prefix-matched.
-    if not _has(w.run("?WDP,FOO"), "[WDP] unknown subcommand 'FOO' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | POLL | ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)"):
+    # Never probe unknown subcommands starting ADD/FORGET/CLEAR/AUTOJOIN/DETAIL/DA, or a digit: they are prefix-matched.
+    if not _has(w.run("?WDP,FOO"), "[WDP] unknown subcommand 'FOO' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | DA,FORGET,S<n>[,<type>] | DA,CLEAR | POLL | ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)"):
         bad.append("?WDP,FOO")
     assert not bad, "; ".join(bad)
 
@@ -1506,7 +1506,7 @@ def rx_crc_gate_probe(bench):
     assert any(s == 1 and x == f"{m4}|CRC{crc(m4)}" for s, x in rx), f"W1's suffix format: {rx}"
 
 
-@test("wdp.da_announce_propagates", "An @WDP1 announce on an unlabelled W2 port reaches W1's DUMP through W2's on-change advert and ages out after 90 s (slow, ~100 s)", needs=["wcb1"], links=["W2S3", "W2S4", "W2S5"])
+@test("wdp.da_announce_propagates", "An @WDP1 announce on an unlabelled W2 port reaches W1's DUMP through W2's on-change advert and device list, goes quiet after 90 s but stays, and a forget clears it (slow, ~100 s)", needs=["wcb1"], links=["W2S3|W2S4|W2S5"])
 def da_announce_propagates(bench):
     w = usb_wcb(bench)
     tokens2 = snapshot(bench, 2)
@@ -1514,19 +1514,34 @@ def da_announce_propagates(bench):
     if port is None:
         raise Skip("no wired, unlabelled W2 port among S3-S5")
     l = link(bench, 2, port)
+    s = port[1]
     with Console(bench, 2) as c2:
-        cm = c2.mark()
-        sent_at = time.monotonic()
-        l.send(b'@WDP1 {"type":"HILDev","fw":"9.9"}\r\n')
-        time.sleep(3)
-        announce, dump = c2.lines(cm), _dump(w)
-        da = _crun(c2, "?WDP,DA", 1.0)
-        time.sleep(max(0.0, 95 - (time.monotonic() - sent_at)))
-        stopped_after = next((round(ts - sent_at, 1) for ts, x in c2.dev.lines[cm:] if f"[WDP-DA] {port}: HILDev stopped announcing" in x), None)
-        dump2 = _dump(w)
-    bench.note(f"WDP-DA announce on W2 {port} expired {stopped_after} s after it was sent")
+        _crun(c2, f"?WDP,DA,FORGET,{port},HILDev")   # devices are kept until forgotten: clear a killed run's copy
+        try:
+            cm = c2.mark()
+            l.send(b'@WDP1 {"type":"HILDev","fw":"9.9"}\r\n')
+            time.sleep(0.5)
+            l.send(b'@WDP1 {"type":"HILDev","fw":"9.9"}\r\n')   # the second announce saves it, and it is advertised
+            sent_at = time.monotonic()
+            time.sleep(3)
+            announce, dump = c2.lines(cm), _dump(w)
+            da = _crun(c2, "?WDP,DA", 1.0)
+            time.sleep(max(0.0, 95 - (time.monotonic() - sent_at)))
+            stopped_after = next((round(ts - sent_at, 1) for ts, x in c2.dev.lines[cm:] if f"[WDP-DA] {port}: HILDev stopped announcing" in x), None)
+            time.sleep(2)                              # going quiet re-sends W2's device list
+            dump2 = _dump(w)
+            _crun(c2, f"?WDP,DA,FORGET,{port},HILDev")
+            time.sleep(3)
+            dump3 = _dump(w)
+        finally:
+            _crun(c2, f"?WDP,DA,FORGET,{port},HILDev")
+    bench.note(f"WDP-DA device on W2 {port} went quiet {stopped_after} s after its announce")
     assert _has(announce, f"[WDP-DA] {port}: HILDev fw 9.9"), "W2 did not log the announce"
-    assert f"[WDPIF:N=2,S={port[1]},DEV=HILDev]" in dump, "W1's DUMP lacks the announced device"
+    assert f"[WDPIF:N=2,S={s},DEV=HILDev]" in dump, "W1's DUMP lacks the announced device"
+    assert f"[WDPDA:N=2,S={s},TYPE=HILDev,FW=9.9,HW=,CAPS=,SEEN=1,AGE=-]" in dump, "W1's DUMP lacks W2's device record"
     assert _has(da, "Serial-attached devices (WDP-DA announces):") and any(x.strip().startswith(f"{port}  HILDev") and "fw 9.9" in x for x in da), da
     assert stopped_after is not None and 88 <= stopped_after <= 94, f"'stopped announcing' after {stopped_after} s (expected ~90-92)"
-    assert not any(x.startswith(f"[WDPIF:N=2,S={port[1]},") for x in dump2), "the expired device is still in W1's DUMP"
+    assert f"[WDPIF:N=2,S={s},DEV=HILDev]" in dump2, "the quiet device stopped naming W2's port in W1's DUMP"
+    assert f"[WDPDA:N=2,S={s},TYPE=HILDev,FW=9.9,HW=,CAPS=,SEEN=0,AGE=-]" in dump2, "W1 did not see the device go quiet"
+    assert not any(x.startswith(f"[WDPIF:N=2,S={s},") for x in dump3), "the forgotten device still names W2's port in W1's DUMP"
+    assert not any(x.startswith(f"[WDPDA:N=2,S={s},TYPE=HILDev,") for x in dump3), "W1 still lists the forgotten device"

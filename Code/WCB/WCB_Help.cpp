@@ -942,6 +942,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WDP,STATUS          One-line status (en, autojoin, peers)"));
         Serial.println(F("  ?WDP,DUMP            Machine-readable dump (for the config tool)"));
         Serial.println(F("  ?WDP,DA              Serial-attached (@WDP1) devices per port"));
+        Serial.println(F("\nSerial-attached devices (kept until forgotten; shared with every board):"));
+        Serial.println(F("  ?WDP,DA,FORGET,S<n>           Forget every device on port S<n>"));
+        Serial.println(F("  ?WDP,DA,FORGET,S<n>,<type>    Forget one device (type as listed, any case)"));
+        Serial.println(F("  ?WDP,DA,CLEAR                 Forget all of them"));
         Serial.println(F("\nEnable / discovery:"));
         Serial.println(F("  ?WDP,ON  /  ?WDP,OFF          Enable/disable WDP (persisted; default ON)"));
         Serial.println(F("  ?WDP,AUTOJOIN                 Show auto-join state"));

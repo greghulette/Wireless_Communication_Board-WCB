@@ -8,6 +8,7 @@
 #include "WCB_Maestro.h"      // maestroConfigs[], MAX_MAESTROS_PER_WCB
 #include "WCB_PWM.h"          // pwmOutputCount, pwmMappings[]
 #include <Preferences.h>
+#include <strings.h>          // strcasecmp (?WDP,DA,FORGET type match)
 
 // ---- Externs provided by WCB.ino ----------------------------------------
 extern String      wcb_alias;         // board alias ("" = unset, sanitized, <=24)
@@ -30,6 +31,8 @@ extern Preferences preferences;
 // The ETM wire struct lives in WCB.ino, so the envelope build + broadcast do
 // too — this module just hands it a ready TLV payload.
 extern void wdpBroadcast(const uint8_t *payload, int len);
+// Same envelope, PACKET_TYPE_WDP_DA: one frame of this board's WDP-DA device list.
+extern void wdpDaBroadcast(const uint8_t *payload, int len);
 // Auto-config action: enable this board's controller (special) peer, live.
 extern void enableControllerPeer(uint8_t id);
 // Dynamic peer membership (WCB.ino): learn regular WCBs from their adverts.
@@ -61,6 +64,12 @@ static unsigned long wdpNextAdvertMs = 0;
 // with NO need to instrument every config path — we detect any content change directly.
 static uint32_t      wdpLastAdvertHash   = 0;
 static unsigned long wdpNextDirtyCheckMs = 0;
+
+// WDP-DA pieces the advert path uses (defined in the WDP-DA section below).
+static void wdpDaLabel(int port, char *out, size_t cap);
+static void wdpDaStartSend();
+static void wdpDaCheckChanged(unsigned long now);
+static void wdpDaTxTick(unsigned long now);
 
 // ---- TLV registry (payload rides structCommand[200]) --------------------
 #define WDP_MAGIC        'W'
@@ -302,7 +311,9 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   // label set that would overflow the 200 B payload is dropped gracefully.
   for (int p = 1; p <= 5; p++) {
     String lbl = serialPortLabels[p - 1];   // raw label, not the "Serial<N> (...)" form
-    if (lbl.length() == 0) lbl = wdpDaType(p);  // unlabeled → fall back to a WDP-DA detected device type
+    if (lbl.length() == 0) {                 // unlabeled → fall back to a WDP-DA detected device type
+      char t[25]; wdpDaLabel(p, t, sizeof(t)); lbl = t;
+    }
     if (lbl.length() == 0) continue;         // still nothing — don't advertise
     int L = lbl.length(); if (L > 24) L = 24;
     uint8_t v[25];
@@ -331,6 +342,7 @@ static void wdpSendAdvert() {
   wdpBroadcast(payload, len);
   wdpLastAdvertHash = wdpFnv1a(payload, len);   // remember what we just advertised
   if (debugMGMT) Serial.printf("[WDP] advert sent (%d B)\n", len);   // mesh-mgmt chatter — under ?DEBUG,MGMT
+  wdpDaStartSend();   // the WDP-DA device list follows every advert, on its own packet type
 }
 
 // Broadcast a bare SOLICIT — "everyone advertise now" — so a fresh/renamed board or an
@@ -388,7 +400,9 @@ void wdpTick() {
       wdpSendAdvert();                    // content changed — announce now (updates the hash)
       if (wdpBootLeft < 1) { wdpBootLeft = 1; wdpNextBootMs = now + 800; }  // 1 re-send for reliability
     }
+    wdpDaCheckChanged(now);               // the device list changed on its own (appeared, quiet, forgotten)
   }
+  wdpDaTxTick(now);                       // next device-list frame, and its armed re-send
   // Age descriptive facts stale (keep the slot as topology memory).
   for (int i = 0; i < MAX_WCB_COUNT; i++) {
     if (wdpNeighbors[i].valid && wdpNeighbors[i].confirmed &&
@@ -795,11 +809,42 @@ int wdpResolveAlias(const char *alias) {
 // A device wired to a serial port self-identifies with "@WDP1 {json}" (see
 // docs/WDP_DEVICE_ANNOUNCE.md). processIncomingSerial routes any line starting
 // with "@WDP" here. One record per (port, type), up to WDP_DA_PER_PORT per port.
-// RAM-only, TTL-aged per record; feeds the advert port label, ?WDP,DA and ?WDP,DUMP.
+// A record is confirmed by its device's second announce, the way auto-join waits for a
+// second advert: boards chained on one port can garble each other into a line that
+// still parses, and a record that is kept for good must not come from one such line.
+// Unconfirmed records live in RAM only and are dropped if not heard again. Confirmed
+// ones persist (NVS wdp_da) and are kept when their device goes quiet; only a forget
+// removes one. They feed the advert port label, ?WDP,DUMP here, and every neighbor
+// through the device-list frames below.
 
 static WdpDaDevice wdpDaDevices[5][WDP_DA_PER_PORT];
 static uint32_t    wdpDaNextFirstHeard = 1;
-static const unsigned long WDP_DA_TTL_MS = 90000UL;   // ~3 missed 25-30 s announces
+static const unsigned long WDP_DA_LIVE_MS = 90000UL;   // ~3 missed 25-30 s announces = quiet
+static bool          wdpDaDirty    = false;   // list changed since the last NVS save
+static unsigned long wdpDaSaveAtMs = 0;       // when loop() saves it: a burst of changes is one write
+
+#define WDP_DA_MAGIC       'D'
+#define WDP_DA_VERSION     0x01    // device-list frame format
+#define WDP_DA_NVS_VERSION 0x01    // saved-list blob format
+#define WDP_DA_FLAG_LIVE   0x01    // record flag: heard within WDP_DA_LIVE_MS
+#define WDP_DA_REC_MAX     (6 + 24 + 27 + 15 + 48)   // one encoded record, all fields at full length
+#define WDP_DA_BLOB_MAX    (3 + 5 * WDP_DA_PER_PORT * WDP_DA_REC_MAX)
+
+// The serial task (which adds and refreshes records) and loop() (which reads them, marks
+// them quiet and forgets them) are both priority 1 on core 1 and time-slice. Suspending
+// the scheduler makes a table access atomic against the other task WITHOUT masking
+// interrupts: a critical section would also hold off the level-3 GPIO ISR that
+// soft-serial RX timestamps edges with (CLAUDE.md rule 13). It only works because both
+// tasks share core 1. Nothing between lock and unlock may block, print, allocate or
+// touch NVS.
+static inline void wdpDaLock()   { vTaskSuspendAll(); }
+static inline void wdpDaUnlock() { xTaskResumeAll(); }
+
+// Call with the lock held. The NVS write itself happens later, in loop() (wdpDaTick).
+static void wdpDaMarkDirty() {
+  wdpDaDirty    = true;
+  wdpDaSaveAtMs = millis() + 1000;
+}
 
 // Pull a "key":"value" string out of a flat JSON object. out is always
 // NUL-terminated (possibly empty). No escape handling — identity strings don't
@@ -833,23 +878,122 @@ static void wdpDaExtractCaps(const String &json, char *out, int outSize) {
   out[o] = '\0';
 }
 
+// One record, the same bytes in NVS and in a device-list frame:
+//   [port][flags][tLen][type][fLen][fw][hLen][hwRev][cLen][capTags]
+// Each length is clamped to its field, so a record is at most WDP_DA_REC_MAX bytes.
+// Returns the offset past it, or -1 if it doesn't fit before max.
+static int wdpDaPutStr(uint8_t *buf, int o, const char *s, int cap) {
+  int L = (int)strnlen(s, cap);
+  buf[o++] = (uint8_t)L;
+  memcpy(buf + o, s, L);
+  return o + L;
+}
+static int wdpDaPutRecord(uint8_t *buf, int o, int max, uint8_t port, uint8_t flags,
+                          const char *type, const char *fw, const char *hwRev, const char *capTags) {
+  int need = 6 + (int)strnlen(type, 24) + (int)strnlen(fw, 27) + (int)strnlen(hwRev, 15) +
+             (int)strnlen(capTags, 48);
+  if (o + need > max) return -1;
+  buf[o++] = port;
+  buf[o++] = flags;
+  o = wdpDaPutStr(buf, o, type, 24);
+  o = wdpDaPutStr(buf, o, fw, 27);
+  o = wdpDaPutStr(buf, o, hwRev, 15);
+  return wdpDaPutStr(buf, o, capTags, 48);
+}
+
+// Decode the record at buf[o]: port, flags and the four strings (scrubbed, NUL-terminated;
+// type non-empty). Returns the offset past it, or -1 if it is malformed or runs past max.
+static int wdpDaGetStr(const uint8_t *buf, int o, int max, char *out, int cap) {
+  if (o >= max) return -1;
+  int L = buf[o++];
+  if (L > cap || o + L > max) return -1;
+  memcpy(out, buf + o, L);
+  out[L] = '\0';
+  return o + L;
+}
+static int wdpDaGetRecord(const uint8_t *buf, int o, int max, uint8_t *port, uint8_t *flags,
+                          char *type, char *fw, char *hwRev, char *capTags) {
+  if (o + 2 > max) return -1;
+  *port  = buf[o++];
+  *flags = buf[o++];
+  if (*port < 1 || *port > 5) return -1;
+  if ((o = wdpDaGetStr(buf, o, max, type, 24)) < 0 || !type[0]) return -1;
+  if ((o = wdpDaGetStr(buf, o, max, fw, 27))      < 0) return -1;
+  if ((o = wdpDaGetStr(buf, o, max, hwRev, 15))   < 0) return -1;
+  if ((o = wdpDaGetStr(buf, o, max, capTags, 48)) < 0) return -1;
+  wdpScrub(type); wdpScrub(fw); wdpScrub(hwRev); wdpScrub(capTags);
+  return o;
+}
+
+// The port's (1-5) records in the order they were first heard, as slot indices into
+// idx[]; returns the count. With confirmedOnly, just the confirmed ones — what is saved,
+// advertised and dumped; idx[0] of those labels the port. Call with the lock held, or
+// from setup before the serial task exists.
+static int wdpDaOrder(int port, int idx[WDP_DA_PER_PORT], bool confirmedOnly) {
+  const WdpDaDevice *row = wdpDaDevices[port - 1];
+  int n = 0;
+  for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+    if (!row[k].used || (confirmedOnly && !row[k].confirmed)) continue;
+    int j = n++;
+    while (j > 0 && row[idx[j - 1]].firstHeard > row[k].firstHeard) { idx[j] = idx[j - 1]; j--; }
+    idx[j] = k;
+  }
+  return n;
+}
+
+// Copy the port's records, first-heard first, into out[]; returns the count. Takes the lock.
+static int wdpDaSnapshotPort(int port, WdpDaDevice out[WDP_DA_PER_PORT], bool confirmedOnly) {
+  int idx[WDP_DA_PER_PORT];
+  wdpDaLock();
+  int c = wdpDaOrder(port, idx, confirmedOnly);
+  for (int j = 0; j < c; j++) out[j] = wdpDaDevices[port - 1][idx[j]];
+  wdpDaUnlock();
+  return c;
+}
+
+// The port's WDP-DA label: the type of its first-heard confirmed record, heard or not —
+// a quiet device keeps naming its port. "" when the port has none.
+static void wdpDaLabel(int port, char *out, size_t cap) {
+  out[0] = '\0';
+  if (port < 1 || port > 5) return;
+  int idx[WDP_DA_PER_PORT];
+  wdpDaLock();
+  if (wdpDaOrder(port, idx, true) > 0) {
+    strncpy(out, wdpDaDevices[port - 1][idx[0]].type, cap - 1);
+    out[cap - 1] = '\0';
+  }
+  wdpDaUnlock();
+}
+
+// On a full port, the record a new type may replace: the unconfirmed one heard from least
+// recently, or -1 when every record is confirmed — a saved device is never pushed out
+// automatically. Call with the lock held.
+static int wdpDaStalestUnconfirmed(const WdpDaDevice *row, unsigned long now) {
+  int best = -1;
+  unsigned long bestAge = 0;
+  for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+    if (!row[k].used || row[k].confirmed) continue;
+    unsigned long age = now - row[k].lastSeenMs;
+    if (best < 0 || age > bestAge) { best = k; bestAge = age; }
+  }
+  return best;
+}
+
 void wdpDaHandleLine(int port, const char *line) {
   if (port < 1 || port > 5 || !line) return;
   String s = line; s.trim();
   if (!s.startsWith("@WDP1")) return;          // only protocol version 1
   // One whole announce per line. Boards chained on one port share its RX wire, and two
   // announcing at once garble each other: a line cut short, or run into the next one,
-  // would otherwise become a phantom record that lingers for the whole TTL.
+  // would otherwise become a phantom record — and records are kept until forgotten.
   if (!s.endsWith("}") || s.indexOf("@WDP", 1) >= 0) return;
   int brace = s.indexOf('{'); if (brace < 0) return;
   String json = s.substring(brace);
 
-  // Build the record aside, then copy it in whole. This runs on the serial task, which
-  // time-slices with loop() on core 1, and loop() reads the table for the advert's port
-  // label. Clearing a live record and refilling it in place would leave a gap in which
-  // the label moves for one advert. Wire strings are unsanitized — scrub bytes that
-  // would corrupt the port label / ?WDP,DUMP (matches the neighbor-decode scrub). The
-  // type is scrubbed before matching, so it compares equal to the stored key.
+  // Build the record aside, then copy it in under the lock (see wdpDaLock). Wire strings
+  // are unsanitized — scrub bytes that would corrupt the port label / ?WDP,DUMP (matches
+  // the neighbor-decode scrub). The type is scrubbed before matching, so it compares equal
+  // to the stored key.
   WdpDaDevice nd;
   memset(&nd, 0, sizeof(nd));
   if (!wdpDaExtractStr(json, "type", nd.type, sizeof(nd.type)) || !nd.type[0]) return;  // type required
@@ -857,62 +1001,165 @@ void wdpDaHandleLine(int port, const char *line) {
   wdpDaExtractStr(json, "hw", nd.hwRev, sizeof(nd.hwRev));
   wdpDaExtractCaps(json,      nd.capTags, sizeof(nd.capTags));
   wdpScrub(nd.type); wdpScrub(nd.fw); wdpScrub(nd.hwRev); wdpScrub(nd.capTags);
-  nd.present    = true;
+  nd.used = nd.heard = nd.live = true;
   nd.lastSeenMs = millis();
 
-  // This type's record, else a free slot, else the one heard from least recently.
+  char dropped[sizeof(nd.type)] = "";
+  bool isNew = false, confirmedNow = false, wasLive = true, refused = false;
+  wdpDaLock();
   WdpDaDevice *row = wdpDaDevices[port - 1];
-  int slot = -1, freeSlot = -1, stalest = 0;
+  int slot = -1, freeSlot = -1;
   for (int k = 0; k < WDP_DA_PER_PORT; k++) {
-    if (row[k].present && strcmp(row[k].type, nd.type) == 0) { slot = k; break; }
-    if (!row[k].present) { if (freeSlot < 0) freeSlot = k; }
-    else if ((nd.lastSeenMs - row[k].lastSeenMs) > (nd.lastSeenMs - row[stalest].lastSeenMs)) stalest = k;
+    if (row[k].used && strcmp(row[k].type, nd.type) == 0) { slot = k; break; }
+    if (!row[k].used && freeSlot < 0) freeSlot = k;
   }
+  if (slot >= 0) {                             // known device: refresh, keep its place
+    WdpDaDevice &d = row[slot];
+    wasLive      = d.live;
+    confirmedNow = !d.confirmed;               // its second announce confirms it
+    if (confirmedNow || strcmp(d.fw, nd.fw) || strcmp(d.hwRev, nd.hwRev) || strcmp(d.capTags, nd.capTags))
+      wdpDaMarkDirty();                        // newly confirmed, or saved facts changed (a reflash)
+    nd.firstHeard = d.firstHeard;
+    nd.confirmed  = true;
+    d = nd;
+  } else {                                     // new device: unconfirmed until it announces again
+    slot = (freeSlot >= 0) ? freeSlot : wdpDaStalestUnconfirmed(row, nd.lastSeenMs);
+    if (slot < 0) {
+      refused = true;                          // every slot holds a saved device
+    } else {
+      isNew = true;
+      if (freeSlot < 0) memcpy(dropped, row[slot].type, sizeof(dropped));
+      nd.firstHeard = wdpDaNextFirstHeard++;
+      row[slot] = nd;                          // confirmed = false: not saved, advertised or a label yet
+    }
+  }
+  wdpDaUnlock();
 
-  if (slot >= 0) {
-    // A refresh rewrites present, type and firstHeard with the bytes they already hold,
-    // so a label read in the middle of the copy sees no change.
-    nd.firstHeard = row[slot].firstHeard;
-    row[slot] = nd;
+  if (refused) {
+    // Once per newcomer per port: a device that keeps announcing would otherwise repeat it every 30 s.
+    static char lastRefused[5][sizeof(nd.type)];
+    if (strcmp(lastRefused[port - 1], nd.type) != 0) {
+      memcpy(lastRefused[port - 1], nd.type, sizeof(nd.type));
+      Serial.printf("[WDP-DA] S%d: %s not added: port full (%d saved devices; %cWDP,DA,FORGET one first)\n",
+                    port, nd.type, WDP_DA_PER_PORT, LocalFunctionIdentifier);
+    }
     return;
   }
-  slot = (freeSlot >= 0) ? freeSlot : stalest;
-  if (freeSlot < 0)
-    Serial.printf("[WDP-DA] S%d: %s dropped, port full (%d devices)\n", port, row[slot].type, WDP_DA_PER_PORT);
-  nd.firstHeard = wdpDaNextFirstHeard++;
-  row[slot] = nd;
-  Serial.printf("[WDP-DA] S%d: %s%s%s\n", port, nd.type, nd.fw[0] ? " fw " : "", nd.fw);
+  if (dropped[0])
+    Serial.printf("[WDP-DA] S%d: %s dropped, port full (%d devices)\n", port, dropped, WDP_DA_PER_PORT);
+  if (isNew || (!wasLive && !confirmedNow))
+    Serial.printf("[WDP-DA] S%d: %s%s%s%s\n", port, nd.type, nd.fw[0] ? " fw " : "", nd.fw,
+                  isNew ? "" : " (heard again)");
+  if (confirmedNow)
+    Serial.printf("[WDP-DA] S%d: %s saved\n", port, nd.type);
 }
 
-void wdpDaTick() {
-  unsigned long now = millis();
-  for (int p = 0; p < 5; p++) {
-    for (int k = 0; k < WDP_DA_PER_PORT; k++) {
-      WdpDaDevice &d = wdpDaDevices[p][k];
-      // Signed: the serial task can refresh a record after `now` was read, leaving
-      // lastSeenMs a millisecond ahead. Unsigned, that wraps huge and expires a device
-      // that has just announced — and its next announce re-creates it behind the others,
-      // moving the port label.
-      if (d.present && (long)(now - d.lastSeenMs) > (long)WDP_DA_TTL_MS) {
-        Serial.printf("[WDP-DA] S%d: %s stopped announcing\n", p + 1, d.type);
-        d.present = false;
+// Save the list to NVS (wdp_da/list) port by port, first-heard first, so the reloaded
+// list keeps each port's order and label. loop() only: an NVS write can stall for tens
+// of ms, and the serial task's job is to keep the soft-serial RX buffers drained.
+static void wdpDaSave() {
+  uint8_t *blob = (uint8_t *)malloc(WDP_DA_BLOB_MAX);
+  if (!blob) return;                           // still dirty: the next tick retries
+  int o = 3, n = 0;
+  blob[0] = WDP_DA_MAGIC;
+  blob[1] = WDP_DA_NVS_VERSION;
+  wdpDaLock();
+  for (int p = 1; p <= 5; p++) {
+    int idx[WDP_DA_PER_PORT];
+    int c = wdpDaOrder(p, idx, true);         // confirmed records only
+    for (int j = 0; j < c; j++) {
+      const WdpDaDevice &d = wdpDaDevices[p - 1][idx[j]];
+      int next = wdpDaPutRecord(blob, o, WDP_DA_BLOB_MAX, (uint8_t)p, 0, d.type, d.fw, d.hwRev, d.capTags);
+      if (next < 0) break;
+      o = next;
+      n++;
+    }
+  }
+  wdpDaDirty = false;
+  wdpDaUnlock();
+  blob[2] = (uint8_t)n;
+  preferences.begin("wdp_da", false);
+  size_t wrote = preferences.putBytes("list", blob, o);
+  preferences.end();
+  free(blob);
+  if (wrote != (size_t)o) {
+    Serial.println("[WDP-DA] could not save the device list to NVS (full?) - retrying in 60 s");
+    wdpDaLock();
+    wdpDaDirty    = true;
+    wdpDaSaveAtMs = millis() + 60000;
+    wdpDaUnlock();
+  }
+}
+
+// Reload the saved list. Called from wdpBegin (setup), before the serial task exists.
+// Every record starts quiet — "not heard since boot" — until its device announces again.
+static void wdpDaLoad() {
+  memset(wdpDaDevices, 0, sizeof(wdpDaDevices));
+  wdpDaNextFirstHeard = 1;
+  preferences.begin("wdp_da", true);
+  size_t len = preferences.getBytesLength("list");
+  uint8_t *blob = (len >= 3 && len <= WDP_DA_BLOB_MAX) ? (uint8_t *)malloc(len) : nullptr;
+  if (blob && preferences.getBytes("list", blob, len) != len) { free(blob); blob = nullptr; }
+  preferences.end();
+  if (!blob) return;
+  int n = 0;
+  if (blob[0] == WDP_DA_MAGIC && blob[1] == WDP_DA_NVS_VERSION) {
+    int o = 3;
+    for (int r = 0; r < blob[2]; r++) {
+      WdpDaDevice d;
+      memset(&d, 0, sizeof(d));
+      uint8_t port, flags;
+      int next = wdpDaGetRecord(blob, o, (int)len, &port, &flags, d.type, d.fw, d.hwRev, d.capTags);
+      if (next < 0) break;                     // corrupt tail: keep what parsed
+      o = next;
+      WdpDaDevice *row = wdpDaDevices[port - 1];
+      for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+        if (row[k].used) {
+          if (strcmp(row[k].type, d.type) == 0) break;   // duplicate: keep the first
+          continue;
+        }
+        d.used = d.confirmed = true;
+        d.firstHeard = wdpDaNextFirstHeard++;
+        row[k] = d;
+        n++;
+        break;
       }
     }
   }
+  free(blob);
+  if (n) Serial.printf("[WDP-DA] %d serial-attached device%s remembered (%cWDP,DA)\n",
+                       n, n == 1 ? "" : "s", LocalFunctionIdentifier);
 }
 
-// The port's (1-5) live records in the order they were first heard, as slot indices
-// into idx[]; returns the count. idx[0] is the one that labels the port.
-static int wdpDaOrder(int port, int idx[WDP_DA_PER_PORT]) {
-  const WdpDaDevice *row = wdpDaDevices[port - 1];
-  int n = 0;
-  for (int k = 0; k < WDP_DA_PER_PORT; k++) {
-    if (!row[k].present) continue;
-    int j = n++;
-    while (j > 0 && row[idx[j - 1]].firstHeard > row[k].firstHeard) { idx[j] = idx[j - 1]; j--; }
-    idx[j] = k;
+void wdpDaTick() {
+  static unsigned long nextScanMs = 0;
+  unsigned long now = millis();
+  if ((long)(now - nextScanMs) >= 0) {
+    nextScanMs = now + 250;
+    for (int p = 0; p < 5; p++) {
+      for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+        WdpDaDevice &d = wdpDaDevices[p][k];
+        // Checked unlocked first (almost always nothing to do), then again under the lock.
+        // Signed: the serial task can refresh a record after `now` was read, leaving
+        // lastSeenMs a millisecond ahead. Unsigned, that wraps huge and marks quiet a
+        // device that has just announced.
+        if (!(d.used && d.live && (long)(now - d.lastSeenMs) > (long)WDP_DA_LIVE_MS)) continue;
+        char quiet[sizeof(d.type)] = "";
+        bool once = false;
+        wdpDaLock();
+        if (d.used && d.live && (long)(now - d.lastSeenMs) > (long)WDP_DA_LIVE_MS) {
+          memcpy(quiet, d.type, sizeof(quiet));
+          once = !d.confirmed;
+          if (once) d.used = false;            // heard only once: a stray line, never saved
+          else      d.live = false;            // kept, and still naming its port: just quiet
+        }
+        wdpDaUnlock();
+        if (quiet[0]) Serial.printf("[WDP-DA] S%d: %s %s\n", p + 1, quiet,
+                                    once ? "heard only once, dropped" : "stopped announcing");
+      }
+    }
   }
-  return n;
+  if (wdpDaDirty && (long)(now - wdpDaSaveAtMs) >= 0) wdpDaSave();
 }
 
 // Seconds since the record was last heard. Clamped at 0: the serial task can refresh it
@@ -921,46 +1168,359 @@ static unsigned long wdpDaAgeS(const WdpDaDevice &d, unsigned long now) {
   return (long)(now - d.lastSeenMs) > 0 ? (now - d.lastSeenMs) / 1000 : 0;
 }
 
-const char *wdpDaType(int port) {
-  if (port < 1 || port > 5) return "";
-  int idx[WDP_DA_PER_PORT];
-  return wdpDaOrder(port, idx) > 0 ? wdpDaDevices[port - 1][idx[0]].type : "";
-}
-
 void wdpDaPrint() {
   Serial.println();
   Serial.println("Serial-attached devices (WDP-DA announces):");
   unsigned long now = millis();
   int n = 0;
   for (int p = 1; p <= 5; p++) {
-    int idx[WDP_DA_PER_PORT];
-    int c = wdpDaOrder(p, idx);
+    WdpDaDevice recs[WDP_DA_PER_PORT];
+    int c = wdpDaSnapshotPort(p, recs, false);  // unconfirmed too, marked
     for (int j = 0; j < c; j++) {
-      const WdpDaDevice &d = wdpDaDevices[p - 1][idx[j]];
+      const WdpDaDevice &d = recs[j];
+      char when[40];
+      if (!d.heard)          strcpy(when, "not heard since boot");
+      else if (!d.confirmed) snprintf(when, sizeof(when), "%lus ago, heard once", wdpDaAgeS(d, now));
+      else                   snprintf(when, sizeof(when), "%lus ago", wdpDaAgeS(d, now));
       n++;
-      Serial.printf("  S%d  %-24.24s  fw %-14.14s  %lus ago\n",
-                    p, d.type, d.fw[0] ? d.fw : "?", wdpDaAgeS(d, now));
+      Serial.printf("  S%d  %-24.24s  fw %-14.14s  %s\n", p, d.type, d.fw[0] ? d.fw : "?", when);
       if (d.hwRev[0])   Serial.printf("       hw %s\n", d.hwRev);
       if (d.capTags[0]) Serial.printf("       caps: %s\n", d.capTags);
     }
   }
-  if (n == 0) Serial.println("  (none — a wired device self-identifies by sending @WDP1)");
+  if (n == 0)
+    Serial.println("  (none — a wired device self-identifies by sending @WDP1)");
+  else
+    Serial.printf("  Saved on a device's second announce, kept until forgotten:\n"
+                  "  %cWDP,DA,FORGET,S<n>[,<type>]  or  %cWDP,DA,CLEAR\n",
+                  LocalFunctionIdentifier, LocalFunctionIdentifier);
   Serial.println();
 }
 
-// ?WDP,DUMP: one [WDPDA:...] line per live record, in port then first-heard order. Its own
-// record type, not fields on [WDPIF:...], so older Wizards ignore it. Only this board's
-// devices: the mesh carries just one label per port (PORTLABEL).
+// ?WDP,DUMP: one [WDPDA:...] line per confirmed record of THIS board, port by port,
+// first-heard first — the same set its neighbors receive. SEEN=1 while heard within
+// WDP_DA_LIVE_MS; AGE is seconds since the last announce, "-" when not heard since boot.
+// Its own record type, not fields on [WDPIF:...], so older Wizards ignore it. Neighbors'
+// devices come from wdpDaDumpRemote.
 static void wdpDaDump(int selfNum) {
   unsigned long now = millis();
   for (int p = 1; p <= 5; p++) {
+    WdpDaDevice recs[WDP_DA_PER_PORT];
+    int c = wdpDaSnapshotPort(p, recs, true);
+    for (int j = 0; j < c; j++) {
+      const WdpDaDevice &d = recs[j];
+      char age[12];
+      if (d.heard) snprintf(age, sizeof(age), "%lu", wdpDaAgeS(d, now));
+      else         strcpy(age, "-");
+      Serial.printf("[WDPDA:N=%d,S=%d,TYPE=%s,FW=%s,HW=%s,CAPS=%s,SEEN=%d,AGE=%s]\n",
+                    selfNum, p, d.type, d.fw, d.hwRev, d.capTags, d.live ? 1 : 0, age);
+    }
+  }
+}
+
+// ?WDP,DA,FORGET,S<n>[,<type>]  and  ?WDP,DA,CLEAR. A device that is still announcing
+// comes straight back on its next announce: forget is for hardware that was removed or
+// replaced. The type match ignores case, since a person types it.
+static void wdpDaCommand(const String &rest) {
+  String r = rest; r.trim();
+  String ru = r; ru.toUpperCase();
+  if (ru == "CLEAR") {
+    int n = 0;
+    wdpDaLock();
+    for (int p = 0; p < 5; p++)
+      for (int k = 0; k < WDP_DA_PER_PORT; k++)
+        if (wdpDaDevices[p][k].used) { wdpDaDevices[p][k].used = false; n++; }
+    if (n) wdpDaMarkDirty();
+    wdpDaUnlock();
+    Serial.printf("[WDP-DA] forgot %d device%s\n", n, n == 1 ? "" : "s");
+    return;
+  }
+  if (ru.startsWith("FORGET,")) {
+    String t = r.substring(7); t.trim();
+    int c = t.indexOf(',');
+    String portTok = (c >= 0) ? t.substring(0, c) : t;
+    String type    = (c >= 0) ? t.substring(c + 1) : String("");
+    portTok.trim(); type.trim();
+    if (portTok.startsWith("S") || portTok.startsWith("s")) portTok = portTok.substring(1);
+    int port = portTok.toInt();
+    if (port >= 1 && port <= 5) {
+      char gone[WDP_DA_PER_PORT][25];
+      int n = 0;
+      wdpDaLock();
+      for (int k = 0; k < WDP_DA_PER_PORT; k++) {
+        WdpDaDevice &d = wdpDaDevices[port - 1][k];
+        if (!d.used) continue;
+        if (type.length() && strcasecmp(type.c_str(), d.type) != 0) continue;
+        memcpy(gone[n++], d.type, sizeof(gone[0]));
+        d.used = false;
+      }
+      if (n) wdpDaMarkDirty();
+      wdpDaUnlock();
+      if (n == 0 && type.length())
+        Serial.printf("[WDP-DA] S%d: no device \"%s\" (see %cWDP,DA)\n", port, type.c_str(), LocalFunctionIdentifier);
+      else if (n == 0)
+        Serial.printf("[WDP-DA] S%d: nothing to forget\n", port);
+      for (int i = 0; i < n; i++) Serial.printf("[WDP-DA] S%d: %s forgotten\n", port, gone[i]);
+      return;
+    }
+  }
+  Serial.printf("[WDP] usage: %cWDP,DA[,FORGET,S<n>[,<type>]|,CLEAR]\n", LocalFunctionIdentifier);
+}
+
+// ---- The device list on the mesh -------------------------------------------------------
+// The advert's 200 B can't hold up to 20 full records, so the list rides its OWN packet
+// type, PACKET_TYPE_WDP_DA (17), in as many frames as it needs:
+//   [0]'D' [1]version [2..5]listHash (LE) [6]frameIdx [7]frameCount [8]recordCount
+//   then records (wdpDaPutRecord) until a 0 port byte or the end of the 200 B.
+// A new packet type, not a TLV on PACKET_TYPE_WDP: released firmware and WCB_Client drop an
+// ETM packet type they don't know, whereas a frame on the advert's type would reach an
+// older board's advert decoder as an EMPTY advert and blank that sender's neighbor record
+// (the SOLICIT trap, docs/WDP_DESIGN.md §3). A receiver shows a list only once it holds
+// every frame of one listHash, so a lost frame leaves the previous list in place, never
+// half of a new one. Sent after every advert (boot burst, 60 s backstop, solicited, advert
+// change) and when the list itself changes (a device appears, goes quiet or is forgotten),
+// with one re-send.
+#define WDP_DA_HDR        9
+#define WDP_DA_MAX_FRAMES (5 * WDP_DA_PER_PORT)   // a record always fits one frame
+
+// Build frame frameIdx of the current list into buf[200]: records packed greedily in list
+// order (port by port, first-heard first). Also returns the list hash — FNV-1a over every
+// record's bytes, live flag included, then the record count — and the frame and record
+// counts. Takes the lock. Returns the frame's length, 0 if frameIdx is past the last frame.
+static int wdpDaBuildFrame(int frameIdx, uint8_t *buf, uint32_t *hash, int *frames, int *records) {
+  uint8_t rec[WDP_DA_REC_MAX];
+  uint32_t h = 2166136261u;
+  int nFrames = 1, used = WDP_DA_HDR, len = 0, n = 0;
+  memset(buf, 0, 200);
+  wdpDaLock();
+  for (int p = 1; p <= 5; p++) {
     int idx[WDP_DA_PER_PORT];
-    int c = wdpDaOrder(p, idx);
+    int c = wdpDaOrder(p, idx, true);         // confirmed records only
     for (int j = 0; j < c; j++) {
       const WdpDaDevice &d = wdpDaDevices[p - 1][idx[j]];
-      Serial.printf("[WDPDA:N=%d,S=%d,TYPE=%s,FW=%s,HW=%s,CAPS=%s,AGE=%lu]\n",
-                    selfNum, p, d.type, d.fw, d.hwRev, d.capTags, wdpDaAgeS(d, now));
+      int rl = wdpDaPutRecord(rec, 0, sizeof(rec), (uint8_t)p, d.live ? WDP_DA_FLAG_LIVE : 0,
+                              d.type, d.fw, d.hwRev, d.capTags);
+      for (int i = 0; i < rl; i++) { h ^= rec[i]; h *= 16777619u; }
+      if (used + rl > 200 - 1) { nFrames++; used = WDP_DA_HDR; }   // keep a byte for the 0 terminator
+      if (nFrames - 1 == frameIdx) { memcpy(buf + used, rec, rl); len = used + rl; }
+      used += rl;
+      n++;
     }
+  }
+  wdpDaUnlock();
+  h ^= (uint8_t)n; h *= 16777619u;
+  *hash = h; *frames = nFrames; *records = n;
+  if (frameIdx >= nFrames) return 0;
+  if (len == 0) len = WDP_DA_HDR;               // an empty list is one header-only frame
+  buf[0] = WDP_DA_MAGIC;
+  buf[1] = WDP_DA_VERSION;
+  buf[2] = (uint8_t)(h & 0xFF);         buf[3] = (uint8_t)((h >> 8) & 0xFF);
+  buf[4] = (uint8_t)((h >> 16) & 0xFF); buf[5] = (uint8_t)((h >> 24) & 0xFF);
+  buf[6] = (uint8_t)frameIdx;
+  buf[7] = (uint8_t)nFrames;
+  buf[8] = (uint8_t)n;
+  return len;
+}
+
+static bool          wdpDaTxActive   = false;   // a send is in progress
+static int           wdpDaTxNext     = 0;       // ...next frame index
+static uint32_t      wdpDaTxHash     = 0;       // ...and the list hash its frames carry
+static unsigned long wdpDaTxAtMs     = 0;
+static bool          wdpDaTxSentAny  = false;   // a whole list has gone out since boot
+static uint32_t      wdpDaTxSentHash = 0;       // ...its hash: the on-change baseline
+static unsigned long wdpDaResendAtMs = 0;       // one re-send after a change (0 = none armed)
+static const unsigned long WDP_DA_FRAME_GAP_MS = 25;
+
+static void wdpDaStartSend() {
+  wdpDaTxActive = true;
+  wdpDaTxNext   = 0;
+  wdpDaTxAtMs   = millis();
+}
+
+// One frame per call, WDP_DA_FRAME_GAP_MS apart, so a long list never floods the ESP-NOW
+// TX queue. If the list changes mid-send, start over: every frame of a send carries one hash.
+static void wdpDaSendStep(unsigned long now) {
+  if (!wdpDaTxActive || (long)(now - wdpDaTxAtMs) < 0) return;
+  uint8_t buf[200];
+  uint32_t h;
+  int frames, records;
+  int len = wdpDaBuildFrame(wdpDaTxNext, buf, &h, &frames, &records);
+  if (wdpDaTxNext > 0 && h != wdpDaTxHash) {
+    wdpDaTxNext = 0;
+    len = wdpDaBuildFrame(0, buf, &h, &frames, &records);
+  }
+  wdpDaTxHash = h;
+  if (len > 0) wdpDaBroadcast(buf, len);
+  wdpDaTxNext++;
+  wdpDaTxAtMs = now + WDP_DA_FRAME_GAP_MS;
+  if (wdpDaTxNext >= frames) {
+    wdpDaTxActive   = false;
+    wdpDaTxSentAny  = true;
+    wdpDaTxSentHash = h;
+    if (debugMGMT) Serial.printf("[WDP] device list sent (%d device%s, %d frame%s)\n",
+                                 records, records == 1 ? "" : "s", frames, frames == 1 ? "" : "s");
+  }
+}
+
+// Called from wdpTick's half-second change check: the list changed since it last went out
+// in full (a device appeared, went quiet or was forgotten), so send it now, plus one re-send
+// 800 ms later, as the advert does. The first full send, in the boot burst, sets the baseline.
+static void wdpDaCheckChanged(unsigned long now) {
+  if (!wdpDaTxSentAny || wdpDaTxActive) return;
+  uint8_t buf[200];
+  uint32_t h;
+  int frames, records;
+  wdpDaBuildFrame(0, buf, &h, &frames, &records);
+  if (h != wdpDaTxSentHash) {
+    wdpDaStartSend();
+    wdpDaResendAtMs = now + 800;
+  }
+}
+
+// Called every wdpTick: the armed re-send, then the next frame of a send in progress.
+static void wdpDaTxTick(unsigned long now) {
+  if (wdpDaResendAtMs && !wdpDaTxActive && (long)(now - wdpDaResendAtMs) >= 0) {
+    wdpDaResendAtMs = 0;
+    wdpDaStartSend();
+  }
+  wdpDaSendStep(now);
+}
+
+// ---- Neighbors' device lists (received) -------------------------------------------------
+// A shared pool rather than a per-neighbor array: most boards announce a handful of
+// devices, and 20 neighbors x 20 full records would cost ~50 KB. Only loop() touches it
+// (frames arrive through the loop-drained WDP queue), so it needs no lock.
+#define WDP_DA_POOL 32
+struct WdpDaRemote {
+  uint8_t  wcb;          // owning neighbor (1..MAX_WCB_COUNT); 0 = free slot
+  bool     pending;      // part of a list still being assembled: not shown yet
+  uint16_t pos;          // position in the sender's list: frame index * 32 + index in frame
+  uint8_t  port;         // 1-5
+  uint8_t  flags;        // WDP_DA_FLAG_*
+  char     type[25];
+  char     fw[28];
+  char     hwRev[16];
+  char     capTags[49];
+};
+static WdpDaRemote wdpDaRemote[WDP_DA_POOL];
+
+struct WdpDaPeer {
+  bool     have;         // a complete list from this neighbor is committed (shown)
+  uint32_t hash;         // ...and its listHash
+  bool     assembling;   // frames of a different list are arriving
+  uint32_t asmHash;
+  uint8_t  asmFrames;    // frames expected
+  uint8_t  asmRecords;   // records expected
+  uint32_t asmMask;      // one bit per frame index received
+  bool     warned;       // "doesn't fit" already printed...
+  uint32_t warnedHash;   // ...for this list, so the 60 s re-sends don't repeat it
+};
+static WdpDaPeer wdpDaPeers[MAX_WCB_COUNT];
+
+// Free one neighbor's pool slots: its partial (pending) list, or its committed one.
+static void wdpDaFreeRemote(uint8_t wcb, bool pending) {
+  for (int i = 0; i < WDP_DA_POOL; i++)
+    if (wdpDaRemote[i].wcb == wcb && wdpDaRemote[i].pending == pending) wdpDaRemote[i].wcb = 0;
+}
+
+// Forget everything received from a neighbor (it left the WDP table).
+static void wdpDaDropPeer(uint8_t wcb) {
+  if (wcb < 1 || wcb > MAX_WCB_COUNT) return;
+  for (int i = 0; i < WDP_DA_POOL; i++)
+    if (wdpDaRemote[i].wcb == wcb) wdpDaRemote[i].wcb = 0;
+  memset(&wdpDaPeers[wcb - 1], 0, sizeof(WdpDaPeer));
+}
+
+// Give up on a neighbor's partial list; the one already shown stays.
+static void wdpDaAbortAssembly(uint8_t wcb) {
+  wdpDaFreeRemote(wcb, true);
+  wdpDaPeers[wcb - 1].assembling = false;
+}
+
+void wdpDaOnFrameReceived(int senderWCB, const uint8_t *cmd) {
+  if (!wdpEnabled) return;
+  if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
+  if (cmd[0] != (uint8_t)WDP_DA_MAGIC || cmd[1] != WDP_DA_VERSION) return;
+  uint32_t hash = (uint32_t)cmd[2] | ((uint32_t)cmd[3] << 8) |
+                  ((uint32_t)cmd[4] << 16) | ((uint32_t)cmd[5] << 24);
+  uint8_t idx = cmd[6], frames = cmd[7], records = cmd[8];
+  if (frames == 0 || frames > WDP_DA_MAX_FRAMES || idx >= frames) return;
+  if (records > 5 * WDP_DA_PER_PORT) return;
+  uint8_t wcb = (uint8_t)senderWCB;
+  WdpDaPeer &pe = wdpDaPeers[wcb - 1];
+  if (pe.have && pe.hash == hash) return;       // already showing this list (a routine re-send)
+
+  if (!pe.assembling || pe.asmHash != hash || pe.asmFrames != frames || pe.asmRecords != records) {
+    wdpDaFreeRemote(wcb, true);                 // a newer list: drop any older partial one
+    pe.assembling = true;
+    pe.asmHash    = hash;
+    pe.asmFrames  = frames;
+    pe.asmRecords = records;
+    pe.asmMask    = 0;
+  }
+  if (pe.asmMask & (1UL << idx)) return;        // duplicate frame
+
+  int o = WDP_DA_HDR, n = 0;
+  while (o < 200 && cmd[o] != 0) {
+    WdpDaRemote r;
+    memset(&r, 0, sizeof(r));
+    int next = wdpDaGetRecord(cmd, o, 200, &r.port, &r.flags, r.type, r.fw, r.hwRev, r.capTags);
+    if (next < 0) { wdpDaAbortAssembly(wcb); return; }   // malformed: never show part of it
+    o = next;
+    int slot = -1;
+    for (int i = 0; i < WDP_DA_POOL; i++) if (wdpDaRemote[i].wcb == 0) { slot = i; break; }
+    if (slot < 0) {
+      if (!(pe.warned && pe.warnedHash == hash))
+        Serial.printf("[WDP] WCB%d's device list doesn't fit (%d devices max across all neighbors)\n",
+                      wcb, WDP_DA_POOL);
+      pe.warned     = true;
+      pe.warnedHash = hash;
+      wdpDaAbortAssembly(wcb);
+      return;
+    }
+    r.wcb     = wcb;
+    r.pending = true;
+    r.pos     = (uint16_t)(idx * 32 + n);
+    wdpDaRemote[slot] = r;
+    n++;
+  }
+  pe.asmMask |= (1UL << idx);
+  if (pe.asmMask != ((1UL << frames) - 1)) return;      // more frames to come
+
+  int got = 0;
+  for (int i = 0; i < WDP_DA_POOL; i++)
+    if (wdpDaRemote[i].wcb == wcb && wdpDaRemote[i].pending) got++;
+  if (got != records) { wdpDaAbortAssembly(wcb); return; }
+  wdpDaFreeRemote(wcb, false);                          // the list it replaces
+  for (int i = 0; i < WDP_DA_POOL; i++)
+    if (wdpDaRemote[i].wcb == wcb) wdpDaRemote[i].pending = false;
+  pe.have       = true;
+  pe.hash       = hash;
+  pe.assembling = false;
+}
+
+// A neighbor's committed list as pool indices in list order; returns the count.
+static int wdpDaRemoteList(uint8_t wcb, int *idx, int max) {
+  int n = 0;
+  for (int i = 0; i < WDP_DA_POOL; i++) {
+    const WdpDaRemote &r = wdpDaRemote[i];
+    if (r.wcb != wcb || r.pending || n >= max) continue;
+    int j = n++;
+    while (j > 0 && wdpDaRemote[idx[j - 1]].pos > r.pos) { idx[j] = idx[j - 1]; j--; }
+    idx[j] = i;
+  }
+  return n;
+}
+
+// ?WDP,DUMP: a neighbor's devices, same record as wdpDaDump. AGE is "-": a receiver only
+// knows whether the sender currently hears each device, not when it last did.
+static void wdpDaDumpRemote(uint8_t wcb) {
+  int idx[WDP_DA_POOL];
+  int n = wdpDaRemoteList(wcb, idx, WDP_DA_POOL);
+  for (int j = 0; j < n; j++) {
+    const WdpDaRemote &r = wdpDaRemote[idx[j]];
+    Serial.printf("[WDPDA:N=%d,S=%d,TYPE=%s,FW=%s,HW=%s,CAPS=%s,SEEN=%d,AGE=-]\n",
+                  wcb, r.port, r.type, r.fw, r.hwRev, r.capTags, (r.flags & WDP_DA_FLAG_LIVE) ? 1 : 0);
   }
 }
 
@@ -1155,10 +1715,26 @@ static void printWdpDetail(int wcbNum) {
                   nb.seqHash, LocalFunctionIdentifier, nb.wcbNumber);
   Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
                 nb.confirmed ? "live" : "stale");
+  // Each port's label, then the devices announcing on it (from the neighbor's WDP-DA
+  // device-list frames — only firmware that sends them has any).
   Serial.println("  Interfaces  :");
+  int ridx[WDP_DA_POOL];
+  int rn = wdpDaRemoteList(nb.wcbNumber, ridx, WDP_DA_POOL);
   bool any = false;
   for (int p = 0; p < 5; p++) {
-    if (nb.portLabels[p][0]) { Serial.printf("    S%d  %s\n", p + 1, nb.portLabels[p]); any = true; }
+    bool hasDev = false;
+    for (int j = 0; j < rn; j++) if (wdpDaRemote[ridx[j]].port == p + 1) { hasDev = true; break; }
+    if (!nb.portLabels[p][0] && !hasDev) continue;
+    any = true;
+    Serial.printf("    S%d  %s\n", p + 1, nb.portLabels[p][0] ? nb.portLabels[p] : "(no label)");
+    for (int j = 0; j < rn; j++) {
+      const WdpDaRemote &r = wdpDaRemote[ridx[j]];
+      if (r.port != p + 1) continue;
+      Serial.printf("          %-24.24s  fw %-14.14s%s\n", r.type, r.fw[0] ? r.fw : "?",
+                    (r.flags & WDP_DA_FLAG_LIVE) ? "" : "  (not heard)");
+      if (r.hwRev[0])   Serial.printf("            hw %s\n", r.hwRev);
+      if (r.capTags[0]) Serial.printf("            caps: %s\n", r.capTags);
+    }
   }
   if (!any) Serial.println("    (none advertised)");
   Serial.println();
@@ -1169,6 +1745,7 @@ static void printWdpDetail(int wcbNum) {
 // with an ever-growing AGE), and by ?WDP,FORGET. Floor/learned peers use ?WDP,FORGET.
 void wdpForgetNeighbor(uint8_t id) {
   if (id >= 1 && id <= MAX_WCB_COUNT) wdpNeighbors[id - 1].valid = false;
+  wdpDaDropPeer(id);                     // and the device list it sent
 }
 
 // Machine-readable dump (for the config tool / scripts).
@@ -1199,7 +1776,7 @@ static void printWdpDump() {
     self.wledCount = (uint8_t)swn;
     for (int p = 0; p < 5; p++) {
       String lbl = serialPortLabels[p];
-      if (lbl.length() == 0) lbl = wdpDaType(p + 1);
+      if (lbl.length() == 0) { char t[25]; wdpDaLabel(p + 1, t, sizeof(t)); lbl = t; }
       strncpy(self.portLabels[p], lbl.c_str(), sizeof(self.portLabels[p]) - 1);
     }
     wdpScrub(self.alias); wdpScrub(self.fwVer);
@@ -1253,6 +1830,7 @@ static void printWdpDump() {
     for (int p = 0; p < 5; p++)
       if (nb.portLabels[p][0])
         Serial.printf("[WDPIF:N=%d,S=%d,DEV=%s]\n", nb.wcbNumber, p + 1, nb.portLabels[p]);
+    wdpDaDumpRemote(nb.wcbNumber);           // the devices announcing on its ports
     wdpEmitDumpX(nb);                        // MB=/WL= (Maestro+WLED id@baud)
     // Sequence-inventory fingerprint (own record — see the SELF row above).
     // Omitted entirely when the neighbor advertised no hash, so a consumer can tell
@@ -1289,6 +1867,7 @@ void processWdpCommand(const String &args) {
   if (au == "STATUS")           { printWdpStatus(); return; }
   if (au == "DUMP")             { printWdpDump();    return; }
   if (au == "DA")               { wdpDaPrint();      return; }   // serial-attached devices (@WDP1)
+  if (au.startsWith("DA,"))     { wdpDaCommand(a.substring(3)); return; }   // DA,FORGET,... / DA,CLEAR
   // ?WDP,POLL — force convergence now: advertise ourselves + broadcast a SOLICIT so
   // every other board advertises within ~1 s instead of waiting for the 60 s backstop.
   if (au == "POLL") {
@@ -1341,6 +1920,8 @@ void processWdpCommand(const String &args) {
   if (au == "CLEAR") {
     clearAllLearnedPeers();
     memset(wdpNeighbors, 0, sizeof(wdpNeighbors));
+    memset(wdpDaRemote, 0, sizeof(wdpDaRemote));   // neighbors' device lists go with them;
+    memset(wdpDaPeers, 0, sizeof(wdpDaPeers));     // this board's own (?WDP,DA) stays
     Serial.println("[WDP] neighbor table + learned peers cleared");
     return;
   }
@@ -1355,7 +1936,8 @@ void processWdpCommand(const String &args) {
   if (n > 0) { printWdpDetail(n); return; }
 
   Serial.printf("[WDP] unknown subcommand '%s' (LIST | <n> | DETAIL,n | STATUS | DUMP | DA | "
-                "POLL | ON | OFF | AUTOJOIN[,ON|,OFF] | ADD,<id> | FORGET,<id> | CLEAR)\n", a.c_str());
+                "DA,FORGET,S<n>[,<type>] | DA,CLEAR | POLL | ON | OFF | AUTOJOIN[,ON|,OFF] | "
+                "ADD,<id> | FORGET,<id> | CLEAR)\n", a.c_str());
 }
 
 // ==================== NVS + lifecycle ====================================
@@ -1377,6 +1959,9 @@ void saveWdpSettings() {
 void wdpBegin() {
   loadWdpSettings();
   memset(wdpNeighbors, 0, sizeof(wdpNeighbors));
+  memset(wdpDaRemote, 0, sizeof(wdpDaRemote));
+  memset(wdpDaPeers, 0, sizeof(wdpDaPeers));
+  wdpDaLoad();                       // this board's saved WDP-DA devices (all "not heard since boot")
   wdpBootLeft   = 3;
   wdpNextBootMs = millis() + 1600;   // just after the ETM boot announce (1500)
   // Per-board phase stagger so periodic backstops from boards that booted

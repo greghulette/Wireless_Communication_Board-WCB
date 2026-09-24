@@ -5,7 +5,9 @@
 //   A self-contained regression guard for the parts of the Wireless Discovery
 //   Protocol that are pure logic: the TLV encode/decode, the single-owner
 //   capability election, the 2-advert auto-join vetting, the sender-MAC binding
-//   gate, and the SOLICIT (?WDP,POLL) short-circuit. Runs anywhere a C++11
+//   gate, the SOLICIT (?WDP,POLL) short-circuit, and the WDP-DA device-list frames
+//   (PACKET_TYPE_WDP_DA: packing, list hash, all-or-nothing assembly, the NVS
+//   blob). Runs anywhere a C++11
 //   compiler exists (CI uses g++); no ESP32 / Arduino toolchain needed.
 //
 // WHY IT IS A REFERENCE, NOT A LINK AGAINST THE FIRMWARE
@@ -315,6 +317,277 @@ static void test_autojoin_vetting(){
   onAdvert(); CHECK(joined,  "second advert joins");
 }
 
+// ============================ WDP-DA device-list frames =====================
+// PACKET_TYPE_WDP_DA (17): a board's serial-attached devices, sent to every neighbor
+// after each advert and when the list changes. Mirrors the WDP-DA section of
+// WCB_WDP.cpp: wdpDaPutRecord / wdpDaGetRecord (the record, shared with the NVS blob),
+// wdpDaBuildFrame (greedy packing + list hash), wdpDaOnFrameReceived (all-or-nothing
+// assembly into a 32-record shared pool) and wdpDaSave / wdpDaLoad (the blob).
+static const uint8_t  DA_MAGIC = 'D', DA_VERSION = 0x01, DA_NVS_VERSION = 0x01;
+static const uint8_t  DA_FLAG_LIVE = 0x01;
+static const int      DA_HDR = 9, DA_PER_PORT = 4, DA_MAX_FRAMES = 5 * 4, DA_POOL = 32;
+static const int      DA_REC_MAX = 6 + 24 + 27 + 15 + 48;
+
+struct DaRec { uint8_t port = 1, flags = 0; std::string type, fw, hw, caps; };
+
+static void daScrub(std::string& s){ for(auto& c : s) if(c==','||c==']'||(uint8_t)c<0x20) c='_'; }
+
+static int daPutStr(uint8_t* buf, int o, const std::string& s, int cap){
+  int L = (int)s.size() < cap ? (int)s.size() : cap;
+  buf[o++] = (uint8_t)L; memcpy(buf + o, s.data(), L); return o + L;
+}
+static int daPutRecord(uint8_t* buf, int o, int max, const DaRec& r){
+  auto cl=[](const std::string& s,int c){ return (int)s.size()<c?(int)s.size():c; };
+  int need = 6 + cl(r.type,24) + cl(r.fw,27) + cl(r.hw,15) + cl(r.caps,48);
+  if(o + need > max) return -1;
+  buf[o++] = r.port; buf[o++] = r.flags;
+  o = daPutStr(buf,o,r.type,24); o = daPutStr(buf,o,r.fw,27); o = daPutStr(buf,o,r.hw,15);
+  return daPutStr(buf,o,r.caps,48);
+}
+static int daGetStr(const uint8_t* buf, int o, int max, std::string& out, int cap){
+  if(o >= max) return -1;
+  int L = buf[o++]; if(L > cap || o + L > max) return -1;
+  out.assign((const char*)buf + o, L); return o + L;
+}
+static int daGetRecord(const uint8_t* buf, int o, int max, DaRec& r){
+  if(o + 2 > max) return -1;
+  r.port = buf[o++]; r.flags = buf[o++];
+  if(r.port < 1 || r.port > 5) return -1;
+  if((o = daGetStr(buf,o,max,r.type,24)) < 0 || r.type.empty()) return -1;
+  if((o = daGetStr(buf,o,max,r.fw,27))   < 0) return -1;
+  if((o = daGetStr(buf,o,max,r.hw,15))   < 0) return -1;
+  if((o = daGetStr(buf,o,max,r.caps,48)) < 0) return -1;
+  daScrub(r.type); daScrub(r.fw); daScrub(r.hw); daScrub(r.caps);
+  return o;
+}
+
+// wdpDaBuildFrame: `list` is already in list order (port by port, first-heard first).
+static int daBuildFrame(const std::vector<DaRec>& list, int frameIdx, uint8_t* buf,
+                        uint32_t* hash, int* frames, int* records){
+  uint8_t rec[DA_REC_MAX]; uint32_t h = 2166136261u;
+  int nFrames = 1, used = DA_HDR, len = 0, n = 0;
+  memset(buf, 0, 200);
+  for(const auto& r : list){
+    int rl = daPutRecord(rec, 0, sizeof(rec), r);
+    for(int i=0;i<rl;i++){ h ^= rec[i]; h *= 16777619u; }
+    if(used + rl > 200 - 1){ nFrames++; used = DA_HDR; }
+    if(nFrames - 1 == frameIdx){ memcpy(buf + used, rec, rl); len = used + rl; }
+    used += rl; n++;
+  }
+  h ^= (uint8_t)n; h *= 16777619u;
+  *hash = h; *frames = nFrames; *records = n;
+  if(frameIdx >= nFrames) return 0;
+  if(len == 0) len = DA_HDR;
+  buf[0]=DA_MAGIC; buf[1]=DA_VERSION;
+  buf[2]=(uint8_t)(h&0xFF); buf[3]=(uint8_t)((h>>8)&0xFF); buf[4]=(uint8_t)((h>>16)&0xFF); buf[5]=(uint8_t)((h>>24)&0xFF);
+  buf[6]=(uint8_t)frameIdx; buf[7]=(uint8_t)nFrames; buf[8]=(uint8_t)n;
+  return len;
+}
+static std::vector<std::vector<uint8_t>> daAllFrames(const std::vector<DaRec>& list, uint32_t* hashOut = nullptr){
+  std::vector<std::vector<uint8_t>> out; uint8_t buf[200]; uint32_t h; int frames, recs;
+  daBuildFrame(list, 0, buf, &h, &frames, &recs);
+  for(int i=0;i<frames;i++){ daBuildFrame(list, i, buf, &h, &frames, &recs); out.emplace_back(buf, buf + 200); }
+  if(hashOut) *hashOut = h;
+  return out;
+}
+
+// Receiver: wdpDaOnFrameReceived + its pool/peer state.
+struct DaRemote { uint8_t wcb = 0; bool pending = false; uint16_t pos = 0; DaRec r; };
+struct DaPeer { bool have=false; uint32_t hash=0; bool assembling=false; uint32_t asmHash=0;
+                uint8_t asmFrames=0, asmRecords=0; uint32_t asmMask=0; };
+struct DaRx {
+  DaRemote pool[DA_POOL]; DaPeer peers[21];
+  void freeRemote(uint8_t w, bool pending){ for(auto& e : pool) if(e.wcb==w && e.pending==pending) e.wcb=0; }
+  void abortAsm(uint8_t w){ freeRemote(w,true); peers[w].assembling=false; }
+  void onFrame(int sender, const uint8_t* cmd){
+    if(sender < 1 || sender > 20) return;
+    if(cmd[0] != DA_MAGIC || cmd[1] != DA_VERSION) return;
+    uint32_t hash = (uint32_t)cmd[2]|((uint32_t)cmd[3]<<8)|((uint32_t)cmd[4]<<16)|((uint32_t)cmd[5]<<24);
+    uint8_t idx = cmd[6], frames = cmd[7], records = cmd[8];
+    if(frames == 0 || frames > DA_MAX_FRAMES || idx >= frames) return;
+    if(records > 5 * DA_PER_PORT) return;
+    uint8_t w = (uint8_t)sender; DaPeer& pe = peers[w];
+    if(pe.have && pe.hash == hash) return;
+    if(!pe.assembling || pe.asmHash != hash || pe.asmFrames != frames || pe.asmRecords != records){
+      freeRemote(w,true); pe.assembling=true; pe.asmHash=hash; pe.asmFrames=frames; pe.asmRecords=records; pe.asmMask=0;
+    }
+    if(pe.asmMask & (1UL << idx)) return;
+    int o = DA_HDR, n = 0;
+    while(o < 200 && cmd[o] != 0){
+      DaRec r; int next = daGetRecord(cmd, o, 200, r);
+      if(next < 0){ abortAsm(w); return; }
+      o = next;
+      int slot = -1; for(int i=0;i<DA_POOL;i++) if(pool[i].wcb==0){ slot=i; break; }
+      if(slot < 0){ abortAsm(w); return; }
+      pool[slot].wcb=w; pool[slot].pending=true; pool[slot].pos=(uint16_t)(idx*32+n); pool[slot].r=r; n++;
+    }
+    pe.asmMask |= (1UL << idx);
+    if(pe.asmMask != ((1UL << frames) - 1)) return;
+    int got = 0; for(auto& e : pool) if(e.wcb==w && e.pending) got++;
+    if(got != records){ abortAsm(w); return; }
+    freeRemote(w,false);
+    for(auto& e : pool) if(e.wcb==w) e.pending=false;
+    pe.have=true; pe.hash=hash; pe.assembling=false;
+  }
+  std::vector<DaRec> list(uint8_t w) const {   // wdpDaRemoteList: committed, by pos
+    std::vector<const DaRemote*> v;
+    for(const auto& e : pool) if(e.wcb==w && !e.pending) v.push_back(&e);
+    for(size_t i=1;i<v.size();i++) for(size_t j=i;j>0 && v[j-1]->pos > v[j]->pos;j--) std::swap(v[j-1],v[j]);
+    std::vector<DaRec> out; for(auto* e : v) out.push_back(e->r); return out;
+  }
+};
+
+static DaRec daRec(uint8_t port, const char* type, const char* fw = "", bool live = true,
+                   const char* hw = "", const char* caps = ""){
+  DaRec r; r.port=port; r.flags=live?DA_FLAG_LIVE:0; r.type=type; r.fw=fw; r.hw=hw; r.caps=caps; return r;
+}
+static bool daSame(const std::vector<DaRec>& a, const std::vector<DaRec>& b){
+  if(a.size()!=b.size()) return false;
+  for(size_t i=0;i<a.size();i++)
+    if(a[i].port!=b[i].port||a[i].flags!=b[i].flags||a[i].type!=b[i].type||a[i].fw!=b[i].fw||
+       a[i].hw!=b[i].hw||a[i].caps!=b[i].caps) return false;
+  return true;
+}
+// A record with every field at full length: 120 bytes, so each gets a frame to itself.
+static DaRec daLong(uint8_t port, int i){
+  char t[25]; snprintf(t, sizeof(t), "Type%02d-AAAAAAAAAAAAAAAAA", i);
+  return daRec(port, t, "FFFFFFFFFFFFFFFFFFFFFFFFFFF", true, "HHHHHHHHHHHHHHH",
+               "cccccccccccccccccccccccccccccccccccccccccccccccc");
+}
+
+static void test_da_single_frame(){
+  printf("WDP-DA: one-frame list round-trip...\n");
+  std::vector<DaRec> L = { daRec(2,"PSI Front","1.4"), daRec(2,"PSI Rear","1.4",false),
+                           daRec(4,"Flthy HP Controller","2.3.0",true,"revB","hp.servo hp.led") };
+  uint32_t h; auto F = daAllFrames(L, &h);
+  CHECK(F.size()==1, "three short records fit one frame");
+  CHECK(F[0][0]==DA_MAGIC && F[0][7]==1 && F[0][8]==3, "header: magic, 1 frame, 3 records");
+  DaRx rx; rx.onFrame(3, F[0].data());
+  CHECK(daSame(rx.list(3), L), "list, order and live flags survive");
+  CHECK(rx.peers[3].have && rx.peers[3].hash==h, "committed under the sender's list hash");
+}
+
+static void test_da_multi_frame_any_order(){
+  printf("WDP-DA: multi-frame list commits only when whole, in any order...\n");
+  std::vector<DaRec> L; for(int i=0;i<20;i++) L.push_back(daLong((uint8_t)(1 + i/4), i));
+  auto F = daAllFrames(L);
+  CHECK(F.size()==20, "20 full-length records need 20 frames");
+  bool termOk = true; for(auto& f : F){ int o=DA_HDR; DaRec r; o=daGetRecord(f.data(),o,200,r); if(o<0||o>=200||f[o]!=0) termOk=false; }
+  CHECK(termOk, "each frame ends with a 0 port byte inside the 200 B");
+  DaRx rx;
+  for(int i=19;i>=1;i--) rx.onFrame(5, F[i].data());
+  CHECK(rx.list(5).empty() && !rx.peers[5].have, "nothing shown until the last frame");
+  rx.onFrame(5, F[0].data());
+  CHECK(daSame(rx.list(5), L), "reverse-order delivery assembles the list in list order");
+}
+
+static void test_da_lost_frame_keeps_old(){
+  printf("WDP-DA: a lost frame leaves the previous list, never half a new one...\n");
+  std::vector<DaRec> A = { daRec(3,"Rseries Logics","2.1") };
+  std::vector<DaRec> B; for(int i=0;i<3;i++) B.push_back(daLong(3, i));
+  DaRx rx; rx.onFrame(4, daAllFrames(A)[0].data());
+  auto FB = daAllFrames(B);
+  CHECK(FB.size()==3, "B spans three frames");
+  rx.onFrame(4, FB[0].data()); rx.onFrame(4, FB[2].data());          // frame 1 lost
+  CHECK(daSame(rx.list(4), A), "old list still shown while B is incomplete");
+  rx.onFrame(4, FB[0].data());                                          // re-send: duplicate ignored...
+  rx.onFrame(4, FB[1].data());                                          // ...and the missing one completes it
+  CHECK(daSame(rx.list(4), B), "the re-send completes B");
+  int used = 0; for(auto& e : rx.pool) if(e.wcb) used++;
+  CHECK(used==3, "A's slots were freed when B committed");
+}
+
+static void test_da_empty_and_repeat(){
+  printf("WDP-DA: an empty list clears; a repeat of the same list is ignored...\n");
+  std::vector<DaRec> A = { daRec(1,"Maestro","1.0") };
+  DaRx rx; rx.onFrame(6, daAllFrames(A)[0].data());
+  auto F0 = daAllFrames(A)[0];
+  rx.onFrame(6, F0.data());
+  CHECK(daSame(rx.list(6), A) && !rx.peers[6].assembling, "same hash again: no re-assembly");
+  std::vector<DaRec> none; auto FE = daAllFrames(none);
+  CHECK(FE.size()==1 && FE[0][8]==0 && FE[0][DA_HDR]==0, "empty list = one header-only frame");
+  rx.onFrame(6, FE[0].data());
+  CHECK(rx.list(6).empty() && rx.peers[6].have, "empty list commits and clears the old one");
+}
+
+static void test_da_hash_tracks_state(){
+  printf("WDP-DA: the list hash moves with any change, incl. the live flag...\n");
+  uint32_t h1, h2, h3, h4;
+  daAllFrames({ daRec(2,"PSI Front","1.4",true) }, &h1);
+  daAllFrames({ daRec(2,"PSI Front","1.4",false) }, &h2);
+  daAllFrames({ daRec(2,"PSI Front","1.5",true) }, &h3);
+  daAllFrames({ daRec(3,"PSI Front","1.4",true) }, &h4);
+  CHECK(h1!=h2, "going quiet changes the hash (neighbors see it)");
+  CHECK(h1!=h3 && h1!=h4, "a new fw or a different port changes the hash");
+}
+
+static void test_da_malformed(){
+  printf("WDP-DA: malformed frames are dropped whole...\n");
+  std::vector<DaRec> A = { daRec(2,"PSI Front","1.4") };
+  auto F = daAllFrames(A)[0];
+  DaRx rx;
+  { auto f = F; f[DA_HDR] = 9;  rx.onFrame(2, f.data()); CHECK(rx.list(2).empty(), "port 9 rejected"); }
+  { auto f = F; f[DA_HDR+2] = 30; rx.onFrame(2, f.data()); CHECK(rx.list(2).empty(), "type length past its field rejected"); }
+  { auto f = F; f[DA_HDR+2] = 0;  rx.onFrame(2, f.data()); CHECK(rx.list(2).empty(), "empty type rejected"); }
+  { auto f = F; f[7] = 0; rx.onFrame(2, f.data()); CHECK(rx.list(2).empty() && !rx.peers[2].assembling, "zero frame count rejected"); }
+  { auto f = F; f[6] = 1; rx.onFrame(2, f.data()); CHECK(rx.list(2).empty() && !rx.peers[2].assembling, "index past the count rejected"); }
+  { auto f = F; f[8] = 2; rx.onFrame(2, f.data()); CHECK(rx.list(2).empty() && !rx.peers[2].have, "record count mismatch never commits"); }
+  { auto f = F; f[0] = 'W'; rx.onFrame(2, f.data()); CHECK(!rx.peers[2].assembling, "an advert's magic is not a device list"); }
+  int used = 0; for(auto& e : rx.pool) if(e.wcb) used++;
+  CHECK(used==0, "no pool slot leaked by a rejected frame");
+  rx.onFrame(2, F.data());
+  CHECK(daSame(rx.list(2), A), "the intact frame still commits afterwards");
+}
+
+static void test_da_scrub(){
+  printf("WDP-DA: received strings are scrubbed for the dump...\n");
+  std::vector<DaRec> A = { daRec(1,"PSI,Front]","1\x01" "4") };
+  DaRx rx; rx.onFrame(7, daAllFrames(A)[0].data());
+  auto L = rx.list(7);
+  CHECK(L.size()==1 && L[0].type=="PSI_Front_" && L[0].fw=="1_4", "',' ']' and control bytes become '_'");
+}
+
+static void test_da_pool_full(){
+  printf("WDP-DA: a list that doesn't fit the shared pool leaves the old one...\n");
+  DaRx rx;
+  std::vector<DaRec> A; for(int i=0;i<20;i++) A.push_back(daRec((uint8_t)(1 + i/4), ("A" + std::to_string(i)).c_str()));
+  std::vector<DaRec> B; for(int i=0;i<20;i++) B.push_back(daRec((uint8_t)(1 + i/4), ("B" + std::to_string(i)).c_str()));
+  for(auto& f : daAllFrames(A)) rx.onFrame(8, f.data());
+  CHECK(rx.list(8).size()==20, "first neighbor's 20 records fit");
+  for(auto& f : daAllFrames(B)) rx.onFrame(9, f.data());
+  CHECK(rx.list(9).empty() && !rx.peers[9].assembling, "second 20 don't fit the 32-slot pool: dropped");
+  CHECK(rx.list(8).size()==20, "the first neighbor's list is untouched");
+  int used = 0; for(auto& e : rx.pool) if(e.wcb) used++;
+  CHECK(used==20, "the partial list's slots were freed");
+}
+
+// wdpDaSave / wdpDaLoad: ['D'][version][count] + records, list order; load skips a
+// duplicate type on a port and anything past 4 per port, and keeps a corrupt blob's head.
+static std::vector<DaRec> daLoad(const std::vector<uint8_t>& blob){
+  std::vector<DaRec> out; int perPort[6] = {0};
+  if(blob.size() < 3 || blob[0]!=DA_MAGIC || blob[1]!=DA_NVS_VERSION) return out;
+  int o = 3;
+  for(int r=0;r<blob[2];r++){
+    DaRec d; int next = daGetRecord(blob.data(), o, (int)blob.size(), d); if(next < 0) break; o = next;
+    bool dup=false; for(auto& e : out) if(e.port==d.port && e.type==d.type) dup=true;
+    if(dup || perPort[d.port] >= DA_PER_PORT) continue;
+    perPort[d.port]++; d.flags = 0; out.push_back(d);                    // reloaded = not heard
+  }
+  return out;
+}
+static void test_da_nvs_blob(){
+  printf("WDP-DA: the saved list reloads in order, quiet...\n");
+  std::vector<DaRec> L = { daRec(2,"PSI Front","1.4"), daRec(2,"PSI Rear","1.4"), daRec(5,"Stealth","3.0",true,"rev2") };
+  std::vector<uint8_t> blob(3); blob[0]=DA_MAGIC; blob[1]=DA_NVS_VERSION; blob[2]=(uint8_t)L.size();
+  for(auto r : L){ r.flags = 0; uint8_t rec[DA_REC_MAX]; int n = daPutRecord(rec,0,sizeof(rec),r); blob.insert(blob.end(), rec, rec + n); }
+  auto back = daLoad(blob);
+  bool ok = back.size()==3 && back[0].type=="PSI Front" && back[1].type=="PSI Rear" && back[2].hw=="rev2";
+  for(auto& r : back) if(r.flags) ok = false;
+  CHECK(ok, "order and fields survive; every record comes back not-live");
+  std::vector<uint8_t> cut(blob.begin(), blob.end() - 3);
+  CHECK(daLoad(cut).size()==2, "a truncated blob keeps the records before the damage");
+}
+
 int main(){
   printf("== WDP wire-format & election spec test ==\n");
   test_roundtrip();
@@ -326,6 +599,15 @@ int main(){
   test_mac_binding();
   test_cap_election();
   test_autojoin_vetting();
+  test_da_single_frame();
+  test_da_multi_frame_any_order();
+  test_da_lost_frame_keeps_old();
+  test_da_empty_and_repeat();
+  test_da_hash_tracks_state();
+  test_da_malformed();
+  test_da_scrub();
+  test_da_pool_full();
+  test_da_nvs_blob();
   if(g_fail){ printf("\n%d CHECK(s) FAILED\n", g_fail); return 1; }
   printf("\nAll checks passed.\n");
   return 0;

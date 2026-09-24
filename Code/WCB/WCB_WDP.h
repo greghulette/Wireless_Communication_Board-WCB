@@ -19,14 +19,18 @@
 //               new PACKET_TYPE_WDP=12; the TLV payload packs into
 //               structCommand[200]. Because it rides the ETM struct + gate,
 //               WDP requires ETM enabled.
-//   Cadence   : 3x boot burst + a ~60 s periodic backstop.
+//   Cadence   : 3x boot burst + a ~60 s periodic backstop. Each advert is
+//               followed by this board's WDP-DA device-list frame(s) on
+//               PACKET_TYPE_WDP_DA=17, which is also re-sent when the list changes.
 //   Table     : RAM-only neighbor table, sized MAX_WCB_COUNT, indexed by
 //               (WCB number - 1). The WDP on/off + auto-join flags persist to
 //               NVS (wdp_cfg); learned-peer MEMBERSHIP persists separately
-//               (learned_peers), MAC-octet fingerprinted.
+//               (learned_peers), MAC-octet fingerprinted; this board's own WDP-DA
+//               devices persist in wdp_da.
 //
 //   Commands  : ?WDP,LIST | ?WDP,<n> | ?WDP,DETAIL,<n> | ?WDP,STATUS |
-//               ?WDP,DUMP | ?WDP,DA | ?WDP,POLL | ?WDP,ON | ?WDP,OFF |
+//               ?WDP,DUMP | ?WDP,DA | ?WDP,DA,FORGET,S<n>[,<type>] |
+//               ?WDP,DA,CLEAR | ?WDP,POLL | ?WDP,ON | ?WDP,OFF |
 //               ?WDP,AUTOJOIN[,ON|,OFF] | ?WDP,ADD,<id> | ?WDP,FORGET,<id> |
 //               ?WDP,CLEAR
 // -----------------------------------------------------------------------
@@ -130,30 +134,41 @@ void saveWdpSettings();
 // self-identify (see docs/WDP_DEVICE_ANNOUNCE.md). We keep one record per
 // (port, type): boards chained on one port (a front and a rear PSI) each get
 // their own, up to WDP_DA_PER_PORT; two devices of the same type on one port
-// share a record. The first-heard live record fills this board's advertised
-// port label (when unlabeled). Lists under ?WDP,DA and ?WDP,DUMP ([WDPDA:...]).
-// RAM-only, TTL-aged per record; never persisted.
+// share a record. A device is CONFIRMED by its second announce (one garbled line
+// can't make a record); a confirmed record is PERSISTENT: saved to NVS (wdp_da) and
+// kept when its device goes quiet, until ?WDP,DA,FORGET / ?WDP,DA,CLEAR — never
+// evicted automatically. The port's first-heard confirmed record fills this board's
+// advertised port label (when unlabeled). Confirmed records are also advertised to
+// every neighbor on their own packet type (PACKET_TYPE_WDP_DA), and list under
+// ?WDP,DA, ?WDP,<n> and ?WDP,DUMP ([WDPDA:...]) on every board.
 #define WDP_DA_PER_PORT 4
 struct WdpDaDevice {
-  bool          present;       // heard an announce within the TTL
+  bool          used;          // slot holds a record
+  bool          confirmed;     // announced twice (or reloaded from NVS): saved, advertised, labels
+                               // the port. Unconfirmed = heard once, RAM only, dropped if not heard
+                               // again within WDP_DA_LIVE_MS.
+  bool          heard;         // announced since boot (a record reloaded from NVS starts false)
+  bool          live;          // heard within WDP_DA_LIVE_MS; wdpDaTick clears it
   char          type[25];      // device type (from the shared vocabulary) — the record's key
   char          fw[28];        // device firmware version ("" = none)
   char          hwRev[16];     // hardware revision ("" = none)
   char          capTags[49];   // space-separated capability tags ("" = none)
-  unsigned long lastSeenMs;
-  uint32_t      firstHeard;    // creation order: the lowest live one labels the port. A counter,
-                               // not a millis() stamp, so the label can't flip when millis wraps.
+  unsigned long lastSeenMs;    // millis() of the last announce (valid once heard)
+  uint32_t      firstHeard;    // order within the port: the lowest labels the port. Saved as the
+                               // list order. A counter, not a millis() stamp, so the label can't
+                               // flip when millis wraps.
 };
 
 // Handle a serial line that begins with "@WDP" on port (1-5): validate the
 // @WDP1 marker, parse the JSON identity, update that port's record for the type.
 void wdpDaHandleLine(int port, const char *line);
-// Age out serial devices not heard within the TTL. Call each loop().
+// Mark devices that stopped announcing as quiet, and save a changed list to NVS.
+// Call each loop().
 void wdpDaTick();
 // ?WDP,DA — print this board's detected serial-attached devices.
 void wdpDaPrint();
-// Type of the port's longest-live record (1-5), or "" if none — fills the port's
-// advertised label when the user hasn't set one. Stable while devices share a port.
-const char *wdpDaType(int port);
+// A neighbor's device-list frame (PACKET_TYPE_WDP_DA), from the loop-drained WDP
+// queue in WCB.ino.
+void wdpDaOnFrameReceived(int senderWCB, const uint8_t *structCommand);
 
 #endif

@@ -3,7 +3,7 @@
 **A way for a device wired to a WCB serial port to tell the WCB what it is.**
 
 **Status:** Implemented — WCB firmware receives these announcements today (`?WDP,DA` shows what
-each port has announced, and the detected type rides into the mesh view automatically). See
+each port has announced; every saved device is shared with the whole mesh automatically). See
 [`WDP_DESIGN.md`](WDP_DESIGN.md) for the mesh side.
 **Who this is for:** Anyone building a device (Arduino, ESP, PIC, …) that plugs into a WCB. You do **not** need to modify any WCB code — this is entirely on your device.
 
@@ -20,7 +20,7 @@ The config tool (the "Wizard") reads that same picture, so plugging in a board a
 Today WDP knows about the WCBs and whatever a person has *typed in* about each serial port. Your device — a smart board with its own microcontroller — can do better: it can **introduce itself.** When it does:
 
 - It shows up automatically, everywhere on the droid, with the **right name** — nobody has to know or type "port 2 is a Flthy HP Controller."
-- Its **firmware version** can be read from the WCB it's plugged into (`?WDP,DA`, and by tools through `?WDP,DUMP`), so anyone maintaining it can check whether it's current — without unplugging anything or opening your device up.
+- Its **firmware version** becomes visible across the whole droid — on every WCB and in the config tool — so anyone maintaining it can check whether it's current without unplugging anything or opening your device up.
 
 A few lines in your sketch make your device a self‑describing part of the droid instead of an anonymous thing on a wire.
 
@@ -159,9 +159,10 @@ void wdpAnnounce(Stream& wcb) {
 
 You don't implement any of this — it's just so you know what to expect:
 
-1. It records what your device announced — type, firmware, and any hardware rev / capabilities — as one record per port **and type**, so several devices can share a port (see the questions below). A record is forgotten 90 s after its device last announced.
-2. Your `type` rides up into the mesh as that port's name, so the config tool and other boards show what's on each port. The rest of the record stays on the WCB you're plugged into: `?WDP,DA` prints `S2  Flthy HP Controller  fw 2.3.0`, and tools read every field from `?WDP,DUMP`.
-3. If nobody has manually labeled that port, your `type` fills it in automatically — when several devices announce on one port, the one the WCB heard first names it, and it stays put while they take turns. If someone *has* set a label, theirs is shown, but your details are still recorded alongside it.
+1. It records what your device announced — type, firmware, and any hardware rev / capabilities — as one record per port **and type**, so several devices can share a port (see the questions below).
+2. Your **second** announcement saves the record: the WCB keeps it through reboots, and when your device stops announcing (no line for 90 s) it's shown as *not heard* but stays on the list. It leaves only when someone forgets it (`?WDP,DA,FORGET`, or the ✕ in the config tool). A device heard just once isn't saved, and is dropped if it doesn't announce again within 90 s.
+3. The saved record rides up into the mesh: every WCB, and the config tool on any of them, shows each port's devices with their firmware — `?WDP,<n>` lists them, `?WDP,DA` prints `S2  Flthy HP Controller  fw 2.3.0` on the WCB you're plugged into, and tools read every field from `?WDP,DUMP` on any board.
+4. If nobody has manually labeled that port, your `type` names it — when several devices announce on one port, the one the WCB heard first names it, and it stays put while they take turns, or while a device is switched off. If someone *has* set a label, theirs is the port's name, and your device is still listed under it.
 
 ## Checklist
 
@@ -179,14 +180,16 @@ You don't implement any of this — it's just so you know what to expect:
 
 **Two of my devices are the same type on different ports — is that a problem?** No. Each port is tracked separately; telling them apart ("front" vs "rear") is the user's job in the config tool.
 
-**Several of my boards share one WCB serial port. Can they all announce?** Yes. The WCB keeps a separate record for each `type` it hears on a port, up to four per port; a fifth replaces the one heard from least recently. Each record ages out on its own. Two boards of the *same* type on one port share a record, so a board that knows its role should announce the role‑specific type (`PSI Front` / `PSI Rear`). Two things to get right:
+**Several of my boards share one WCB serial port. Can they all announce?** Yes. The WCB keeps a separate record for each `type` it hears on a port, up to four per port. A fifth can take the place of a device heard only once, but never of a saved one: it's refused (the WCB says so once) until one is forgotten. Each device goes quiet on its own and stays listed. Two boards of the *same* type on one port share a record, so a board that knows its role should announce the role‑specific type (`PSI Front` / `PSI Rear`). Two things to get right:
 
 - **Seed the random interval per board** (see *When to send it*). Chained boards that power up together otherwise announce in lockstep and talk over each other every time.
 - **Combining several TX lines onto the WCB's one RX wire is a hardware question** — two outputs wired straight together fight each other. Solve it on your side before relying on announcements from every board.
 
-If two boards do talk at once, the WCB drops the garbled line when it can tell — one that doesn't end in `}`, or that runs into a second `@WDP` — and the next announcement fills in. A garbled line that still looks whole shows up as an extra device until it ages out, 90 s later.
+If two boards do talk at once, the WCB drops the garbled line when it can tell — one that doesn't end in `}`, or that runs into a second `@WDP` — and the next announcement fills in. A garbled line that still looks whole counts as a device heard once: it's never saved or shared, and it disappears 90 s later.
 
-**Will this break anything on an older WCB that doesn't know about this yet?** No — it just sees an unrecognized line and ignores it. An older WCB keeps one record per port, so of several boards sharing a port it shows whichever announced last.
+**I removed or replaced a board. How do I get it off the list?** Forget it on the WCB it was wired to: `?WDP,DA,FORGET,S2,PSI Rear` (the type as listed, any case), `?WDP,DA,FORGET,S2` for everything on that port, or the ✕ next to it in the config tool's mesh view. The other boards drop it within a second or so. If it's actually still wired and announcing, it comes back on its next announcement.
+
+**Will this break anything on an older WCB that doesn't know about this yet?** No — it just sees an unrecognized line and ignores it. An older WCB that does know about it forgets a device 90 s after it stops announcing, keeps it to itself, and — if it's old enough — keeps only one device per port.
 
 ---
 
@@ -194,4 +197,5 @@ If two boards do talk at once, the WCB drops the garbled line when it can tell �
 
 | Date | Change | Commit |
 |---|---|---|
-| 2026-09-22 | Several devices may announce on one port: the WCB keeps one record per port and type (up to four per port), and the first one heard names the port (issue #19). An announce must now end at its JSON object's closing `}` and contain a single `@WDP`, so a line two boards garble by talking at once is dropped. Added the role‑specific‑type exception (`PSI Front` / `PSI Rear`) to "don't send an instance name", and the shared‑port questions. Corrected the claim that a device's firmware version is visible across the droid: only its `type` crosses the mesh (as the port's name); fw/hw/caps are read from the WCB it's plugged into. | _(pending)_ |
+| 2026-09-23 | Devices are saved and shared: the second announcement saves a device (one heard once is dropped after 90 s, so a garbled line never sticks), a saved device is kept through reboots and while switched off until someone forgets it (`?WDP,DA,FORGET` / `CLEAR`, or the config tool's ✕), and its whole record — type, fw, hw, caps — reaches every WCB and the config tool. A full port refuses a newcomer instead of dropping a saved device. Added the "removed a board" question. | _(pending)_ |
+| 2026-09-22 | Several devices may announce on one port: the WCB keeps one record per port and type (up to four per port), and the first one heard names the port (issue #19). An announce must now end at its JSON object's closing `}` and contain a single `@WDP`, so a line two boards garble by talking at once is dropped. Added the role‑specific‑type exception (`PSI Front` / `PSI Rear`) to "don't send an instance name", and the shared‑port questions. Corrected the claim that a device's firmware version is visible across the droid: only its `type` crosses the mesh (as the port's name); fw/hw/caps are read from the WCB it's plugged into. | `95dd811` |

@@ -18,7 +18,8 @@ auto‑configuration, and — with auto‑join — a peer table that builds itse
 **Goals (all met by the shipped implementation)**
 - **Zero‑config awareness** — boards learn the mesh without hand‑entering cross‑board maps.
 - **Extensible** — TLV encoding; new advertised facts never break older firmware.
-- **Cheap** — a couple of 252‑byte broadcasts per minute per board.
+- **Cheap** — a couple of 252‑byte broadcasts per minute per board (an advert, plus one WDP‑DA
+  device‑list frame for a board with a few serial‑attached devices).
 - **Backward compatible** — no wire‑size change; pre‑WDP firmware ignores the packets harmlessly.
 - **Authoritative‑by‑owner** — a board only ever advertises *its own* facts.
 
@@ -42,17 +43,27 @@ WDP rides the existing 252‑byte ETM struct (`espnow_struct_message_etm`) as pa
 packets. No wire‑size change, so the size‑based receive router is untouched; old firmware sees an
 unknown packet type in the ETM branch and drops it.
 
-Decode is **deferred to `loop()`** (`enqueueWdpPacket` → `drainWdpPackets`) — the ESP‑NOW receive
-callback runs on the WiFi task and must not do heavy work.
+A board's serial‑attached (WDP‑DA) device list rides the same struct as **`PACKET_TYPE_WDP_DA =
+17`** (§3). It has its own packet type for the same reason WDP could be added at all: released
+firmware and `WCB_Client` drop an ETM packet type they don't know (the fall‑through `return` at the
+end of the ETM receive path; `WCB_Client`'s packet switch has no `default`). Sent on type 12, an older
+board's advert decoder would take it for an **empty advert** and blank the sender (the SOLICIT trap, §3).
+
+Decode is **deferred to `loop()`** (`enqueueWdpPacket` → `drainWdpPackets`, which dispatches on the
+packet type) — the ESP‑NOW receive callback runs on the WiFi task and must not do heavy work.
 
 ### Cadence
 
 | Trigger | Count | Notes |
 |---|---|---|
-| 2026-08-19 | **A structural TLV is not forward-compatible by skipping.** `WCB_Client` predated `0x11` SOLICIT and decoded one as an empty advert, so every `?WDP,POLL` / "Poll mesh" blanked the sending board’s alias, port labels, capability flags, Maestro ids and seqHash in the client’s roster until that board’s next real advert (up to 60 s). Added the same solicit-first guard the firmware has, plus the missing other half — the client now **answers** a solicit, arming a jittered advert from `_wdpTick()` rather than sending inline (`_handleWdpAdvert` runs on the WiFi-task receive callback). `WCB_Client` 1.15.1. | — |
 | Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce |
 | Periodic backstop | every 60 s | staggered per board (`WCB_Number`‑based phase) so co‑booted boards don't collide |
 | Solicited | 1× on hearing a SOLICIT (or local `?WDP,POLL`) | jittered 0–600 ms by board number so a fleet doesn't reply in lockstep; lets an operator refresh the whole mesh on demand |
+| Advert change | 1× + 1 re‑send 800 ms later | the payload is hashed every 500 ms; any change (a label, a capability, a device) goes out now |
+
+Every advert is followed by the board's **WDP‑DA device list** (§3), one frame per 25 ms. The list is
+also sent on its own, plus one re‑send, whenever it changes (a device is saved, goes quiet or is
+forgotten).
 
 Facts go **stale** after `WDP_TTL_MS` = 180 s (~3 missed adverts). Staleness is display state —
 the record stays in RAM until overwritten or `?WDP,CLEAR`.
@@ -96,7 +107,7 @@ SOLICIT **before** decoding, and return without touching the table
 | `0x04` | HWVER | numeric hw id (1, 21, 23, 24, 31, 32) | WCB |
 | `0x05` | CAPFLAGS | uint16 LE capability bitmap (below) | WCB |
 | `0x06` | MAESTRO | list of locally attached Maestro device IDs | WCB |
-| `0x09` | PORTLABEL | `[port 1‑5][label bytes]`, one TLV per labeled serial port; unlabeled ports fall back to the WDP‑DA detected device type | WCB |
+| `0x09` | PORTLABEL | `[port 1‑5][label bytes]`, one TLV per labeled serial port; unlabeled ports fall back to the type of the port's first‑heard saved WDP‑DA device | WCB |
 | `0x0A` | CTRLID | controller (special‑peer) id this board links to | WCB, only when linked |
 | `0x0B` | DEVTYPE | device type name — marks the sender as a **client device**; doubles as its display name | client |
 | `0x0C` | HWREV | hardware revision string, ≤15 | client |
@@ -117,6 +128,31 @@ SOLICIT **before** decoding, and return without touching the table
 
 Wire strings are scrubbed on receive (`,`/`]`/control chars → `_`) so they can't corrupt the
 machine‑readable dump lines (§7).
+
+### WDP‑DA device‑list frames (`PACKET_TYPE_WDP_DA = 17`)
+
+A board's saved serial‑attached devices (§5), in `structCommand[200]` of the same ETM struct:
+
+```
+[0] 'D' (0x44)  magic        [1] 0x01  frame version
+[2..5] listHash (uint32 LE)  [6] frameIdx   [7] frameCount   [8] recordCount
+then records until a 0 byte (port 0 = end) or the end of the 200 B:
+  [port 1-5][flags][tLen][type ≤24][fLen][fw ≤27][hLen][hwRev ≤15][cLen][capTags ≤48]
+flags bit 0x01 = LIVE (heard within the last 90 s)
+```
+
+A record is at most 120 B, so any record fits one frame; records pack greedily in list order (port by
+port, first‑heard first) and a long list spans frames (at most 20). `listHash` is FNV‑1a over every
+record's bytes, LIVE flag included, then the record count — so a device going quiet changes it too. An
+empty list is one header‑only frame, which is how a receiver learns every device was forgotten.
+
+A receiver assembles all `frameCount` frames of one `listHash` before it shows the list, replacing the
+sender's previous one; a lost frame leaves the previous list in place, never half of a new one, and the
+next send completes it. A `listHash` it already shows is ignored, so the per‑advert re‑sends cost only
+the decode. Receivers keep neighbors' lists in a shared 32‑record RAM pool (`WDP_DA_POOL`) — not
+persisted; the owning board has them saved and re‑sends them in its boot burst. A list that doesn't
+fit the pool is dropped (logged once) and the one already shown stays. The same record encoding is the
+NVS blob (`wdp_da`/`list`: `['D'][0x01][count]` + records, LIVE flag unused).
 
 ---
 
@@ -144,11 +180,21 @@ peer **membership** (§6).
 3. **Serial‑attached devices** — anything wired to a WCB serial port announces with a one‑line
    `@WDP1 {json}` every 25–30 s (see `WDP_DEVICE_ANNOUNCE.md`). The WCB keeps one record per
    port **and type** — up to `WDP_DA_PER_PORT` (4) per port, so boards chained on one port are each
-   tracked, and each record ages out on its own (TTL 90 s; `?WDP,DA` to inspect). It folds the type
-   of the port's **first‑heard** live record into its own PORTLABEL adverts, so the label holds
-   still while several devices take turns announcing — a Maestro plugged into WCB 4 shows up
-   mesh‑wide with zero config. Only that one label per port crosses the mesh; the full per‑device
-   list is local (`[WDPDA:…]` in the board's own dump).
+   tracked (`?WDP,DA` to inspect).
+   - **Confirmed by a second announce.** A device heard once is RAM‑only and dropped if not heard
+     again within 90 s — the same idea as auto‑join's two‑advert vetting (§6): chained boards can
+     garble each other into a line that still parses, and a record that is kept for good must not
+     come from one such line.
+   - **Persistent.** A confirmed record is saved to NVS (`wdp_da`) and kept when its device goes
+     quiet (90 s without an announce: shown as not heard, still listed), and across reboots —
+     reloaded as "not heard since boot". Only `?WDP,DA,FORGET` / `?WDP,DA,CLEAR` removes one; a
+     newcomer on a full port may replace a device heard only once, but never a saved one, and is
+     refused (logged once) until one is forgotten.
+   - **Advertised to every neighbor**, in the board's device‑list frames (§3), so `?WDP,<n>` and
+     `?WDP,DUMP` on any board list every board's devices, and the Wizard mesh view shows them.
+   - The type of the port's **first‑heard** confirmed record — heard or quiet — fills its PORTLABEL,
+     so the label holds still while several devices take turns announcing, and a Maestro plugged
+     into WCB 4 shows up mesh‑wide by name with zero config. A `?LABEL` replaces only that name.
 
 ---
 
@@ -206,7 +252,9 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 | `?WDP,<n>` / `?WDP,DETAIL,<n>` | one neighbor in detail |
 | `?WDP,STATUS` | `[WDP:en,autojoin,proto,neighbors,peers]` one‑liner |
 | `?WDP,DUMP` | machine‑readable dump for the Wizard (below) |
-| `?WDP,DA` | serial‑attached (WDP‑DA) devices per port |
+| `?WDP,DA` | this board's serial‑attached (WDP‑DA) devices per port, incl. ones heard once |
+| `?WDP,DA,FORGET,S<n>[,<type>]` | forget one device on a port (type as listed, any case), or all of the port's (RAM + NVS; neighbors drop it on the list's re‑send) |
+| `?WDP,DA,CLEAR` | forget every serial‑attached device on this board |
 | `?WDP,POLL` | advertise now + broadcast a SOLICIT so every board re‑advertises (fast convergence; skips the 60 s wait) |
 | `?WDP,ON` / `?WDP,OFF` | enable/disable WDP (persisted; default ON) |
 | `?WDP,AUTOJOIN[,ON\|,OFF]` | auto‑join learned peers (persisted; default ON) |
@@ -221,9 +269,11 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 ```
 [WDP:N=..,CLIENT=..,ALIAS=..,HW=..,HWREV=..,FW=..,CAP=....,CTRL=..,CAPTAGS=..,MAESTRO=..,AGE=..,SEEN=..,PEER=..]
 [WDPIF:N=..,S=<port>,DEV=<label>]          ← one per labeled/detected port
-[WDPDA:N=<self>,S=<port>,TYPE=..,FW=..,HW=..,CAPS=<tags>,AGE=<s>]
-                                           ← self row only: one per device announcing on a port (WDP-DA),
-                                             in first-heard order; "" = not sent, CAPS space-separated
+[WDPDA:N=..,S=<port>,TYPE=..,FW=..,HW=..,CAPS=<tags>,SEEN=<0|1>,AGE=<s|->]
+                                           ← one per saved WDP-DA device on board N's port, any board,
+                                             first-heard order; SEEN=1 = heard in the last 90 s; AGE =
+                                             s since heard (this board only, "-" = not since boot or
+                                             a neighbor's); "" = not sent, CAPS space-separated
 [WDPX:N=..,MB=<id@baud.…>,WL=<id@baud.…>]  ← per board hosting Maestro/WLED: the per-device baud the
                                              main line omits, plus the full WLED list (`-` = none)
 [WDPSEQ:N=..,HASH=<8 hex>]                 ← stored-sequence fingerprint (see SEQUENCE_INVENTORY.md)
@@ -239,7 +289,9 @@ edges *touching the queried board* are reconstructable from one dump (a board ke
 
 **Wizard:** the *WDP Mesh* panel renders the dump — every neighbor with kind/platform/fw/caps/
 Maestros (with baud)/remote WLED/remote‑PWM wiring/port devices/membership, plus an auto‑join
-toggle, per‑row Forget for learned peers, and Clear‑learned. The General section shows a
+toggle, per‑row Forget for learned peers, and Clear‑learned. Under each port it lists the
+serial‑attached devices from `[WDPDA:…]` (dimmed when not heard), each with a ✕ that forgets it on
+its own board — directly, or relayed through `MGMT,FRAG` for another board. The General section shows a
 read‑only "mesh: N live peers" badge next to WCB Quantity (from `PEERSLIVE` in the config pull).
 
 ---
@@ -332,7 +384,11 @@ so any device can opt in regardless of id.)*
 
 - Firmware: `Code/WCB/WCB_WDP.cpp` / `.h` (advertise, decode, neighbor table, WDP‑DA, commands),
   `Code/WCB/WCB.ino` (carrier structs, receive gates + queue, membership arrays,
-  `addActivePeer`/`removeActivePeer`, `learned_peers` NVS, `?PEERSLIVE`).
+  `addActivePeer`/`removeActivePeer`, `learned_peers` NVS, `?PEERSLIVE`). WDP‑DA:
+  `wdpDaHandleLine` (announce → record), `wdpDaTick` (quiet / heard‑once drop, NVS save),
+  `wdpDaBuildFrame` / `wdpDaOnFrameReceived` (the device‑list frames), `wdpDaCommand` (forget).
+  The serial task and `loop()` share the table under `wdpDaLock()` — a scheduler suspend, because
+  both run on core 1 and a critical section would hold off the soft‑serial RX ISR.
 - Client library: `WCBClient` repo, `src/WCB_Client.{h,cpp}` — `setIdentity`, `onNeighbor`,
   `getNeighbor`, `neighborCount`, `setAutoJoin`, `forgetPeer`, `clearLearnedPeers`;
   `examples/NeighborDiscovery`.
@@ -349,6 +405,8 @@ so any device can opt in regardless of id.)*
 | Date | Change | Commit |
 |---|---|---|
 | 2026-09-23 | **PWMTARGET auto-config can claim the free hardware port of a Kyber‑local board.** `canUsePWMOnPort` now reserves only the port a Kyber mode owns (the Kyber's own port; S1 under Maestro REMOTE — `kyberModeReservesPort`, WCB_Storage.cpp), so the other hardware port takes an auto-configured PWM output like any port; before, it was refused along with the Kyber port (tracker #73 D4, HIL `kyber.local_free_port_takes_pwm`). Nothing changes on the wire. | _(pending)_ |
-| 2026-09-22 | **WDP‑DA keeps one record per port *and type*, up to 4 per port** (issue #19). One record per port meant boards chained on one port overwrote each other: `?WDP,DA` showed whoever announced last, and an unlabeled port's PORTLABEL flipped on every announce (~every 14 s for two boards), each flip costing an advert plus a re‑send. The label now comes from the port's first‑heard live record, so it holds still; a full port replaces the record heard from least recently. New self‑only `[WDPDA:…]` dump record with each device's type/fw/hw/caps/age. Announces must now be one whole line (end in `}`, no second `@WDP`) so a collision‑garbled line can't leave a phantom record. Also fixed in passing: TTL expiry compared ages unsigned, so a refresh landing just after `wdpDaTick` read `millis()` expired a device that had just announced. Nothing changes on the wire. The DUMP block above also gained the missing `WDPSEQ` line and `WDPCFG`'s `EN=`. | _(pending)_ |
+| 2026-09-23 | **WDP‑DA devices are persistent, advertised to every neighbor, and forgettable** (issue #19 follow‑up). A device is confirmed by its second announce (heard once = RAM only, dropped after 90 s: a record kept for good must not come from one collision‑garbled line); a confirmed one is saved to NVS `wdp_da`, reloaded at boot as "not heard since boot", and kept when it goes quiet — still listed (`SEEN=0`) and still naming its port. It leaves only through the new `?WDP,DA,FORGET,S<n>[,<type>]` / `?WDP,DA,CLEAR` (and a Wizard ✕); a full port no longer evicts a saved device, it refuses the newcomer. The whole list goes to every neighbor as **`PACKET_TYPE_WDP_DA` (17)** device‑list frames — a new type because old firmware and `WCB_Client` drop unknown ETM types, while on type 12 an old board would read it as an empty advert — assembled all‑or‑nothing per list hash into a 32‑record pool; `?WDP,<n>` and every board's `?WDP,DUMP` now list every board's devices. `[WDPDA:…]` gained `SEEN=` and `AGE=-`. Host test covers the frame codec and assembly. | _(pending)_ |
+| 2026-09-22 | **WDP‑DA keeps one record per port *and type*, up to 4 per port** (issue #19). One record per port meant boards chained on one port overwrote each other: `?WDP,DA` showed whoever announced last, and an unlabeled port's PORTLABEL flipped on every announce (~every 14 s for two boards), each flip costing an advert plus a re‑send. The label now comes from the port's first‑heard live record, so it holds still; a full port replaces the record heard from least recently. New self‑only `[WDPDA:…]` dump record with each device's type/fw/hw/caps/age. Announces must now be one whole line (end in `}`, no second `@WDP`) so a collision‑garbled line can't leave a phantom record. Also fixed in passing: TTL expiry compared ages unsigned, so a refresh landing just after `wdpDaTick` read `millis()` expired a device that had just announced. Nothing changes on the wire. The DUMP block above also gained the missing `WDPSEQ` line and `WDPCFG`'s `EN=`. | `95dd811` |
+| 2026-08-19 | **A structural TLV is not forward-compatible by skipping.** `WCB_Client` predated `0x11` SOLICIT and decoded one as an empty advert, so every `?WDP,POLL` / "Poll mesh" blanked the sending board’s alias, port labels, capability flags, Maestro ids and seqHash in the client’s roster until that board’s next real advert (up to 60 s). Added the same solicit-first guard the firmware has, plus the missing other half — the client now **answers** a solicit, arming a jittered advert from `_wdpTick()` rather than sending inline (`_handleWdpAdvert` runs on the WiFi-task receive callback). `WCB_Client` 1.15.1. | `8455484` |
 | 2026-08-17 | **SEQHASH now covers stored VALUES, not just `key_list`.** A keys-only hash never moved when a sequence was edited in place, so every peer kept a stale copy while believing it current — the exact failure the fingerprint exists to prevent. Cached in RAM and invalidated at each write path, because the WDP dirty-check rebuilds the advert twice a second and hashing values uncached would mean N NVS reads at 2 Hz. Mixed fleets are fine: the contract is only "if it changes, re-pull", so an older board simply doesn't signal value edits. | `80f44d9` |
 | 2026-08-17 | Added TLV `0x13` **SEQHASH** — 4-byte stored-sequence inventory fingerprint, advertised before PORTLABEL so it survives a full payload. Names themselves are **not** advertised (~16 B each would evict the port labels from the fixed 200 B payload); they are pulled on demand — see [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md). Decoder + `WdpNeighbor::seqHash` in firmware and `WCB_Client`; new `[WDPSEQ:N=,HASH=]` record in `?WDP,DUMP`; round-trip and absence-semantics coverage in `tests/wdp_wire_test.cpp`. | `bbd6bdf` |
