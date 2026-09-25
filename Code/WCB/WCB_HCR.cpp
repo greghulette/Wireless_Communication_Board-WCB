@@ -863,11 +863,16 @@ void configureHCR(const String &args) {
       baudRate != 57600 && baudRate != 115200) {
     Serial.println("[HCR] Baud must be 9600/19200/38400/57600/115200"); return;
   }
-  if (serialPort >= 3 && baudRate > 9600) {
+  // S3-S5 are software UARTs (RMT TX, level-3 GPIO RX ISR) measured exact through 57600 and 0/20 lines at 115200
+  // (CLAUDE.md rule 13; ?BAUD applies the same limit, WCB_Storage.cpp). The HCR answers every poll, so its port
+  // must receive reliably: 115200 is refused, 19200-57600 are allowed. They were refused above 9600 until
+  // 2026-09-24, a limit left over from the bit-banged TX (docs/HIL_TEST_AUDIT.md F1).
+  if (serialPort >= 3 && baudRate > 57600) {
     Serial.println("\n⚠️  =============== WARNING ===============");
-    Serial.printf("S%d is SOFTWARE SERIAL — unreliable above 9600 baud\n", serialPort);
+    Serial.printf("S%d is SOFTWARE SERIAL — %d baud is not received reliably (measured exact through 57600)\n",
+                  serialPort, baudRate);
     Serial.println("❌ CONFIGURATION BLOCKED!");
-    Serial.printf("  Use a hardware port: %cHCR,PORT,S1:%d   or   S%d:9600\n",
+    Serial.printf("  Use a hardware port: %cHCR,PORT,S1:%d   or   S%d:57600\n",
                   LocalFunctionIdentifier, baudRate, serialPort);
     Serial.println("=========================================\n");
     return;
@@ -953,33 +958,22 @@ void printHCRStatus() {
   Serial.println(line);
 }
 
-void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial,
-                    const String &defSep, const String &defFunc) {
+void emitHCRBackup(const std::function<void(const String &)> &emit) {
   // Client board (no local HCR, routes ;H to a remote host): persist the route.
   if (!hcrConfig.configured) {
     if (hcrConfig.remoteWCB > 0) {
       String suffix = "HCR,REMOTE,W" + String(hcrConfig.remoteWCB);
-      String cmd = String(LocalFunctionIdentifier) + suffix;
-      if (printToSerial) Serial.println(cmd);
-      chainedConfig        += String(delimiter) + cmd;
-      chainedConfigDefault += defSep + defFunc + suffix;
+      emit(suffix);
     }
     return;
   }
 
   String suffix = "HCR,PORT,S" + String(hcrConfig.serialPort) +
                   ":" + String(hcrConfig.baudRate);
-  String cmd = String(LocalFunctionIdentifier) + suffix;
-  if (printToSerial) Serial.println(cmd);
-  chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += defSep + defFunc + suffix;
+  emit(suffix);
 
   suffix = "HCR,POLL," + String(hcrConfig.pollSec);
-  cmd    = String(LocalFunctionIdentifier) + suffix;
-  if (printToSerial) Serial.println(cmd);
-  chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += defSep + defFunc + suffix;
+  emit(suffix);
 }
 
 // ==================== NVS storage =======================================

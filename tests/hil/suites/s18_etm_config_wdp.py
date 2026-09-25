@@ -150,7 +150,8 @@ def legacy_forms(bench):
         checks = [("?ETMHB0", f"Invalid ETM heartbeat. Use 1-3600 seconds (currently {orig['HB']})."), ("?ETMHB12", "ETM heartbeat set to 12 sec"),
                   ("?ETMTIMEOUT650", "ETM timeout set to 650 ms"), ("?ETMBOOT3", "ETM boot window set to 3 sec"),
                   ("?ETMCHARCOUNT5", "ETM char count set to 10"), ("?ETMCHARDELAY150", "ETM char delay set to 150 ms"),
-                  ("?etmmiss6", "ETM missed heartbeats set to 6"), ("?EtmMiss6", "Unknown command: EtmMiss6"), ("?ETMON", "ETM enabled")]
+                  ("?etmmiss6", "ETM missed heartbeats set to 6"), ("?EtmMiss6", "Unknown command: EtmMiss6"),
+                  ("?ETMOFF", "ETM disabled"), ("?ETMON", "ETM enabled")]     # OFF for one command: ON follows at once
         try:
             bad += [f"{cmd}: {out}" for cmd, want in checks for out in [w.run(cmd)] if not _has(out, want)]
             cfg = _cfg(w)
@@ -158,6 +159,7 @@ def legacy_forms(bench):
                                                      "Offline after:        6 missed heartbeats (78 sec max)", "Retry timeout:        650 ms",
                                                      "Char message count:   10  delay: 150 ms") if not _has(cfg, x)]
         finally:
+            w.run("?ETM,ON")          # never leave W1 with ETM off: WDP and every ACK depend on it (rule 4)
             _restore_etm(w, orig)
     assert not bad, "; ".join(bad)
 
@@ -458,17 +460,35 @@ def offline_detection_timing(bench):
             w.run("?DEBUG,ETM,OFF")
             w.run("?WDP,POLL")
             time.sleep(2)
-    gaps, last_seen = [], None
+    gaps, last_seen, state, unpaired = [], None, None, []
     for t, line in entries:
         if re.search(r"\[ETM\] (Heartbeat from WCB2|WCB2 came ONLINE)(?!\d)", line):   # not NaviCore's WCB20
             last_seen = t
         elif "[ETM] WCB2 went OFFLINE (no heartbeat for 5s)" in line and last_seen is not None:
             gaps.append(round(t - last_seen, 2))
+        # Tracker #80's fingerprint, whatever the gaps: W2's edges alternate. The race printed a false OFFLINE as W2's
+        # packet arrived (two OFFLINEs with no ONLINE between) or lost one (an ONLINE with no OFFLINE before it). A
+        # boot announce re-prints ONLINE whatever the state (espNowReceiveCallback, WCB.ino), so it only sets it.
+        if "[ETM] WCB2 went OFFLINE" in line:
+            if state == "off":
+                unpaired.append(f"OFFLINE at {t:.2f}")
+            state = "off"
+        elif "[ETM] WCB2 came ONLINE" in line:
+            if state == "on" and "(boot)" not in line:
+                unpaired.append(f"ONLINE at {t:.2f}")
+            state = "on"
     nexts = [int(m.group(1)) for _, line in entries for m in [re.search(r"\[ETM\] Next heartbeat in (\d+)ms", line)] if m]
     bench.note(f"offline gaps {gaps} s; next-heartbeat delays {nexts}")
     assert cfg_ok, "?config does not show '1 missed heartbeats (5 sec max)'"
     assert gaps, "W2 never went offline with HB 4 / MISS 1"
-    assert min(gaps) >= 4.95 and sorted(gaps)[len(gaps) // 2] <= 6.5, f"offline gaps {gaps}"
+    assert not unpaired, f"W2's edges do not alternate (tracker #80's race): {unpaired}, each with none of the other kind since"
+    # The floor is the firmware's (it clears a board only once its age is past the threshold, boardSweepOffline in
+    # WCB.ino) less the host's timing error. A line is stamped when SerialDevice splits it out of a read
+    # (hil/serialdev.py): alone in its read it is good to one Windows timer tick (~16 ms), but with more output behind it
+    # in the same read it is stamped when that read ends, up to one read (60-95 ms) late. A Heartbeat line that shared
+    # its read with NaviCore's rc_hb gave 4.93 s (run 20260924-234056); every gap without that has been 4.985 s or more.
+    # #80 made gaps of about 10 s, which the alternation check above catches even when only one gap is hit.
+    assert min(gaps) >= 4.85 and sorted(gaps)[len(gaps) // 2] <= 6.5, f"offline gaps {gaps}"
     assert all(3000 <= n < 5000 for n in nexts[1:]), f"heartbeat delays {nexts}"
 
 
@@ -1199,12 +1219,23 @@ def poll_refreshes_age(bench):
         if time.monotonic() > deadline:
             raise Skip("neighbour ages never reached 5 s (something keeps advertising)")
         time.sleep(2)
-    poll = w.run("?WDP,POLL")
-    time.sleep(3)
-    dump = _dump(w)
-    assert _has(poll, "[WDP] polled: advertised + solicited the mesh"), poll
-    late = {n: _field(_row(dump, n), "AGE") for n in (2, 20) if _row(dump, n) and int(_field(_row(dump, n), "AGE")) > 3}
-    assert not late, f"not refreshed by the poll: {late}"
+
+    def late_after_poll(boards):
+        poll = w.run("?WDP,POLL")
+        time.sleep(3)
+        dump = _dump(w)
+        assert _has(poll, "[WDP] polled: advertised + solicited the mesh"), poll
+        return {n: _field(_row(dump, n), "AGE") for n in boards if _row(dump, n) and int(_field(_row(dump, n), "AGE")) > 3}
+
+    late = late_after_poll((2, 20))
+    if late:
+        # The SOLICIT (WCB_WDP.cpp:1875-1876) and each board's one answering advert are single unacknowledged ESP-NOW
+        # broadcasts with no MAC-layer retry, so losing one frame is legitimate: in 20260924-190733 NaviCore's answer
+        # (or the SOLICIT to it) was lost while W2's came back at AGE 2, and the rerun passed. Poll once more, as
+        # wdp.controller_auto_enable does (tracker #68). A missed board reads AGE ~11 by now, so two misses in a row fail.
+        bench.note(f"first ?WDP,POLL not answered by {sorted(late)} (AGE {late}); polling once more")
+        late = late_after_poll(late)
+    assert not late, f"not refreshed by two polls in a row: {late}"
 
 
 @test("wdp.off_on", "?WDP,OFF ignores adverts, refuses POLL and rides the config chain; aliases still resolve; ON restores", needs=["wcb1"])
@@ -1545,3 +1576,72 @@ def da_announce_propagates(bench):
     assert f"[WDPDA:N=2,S={s},TYPE=HILDev,FW=9.9,HW=,CAPS=,SEEN=0,AGE=-]" in dump2, "W1 did not see the device go quiet"
     assert not any(x.startswith(f"[WDPIF:N=2,S={s},") for x in dump3), "the forgotten device still names W2's port in W1's DUMP"
     assert not any(x.startswith(f"[WDPDA:N=2,S={s},TYPE=HILDev,") for x in dump3), "W1 still lists the forgotten device"
+
+
+# ============================================================ legacy spellings and read-only status
+@test("chars.legacy_debug_toggles", "Legacy ?DON/?DOFF, ?DMON/?DMOFF (= ?DKON/?DKOFF), ?DPWMON/OFF, ?DETMON/OFF and ?DHCRON/OFF flip the RAM debug flags and print their lines", needs=["wcb1"], links=[])
+def legacy_debug_toggles(bench):
+    """WCB.ino's legacy block ('don' .. 'dhcron'). RAM only: nothing reaches NVS, and every flag is put back OFF."""
+    w = usb_wcb(bench)
+    checks = [("?DON", "Debugging enabled"), ("?DOFF", "Debugging disabled"),
+              ("?DMON", "Maestro debugging enabled"), ("?DMOFF", "Maestro debugging disabled"),
+              ("?DKON", "Maestro debugging enabled"), ("?DKOFF", "Maestro debugging disabled"),
+              ("?DPWMON", "PWM debugging enabled"), ("?DPWMOFF", "PWM debugging disabled"),
+              ("?DETMON", "ETM debugging enabled"), ("?DETMOFF", "ETM debugging disabled"),
+              ("?DHCRON", "HCR debugging enabled"), ("?DHCROFF", "HCR debugging disabled"),
+              ("?don", "Debugging enabled"), ("?doff", "Debugging disabled")]
+    bad = []
+    try:
+        for cmd, want in checks:
+            out = w.run(cmd)
+            if not _has(out, want):
+                bad.append(f"{cmd}: {out}")
+    finally:
+        for cmd in ("?DOFF", "?DMOFF", "?DPWMOFF", "?DETMOFF", "?DHCROFF"):
+            w.run(cmd)
+    assert not bad, "; ".join(bad)
+
+
+@test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, free heap", needs=["wcb1"], links=[])
+def wifi_status(bench):
+    """wcbWifiPrintStatus (WCB_WiFi.cpp). Read-only, so it runs in whatever mode the board is in (W1 hosts an AP on the
+    bench); the mode changes are wifi.off_and_back and wifi.join_w2_ap (opt-in wifi_modes) and the WebSocket endpoint
+    wifi.pc_joins_ap_ws (opt-in wifi_pc, attended), all in s28_wifi.py. The ?WIFI line is emitted with the credentials and is not in the chain the harness
+    compares, so the mode is read from the block itself. The SSID is printed, the password only as 'set'."""
+    w = usb_wcb(bench)
+    ch = (token(bench.config_tokens(1), "?WCBCH,") or "?WCBCH,?").split(",")[1]
+    out = [x.rstrip() for x in w.run("?WIFI")]
+    mode = next((x for x in out if x.startswith("Mode          : ")), None)
+    assert mode, f"?WIFI printed no status block: {out[:6]}"
+    bad = [f"no {x!r}" for x in ("------ WiFi ------------------------------------------",
+                                 "------------------------------------------------------") if x not in out]
+    up = "Interface     : up" in out
+    if not up and "Interface     : down" not in out:
+        bad.append("no Interface line")
+    if mode == "Mode          : OFF (ESP-NOW only)":
+        if up or "WS endpoint   : NOT RUNNING" not in out:
+            bad.append("WiFi off, yet the interface is up or a WS endpoint is running")
+    elif mode == "Mode          : AP":
+        if not any(x.startswith("AP SSID       : ") for x in out):
+            bad.append("no AP SSID line")
+        if not any(x in ("AP password   : set", "AP password   : NOT SET — AP will not start") for x in out):
+            bad.append("no AP password line")
+        if up and not (any(x.startswith("Clients       : ") for x in out) and any(x.startswith("IP address    : ") for x in out)):
+            bad.append("AP up, but no Clients / IP address line")
+    elif mode == "Mode          : JOIN":
+        if not any(x.startswith("Join SSID     : ") for x in out) or not any(re.match(r"^Association   : (not )?connected \(\d+ attempt\(s\)\)$", x) for x in out):
+            bad.append("no Join SSID / Association lines")
+    else:
+        bad.append(f"unknown mode line {mode!r}")
+    radio = next((x for x in out if x.startswith("Radio channel : ")), "")
+    m = re.match(r"^Radio channel : (\d+)  \(mesh channel (\d+)\)(.*)$", radio)
+    if not m or m.group(2) != ch:
+        bad.append(f"radio line {radio!r} (config ?WCBCH,{ch})")
+    elif m.group(3):
+        bad.append(f"the radio is off the mesh channel, so the mesh is dead: {radio!r}")
+    if not any(re.match(r"^WS endpoint   : (ws://\S+/ws  \(\d+ client\(s\) connected\)|NOT RUNNING)$", x) for x in out):
+        bad.append("no WS endpoint line")
+    if not any(re.match(r"^Free heap     : \d+ bytes \(min since boot \d+\)$", x) for x in out):
+        bad.append("no Free heap line")
+    bench.note("W1 WiFi: " + "; ".join(x.strip() for x in out if x.startswith(("Mode", "Interface", "WS endpoint", "Radio channel"))))
+    assert not bad, "; ".join(bad)

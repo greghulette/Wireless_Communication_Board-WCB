@@ -56,6 +56,7 @@ def verbs(bench):
 def bad_verb(bench):
     # Ranges are the Pololu protocol's, not a particular Maestro's: channel and device are
     # 7-bit (0-127), targets/speeds 14-bit (0-16383), accel 0-255 (WcbCmd WcbMaestro.cpp:35-63).
+    _frame(bench, ";M11", bytes.fromhex("AA012701"))   # positive control: the wire carries frames before silence counts
     probe, ch = wire(bench, 1, "S1")
     w = usb_wcb(bench)
     m = probe.dev.mark()
@@ -104,10 +105,21 @@ def _read_pos(w, dev, ch):
 @test("maestro.remote_readback", "W2's real Maestro 2 moves to setTarget and reports it back over the mesh",
       needs=["wcb1"])
 def remote_readback(bench):
+    """Reads where the servo rests first and ends there (a getPosition on a Maestro returns its current target; 0
+    means the channel is off). The move is 400 quarter-us (100 us) from rest, or to 6400 when the channel is off."""
     w = usb_wcb(bench)
-    for target in (6400, 6000):
-        w.send(f";M2,setTarget,0,{target}")
-        time.sleep(1.5)
-        pos = _read_pos(w, 2, 0)
-        bench.note(f"Maestro 2 ch0 target {target} -> reads {pos}")
-        assert pos == target, f"Maestro 2 ch0: set {target}, read back {pos}"
+    p0 = _read_pos(w, 2, 0)
+    assert p0 is not None, "Maestro 2 ch0 did not answer getPosition before the move"
+    away = 6400 if p0 == 0 else (p0 + 400 if p0 <= 7600 else p0 - 400)
+    bench.note(f"Maestro 2 ch0 rests at {p0}; moving to {away} and back")
+    try:
+        for target in (away, p0):
+            w.send(f";M2,setTarget,0,{target}")
+            time.sleep(1.5)
+            pos = _read_pos(w, 2, 0)
+            bench.note(f"Maestro 2 ch0 target {target} -> reads {pos}")
+            assert pos == target, f"Maestro 2 ch0: set {target}, read back {pos}"
+    finally:
+        w.send(f";M2,setTarget,0,{p0}")
+        time.sleep(1.0)
+        w.run("?VAR,CLEAR,m2pos0")

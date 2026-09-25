@@ -1,6 +1,7 @@
 #ifndef WCB_MAESTRO_H
 #define WCB_MAESTRO_H
 #include <Arduino.h>
+#include <functional>
 
 // Maestro configuration structure
 struct MaestroConfig {
@@ -66,8 +67,6 @@ bool isMaestroConfigured(uint8_t maestroID);
 // True when a LOCAL Maestro slot owns this serial port. Used by the PWM guards so a ;P or a
 // ?MAP,PWM cannot reconfigure a live Maestro UART's TX pin out from under it.
 bool isSerialPortUsedForMaestro(int port);
-// defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
-                        char delimiter, bool printToSerial = false,
-                        const String &defSep = "^", const String &defFunc = "?");
+// Backup: yields each command body through `emit`, unprefixed (see WCB_HCR.h).
+void emitMaestroBackup(const std::function<void(const String &)> &emit);
 #endif

@@ -47,7 +47,7 @@ except ImportError:
     print(msg)
     sys.exit(1)
 
-from hil import checkpoint, durations, optin, runner, wiring, wizard  # noqa: E402
+from hil import checkpoint, durations, optin, runner, servos, wiring, wizard  # noqa: E402
 from hil.checkpoint import CheckpointError, RunBusy  # noqa: E402
 from hil.identify import ESP_VIDS, identify_port, usb_fingerprint  # noqa: E402
 from hil.navicore import NaviCore  # noqa: E402
@@ -809,6 +809,13 @@ class App:
         self.optin_toggle_btn.pack(side="left")
         self.optin_head_var = tk.StringVar(value="Opt-in tests")
         ttk.Label(head, textvariable=self.optin_head_var, font=BOLD).pack(side="left", padx=(8, 0))
+        # On the header line, so it shows while the panel is folded: bench.json "no_servos" (hil/servos.py), written
+        # like an opt-in tick and read by the runner before each test - for a run with nobody watching the servos.
+        n = sum(1 for t in runner.REGISTRY if servos.moves_servo(t))
+        self.no_servos_var = tk.BooleanVar(value=servos.enabled(self.bench.cfg))
+        self.no_servos_check = ttk.Checkbutton(head, text=f"No moving servos (skips {n} tests)",
+                                               variable=self.no_servos_var, command=self.on_no_servos_toggle)
+        self.no_servos_check.pack(side="right")
         self.optin_body = ttk.Frame(box, padding=(4, 4, 0, 0))
         self.optin_checks, self.optin_cost_vars = {}, {}
         on = optin.enabled(self.bench.cfg)
@@ -846,6 +853,14 @@ class App:
             return
         self.submit(f"opt-in {key} {'on' if var.get() else 'off'}", self.job_set_opt_in, key, bool(var.get()))
 
+    def on_no_servos_toggle(self):
+        if self.run_active:        # disabled during a run, like the opt-ins; this covers a click that raced it
+            self.no_servos_var.set(servos.enabled(self.bench.cfg))
+            self.status("No moving servos cannot change while a run is going")
+            return
+        on = bool(self.no_servos_var.get())
+        self.submit(f"no servos {'on' if on else 'off'}", self.job_set_no_servos, on)
+
     # ---- expected durations (Tk thread; the history itself is read by _durations_job)
     def load_durations(self):
         """Re-read past runs' durations on a thread of its own; the pump applies them."""
@@ -869,13 +884,21 @@ class App:
     def expected_of(self, t):
         return durations.expected(t, self.history, self.bench.cfg)
 
+    def servo_off(self, t):
+        """The runner will skip `t` as a servo test: bench.json "no_servos", or the run on the worker was started or
+        resumed with run.py --no-servos, which only its checkpoint records (hil/servos.py)."""
+        ck = self.current_ckpt if self.run_active else None
+        return servos.moves_servo(t) and servos.enabled(self.bench.cfg, ck.data if ck else None)
+
     def expected_text(self, t):
+        if self.servo_off(t):          # the runner's own order: the servo skip before the opt-in one
+            return "no servos"
         return "opt-in off" if self.opted_off(t) else durations.fmt_expected(*self.expected_of(t))
 
     def cost(self, t):
         """(seconds this test adds to a run, kind): 0 for one the runner skips at once (a missing wire or device, or
-        its opt-in off); (None, None) when nothing is known."""
-        if self.skip_now.get(t["id"]) or self.opted_off(t):
+        its opt-in off, or it moves a servo with No moving servos on); (None, None) when nothing is known."""
+        if self.skip_now.get(t["id"]) or self.servo_off(t) or self.opted_off(t):
             return 0.0, "skip"
         return self.expected_of(t)
 
@@ -906,7 +929,8 @@ class App:
                 continue
             self.test_tree.set(tid, "expected", self.expected_text(t))
             if not self.results.get(tid, ("",))[0]:
-                tag = "missing" if self.skip_now.get(tid) else "optoff" if self.opted_off(t) else ""
+                off = self.opted_off(t) or self.servo_off(t)
+                tag = "missing" if self.skip_now.get(tid) else "optoff" if off else ""
                 self.test_tree.item(tid, tags=(tag,))
         for a, tests in areas.items():
             if self.test_tree.exists(f"area:{a}"):
@@ -927,6 +951,8 @@ class App:
                 adds += sum(self.cost(t)[0] or 0.0 for t in tests)   # as Run everything counts it: 0 for a missing wire
             if self.optin_vars[key].get() != (key in on):
                 self.optin_vars[key].set(key in on)
+        if self.no_servos_var.get() != servos.enabled(self.bench.cfg):
+            self.no_servos_var.set(servos.enabled(self.bench.cfg))
         self.optin_head_var.set(f"Opt-in tests: {len(on)} of {len(optin.OPT_INS)} on"
                                 + (f", adding ~{durations.fmt_span(adds)} to Run everything" if on else ""))
         sec, unknown = self.estimate_tests(runner.REGISTRY)
@@ -960,7 +986,7 @@ class App:
             self.skip_now[t["id"]] = bool(miss)
             needs = ", ".join(t["needs"] + runner.links_of(t)) or "—"
             status, detail, dur = self.results.get(t["id"], ("", "", None))
-            tag = status or ("missing" if miss else "optoff" if self.opted_off(t) else "")
+            tag = status or ("missing" if miss else "optoff" if self.opted_off(t) or self.servo_off(t) else "")
             if miss and not status:
                 needs = "missing: " + ", ".join(miss)
             self.test_tree.insert(f"area:{runner.area_of(t)}", "end", iid=t["id"], text=t["id"],
@@ -1025,6 +1051,9 @@ class App:
             key = t["opt_in"]
             text += (f"Opt-in: {key} ({'on' if key in optin.enabled(self.bench.cfg) else 'OFF - it is skipped'}) — "
                      f"{optin.OPT_INS[key]['what']}\n")
+        if servos.moves_servo(t):
+            text += (f"Moves a servo: {servos.SERVO_TESTS[t['id']]}"
+                     + (" (No moving servos is on: it is skipped)" if self.servo_off(t) else "") + "\n")
         text += f"Devices: {', '.join(t['needs']) or '—'}   Wires: {', '.join(runner.links_of(t)) or '— (uses whatever is wired)'}\n"
         if miss:
             text += f"Missing: {', '.join(miss)}\n"
@@ -1101,6 +1130,8 @@ class App:
         # The runner reads bench.json opt_in before each test, so a tick mid-run would change the rest of the run.
         for cb in getattr(self, "optin_checks", {}).values():
             cb.state(["disabled"] if self.run_active else ["!disabled"])
+        if hasattr(self, "no_servos_check"):
+            self.no_servos_check.state(["disabled"] if self.run_active else ["!disabled"])
 
     # ------------------------------------------------------------------ paused runs (Tk thread)
     def scan_resumable(self, prefer=None):
@@ -1457,6 +1488,38 @@ class App:
         self.emit("optin_changed")
         self.emit("status", f"Opt-in {key} {'on' if on else 'off'}: {optin.OPT_INS[key]['title']} "
                             f"{'will run' if on else 'is skipped'} (bench.json saved)")
+
+    def job_set_no_servos(self, on):
+        """Set or clear bench.json "no_servos" (hil/servos.py) the way job_set_opt_in ticks an opt-in, for the same
+        reasons: refused while a run is live in another process (the key is in that run's bench canon), written onto
+        the file as it is now, atomically, and into memory only once the write succeeded."""
+        b = self.bench
+        try:
+            names = sorted(os.listdir(RESULTS), reverse=True)
+        except OSError:
+            names = []
+        live = next((n for n in names if checkpoint.RunLock.held(os.path.join(RESULTS, n))), None)
+        if live:
+            self.emit("optin_changed")   # update_estimates puts the checkbox back to match cfg
+            self.emit("status", f"A run is live in another window or terminal (results/{live}): "
+                                f"No moving servos not changed")
+            return
+        try:
+            with open(b.bench_path, encoding="utf-8") as f:
+                fresh = json.load(f)
+            if not isinstance(fresh, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            self.emit("optin_changed")
+            self.emit("status", f"No moving servos: bench.json could not be read ({e}), nothing saved")
+            return
+        servos.set_enabled(fresh, on)
+        checkpoint.atomic_write_json(b.bench_path, fresh)
+        servos.set_enabled(b.cfg, on)
+        self.emit("optin_changed")
+        n = sum(1 for t in runner.REGISTRY if servos.moves_servo(t))
+        self.emit("status", (f"No moving servos on: the {n} tests that move a servo are skipped" if on
+                             else "No moving servos off: tests that move a servo run again") + " (bench.json saved)")
 
     def job_run(self, tests, label="tests", selectors=None):
         b = self.bench

@@ -310,13 +310,17 @@ void configureWLED(const String &args) {
 
   // ---- LOCAL (hosted on THIS board) --------------------------------------
   if (serialPort < 1 || serialPort > 5) { Serial.println("[WLED] Invalid serial port. Must be S1-S5"); return; }
-  if (serialPort >= 3 && baudRate > 9600) {
+  // S3-S5 are software UARTs measured exact through 57600 and 0/20 lines at 115200 (CLAUDE.md rule 13; ?BAUD
+  // applies the same limit). A WLED's default 115200 therefore needs S1/S2, but a WLED set to 57600 or below
+  // can sit on a soft port - refused above 9600 until 2026-09-24 (docs/HIL_TEST_AUDIT.md F1).
+  if (serialPort >= 3 && baudRate > 57600) {
     Serial.println("\n⚠️  =============== WARNING ===============");
-    Serial.printf("S%d is SOFTWARE SERIAL — unreliable above 9600 baud\n", serialPort);
-    Serial.println("WLED wants 115200 — use a HARDWARE port (S1/S2).");
+    Serial.printf("S%d is SOFTWARE SERIAL — %d baud is not received reliably (measured exact through 57600)\n",
+                  serialPort, baudRate);
+    Serial.println("A WLED defaults to 115200 — use a HARDWARE port (S1/S2), or set the WLED to 57600 for this port.");
     Serial.println("❌ CONFIGURATION BLOCKED!");
-    Serial.printf("  Use: %cWLED,%d:W%dS1:115200   or   S2:115200\n",
-                  LocalFunctionIdentifier, wledID, WCB_Number);
+    Serial.printf("  Use: %cWLED,%d:W%dS1:115200   or   S2:115200   or   S%d:57600\n",
+                  LocalFunctionIdentifier, wledID, WCB_Number, serialPort);
     Serial.println("=========================================\n");
     return;
   }
@@ -385,9 +389,7 @@ void printWLEDStatus() {
   }
 }
 
-void printWLEDBackup(String &chainedConfig, String &chainedConfigDefault,
-                     char delimiter, bool printToSerial,
-                     const String &defSep, const String &defFunc) {
+void emitWLEDBackup(const std::function<void(const String &)> &emit) {
   for (int i = 0; i < MAX_WLED_PER_WCB; i++) {
     WLEDConfig &c = wledConfigs[i];
     if (!c.configured) continue;
@@ -403,10 +405,7 @@ void printWLEDBackup(String &chainedConfig, String &chainedConfigDefault,
       suffix = "WLED," + String(c.wledID) + ":W" + String(c.remoteWCB) + "S0" +
                ":" + String(c.baudRate);
 
-    String cmd = String(LocalFunctionIdentifier) + suffix;
-    if (printToSerial) Serial.println(cmd);
-    chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += defSep + defFunc + suffix;
+    emit(suffix);
   }
 }
 

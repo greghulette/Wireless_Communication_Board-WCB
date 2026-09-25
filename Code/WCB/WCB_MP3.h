@@ -2,6 +2,7 @@
 #define WCB_MP3_H
 
 #include <Arduino.h>
+#include <functional>
 
 // -----------------------------------------------------------------------
 // MP3 Trigger v2.x serial-control driver for WCB
@@ -38,10 +39,8 @@ void processMP3AudioCommand(const String &message);   // dispatch ;A,... command
 void configureMP3(const String &args);
 void clearMP3Config();
 void printMP3Settings();
-// defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
-void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial = false,
-                    const String &defSep = "^", const String &defFunc = "?");
+// Backup: yields each command body through `emit`, unprefixed (see WCB_HCR.h).
+void emitMP3Backup(const std::function<void(const String &)> &emit);
 
 // ---- Response reader — call once per loop() tick ------------------------
 void processMP3Responses();

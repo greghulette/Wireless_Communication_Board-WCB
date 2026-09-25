@@ -11,12 +11,14 @@ def seq_local(bench):
     probe, ch = wire(bench, 1, "S1")
     with config_guard(bench, 1):
         a, b = marker("a"), marker("b")
-        lines = w.run(f"?SEQ,SAVE,HILSEQ,;S1{a}^;S1{b}")
-        assert any("Stored: Key='HILSEQ'" in x for x in lines), f"got {lines}"
-        m = probe.dev.mark()
-        w.send(";CHILSEQ,L")
-        probe.expect_bytes(ch, f"{a}\r{b}\r".encode(), timeout=3, since=m)
-        w.run("?SEQ,CLEAR,HILSEQ")
+        try:
+            lines = w.run(f"?SEQ,SAVE,HILSEQ,;S1{a}^;S1{b}")
+            assert any("Stored: Key='HILSEQ'" in x for x in lines), f"got {lines}"
+            m = probe.dev.mark()
+            w.send(";CHILSEQ,L")
+            probe.expect_bytes(ch, f"{a}\r{b}\r".encode(), timeout=3, since=m)
+        finally:
+            w.run("?SEQ,CLEAR,HILSEQ")
 
 
 @test("seq.timer", "A stored sequence keeps its ;T delay when recalled", needs=["wcb1", "probe1"])
@@ -25,13 +27,15 @@ def seq_timer(bench):
     probe, ch = wire(bench, 1, "S1")
     with config_guard(bench, 1):
         a, b = marker("a"), marker("b")
-        w.run(f"?SEQ,SAVE,HILSEQT,;S1{a}^;T800^;S1{b}")
-        m = probe.dev.mark()
-        w.send(";CHILSEQT,L")
-        probe.expect_bytes(ch, b.encode(), timeout=4, since=m)
-        gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
-        bench.note(f"recalled timer gap {gap} ms")
-        w.run("?SEQ,CLEAR,HILSEQT")
+        try:
+            w.run(f"?SEQ,SAVE,HILSEQT,;S1{a}^;T800^;S1{b}")
+            m = probe.dev.mark()
+            w.send(";CHILSEQT,L")
+            probe.expect_bytes(ch, b.encode(), timeout=4, since=m)
+            gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
+            bench.note(f"recalled timer gap {gap} ms")
+        finally:
+            w.run("?SEQ,CLEAR,HILSEQT")
         assert 700 <= gap <= 1100, f"gap {gap} ms, expected ~800"
 
 

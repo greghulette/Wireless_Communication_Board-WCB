@@ -385,19 +385,21 @@ def bcast_in_block(bench):
     s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")
     w = usb_wcb(bench)
     with config_guard(bench, 1):
-        assert _has(w.run("?BCAST,IN,S3,OFF"), "Broadcast INPUT on S3: Disabled")
-        prime(s3)
-        time.sleep(0.3)
-        a, b = marker("a"), marker("b")
-        watch = Watch(s2, s4, s5, bench.links.get(2, "S3"))
-        m = w.dev.mark()
-        s3.send(a.encode() + b"\r")
-        w.dev.expect(r"^Broadcast blocked from Serial3 \(input blocking enabled\)", timeout=2, since=m)
-        watch.silent(s2, s4, s5, bench.links.get(2, "S3"), window=1.5)
-        watch = Watch(s4)
-        s3.send(f";S4{b}\r".encode())
-        watch.expect(s4, b.encode() + b"\r", timeout=2)
-        w.run("?BCAST,IN,S3,ON")
+        try:
+            assert _has(w.run("?BCAST,IN,S3,OFF"), "Broadcast INPUT on S3: Disabled")
+            prime(s3)
+            time.sleep(0.3)
+            a, b = marker("a"), marker("b")
+            watch = Watch(s2, s4, s5, bench.links.get(2, "S3"))
+            m = w.dev.mark()
+            s3.send(a.encode() + b"\r")
+            w.dev.expect(r"^Broadcast blocked from Serial3 \(input blocking enabled\)", timeout=2, since=m)
+            watch.silent(s2, s4, s5, bench.links.get(2, "S3"), window=1.5)
+            watch = Watch(s4)
+            s3.send(f";S4{b}\r".encode())
+            watch.expect(s4, b.encode() + b"\r", timeout=2)
+        finally:
+            w.run("?BCAST,IN,S3,ON")
 
 
 @test("input.bcast_out_block", "?BCAST,OUT,S4,OFF removes only S4 from broadcasts; ;S4 still writes", needs=["wcb1"])
@@ -405,24 +407,28 @@ def bcast_out_block(bench):
     s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")
     w = usb_wcb(bench)
     with config_guard(bench, 1):
-        assert _has(w.run("?BCAST,OUT,S4,OFF"), "Broadcast OUTPUT on S4: Disabled")
-        a, b = marker("a"), marker("b")
-        watch = Watch(s2, s3, s4, s5)
-        w.send(a)
-        for l in (s2, s3, s5):
-            watch.expect(l, a.encode() + b"\r", timeout=2)
-        watch.silent(s4, window=1.5)
-        watch = Watch(s4)
-        w.send(f";S4{b}")
-        watch.expect(s4, b.encode() + b"\r", timeout=2)
-        w.run("?BCAST,OUT,S4,ON")
+        try:
+            assert _has(w.run("?BCAST,OUT,S4,OFF"), "Broadcast OUTPUT on S4: Disabled")
+            a, b = marker("a"), marker("b")
+            watch = Watch(s2, s3, s4, s5)
+            w.send(a)
+            for l in (s2, s3, s5):
+                watch.expect(l, a.encode() + b"\r", timeout=2)
+            watch.silent(s4, window=1.5)
+            watch = Watch(s4)
+            w.send(f";S4{b}")
+            watch.expect(s4, b.encode() + b"\r", timeout=2)
+        finally:
+            w.run("?BCAST,OUT,S4,ON")
 
 
 @test("input.bcast_parsing", "?BCAST argument handling: only exact ON enables; only the port digit is read; error messages", needs=["wcb1"])
 def bcast_parsing(bench):
     s5 = link(bench, 1, "S5")
+    require_tokens(bench, 1, "?BCAST,OUT,S5,ON")   # the checks end with S5 output enabled (A11)
     w = usb_wcb(bench)
     with config_guard(bench, 1):
+      try:
         assert _has(w.run("?BCAST,OUT,S5,yes"), "Broadcast OUTPUT on S5: Disabled")
         t = marker()
         watch = Watch(s5)
@@ -439,7 +445,9 @@ def bcast_parsing(bench):
             ("?BCAST,IN,S0,ON", "Invalid port. Must be S1-S5 (S0 = OUT only)"),
         ]
         bad = [f"{cmd!r} -> {out}" for cmd, want in checks for out in [w.run(cmd)] if not _has(out, want)]
-        assert not bad, "; ".join(bad)
+      finally:
+        w.run("?BCAST,OUT,S5,ON")
+    assert not bad, "; ".join(bad)
 
 
 @test("input.bcast_legacy_forms", "Legacy ?SBIS/?SBOS/?Sxn forms work; the ?SBOx1 form the warning and wiki recommend is rejected (characterisation)", needs=["wcb1"])
@@ -450,6 +458,7 @@ def bcast_legacy_forms(bench):
     w = usb_wcb(bench)
     require_tokens(bench, 1, "?BCAST,IN,S3,ON", "?BCAST,OUT,S4,ON", "?BCAST,OUT,S0,OFF")
     with config_guard(bench, 1):
+      try:
         assert _has(w.run("?SBIS3OFF"), "Serial3 broadcast input: DISABLED")
         prime(s3)
         time.sleep(0.3)
@@ -474,7 +483,10 @@ def bcast_legacy_forms(bench):
             out = w.run(cmd)
             if not all(_has(out, want) for want in wants):
                 bad.append(f"{cmd!r} -> {out}")
-        assert not bad, "; ".join(bad)
+      finally:
+        for cmd in ("?BCAST,IN,S3,ON", "?BCAST,OUT,S4,ON", "?BCAST,OUT,S0,OFF"):   # the required baseline
+            w.run(cmd)
+    assert not bad, "; ".join(bad)
 
 
 @test("input.bcast_s0_echo_local", "?BCAST,OUT,S0,ON echoes broadcasts on USB, including ones typed on USB", needs=["wcb1"])
@@ -482,6 +494,7 @@ def bcast_s0_echo_local(bench):
     s3 = link(bench, 1, "S3")
     w = usb_wcb(bench)
     with config_guard(bench, 1):
+      try:
         z = marker("z")
         m = w.dev.mark()
         w.send(z)
@@ -505,6 +518,7 @@ def bcast_s0_echo_local(bench):
         w.dev.expect(r"^Broadcast blocked from Serial3", timeout=2, since=m)
         time.sleep(0.5)
         assert not any(x.strip() == c for x in w.dev.since(m)), "a blocked broadcast was still echoed"
+      finally:
         w.run("?BCAST,IN,S3,ON")
         w.run("?BCAST,OUT,S0,OFF")
 
@@ -513,14 +527,16 @@ def bcast_s0_echo_local(bench):
 def bcast_s0_echo_remote(bench):
     w = usb_wcb(bench)
     with config_guard(bench, 2), Console(bench, 2) as c2:
-        m = c2.send("?BCAST,OUT,S0,ON")
-        c2.expect(r"Broadcast OUTPUT on S0 \(USB\): Enabled", since=m)
-        t = marker()
-        m = c2.mark()
-        w.send(t)
-        c2.expect(rf"{t}$", timeout=4, since=m)
-        c2.send("?BCAST,OUT,S0,OFF")
-        time.sleep(1.0)
+        try:
+            m = c2.send("?BCAST,OUT,S0,ON")
+            c2.expect(r"Broadcast OUTPUT on S0 \(USB\): Enabled", since=m)
+            t = marker()
+            m = c2.mark()
+            w.send(t)
+            c2.expect(rf"{t}$", timeout=4, since=m)
+        finally:
+            c2.send("?BCAST,OUT,S0,OFF")
+            time.sleep(1.0)
 
 
 @test("input.bcast_wled_port_not_excluded", "A WLED port is not excluded from broadcasts once its output is forced on", needs=["wcb1"])
@@ -529,14 +545,16 @@ def bcast_wled_port_not_excluded(bench):
     w = usb_wcb(bench)
     orig = token(bench.config_tokens(2, refresh=True), "?BCAST,OUT,S2,")
     with config_guard(bench, 2), Console(bench, 2) as c2:
-        m = c2.send("?BCAST,OUT,S2,ON")
-        c2.expect(r"Broadcast OUTPUT on S2: Enabled", since=m)
-        t = marker()
-        watch = Watch(w2s2)
-        w.send(t)
-        watch.expect(w2s2, t.encode() + b"\r", timeout=3)
-        c2.send(orig or "?BCAST,OUT,S2,OFF")
-        time.sleep(1.0)
+        try:
+            m = c2.send("?BCAST,OUT,S2,ON")
+            c2.expect(r"Broadcast OUTPUT on S2: Enabled", since=m)
+            t = marker()
+            watch = Watch(w2s2)
+            w.send(t)
+            watch.expect(w2s2, t.encode() + b"\r", timeout=3)
+        finally:
+            c2.send(orig or "?BCAST,OUT,S2,OFF")
+            time.sleep(1.0)
 
 
 @test("input.bcast_json_local_only", "A '{' line from a port reaches local ports but is sent untracked and never acted on remotely", needs=["wcb1"])
@@ -628,15 +646,17 @@ def timer_keeps_source(bench):
     if t1.encode() in watch.got(s3):
         problems.append("a ;T chain typed on S3 echoed its broadcast back to S3")
     with config_guard(bench, 1):
-        w.run("?BCAST,IN,S3,OFF")
-        t4 = marker("d")
-        watch = Watch(s2, s3, s4, s5)
-        s3.send(f";T100^{t4}\r".encode())
-        time.sleep(2.0)
-        leaked = [l.key for l in (s2, s3, s4, s5) if t4.encode() in watch.got(l)]
-        if leaked:
-            problems.append(f"input blocking on S3 did not stop a ;T chain — it reached {leaked}")
-        w.run("?BCAST,IN,S3,ON")
+        try:
+            w.run("?BCAST,IN,S3,OFF")
+            t4 = marker("d")
+            watch = Watch(s2, s3, s4, s5)
+            s3.send(f";T100^{t4}\r".encode())
+            time.sleep(2.0)
+            leaked = [l.key for l in (s2, s3, s4, s5) if t4.encode() in watch.got(l)]
+            if leaked:
+                problems.append(f"input blocking on S3 did not stop a ;T chain — it reached {leaked}")
+        finally:
+            w.run("?BCAST,IN,S3,ON")
     assert not problems, "; ".join(problems)
 
 
@@ -647,17 +667,19 @@ def recall_keeps_source(bench):
     key = "hr" + marker()[3:7].lower()
     a = marker("a")
     with config_guard(bench, 1):
-        assert _has(w.run(f"?SEQ,SAVE,{key},{a}"), f"Stored: Key='{key}'")
-        prime(s3)
-        time.sleep(0.3)
-        watch = Watch(s2, s3, s4)
-        m = w.dev.mark()
-        s3.send(f";C{key},L\r".encode())
-        w.dev.expect(rf"^Recalling command for key '{key}': {a}", timeout=2, since=m)
-        for l in (s2, s4):
-            watch.expect(l, a.encode() + b"\r", timeout=2)
-        watch.silent(s3, window=1.5)
-        w.run(f"?SEQ,CLEAR,{key}")
+        try:
+            assert _has(w.run(f"?SEQ,SAVE,{key},{a}"), f"Stored: Key='{key}'")
+            prime(s3)
+            time.sleep(0.3)
+            watch = Watch(s2, s3, s4)
+            m = w.dev.mark()
+            s3.send(f";C{key},L\r".encode())
+            w.dev.expect(rf"^Recalling command for key '{key}': {a}", timeout=2, since=m)
+            for l in (s2, s4):
+                watch.expect(l, a.encode() + b"\r", timeout=2)
+            watch.silent(s3, window=1.5)
+        finally:
+            w.run(f"?SEQ,CLEAR,{key}")
 
 
 # ============================================================ devices on ports
@@ -784,6 +806,7 @@ def bcast_dfp_port_excluded(bench):
     tokens = bench.config_tokens(1, refresh=True)
     if token(tokens, "?DFP,") or token(tokens, "?WDP,OFF"):
         raise Skip("W1 already has a DFPlayer or WDP off")
+    require_tokens(bench, 1, "?BAUD,S5,9600")   # ?DFP,CLEAR resets the freed port to 9600 (WCB_DFP.cpp:138)
     restore = [t for t in tokens if t.upper().startswith(("?BCAST,OUT,S5,", "?BCAST,IN,S5,", "?LABEL,S5,"))]
     with config_guard(bench, 1):
         try:
@@ -863,34 +886,43 @@ def soft_rx_under_soft_tx(bench):
     assert all(n == 40 for n in results.values()), f"soft-port input corrupted under soft TX: {results}"
 
 
-@test("input.soft_rx_baud_sweep", "Soft-port input is exact at 19200 and 38400 (57600/115200 recorded only)", needs=["wcb1"])
+@test("input.soft_rx_baud_sweep", "Soft-port input is exact at 19200 and 38400; 57600 loses at most 2 lines of 20 (115200 recorded only: 0/20 by design)", needs=["wcb1"])
 def soft_rx_baud_sweep(bench):
+    """The bar follows the level-3 GPIO ISR (2026-09-21) and the level-triggered RX (tracker #78). 19200 and 38400 must
+    be 20/20: before that fix 38400 read 11-19 of 20 and never 20, so those two are what catch a regression. 57600 gets
+    a floor of 18 instead. In the 19 runs since the level-3 ISR (20260921-143146 to 20260924-190733) it read 20/20 in 16;
+    the other three read 19 (20260922-095852), 19 (20260922-151421) and 18 (20260924-190733). That is 4 lines of 380,
+    about 1%, or one run in six. Each loss decodes byte for byte as one core-1 GPIO-ISR latency spike of half a bit or
+    more: a misframed word whose stop bit reads low is dropped, one that reads high is kept as garbage. 57600 has only
+    about 8.7 us of that margin (38400 13 us, 19200 26 us), so the same spike is harmless at the lower rates. A floor
+    of 18 would have passed some pre-fix runs too (57600 read 9-18 then), which is why 19200 and 38400 stay exact.
+    115200 is recorded only (0/20, rxBitSyncISR), and ?BAUD warns only above 57600 (WCB_Storage.cpp:171-181,
+    CLAUDE.md rule 13)."""
     s2, s3 = link(bench, 1, "S2"), link(bench, 1, "S3")
     w = usb_wcb(bench)
     counts = {}
-    with config_guard(bench, 1):
-        for baud in (19200, 38400, 57600, 115200):
-            assert _has(w.run(f"?BAUD,S3,{baud}"), f"Baud rate for Serial3 updated to {baud}")
-            s3.listen(baud)
-            prime(s3)
-            time.sleep(0.5)
-            marks = [marker(f"{baud}x") for _ in range(20)]
-            watch = Watch(s2)
-            s3.send(b"".join(f";S2{x}\r".encode() for x in marks))
-            time.sleep(2.5)
-            got = watch.got(s2)
-            counts[baud] = sum(1 for x in marks if x.encode() + b"\r" in got)
-        w.run("?BAUD,S3,9600")
-        s3.listen()
+    with config_guard(bench, 1) as before:
+        orig = token(before[1], "?BAUD,S3,") or "?BAUD,S3,9600"
+        try:
+            for baud in (19200, 38400, 57600, 115200):
+                assert _has(w.run(f"?BAUD,S3,{baud}"), f"Baud rate for Serial3 updated to {baud}")
+                s3.listen(baud)
+                prime(s3)
+                time.sleep(0.5)
+                marks = [marker(f"{baud}x") for _ in range(20)]
+                watch = Watch(s2)
+                s3.send(b"".join(f";S2{x}\r".encode() for x in marks))
+                time.sleep(2.5)
+                got = watch.got(s2)
+                counts[baud] = sum(1 for x in marks if x.encode() + b"\r" in got)
+        finally:
+            w.run(orig)
+            s3.listen()
     bench.note(f"soft RX exact lines of 20 per baud: {counts}")
-    # The counts are lines that arrived EXACT, out of 20 — not lines lost.
-    # 19200 is the bar a bit-banged RX actually holds under mesh load: measured 20/20 every run.
-    # 38400 is NOT — it has measured 15-19 of 20 across seven runs on unchanged firmware, so
-    # asserting it made this test a coin flip rather than a regression signal. It is recorded
-    # instead, alongside 57600/115200. The firmware half of this (?BAUD accepting rates the port
-    # cannot receive at) is fixed separately; see docs/HIL_FIX_TRACKER.md #34.
-    assert counts[19200] == 20, f"soft RX exact lines of 20 per baud: {counts}"
-
+    # The counts are lines that arrived EXACT, out of 20. 115200 is recorded only (rxBitSyncISR, 0/20 on a classic ESP32).
+    assert counts[19200] == 20 and counts[38400] == 20, f"soft RX exact lines of 20 per baud: {counts} (19200/38400 must be 20/20)"
+    # 57600's ~1% loss (docstring): 20260924-190733 read 18 here, and the rerun on the same image 20.
+    assert counts[57600] >= 18, f"soft RX at 57600 below its ~1% loss floor of 18/20: {counts}"
 
 @test("input.framing_variants", "8N2 input is accepted on hardware and soft ports; wrong-baud input never executes", needs=["wcb1"])
 def framing_variants(bench):
@@ -940,6 +972,9 @@ def softserial_tx_rmt(bench):
     tokens = bench.config_tokens(1, refresh=True)
     if token(tokens, "?MAP,SERIAL,S5"):
         raise Skip("W1 S5 already has a serial mapping")
+    # The ?BAUD lines below re-issue 9600, so the ports must already be there (A13): the guard would otherwise fail
+    # the test on a bench with another rate, after the check itself passed.
+    require_tokens(bench, 1, "?BAUD,S2,9600", "?BAUD,S3,9600", "?BAUD,S4,9600", "?BAUD,S5,9600")
     hw = (token(tokens, "?HW,") or "?HW,?").split(",")[1]
     rx_mode = ("level-triggered" if hw in ("1", "21", "23", "24") else
                "edge-triggered" if hw in ("31", "32") else None)   # None: unknown board, any RX line will do
@@ -987,9 +1022,21 @@ def _da_types(w, port):
     return _da_listed(_da_rows(w), port)
 
 
+# A forget schedules the wdp_da list save 1 s later (wdpDaMarkDirty, WCB_WDP.cpp:844-847), which wdpDaTick writes from
+# loop() (:1162). The GPIO ISR service is not IRAM (WCB.ino:9023-9031), so soft-port RX edges wait out that NVS write and
+# the bits on an S3-S5 wire during it are lost. The next test's confirming second announce goes out ~0.9 s after this
+# cleanup, right on the save: in 20260924-190733 input.wdpda_port_full's lost "HILF0" (a phantom "633C" record) and
+# input.wdpda_persists_reboot's lost its fw/hw keys (saved and reloaded empty); in 20260924-092602 port_full's whole line
+# was lost. So a helper that forgot something waits the save out here, in the cleanup of the test that caused it.
+DA_SAVE_SETTLE_S = 1.5
+
+
 def _da_forget(w, port, *types):
+    forgot = False
     for t in types:
-        w.run(f"?WDP,DA,FORGET,{port},{t}")
+        forgot |= _has(w.run(f"?WDP,DA,FORGET,{port},{t}"), " forgotten")
+    if forgot:
+        time.sleep(DA_SAVE_SETTLE_S)
 
 
 def _da_scrub(w, *ports):
@@ -1007,9 +1054,12 @@ def _da_types_on(c, port):
 
 
 def _da_forget_on(c, port, *types):
+    m = c.mark()
     for t in types:
         c.send(f"?WDP,DA,FORGET,{port},{t}")
         time.sleep(0.3)
+    if _has(c.lines(m), " forgotten"):   # W2 S4 is a soft port too: wait out the save, as _da_forget does
+        time.sleep(DA_SAVE_SETTLE_S)
 
 
 def _da_scrub_on(c, port):
@@ -1390,6 +1440,8 @@ def wdpda_port_full(bench):
         s4.send(lines[3])                              # four saved: refused, and said only once
         w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} not added: port full", timeout=3, since=m)
         s4.send(lines[3])
+        # Each confirm above re-armed the 1 s wdp_da save (WCB_WDP.cpp:846), so the last one's lands in this sleep, with
+        # S4 idle. Slow this test down and it can land under an announce and garble it (DA_SAVE_SETTLE_S).
         time.sleep(1.0)
         refusals = [x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S4: {names[3]} not added")]
         assert len(refusals) == 1, f"the refusal repeated: {refusals}"

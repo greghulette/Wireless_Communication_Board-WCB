@@ -16,15 +16,21 @@ another handle held; a finished-but-unsaved run resumed to done without the chec
 a passing wire recorded as verified; the SBUS controller's held inputs released after a cut-off sbus.* test; a Ctrl+C
 during a Wizard test landing at once and killing node's tree; run.py's questions on stdin=NUL and its SIGINT handler;
 Ctrl+C during the resume checks; a PAUSE file with an old mtime; secrets in free text; tests added since a selection.
+The config-pull collector (hil/wcb.py, F13) runs against a scripted relay console: one line, parts, refusals, timeouts,
+the one re-send after a NOPARTS, and the screening of a refusal's code and detail; so do navicore.pull_over_limit's
+verdict on NaviCore's library and wcb.pull_error_oom_parts' re-arm of the one-shot fault (s21 and s03 helpers).
 Outside pause/resume, it also checks that the probe's bundled EspSoftwareSerial is byte-identical to the WCB's; the
 expected durations (hil/durations.py: checkpoint and report.md sources, the median of the newest five real results,
 SKIP and NOT A RESULT rows left out, the cache reused and invalidated, corrupt files tolerated); the runner's up-front
 opt-in skip with the exact message the tests' own checks used to raise; and run.py --list, in a subprocess that
-imports the real suites (read-only: it writes no cache), for every gated test's declared opt-in and message.
+imports the real suites (read-only: it writes no cache), for every gated test's declared opt-in and message. And the
+no-servos gate (hil/servos.py, run.py --no-servos): its skip, its flag across a pause and resume, and the real registry
+through the runner loop with fake bodies, skipping exactly the listed ids.
 
-The real suites are never imported: runner.REGISTRY holds fake tests while this runs, and the rest of the resume
-checks (resume.check_bench, which talks to the boards) are replaced by a stub. What only the real bench can prove is
-listed in docs/HIL_TESTING.md §9.
+The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
+and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
+which talks to the boards) are replaced by a stub. What only the real bench can prove is listed in
+docs/HIL_TESTING.md §9.
 """
 import json
 import os
@@ -39,7 +45,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from hil import checkpoint, durations, optin, resume, runner  # noqa: E402
+from hil import checkpoint, durations, optin, resume, runner, servos  # noqa: E402
 from hil.checkpoint import Checkpoint, CheckpointError, RunBusy, RunLock  # noqa: E402
 
 # report.md exactly as runner.write_report wrote it for GOLDEN_RESULTS with elapsed=3725.4, captured from that function
@@ -1240,6 +1246,10 @@ def t_redaction_free_text(tmp):
     assert "extra ['?EPASS,<redacted:" in rt("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']")
     assert rt("AP password   : set") == "AP password   : set" and rt("?WIFI,OFF") == "?WIFI,OFF"
     assert rt("MESH JOIN ... PASS=<pw>") == "MESH JOIN ... PASS=<pw>", "the usage text is left alone"
+    # F13: a config part line in a tail - its secrets sit whole in part 1, where the token prefixes still find them
+    part = "[MGMT:CFGPART,2]P1A2B,1,2:[VER:6.3.0]?HW,24^?WCB,2^?WIFI,AP,DomeNet,sekrit99^?EPASS,hunter2^?SEQ,SAVE,K,z~"
+    assert not any(s in rt(part) for s in SECRETS) and rt(part).endswith("^?SEQ,SAVE,K,z~"), rt(part)
+    assert not any(s in rt(part[:part.index("^?SEQ")] + "~") for s in SECRETS), "a part ending right after ?EPASS"
     # a truncated ?MGMT,PULL chain: the snapshot note, the block, the checkpoint and the report stay clean
     b = tmp.bench()
     ctl = runner.RunControl()
@@ -1702,6 +1712,13 @@ _ERASE = "every accepted BEGIN erases at least 4 KB of the inactive app slot, wh
 GATED = {
     "var.cap_persistent_full": ("nvs_wear", "about 100 whole-blob NVS writes"),
     "seq.clear_all_empty_hash": ("seq_wipe", "wipes W1's sequences and replays them"),
+    "wifi.off_and_back": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
+    "wifi.join_w2_ap": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
+    "wifi.pc_joins_ap_ws": ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard"),
+    "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
+    "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
+    "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
+    "seq.nvs_full_consistency": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them"),
     **{f"ota.{n}": ("ota_erase", _ERASE) for n in (
         "local_begin_abort", "local_begin_supersede", "local_cursor_nak_incomplete", "local_truncated_verify_fail",
         "local_bad_magic", "local_overrun", "local_base64_errors", "local_idle_timeout_nak_no_refresh",
@@ -1922,6 +1939,682 @@ def t_list_lines(tmp):
     assert before == after, "run.py --list wrote results/durations.json"
 
 
+
+def t_no_servos(tmp):
+    """No moving servos (hil/servos.py; tonight's run.py --no-servos): every listed test is skipped before it starts -
+    body never run, on_start never called - with exactly servos.SKIP_REASON, ahead of its opt-in's skip but after a
+    missing device; the run's flag lives in its checkpoint and survives a pause and a resume from disk into a bench.json
+    that lacks it; bench.json "no_servos" alone does the same and fails safe on a hand-typed value; every listed id is
+    a registered test (a renamed test would silently move its servo again), and the whole real registry, fed through
+    the runner loop with fake bodies, skips exactly the listed ids; run.py --list --no-servos tags exactly those rows."""
+    for v in (True, "true", "yes", 1):
+        assert servos.enabled({"no_servos": v}), v
+    for v in (False, 0, None, "false", "no", "off", ""):
+        assert not servos.enabled({"no_servos": v}), v
+    assert not servos.enabled({}) and servos.enabled({}, {"no_servos": True}) and not servos.enabled(None, None)
+    # 1. the run's flag: start_run(no_servos=True), a pause, then a resume from disk into a bench.json without the key
+    b = tmp.bench()
+    ran, started = [], []
+    listed = fake("maestro.sub", ran=ran)
+    gated = fake("navicore.rec_play_clip", ran=ran)
+    gated["opt_in"] = "navicore_clip"                    # listed and opt-in off: the servo reason is the one reported
+    needy = fake("navicore.set_mode", ran=ran)
+    needy["needs"] = ["navicore"]                         # listed but its device is missing: "needs ..." still wins
+    first = fake("area.first", lambda bench: open(os.path.join(bench.out_dir, "PAUSE"), "w").close(), ran=ran)
+    tests = [fake("wcb.unknown", ran=ran), listed, gated, needy, first, fake("sbus.to_navicore", ran=ran),
+             fake("area.last", ran=ran)]
+    runner.REGISTRY[:] = tests
+    ck = runner.start_run(b, tests, "selftest", no_servos=True)
+    runner.continue_run(b, ck, resuming=False, on_start=lambda t: started.append(t["id"]))
+    assert ck.state == "paused", ck.state
+    got = {r["id"]: (r["status"], r["detail"], r["dur"]) for r in ck.data["results"]}
+    assert got["maestro.sub"] == ("SKIP", servos.SKIP_REASON, 0.0), got["maestro.sub"]
+    assert got["navicore.rec_play_clip"] == ("SKIP", servos.SKIP_REASON, 0.0), got["navicore.rec_play_clip"]
+    assert got["navicore.set_mode"] == ("SKIP", "needs device navicore", 0.0), got["navicore.set_mode"]
+    assert got["wcb.unknown"][0] == "PASS" and ran == started == ["wcb.unknown", "area.first"], (ran, started)
+    assert Checkpoint.load(ck.out_dir).data.get("no_servos") is True, "the flag is not in the checkpoint on disk"
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    assert f"===== maestro.sub SKIP (0.0s) {servos.SKIP_REASON}" in log and "===== maestro.sub fake" not in log, log
+    b2 = tmp.bench()
+    assert "no_servos" not in b2.cfg
+    ck2 = resume_run(b2, ck.out_dir)
+    assert ck2.state == "done", ck2.state
+    got = {r["id"]: (r["status"], r["detail"]) for r in ck2.data["results"]}
+    assert got["sbus.to_navicore"] == ("SKIP", servos.SKIP_REASON), got["sbus.to_navicore"]
+    assert got["area.last"][0] == "PASS" and ran == ["wcb.unknown", "area.first", "area.last"], ran
+    rep = read(os.path.join(ck2.out_dir, "report.md"))
+    assert f"| SKIP | maestro.sub | fake maestro.sub | 0.0s | {servos.SKIP_REASON} |" in rep, rep
+    # 2. bench.json "no_servos" alone, and a run with neither
+    b3 = tmp.bench()
+    b3.cfg["no_servos"] = True
+    ran3 = []
+    ck3 = new_run(b3, [fake("maestro.verbs", ran=ran3), fake("area.x", ran=ran3)])
+    assert [(r["id"], r["status"]) for r in ck3.data["results"]] == [("maestro.verbs", "SKIP"), ("area.x", "PASS")]
+    assert ran3 == ["area.x"] and "no_servos" not in ck3.data, (ran3, ck3.data.get("no_servos"))
+    ran4 = []
+    ck4 = new_run(tmp.bench(), [fake("maestro.verbs", ran=ran4)])
+    assert ran4 == ["maestro.verbs"] and ck4.data["results"][0]["status"] == "PASS"
+    # 3. list_lines' tags
+    rows = runner.list_lines([fake("maestro.sub", title="S"), fake("area.one", title="One")], {}, {})
+    assert rows[0].endswith("  [servo] S") and rows[1].endswith("  One"), rows
+    assert runner.list_lines([fake("maestro.sub", title="S")], {}, {}, no_servos=True)[0].endswith("[servo: skipped] S")
+    assert runner.list_lines([fake("maestro.sub", title="S")], {"no_servos": True}, {})[0].endswith("[servo: skipped] S")
+    # 4. the real suites, listed in their own process (this one keeps the fake registry)
+    probe = (
+        "import importlib, json, pkgutil, sys\n"
+        f"sys.path.insert(0, {HERE!r})\n"
+        "from hil import runner\n"
+        "import suites\n"
+        "for m in pkgutil.iter_modules(suites.__path__):\n"
+        "    importlib.import_module('suites.' + m.name)\n"
+        "print(json.dumps([[t['id'], t['title'], t.get('opt_in')] for t in runner.REGISTRY]))\n")
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert out.returncode == 0, out.stderr
+    reg = json.loads(out.stdout)
+    real = {tid for tid, _, _ in reg}
+    stale = sorted(set(servos.SERVO_TESTS) - real)
+    assert not stale, f"hil/servos.py lists ids no suite registers (renamed? their servos would move again): {stale}"
+    # every real test, with a fake body, through the real start_run / checkpoint / runner loop; every opt-in on, so the
+    # only skips left are the servo ones
+    b5 = tmp.bench()
+    b5.cfg["opt_in"] = list(optin.OPT_INS)
+    ran5 = []
+    fakes = []
+    for tid, title, key in reg:
+        f = fake(tid, title=title, ran=ran5)
+        f["opt_in"] = key
+        fakes.append(f)
+    runner.REGISTRY[:] = fakes
+    ck5 = runner.start_run(b5, fakes, "selftest", no_servos=True)
+    runner.continue_run(b5, ck5, resuming=False)
+    assert ck5.state == "done", ck5.state
+    skipped = {r["id"] for r in ck5.data["results"] if r["status"] == "SKIP"}
+    assert skipped == set(servos.SERVO_TESTS), sorted(skipped ^ set(servos.SERVO_TESTS))
+    assert all(r["detail"] == servos.SKIP_REASON for r in ck5.data["results"] if r["status"] == "SKIP")
+    assert not set(ran5) & set(servos.SERVO_TESTS) and len(ran5) == len(reg) - len(servos.SERVO_TESTS), len(ran5)
+    # run.py --list --no-servos against the real suites: exactly the listed rows are tagged as skipped
+    bench = os.path.join(tmp.root, "bench.json")
+    with open(bench, "w", encoding="utf-8") as f:
+        json.dump({"devices": {}}, f)
+    out = subprocess.run([sys.executable, os.path.join(HERE, "run.py"), "--list", "--no-servos", "--bench", bench],
+                         capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert out.returncode == 0, out.stderr
+    rows = out.stdout.splitlines()
+    assert len(rows) == len(reg), (len(rows), len(reg))
+    tagged = {r.split()[0] for r in rows if "[servo: skipped] " in r}
+    assert tagged == set(servos.SERVO_TESTS), sorted(tagged ^ set(servos.SERVO_TESTS))
+    assert not [r for r in rows if "[servo] " in r], "--no-servos left a servo row untagged as skipped"
+
+
+def t_config_guard_auto_restore(tmp):
+    """config_guard puts back the AUTO_RESTORE token kinds a test leaked - and only those - before it reports the leak
+    (docs/HIL_TEST_AUDIT.md A1): undo lines first, then the missing baseline tokens in backup order; a mesh-only board
+    gets ;W<n> lines and keeps a ^-chained value; a leaked delimiter stops the auto-restore altogether."""
+    import suites.common as common
+
+    class FakeWCB:
+        sent = []
+
+        def __init__(self, dev):
+            self.dev = dev
+
+        def run(self, cmd, timeout=5.0):
+            FakeWCB.sent.append((self.dev, cmd))
+            return []
+
+        def send(self, cmd):
+            FakeWCB.sent.append((self.dev, cmd))
+
+    class FakeLinks:
+        def resync(self, n):
+            pass
+
+    class FakeBench:
+        def __init__(self):
+            self.cache, self.links, self.notes = {}, FakeLinks(), []
+
+        def usb_wcbs(self):
+            return {1: "wcb1"}
+
+        def usb_wcb_number(self):
+            return 1
+
+        def dev(self, name):
+            return name
+
+        def note(self, s):
+            self.notes.append(s)
+
+    def guard(wcb, snaps):
+        FakeWCB.sent.clear()
+        queue = [list(s) for s in snaps]
+        old = common.snapshot, common.WCB, common.time.sleep
+        common.snapshot, common.WCB, common.time.sleep = (lambda bench, n: queue.pop(0)), FakeWCB, (lambda s: None)
+        try:
+            with common.config_guard(FakeBench(), wcb):
+                pass
+        except AssertionError as e:
+            return str(e), list(FakeWCB.sent)
+        finally:
+            common.snapshot, common.WCB, common.time.sleep = old
+        raise AssertionError("no leak reported")
+
+    before = ["?HW,24", "?WCB,1", "?BAUD,S3,9600", "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON", "?LABEL,S3,Old",
+              "?SEQ,SAVE,K1,;S1a", "?ETM,ON", "?MAP,SERIAL,S2,S4"]
+    leaked = ["?HW,24", "?WCB,1", "?BAUD,S3,19200", "?BCAST,OUT,S3,OFF", "?BCAST,IN,S3,ON", "?LABEL,S3,New",
+              "?LABEL,S5,Extra", "?SEQ,SAVE,K1,;S1b", "?SEQ,SAVE,K9,;S1z", "?ETM,ON", "?MAP,SERIAL,S2,S5",
+              "?MAP,SERIAL,S4,S5", "?VAR,SET,v1,3"]
+    msg, sent = guard(1, [before, leaked, before])
+    assert [c for _, c in sent] == ["?LABEL,CLEAR,S5", "?SEQ,CLEAR,K9", "?MAP,SERIAL,CLEAR,S4", "?VAR,CLEAR,v1",
+                                    "?BAUD,S3,9600", "?BCAST,OUT,S3,ON", "?LABEL,S3,Old", "?SEQ,SAVE,K1,;S1a",
+                                    "?MAP,SERIAL,S2,S4"], sent
+    assert all(d == "wcb1" for d, _ in sent) and "put back by config_guard" in msg and "CONFIG NOT RESTORED" in msg, msg
+    # a kind it must never touch stays with the test, and the failure names it
+    leaked2 = [x if x != "?ETM,ON" else "?ETM,OFF" for x in before]
+    msg, sent = guard(1, [before, leaked2, leaked2])
+    assert not sent and "not put back: ['?ETM,OFF', '?ETM,ON']" in msg and "put back by" not in msg, msg
+    # a mesh-only board: ;W<n> lines through wcb1, and a ^-chained value is left alone (the sender would split it)
+    before3 = ["?WCB,2", "?LABEL,S4,Old", "?SEQ,SAVE,K2,;S2a^;S2b"]
+    leaked3 = ["?WCB,2", "?LABEL,S4,New", "?LABEL,S5,Extra"]
+    msg, sent = guard(2, [before3, leaked3, leaked3])
+    assert sent == [("wcb1", ";W2,?LABEL,CLEAR,S5"), ("wcb1", ";W2,?LABEL,S4,Old")], sent
+    assert "not put back: ['?SEQ,SAVE,K2,;S2a^;S2b']" in msg and "board still differs" in msg, msg
+    # a leaked delimiter: nothing can be sent safely
+    msg, sent = guard(1, [before, before[:-1] + ["?DELIM,|"], before])
+    assert not sent and "not put back" in msg, (msg, sent)
+
+
+def t_ws_frames(tmp):
+    """hil.ws: a masked client frame round-trips through parse() in its three length forms, and WsClient completes a
+    handshake, sends a command line and reads text frames from a stand-in server on a local socket."""
+    import socket
+    import threading
+    from hil import ws
+    for n in (5, 300, 70000):
+        data = (bytes(range(256)) * (n // 256 + 1))[:n]
+        f = ws.frame(data, mask=b"\x01\x02\x03\x04")
+        got = ws.parse(f)
+        assert got and got[0] == 0x1 and got[1] == data and got[2] == len(f), n
+    assert ws.parse(b"\x81") is None
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    seen = {}
+
+    def server():
+        c, _ = srv.accept()
+        req = b""
+        while b"\r\n\r\n" not in req:
+            req += c.recv(4096)
+        seen["req"] = req
+        c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        buf = b""
+        while True:
+            got = ws.parse(buf)
+            if got:
+                break
+            buf += c.recv(4096)
+        seen["cmd"] = got[1]
+        for line in (b"Software Version: 1\n", b"End of Version\n"):
+            c.sendall(b"\x81" + bytes([len(line)]) + line)          # the board's frames are not masked
+        c.close()
+
+    th = threading.Thread(target=server, daemon=True)
+    th.start()
+    cl = ws.WsClient("127.0.0.1", port, timeout=3.0)
+    cl.send_text("?VERSION\n")
+    text = cl.read_until("End of Version", timeout=3.0)
+    cl.close()
+    th.join(2)
+    srv.close()
+    assert b"Upgrade: websocket" in seen["req"] and seen["cmd"] == b"?VERSION\n", seen
+    assert "Software Version: 1" in text and "End of Version" in text, text
+
+
+def t_nvs_parse(tmp):
+    """hil/nvs.py reads ?NVS output: the usage line, the namespace lines after it, and nothing from a board without
+    ?NVS; the report shows one line per board at start and end."""
+    from hil import nvs, checkpoint as ck
+    out = ["NVS: used=404 free=226 available=100 total=630 namespaces=32 (64% used)",
+           "  maestro_cfg     45", "  phy             66", "End of NVS"]
+    stats, spaces = nvs.parse(out)
+    assert stats == dict(used=404, free=226, available=100, total=630, namespaces=32, pct=64), stats
+    assert spaces == {"maestro_cfg": 45, "phy": 66}, spaces
+    assert nvs.parse(["Unknown command: NVS"]) == (None, {})
+    stats["spaces"] = spaces
+    assert "used 404/630 (64%), available 100; most: phy 66, maestro_cfg 45" == nvs.summary(stats), nvs.summary(stats)
+    lines = ck._nvs_lines({"start": {"W1": stats}, "end": {"W1": dict(stats, used=410, available=94, pct=65)}})
+    assert lines[0] == "NVS W1: start 404/630 used (64%), 100 available · end 410/630 used (65%), 94 available\n", lines
+    assert ck._nvs_lines(None) == [] and ck._nvs_lines({}) == []
+
+
+class PullDev:
+    """A relay's console for the config-pull collector (hil/wcb.py Pull). Each send() is answered by script(cmd, n) -
+    n counts the sends from 1 - appended at once, plus `timed` lines appended later from a timer thread (for the
+    deadline). Duck-types what Pull reads of a SerialDevice: name, mark(), since(), send(), and log (None, or a
+    callable(name, direction, text) as SerialDevice's)."""
+
+    def __init__(self, script=None, timed=()):
+        self.name, self.lines, self.sent, self.sent_at = "fakerelay", [], [], []
+        self.log = None
+        self._script = script or (lambda cmd, n: [])
+        self._timed = list(timed)
+        self._lock = threading.Lock()
+
+    def _append(self, *lines):
+        with self._lock:
+            self.lines.extend(lines)
+
+    def mark(self):
+        with self._lock:
+            return len(self.lines)
+
+    def since(self, m):
+        with self._lock:
+            return list(self.lines[m:])
+
+    def send(self, text):
+        self.sent.append(text)
+        self.sent_at.append(time.monotonic())
+        self._append(*self._script(text, len(self.sent)))
+        for delay, line in self._timed:
+            t = threading.Timer(delay, self._append, [line])
+            t.daemon = True
+            t.start()
+
+
+def t_mgmt_pull_parts(tmp):
+    """F13: hil/wcb.py's config-pull collector against a scripted relay console - the one-line reply; parts with noise
+    lines between them, out of order and with a duplicate; a missing part (a timeout naming what arrived); a new id
+    (restarts); CFGERR of each code, and read_config retrying only the passing ones; an empty legacy line; trailing
+    spaces kept by the '~'; a '^' inside a ?SEQ,SAVE value spanning a part boundary; a CRC failure; the deadline
+    restarting on each new part; the pull spacing stamped when the reply completes; and no secret in any message."""
+    import types
+    from hil import config as C, wcb as W
+    chain = "?HW,24^?WCB,2^?WIFI,AP,DomeNet,sekrit99^?EPASS,hunter2^?SEQ,SAVE,HILK,;S1a^;S1b^?LABEL,S3,Dome  ^?CMDCHAR,;"
+    reply = f"[VER:6.3.0_TEST]{chain}^?CHK{W.chain_crc(chain)}"
+    seq = "?SEQ,SAVE,HILK,;S1a^;S1b"
+    msgs = []
+
+    def parts_of(text, cuts, pid="1A2B", wcb=2):
+        b = [0] + list(cuts) + [len(text)]
+        return [f"[MGMT:CFGPART,{wcb}]P{pid},{k},{len(b) - 1}:{text[b[k - 1]:b[k]]}~" for k in range(1, len(b))]
+
+    def answer(*lines):
+        return PullDev(lambda cmd, n: list(lines))
+
+    def fails(fn, exc=AssertionError):
+        try:
+            fn()
+        except exc as e:
+            msgs.append(str(e))
+            return e
+        raise AssertionError(f"{fn} did not raise {exc.__name__}")
+
+    old = W.PULL_SPACING_S, C.time
+    W.PULL_SPACING_S = 0
+    try:
+        # the one-line reply, the ,P form, and mgmt_pull's tuple
+        d = answer("[ETM] WCB3 came ONLINE", f"[MGMT:CONFIG,2]{reply}")
+        r = W.pull_config(d, 2, timeout=1)
+        assert d.sent == ["?MGMT,PULL,2,P"] and (r.kind, r.count, r.part_id) == ("legacy", 1, None) and r.text == reply
+        assert r.version == "6.3.0_TEST" and r.provided == r.calc and seq in W.comparable(r.tokens), W.comparable(r.tokens)
+        assert W.WCB(answer(f"[MGMT:CONFIG,2]{reply}")).mgmt_pull(2)[0] == "6.3.0_TEST"
+        assert W.pull_config(answer(f"[MGMT:CONFIG,2]{reply}"), 2, parts=False, timeout=1).kind == "legacy"
+        msgs.append(repr(r))
+        # three parts with noise between them, out of order, one twice
+        p = parts_of(reply, [45, 90])                   # the reply is 136 characters
+        noise = ["[ETM] WCB3 came ONLINE", "[MGMT:CFGPART,3]P0001,1,1:x~", "[MGMT:CONFIG,3][VER:x]y", '{"sys":1}',
+                 "[MGMT:CFGERR,3]NOMEM,x", "[MGMT:CFGPART,2]P1A2B,1,3:no tilde"]
+        d = answer(p[1], *noise[:3], p[0], p[1], *noise[3:], p[2])
+        r = W.pull_config(d, 2, timeout=1)
+        assert (r.kind, r.count, r.part_id, r.text) == ("parts", 3, "1A2B", reply), repr(r)
+        assert r.part_lengths == [45, 45, len(reply) - 90] and seq in W.comparable(r.tokens)
+        msgs.append(repr(r))
+        col = W.PullCollector(2)
+        assert [col.feed(x) for x in (p[1], p[1], noise[1], noise[5], "plain text", p[2])] == \
+            ["partial", "duplicate", "ignored", "malformed", "ignored", "partial"]
+        assert col.feed(p[0]) == "complete" and col.reply[1] == reply
+        # a missing part: a timeout that names what arrived, and nothing else
+        e = fails(lambda: W.pull_config(answer(p[0], p[2]), 2, timeout=0.3))
+        assert not isinstance(e, W.PullRefused) and "parts [1, 3] of 3 under id 1A2B" in str(e), e
+        # a new id: the parts held are dropped, and the new build's parts join
+        stale = chain.replace("?WCB,2", "?WCB,2^?PEERSLIVE,9")
+        stale = f"[VER:6.3.0_TEST]{stale}^?CHK{W.chain_crc(stale)}"
+        col = W.PullCollector(2)
+        assert [col.feed(x) for x in parts_of(stale, [70], "AAAA")[:1] + parts_of(reply, [60], "BBBB")] == \
+            ["partial", "partial", "complete"] and col.restarts == 1 and col.result().part_id == "BBBB"
+        assert col.result().text == reply
+        # CFGERR: the code, whether it passes, the mark it was sent at (a ,P NOPARTS is asked again once: see below)
+        for code, retryable in (("NOMEM", True), ("CHANGED", True), ("NOPARTS", True), ("TOOBIG", False)):
+            d = answer("noise", p[0], f"[MGMT:CFGERR,2]{code},3100 bytes, free 9000")
+            e = fails(lambda: W.pull_config(d, 2, timeout=1), W.PullRefused)
+            assert (e.code, e.retryable, e.mark, e.detail) == (code, retryable, 0, "3100 bytes, free 9000"), vars(e)
+            assert len(d.sent) == (2 if code == "NOPARTS" else 1), (code, d.sent)
+        # a detail that looks like config text (a firmware bug) is withheld, never quoted
+        e = fails(lambda: W.pull_config(answer(f"[MGMT:CFGERR,2]NOPARTS,3100 {reply[:90]}"), 2, timeout=1), W.PullRefused)
+        assert e.detail.startswith("<") and "withheld" in e.detail, e.detail
+        # the bare legacy line: out of memory on a target, or through a relay with no CFGERR
+        for line in ("[MGMT:CONFIG,2]", "[MGMT:CONFIG,2]   "):
+            e = fails(lambda: W.pull_config(answer(line), 2, timeout=1), W.PullRefused)
+            assert (e.code, e.retryable) == ("EMPTY", True), vars(e)
+        # trailing spaces at the end of a part survive the join: the '~' frames them
+        cut = reply.index("Dome  ") + len("Dome  ")
+        p = parts_of(reply, [cut])
+        assert p[0].endswith("  ~")
+        r = W.pull_config(answer(*p), 2, timeout=1)
+        assert r.text == reply and r.provided == r.calc and "?LABEL,S3,Dome  " in r.tokens
+        # a '^' inside a ?SEQ,SAVE value, with the part boundary just before or just after it: joined as text first
+        for off in (4, 5):
+            r = W.pull_config(answer(*parts_of(reply, [reply.index(";S1a^") + off])), 2, timeout=1)
+            assert seq in W.comparable(r.tokens), (off, W.comparable(r.tokens))
+        # a CRC failure: raised with verify, returned without it
+        bad = parts_of(reply, [60])
+        bad[1] = bad[1].replace(";S1b", ";S1c")
+        e = fails(lambda: W.pull_config(answer(*bad), 2, timeout=1))
+        assert "fails its CRC" in str(e), e
+        r = W.pull_config(answer(*bad), 2, timeout=1, verify=False)
+        assert r.provided != r.calc
+        # the deadline restarts on every new part: 0.6 s from the send would expire before part 2 at 0.9 s
+        p = parts_of(reply, [70])
+        t0 = time.monotonic()
+        r = W.pull_config(PullDev(timed=[(0.4, p[0]), (0.9, p[1])]), 2, timeout=0.6)
+        assert r.text == reply and time.monotonic() - t0 >= 0.85
+        e = fails(lambda: W.pull_config(PullDev(timed=[(0.3, p[0])]), 2, timeout=0.4))
+        assert "parts [1] of 2" in str(e), e
+        # the spacing counts from the reply's completion, not the send
+        W.PULL_SPACING_S = 0.3
+        d = PullDev(lambda cmd, n: [] if n == 1 else [f"[MGMT:CONFIG,2]{reply}"], timed=[(0.2, f"[MGMT:CONFIG,2]{reply}")])
+        W.pull_config(d, 2, timeout=1)
+        W.pull_config(d, 2, timeout=1)
+        assert d.sent_at[1] - d.sent_at[0] >= 0.45, d.sent_at
+        W.PULL_SPACING_S = 0
+        # read_config: a permanent refusal fails at once, a passing one is tried three times, then a success is taken
+
+        class Bench:
+            def __init__(self, dev):
+                self.d = dev
+
+            def usb_wcbs(self):
+                return {}
+
+            def usb_wcb_number(self):
+                return 1
+
+            def dev(self, name):
+                return self.d
+
+        C.time = types.SimpleNamespace(sleep=lambda s: None)
+        # NOPARTS: three tries of a ,P pull that Pull itself sends twice
+        for code, sends in (("TOOBIG", 1), ("NOPARTS", 6), ("NOMEM", 3)):
+            d = PullDev(lambda cmd, n: [f"[MGMT:CFGERR,2]{code},x"])
+            e = fails(lambda: C.read_config(Bench(d), 2), W.PullRefused)
+            assert e.code == code and len(d.sent) == sends, (code, len(d.sent))
+        d = PullDev(lambda cmd, n: ["[MGMT:CFGERR,2]NOMEM,x"] if n == 1 else parts_of(reply, [90]))
+        assert seq in C.read_config(Bench(d), 2) and len(d.sent) == 2
+    finally:
+        W.PULL_SPACING_S, C.time = old
+    leaked = [m for m in msgs if any(s in m for s in SECRETS)]
+    assert not leaked, f"{len(leaked)} messages quote a secret"
+
+
+def _raises(fn, exc=AssertionError):
+    try:
+        fn()
+    except exc as e:
+        return e
+    raise AssertionError(f"{fn} did not raise {exc.__name__}")
+
+
+def _drain(p):
+    while not p.poll():
+        time.sleep(0.01)
+    return p
+
+
+def t_mgmt_pull_noparts_and_codes(tmp):
+    """F13 review: a ,P pull answered NOPARTS (every copy of its parts request lost) is sent once more, PULL_SPACING_S
+    after the refusal, without blocking poll(), and noted in session.log; the parts that follow complete it, a second
+    NOPARTS raises with the first send's mark, and a timeout after the re-send is a timeout. No re-send for a plain
+    pull, with retry_noparts=False, or for any other code. A CFGERR code is kept only shaped like the firmware's (else
+    MALFORMED, permanent), and its detail only beside a code the firmware sends - no secret in any message."""
+    from hil import wcb as W
+    chain = "?HW,24^?WCB,2^?WIFI,AP,DomeNet,sekrit99^?EPASS,hunter2^?CMDCHAR,;"
+    reply = f"[VER:6.3.0_TEST]{chain}^?CHK{W.chain_crc(chain)}"
+    parts = [f"[MGMT:CFGPART,2]P1A2B,1,2:{reply[:50]}~", f"[MGMT:CFGPART,2]P1A2B,2,2:{reply[50:]}~"]
+    noparts = "[MGMT:CFGERR,2]NOPARTS,3100 chars, max 2912"
+    msgs, notes = [], []
+    old = W.PULL_SPACING_S
+    W.PULL_SPACING_S = 0
+    try:
+        # one lost parts request: NOPARTS, then the parts - one re-send, one note, the mark of the first send
+        d = PullDev(lambda cmd, n: ["[ETM] WCB3 came ONLINE", noparts] if n == 1 else parts)
+        d.log = lambda name, direction, text: notes.append((name, direction, text))
+        r = W.pull_config(d, 2, timeout=1)
+        assert d.sent == ["?MGMT,PULL,2,P"] * 2, d.sent
+        assert (r.kind, r.count, r.text == reply, r.resent, r.mark) == ("parts", 2, True, ["NOPARTS"], 0), repr(r)
+        assert len(notes) == 1 and notes[0][:2] == ("fakerelay", "#") and "NOPARTS" in notes[0][2], notes
+        msgs += [x[2] for x in notes]
+        # the re-send waits PULL_SPACING_S from the refusal, and poll() returns meanwhile
+        W.PULL_SPACING_S = 0.3
+        d = PullDev(lambda cmd, n: [noparts] if n == 1 else parts)
+        p = W.Pull(d, 2, timeout=1)
+        t0 = time.monotonic()
+        assert p.poll() is False and p.poll() is False and len(d.sent) == 1 and time.monotonic() - t0 < 0.1
+        assert _drain(p).reply().resent == ["NOPARTS"] and d.sent_at[1] - d.sent_at[0] >= 0.3, d.sent_at
+        W.PULL_SPACING_S = 0
+        # a second NOPARTS raises, with the first send's mark
+        d = PullDev(lambda cmd, n: ["noise", noparts])
+        e = _raises(lambda: W.pull_config(d, 2, timeout=1), W.PullRefused)
+        assert (e.code, e.mark, len(d.sent)) == ("NOPARTS", 0, 2), (e.code, e.mark, d.sent)
+        msgs.append(str(e))
+        # a re-send that gets only part of the reply times out as a timeout, naming what arrived
+        d = PullDev(lambda cmd, n: [noparts] if n == 1 else parts[:1])
+        e = _raises(lambda: W.pull_config(d, 2, timeout=0.3))
+        assert not isinstance(e, W.PullRefused) and len(d.sent) == 2 and "parts [1] of 2" in str(e), str(e)
+        # no re-send: a plain pull, retry_noparts=False, another code
+        for kw, line in (({"parts": False}, noparts), ({"retry_noparts": False}, noparts),
+                         ({}, "[MGMT:CFGERR,2]NOMEM,need 3100 free 9000")):
+            d = PullDev(lambda cmd, n: [line])
+            e = _raises(lambda: _drain(W.Pull(d, 2, timeout=1, **kw)), W.PullRefused)
+            assert len(d.sent) == 1 and e.code == W.parse_error(line.split("]", 1)[1])[0], (kw, e.code, d.sent)
+        # the code: 2-12 upper-case letters, else MALFORMED (permanent); the detail: only beside a firmware code
+        malformed = "the line does not start with a refusal code"
+        for body, code, detail in (
+                ("NOMEM,3100 bytes, free 9000", "NOMEM", "3100 bytes, free 9000"),
+                ("NOPARTS", "NOPARTS", ""),
+                ("?EPASS,hunter2", "MALFORMED", f"<13 characters withheld: {malformed}>"),
+                ("?WIFI,AP,DomeNet,sekrit99", "MALFORMED", f"<24 characters withheld: {malformed}>"),
+                ("hunter2", "MALFORMED", f"<7 characters withheld: {malformed}>"),          # a bare secret
+                ("nomem,x", "MALFORMED", f"<6 characters withheld: {malformed}>"),
+                ("N,x", "MALFORMED", f"<2 characters withheld: {malformed}>"),
+                ("NOMEMNOMEMNOM,x", "MALFORMED", f"<14 characters withheld: {malformed}>"),  # 13 letters
+                ("", "MALFORMED", ""),
+                ("SEKRIT,hunter2", "SEKRIT", "<7 characters withheld: SEKRIT is not a code the firmware sends>"),
+                ("TOOBIG,3100 ^?EPASS,x", "TOOBIG", "<14 characters withheld: they look like config text>")):
+            e = W.PullRefused(2, *W.parse_error(body))
+            assert (e.code, e.detail) == (code, detail), (code, e.code, len(e.detail))
+            assert e.retryable == (code in W.RETRYABLE) and (code != "MALFORMED" or not e.retryable)
+            msgs.append(str(e))
+        # through a pull: a malformed refusal is permanent, raised at once
+        d = PullDev(lambda cmd, n: ["[MGMT:CFGERR,2]?EPASS,hunter2"])
+        e = _raises(lambda: W.pull_config(d, 2, timeout=1), W.PullRefused)
+        assert (e.code, e.retryable, len(d.sent)) == ("MALFORMED", False, 1), (e.code, d.sent)
+        msgs.append(str(e))
+    finally:
+        W.PULL_SPACING_S = old
+    leaked = [m for m in msgs if any(s in m for s in SECRETS)]
+    assert not leaked, f"{len(leaked)} messages quote a secret"
+
+
+def t_pull_over_limit_policy(tmp):
+    """F13 review: navicore.pull_over_limit's verdict (s21 _navicore_library_problems) - silent for both pulls passes
+    only while nothing shows the library is new; with F13 (a plain pull answered, or W2 accepting a parts request) the
+    ,P pull must end in parts or a passing NOMEM/CHANGED, so NOPARTS twice running (a relay that never sends type 19)
+    fails and one lost parts request does not; _navicore_pull_outcome against a scripted NaviCore relay; s03's _refused
+    re-arming the one-shot PULLFAULT after a NOPARTS, and _pull_lines screening the code."""
+    import types
+    from hil import wcb as W
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s03_wcb as S03
+        import suites.s21_navicore_sbus as S21
+    finally:
+        runner.REGISTRY[:] = saved              # helpers only: the real tests never join a selftest run
+    V, msgs = S21._navicore_library_problems, []
+    for plain, asked, accepted in (("silent", "silent", False),                        # a library from before F13
+                                   ("refused NOPARTS", "parts 2", False), ("refused NOPARTS", "parts 3", True),
+                                   ("refused NOPARTS", "refused NOPARTS, then parts 2", True),   # a lost request
+                                   ("refused NOPARTS", "refused NOMEM", False),
+                                   ("refused NOPARTS", "refused NOPARTS, then refused CHANGED", True)):
+        assert V(plain, asked, accepted) == [], (plain, asked, accepted, V(plain, asked, accepted))
+    for plain, asked, accepted, why in (
+            ("silent", "silent", True, "never reached NaviCore's console"),           # new, and drops type 18
+            ("refused NOPARTS", "refused NOPARTS, then refused NOPARTS", False, "never reached W2"),   # ,P ignored
+            ("refused NOPARTS", "silent", False, "nothing on packet type 18"),
+            ("refused NOPARTS", "refused NOPARTS, then silent", True, "not refused NOPARTS, then silent"),
+            ("refused NOPARTS", "refused TOOBIG", False, "not refused TOOBIG"),
+            ("refused NOPARTS", "refused EMPTY", False, "not refused EMPTY"),
+            ("refused NOPARTS", "refused MALFORMED", False, "not refused MALFORMED"),
+            ("refused NOPARTS", "a config line", False, "not a config line"),
+            ("silent", "parts 2", False, "silent for both"),
+            ("silent", "parts 2", True, "yet the plain pull was silent")):
+        got = "; ".join(V(plain, asked, accepted))
+        assert why in got, (plain, asked, accepted, got)
+        msgs.append(got)
+
+    chain = "?HW,24^?WCB,2^?EPASS,hunter2^?SEQ,SAVE,HILP00," + "z" * 40
+    want = f"[VER:6.3.0_TEST]{chain}^?CHK{W.chain_crc(chain)}"
+    parts = [f"[MGMT:CFGPART,2]PABCD,1,2:{want[:40]}~", f"[MGMT:CFGPART,2]PABCD,2,2:{want[40:]}~"]
+    noparts = "[MGMT:CFGERR,2]NOPARTS,3100 chars, max 2912"
+    nomem = "[MGMT:CFGERR,2]NOMEM,need 3100 free 9000"
+
+    def nc(script):
+        return types.SimpleNamespace(dev=PullDev(script))
+
+    old = W.PULL_SPACING_S, S21.time
+    W.PULL_SPACING_S = 0
+    S21.time = types.SimpleNamespace(sleep=lambda s: None, monotonic=time.monotonic)
+    try:
+        # a new library whose ,P is ignored (type 5 only): NOPARTS for both, the ,P pull asked twice - it fails
+        c, problems = nc(lambda cmd, n: [noparts]), []
+        plain = S21._navicore_pull_outcome(c, False, 3100, want, problems, timeout=0.5)
+        asked = S21._navicore_pull_outcome(c, True, 3100, want, problems, timeout=0.5)
+        assert (plain, asked, problems) == ("refused NOPARTS", "refused NOPARTS, then refused NOPARTS", []), \
+            (plain, asked, problems)
+        assert c.dev.sent == ["?MGMT,PULL,2", "?MGMT,PULL,2,P", "?MGMT,PULL,2,P"], c.dev.sent
+        assert "never reached W2" in "; ".join(V(plain, asked, False))
+        # one lost parts request: NOPARTS, then parts that join into W2's chain - it passes
+        c, problems = nc(lambda cmd, n: [noparts] if n == 1 else parts), []
+        asked = S21._navicore_pull_outcome(c, True, 3100, want, problems, timeout=0.5)
+        assert (asked, problems) == ("refused NOPARTS, then parts 2", []), (asked, problems)
+        assert V("refused NOPARTS", asked, True) == []
+        # a library from before F13: nothing at all
+        assert S21._navicore_pull_outcome(nc(lambda cmd, n: []), True, 3100, want, [], timeout=0.2) == "silent"
+        # a plain pull refused but for NOPARTS, or a config line for an over-limit config: wrong for any library
+        c, problems = nc(lambda cmd, n: [nomem]), []
+        assert S21._navicore_pull_outcome(c, False, 3100, want, problems, timeout=0.5) == "refused NOMEM"
+        assert len(problems) == 1 and "CFGERR NOMEM" in problems[0], problems
+        c, problems = nc(lambda cmd, n: [f"[MGMT:CONFIG,2]{want}"]), []
+        assert S21._navicore_pull_outcome(c, True, 3100, want, problems, timeout=0.5) == "a config line"
+        assert len(problems) == 1 and "[MGMT:CONFIG,2] line" in problems[0], problems
+        msgs += problems
+
+        # s03 _refused: a NOPARTS spent the one-shot fault, so it is re-armed and the pull goes once more
+        notes = []
+        w1 = types.SimpleNamespace(dev=PullDev(lambda cmd, n: [noparts] if n == 1 else [nomem]))
+        w1.dev.log = lambda name, direction, text: notes.append(text)
+        rearmed, problems = [], []
+        mark, e = S03._refused(w1, "NOMEM", problems, rearm=lambda: rearmed.append(len(w1.dev.sent)))
+        assert (e.code, mark, problems, rearmed, len(w1.dev.sent)) == ("NOMEM", 1, [], [1], 2), \
+            (e.code, mark, problems, rearmed, w1.dev.sent)
+        assert len(notes) == 1 and "NOPARTS" in notes[0], notes
+        # NOPARTS again: re-armed once, then a problem
+        w1, rearmed, problems = types.SimpleNamespace(dev=PullDev(lambda cmd, n: [noparts])), [], []
+        mark, e = S03._refused(w1, "NOMEM", problems, rearm=lambda: rearmed.append(1))
+        assert e.code == "NOPARTS" and rearmed == [1] and len(w1.dev.sent) == 2, (e.code, rearmed, w1.dev.sent)
+        assert len(problems) == 1 and "not NOMEM" in problems[0], problems
+        msgs += problems + notes
+        # no rearm (the one-line test, where NOPARTS cannot happen), or a plain pull expecting NOPARTS: one send
+        for kw, code, bad in (({}, "NOMEM", True), ({"parts": False}, "NOPARTS", False)):
+            w1, problems = types.SimpleNamespace(dev=PullDev(lambda cmd, n: [noparts])), []
+            S03._refused(w1, code, problems, **kw)
+            assert len(w1.dev.sent) == 1 and bool(problems) == bad, (kw, w1.dev.sent, problems)
+        # s03 _pull_lines screens the code of a CFGERR line
+        d = PullDev()
+        d._append("[MGMT:CFGERR,2]?EPASS,hunter2", "[MGMT:CFGERR,2]NOMEM,x", "[MGMT:CFGERR,3]?WIFI,AP,x,sekrit99")
+        codes = [code for code, _ in S03._pull_lines(d, 0, 2)["CFGERR"]]
+        assert codes == ["MALFORMED", "NOMEM"], codes
+    finally:
+        W.PULL_SPACING_S, S21.time = old
+    leaked = [m for m in msgs if any(s in m for s in SECRETS)]
+    assert not leaked, f"{len(leaked)} messages quote a secret"
+
+
+def t_backup_chain_parse(tmp):
+    """s03's ?backup chain parser (wizard.remote_pull, run 20260924-234056): a line printed on the WiFi task between each
+    header and its chain; a chain split by one, reported as failing its CRC; a configured chain that is missing, which
+    must not pick up the factory one; a bare checksum and an empty chain line; and _factory_reply reading ?backup again
+    while its factory chain is broken, then giving up."""
+    from hil import wcb as W
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s03_wcb as S03
+    finally:
+        runner.REGISTRY[:] = saved              # helpers only: the real tests never join a selftest run
+    live, fact = "?HW,24^?WCB,2^?SEQ,SAVE,HILK,;S1a^;S1b^?LABEL,S3,Dome", "?HW,24^?WCB,2^?SEQ,SAVE,HILK,;S1a^;S1b"
+    stray = "[ETM] WCB1 came ONLINE (boot) (src MAC: 00:11:22:33:44:55)"
+
+    def chk(chain):
+        return f"{chain}^?CHK{W.chain_crc(chain)}"
+
+    def backup(configured, factory, noise=()):
+        return (["", "*** ========================================", "*** WCB Configuration Backup", "?HW,24", "?WCB,2",
+                 "", "*** === For Configured Boards (Current Delimiter: '^') ==="] + list(noise) + configured +
+                [f"*** Checksum: ?CHK{W.chain_crc(live)}", "",
+                 "*** === For Factory Reset/Fresh Boards (Uses Default '^' Delimiter) ==="] + list(noise) + factory +
+                [f"*** Checksum: ?CHK{W.chain_crc(fact)}", "--------- End of Backup ---------", ""])
+
+    good = backup([chk(live)], [chk(fact)])
+    assert S03.backup_chain_lines(good) == {"configured": chk(live), "factory": chk(fact)}
+    assert S03.backup_chain_problems(good) == []
+    between = backup([chk(live)], [chk(fact)], noise=[stray])
+    assert S03.backup_chain_lines(between) == {"configured": chk(live), "factory": chk(fact)}, "a stray line broke it"
+    assert S03.backup_chain_problems(between) == []
+    cut = chk(fact).index("^?SEQ") + 1
+    split = backup([chk(live)], [chk(fact)[:cut], stray, chk(fact)[cut:]])
+    probs = S03.backup_chain_problems(split)
+    assert len(probs) == 1 and "factory chain" in probs[0] and "fails its CRC" in probs[0], probs
+    missing = S03.backup_chain_lines(backup([], [chk(fact)]))
+    assert missing == {"configured": "", "factory": chk(fact)}, missing
+    assert "not a checksummed chain (0 chars)" in S03.backup_chain_problems(backup([], [chk(fact)]))[0]
+    bare = S03.backup_chain_problems(backup([f"^?CHK{W.chain_crc('')}"], [chk(fact)]))
+    assert len(bare) == 1 and "configured chain is not a checksummed chain" in bare[0], bare
+    assert S03.backup_chain_lines(backup([""], [chk(fact)]))["configured"] == ""
+    assert S03.backup_chain_lines(["no backup here"]) == {"configured": None, "factory": None}
+    for text in [str(x) for x in (S03.backup_chain_problems(split), bare)]:
+        assert "HILK" not in text and "Dome" not in text, "a problem line quoted the chain"
+
+    class W2:
+        def __init__(self, *replies):
+            self.replies, self.calls = replies, 0
+
+        def run(self, cmd, timeout=None):
+            assert cmd == "?backup", cmd
+            self.calls += 1
+            return self.replies[min(self.calls, len(self.replies)) - 1]
+
+    w2 = W2(split, between)
+    assert S03._factory_reply(w2, "6.3.0_T") == f"[VER:6.3.0_T]{chk(fact)}" and w2.calls == 2
+    w2 = W2(split)
+    try:
+        S03._factory_reply(w2, "6.3.0_T")
+        raise RuntimeError("a factory chain that never passes its CRC was accepted")
+    except AssertionError as e:
+        assert w2.calls == 3 and "3 reads" in str(e) and "HILK" not in str(e), (w2.calls, str(e))
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -1932,7 +2625,9 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
          t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
-         t_durations, t_optin_gate_up_front, t_list_lines]
+         t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
+         t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
+         t_backup_chain_parse]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

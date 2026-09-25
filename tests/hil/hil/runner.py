@@ -2,8 +2,8 @@
 
 Tests register with @test(id, title, needs=[device names], links=[port keys], opt_in=<key>). A test passes by
 returning, fails by raising AssertionError (ExpectTimeout included), and is skipped by raising
-Skip — or automatically when a device or wire it needs is not on the bench, or its opt-in (hil/optin.py) is not in
-bench.json "opt_in". When `links` is not
+Skip — or automatically when a device or wire it needs is not on the bench, when it moves a servo in a no-servos run
+(hil/servos.py), or when its opt-in (hil/optin.py) is not in bench.json "opt_in". When `links` is not
 given it is read from the test's source (`wire(bench, 1, "S3")` / `link(bench, 2, "S1")`, one
 level into module helpers), so the GUI can say which wire unlocks which test without anyone
 maintaining a list. Every serial line in and out is written to session.log.
@@ -25,7 +25,8 @@ from datetime import datetime
 
 from .checkpoint import (PAUSE, Checkpoint, CheckpointError, atomic_write_json, find_resumable,
                          fmt_duration, harness_info, redact_text)
-from . import optin
+from . import nvs as nvsrec
+from . import optin, servos
 from .config import read_config
 from .links import LinkManager
 from .probe import PROBE_BAUD, Probe, restart_what
@@ -133,17 +134,20 @@ def drives_of(bench, t):
     return sorted(k for k in keys if re.match(r"^W\d+S[1-5]$", k))
 
 
-def list_lines(tests, cfg=None, history=None):
+def list_lines(tests, cfg=None, history=None, no_servos=False):
     """run.py --list: id, wires, expected duration (hil/durations.py: '0:12' from past runs, '~5:00' estimated, '?'),
-    an opt-in tag ('[opt-in ota_full]', or '[opt-in ota_full: off]' when bench.json does not name it), and the title."""
+    a servo tag ('[servo]', or '[servo: skipped]' under --no-servos or bench.json "no_servos"; hil/servos.py), an
+    opt-in tag ('[opt-in ota_full]', or '[opt-in ota_full: off]' when bench.json does not name it), and the title."""
     from . import durations
     on = optin.enabled(cfg)
+    skip_servos = servos.enabled(cfg, {"no_servos": no_servos})
     out = []
     for t in tests:
         wires = ",".join(links_of(t)) or "-"
         exp = durations.fmt_expected(*durations.expected(t, history, cfg))
         key = t.get("opt_in")
-        tag = f"[opt-in {key}{'' if key in on else ': off'}] " if key else ""
+        tag = f"[servo{': skipped' if skip_servos else ''}] " if servos.moves_servo(t) else ""
+        tag += f"[opt-in {key}{'' if key in on else ': off'}] " if key else ""
         out.append(f"{t['id']:<26} {wires:<16} {exp:>8}  {tag}{t['title']}")
     return out
 
@@ -580,8 +584,10 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
             ckpt.last_boundary = _boundary()
             continue
         miss = missing(bench, t)
-        # After the missing check, so a gated test that also lacks a wire keeps the "needs ..." skip it always had.
-        off = None if miss else optin.gate(bench.cfg, t)
+        # After the missing check, so a gated test that also lacks a wire keeps the "needs ..." skip it always had. The
+        # servo gate goes before the opt-in one: a no-servos run's report has to say which tests it kept still, and
+        # its flag lives in the checkpoint as well as bench.json, so a --resume keeps it (hil/servos.py).
+        off = None if miss else (servos.gate(bench.cfg, ckpt.data, t) or optin.gate(bench.cfg, t))
         if miss:
             r = (t, "SKIP", "needs " + ", ".join(miss), 0.0)
             bench.note(f"===== {t['id']} SKIP (0.0s) needs {', '.join(miss)}")
@@ -668,6 +674,8 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
         i += 1
         ckpt.last_boundary = _boundary()
     else:
+        if ckpt.data.get("nvs"):
+            ckpt.data["nvs"]["end"] = nvsrec.record(bench, "end", ckpt.name)
         ckpt.finish("done")
     return results
 
@@ -754,10 +762,11 @@ def _discover(bench, log):
         log(f"  {link}{'' if link.verified else '   <-- did not verify'}")
 
 
-def start_run(bench, tests, label, selectors=None, discover=False):
+def start_run(bench, tests, label, selectors=None, discover=False, no_servos=False):
     """A new run: its folder and session.log, a checkpoint holding the lock, and - for a run of SNAPSHOT_MIN_TESTS or
     more - the firmware versions and the saved-config baseline (about 5 s). A shorter run skips both, so a
-    double-clicked single test does not pay for them. Nothing here ever blocks the run."""
+    double-clicked single test does not pay for them. Nothing here ever blocks the run. no_servos (run.py --no-servos)
+    is recorded in the checkpoint, not bench.json: the run's own flag, kept by a resume in any process."""
     from . import resume
     out_dir = bench.new_session()
     stale = os.path.join(bench.results_root, PAUSE)
@@ -768,6 +777,8 @@ def start_run(bench, tests, label, selectors=None, discover=False):
         except OSError:
             pass
     ckpt = Checkpoint.new(out_dir, tests, label, selectors, bench, discover=discover)
+    if no_servos:
+        ckpt.data["no_servos"] = True
     ckpt.log, ckpt.sync_log = bench.note, bench.sync_log
     ckpt.acquire()        # before the first save, so a scan never sees this run as interrupted
     try:
@@ -780,6 +791,9 @@ def start_run(bench, tests, label, selectors=None, discover=False):
             try:
                 ckpt.start_firmware = resume.record_firmware(bench)
                 ckpt.set_config_ref(resume.snapshot_configs(bench), "start")
+                # Settings-storage use per board (hil/nvs.py; HIL_TEST_AUDIT.md F10): a full NVS fails tests that
+                # have nothing wrong with them, and only a reading at both ends of every run shows it creeping.
+                ckpt.data["nvs"] = {"start": nvsrec.record(bench, "start", ckpt.name)}
             finally:
                 # record_firmware opens NaviCore and every probe. A run whose tests never use them must not hold their
                 # ports all run (an IDE upload or a NaviCore tab gets "port busy"), and the pre-test gate must not
@@ -901,7 +915,7 @@ def _cli_requeue(t, detail):
     print(f"RETRY {t['id']:<24} {detail.splitlines()[0]} - it will run again")
 
 
-def run(bench_path, selectors, results_root, discover=False, control=None, on_checks_done=None):
+def run(bench_path, selectors, results_root, discover=False, control=None, on_checks_done=None, no_servos=False):
     """The CLI flow: open the bench, discover wires if asked (or never done), run, report. -> (out_dir, ckpt)."""
     control = control or RunControl()
     bench = Bench(bench_path, results_root)
@@ -910,8 +924,9 @@ def run(bench_path, selectors, results_root, discover=False, control=None, on_ch
         disc = bool(discover or (first_time and bench.probe_names() and bench.has("wcb1")))
         tests = select(selectors)
         ckpt = start_run(bench, tests, " ".join(selectors) or "everything", selectors=list(selectors or []),
-                         discover=disc)
+                         discover=disc, no_servos=no_servos)
         print(f"Run {ckpt.name} · {len(tests)} tests · pause: Ctrl+C, or create results/{ckpt.name}/{PAUSE}")
+        _print_no_servos(bench, ckpt, tests)
         continue_run(bench, ckpt, resuming=False, on_result=_cli_printer, on_requeue=_cli_requeue,
                      should_stop=control.should_stop, should_pause=control.should_pause,
                      on_checks_done=on_checks_done, discover_log=print)
@@ -935,8 +950,15 @@ def resolve_run(results_root, which="latest"):
     return path
 
 
-def resume(bench_path, results_root, which="latest", control=None, ask=None, on_checks_done=None):
-    """The CLI's --resume: continue a paused, interrupted or (named) stopped run. -> (out_dir, ckpt)."""
+def _print_no_servos(bench, ckpt, tests):
+    if servos.enabled(bench.cfg, ckpt.data):
+        n = sum(1 for t in tests if servos.moves_servo(t))
+        print(f"No moving servos: {n} test{'' if n == 1 else 's'} that move a servo will SKIP (hil/servos.py)")
+
+
+def resume(bench_path, results_root, which="latest", control=None, ask=None, on_checks_done=None, no_servos=False):
+    """The CLI's --resume: continue a paused, interrupted or (named) stopped run. -> (out_dir, ckpt). no_servos turns
+    the run's no-servos flag on for the rest of it (and it stays on); it never turns off a flag the run started with."""
     control = control or RunControl()
     path = resolve_run(results_root, which)
     ckpt = Checkpoint.load(path)
@@ -945,6 +967,10 @@ def resume(bench_path, results_root, which="latest", control=None, ask=None, on_
     bench = Bench(bench_path, results_root)
     try:
         print(f"Resuming {ckpt.name} ({ckpt.data.get('label')}): {ckpt.done_count} of {ckpt.total} done")
+        if no_servos:
+            ckpt.data["no_servos"] = True    # saved with the checkpoint's next write, before any test runs
+        done = {r["id"] for r in ckpt.data["results"]}
+        _print_no_servos(bench, ckpt, [t for t in REGISTRY if t["id"] in ckpt.data["tests"] and t["id"] not in done])
 
         def log(s):
             bench.note(s)

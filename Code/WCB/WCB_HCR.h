@@ -2,6 +2,7 @@
 #define WCB_HCR_H
 
 #include <Arduino.h>
+#include <functional>
 
 // -----------------------------------------------------------------------
 // Human-Cyborg Relations (HCR) Vocalizer integration for the WCB
@@ -52,13 +53,11 @@ void configureHCR(const String &args);
 void clearHCRConfig();
 void printHCRSettings();     // ?HCR,LIST
 void printHCRStatus();       // ?HCR,STATUS  ->  [HCR:...]
-// defSep/defFunc: separator + function-identifier used for the FACTORY chain
-// (chainedConfigDefault). printBackupConfig passes its live defaultSep/
-// defaultFunc, which flip after the chain replays ?DELIM/?FUNCCHAR — never
-// hardcode '^'/'?' inside an emitter or custom-delimiter restores break.
-void printHCRBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial = false,
-                    const String &defSep = "^", const String &defFunc = "?");
+// Backup: yields each command BODY ("HCR,PORT,S2:9600" - no prefix, no separator) through
+// `emit`. collectConfigCommands (WCB.ino) gives every output its own prefix and separator:
+// the live chain's delimiter/funcChar, the factory chain's '^' and a func id that flips after
+// ?FUNCCHAR. An emitter that hardcoded '^'/'?' broke custom-delimiter restores.
+void emitHCRBackup(const std::function<void(const String &)> &emit);
 
 // ---- Loop tick — non-blocking update + auto-poll; call once per loop ----
 void processHCRTick();

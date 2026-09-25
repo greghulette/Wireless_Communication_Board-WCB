@@ -1110,9 +1110,7 @@ void clearAllMaestroConfigs() {
   saveBroadcastBlockSettings();
 }
 
-void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
-                        char delimiter, bool printToSerial,
-                        const String &defSep, const String &defFunc) {
+void emitMaestroBackup(const std::function<void(const String &)> &emit) {
     bool anyActive = false;
     for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured) {
@@ -1153,10 +1151,7 @@ void printMaestroBackup(String &chainedConfig, String &chainedConfigDefault,
                       ":" + String(maestroConfigs[i].baudRate);
         }
 
-        String cmd = String(LocalFunctionIdentifier) + suffix;
-        if (printToSerial) Serial.println(cmd);
-        chainedConfig += String(delimiter) + cmd;
-        chainedConfigDefault += defSep + defFunc + suffix;
+        emit(suffix);
     }
 }
 

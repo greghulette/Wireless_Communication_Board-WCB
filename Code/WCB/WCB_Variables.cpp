@@ -500,9 +500,7 @@ bool evaluateIfCondition(const String &expr) {
 }
 
 // ---- Backup -------------------------------------------------------------
-void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
-                          char delimiter, bool printToSerial,
-                          const String &defSep, const String &defFunc) {
+void emitVariablesBackup(const std::function<void(const String &)> &emit) {
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
     if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars (live telemetry) are not backed up
     // Emit as a CONFIG command (?VAR,SET,name,value), not runtime ";V":
@@ -510,9 +508,6 @@ void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
     //  - restores via processVarConfig exactly like every other ? entry
     // (";V" remains the runtime set/mutate command; backups are config.)
     String suffix = "VAR,SET," + String(vars[i].name) + "," + String((long)vars[i].value);
-    String cmd = String(LocalFunctionIdentifier) + suffix;
-    if (printToSerial) Serial.println(cmd);
-    chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += defSep + defFunc + suffix;
+    emit(suffix);
   }
 }

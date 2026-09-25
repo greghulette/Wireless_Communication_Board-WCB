@@ -33,12 +33,22 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ETM,ON            Enable ETM packet/ACK/retry debug"));
         Serial.println(F("                      Shows sequence numbers, ACKs, retries"));
         Serial.println(F("  ETM,OFF           Disable ETM debug"));
+        Serial.println(F("\nTest knobs (mesh config pull, see ?MGMT?):"));
+        Serial.println(F("  PULLFAULT,OOM     The next config pull this board accepts fails its"));
+        Serial.println(F("                      reply buffer allocation and answers CFGERR"));
+        Serial.println(F("                      NOMEM (+ an empty reply if it fits one line)."));
+        Serial.println(F("                      One-shot; disarms after firing or after 60 s"));
+        Serial.println(F("  PULLFAULT,OFF     Disarm PULLFAULT"));
+        Serial.println(F("  PULLPART,<n>      Data bytes per part when this board sends a"));
+        Serial.println(F("                      config in parts (512-2880; 0 or OFF = 2880)"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?DEBUG,ON"));
         Serial.println(F("  ?DEBUG,ETM,ON"));
         Serial.println(F("  ?DEBUG,PWM,OFF"));
+        Serial.println(F("  ?DEBUG,PULLPART,600    - Split a large config into more parts"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Debug settings are NOT saved to NVS and reset on reboot"));
+        Serial.println(F("  - PULLFAULT and PULLPART are RAM-only and never in ?backup"));
         Serial.println(F("  - ETM debug is very verbose during characterization runs"));
         Serial.println(F("  - PWM debug will print for every pulse received"));
         Serial.println(F("\nLegacy commands:"));
@@ -97,7 +107,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?SMRSx        - Remove serial mapping"));
         Serial.println(F("  ?SMLIST       - List serial mappings"));
         Serial.println(F("  ?SMCLEAR      - Clear all serial mappings"));
-        Serial.println(F("  ?PMSSx,dest   - PWM map"));
+        Serial.println(F("  ?PMSx,dest    - PWM map"));
         Serial.println(F("  ?POSx         - PWM output port"));
         Serial.println(F("  ?PRSx         - Remove PWM mapping"));
         Serial.println(F("  ?PLIST        - List PWM mappings"));
@@ -493,7 +503,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nConfiguration Commands:"));
         Serial.println(F("  S<port>:<baud>:V<vol>  Configure MP3 Trigger (all fields required)"));
         Serial.println(F("                           port: 1-5 (any free port)"));
-        Serial.println(F("                           baud: 9600 or 38400 (38400 requires S1/S2)"));
+        Serial.println(F("                           baud: 9600 or 38400 (either works on any port)"));
         Serial.println(F("                           vol:  0-64 (0=loudest, 64=inaudible)"));
         Serial.println(F("  LIST                   Show current configuration"));
         Serial.println(F("  CLEAR                  Remove configuration, free the port"));
@@ -620,7 +630,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nConfiguration Commands (?HCR,...):"));
         Serial.println(F("  PORT,Sx:baud      Reserve & configure the HCR port"));
         Serial.println(F("                      baud: 9600/19200/38400/57600/115200"));
-        Serial.println(F("                      (S3-S5 software serial: 9600 only)"));
+        Serial.println(F("                      (S3-S5 software serial: up to 57600)"));
         Serial.println(F("  CLEAR             Release the HCR port"));
         Serial.println(F("  LIST              Show HCR configuration and link status"));
         Serial.println(F("  POLL,<sec>        Auto-poll interval (default 10; OFF to stop)"));
@@ -716,6 +726,46 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - One slot per WLED ID; ;L<id> routes to whichever board hosts it"));
         Serial.println(F("  - Port is dedicated: broadcast I/O is disabled on it"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
+
+    // ================================================================
+    } else if (c == "MGMT") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?MGMT,<verb>,<target WCB>[,...]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Relays a management request to another board over ESP-NOW. THIS"));
+        Serial.println(F("  board is the relay: the target answers over the mesh and the reply"));
+        Serial.println(F("  prints here as one [MGMT:<tag>,<n>] line. Normally driven by the"));
+        Serial.println(F("  Wizard, not by hand."));
+        Serial.println(F("\nCommands:"));
+        Serial.println(F("  PULL,<n>          WCB n's config:  [MGMT:CONFIG,n]<config>"));
+        Serial.println(F("                      Over 2912 characters it cannot come back this"));
+        Serial.println(F("                      way: [MGMT:CFGERR,n]NOPARTS,..."));
+        Serial.println(F("  PULL,<n>,P        The same, and a config over 2912 characters comes"));
+        Serial.println(F("                      back in parts, one line each:"));
+        Serial.println(F("                      [MGMT:CFGPART,n]P<id>,<k>,<K>:<data>~"));
+        Serial.println(F("                      The <data> of parts 1..K of one <id>, joined,"));
+        Serial.println(F("                      is the config"));
+        Serial.println(F("  STATS,<n>         WCB n's ?STATS:  [MGMT:STATS,n]"));
+        Serial.println(F("  SEQ,<n>           WCB n's sequence names:  [MGMT:SEQ,n]"));
+        Serial.println(F("  SEQGET,<n>,<key>  One sequence from WCB n:  [MGMT:SEQVAL,n]"));
+        Serial.println(F("  ETM,CHAR,<n>      ETM characterization on WCB n:  [MGMT:ETM,n]"));
+        Serial.println(F("  FRAG,...          One fragment of a Wizard config push"));
+        Serial.println(F("\nPull errors ([MGMT:CFGERR,n]<CODE>,<detail>):"));
+        Serial.println(F("  NOMEM             The target was out of memory - try again"));
+        Serial.println(F("  CHANGED           The config changed while it was sent - try again"));
+        Serial.println(F("  NOPARTS           Over 2912 characters and no request for parts"));
+        Serial.println(F("                      arrived (every ,P copy lost, or an older"));
+        Serial.println(F("                      Wizard/relay): ask again with ,P"));
+        Serial.println(F("  TOOBIG            Too large even in parts: ?backup over USB"));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?MGMT,PULL,3         - Config of WCB3"));
+        Serial.println(F("  ?MGMT,PULL,3,P       - Config of WCB3, in parts if it is large"));
+        Serial.println(F("  ?MGMT,SEQGET,3,wave  - Sequence 'wave' from WCB3"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - A config pull carries the mesh password and any WiFi passphrase"));
+        Serial.println(F("  - Older relays treat PULL,<n>,P as PULL,<n>"));
+        Serial.println(F("  - Test knobs, on the TARGET: ?DEBUG,PULLPART and ?DEBUG,PULLFAULT"));
 
     // ================================================================
     } else if (c == "OTA" || c == "OTALOCAL") {
@@ -844,6 +894,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    itself (directly or in a ring): that recall is refused. Max 8 levels deep."));
         Serial.println(F("  - A called sequence containing ;T replaces the caller's remaining timed steps."));
         Serial.println(F("  - Timer commands (;T) create non-blocking delays between steps"));
+        Serial.println(F("  - A ;T delay over 30 minutes is capped at 1800000 ms (and says so); a"));
+        Serial.println(F("    negative one (;T-500) refuses the whole chain - nothing in it runs"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?CSkey,value   - Save sequence  (e.g. ?CSwave,CMD1^CMD2)"));
@@ -1031,6 +1083,21 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?CCx   (e.g. ?CC;)"));
 
     // ================================================================
+    } else if (c == "NVS") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?NVS"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Shows how full the settings storage (NVS) is and which namespace"));
+        Serial.println(F("  uses what. Read-only. A full store refuses long sequences and the"));
+        Serial.println(F("  variable table long before anything else says why."));
+        Serial.println(F("\nOutput:"));
+        Serial.println(F("  NVS: used=U free=F available=A total=T namespaces=N (P% used)"));
+        Serial.println(F("    one line per namespace: its name and the entries it uses"));
+        Serial.println(F("  Entries are 32-byte slots; a string or blob takes one per 32 bytes."));
+        Serial.println(F("  'available' is what new data can use (free minus the GC reserve)."));
+
+    // ================================================================
     } else if (c == "ERASE") {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("---------------------------------------------------"));
@@ -1052,6 +1119,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Hardware version"));
         Serial.println(F("  - ETM settings"));
         Serial.println(F("  - Serial labels"));
+        Serial.println(F("  - WiFi settings, including their passwords"));
+        Serial.println(F("  - Learned peers and saved serial-attached devices"));
+        Serial.println(F("  - Devices (Maestro, HCR, MP3, DFPlayer, WLED), variables"));
+        Serial.println(F("  - Anything else in NVS, including older firmware's leftovers"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?ERASE,NVS     - Erase everything and reboot"));
         Serial.println(F("\nWARNING: This cannot be undone! Use ?BACKUP first!"));
@@ -1143,7 +1214,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\n  NETWORK:"));
         Serial.println(F("    ?ETM            Ensured Transmission Mode (ACK/retry/heartbeat)"));
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
+        Serial.println(F("    ?NVS            Settings storage use, by namespace (read-only)"));
         Serial.println(F("    ?WDP            Mesh discovery + neighbor table (auto-join peers)"));
+        Serial.println(F("    ?MGMT           Relay a config pull/push to another board (Wizard)"));
         Serial.println(F("\n  FIRMWARE UPDATE:"));
         Serial.println(F("    ?OTA            Relay a firmware image to another WCB over the mesh"));
         Serial.println(F("    ?OTALOCAL       Update THIS board over USB"));

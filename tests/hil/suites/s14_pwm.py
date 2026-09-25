@@ -1,8 +1,8 @@
 """PWM — ;P pulses, ?MAP,PWM output ports, local and mesh passthrough, WDP PWMTARGET auto-config.
 
 Built from the verified pwm specs. Most tests reboot: a ?MAP,PWM mapping reboots once the command
-queue has been quiet for 4 s (pwmRebootPending, WCB.ino:966), and ?MAP,PWM,CLEAR,OUT / ?PX restart
-INLINE (WCB.ino:5045-5053), so those are sent with send() and a boot wait, never run().
+queue has been quiet for 4 s (pwmRebootPending, WCB.ino:966), and ?MAP,PWM,CLEAR,OUT / ?PX defer their
+restart the same way (tracker #9), so all three are sent with send() and a boot wait, never run().
 
 "(should)" tests assert intended behaviour where the firmware has a probable bug. Rules from the specs:
 never ;P or map onto W2S1 (the real Maestro); hold a WCB PWM input with PWMOUT 0, never leave it
@@ -450,7 +450,7 @@ def map_deferred_reboot(bench):
                 assert any(re.search(pattern, x) for x in boot), f"boot banner lacks /{pattern}/"
             tokens = snapshot(bench, 1)
             assert tokens[-1] == "?MAP,PWM,S3,S4", f"the PWM token is not last in ?backup: {tokens[-3:]}"
-            assert gap < 12, f"reboot came {gap:.1f} s after the last command"
+            assert 3.5 <= gap <= 7, f"reboot came {gap:.1f} s after the last command (PWM_REBOOT_QUIET_MS is 4000, WCB.ino:1104)"
         finally:
             _clear_local_mapping(w, "S3")
             s3.pwm_stop()
@@ -475,6 +475,28 @@ def map_validation(bench):
         bad = [f"{cmd!r} -> {out}" for cmd, wants in checks for out in [w.run(cmd)] if not all(_has(out, x) for x in wants)]
         time.sleep(6.0)
         assert not any("Rebooting" in x for x in w.dev.since(m)), "an invalid ?MAP,PWM rebooted the board"
+        assert not bad, "; ".join(bad)
+
+
+@test("pwm.legacy_forms", "Legacy ?PLIST, ?PRS<n> and ?PMS<n>,<dest> reach the ?MAP,PWM handlers (characterisation; nothing gets mapped, no reboot)", needs=["wcb1"], links=[])
+def legacy_forms(bench):
+    """WCB.ino's legacy block: ?PLIST -> listPWMMappings, ?PRS<n> -> removePWMMapping(n), ?PMS<n>,<dest> ->
+    addPWMMapping("PMS<n>,<dest>"), the same string ?MAP,PWM,S<n>,<dest> builds (WCB.ino:5446). The help once advertised a
+    ?PMSSx form (fixed 2026-09-24, F2 / tracker #82); that spelling reads its 'S3' as port 0 and is refused. ?PCLEAR and ?POS<n> are never sent - both can reboot."""
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    with config_guard(bench, 1):
+        m = w.dev.mark()
+        checks = [("?PLIST", ["PWM Mappings:", "No input mappings configured"]),
+                  ("?PRS3", ["No PWM mapping found for Serial3"]),
+                  ("?PMS3,X9", ["No valid outputs specified"]),
+                  ("?PMSS3,S4", ["Input port must be 1-5"])]
+        bad = [f"{cmd!r} -> {out}" for cmd, wants in checks for out in [w.run(cmd)] if not all(_has(out, x) for x in wants)]
+        page = w.run("?MAP?")                                  # the MAP help page lists the legacy spellings
+        if not _has(page, "  ?PMSx,dest    - PWM map") or _has(page, "?PMSS"):
+            bad.append("the ?MAP? help page does not advertise the working ?PMSx,dest spelling (F2, tracker #82)")
+        time.sleep(6.0)
+        assert not any("Rebooting" in x for x in w.dev.since(m)), "a legacy PWM command rebooted the board"
         assert not bad, "; ".join(bad)
 
 

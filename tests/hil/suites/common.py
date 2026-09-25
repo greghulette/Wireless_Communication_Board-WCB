@@ -160,11 +160,81 @@ def snapshot(bench, wcb):
     return read_config(bench, wcb)
 
 
+# Token kinds config_guard puts back on its own when a test leaks them (docs/HIL_TEST_AUDIT.md A1). Only settings a
+# replayed backup line restores in place, with no reboot and no mesh side effect. Identity and radio (?WCB, ?WCBCH,
+# ?MAC, ?EPASS), ETM, WDP, the controller, devices (?MAESTRO, ?KYBER, ?HCR, ?MP3, ?DFP, ?WLED) and ?MAP,PWM (which
+# reboots) are left to the test and reported as not put back.
+AUTO_RESTORE = ("?BAUD,", "?BCAST,", "?LABEL,", "?SEQ,SAVE,", "?MAP,SERIAL,", "?VAR,SET,", "?ALIAS,")
+# A leaked one of these changes how commands are read: nothing can be sent safely until the test's own restore runs.
+NO_AUTO_RESTORE_WHILE = ("?DELIM,", "?CMDCHAR,", "?FUNCCHAR,")
+
+
+def _undo(leaked, before):
+    """The command that removes a leaked token, or None when replaying the baseline's own token replaces it.
+
+    A same-key ?SEQ,SAVE is overwritten in place (a clear-and-save would move the key to the end of the inventory and
+    change the backup order); a same-port ?MAP,SERIAL replaces its destination list; ?BAUD / ?BCAST are values the
+    baseline token sets back."""
+    u = leaked.upper()
+    m = re.match(r"^\?LABEL,(S\d),", u)
+    if m:
+        return None if any(t.upper().startswith(f"?LABEL,{m.group(1)},") for t in before) else f"?LABEL,CLEAR,{m.group(1)}"
+    m = re.match(r"^\?SEQ,SAVE,([^,]+),", leaked, re.I)
+    if m:
+        return None if any(t.startswith(f"?SEQ,SAVE,{m.group(1)},") for t in before) else f"?SEQ,CLEAR,{m.group(1)}"
+    m = re.match(r"^\?MAP,SERIAL,(S\d)", u)
+    if m:
+        return None if any(re.match(rf"^\?MAP,SERIAL,{m.group(1)}\b", t, re.I) for t in before) else f"?MAP,SERIAL,CLEAR,{m.group(1)}"
+    m = re.match(r"^\?VAR,SET,([^,]+),", leaked, re.I)
+    if m:
+        return None if any(t.startswith(f"?VAR,SET,{m.group(1)},") for t in before) else f"?VAR,CLEAR,{m.group(1)}"
+    if u.startswith("?ALIAS,"):
+        return None if any(t.upper().startswith("?ALIAS,") for t in before) else "?ALIAS,CLEAR"
+    return None
+
+
+def _auto_restore(bench, wcb, before, after):
+    """Send what puts W<wcb> back for the AUTO_RESTORE token kinds -> (commands sent, tokens left to the test).
+    Undo lines go first (a leaked mapping's CLEAR also restores that port's broadcast flags), then the missing
+    baseline tokens in backup order, as a restore would send them."""
+    missing = [t for t in before if t not in after]
+    extra = [t for t in after if t not in before]
+    if any(t.upper().startswith(NO_AUTO_RESTORE_WHILE) for t in missing + extra):
+        return [], missing + extra
+    cmds, left = [], []
+    for t in extra:
+        if t.upper().startswith(AUTO_RESTORE):
+            undo = _undo(t, before)
+            if undo:
+                cmds.append(undo)
+        else:
+            left.append(t)
+    for t in missing:
+        (cmds if t.upper().startswith(AUTO_RESTORE) else left).append(t)
+    own = bench.usb_wcbs().get(wcb) or ("wcb1" if wcb == bench.usb_wcb_number() else None)
+    sent = []
+    for c in cmds:
+        if own:
+            WCB(bench.dev(own)).run(c, timeout=8)
+        elif "^" in c:
+            left.append(c)          # ;W<n>,a^b is split by the sender (WCB.ino): a ^ value cannot be replayed this way
+            continue
+        else:
+            WCB(bench.dev("wcb1")).send(f";W{wcb},{c}")
+            time.sleep(0.4)
+        sent.append(c)
+    if sent and not own:
+        time.sleep(1.0)
+    return sent, left
+
+
 @contextmanager
 def config_guard(bench, *wcbs):
     """Snapshot the config of each WCB, run the body, and fail if any board did not end up
-    byte-identical. A leak is reported even when the body itself failed. Afterwards the config
-    cache is refreshed and bound wires re-follow the (restored) port bauds."""
+    byte-identical. A leak is reported even when the body itself failed. Before the report, the
+    guard puts back what it safely can (AUTO_RESTORE): the failure then says the bench is clean,
+    or which tokens it left alone. Afterwards the config cache is refreshed and bound wires
+    re-follow the (restored) port bauds."""
     before = {n: snapshot(bench, n) for n in wcbs}
     failure = None
     try:
@@ -185,7 +255,21 @@ def config_guard(bench, *wcbs):
         if after != before[n]:
             missing = [t for t in before[n] if t not in after]
             extra = [t for t in after if t not in before[n]]
-            leaks.append(f"W{n}: missing {missing} / extra {extra}")
+            sent, left = [], []
+            try:
+                sent, left = _auto_restore(bench, n, before[n], after)
+                if sent:
+                    after = snapshot(bench, n)
+                    bench.cache[n] = after
+            except AssertionError as e:      # a send or the re-read timed out: report the leak with what was tried
+                left.append(f"auto-restore stopped: {e}")
+            what = f"W{n}: missing {missing} / extra {extra}"
+            if after == before[n]:
+                leaks.append(f"{what} — put back by config_guard: {sent}")
+            else:
+                still = ([t for t in before[n] if t not in after], [t for t in after if t not in before[n]])
+                leaks.append(what + (f" — config_guard sent {sent}, board still differs: missing {still[0]} / extra {still[1]}"
+                                     if sent else "") + (f"; not put back: {left}" if left else ""))
         bench.links.resync(n)
     if leaks:
         bench.note("CONFIG LEAK " + " | ".join(leaks))

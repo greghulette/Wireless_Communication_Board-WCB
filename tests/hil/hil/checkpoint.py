@@ -826,6 +826,22 @@ def _when(iso):
     return (iso or "")[:19].replace("T", " ")
 
 
+def _nvs_lines(nvs):
+    """One line per board with its settings-storage use at the run's start and end (hil/nvs.py), or nothing."""
+    if not nvs:
+        return []
+    lines = []
+    for board in sorted(set(nvs.get("start") or {}) | set(nvs.get("end") or {})):
+        parts = []
+        for phase in ("start", "end"):
+            s = (nvs.get(phase) or {}).get(board)
+            if s:
+                parts.append(f"{phase} {s['used']}/{s['total']} used ({s['pct']}%), {s['available']} available")
+        if parts:
+            lines.append(f"NVS {board}: " + " · ".join(parts) + "\n")
+    return lines + ["\n"] if lines else []
+
+
 def render_report(ck):
     """report.md from the checkpoint. A single-segment run that finished (done, or stopped) with no host outage and
     no dropped test renders exactly the layout write_report always produced; everything else adds a status line and
@@ -852,6 +868,7 @@ def render_report(ck):
             line += f"\n\nLast resume attempt blocked: {d['last_resume_error'].splitlines()[0]}"
         out.append(line + "\n\n")
     out.append(" · ".join(f"{k} {v}" for k, v in sorted(counts.items())) + f" · took {fmt_duration(ck.active_s)}\n\n")
+    out += _nvs_lines(d.get("nvs"))
     out.append("| Result | Test | Title | Time | Detail |\n|---|---|---|---|---|\n")
     for r in results:
         first = r["detail"].splitlines()[0].replace("|", "\\|") if r["detail"] else ""

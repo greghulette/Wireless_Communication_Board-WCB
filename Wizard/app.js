@@ -113,7 +113,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '23.23:16.R.SEP.2026';
+const UI_VERSION = '25.06:46.R.SEP.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -541,10 +541,10 @@ function relayManageOne(relaySlot, targetN, pull = true) {
 }
 
 // Arm every heard board for management through the relay, then pull each config
-// SEQUENTIALLY. The relay reassembles one config reply at a time, and the pull's
-// [MGMT:CONFIG,] listener isn't target-filtered — so overlapping pulls would
-// cross-assign configs to the wrong board. Hence one-at-a-time, awaiting each to
-// fully settle (config parsed, or all retries exhausted) before the next.
+// SEQUENTIALLY. The relay reassembles one config reply at a time. remoteBoardPull
+// queues its attempts per relay and takes only the target's own reply, so an overlap
+// is safe, but awaiting each to fully settle (config parsed, or all retries exhausted)
+// before the next keeps one board's retries from waiting behind every other board's.
 async function relayRouteAll(relaySlot) {
   if (_relayRouteAllBusy.has(relaySlot)) return;   // ignore a double-click while a run is active
   _relayRouteAllBusy.add(relaySlot);
@@ -2028,8 +2028,9 @@ async function boardOtaRelay(n) {
       // firmware relay keeps only ONE pullSession (WCB.ino), so overlapping requests thrash it —
       // and every live listener used to consume whichever reply arrived first. The reply is now
       // source-filtered, but running them one at a time is what actually makes the relay
-      // answer each request. Fire-and-forget the chain so the finally block still returns
-      // promptly to re-enable the UI.
+      // answer each request. (The await below returns once a pull's first attempt is SENT;
+      // remoteBoardPull's per-relay queue is what keeps the attempts themselves apart.)
+      // Fire-and-forget the chain so the finally block still returns promptly to re-enable the UI.
       (async () => {
         for (const bn of boards) {
           if (bn === n || bn === targetWcb) continue;
@@ -2662,28 +2663,28 @@ function syncDFPToConfig(n) {
 
 // ─── HCR Vocalizer ────────────────────────────────────────────────
 // Mirrors the MP3 pattern (single device, reserved port). HCR firmware
-// blocks >9600 baud on software serial (S3-S5), so the baud dropdown is
-// capped there. config.hcr round-trips via parser.js (HCR,PORT/POLL).
+// blocks >57600 baud on software serial (S3-S5), so the baud dropdown is
+// capped there (9600 until 2026-09-24, HIL_TEST_AUDIT.md F1). config.hcr round-trips via parser.js (HCR,PORT/POLL).
 function _hcrApplyBaudCap(n) {
   const portVal = parseInt(document.getElementById(`b${n}-hcr-port`)?.value);
   const baudSel = document.getElementById(`b${n}-hcr-baud`);
   if (!baudSel) return;
   const isSoftSerial = portVal >= 3;          // S3-S5
   for (const opt of baudSel.options) {
-    opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+    opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
   }
-  if (isSoftSerial && parseInt(baudSel.value) > 9600) {
-    baudSel.value = '9600';
+  if (isSoftSerial && parseInt(baudSel.value) > 57600) {
+    baudSel.value = '57600';
     const config = boardConfigs[n];
     if (config) {
-      config.hcr.baud = 9600;
+      config.hcr.baud = 57600;
       // Keep the underlying serial port baud in sync so buildCommandString
       // doesn't emit a contradictory ?BAUD,S<port>,<high> alongside
-      // ?HCR,PORT,S<port>:9600 on the same push.
+      // ?HCR,PORT,S<port>:57600 on the same push.
       if (portVal >= 1 && portVal <= 5 && config.serialPorts?.[portVal - 1]) {
-        config.serialPorts[portVal - 1].baud = 9600;
+        config.serialPorts[portVal - 1].baud = 57600;
         const sBaudEl = document.getElementById(`b${n}-s${portVal}-baud`);
-        if (sBaudEl) sBaudEl.value = '9600';
+        if (sBaudEl) sBaudEl.value = '57600';
       }
     }
   }
@@ -2889,7 +2890,7 @@ function appendWLEDRow(n, wled) {
   const idOptions = Array.from({length: 8}, (_, i) => i + 1).map(v =>
     `<option value="${v}" ${v === wled.id ? 'selected' : ''}>${v}</option>`).join('');
 
-  const maxBaud  = (wled.port >= 3) ? 9600 : Infinity;   // S3-5 software serial cap
+  const maxBaud  = (wled.port >= 3) ? 57600 : Infinity;   // S3-5 software serial cap (firmware: 115200 refused there)
   const safeBaud = Math.min(wled.baud, maxBaud);
   const baudOptions = WLED_BAUD_RATES.filter(b => b <= maxBaud).map(b =>
     `<option value="${b}" ${b === safeBaud ? 'selected' : ''}>${b.toLocaleString()}</option>`).join('');
@@ -3312,9 +3313,9 @@ function populateUIFromConfig(n, config) {
         if (portSel) portSel.value = config.hcr.port;
         const baudSel = document.getElementById(`b${n}-hcr-baud`);
         if (baudSel) {
-          const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 9600
+          const isSoftSerial = config.hcr.port >= 3;   // S3-S5 capped at 57600
           for (const opt of baudSel.options) {
-            opt.hidden = isSoftSerial && parseInt(opt.value) > 9600;
+            opt.hidden = isSoftSerial && parseInt(opt.value) > 57600;
           }
           baudSel.value = config.hcr.baud ?? 9600;
         }
@@ -5216,9 +5217,7 @@ class BoardConnection {
     this.port = null;
     this.reader = null;
     this._connected = false;
-    this._readBuffer = '';
     this._dataCallbacks = [];
-    this._lineTransform = null;  // optional (line) => displayLine | null — filters terminal output
     // Set true before ?reboot when boardGo is managing the reconnect itself.
     // Prevents _startReading's auto-reconnect from racing with the fire-and-forget.
     this._rebootManaged = false;
@@ -5348,7 +5347,6 @@ class BoardConnection {
         try { await this.port.setSignals({ dataTerminalReady: true }); }
         catch (e) { termLog(this.boardIndex, `⚠ reconnect DTR=true failed: ${e?.message ?? e}`, 'sys'); }
         this._connected = true;
-        this._readBuffer = '';
         this._srDataSeen = false;
         this._startReading();
         _cleanup();
@@ -5369,7 +5367,6 @@ class BoardConnection {
                 await this.port.reconfigure({ baudRate: 115200 });
               try { await this.port.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
               this._connected = true;
-              this._readBuffer = '';
               this._startReading();
               _cleanup();
               return true;
@@ -5396,7 +5393,6 @@ class BoardConnection {
           try { await evtPort.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
           this.port = evtPort;
           this._connected = true;
-          this._readBuffer = '';
           this._startReading();
           _cleanup();
           return true;
@@ -5444,7 +5440,6 @@ class BoardConnection {
               try { await fresh.setSignals({ dataTerminalReady: true }); } catch (_) {} // enable CDC data flow; see connect() comment
               this.port = fresh;   // keep the new reference for future reconnects
               this._connected = true;
-              this._readBuffer = '';
               this._startReading();
               _cleanup();
               return true;
@@ -5610,7 +5605,18 @@ class BoardConnection {
     // Low-rate rc_trig / rc_mode events stay visible.
     const _isRcNoise = line[0] === '{' &&
       (line.indexOf('"rc_hb"') !== -1 || line.indexOf('"rc_ch"') !== -1);
-    if (!_isRcNoise) this._dataCallbacks.forEach(cb => cb(line));
+    // Each listener in its own try: one listener's bug must not cost the others this line. On a direct port
+    // _handleLine runs inside _startReading's try, so a throw that escaped here also read as "Port closed": the
+    // relay was marked disconnected, every board behind it un-managed and the port reopened, on every line that
+    // tripped it.
+    if (!_isRcNoise) this._dataCallbacks.forEach(cb => {
+      try {
+        cb(line);
+      } catch (e) {
+        console.error('[Wizard] a line listener threw:', e);
+        termLog(this.boardIndex, `[Wizard] a line listener failed: ${e?.message ?? e}`, 'err');
+      }
+    });
 
     // ── RC-Controller discovery sniffer (Phase 4) ──────────────────
     // Every serial line on every connected WCB gets fed to the RC
@@ -5687,10 +5693,13 @@ class BoardConnection {
         if (remoteRelayForBoard[s] === this.boardIndex &&
             (boardConfigs[s]?.wcbNumber ?? +s) === srcWcb) { slot = +s; break; }
       }
-      if (!_suppressTerminalLine(termMatch[2]))
-        termLog(slot, termMatch[2], 'out');
+      // A mirrored board can itself be a relay answering someone else's pull: its [MGMT:CONFIG/CFGPART] lines
+      // arrive here inside [TERM:n], and get the same summary as the relay's own.
+      const termText = _summariseMgmtConfigLine(termMatch[2]);
+      if (!_suppressTerminalLine(termText))
+        termLog(slot, termText, 'out');
     } else {
-      const displayed = this._lineTransform ? this._lineTransform(line) : line;
+      const displayed = _summariseMgmtConfigLine(line);   // config text (and its passwords) never reaches the pane
       // Don't echo RC telemetry noise (rc_hb 0.5Hz, rc_ch up to 20Hz) to the terminal —
       // the RC Controllers panel / discovery hook already consume it, and now that the WCB
       // relays rc_ch it would bury real board output. (rc_trig / rc_mode aren't _isRcNoise,
@@ -5713,17 +5722,8 @@ class BoardConnection {
   connectShared(hub) {
     this._shared = true;
     this._hub = hub;
-    this._sharedBuf = '';
-    this._sharedDecoder = new TextDecoder();
-    this._onHubData = (u8) => {
-      this._sharedBuf += this._sharedDecoder.decode(u8, { stream: true });
-      let nl;
-      while ((nl = this._sharedBuf.indexOf('\n')) !== -1) {
-        const line = this._sharedBuf.slice(0, nl).replace(/\r$/, '').trim();
-        this._sharedBuf = this._sharedBuf.slice(nl + 1);
-        if (line) this._handleLine(line);
-      }
-    };
+    // The same splitter as the direct reader (parser.js makeLineSplitter): one streaming decoder per connection.
+    this._onHubData = WCBParser.makeLineSplitter(line => this._handleLine(line));
     this._onHubState = (st) => {
       // Reflect the shared port's open/closed state as this board's connection state.
       // Always re-apply (idempotent) so a card rebuilt mid-session can't get stuck
@@ -5798,6 +5798,9 @@ class BoardConnection {
 
   async _startReading() {
     termLog(this.boardIndex, `[sr] start: connected=${this._connected} readable=${!!this.port?.readable}`, 'sys');
+    // One splitter (parser.js makeLineSplitter: one streaming TextDecoder) for this read loop. Fresh per call, so a
+    // line the port dropped halfway through never prefixes the first line after a reconnect.
+    const splitLines = WCBParser.makeLineSplitter(line => this._handleLine(line));
     outer: while (this._connected && this.port?.readable) {
       try {
         this.reader = this.port.readable.getReader();
@@ -5812,13 +5815,7 @@ class BoardConnection {
           const { value, done } = await this.reader.read();
           if (done) { termLog(this.boardIndex, '[sr] reader done', 'sys'); break outer; }
           if (value?.length > 0 && !this._srDataSeen) { this._srDataSeen = true; termLog(this.boardIndex, `[sr] first data: ${value.length} bytes`, 'sys'); }
-          this._readBuffer += new TextDecoder().decode(value);
-          let nl;
-          while ((nl = this._readBuffer.indexOf('\n')) !== -1) {
-            const line = this._readBuffer.slice(0, nl).replace(/\r$/, '').trim();
-            this._readBuffer = this._readBuffer.slice(nl + 1);
-            if (line) this._handleLine(line);
-          }
+          splitLines(value);
         }
       } catch (e) {
         // Board disconnected mid-read (e.g. reboot) — exit outer loop to trigger reconnect
@@ -8364,190 +8361,433 @@ async function boardGoRemote(n, opts = {}) {
 }
 
 // Pull config from a remote board via the relay's CONFIG_REQ/CONFIG_FRAG protocol.
-// Sends ?MGMT,PULL,<targetN> to the relay; waits PULL_TIMEOUT_MS for [MGMT:CONFIG,<targetN>].
-// Auto-retries up to MAX_PULL_ATTEMPTS times (PULL_RETRY_MS apart) before marking error.
+// Sends ?MGMT,PULL,<n>,P to the relay. The ',P' asks for parts: a target whose reply is over 2912 characters
+// (16 frags x 182, the most one relay message carries) sends it as [MGMT:CFGPART,n] lines instead of refusing. An
+// old relay reads '<n>,P' as <n> (toInt / atoi) and sends a plain request, so the flag costs nothing there. What
+// comes back is decoded by WCBParser.createPullCollector (parser.js has the line formats):
+//   [MGMT:CONFIG,n]<reply>  a single reply -> the success path, unchanged and, as ever, not CRC-checked
+//   K x [MGMT:CFGPART,n]    parts of one id, joined and CRC-checked -> the same success path with the joined text
+//   [MGMT:CONFIG,n] empty   the target could not build the reply (out of heap) -> retried, reported at the end
+//   [MGMT:CFGERR,n]         NOMEM / CHANGED / NOPARTS -> retried like a timeout; TOOBIG -> stop at once
+//   a join failing its CRC  -> retried (parts of two builds, or a corrupted line)
+//   ... with U+FFFD in it   -> retried once; a second job's join failing the same way stops the pull (_pullNotUtf8)
+// Each attempt waits PULL_TIMEOUT_MS, restarted by every NEW part, and the pull retries up to maxAttempts times
+// (PULL_RETRY_MS apart), all inside PULL_DEADLINE_MS of the call.
 // The timeout is short on purpose: a successful pull returns in well under a second,
 // and the relay+target now send CONFIG_REQ/FRAG redundantly, so a dropped first frame
 // should be rare — when it does happen we want to retry quickly, not stall ~15 s.
 const MAX_PULL_ATTEMPTS = 3;
 const PULL_TIMEOUT_MS   = 6000;
 const PULL_RETRY_MS     = 2500;
+// A cap on the whole cycle, counted from the call. Intellex's shim calls remoteBoardPull(slot, n, 1, 3, cb) behind a
+// 45 s watchdog sized for 3 x 6 s + 2 x 2.5 s = 23 s, and then pulls the next board through the same relay. With the
+// timer restarted per part, a failing parts pull grows with K (3 x (K x ~0.64 s + 6 s) + 5 s passes 45 s near
+// K = 12), and that next board would land on a relay still busy with this one. Time queued behind other pulls on the
+// relay counts too, because nothing else bounds it: a target that never answers holds the relay 6 s per attempt, so
+// a pull called behind three of them first went on the air 18 s later, and a cap counted from that send ran out 58 s
+// after the call, past the watchdog. A caller that asks for more than MAX_PULL_ATTEMPTS (the post-OTA pull asks for
+// 12, sized for a board that is still rebooting) gets a full PULL_TIMEOUT_MS + PULL_RETRY_MS more per extra attempt,
+// so its ~100 s budget is not cut to 40 s.
+const PULL_DEADLINE_MS  = 40000;
+
+// One pull attempt on the air per relay. The relay reassembles ONE reply at a time and a new session wipes the one
+// in progress (WCB.ino handleConfigFragPacket; WcbMgmt the same), so two targets answering through one relay at once
+// can both lose - and a parts reply holds the relay for K x ~0.64 s per attempt, not ~0.64 s. Nothing upstream
+// serialises pulls: the ETM came-ONLINE listener fires one per announcing board, the post-OTA reconciliation and the
+// OTA'd board's own 12-attempt pull overlap, and Intellex moves on to the next board after its watchdog while a pull
+// may still be retrying. So every attempt, a retry included, queues here; its PULL_TIMEOUT_MS starts only when it is
+// sent, and the relay is freed on the attempt's outcome, so another board's attempt runs in our retry gap instead of
+// colliding with it. Keyed by relay SLOT, and per tab: another tab sharing the port through the hub is not covered.
+const _pullRelayQueues = {};   // { relaySlot: { active: ticket|null, waiting: [ticket] } }
+// The live pull per target slot. Only the pull that owns this entry releases _pullingBoards (the dedup guard, which
+// Intellex also reads by name): the post-OTA paths clear the guard by hand to force a fresh pull, and the older pull
+// must not release the fresh one's guard when it ends. The older pull is settled (superseded) as the fresh one starts.
+const _activePulls = new Map();   // { targetSlot: pull }
+
+function _pullRelayPump(relayN) {
+  const q = _pullRelayQueues[relayN];
+  while (q && !q.active && q.waiting.length) {
+    const ticket = q.waiting.shift();
+    q.active = ticket;
+    try {
+      ticket.run();
+    } catch (e) {
+      console.error('[Remote] a pull attempt failed to start:', e);
+      if (q.active === ticket) q.active = null;
+    }
+  }
+}
+
+// Queue a ticket ({ relayN, run }) to run when its relay has no attempt on the air. The caller keeps the ticket
+// BEFORE queueing it: run() can start - and its pull end - before this returns.
+function _pullRelayEnqueue(ticket) {
+  const q = (_pullRelayQueues[ticket.relayN] ??= { active: null, waiting: [] });
+  q.waiting.push(ticket);
+  _pullRelayPump(ticket.relayN);
+}
+
+// Free the relay if this ticket holds it, or take the ticket out of the queue if it never ran. Idempotent.
+function _pullRelayRelease(ticket) {
+  const q = ticket && _pullRelayQueues[ticket.relayN];
+  if (!q) return;
+  if (q.active === ticket) q.active = null;
+  else q.waiting = q.waiting.filter(t => t !== ticket);
+  _pullRelayPump(ticket.relayN);
+}
+
 // onComplete(success:boolean) — optional, fired ONCE when this pull cycle fully
 // settles (config parsed, or all retries exhausted). Lets a bulk caller
 // (relayRouteAll) sequence pulls strictly one-at-a-time; retries thread the
 // same callback through so it fires only on the final outcome.
+// Intellex calls this by name with these same 5 positional arguments (intellex_shim.js routeMeshThroughBoard). The
+// returned promise settles once attempt 1 is sent (rejecting if that send throws, as it always has), or when the
+// pull ends before it could be sent; the OUTCOME only ever arrives through onComplete.
 async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_PULL_ATTEMPTS, onComplete = null) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) {
-    // Release the in-flight guard. On a RETRY (attempt > 1) the entry was added by attempt 1, so
-    // bailing here without removing it left the board permanently in _pullingBoards — every later
-    // pull was then rejected as a "duplicate" and the slot could never be refreshed again. A relay
-    // that drops between the timeout and the retry is exactly how this happens.
-    _pullingBoards.delete(targetN);
     showToast('Relay board not connected', 'error');
     onComplete?.(false);
     return;
   }
 
   // Guard against duplicate pulls triggered by the double "[ETM] WCBn came ONLINE" on boot
-  if (attempt === 1) {
-    if (_pullingBoards.has(targetN)) {
-      termLog(relayN, `[Remote] Pull for WCB${targetN} already in progress — skipping duplicate`, 'sys');
-      onComplete?.(false);
-      return;
-    }
-    _pullingBoards.add(targetN);
+  if (attempt === 1 && _pullingBoards.has(targetN)) {
+    termLog(relayN, `[Remote] Pull for WCB${targetN} already in progress — skipping duplicate`, 'sys');
+    onComplete?.(false);
+    return;
+  }
+  const stale = _activePulls.get(targetN);
+  if (stale) {
+    termLog(stale.relayN, `[Remote] Earlier pull for WCB${targetN} superseded by a new one`, 'sys');
+    _pullSettle(stale, false);
   }
 
+  // The WCB number we ask for and accept. The reply carries the SOURCE board's number, and more than one
+  // pull can be in flight on the same relay (post-OTA reconciliation fires one per deferred board, and the
+  // ETM came-ONLINE listener can fire two within a second). Every live listener sees every line on that
+  // relay's stream, so without this check the first reply to arrive was consumed by ALL of them — one
+  // board's config written onto another board's slot, baseline and wcbNumber included. A later "Push
+  // Config" on the victim slot then wrote the wrong board's settings to real hardware.
+  const wantWCB = boardConfigs[targetN]?.wcbNumber || targetN;
+  const pull = {
+    relayN, targetN, wantWCB, attempt, maxAttempts, onComplete,
+    collector: WCBParser.createPullCollector(wantWCB),
+    deadlineMs: PULL_DEADLINE_MS + Math.max(0, maxAttempts - MAX_PULL_ATTEMPTS) * (PULL_TIMEOUT_MS + PULL_RETRY_MS),
+    conn: null, onLine: null, ticket: null,
+    onAir: false, settled: false, finished: false,
+    attemptTimer: null, retryTimer: null, deadlineTimer: null, deadlineAt: 0,
+    notUtf8Id: null,   // the job id of the first join that held U+FFFD (_pullNotUtf8)
+    firstSent: false, resolveFirst: null, rejectFirst: null,
+  };
+  const firstSend = new Promise((res, rej) => { pull.resolveFirst = res; pull.rejectFirst = rej; });
+  pull.onLine = (line) => _pullOnLine(pull, line);
+  _activePulls.set(targetN, pull);
+  _pullingBoards.add(targetN);   // from the moment it is queued, not when it reaches the air
+  // The cap runs from the call (PULL_DEADLINE_MS). Armed before the first attempt is queued: that attempt can settle
+  // the pull before _pullQueueAttempt returns, and settling is what clears this timer.
+  pull.deadlineAt = Date.now() + pull.deadlineMs;
+  pull.deadlineTimer = setTimeout(() => _pullGiveUp(pull), pull.deadlineMs);
+  _pullAttach(pull, relayConn);
+  _pullQueueAttempt(pull);
+  return firstSend;
+}
+
+// The listener lives for the whole pull, retry gaps and queue waits included, so a reply that arrives late (a parts
+// job that outlived an attempt's timeout, a legacy reply to an attempt already given up on) still completes it.
+// It follows the relay's connection object if that was replaced between attempts.
+function _pullAttach(pull, conn) {
+  if (pull.conn === conn) return;
+  if (pull.conn) pull.conn._dataCallbacks = pull.conn._dataCallbacks.filter(cb => cb !== pull.onLine);
+  pull.conn = conn;
+  conn._dataCallbacks.push(pull.onLine);
+}
+
+function _pullQueueAttempt(pull) {
+  pull.retryTimer = null;
+  if (pull.settled) return;
+  const ticket = { relayN: pull.relayN, run: () => { _pullSendAttempt(pull); } };
+  pull.ticket = ticket;
+  _pullRelayEnqueue(ticket);
+  if (!pull.settled && !pull.onAir && pull.ticket === ticket) {
+    termLog(pull.relayN, `[Remote] Pull for WCB${pull.targetN} queued — WCB${pull.relayN} is answering another pull`, 'sys');
+  }
+}
+
+async function _pullSendAttempt(pull) {
+  const { relayN, targetN, maxAttempts } = pull;
+  const attempt = pull.attempt;
+  if (Date.now() >= pull.deadlineAt) {
+    // Its turn came as the cap ran out, before the deadline timer fired (timers due in the same instant, a background
+    // tab's throttled timers): end it here rather than put a request on the air for a pull that is already over.
+    _pullGiveUp(pull);
+    return;
+  }
+  const relayConn = boardConnections[relayN];
+  if (!relayConn?.isConnected()) {
+    // The relay dropped between the call (or the last attempt) and this attempt's turn. Settle, never just return:
+    // a retry that bailed here without releasing the guard left the board in _pullingBoards for good, and every
+    // later pull was rejected as a "duplicate" - a relay that drops between a timeout and the retry does exactly that.
+    showToast('Relay board not connected', 'error');
+    _pullSettle(pull, false);
+    return;
+  }
+  _pullAttach(pull, relayConn);
+  pull.onAir = true;
   termLog(relayN, `[Remote] Requesting config from WCB${targetN} (attempt ${attempt}/${maxAttempts})…`, 'sys');
   showToast(attempt === 1
     ? `Pulling config from WCB${targetN} via WCB${relayN}…`
     : `Retrying pull from WCB${targetN} (attempt ${attempt}/${maxAttempts})…`, 'info');
+  pull.attemptTimer = setTimeout(() => _pullAttemptFailed(pull, null), PULL_TIMEOUT_MS);
 
-  // Before the first pull we don't know the board's WCB_Number, so match
-  // [MGMT:CONFIG,<any>] and extract the actual number from the response.
-  const prefixBase = `[MGMT:CONFIG,`;
-  let done = false;
-  let timer;
-
-  // Replace the raw config blob in the terminal with a char-count summary
-  relayConn._lineTransform = (line) => {
-    if (line.startsWith(prefixBase)) {
-      return `${line.slice(0, line.indexOf(']') + 1)} <${line.length - line.indexOf(']') - 1} chars received>`;
-    }
-    return line;
-  };
-
-  const cleanup = () => {
-    relayConn._lineTransform = null;
-    relayConn._dataCallbacks = relayConn._dataCallbacks.filter(cb => cb !== onLine);
-  };
-
-  // The WCB number we asked for. The reply carries the SOURCE board's number, and more than one
-  // pull can be in flight on the same relay (post-OTA reconciliation fires one per deferred board
-  // with no await, and the ETM came-ONLINE listener can fire two within a second). Every live
-  // listener sees every line on that relay's stream, so without this check the first reply to
-  // arrive was consumed by ALL of them — one board's config written onto another board's slot,
-  // baseline and wcbNumber included. A later "Push Config" on the victim slot then wrote the
-  // wrong board's settings to real hardware.
-  const wantWCB = boardConfigs[targetN]?.wcbNumber || targetN;
-
-  const onLine = (line) => {
-    if (done || !line.startsWith(prefixBase)) return;
-    const closeIdx = line.indexOf(']', prefixBase.length);
-    if (closeIdx < 0) return;
-    const srcWCB = parseInt(line.slice(prefixBase.length, closeIdx), 10);
-    if (Number.isFinite(srcWCB) && srcWCB !== wantWCB) return;   // another board's reply — leave it
-    done = true;
-    clearTimeout(timer);
-    cleanup();
-
-    const prefix = line.slice(0, closeIdx + 1);  // e.g. "[MGMT:CONFIG,3]"
-    let configStr = line.slice(closeIdx + 1).trim();
-    if (!configStr) {
-      _pullingBoards.delete(targetN);
-      updateBoardStatusBadge(targetN, 'error');
-      showToast(`WCB${targetN}: empty config response`, 'error');
-      termLog(relayN, `[Remote] WCB${targetN} returned empty config`, 'err');
-      onComplete?.(false);
-      return;
-    }
-
-    // Extract [VER:<version>] prefix added by buildConfigString() and strip it
-    // before handing the command string to the parser.
-    let remoteFwVersion = null;
-    const verMatch = configStr.match(/^\[VER:([^\]]+)\]/);
-    if (verMatch) {
-      remoteFwVersion = verMatch[1].trim();
-      configStr = configStr.slice(verMatch[0].length);
-    }
-
-    try {
-      const config = WCBParser.parseBackupString(configStr);
-
-      // ── General settings: establish baseline on first pull, detect mismatches after ──
-      const incomingGeneral = extractGeneralFields(config);
-      if (!generalBaseline) {
-        syncGeneralFromConfig(config);
-        generalBaseline = { sourceBoard: config.wcbNumber || targetN, fields: incomingGeneral };
-      } else {
-        const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
-        if (mismatches.length > 0 && !_wizardOpen && !isDefaultNetworkSettings(incomingGeneral)) {
-          setTimeout(() => showGeneralMismatchModal(
-            generalBaseline.sourceBoard, generalBaseline.fields,
-            config.wcbNumber || targetN, incomingGeneral, mismatches
-          ), 200);
-        }
-      }
-
-      boardConfigs[targetN]   = config;
-      boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
-      // Store the firmware version from the VER prefix (if present) and update display
-      if (remoteFwVersion) {
-        boardConfigs[targetN].fwVersion = remoteFwVersion;
-        updateBoardSwVersionDisplay(targetN);
-      }
-      populateUIFromConfig(targetN, config);
-      // Preserve remote badge and connection label (setRemoteConnected may have run before us)
-      updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
-      showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
-      termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
-      // Enable the terminal input and debug buttons for this remote board
-      ensureTerminalPane(targetN);
-      updateTerminalPaneDot(targetN, true);
-      updatePaneVisibilityChip(targetN);   // refresh label in case board switched USB→remote
-      // Start the remote terminal session so WCB${targetN}'s Serial output is mirrored here
-      startRemoteTermSession(relayN, targetN);
-      _pullingBoards.delete(targetN);
-      onComplete?.(true);
-    } catch (e) {
-      _pullingBoards.delete(targetN);
-      updateBoardStatusBadge(targetN, 'error');
-      showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
-      termLog(relayN, `[Remote] Config parse error for WCB${targetN}: ${e.message}`, 'err');
-      onComplete?.(false);
-    }
-  };
-
-  relayConn._dataCallbacks.push(onLine);
-  timer = setTimeout(() => {
-    if (done) return;
-    done = true;
-    cleanup();
-    if (attempt < maxAttempts) {
-      updateBoardStatusBadge(targetN, 'retrying');
-      termLog(relayN, `[Remote] Pull attempt ${attempt}/${maxAttempts} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
-      setTimeout(() => remoteBoardPull(relayN, targetN, attempt + 1, maxAttempts, onComplete), PULL_RETRY_MS);
-    } else {
-      _pullingBoards.delete(targetN);
-      updateBoardStatusBadge(targetN, 'error');
-      showToast(`WCB${targetN}: config pull failed after ${maxAttempts} attempts`, 'error');
-      termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${maxAttempts} attempts`, 'err');
-      onComplete?.(false);
-    }
-  }, PULL_TIMEOUT_MS);
-
-  // Use the board's known WCB number if already pulled; otherwise use the slot (best guess)
-  const pullWCBNum = boardConfigs[targetN]?.wcbNumber || targetN;
+  // wantWCB: the board's known WCB number if already pulled; otherwise the slot (best guess)
   const pullRelayFc = _relayFuncChar(relayN);
   try {
-    await relayConn.send(`${pullRelayFc}MGMT,PULL,${pullWCBNum}\r`);
+    await relayConn.send(`${pullRelayFc}MGMT,PULL,${pull.wantWCB},P\r`);
   } catch (e) {
-    // If the send itself throws (e.g. relay just disconnected), release the
-    // in-flight marker so a subsequent ETM-online event can re-trigger the
-    // pull. Otherwise the slot is permanently locked until the next page
-    // reload. The terminal-state delete calls (success / parse-error /
-    // max-retry) all run after sendAndCollect resolves, so we have to
-    // also cover the failed-send case explicitly.
-    _pullingBoards.delete(targetN);
-    cleanup();
-    if (timer) clearTimeout(timer);
+    // If the send itself throws (e.g. relay just disconnected), end the pull now: settling releases the
+    // in-flight marker, so a subsequent ETM-online event can re-trigger the pull. Otherwise the slot is
+    // permanently locked until the next page reload.
+    if (pull.settled) return;
     termLog(relayN, `[Remote] Send to relay failed: ${e.message}`, 'err');
     updateBoardStatusBadge(targetN, 'error');
-    onComplete?.(false);
-    throw e;
+    _pullSettle(pull, false, e);
+    return;
+  }
+  if (!pull.firstSent) { pull.firstSent = true; pull.resolveFirst(); }
+}
+
+function _pullOnLine(pull, line) {
+  if (pull.settled) return;
+  const r = pull.collector.feed(line);
+  switch (r.kind) {
+    case 'partial':
+      // A NEW part is progress: this attempt is being answered, so it gets another PULL_TIMEOUT_MS. A duplicate is not.
+      if (r.progress && pull.onAir) {
+        clearTimeout(pull.attemptTimer);
+        pull.attemptTimer = setTimeout(() => _pullAttemptFailed(pull, null), PULL_TIMEOUT_MS);
+      }
+      return;
+    case 'legacy':
+      _pullSucceeded(pull, r.body);
+      return;
+    case 'complete':
+      termLog(pull.relayN, `[Remote] WCB${pull.targetN}: ${r.K} config parts joined, checksum OK`, 'sys');
+      _pullSucceeded(pull, r.text);
+      return;
+    case 'empty':
+      _pullAttemptFailed(pull, 'empty config response (out of memory on the target?)');
+      return;
+    case 'crcFail':
+      _pullAttemptFailed(pull, `config parts failed the checksum — ${r.reason}`);
+      return;
+    case 'error':
+      if (r.code === 'NOTUTF8') _pullNotUtf8(pull, r);
+      else if (r.retryable) _pullAttemptFailed(pull, r.reason);
+      else _pullFailNow(pull, r.reason);
+      return;
+    default:
+      return;   // 'ignored': another board's reply, another tag, a malformed part
   }
 }
+
+// The attempt on the air ended without a config: a timeout (reason null) or a retryable reply. Frees the relay and
+// retries after PULL_RETRY_MS, or reports the last reason once the attempts are used up. A retryable reply that
+// arrives while no attempt is on the air belongs to an attempt already counted (the empty legacy reply a target
+// sends after its CFGERR NOMEM, a late reply to a timed-out attempt), so it is not counted twice.
+function _pullAttemptFailed(pull, reason) {
+  if (pull.settled || !pull.onAir) return;
+  const { relayN, targetN, attempt, maxAttempts } = pull;
+  pull.onAir = false;
+  clearTimeout(pull.attemptTimer);
+  pull.attemptTimer = null;
+  const ticket = pull.ticket;
+  pull.ticket = null;
+  _pullRelayRelease(ticket);
+  if (attempt < maxAttempts) {
+    updateBoardStatusBadge(targetN, 'retrying');
+    termLog(relayN, reason
+      ? `[Remote] Pull attempt ${attempt}/${maxAttempts}: ${reason} — retrying in ${PULL_RETRY_MS / 1000}s…`
+      : `[Remote] Pull attempt ${attempt}/${maxAttempts} timed out — retrying in ${PULL_RETRY_MS / 1000}s…`, 'sys');
+    pull.attempt = attempt + 1;
+    pull.retryTimer = setTimeout(() => _pullQueueAttempt(pull), PULL_RETRY_MS);
+  } else {
+    const why = reason ? ` — ${reason}` : '';
+    updateBoardStatusBadge(targetN, 'error');
+    showToast(`WCB${targetN}: config pull failed after ${maxAttempts} attempts${why}`, 'error');
+    termLog(relayN, `[Remote] Config pull from WCB${targetN} failed after ${maxAttempts} attempts${why}`, 'err');
+    _pullSettle(pull, false);
+  }
+}
+
+// A join that failed its CRC with U+FFFD in it (parser.js, code NOTUTF8). One such join has two possible causes: a
+// byte lost on the way inside a multi-byte character, which is random (the next job's parts arrive whole), or bytes
+// stored on the target that are not UTF-8 (a label typed from a Latin-1 terminal), which fail every job the same way.
+// So the first is retried like any CRC failure, and a join from a SECOND job failing the same way stops the pull. The
+// same job's parts delivered again prove nothing new: ignored, and the attempt on the air keeps waiting for its own.
+function _pullNotUtf8(pull, r) {
+  if (pull.notUtf8Id === null) {
+    pull.notUtf8Id = r.id;
+    _pullAttemptFailed(pull, r.reason);
+  } else if (r.id !== pull.notUtf8Id) {
+    _pullFailNow(pull, 'config text is not valid UTF-8 in two replies, so its checksum can never match - read it over USB');
+  }
+}
+
+// A reply that no retry can change (CFGERR TOOBIG or a code this Wizard does not know, a config that is not UTF-8 in
+// two jobs' replies): stop at once.
+function _pullFailNow(pull, reason) {
+  updateBoardStatusBadge(pull.targetN, 'error');
+  showToast(`WCB${pull.targetN}: ${reason}`, 'error');
+  termLog(pull.relayN, `[Remote] Config pull from WCB${pull.targetN} stopped: ${reason}`, 'err');
+  _pullSettle(pull, false);
+}
+
+function _pullGiveUp(pull) {
+  if (pull.settled) return;
+  const secs = Math.round(pull.deadlineMs / 1000);
+  updateBoardStatusBadge(pull.targetN, 'error');
+  showToast(`WCB${pull.targetN}: config pull gave up — no complete reply within ${secs} s`, 'error');
+  // An attempt still waiting its turn says so: the time went to other boards' pulls on the relay, not to this target.
+  const waiting = !pull.onAir && pull.ticket ? `, waiting for WCB${pull.relayN} to finish another pull` : '';
+  termLog(pull.relayN, `[Remote] Config pull from WCB${pull.targetN} gave up after ${secs} s (attempt ${pull.attempt}/${pull.maxAttempts}${waiting})`, 'err');
+  _pullSettle(pull, false);
+}
+
+function _pullSucceeded(pull, configStr) {
+  // Listener and timers off first, then the config, then the guard and the callback: the order the legacy path
+  // always had. _pullSettle repeats the detach, which is idempotent.
+  _pullDetach(pull);
+  let ok = false;
+  try {
+    ok = _applyRemotePulledConfig(pull.relayN, pull.targetN, configStr);
+  } finally {
+    _pullSettle(pull, ok);
+  }
+}
+
+// Every way a pull ends goes through here: timers stopped, listener removed, relay freed, the dedup guard released
+// (by the pull that owns it), onComplete fired exactly once. relayRouteAll awaits onComplete with no watchdog, and a
+// pull left in _pullingBoards is "already in progress" to every later pull until a reload.
+function _pullSettle(pull, ok, sendError = null) {
+  _pullDetach(pull);
+  _pullFinish(pull, ok, sendError);
+}
+
+function _pullDetach(pull) {
+  pull.settled = true;
+  pull.onAir = false;
+  clearTimeout(pull.attemptTimer);
+  clearTimeout(pull.retryTimer);
+  clearTimeout(pull.deadlineTimer);
+  pull.attemptTimer = pull.retryTimer = pull.deadlineTimer = null;
+  if (pull.conn) pull.conn._dataCallbacks = pull.conn._dataCallbacks.filter(cb => cb !== pull.onLine);
+  pull.conn = null;
+}
+
+function _pullFinish(pull, ok, sendError = null) {
+  if (pull.finished) return;
+  pull.finished = true;
+  if (_activePulls.get(pull.targetN) === pull) {
+    _activePulls.delete(pull.targetN);
+    _pullingBoards.delete(pull.targetN);
+  }
+  if (!pull.firstSent) {
+    pull.firstSent = true;
+    if (sendError) pull.rejectFirst(sendError);
+    else pull.resolveFirst();
+  }
+  const cb = pull.onComplete;
+  pull.onComplete = null;
+  try {
+    cb?.(ok);
+  } catch (e) {
+    console.error('[Remote] a pull onComplete callback threw:', e);
+  } finally {
+    const ticket = pull.ticket;
+    pull.ticket = null;
+    _pullRelayRelease(ticket);
+  }
+}
+
+// The remote-pull success path: the legacy single reply's, unchanged, and now also the joined, CRC-checked parts.
+// configStr is the reply without its [MGMT:...] tag: [VER:<fw>]<chain>^?CHK<crc>. It becomes the slot's config AND the
+// baseline the next push diffs against. Returns true when stored; a parse failure is reported here and returns
+// false. The caller releases _pullingBoards and fires onComplete.
+function _applyRemotePulledConfig(relayN, targetN, configStr) {
+  // Extract the [VER:<version>] prefix the config pull adds (configPullWalk, WCB.ino) and strip it
+  // before handing the command string to the parser.
+  let remoteFwVersion = null;
+  const verMatch = configStr.match(/^\[VER:([^\]]+)\]/);
+  if (verMatch) {
+    remoteFwVersion = verMatch[1].trim();
+    configStr = configStr.slice(verMatch[0].length);
+  }
+
+  try {
+    const config = WCBParser.parseBackupString(configStr);
+
+    // ── General settings: establish baseline on first pull, detect mismatches after ──
+    const incomingGeneral = extractGeneralFields(config);
+    if (!generalBaseline) {
+      syncGeneralFromConfig(config);
+      generalBaseline = { sourceBoard: config.wcbNumber || targetN, fields: incomingGeneral };
+    } else {
+      const mismatches = getGeneralMismatches(generalBaseline.fields, incomingGeneral);
+      if (mismatches.length > 0 && !_wizardOpen && !isDefaultNetworkSettings(incomingGeneral)) {
+        setTimeout(() => showGeneralMismatchModal(
+          generalBaseline.sourceBoard, generalBaseline.fields,
+          config.wcbNumber || targetN, incomingGeneral, mismatches
+        ), 200);
+      }
+    }
+
+    boardConfigs[targetN]   = config;
+    boardBaselines[targetN] = JSON.parse(JSON.stringify(config));
+    // Store the firmware version from the VER prefix (if present) and update display
+    if (remoteFwVersion) {
+      boardConfigs[targetN].fwVersion = remoteFwVersion;
+      updateBoardSwVersionDisplay(targetN);
+    }
+    populateUIFromConfig(targetN, config);
+    // Preserve remote badge and connection label (setRemoteConnected may have run before us)
+    updateBoardStatusBadge(targetN, remoteRelayForBoard[targetN] ? 'remote' : 'configured');
+    showToast(`Config pulled from WCB${targetN} (remote via WCB${relayN})`, 'success');
+    termLog(relayN, `[Remote] Config received from WCB${targetN} (${configStr.length} chars)`, 'sys');
+    // Enable the terminal input and debug buttons for this remote board
+    ensureTerminalPane(targetN);
+    updateTerminalPaneDot(targetN, true);
+    updatePaneVisibilityChip(targetN);   // refresh label in case board switched USB→remote
+    // Start the remote terminal session so WCB${targetN}'s Serial output is mirrored here
+    startRemoteTermSession(relayN, targetN);
+    return true;
+  } catch (e) {
+    updateBoardStatusBadge(targetN, 'error');
+    showToast(`WCB${targetN}: config parse failed — ${e.message}`, 'error');
+    termLog(relayN, `[Remote] Config parse error for WCB${targetN}: ${e.message}`, 'err');
+    return false;
+  }
+}
+
+// Terminal display for config replies, stateless. Every [MGMT:CONFIG,n] and [MGMT:CFGPART,n] line is shown as a
+// length summary whether or not a pull is waiting for it: the text is a board's whole config, WiFi passphrase and
+// mesh password (EPASS) included, and those sit in its first ~300 characters - inside part 1. This used to be a
+// per-pull transform in one slot per connection that any finishing pull cleared, so an overlapping pull, a retry
+// gap or a reply nobody asked for printed the raw text. [MGMT:CFGERR,n] lines carry no config: shown in full.
+function _summariseMgmtConfigLine(line) {
+  const m = /^\[MGMT:(CONFIG|CFGPART),[^\]]*\]/.exec(line);
+  if (!m) return line;
+  const body = line.slice(m[0].length);
+  const part = m[1] === 'CFGPART' ? WCBParser.parseConfigPart(body) : null;
+  return part
+    ? `${m[0]} <part ${part.k}/${part.K} (id ${part.id}), ${part.data.length} chars received>`
+    : `${m[0]} <${body.length} chars received>`;
+}
+
+// A line that answers a pull (config reply, part, pull error, sequence reply), bare or inside a mirrored board's
+// [TERM:n]. The stats and ETM captures leave these out, direct and relayed alike: they keep every line their board
+// prints for 5 s to 120 s, and a board that relays pulls prints parts of other boards' configs, WiFi passphrase and
+// mesh password included, into the modal whose text users paste into bug reports.
+const _PULL_REPLY_LINE_RE = /^(?:\[TERM:\d+\])?\[MGMT:(CONFIG|CFGPART|CFGERR|SEQ|SEQVAL),/;
 
 // Convenience wrapper — uses the relay tracked for this board
 function boardPullRemote(n) {
@@ -9511,21 +9751,26 @@ function autoComputeKyberTargets(n) {
   const prevTargets = config.kyber.targets ?? [];
 
   config.kyber.targets = [];
-  const foundIds = new Set();
+  // The boards whose Maestro list is live here. A remembered target is kept only when its board is NOT one of
+  // them: the same Maestro id can live on two boards (CLAUDE.md rule 5), so keying the fallback on the id alone
+  // dropped a remembered M1 on an unconnected W3 as soon as any connected board reported its own M1, and the
+  // Kyber board lost that route until W3 was pulled again (HIL_TEST_AUDIT.md F4). A live list replaces every
+  // remembered entry for its own board, so a Maestro removed or moved there does not linger.
+  const liveBoards = new Set();
 
   for (let b = 1; b <= 20; b++) {
     const bc = boardConfigs[b];
     if (!bc?.maestros?.length) continue;
     const wcbNum = bc.wcbNumber || b;
+    liveBoards.add(wcbNum);
     for (const m of bc.maestros) {
       config.kyber.targets.push({ id: m.id, wcb: wcbNum, port: m.port, baud: m.baud });
-      foundIds.add(m.id);
     }
   }
 
-  // Fall back to previously-known targets for maestros whose board isn't connected yet.
+  // Fall back to previously-known targets on boards that aren't connected yet.
   for (const t of prevTargets) {
-    if (!foundIds.has(t.id)) {
+    if (!liveBoards.has(t.wcb)) {
       config.kyber.targets.push(t);
     }
   }
@@ -12546,6 +12791,11 @@ async function fetchStatsData() {
             const firstChunk = line.slice(closeIdx + 1);
             if (firstChunk.trim()) lines.push(firstChunk);
           } else {
+            // A pull reply on the same relay is never part of this capture. One with no closing sentinel (a relayed
+            // '[ERROR] Result too large...', a lost tail) appends every relay line for 10 s / 120 s: a 2.9 KB part of
+            // another board's config, passwords included, would land in the modal, or its data match the ETM dash
+            // sentinel and end the capture with it.
+            if (_PULL_REPLY_LINE_RE.test(line)) return;
             lines.push(line);
           }
           // Stop when the terminal sentinel line is seen
@@ -12568,6 +12818,10 @@ async function fetchStatsData() {
       if (!conn?.isConnected()) { output.textContent = 'Board not connected.'; return; }
       termLog(n, cmd, 'in');
       result = await conn.sendAndCollect(cmd, timeout, sentinel);
+      // The same rule as the relay path: this board may be relaying pulls for others meanwhile (installEtmListener
+      // fires one per ONLINE or OFFLINE edge, and ETM,CHAR's phase 3 load is when OFFLINE edges come), and those
+      // replies are not this board's output.
+      result = result.split('\n').filter(l => !_PULL_REPLY_LINE_RE.test(l.trim())).join('\n');
       result = result.trim() || '(no response received)';
     }
 

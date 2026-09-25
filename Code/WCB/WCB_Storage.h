@@ -240,6 +240,7 @@ void setCommandDelimiter(char delimiter);
 void loadCommandDelimiter();
 
 void eraseNVSFlash();
+void printNvsUsage();          // ?NVS - read-only storage usage by namespace
 
 extern bool isSerialPortUsedForPWMInput(int port);
 extern bool isSerialPortPWMOutput(int port);

@@ -6,12 +6,14 @@ clears its mapping in a finally block, because a failed ?MAP update still leaves
 (WCB_Storage.cpp:1715-1742), and runs inside config_guard.
 
 Never inject into W1S1 (KyberRemoteTask re-broadcasts it to the real Maestro), and never map to W2S1.
-Restore with per-port ?MAP,SERIAL,CLEAR,S<n>, never CLEAR,ALL (it leaves broadcast output off).
+Restore with per-port ?MAP,SERIAL,CLEAR,S<n>: CLEAR,ALL restores the ports' flags too since tracker #46, but a
+per-port clear touches only what the test mapped.
 """
 import re
 import threading
 import time
 
+from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
 from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, require_tokens,
                            snapshot, token, usb_wcb)
@@ -153,6 +155,7 @@ def text_multi_dest(bench):
             assert len(usb_hits) == 1, f"expected one USB line, got {len(usb_hits)}"
             times = [l.time_of(t.encode(), watch.marks[l.key]) for l in (s3, s4, s5)]
             bench.note(f"text_multi_dest burst starts S3/S4/S5 (probe ms): {times}")
+            assert None not in times and times == sorted(times), f"S3, S4, S5 were not written in list order: {times}"
         finally:
             _clear(w, "S2")
 
@@ -555,7 +558,7 @@ def raw_remote_115200_exact(bench):
     w = usb_wcb(bench)
     _no_mappings(w)
     data = bytes(i & 0xFF for i in range(200))
-    with config_guard(bench, 1):
+    with config_guard(bench, 1) as before:
         try:
             assert _has(w.run("?BAUD,S2,115200"), "Baud rate for Serial2 updated to 115200")
             s2.listen(115200)
@@ -572,7 +575,7 @@ def raw_remote_115200_exact(bench):
         finally:
             w.run("?DEBUG,RAW,OFF")
             _clear(w, "S2")
-            w.run("?BAUD,S2,9600")
+            w.run(token(before[1], "?BAUD,S2,") or "?BAUD,S2,9600")
 
 
 @test("map.raw_remote_bursts_no_loss", "(should) Raw bursts to a remote port at 115200 lose no bytes", needs=["wcb1"])
@@ -584,7 +587,7 @@ def raw_remote_bursts_no_loss(bench):
     w = usb_wcb(bench)
     _no_mappings(w)
     bursts = [bytes(((i * 7 + k) & 0xFF) for i in range(200)) for k in range(10)]
-    with config_guard(bench, 1):
+    with config_guard(bench, 1) as before:
         try:
             w.run("?BAUD,S2,115200")
             s2.listen(115200)
@@ -602,7 +605,7 @@ def raw_remote_bursts_no_loss(bench):
                                      f"NO_MEM drop (WCB.ino:2855-2866)")
         finally:
             _clear(w, "S2")
-            w.run("?BAUD,S2,9600")
+            w.run(token(before[1], "?BAUD,S2,") or "?BAUD,S2,9600")
 
 
 @test("map.raw_self_wcb_local", "Raw mode with this board's own W<n>S<p> is written locally", needs=["wcb1"])
@@ -725,7 +728,7 @@ def raw_remote_soft_port(bench):
     w = usb_wcb(bench)
     _no_mappings(w)
     data = b"HIL" + padded("", 16)[3:16].encode()
-    with config_guard(bench, 1):
+    with config_guard(bench, 1) as before:
         try:
             assert _has(w.run(f"?MAP,SERIAL,S3,R,W2{q}"), "Serial mapping set: Serial3 (RAW) -> 1 destination(s)")
             watch = Watch(dst)
@@ -735,7 +738,7 @@ def raw_remote_soft_port(bench):
             assert not errs, f"framing errors on W2 {q}: {errs}"
         finally:
             _clear(w, "S3")
-            w.run("?BAUD,S3,9600")   # re-evaluate S3's soft-TX protection (applied only at begin, WCB.ino:2042-2066)
+            w.run(token(before[1], "?BAUD,S3,") or "?BAUD,S3,9600")   # re-evaluate S3's soft-TX protection (applied only at begin, WCB.ino:2042-2066)
 
 
 # ============================================================ persistence and restore fidelity
@@ -819,6 +822,52 @@ def clear_all_restores_output(bench):
             w.run("?BCAST,IN,S2,ON")
 
 
+def _serial_map_entries(w):
+    """serial_map's entry count from ?NVS: 0 when the namespace holds no key (?NVS then does not list it)."""
+    stats, spaces = nvs_parse(w.run("?NVS", timeout=6))
+    if not stats:
+        raise Skip("W1 has no ?NVS (older firmware)")
+    return spaces.get("serial_map", 0)
+
+
+@test("map.nvs_keys_freed", "Clearing a serial mapping frees its storage: a 10-destination mapping takes 26 serial_map entries in ?NVS (6 slot keys, 2 per destination) and CLEAR,S<n> frees all 26; CLEAR,ALL frees those of two mappings (34); the count ends at or below the baseline (tracker #92)", needs=["wcb1"], links=[])
+def nvs_keys_freed(bench):
+    """F20 (docs/HIL_TEST_AUDIT.md): saveSerialMonitorMappings (WCB_Storage.cpp) used to only write, so a cleared
+    mapping kept its _act/_in/_cnt/_raw/_pbo/_pbi keys and a w/p pair per destination until ?ERASE,NVS - the ones the
+    map suite left filled W1's store in run 20260924-190733. removeUnusedSerialMapKeys now drops every key no active
+    mapping uses. Asserted as the entries each clear frees, so a board carrying keys an older firmware left still
+    passes; the first save here removes those, which can only take the count below the baseline. The destinations are
+    map.max_ten's, on boards that do not exist, and nothing feeds the mapped ports."""
+    w = usb_wcb(bench)
+    _no_mappings(w)
+    ten = "W3S1,W4S1,W5S1,W6S1,W7S1,W8S1,W9S1,W10S1,W11S1,W12S1"
+    with config_guard(bench, 1):
+        try:
+            base = _serial_map_entries(w)
+            problems, seen = [], [f"baseline {base}"]
+            s2 = (f"?MAP,SERIAL,S2,{ten}", "Serial mapping set: Serial2 -> 10 destination(s)")
+            s3 = ("?MAP,SERIAL,S3,S4", "Serial mapping set: Serial3 -> 1 destination(s)")
+            rounds = (("?MAP,SERIAL,CLEAR,S2", [s2], 26), ("?MAP,SERIAL,CLEAR,ALL", [s2, s3], 34))
+            for clear, maps, want in rounds:
+                for cmd, ok in maps:
+                    out = w.run(cmd)
+                    assert _has(out, ok), f"{cmd} did not print {ok!r}: {out}"
+                mapped = _serial_map_entries(w)
+                out = w.run(clear)
+                assert _has(_list(w), "No serial mappings configured"), f"{clear} left a mapping: {out}"
+                after = _serial_map_entries(w)
+                seen.append(f"{len(maps)} mapping(s) {mapped}, after {clear} {after}")
+                if mapped - after != want:
+                    problems.append(f"{clear} freed {mapped - after} serial_map entries, not {want} "
+                                    f"({mapped} with the mapping(s), {after} after)")
+                if after > base:
+                    problems.append(f"after {clear} serial_map holds {after} entries, above the baseline {base}")
+            bench.note("serial_map entries: " + "; ".join(seen))
+            assert not problems, "; ".join(problems)
+        finally:
+            _clear(w, "S2", "S3")
+
+
 @test("map.raw_text_toggle", "'S2R' sets raw mode, lowercase works, re-issuing toggles raw/text live, backup normalises", needs=["wcb1"])
 def raw_text_toggle(bench):
     s2, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S4"), link(bench, 1, "S5")
@@ -858,6 +907,7 @@ def legacy_sm(bench):
                 ("?SMLIST", ["Serial2 (RAW) -> S4"]),
                 ("?SMRS2", ["Serial mapping removed for Serial2"]),
                 ("?SMRS2", ["No mapping found for Serial2"]),
+                ("?SMCLEAR", ["All serial mappings cleared"]),      # nothing mapped: clears nothing, touches no flags
                 ("?SM", ["Invalid format. Use: ?SMSx[R],dest1[R],dest2[R],..."]),
             ]
             bad = [f"{cmd!r} -> {out}" for cmd, wants in checks for out in [w.run(cmd)] if not all(_has(out, x) for x in wants)]
@@ -872,7 +922,7 @@ def baud_on_raw_mapped_port(bench):
     w = usb_wcb(bench)
     _no_mappings(w)
     end = marker("end")
-    with config_guard(bench, 1):
+    with config_guard(bench, 1) as before:
         try:
             w.run("?MAP,SERIAL,S3,R,S4")
             stop = threading.Event()
@@ -899,7 +949,7 @@ def baud_on_raw_mapped_port(bench):
             watch.expect(s4, end.encode(), timeout=3)
         finally:
             _clear(w, "S3")
-            w.run("?BAUD,S3,9600")
+            w.run(token(before[1], "?BAUD,S3,") or "?BAUD,S3,9600")
 
 
 @test("map.input_port_loses_output", "While mapped, the input port receives no plain broadcasts", needs=["wcb1"])

@@ -2,18 +2,18 @@
 from hil.runner import Skip, test
 
 
-@test("probe.hello", "Every probe answers and runs wcb_probe v2 or newer", links=[])
+@test("probe.hello", "Every probe answers and runs wcb_probe v5 or newer (v6 is refused: it panic-loops when a WCB reboots)", links=[])
 def probe_hello(bench):
     names = bench.probe_names()
     if not names:
         raise Skip("no probes in bench.json")
     for name in names:
-        p = bench.probe(name)   # resets it, which requires v2
+        p = bench.probe(name)   # resets it, which enforces PROBE_MIN_VERSION and refuses PROBE_BAD_VERSIONS
         m = p.hello()
         bench.note(f"{name}: wcb_probe v{m.group(1)} mac={m.group(2)}")
 
 
-@test("probe.links", "Every discovered wire verified at its WCB port's configured baud", links=[])
+@test("probe.links", "Every wire found by the last discovery verified then at its WCB port's configured baud (link.out re-checks live)", links=[])
 def probe_links(bench):
     links = bench.links.all()
     if not links:

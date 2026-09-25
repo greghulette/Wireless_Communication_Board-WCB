@@ -3,6 +3,7 @@
 #include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
 #include <Preferences.h>
+#include <nvs.h>             // ?NVS usage and the whole-store erase
 #include "WCB_PWM.h"
 #include "WCB_Maestro.h"  // For MAX_MAESTROS_PER_WCB and maestroConfigs
 // Declare the external variables that are defined in the main sketch
@@ -84,6 +85,11 @@ void saveHWversion(int wcb_hw_version_f){
   preferences.begin("hw_version", false);
   preferences.putInt("hw_version", wcb_hw_version_f);
   preferences.end();
+  // The running value follows at once, so ?backup, ?WDP,DUMP and the adverts report what was saved: a pull right
+  // after a ?HW push showed the old version, and the Wizard pushed it again (docs/HIL_TEST_AUDIT.md F3). The pin
+  // map is NOT re-applied (updatePinMap stays boot-only, below): the ports keep the pins they were opened on until
+  // the reboot the message asks for. Only the status-LED branches read this live.
+  wcb_hw_version = wcb_hw_version_f;
   if (wcb_hw_version_f == 1){
     Serial.println("Saved HW Ver: 1.0 to NVS.  Reboot to take effect!");
   } else if (wcb_hw_version_f == 21){
@@ -755,7 +761,16 @@ void saveStoredCommandsToPreferences(const String &message) {
 
   if (!alreadyExists) {
     existingKeys += key + ",";
-    preferences.putString("key_list", existingKeys);
+    // Checked (HIL_TEST_AUDIT.md F9): on a full NVS this write fails, and the value just stored would be a sequence
+    // no list names - never shown by ?SEQ,NAMES or ?backup, never cleared, and holding NVS space for good. Take the
+    // value back out (an erase needs no free space) and say it was not stored.
+    if (preferences.putString("key_list", existingKeys) != existingKeys.length()) {
+      preferences.remove(key.c_str());
+      preferences.end();
+      Serial.printf("Failed to store sequence '%s' (NVS could not update the sequence list). Not stored.\n",
+                    key.c_str());
+      return;
+    }
   }
 
   preferences.end();
@@ -800,10 +815,21 @@ void eraseStoredCommandByName(const String &name) {
         updatedList += k + ",";
     }
 
-    preferences.putString("key_list", updatedList);
+    // Checked (HIL_TEST_AUDIT.md F9). The value goes first on purpose: on a full NVS, removing it is what frees the
+    // room this rewrite needs. If the rewrite still fails, the name stays listed with no value - an empty
+    // ?SEQ,SAVE,<key>, in ?backup - so say so instead of reporting a clean delete.
+    bool listed = (updatedList != existingKeys);
+    bool listOk = !listed ||
+                  (updatedList.length() ? preferences.putString("key_list", updatedList) == updatedList.length()
+                                        : preferences.remove("key_list"));
     preferences.end();
     invalidateSequenceInventoryHash();
 
+    if (!listOk) {
+        Serial.printf("Removed the value of '%s', but NVS could not update the sequence list: it is still listed, "
+                      "empty. See ?NVS, free space, then clear it again.\n", name.c_str());
+        return;
+    }
     if (removed) {
         Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
     } else {
@@ -1045,6 +1071,88 @@ void migrateOldStoredCommands() {
 }
 
 // Erase all NVS preferences
+// Erase every namespace in the NVS partition, whoever wrote it: every setting this firmware keeps (WiFi and its
+// passwords, learned peers and the saved serial-attached devices included), anything older firmware left, and the
+// radio's own stored data - the same end state as the Wizard's Factory Reset, which blanks the whole partition. The
+// fixed list below it missed wifi_cfg and wdp_da (HIL_TEST_AUDIT.md F8) and could never know an older firmware's
+// namespaces. Erases need no free space, so this works on a full store. Returns the namespaces erased.
+static int eraseAllNvsNamespaces() {
+    char names[48][NVS_NS_NAME_MAX_SIZE];
+    int n = 0;
+    nvs_iterator_t it = nullptr;
+    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, NULL, NVS_TYPE_ANY, &it);
+    while (err == ESP_OK) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        bool seen = false;
+        for (int i = 0; i < n && !seen; i++) seen = (strcmp(names[i], info.namespace_name) == 0);
+        if (!seen && n < 48) {
+            strncpy(names[n], info.namespace_name, NVS_NS_NAME_MAX_SIZE - 1);
+            names[n][NVS_NS_NAME_MAX_SIZE - 1] = '\0';
+            n++;
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    int erased = 0;
+    for (int i = 0; i < n; i++) {
+        nvs_handle_t h;
+        if (nvs_open(names[i], NVS_READWRITE, &h) != ESP_OK) continue;
+        if (nvs_erase_all(h) == ESP_OK && nvs_commit(h) == ESP_OK) erased++;
+        nvs_close(h);
+    }
+    return erased;
+}
+
+// ?NVS: how full the settings store is and which namespace holds what. Entries are NVS's 32-byte slots; a string
+// or blob takes one per 32 bytes of data. "available" is what new data can use (free minus the page kept for
+// garbage collection). Read-only.
+void printNvsUsage() {
+    nvs_stats_t st;
+    if (nvs_get_stats(NULL, &st) != ESP_OK) {
+        Serial.println("NVS: statistics unavailable");
+        return;
+    }
+    unsigned pct = st.total_entries ? (unsigned)((st.used_entries * 100 + st.total_entries / 2) / st.total_entries) : 0;
+    Serial.printf("NVS: used=%u free=%u available=%u total=%u namespaces=%u (%u%% used)\n",
+                  (unsigned)st.used_entries, (unsigned)st.free_entries, (unsigned)st.available_entries,
+                  (unsigned)st.total_entries, (unsigned)st.namespace_count, pct);
+    char names[48][NVS_NS_NAME_MAX_SIZE];
+    int n = 0;
+    nvs_iterator_t it = nullptr;
+    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, NULL, NVS_TYPE_ANY, &it);
+    while (err == ESP_OK) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        bool seen = false;
+        for (int i = 0; i < n && !seen; i++) seen = (strcmp(names[i], info.namespace_name) == 0);
+        if (!seen && n < 48) {
+            strncpy(names[n], info.namespace_name, NVS_NS_NAME_MAX_SIZE - 1);
+            names[n][NVS_NS_NAME_MAX_SIZE - 1] = '\0';
+            n++;
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    for (int i = 1; i < n; i++)                        // alphabetical, so two reports diff line by line
+        for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
+            char tmp[NVS_NS_NAME_MAX_SIZE];
+            memcpy(tmp, names[j], sizeof(tmp));
+            memcpy(names[j], names[j - 1], sizeof(tmp));
+            memcpy(names[j - 1], tmp, sizeof(tmp));
+        }
+    for (int i = 0; i < n; i++) {
+        nvs_handle_t h;
+        size_t used = 0;
+        if (nvs_open(names[i], NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_used_entry_count(h, &used);
+            nvs_close(h);
+        }
+        Serial.printf("  %-15s %u\n", names[i], (unsigned)used);
+    }
+    Serial.println("End of NVS");
+}
+
 void eraseNVSFlash() {
     preferences.begin("serial_baud", false);
     preferences.clear();
@@ -1146,6 +1254,11 @@ void eraseNVSFlash() {
     // board being erased. Both are now behind autoReboot, and the local restart is deferred to
     // loop() via pwmRebootPending rather than taken inside the command.
     clearAllPWMMappings(false);
+
+    // Then every namespace, whoever wrote it (F8). The named clears above stay as the readable list of what this
+    // firmware keeps; this pass catches the rest (wifi_cfg, wdp_da, the radio's data, older firmware's leftovers).
+    Serial.printf("NVS: erased %d storage area(s) - every setting, WiFi and learned peers included.\n",
+                  eraseAllNvsNamespaces());
 
     // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the
     // Wizard's factory-reset modal both say so). Say what to do about it: until ?HW is set the
@@ -2163,14 +2276,54 @@ void setSerialMappingRawMode(int inputPort, bool raw) {
     Serial.printf("No mapping found for Serial%d\n", inputPort);
 }
 
+// Remove every serial_map key that no active mapping uses: all of an inactive slot's keys, and an active slot's
+// output pairs past its count. The save used to only ever write, so a cleared mapping kept its 6 slot keys and 2 keys
+// per output it ever had until ?ERASE,NVS - up to 130 of the store's 630 entries. The map suite alone left about 44 on
+// W1, and the full store then refused the persistent-variable table and a 900-character sequence (HIL run
+// 20260924-190733; tracker #92, HIL_TEST_AUDIT.md F20). An erase needs no free space, so this works on a full store,
+// which is when it matters. Raw NVS rather than Preferences::remove(): most of these keys were never written, and
+// remove() logs an error for each missing one. _act goes first, so a restart part-way leaves the slot inactive (a
+// missing _act loads as false), never active with its keys half gone. The caller runs this after its puts, so an
+// active slot's new count is stored before the outputs past it are removed - and when that count could NOT be
+// stored (a full store refuses even one entry), the slot's outputs are left alone: NVS still holds the old, larger
+// count, and erasing the pairs it names would reload them as board 0 / port 0, i.e. extra USB destinations.
+static void removeUnusedSerialMapKeys(const bool *countStored) {
+    nvs_handle_t h;
+    if (nvs_open("serial_map", NVS_READWRITE, &h) != ESP_OK) return;
+    static const char *const slotKeys[] = {"_act", "_in", "_cnt", "_raw", "_pbo", "_pbi"};
+    const int maxOutputs = (int)(sizeof(serialMonitorMappings[0].outputs) / sizeof(serialMonitorMappings[0].outputs[0]));
+    char key[NVS_KEY_NAME_MAX_SIZE];
+    for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
+        const bool active = serialMonitorMappings[i].active;
+        if (!active) {
+            for (const char *suffix : slotKeys) {
+                snprintf(key, sizeof(key), "sm%d%s", i, suffix);
+                nvs_erase_key(h, key);           // ESP_ERR_NVS_NOT_FOUND for a key never written - nothing to do
+            }
+        }
+        if (active && !countStored[i]) continue;
+        for (int j = active ? serialMonitorMappings[i].outputCount : 0; j < maxOutputs; j++) {
+            snprintf(key, sizeof(key), "sm%d_%dw", i, j);
+            nvs_erase_key(h, key);
+            snprintf(key, sizeof(key), "sm%d_%dp", i, j);
+            nvs_erase_key(h, key);
+        }
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void saveSerialMonitorMappings() {
     preferences.begin("serial_map", false);
+    bool countStored[MAX_SERIAL_MONITOR_MAPPINGS] = {};
     
     for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
-        String keyActive = "sm" + String(i) + "_act";
-        preferences.putBool(keyActive.c_str(), serialMonitorMappings[i].active);
-        
+        // An inactive slot writes nothing: removeUnusedSerialMapKeys() below drops its keys, and a missing
+        // _act loads as false (loadSerialMonitorMappings).
         if (serialMonitorMappings[i].active) {
+            // _act goes LAST: a restart part-way through a newly activated slot then leaves no _act, which loads
+            // as inactive, instead of an active slot whose input and count are not written yet.
+            String keyActive = "sm" + String(i) + "_act";
             String keyInput = "sm" + String(i) + "_in";
             String keyCount = "sm" + String(i) + "_cnt";
             String keyRaw = "sm" + String(i) + "_raw";
@@ -2178,7 +2331,7 @@ void saveSerialMonitorMappings() {
             String keyPrI = "sm" + String(i) + "_pbi";   // input blocking before the mapping
             
             preferences.putUChar(keyInput.c_str(), serialMonitorMappings[i].inputPort);
-            preferences.putUChar(keyCount.c_str(), serialMonitorMappings[i].outputCount);
+            countStored[i] = preferences.putUChar(keyCount.c_str(), serialMonitorMappings[i].outputCount) == 1;
             preferences.putBool(keyRaw.c_str(), serialMonitorMappings[i].rawMode);
             preferences.putBool(keyPrO.c_str(), serialMonitorMappings[i].prevBroadcastOut);
             preferences.putBool(keyPrI.c_str(), serialMonitorMappings[i].prevBlockIn);
@@ -2189,10 +2342,15 @@ void saveSerialMonitorMappings() {
                 preferences.putUChar(keyWCB.c_str(), serialMonitorMappings[i].outputs[j].wcbNumber);
                 preferences.putUChar(keyPort.c_str(), serialMonitorMappings[i].outputs[j].serialPort);
             }
+            preferences.putBool(keyActive.c_str(), true);
+            if (!countStored[i])
+                Serial.printf("Serial mapping S%d: NVS could not store it (full?) - it will not survive a reboot. See ?NVS.\n",
+                              serialMonitorMappings[i].inputPort);
         }
     }
     
     preferences.end();
+    removeUnusedSerialMapKeys(countStored);
 }
 
 void removeSerialMonitorMapping(const String &portStr) {

@@ -176,20 +176,32 @@ void parseCommandGroups(const String &input, int sourceID) {
         delayStr = token.substring(2);
         remaining = "";
       }
+      // A negative delay was read as a huge unsigned number and silently capped to 30 minutes, so a typo like
+      // ;T-500 held the rest of the chain for half an hour (HIL_TEST_AUDIT.md F6). Refuse the whole chain instead:
+      // running the rest at once could move something the operator meant to delay.
+      delayStr.trim();
+      if (delayStr.startsWith("-")) {
+        Serial.printf("⚠️ Timer refused: '%s' is a negative delay. Nothing in this chain was run.\n", token.c_str());
+        commandGroups.clear();
+        commandGroupsGeneration++;
+        commandTimerModeEnabled = false;
+        currentGroupIndex = 0;
+        waitingForNextGroup = false;
+        return;
+      }
       unsigned long parsedDelay = delayStr.toInt();
       unsigned long parsedDelayLimit = 1800000; // 30 Minutes (30 * 60 * 1000) (Minutes * Seconds in a Minute * milliseconds in a second)
       if (debugEnabled) {
         // printTimerDebugInfo(delayStr, parsedDelay, parsedDelayLimit);
       }
     if (debugEnabled && parsedDelay > parsedDelayLimit) {
-        Serial.printf("⚠️ Warning: Delay exceeds configured limits of %i. Input: %s ms\n", parsedDelayLimit, delayStr.c_str());
+        Serial.printf("⚠️ Warning: Delay exceeds configured limits of %lu. Input: %s ms\n", parsedDelayLimit, delayStr.c_str());
         // printTimerDebugInfo(delayStr, parsedDelay, parsedDelayLimit);
       }
       if (parsedDelay > parsedDelayLimit) {
         parsedDelay = parsedDelayLimit;
-        if (debugEnabled) {
-          Serial.printf("⏱️ Delay capped to %i ms : originally requested %s ms\n", parsedDelayLimit, delayStr.c_str());
-        }
+        // Always reported now, not only under ?DEBUG: a silently shortened delay is as surprising as a lengthened one.
+        Serial.printf("⏱️ Delay capped to %lu ms : originally requested %s ms\n", parsedDelayLimit, delayStr.c_str());
       }
       // ACCUMULATE (don't overwrite): consecutive delay tokens with no command
       // between them — ';t500^;t300^cmd' or ';t500^***note^;t300^cmd' (the

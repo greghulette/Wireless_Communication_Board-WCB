@@ -290,18 +290,9 @@ void configureMP3(const String &args) {
     return;
   }
 
-  if (serialPort >= 3 && baudRate > 9600) {
-    Serial.println("\n⚠️  =============== WARNING ===============");
-    Serial.printf("S%d is SOFTWARE SERIAL\n", serialPort);
-    Serial.println("Software serial is unreliable above 9600 baud");
-    Serial.println("❌ CONFIGURATION BLOCKED!");
-    Serial.printf("  Use hardware serial (S1 or S2): %cMP3,S1:%d:V%d\n",
-                  LocalFunctionIdentifier, baudRate, volume);
-    Serial.printf("  Or use 9600 baud:               %cMP3,S%d:9600:V%d\n",
-                  LocalFunctionIdentifier, serialPort, volume);
-    Serial.println("=========================================\n");
-    return;
-  }
+  // No software-serial block: both rates an MP3 Trigger runs at (9600, 38400) are inside what S3-S5 receive
+  // exactly (measured through 57600, CLAUDE.md rule 13; ?BAUD applies the same limit). 38400 was refused there
+  // until 2026-09-24, a limit left over from the bit-banged TX (docs/HIL_TEST_AUDIT.md F1).
 
   if (volume < 0 || volume > 64) {
     Serial.println("[MP3] Volume must be 0-64 (0=loudest, 64=inaudible)");
@@ -396,17 +387,12 @@ void printMP3Settings() {
   Serial.println("---------------------------------");
 }
 
-void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial,
-                    const String &defSep, const String &defFunc) {
+void emitMP3Backup(const std::function<void(const String &)> &emit) {
   // Client board (no local MP3, routes ;A to a remote host): persist the route.
   if (!mp3Config.configured) {
     if (mp3Config.remoteWCB > 0) {
       String suffix = "MP3,REMOTE,W" + String(mp3Config.remoteWCB);
-      String cmd = String(LocalFunctionIdentifier) + suffix;
-      if (printToSerial) Serial.println(cmd);
-      chainedConfig        += String(delimiter) + cmd;
-      chainedConfigDefault += defSep + defFunc + suffix;
+      emit(suffix);
     }
     return;
   }
@@ -415,18 +401,12 @@ void printMP3Backup(String &chainedConfig, String &chainedConfigDefault,
   String cmdSuffix = "MP3,S" + String(mp3Config.serialPort) +
                      ":" + String(mp3Config.baudRate) +
                      ":V" + String(mp3Config.volume);
-  String cmd = String(LocalFunctionIdentifier) + cmdSuffix;
-  if (printToSerial) Serial.println(cmd);
-  chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += defSep + defFunc + cmdSuffix;
+  emit(cmdSuffix);
 
   // Error callback
   if (strlen(mp3Config.onErrCmd) > 0) {
     cmdSuffix = "MP3,ONERR," + String(mp3Config.onErrCmd);
-    cmd = String(LocalFunctionIdentifier) + cmdSuffix;
-    if (printToSerial) Serial.println(cmd);
-    chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += defSep + defFunc + cmdSuffix;
+    emit(cmdSuffix);
   }
 }
 

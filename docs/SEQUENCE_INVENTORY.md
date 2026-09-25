@@ -44,14 +44,17 @@ tempted to scrape it anyway:
 ### The config pull carries values, and overflows
 
 `?MGMT,PULL,<n>` does return machine-readable text, and it *does* include sequences as
-`?SEQ,SAVE,<key>,<value>` tokens (`WCB.ino:2855-2871`). But it carries every sequence
-**value** plus the entire board config, and the whole thing caps at
-`MGMT_MAX_CHUNKS` × 182 = **2912 characters** (`WCB.ino:803`).
+`?SEQ,SAVE,<key>,<value>` tokens (`collectConfigCommands`, `WCB.ino:3645`). But it carries every
+sequence **value** plus the entire board config, and one reply caps at
+`MGMT_MAX_CHUNKS` × 182 = **2912 characters** (`WCB.ino:1038`).
 
-A board with ~20 real sequences exceeds that. When it does, the target sends **nothing at
-all**, and the "Config too large" diagnostic is behind `debugMGMT` (`WCB.ino:2959`) — so
-from the consumer's side it is indistinguishable from a timeout. This is the trap this
-feature exists to route around.
+A board with ~20 real sequences exceeds that. A pull that asks for parts
+(`?MGMT,PULL,<n>,P`, which the Wizard sends) then gets the config in parts of 2880 characters,
+joined and CRC-checked by the requester ([MGMT_RELAY.md](MGMT_RELAY.md)). A plain pull gets a
+`[MGMT:CFGERR,<n>]NOPARTS` line, and any pull through a relay or from a target that predates
+parts still gets **nothing at all**, indistinguishable from a timeout. Either way the whole
+config crosses the mesh just to read a list of names; that cost, and the silence on older
+boards, are what this feature routes around.
 
 ---
 
@@ -191,7 +194,7 @@ first try.
 
 **`TOOBIG` is reported explicitly.** `sendResultFrags()` silently refuses anything
 over 16 chunks, so the handler checks the budget first and answers with a status
-instead of nothing. Silence is what makes the config pull unusable here (§1) and
+instead of nothing. Silence is what makes a config pull through older firmware unusable here (§1) and
 reintroducing it in the replacement would recreate the very bug this routes around.
 In practice `TOOBIG` is rare. The budget allows a 2,903-character value, but NVS on a
 configured board refuses long values well before that, and the limit falls as NVS fills. On
@@ -462,6 +465,8 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-24 | §1: a pull that asks for parts (`?MGMT,PULL,<n>,P`) now gets a config over 2912 characters in parts; a plain pull gets CFGERR NOPARTS; older relays and targets stay silent (F13, tracker #91, MGMT_RELAY.md). | _(pending)_ |
+| 2026-09-24 | §1: the config pull's too-large case is no longer silent on the target, which measures the config first and prints why, ungated; the requester still gets nothing (tracker #90). Line references in §1 updated. | _(pending)_ |
 | 2026-09-23 | New §3c: the cycle guard is a per-item lineage (`seqDepth` + hashes in front of the queued text, restored into `seqCurPath` at drain, pushed by `recallCommandSlot()`, carried across `;t` by `commandGroupsPath`). It replaces the never-popped `activeChainKeys` set, which refused every second call to a sub-sequence in one run and counted a flat body's calls toward the depth limit (tracker #47). A nested expansion that would leave fewer than 16 queue slots free is refused whole, with one line, rather than flooding UART0 with one "queue is full" line per token. Refusal texts and the 8-level limit are unchanged. HIL `seq.cycle_guard_reuse`, `seq.reuse_queue_reserve`. | _(pending)_ |
 | 2026-09-22 | §3a says the SEQVAL reply is sent once and unacknowledged, so a requester must retry on timeout. The first run of `inv.seqget_largest` lost a 7-chunk reply that way (tracker #71). §3a also notes how rarely `TOOBIG` can occur. NVS refuses values long before the 2,903-character relay budget, and a ~2,950-character `?SEQ,SAVE` fails even earlier, on heap. The "38,900-byte largest block" that made that look like a mystery was the classic ESP32's 32-bit-only IRAM heap. ?STATS and the out-of-memory line now report byte-addressable heap (tracker #58). | — |
 | 2026-09-20 | A chain carrying `?SEQ,SAVE`, `?CS` or `?MGMT,` never reaches the timer splitter: the exemption is token-aware (`chainCarriesValueVerb`) instead of a first-character test, so a chain beginning with any other token no longer has its stored value cut at the first `;t` with the tail executed. |

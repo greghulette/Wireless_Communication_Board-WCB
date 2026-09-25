@@ -5,7 +5,8 @@ import time
 from .serialdev import ExpectTimeout
 
 PROBE_BAUD = 921600
-PROBE_MIN_VERSION = 2
+PROBE_MIN_VERSION = 5           # v5 holds a re-bound channel's TX line high (tracker #79): every byte-exact test needs it
+PROBE_BAD_VERSIONS = ("6",)     # v6 panic-loops whenever a wired WCB reboots (a soft-RX level arm survives a CPU reset, #78)
 PROBE_TXSKEW_VERSION = 4        # TXSKEW (tracker #78); only softrx.* needs it, and skips on an older probe
 PROBE_LEVELRX_VERSION = 6       # soft channels on level-triggered RX (tracker #78): two receiving at once are exact
 HW_CHANNELS = ("A", "B")        # hardware UART1 / UART2
@@ -77,6 +78,9 @@ class Probe:
         if not self.version.isdigit() or int(self.version) < PROBE_MIN_VERSION:
             raise AssertionError(f"{self.dev.name} runs wcb_probe v{self.version}; the harness needs "
                                  f"v{PROBE_MIN_VERSION}+ — flash tests/hil/wcb_probe")
+        if self.version in PROBE_BAD_VERSIONS:
+            raise AssertionError(f"{self.dev.name} runs wcb_probe v{self.version}, which panic-loops whenever a wired WCB "
+                                 f"reboots (docs/HIL_TESTING.md §3) — flash tests/hil/wcb_probe")
 
     def reset(self):
         """Release every channel, pin, rule and PWM. The probe keeps state across host runs."""

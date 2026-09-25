@@ -833,7 +833,7 @@ def local_wrong_chip_image(bench):
     assert not rebooted and after["running"] == before["running"], after
 
 
-@test("ota.relay_full_same_image_wcb2", "OPT-IN (ota_full_wcb2): relay-OTA W2 with the image it runs, twice; each pass reboots W2 into the other slot with the same version and config (slow: ~7000 frames per pass at 115200)", needs=["wcb1"], links=["W2S1"], opt_in="ota_full_wcb2")
+@test("ota.relay_full_same_image_wcb2", "OPT-IN (ota_full_wcb2): relay-OTA W2 with the image it runs, twice; each pass reboots W2 into the other slot with the same version and config (slow: ~7000 frames per pass at 115200)", needs=["wcb1"], links=[], opt_in="ota_full_wcb2")   # the W2S1 tap is used when wired, never required
 def relay_full_same_image_wcb2(bench):
     """Run only after ota.local_full_same_image_wcb1 passed with the same file (one ESP32 image serves HW 1.0 and 2.4;
     pin maps are runtime). The relay has no baud bump (?OTALOCAL,BAUD needs a local session, WCB_OTA.cpp:247). W2

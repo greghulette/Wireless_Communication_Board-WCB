@@ -16,6 +16,7 @@ extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6]; // P2: per-WCB MAC table
 extern void    otaRelayPrint(const char *line);  // defer relay-ACK Serial output to loop() (cross-core safe)
 extern uint32_t calculateCRC32(const String &data);   // WCB.ino — reflected CRC-32, poly 0xEDB88320
 extern volatile uint32_t serialRxOverflows;           // WCB.ino — UART RX overflow count
+extern void    configPullJobAbort(const char *why);  // WCB.ino — frees a running mesh config pull (F13)
 
 // Struct sizes feed the size-based ESP-NOW router in WCB.ino — they MUST stay
 // distinct from every other packet ({43,204,226,230,249,252}). Lock them here.
@@ -123,6 +124,11 @@ bool otaBegin(uint16_t sessionId, uint32_t imageSize, uint8_t chipFamily) {
                   imageSize, part->label, part->size);
     return false;
   }
+
+  // A mesh config pull being answered from here holds a reply buffer of up to 2.9 KB and keeps
+  // sending frags from loop(); esp_ota_begin is about to erase flash with loop() held for seconds.
+  // Free it now - the requester times out and asks again after the update.
+  configPullJobAbort("OTA started");
 
   esp_err_t e = esp_ota_begin(part, imageSize, &ota.handle);
   if (e != ESP_OK) {

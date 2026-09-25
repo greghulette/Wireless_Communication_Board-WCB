@@ -131,3 +131,33 @@ test('wizard.kyber_local_frees_other_port a local Kyber claims only its own port
 
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.kyber_auto_targets a local Kyber board targets every connected board\'s Maestros (its own included), keeps every remembered target of a board that is not connected (the same id on another board included), drops the remembered ones of a connected board, and a remote board is left alone', async ({ page }) => {
+  await openWizard(page);
+  const r = await page.evaluate(() => {
+    const P = window.WCBParser;
+    const mk = (n, fn) => { const c = P.createDefaultBoardConfig(); c.wcbNumber = n; fn(c); return c; };
+    const list = (c) => c.kyber.targets.map((t) => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`);
+    boardConfigs[1] = mk(1, (c) => {
+      c.kyber.mode = 'local';
+      c.kyber.port = 2;
+      c.kyber.targets = [{ id: 5, wcb: 3, port: 1, baud: 57600 },    // from the last ?backup: W3 is not connected
+                         { id: 1, wcb: 3, port: 2, baud: 9600 },      // same id as W1's own Maestro, hosted on W3
+                         { id: 9, wcb: 2, port: 5, baud: 9600 }];     // remembered on W2, which reports a live list without it
+      c.maestros = [{ id: 1, port: 1, baud: 57600 }];
+    });
+    boardConfigs[2] = mk(2, (c) => { c.maestros = [{ id: 2, port: 1, baud: 115200 }, { id: 1, port: 3, baud: 9600 }]; });
+    boardConfigs[3] = undefined;
+    autoComputeKyberTargets(1);
+    const local = list(boardConfigs[1]);
+    boardConfigs[4] = mk(4, (c) => { c.kyber.mode = 'remote'; c.kyber.targets = [{ id: 9, wcb: 9, port: 9, baud: 9600 }]; });
+    autoComputeKyberTargets(4);
+    return { local, remote: list(boardConfigs[4]) };
+  });
+  // Connected boards first, in board order, the Kyber board's own Maestro included; then every remembered target on
+  // the unconnected W3, the M1 that shares its id with W1's own Maestro included (CLAUDE.md rule 5). The remembered M9
+  // on W2 is gone: W2 reported a live list. (Until 2026-09-24 the fallback was keyed on the id alone and dropped the
+  // M1 - docs/HIL_TEST_AUDIT.md F4.)
+  expect(r.local).toEqual(['M1:W1S1:57600', 'M2:W2S1:115200', 'M1:W2S3:9600', 'M5:W3S1:57600', 'M1:W3S2:9600']);
+  expect(r.remote).toEqual(['M9:W9S9:9600']);
+});

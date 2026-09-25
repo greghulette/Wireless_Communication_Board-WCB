@@ -16,6 +16,7 @@ changing before editing.**
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
+| Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
 | Device command translation | it's in [`WcbCmd`](https://github.com/greghulette/WcbCmd), not here |
 | Hardware-in-the-loop tests — `tests/hil`, the `wcb_probe` firmware | [docs/HIL_TESTING.md](docs/HIL_TESTING.md) |
 
@@ -112,13 +113,22 @@ changing before editing.**
     and the pusher cannot tell, because the boot banner satisfies its "did the board answer"
     test, so nothing retries and the push is scored as fully ACKed. Set a deferred flag and let
     `loop()` restart once the queue is empty **and quiet** (`PWM_REBOOT_QUIET_MS`) — quiet
-    matters, because an ACK-paced push empties the queue between every pair of commands. Two flags
+    matters, because an ACK-paced push empties the queue between every pair of commands. A command
+    that changes nothing is not activity (`quietWindowExempt`: a store-only `?STATS,RPT`, a re-arm
+    of the running `?RTERM` session), and `RESTART_MAX_DEFER_MS` (20 s) restarts anyway once the
+    request is that old — a client re-arming a terminal once a second held a `?reboot` off for
+    good (tracker #93). The cap is sized to outlast the longest push tail the window protects (the
+    commands that ask for a restart come last in a push); re-derive that before shrinking it. Once the
+    restart is imminent (`restartImminent`) the ETM path neither ACKs nor queues a command, so nothing is
+    ACKed and then lost in the last ~150 ms. Two flags
     feed that one restart point: `pwmRebootPending` (`WCB_PWM.cpp`) and the general `rebootPending`
     (`WCB.ino`), which `reboot()` and `eraseNVSFlash()` set. **Every restart reached from a command
     handler uses one of them** — `?reboot`, `?ERASE,NVS`, `?MAP,PWM,CLEAR,OUT` and `?PX` each took
     it inline until 2026-09-20, and an ETM-received one is ACKed on the WiFi task before `loop()`
     ever dequeues it, so a whole delay window of commands was ACKed and then thrown away. The OTA
-    post-flash restarts (`WCB_OTA.cpp`) and the boot guard are not command handlers and stay inline. Likewise `espNowReceiveCallback` runs on the WiFi
+    post-flash restarts (`WCB_OTA.cpp`) and the boot guard are not command handlers and stay inline.
+    Both flags also wait for a running config-pull reply (`!configPullJobActive()`), which a restart
+    would cut in half (docs/MGMT_RELAY.md). Likewise `espNowReceiveCallback` runs on the WiFi
     task: UART0 has no TX buffer, so a multi-KB `Serial.printf` there blocks for ~235 ms and,
     with HAL locks on, holds the UART0 mutex against `loop()` too. That is what fired the WiFi
     watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
@@ -159,8 +169,9 @@ changing before editing.**
       route it back to RMT. A declared PWM-output port drops serial writes.
     - **Receive is a GPIO ISR**, which decodes from the time each edge's interrupt
       starts. So the GPIO ISR service is installed at **level 3** in `setup()`, ahead of any
-      `attachInterrupt`, to pre-empt the level-1 UART/RMT interrupts. That took 19200-57600 from
-      15-19/20 lines exact to 20/20; 115200 is still 0/20 (`?BAUD` warns). Keep it first. **Never
+      `attachInterrupt`, to pre-empt the level-1 UART/RMT interrupts. That took 19200 and 38400 from
+      15-19/20 lines exact to 20/20. 57600 loses about 1% of lines in back-to-back bursts: it has only
+      about 8.7 µs of ISR-latency margin. 115200 is still 0/20 (`?BAUD` warns). Keep it first. **Never
       add `ESP_INTR_FLAG_IRAM`** to it. Every handler is reached through Arduino's `__onPinInterrupt`,
       which is in flash (and so is the `micros()` the ISRs call), so an IRAM service runs flash code
       with the cache off during any NVS write and panics. A PWM input pulses every 20 ms, so that
@@ -198,6 +209,24 @@ changing before editing.**
       poll as one frame anyway: status readers must never transmit, because a reply that overlaps a
       query is still lost on the device side.
 
+14. **The heap is small, and a failed `String` allocation is silent.** With WiFi in AP mode a
+    classic-ESP32 WCB has about 19 KB of byte-addressable heap, largest block 16-17 KB (`?STATS`
+    prints it; `ESP.getMaxAllocHeap()` measures the wrong heap, #58). An Arduino `String` whose
+    allocation fails comes back empty, and a failed append leaves it unchanged, so building or
+    copying anything config-sized loses output with no error: `?backup` printed its restore
+    chains as a bare `^?CHK<crc>` from about 2.5 KB (#90), and a long `?SEQ,SAVE` read as empty
+    (#58). Stream big output in pieces (`printBackupConfig`), or walk the config once per piece
+    and check each walk (the config pull's `configPullWalk`, which also counts a token whose
+    String failed and reports it as out of memory instead of shipping the config without it).
+
+15. **`[MGMT:CONFIG,<n>]` (packet type 6) carries a board's whole config or nothing.** Every Wizard
+    from before 2026-09-24, including the copies frozen inside Intellex installs, stores ANY non-empty
+    body under that tag as the board's config and baseline, without checking its `^?CHK`, and the next
+    push writes it back. Parts and errors are packet type 18, printed as `[MGMT:CFGPART,` and
+    `[MGMT:CFGERR,` (they differ before the comma, so old Wizards ignore them), and parts go only to a
+    request that asked for them (`?MGMT,PULL,<n>,P`, type 19). Nothing else may ever travel as type 6
+    or under that tag. See [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md).
+
 ## Verifying
 
 ```bash
@@ -207,8 +236,9 @@ Code/bin/build.sh
 #   ESP32-S3  : esp32:esp32:esp32s3:PartitionScheme=min_spiffs
 #   core pinned to esp32:esp32@3.3.4
 
-# Host test — WDP wire format + election, pure C++11
+# Host tests — WDP wire format + election; config-pull parts (split, framing, UTF-8, error texts)
 g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./wdp_wire_test
+g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test && ./config_parts_test
 
 # Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
 python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log
@@ -223,17 +253,20 @@ python tests/hil/selftest.py             # harness self-test, no hardware
 cd tests/wizard && npm run unit
 ```
 
-The WDP test is independent of the firmware build so it can never block a push. The HIL
+The host tests are independent of the firmware build so they can never block a push. The HIL
 suite needs the physical bench (`tests/hil/bench.json`), so no CI runs it — it changes saved
 config, moves servos and reboots boards, and fails any test that leaves a board's config
 different from how it found it. Close the Arduino IDE monitor and Wizard tabs first: a COM
 port has one owner. What neither covers is left to the compiler and `TestConfigs/` (a manual
 bench plan — `TestPlan.md`, `steps.md`, and per-board config fixtures).
 
-The Wizard has no build step, so a syntax slip silently breaks all event wiring:
+The Wizard has no build step, so a syntax slip silently breaks all event wiring. All its JS
+loads through `src=`, so `jscheck.js Wizard/index.html` finds no inline block and checks nothing;
+check the files themselves, then run the no-board browser specs CI runs:
 
 ```bash
-node C:\Users\ghulette\tools\jscheck.js Wizard/index.html
+node --check Wizard/app.js && node --check Wizard/parser.js
+cd tests/wizard && WIZ_HEADLESS=1 WIZ_NO_AUTHORIZE=1 npx playwright test specs/smoke.spec.js specs/kyber.spec.js specs/remote_pull_fake.spec.js
 ```
 
 A static Wizard server is configured as launch config `wizard-static` (port 8777). It runs

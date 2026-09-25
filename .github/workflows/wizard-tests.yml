@@ -6,7 +6,9 @@ name: Wizard tests
 # Two jobs, both host-only:
 #   parser — Wizard/parser.js under `node --test`. This is where config LOSS lives: the Wizard pushes
 #            the diff against the baseline it pulled, so a dropped field silently rewrites a good board.
-#   smoke  — the Wizard loaded in Chromium (Playwright), failing on any uncaught page error.
+#   smoke  — the Wizard's no-board browser specs in Chromium (Playwright): the page loads with no uncaught
+#            error (smoke), the Kyber push order (kyber), and remoteBoardPull against a fake relay and
+#            clock (remote_pull_fake).
 #
 # Deliberately separate from build.yml, and filtered to the Wizard's own paths: build.yml stamps a fresh
 # timestamp into every firmware image it compiles and auto-commits the binaries, so a Wizard-only change
@@ -54,7 +56,8 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Smoke test
         working-directory: tests/wizard
-        # The board tests skip themselves without HIL_BRIDGE, so this runs wizard.smoke alone.
+        # Runs every no-board spec (smoke, kyber, remote_pull_fake); the board specs (board, remote_pull)
+        # skip themselves without HIL_BRIDGE.
         # Headless here: no port dialog is possible on a runner, and no board is present.
         env:
           WIZ_HEADLESS: '1'

@@ -1,6 +1,6 @@
 // Playwright for the Wizard. Board tests are started one at a time by the HIL harness (tests/hil/hil/wizard.py),
 // which hands the board's COM port to Chrome and passes HIL_BRIDGE; run standalone, only the no-board tests
-// (wizard.smoke, wizard.kyber_*) run.
+// (wizard.smoke, wizard.kyber_*, wizard.remote_pull_fake_*) run.
 const { defineConfig } = require('@playwright/test');
 
 // The Web Serial grant is stored per origin, so this origin must never change or every profile needs

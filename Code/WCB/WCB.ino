@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_232316RSEP2026                                  *****////
+///*****                                          Version 6.2.1_250646RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -108,6 +108,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_PWM.h"
 #include "WCB_Help.h"
 #include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
+#include "WCB_ConfigParts.h"  // mesh config pull: parts split/framing arithmetic (pure; tests/config_parts_test.cpp)
 #include "driver/gpio.h"  // clearStaleGpioInterrupts (boot): gpio_intr_disable / gpio_set_intr_type
 #include "hal/gpio_ll.h"  // ...and the GPIO register block it inspects
 
@@ -196,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_232316RSEP2026";
+String SoftwareVersion = "6.2.1_250646RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -273,7 +274,8 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_ETM_REQ     8   // relay → target: request ETM characterization
 #define PACKET_TYPE_STATS_FRAG  9   // target → relay: ?STATS response fragment
 #define PACKET_TYPE_ETM_FRAG    10  // target → relay: ?ETM,CHAR response fragment
-// 11 = ETM_BOOT, 12 = WDP, 17 = WDP_DA (declared above with the ETM-struct types), 20+ = OTA.
+// 11 = ETM_BOOT, 12 = WDP, 17 = WDP_DA (declared above with the ETM-struct types), 18/19 = config
+// parts (below), 20+ = OTA.
 #define PACKET_TYPE_SEQ_REQ     13  // relay → target: request stored-sequence NAMES
 #define PACKET_TYPE_SEQ_FRAG    14  // target → relay: sequence-name response fragment
                                     // Names only — deliberately NOT the values. The
@@ -287,6 +289,15 @@ typedef struct __attribute__((packed)) {
                                     // set is not — a consumer walks the name list and
                                     // pulls each key, which has no aggregate ceiling and
                                     // resumes cleanly if a board drops mid-walk.
+#define PACKET_TYPE_CONFIG_PART      18  // target → relay: one part of a config over 2912 chars,
+                                         // or a pull error (WCB_ConfigParts.h). Its own type on
+                                         // purpose: every older relay drops a 230-byte frame whose
+                                         // type it does not know, while type 6 it prints as
+                                         // [MGMT:CONFIG,n] - which every Wizard before F13 stores
+                                         // as the board's config, with no checksum test.
+#define PACKET_TYPE_CONFIG_REQ_PARTS 19  // relay → target: CONFIG_REQ (same 43-byte struct) from a
+                                         // requester that accepts parts. Older targets drop it at
+                                         // the receive filter and answer the type-5 copies behind it.
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -738,9 +749,6 @@ int etmLoadRoundRobinIndex = 0;
 // Delivery confirmation tracking
 unsigned long espnowCommandDelivered = 0;
 
-// Delivery tracking enable flags (can toggle each independently)
-bool trackCommandDelivery = true;
-
 // Serial port monitoring/mirroring
 bool serialMonitorEnabled[5] = {false, false, false, false, false};  // Which ports to monitor
 bool mirrorToUSB = true;      // Mirror monitored ports to USB Serial
@@ -909,19 +917,23 @@ void identifyTask(void *parameter) {
 // DATA handler in WCB_OTA.cpp, which reports it alongside a CRC rejection.
 volatile uint32_t serialRxOverflows = 0;
 
-// CRC32 calculation for verification
-uint32_t calculateCRC32(const String &data) {
-    const uint8_t *bytes = (const uint8_t *)data.c_str();
-    size_t length = data.length();
-    uint32_t crc = 0xFFFFFFFF;
-    
+// CRC32 calculation for verification: reflected CRC-32, poly 0xEDB88320, init and final XOR 0xFFFFFFFF.
+// crc32Update() is the running form, for data that is never held in one buffer - the ?backup chains are
+// printed a token at a time (printBackupConfig). Start at CRC32_INIT, feed every byte in order, finish
+// with ~crc: the result equals calculateCRC32() of the concatenation.
+static const uint32_t CRC32_INIT = 0xFFFFFFFFu;
+uint32_t crc32Update(uint32_t crc, const uint8_t *bytes, size_t length) {
     for (size_t i = 0; i < length; i++) {
         crc ^= bytes[i];
         for (int j = 0; j < 8; j++) {
             crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
         }
     }
-    return ~crc;
+    return crc;
+}
+
+uint32_t calculateCRC32(const String &data) {
+    return ~crc32Update(CRC32_INIT, (const uint8_t *)data.c_str(), data.length());
 }
 // Reboot helper. Deferred, never inline - CLAUDE.md rule 11. An ETM-received ?reboot is ACKed on
 // the WiFi task before loop() ever dequeues it, and the old delay(2000) + ESP.restart() ran on
@@ -1055,6 +1067,7 @@ struct ConfigPullSession {
   uint8_t  sourceWCB;
   uint16_t sessionId;
   uint8_t  totalChunks;
+  uint8_t  packetType;      // pullSession only: 6 (whole config) or 18 (part/error) - part of its key
   uint16_t receivedMask;
   char     chunks[MGMT_MAX_CHUNKS][CONFIG_PAYLOAD_SIZE + 1];
   unsigned long lastActivityMs;
@@ -1103,6 +1116,28 @@ static QueueHandle_t commandQueue = nullptr;
 // empty" alone would still land mid-push. 4 s comfortably outlasts the pacing gap.
 static const unsigned long PWM_REBOOT_QUIET_MS = 4000;
 static unsigned long lastCommandProcessedMs = 0;
+// Set by a handler whose command changes nothing, so it must not restart that window: a store-only ?STATS,RPT, and a
+// ?RTERM,START that re-arms the session already running to the same relay. loop() clears it before every queue item.
+// Every item used to count: Intellex, through NaviCore, re-arms W1's terminal about once a second, and that held a
+// queued ?reboot and a PWM reboot off for good (HIL run 20260924-213158; tracker #93, HIL_TEST_AUDIT.md F21).
+static bool quietWindowExempt = false;
+// Backstop: a deferred restart goes this long after it was asked for even if commands never stop arriving (a client
+// nobody exempted, or two clients re-arming a terminal to different relays). It must not cut a push the quiet window
+// would let finish. The commands that ask for a restart come last in a push - the Wizard's buildCommandString
+// (parser.js) and the ?backup chain (collectConfigCommands) both end with the PWM outputs and then the mappings - so at
+// most 4 mappings follow the first one (one mapping per input port, 5 ports), then the Wizard's own ?reboot. Each of
+// the 4 has to arrive within the 4 s window of the one before, or the window restarts the board anyway, and takes up
+// to ~0.6 s to run (a PWM mapping waits 50 ms per remote output), so the last one starts under 4 x 4.6 = 18.4 s after
+// the request. A relay push is one MGMT session, queued whole and drained in a single loop() pass, so no restart lands
+// inside it. 20 s, then, not the ~15 s first proposed, which a slow-answering push could still reach.
+static const unsigned long RESTART_MAX_DEFER_MS = 20000;
+// Set just before the restart line. The ETM receive path (WiFi task) ACKs a command before anything queues it,
+// so a command that lands in the last ~150 ms before ESP.restart() would be ACKed and then thrown away - rule 11's
+// failure. The cap makes that likely, because it fires exactly while commands are still arriving. Once this is
+// set a command is neither ACKed nor queued, and its sender retries after the reboot.
+volatile bool restartImminent = false;
+static bool restartWaitStarted = false;           // a restart is pending and restartWaitSinceMs holds when loop() saw it
+static unsigned long restartWaitSinceMs = 0;
 
 // ============================= Stored Commands =============================
 #define MAX_STORED_COMMANDS 80
@@ -1114,7 +1149,10 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 // Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
 void checkConfigPullTimeout();
-String buildConfigString();
+// frozenPeersLive >= 0: emit PEERSLIVE with that value instead of the live count (a config pull job's
+// snapshot, so its walks agree). ?backup passes nothing and keeps the live value.
+void collectConfigCommands(const std::function<void(const String &cmd, bool includeInLive)> &emit,
+                           int frozenPeersLive = -1);
 void processPWMPassthrough();
 void addPWMOutputPort(int port, uint8_t wdpAutoSrc);  // default (0) lives in WCB_PWM.h; match arity here
 bool removePWMOutputPort(int port);
@@ -3421,16 +3459,16 @@ void checkMgmtTimeout() {
 // Walks every persisted setting in canonical order and hands each command BODY
 // (e.g. "HW,24", "SPECIAL,ON,20") to `emit`. `includeInLive` is false for the two
 // commands (DELIM, FUNCCHAR) that must NOT appear in the live/configured restore
-// chain — see printBackupConfig for the rationale. `emitHelpers` is invoked at the
-// spot where the Maestro/MP3/HCR/Variable sub-emitters belong, so each caller can
-// route them to its own output target.
+// chain — see printBackupConfig for the rationale. The Maestro/MP3/DFP/HCR/WLED/variable
+// sub-emitters yield their bodies through the same `emit`, at the spot where they
+// belong, so every caller prefixes and separates them exactly like the rest.
 //
-// BOTH printBackupConfig() (serial backup) and buildConfigString() (ESP-NOW relay
+// BOTH printBackupConfig() (serial backup) and configPullWalk() (ESP-NOW relay
 // pull) drive this, so a setting added here is emitted by both automatically — no
 // more "works on serial, missing on relay" drift (the bug that dropped SPECIAL).
 // ───────────────────────────────────────────────────────────────────────────
 void collectConfigCommands(const std::function<void(const String &cmd, bool includeInLive)> &emit,
-                           const std::function<void()> &emitHelpers) {
+                           int frozenPeersLive) {
   String cmd;
   char   hexBuffer[3];
 
@@ -3472,8 +3510,9 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // operator sees what the board actually talks to, not just what they typed.
   // includeInLive=false: it's board-derived telemetry, NOT restorable config —
   // keep it out of the backup chain (like DELIM/FUNCCHAR) so a restore never
-  // dispatches ?PEERSLIVE,<n>.
-  emit("PEERSLIVE," + String(activePeerCount()), false);
+  // dispatches ?PEERSLIVE,<n>. A config pull job passes its own snapshot (frozenPeersLive): the count
+  // changes with no command, and the job walks this list once per message and compares the CRCs.
+  emit("PEERSLIVE," + String(frozenPeersLive >= 0 ? frozenPeersLive : activePeerCount()), false);
   emit("EPASS," + String(espnowPassword), true);
 
   // Command characters — DELIM/FUNCCHAR are factory-chain-only (includeInLive=false)
@@ -3485,7 +3524,7 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // ?KYBER,LOCAL port move) puts the port it gives up back to 9600 with broadcasts on (kyberReleasePort,
   // WCB_Storage.cpp). Replayed onto a board whose Kyber sits elsewhere, a later release would undo this chain's
   // own BAUD/BCAST lines for that port. A backup can't see the target board's Kyber port, so a Kyber_Local board
-  // releases too and claims again with KYBER,LOCAL after emitHelpers() - as the Wizard's full push does (#73 D5/D9).
+  // releases too and claims again with KYBER,LOCAL after the sub-emitters - as the Wizard's full push does (#73 D5/D9).
   emit(Maestro_Remote ? "MAESTRO,REMOTE" : "KYBER,CLEAR", true);
 
   // Baud rates and labels
@@ -3518,7 +3557,7 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   }
 
   // Kyber LOCAL: claim late (the release is emitted before the BAUD lines). A Kyber_Local board's
-  // KYBER,LOCAL line goes out AFTER emitHelpers() (the Maestro/MP3/HCR/DFP/WLED lines). ?KYBER,LOCAL
+  // KYBER,LOCAL line goes out AFTER the sub-emitters (the Maestro/MP3/HCR/DFP/WLED lines). ?KYBER,LOCAL
   // refuses a port that hosts a local Maestro, and ?MAESTRO refuses the current Kyber port, so a
   // restore that moves the two must place the Maestros first (tracker #28 follow-up).
   String kyberCmd;
@@ -3546,8 +3585,16 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
     }
   }
 
-  // Maestro / MP3 / HCR / Variable sub-emitters (routed to the caller's target)
-  emitHelpers();
+  // Maestro / MP3 / DFP / HCR / WLED / variable sub-emitters, here after Kyber's release and before ETM
+  {
+    const auto sub = [&emit](const String &c) { emit(c, true); };
+    emitMaestroBackup(sub);
+    emitMP3Backup(sub);
+    emitDFPBackup(sub);
+    emitHCRBackup(sub);
+    emitWLEDBackup(sub);
+    emitVariablesBackup(sub);   // user variables - config form ?VAR,SET, never the runtime ;V
+  }
   if (kyberCmd.length()) emit(kyberCmd, true);   // Kyber_Local: claimed after the Maestros (see above)
 
   // ETM settings
@@ -3619,113 +3666,527 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   }
 }
 
-// Builds the always-'?' config string used by the ESP-NOW relay pull (the Wizard
-// reads it). Drives collectConfigCommands so it can never drift from the serial
-// backup (printBackupConfig). DELIM/FUNCCHAR are emitted in the always-'?' form
-// here regardless of includeInLive — the Wizard parses '?'-prefixed tokens.
-String buildConfigString() {
-  String out = "";
-  auto emit = [&](const String &c, bool /*includeInLive*/) {
-    out += (out.isEmpty() ? "?" : "^?") + c;
-  };
-  auto emitHelpers = [&]() {
-    String dummy;
-    printMaestroBackup(dummy, out, '^');
-    printMP3Backup(dummy, out, '^');
-    printDFPBackup(dummy, out, '^');
-    printHCRBackup(dummy, out, '^');
-    printWLEDBackup(dummy, out, '^');
-    // User variables — webtool grammar is always the fixed '^?' form.
-    printVariablesBackup(dummy, out, '^');
-  };
-  collectConfigCommands(emit, emitHelpers);
-
-  // Checksum (zero-padded %08X to match printBackupConfig and the verifiers
-  // at WCB.ino:~1471 and :~5121 — see fix #6 comment there).
-  uint32_t checksum = calculateCRC32(out);
-  char chkBuf[9];
-  snprintf(chkBuf, sizeof(chkBuf), "%08X", checksum);
-  out += "^?CHK" + String(chkBuf);
-
-  // Prepend software version so the Wizard can read it from remote (MGMT) pulls.
-  // The [VER:...] prefix is stripped by the Wizard before command parsing.
-  return "[VER:" + SoftwareVersion + "]" + out;
+// Streams the reply the ESP-NOW relay pull sends (the Wizard reads it) through `w` without ever
+// building it: "[VER:<fw>]" + the always-'?' config body + "^?CHK<8 hex>". The software version
+// leads so the Wizard can read it from remote (MGMT) pulls; it strips the [VER:...] prefix before
+// parsing. Drives collectConfigCommands so it can never drift from the serial backup
+// (printBackupConfig). DELIM/FUNCCHAR are emitted in the always-'?' form here regardless of
+// includeInLive — the Wizard parses '?'-prefixed tokens. The bytes are exactly what
+// buildConfigString() made before F13, so a reply of 2912 characters or less still goes out
+// byte-identical (tests/config_parts_test.cpp pins the framing against a frozen copy of it).
+//
+// frozenPeers is the job's PEERSLIVE snapshot. PEERSLIVE counts live peers, which changes with no
+// command at all (WDP auto-join, temporary-peer eviction); unfrozen, two walks of one job would
+// disagree and the job would start over as "config changed".
+//
+// Every token is a String built for this walk. One whose allocation fails comes back invalidated
+// (c_str() nullptr, length 0) rather than failing, and cfgpReplyToken counts it in w.lostTokens
+// instead of feeding it: the caller must check that before trusting w.len or w.crc, which describe a
+// reply without that line.
+static void configPullWalk(CfgpWalk &w, int frozenPeers) {
+  cfgpReplyBegin(w, SoftwareVersion.c_str(), SoftwareVersion.length());
+  collectConfigCommands([&w](const String &c, bool /*includeInLive*/) {
+    cfgpReplyToken(w, c.c_str(), c.length());
+  }, frozenPeers);
+  cfgpReplyEnd(w);
 }
 
-// Target side: received a CONFIG_REQ — generate config and send it back in fragments
-void handleConfigReqPacket(const uint8_t *data) {
+// ── Config pull job (target side) ────────────────────────────────────────────
+// A CONFIG_REQ (type 5), or a CONFIG_REQ_PARTS (type 19) from a requester that can take parts,
+// starts ONE job, which serviceConfigPullJob() advances from loop() a step per call: a walk (the
+// measure walk and the first message's go together), or one frag. The handler before F13 sent the
+// whole reply inline with delay(20) per frag, up to 640 ms of loop() per pull. That fits one
+// 2912-character reply, not K parts: the ETM ACK ring (24) and the request queue (8) would fill, and
+// ETM retries would stall, for K x 640 ms plus K walks.
+//
+// A job sends messages, each its own relay session (a fresh sessionId, both passes, then the next):
+//   legacy   L <= 2912             the reply, type 6, no framing: byte-identical to before F13
+//   parts    L > 2912, type 19     P<id>,<k>,<K>:<data>~ for k = 1..K, type 18 (WCB_ConfigParts.h)
+//   error                          E<CODE>,<detail>, type 18, one chunk. NOMEM on a legacy-size reply
+//                                  is followed by the EMPTY type-6 reply sent before F13, so an old
+//                                  Wizard still says "empty config response" instead of timing out.
+// Nothing a job sends reaches any Wizard as a non-empty [MGMT:CONFIG,n] that is not the whole config:
+// older relays drop type 18 outright, newer ones print it under their own tags. Parts go only to a
+// type-19 request, which only a newer relay sends, and only for ?MGMT,PULL,<n>,P - a plain request
+// for an over-limit config gets ERROR NOPARTS, never parts. So does a ,P request whose three type-19
+// copies were all lost while a type-5 copy got through, which is why NOPARTS is retryable.
+//
+// Memory: never more than one message (<= 2912 bytes), malloc'd for it and freed after its second
+// pass. Each message re-walks collectConfigCommands and copies only its own window; the same walk
+// re-checks the length and the body CRC against the measure walk, so a config that changed between
+// walks (a command, an auto-learned device) is caught before a byte of that message goes out. The job
+// then starts over with a new parts id, at most twice, and after that sends ERROR CHANGED. The measure
+// walk and the first message's walk run in ONE step, as configStringLength() and buildConfigString()
+// ran in one handler call before F13: unless the build has to wait out a failed allocation, no command
+// or WDP advert is processed between them, so none can turn a legacy reply into ERROR CHANGED. The
+// buffer is not a static array: .bss comes out of the same DRAM as the heap, which is ~19 KB with the
+// WiFi AP up. Not a String either: one whose allocation fails comes back EMPTY instead of failing
+// (tracker #90), and assigning to one never gives its buffer back. The walks' own tokens are still
+// Strings, so a walk that lost one (configPullWalk) counts as out of memory exactly like a failed
+// buffer malloc: never CHANGED, and never a reply shipped without that line.
+//
+// Every refusal and failure prints one ungated line on this console, like the size refusal before it:
+// behind debugMGMT the requester only saw its pull time out, and nobody could say why.
+enum : uint8_t { CPJ_IDLE = 0, CPJ_MEASURE, CPJ_BUILD, CPJ_SEND };
+enum : uint8_t { CPM_REPLY = 0, CPM_ERROR, CPM_EMPTY };
+
+static const uint32_t CPJ_FRAG_GAP_MS   = 20;      // between two frags - the old per-frag delay(20)
+static const uint32_t CPJ_DEDUP_MS      = 1500;    // a requester accepted this recently: a burst copy
+static const uint32_t CPJ_PARK_MAX_MS   = 5000;    // a parked request older than this is dropped; its
+                                                   // requester retries on its own
+static const uint32_t CPJ_OOM_RETRY_MS  = 200;     // buffer malloc failed: try again this much later...
+static const uint32_t CPJ_OOM_GIVEUP_MS = 1000;    // ...for this long, then ERROR NOMEM
+static const uint8_t  CPJ_NOMEM_TRIES   = 10;      // esp_now_send ESP_ERR_ESPNOW_NO_MEM resends per frag
+static const uint8_t  CPJ_MAX_RESTARTS  = 2;       // "config changed" restarts before ERROR CHANGED
+static const uint32_t CPJ_FAULT_ARM_MS  = 60000;   // ?DEBUG,PULLFAULT,OOM disarms itself after this
+
+static struct {
+  uint8_t  state;          // CPJ_*
+  uint8_t  requester;
+  bool     partsOk;        // the request was type 19
+  bool     faultOom;       // ?DEBUG,PULLFAULT,OOM fired on this job: every buffer malloc "fails"
+  uint8_t  restarts;
+  int      peers;          // frozen PEERSLIVE
+  uint16_t D;              // part data size for this job
+  uint32_t L;              // reply length, from the measure walk
+  uint32_t crc;            // body CRC, from the measure walk
+  uint16_t id;             // parts id, new for every measure walk
+  uint8_t  K;              // 0 = one legacy reply, else the number of parts
+  uint8_t  part;           // the next part to build (1-based; the legacy reply is part 1 of 1)
+  uint16_t split[CFGP_MAX_PARTS + 1];
+  uint8_t  err;            // CFGP_E_* to send
+  uint32_t errA, errB, errC;
+  bool     emptyAfterErr;  // NOMEM on a legacy-size reply: send the empty type-6 reply after it
+  bool     oomWaiting;
+  uint32_t oomSinceMs, oomNextMs;
+  // the message on the air
+  uint8_t  msgKind;        // CPM_*
+  uint8_t *buf;            // CPM_REPLY only, malloc'd
+  uint16_t msgLen;
+  uint8_t  pktType;        // PACKET_TYPE_CONFIG_FRAG (6) or PACKET_TYPE_CONFIG_PART (18)
+  uint16_t session;
+  uint8_t  chunks, pass, chunk, tries;
+  uint16_t failMask;       // chunks whose pass-1 send failed; failing again in pass 2 ends the job
+} s_cpj = {};
+
+static uint16_t s_cpjLastSession = 0;      // the last sessionId this target put on the air for a pull
+static uint32_t s_cpjLastFragMs  = 0;
+static uint32_t s_cpjSendErrors  = 0;      // esp_now_send failures on config frags since boot
+
+// Requests seen, per requester: slot r for WCB r, slot 0 for a requester numbered above MAX_WCB_COUNT
+// (a WCB_Client relay may use any id). The dedup stamp is taken when a request is ACCEPTED, i.e. its
+// job starts - the start-anchored window of the old handler, now one per requester, so a copy from W1
+// landing between two of W3's copies is not served twice.
+static_assert(MAX_WCB_COUNT < 32, "the config pull masks are 32-bit");
+static uint32_t s_cpjAcceptMs[MAX_WCB_COUNT + 1];
+static uint32_t s_cpjAcceptMask = 0;
+static uint8_t  s_cpjAccept0Who = 0;
+// Requests parked behind a running job, served oldest first when it ends.
+static uint32_t s_cpjParkMs[MAX_WCB_COUNT + 1];
+static uint32_t s_cpjParkMask = 0, s_cpjParkPartsMask = 0;
+static uint8_t  s_cpjPark0Who = 0;
+
+// Test knobs (RAM only, never saved, not in ?backup): ?DEBUG,PULLPART / ?DEBUG,PULLFAULT.
+static uint16_t s_pullPartD       = 0;     // 0 = CFGP_PART_DATA
+static bool     s_pullFaultArmed  = false;
+static uint32_t s_pullFaultArmMs  = 0;
+
+void configPullFaultArm(bool on) {
+  s_pullFaultArmed = on;
+  s_pullFaultArmMs = millis();
+}
+void configPullSetPartSize(uint16_t d) { s_pullPartD = d; }
+
+bool configPullJobActive() { return s_cpj.state != CPJ_IDLE; }
+
+static uint8_t cpjSlot(uint8_t requester) {
+  return (requester >= 1 && requester <= MAX_WCB_COUNT) ? requester : 0;
+}
+
+static void cpjFreeBuf() {
+  if (s_cpj.buf) {
+    free(s_cpj.buf);
+    s_cpj.buf = nullptr;
+  }
+}
+
+static void cpjStart(uint8_t requester, bool partsOk) {
+  cpjFreeBuf();
+  memset(&s_cpj, 0, sizeof(s_cpj));
+  s_cpj.state     = CPJ_MEASURE;
+  s_cpj.requester = requester;
+  s_cpj.partsOk   = partsOk;
+  s_cpj.D         = s_pullPartD ? s_pullPartD : (uint16_t)CFGP_PART_DATA;
+  s_cpj.peers     = activePeerCount();
+  if (s_pullFaultArmed) {                  // one-shot: fires on this job, or lapses unfired
+    s_cpj.faultOom   = (millis() - s_pullFaultArmMs < CPJ_FAULT_ARM_MS);
+    s_pullFaultArmed = false;
+  }
+  const uint8_t slot = cpjSlot(requester);
+  s_cpjAcceptMs[slot] = millis();
+  s_cpjAcceptMask    |= (1UL << slot);
+  if (!slot) s_cpjAccept0Who = requester;
+  if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d%s\n", requester,
+                               partsOk ? " (parts accepted)" : "");
+}
+
+// The job is over (sent, refused, or abandoned): release it and serve the oldest parked request.
+static void cpjEnd() {
+  cpjFreeBuf();
+  s_cpj.state = CPJ_IDLE;
+  const uint32_t now  = millis();
+  int            best = -1;
+  uint32_t       age  = 0;
+  for (int i = 0; i <= MAX_WCB_COUNT; i++) {
+    const uint32_t bit = 1UL << i;
+    if (!(s_cpjParkMask & bit)) continue;
+    const uint32_t a = now - s_cpjParkMs[i];
+    if (a >= CPJ_PARK_MAX_MS) {            // its requester has moved on to its own retry
+      s_cpjParkMask &= ~bit;
+      s_cpjParkPartsMask &= ~bit;
+      continue;
+    }
+    if (best < 0 || a > age) { best = i; age = a; }
+  }
+  if (best < 0) return;
+  const uint32_t bit   = 1UL << best;
+  const bool     parts = (s_cpjParkPartsMask & bit) != 0;
+  s_cpjParkMask      &= ~bit;
+  s_cpjParkPartsMask &= ~bit;
+  cpjStart(best ? (uint8_t)best : s_cpjPark0Who, parts);
+}
+
+// Frees a running job - called by otaBegin(): the flash erase is about to hold loop() for seconds,
+// and the reply buffer is heap the update may want. Parked requests go too (they would only start
+// here and now); their requesters retry.
+void configPullJobAbort(const char *why) {
+  s_cpjParkMask = s_cpjParkPartsMask = 0;
+  if (s_cpj.state == CPJ_IDLE) return;
+  Serial.printf("[MGMT] Config pull for WCB%d abandoned: %s.\n", s_cpj.requester, why);
+  cpjFreeBuf();
+  s_cpj.state = CPJ_IDLE;
+}
+
+static void cpjBeginMessage(uint8_t kind) {
+  s_cpj.msgKind  = kind;
+  s_cpj.pktType  = (kind == CPM_EMPTY || (kind == CPM_REPLY && s_cpj.K == 0)) ? PACKET_TYPE_CONFIG_FRAG
+                                                                              : PACKET_TYPE_CONFIG_PART;
+  s_cpj.chunks   = (kind == CPM_REPLY) ? (uint8_t)cfgpChunkCount(s_cpj.msgLen) : 1;
+  s_cpj.session  = cfgpSessionId(esp_random(), s_cpjLastSession);
+  s_cpj.pass     = 0;
+  s_cpj.chunk    = 0;
+  s_cpj.tries    = 0;
+  s_cpj.failMask = 0;
+  s_cpj.state    = CPJ_SEND;
+}
+
+// Refuse or give up with an error message. It carries numbers only, never config text.
+static void cpjFail(uint8_t code, uint32_t a, uint32_t b, uint32_t c) {
+  cpjFreeBuf();
+  s_cpj.err           = code;
+  s_cpj.errA          = a;
+  s_cpj.errB          = b;
+  s_cpj.errC          = c;
+  // A legacy-size reply's NOMEM is followed by the empty reply an old Wizard understands. After a
+  // measure walk that lost a line, L is only a lower bound; an empty reply is still the truth then.
+  s_cpj.emptyAfterErr = (code == CFGP_E_NOMEM && s_cpj.K == 0 && s_cpj.L <= CFGP_LEGACY_MAX);
+  const int r = s_cpj.requester;
+  switch (code) {
+    case CFGP_E_NOPARTS:   // wording kept up to the ')': tests and users match the pre-F13 refusal.
+      // The rest names both causes: a current requester gets here only when every ,P copy was lost.
+      Serial.printf("[MGMT] Config pull from WCB%d: the config is too large to relay (%lu chars, max %lu). "
+                    "No request for parts arrived: every ,P copy was lost, or the Wizard or relay is too old "
+                    "to ask. Ask again with ?MGMT,PULL,%d,P, or read it over USB with ?backup.\n",
+                    r, (unsigned long)a, (unsigned long)b, WCB_Number);
+      break;
+    case CFGP_E_TOOBIG:
+      Serial.printf("[MGMT] Config pull from WCB%d: the config is too large to relay even in parts (%lu chars, "
+                    "max %lu in %lu parts). Read it over USB with ?backup.\n",
+                    r, (unsigned long)a, (unsigned long)b, (unsigned long)c);
+      break;
+    case CFGP_E_NOMEM:
+      if (a)
+        Serial.printf("[MGMT] Config pull from WCB%d: out of memory for a %lu-byte reply buffer for %lu ms (free "
+                      "%lu, largest block %lu). Sending an error%s.\n", r, (unsigned long)a,
+                      (unsigned long)CPJ_OOM_GIVEUP_MS, (unsigned long)b, (unsigned long)c,
+                      s_cpj.emptyAfterErr ? " and an empty reply" : "");
+      else
+        Serial.printf("[MGMT] Config pull from WCB%d: out of memory for a config line's text for %lu ms (free "
+                      "%lu, largest block %lu). Sending an error%s.\n", r,
+                      (unsigned long)CPJ_OOM_GIVEUP_MS, (unsigned long)b, (unsigned long)c,
+                      s_cpj.emptyAfterErr ? " and an empty reply" : "");
+      break;
+    case CFGP_E_CHANGED:
+      Serial.printf("[MGMT] Config pull from WCB%d: the config changed on every walk (%lu tries). "
+                    "Sending an error; the requester can retry.\n", r, (unsigned long)a);
+      break;
+    default: break;
+  }
+  cpjBeginMessage(CPM_ERROR);
+}
+
+// Out of memory in this step - the reply buffer's malloc (need = its size), or a String in a walk
+// (need = 0: its size is not known). The job stays in its state and tries the step again every
+// CPJ_OOM_RETRY_MS (it waits; loop() does not), and after CPJ_OOM_GIVEUP_MS of failing sends ERROR
+// NOMEM. The caller has freed anything it held.
+static void cpjOutOfMemory(uint32_t now, uint32_t need) {
+  if (!s_cpj.oomWaiting) {
+    s_cpj.oomWaiting = true;
+    s_cpj.oomSinceMs = now;
+  }
+  if (now - s_cpj.oomSinceMs >= CPJ_OOM_GIVEUP_MS) {
+    s_cpj.oomWaiting = false;
+    cpjFail(CFGP_E_NOMEM, need, (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+            (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  } else {
+    s_cpj.oomNextMs = now + CPJ_OOM_RETRY_MS;
+  }
+}
+
+static void cpjBuild();
+
+// Walk 1: the reply's length and body CRC, and the bytes around every split point. Holds nothing.
+// The first message's walk follows in this same step (see the job's header).
+static void cpjMeasure() {
+  const uint32_t now = millis();
+  if (s_cpj.oomWaiting && (int32_t)(now - s_cpj.oomNextMs) < 0) return;
+
+  CfgpWalk w;
+  cfgpWalkBegin(w, s_cpj.D, nullptr, 0, 0);
+  configPullWalk(w, s_cpj.peers);
+  s_cpj.K    = 0;
+  s_cpj.part = 1;
+  s_cpj.L    = (uint32_t)w.len;   // after a lost line, a lower bound: it only picks cpjFail's empty reply
+  if (w.lostTokens) {
+    cpjOutOfMemory(now, 0);
+    return;
+  }
+  s_cpj.oomWaiting = false;
+  s_cpj.crc = w.crc;
+  const uint16_t prevId = s_cpj.id;
+  do { s_cpj.id = (uint16_t)esp_random(); } while (s_cpj.id == prevId);   // a restart must look new
+  switch (cfgpPlan(w.len, s_cpj.partsOk, s_cpj.D)) {
+    case CFGP_PLAN_LEGACY:
+      s_cpj.state = CPJ_BUILD;
+      cpjBuild();
+      break;
+    case CFGP_PLAN_PARTS:
+      s_cpj.K     = (uint8_t)cfgpSplit(w.len, s_cpj.D, w.grid, s_cpj.split);
+      s_cpj.state = CPJ_BUILD;
+      if (debugMGMT) Serial.printf("[MGMT] Config pull to WCB%d: %lu chars in %u parts (id %04X)\n",
+                                   s_cpj.requester, (unsigned long)s_cpj.L, (unsigned)s_cpj.K, s_cpj.id);
+      cpjBuild();
+      break;
+    case CFGP_PLAN_NOPARTS:
+      cpjFail(CFGP_E_NOPARTS, s_cpj.L, (uint32_t)CFGP_LEGACY_MAX, 0);
+      break;
+    default:   // CFGP_PLAN_TOOBIG
+      cpjFail(CFGP_E_TOOBIG, s_cpj.L, (uint32_t)(CFGP_MAX_PARTS * s_cpj.D), CFGP_MAX_PARTS);
+      break;
+  }
+}
+
+// Walk k+1: build the next message - the legacy reply, or part `part` with its framing.
+static void cpjBuild() {
+  const uint32_t now = millis();
+  if (s_cpj.oomWaiting && (int32_t)(now - s_cpj.oomNextMs) < 0) return;
+
+  const bool   legacy = (s_cpj.K == 0);
+  const size_t lo     = legacy ? 0 : s_cpj.split[s_cpj.part - 1];
+  const size_t hi     = legacy ? s_cpj.L : s_cpj.split[s_cpj.part];
+  char         hdr[CFGP_PART_HDR_MAX + 1] = "";
+  const size_t hdrLen = legacy ? 0 : cfgpPartHeader(hdr, sizeof(hdr), s_cpj.id, s_cpj.part, s_cpj.K);
+  const size_t msgLen = hdrLen + (hi - lo) + (legacy ? 0 : 1);   // + the closing '~'
+
+  // ?DEBUG,PULLFAULT,OOM is injected HERE, at the malloc, so what runs is the real NOMEM branch.
+  uint8_t *buf = s_cpj.faultOom ? nullptr : (uint8_t *)malloc(msgLen ? msgLen : 1);
+  if (!buf) {
+    cpjOutOfMemory(now, (uint32_t)msgLen);
+    return;
+  }
+
+  memcpy(buf, hdr, hdrLen);
+  CfgpWalk w;
+  cfgpWalkBegin(w, 0, buf + hdrLen, lo, hi);
+  configPullWalk(w, s_cpj.peers);
+  // A lost line first: this walk runs with the buffer held, so it has less heap than the measure
+  // walk had, and its short CRC would otherwise read as "config changed" on every try.
+  if (w.lostTokens) {
+    free(buf);
+    cpjOutOfMemory(now, 0);
+    return;
+  }
+  s_cpj.oomWaiting = false;
+  if (w.len != s_cpj.L || w.crc != s_cpj.crc) {
+    free(buf);
+    if (s_cpj.restarts < CPJ_MAX_RESTARTS) {
+      s_cpj.restarts++;
+      s_cpj.state = CPJ_MEASURE;            // new id: the requester drops any parts it holds
+      if (debugMGMT) Serial.printf("[MGMT] Config pull to WCB%d: the config changed between walks - "
+                                   "starting over\n", s_cpj.requester);
+      return;
+    }
+    cpjFail(CFGP_E_CHANGED, (uint32_t)s_cpj.restarts + 1, 0, 0);
+    return;
+  }
+  if (!legacy) buf[msgLen - 1] = '~';
+  s_cpj.buf    = buf;
+  s_cpj.msgLen = (uint16_t)msgLen;
+  cpjBeginMessage(CPM_REPLY);
+}
+
+static void cpjMessageDone() {
+  cpjFreeBuf();
+  switch (s_cpj.msgKind) {
+    case CPM_REPLY:
+      if (s_cpj.K == 0 || ++s_cpj.part > s_cpj.K) {
+        if (debugMGMT) Serial.printf("[MGMT] Config pull to WCB%d sent (%lu chars)\n",
+                                     s_cpj.requester, (unsigned long)s_cpj.L);
+        cpjEnd();
+      } else {
+        s_cpj.state = CPJ_BUILD;
+      }
+      return;
+    case CPM_ERROR:
+      if (s_cpj.emptyAfterErr) {
+        s_cpj.msgLen = 0;
+        cpjBeginMessage(CPM_EMPTY);
+      } else {
+        cpjEnd();
+      }
+      return;
+    default:
+      cpjEnd();
+      return;
+  }
+}
+
+// One frag, at least CPJ_FRAG_GAP_MS after the previous one. All chunks of a message, then all of
+// them again (pass 2: the relay dedups by chunkIdx, so a frame lost in one pass is recovered by the
+// other), then the next message.
+static void cpjSendOne() {
+  if (millis() - s_cpjLastFragMs < CPJ_FRAG_GAP_MS) return;
+
+  espnow_struct_config_frag frag;
+  memset(&frag, 0, sizeof(frag));
+  strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+  frag.packetType   = s_cpj.pktType;
+  frag.sourceWCB    = WCB_Number;
+  frag.requesterWCB = s_cpj.requester;
+  frag.sessionId    = s_cpj.session;
+  frag.chunkIdx     = s_cpj.chunk;
+  frag.totalChunks  = s_cpj.chunks;
+  if (s_cpj.msgKind == CPM_REPLY) {
+    // Straight from the buffer: memset already zeroed the struct, so payload[n] is '\0'.
+    const size_t start = (size_t)s_cpj.chunk * CFGP_CHUNK_BYTES;
+    const size_t left  = s_cpj.msgLen > start ? s_cpj.msgLen - start : 0;
+    const size_t n     = left < CFGP_CHUNK_BYTES ? left : CFGP_CHUNK_BYTES;
+    if (n) memcpy(frag.payload, s_cpj.buf + start, n);
+  } else if (s_cpj.msgKind == CPM_ERROR) {
+    cfgpErrorText(frag.payload, sizeof(frag.payload), s_cpj.err, s_cpj.errA, s_cpj.errB, s_cpj.errC);
+  }                                          // CPM_EMPTY: one frag, empty payload - as before F13
+
+  const esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+  s_cpjLastFragMs = millis();
+  // NO_MEM is the driver's TX queue being full: nothing went on the air, so the same frag goes again
+  // on a later call (>= 20 ms, as esp_now.h advises) without advancing.
+  if (r == ESP_ERR_ESPNOW_NO_MEM && ++s_cpj.tries < CPJ_NOMEM_TRIES) return;
+  if (r == ESP_OK) {
+    s_cpjLastSession = s_cpj.session;
+  } else {
+    // Counted and passed over: pass 2 is this frag's second chance. A frag that fails in both
+    // passes can never complete the session, so the job ends here with no ERROR - the requester
+    // times out and asks again, which beats sending the rest of a message nobody can assemble.
+    s_cpjSendErrors++;
+    const uint16_t bit = (uint16_t)(1u << s_cpj.chunk);
+    if (s_cpj.pass == 1 && (s_cpj.failMask & bit)) {
+      Serial.printf("[MGMT] Config pull to WCB%d abandoned: frag %u/%u of session %04X failed to send in "
+                    "both passes (err 0x%X, %lu send failures since boot). The requester will retry.\n",
+                    s_cpj.requester, (unsigned)s_cpj.chunk + 1, (unsigned)s_cpj.chunks, s_cpj.session,
+                    (unsigned)r, (unsigned long)s_cpjSendErrors);
+      cpjEnd();
+      return;
+    }
+    s_cpj.failMask |= bit;
+  }
+  if (debugMGMT) {
+    if (s_cpj.msgKind == CPM_REPLY && s_cpj.K == 0)
+      Serial.printf("[MGMT] Sent config frag %d/%d session %04X (pass %d)\n",
+                    s_cpj.chunk + 1, s_cpj.chunks, s_cpj.session, s_cpj.pass + 1);
+    else if (s_cpj.msgKind == CPM_REPLY)
+      Serial.printf("[MGMT] Sent config part %u/%u frag %d/%d session %04X (pass %d)\n",
+                    (unsigned)s_cpj.part, (unsigned)s_cpj.K, s_cpj.chunk + 1, s_cpj.chunks, s_cpj.session,
+                    s_cpj.pass + 1);
+    else
+      Serial.printf("[MGMT] Sent config %s session %04X (pass %d)\n",
+                    s_cpj.msgKind == CPM_ERROR ? cfgpErrName(s_cpj.err) : "empty reply", s_cpj.session,
+                    s_cpj.pass + 1);
+  }
+  s_cpj.tries = 0;
+  if (++s_cpj.chunk < s_cpj.chunks) return;
+  s_cpj.chunk = 0;
+  if (++s_cpj.pass < 2) return;
+  cpjMessageDone();
+}
+
+// Called from loop(): advance the running job by one step. Never waits.
+void serviceConfigPullJob() {
+  switch (s_cpj.state) {
+    case CPJ_MEASURE: cpjMeasure(); break;
+    case CPJ_BUILD:   cpjBuild();   break;
+    case CPJ_SEND:    cpjSendOne(); break;
+    default:          break;
+  }
+}
+
+// Target side: a CONFIG_REQ (partsOk false) or CONFIG_REQ_PARTS (partsOk true), from loop() via
+// drainMgmtReqs. Starts a job, parks the request behind the running one, or drops a copy.
+void handleConfigReqPacket(const uint8_t *data, bool partsOk) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
 
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (pkt.packetType != (partsOk ? PACKET_TYPE_CONFIG_REQ_PARTS : PACKET_TYPE_CONFIG_REQ)) return;
   if (pkt.targetWCB != WCB_Number) return;
+  // The fixed fields, not String(a) != String(b): on an exhausted heap both Strings come back empty
+  // and compare EQUAL, so that check passes any password.
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
 
-  // The relay sends CONFIG_REQ redundantly to survive broadcast loss; answer only
-  // the first of a burst. Ignore a repeat from the same requester within a short
-  // window so we don't fire multiple overlapping config responses. The window is
-  // shorter than the wizard's retry interval, so a genuine retry still gets served.
-  static uint32_t lastConfigReqMs   = 0;
-  static uint8_t  lastConfigReqFrom = 0;
-  uint32_t nowMs = millis();
-  if (pkt.requesterWCB == lastConfigReqFrom && (nowMs - lastConfigReqMs) < 1500) {
-    if (debugMGMT) Serial.printf("[MGMT] Duplicate config request from WCB%d ignored\n", pkt.requesterWCB);
+  // The relay sends each request 3 times (6 for ,P) to survive broadcast loss; answer only the first
+  // of a burst. The window is shorter than the Wizard's retry interval, so a genuine retry is served.
+  const uint8_t  r    = pkt.requesterWCB;
+  const uint8_t  slot = cpjSlot(r);
+  const uint32_t bit  = 1UL << slot;
+  const uint32_t now  = millis();
+  if ((s_cpjAcceptMask & bit) && (slot || s_cpjAccept0Who == r) && now - s_cpjAcceptMs[slot] < CPJ_DEDUP_MS) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate config request from WCB%d ignored\n", r);
     return;
   }
-  lastConfigReqFrom = pkt.requesterWCB;
-  lastConfigReqMs   = nowMs;
-
-  if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d\n", pkt.requesterWCB);
-
-  String configStr = buildConfigString();
-  int totalLen    = configStr.length();
-  // Use CONFIG_PAYLOAD_SIZE-1 bytes per chunk so the 183rd byte is always
-  // available as a null terminator.  The original code used all 183 bytes
-  // and then forcibly set [182] = '\0', silently dropping one character from
-  // every full chunk — causing bytes at positions 182, 364, … to be lost.
-  // With a 1-byte gap sequence chars that fell at those positions (e.g. the
-  // comma in "SEQ,SAVE,key,value") were stripped, corrupting the parsed config.
-  const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
-  int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
-  if (totalChunks > MGMT_MAX_CHUNKS) {
-    if (debugMGMT) Serial.printf("[MGMT] Config too large (%d chars) — cannot send\n", totalLen);
-    return;
-  }
-
-  uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
-
-  // Send the whole fragmented config TWICE (two spaced passes, same sessionId).
-  // The relay dedups by chunkIdx (receivedMask), so a frame lost in one pass is
-  // recovered by the other. Without this, a single dropped broadcast frag stalls
-  // the entire pull until the wizard's multi-second retry. Two full passes give
-  // each frag's copies temporal separation (better than back-to-back resends).
-  for (int pass = 0; pass < 2; pass++) {
-    for (int i = 0; i < totalChunks; i++) {
-      espnow_struct_config_frag frag;
-      memset(&frag, 0, sizeof(frag));
-      strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
-      frag.packetType   = PACKET_TYPE_CONFIG_FRAG;
-      frag.sourceWCB    = WCB_Number;
-      frag.requesterWCB = pkt.requesterWCB;
-      frag.sessionId    = sessionId;
-      frag.chunkIdx     = (uint8_t)i;
-      frag.totalChunks  = (uint8_t)totalChunks;
-
-      int start = i * chunkStride;
-      int end   = min(start + chunkStride, totalLen);
-      String chunk = configStr.substring(start, end);
-      // memset already zeroed the struct — payload[chunk.length()] is '\0'
-      memcpy(frag.payload, chunk.c_str(), chunk.length());
-
-      esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
-      if (debugMGMT) Serial.printf("[MGMT] Sent config frag %d/%d session %04X (pass %d)\n",
-                                   i + 1, totalChunks, sessionId, pass + 1);
-      delay(20);
+  if (s_cpj.state != CPJ_IDLE) {
+    if (s_cpj.requester == r) {   // its reply is on the air already; a retry would only restart it
+      if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d ignored: reply in progress\n", r);
+      return;
     }
+    // Another requester: park it and serve it when this job ends, as the old blocking handler did by
+    // dequeuing it afterwards. A copy keeps its place in line unless it is a retry (older than the
+    // dedup window), and a type-19 copy upgrades a parked type-5 one (19s are sent first).
+    const bool fresh = !(s_cpjParkMask & bit) || (!slot && s_cpjPark0Who != r);
+    if (fresh) {
+      s_cpjParkMs[slot]   = now;
+      s_cpjParkPartsMask &= ~bit;
+    } else if (now - s_cpjParkMs[slot] >= CPJ_DEDUP_MS) {
+      s_cpjParkMs[slot] = now;   // a retry, not a burst copy: its CPJ_PARK_MAX_MS starts over
+    }
+    s_cpjParkMask |= bit;
+    if (partsOk) s_cpjParkPartsMask |= bit;
+    if (!slot) s_cpjPark0Who = r;
+    if (debugMGMT) Serial.printf("[MGMT] Config request from WCB%d parked behind WCB%d's reply\n",
+                                 r, s_cpj.requester);
+    return;
   }
+  cpjStart(r, partsOk);
 }
 
-// Relay side: received a CONFIG_FRAG — reassemble and output to serial when complete
 // ── Deferred MGMT output ────────────────────────────────────────────────────
 // The five *FragPacket handlers all run on the WiFi task (espNowReceiveCallback dispatches
 // them inline), and each ends by printing the reassembled result — up to 2912 bytes. UART0
@@ -3742,6 +4203,11 @@ void handleConfigReqPacket(const uint8_t *data) {
 #define MGMT_OUT_SLOTS 3
 #define MGMT_OUT_BUFSZ (MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1) + 48)   // 2960
 static char s_mgmtOut[MGMT_OUT_SLOTS][MGMT_OUT_BUFSZ];
+// WCB_ConfigParts.h restates these as plain numbers so the host test can use it; pin them together.
+static_assert(CFGP_CHUNK_BYTES == CONFIG_PAYLOAD_SIZE - 1, "WCB_ConfigParts.h chunk size != CONFIG_PAYLOAD_SIZE - 1");
+static_assert(CFGP_MAX_CHUNKS == MGMT_MAX_CHUNKS, "WCB_ConfigParts.h chunk limit != MGMT_MAX_CHUNKS");
+static_assert(sizeof("[MGMT:CFGPART,255]") - 1 + CFGP_MSG_MAX + 3 <= MGMT_OUT_BUFSZ,
+              "a whole part line (tag + 2912 + CRLF + NUL) must fit one output slot");
 static volatile uint8_t s_mgmtOutHead = 0;   // written by the WiFi task
 static volatile uint8_t s_mgmtOutTail = 0;   // written by loop()
 // Mux over the INDICES only, matching the etmAckQ ring above ("the mux makes push/pop
@@ -3752,20 +4218,72 @@ static volatile uint8_t s_mgmtOutTail = 0;   // written by loop()
 // than the race it closes.
 static portMUX_TYPE s_mgmtOutMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Queue one already-reassembled MGMT line for loop() to print. Safe from the WiFi task.
-static void mgmtQueueOut(const char *tag, uint8_t srcWCB, const char *body) {
+// Every queued line carries its own CRLF, and drainMgmtOut() prints it with ONE write. On the UART
+// that is atomic: HAL locks hold UART0 for a whole write, so another task's print can land between two
+// lines but never inside one or between a line and its end - where Serial.println's second write used
+// to leave room for, say, the WiFi task's "[ETM] WCBn came ONLINE" right after a part's closing '~'.
+// Same bytes. The guarantee covers the UART ONLY: WCBSerial::write then tees the line into the
+// WebSocket sink and the RTERM relay buffer a byte at a time, outside that lock (WCB_RemoteTerm.cpp),
+// so on those transports another task's print can still land inside a line and cost the requester
+// that line (a part fails its strict parse and is asked for again). Room for the CRLF and the NUL is
+// kept whatever the body does.
+static const size_t MGMT_OUT_TEXT_MAX = MGMT_OUT_BUFSZ - 3;
+
+static bool mgmtOutReserve(uint8_t &head, uint8_t &next) {
   portENTER_CRITICAL(&s_mgmtOutMux);
-  const uint8_t head = s_mgmtOutHead;
-  const uint8_t next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
-  const bool    full = (next == s_mgmtOutTail);
+  head = s_mgmtOutHead;
+  next = (uint8_t)((head + 1) % MGMT_OUT_SLOTS);
+  const bool full = (next == s_mgmtOutTail);
   portEXIT_CRITICAL(&s_mgmtOutMux);
-  if (full) return;                  // loop() is behind — drop rather than block here
+  return !full;
+}
 
-  snprintf(s_mgmtOut[head], MGMT_OUT_BUFSZ, "[MGMT:%s,%d]%s", tag, (int)srcWCB, body);
-
+static void mgmtOutPublish(uint8_t head, uint8_t next, size_t len) {
+  char *slot = s_mgmtOut[head];
+  if (len > MGMT_OUT_TEXT_MAX) len = MGMT_OUT_TEXT_MAX;
+  slot[len]     = '\r';
+  slot[len + 1] = '\n';
+  slot[len + 2] = '\0';
   portENTER_CRITICAL(&s_mgmtOutMux);
   s_mgmtOutHead = next;              // publish only after the slot is fully written
   portEXIT_CRITICAL(&s_mgmtOutMux);
+}
+
+// Queue one already-reassembled MGMT line for loop() to print. Safe from the WiFi task.
+static void mgmtQueueOut(const char *tag, uint8_t srcWCB, const char *body) {
+  uint8_t head, next;
+  if (!mgmtOutReserve(head, next)) return;   // loop() is behind — drop rather than block here
+
+  const int n = snprintf(s_mgmtOut[head], MGMT_OUT_TEXT_MAX + 1, "[MGMT:%s,%d]%s", tag, (int)srcWCB, body);
+  mgmtOutPublish(head, next, n < 0 ? 0 : (size_t)n);
+}
+
+// Queue "[MGMT:<tag>,<src>]" + the reassembled chunks straight from a relay session's chunk array:
+// no String and no heap on the WiFi task. A heap-starved relay used to concatenate a String whose
+// failed appends dropped chunks silently, and printed what was left as a well-formed line. `skip`
+// leaves out the first bytes of chunk 0 (the 'E' of a pull error). The chunks are n NUL-padded rows
+// of `stride` bytes (a flat pointer: a sketch-defined array type in the signature would break the
+// .ino prototype generator). Returns the body length, or -1 when the ring is full and the line was
+// dropped.
+static int mgmtQueueOutChunks(const char *tag, uint8_t srcWCB, const char *chunks, size_t stride,
+                              uint8_t n, size_t skip) {
+  uint8_t head, next;
+  if (!mgmtOutReserve(head, next)) return -1;
+
+  char *slot = s_mgmtOut[head];
+  int t = snprintf(slot, MGMT_OUT_TEXT_MAX + 1, "[MGMT:%s,%d]", tag, (int)srcWCB);
+  size_t pos = t < 0 ? 0 : ((size_t)t > MGMT_OUT_TEXT_MAX ? MGMT_OUT_TEXT_MAX : (size_t)t);
+  const size_t bodyStart = pos;
+  for (uint8_t i = 0; i < n; i++) {
+    const char *c   = chunks + (size_t)i * stride;
+    size_t      len = strnlen(c, stride - 1);
+    if (i == 0) { const size_t k = skip < len ? skip : len; c += k; len -= k; }
+    if (len > MGMT_OUT_TEXT_MAX - pos) len = MGMT_OUT_TEXT_MAX - pos;
+    memcpy(slot + pos, c, len);
+    pos += len;
+  }
+  mgmtOutPublish(head, next, pos);
+  return (int)(pos - bodyStart);
 }
 
 // Print any queued MGMT results. Called from loop(), where a blocking UART write is fine.
@@ -3777,7 +4295,8 @@ void drainMgmtOut() {
     portEXIT_CRITICAL(&s_mgmtOutMux);
     if (empty) break;
 
-    Serial.println(s_mgmtOut[tail]);   // outside the lock — this is the blocking part
+    // Outside the lock — this is the blocking part. ONE write: the line and its CRLF together.
+    Serial.write((const uint8_t *)s_mgmtOut[tail], strlen(s_mgmtOut[tail]));
 
     portENTER_CRITICAL(&s_mgmtOutMux);
     s_mgmtOutTail = (uint8_t)((tail + 1) % MGMT_OUT_SLOTS);   // free the slot only now
@@ -3785,56 +4304,87 @@ void drainMgmtOut() {
   }
 }
 
+// Relay side: a CONFIG_FRAG (type 6, a whole config) or CONFIG_PART (type 18, one part or a pull
+// error) frag. Reassemble, and queue the line for loop() when the session is complete. Runs on the
+// WiFi task, so the type-18 path prints nothing and touches no heap; the type-6 debug lines are the
+// old ones, behind debugMGMT.
+//
+// ONE session, keyed on (sessionId, packetType, sourceWCB). A frag that differs in any of the three
+// starts a new session - except a type-18 frag while a type-6 reply is live (a frag within the last
+// CONFIG_PART_YIELD_MS): that part frag is dropped. A legacy reply always wins: an older Wizard can
+// complete it and cannot use a part, while the newer Wizard asks for the lost part again. Keyed on
+// the sessionId alone, two replies meeting here could be spliced, and part text could come out under
+// [MGMT:CONFIG,n] - which every Wizard before F13 stores as the board's config, unchecked.
+#define CONFIG_PART_YIELD_MS 200
+
 void handleConfigFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
 
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  // The fixed fields, not String(a) != String(b): on an exhausted heap both Strings come back empty
+  // and compare EQUAL, so that check passes any password.
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  const bool part = (pkt.packetType == PACKET_TYPE_CONFIG_PART);
 
-  // The target sends the config in two passes for loss resilience. Once a session
-  // has been fully reassembled and delivered, ignore any leftover frags bearing
-  // that same sessionId (the second pass) so we don't deliver the config twice or
-  // start a stray never-completing session. (sessionId 0 means "none".)
+  // The target sends every message in two passes for loss resilience. Once a session has been
+  // fully reassembled and delivered, ignore any leftover frags bearing that same sessionId (the
+  // second pass) so we don't deliver it twice or start a stray never-completing session. (0 means
+  // "none".) One value is enough: a target never sends the same sessionId twice in a row
+  // (cfgpSessionId), so each part - its own session - gets through.
   static uint16_t lastDeliveredSession = 0;
   if (lastDeliveredSession != 0 && pkt.sessionId == lastDeliveredSession) return;
 
   // Start or continue pull session
-  if (!pullSession.active || pullSession.sessionId != pkt.sessionId) {
+  const bool same = pullSession.active && pullSession.sessionId == pkt.sessionId &&
+                    pullSession.packetType == pkt.packetType && pullSession.sourceWCB == pkt.sourceWCB;
+  if (!same) {
+    if (part && pullSession.active && pullSession.packetType != PACKET_TYPE_CONFIG_PART &&
+        millis() - pullSession.lastActivityMs < CONFIG_PART_YIELD_MS)
+      return;                                  // a live legacy reply wins; the part is asked for again
     memset(&pullSession, 0, sizeof(pullSession));
     pullSession.sourceWCB      = pkt.sourceWCB;
     pullSession.sessionId      = pkt.sessionId;
     pullSession.totalChunks    = pkt.totalChunks;
+    pullSession.packetType     = pkt.packetType;
     pullSession.lastActivityMs = millis();
     pullSession.active         = true;
-    if (debugMGMT) Serial.printf("[MGMT] Config pull session %04X from WCB%d (%d chunks)\n",
-                                 pkt.sessionId, pkt.sourceWCB, pkt.totalChunks);
+    if (debugMGMT && !part) Serial.printf("[MGMT] Config pull session %04X from WCB%d (%d chunks)\n",
+                                          pkt.sessionId, pkt.sourceWCB, pkt.totalChunks);
   }
 
   if (!(pullSession.receivedMask & (1 << pkt.chunkIdx))) {
     strncpy(pullSession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
     pullSession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
     pullSession.receivedMask |= (1 << pkt.chunkIdx);
-    if (debugMGMT) Serial.printf("[MGMT] Config frag %d/%d received (session %04X)\n",
-                                 pkt.chunkIdx + 1, pkt.totalChunks, pkt.sessionId);
+    if (debugMGMT && !part) Serial.printf("[MGMT] Config frag %d/%d received (session %04X)\n",
+                                          pkt.chunkIdx + 1, pkt.totalChunks, pkt.sessionId);
   }
   pullSession.lastActivityMs = millis();
 
-  // Reassemble and deliver when all chunks are in
+  // Reassemble and deliver when all chunks are in - straight from the chunk array into the output
+  // slot (mgmtQueueOutChunks), before the session is wiped. Printed by drainMgmtOut() in loop(),
+  // always, regardless of debugMGMT.
   uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
   if (pullSession.receivedMask == expectedMask) {
-    String fullConfig = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullConfig += String(pullSession.chunks[i]);
-    uint8_t srcWCB = pullSession.sourceWCB;
+    const uint8_t srcWCB = pullSession.sourceWCB;
     lastDeliveredSession = pkt.sessionId;   // suppress the redundant second pass
+    int len = -1;
+    if (!part) {
+      len = mgmtQueueOutChunks("CONFIG", srcWCB, (const char *)pullSession.chunks, sizeof(pullSession.chunks[0]),
+                               pkt.totalChunks, 0);
+    } else if (pullSession.chunks[0][0] == 'P') {
+      len = mgmtQueueOutChunks("CFGPART", srcWCB, (const char *)pullSession.chunks, sizeof(pullSession.chunks[0]),
+                               pkt.totalChunks, 0);
+    } else if (pullSession.chunks[0][0] == 'E') {
+      len = mgmtQueueOutChunks("CFGERR", srcWCB, (const char *)pullSession.chunks, sizeof(pullSession.chunks[0]),
+                               pkt.totalChunks, 1);
+    }                                       // any other type-18 body: not ours to print - dropped
     memset(&pullSession, 0, sizeof(pullSession));
-    // Deliver to webpage — always printed regardless of debugMGMT
-    mgmtQueueOut("CONFIG", srcWCB, fullConfig.c_str());   // printed by drainMgmtOut() in loop()
-    if (debugMGMT) Serial.printf("[MGMT] Config pull complete for WCB%d (%d chars)\n",
-                                 srcWCB, fullConfig.length());
+    if (debugMGMT && !part) Serial.printf("[MGMT] Config pull complete for WCB%d (%d chars)\n", srcWCB, len);
   }
 }
 
@@ -4010,9 +4560,9 @@ void handleETMReqPacket(const uint8_t *data) {
 }
 
 // ── Defer mgmt request responses out of the WiFi receive callback ───────────
-// CONFIG_REQ / STATS_REQ / ETM_REQ each generate a FRAGMENTED response with a
-// delay(20) per fragment (and CONFIG_REQ re-reads NVS via buildConfigString) —
-// hundreds of ms of work. Running that in the ESP-NOW receive callback (WiFi
+// STATS_REQ / ETM_REQ each generate a FRAGMENTED response with a delay(20) per
+// fragment, and CONFIG_REQ / CONFIG_REQ_PARTS start the config-pull job, whose walks
+// re-read NVS (configPullWalk) — hundreds of ms of work. Running that in the ESP-NOW receive callback (WiFi
 // task) stalls ESP-NOW and drops other inbound packets (heartbeats, OTA frags,
 // RC telemetry). So the callback only ENQUEUES the 43-byte request here, and
 // drainMgmtReqs() runs the heavy handler in loop() context — same pattern as the
@@ -4048,7 +4598,8 @@ void drainMgmtReqs() {
     // (immediately after structPassword[40]), so one peek routes them all.
     uint8_t ptype = slot.raw[40];
     switch (ptype) {
-      case PACKET_TYPE_CONFIG_REQ: handleConfigReqPacket(p); break;
+      case PACKET_TYPE_CONFIG_REQ:       handleConfigReqPacket(p, false); break;
+      case PACKET_TYPE_CONFIG_REQ_PARTS: handleConfigReqPacket(p, true);  break;
       case PACKET_TYPE_STATS_REQ:  handleStatsReqPacket(p);  break;
       case PACKET_TYPE_ETM_REQ:    handleETMReqPacket(p);    break;
       case PACKET_TYPE_SEQ_REQ:    handleSeqReqPacket(p);    break;
@@ -4288,18 +4839,29 @@ void handleMgmtETMRequest(const String &targetStr) {
   if (debugMGMT) Serial.printf("[MGMT] ETM char request sent to WCB%d\n", targetWCB);
 }
 
-// Relay side: handle ?MGMT,PULL,<targetWCB> — send a config pull request
+// Relay side: handle ?MGMT,PULL,<targetWCB>[,P] — send a config pull request
+//
+// ,P: the requester (a Wizard or harness that reassembles parts) accepts a config over 2912
+// characters as [MGMT:CFGPART,n] lines. Sent as CONFIG_REQ_PARTS (19) x3 first, then the usual
+// CONFIG_REQ (5) x3: an older target drops 19 at its receive filter and answers the 5s as it always
+// has; a newer one takes the first 19 and ignores the 5s as copies of a request it is serving. Older
+// relays read "<n>,P" with toInt/atoi as <n> and send only type 5, so the ,P form is safe to send
+// through any relay.
 void handleMgmtPullRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
   if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {   // mesh supports up to MAX_WCB_COUNT boards, not 8
     if (debugMGMT) Serial.println("[MGMT] PULL: invalid targetWCB");
     return;
   }
+  const int optAt = targetStr.indexOf(',');
+  String opt = optAt < 0 ? String() : targetStr.substring(optAt + 1);
+  opt.trim();
+  opt.toUpperCase();
+  const bool parts = (opt == "P");
 
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
-  pkt.packetType   = PACKET_TYPE_CONFIG_REQ;
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
 
@@ -4309,14 +4871,17 @@ void handleMgmtPullRequest(const String &targetStr) {
   // try"). The target dedups repeats within a short window (handleConfigReqPacket),
   // so these 3 sends still produce exactly one config response.
   esp_err_t result = ESP_OK;
-  for (int i = 0; i < 3; i++) {
-    esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
-    if (r != ESP_OK) result = r;
-    delay(15);
+  for (int round = parts ? 0 : 1; round < 2; round++) {
+    pkt.packetType = round == 0 ? PACKET_TYPE_CONFIG_REQ_PARTS : PACKET_TYPE_CONFIG_REQ;
+    for (int i = 0; i < 3; i++) {
+      esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+      if (r != ESP_OK) result = r;
+      delay(15);
+    }
   }
   if (debugMGMT) {
     if (result == ESP_OK)
-      Serial.printf("[MGMT] Config pull request sent for WCB%d (x3)\n", targetWCB);
+      Serial.printf("[MGMT] Config pull request sent for WCB%d (x3%s)\n", targetWCB, parts ? ", parts accepted" : "");
     else
       Serial.printf("[MGMT] Config pull request failed, error: %d\n", result);
   }
@@ -4396,8 +4961,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // + NVS) — DEFER to loop() (drainMgmtReqs) so we don't stall the WiFi task,
     // exactly like the OTA packets below. (STATS_REQ and ETM_REQ share this size.)
     uint8_t ptype = ((const espnow_struct_config_req*)incomingData)->packetType;
-    if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_STATS_REQ ||
-        ptype == PACKET_TYPE_ETM_REQ    || ptype == PACKET_TYPE_SEQ_REQ) {
+    if (ptype == PACKET_TYPE_CONFIG_REQ || ptype == PACKET_TYPE_CONFIG_REQ_PARTS ||
+        ptype == PACKET_TYPE_STATS_REQ  || ptype == PACKET_TYPE_ETM_REQ || ptype == PACKET_TYPE_SEQ_REQ) {
       enqueueMgmtReq(incomingData, len);
     }
     return;
@@ -4409,9 +4974,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
-    // Dispatch by packetType — STATS_FRAG and ETM_FRAG share the same struct size
+    // Dispatch by packetType — STATS_FRAG and ETM_FRAG share the same struct size. CONFIG_PART
+    // shares the config reassembly: its session key includes the type (handleConfigFragPacket).
     uint8_t ptype = ((const espnow_struct_config_frag*)incomingData)->packetType;
-    if      (ptype == PACKET_TYPE_CONFIG_FRAG) handleConfigFragPacket(incomingData);
+    if      (ptype == PACKET_TYPE_CONFIG_FRAG ||
+             ptype == PACKET_TYPE_CONFIG_PART)  handleConfigFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_SEQ_FRAG)    handleSeqFragPacket(incomingData);
     else if (ptype == PACKET_TYPE_SEQVAL_FRAG) handleSeqValFragPacket(incomingData);
@@ -4594,6 +5161,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         // not bare JSON) still ACK exactly as before.
         bool bestEffortTelemetry =
             (targetWCB == 0 && etmReceived.structCommand[0] == '{');
+        if (restartImminent) return;          // not ACKed, not queued: the sender retries after the reboot
         if (!bestEffortTelemetry)
             etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
@@ -5356,6 +5924,29 @@ void processLocalCommand(const String &message) {
         } else if (argsUpper == "RAW,OFF") {
             debugRawSerial = false;
             Serial.println("Raw serial debugging disabled");
+        } else if (argsUpper == "PULLFAULT,OOM") {
+            // Test knob (RAM only, never saved, not in ?backup): the HIL harness uses it to drive the
+            // real out-of-memory branch of a mesh config pull, which no bench board reaches on its own.
+            configPullFaultArm(true);
+            Serial.println("Config pull fault armed: the next accepted config request fails its reply "
+                           "buffer allocation (one-shot; disarms after firing or in 60 s)");
+        } else if (argsUpper == "PULLFAULT,OFF") {
+            configPullFaultArm(false);
+            Serial.println("Config pull fault disarmed");
+        } else if (argsUpper.startsWith("PULLPART,")) {
+            // Test knob (RAM only): a smaller part size, so a bench config splits into 3+ parts.
+            String v = argsUpper.substring(9);
+            v.trim();
+            const long   req = (v == "OFF") ? 0 : v.toInt();
+            const size_t d   = (v == "OFF" || v == String(req)) ? cfgpPartDataSize(req) : 0;
+            if (d) {
+                configPullSetPartSize(req == 0 ? 0 : (uint16_t)d);
+                Serial.printf("Config pull part size: %u bytes%s\n", (unsigned)d,
+                              req == 0 ? " (default)" : " (test value, until reboot)");
+            } else {
+                Serial.printf("Invalid PULLPART size. Use %u-%u, or 0/OFF for the default (%u)\n",
+                              (unsigned)CFGP_PART_DATA_MIN, (unsigned)CFGP_PART_DATA, (unsigned)CFGP_PART_DATA);
+            }
         } else {
             Serial.println("Invalid DEBUG command. Use: ?DEBUG ?");
         }
@@ -5485,7 +6076,10 @@ void processLocalCommand(const String &message) {
                 for (int i = 1; i <= 5; i++) clearSerialLabel(i);
                 Serial.println("All serial labels cleared");
             } else if (target.startsWith("S")) {
-                clearSerialLabel(target.substring(1).toInt());
+                // A port outside 1-5 was ignored with no reply (HIL_TEST_AUDIT.md F7); ?BAUD names it.
+                int port = target.substring(1).toInt();
+                if (port < 1 || port > 5) Serial.printf("Invalid serial port %d (must be 1-5)\n", port);
+                else clearSerialLabel(port);
             } else {
                 Serial.println("Invalid format. Use: ?LABEL,CLEAR,Sx or ?LABEL,CLEAR,ALL");
             }
@@ -5493,6 +6087,10 @@ void processLocalCommand(const String &message) {
             int port = labelArg1.substring(1).toInt();
             if (secondComma == -1) {
                 Serial.println("Invalid format. Use: ?LABEL,Sx,text");
+                return;
+            }
+            if (port < 1 || port > 5) {
+                Serial.printf("Invalid serial port %d (must be 1-5)\n", port);   // was ignored silently (F7)
                 return;
             }
             String label = args.substring(secondComma + 1);
@@ -5981,25 +6579,21 @@ void processLocalCommand(const String &message) {
             // echo, never forward: this arrives every 30s from every reporting
             // node, and printing it would bury the console. ?STATS shows it.
             storeReportedStats(args.substring(3));   // strip "RPT", keep the leading comma
+            // Telemetry, not configuration: it does not hold off a deferred restart (tracker #93). NaviCore
+            // sends one every 30 s, which alone stretched a ?reboot to ~8 s.
+            quietWindowExempt = true;
         } else {
             printESPNowStats();
         }
         return;
     }
 
-    // --- ?TRACK,... ---
-    if (rootUpper == "TRACK") {
-        if (argsUpper == "ON") {
-            trackCommandDelivery = true;
-            Serial.println("Delivery tracking enabled");
-        } else if (argsUpper == "OFF") {
-            trackCommandDelivery = false;
-            Serial.println("Delivery tracking disabled");
-        } else if (argsUpper == "STATUS") {
-            printTrackingStatus();
-        } else {
-            Serial.println("Invalid TRACK command. Use: ?TRACK ?");
-        }
+    // --- ?NVS --- read-only: how full the settings storage is, and what fills it. Nothing else can tell a
+    // full store from a bug: in HIL run 20260924-092602 a full NVS on WCB1 refused a 38-variable table and any
+    // sequence over ~900 characters, and a ?SEQ,CLEAR it could not complete left a ghost sequence behind.
+    // (?TRACK used to live here: it set a flag nothing read, and was removed 2026-09-24 - HIL_TEST_AUDIT.md F5.)
+    if (rootUpper == "NVS") {
+        printNvsUsage();
         return;
     }
 
@@ -6081,6 +6675,11 @@ void processLocalCommand(const String &message) {
             // (e.g. a MgmtRelay at WCB19) — the mirror never armed and the relayed
             // terminal returned nothing. Any valid WCB number can be a relay.
             if (relayWCB >= 1 && relayWCB <= MAX_WCB_COUNT) {
+                // A re-arm of the session already running to this relay changes nothing, so it does not hold
+                // off a deferred restart (tracker #93): Intellex, through NaviCore, re-arms once a second. It
+                // still re-announces, as it always has - the harness and the Wizard wait for that line.
+                if (WCBDebugSerial.sessionActive() && WCBDebugSerial.getRelayWCB() == relayWCB)
+                    quietWindowExempt = true;
                 WCBDebugSerial.startSession(relayWCB);
             } else {
                 Serial.printf("[RTERM] Invalid relay WCB. Use ?RTERM,START,1..%d\n", MAX_WCB_COUNT);
@@ -6263,7 +6862,7 @@ void processLocalCommand(const String &message) {
         // command could never succeed.
         updateSerialLabel(message);
     } else if (message.startsWith("slc") || message.startsWith("SLC")) {
-        clearSerialLabel(message.substring(4).toInt());
+        clearSerialLabelCommand(message);   // validates the port; the bare clearSerialLabel ignored a bad one silently
     } else if (message.startsWith("sbi") || message.startsWith("SBI")) {
         updateBroadcastInputSetting(message);   // pass FULL "SBISxON" — the fn strips "SBI" itself
                                                  // (was double-stripped here → whole command was dead)
@@ -6276,14 +6875,6 @@ void processLocalCommand(const String &message) {
         resetESPNowStats();
     } else if (message == "stats" || message == "STATS") {
         printESPNowStats();
-    } else if (message.startsWith("track_all_on") || message.startsWith("TRACK_ALL_ON")) {
-        trackCommandDelivery = true;
-        Serial.println("Delivery tracking enabled");
-    } else if (message.startsWith("track_all_off") || message.startsWith("TRACK_ALL_OFF")) {
-        trackCommandDelivery = false;
-        Serial.println("Delivery tracking disabled");
-    } else if (message.startsWith("track_status") || message.startsWith("TRACK_STATUS")) {
-        printTrackingStatus();
     } else if (message.startsWith("etmcharcount") || message.startsWith("ETMCHARCOUNT")) {
         etmCharMessageCount = constrain(message.substring(12).toInt(), 10, 200);
         saveETMSettings();
@@ -6396,11 +6987,6 @@ void resetESPNowStats() {
         reportedStats[b] = ReportedStats{};
     }
     Serial.println("ESP-NOW statistics reset.");
-}
-
-void printTrackingStatus() {
-    Serial.printf("Command delivery tracking: %s\n",
-                  trackCommandDelivery ? "ENABLED" : "DISABLED");
 }
 
 //*******************************
@@ -6753,65 +7339,126 @@ void updateHWVersion(const String &message) {
           wcb_hw_version == 24 || wcb_hw_version == 31 || wcb_hw_version == 32))
         Serial.println("WARNING: Hardware version not set! Use ?HW,xx to set version before backup.");
 
-    String chainedConfig        = "";
-    String chainedConfigDefault = "";
-    String defaultSep  = "^";                      // factory reset separator — never flips (see DELIM note)
-    String defaultFunc = "?";                      // factory reset func identifier, flips after ?FUNCCHAR
-    String lfi         = String(LocalFunctionIdentifier);  // shorthand for configured string
+    // The two one-line chains are PRINTED as they are generated, never held whole. They used to be built as two
+    // Strings and each copied again to append its checksum. With WiFi in AP mode (about 19 KB of heap,
+    // largest block 16-17 KB) a chain from about 2.5 KB up could not be copied, and an Arduino String
+    // whose allocation fails comes back EMPTY instead of failing - so the chain printed as an empty line
+    // or as a bare ^?CHK<crc>, the checksum of a chain that was never printed (tracker #90). Now
+    // collectConfigCommands runs once per output (the per-command lines, the live chain, the factory
+    // chain) and each chain's CRC covers exactly the bytes printed. Nothing here grows with the config;
+    // the price is reading the settings three times.
+    const String lfi = String(LocalFunctionIdentifier);  // shorthand for configured string
 
-    // Per-command emitter: prints to Serial (lfi prefix), accumulates the LIVE
-    // chain (configured delimiter + funcChar) and the FACTORY-RESET chain (fixed
-    // '^' separator + defaultFunc). includeInLive=false (DELIM, FUNCCHAR) keeps
-    // those out of the live chain — the board already uses the right
-    // delimiter/funcChar. After ?FUNCCHAR the factory chain flips defaultFunc so
-    // SUBSEQUENT tokens carry the new prefix (governs DISPATCH at restore time).
-    // The separator is intentionally NOT flipped after ?DELIM: the restore is
-    // split ONCE up front using the receiving board's current delimiter, so
-    // keeping '^' throughout makes the whole chain split correctly.
-    auto emit = [&](const String &c, bool includeInLive) {
-        Serial.println(lfi + c);
-        if (includeInLive)
-            chainedConfig += (chainedConfig.isEmpty() ? String("") : String(commandDelimiter)) + lfi + c;
-        chainedConfigDefault += (chainedConfigDefault.isEmpty() ? String("") : defaultSep) + defaultFunc + c;
-        if (c.startsWith("FUNCCHAR,")) defaultFunc = String(LocalFunctionIdentifier);
+    // Buffers what ?backup prints, so each line leaves in ONE write wherever it fits. A write holds the
+    // UART, so a line another task prints meanwhile (the receive callback's "[ETM] WCBn came ONLINE", on the
+    // WiFi task, right after a reboot) lands between two lines instead of inside one; with 256-byte writes it
+    // split a chain in two and broke its checksum (persist.bcast_flags_reboot, run 20260924-131417). The
+    // buffer is 2 KB from the heap for the length of one output, or 128 bytes on the stack if the heap
+    // refuses even that. A chain longer than the buffer still leaves in pieces, where its checksum still
+    // protects a restore. For a chain it also keeps the CRC-32 of exactly the bytes put().
+    struct BackupWriter {
+        char    *buf;
+        size_t   cap;
+        size_t   used  = 0;
+        uint32_t crc   = CRC32_INIT;
+        bool     empty = true;
+        char     small[128];
+        BackupWriter() : buf((char *)malloc(2048)), cap(2048) {
+            if (!buf) { buf = small; cap = sizeof(small); }
+        }
+        ~BackupWriter() {
+            flush();
+            if (buf != small) free(buf);
+        }
+        BackupWriter(const BackupWriter &) = delete;
+        BackupWriter &operator=(const BackupWriter &) = delete;
+        void flush() {
+            if (used) Serial.write((const uint8_t *)buf, used);
+            used = 0;
+        }
+        void raw(const char *s, size_t n) {           // printed, not checksummed
+            while (n) {
+                const size_t k = min(n, cap - used);
+                memcpy(buf + used, s, k);
+                used += k; s += k; n -= k;
+                if (used == cap) flush();
+            }
+        }
+        void put(const char *s, size_t n) {           // printed and checksummed
+            raw(s, n);
+            crc = crc32Update(crc, (const uint8_t *)s, n);
+        }
+        // One whole line, a + b + CRLF, in one write where it fits.
+        void line(const String &a, const String &b) {
+            raw(a.c_str(), a.length());
+            raw(b.c_str(), b.length());
+            raw("\r\n", 2);
+            flush();
+        }
+        // A chain token: the separator first unless this is the first token, then prefix + body.
+        void token(char sep, const String &prefix, const String &body) {
+            if (!empty) put(&sep, 1);
+            empty = false;
+            put(prefix.c_str(), prefix.length());
+            put(body.c_str(), body.length());
+        }
+        // Ends a chain line: the separator and <prefix>CHK<crc>, outside the CRC (it covers the chain before
+        // them), then CRLF, flushed with the rest. Returns the checksum token.
+        String finish(char sep, const String &prefix) {
+            char hex[9];
+            snprintf(hex, sizeof(hex), "%08X", ~crc);
+            const String chk = prefix + "CHK" + hex;
+            raw(&sep, 1);
+            raw(chk.c_str(), chk.length());
+            raw("\r\n", 2);
+            flush();
+            return chk;
+        }
     };
-    // Sub-emitters run at the canonical point (after Kyber, before ETM). Pass the
-    // LIVE defaultSep/defaultFunc (defaultFunc has flipped by now if ?FUNCCHAR was
-    // emitted) so a custom-funcChar board still splits them on restore.
-    auto emitHelpers = [&]() {
-        printMaestroBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-        printMP3Backup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-        printDFPBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-        printHCRBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-        printWLEDBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-        printVariablesBackup(chainedConfig, chainedConfigDefault, commandDelimiter, true, defaultSep, defaultFunc);
-    };
-    collectConfigCommands(emit, emitHelpers);
+
+    // One line per command - what the Wizard reads from a live board. Every command, the factory-only
+    // DELIM/FUNCCHAR and the read-only PEERSLIVE included. Each goes out whole in one write; never as a
+    // concatenation, which is one more allocation and, failed, an empty line in place of the command.
+    {
+        BackupWriter out;
+        collectConfigCommands([&](const String &c, bool /*includeInLive*/) { out.line(lfi, c); });
+    }
 
     // ---- Checksums ----
     // Format as zero-padded 8 hex chars (%08X) — matches the verifier at
     // WCB.ino:5121 which always uses sprintf %08X. The previous String(x,HEX)
     // form stripped leading zeros, so any CRC with a leading zero nibble
     // (~1/16 chance) failed verification through the ?C* legacy path.
-    char crcStrBuf[9];
-    uint32_t checksum = calculateCRC32(chainedConfig);
-    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksum);
-    String checksumCmd = lfi + "CHK" + String(crcStrBuf);
+    // BackupWriter::finish formats it.
 
-    uint32_t checksumDefault = calculateCRC32(chainedConfigDefault);
-    snprintf(crcStrBuf, sizeof(crcStrBuf), "%08X", checksumDefault);
-    String checksumCmdDefault = "?CHK" + String(crcStrBuf);  // factory reset always uses ?
-
-    String chainedWithChecksum        = chainedConfig        + String(commandDelimiter) + checksumCmd;
-    String chainedWithChecksumDefault = chainedConfigDefault + defaultSep               + checksumCmdDefault;
-
+    // LIVE chain: the configured delimiter and funcChar. DELIM and FUNCCHAR stay out of it
+    // (includeInLive=false): the board already uses the right delimiter/funcChar.
     Serial.println("\n" + commentDelimiter + " === For Configured Boards (Current Delimiter: '" + String(commandDelimiter) + "') ===");
-    Serial.println(chainedWithChecksum);
-    Serial.println(commentDelimiter + " Checksum: " + checksumCmd);
+    {
+        BackupWriter live;
+        collectConfigCommands([&](const String &c, bool includeInLive) {
+            if (includeInLive) live.token(commandDelimiter, lfi, c);
+        });
+        const String checksumCmd = live.finish(commandDelimiter, lfi);
+        Serial.println(commentDelimiter + " Checksum: " + checksumCmd);
+    }
 
+    // FACTORY-RESET chain: the fixed '^' separator and the '?' a fresh board starts with. After
+    // ?FUNCCHAR the func id flips, so SUBSEQUENT tokens carry the new prefix (governs DISPATCH at
+    // restore time). The separator is intentionally NOT flipped after ?DELIM: the restore is split
+    // ONCE up front using the receiving board's current delimiter, so keeping '^' throughout makes the
+    // whole chain split correctly. Its checksum token always uses '?'.
     Serial.println("\n" + commentDelimiter + " === For Factory Reset/Fresh Boards (Uses Default '^' Delimiter) ===");
-    Serial.println(chainedWithChecksumDefault);
-    Serial.println(commentDelimiter + " Checksum: " + checksumCmdDefault);
+    {
+        BackupWriter factory;
+        String defaultFunc = "?";
+        collectConfigCommands([&](const String &c, bool /*includeInLive*/) {
+            factory.token('^', defaultFunc, c);
+            if (c.startsWith("FUNCCHAR,")) defaultFunc = lfi;
+        });
+        const String checksumCmdDefault = factory.finish('^', "?");
+        Serial.println(commentDelimiter + " Checksum: " + checksumCmdDefault);
+    }
 
     Serial.println("--------- End of Backup ---------\n");
 }
@@ -8864,6 +9511,7 @@ void loop() {
   checkMgmtTimeout();
   checkConfigPullTimeout();
   drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  serviceConfigPullJob();  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
   drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
@@ -8901,6 +9549,7 @@ void loop() {
     lastReceivedViaESPNOW = inItem.espnowOrigin;
     inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
     seqCurPath     = itemPath;              // this item's call stack, for recallStoredCommand's cycle guard
+    quietWindowExempt = false;              // a handler sets it when this command must not hold off a restart
     handleSingleCommand(commandStr, inItem.sourceID);
     // A sequence-body item's flag must NOT persist past its own dispatch: a recall's body
     // commands drain last, so without this the global would latch true and every later
@@ -8909,7 +9558,8 @@ void loop() {
     // (serial/ETM/MGMT/receive) reset it too, so this just closes the drain-boundary leak.
     inSequenceBody   = false;
     seqCurPath.depth = 0;                   // same drain-boundary reason: nothing outside a dispatch has a lineage
-    lastCommandProcessedMs = millis();   // deferred-restart quiet-window clock (see below)
+    if (!quietWindowExempt)
+      lastCommandProcessedMs = millis();   // deferred-restart quiet-window clock (see below)
   }
 
   // A PWM input mapping needs a restart to (re)attach its interrupt, but taking it inside
@@ -8919,12 +9569,29 @@ void loop() {
   // (the while above only exits on xQueueReceive failing) AND quiet for PWM_REBOOT_QUIET_MS.
   // The quiet window matters — a Wizard push is ACK-paced, so it sends the NEXT command as
   // soon as this board answers, and the queue is briefly empty between every pair. Each
-  // command processed pushes the deadline out, so the restart lands after the push ends.
+  // command processed pushes the deadline out, so the restart lands after the push ends. A command
+  // that changes nothing (quietWindowExempt) does not, and RESTART_MAX_DEFER_MS after the request the
+  // restart goes anyway, so no stream of commands can hold it off for good (tracker #93).
+  // Nor under a config pull job: it sends over several loop() passes now, and a restart mid-reply
+  // leaves the requester a partial part set to time out on.
   if (pwmRebootPending || rebootPending) {
-    if (millis() - lastCommandProcessedMs >= PWM_REBOOT_QUIET_MS) {
+    const unsigned long now = millis();
+    if (!restartWaitStarted) {             // normally the pass that ran the command that set the flag
+      restartWaitStarted = true;
+      restartWaitSinceMs = now;
+    }
+    const bool quiet  = now - lastCommandProcessedMs >= PWM_REBOOT_QUIET_MS;
+    const bool capped = now - restartWaitSinceMs >= RESTART_MAX_DEFER_MS;
+    if ((quiet || capped) && !configPullJobActive()) {
       const bool forPWM = pwmRebootPending;
       pwmRebootPending = false;
       rebootPending    = false;
+      restartWaitStarted = false;
+      // Ungated: nothing else shows that commands were still arriving when the restart went.
+      restartImminent = true;             // from here on no ETM command is ACKed (see its declaration)
+      if (!quiet)
+        Serial.printf("Restart held off %lu s by commands that kept arriving - restarting anyway\n",
+                      (now - restartWaitSinceMs) / 1000UL);
       Serial.println(forPWM ? "Rebooting now to apply PWM configuration..."
                             : "Rebooting now...");
       Serial.flush();

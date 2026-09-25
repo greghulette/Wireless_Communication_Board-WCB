@@ -6,6 +6,7 @@
     python tests/hil/run.py --list | --plan | --links
     python tests/hil/run.py --resume [RUN]  # continue a paused or interrupted run (the newest, or RUN)
     python tests/hil/run.py --paused        # list the runs that can be resumed
+    python tests/hil/run.py --no-servos     # everything except the tests that move a real servo (hil/servos.py)
 
 Ctrl+C once pauses after the current test (exit 3, safe to disconnect); twice aborts at once and cuts that test off
 (exit 130; it runs again first on --resume). Creating results/<run>/PAUSE, or results/PAUSE, pauses a run started
@@ -98,6 +99,10 @@ def main():
                     help="continue a paused or interrupted run: the newest, or the run folder named")
     ap.add_argument("--paused", action="store_true", help="list the runs that can be resumed")
     ap.add_argument("--force", action="store_true", help="--resume: accept every difference without asking")
+    # Recorded in the run's checkpoint, not bench.json, so it lasts exactly as long as the run, a --resume included.
+    ap.add_argument("--no-servos", action="store_true",
+                    help="skip every test that can move a real servo (hil/servos.py); with --resume, from now on; "
+                         "with --list, tag them as skipped. bench.json \"no_servos\": true does it for every run")
     args = ap.parse_args()
     results_root = os.path.join(HERE, "results")
 
@@ -110,7 +115,7 @@ def main():
         except (OSError, ValueError):
             cfg = {}
         history = durations.load(results_root, write_cache=False)
-        for line in runner.list_lines(runner.REGISTRY, cfg, history):
+        for line in runner.list_lines(runner.REGISTRY, cfg, history, no_servos=args.no_servos):
             print(line)
         return 0
     if args.paused:
@@ -145,10 +150,12 @@ def main():
     try:
         if args.resume is not None:
             out_dir, ckpt = runner.resume(args.bench, results_root, args.resume, control=control,
-                                          ask=ask, on_checks_done=lambda: install_pause_handler(control))
+                                          ask=ask, on_checks_done=lambda: install_pause_handler(control),
+                                          no_servos=args.no_servos)
         else:
             out_dir, ckpt = runner.run(args.bench, args.selectors, results_root, discover=args.discover,
-                                       control=control, on_checks_done=lambda: install_pause_handler(control))
+                                       control=control, on_checks_done=lambda: install_pause_handler(control),
+                                       no_servos=args.no_servos)
     except checkpoint.CheckpointError as e:
         print(f"run.py: {e}", file=sys.stderr)
         return 2

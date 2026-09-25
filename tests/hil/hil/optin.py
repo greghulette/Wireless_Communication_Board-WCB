@@ -73,6 +73,42 @@ OPT_INS = {
         "why": "about 15 minutes of soft-port input into W1 S3-S5; needs wcb_probe 4",
         "estimate_s": 16 * 60,
     },
+    "wifi_modes": {
+        "title": "WiFi mode changes on W1",
+        "what": "W1 turns its access point off and back on, then joins W2's access point and returns to its own: four W1 "
+                "reboots, and W1's WiFi is unreachable meanwhile.",
+        "why": "changes W1's WiFi mode and reboots it four times",
+        "estimate_s": 60,
+    },
+    "wifi_pc": {
+        "title": "PC joins W1's access point (attended)",
+        "what": "A WiFi adapter on the PC joins W1's access point for about 30 s, opens the WebSocket endpoint, then returns "
+                "to its network. The spare adapter is used when there is one; with a single adapter the PC is offline "
+                "meanwhile. The AP password sits in a temporary Windows profile that is deleted after.",
+        "why": "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard",
+        "estimate_s": 90,
+    },
+    "mesh_password": {
+        "title": "Mesh password on W1 (attended)",
+        "what": "Gives W1 a throwaway ESP-NOW password for a few seconds, then its own back from its chain: W1 is off the "
+                "mesh meanwhile, and stays off if the run dies before the restore.",
+        "why": "takes W1 off the mesh for a few seconds with a throwaway password",
+        "estimate_s": 30,
+    },
+    "nvs_erase": {
+        "title": "Erase W1's NVS (attended)",
+        "what": "Erases all of W1's settings, checks the factory defaults, then restores every setting from W1's own "
+                "chain and its learned peers: three reboots per test, two tests.",
+        "why": "erases all of W1's settings and restores them from its chain",
+        "estimate_s": 120,
+    },
+    "nvs_fill": {
+        "title": "Fill W1's NVS with sequences",
+        "what": "Saves throwaway sequences on W1 until its settings storage refuses one, checks nothing is left "
+                "half-saved or listed empty, then removes them. Other NVS writes on W1 may fail for those seconds.",
+        "why": "fills W1's settings storage with throwaway sequences, then removes them",
+        "estimate_s": 60,
+    },
     "w1s4_soak": {
         "title": "W1S4 corruption soak (#78)",
         "what": "Loads W1's S2/S4 fan-out for bench.json soak_minutes (default 20), alternating W1S4's receiver.",

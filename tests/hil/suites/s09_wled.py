@@ -45,6 +45,11 @@ def verbs(bench):
 @test("wled.bad_verb", "An unknown ;L verb writes nothing", needs=NEEDS)
 def bad_verb(bench):
     probe, ch = wire(bench, 2, "S2")
+    w = usb_wcb(bench)
     m = probe.dev.mark()
-    usb_wcb(bench).send(";L1,BOGUS")
+    w.send(";L1,ON")                    # positive control: the route to W2 S2 delivers before silence is asserted
+    probe.expect_bytes(ch, b'{"on":true}\n', timeout=3, since=m)
+    time.sleep(0.3)
+    m = probe.dev.mark()
+    w.send(";L1,BOGUS")
     probe.expect_silence(ch, window=2.0, since=m)

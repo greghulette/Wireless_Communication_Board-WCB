@@ -960,13 +960,16 @@ def config_negatives(bench):
             bad += _in_order(w.run(cmd), needles, cmd)
         if snapshot(bench, 1) != before[1]:
             bad.append("a refused ?MAESTRO changed the saved config")
-        out = w.run("?MAESTRO,M8:W11S3:115200")
-        m = next((re.search(r"Maestro 8: Remote on WCB11 \(unicast, slot (\d)\)", x) for x in out if "WCB11" in x), None)
-        if not m or _has(out, "SOFTWARE SERIAL"):
-            bad.append(f"a remote S3 target at 115200 should be accepted without the block: {out}")
-        slot = m.group(1) if m else "?"
-        if not _has(w.run("?MAESTRO,CLEAR,M8:W11S3"), f"Cleared Maestro M8:W11S3 (freed slot {slot})"):
-            bad.append("the M8:W11S3 placeholder did not clear")
+        slot = "?"
+        try:
+            out = w.run("?MAESTRO,M8:W11S3:115200")
+            m = next((re.search(r"Maestro 8: Remote on WCB11 \(unicast, slot (\d)\)", x) for x in out if "WCB11" in x), None)
+            if not m or _has(out, "SOFTWARE SERIAL"):
+                bad.append(f"a remote S3 target at 115200 should be accepted without the block: {out}")
+            slot = m.group(1) if m else "?"
+        finally:
+            if not _has(w.run("?MAESTRO,CLEAR,M8:W11S3"), f"Cleared Maestro M8:W11S3 (freed slot {slot})"):
+                bad.append("the M8:W11S3 placeholder did not clear")
     assert not bad, "; ".join(bad)
 
 
@@ -1120,6 +1123,7 @@ def kyber_config_negatives(bench):
             for cmd, needles in (
                     ("?KYBER,LOCAL,X2", ["Invalid format. Use: ?KYBER,LOCAL,Sx or ?KYBER,LOCAL,Sx,M1:W1S1:57600", "Kyber is Remote"]),
                     ("?KYBER,LOCAL,S6", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"]),
+                    ("?KYBER_LOCAL,S6", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"]),   # the legacy spelling, same handler
                     ("?KYBER,LOCAL,S0", ["Invalid Kyber port. Must be S1-S5", "Kyber is Remote"]),
                     ("?KYBER,LOCAL,S3", ["S3 is SOFTWARE SERIAL", "Kyber is Remote"]),
                     ("?KYBER,LOCAL,S4", ["S4 is SOFTWARE SERIAL", "Kyber is Remote"]),

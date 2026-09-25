@@ -2,6 +2,7 @@
 #define WCB_VARIABLES_H
 
 #include <Arduino.h>
+#include <functional>
 
 // ---------------------------------------------------------------------------
 // WCB user variables + conditional execution.  See docs/VARIABLES_DESIGN.md.
@@ -75,9 +76,7 @@ bool ifGateConsumeToken(const String &trimmedTok, bool &ifSkipping);
 // ---- Backup -------------------------------------------------------------
 // Emits variables as "?VAR,SET,<name>,<value>" config-altitude commands (NOT
 // runtime ";V" lines) so the Wizard's '^?' grammar and per-line parser see
-// them. defSep/defFunc: factory-chain separator + func id (see WCB_HCR.h).
-void printVariablesBackup(String &chainedConfig, String &chainedConfigDefault,
-                          char delimiter, bool printToSerial = false,
-                          const String &defSep = "^", const String &defFunc = "?");
+// them. Yields each body through `emit`, unprefixed (see WCB_HCR.h).
+void emitVariablesBackup(const std::function<void(const String &)> &emit);
 
 #endif // WCB_VARIABLES_H

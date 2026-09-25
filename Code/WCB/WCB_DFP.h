@@ -2,6 +2,7 @@
 #define WCB_DFP_H
 
 #include <Arduino.h>
+#include <functional>
 
 // -----------------------------------------------------------------------
 // DFPlayer Mini serial-control driver for WCB
@@ -49,10 +50,8 @@ void processDFPCommand(const String &message);   // dispatch ;D,... commands
 void configureDFP(const String &args);
 void clearDFPConfig();
 void printDFPSettings();
-// defSep/defFunc: factory-chain separator + func identifier (see WCB_HCR.h).
-void printDFPBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial = false,
-                    const String &defSep = "^", const String &defFunc = "?");
+// Backup: yields each command body through `emit`, unprefixed (see WCB_HCR.h).
+void emitDFPBackup(const std::function<void(const String &)> &emit);
 
 // ---- Response reader — call once per loop() tick ------------------------
 void processDFPResponses();

@@ -1,8 +1,13 @@
 name: WDP wire tests
 
-# Host-side unit tests for the WDP wire format + election logic. Pure C++11, no
-# Arduino toolchain — compiles and runs in seconds on the GitHub runner's g++.
-# Independent of the firmware build workflow so it can never block a firmware push.
+# Host-side unit tests. Pure C++11, no Arduino toolchain — each compiles and runs in
+# seconds on the GitHub runner's g++. Independent of the firmware build workflow so
+# they can never block a firmware push.
+#   wdp_wire_test      the WDP wire format + election logic (a mirror of WCB_WDP.cpp)
+#   config_parts_test  the mesh config pull's split/framing arithmetic: it includes
+#                      Code/WCB/WCB_ConfigParts.h itself, so it tests the firmware's code
+# Two jobs, so one failing never hides the other's result. Both run on either test's
+# paths: the workflow name is kept so existing links and badges still resolve.
 
 on:
   push:
@@ -10,12 +15,16 @@ on:
       - 'tests/wdp_wire_test.cpp'
       - 'Code/WCB/WCB_WDP.cpp'
       - 'Code/WCB/WCB_WDP.h'
+      - 'tests/config_parts_test.cpp'
+      - 'Code/WCB/WCB_ConfigParts.h'
       - '.github/workflows/wdp-tests.yml'
   pull_request:
     paths:
       - 'tests/wdp_wire_test.cpp'
       - 'Code/WCB/WCB_WDP.cpp'
       - 'Code/WCB/WCB_WDP.h'
+      - 'tests/config_parts_test.cpp'
+      - 'Code/WCB/WCB_ConfigParts.h'
       - '.github/workflows/wdp-tests.yml'
   workflow_dispatch:
 
@@ -28,3 +37,12 @@ jobs:
         run: g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test
       - name: Run
         run: ./wdp_wire_test
+
+  config-parts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test
+      - name: Run
+        run: ./config_parts_test

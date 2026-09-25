@@ -2,6 +2,7 @@
 #define WCB_WLED_H
 
 #include <Arduino.h>
+#include <functional>
 
 // -----------------------------------------------------------------------
 // WLED serial control for the WCB — ID-ADDRESSED (mirrors the Maestro model)
@@ -61,11 +62,8 @@ void clearWLEDConfig();                    // ?WLED,CLEAR — clear ALL
 void clearWLEDByID(const String &idArg);   // ?WLED,CLEAR,<id> — clear one
 void printWLEDSettings();    // ?WLED,LIST
 void printWLEDStatus();      // ?WLED,STATUS  ->  [WLED:...]
-// defSep/defFunc mirror printHCRBackup: the FACTORY chain uses these; the live
-// chain uses the running delimiter/func so a custom-funcChar restore still works.
-void printWLEDBackup(String &chainedConfig, String &chainedConfigDefault,
-                     char delimiter, bool printToSerial = false,
-                     const String &defSep = "^", const String &defFunc = "?");
+// Backup: yields each command body through `emit`, unprefixed (see WCB_HCR.h).
+void emitWLEDBackup(const std::function<void(const String &)> &emit);
 
 // ---- Slot helpers ------------------------------------------------------
 // A WLED ID is ONE physical device: exactly one slot per wledID (unlike Maestro,

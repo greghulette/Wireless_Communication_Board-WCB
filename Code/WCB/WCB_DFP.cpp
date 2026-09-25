@@ -347,17 +347,12 @@ void printDFPSettings() {
   Serial.println("-----------------------------------");
 }
 
-void printDFPBackup(String &chainedConfig, String &chainedConfigDefault,
-                    char delimiter, bool printToSerial,
-                    const String &defSep, const String &defFunc) {
+void emitDFPBackup(const std::function<void(const String &)> &emit) {
   // Client board (no local DFPlayer, routes ;D to a remote host): persist the route.
   if (!dfpConfig.configured) {
     if (dfpConfig.remoteWCB > 0) {
       String suffix = "DFP,REMOTE,W" + String(dfpConfig.remoteWCB);
-      String cmd = String(LocalFunctionIdentifier) + suffix;
-      if (printToSerial) Serial.println(cmd);
-      chainedConfig        += String(delimiter) + cmd;
-      chainedConfigDefault += defSep + defFunc + suffix;
+      emit(suffix);
     }
     return;
   }
@@ -366,18 +361,12 @@ void printDFPBackup(String &chainedConfig, String &chainedConfigDefault,
   String cmdSuffix = "DFP,S" + String(dfpConfig.serialPort) +
                      ":" + String(dfpConfig.baudRate) +
                      ":V" + String(dfpConfig.volume);
-  String cmd = String(LocalFunctionIdentifier) + cmdSuffix;
-  if (printToSerial) Serial.println(cmd);
-  chainedConfig        += String(delimiter) + cmd;
-  chainedConfigDefault += defSep + defFunc + cmdSuffix;
+  emit(cmdSuffix);
 
   // Error callback
   if (strlen(dfpConfig.onErrCmd) > 0) {
     cmdSuffix = "DFP,ONERR," + String(dfpConfig.onErrCmd);
-    cmd = String(LocalFunctionIdentifier) + cmdSuffix;
-    if (printToSerial) Serial.println(cmd);
-    chainedConfig        += String(delimiter) + cmd;
-    chainedConfigDefault += defSep + defFunc + cmdSuffix;
+    emit(cmdSuffix);
   }
 }
 

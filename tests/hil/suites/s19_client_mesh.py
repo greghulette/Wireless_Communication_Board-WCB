@@ -175,16 +175,34 @@ def sendraw_exact_bytes(bench):
     assert _has(lines, f"[RAW] W{cid} → S2 (ESP-NOW)  6 bytes: AA 02 04 00 70 2E"), "no [RAW] debug line"
 
 
-@test("client_mesh.sendraw_real_maestro_tap", "sendRaw to the real Maestro line on W2 S1 arrives byte-exact on the tap (moves Maestro 2 channel 0 to 1500 µs)", needs=["wcb1", "probe1"])
+def _maestro2_pos(w):
+    """Maestro 2 ch0's current target, asked through W1's proxy (;MG to W2, answered into W1's m2pos0), or None."""
+    w.run("?VAR,CLEAR,m2pos0")
+    w.send(";M2,getPosition,0")
+    time.sleep(1.2)
+    got = next((x for x in w.run("?VAR,GET,m2pos0") if x.startswith("[VAR] m2pos0 = ")), None)
+    return int(got.split("=")[1]) if got else None
+
+
+@test("client_mesh.sendraw_real_maestro_tap", "sendRaw to the real Maestro line on W2 S1 arrives byte-exact on the tap (moves Maestro 2 channel 0 to 1500 µs, then back to where it was)", needs=["wcb1", "probe1"])
 def sendraw_real_maestro_tap(bench):
     tap = link(bench, 2, "S1")
+    w = usb_wcb(bench)
     frame = bytes.fromhex("AA020400702E")        # Pololu setTarget, device 2, channel 0, 6000 quarter-us
-    with _client(bench, "probe1", "raw") as (probe, _, _):
-        tm = tap.mark()
-        ok = probe.mesh_raw(2, 1, frame)
-        tap.expect(frame, timeout=1.5, since=tm)
-        time.sleep(0.5)
-        got = tap.received(tm)
+    p0 = _maestro2_pos(w)
+    if p0 is None:
+        raise Skip("Maestro 2 ch0 did not answer getPosition, so the servo could not be put back afterwards")
+    try:
+        with _client(bench, "probe1", "raw") as (probe, _, _):
+            tm = tap.mark()
+            ok = probe.mesh_raw(2, 1, frame)
+            tap.expect(frame, timeout=1.5, since=tm)
+            time.sleep(0.5)
+            got = tap.received(tm)
+    finally:
+        w.send(f";M2,setTarget,0,{p0}")        # back to where it rested (0 = the channel was off)
+        time.sleep(1.0)
+        w.run("?VAR,CLEAR,m2pos0")
     assert ok and got == frame, f"the Maestro line carried {got.hex(' ')}"
 
 

@@ -330,6 +330,12 @@ def verbs_emote_raw(bench):
         (";H,OVERRIDE,2", _lf("<O0,QO>")), (";H,MUSE", _lf("<MM>")), (";H,MUSE,GAP,5,30", _lf("<MN5,MX30>")),
         (";H,MUSE,ON", _lf("<M1,QM>")), (";H,MUSE,OFF", _lf("<M0,QM>")), (";H,RAW,<MM,QM>", _lf("<MM,QM>")),
         (";H,RAW,X", _lf("X")),
+        # the word forms hcrEmotion / hcrLevel accept (WCB_HCR.cpp), and the NOW / GRACEFUL stop styles (hcrStopStyle):
+        # StopGraceful = <PSG> then StopWAV(A) and StopWAV(B) (hcr.cpp:482-499); StopEmoteGraceful = <PSG> alone
+        (";H,STIM,HAPPY,MODERATE", _lf("<SH0,QEH,QT>")), (";H,STIM,SAD,1", _lf("<SS1,QES,QT>")),
+        (";H,STIM,MAD,STRONG", _lf("<SM1,QEM,QT>")), (";H,STIM,SCARED,0", _lf("<SC0,QEC,QT>")),
+        (";H,STOP,NOW", STOP_BURST), (";H,STOP,GRACEFUL", _lf("<PSG>", "<PSA,QPA>", "<PSB,QPB>")),
+        (";H,STOPEMOTE,G", _lf("<PSG>")), (";H,STOPEMOTE,HARD", _lf("<PSV,QT>")),
     ])
     assert not bad, "; ".join(bad)
     assert not errs, f"RXERR: {errs}"
@@ -370,13 +376,15 @@ def fn_codec(bench):
 @test("hcr.bad_args", "Malformed ;H verbs print their usage line and never touch the wire", needs=["wcb1"], links=["W2S4"])
 def bad_args(bench):
     stims = [";H,STIM,O,MOD", ";H,STIM,X,MOD", ";H,SETEMOTION,H,101", ";H,PLAY,V,5", ";H,PLAY,A,10000", ";H,STOPWAV,V",
-             ";H,VOL,101", ";H,VOL,A", ";H,FADEIN,V,2", ";H,FADEOUT,X,2", ";H,RAW", ";H", ";H,FOO"]
+             ";H,VOL,101", ";H,VOL,A", ";H,FADEIN,V,2", ";H,FADEOUT,X,2", ";H,RAW", ";H", ";H,FOO",
+             ";H,STOP,BOGUS", ";H,STOPEMOTE,X"]
     bad, errs, lines = _routed_verbs(bench, [(s, b"") for s in stims])
     play, vol = "[HCR] Usage: ;H,PLAY,<A|B>,<0-9999>[,FADEIN,<sec>]", "[HCR] Usage: ;H,VOL[,<V|A|B>],<0-100>"
     want = ["[HCR] STIM does not take OVERLOAD — use ;H,OVERLOAD", "[HCR] Usage: ;H,STIM,<H|S|M|C>,<MOD|STRONG>",
             "[HCR] Usage: ;H,SETEMOTION,<H|S|M|C>,<0-100>", play, play, "[HCR] Usage: ;H,STOPWAV,<A|B>", vol, vol,
             "[HCR] Usage: ;H,FADEIN,<A|B>,<sec>", "[HCR] Usage: ;H,FADEOUT,<A|B>,<sec>", "[HCR] RAW needs a payload",
-            "[HCR] Empty ;H command", "[HCR] Unknown ;H command: FOO"]
+            "[HCR] Empty ;H command", "[HCR] Unknown ;H command: FOO",
+            "[HCR] Usage: ;H,STOP[,NOW|GRACEFUL]", "[HCR] Usage: ;H,STOPEMOTE[,NOW|GRACEFUL]"]
     assert not bad, "; ".join(bad)
     assert lines == want, f"W2 HCR lines {lines}, expected {want}"
 
@@ -597,16 +605,16 @@ def status_reply_parse(bench):
                 problems.append("the poll reply rule never fired")
             want = "[HCR:cfg=1,port=4,poll=0,age=*,H=1,S=2,M=3,C=4,dur=2.50,ovr=1,muse=1,wav=9,pV=0,pA=5,pB=0,vV=0,vA={},vB=0,rx=2,vage=-1]"   # rx: the DF + QVA replies; vage -1: V and B never confirmed (WCB_HCR.cpp printHCRStatus)
             time.sleep(0.5)      # the replies trail the poll by ~50 ms + transmit time
-            for va in (42,):     # the poll itself carries QVA, so the value is there on the first STATUS
-                pm = s4.mark()
-                got = next((x for x in _run(c2, "?HCR,STATUS", 1.0) if x.startswith("[HCR:cfg=")), "")
-                bench.note(f"STATUS: {got}")
-                # \b: the wildcard must not also swallow the vage= field
-                if re.sub(r"\bage=-?\d+", "age=*", got) != want.format(va):
-                    problems.append(f"STATUS {got!r}, expected {want.format(va)!r} (age not compared)")
-                sent = [t for _, t in _timed_frames(s4, pm)]
-                if sent:     # a status reader must never transmit (rule 13): its query would mask the reply
-                    problems.append(f"STATUS transmitted {sent}")
+            va = 42              # the poll itself carries QVA, so the value is there on the first STATUS
+            pm = s4.mark()
+            got = next((x for x in _run(c2, "?HCR,STATUS", 1.0) if x.startswith("[HCR:cfg=")), "")
+            bench.note(f"STATUS: {got}")
+            # \b: the wildcard must not also swallow the vage= field
+            if re.sub(r"\bage=-?\d+", "age=*", got) != want.format(va):
+                problems.append(f"STATUS {got!r}, expected {want.format(va)!r} (age not compared)")
+            sent = [t for _, t in _timed_frames(s4, pm)]
+            if sent:     # a status reader must never transmit (rule 13): its query would mask the reply
+                problems.append(f"STATUS transmitted {sent}")
             gets = [("VOL,A", "[HCR] VOL VOL,A = 42"), ("EMOTION,M", "[HCR] EMOTION EMOTION,M = 3"),
                     ("DURATION", "[HCR] DURATION = 2.50"), ("OVERRIDE", "[HCR] OVERRIDE = 1"), ("MUSE", "[HCR] MUSE = 1"),
                     ("WAVCOUNT", "[HCR] WAVCOUNT = 9"), ("PLAYING,A", "[HCR] PLAYING PLAYING,A = 5"),
@@ -664,15 +672,15 @@ def debug_periodic(bench):
     assert not dbg_after, f"debug lines after OFF: {dbg_after}"
 
 
-@test("hcr.config_rejects", "?HCR config validation on W2: soft-serial baud block, bad baud/port/format, occupied ports, bad host; nothing changes", needs=["wcb1"], links=[])
+@test("hcr.config_rejects", "?HCR config validation on W2: the soft-serial 115200 block, bad baud/port/format, occupied ports, bad host; nothing changes", needs=["wcb1"], links=[])
 def hcr_config_rejects(bench):
     if _device_tokens(bench, 2):
         raise Skip("W2 has HCR/MP3/DFP config")
     have = {t.upper() for t in bench.config_tokens(2)}
     host = "[HCR] Invalid host. Use ?HCR,REMOTE,W<n> (1-20, not this board)"
     checks = [
-        ("?HCR,PORT,S4:19200", ["S4 is SOFTWARE SERIAL — unreliable above 9600 baud", "❌ CONFIGURATION BLOCKED!",
-                                "  Use a hardware port: ?HCR,PORT,S1:19200   or   S4:9600"]),
+        ("?HCR,PORT,S4:115200", ["S4 is SOFTWARE SERIAL — 115200 baud is not received reliably (measured exact through 57600)",
+                                 "❌ CONFIGURATION BLOCKED!", "  Use a hardware port: ?HCR,PORT,S1:115200   or   S4:57600"]),
         ("?HCR,PORT,S4:4800", ["[HCR] Baud must be 9600/19200/38400/57600/115200"]),
         ("?HCR,PORT,S6:9600", ["[HCR] Invalid serial port. Must be S1-S5"]),
         ("?HCR,PORT,S4", ["[HCR] Missing baud. Use: ?HCR,PORT,S<port>:<baud>"]),
@@ -1011,15 +1019,13 @@ def mp3_rx_callbacks(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("mp3.config_rejects", "?MP3 validation on W2 (soft 38400 block, baud, format, volume, occupied port, host, ONERR length); nothing changes", needs=["wcb1"], links=[])
+@test("mp3.config_rejects", "?MP3 validation on W2 (baud, format, volume, occupied port, host, ONERR length); nothing changes", needs=["wcb1"], links=[])
 def mp3_config_rejects(bench):
     if _device_tokens(bench, 2, "MP3"):
         raise Skip("W2 has MP3 config")
     host = "[MP3] Invalid host. Use ?MP3,REMOTE,W<n> (1-20, not this board)"
     example = "  Example: ?MP3,S2:9600:V25"
     checks = [
-        ("?MP3,S3:38400:V20", ["S3 is SOFTWARE SERIAL", "Software serial is unreliable above 9600 baud", "❌ CONFIGURATION BLOCKED!",
-                               "  Use hardware serial (S1 or S2): ?MP3,S1:38400:V20", "  Or use 9600 baud:               ?MP3,S3:9600:V20"]),
         ("?MP3,S5:19200:V20", ["[MP3] MP3 Trigger only supports 9600 or 38400 baud"]),
         ("?MP3,S5:9600", ["[MP3] Incomplete config. Use: ?MP3,S<port>:<baud>:V<vol>", example]),
         ("?MP3,S5:9600:25", ["[MP3] Volume required. Use :V<0-64> at the end (e.g. :V25)"]),
@@ -1445,4 +1451,52 @@ def move_release_hcr_mp3(bench):
             _relabel(c2, before[2], "S4", "S5")
             if mp3_on:
                 _unlearn(bench, "MP3", learner=1)
+    assert not problems, "; ".join(problems)
+
+
+@test("devices.soft_ports_fast_baud", "An MP3 Trigger at 38400 on W2 S3 and an HCR at 57600 on W2 S4 are accepted (soft ports take up to 57600 since 2026-09-24, F1): the config lines, the chain, and each device's exact bytes at that rate; cleared and restored after", needs=["wcb1"], links=["W2S3", "W2S4"])
+def soft_ports_fast_baud(bench):
+    """The HCR / MP3 / WLED guards refused anything above 9600 on S3-S5, a limit from the bit-banged days, while ?BAUD
+    allowed 57600 (received exactly through 57600, 0/20 lines at 115200: CLAUDE.md rule 13). Since 2026-09-24 all of
+    them agree at 57600 (docs/HIL_TEST_AUDIT.md F1, tracker #81); 115200 stays refused (hcr.config_rejects,
+    wled.config_rejects). Same flow as boot.devices_restore_w2: configure on W2's own console, prove the bytes from W1
+    through its routes, clear, relabel, and unlearn the MP3 route W1 persisted."""
+    s3, s4 = link(bench, 2, "S3"), link(bench, 2, "S4")
+    require_tokens(bench, 1, "?HCR,REMOTE,W2")
+    for p in ("S3", "S4"):
+        _require_free(bench, 2, p)
+    if _device_tokens(bench, 2) or _device_tokens(bench, 1, "MP3", "DFP"):
+        raise Skip("W1 or W2 already has device config")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        try:
+            out = _run(c2, "?MP3,S3:38400:V10", 1.0)
+            miss = _in_order(out, ["Baud rate for Serial3 updated to 38400", "  ⚠️  Disabled broadcast output on S3 (MP3 Trigger port)",
+                                   "  ⚠️  Disabled broadcast input on S3 (MP3 Trigger port)", "Serial3 label set to: 'MP3 Trigger'",
+                                   "[MP3] Configured: S3 at 38400 baud  default volume=10"])
+            if miss:
+                problems.append(f"?MP3,S3:38400:V10 output lacks {miss!r} (in order)")
+            if _has(out, "SOFTWARE SERIAL") or _has(out, "BLOCKED"):
+                problems.append("?MP3,S3:38400 was refused as software serial")
+            _run(c2, "?HCR,POLL,OFF", 1.0)
+            out = _run(c2, "?HCR,PORT,S4:57600", 1.0)
+            miss = _in_order(out, ["Baud rate for Serial4 updated to 57600", "  ⚠️  Disabled broadcast output on S4 (HCR port)",
+                                   "  ⚠️  Disabled broadcast input on S4 (HCR port)", "[HCR] Configured on S4 at 57600 baud"])
+            if miss:
+                problems.append(f"?HCR,PORT,S4:57600 output lacks {miss!r} (in order)")
+            if _has(out, "SOFTWARE SERIAL") or _has(out, "BLOCKED"):
+                problems.append("?HCR,PORT,S4:57600 was refused as software serial")
+            time.sleep(2)
+            toks = snapshot(bench, 2)
+            problems += [f"W2's chain lacks {t}" for t in ("?MP3,S3:38400:V10", "?BAUD,S3,38400", "?HCR,PORT,S4:57600", "?BAUD,S4,57600")
+                         if t not in toks]
+            s3.listen(38400)
+            s4.listen(57600)
+            problems += _steps(s3, w.send, [(";A,PLAY,7", bytes.fromhex("760A7407"))])
+            problems += _steps(s4, w.send, [(";H,OVERLOAD", _lf("<SE,QT>"))])
+        finally:
+            _clear_all_w2(c2)
+            _relabel(c2, before[2], "S3", "S4")
+            _unlearn(bench, "MP3", learner=1)
     assert not problems, "; ".join(problems)

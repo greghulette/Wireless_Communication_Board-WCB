@@ -18,7 +18,7 @@ def unicast_acked(bench):
     time.sleep(1.0)
     after = w.etm_board_stats()[2]
     bench.note(f"W2 ETM stats before {before} after {after}")
-    assert after["ackd"] >= before["ackd"] + 1, f"ACK count did not rise: {before} -> {after}"
+    assert (after["sent"], after["ackd"]) == (before["sent"] + 1, before["ackd"] + 1), f"expected exactly one more unicast, sent and ACKed: {before} -> {after}"
     assert after["failed"] == before["failed"], f"failures rose: {before} -> {after}"
 
 

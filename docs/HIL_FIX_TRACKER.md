@@ -35,6 +35,16 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-25 | No-servo full run `20260924-234056` on the F20/F21 image: 459 pass, 3 fail, 37 skip; all three test-side (docs/HIL_TEST_AUDIT.md §5), none from #91-#93. Test fixes to the offline-timing floor (plus #80's alternation check), the `?backup` chain parser and `?ETM,CHAR`'s peer wait; verified `20260925-015720` (21/21). Recorded audit F22 (a rebooted WCB sees its peers offline for one heartbeat), not filed here: the recommendation is to leave it. |
+| 2026-09-24 | **#92 and #93 VERIFIED (20260924-233628, 43/43).** Greg: "Fix both". A cleared serial mapping frees its NVS keys; RTERM re-arms and `?STATS,RPT` no longer hold off a deferred restart, which also goes anyway after 20 s. A review found three small defects, fixed before flashing: `_act` written last, a slot whose count could not be stored keeps its output keys, and no ETM command is ACKed once the restart is imminent. W1/W2 flashed 23:36. The harness gained `--no-servos` (`hil/servos.py`, 27 tests, cross-checked by a second list). |
+| 2026-09-24 | **#92, #93 FIXED (unverified)** on Greg's "Fix both": a serial-mapping save removes the keys no active mapping uses (`removeUnusedSerialMapKeys`), and a deferred restart ignores a re-arm of the running RTERM session and `?STATS,RPT`, with a 20 s cap (`RESTART_MAX_DEFER_MS`; sized in #93, not the 15 s proposed). Tests `map.nvs_keys_freed`, `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`. ESP32 70 %, S3 68 %, no new warnings; host tests and `selftest.py` pass; not flashed. |
+| 2026-09-24 | Full run `20260924-190733` on the F13 image: 478 pass, 8 fail, none from F13 (docs/HIL_TEST_AUDIT.md §5). Filed #92 (a cleared serial mapping's NVS keys leak, audit F20) and #93 (RTERM re-arms starve a deferred reboot, F21), both TODO for Greg's decision; five harness fixes; reruns `20260924-205621`, `20260924-213158`. |
+| 2026-09-24 | **#91 VERIFIED (20260924-190431).** F13 on Greg's word: a `?MGMT,PULL,<n>,P` of a config over 2912 characters arrives in parts, refusals are coded `[MGMT:CFGERR` lines, the target's reply is a non-blocking job, and the Wizard serialises pulls per relay (docs/MGMT_RELAY.md). Designed and reviewed by agent workflows (45 design issues, 15 code findings), implemented in the firmware, the Wizard, the harness and both WCBClient relays; W1/W2 flashed 19:04, backup and pull output byte-identical to before. Audit F14-F19 recorded, not fixed. |
+| 2026-09-24 | **#90 VERIFIED (20260924-133332).** Greg took the recommendation: `?backup` streams its chains with a running CRC, and the mesh pull is measured, reserved once and never sent partial. The first build (20260924-131417) wrote 256 bytes at a time, and a peer's came-ONLINE line split a chain after a reboot; the writer now buffers 2 KB and flushes per line. W1/W2 flashed at 13:33 from `tests/hil/results/builds/wcb-esp32-meshq`; their `?backup` and the W2 pull are byte-identical to before. probe2's COM11 had been held by `Intellex.exe`, stopped with Greg's OK. Found audit F13: a pull over 2912 characters still gives the requester nothing. |
+| 2026-09-24 | **#84-#89 VERIFIED, #90 filed.** Greg's decisions on the audit's F5-F10: `?TRACK` removed (#85), a negative `;T` delay refuses its chain (#86), `?LABEL` names a bad port (#87), `?ERASE,NVS` clears every namespace (#88), the sequence-list writes are checked (#84), and `?NVS` reports storage use, recorded by the harness per run (#89). Verified in 20260924-120036 and, for #84, 20260924-120958; W1/W2 run that image from `tests/hil/results/builds/wcb-esp32-meshq`. Filling W1's store showed `?backup` printing only a checksum where its one-line chains belong once the heap cannot copy them (#90, audit F12, Greg's decision). |
+| 2026-09-24 | **Full run 20260924-092602 (servos on): 459 PASS / 6 FAIL / 8 SKIP in 1:45:28.** Three storage failures (`var.cap_persistent_full`, `inv.seqget_largest`, `seq.cycle_guard_reuse`) were a full NVS on W1 and pass once it is wiped (`20260924-112513`); nothing reports NVS usage (`docs/HIL_TEST_AUDIT.md` F10). The empty `?SEQ,SAVE,HILL1,` left behind is a firmware bug, filed as #84. `input.wdpda_port_full` lost one announce on W1 S4. `sbus.signal_loss_controller_reset` and `wifi.pc_joins_ap_ws` were test bugs, fixed and re-run to pass. |
+| 2026-09-24 | **#81-#83 VERIFIED.** W1 and W2 flashed from `tests/hil/results/builds/wcb-esp32-meshq` (both report `6.2.1_232316RSEP2026`; the session's flash was refused by the auto-mode permission check until Greg switched the permission mode). The seven tests that depend on the fixes all pass (run 20260924-092423). The CI release of the same version name in `Code/bin` is a different image, so the bench build now lives in `wcb-esp32-meshq`, which the OTA tests stream; the previous build is kept in `wcb-esp32-meshq-231928`. Full run 20260924-092602 started, servos allowed. |
+| 2026-09-24 | **#81-#83 filed and fixed from the HIL test audit** (`docs/HIL_TEST_AUDIT.md` F1-F3): the HCR/MP3/WLED soft-serial guards allow up to 57600 like `?BAUD`, the help's legacy PWM spelling, and `?HW` updating the running version. Compiled locally (ESP32 69 %, S3 68 %) into `tests/hil/results/builds/wcb-esp32-meshq`; NOT flashed - the session may not write the bench boards - so the three stay FIXED (unverified) until the image is on W1/W2 and `hcr.config_rejects mp3.config_rejects wled.config_rejects devices.soft_ports_fast_baud wled.soft_port_57600 ident.hw_setter pwm.legacy_forms` run. The audit's suites s24-s28 and the Wizard tests landed the same night (451 tests). |
 | 2026-09-23 | **Full run 20260923-192959 on the pushed images (WIFI 95dd811/078a907, 6.2.1_231928RSEP2026 built locally; wcb_probe 7): 415 PASS / 0 FAIL / 5 SKIP in 1:59:25**, no probe panic, no host outage. Skips: the three WDP-DA label checks (need an unlabelled W1 port) and the opt-ins left off (`ota_wrong_chip`, `w1s4_soak`). Before it: #80 verified (`etm.offline_detection_timing` 10/10, no race fingerprint in 45 OFFLINE events), the probe crash loop reproduced on v6 (6 panics in 3 W1 reboots) and gone on v7 (0 in 10), and the three other failures of 20260923-154611 pass. CI on the push: firmware build (EspSoftwareSerial bundled, not installed), Wizard tests, WDP wire tests, Wizard preview - all green. |
 | 2026-09-23 | **Full run 20260923-154611 (probe 6): 4 FAIL, all diagnosed and adversarially verified.** `etm.offline_detection_timing` = a pre-existing cross-core race on `boardTable` presence, filed and fixed as **#80** (spinlock helpers). `peers.controller_off_on` = test bug (an ACK during the OFF window re-adds WCB20; now excused only when that ACK is logged). `client_mesh.rejoin_seq_reuse` + `input.mesh_bcast_to_ports` = the probe: wcb_probe 6 boot-looped on interrupt-WDT panics after a CPU-only reset left a soft-RX level arm with no handler, and the harness kept reading its lost channel - #78's new failure mode, fixed in wcb_probe 7, hardened in WCB `setup()` (`clearStaleGpioInterrupts`), and the harness now re-binds after any probe restart (a dropped-and-reopened port included) and fails the test in which an unplanned one happens; a review pass made the forget selective and the end-of-test incident `RESET` the probe, so probe and host never disagree on which headers are held. ESP32, S3 and probe compile; `selftest.py` 39/39. Nothing flashed. |
 | 2026-09-23 | #78 CONFIRMED and fixed (FIXED, unverified; compiled, not flashed). `softrx.erratum_pairs` on W1 (run 20260923-113109): 227 of 10125 two/three-port lines lost at -1.5 to -3 µs skew, all 10125 single-port lines exact; every attributable one-byte corruption is exactly one lost edge. Fix: EspSoftwareSerial 8.1.0 vendored at `Code/WCB/src/EspSoftwareSerial` with level-triggered, polarity-flipping RX on the classic ESP32 (S3 untouched), PWM input ISRs converted the same way, CI no longer installs the library, `?DEBUG` reports each soft port's RX mode. New test `softrx.level_irq_stuck_line`; `input.softserial_tx_rmt` asserts the RX mode. ESP32 69 % / S3 67 %, ISRs in IRAM, no stock library in the build. Next: flash W1/W2, run `softrx.*` and `input.softserial_tx_rmt`, then the soft-port and PWM suites. |
@@ -1676,3 +1686,226 @@ From the adversarially verified review of the #14/#28 change (workflow wf_3dab45
 **Bench check.** `python run.py "etm.offline_detection_timing"` about 10 times: every gap 4.95-5.05 s, no `went OFFLINE` in the same batch as `came ONLINE`, and every OFFLINE preceded by its own online edge.
 
 **Also from that run (TEST_BUG, fixed in the test).** `peers.controller_off_on` failed because `?CONTROLLER,ON,20` printed no `registered (live)`: NaviCore's 30 s `?STATS,RPT` landed inside the 0.64 s OFF window, W1 ACKed it, and `etmSendAck` re-added WCB20 as an ESP-NOW peer on demand, so ON found the peer present. The firmware ended correct (NaviCore answered `;W20,?version`). The test now runs with `?DEBUG,ETM,ON` and excuses the missing line only when an `[ETM] Sent ACK seq N to WCB20` falls between OFF's confirmation and ON; otherwise it still fails, since that line is its only check that OFF frees the slot. The `?CONTROLLER` comment in WCB.ino that said a disabled controller is "ignored" now says what happens.
+
+
+#### 81. The HCR, MP3 and WLED guards refused every soft-serial rate above 9600 while ?BAUD allowed 57600
+
+| | |
+|---|---|
+| **Status** | VERIFIED - flashed to W1/W2 2026-09-24 (`6.2.1_232316RSEP2026` + the fix, from `tests/hil/results/builds/wcb-esp32-meshq`); `devices.soft_ports_fast_baud`, `wled.soft_port_57600`, `hcr.config_rejects`, `mp3.config_rejects`, `wled.config_rejects` all PASS (run 20260924-092423) |
+| **Owner** | `WCB_firmware` (`WCB_HCR.cpp`, `WCB_MP3.cpp`, `WCB_WLED.cpp`, `WCB_Help.cpp`) |
+| **Effort** | S |
+| **Tests** | `devices.soft_ports_fast_baud`, `wled.soft_port_57600`, `hcr.config_rejects`, `mp3.config_rejects`, `wled.config_rejects` |
+| **Subsystem** | devices / soft serial |
+
+**Evidence.** `docs/HIL_TEST_AUDIT.md` F1: `?BAUD,S3-S5` accepts up to 57600 (received exactly through 57600, 0/20 lines at 115200 - CLAUDE.md rule 13), but `?HCR,PORT,S4:19200`, `?MP3,S3:38400` and a WLED above 9600 on a soft port were refused as "unreliable above 9600", a limit left over from the bit-banged TX. An MP3 Trigger at its usual 38400 could not live on S3-S5.
+
+**Fix.** The HCR and WLED guards refuse above 57600 (115200 stays refused); the MP3 block is gone, since 9600 and 38400 are its only rates. The help text, the wiki (HCR-Vocalizer, MP3-Trigger, Command-Reference, Configuration-Guide) and the Wizard's HCR and WLED baud pickers (capped at 57600 on S3-S5, as the MP3 one already was) follow.
+
+#### 82. The help advertised the legacy PWM map as ?PMSSx,dest; the handler only takes ?PMSx,dest
+
+| | |
+|---|---|
+| **Status** | VERIFIED - `pwm.legacy_forms` PASS on the flashed boards (run 20260924-092423), including its check that the `?MAP?` help page shows `?PMSx,dest` |
+| **Owner** | `WCB_firmware` (`WCB_Help.cpp`) |
+| **Effort** | XS |
+| **Tests** | `pwm.legacy_forms` |
+| **Subsystem** | help / legacy PWM |
+
+**Evidence.** `docs/HIL_TEST_AUDIT.md` F2: `?PMSS3,S4` reads its port from `S3` as 0 and prints `Input port must be 1-5`; `?PMS3,S4` is the string `?MAP,PWM,S3,S4` builds itself (WCB.ino:6037).
+
+#### 83. ?HW wrote NVS only, so ?backup reported the running hardware version until the next boot
+
+| | |
+|---|---|
+| **Status** | VERIFIED - `ident.hw_setter` PASS on the flashed boards (run 20260924-092423): the chain reports a saved `?HW` at once |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`) |
+| **Effort** | XS |
+| **Tests** | `ident.hw_setter` |
+| **Subsystem** | identity / storage |
+
+**Evidence.** `docs/HIL_TEST_AUDIT.md` F3 (bench `20260924-005924`): after `?HW,32` the chain still said `?HW,1`, so a Wizard pull right after a push showed the old version and its diff pushed it again.
+
+**Fix.** The running value follows the saved one. The pin map is still applied at boot only (`updatePinMap`), and only the status-LED branches read the value live.
+
+#### 84. On a full NVS, ?SEQ,CLEAR leaves a ghost empty sequence, and ?SEQ,SAVE can hide one
+
+| | |
+|---|---|
+| **Status** | VERIFIED - both `key_list` writes checked (`WCB_Storage.cpp`); `seq.nvs_full_consistency` PASS (20260924-120958) |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`) |
+| **Effort** | S |
+| **Tests** | `seq.nvs_full_consistency` (opt-in `nvs_fill`); `seq.cycle_guard_reuse` saw it first |
+| **Subsystem** | stored sequences / NVS |
+
+**Evidence (run 20260924-092602).** With W1's NVS full, `?SEQ,CLEAR,HILL1` printed "Deleted stored command key: 'HILL1'",
+a second clear printed "No stored value found ... removed from list if present", and `?backup` still listed
+`?SEQ,SAVE,HILL1,` with an empty value; config_guard's own clear then removed it.
+
+**Mechanism.** `eraseStoredCommandByName` removes the value key, then rewrites `key_list` with `putString` and never
+checks the result (`WCB_Storage.cpp:804`); the save does the same after writing the value (`:761-762`). A failed list
+write on clear leaves the name listed with no value; on save it leaves a value no list names, which nothing backs up,
+recalls by inventory or clears.
+
+**Fix.** Both `key_list` writes are checked. A failed save removes the value it just stored and prints "Not stored";
+a clear removes the value first (on a full store that frees the room the rewrite needs) and, if the list still cannot
+be written, says the key is still listed instead of "Deleted".
+
+#### 85. ?TRACK set a flag nothing read; removed with its legacy spellings
+
+| | |
+|---|---|
+| **Status** | VERIFIED - misc.track_removed PASS (20260924-120036) |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `misc.track_removed` |
+| **Subsystem** | commands |
+
+**Evidence.** `?TRACK,ON/OFF/STATUS` and `?TRACK_ALL_ON/_OFF/_STATUS` set or printed `trackCommandDelivery`, which no other code read; no help page, tool or wiki page listed them (`docs/HIL_TEST_AUDIT.md` F5).
+
+**Fix.** The command, its legacy spellings, the flag and `printTrackingStatus` are gone; each spelling now answers "Unknown command".
+
+#### 86. A negative ;T delay waited 30 minutes; the cap was silent without ?DEBUG
+
+| | |
+|---|---|
+| **Status** | VERIFIED - serial.timer_cap_negative PASS (20260924-120036) |
+| **Owner** | `WCB_firmware` (`command_timer.cpp`) |
+| **Effort** | S |
+| **Tests** | `serial.timer_cap_negative` |
+| **Subsystem** | command timer |
+
+**Evidence.** `parseCommandGroups` stored `String::toInt()` in an `unsigned long`, so `;T-500` became the 1800000 ms cap and held the rest of the chain for half an hour (F6).
+
+**Fix.** A delay starting with '-' refuses the whole chain ("Timer refused: ... Nothing in this chain was run."); the cap line now prints without `?DEBUG`.
+
+#### 87. ?LABEL with a port outside 1-5 was ignored with no reply
+
+| | |
+|---|---|
+| **Status** | VERIFIED - persist.baud_label_validation, persist.legacy_label_baud PASS (20260924-120036) |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `persist.baud_label_validation` |
+| **Subsystem** | serial labels |
+
+**Evidence.** `?LABEL,S9,x`, `?LABEL,CLEAR,S9` and the legacy `?SLCS9` reached setters that return silently on a bad port (F7).
+
+**Fix.** The `?LABEL` handler prints `Invalid serial port <n> (must be 1-5)` like `?BAUD`; the legacy branch calls `clearSerialLabelCommand`, which validates.
+
+#### 88. ?ERASE,NVS kept the WiFi settings and the saved serial devices
+
+| | |
+|---|---|
+| **Status** | VERIFIED - nvs.erase_defaults_restore, nvs.wcb_erase_alias PASS (20260924-120036) |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`, `WCB_Help.cpp`) |
+| **Effort** | S |
+| **Tests** | `nvs.erase_defaults_restore, nvs.wcb_erase_alias` |
+| **Subsystem** | NVS |
+
+**Evidence.** The erase cleared a fixed list of namespaces that missed `wifi_cfg` and `wdp_da`, although its help said it erases all settings; the Wizard's Factory Reset blanks the whole partition (F8).
+
+**Fix.** `eraseAllNvsNamespaces` clears every namespace the iterator finds, older firmware's and the radio's included, and the erase prints how many.
+
+#### 89. Nothing reported how full NVS is
+
+| | |
+|---|---|
+| **Status** | VERIFIED - wcb.nvs_report PASS (20260924-120036); that run's report shows W1/W2 at start and end |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`, `WCB.ino`) + harness (`tests/hil/hil/nvs.py`) |
+| **Effort** | S |
+| **Tests** | `wcb.nvs_report` |
+| **Subsystem** | NVS |
+
+**Evidence.** Run 20260924-092602 failed three tests on a full NVS on W1 that nothing could show (F10).
+
+**Fix.** `?NVS` prints the usage line and one line per namespace; `hil/nvs.py` records it for each USB board at the start and end of every run of 5+ tests (session.log, report.md, `results/nvs_history.csv`).
+
+#### 90. ?backup prints only a checksum where a one-line chain belongs when the heap cannot copy the chain
+
+| | |
+|---|---|
+| **Status** | VERIFIED - wcb.backup_large_config, wcb.pull_size_limit, seq.nvs_full_consistency PASS (20260924-133332) |
+| **Owner** | `WCB_firmware` (`WCB.ino` `printBackupConfig`, `buildConfigString` - since replaced by `configPullWalk`, #91) |
+| **Effort** | M |
+| **Tests** | `wcb.backup_large_config`, `wcb.pull_size_limit`, `seq.nvs_full_consistency` |
+| **Subsystem** | backup / heap |
+
+**Evidence (20260924-120036, then measured).** With W1's store filled, `?backup` printed `^?CHK<crc>` alone under both chain headers. Measured on W1 with WiFi in AP mode (about 19 KB heap free, largest block 16-17 KB), adding 500-character sequences to its 899-character chain: the factory-reset chain printed empty at 2.5 KB and as the checksum alone at 3.5 and 4 KB; at 4.5 KB the configured chain did the same; the heap's minimum since boot fell to 2.5 KB. `printBackupConfig` builds both chains as Strings and copies each to append the checksum (`WCB.ino:6789-6790`); a String whose allocation fails comes back empty (#58). The test only notes it.
+
+**Fix.** `printBackupConfig` runs `collectConfigCommands` once per output and streams each chain, CRC-32 running over the bytes printed (`crc32Update`), so nothing grows with the config; the sub-emitters became token producers (`emit*Backup`). Output goes through a 2 KB write buffer flushed per line: with 256-byte writes, a peer's `[ETM] WCBn came ONLINE` (printed on the WiFi task) landed inside a chain after a reboot and broke its checksum (`persist.bcast_flags_reboot`, 20260924-131417). `buildConfigString` (the mesh pull) is measured first (`configStringLength`), reserved once and filled in place; out of memory, it returns "" and the target sends an empty reply, which the Wizard reports as an error, never a partial config. A pull over 2912 characters is refused before it is built, and both refusals print on the target, ungated (F13 has since replaced this pull with the config-pull job, `configPullWalk`, #91). Output byte-identical to before on W1 and W2.
+
+#### 91. A config pull over 2912 characters gave the requester nothing
+
+| | |
+|---|---|
+| **Status** | VERIFIED - wcb.pull_size_limit, wcb.pull_plain_over_limit, wcb.pull_parts_many, wcb.pull_error_oom_legacy, wcb.pull_error_oom_parts, wcb.pull_nonblocking, navicore.mgmt_pull, navicore.pull_over_limit, wizard.remote_pull, wizard.remote_pull_parts and the ten wizard.remote_pull_fake_* PASS (20260924-190431) |
+| **Owner** | `WCB_firmware` + Wizard + harness + WCBClient |
+| **Effort** | L |
+| **Tests** | the ids above; host `tests/config_parts_test.cpp`; `tests/wizard/unit/pull.test.js` |
+| **Subsystem** | MGMT relay / config pull |
+
+**Evidence.** One pull reply carries at most 16 frags of 182 bytes. A larger config was refused on the target with a
+debug-only (then, after #90, an ungated but local) line, so the requester only saw its pull time out. An error text
+in the reply was not an option: every released Wizard stores any non-empty `[MGMT:CONFIG,<n>]` body as the board's
+config and baseline without checking its CRC (audit F13).
+
+**Fix.** A `,P` pull (type 19 request) gets a config over 2912 characters as type-18 parts, `P<id>,<k>,<K>:<data>~`,
+grid-split at 2880 bytes without cutting a UTF-8 character, each built by its own walk with PEERSLIVE frozen and the
+CRC re-checked; refusals are `E<CODE>,<detail>` (NOMEM, CHANGED, NOPARTS, TOOBIG). The reply is a non-blocking job in
+`loop()` (one frag per step); relays key reassembly on (sessionId, type, source), let a whole reply beat a part, and
+print each line with one write; the Wizard collects, joins and verifies parts, queues pulls per relay and decodes
+serial input as a stream. docs/MGMT_RELAY.md.
+
+#### 92. Clearing a serial mapping leaves its NVS keys behind
+
+| | |
+|---|---|
+| **Status** | VERIFIED - map.nvs_keys_freed and every map.* test PASS (20260924-233628); Greg: "Fix both" (2026-09-24) (`docs/HIL_TEST_AUDIT.md` F20) |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`) |
+| **Effort** | S |
+| **Tests** | `map.nvs_keys_freed` (new: counts `serial_map` in `?NVS` around a clear and a `CLEAR,ALL`); `var.cap_persistent_full`, `inv.seqget_largest` failed on it mid-run |
+| **Subsystem** | serial mapping / NVS |
+
+**Evidence (run 20260924-190733).** `saveSerialMonitorMappings` never removes a key: a cleared slot keeps its input, count, raw,
+prior-flag and per-output keys. The map suite left about 44 `serial_map` entries on W1 (up to ~130 possible), and the
+persistent-variable table and a 900-character sequence then could not be written. `?ERASE,NVS` later in the run hid
+it from the end-of-run `?NVS` reading.
+
+**Fix.** `saveSerialMonitorMappings` (`WCB_Storage.cpp`) writes an active slot only, then `removeUnusedSerialMapKeys`
+erases every key no active mapping uses: all of an inactive slot's (`_act` first, so a restart part-way leaves it
+inactive) and an active slot's output pairs past its count, after the puts so the new count is stored first. Raw
+`nvs_erase_key`, because `Preferences::remove()` logs an error for each key that was never written; an erase needs
+no free space, so it works on a full store. `loadSerialMonitorMappings` already reads a missing `_act` as false, and
+`?backup` is built from RAM, so neither changes. From the review: an active slot's `_act` is written last (a restart part-way
+through a new slot leaves it inactive), and when its count cannot be stored (a full store) its output keys are left
+alone and a warning prints, because NVS still holds the old count and erasing the pairs it names would reload them
+as extra USB destinations.
+
+#### 93. A client that keeps re-arming a remote terminal blocks a deferred reboot
+
+| | |
+|---|---|
+| **Status** | VERIFIED - etm.reboot_rterm_rearm, etm.reboot_stats_rpt, etm.reboot_defer_cap, etm.w1_reboot_sees_peers, pwm.map_deferred_reboot PASS (20260924-233628); Greg: "Fix both" (2026-09-24) (`docs/HIL_TEST_AUDIT.md` F21) |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | new: `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`; failed on it: `etm.w1_reboot_sees_peers`, `input.wdpda_persists_reboot`, `pwm.wdp_selfheal_missed_clear` |
+| **Subsystem** | deferred restart / RTERM |
+
+**Evidence (runs 20260924-190733, 20260924-213158).** The quiet window before a deferred restart (4 s with no command processed) is
+reset by every queue item. Intellex, connected to NaviCore's AP, made NaviCore send `?RTERM,START,20` to W1 about once
+a second, so `?reboot` and a PWM reboot never ran; NaviCore's `?STATS,RPT` (every 30 s) alone stretches it to ~8 s.
+
+**Fix.** `loop()` clears `quietWindowExempt` (`WCB.ino`) before each queue item and stamps the quiet-window clock only
+when no handler set it; the `?STATS,RPT` branch sets it, and so does `?RTERM,START,<n>` when a session to relay `<n>`
+is already running (it still re-announces the session). `RESTART_MAX_DEFER_MS` = 20 s after `loop()` first sees a
+pending flag, the restart goes anyway (still never under a running config-pull reply), after an ungated
+`Restart held off <n> s by commands that kept arriving - restarting anyway`. Greg approved about 15 s; 20 s is the
+smallest round value that cannot cut a push the window protects: the commands that ask for a restart come last in a
+Wizard USB push (`buildCommandString`) and in the `?backup` chain the harness replays (`collectConfigCommands`), so
+at most 4 mappings follow the first (5 input ports), each within 4 s of the one before or the window restarts the
+board anyway, each taking up to ~0.6 s: the last starts under 18.4 s after the request. A relay push is one MGMT
+session, queued whole and drained in one `loop()` pass. `hil.wcb` waits 25 s for a `?reboot` now. From the
+review: `restartImminent` is set just before the restart line, and after it the ETM receive path neither ACKs nor
+queues a command, so one arriving in the last ~150 ms is retried by its sender instead of being ACKed and lost
+(the cap fires exactly while commands are still arriving).
