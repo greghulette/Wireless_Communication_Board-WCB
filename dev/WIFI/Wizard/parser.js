@@ -1745,6 +1745,7 @@ function diffConfigs(configA, configB) {
   check('kyber',          configA.kyber,           configB.kyber);
   check('mp3',            configA.mp3,             configB.mp3);
   check('hcr',            configA.hcr,             configB.hcr);
+  check('dfp',            configA.dfp,             configB.dfp);
   check('wleds',          configA.wleds,           configB.wleds);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
@@ -1800,40 +1801,209 @@ function getNestedValue(obj, path) {
 }
 
 // ─────────────────────────────────────────────
+// Remote config pull (?MGMT,PULL through a relay) — the pure pieces, here so node --test reaches them
+// ─────────────────────────────────────────────
+// A relay prints one line per message it reassembles, and picks the tag from the ESP-NOW packet type the TARGET
+// sent it in, never from the text:
+//   [MGMT:CONFIG,<n>]<reply>                  a whole reply of 2912 characters or less (16 frags x 182), the only
+//                                             form every firmware before F13 sends
+//   [MGMT:CFGPART,<n>]P<id>,<k>,<K>:<data>~   part k of K of a longer reply. Only for a request that asked for
+//                                             parts (?MGMT,PULL,<n>,P); a target never sends parts unasked
+//   [MGMT:CFGERR,<n>]<CODE>,<detail>          the target could not send its config; never any config text
+// <reply> is [VER:<fw>] + the ?-chain + ^?CHK<8 hex>, the CRC-32 of the chain between them (configPullWalk,
+// WCB.ino). The data of parts 1..K, joined in order, is that same reply, cut on byte offsets the target backs off
+// so no UTF-8 character is split.
+// The new tags differ from CONFIG BEFORE the comma on purpose. An old Wizard (including the copy frozen inside
+// every Intellex install) matches '[MGMT:CONFIG,' and stores ANY non-empty body under it as the board's config AND
+// the baseline the next push diffs against, with no CRC check - so a part or an error must never arrive under it.
+
+// CRC-32: reflected, poly 0xEDB88320, init and final XOR 0xFFFFFFFF - the firmware's calculateCRC32/crc32Update
+// (WCB.ino) and zlib's. Over UTF-8 BYTES: a string is encoded first, because the firmware sums the raw bytes of
+// aliases, labels and sequence values that can hold multi-byte characters. Returns an unsigned 32-bit number.
+const _CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(input) {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = _CRC32_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Bytes in, trimmed non-empty lines out: THE line splitter for both serial transports, BoardConnection's direct
+// reader (_startReading) and its shared-hub path (connectShared). One TextDecoder in stream mode, so a multi-byte
+// character split across two reads decodes whole. The direct reader used to decode every read on its own, which
+// turned such a character into two U+FFFD: silently stored as config by a legacy pull, and a CRC failure on every
+// parts pull. Reads end wherever the USB transfer does (Intellex forwards reads of 'in_waiting or 1' bytes), so a
+// 2.9 KB part line crosses a dozen boundaries. A throw from onLine propagates, but only after the buffer has moved
+// past that line, so it is never delivered twice.
+function makeLineSplitter(onLine) {
+  const decoder = new TextDecoder();
+  let buf = '';
+  return function feed(bytes) {
+    buf += decoder.decode(bytes, { stream: true });
+    let start = 0;
+    try {
+      let nl;
+      while ((nl = buf.indexOf('\n', start)) !== -1) {
+        const line = buf.slice(start, nl).replace(/\r$/, '').trim();
+        start = nl + 1;
+        if (line) onLine(line);
+      }
+    } finally {
+      if (start) buf = buf.slice(start);
+    }
+  };
+}
+
+// A part's body (after its [MGMT:CFGPART,<n>] tag): P<id>,<k>,<K>:<data>~ -> { id, k, K, data } or null.
+// id is 4 upper-case hex digits, random per target job; k is 1-based and k <= K. Strict, trailing '~' included: the
+// '~' is framing, because every line is trimmed on the way in and a part ending in a space (a label, a sequence
+// value) would otherwise lose it at the join. A line that another print landed on after the '~' is null too -
+// the part is lost and the attempt retries, which is safe; a guessed repair is not.
+const _CFG_PART_RE = /^P([0-9A-F]{4}),([1-9][0-9]?),([1-9][0-9]?):([\s\S]+)~$/;
+function parseConfigPart(body) {
+  const m = _CFG_PART_RE.exec(typeof body === 'string' ? body : '');
+  if (!m) return null;
+  const k = Number(m[2]);
+  const K = Number(m[3]);
+  if (k > K) return null;
+  return { id: m[1], k, K, data: m[4] };
+}
+
+// An error's body (after its [MGMT:CFGERR,<n>] tag; the relay strips the leading 'E'): <CODE>,<detail>.
+// -> { code, detail, retryable, reason }. NOMEM (heap too fragmented for the reply buffer, which comes and goes
+// with load) and CHANGED (the config changed between the target's walks) are worth another attempt, and so is
+// NOPARTS (a reply over 2912 characters for a request that did not ask for parts): this Wizard always asks with
+// ,P, so a NOPARTS only means every type-19 copy of the request was lost while a type-5 copy got through.
+// TOOBIG (more than 16 parts) is not.
+// A code this Wizard does not know is treated as permanent: its detail is shown at once rather than after three
+// more requests to a target that already said no.
+const _CFGERR_CODES = {
+  NOMEM:   { retryable: true,  text: 'target is out of memory for the reply' },
+  CHANGED: { retryable: true,  text: 'config changed while the target was sending it' },
+  NOPARTS: { retryable: true,  text: 'config is too large for one reply and the request for parts did not arrive' },
+  TOOBIG:  { retryable: false, text: 'config is too large to pull' },
+};
+function parseConfigError(body) {
+  const s = String(body ?? '').trim();
+  const m = /^([A-Z][A-Z0-9_]*)(?:,([\s\S]*))?$/.exec(s);
+  const code = m ? m[1] : 'UNKNOWN';
+  const detail = m ? (m[2] ?? '').trim() : s;
+  const known = Object.prototype.hasOwnProperty.call(_CFGERR_CODES, code) ? _CFGERR_CODES[code] : null;
+  const text = known ? known.text : `target error ${code}`;
+  return { code, detail, retryable: !!known?.retryable, reason: detail ? `${text} (${detail})` : text };
+}
+
+// A whole reply: [VER:<fw>] head, ^?CHK<8 hex> tail, and the CRC-32 of the chain between them. -> { ok, reason,
+// ver }. The tail is taken from the END: a sequence value can legitimately hold an earlier '^?CHK' (WCB.ino looks
+// for the checksum with lastIndexOf for the same reason).
+function verifyConfigReply(str) {
+  if (typeof str !== 'string') return { ok: false, reason: 'no reply text' };
+  const head = /^\[VER:([^\]]*)\]/.exec(str);
+  if (!head) return { ok: false, reason: 'no [VER:] head' };
+  const tail = /\^\?CHK([0-9A-Fa-f]{8})$/.exec(str);
+  if (!tail || tail.index < head[0].length) return { ok: false, reason: 'no ^?CHK tail' };
+  const want = parseInt(tail[1], 16) >>> 0;
+  const got = crc32(str.slice(head[0].length, tail.index));
+  if (got !== want) {
+    return { ok: false, reason: `checksum ${got.toString(16).toUpperCase().padStart(8, '0')} != ${tail[1].toUpperCase()}` };
+  }
+  return { ok: true, reason: '', ver: head[1] };
+}
+
+// The pull listener's state machine, one per pull: feed(line) -> { kind, src, ... } with kind
+//   'ignored'   not a pull reply for wantWCB (another board's, another tag, a malformed part: reason says which)
+//   'legacy'    [MGMT:CONFIG,n] with a body: { body } (trimmed), exactly what a legacy pull has always stored
+//   'empty'     [MGMT:CONFIG,n] with no body: the target ran out of memory building a legacy reply
+//   'partial'   a part of the current id: { id, k, K, have, progress } - progress false for a duplicate
+//   'complete'  all K parts of one id, joined and CRC-checked: { id, K, text, ver }
+//   'crcFail'   all K parts in, but the join fails verifyConfigReply: { id, K, reason }
+//   'error'     a CFGERR ({ code, detail, retryable, reason }), or code NOTUTF8 when a failed join holds U+FFFD
+//               (with the join's { id, K } too)
+// The tag is matched strictly: digits right up to the ']'. The old listener read the number with parseInt, so
+// '[MGMT:CONFIG,3,1/3]' counted as board 3 and '[MGMT:CONFIG,X]' (NaN) as every board.
+// Parts collect per id: a part of another id (a new target job - a retry, or a job restarted because the config
+// changed) starts over, since two builds' parts must never be joined; the CRC would catch it, but only after the
+// last part. A U+FFFD in a join that fails the CRC is NOTUTF8, and retryable, because one join cannot tell its two
+// causes apart: a byte lost in transport inside a multi-byte character (random: the next job arrives whole), or bytes
+// stored in NVS that are not UTF-8 (a label typed from a Latin-1 terminal: every job decodes them to U+FFFD, which
+// re-encodes as EF BF BD, so it never verifies). A second job is what tells them apart, so the caller stops on the
+// second NOTUTF8 of a pull from a new id (app.js _pullNotUtf8).
+const _MGMT_PULL_TAG_RE = /^\[MGMT:(CONFIG|CFGPART|CFGERR),(\d+)\]/;
+function createPullCollector(wantWCB) {
+  const want = Number(wantWCB);
+  let cur = null;   // { id, K, parts: [data | undefined] x K, have }
+  return {
+    feed(line) {
+      const m = _MGMT_PULL_TAG_RE.exec(typeof line === 'string' ? line : '');
+      if (!m) return { kind: 'ignored' };
+      const src = Number(m[2]);
+      if (src !== want) return { kind: 'ignored', src, reason: `a reply from WCB${src}` };
+      const body = line.slice(m[0].length);
+      if (m[1] === 'CONFIG') {
+        const text = body.trim();
+        return text ? { kind: 'legacy', src, body: text } : { kind: 'empty', src };
+      }
+      if (m[1] === 'CFGERR') return { kind: 'error', src, ...parseConfigError(body) };
+      const p = parseConfigPart(body);
+      if (!p) return { kind: 'ignored', src, reason: 'a malformed part' };
+      if (!cur || cur.id !== p.id || cur.K !== p.K) cur = { id: p.id, K: p.K, parts: new Array(p.K), have: 0 };
+      if (cur.parts[p.k - 1] !== undefined) {
+        return { kind: 'partial', src, id: p.id, k: p.k, K: p.K, have: cur.have, progress: false };
+      }
+      cur.parts[p.k - 1] = p.data;
+      cur.have++;
+      if (cur.have < cur.K) return { kind: 'partial', src, id: p.id, k: p.k, K: p.K, have: cur.have, progress: true };
+      const text = cur.parts.join('');
+      cur = null;
+      const v = verifyConfigReply(text);
+      if (v.ok) return { kind: 'complete', src, id: p.id, K: p.K, text, ver: v.ver };
+      if (text.includes('\uFFFD')) {
+        return { kind: 'error', src, id: p.id, K: p.K, code: 'NOTUTF8', detail: v.reason, retryable: true,
+                 reason: 'config text is not valid UTF-8 (a byte lost on the way, or stored that way on the target)' };
+      }
+      return { kind: 'crcFail', src, id: p.id, K: p.K, reason: v.reason };
+    },
+  };
+}
+
+// ─────────────────────────────────────────────
 // Exports — available to app.js and parser.test.js
 // ─────────────────────────────────────────────
-if (typeof module !== 'undefined' && typeof module.exports !== 'undefined' && typeof window === 'undefined') {
-  // Node.js / test environment only (not browser)
-  module.exports = {
-    createDefaultBoardConfig,
-    createDefaultSystemConfig,
-    parseBackupString,
-    parseSystemFile,
-    buildCommandString,
-    buildSystemFile,
-    diffConfigs,
-    collectAllMaestros,
-    getAvailablePorts,
-    evaluatePortClaims,
-    HW_VERSION_MAP,
-    hwValueToDisplay,
-    hwValueToBinary,
-  };
-} else {
-  // Browser environment — attach to window
-  window.WCBParser = {
-    createDefaultBoardConfig,
-    createDefaultSystemConfig,
-    parseBackupString,
-    parseSystemFile,
-    buildCommandString,
-    buildSystemFile,
-    diffConfigs,
-    collectAllMaestros,
-    getAvailablePorts,
-    evaluatePortClaims,
-    HW_VERSION_MAP,
-    hwValueToDisplay,
-    hwValueToBinary,
-  };
+// ONE object for both worlds. They used to be two hand-kept lists, and a function added to the Node one only
+// passed every unit test and then threw 'WCBParser.x is not a function' in the page. Two independent ifs, so a
+// test that loads this file with a stub window and module (unit/pull.test.js) sees both and can compare them.
+const WCB_PARSER_API = {
+  createDefaultBoardConfig,
+  createDefaultSystemConfig,
+  parseBackupString,
+  parseSystemFile,
+  buildCommandString,
+  buildSystemFile,
+  diffConfigs,
+  collectAllMaestros,
+  getAvailablePorts,
+  evaluatePortClaims,
+  HW_VERSION_MAP,
+  hwValueToDisplay,
+  hwValueToBinary,
+  crc32,
+  makeLineSplitter,
+  parseConfigPart,
+  parseConfigError,
+  verifyConfigReply,
+  createPullCollector,
+};
+if (typeof module !== 'undefined' && module && module.exports) {
+  module.exports = WCB_PARSER_API;   // Node: node --test, the harness's wizard.parser
+}
+if (typeof window !== 'undefined') {
+  window.WCBParser = WCB_PARSER_API; // the browser: app.js reaches every parser function as WCBParser.x
 }
