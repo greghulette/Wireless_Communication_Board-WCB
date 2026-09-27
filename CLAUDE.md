@@ -164,9 +164,13 @@ changing before editing.**
       (NeoPixel) takes one and S3-S5 one each, which **fills the S3 exactly**. Anything else that
       wants RMT on the S3 makes a soft port fall back to bit-banged TX. It prints
       `[SOFTSERIAL] S<n>: no RMT channel` at boot, and the old `applySoftSerialIntTx()` rules then
-      govern that port again.
-    - `;P` borrows a soft TX pin with `pinMode`; `noteTxPinBorrowed()` makes the next serial write
-      route it back to RMT. A declared PWM-output port drops serial writes.
+      govern that port again. PWM output pulses (`pwmPulse()`, `WCB_PWM.cpp`) take one channel per
+      port at that port's first pulse, so preemption cannot stretch them (tracker #94: a bit-banged
+      1000 us came out as 1830 us). On the S3 a pulse channel exists only when the port's soft serial
+      never began (a declared PWM output port); otherwise that port's pulses stay bit-banged and it
+      prints `[PWM] S<n>: no RMT channel` once.
+    - `;P` routes a soft TX pin to the port's pulse channel; `noteTxPinBorrowed()` makes the next
+      serial write route it back to the serial channel. A declared PWM-output port drops serial writes.
     - **Receive is a GPIO ISR**, which decodes from the time each edge's interrupt
       starts. So the GPIO ISR service is installed at **level 3** in `setup()`, ahead of any
       `attachInterrupt`, to pre-empt the level-1 UART/RMT interrupts. That took 19200 and 38400 from

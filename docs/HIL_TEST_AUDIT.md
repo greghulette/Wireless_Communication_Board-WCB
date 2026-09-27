@@ -537,6 +537,11 @@ back to the bit-bang when no channel is free and say so at boot. The same helper
 core 1 is only a mitigation: an NVS or flash write stalls both cores, and the web server task is unpinned. Do not
 wrap the pulse in a critical section, which would hold off the WiFi and UART0 interrupts for up to 2.5 ms. After
 the fix, `pwm.passthrough_local` should also check the last (held) pulse of each step.
+*Fixed 2026-09-27 as recommended (tracker #94; decided in Greg's absence, `HIL_WEEK_DECISIONS.md` D5), verified
+on the bench (20260927-130212; 20260927-131152 to -131509; 20260927-174251 to -174402, 3/3):* `pwmPulse()` (`WCB_PWM.cpp`) gives each port an RMT channel at
+its first pulse and sends one symbol per pulse; local passthrough and `;P` both use it, and a port with no free
+channel keeps the bit-bang and says so once. `pwm.passthrough_local` and `pwm.passthrough_mesh` now also check
+each step's last pulse.
 
 ## 4. Coverage gaps
 
@@ -646,7 +651,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 | F20 | fixed 2026-09-24 (tracker #92), bench 20260924-233628 | The save removes every `serial_map` key no active mapping uses; `map.nvs_keys_freed`. |
 | F21 | fixed 2026-09-24 (tracker #93), bench 20260924-233628 | RTERM re-arms of the running session and `?STATS,RPT` do not reset the quiet window; `RESTART_MAX_DEFER_MS` = 20 s; `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`. |
 | F22 | open (firmware; recommend leave) | A rebooted WCB sees no peer online until its next packet (up to HB+1 s); unicasts meanwhile are not ETM-retried. |
-| F23 | open (firmware) | Make PWM output pulses in hardware (a one-shot RMT symbol); the bit-bang is stretched by preemption (1830 µs for 1000 seen). |
+| F23 | fixed 2026-09-27 (tracker #94, D5), bench 20260927-130212 | One RMT symbol per PWM output pulse (`pwmPulse()`); both passthrough tests check the held pulse. |
 | Run 20260925-092255 | 493 pass, 2 fail, 4 skip in 2:35:02 (F20/F21 image, servos on) | Both triaged by an analyst and a skeptic. `pwm.passthrough_local`: W1 put out one 1830 µs pulse for a 1000 µs input, a firmware defect from 2025-11 (F23); Greg's rerun `20260925-132403` passed it, every width within 5 µs. `etm.reboot_defer_cap`: the test itself passed (the restart came at the 20 s cap); then the reboot cleanup added the night before (`?WDP,POLL`, then `?STATS`) failed its read, because W2's `came ONLINE` (F18) landed between the `;S0` sentinel's text and its CRLF, the only glued sentinel in 68,887. `WCB.run` now accepts a sentinel that starts its line, the cleanup waits 1 s after the poll and never raises; `selftest.py` 48/48. |
 | Run 20260924-234056 | 459 pass, 3 fail, 37 skip (27 servo, 10 opt-in/attended/label) with `--no-servos` (F20/F21 image) | None is F13, F20 or F21 (one analyst per failure plus a skeptic, both reading the session log and the code). `etm.offline_detection_timing` measured 4.93 s against a 4.95 s floor. It was host timing: a line is stamped when SerialDevice splits it out of a read, so one with more output behind it in the same read (here NaviCore's `rc_hb`) is stamped up to one read late. The floor is now 4.85 s, and the test checks the edges alternate, which is #80's real fingerprint. Replayed over all 31 recorded runs, that fails every run the race hit (5 of which the old test passed) and passes every run since the #80 fix. `wizard.remote_pull`: W1's third boot announce after Chrome returned COM6 printed `[ETM] WCB1 came ONLINE (boot)` on W2 between the factory header and its chain (F18, a window F12 opened), and the parser took the line after the header; it now searches the section, and `_factory_reply` re-reads a chain that fails its CRC. `etm.char_unicast`: `etm.reboot_defer_cap` had just rebooted W1, which saw no peer online yet (F22) and aborted; `_char` now polls until every bench WCB is online and fails at once on an abort, and the reboot tests leave W1 seeing its peers. Rerun `20260925-013055` (unchanged tests, different order) passed all three; the fixed tests in `20260925-015720`: 21/21. |
 | Run 20260924-190733 | 478 pass, 8 fail, 9 skip in 1:47:50 (F13 image, servos on) | None is F13 (triaged by one analyst per failure plus a skeptic). Four came from W1's NVS: the map suite's leftover keys (F20) filled it for `var.cap_persistent_full` and `inv.seqget_largest`, and a WDP-DA save scheduled 1 s after the previous test's forget held off soft-serial RX mid-line for the two `input.wdpda_*` tests (the forget helpers now wait it out). `input.soft_rx_baud_sweep` hit 57600's ~1% loss (3 of the last 19 runs; now a floor of 18/20). `wdp.poll_refreshes_age` lost one unacknowledged broadcast (now retried once). `pwm.wdp_selfheal_missed_clear` raced its own mark (reordered). `etm.w1_reboot_sees_peers` missed a restart deferred past 10 s (now 20 s; see F21). Reruns `20260924-205621` and `20260924-213158`: all pass except the two reboot waits blocked by Intellex (F21); with Intellex closed, `20260924-223915` passes those too (3/3). |
@@ -675,6 +680,11 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     09-25 and were relaunched after it reset).
   - 2026-09-27 12:37: Friday's harness fixes (glued-sentinel read, reboot cleanup, `navicore.wdp` poll, GUI combo
     colours) bench-verified in `20260927-123557` (9/9) and committed to WIFI.
+  - 2026-09-27 18:00: F23 fixed (D5, tracker #94): PWM output pulses are RMT-clocked; W1/W2 flashed 13:02 with the
+    new image (`results/builds/wcb-esp32-meshq`, fallback `-f21`); `pwm.*` 26/26 and the passthrough tests 8 more
+    times, with a new held-pulse check. The WCB coverage re-scan finished (295 confirmed gaps: 19 high, 98 medium,
+    178 low) and the NaviCore mapping (358 features, 59 existing tests); plans for WCB, NaviCore and Intellex are
+    being written. Next: the plans into docs, then the high-risk WCB gaps; the first nightly full run tonight.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -698,8 +708,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   hub), and what the bench lacks (§7 WP9).
 - **Open decisions:** F14-F16, F18, F19 (found during F13: relay push cap, String password checks, NaviCore WsSink,
   the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
-  sees its peers offline for up to one heartbeat; recommend leave); F23 (a bit-banged PWM output pulse is stretched
-  by preemption; recommend an RMT pulse); A20 (probe literal,
+  sees its peers offline for up to one heartbeat; recommend leave); A20 (probe literal,
   nit). F11 is deferred on Greg's word: revisit it if `results/nvs_history.csv` shows NVS filling.
 - **Everything is uncommitted.** Greg commits his own work.
 - **Bench:** free when this was written; `ListAgents` first.

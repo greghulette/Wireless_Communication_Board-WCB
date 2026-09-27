@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-27 | **#94 VERIFIED** (decided in Greg's absence, D5): one RMT symbol per PWM output pulse. `pwm.*` 26/26 (20260927-130212); both passthrough tests five more times, with the new held-pulse check (20260927-131152 to -131509, 20260927-174251 to -174402, 3/3). The one failure among them was the test's filter check counting a late pulse of the previous step, a harness race now fixed. |
 | 2026-09-25 | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip (docs/HIL_TEST_AUDIT.md §5). Filed #94 (a bit-banged PWM output pulse is stretched by preemption, audit F23), TODO for Greg's decision. `etm.reboot_defer_cap` was the harness: fixed in `WCB.run` and the reboot cleanup. |
 | 2026-09-25 | **WcbCmd 0.9.1 pushed (`0ab4af5`)** with #2 and #21, on Greg's word. Before it, GitHub's WcbCmd (`e51c39b`) still had both bugs, so every CI build of WCB and NaviCore did: only local builds, from the sketchbook copy, had the fixes. The `DEVICE,2` golden vector added in 0.8.0 fails on that code, so the vectors had never been run. They now pass on a host build of the sketch (107 OK); not yet flashed to an ESP32. Version 0.9.1 rather than a re-used 0.9.0; not tagged. The WIFI binaries at `cd3746e` predate it and pick it up on the next `Code/**` push. |
 | 2026-09-25 | No-servo full run `20260924-234056` on the F20/F21 image: 459 pass, 3 fail, 37 skip; all three test-side (docs/HIL_TEST_AUDIT.md §5), none from #91-#93. Test fixes to the offline-timing floor (plus #80's alternation check), the `?backup` chain parser and `?ETM,CHAR`'s peer wait; verified `20260925-015720` (21/21). Recorded audit F22 (a rebooted WCB sees its peers offline for one heartbeat), not filed here: the recommendation is to leave it. |
@@ -1916,7 +1917,7 @@ queues a command, so one arriving in the last ~150 ms is retried by its sender i
 
 | | |
 |---|---|
-| **Status** | TODO - Greg's decision (`docs/HIL_TEST_AUDIT.md` F23) |
+| **Status** | VERIFIED - `pwm.*` 26/26 (20260927-130212) and both passthrough tests in 20260927-131152 to -131509 and 20260927-174251 to -174402, 3/3, with the held-pulse check; decided in Greg's absence (`docs/HIL_WEEK_DECISIONS.md` D5) |
 | **Owner** | `WCB_firmware` (`WCB_PWM.cpp`, `WCB.ino`) |
 | **Effort** | M |
 | **Tests** | `pwm.passthrough_local`; after the fix it should also check each step's last (held) pulse |
@@ -1929,5 +1930,8 @@ same kind; `;P` (core 1) up to +45 µs.
 **Cause.** `PWMTask` (core 0) makes the pulse with `digitalWrite(HIGH); delayMicroseconds(w); digitalWrite(LOW)`;
 whatever takes the core during the wait (WiFi task, esp_timer, UART0 ISR) lengthens it.
 
-**Fix (proposed).** A one-shot RMT pulse (a PWM port on S3-S5 leaves its RMT channel free; the S3 falls back to the
-bit-bang when none is). Re-pinning `PWMTask` to core 1 is only a mitigation. No critical section around the pulse.
+**Fix.** `pwmPulse()` (`WCB_PWM.cpp`): each port gets an RMT channel (1 MHz, one memory block) at its first pulse, and a
+pulse is one symbol, high for the width then low, with the line held low after it. Before each pulse the channel
+waits for the previous one (bounded, 100 ms) and re-routes the pin (`rmt_tx_switch_gpio`), since a mapping's `pinMode`
+or a soft port's serial write may have taken it. Local passthrough and `;P` both call it; PWMTask no longer busy-waits.
+No free channel: the old bit-bang, and `[PWM] S<n>: no RMT channel` once.

@@ -4,6 +4,10 @@
 #include "wcb_pin_map.h"
 #include <Preferences.h>
 #include <sdkconfig.h>
+#include "driver/rmt_tx.h"      // hardware-timed output pulses - see pwmPulse()
+#include "driver/rmt_encoder.h"
+#include "soc/soc_caps.h"
+#include "freertos/semphr.h"
 #if CONFIG_IDF_TARGET_ESP32
 #include "hal/gpio_ll.h"   // level-emulated PWM input edges (erratum GPIO-3.14) - see pwmEdge()
 #endif
@@ -151,7 +155,86 @@ void IRAM_ATTR pwmISR3() { pwmEdge(2, SERIAL3_RX_PIN); }
 void IRAM_ATTR pwmISR4() { pwmEdge(3, SERIAL4_RX_PIN); }
 void IRAM_ATTR pwmISR5() { pwmEdge(4, SERIAL5_RX_PIN); }
 
+// ── Hardware-timed output pulses (tracker #94, docs/HIL_TEST_AUDIT.md F23) ────────────────────────────
+// A pulse used to be digitalWrite(HIGH); delayMicroseconds(w); digitalWrite(LOW). Whatever took the CPU during
+// the wait - on PWMTask's core 0 the WiFi task, esp_timer, the UART0 interrupt - held the pin HIGH until the task
+// ran again, so a pulse could only get longer: 1000 us came out as 1830 us (HIL run 20260925-092255), and it was
+// the last pulse of its step, the one a digital servo holds; ;P on core 1 stretched by up to 45 us. Now each port
+// has its own RMT channel and a pulse is ONE symbol, high for w then low, clocked out by the peripheral. Nothing
+// the CPUs do can stretch it, not even a flash write: the symbol is in channel memory when the transmission
+// starts, and the level after it is set in hardware. A late done-interrupt only delays the port's NEXT pulse.
+// Channel budget (CLAUDE.md rule 13): the ESP32 has 8 TX channels, the S3 4. A port takes its channel at its first
+// pulse; when none is free the port keeps the bit-bang and says so once.
+struct PwmPulsePort {
+    rmt_channel_handle_t ch    = nullptr;
+    rmt_encoder_handle_t enc   = nullptr;
+    SemaphoreHandle_t    lock  = nullptr;   // PWMTask (core 0) and ;P (core 1) can both pulse a port
+    rmt_symbol_word_t    sym   = {};        // the payload: must not change until the previous pulse is done
+    bool                 tried = false;     // channel creation attempted, successfully or not
+};
+static PwmPulsePort pwmPulsePorts[6];       // index = port 1..5
+
+static bool pwmPulseStart(PwmPulsePort &pp, int port, int pin) {
+    pp.tried = true;
+    rmt_tx_channel_config_t cc = {};
+    cc.gpio_num          = (gpio_num_t)pin;
+    cc.clk_src           = RMT_CLK_SRC_DEFAULT;
+    cc.resolution_hz     = 1000000;                         // 1 us a tick: 500-2500 us fits one 15-bit duration
+    cc.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+    cc.trans_queue_depth = 1;
+    cc.flags.init_level  = 0;                               // a servo line idles LOW
+    if (rmt_new_tx_channel(&cc, &pp.ch) == ESP_OK) {
+        rmt_copy_encoder_config_t ec = {};
+        if (rmt_new_copy_encoder(&ec, &pp.enc) != ESP_OK || rmt_enable(pp.ch) != ESP_OK) {
+            if (pp.enc) { rmt_del_encoder(pp.enc); pp.enc = nullptr; }
+            rmt_del_channel(pp.ch);
+            pp.ch = nullptr;
+        }
+    } else {
+        pp.ch = nullptr;
+    }
+    if (!pp.ch)
+        Serial.printf("[PWM] S%d: no RMT channel - its pulses are bit-banged and can stretch under load (rule 13)\n", port);
+    return pp.ch != nullptr;
+}
+
+void pwmPulse(int port, int pin, uint32_t widthUs) {
+    if (port < 1 || port > 5 || pin < 0) return;
+    PwmPulsePort &pp = pwmPulsePorts[port];
+    if (pp.lock) xSemaphoreTake(pp.lock, portMAX_DELAY);
+    if (!pp.tried) pwmPulseStart(pp, port, pin);
+    bool sent = false;
+    // The previous pulse must be off the wire before its symbol is rewritten. That is immediate unless its
+    // done-interrupt is being held off (a flash write stalls it), and never longer than the bound.
+    if (pp.ch && rmt_tx_wait_all_done(pp.ch, 100) == ESP_OK) {
+        // Something may have re-muxed the pin since - pinMode() when a mapping is configured, or a soft port's
+        // serial write taking its TX pin back - so route it to this channel again. Microseconds, once a pulse.
+        rmt_disable(pp.ch);
+        rmt_tx_switch_gpio(pp.ch, (gpio_num_t)pin, false);
+        if (rmt_enable(pp.ch) == ESP_OK) {
+            pp.sym.level0    = 1;
+            pp.sym.duration0 = widthUs > 32767 ? 32767 : widthUs;
+            pp.sym.level1    = 0;
+            pp.sym.duration1 = 1;
+            rmt_transmit_config_t tc = {};
+            tc.loop_count      = 0;
+            tc.flags.eot_level = 0;                              // and LOW after it
+            sent = rmt_transmit(pp.ch, pp.enc, &pp.sym, sizeof(pp.sym), &tc) == ESP_OK;
+        }
+    }
+    if (!sent) {                                                 // no channel, or it would not come free
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, HIGH);
+        delayMicroseconds(widthUs);
+        digitalWrite(pin, LOW);
+    }
+    if (pp.lock) xSemaphoreGive(pp.lock);
+}
+
 void initPWM() {
+    // The pulse locks exist before PWMTask does (setup(), core 1): both cores may pulse a port later.
+    for (int p = 1; p <= 5; p++)
+        if (!pwmPulsePorts[p].lock) pwmPulsePorts[p].lock = xSemaphoreCreateMutex();
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         pwmMappings[i].active = false;
         pwmMappings[i].inputPort = 0;
@@ -777,9 +860,7 @@ void processPWMPassthrough() {
                     case 5: txPin = SERIAL5_TX_PIN; break;
                 }
                 if (txPin > 0) {
-                    digitalWrite(txPin, HIGH);
-                    delayMicroseconds(pulseWidth);
-                    digitalWrite(txPin, LOW);
+                    pwmPulse(targetPort, txPin, pulseWidth);   // hardware-timed; returns before it ends
                     if (debugPWMPassthrough) {
                         Serial.printf("[PWM] Local output -> S%d pin %d: %lu μs\n", targetPort, txPin, pulseWidth);
                     }

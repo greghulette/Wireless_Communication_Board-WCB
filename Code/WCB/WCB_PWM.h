@@ -35,6 +35,9 @@ struct PWMStabilityTracker {
 extern PWMStabilityTracker pwmStability[5];  // One tracker per serial port
 
 void initPWM();
+// One output pulse of widthUs on a port's TX pin, clocked by an RMT channel so preemption cannot stretch it
+// (tracker #94); falls back to a bit-bang when no channel is free. Returns without waiting for the pulse.
+void pwmPulse(int port, int pin, uint32_t widthUs);
 // autoReboot=true does NOT restart inline — it sets pwmRebootPending and lets loop() take
 // the restart once the command queue is empty. A config push is a stream of commands, and
 // restarting inside one of them silently destroys the ones still queued behind it.

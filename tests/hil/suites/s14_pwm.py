@@ -126,6 +126,17 @@ def p_output_port(bench):
             _inline_clear_out(w, "S4")
 
 
+def _step_problem(got, us, where=""):
+    """None when a pulse within 50 us of `us` arrived AND the last one did: the last is the width a digital servo holds.
+    The probe reports only the last pulse of each 200 ms window, so a right pulse followed by a stretched one shows as the
+    stretched one; before tracker #94 made pulses hardware-timed, 1000 us came out as 1830 us (run 20260925-092255)."""
+    if not any(abs(wd - us) <= 50 for wd, _ in got):
+        return f"step {us}{where}: {got}"
+    if abs(got[-1][0] - us) > 50:
+        return f"step {us}{where}: held (last) pulse {got[-1][0]} us: {got}"
+    return None
+
+
 @test("pwm.p_undeclared_softport", ";P on an ordinary soft-serial port gives a real pulse from the first call and parks the line LOW; the port still transmits afterwards", needs=["wcb1"])
 def p_undeclared_softport(bench):
     s4 = link(bench, 1, "S4")
@@ -564,19 +575,27 @@ def passthrough_local(bench):
                 pm = probe.dev.mark()
                 s3.pwm_out(us)
                 time.sleep(1.0)
-                if not any(abs(wd - us) <= 50 for wd, _ in s4.pulses(pm)):
-                    problems.append(f"step {us}: {s4.pulses(pm)}")
+                problem = _step_problem(s4.pulses(pm), us)
+                if problem:
+                    problems.append(problem)
+            prev = 2000     # the last step above
             for us, passes in ((450, False), (2550, False), (600, True), (2400, True)):
-                # Mark before the change: passthrough only pulses when the input changes (WCB_PWM.cpp:659-693),
+                # Mark before the change: passthrough only pulses when the input changes (processPWMPassthrough),
                 # so a width that passes has finished pulsing within ~0.3 s and a later mark sees nothing.
                 pm = probe.dev.mark()
                 s3.pwm_out(us)
                 time.sleep(1.4)
                 got = s4.pulses(pm)
-                if passes and not any(abs(wd - us) <= 50 for wd, _ in got):
-                    problems.append(f"{us} was not passed through: {got}")
-                if not passes and got:
+                if passes and _step_problem(got, us):
+                    problems.append(f"{us} was not passed through right: {got}")
+                # A filtered width must produce nothing of its own. A pulse at the PREVIOUS width is that step's late
+                # pulse: input jitter of 6 us or more re-sends a steady input now and then (a third pulse in the steady
+                # 3 s in 11 of 30 runs), and the probe's 200 ms report straddles the mark, so one sent just before the
+                # change can be reported after it (run 20260927-131152: 450 saw two 1997 us pulses). A filter that failed
+                # would put out the filtered width itself.
+                if not passes and any(abs(wd - prev) > 50 for wd, _ in got):
                     problems.append(f"{us} was not filtered: {got}")
+                prev = us
             s3.pwm_out(0)
             time.sleep(0.4)
             pm = probe.dev.mark()
@@ -617,8 +636,9 @@ def passthrough_mesh(bench):
                 pm = w2s3.probe.dev.mark()
                 s3.pwm_out(us)
                 time.sleep(1.0)
-                if not any(abs(wd - us) <= 50 for wd, _ in w2s3.pulses(pm)):
-                    problems.append(f"step {us} on W2S3: {w2s3.pulses(pm)}")
+                problem = _step_problem(w2s3.pulses(pm), us, " on W2S3")
+                if problem:
+                    problems.append(problem)
             stats = _stats_pwm(w)
             if not stats or stats[0] < 3 or stats[1] != stats[0] or stats[2] != 0:
                 problems.append(f"PWM Passthrough stats {stats}")
