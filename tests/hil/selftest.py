@@ -2667,6 +2667,22 @@ def t_run_glued_sentinel(tmp):
         pass
 
 
+def t_intellex_stage_filter(tmp):
+    """hil/intellex.py's stage filter drops the tool bundles, downloaded data, caches, the build stamp and zips from a
+    staged src/, and KEEPS src/wiki.html and src/wikidocs.py - source the host imports, which a 'wiki*' glob dropped
+    (the first staged host could not have started). include_data keeps the wikis and the firmware cache."""
+    from hil import intellex as IX
+    src = os.path.join(tmp.root, "src")
+    for d in ("wiki", "webui", "webui_wcb", "firmware", "__pycache__"):
+        os.makedirs(os.path.join(src, d))
+    for f in ("wiki.html", "wikidocs.py", "host.py", "build_stamp.py", "design.zip"):
+        open(os.path.join(src, f), "w").close()
+    names = sorted(os.listdir(src))
+    assert IX._stage_ignore(False)(src, names) == {"wiki", "webui", "webui_wcb", "firmware", "__pycache__",
+                                                   "build_stamp.py", "design.zip"}
+    assert IX._stage_ignore(True)(src, names) == {"webui", "webui_wcb", "__pycache__", "build_stamp.py", "design.zip"}
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -2679,7 +2695,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
-         t_backup_chain_parse, t_run_glued_sentinel]
+         t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

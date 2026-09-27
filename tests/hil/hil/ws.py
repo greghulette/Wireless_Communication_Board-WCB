@@ -49,12 +49,15 @@ def parse(buf: bytes):
 
 
 class WsClient:
-    def __init__(self, host, port=80, path="/ws", timeout=5.0):
+    """origin: an Origin header to send (Intellex's /_link refuses a foreign one and allows none). Binary frames -
+    Intellex relays every byte from the board as one - are kept whole in self.raw and decoded into self.text too."""
+    def __init__(self, host, port=80, path="/ws", timeout=5.0, origin=None):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
+        extra = f"Origin: {origin}\r\n" if origin else ""
         self.sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+                           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n").encode())
         resp = b""
         while b"\r\n\r\n" not in resp:
             chunk = self.sock.recv(4096)
@@ -66,6 +69,7 @@ class WsClient:
         if " 101 " not in status:
             raise ConnectionError(f"WebSocket handshake refused: {status}")
         self.text = ""
+        self.raw = b""
 
     def send_text(self, s: str):
         self.sock.sendall(frame(s.encode()))
@@ -92,6 +96,9 @@ class WsClient:
             except socket.timeout:
                 break
             if op == 0x1:
+                self.text += payload.decode(errors="replace")
+            elif op == 0x2:
+                self.raw += payload
                 self.text += payload.decode(errors="replace")
             elif op == 0x9:
                 self.sock.sendall(frame(payload, opcode=0xA))

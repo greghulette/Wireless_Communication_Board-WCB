@@ -673,7 +673,8 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
      transports (serial to the bench boards, WiFi to NaviCore's AP), and its flashing path.
   4. **One tool:** `run.py` and the GUI cover all three; docs current.
   Check-ins every 3 h continue from the progress notes below; a usage limit pauses work until it resets.
-  Every decision that would normally be Greg's is made, not deferred, and logged in
+  The plans for all three systems are in [hil_plan/](hil_plan/) (WCB-WP12..59 with 26 confirmed firmware defects,
+  NC-WP1..14, IX-WP1..14). Every decision that would normally be Greg's is made, not deferred, and logged in
   [HIL_WEEK_DECISIONS.md](HIL_WEEK_DECISIONS.md) for his review.
 - **Progress notes (newest last):**
   - 2026-09-27 12:40: plan set; WCB coverage re-scan running (both workflows had died on the weekly usage limit on
@@ -685,6 +686,10 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     times, with a new held-pulse check. The WCB coverage re-scan finished (295 confirmed gaps: 19 high, 98 medium,
     178 low) and the NaviCore mapping (358 features, 59 existing tests); plans for WCB, NaviCore and Intellex are
     being written. Next: the plans into docs, then the high-risk WCB gaps; the first nightly full run tonight.
+  - 2026-09-27 18:45: Intellex IX-WP1 done (hooks, Intellex `e9f95f2`) and IX-WP2..4 started: `s32_intellex.py`,
+    `hil/intellex.py`, `tests/intellex`; 19 no-board tests pass standalone (the full run held the run lock). The
+    three plans are in `docs/hil_plan/`. Next: fix the three high WCB defects (PWM load order, `?HW` chip check,
+    the broadcast race) once the full run frees the bench, then WCB-WP12 onward.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests

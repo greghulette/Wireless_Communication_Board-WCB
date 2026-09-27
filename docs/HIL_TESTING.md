@@ -814,10 +814,45 @@ paused value.
 
 ---
 
+## 10. Intellex tests (`tests/intellex`)
+
+Intellex (github.com/greghulette/Intellex) is the desktop companion for NaviCore: one aiohttp host that serves the
+NaviCore config tool at `/` and the Wizard at `/wcb/Wizard/`, and bridges each page's `/_link` WebSocket to ONE
+transport - a COM port or a droid's `ws://<ip>/ws`. `suites/s32_intellex.py` tests it through `hil/intellex.py`:
+
+1. **Stage** (`stage()`). `<out>/ixstage/<id>/` gets a copy of Intellex's `src/` and `tools/` (never Greg's checkout),
+   the two tool bundles, and its own `appdata/`, which the host gets as `LOCALAPPDATA`. Bundles: `worktree` (the
+   default) copies NaviCore `config_tool/` and this repo's `Wizard/`, with the file lists read from Intellex's own
+   `tools/fetch_webui.py`, so a Wizard change is tested inside Intellex before it ships; `shipped` copies Intellex's
+   bundles; `none` leaves them out (the 503 pages). The path is short on purpose: Windows' 260-character limit.
+2. **Leash** (`IntellexHost`). Every host starts with `INTELLEX_OFFLINE=1`, `INTELLEX_SERIAL_ALLOW` naming only the
+   test's own port (usually none), `INTELLEX_DISCOVER_HOSTS` empty (Intellex's CLAUDE.md "A test host needs a leash")
+   and `--no-auto-bounce`. No Intellex test touches another bench port, GitHub or the PC's WiFi, so the no-board ones
+   run even while a bench run holds every COM port.
+3. **Checks.** HTTP and `/_link` straight from the harness (urllib, and `hil/ws.py`, which keeps binary frames and can
+   send an Origin header); Intellex's own smoke tools under its venv (`run_venv`: `python.exe`, never the venv's `.exe`
+   shims); Playwright specs in `tests/intellex/specs` through `run_intellex_test()`, always headless - Intellex's pages
+   talk to the host, not to Web Serial, so there is no port grant and no one needs to be at the keyboard. Specs use
+   `lib/fixtures.js`, which records page errors and failed requests and answers the routes that would reach past the
+   host (identify, discover, wifi-bounce, the updates) unless a spec allows them.
+4. **Teardown.** Detach, kill the host's process tree (a host left running reopens its target every second, forever),
+   copy its log next to the report (`intellex-logs/<id>`).
+
+A test skips while another Intellex runs (Greg's app, or a host from a source checkout): one attached to NaviCore's AP
+made NaviCore re-arm W1's terminal every second (tracker #93). `intellex.origin_guard` leaves `/_api/wifi-bounce` out
+on purpose: were the Origin guard broken, that request would run `netsh` against the PC's WiFi.
+
+The plan is IX-WP1 to IX-WP14 in [hil_plan/INTELLEX.md](hil_plan/INTELLEX.md). Done: the hooks (Intellex `e9f95f2`),
+the plumbing, the API and guard tests (`intellex.routes`, `.origin_guard`, `.link_error_frame`, `.attach_validation`,
+`.settings_branch`, `.offline_con_floor`), Intellex's smoke tools (`intellex.smoke_repo_*`) and
+`intellex.ui_tools_load`. Next: the transports and the bridge on bench boards, both tools through Intellex, WiFi, and
+flashing (W2 only).
+
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-27 | _(pending)_ | **§10 Intellex tests.** `suites/s32_intellex.py`, `hil/intellex.py` (stage, a leashed host, Playwright and venv runners), `tests/intellex` (Playwright 1.63.0, headless); `hil/ws.py` keeps binary frames and sends an Origin header. 19 tests, none needing a board. |
 | 2026-09-27 | _(pending)_ | Tracker #94 (F23): PWM output pulses are RMT-clocked. `pwm.passthrough_local` and `pwm.passthrough_mesh` check each step's held (last) pulse; the filter check allows a late pulse of the previous step (run 20260927-131152). A §6 row records the re-send trap. |
 | 2026-09-25 | _(pending)_ | **Full run `20260925-092255` triaged (`HIL_TEST_AUDIT.md` §5).** `etm.reboot_defer_cap` passed its own check but its new cleanup failed: W2's `came ONLINE` glued onto the `;S0` sentinel. `WCB.run` now accepts a sentinel that starts its line, and the cleanup waits after its poll and never raises; a §6 row records the trap. `pwm.passthrough_local` found a firmware defect (audit F23). |
 | 2026-09-25 | _(pending)_ | `navicore.wdp` failed in run `20260925-091104` because NaviCore had booted about 27 s before it and had learned no WCB over WDP yet. The test now polls with `?WDP,POLL` when a row is missing; a §6 row records the trap. |

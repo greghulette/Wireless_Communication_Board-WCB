@@ -1,0 +1,11 @@
+{
+  "name": "wcb-intellex-tests",
+  "private": true,
+  "description": "Playwright tests of Intellex (the NaviCore desktop companion) run by the HIL harness: python tests/hil/run.py \"intellex.*\". The harness stages Intellex, starts its host and passes INTELLEX_URL.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

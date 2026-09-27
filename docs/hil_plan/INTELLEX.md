@@ -1,0 +1,947 @@
+# Intellex under the HIL harness: feature map and test plan
+
+> Written 2026-09-27 by planning agents that read the code (and, for WCB, a verified coverage re-scan), for the
+> away week's goal: a complete HIL tool for the WCBs, NaviCore and Intellex. It is a plan, not a spec: line numbers
+> drift, and any claim is to be confirmed against the code before acting on it. Progress is tracked in
+> [../HIL_TEST_AUDIT.md](../HIL_TEST_AUDIT.md) §6 and decisions in [../HIL_WEEK_DECISIONS.md](../HIL_WEEK_DECISIONS.md).
+
+Written 2026-09-27 for phase 3 of the away-week plan (`docs/HIL_TEST_AUDIT.md:672-673`: "Intellex: map its
+features, run it headless, Playwright against its UI over both transports, and its flashing path"). Read-only
+research: nothing was run, no port was opened, and no repo was changed.
+
+**What was read:**
+
+- **Intellex**, working tree `C:/Users/ghulette/Documents/GitHub/Intellex` at `d615344` (local `main`, one commit
+  ahead of `origin/main`): `CLAUDE.md`, `README.md`, `docs/*`, every `src/*.py`, `src/*.html`,
+  `src/intellex_shim.js`, `tools/*`, `scripts/*`, `Intellex.spec`, `requirements.txt` and `Intellex.bat`.
+- **NaviCore:** the parts of `config_tool/` and `NaviCore.ino` that Intellex depends on.
+- **WCB:** `Wizard/`; `tests/wizard/` (config, `lib/`, `specs/`); `tests/hil/hil/{wizard,bridge,ws,runner,optin,
+  navicore,serialdev}.py`; `suites/s28_wifi.py`; `suites/s30_wizard.py`; `bench.json`; `docs/HIL_TESTING.md`;
+  `docs/HIL_WEEK_DECISIONS.md`; `results/builds/**/FLASHED.md`.
+
+A bare `file:line` means `Intellex/src/...`; every other repo is named. "The harness" means `tests/hil` in the WCB
+repo.
+
+---
+
+## 0. The short version
+
+- **What Intellex is.** One aiohttp process (`host.py`) that serves:
+  - the two browser tools, unmodified;
+  - its own launcher, shell and docs viewer.
+
+  It runs on `127.0.0.1:<port>`. Each page's `/_link` WebSocket is bridged to **one** transport: a COM port (pyserial,
+  opened with DTR and RTS low) or a droid's `ws://<ip>/ws`. `app.py` only adds a pywebview window on top.
+- **It already runs headless.** `python src/host.py --port P --no-auto-bounce [--serial COMx | --ws IP]` serves with
+  no window and no browser (`host.py:1840-1898`).
+- **What a bench needs from it:**
+  - *Isolation.* Today it writes Greg's real settings, logs, bundles and firmware cache. No code change is needed:
+    stage a copy of `src/` and `tools/` for each test and point `LOCALAPPDATA` into the stage.
+  - *A leash.* Its launcher opens every Espressif COM port and probes 192.168.4.1. This needs three small env hooks
+    in Intellex (§2.4, H1-H3).
+- **No Web Serial.** Intellex's pages talk to the host, so its Playwright specs need no Chrome profile, no port grant
+  and no one at the keyboard. They run headless against a host the harness starts, which makes most of this plan
+  unattended.
+- **Where the tests go.** 14 work packages, IX-WP1 to IX-WP14 (§3.3). Bench-bound specs live in `tests/intellex/` in
+  the WCB repo (decision D3). They are launched by `tests/hil/suites/s32_intellex.py` through a new `hil/intellex.py`,
+  the same way `s30_wizard.py` launches `tests/wizard`.
+- **What reading the code found.** 11 items (§1.6). Three are real bugs, and one is a likely hazard:
+  - the shim cannot update the Wizard's `latestFirmwareVersion`;
+  - two Wizard images are never bundled;
+  - Update FW skips the Wizard's partition-table migration check;
+  - a USB-cabled WCB doorway probably leaves the NaviCore tool out of Via WCB mode, which is the rule-10 OTA hazard.
+
+---
+
+## 1. Feature inventory
+
+### 1.1 The shape
+
+```
+ page(s): Playwright or WebView2          Intellex host (one process, 127.0.0.1:P)                  far end
+ ───────────────────────────────          ────────────────────────────────────────                  ───────
+ /            NaviCore config tool ─┐      aiohttp app, host.py:1760-1837
+ /wcb/Wizard/ WCB Wizard           ─┼─ /_link (WS) ─► Bridge: a set of pages, one FIFO pump (host.py:124-382)
+ /_launcher  /_shell  /wiki/*      ─┘                   └─ one Transport ─┬─ SerialTransport ──► COMx (DTR/RTS low)
+   every tool page carries the shim                                      └─ WebSocketTransport ─► ws://192.168.4.1/ws
+   (intellex_shim.js: navigator.serial -> /_link)   /_api/* = HTTP JSON control plane
+                                                     reconnect_loop host.py:1518-1702 (1 s poll, TCP probe, re-identify, bounce)
+```
+
+### 1.2 The page <-> host WebSocket protocol (`/_link`)
+
+| Direction | Frame | Content and rule | Where |
+|---|---|---|---|
+| page -> host | TEXT | One complete line, **terminator included**. The shim splits on `\r`, `\n` or `\r\n` (CRLF counts as one terminator). An unterminated tail stays buffered. One `TextDecoder` lives as long as the port. | `intellex_shim.js:166-215` (split at `:202-212`); flushed on close `:216-218` |
+| page -> host | BINARY | Raw bytes, written as they are. The shim never sends these; a native client may. | `host.py:1292-1293` |
+| page -> host | TEXT (host side) | Encoded as UTF-8, then written to the transport. | `host.py:1294-1299` |
+| host -> page | BINARY | Every transport chunk goes to **every** page, whole and in arrival order: one `asyncio.Queue`, one `_pump` task. A send failure is suppressed per page. | `host.py:322-372` |
+| host -> page | TEXT | `{"type":"ERROR","msg":"link write failed: ..."}\n` when the transport write raises (nothing attached, or device lost). The page sees it as a line in its stream. | `host.py:1300-1306` |
+| host -> page | close | Every page socket is closed when the transport drops or is re-attached. Each tool then re-handshakes, which is how it sees a fresh PONG version after an OTA. | `host.py:249-287`; `attach` `:210-238` |
+| host <-> page | ping/pong | aiohttp heartbeat every 30 s. | `host.py:1287` |
+| upgrade | 403 | A cross-origin `Origin` is refused. **No** `Origin` at all (a native client) is allowed. | `host.py:1261-1286` |
+| shim | stream error | When the socket closes or errors, the ReadableStream errors with `NetworkError` rather than closing gracefully (a graceful close pegged a CPU core). Writing while not OPEN throws `NetworkError`. | shim `:100-147`, `:170-174` |
+| shim | DTR/RTS | `port.setSignals()` becomes a real `POST /_api/signals`. It is a no-op on a WS transport. | shim `:248-260`; `host.py:1234-1257` |
+| frame <-> frame | postMessage | `{intellex:'open-chooser'}` and `{intellex:'close-chooser'}`, same origin only. | shim `:1492-1500`; `launcher.html:617-620`; `shell.html:439-444` |
+
+**Host -> droid** (`ws_transport.py`):
+
+- **Endpoint:** `ws://<host>:80/ws` (`:24-25`, `:37`).
+- **Timing:** 5 s open timeout; a ping every 5 s with a 10 s pong deadline (`:77-80`).
+- **Sending:** each write is decoded strictly as UTF-8, then sent as one TEXT message (`:106-124`).
+- **Receiving:** frames are concatenated as bytes, with no awareness of lines (`:130-159`).
+
+### 1.3 Control API (`build_app`, `host.py:1760-1837`)
+
+Every POST passes through `_guard_origin` (`host.py:1733-1757`). A foreign `Origin` gets a 403 and a log line.
+
+| Route | Handler | What it does, and its side effects |
+|---|---|---|
+| `GET /` | `index` `:1366-1392` | Serves the NaviCore tool. The shim tag is injected before the first `<script>` at serve time (`_inject_shim` `:1345-1363`). Sent `no-store`; a 503 explanation when the bundle is missing. |
+| `GET /wcb/Wizard/`, `/wcb/Wizard/index.html` | `wcb_index` `:1395-1416` | The same for the Wizard. `/wcb/Wizard` without the slash redirects (`:1813-1815`). |
+| static `/wcb/`, `/_assets/`, `/` | `:1830-1836` | Registration order is load-bearing: `/` matches every path. |
+| `GET /_intellex.js` | `shim_js` `:1317-1342` | The shim, with `window.__intellexBranches = {...}` prepended. |
+| `GET /_launcher`, `GET /_shell` | `:842-854` | The chooser, and the two-tool window. |
+| `GET /wiki/`, `/wiki/{product}/{name}` | `:730-772` | Rendered wikis. Pages get a nonce CSP (`:675-712`); assets are sandboxed (`:681`, `:755-762`). |
+| `GET /_api/status` | `:1112-1128` | Returns `attached`, `target`, `lastError`, `reconnecting`, `wantsLink`, `kind`, `role`, `relayId`. |
+| `POST /_api/attach` | `:1131-1199` | Body `{kind:serial,port}` or `{kind:ws,host,role?,ssid?,relayId?}`. **The target is set before the attach is tried**, so a failed attach is retried every second until `/_api/detach`. |
+| `POST /_api/detach` | `:1229-1231` | Forgets the target and closes the transport. |
+| `POST /_api/identify` | `:1202-1226` | **Opens the COM port** and sends it a PING (`discover.identify_serial`). |
+| `POST /_api/signals` | `:1234-1257` | Sets DTR/RTS on the attached serial port. |
+| `GET /_api/ports` | `:386-390` | `list_serial_ports()`. |
+| `GET /_api/discover` | `:393-402` | WS-probes 192.168.4.1 and .19 (`?hosts=` overrides that list). Sends PING, `?RELAY,WIFI` and `?WDP,DUMP`. |
+| `POST /_api/wifi-bounce` | `:405-414` | Runs `netsh wlan disconnect`, then `connect`, on the adapter that carries the SSID. |
+| `GET /_api/webui-version` | `:502-536` | Bundled vs published stamp for both tools (network). |
+| `POST /_api/update-webui?tool=` | `:897-950` | Runs `tools/fetch_webui.py` (network). Rewrites the bundle and keeps `.prev`. |
+| `GET /_api/firmware`, `POST /_api/update-firmware` | `:616-654` | Cache summary; runs `tools/fetch_firmware.py`. |
+| `GET /_api/branches`, `GET /_api/branch-list`, `POST /_api/branch` | `:573-613` | Branch per product (`settings.py`); GitHub branch list (`branchlist.py`). |
+| `GET /_api/gh/contents`, `GET /_api/gh/raw` | `:775-805` | The tools' own GitHub firmware calls, answered from GitHub or from the cache (`ghproxy.py`). |
+| `POST /_api/flash`, `POST /_api/flash-wcb`, `GET /_api/flash-status` | `:1055-1109` | Native esptool flash: one at a time, USB only, with a detach before and a reattach after. |
+| `GET /_api/wiki`, `POST /_api/update-wiki` | `:808-839` | Wiki inventory; runs `tools/fetch_wiki.py`. |
+| `GET /_api/log`, `GET /_api/version` | `:539-570` | Log path plus its last 400 lines; `version.info()`. |
+| `POST /_api/open-window` | `:865-894` | Local paths only (400 otherwise). Returns 501 when there is no pywebview hook, which is always the case under `host.py`. |
+
+### 1.4 Every feature: how a test drives and observes it, and its risk
+
+**Risk:**
+
+- **H:** a regression silently costs a board, a config or the droid link.
+- **M:** the breakage is visible.
+- **L:** cosmetic, or narrow.
+
+| # | Feature | Where | Drive | Observe | Risk |
+|---|---|---|---|---|---|
+| A1 | Headless host | `host.py:1840-1898` | start with `--port P --no-auto-bounce` | `GET /_api/status` answers 200; process stdout | M |
+| A2 | App window | `app.py:141-387`. The port is bound on the main thread with no `SO_REUSEADDR` (`:47-71`). A failure shows a MessageBox (`:89-112`, `:219-226`). pywebview runs with `private_mode=False` and a `storage_path` (`:350-374`). `--inspect` sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (`:209-212`). | `app.py --inspect 9333` | Playwright `connectOverCDP` into the real WebView2 | M |
+| A3 | Frozen-build sentinels | `app.py:148-170`: `--run-esptool`, `--run-fetch-webui`, `--run-fetch-firmware`, `--run-fetch-wiki` | `dist/Intellex.exe --run-esptool version` | exit code, stdout | M |
+| A4 | Launcher (chooser) | `launcher.html`, see the note below this table | Playwright, with `/_api/ports`, `/_api/identify` and `/_api/discover` fulfilled from fixtures | DOM text and classes, captured request bodies, navigation | M |
+| A5 | Shell | `shell.html`, see the note below this table | Playwright | the iframes; `style.zoom` and `width`; `localStorage`; popups; a frame's `timeOrigin` unchanged across the overlay | M |
+| B1 | Serial transport | `serial_transport.py`, see the note below this table | Python on COM5 and COM6 | no boot banner on the stream; data arrives as `bytes`; writes raise | H |
+| B2 | WebSocket transport | `ws_transport.py` (see §1.2) | Python, through Wi-Fi 2 on NaviCore's AP | PONG; a 13 KB `GET_CONFIG` reassembled; raises on loss | H |
+| B3 | Bridge fan-out | `host.py:124-382`: a set of pages, one FIFO pump, suppression per page, a `_gen` counter so a newer attach wins, and the lock never held across I/O | two `/_link` clients | identical byte streams (compared by hash) under load | H |
+| B4 | Reconnect loop | `host.py:1518-1702`, see the note below this table | drop the far end (a reboot), or hop APs | `/_api/status`; the order of log lines | H |
+| C1 | Tool hosting | `host.py:1313-1416`, `:1817-1836` (see §1.3) | HTTP GETs | body equals the file on disk plus one shim tag; headers | M |
+| C2 | Shim core | serial shim `:56-299`; reload keys `:375-380`; the "still trying" banner and `watchLink` `:1541-1596` | Playwright | `navigator.serial`; `[Intellex]` console lines; the banner | H |
+| C3 | NaviCore-tool glue | `autoConnect`, which forces Via WCB for role `wcb` or `relay` (`:396-448`); native flash buttons (`:539-607`, `:670-738`); OTA relabel (`:630-666`); transport label (`:1414-1464`) | Playwright on COM5, or over Wi-Fi | status text; `viaWcbActive`; button titles and labels | H |
+| C4 | Wizard glue | intellex_shim.js, see the note below this table | Playwright on COM6, or through NaviCore | `boardBaselines`; `remoteRelayForBoard`; chip text | H |
+| C5 | GitHub fetch rewrite | shim `:472-495` redirects to `/_api/gh/contents` | Playwright, opening a tool's Firmware tab | the request URL; the `X-Intellex-Source` header | H (offline OTA) |
+| D1 | Firmware cache | `fwcache.py`, see the note below this table | seed a test branch | `/_api/firmware`; the files | M |
+| D2 | NaviCore flash | `flash.py`, see the note below this table | the Update Firmware button, on COM5 | the `/_api/flash-status` log; PONG afterwards | H |
+| D3 | WCB flash | `wcb_flash.py`, see the note below this table | Wizard Update FW, on W2 | the log; W2 `?VERSION`; config unchanged | H |
+| D4 | Flash orchestration | One claim covers both tools (`host.py:979-1013`); USB only (`:1002-1009`); detach, run esptool, always reattach (`:1016-1052`); progress never goes backwards (`:972-976`) | two panes | the 409s; status JSON | H |
+| E1 | Branch per product | `settings.py`: whitelist `[A-Za-z0-9._/-]`, at most 100 characters (`:37`, `:61-86`); read at call time; `tool_base()` for `/dev/<branch>/` (`:104-110`) | `POST /_api/branch` | the 400s; `settings.json`; the `/_intellex.js` prelude; the tools' `localStorage` | M |
+| E2 | Branch list | `branchlist.py`: a 6 h TTL, but refetched once per run (`:45-55`); `gh-pages` dropped (`:118-122`); the current branch and `main` always present (`:147-155`); `missing` (`:144-145`) | `/_api/branch-list`, with or without `?refresh=1` | JSON | L |
+| E3 | GitHub proxy | `ghproxy.py`, see the note below this table | `/_api/gh/*` | body; headers; the 502s | H |
+| E4 | Tool update | `tools/fetch_webui.py`, see the note below this table | `/_api/update-webui`, in a staged copy | files byte-identical to Pages | M |
+| E5 | Firmware pre-fetch | `tools/fetch_firmware.py`: both WCB families and both S3 sizes (`:52-70`) | `/_api/update-firmware`, in a staged copy | cache summary | M |
+| F1 | Wiki viewer | `wikidocs.py`, `host.py:668-772` and `wiki.html`, see the note below this table | a seeded wiki | rendered HTML; the CSP; no script runs from wiki content | M (security) |
+| F2 | Wiki download | `tools/fetch_wiki.py`: images capped at 1 MB (`:90`); one swap per wiki | `/_api/update-wiki`, in a staged copy | `/_api/wiki` | L |
+| G1 | Paths | `paths.py`, see the note below this table | unit test with `FROZEN` patched; `LOCALAPPDATA` | which directory is chosen | M |
+| G2 | Log | `applog.py`: one file per run, teed; keeps 20 runs across both name prefixes, sorted by timestamp (`:33`, `:91-106`); the header records argv (`:131-137`) | start hosts | `/_api/log` | M (prunes Greg's real logs if not isolated) |
+| G3 | Version | `version.py`: the build stamp first, then git with `+dirty` (`:65-67`) | `/_api/version` | JSON | L |
+| H1 | Discovery | `discover.py`, see the note below this table | Python through Wi-Fi 2; the launcher | the returned dicts | M |
+| I1 | Window size and icon | `winsize.py` (work area, DPI-normalised, `:49-84`); `appicon.py` | unit test with the work area patched; window mode | geometry | L |
+| J1 | Certificates | `certs.py`: the system store, else certifi, never unverified; `is_cert_error` walks the cause chain (`:51-66`) | unit test | contexts; messages | L here (M on macOS) |
+| K1 | Packaging | `Intellex.spec`, `scripts/build-windows.bat`, `scripts/install-windows.ps1` | a build (heavy side effects) | `dist/Intellex.exe` runs | M |
+| L1 | Security surface | Origin guards (`host.py:1261-1286`, `:1733-1757`); loopback bind (`:119-121`); wiki CSP and escaped titles (`:685-712`); open-window takes local paths only (`:878-884`); the proxy is not open (`ghproxy.py:57-61`) | crafted requests | 403, 400 or 502; no script runs | H |
+
+Notes for the longer rows:
+
+- **A4, Launcher** (`launcher.html`):
+  - *Scanning.* `scan()` `:771-866` lists ports, then sends **`/_api/identify` to every 303A port** (`:805`,
+    `:830-855`). `scanWifi()` is at `:681-760`, and the watch while a droid boots at `:675-769`.
+  - *Selecting.* Auto-select runs once (`:419-423`). Selection panel `:458-489`; filter tabs `:495-511`.
+  - *Settings.* Theme `:521-543`. Views, with `wcb` as the default, `:553-606`.
+  - *Connecting.* Connect `:647-657`; opening the tools, including `sep`, `:628-645`.
+  - *Maintenance.* Summary lines `:348-394`; firmware `:907-941`; branches `:966-1090`; docs `:1093-1141`; version
+    `:1146-1154`; log `:1156-1173`; update `:1176-1191`; back and offline `:1196-1232`.
+- **A5, Shell** (`shell.html`):
+  - Frames are never destroyed (`:143-163`), and **both panes are preloaded after 4 s** (`:182-188`).
+  - Views and the URL: `:130-217`. Split view with zoom-to-fit (`DESIGN_W` 1180, minimum zoom 0.55): `:219-293`.
+    Drag: `:300-323`.
+  - New window moves the tool rather than copying it (`:348-375`). Transport label: `:380-396`. Chooser overlay:
+    `:397-444`.
+- **B1, Serial transport** (`serial_transport.py`):
+  - DTR and RTS are set low **before** `open()` (`:43-66`).
+  - 115200 baud, a 50 ms read timeout, reads of up to 4 KB (`:19-24`).
+  - Writes take a lock, have a 2 s write timeout, and **raise** on loss (`:91-106`).
+  - The reader closes the port before reporting a loss (`:122-137`).
+  - `set_signals` writes DTR before RTS (`:108-119`).
+- **B4, Reconnect loop** (`host.py:1518-1702`):
+  - Polls every second.
+  - A TCP probe, gated on idle: 6 s of silence and 3 failures (`:1554-1593`).
+  - An adapter bounce only when the route is wrong: gives up after `BOUNCE_GIVE_UP` (3) failures, 10 s cooldown
+    (`:1633-1696`).
+  - When the SSID has changed, it re-identifies the board **before** reattaching (`:1447-1515`, `:1605-1627`).
+- **C4, Wizard glue** (`intellex_shim.js`):
+  - Disables port sharing (`:784-794`), retires the branch toast (`:812-832`), dismisses the splash (`:856-877`) and
+    sets `rc_config_tool_url='/'` (`:360-366`).
+  - Auto-connects by **port, not slot** (`:906-993`).
+  - Routes the mesh through a relay (`:1019-1106`), or through a plain WCB (`:1146-1296`).
+  - Replaces `flashFirmware` (`:1318-1395`); draws the chip (`:1502-1528`).
+- **D1, Firmware cache** (`fwcache.py`):
+  - One directory per (product, branch), with `/` in a branch name flattened (`:81-89`).
+  - Atomic write through a `.part` file and a rename (`:108-125`).
+  - A manifest and a cached listing (`:180-204`); the summary covers the configured branch (`:143-168`).
+- **D2, NaviCore flash** (`flash.py`):
+  - A reachability probe per host (`:49-147`) that fails fast when offline (`:150-175`). GitHub retries honour
+    `Retry-After` (`:214-254`).
+  - The app name is anchored; the bootloader and partition table are both-or-neither (`:297-362`).
+  - otadata is always erased, NVS only on Full Wipe (`:365-388`).
+  - esptool at 921600, with the flash parameters left at `keep` (`:408-455`).
+- **D3, WCB flash** (`wcb_flash.py`):
+  - `detect()` runs `flash-id` before anything else (`:246-286`).
+  - Exactly one app image, or it refuses (`:112-134`). App, part and boot come from one build tag.
+  - The S3 bootloader must match the chip's 8 or 16 MB (`:190-228`).
+  - A full flash is refused without a bootloader or partition table (`:309-323`). NVS is erased only on Factory
+    Reset (`:326-339`).
+- **E3, GitHub proxy** (`ghproxy.py`):
+  - Only the two firmware repos and their bin directories (`:47-61`, `:82-84`).
+  - A listing is stored only after it parses as one (`:112-116`), and `download_url` is rewritten to point at the
+    host (`:118-124`).
+  - Filenames must be bare (`:132-133`).
+- **E4, Tool update** (`tools/fetch_webui.py`):
+  - Probes reachability once (`:451-455`).
+  - Uses the branch's tool, or main's with a note (`:81-102`).
+  - Explicit file lists (`:113`, `:125-150`, `:171`).
+  - An atomic swap that keeps `.prev` (`:327-342`); a `--base` override (`:438-439`).
+- **F1, Wiki viewer** (`wikidocs.py`, `host.py:668-772`, `wiki.html`):
+  - Links are rewritten in the markdown renderer's rules.
+  - Raw `<img>` tags are rewritten (`:170-206`), and path traversal is refused (`:71-85`).
+  - The page carries one nonce'd script.
+- **G1, Paths** (`paths.py`):
+  - The user data dir is `%LOCALAPPDATA%\Intellex` (`:81-98`). A one-shot move from the old `NaviLink` name
+    (`:44-78`).
+  - Frozen builds prefer the user copy when it is non-empty (`:101-117`). Wikis decide per subdirectory (`:120-139`).
+  - Frozen builds write updates to the user dir (`:142-144`).
+- **H1, Discovery** (`discover.py`):
+  - `probe()` separates a direct PONG, a mesh PONG and the SELF row (`:259-409`). `scan()`: `:412-440`.
+    `identify_serial()`: `:142-224`.
+  - `ssid_for_host()` makes read-only netsh calls (`:461-518`). `wifi_bounce()` is scoped to one adapter
+    (`:521-594`).
+  - The macOS path (`:597-750`); hints (`:753-781`).
+
+### 1.5 Where Intellex reaches into the two tools (the drift surface)
+
+Intellex depends on names inside files it does not own. Every one of them is present today.
+
+**Wizard** (`Wireless_Communication_Board-WCB/Wizard`):
+
+- *State (`app.js`):* `boardConnections`, `boardConfigs`, `boardBaselines` (`:42-44`); `remoteRelayForBoard`
+  (`:58`); `_pullingBoards` (`:60`); `UI_VERSION` (`:116`); `latestFirmwareVersion` (`:128`, a top-level `let`);
+  `_meshBoards` (`:402`); `_meshClients` (`:407`).
+- *Functions (`app.js`):* `splashGoConfig` (`:314`); `relayManageOne` (`:534`); `relayRouteAll` (`:548`);
+  `renderRelayCard` (`:590`); `establishConnection` (`:5946`); `_modalDoConnect` (`:6240`); `setRemoteConnected`
+  (`:6271`); `boardGo` (`:7365`); `remoteBoardPull` (`:8445`); `renderWdpMesh` (`:13170`); `_wdpMeshConn`
+  (`:13273`). `flashFirmware` lives in `flasher.js:302`.
+- *Other hooks (`app.js`):* the branch-toast text (`:344`); `rc_config_tool_url` (`:12895`); the WDP `client` flag
+  (`:13095`).
+- *DOM (`index.html`):* `#relay-cards` (`:193`); `#toast-container` (`:411`); `#section-board-*` (`:415`);
+  `#splash-overlay` (`:1001`).
+
+**NaviCore tool** (`NaviCore/config_tool`):
+
+- *Functions and state (`index.html`):* `connectDirect` (`:4639`); `onViaWcbToggle` (`:5402`); `viaWcbActive`
+  (`:5357`); the PONG handler, which accepts any PONG (`:9515`).
+- *DOM (`index.html`):* the flash buttons and progress ids (`:3245-3277`); `#status-text` and `#btn-connect`
+  (`:1010-1011`); `#footer-dtg` (`:2322`).
+- *Firmware (`flasher.js`):* `rc_fw_branch` (`:51`); the Contents URL (`:68`).
+
+A runtime contract spec (IX-WP4) that asserts every one of these catches a cross-repo break before a user does.
+
+### 1.6 Found while reading (verify, then fix or file)
+
+1. **The shim cannot label a flashed board.**
+   - `window.latestFirmwareVersion = st.version` (`intellex_shim.js:1390`) only creates a property on `window`.
+   - The Wizard's `latestFirmwareVersion` is a top-level `let` (`Wizard/app.js:128`), and the shim's own comment
+     (`:1176-1181`) says assigning on `window` cannot reach one of those.
+   - `boardGo` therefore labels the card with the page's GitHub "latest", not with the build the host actually wrote
+     (`app.js:7479-7480`).
+2. **Two Wizard images are never bundled.**
+   - `../Images/LabelOnly.jpg` (`Wizard/app.js:10550`) and `../Images/PololuLogo.png` (`:10811`) are missing from
+     `WCB_IMAGES` (`tools/fetch_webui.py:150`).
+   - Inside Intellex, the Setup Wizard's hardware-version and Maestro steps show broken images.
+3. **`identify_serial()` accepts any PONG** (`discover.py:217`). Its own docstring says only a direct PONG counts
+   (`:153-157`), and `probe()` does tell the two apart (`:347-359`). Low impact today, because the launcher only
+   asks 303A ports (`launcher.html:805`).
+4. **A USB-cabled WCB doorway probably leaves the NaviCore tool out of Via WCB mode.**
+   - Intellex records a role only for a `ws` attach (`host.py:1138-1182`). A serial attach reports `role: ""`, so the
+     shim never forces Via WCB (`intellex_shim.js:440-444`).
+   - The NaviCore tool accepts any PONG (`NaviCore/config_tool/index.html:9515`). A WCB broadcasts an unprefixed JSON
+     PING to the mesh and mirrors NaviCore's mesh PONG back (`discover.py:26-33`, `docs/HIL_TESTING.md:277`).
+   - The shell preloads the NaviCore pane even when only the Wizard was chosen (`shell.html:182-188`); the launcher's
+     default view is `wcb` (`launcher.html:568-573`).
+   - So picking W1's COM port likely yields a NaviCore tool that believes it is wired straight to the droid. That is
+     rule 10's hazard over USB: `?OTALOCAL` lands on the WCB. Unverified, so IX-WP7 writes it as a `(should)` test.
+5. **Update FW does not fully match the Wizard's.**
+   - `wcb_flash.write_list(app_only=True)` writes the app alone (`wcb_flash.py:302-307`).
+   - `flasher.js` first reads the board's partition table. When it differs, it escalates once to a full,
+     NVS-preserving flash (`Wizard/flasher.js:466-504`, `:246-260`).
+   - A board still on the default table would take a min_spiffs-sized app (1.38 MB) into a 1.25 MB slot. The module
+     header claims parity with `flasher.js` (`wcb_flash.py:11-14`).
+   - The bench boards are min_spiffs, so only a unit test can show this.
+6. **Stale doc about the clone directory.**
+   - Intellex `CLAUDE.md:19-21` says the Windows clone is still named `NaviLink`. It is `Intellex`.
+   - The venv was created at `...\NaviLink\.venv` (`.venv/pyvenv.cfg`, `command =`). So `.venv/Scripts/esptool.exe`
+     and `pip.exe` start with `#!C:\...\NaviLink\.venv\Scripts\python.exe`, which no longer exists.
+   - `.venv/Scripts/python.exe -m ...` still works, and Intellex itself calls `sys.executable -m esptool`
+     (`flash.py:402`).
+7. **Revision rows inside a table.** In `docs/WCB_WIZARD.md:381-390`, three 2026-09-07 revision rows (`:383-385`)
+   are spliced into the "Flashing a WCB" flash-map table instead of the Revision log.
+8. **Another project's file in a public repo.** `src/5G Monitoring Icon Design.zip` is tracked. It was added in
+   `258cf8e`, a revision-log commit, and is on `origin/main`.
+9. **Stale status text.** `README.md:23` says flashing is "Written, not yet run against a board". `README.md:179-180`
+   and `transport.py:104-118` still describe the transports as unwritten.
+10. **The build stamp shadows git.** A build leaves `src/build_stamp.py` behind (gitignored), and `version.info()`
+    prefers it (`version.py:65-67`). A run from source therefore reports the build's commit (`d615344`,
+    2026-09-11), not the working tree's.
+11. **A commit that is not pushed yet.** Local `main` holds `d615344` ("Wizard: reconnect the link at its own slot"),
+    and its doc row says "Not yet verified on hardware" (`docs/WCB_WIZARD.md:546`). The first Intellex push
+    (IX-WP1) publishes it too.
+
+---
+
+## 2. Running Intellex under test
+
+### 2.1 What exists today
+
+| Knob | Where | Effect |
+|---|---|---|
+| `host.py --port N` | `host.py:1842`; default 8765 at `:118` | Listens on `127.0.0.1:N` (loopback always, `:121`). |
+| `host.py --serial COMx` or `--ws IP [--ssid S]` | `:1843-1846`, `:1851-1867` | Attaches at startup. The two are mutually exclusive. **`--ws` cannot set `role` or `relayId`**: only `POST /_api/attach` can. |
+| `host.py --no-auto-bounce` | `:1847-1848`, `:1858-1859` | Turns the WLAN adapter bounce off. **Mandatory for any test host** (Intellex `CLAUDE.md:444-465`). |
+| no window, no browser | `host.py:857-862` (never imports webview), `:1877` | `host.py` is already the headless mode. `/_api/open-window` answers 501, and the pages fall back to `window.open()`. |
+| `app.py --port/--serial/--ws/--ssid/--no-auto-bounce/--dev/--inspect [9333]/--browser` | `app.py:182-195` | Window mode. There is **no headless flag**: it always opens a pywebview window or the default browser (`:258-317`), and shows a modal MessageBox when it fails (`:89-112`). |
+| `app.py --run-esptool` and the `--run-fetch-*` flags | `app.py:148-170` | Frozen-build sentinels. They also work from source. |
+| `LOCALAPPDATA` (env) | `paths.py:89-91` | Moves the whole user data dir on Windows: `settings.json` (`settings.py:40-41`), logs (`applog.py:118`), `branches_cache.json` (`branchlist.py:63-64`) and webview storage (`app.py:363`). In frozen builds it also holds the updated webui, webui_wcb, firmware and wiki. |
+| the bundle dir | `paths.py:40-41`, `:113-117`, `:142-144`; `fwcache.py:65-78` | Run from source, the bundles and the firmware cache are read **and written** in the directory `paths.py` sits in (`src/`). |
+| `settings.json` | `settings.py:84-86` | `{"branch":{"navicore":..,"wcb":..}}`. Seed the file, or use `POST /_api/branch`. |
+
+**Startup side effects of `host.py`:**
+
+- `applog.start()` creates a log and prunes old ones down to 20 (`:1874`).
+- `_published_dtg()` probes github.io and reads the head of `index.html` (`:1878-1890`), which can take up to about
+  9 s plus a 10 s read.
+- `build_app` creates `webui/` and `webui_wcb/` under the bundle dir (`:1825-1826`).
+- The reconnect loop starts (`:1721-1722`).
+
+**What does not happen on its own.** Nothing opens a COM port except an attach or `/_api/identify`. Nothing touches
+WiFi except:
+
+- `/_api/discover`;
+- a `ws` attach, through `ssid_for_host`, which runs read-only netsh (`:1170`);
+- the bounce.
+
+**What an unisolated test would clobber.** Greg's real state right now:
+
+- `%LOCALAPPDATA%\Intellex\settings.json`: WCB on `WIFI`, NaviCore on `main`.
+- 21 log files, which a 20-run prune would start deleting.
+- `src/webui_wcb`, whose Wizard is `UI_VERSION 04.13:06.R.SEP.2026`. The WCB working tree is
+  `25.06:46.R.SEP.2026` (`Wizard/app.js:116`), so the bundled Wizard predates the F13 pull-in-parts protocol.
+- `src/firmware`: `navicore/main` and `wcb/WIFI`.
+
+**Ports already taken on this PC:**
+
+- 8765: Intellex's default.
+- 8777 and 8778: the Wizard static servers.
+- 8799: a 5G-monitor GUI is listening there now.
+
+Pick a free ephemeral port for every test.
+
+### 2.2 The recipe (no Intellex change needed)
+
+1. **Stage** `results/<run>/intellex/<test_id>/`.
+   - Copy `Intellex/src`, without `webui*`, `wiki*`, `firmware`, `__pycache__`, `build_stamp.py` or `*.zip`. Copy
+     `Intellex/tools` as well.
+   - `host.py` finds `tools/` as `parent.parent/tools` (`host.py:637`, `:820`, `:930`), and `paths.BUNDLE_DIR`
+     becomes the staged `src/`. So nothing in Greg's checkout or user data can be written.
+2. **Seed the bundles.** Mode `worktree` is the default:
+   - `webui/`: NaviCore `config_tool/{index.html, flasher.js, serial-hub.js}` and `cmdlib/{droidnet,navicore}/**`
+     (27 files), plus `webui/Images/{qr-code.png, r2logo.png}` from `NaviCore/Images`. This is the set
+     `fetch_webui.py` builds (`:113`, `:171`, cmdlib `:238-301`): 32 files, the same count as Intellex's bundle.
+   - `webui_wcb/Wizard/`: the 12 files `fetch_webui.py:125-146` lists, taken from WCB `Wizard/` (all present), plus
+     `webui_wcb/Images/{r2logo, navicore-icon, kyberLogo, qr-code}.png` (`:150`).
+
+   Mode `shipped` instead copies Intellex's own `src/webui` and `src/webui_wcb`.
+3. **Seed the firmware cache** (flash and OTA tests only). See IX-WP10.
+4. **Seed** `appdata/Intellex/settings.json` with the branches the test wants.
+5. **Launch** `<Intellex>/.venv/Scripts/python.exe <stage>/src/host.py --port <free> --no-auto-bounce`.
+   - Environment:
+     - `LOCALAPPDATA=<stage>/appdata`.
+     - `PYTHONUTF8=1`. The host prints `—` and `→`, and a cp1252 pipe would raise on them; `host.py:1864` prints
+       before the log tee starts.
+     - `INTELLEX_OFFLINE=1` (H1).
+     - `INTELLEX_SERIAL_ALLOW=<the one COM port>` (H2).
+     - `INTELLEX_DISCOVER_HOSTS=` (H3). Leave it empty unless the test is about discovery.
+   - Start it with `CREATE_NEW_PROCESS_GROUP`, and send its stdout to `session.log` tagged `intellex`.
+6. **Wait until ready:** poll `GET /_api/status` for up to 30 s (about 2 s with H1).
+7. **Attach with `POST /_api/attach`,** not `--serial`. Errors then come back as JSON. Follow a failed attach with
+   `POST /_api/detach`, because attach records the target first (`host.py:1186-1189`) and would keep retrying.
+8. **Tear down** in `finally`, always:
+   - `POST /_api/detach`;
+   - kill the process tree (`taskkill /T /F`, like `hil/wizard.py:41-61`);
+   - check that the harness can reopen the COM port;
+   - copy `appdata/Intellex/logs/*.log` next to the report;
+   - delete the stage, unless the test failed.
+
+```
+C:\Users\ghulette\Documents\GitHub\Intellex\.venv\Scripts\python.exe <stage>\src\host.py --port 51873 --no-auto-bounce
+    env  LOCALAPPDATA=<stage>\appdata  PYTHONUTF8=1  INTELLEX_OFFLINE=1  INTELLEX_SERIAL_ALLOW=COM6  INTELLEX_DISCOVER_HOSTS=
+POST http://127.0.0.1:51873/_api/attach   {"kind":"serial","port":"COM6"}
+```
+
+Never run `.venv\Scripts\esptool.exe` or `pip.exe` (finding 6). Always use `python.exe -m`.
+
+### 2.3 Rules for any test host
+
+- **Always pass `--no-auto-bounce`.** Never POST `/_api/wifi-bounce`, except in the one attended bounce test.
+- **Guard the launcher.** Never load `/_launcher`, or the shell's chooser overlay, unless H2 and H3 are set or the
+  routes are fulfilled. On load, `scan()`:
+  - POSTs `/_api/identify` to every 303A port. That includes the SBUS controller on COM4, which may reset when its
+    port opens (`docs/HIL_TESTING.md:169`), and NaviCore on COM5.
+  - calls `/_api/discover`, which WS-probes 192.168.4.1 through Wi-Fi 2.
+- **Never point a test at Greg's `src/` or his real `LOCALAPPDATA`.**
+- **Never leave a host running.** It reopens a wanted target every second, forever (`host.py:1595-1632`). The COM11
+  incident was exactly this: `Intellex.exe` held probe2's port for hours (`docs/HIL_TEST_AUDIT.md:702-704`).
+- **Preflight: Greg's own Intellex must not be running.**
+  - The preflight looks for `Intellex.exe`, and for a Python process running `src/app.py` or `src/host.py`. If one is
+    running, it **skips** with a message and never kills anything.
+  - This matters beyond the COM port: an Intellex session attached to NaviCore's AP made NaviCore re-arm `?RTERM` on
+    W1 once a second, which blocked W1's deferred reboots (F21, `docs/HIL_TEST_AUDIT.md:493-503`).
+- **Specs never receive, log or compare a credential.**
+  - NaviCore's `GET_CONFIG` carries `wifiPassword` in clear (`NaviCore/rc_config.h:1224-1226`). Config pulls carry
+    the mesh password.
+  - Follow the same discipline as `tests/wizard/specs/remote_pull.spec.js:1-7`: the harness hands a spec lengths,
+    versions and keys, never tokens.
+
+### 2.4 Testability hooks to add to Intellex (pushed to its `main`)
+
+Each hook is a few lines. Each comes with a no-hardware smoke tool, `tools/smoke_test_hooks.py`, and a mention in
+Intellex `CLAUDE.md` § Verifying, in the same commit (`CLAUDE.md:544-548`).
+
+Before editing, follow Intellex's own rules:
+
+- `git fetch --all --prune` and check every branch (`CLAUDE.md:51-67`);
+- commit to `main`, with no feature branch;
+- set the exec bit through the index on any new `.command` or `.sh` file.
+
+**H1. `INTELLEX_OFFLINE=1` makes GitHub unreachable, deterministically.**
+
+- **Change:** `flash.reachable()` (`flash.py:64-147`) first checks the variable, then records
+  `(now, False, "INTELLEX_OFFLINE is set")` in `_reach` and returns `False`. `flash.py` needs an `import os`.
+- **Why it reaches everything:** every network consumer already asks this one probe:
+  - the host's version check (`host.py:448-450`, `:484-486`);
+  - the branch list (`branchlist.py:111`, `:135-137`);
+  - the proxy (`ghproxy.py:93-104`, `:138-150`);
+  - both flashers (`flash.py:267-275`, `:324-332`; `wcb_flash.py:94-102`, `:169-177`);
+  - `fetch_webui` (`:451-455`), `fetch_wiki` (`:334-336`) and `fetch_firmware`.
+- **What it buys:**
+  - the con-floor workflow, which is Intellex's core design point, becomes testable;
+  - a 2 s startup;
+  - no GitHub rate limit (60 API calls an hour, unauthenticated);
+  - the fetchers run as subprocesses, so they inherit it.
+- **Why an env var rather than monkeypatching:** `wcb_flash` binds `reachable` at import
+  (`from flash import reachable`, `wcb_flash.py:38`), so patching `flash.reachable` in-process misses it.
+
+**H2. `INTELLEX_SERIAL_ALLOW=COM5,COM6` restricts serial ports (a comma list; case-insensitive; unset means no
+restriction).**
+
+- **Change:** one helper, `transport.serial_allowed(path)`, used in four places:
+  1. `list_serial_ports()` filters its result (`transport.py:83-101`).
+  2. `SerialTransport.open()` raises `TransportError("<port> is not in INTELLEX_SERIAL_ALLOW")` before touching the
+     port (`serial_transport.py:39-66`). This one guard covers `/_api/attach`, `--serial`, the reconnect loop and the
+     reattach after a flash.
+  3. `identify_serial()` returns `{"version": None, "busy": False}` without opening (`discover.py:142-188`).
+  4. `_claim_port_for_flash()` answers 409 (`host.py:997-1013`), because esptool opens the port itself and bypasses
+     the transport.
+- **What it buys:** the launcher, the shell overlay and any stray reconnect can no longer touch COM4, COM11, COM15 or
+  COM16.
+- **Why not only Playwright route interception:** Python-level tests and background loops need the same protection.
+
+**H3. `INTELLEX_DISCOVER_HOSTS=192.168.4.1` sets the discovery candidates (a comma list; set but empty means probe
+nothing).**
+
+- **Change:** in `discover.scan()` (`discover.py:412-415`), an explicit `?hosts=` still wins; otherwise the variable
+  replaces `DEFAULT_CANDIDATES` (`:69-71`).
+- **What it buys:** the launcher's WS probes send PING, `?RELAY,WIFI` and `?WDP,DUMP`. With this, they reach a droid
+  only when a test wants them to.
+
+**H4 (optional). `INTELLEX_DATA_DIR`.** `paths.user_data_dir()` returns it when set and skips the legacy migration
+(`paths.py:81-98`). `LOCALAPPDATA` already does this on Windows, so this hook is only for clarity and for macOS.
+
+**H5 (optional). `app.py --headless`.**
+
+- **Change:** after `_wait_until_up()` succeeds (`app.py:241-250`), print `serving <url>` and wait on an Event until
+  interrupted, then call `bridge.detach()`. Also make `_tell_user()` return early (`:89-112`).
+- **What it buys:** an unattended test of the frozen `dist/Intellex.exe`, with no window and no modal. Source tests
+  do not need it.
+
+---
+
+## 3. Test plan
+
+### 3.1 Where it lives (decision D3: every HIL test is in the WCB repo)
+
+```
+Wireless_Communication_Board-WCB/
+  tests/intellex/
+    package.json           @playwright/test pinned to 1.63.0, as in tests/wizard, so the installed chromium-1243 is shared
+    playwright.config.js   no webServer; baseURL = process.env.INTELLEX_URL; headless; workers 1; timeout 300 s; reporter line
+    global-setup.js        standalone runs only: when INTELLEX_URL is unset, stage and start a no-board host
+                           (INTELLEX_DIR defaults to ../../../Intellex)
+    lib/fixtures.js        page fixture: records pageerror, [Intellex] console lines and responses >= 400;
+                           guard() fulfils /_api/identify|discover|wifi-bounce|update-* unless a spec opts in;
+                           hilCtx is borrowed from ../../wizard/lib/hil.js
+    lib/intellex.js        openTool(), frame('nc'|'wcb'), rawLink(), waitAttached(), stats()
+                           rawLink(): a read-only /_link client (Node 24 global WebSocket), the oracle for
+                           "no boot banner" and for byte counts
+    fixtures/              a seeded wiki, fake ports and discover payloads, recorded esptool 5.3.1 output,
+                           a fake esptool package
+    specs/                 ui_*.spec.js  wizard_*.spec.js  nc_*.spec.js  wifi_*.spec.js  flash_*.spec.js  window_*.spec.js
+    py/                    run under Intellex's venv:
+                           transports, discover, the flash units, the fake-esptool pipeline, paths/applog/winsize/certs
+  tests/hil/hil/intellex.py   stage(), class IntellexHost (start, attach, detach, stop), run_intellex_test(), run_intellex_py()
+  tests/hil/hil/ws.py         + read BINARY frames (opcode 0x2; read_until drops them today, :85-100) and send an optional Origin header
+  tests/hil/suites/s32_intellex.py
+  tests/hil/hil/optin.py      + the intellex_* keys (§3.4)
+  tests/hil/bench.json        + "intellex_dir" (default: an Intellex checkout beside this repo), optional "intellex_python"
+```
+
+**The harness stays stdlib plus pyserial** (`docs/HIL_TESTING.md:8`):
+
+- *HTTP and WS checks* run in the harness itself (urllib and `hil/ws.py`) against a staged host subprocess.
+- *Checks that import Intellex modules* (transports, `discover`, flash logic, in-process fakes) run as scripts under
+  `<intellex_dir>/.venv/Scripts/python.exe`. That venv has aiohttp 3.14.3, websockets 17.1, esptool 5.3.1,
+  pyserial 3.5, markdown-it-py 4.2.0 and pywebview 6.2.1. The scripts write a JSON results file, which the harness
+  parses the way `_outcomes` parses a Playwright report (`hil/wizard.py:71-90`).
+
+### 3.2 How `run.py` launches them
+
+`run.py` imports every module in `suites/` (`run.py:28-31`), so `s32_intellex.py` needs no registration. Its tests
+are `intellex.*`, and the GUI groups them as their own area.
+
+`run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", cache=None, settings=None, env=None,
+args=None, timeout=300)` follows `run_wizard_test` (`hil/wizard.py:175-245`, `docs/HIL_TESTING.md:563-575`) step for
+step:
+
+1. Stage and seed the instance (§2.2). Record Intellex's `git rev-parse HEAD`, with `+dirty` when the tree is dirty,
+   in `session.log`.
+2. If `device` is set, read its VID/PID and release its port with `bench.close_device(device)`.
+3. Start the host with the environment from §2.2, and wait for `/_api/status`. When `attach` is given, `POST` it; on
+   failure, `POST /_api/detach`, then fail with the error.
+4. Serve a `Bridge` (`hil/bridge.py`, unchanged). Its `/context` adds `{intellex: {url, stage, target}}`.
+5. Run `node tests/intellex/node_modules/@playwright/test/cli.js test --reporter=line,json --grep <id>`. Use its own
+   process group. Set `INTELLEX_URL`, `HIL_BRIDGE` and `PLAYWRIGHT_JSON_OUTPUT_NAME`, and log its output as `wizard`
+   lines do. A watchdog kills the process tree (`_wait_node`, `hil/wizard.py:116-152`).
+6. In `finally`:
+   - `POST /_api/detach`;
+   - kill the host's process tree;
+   - reacquire the device and wait for it to answer: a WCB `?VERSION` or a NaviCore PING, as `_reacquire` does
+     (`hil/wizard.py:93-113`);
+   - copy the Intellex log next to the report.
+7. Turn the JSON report into PASS, FAIL or SKIP (reuse `_outcomes`).
+
+`run_intellex_py(bench, test_id, script, device=None, args=None)` does steps 1-2 and 6-7, and runs
+`<venv python> tests/intellex/py/<script>.py --stage <dir> --args <json> --out <json>` instead of Playwright.
+
+Sketch of the suite (the same shape as `s30_wizard.py:65-86`):
+
+```python
+@test("intellex.wizard_pull_w1", "The Wizard served by Intellex auto-connects to W1 over COM6 (no port picker) and shows its saved bauds and labels", needs=["wcb1"])
+def wizard_pull_w1(bench):
+    with config_guard(bench, 1) as before:
+        run_intellex_test(bench, "intellex.wizard_pull_w1", device="wcb1",
+                          attach={"kind": "serial", "port": bench.cfg["devices"]["wcb1"]["port"]},
+                          args={"tokens": before[1]})
+
+@test("intellex.flash_w2_update", "Intellex re-flashes W2 with the bench image through the Wizard's Update FW, offline from its cache; W2 comes back identical", needs=["wcb2"], opt_in="intellex_flash")
+def flash_w2_update(bench): ...
+```
+
+### 3.3 Work packages
+
+**Effort** is agent hours to write and debug. **Bench** is the time one run takes. **Mode** is one of: *unattended*
+(runs in the nightly full run); *opt-in* (a `bench.json` key, can run unattended once it has been proven); or
+*attended* (someone at the bench, or it changes the PC's own WiFi).
+
+#### IX-WP1: Testability hooks in Intellex
+
+| | |
+|---|---|
+| Goal | H1, H2 and H3 from §2.4 (H4 and H5 are deferred). |
+| Tests | `tools/smoke_test_hooks.py`, no hardware: offline makes `reachable()` false with its reason, and `/_api/webui-version` says `offline`; the allow-list filters `/_api/ports`, and refuses `open`, `identify` and the flash claim for any other port; the discover hosts variable empties `scan()`. The harness wraps it as `intellex.smoke_hooks`. |
+| Also | Fix the doc drift in findings 6, 7 and 9 in the same push, and record the `d615344` publication (finding 11) in `HIL_WEEK_DECISIONS.md`. |
+| Prereqs | The Intellex checkout. `git fetch --all`, then check every branch. |
+| Effort | 3 h. |
+| Mode | No hardware. |
+
+#### IX-WP2: Harness plumbing
+
+| | |
+|---|---|
+| Goal | `hil/intellex.py`; `hil/ws.py` learns binary frames and an Origin header; `s32_intellex.py`; the opt-in keys; the `tests/intellex` Playwright project with `lib/` and `fixtures/`; the `bench.json` keys; the preflight. |
+| Tests | `intellex.stage_selftest`: stage, start, check `/_api/status`, stop. Asserts that nothing was written outside the stage, and that no COM port or netsh call was touched (read the log). A `selftest.py` case covers the stage-file filter. |
+| Effort | 8 h. |
+| Mode | Unattended. |
+
+#### IX-WP3: No-board host, API and security (harness side, plus the Intellex venv)
+
+| Test id | Checks |
+|---|---|
+| `intellex.smoke_repo_*` | Intellex's own suite, one harness test per tool. Python: `smoke_fanout`, `smoke_probe_identity`, `smoke_reconnect_identity`, `smoke_ghproxy` (on a seeded cache), `smoke_wiki` (on a seeded wiki). Node: `smoke_mesh_route`, `smoke_doorway_via_wcb`, `smoke_ota_label`, `smoke_wizard_reconnect`. Plus `py_compile` of `src`/`tools`, `node --check` of the shim, and `jscheck.js` on `shell.html` and `launcher.html` (Intellex `CLAUDE.md:467-539`). |
+| `intellex.routes` | Every route answers with the status and content type in §1.3. `/`, `/wcb/Wizard/` and `/wcb/Wizard/index.html` each carry the shim tag exactly once, before the first `<script>`. The body minus the tag equals the file on disk (no fork). The headers are `no-store` where `host.py` says so. `/wcb/Wizard` gets a 301. Both 503 texts appear with empty bundles. `/_intellex.js` starts with `window.__intellexBranches` matching `settings.json`. |
+| `intellex.origin_guard` | Every POST route in `build_app`, sent with `Origin: http://evil.example`, gets a 403. The `/_link` upgrade gets a 403 for a foreign Origin, and a 101 for `127.0.0.1`, for `localhost` and for no Origin. |
+| `intellex.wiki_security` | `/wiki/wcb/</title><script>…` is escaped and does not run (verified in the page in WP4). The CSP carries a fresh nonce on every response. An asset gets the `sandbox` CSP. `..%2F` traversal is refused. An unknown product gets a 404. A missing page gets the "not in the downloaded copy" body. |
+| `intellex.attach_validation` | Bad JSON gives 400; a bad `kind` gives 400; serial without a port gives 400. A `relayId` outside 1-20 is dropped. `role` is whitelisted. With H2, a port that is not allowed is refused with `wantsLink` false afterwards. `/_api/open-window` gives 400 for a non-local URL and 501 with no hook. |
+| `intellex.link_error_frame` | A `/_link` write with nothing attached comes back as the TEXT `{"type":"ERROR",...}\n`. The `/_api/status` keys match §1.3. |
+| `intellex.offline_con_floor` | With H1: `webui-version` reason `offline - no route to github.io...`. `branch-list` returns its error with the current branch and `main` present. `gh/contents` comes from the cache with `X-Intellex-Source: cache`, and every `download_url` begins `/_api/gh/raw`. `gh/raw` bytes equal the cached file. Other repos, paths and filenames get 502. `update-firmware` gives `ok:false` with the cache summary. `update-webui` gives 502. `update-wiki` gives `ok:false`. |
+| `intellex.settings_branch` | `POST /_api/branch` accepts `WIFI` and `feature/x`. It refuses `../x`, `a b`, `x?y`, a 101-character name and an unknown product. The branch shows up in the shim prelude and in `/_api/firmware`, and `settings.json` is written only inside the stage. |
+| `intellex.flash_rules_unit` (venv) | Pure functions: `_pick_app` refuses two images; the S3 bootloader must be the 8 or 16 MB file, and the unsized fallback is accepted only for 16 MB; a full flash is refused without a bootloader or partition table; write lists are sorted, otadata is always erased and NVS only on factory/wipe; NaviCore boot and part are both-or-neither. `detect()` parses recorded esptool 5.3.1 output for ESP32, ESP32-S3 8 MB and 16 MB, and refuses C3. A `(should)` case for finding 5 (a partition-table mismatch escalates to a full NVS-preserving flash), which fails until it is ported. |
+| `intellex.flash_pipeline_fake` (venv, in-process) | `build_app()` on a local site with a FakeTransport attached as `{kind:serial, port:COMFAKE}`, a fake `esptool` package on `PYTHONPATH`, and H1 with a seeded cache. `/_api/flash-wcb` goes: claim (a second POST gets 409), detach, fake detect, write, progress that never goes backwards, `version`, reattach (`rebuild` patched). The esptool argv is checked: chip; sorted addresses; `keep/keep/keep`; `--compress`; 921600. A fake esptool exit 2 surfaces as `ok:false` with the tail of its output. A ws spec gets the USB 409. |
+| `intellex.ghget_retry_unit` (venv) | `flash._get` against a local HTTP server: 429 with `Retry-After: 1`, then 200, is retried; a 404 is not retried; connection refused fails fast (`no_network`). |
+| `intellex.paths_logs_unit` (venv) | With `FROZEN` patched: `data_dir` prefers the user copy only when it is non-empty; wikis decide per subdirectory; `write_dir` goes to the user dir. The legacy `NaviLink` directory is moved once and never merged. The applog prune spans both prefixes and orders by timestamp. `winsize.fit` clamping and centring with a patched work area. `certs.is_cert_error` on a nested `SSLCertVerificationError`. |
+
+| | |
+|---|---|
+| Prereqs | IX-WP1 and IX-WP2. |
+| Effort | 12 h. |
+| Mode | Unattended; no board. |
+
+#### IX-WP4: No-board Playwright (UI with nothing attached, dangerous routes guarded)
+
+| Test id | Checks |
+|---|---|
+| `intellex.ui_tools_load` | `/` and `/wcb/Wizard/`: no `pageerror` and no response of 400 or more. The console shows `navigator.serial is backed by`, `tool: WCB Wizard`, `cross-tab port sharing disabled` and `flashFirmware() now runs on the host`. The splash is closed within 2 s. `requestPort()` returns the shim port, with `getInfo()` 303A:1001. `wcb_fw_branch` is set only when the branch is not `main`. `rc_config_tool_url === '/'`. The chip reads `Intellex · not attached ▾`. For the NaviCore tool: flash buttons enabled with the native titles, the OTA label untouched, and `host has no transport attached`. |
+| `intellex.ui_wizard_setup_images` | Opens the Wizard's guided setup and walks to the hardware-version and Maestro steps. No image 404s. Fails today (finding 2). |
+| `intellex.ui_contract_wizard`, `intellex.ui_contract_navicore` | Asserts the type of every symbol and DOM id in §1.5, in the page. Runs twice: against the `worktree` bundles (a Wizard change that breaks the shim fails here) and against the `shipped` bundles (reports what users run today). |
+| `intellex.ui_latest_fw_version` | `(should)`, finding 1. With `/_api/flash-wcb` and `/_api/flash-status` fulfilled, the replacement `flashFirmware()` is called. The bare `latestFirmwareVersion` must then equal the flashed version. |
+| `intellex.ui_launcher` | Fulfilled ports (303A, 1A86, 10C4, a Bluetooth port, `/dev/tty.*`) give the chip labels, the skips, and "asking…" upgraded in place by the identify fixtures (version, busy, none). Fulfilled discover results (navicore, wcb, relay, routable-but-silent) give the rows, the subtitles, `relayId` in the attach body, and the "watching…" state. Also covered: the filter counts; auto-select exactly once; the theme and view persist, with `wcb` the default; the maintenance lines and attention count, orange for a non-main branch or an uncached set; the branch dropdown including `Other…`, `Set` and `Refresh`; the Log toggle; the Docs popup; Connect POSTs `/_api/attach` then goes to `/_shell?view=`; `sep` makes a popup; "Open the tool anyway"; Back when attached; F5. |
+| `intellex.ui_shell` | Tab `aria-pressed` states and `?view=` in the URL. Both panes exist after 4 s. The split zoom arithmetic: a 700 px pane gives `zoom` 0.593 and an iframe width of `round(w/z)` px. A drag persists `intellex_split`. New window removes the frame and opens the popup. The chooser overlay opens from `#target` and from `postMessage`, and closes, **without reloading the tool frames** (`performance.timeOrigin` unchanged). The label strings. |
+| `intellex.ui_wiki` | On a seeded wiki: tabs, sidebar and filter; `[[Links]]` and `(Page-Name)` rewritten to `/wiki/<p>/`; a missing image becomes an "offimg" link; raw `<img>` rewritten; a `<script>` in the markdown and the XSS URL do not run (a `window.__pwned` sentinel stays unset); no request leaves `127.0.0.1` except `https` images. |
+
+| | |
+|---|---|
+| Prereqs | IX-WP1 and IX-WP2. |
+| Effort | 12 h. |
+| Mode | Unattended; no board. Later CI-able (decision DX12). |
+
+#### IX-WP5: Transports against bench boards (Intellex venv; the harness hands the port over)
+
+| Test id | Needs | Checks |
+|---|---|---|
+| `intellex.serial_no_reset_w1` | wcb1, wcb2 | Opens and closes `SerialTransport(COM6)` 10 times. Oracles: no `Raw Serial Forwarding Task Created` on the stream, and no W1 boot announce on W2's console, which the harness keeps holding. |
+| `intellex.serial_no_reset_navicore` | navicore, wcb1 | The same on COM5. Oracles: no `Reset reason` or boot banner, and W1 shows no NaviCore reboot announce. |
+| `intellex.serial_contract_w1` | wcb1 | `on_data` receives only `bytes`. `;S0,HIL<n>` followed by a multi-byte UTF-8 marker comes back byte-exact. A write after `close()` raises `TransportError`. `set_signals(dtr=False, rts=False)` does not reset. |
+| `intellex.serial_signals_reset_w1` | wcb1 | Characterisation: `set_signals(rts=True)`, then `rts=False`, resets W1 (boot line seen). Records the DTR-then-RTS write order for native-USB boards (`serial_transport.py:113-117`). |
+| `intellex.serial_device_loss_navicore` | navicore | Opt-in `intellex_reboot`. `{"type":"REBOOT"}` (`NaviCore.ino:26`, `:4006-4026`). Records whether the COM handle survives the reboot. If it does not: `write()` raises and `on_lost` fires. If it does: the boot banner arrives and the transport stays open. |
+| `intellex.ws_transport_navicore` | navicore, Wi-Fi 2 on NaviCore's AP | PING gets a PONG. A `GET_CONFIG` of at least 10 KB is reassembled from about 1400-byte frames and parses (field names only). A non-UTF-8 write raises. A write after close raises. |
+
+| | |
+|---|---|
+| Effort | 6 h. |
+| Bench | About 5 minutes. |
+| Mode | Unattended, except where marked. |
+
+#### IX-WP6: The bridge end to end on bench boards (harness side, raw `/_link` clients)
+
+| Test id | Needs | Checks |
+|---|---|---|
+| `intellex.bridge_wire_w1` | wcb1, probe1 wire W1S1 | The host is attached to COM6. Client A sends `;S1HIL<n>\r`, and the probe sees it exactly once. Clients A and B receive byte streams with the same SHA-256 over 30 s of mesh traffic. |
+| `intellex.bridge_terminators_w1` | wcb1 | `?VERSION\r`, `?VERSION\n` and `?VERSION\r\n` are each answered exactly once (count the `End of Version` lines). |
+| `intellex.bridge_load_navicore` | navicore | Two clients. PING gets a PONG, and `GET_CONFIG` arrives whole. During 20 s of `START_MONITOR`, both clients' streams are identical and made of whole lines. Cleanup: `STOP_MONITOR`, and debug flags back to the harness baseline (they are RAM-only, `NaviCore.ino:489-494`). |
+| `intellex.bridge_release_w1` | wcb1 | After detach, the harness reopens COM6 within 2 s. Killing an attached host also frees the port. |
+| `intellex.bridge_failed_attach_w1` | wcb1 | While the harness holds COM6, `attach` gets 502 with `wantsLink` true; `detach` then clears `wantsLink`. The harness keeps the port afterwards: no steal once it is released (the COM11 precedent). |
+| `intellex.bridge_reboot_w1` | wcb1 | `?reboot\r` through `/_link`. The CH9102 stays enumerated, so the link must not drop and the pages must not be closed; the boot banner arrives through the link. |
+
+| | |
+|---|---|
+| Effort | 6 h. |
+| Bench | About 5 minutes. |
+| Mode | Unattended. |
+
+#### IX-WP7: The Wizard through Intellex, on W1 (and W2 over the mesh)
+
+Ports of the `wizard.*` board tests. Intellex replaces the port picker with its own auto-connect, so the specs need
+no Chrome profile.
+
+| Test id | Needs | Checks |
+|---|---|---|
+| `intellex.wizard_pull_w1` | wcb1 | With no click, `boardBaselines[1].wcbNumber === 1` within 45 s. The bauds and labels match the harness tokens (the same as `board.spec.js:10-28`). The chip reads `Intellex · USB COM6 ▾`. No `pageerror`. Per `rawLink`, W1 was not reset. |
+| `intellex.wizard_push_label_w1` | wcb1 | `config_guard(1)`. A port of `wizard.push_label` (`s30_wizard.py:71-80`). |
+| `intellex.wizard_terminal_wire` | wcb1, probe1 | A port of `wizard.terminal_wire`: the `\r` framing through the shim, proved on the wire. |
+| `intellex.wizard_mesh_autopull_w2` | wcb1, wcb2 | `config_guard(1,2)`, and `?RTERM,STOP` on W2 in `finally` (as at `s30_wizard.py:113`). `routeMeshThroughBoard` pulls W2 through W1: `remoteRelayForBoard[2]===1`, and a baseline for 2 appears. Client 20 (NaviCore) and probe clients are never pulled. Each board is pulled once. |
+| `intellex.wizard_remote_pull_parts` | wcb1, wcb2 | A port of `wizard.remote_pull_parts` (`s30_wizard.py:89-124`). Long `[MGMT:CFGPART` lines cross the Intellex link. |
+| `intellex.wizard_reload_no_reset_w1` | wcb1 | Three reloads. No boot line; the link reconnects each time; the slot is the same. |
+| `intellex.shell_split_w1` | wcb1 | `/_shell?view=split`. Both tools connect: the Wizard pulls W1, and the NaviCore pane shows its status. |
+| `intellex.nc_via_usb_doorway` | wcb1 | `(should)`, finding 4. The NaviCore tool reached through W1 over USB ends up with `viaWcbActive === true`. It is expected to fail until Intellex identifies a serial WCB (§4.3 DX9). Its companion check records whether the mesh PONG actually arrived. |
+
+| | |
+|---|---|
+| Effort | 12 h. |
+| Bench | About 10 minutes. |
+| Mode | Unattended: `config_guard`, the same class as the `wizard.*` tests. |
+
+#### IX-WP8: The NaviCore tool through Intellex on COM5
+
+| Test id | Checks |
+|---|---|
+| `intellex.nc_autoconnect` | Status `Connected ✓`; `#intellex-transport` reads `· USB COM5 ▾`; `#fw-current-version` equals the harness's PING version; not in Via WCB; flash buttons wired, with the native titles; the OTA button reads `Update over USB (OTA)`; no `pageerror`. |
+| `intellex.nc_reload_no_reset` | **The reason Intellex exists** (Intellex `CLAUDE.md:97-105`). Three F5 reloads, with no `Reset reason` or boot banner on `rawLink` and the PONG version stable. Afterwards, W1 shows that NaviCore stayed on the mesh without rebooting. |
+| `intellex.nc_config_matches` | Named, non-secret fields of the tool's loaded config equal the harness's `GET_CONFIG`. Passwords are never compared or printed. |
+| `intellex.nc_setsignals` | The page's `setSignals({dataTerminalReady:false, requestToSend:false})` gets 200 and causes no reset. |
+| `intellex.nc_save_unchanged` | Opt-in `intellex_nc_save`, until a NaviCore config guard exists (phase 2). Save with no edits (`SET_CONFIG`); the config must be unchanged afterwards. If it re-dispatches mode knobs, add it to `hil/servos.py`. |
+
+Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
+
+| | |
+|---|---|
+| Effort | 8 h. |
+| Bench | About 5 minutes. |
+| Mode | Unattended, except the save. |
+
+#### IX-WP9: Over WiFi, through NaviCore's AP on the PC's second adapter
+
+**Bench facts:**
+
+- NaviCore has `wifiEnabled:true` and SSID `NaviCore` (bench session log `20260927-174702`). The SSID is derived in
+  `NaviCore.ino:4694-4695`.
+- "Wi-Fi 2" (the TP-Link) is usually already on that AP; "Wi-Fi" carries the internet.
+- The precondition check is read-only: `netsh wlan show interfaces` must show Wi-Fi 2 on `NaviCore`, and
+  `local_ip_for('192.168.4.1')` must be on 192.168.4.x. When the check fails, the unattended tests skip.
+
+| Test id | Mode | Checks |
+|---|---|---|
+| `intellex.wifi_discover` | unattended when the precondition holds | `discover.scan(['192.168.4.1'])`: kind `navicore`, a version equal to the PONG, and `via` on 192.168.4.x. `ssid_for_host()` returns `NaviCore`. `/_api/discover?hosts=192.168.4.1` gives the same. |
+| `intellex.wifi_nc_tool` | unattended | Attach `{kind:ws, host:192.168.4.1, role:navicore}`. The label reads `· WiFi 192.168.4.1 ▾`. The OTA button reads `Update over WiFi (OTA)` with the WiFi title. The flash buttons are disabled with the not-USB message. `POST /_api/flash` gets the USB 409. |
+| `intellex.wifi_wizard_via_navicore` | unattended; `config_guard(1,2)`; `?RTERM,STOP` on W1 and W2 in `finally` | The Wizard through NaviCore as its doorway: a relay card at 20, or the plain-board route, and baselines for W1 and W2. This answers "still to verify on hardware" (`docs/WCB_WIZARD.md:321-323`). |
+| `intellex.wifi_rterm_rate` | unattended | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:499`). Count `RTERM,START` arrivals on W1's USB console for 60 s while the Wizard is attached through NaviCore. Record the rate, and fail above an agreed bound (DX10). |
+| `intellex.wifi_link_loss` | opt-in `intellex_reboot` | NaviCore `REBOOT` through the link. The host notices within 15 s. The log has **no** `re-associating` line (`--no-auto-bounce`). It reattaches once the AP is back, and the pages see a PONG again. |
+| `intellex.wifi_ap_hop_reidentify` | attended, opt-in `intellex_wifi_join` | While attached, move Wi-Fi 2 from NaviCore's AP to W1's (a temporary `HIL-` profile, as in `s28_wifi.py:254-351`). `/_api/status` flips from role `navicore` to `wcb` with `relayId` 1, and the log shows that **before** the attach (rule 10). The NaviCore tool goes to Via WCB. Then move back. |
+| `intellex.wifi_bounce_scoped` | attended, opt-in `intellex_wifi_join` | `discover.wifi_bounce('NaviCore')` bounces only Wi-Fi 2, and "Wi-Fi" stays connected throughout. |
+
+| | |
+|---|---|
+| Effort | 12 h. |
+| Bench | About 10 minutes, plus the attended part. |
+
+#### IX-WP10: Flashing
+
+**Which board. W2.**
+
+- It is a classic ESP32 (HW 2.4, CP210x) running the bench image
+  `tests/hil/results/builds/wcb-esp32-meshq` (`WCB.ino.bin`, `.bootloader.bin` and `.partitions.bin`; version
+  `6.2.1_250646RSEP2026`), per that folder's `FLASHED.md`.
+- Seeded as a test branch, that image makes the flash **identity-preserving**: W2 ends the test running the image it
+  started with. Its bootloader and partition table are the same files `arduino-cli upload` wrote.
+- Not a probe:
+  - probes are the harness's instruments;
+  - probe2's auto-reset sometimes misses download mode (`0x17`);
+  - a failed probe flash breaks the wire tests until it is fixed.
+- Not NaviCore unattended: its native USB may need the BOOT button to recover. It gets its own app-only opt-in.
+
+**The seed** (`<stage>/src/firmware`), used with H1:
+
+- `wcb/hil-bench/WCB_6.2.1_250646RSEP2026_hilbench_ESP32.bin`, with `_part.bin` and `_boot.bin` beside it, and a
+  `listing.json` of `{name, type:"file", download_url}` entries.
+- `navicore/hil-bench/NaviCore_<tag>_ESP32S3.bin` from `results/builds/navicore`. This is the app **only**, so
+  `flash.py` takes its app-only path (`:356-358`) and leaves NaviCore's bootloader alone.
+- `settings.json` sets the branch to `hil-bench`.
+
+Even without H1, a missing branch gets a 404 from GitHub, and both the flashers and the proxy then fall back to the
+cached listing. H1 just makes that deterministic.
+
+| Test id | Mode | Checks |
+|---|---|---|
+| `intellex.flash_w2_update` | opt-in `intellex_flash`; `config_guard(2)` | The Wizard auto-connects W2. `boardGo(<its slot>, {mode:'update'})` (`Wizard/app.js:7381-7386`) goes to the shim's `flashFirmware`, then to `/_api/flash-wcb {appOnly:true}`. The log shows `ESP32`, `offline - using the cached hil-bench copy`, and `Hash of data verified` for 0xE000 and 0x10000. `/_api/flash-status` has `ok:true` and version `6.2.1_250646RSEP2026_hilbench`. W2 reattaches, and the Wizard's re-push changes nothing. After the test: W2 `?VERSION` is unchanged, W1 sees W2 back online, and the guard passes. |
+| `intellex.flash_w2_full` | opt-in `intellex_flash` | `mode:'flash'`: bootloader at 0x1000, partitions at 0x8000, app, and otadata erased. The same checks. |
+| `intellex.flash_one_at_a_time` | opt-in `intellex_flash` | While the Wizard is flashing, a `POST /_api/flash` from the NaviCore pane gets 409 `a flash is already running`. |
+| `intellex.flash_w2_factory` | attended, opt-in `intellex_flash_factory` | `mode:'factory'` erases W2's NVS. Restore it from its pre-test chain and learned peers, with `s31_password_erase.py`'s restore generalised to W2. The guard must pass. |
+| `intellex.flash_navicore_app` | opt-in `intellex_flash_navicore` | The NaviCore tool's Update Firmware button is intercepted and goes to `/_api/flash`. The log says the app is written alone. Afterwards: the PONG version is unchanged, `GET_CONFIG` is unchanged, and NaviCore is back on the mesh. |
+
+**Recovery**, from `results/builds/FLASHED.md`:
+
+- **If a flash fails:** run the same Intellex flash again. The ESP32 ROM loader always answers on auto-reset.
+- **W2, last resort:** `arduino-cli upload --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --input-dir
+  tests/hil/results/builds/wcb-esp32-meshq -p COM15`.
+- **NaviCore:** `arduino-cli upload --fqbn
+  esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=custom,FlashSize=16M,PSRAM=opi --input-dir
+  tests/hil/results/builds/navicore -p COM5`.
+- **Permission:** a Claude session in auto mode is refused bench uploads, so Greg must run these, or the session must
+  be in bypass mode.
+
+| | |
+|---|---|
+| Effort | 12 h. |
+| Bench | About 3 minutes per flash. |
+
+#### IX-WP11: OTA through Intellex (opt-in `intellex_ota`)
+
+| Test id | Checks |
+|---|---|
+| `intellex.ota_navicore_usb` | "Update over USB (OTA)" on COM5. The page fetches the image through the shim's rewrite, which the proxy serves from the seeded `hil-bench` cache. NaviCore reboots into the same image. The reconnect loop recovers the link, and the page re-PONGs the same version. |
+| `intellex.ota_navicore_wifi` | The same over NaviCore's AP, with the precondition from IX-WP9. Greg verified this by hand on 2026-09-10. |
+| `intellex.ota_w2_via_w1` | Not in the first pass: relay OTA takes about 25 minutes, and s20 already covers it at the firmware level. |
+
+| | |
+|---|---|
+| Effort | 8 h. |
+| Bench | 10-30 minutes. |
+
+#### IX-WP12: Online features (network-dependent; unattended; skip when offline)
+
+| Test id | Checks |
+|---|---|
+| `intellex.online_update_tools` | `/_api/update-webui` in the stage updates both tools. The files hash identical to a fresh fetch from Pages, and `.prev` is kept. |
+| `intellex.online_branch_list` | `refresh=1` lists `main` and `WIFI` for the WCB, has no `gh-pages`, and reports `cached:false`. |
+| `intellex.online_fetch_firmware` | The cache fills for NaviCore on `main` and the WCB on `WIFI`, with a listing stored. |
+| `intellex.online_wiki` | `fetch_wiki --wiki intellex` into the stage, then `smoke_wiki` passes. |
+| `intellex.online_version` | `/_api/webui-version` has `checked:true` for both tools. |
+
+About 6 GitHub API calls per run, well under the limit.
+
+| | |
+|---|---|
+| Effort | 4 h. |
+
+#### IX-WP13: Window mode and the frozen exe (attended, opt-in `intellex_window`)
+
+| Test id | Checks |
+|---|---|
+| `intellex.window_cdp` | `app.py --inspect <p> --port <q> --no-auto-bounce`, staged, with `LOCALAPPDATA` isolated. Playwright `connectOverCDP` into WebView2. The launcher renders. `intellex_view` survives a relaunch (the `private_mode=False` fix, `app.py:350-374`). `/_api/open-window` answers 200 and a second CDP target appears. The window lies inside the work area. |
+| `intellex.exe_sentinels` | `dist\Intellex.exe --run-esptool version` exits 0. `--run-fetch-firmware --check` with H1 reports and exits 0. |
+| `intellex.exe_headless` | Only with H5: the exe serves the no-board routes of IX-WP3. |
+
+| | |
+|---|---|
+| Effort | 6 h. |
+| Mode | Attended: windows open on Greg's desktop. |
+
+#### IX-WP14: Docs and integration
+
+- `docs/HIL_TESTING.md` gets a new §10 "Intellex tests", a coverage-table row and a revision-log row.
+- `HIL_WEEK_DECISIONS.md` gets the rows for the decisions taken.
+- `HIL_TEST_AUDIT.md` §6 gets the progress.
+- Intellex `CLAUDE.md` § Verifying gets the hooks and `tools/smoke_test_hooks.py`.
+- Filed as fixes or tracker items: findings 1-5, 8 and 10.
+
+| | |
+|---|---|
+| Effort | 3 h. |
+
+### 3.4 Opt-in keys to add to `hil/optin.py` (all start unticked)
+
+| Key | What it does to the bench | Estimate |
+|---|---|---|
+| `intellex_flash` | Re-flashes W2, through Intellex's esptool path, with the bench image: app-only, then full. W2 is off the mesh about 1 minute each time. | 300 s |
+| `intellex_flash_factory` | Attended. Erases W2's NVS through Intellex, then restores it from its chain. | 180 s |
+| `intellex_flash_navicore` | Re-flashes NaviCore's app with its bench build. NaviCore is off the mesh about 1 minute. | 150 s |
+| `intellex_ota` | OTA of NaviCore through Intellex. Erases and rewrites NaviCore's inactive slot, then reboots it. | 600 s |
+| `intellex_reboot` | Reboots NaviCore through the link, to exercise device loss and reconnect. | 60 s |
+| `intellex_wifi_join` | Attended. Moves Wi-Fi 2 between APs through temporary `HIL-` profiles, and bounces it once. | 120 s |
+| `intellex_window` | Attended. Opens Intellex app windows on the desktop. | 120 s |
+| `intellex_nc_save` | Writes NaviCore's config back unchanged (an NVS write). Only until a NaviCore config guard exists. | 30 s |
+
+### 3.5 Order
+
+1. IX-WP1 and IX-WP2 first (the hooks and the plumbing).
+2. Then IX-WP3 and IX-WP4, which need no board and whose results are known immediately.
+3. Then IX-WP5 to IX-WP8 on the bench. W1 goes before NaviCore, so that finding 4's `(should)` test is known early.
+4. Then IX-WP9 (WiFi).
+5. Then IX-WP10 and IX-WP11: one attended pass first, then opt-in.
+6. Then IX-WP12 and IX-WP13, and IX-WP14 throughout.
+
+The suite is `s32`, so the full-run order puts it after the firmware suites and before `s99`. Every Intellex test
+cleans up after itself (`?RTERM,STOP`, `STOP_MONITOR`, debug flags, and the host killed), so the timing-sensitive
+suites that follow are not affected (the F21 precedent).
+
+---
+
+## 4. Risks, what cannot be tested here, and decisions
+
+### 4.1 Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| **A test host captures a COM port.** A wanted target is reopened every second, forever (`host.py:1595-1632`); the COM11 incident cost a whole run. | H2 allow-list; detach, then kill the tree, in `finally`; `_reacquire` must succeed; the preflight skips while Greg's Intellex runs; the attach-failure test (IX-WP6). |
+| **The launcher opens ports and probes WiFi.** It opens every 303A port (COM4 may reset) and probes through Wi-Fi 2. | H2 and H3, plus `guard()` route fulfilment in every spec. |
+| **The user's WiFi gets bounced.** | `--no-auto-bounce` always. `/_api/wifi-bounce` is fulfilled with a 403 unless the attended test opts in. `intellex.wifi_link_loss` asserts that no bounce happened. |
+| **Mesh side effects.** The Wizard through Intellex arms `?RTERM` sessions and pulls every board, and its NaviCore pane starts `START_MONITOR`. | `config_guard`; `?RTERM,STOP`, `STOP_MONITOR` and debug flags restored; the suite runs late; `intellex.wifi_rterm_rate` measures the effect. |
+| **A flash writes the wrong image.** The CI release shares the version string with the bench build and would silently drop uncommitted fixes (`results/builds/wcb-esp32-meshq/FLASHED.md`). | Seeded `hil-bench` branch with H1. Assert that the cached tag and `Hash of data verified` are in the log. Never flash without the seed. |
+| **A flash is interrupted.** | Re-run the Intellex flash (the ROM loader always answers on ESP32); `arduino-cli upload` from `results/builds` as a last resort (needs Greg's permission mode). |
+| **Update FW skips the partition-migration check** (finding 5). An un-migrated board could fail to boot. | Unit `(should)` test now. Port the `flasher.js` check (DX11). The bench boards are already migrated. |
+| **Credentials.** NaviCore's config holds the AP password; pulls hold the mesh password. | The harness hands specs lengths, versions and keys only. The temporary WiFi profile is deleted afterwards (the `s28` pattern). The Intellex log holds argv and no secrets. |
+| **Greg's real Intellex state gets polluted:** his branch setting (`WIFI`), logs pruned to 20, his bundles and his cache. | Stage plus `LOCALAPPDATA`. The self-test (IX-WP2) fails if anything outside the stage changes. |
+| **The bundled Wizard is stale** (`04.13:06.R.SEP.2026`): it predates F13, and WCB rule 15 names it as an old Wizard. | Test `worktree` by default. Run `shipped` for the contract and load checks only, and report staleness without failing on it (DX3). |
+| **Headless Chromium is not WebView2** (zoom, storage, window API). | IX-WP13 drives the real WebView2 over CDP. |
+| **GitHub rate limit or network flakiness.** | H1 everywhere except IX-WP12, which skips when offline. |
+| **Port collisions:** 8765, 8777, 8778, and 8799, which is in use now. | A free ephemeral port for every test. |
+| **Pushing Intellex publishes `d615344`** (finding 11). | Allowed (`HIL_WEEK_DECISIONS.md:16-17`). Log it as a decision; `intellex.wizard_*` and `intellex.wifi_wizard_via_navicore` then verify it on hardware. |
+
+### 4.2 Not testable on this bench
+
+- **macOS as a whole.** `Intellex.command`, `scripts/*macos*`, WKWebView, the empty CA store of python.org's macOS
+  Python (the path `certs.py` exists for), the `/dev/cu.*` and `/dev/tty.*` filtering, and `_wifi_bounce_macos`,
+  which is confirmed broken and diagnosed but not fixed (`README.md:138-142`).
+- **A real MgmtRelay doorway** (role `relay`, `?RELAY,WIFI` answering at .19). The old relay board is now probe1.
+  NaviCore-as-relay is covered (IX-WP9); a MgmtRelay is not.
+- **An ESP32-S3 WCB.** That means the 8 MB vs 16 MB bootloader selection on real silicon, and the rule-10 hazard
+  where an S3 WCB accepts a NaviCore image. Unit tests only.
+  - The SBUS controller is S3 silicon on WCB hardware, but `detect()` leaves a chip in download mode
+    (`--after no-reset`, `wcb_flash.py:254-256`), and it is the bench's controller. Not recommended.
+- **A physical USB unplug** (contract 2 on a device that really vanished). This needs a person or a switchable hub.
+  IX-WP5 covers whatever a NaviCore reboot does.
+- **Windows WiFi pathologies:** a half-dead association after a real AP reboot, or an adapter that comes up with DHCP
+  off (Intellex `docs/WIP_NOTES.md:219`). Attended observation only.
+- **Other displays:** multi-monitor, and DPI other than this PC's (`winsize.py`).
+- **The one-file build's temp extraction** (`paths.FROZEN` with `_MEIPASS`). Only through `dist/Intellex.exe`
+  (IX-WP13). Building the exe has heavy side effects: it writes `dist/` and `src/build_stamp.py`, and fetches into
+  `src/`. Not part of HIL.
+- **Real GitHub throttling (403 or 429 from GitHub itself).** Simulated with a local server instead
+  (`intellex.ghget_retry_unit`).
+
+### 4.3 Decisions to take (each with the recommendation, to be logged in `HIL_WEEK_DECISIONS.md`)
+
+| # | Decision | Recommendation |
+|---|---|---|
+| DX1 | Where the tests live. | Bench-bound and cross-repo tests go in WCB `tests/intellex/` plus `suites/s32_intellex.py` (D3). Intellex-only smoke tools stay in `Intellex/tools/`, and the harness wraps them. |
+| DX2 | Which Intellex is under test. | A fresh staged copy of the working tree for each test, recording HEAD and whether it is dirty. `dist/Intellex.exe` only in IX-WP13. |
+| DX3 | Which tool bundles. | `worktree` by default: NaviCore `config_tool/` and WCB `Wizard/`, so a Wizard change is tested inside Intellex before it ships. Run `shipped` for `ui_contract_*` and `ui_tools_load` only, reporting staleness as a note. |
+| DX4 | Hooks in Intellex vs Playwright interception only. | Add H1-H3 now (pushed to Intellex `main`). Defer H4, since `LOCALAPPDATA` already works, and H5, since it is only needed for the exe. |
+| DX5 | How to isolate. | Stage `src/` and `tools/`, and set `LOCALAPPDATA`. No `INTELLEX_DATA_DIR` needed. |
+| DX6 | Which interpreter runs the Python tests. | Intellex's venv, as subprocess scripts. The harness stays stdlib plus pyserial, and `hil/ws.py` gains binary frames and an Origin header. Do not rebuild the renamed venv; call `python.exe -m`. |
+| DX7 | Which board to flash. | W2 with the seeded bench image: app-only, then full (`intellex_flash`), attended once and then unattended. NaviCore app-only under its own key. Factory reset attended only. Never a probe. |
+| DX8 | How to get WiFi. | Use Wi-Fi 2 as it is when it is already on NaviCore's AP (read-only check, unattended), and skip otherwise. AP hops, joins and the bounce stay attended (`intellex_wifi_join`). |
+| DX9 | The serial-doorway gap (finding 4). | Write `intellex.nc_via_usb_doorway` as a `(should)` test now. Fix it in Intellex once it is confirmed on the bench: have the host identify a serial target as a WCB (for example the `?WDP,DUMP` SELF row that `probe()` already reads) and report `role:"wcb"` to the shim. File it as an Intellex item. |
+| DX10 | The F21 re-arm rate. | Measure it first (`intellex.wifi_rterm_rate`). Bound it at 6 a minute, which is at least 10 s apart. Report the root cause to Intellex, or to the Wizard if it is `setRemoteConnected` re-arming. |
+| DX11 | Findings 1, 2, 3 and 5. | Fix them in Intellex test-first, each with its failing test. Finding 5 is the only one that can cost a board, so it goes first. |
+| DX12 | CI. | Later (phase 4): a separate job in the WCB repo, path-filtered to `Wizard/**`, that clones the public Intellex and runs `ui_contract_wizard` and `ui_tools_load` without a board. Non-blocking at first. |
+| DX13 | Nightly full runs. | Include every unattended `intellex.*` test (no board, serial, WiFi when on the AP, online). Leave the new opt-ins unticked (D7 runs only what Greg ticked). Run each opt-in once in a targeted run and log it. |
+| DX14 | The stray zip and the stale docs (findings 6-10). | Fix the docs in the IX-WP1 push. Remove the zip from the Intellex tree in the same push; it stays in history, which is acceptable for a non-secret design asset. |
+
+---
+
+## Revision log
+
+| Date | Change |
+|---|---|
+| 2026-09-27 | Created. Map of Intellex at `d615344`, how to run it under test, IX-WP1-14, risks and decisions. Research only: nothing run, nothing changed. |
