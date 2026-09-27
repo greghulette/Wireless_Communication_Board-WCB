@@ -654,12 +654,22 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 
 ## 6. Resume here
 
-- **Plan for 2026-09-27 to about 10-04 (Greg away, no physical access; his standing OKs: servos may move, the GUI may
-  be stopped, firmware may be changed and flashed including NaviCore, finished work is committed and pushed to WIFI,
-  never main).** In order: (1) the WCB coverage re-scan (workflow `wcb-coverage-rescan`) - write the missing tests,
-  run them, fix what fails; (2) the open firmware F-items on their recommendations, F23 (RMT pulse) first, each
-  verified on the bench; (3) the NaviCore coverage plan (workflow `navicore-hil-coverage-plan`) and its work
-  packages. Scheduled check-ins at about 09:07 and 17:07 continue from the progress notes below.
+- **Plan for 2026-09-27 to about 10-04 (Greg away, no physical access).** The goal, in his words: "a complete hil
+  tool that tests the wcbs, navicore and intellex fully. All features of every system should be testable. Use
+  playwright testing to test webpages and functionality of that." His standing OKs: servos may move; the GUI may be
+  stopped; firmware may be changed and flashed, NaviCore included; WCB work is pushed to WIFI (never WCB main, which
+  releases); NaviCore, Intellex, WcbCmd and WCBClient may be pushed to main. All tests live here, in `tests/`. Phases:
+  1. **WCB, complete:** act on the coverage re-scan (workflow `wcb-coverage-rescan`) - the missing tests, written and
+     run; the Wizard in Playwright beyond its parser (editor screens, pull-edit-push round trip against W1/W2, the
+     shared-port hub, the flasher); the open firmware F-items on their recommendations, F23 first.
+  2. **NaviCore:** the coverage plan (workflow `navicore-hil-coverage-plan`), then its driver and config
+     snapshot/restore, then its work packages; its config tool in Playwright, without and with the board.
+  3. **Intellex:** map its features, run it headless (it serves plain HTTP), Playwright against its UI over both
+     transports (serial to the bench boards, WiFi to NaviCore's AP), and its flashing path.
+  4. **One tool:** `run.py` and the GUI cover all three; docs current.
+  Check-ins every 3 h continue from the progress notes below; a usage limit pauses work until it resets.
+  Every decision that would normally be Greg's is made, not deferred, and logged in
+  [HIL_WEEK_DECISIONS.md](HIL_WEEK_DECISIONS.md) for his review.
 - **Progress notes (newest last):**
   - 2026-09-27 12:40: plan set; WCB coverage re-scan running (both workflows had died on the weekly usage limit on
     09-25 and were relaunched after it reset).
