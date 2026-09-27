@@ -35,6 +35,8 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-25 | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip (docs/HIL_TEST_AUDIT.md §5). Filed #94 (a bit-banged PWM output pulse is stretched by preemption, audit F23), TODO for Greg's decision. `etm.reboot_defer_cap` was the harness: fixed in `WCB.run` and the reboot cleanup. |
+| 2026-09-25 | **WcbCmd 0.9.1 pushed (`0ab4af5`)** with #2 and #21, on Greg's word. Before it, GitHub's WcbCmd (`e51c39b`) still had both bugs, so every CI build of WCB and NaviCore did: only local builds, from the sketchbook copy, had the fixes. The `DEVICE,2` golden vector added in 0.8.0 fails on that code, so the vectors had never been run. They now pass on a host build of the sketch (107 OK); not yet flashed to an ESP32. Version 0.9.1 rather than a re-used 0.9.0; not tagged. The WIFI binaries at `cd3746e` predate it and pick it up on the next `Code/**` push. |
 | 2026-09-25 | No-servo full run `20260924-234056` on the F20/F21 image: 459 pass, 3 fail, 37 skip; all three test-side (docs/HIL_TEST_AUDIT.md §5), none from #91-#93. Test fixes to the offline-timing floor (plus #80's alternation check), the `?backup` chain parser and `?ETM,CHAR`'s peer wait; verified `20260925-015720` (21/21). Recorded audit F22 (a rebooted WCB sees its peers offline for one heartbeat), not filed here: the recommendation is to leave it. |
 | 2026-09-24 | **#92 and #93 VERIFIED (20260924-233628, 43/43).** Greg: "Fix both". A cleared serial mapping frees its NVS keys; RTERM re-arms and `?STATS,RPT` no longer hold off a deferred restart, which also goes anyway after 20 s. A review found three small defects, fixed before flashing: `_act` written last, a slot whose count could not be stored keeps its output keys, and no ETM command is ACKed once the restart is imminent. W1/W2 flashed 23:36. The harness gained `--no-servos` (`hil/servos.py`, 27 tests, cross-checked by a second list). |
 | 2026-09-24 | **#92, #93 FIXED (unverified)** on Greg's "Fix both": a serial-mapping save removes the keys no active mapping uses (`removeUnusedSerialMapKeys`), and a deferred restart ignores a re-arm of the running RTERM session and `?STATS,RPT`, with a 20 s cap (`RESTART_MAX_DEFER_MS`; sized in #93, not the 15 s proposed). Tests `map.nvs_keys_freed`, `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`. ESP32 70 %, S3 68 %, no new warnings; host tests and `selftest.py` pass; not flashed. |
@@ -120,7 +122,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | VERIFIED — dfp.partial_frame_resync PASS on the bench (20260922-125537) |
+| **Status** | VERIFIED — dfp.partial_frame_resync PASS on the bench (20260922-125537); shipped in WcbCmd 0.9.1 (`0ab4af5`, 2026-09-25) |
 | **Owner** | `WcbCmd` |
 | **Effort** | S |
 | **Tests** | `dfp.partial_frame_resync` |
@@ -525,7 +527,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | VERIFIED — dfp.device_verb PASS on the bench (20260922-125537) |
+| **Status** | VERIFIED — dfp.device_verb PASS on the bench (20260922-125537); shipped in WcbCmd 0.9.1 (`0ab4af5`, 2026-09-25) |
 | **Owner** | `WcbCmd` |
 | **Effort** | S |
 | **Tests** | `dfp.device_verb` |
@@ -1909,3 +1911,23 @@ session, queued whole and drained in one `loop()` pass. `hil.wcb` waits 25 s for
 review: `restartImminent` is set just before the restart line, and after it the ETM receive path neither ACKs nor
 queues a command, so one arriving in the last ~150 ms is retried by its sender instead of being ACKed and lost
 (the cap fires exactly while commands are still arriving).
+
+#### 94. A bit-banged PWM output pulse is stretched by preemption
+
+| | |
+|---|---|
+| **Status** | TODO - Greg's decision (`docs/HIL_TEST_AUDIT.md` F23) |
+| **Owner** | `WCB_firmware` (`WCB_PWM.cpp`, `WCB.ino`) |
+| **Effort** | M |
+| **Tests** | `pwm.passthrough_local`; after the fix it should also check each step's last (held) pulse |
+| **Subsystem** | PWM passthrough / `;P` |
+
+**Evidence (run 20260925-092255).** Step 1000 µs came out as one 1830 µs pulse, the last one sent for that step, so a digital
+servo would have held it. The input measurement was right. Earlier passing runs show +24 to +124 µs stretches of the
+same kind; `;P` (core 1) up to +45 µs.
+
+**Cause.** `PWMTask` (core 0) makes the pulse with `digitalWrite(HIGH); delayMicroseconds(w); digitalWrite(LOW)`;
+whatever takes the core during the wait (WiFi task, esp_timer, UART0 ISR) lengthens it.
+
+**Fix (proposed).** A one-shot RMT pulse (a PWM port on S3-S5 leaves its RMT channel free; the S3 falls back to the
+bit-bang when none is). Re-pinning `PWMTask` to core 1 is only a mitigation. No critical section around the pulse.

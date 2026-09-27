@@ -1,4 +1,6 @@
 """NaviCore as a WCB_Client mesh member — read-only checks, nothing moves."""
+import time
+
 from hil.navicore import NaviCore
 from hil.runner import test
 from hil.wcb import WCB
@@ -28,9 +30,24 @@ def navicore_online(bench):
 @test("navicore.wdp", "NaviCore's WDP table lists every bench WCB, running WCB1's firmware",
       needs=["navicore", "wcb1"])
 def navicore_wdp(bench):
-    fw = WCB(bench.dev("wcb1")).version()
+    """NaviCore learns a WCB from its WDP advert, which a WCB sends about once a minute, so a NaviCore that has just
+    booted has no rows yet (run 20260925-091104: up about 27 s, count=0, both WCBs learned 4 and 10 s after the test).
+    A missing row gets one ?WDP,POLL from W1 - W1 advertises and solicits the rest; WCB_Client answers a SOLICIT and
+    does not mistake it for an advert since 1.15.1 - and up to 15 s to arrive. The note says when that was needed."""
+    w1 = WCB(bench.dev("wcb1"))
+    fw = w1.version()
+    want = sorted(_bench_wcb_ids(bench))
     rows = {int(r["N"]): r for r in _nc(bench).wdp_dump()}
-    for wcb_id in sorted(_bench_wcb_ids(bench)):
+    missing = [n for n in want if n not in rows]
+    if missing:
+        t0 = time.monotonic()
+        w1.run("?WDP,POLL")
+        while any(n not in rows for n in want) and time.monotonic() - t0 < 15:
+            time.sleep(1.0)
+            rows = {int(r["N"]): r for r in _nc(bench).wdp_dump()}
+        bench.note(f"NaviCore's WDP table lacked WCB {missing} (a fresh NaviCore?); after ?WDP,POLL it had "
+                   f"{sorted(rows)} in {time.monotonic() - t0:.1f} s")
+    for wcb_id in want:
         assert wcb_id in rows, f"WCB{wcb_id} missing from NaviCore ?WDP,DUMP (has {sorted(rows)})"
         row = rows[wcb_id]
         assert row["CLIENT"] == "0", f"WCB{wcb_id} advertised as a client: {row}"

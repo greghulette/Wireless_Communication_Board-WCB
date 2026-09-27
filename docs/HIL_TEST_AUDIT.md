@@ -444,11 +444,15 @@ observed. F13 converted the config handlers to strncmp on the fixed field; the r
 `httpd_queue_work`). From code reading, not reproduced; long lines such as config replies are what reach it.
 
 **F17 — one WCBClient example does not use the placeholder credentials the others share.** It is handled in the
-WCBClient repo; the details are deliberately kept out of this doc.
+WCBClient repo; the details are deliberately kept out of this doc. Closed 2026-09-25: Greg keeps it that way for
+now on purpose.
 
 **F18 — `[ETM] WCBn came ONLINE` is printed from the WiFi task.** The receive callback prints it directly
-(`WCB.ino`, `espNowReceiveCallback`), against rule 11. On the UART it can only land between whole lines now, but
-the WebSocket and RTERM tees copy a line a byte at a time, so there it can land inside a `?backup` chain or a pull
+(`WCB.ino`, `espNowReceiveCallback`), against rule 11. On the UART it lands between two writes: after a whole line
+of single-write output (the MGMT lines, `?backup`'s chains), but between the text and the CRLF of any
+`Serial.println`, which is two writes - the `;S0` echo the harness ends every read with (run `20260925-092255`) and the
+`?backup` section header (`20260924-234056`). The WebSocket and RTERM tees copy a line a byte at a time, so there
+it can land inside a `?backup` chain or a pull
 part (the requester then drops that line and retries). Since F12, `printBackupConfig` prints each section header,
 then builds that chain through a whole `collectConfigCommands` pass before writing it, so the line can also land
 between a header and its chain (10-20 ms per header). It did, in `wizard.remote_pull` (run `20260924-234056`), whose
@@ -459,7 +463,8 @@ print for `loop()` in a small ring of its own (say 8 x 96 bytes, drained beside 
 ring, which holds two lines and drops when full, so a fleet power-up would cost config replies or `came ONLINE`
 lines that the Wizard and the harness wait for. `?backup` runs in `loop()`, so the line would then print after
 `End of Backup`. A cheaper partial fix: put each header into its chain's `BackupWriter`, so header and chain leave
-in one write under 2 KB, as they did before F12.
+in one write under 2 KB, as they did before F12; likewise the `;S0` echo as one write
+(`Serial.printf("%s\r\n", ...)`; vprintf allocates for 62 characters or more and prints nothing if that fails).
 
 **F19 — some config lines can still be lost silently to the heap.** Inside `collectConfigCommands`, a failed
 in-place `cmd += ...` (the MAP,SERIAL / MAP,PWM output loops, the KYBER,LOCAL target loop) leaves a line truncated,
@@ -515,6 +520,23 @@ hears a peer's first boot announce pulls its own next heartbeat forward by a ran
 WDP SOLICIT: an older WCB_Client decodes one as an empty advert and blanks the sender (`WDP_DESIGN.md`).
 Recommendation: leave it. ESP-NOW still retries a unicast at the MAC layer, and the window is one heartbeat long.
 Revisit if commands sent right after a reboot go missing.
+
+Found by full run `20260925-092255` (see §5):
+
+**F23 — a bit-banged PWM output pulse can be stretched.** Local PWM passthrough makes each output pulse with
+`digitalWrite(HIGH); delayMicroseconds(w); digitalWrite(LOW)` in `PWMTask` (`WCB_PWM.cpp`), which is pinned to core 0
+(`WCB.ino`, `xTaskCreatePinnedToCore(PWMTask, ...)`), where the WiFi task, esp_timer and the UART0 interrupt also
+run. Anything that takes the core during the wait holds the pin high until `PWMTask` runs again, so a pulse can only
+get longer. `pwm.passthrough_local` saw 1830 µs for a 1000 µs input. Four earlier runs show smaller stretches
+(+24 to +124 µs) that passed, because the test passes a step when any pulse in it is right. Passthrough sends only on
+a change, and the stretched pulse was the last one sent, so a digital servo would have held the wrong position.
+`;P` makes its pulse the same way on core 1 and has stretched by up to 45 µs. Present since the bit-bang was
+written (2025-11); none of F12, F13, F20 or F21 touches it. Proposed: make the pulse in hardware with a one-shot RMT
+symbol. A PWM output port on S3-S5 never calls its `Serial<n>.begin`, so its RMT channel is free; on the S3, fall
+back to the bit-bang when no channel is free and say so at boot. The same helper serves `;P`. Moving `PWMTask` to
+core 1 is only a mitigation: an NVS or flash write stalls both cores, and the web server task is unpinned. Do not
+wrap the pulse in a critical section, which would hold off the WiFi and UART0 interrupts for up to 2.5 ms. After
+the fix, `pwm.passthrough_local` should also check the last (held) pulse of each step.
 
 ## 4. Coverage gaps
 
@@ -618,28 +640,41 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 | F14 | open (Wizard decision) | Check the relay push's size before the confirm and bootstrap, then split pushes over 2864 characters. |
 | F15 | open (firmware) | strncmp for the remaining mgmt password checks. |
 | F16 | open (NaviCore) | Drop, don't store, when `WsSink::pump()` cannot drain. |
-| F17 | open (Greg) | Put that WCBClient example back on the shared placeholder credentials (details kept out of this doc). |
+| F17 | closed 2026-09-25 (Greg: intended for now) | The example's credentials are Greg's development ones on purpose; nothing to change. |
 | F18 | open (firmware) | Queue the WiFi-task `came ONLINE` print for `loop()`. |
 | F19 | open (firmware) | Make `collectConfigCommands` report a failed append or NVS read. |
 | F20 | fixed 2026-09-24 (tracker #92), bench 20260924-233628 | The save removes every `serial_map` key no active mapping uses; `map.nvs_keys_freed`. |
 | F21 | fixed 2026-09-24 (tracker #93), bench 20260924-233628 | RTERM re-arms of the running session and `?STATS,RPT` do not reset the quiet window; `RESTART_MAX_DEFER_MS` = 20 s; `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`. |
 | F22 | open (firmware; recommend leave) | A rebooted WCB sees no peer online until its next packet (up to HB+1 s); unicasts meanwhile are not ETM-retried. |
+| F23 | open (firmware) | Make PWM output pulses in hardware (a one-shot RMT symbol); the bit-bang is stretched by preemption (1830 µs for 1000 seen). |
+| Run 20260925-092255 | 493 pass, 2 fail, 4 skip in 2:35:02 (F20/F21 image, servos on) | Both triaged by an analyst and a skeptic. `pwm.passthrough_local`: W1 put out one 1830 µs pulse for a 1000 µs input, a firmware defect from 2025-11 (F23); Greg's rerun `20260925-132403` passed it, every width within 5 µs. `etm.reboot_defer_cap`: the test itself passed (the restart came at the 20 s cap); then the reboot cleanup added the night before (`?WDP,POLL`, then `?STATS`) failed its read, because W2's `came ONLINE` (F18) landed between the `;S0` sentinel's text and its CRLF, the only glued sentinel in 68,887. `WCB.run` now accepts a sentinel that starts its line, the cleanup waits 1 s after the poll and never raises; `selftest.py` 48/48. |
 | Run 20260924-234056 | 459 pass, 3 fail, 37 skip (27 servo, 10 opt-in/attended/label) with `--no-servos` (F20/F21 image) | None is F13, F20 or F21 (one analyst per failure plus a skeptic, both reading the session log and the code). `etm.offline_detection_timing` measured 4.93 s against a 4.95 s floor. It was host timing: a line is stamped when SerialDevice splits it out of a read, so one with more output behind it in the same read (here NaviCore's `rc_hb`) is stamped up to one read late. The floor is now 4.85 s, and the test checks the edges alternate, which is #80's real fingerprint. Replayed over all 31 recorded runs, that fails every run the race hit (5 of which the old test passed) and passes every run since the #80 fix. `wizard.remote_pull`: W1's third boot announce after Chrome returned COM6 printed `[ETM] WCB1 came ONLINE (boot)` on W2 between the factory header and its chain (F18, a window F12 opened), and the parser took the line after the header; it now searches the section, and `_factory_reply` re-reads a chain that fails its CRC. `etm.char_unicast`: `etm.reboot_defer_cap` had just rebooted W1, which saw no peer online yet (F22) and aborted; `_char` now polls until every bench WCB is online and fails at once on an abort, and the reboot tests leave W1 seeing its peers. Rerun `20260925-013055` (unchanged tests, different order) passed all three; the fixed tests in `20260925-015720`: 21/21. |
 | Run 20260924-190733 | 478 pass, 8 fail, 9 skip in 1:47:50 (F13 image, servos on) | None is F13 (triaged by one analyst per failure plus a skeptic). Four came from W1's NVS: the map suite's leftover keys (F20) filled it for `var.cap_persistent_full` and `inv.seqget_largest`, and a WDP-DA save scheduled 1 s after the previous test's forget held off soft-serial RX mid-line for the two `input.wdpda_*` tests (the forget helpers now wait it out). `input.soft_rx_baud_sweep` hit 57600's ~1% loss (3 of the last 19 runs; now a floor of 18/20). `wdp.poll_refreshes_age` lost one unacknowledged broadcast (now retried once). `pwm.wdp_selfheal_missed_clear` raced its own mark (reordered). `etm.w1_reboot_sees_peers` missed a restart deferred past 10 s (now 20 s; see F21). Reruns `20260924-205621` and `20260924-213158`: all pass except the two reboot waits blocked by Intellex (F21); with Intellex closed, `20260924-223915` passes those too (3/3). |
 | Run 20260924-131417 | 103 pass, 1 fail, 19 errors in 14:28 (123 tests of the first F12 build) | The 19 errors: probe2's COM11 was held by `Intellex.exe` (Greg's app, running since 2026-09-22), stopped with Greg's OK. The fail, `persist.bcast_flags_reboot`: a peer's `[ETM] WCBn came ONLINE`, printed on the WiFi task right after W1's reboot, landed between two of that build's 256-byte writes and split the configured chain, so its CRC failed. The writer now buffers 2 KB and flushes per line; everything re-ran in 20260924-133332. |
 
 ## 6. Resume here
 
+- **Plan for 2026-09-27 to about 10-04 (Greg away, no physical access; his standing OKs: servos may move, the GUI may
+  be stopped, firmware may be changed and flashed including NaviCore, finished work is committed and pushed to WIFI,
+  never main).** In order: (1) the WCB coverage re-scan (workflow `wcb-coverage-rescan`) - write the missing tests,
+  run them, fix what fails; (2) the open firmware F-items on their recommendations, F23 (RMT pulse) first, each
+  verified on the bench; (3) the NaviCore coverage plan (workflow `navicore-hil-coverage-plan`) and its work
+  packages. Scheduled check-ins at about 09:07 and 17:07 continue from the progress notes below.
+- **Progress notes (newest last):**
+  - 2026-09-27 12:40: plan set; WCB coverage re-scan running (both workflows had died on the weekly usage limit on
+    09-25 and were relaunched after it reset).
+  - 2026-09-27 12:37: Friday's harness fixes (glued-sentinel read, reboot cleanup, `navicore.wdp` poll, GUI combo
+    colours) bench-verified in `20260927-123557` (9/9) and committed to WIFI.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
-  and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 47/47; Wizard unit tests 36/36; host tests
+  and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
   `wdp_wire_test` and `config_parts_test` pass; every no-board Playwright spec passes.
 - **Verified on the bench:** the runs in §5; full run `20260924-092602` with servos (459 pass, 6 fail, 8 skip, every
   failure triaged in §5); the F5-F10 runs `20260924-120036` and `20260924-120958`; and the F12 runs `20260924-131417`
   and `20260924-133332`; the F13 runs `20260924-181517` and `20260924-190431` (27/27); the full run `20260924-190733` on the
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
-  3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21).
+  3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
 - **Flashed:** W1 and W2 run the image in `tests/hil/results/builds/wcb-esp32-meshq` (`6.2.1_232316RSEP2026` + F1-F10,
   F12, F13, F20 and F21, built 23:32 and flashed 23:36 on 2026-09-24; the CI release of that name is a different
   image, see the folder's FLASHED.md). Tracker #81-#93 are VERIFIED. NaviCore (COM5) still runs the WCBClient library from
@@ -651,9 +686,10 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   `ident.epass_live` (opt-in `mesh_password`) has not run yet.
 - **Not covered:** the Wizard beyond its parser (the flasher, a multi-board push, the editor screens, the shared-port
   hub), and what the bench lacks (§7 WP9).
-- **Open decisions:** F14-F19 (found during F13: relay push cap, String password checks, NaviCore WsSink, the
-  WCBClient example's credentials, the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
-  sees its peers offline for up to one heartbeat; recommend leave); A20 (probe literal,
+- **Open decisions:** F14-F16, F18, F19 (found during F13: relay push cap, String password checks, NaviCore WsSink,
+  the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
+  sees its peers offline for up to one heartbeat; recommend leave); F23 (a bit-banged PWM output pulse is stretched
+  by preemption; recommend an RMT pulse); A20 (probe literal,
   nit). F11 is deferred on Greg's word: revisit it if `results/nvs_history.csv` shows NVS filling.
 - **Everything is uncommitted.** Greg commits his own work.
 - **Bench:** free when this was written; `ListAgents` first.
@@ -702,3 +738,4 @@ the next starts; a row's status is `todo` / `written` / `bench <run>` / `blocked
 | 2026-09-24 | _(pending)_ | F20 and F21 fixed on Greg's decision (tracker #92, #93; §3): a serial-mapping save removes the keys no active mapping uses, and a deferred restart ignores RTERM re-arms of the running session and `?STATS,RPT`, with a 20 s cap (sized in §3, not the 15 s proposed). Four tests (`map.nvs_keys_freed`, `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`); both targets compile, not yet flashed. |
 | 2026-09-24 | _(pending)_ | F20 and F21 verified on the bench (20260924-233628, 43/43), after three review fixes (`_act` last, keep a slot's output keys when its count was not stored, no ETM ACK once a restart is imminent). W1/W2 flashed 23:36. Harness: `--no-servos` (27 tests). |
 | 2026-09-25 | _(pending)_ | No-servo full run `20260924-234056`: 459 pass, 3 fail, 37 skip, all three test-side (§5). Test fixes: the offline-timing floor is 4.85 s plus an edge-alternation check (#80's fingerprint); the `?backup` parser searches each section for its chain; `?ETM,CHAR` waits for its peers and fails fast on an abort. F18 gains the header window and the right ring for its fix; F22 recorded (recommend leave). Verified `20260925-015720` (21/21); `selftest.py` 47/47. |
+| 2026-09-25 | _(pending)_ | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip, both triaged (§5). F23 recorded (bit-banged PWM pulses stretched by preemption). F18 corrected: a `Serial.println` is two writes, so the WiFi-task line can land inside one; the harness's sentinel read now allows for it. |

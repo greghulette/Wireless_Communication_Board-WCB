@@ -207,6 +207,18 @@ class App:
         style.map("TNotebook.Tab", background=[("selected", t["panel"])], foreground=[("selected", t["fg"])])
         style.configure("TCombobox", fieldbackground=t["entry"], background=t["card"], foreground=t["fg"],
                         arrowcolor=t["fg"])
+        # clam maps a READONLY combobox's field to its own light grey, which beats the configure above - every port
+        # picker is readonly, so on the dark palette its light text sat on a light field. Map the states back onto the
+        # palette, including the selection highlight a focused readonly box draws over its text.
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", t["entry"]), ("disabled", t["card"])],
+                  foreground=[("disabled", t["mute"]), ("readonly", t["fg"])],
+                  selectbackground=[("readonly", t["sel"])], selectforeground=[("readonly", t["fg"])],
+                  background=[("active", t["sel"]), ("pressed", t["sel"])])
+        # The drop-down list is a plain Tk Listbox that ttk styles never reach; the option database does.
+        for opt, key in (("background", "entry"), ("foreground", "fg"),
+                         ("selectBackground", "sel"), ("selectForeground", "fg")):
+            self.root.option_add(f"*TCombobox*Listbox.{opt}", t[key])
         style.configure("TEntry", fieldbackground=t["entry"], foreground=t["fg"], insertcolor=t["fg"])
         style.configure("Vertical.TScrollbar", background=t["card"], troughcolor=t["bg"], arrowcolor=t["fg"])
         style.configure("Horizontal.TScrollbar", background=t["card"], troughcolor=t["bg"], arrowcolor=t["fg"])

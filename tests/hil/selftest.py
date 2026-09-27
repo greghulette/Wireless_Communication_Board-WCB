@@ -2615,6 +2615,58 @@ def t_backup_chain_parse(tmp):
         assert w2.calls == 3 and "3 reads" in str(e) and "HILK" not in str(e), (w2.calls, str(e))
 
 
+def t_run_glued_sentinel(tmp):
+    """WCB.run (run 20260925-092255, etm.reboot_defer_cap): the ;S0 echo is two writes, so the WiFi task's 'came
+    ONLINE' can land between the sentinel's text and its CRLF. A sentinel that starts its line ends the read, with
+    the output before it intact; one that only appears mid-line (?DEBUG's 'Sent to USB: HILEND...') does not."""
+    import re as _re
+    from hil import wcb as W
+
+    class Dev:
+        def __init__(self, shape):
+            self.lines, self.shape = [], shape
+
+        def mark(self):
+            return len(self.lines)
+
+        def send(self, text, eol=None):
+            if text.startswith(";S0,"):
+                end = text[4:]
+                self.lines += self.shape(end)
+            else:
+                self.lines += [(0.0, "out 1"), (0.0, "out 2")]
+
+        def expect(self, pattern, timeout=3.0, since=None):
+            rx = _re.compile(pattern)
+            for _, x in self.lines[since or 0:]:
+                if rx.search(x):
+                    return rx.search(x)
+            raise AssertionError(f"no line matching /{pattern}/")
+
+        def since(self, mark):
+            return [x for _, x in self.lines[mark:]]
+
+    def lines(texts):
+        return [(0.0, x) for x in texts]
+
+    glued = Dev(lambda end: lines([f"Sent to USB: {end}", f"{end}[ETM] WCB2 came ONLINE (src MAC: 02:05:4B:00:00:02)", ""]))
+    assert W.WCB(glued).run("?STATS") == ["out 1", "out 2", f"Sent to USB: {glued.lines[2][1][13:]}"]
+    clean = Dev(lambda end: lines([end]))
+    assert W.WCB(clean).run("?STATS") == ["out 1", "out 2"]
+    midline = Dev(lambda end: lines([f"Sent to USB: {end}"]))
+    try:
+        W.WCB(midline).run("?STATS", timeout=0.1)
+        raise RuntimeError("a mid-line sentinel ended the read")
+    except AssertionError:
+        pass
+    longer = Dev(lambda end: lines([end + "0"]))       # another sentinel that merely starts with this one's text
+    try:
+        W.WCB(longer).run("?STATS", timeout=0.1)
+        raise RuntimeError("a longer hex token ended the read")
+    except AssertionError:
+        pass
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -2627,7 +2679,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
-         t_backup_chain_parse]
+         t_backup_chain_parse, t_run_glued_sentinel]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

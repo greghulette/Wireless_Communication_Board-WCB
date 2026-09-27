@@ -347,14 +347,19 @@ class WCB:
         m = self.dev.mark()
         self.dev.send(command)
         self.dev.send(f";S0,{end}")
-        self.dev.expect(rf"^{end}$", timeout=timeout, since=m)
+        # The echo is Serial.println, two writes (text, then CRLF), so another task's line can land between them:
+        # the WiFi task's '[ETM] WCBn came ONLINE' (HIL_TEST_AUDIT.md F18) arrived as 'HILEND<hex>[ETM] WCB2 came
+        # ONLINE ...' (run 20260925-092255). So the sentinel only has to START its line. The ^ stays: with ?DEBUG on,
+        # 'Sent to USB: HILEND<hex>' carries it mid-line, before the echo itself.
+        self.dev.expect(rf"^{end}(?![0-9A-F])", timeout=timeout, since=m)
         lines = self.dev.since(m)
         # Drop relayed telemetry. While a host holds W1's RC relay window open (any ;W20,{json} does, for
         # 20 s), NaviCore's rc_ch/rc_hb/rc_trig arrive on W1's USB at up to 5 Hz, tagged {"sys":1,...}, and
         # land in the middle of whatever command is running - ?KYBER,LIST once came back with an rc_ch line
         # as its first line (maestro.list_and_legacy_spellings, 2026-09-22). They are never a command's own
         # output; tests that want them read self.dev directly.
-        return [x for x in lines[:lines.index(end)] if not x.startswith('{"sys":1')]
+        cut = next(i for i, x in enumerate(lines) if x.startswith(end))
+        return [x for x in lines[:cut] if not x.startswith('{"sys":1')]
 
     def send(self, command):
         m = self.dev.mark()

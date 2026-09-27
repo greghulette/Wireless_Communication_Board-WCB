@@ -71,6 +71,8 @@ def _peers_online(bench, w, wait=25.0, strict=True):
     notes a peer still offline, for a finally that must not replace the test's own failure."""
     others, t0 = remote_wcbs(bench), time.monotonic()
     w.run("?WDP,POLL")
+    time.sleep(1.0)     # the adverts it solicits print '[ETM] WCBn came ONLINE' on W1's WiFi task 77-654 ms later (F18);
+                        # a ?STATS sent at once prints into that window (run 20260925-092255)
     while True:
         stats = w.etm_board_stats()
         off = [n for n in others if not stats.get(n, {}).get("online")]
@@ -89,7 +91,10 @@ def _finish_reboot(bench, w, m):
     bench as found: W1 seeing its peers online."""
     w.dev.expect(r"^Rebooting now", timeout=CAP_S + 8, since=m)
     w.wait_boot(m, timeout=30)
-    _peers_online(bench, w, strict=False)
+    try:
+        _peers_online(bench, w, strict=False)
+    except AssertionError as e:     # ExpectTimeout is one: a failed read here must not replace the test's result
+        bench.note(f"after the reboot the peer check failed: {(str(e).splitlines() or [repr(e)])[0]}")
 
 
 @test("etm.reboot_rterm_rearm", "A ?reboot queued on W1 restarts within the 4 s quiet window plus margin (10 s; the cap is 20 s) while W2 re-arms W1's remote terminal to itself every second over the mesh: re-arming a running session is not activity (tracker #93; 1 reboot)", needs=["wcb1", "wcb2"])

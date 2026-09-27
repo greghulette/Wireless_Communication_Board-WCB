@@ -74,6 +74,12 @@
     "navicore_clip",
     "softrx_erratum",
     "wifi_pc",
-    "nvs_erase"
+    "nvs_erase",
+    "ota_full_wcb2",
+    "ota_wrong_chip",
+    "wifi_modes",
+    "mesh_password",
+    "nvs_fill",
+    "w1s4_soak"
   ]
 }
