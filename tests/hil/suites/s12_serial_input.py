@@ -15,6 +15,7 @@ import zlib
 from hil.links import SW_MAX_BAUD
 from hil.probe import HW_ONLY_HEADERS, PROBE_LEVELRX_VERSION, SW_CHANNELS
 from hil.runner import Skip, test
+from hil.wcb import WCB
 from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, quiet_lines,
                            require_tokens, send_chunked, token, usb_wcb, usb_wcb_number)
 
@@ -46,6 +47,47 @@ def cmd_to_usb(bench):
         usb.expect(r"^Software Version: \S+", timeout=2, since=m)
         usb.expect(r"^End of Version", timeout=2, since=m)
         w.silent(*ports, window=1.0)
+
+
+@test("input.line_cap_drops_whole", "A port line over 4096 characters is dropped whole with one '[SERIAL] S2: line longer than 4096 characters - dropped' line - its head does not run - and the next line on that port runs (re-scan #23)", needs=["wcb1"])
+def line_cap_drops_whole(bench):
+    """WCB coverage re-scan #23. processIncomingSerial appended every byte until a line end, so a device that never sent
+    one could take the whole heap (about 19 KB in AP mode, CLAUDE.md rule 14). A line is capped now - 4 KB on S1-S5,
+    32 KB on USB, where a whole ?backup chain is pasted - and an over-long one is dropped whole: its head, run alone,
+    would have lost the ^?CHK that verifies a chain and cut its last token. The line is a ;S0 whose text runs past the
+    cap, so a head that ran would print on USB."""
+    s2 = link(bench, 1, "S2")
+    usb = usb_wcb(bench)
+    head, after = marker("h"), marker("n")
+    prime(s2)
+    time.sleep(0.5)
+    m = usb.dev.mark()
+    send_chunked(s2, f";S0{head}".encode() + b"X" * 4200 + b"\r")
+    time.sleep(1.5)
+    s2.send(f";S0{after}\r".encode())
+    usb.dev.expect(rf"^{after}$", timeout=4, since=m)
+    lines = [x.rstrip() for x in usb.dev.since(m)]
+    assert "[SERIAL] S2: line longer than 4096 characters - dropped" in lines, f"no drop line: {lines[:6]}"
+    assert not any(x.startswith(head) for x in lines), "the head of the over-long line ran"
+
+
+@test("input.usb_long_chain_backpressure", "One USB line of 250 commands - more than the 200-slot command queue holds - runs every one: the serial reader waits for room instead of dropping tokens (re-scan #24)", needs=["wcb1"], links=[])
+def usb_long_chain_backpressure(bench):
+    """WCB coverage re-scan #24 (WCB-WP12 row 1 (f)). A pasted ?backup of more than 200 tokens lost everything past the
+    queue's capacity, one "Command queue is full! Discarding command." line per token. enqueueCommand now lets the
+    serial reader (serialCommandTask), and only it, wait for room: the loop task drains the queue, and the WiFi task
+    never blocks (CLAUDE.md rule 11). Each token prints its own numbered marker on USB."""
+    w = usb_wcb(bench)
+    m = marker("b")
+    wm = w.dev.mark()
+    w.dev.send("^".join(f";S0{m}{k:03d}" for k in range(250)))
+    w.dev.expect(rf"^{m}249$", timeout=20, since=wm)
+    time.sleep(1.0)
+    lines = [x.rstrip() for x in w.dev.since(wm)]
+    got = [x for x in lines if x.startswith(m)]
+    full = sum(1 for x in lines if x.startswith("Command queue is full"))
+    assert not full, f"{full} token(s) dropped with 'Command queue is full'"
+    assert got == [f"{m}{k:03d}" for k in range(250)], f"{len(got)} of 250 ran, in order: {got[:3]} ... {got[-3:]}"
 
 
 @test("input.terminators", "CR, LF, CRLF and LFCR each end exactly one line", needs=["wcb1"])
@@ -257,6 +299,64 @@ def bcast_fanout(bench):
         w.silent(*([src] if src != "usb" else []), w1s1, *remote_quiet, window=1.5)
         assert not any(x.strip() == t for x in usb.dev.since(m)), "the broadcast was echoed on USB with S0 echo off"
         time.sleep(0.5)
+
+
+@test("input.bcast_mesh_under_traffic", "A line typed on W1's console reaches the mesh and W1's own port while W2 sends W1 a command every 50 ms: a received command no longer decides a local broadcast's origin (re-scan #3)", needs=["wcb1", "wcb2"])
+def bcast_mesh_under_traffic(bench):
+    """WCB coverage re-scan #3 (docs/hil_plan/WCB.md WCB-WP14). The ESP-NOW receive callback (the WiFi task) used to
+    write lastReceivedViaESPNOW, the one global that gates every broadcast's mesh copy (CLAUDE.md rule 3), while
+    processBroadcastCommand read it only after writing the line to the local ports - and a soft-port write blocks
+    until the bytes are on the wire, 43 ms a port for these 41-byte lines at 9600 baud. A command that arrived in that
+    window made the typed line look mesh-originated: its mesh copy was dropped while W1's own ports still printed it.
+    The load is W2 sending ;W1,?STATS,RPT, stored in RAM and printed only under ?DEBUG,MGMT (etm.reboot_stats_rpt),
+    which counts that the load really reached W1. The unloaded arm is the control: a loss there is the link, not the
+    race."""
+    usb, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    near, far = link(bench, 1, "S3"), link(bench, 2, "S3")
+    require_tokens(bench, 1, "?BCAST,OUT,S3,ON", "?BCAST,OUT,S0,OFF")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    rpt = ";W1,?STATS,RPT,2,0,0,0,0,0,0,0"
+    results, loads = {}, 0
+    usb.run("?DEBUG,MGMT,ON")
+    try:
+        for arm, count in (("C", 10), ("L", 30)):
+            prime(near, far)
+            time.sleep(0.5)
+            lines = [padded(arm, 40) for _ in range(count)]
+            stop = threading.Event()
+
+            def loader():
+                while not stop.is_set():
+                    w2.dev.send(rpt)
+                    time.sleep(0.05)
+
+            th = threading.Thread(target=loader, daemon=True) if arm == "L" else None
+            m = usb.dev.mark()
+            watch = Watch(near, far)
+            if th:
+                th.start()
+                time.sleep(1.0)
+            try:
+                for x in lines:
+                    usb.send(x)
+                    time.sleep(0.4)
+            finally:   # a failed send must not leave W2 loading W1 through every later test
+                if th:
+                    stop.set()
+                    th.join()
+            time.sleep(2.0)
+            got_near, got_far = watch.got(near), watch.got(far)
+            results[arm] = (sum(1 for x in lines if x.encode() + b"\r" in got_near),
+                            sum(1 for x in lines if x.encode() + b"\r" in got_far), count)
+            if th:
+                loads = sum(1 for x in usb.dev.since(m) if x.startswith("[STATS] RPT from WCB2:"))
+    finally:
+        usb.run("?DEBUG,MGMT,OFF")
+    bench.note(f"lines at W1 S3 / W2 S3 of each arm: {results}; {loads} commands from W2 reached W1 under the load")
+    assert results["C"][0] == results["C"][1] == 10, f"the control lost lines - suspect the wires, not the race: {results}"
+    assert loads >= 100, f"only {loads} of W2's commands reached W1 during the loaded arm: the race was not loaded"
+    assert results["L"][0] == 30, f"W1's own port lost lines under the load: {results}"
+    assert results["L"][1] == 30, f"typed lines lost their mesh copy while W2's commands arrived: {results}"
 
 
 def _bind_soft_in_order(bench, *wires):

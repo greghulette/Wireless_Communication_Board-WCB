@@ -764,7 +764,7 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
     for (int i = 0; i < nb.pwmSelfCount; i++) {
       uint8_t prt = nb.pwmSelfPorts[i];
       if (isSerialPortPWMOutput(prt)) continue;   // already an output — nothing to do
-      if (!canUsePWMOnPort(prt, true)) continue;  // reserved (the Kyber's own port, a REMOTE board's
+      if (!canUsePWMOnPort(prt, true) || serialMapOwnsPort(prt, true)) continue;  // reserved (the Kyber's own port, a REMOTE board's
                                                   // S1, a device or local-Maestro port): skip SILENTLY
                                                   // so we don't re-log every 60 s advert. It can flip
                                                   // (a Kyber move, a device clear); the next advert
@@ -1622,7 +1622,7 @@ static void wdpEmitDumpX(const WdpNeighbor &nb) {
 // Summary table — `show cdp neighbors` for the WCB mesh.
 static void printWdpList() {
   Serial.println();
-  Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller link");
+  Serial.println("Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller link  D=DFPlayer");
   Serial.println();
   Serial.printf("%-4s  %-16s  %-10s  %-12s  %-10s  %-5s  %-5s\n",
                 "WCB", "Alias", "Platform", "Cap", "Maestros", "Age", "State");

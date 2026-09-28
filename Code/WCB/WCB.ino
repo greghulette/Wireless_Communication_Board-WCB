@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_271746RSEP2026                                  *****////
+///*****                                          Version 6.2.1_280049RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -197,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_271746RSEP2026";
+String SoftwareVersion = "6.2.1_280049RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -465,23 +465,44 @@ void otaRelayPrint(const char *line) { enqueueRcJsonRelay(String(line)); }
 // An earlier version of this comment claimed the serial path ran inside loop(); it never did.
 //
 // Slot size 220 covers the 200-byte ESP-NOW structCommand plus any CRC
-// suffix that's already been stripped. 8 slots ≈ 1.76 KB heap.
+// suffix that's already been stripped; a longer chain (FRAG reassembly, up to
+// MGMT_MAX_CHUNKS x MGMT_PAYLOAD_SIZE) rides slot.longBuf. 8 slots ≈ 1.8 KB heap.
 constexpr size_t TIMER_CHAIN_QUEUE_SLOTS = 8;
 constexpr size_t TIMER_CHAIN_MAX_LEN     = 220;
 struct PendingTimerChainSlot {
   char buf[TIMER_CHAIN_MAX_LEN];
+  char *longBuf;       // a chain too long for buf - a multi-chunk FRAG or a WCB_Client fragmented unicast carries up
+                       // to a few KB - malloc'd by the enqueuer, freed by the drain; nullptr otherwise
   bool espnowOrigin;   // origin captured at enqueue; restored before parseCommandGroups so
                        // the deferred timer group keeps the right ESP-NOW semantics.
   bool sequenceBody;   // sequence-body flag captured at enqueue; restored before parse so a
                        // nested recall inside a TIMER sequence body is not re-fanned out.
 };
 QueueHandle_t pendingTimerChainQueue = nullptr;
+// Chains a receive path could not queue: counted where it happens (the WiFi task, which must not print - CLAUDE.md
+// rule 11) and reported by the drain in loop(). Both losses were silent: a chain of TIMER_CHAIN_MAX_LEN characters or
+// more was cut mid-token and run, and a full queue dropped it (WCB coverage re-scan #22). A long chain now rides a
+// heap buffer, so what is left is a failed allocation (the heap is small: CLAUDE.md rule 14) or a full queue.
+volatile uint32_t timerChainsNoMemory = 0;
+volatile uint32_t timerChainsDropped = 0;
 
 // Drain on loop() context only. Each parseCommandGroups() call clobbers
 // the previous chain's state (same as before the queue) — if you want
 // multiple chains in flight you'd need a different scheduler.
 static inline void drainPendingTimerChains() {
   if (!pendingTimerChainQueue) return;
+  static uint32_t reportedNoMem = 0, reportedDropped = 0;
+  const uint32_t noMem = timerChainsNoMemory, dropped = timerChainsDropped;
+  if (noMem != reportedNoMem) {
+    Serial.printf("[TIMER] %lu received timer chain(s) not run: no memory for the chain\n",
+                  (unsigned long)(noMem - reportedNoMem));
+    reportedNoMem = noMem;
+  }
+  if (dropped != reportedDropped) {
+    Serial.printf("[TIMER] %lu received timer chain(s) not run: %u already waiting\n",
+                  (unsigned long)(dropped - reportedDropped), (unsigned)TIMER_CHAIN_QUEUE_SLOTS);
+    reportedDropped = dropped;
+  }
   PendingTimerChainSlot slot;
   while (xQueueReceive(pendingTimerChainQueue, &slot, 0) == pdTRUE) {
     // parseCommandGroups snapshots the current globals into commandGroupsEspnowOrigin /
@@ -491,20 +512,38 @@ static inline void drainPendingTimerChains() {
     bool _savedSeqBody       = inSequenceBody;
     lastReceivedViaESPNOW = slot.espnowOrigin;
     inSequenceBody        = slot.sequenceBody;
-    parseCommandGroups(String(slot.buf));
+    parseCommandGroups(String(slot.longBuf ? slot.longBuf : slot.buf));
+    free(slot.longBuf);                   // nullptr for a chain that fit the slot
     lastReceivedViaESPNOW = _savedEspNowOrigin;
     inSequenceBody        = _savedSeqBody;
   }
 }
 
-static inline void enqueuePendingTimerChain(const String& chain) {
+// originEspnow / originSeqBody: -1 snapshots the globals (a caller on the loop task, where they describe the command
+// being run); 0/1 says it outright. The ESP-NOW receive callback always says it: it runs on the WiFi task, and writing
+// the globals there raced the loop task's broadcasts (WCB coverage re-scan #3).
+static inline void enqueuePendingTimerChain(const String& chain, int originEspnow = -1, int originSeqBody = -1) {
   if (!pendingTimerChainQueue) return;
   PendingTimerChainSlot slot;
-  strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
-  slot.buf[sizeof(slot.buf) - 1] = '\0';
-  slot.espnowOrigin = lastReceivedViaESPNOW;   // remember origin for the deferred fire
-  slot.sequenceBody = inSequenceBody;          // ...and whether it came from a sequence body
-  xQueueSend(pendingTimerChainQueue, &slot, 0);
+  slot.longBuf = nullptr;
+  if (chain.length() >= sizeof(slot.buf)) {   // was cut to the slot and run (re-scan #22)
+    slot.longBuf = (char *)malloc(chain.length() + 1);
+    if (!slot.longBuf) {
+      timerChainsNoMemory++;
+      return;
+    }
+    memcpy(slot.longBuf, chain.c_str(), chain.length() + 1);
+    slot.buf[0] = '\0';
+  } else {
+    strncpy(slot.buf, chain.c_str(), sizeof(slot.buf) - 1);
+    slot.buf[sizeof(slot.buf) - 1] = '\0';
+  }
+  slot.espnowOrigin = (originEspnow >= 0) ? (originEspnow != 0) : lastReceivedViaESPNOW;   // for the deferred fire
+  slot.sequenceBody = (originSeqBody >= 0) ? (originSeqBody != 0) : inSequenceBody;        // ...and body-or-not
+  if (xQueueSend(pendingTimerChainQueue, &slot, 0) != pdTRUE) {
+    free(slot.longBuf);
+    timerChainsDropped++;
+  }
 }
 // ETM Board Status Table
 struct BoardStatus {
@@ -628,6 +667,8 @@ bool    wcbPeerReciprocated[MAX_WCB_COUNT] = { false };  // has this learned pee
 #define LEARNED_FLUSH_DEBOUNCE_MS 5000UL     // coalesce a burst of changes into one write
 bool          learnedPeersDirty   = false;
 unsigned long learnedPeersFlushMs = 0;
+// Set by ?ERASE,NVS (eraseNVSFlash): until the restart nothing may write the table back into the erased store.
+bool          learnedPeersFrozen  = false;
 
 // ETM Heartbeat timing
 unsigned long etmNextHeartbeatMs = 0;  // when to send next heartbeat
@@ -656,6 +697,13 @@ PendingMessage etmPendingTable[ETM_PENDING_MAX];
 
 // ETM - Sequence counter
 uint16_t etmSequenceCounter = 0;
+// The next ETM command sequence number. A receiver's duplicate ring uses 0 for an empty slot, so 0 is never sent: the
+// counter used to wrap to it after 65,535 sends (JSON broadcasts count), and a seq-0 command reaching a ring that
+// still had an empty slot for its sender was ACKed and never run (WCB coverage re-scan #19).
+static inline uint16_t nextEtmSeq() {
+  if (++etmSequenceCounter == 0) ++etmSequenceCounter;
+  return etmSequenceCounter;
+}
 
 // ETM - Per-board stats (boardTable already has online/lastSeen from Layer 2)
 unsigned long etmStatsSent[MAX_WCB_COUNT]    = {0};
@@ -745,6 +793,10 @@ bool etmLoadRunning = false;
 unsigned long etmLoadStartTime = 0;
 unsigned long etmLoadLastSendTime = 0;
 int etmLoadRoundRobinIndex = 0;
+// Set by either receive path (WiFi task) on ETMLOAD; processETMLoad (loop) takes it and starts the run, so the run's
+// state and its start line belong to the loop task alone.
+volatile bool etmLoadRequested = false;
+int etmLoadSent = 0;   // frames this run sent, for its closing line
 
 // Delivery confirmation tracking
 unsigned long espnowCommandDelivered = 0;
@@ -957,8 +1009,43 @@ static bool prefixCharOk(char nc, bool isFunc) {
                   isFunc ? "function identifier" : "command character");
     return false;
   }
+  // The delimiter splits every chain before anything reads it, so a prefix equal to it split each command at its own
+  // first character: only an erase-flash got the board back (WCB coverage re-scan #7).
+  if (nc == commandDelimiter) {
+    Serial.printf("'%c' is the command delimiter — every chain would split at it. Pick a different %s.\n",
+                  nc, isFunc ? "function identifier" : "command character");
+    return false;
+  }
   if (nc <= ' ' || nc == 0x7F) {
     Serial.println("Prefix characters must be printable, non-space characters.");
+    return false;
+  }
+  return true;
+}
+
+// ?DELIM and the legacy ?D<x>. The delimiter may not be either prefix: on a board whose function identifier is '!',
+// '!DELIM,!' - or ?DELIM,<c> after ?FUNCCHAR,<c> - split every config line at its own prefix, the setter that would undo
+// it included, and only an erase-flash recovered the board. Nor the comma that separates every command's arguments,
+// which split ?DELIM,^ itself (WCB coverage re-scan #7). The opposite order is safe without a check: a whole line is
+// split on the live delimiter before any setter reads it, so ?FUNCCHAR,<delimiter> arrives as ?FUNCCHAR, and is refused.
+static bool delimCharOk(char nc) {
+  if (nc == LocalFunctionIdentifier || nc == CommandCharacter) {
+    Serial.printf("'%c' is the %s — every command would split at its own prefix. Pick a different delimiter.\n",
+                  nc, nc == LocalFunctionIdentifier ? "function identifier" : "command character");
+    return false;
+  }
+  if (nc == ',') {
+    Serial.println("',' separates every command's arguments. Pick a different delimiter.");
+    return false;
+  }
+  if (nc <= ' ' || nc == 0x7F) {
+    Serial.println("The delimiter must be a printable, non-space character.");
+    return false;
+  }
+  // A letter or digit splits ordinary words: the legacy ?D<x> takes any 2-character line, so the typo ?DE made 'E' the
+  // delimiter and cut ?DEBUG,ON in half (re-scan #8).
+  if (isalnum((unsigned char)nc)) {
+    Serial.printf("'%c' would split ordinary words. Pick a punctuation character for the delimiter.\n", nc);
     return false;
   }
   return true;
@@ -1684,14 +1771,23 @@ static void sendOwnBroadcast(const char *message, bool useETM) {
     lastReceivedViaESPNOW = saved;
 }
 
-void startETMChar() {
+// Returns nullptr once the run has started, else why not (also printed). A relayed request needs the reason: it has
+// latched its requester, who is told and released (handleETMReqPacket).
+const char *startETMChar() {
+    // A second start mid-run re-saved the ALREADY-suppressed debugETM as the state to restore, so the run ended
+    // without turning ?DEBUG,ETM back on (WCB coverage re-scan #17). The relay path had this check; the two local
+    // entry points did not.
+    if (etmCharRunning) {
+        Serial.println("ETM characterization is already running.");
+        return "already running";
+    }
     if (!etmEnabled) {
         Serial.println("ETM is not enabled. Use ?ETMON first.");
-        return;
+        return "ETM is not enabled";
     }
     if (Default_WCB_Quantity < 2) {
         Serial.println("ETM Char requires at least 2 WCBs in the network (?WCBQ).");
-        return;
+        return "fewer than 2 WCBs in the network (?WCBQ)";
     }
 
     // Save and suppress ETM debug for accurate timing
@@ -1718,6 +1814,7 @@ void startETMChar() {
     Serial.println("\n---------- ETM Network Characterization ----------");
     Serial.printf("Messages per board per phase: %d\n", etmCharMessageCount);
     Serial.printf("Phase 1 - Individual Baseline (unicast, no load)...\n");
+    return nullptr;
 }
 
 void processETMChar() {
@@ -1800,10 +1897,10 @@ void processETMChar() {
     } else if (etmCharPhase == 3) {
         if (etmCharPhaseMessageIndex == 0) {
             Serial.println("Triggering network load on all peers...");
-            // MUST go out under ETM. Sent non-ETM it arrives as a plain 249-byte packet, which
-            // every ETM-enabled peer drops on the ETM-mismatch gate — so no peer ever started
-            // generating load and phase 3 "Loaded Network" measured an idle mesh while claiming
-            // otherwise. (processETMLoad on the receiving side was consequently unreachable.)
+            // Under ETM: the only frame an ETM peer takes. Its ETM receive path starts the peer's 10 s generator
+            // (etmLoadRequested -> processETMLoad), which sends untracked ETM frames. Until WCB coverage re-scan #4
+            // that path ACKed ETMLOAD and did nothing, and the generator sent plain frames the peers dropped, so
+            // phase 3 "Loaded Network" measured an idle mesh.
             sendOwnBroadcast("ETMLOAD", true);
         }
 
@@ -1897,7 +1994,19 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     if (latency > r.latencyMax) r.latencyMax = latency;
 }
 
+static void sendEtmCommandUntracked(uint8_t target, const char *message);
+
 void processETMLoad() {
+    if (etmLoadRequested) {
+        etmLoadRequested = false;
+        etmLoadStartTime = millis();
+        etmLoadLastSendTime = 0;
+        etmLoadRoundRobinIndex = 0;
+        etmLoadSent = 0;
+        etmLoadRunning = true;
+        // Ungated, like the closing line: once per ?ETM,CHAR on each peer, and the only sign the load ran.
+        Serial.println("ETM load test started by remote board.");
+    }
     if (!etmLoadRunning) return;
 
     unsigned long now = millis();
@@ -1905,7 +2014,7 @@ void processETMLoad() {
     // Run for 10 seconds
     if (now - etmLoadStartTime > 10000) {
         etmLoadRunning = false;
-        if (debugEnabled) Serial.println("ETM load test complete.");
+        Serial.printf("ETM load test complete: %d frame(s) sent.\n", etmLoadSent);
         return;
     }
 
@@ -1914,19 +2023,22 @@ void processETMLoad() {
         static int loadMsgCount = 0;
         bool sendBcast = (loadMsgCount % 3 == 2);
 
-        // Random-ish test payloads of varying length
+        // Payloads of varying length. Untracked ETM frames (the characterisation needs ETM on, and an ETM peer drops a
+        // plain frame at its mismatch gate), each starting ETMCHAR_: the receiver ACKs it and drops it unrun, so the
+        // load is airtime and ACKs, never text on a peer's ports.
         const char* payloads[] = {
-            "LOAD_TEST_SHORT",
-            "LOAD_TEST_MEDIUM_PAYLOAD",
-            "LOAD_TEST_THIS_IS_A_LONGER_MESSAGE",
-            "LOAD_SHORT2",
-            "LOAD_MED_SIZE_MSG",
-            "LOAD_TEST_FILLER_DATA_123"
+            "ETMCHAR_LOAD_SHORT",
+            "ETMCHAR_LOAD_MEDIUM_PAYLOAD",
+            "ETMCHAR_LOAD_THIS_IS_A_LONGER_MESSAGE",
+            "ETMCHAR_LOAD_S2",
+            "ETMCHAR_LOAD_MED_SIZE_MSG",
+            "ETMCHAR_LOAD_FILLER_DATA_123"
         };
-        String payload = payloads[loadMsgCount % 6];
+        const char *payload = payloads[loadMsgCount % 6];
 
         if (sendBcast) {
-            sendOwnBroadcast(payload.c_str(), false);  // broadcast, not ETM
+            sendEtmCommandUntracked(0, payload);   // broadcast
+            etmLoadSent++;
         } else {
             // Round-robin unicast across the active member peers. Walk the
             // membership set by index (not raw id arithmetic) so a sparse /
@@ -1941,7 +2053,10 @@ void processETMLoad() {
                     seen++;
                 }
                 etmLoadRoundRobinIndex = (etmLoadRoundRobinIndex + 1) % nPeers;
-                if (target != 0) sendESPNowMessage(target, payload.c_str(), false);  // not ETM, just load
+                if (target != 0) {
+                    sendEtmCommandUntracked((uint8_t)target, payload);
+                    etmLoadSent++;
+                }
             }
         }
 
@@ -2433,6 +2548,9 @@ void MeshSerialOutTask(void *parameter) {
 // from one can land between another task setting them and this snapshot reading them, staging the
 // wrong origin for a command. Callers that already know the answer should say so rather than
 // routing it through a global that a concurrent packet can clobber.
+// Set in setup(): enqueueCommand lets this task, and only this one, wait for queue room.
+static TaskHandle_t serialCommandTaskHandle = nullptr;
+
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody) {
   if (!commandQueue) return;
 
@@ -2467,8 +2585,12 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
   strncpy(item.cmd, cmd.c_str(), length);
   item.cmd[length - 1] = '\0';
 
-  // Attempt to enqueue
-  if (xQueueSend(commandQueue, &item, 0) != pdTRUE) {
+  // Attempt to enqueue. Only the serial reader may wait for room: it is its own task, and a pasted ?backup of more
+  // than 200 tokens lost everything past the queue's capacity, one "queue is full" line per token (WCB coverage
+  // re-scan #24). The loop task drains this queue, so it never waits on it, and the WiFi task never blocks (rule 11).
+  const TickType_t wait = (serialCommandTaskHandle && xTaskGetCurrentTaskHandle() == serialCommandTaskHandle)
+                              ? pdMS_TO_TICKS(2000) : 0;
+  if (xQueueSend(commandQueue, &item, wait) != pdTRUE) {
     // If queue is full, free memory - the block, not item.cmd (it points past the lineage)
     Serial.println("Command queue is full! Discarding command.");
     free(block);
@@ -2517,6 +2639,43 @@ bool chainCarriesValueVerb(const String &data) {
     i = nxt + 1;
   }
   return false;
+}
+
+// For a chain that starts with the function identifier: true when some delimited token is a timer token
+// (<cmdChar>T or t, then a digit: ;T800, ;t300,<cmd>) and no token is a checksum (<funcChar>CHK / ?CHK - a verified
+// chain goes through the checksum gate, which the timer path skips). Walked in place: a config restore is a ?-first
+// chain of a few KB and this runs for every line.
+static bool funcFirstChainIsTimed(const String &data) {
+  bool timed = false;
+  const int n = data.length();
+  for (int i = 0; i <= n; ) {
+    int end = data.indexOf(commandDelimiter, i);
+    if (end < 0) end = n;
+    int k = i;
+    while (k < end && data[k] == ' ') k++;
+    if (end - k >= 3 && data[k] == CommandCharacter && (data[k + 1] == 'T' || data[k + 1] == 't') &&
+        isdigit((unsigned char)data[k + 2]))
+      timed = true;
+    if (end - k >= 4 && (data[k] == LocalFunctionIdentifier || data[k] == '?') &&
+        toupper((unsigned char)data[k + 1]) == 'C' && toupper((unsigned char)data[k + 2]) == 'H' &&
+        toupper((unsigned char)data[k + 3]) == 'K')
+      return false;
+    i = end + 1;
+  }
+  return timed;
+}
+
+// Does this chain belong to the timer engine (parseCommandGroups) rather than the plain splitter, which has no ;T - a
+// ;T there printed 'Invalid Serial Command' and the rest of the chain ran at once? Every path that takes a chain asks
+// this one question: the console and WebSocket reader, both ESP-NOW receive paths and the FRAG reassembly. A chain
+// carrying a value verb (?SEQ,SAVE / ?CS / ?MGMT) never does - a ;T in a value is stored, not run. A ;-first chain
+// keeps the loose test it always had. A chain starting with the function identifier needs a real timer token and no
+// checksum; it used to be refused outright, so ?VERSION^;S1a^;T800^;S1b ran both writes together (WCB coverage re-scan
+// #10), as did a multi-chunk FRAG or fragmented client unicast, which skipped the gate altogether.
+bool isTimerChain(const String &data) {
+  if (chainCarriesValueVerb(data)) return false;
+  if (data.length() == 0 || data[0] != LocalFunctionIdentifier) return isTimerCommand(data);
+  return funcFirstChainIsTimed(data);
 }
 
 // If tok is "<curFunc>FUNCCHAR,<c>", return <c> — the character every LATER token in this
@@ -2749,8 +2908,8 @@ void printConfigInfo() {
 
   // ---- Serial Settings ----
   Serial.println("-------------------------------------------------------");
-  loadBaudRatesFromPreferences();
-  loadBroadcastBlockSettings();
+  // The RAM tables, not a fresh read of NVS: every setter keeps them current, so a reload changed nothing - except
+  // after a write NVS refused (full), when it swapped the rate the port runs at for the saved one (re-scan #20).
   printBaudRates();
 
   // Broadcast blocking & monitoring
@@ -2934,7 +3093,7 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     }
     etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = '\0';
     etmMsg.structPacketType = PACKET_TYPE_COMMAND;
-    etmMsg.structSequenceNumber = ++etmSequenceCounter;
+    etmMsg.structSequenceNumber = nextEtmSeq();
 
     // Best-effort JSON telemetry broadcasts (rc_hb / rc_ch etc.) are never ACKed,
     // so tracking them for retries just burns the retry budget and can evict
@@ -3018,8 +3177,9 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
 //
 // Callers must be idempotent-tolerant: nothing retries this, and the shared sequence counter
 // is incremented off two tasks, so a rare collision can cost one frame to peer-side dedup.
+// target 0 = broadcast (the ETM load generator); every receiver ACKs, and nothing here waits for it.
 static void sendEtmCommandUntracked(uint8_t target, const char *message) {
-  if (target < 1 || target > MAX_WCB_COUNT) return;
+  if (target > MAX_WCB_COUNT) return;
   espnow_struct_message_etm etmMsg;
   memset(&etmMsg, 0, sizeof(etmMsg));
   strncpy(etmMsg.structPassword, espnowPassword, sizeof(etmMsg.structPassword) - 1);
@@ -3036,11 +3196,12 @@ static void sendEtmCommandUntracked(uint8_t target, const char *message) {
   } else {
     strncpy(etmMsg.structCommand, message, sizeof(etmMsg.structCommand) - 1);
   }
-  etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = ' ';
+  etmMsg.structCommand[sizeof(etmMsg.structCommand) - 1] = '\0';   // escaped: it was a raw NUL byte in the source
   etmMsg.structPacketType = PACKET_TYPE_COMMAND;
-  etmMsg.structSequenceNumber = ++etmSequenceCounter;
+  etmMsg.structSequenceNumber = nextEtmSeq();
   espnowCommandAttempts++;
-  if (esp_now_send(WCBMacAddresses[target - 1], (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
+  uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
+  if (esp_now_send(mac, (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
     espnowCommandSuccess++;
     espnowCommandDelivered++;
   } else {
@@ -3348,7 +3509,7 @@ void handleMgmtPacket(const uint8_t *data) {
   if (pkt.packetType != PACKET_TYPE_MGMT_FRAG &&
       pkt.packetType != PACKET_TYPE_MGMT_FRAG_UNICAST) return;
 
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
@@ -3430,13 +3591,19 @@ void handleMgmtPacket(const uint8_t *data) {
     //    THIS board. Keep the flag set so broadcastable tokens stay local —
     //    otherwise a WCB_Client unicast would silently become a network-wide
     //    broadcast the moment the command crossed the fragmentation threshold.
-    lastReceivedViaESPNOW = unicastOrigin;
-    inSequenceBody = false;   // reassembled command is top-level, not a sequence body
+    // Stated at the enqueue, not written into the globals: this runs on the WiFi task (espNowReceiveCallback),
+    // and the globals describe the command the loop task is running (WCB coverage re-scan #3).
     // Use parseCommandsAndEnqueue (not enqueueCommand) so that a chained config string
     // like "?SEQ,SAVE,a,val^?SEQ,SAVE,b,val^..." is correctly split into individual
     // commands.  enqueueCommand would hand the whole string to processLocalCommand,
     // which only parses the first command and silently drops everything after it.
-    parseCommandsAndEnqueue(fullCmd, 0);
+    if (isTimerChain(fullCmd)) {
+      // A ;T chain in a multi-chunk FRAG or fragmented client unicast: the timer engine, deferred to loop() like every
+      // receive path. It went straight to the splitter and lost its delays (WCB coverage re-scan #10).
+      enqueuePendingTimerChain(fullCmd, unicastOrigin ? 1 : 0, 0);
+    } else {
+      parseCommandsAndEnqueue(fullCmd, 0, unicastOrigin ? 1 : 0, 0);
+    }
   }
 }
 
@@ -4435,7 +4602,7 @@ void handleStatsReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
   if (debugMGMT) Serial.printf("[MGMT] Stats request from WCB%d\n", pkt.requesterWCB);
   String result = buildStatsString();
@@ -4449,7 +4616,7 @@ void handleSeqReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
 
   // The requester sends SEQ_REQ 3x (see handleMgmtSeqRequest) because a first
@@ -4488,7 +4655,7 @@ void handleSeqValReqPacket(const uint8_t *data) {
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   pkt.key[sizeof(pkt.key) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
 
   String key = String(pkt.key);
@@ -4548,7 +4715,7 @@ void handleETMReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
   if (debugMGMT) Serial.printf("[MGMT] ETM char request from WCB%d\n", pkt.requesterWCB);
   if (etmCharRunning) {
@@ -4556,7 +4723,13 @@ void handleETMReqPacket(const uint8_t *data) {
     return;
   }
   etmCharRelayRequesterWCB = pkt.requesterWCB;
-  startETMChar();
+  if (const char *why = startETMChar()) {
+    // No run means no results to send: tell the requester now and release the latch. Left latched, the requester
+    // waited for nothing, and this board's next LOCAL run sent its results to it (WCB coverage re-scan #18).
+    sendResultFrags(String("ETM characterization could not run on WCB") + String(WCB_Number) + ": " + why,
+                    pkt.requesterWCB, PACKET_TYPE_ETM_FRAG);
+    etmCharRelayRequesterWCB = 0;
+  }
 }
 
 // ── Defer mgmt request responses out of the WiFi receive callback ───────────
@@ -4616,7 +4789,7 @@ void handleStatsFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
@@ -4651,7 +4824,7 @@ void handleSeqFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
@@ -4686,7 +4859,7 @@ void handleSeqValFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
@@ -4721,7 +4894,7 @@ void handleETMFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
@@ -5024,7 +5197,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                            (peek.structCommand[1] == 'P' || peek.structCommand[1] == 'p'));
     // Maestro script triggers are intentionally sent without ETM (fire-and-forget).
     // Allow them through regardless of local ETM mode.
-    bool isMaestroPacket = (peek.structCommand[1] == 'M' || peek.structCommand[1] == 'm');
+    // <cmdChar>M, not any payload whose SECOND byte is M: '?M...' or 'xM...' passed the ETM-mismatch gate too (re-scan
+    // #21). ';' as well, like the PWM test above, for a sender on the default.
+    bool isMaestroPacket = ((peek.structCommand[0] == ';' || peek.structCommand[0] == CommandCharacter) &&
+                            (peek.structCommand[1] == 'M' || peek.structCommand[1] == 'm'));
     // RC-Controller JSON bridge — RC firmware's rcTelemetry::tick() and
     // emit* helpers broadcast JSON over WCBClient WITHOUT ETM wrapping;
     // they're fire-and-forget telemetry (rc_hb / rc_ch / rc_trig / rc_mode)
@@ -5047,7 +5223,9 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     memcpy(&etmReceived, incomingData, sizeof(etmReceived));
     etmReceived.structPassword[sizeof(etmReceived.structPassword) - 1] = '\0';
 
-    if (String(etmReceived.structPassword) != String(espnowPassword)) return;
+    // strncmp at every password gate, never String(a) != String(b): a failed String allocation comes back empty and two
+    // empties compare equal, so the gate passed on a starved heap (CLAUDE.md rule 14; WCB coverage re-scan #26).
+    if (strncmp(etmReceived.structPassword, espnowPassword, sizeof(etmReceived.structPassword)) != 0) return;
     // MAC-octet check was redundant here — already enforced at the top of
     // espNowReceiveCallback (line ~2600).  Removed to avoid duplicate work.
 
@@ -5192,6 +5370,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             return;
         }
 
+        // No guaranteed terminator in a fixed 200-byte field: force one, as the plain path does (re-scan #25).
+        etmReceived.structCommand[sizeof(etmReceived.structCommand) - 1] = '\0';
         String etmCmd = String(etmReceived.structCommand);
 
         // CRC verification if enabled — strip "|CRC<hex>" suffix before further processing
@@ -5223,17 +5403,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         // loop prevention stays intact.
         bool wizardOrigin = (etmCmd.length() > 0 && (uint8_t)etmCmd[0] == 0x01);
         if (wizardOrigin) etmCmd = etmCmd.substring(1);  // strip marker before executing
-        // JSON telemetry (rc_hb / rc_ch / rc_trig / rc_mode / PONG) is consumed by the relay branch
-        // below and NEVER runs as a command, so it must not touch the origin flags. A controller on the
-        // mesh broadcasts rc_ch at 5 Hz; between those packets lastReceivedViaESPNOW stayed true, so the
-        // next locally-typed broadcast looked mesh-originated — its origin is snapshotted when it is
-        // enqueued (WCB.ino:2204) — and the loop-prevention gate in sendESPNowMessage() dropped it
-        // silently. The board's own ports still printed the line, so only the mesh copy went missing,
-        // at random: input.bcast_fanout / input.bcast_too_long_local_only / etm.char_loaded on the bench.
-        if (etmCmd.length() == 0 || etmCmd[0] != '{') {
-            lastReceivedViaESPNOW = !wizardOrigin;
-            inSequenceBody = false;   // received command is top-level, not a sequence body
-        }
+        // The origin flags (lastReceivedViaESPNOW, inSequenceBody) are NOT written here. This is the WiFi task, and
+        // the flags describe the command the LOOP task is running: set from here, a received command landed while
+        // processBroadcastCommand wrote a typed broadcast to the local ports and dropped its mesh copy, silently -
+        // the ports still printed it (WCB coverage re-scan #3). Before that, JSON telemetry at 5 Hz did the same
+        // (input.bcast_fanout). Every command from here is enqueued with its origin stated instead (below).
         colorWipeStatus("ES", green, 200);
 
         if (debugETM) {
@@ -5242,6 +5416,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                         wizardOrigin ? " [wizard]" : "", etmCmd.c_str());
         }
 
+        if (etmCmd.startsWith("ETMLOAD")) etmLoadRequested = true;   // ?ETM,CHAR phase 3 (re-scan #4)
         if (!etmCmd.startsWith("ETMCHAR_") && !etmCmd.startsWith("ETMLOAD")) {
             // ── RC-Controller bridge (JSON passthrough) ─────────────────────
             // RC-Controller firmware (rc_telemetry.h) broadcasts JSON
@@ -5354,12 +5529,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // rewrite ;M<dev>,getX → ;MG<dev>,<sender>,getX so the get-query path routes
             // the reply home (:MQR to a controller like NaviCore, ;M! to a peer WCB).
             maestroRewriteInboundGet(etmCmd, senderWCB);
-            if (!etmCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(etmCmd) &&
-                !chainCarriesValueVerb(etmCmd)) {
+            if (isTimerChain(etmCmd)) {
                 // parseCommandGroups mutates a std::vector iterated by loop();
                 // defer to loop() via the pendingTimerChainQueue (see comment
-                // at the queue's declaration).
-                enqueuePendingTimerChain(etmCmd);
+                // at the queue's declaration). Origin stated, as for the queue below.
+                enqueuePendingTimerChain(etmCmd, wizardOrigin ? 0 : 1, 0);
             } else {
                 // Explicit origin: a wizard-relayed command is NOT mesh-origin (so it may
                 // re-broadcast), anything else on this path is. Passing it beats reading the
@@ -5378,7 +5552,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   memcpy(&received, incomingData, sizeof(received));
   received.structPassword[sizeof(received.structPassword) - 1] = '\0';
 
-  if (String(received.structPassword) != String(espnowPassword)) return;
+  if (strncmp(received.structPassword, espnowPassword, sizeof(received.structPassword)) != 0) return;
 
   int senderWCB = atoi(received.structSenderID);
   int targetWCB = atoi(received.structTargetID);
@@ -5459,24 +5633,32 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     }
 
     const uint8_t *dataPtr = (uint8_t *)(received.structCommand + 2);
+    // Once per local PORT, not per Maestro slot: daisy-chained Maestros share one serial line, so two local ids on it
+    // got every chunk twice and each frame arrived as garbage. The send side has the same mask (sentLocalPorts, in the
+    // Kyber forwarders); this side lacked it (WCB coverage re-scan #11).
+    uint8_t wrotePorts = 0;
+    auto writeOncePerPort = [&](int port) {
+      if (port < 1 || port > 5 || (wrotePorts & (1 << port))) return;
+      wrotePorts |= (uint8_t)(1 << port);
+      meshSerialWrite(port, dataPtr, chunkLen);
+    };
     if (Kyber_Local) {
       // Write to every locally configured Maestro port
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          meshSerialWrite(maestroConfigs[i].serialPort, dataPtr, chunkLen);
+          writeOncePerPort(maestroConfigs[i].serialPort);
         }
       }
       // Also echo back to the local Kyber port
-      if (kyberLocalPort > 0) meshSerialWrite(kyberLocalPort, dataPtr, chunkLen);
+      if (kyberLocalPort > 0) writeOncePerPort(kyberLocalPort);
     } else if (Maestro_Remote) {
       // Write to every locally configured Maestro port
-      bool wroteAny = false;
       for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
         if (maestroConfigs[i].configured && maestroConfigs[i].remoteWCB == 0 && maestroConfigs[i].serialPort > 0) {
-          meshSerialWrite(maestroConfigs[i].serialPort, dataPtr, chunkLen);
-          wroteAny = true;
+          writeOncePerPort(maestroConfigs[i].serialPort);
         }
       }
+      const bool wroteAny = (wrotePorts != 0);
       // Backward-compat fallback: if no local Maestro configs exist yet,
       // write to Serial1 (the legacy hardcoded port) so boards that haven't
       // been reconfigured still work.
@@ -5523,12 +5705,8 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
-  // Normal command for this board. JSON telemetry is consumed by the relay branch below without ever
-  // running as a command, so it leaves the origin flags alone — same reason as the ETM path above.
-  if (received.structCommand[0] != '{') {
-    lastReceivedViaESPNOW = true;
-    inSequenceBody = false;   // received command is top-level, not a sequence body
-  }
+  // Normal command for this board. The origin flags are not written on the WiFi task (see the ETM branch
+  // above); the command is enqueued below with its origin stated.
   colorWipeStatus("ES", green, 200);
 
   if (targetWCB != 0 && targetWCB != WCB_Number) {
@@ -5553,15 +5731,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   bool wizardOriginPlain = (receivedCmd.length() > 0 && (uint8_t)receivedCmd[0] == 0x01);
   if (wizardOriginPlain) {
     receivedCmd = receivedCmd.substring(1);
-    lastReceivedViaESPNOW = false;
   }
 
   if (receivedCmd.startsWith("ETMLOAD")) {
-    etmLoadRunning = true;
-    etmLoadStartTime = millis();
-    etmLoadLastSendTime = 0;
-    etmLoadRoundRobinIndex = 0;
-    if (debugEnabled) Serial.println("ETM load test started by remote board.");
+    etmLoadRequested = true;   // processETMLoad starts it on the loop task
     return;
   }
   if (receivedCmd.startsWith("ETMCHAR_")) {
@@ -5603,11 +5776,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       Serial.printf("Processing ESP-NOW input: %s\n", receivedCmd.c_str());
   // Native Maestro read over the mesh → reply to the SENDER (see the ETM branch above).
   maestroRewriteInboundGet(receivedCmd, senderWCB);
-  if (!receivedCmd.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(receivedCmd) &&
-      !chainCarriesValueVerb(receivedCmd)) {
+  if (isTimerChain(receivedCmd)) {
     // Same race-avoidance as the ETM branch above: defer parseCommandGroups
-    // to loop() via the queue (see pendingTimerChainQueue comment).
-    enqueuePendingTimerChain(receivedCmd);
+    // to loop() via the queue (see pendingTimerChainQueue comment), origin stated.
+    enqueuePendingTimerChain(receivedCmd, wizardOriginPlain ? 0 : 1, 0);
   } else {
     // Same explicit origin as the ETM branch — see the note there.
     parseCommandsAndEnqueue(receivedCmd, 0, wizardOriginPlain ? 0 : 1, 0);
@@ -5825,6 +5997,16 @@ void handleSingleCommand(const String &cmd, int sourceID) {
 }
 
 
+// The legacy ?S<port><0|1> / ?S<port><baud> forms (updateSerialSettings): S, a port 1-5, then digits only. The
+// legacy 'S' branch took ANY unmatched ?S... - ?STAT, ?SBAUDS1,9600, ?S69600 - and dropped it with no 'Unknown
+// command' (WCB coverage re-scan #8).
+static bool isLegacySerialSetting(const String &m) {
+  if (m.length() < 3 || (m[0] != 's' && m[0] != 'S') || m[1] < '1' || m[1] > '5') return false;
+  for (unsigned i = 2; i < m.length(); i++)
+    if (!isdigit((unsigned char)m[i])) return false;
+  return true;
+}
+
 void processLocalCommand(const String &message) {
 
     // ---- Help: bare ? or HELP ----
@@ -5853,6 +6035,9 @@ void processLocalCommand(const String &message) {
                            // funcChar could never be returned to the default except by ?ERASE,NVS.
                            message.startsWith("FUNCCHAR,") || message.startsWith("funcchar,") ||
                            message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,") ||
+                           // DELIM likewise: '?DELIM,?' printed the whole help page, so it never reached the setter's
+                           // refusal (delimCharOk); '?DELIM?' still asks for help.
+                           message.startsWith("DELIM,")    || message.startsWith("delim,") ||
                            // WIFI carries an SSID and a WPA2 passphrase, both of which may
                            // legally end in '?' (ASCII 32-126 is all valid). Without this,
                            // "?WIFI,AP,R2,letmein?" is eaten as a help request: the operator
@@ -5879,6 +6064,14 @@ void processLocalCommand(const String &message) {
     // ========================================
     // NEW FORMAT COMMANDS
     // ========================================
+
+    // --- ?STOP --- stops the running timer chain. A typed whole line is caught before the queue
+    // (processSerialCommandHelper) and a ?STOP group by the timer engine, but one from the mesh, a FRAG or a plain chain
+    // lands here - and fell into the legacy 's' catch-all below, ACKed and ignored (WCB coverage re-scan #9).
+    if (rootUpper == "STOP" && args.length() == 0) {
+        stopTimerSequence();
+        return;
+    }
 
     // --- ?DEBUG,... ---
     if (rootUpper == "DEBUG") {
@@ -6095,6 +6288,10 @@ void processLocalCommand(const String &message) {
             }
             String label = args.substring(secondComma + 1);
             label.trim();
+            if (label.length() > 30) {   // the legacy ?SLS, the help and the Wizard all cap it (re-scan #27)
+                Serial.println("Label too long. Maximum 30 characters.");
+                return;
+            }
             saveSerialLabelToPreferences(port, label);
         } else {
             Serial.println("Invalid LABEL command. Use: ?LABEL ?");
@@ -6287,6 +6484,21 @@ void processLocalCommand(const String &message) {
         }
         String octet = args.substring(0, secondComma);
         String hexVal = args.substring(secondComma + 1);
+        hexVal.trim();
+        if (octet != "2" && octet != "3") {
+            Serial.println("Invalid octet. Use 2 or 3");
+            return;
+        }
+        // One or two hex digits and nothing else, as the legacy ?M2/?M3 check. strtoul with no end check turned 'ZZ' or
+        // an empty value into 0x00 and '1FF' into 0xFF, saved it, and took the board off its mesh group (WCB coverage
+        // re-scan #5).
+        bool hexOk = hexVal.length() >= 1 && hexVal.length() <= 2;
+        for (unsigned i = 0; hexOk && i < hexVal.length(); i++) hexOk = isxdigit((unsigned char)hexVal[i]);
+        if (!hexOk) {
+            Serial.printf("Invalid hex value for %s MAC octet. Use two hex digits (00-FF).\n",
+                          octet == "2" ? "2nd" : "3rd");
+            return;
+        }
         int newValue = strtoul(hexVal.c_str(), NULL, 16);
         if (octet == "2") {
             umac_oct2 = static_cast<uint8_t>(newValue);
@@ -6296,8 +6508,6 @@ void processLocalCommand(const String &message) {
             umac_oct3 = static_cast<uint8_t>(newValue);
             saveMACPreferences();
             Serial.printf("Updated 3rd MAC octet to 0x%02X\n", umac_oct3);
-        } else {
-            Serial.println("Invalid octet. Use 2 or 3");
         }
         return;
     }
@@ -6600,6 +6810,7 @@ void processLocalCommand(const String &message) {
     // --- ?DELIM,x ---
     if (rootUpper == "DELIM") {
         if (args.length() == 1) {
+            if (!delimCharOk(args.charAt(0))) return;
             setCommandDelimiter(args.charAt(0));
             Serial.printf("Delimiter updated to: '%c'\n", commandDelimiter);
         } else {
@@ -6754,12 +6965,13 @@ void processLocalCommand(const String &message) {
     } else if (message.startsWith("dhcron") || message.startsWith("DHCRON")) {
         debugHCR = true;
         Serial.println("HCR debugging enabled");
-    } else if (message.startsWith("lf") || message.startsWith("LF")) {
-        updateLocalFunctionIdentifier(message);
+    } else if ((message.startsWith("lf") || message.startsWith("LF")) && message.length() <= 3) {
+        updateLocalFunctionIdentifier(message);   // ?LF<c> only: a longer word is a typo, not a setter (re-scan #8)
     } else if (message.equals("cclear") || message.equals("CCLEAR")) {
         clearAllStoredCommands();
         Serial.println("All stored sequences cleared");
-    } else if (message.startsWith("cc") || message.startsWith("CC")) {
+    } else if ((message.startsWith("cc") || message.startsWith("CC")) && message.length() <= 3) {
+        // ?CC<c> only: ?CCLEAR,ALL (a plausible ?SEQ,CLEAR,ALL) saved 'L' as the command character (re-scan #8).
         updateCommandCharacter(message);
     } else if (message.startsWith("cs") || message.startsWith("CS")) {
         storeCommand(message);
@@ -6951,8 +7163,10 @@ void processLocalCommand(const String &message) {
             int port = message.substring(5, commaPos).toInt();
             int baud = message.substring(commaPos + 1).toInt();
             updateBaudRate(port, baud);
+        } else {
+            Serial.println("Invalid format. Use ?BAUDSx,yyyyy (e.g., ?BAUDS1,57600)");   // was silent (re-scan #28)
         }
-    } else if (message.startsWith("s") || message.startsWith("S")) {
+    } else if (isLegacySerialSetting(message)) {
         updateSerialSettings(message);
     } else {
         Serial.printf("Unknown command: %s\n", message.c_str());
@@ -7025,6 +7239,7 @@ void eraseSingleCommand(const String &message){
 void updateCommandDelimiter(const String &message){
   if (message.length() >= 2) {  // <-- Change from == 2 to >= 2
     char newDelimiter = message.charAt(1);
+    if (!delimCharOk(newDelimiter)) return;   // same guard as ?DELIM
     setCommandDelimiter(newDelimiter);
     Serial.printf("Command delimiter updated to: '%c'\n", newDelimiter);
   } else {
@@ -7269,7 +7484,9 @@ void updateSerialSettings(const String &message){
     if (port >= 1 && port <= 5) {
       Serial.println("⚠️  Command is being deprecated: Use ?BAUDSx,yyyyy instead (e.g., ?BAUDS1,57600).  This command will still function for now but may be removed in future versions.");
       updateBaudRate(port, baud);
-      Serial.printf("Updated Serial%d baud rate to %d and stored in NVS\n", port, baud);
+      // updateBaudRate says why when it refuses; only a rate the port now runs at was stored (re-scan #28).
+      if (baudRates[port - 1] == (unsigned long)baud)
+        Serial.printf("Updated Serial%d baud rate to %d and stored in NVS\n", port, baud);
     }
   }
 }
@@ -7799,6 +8016,11 @@ void recallStoredCommand(const String &message, int sourceID) {
         Serial.printf("No command stored under key: '%s'\n", key.c_str());
         return;
     }
+    // Before the fan-out as well as in recallCommandSlot: every peer would run its own name list (seqKeyReserved).
+    if (seqKeyReserved(key)) {
+        Serial.printf("'%s' is a reserved name, not a sequence.\n", key.c_str());
+        return;
+    }
 
     // Fan the trigger out to the mesh — but ONLY for a genuine mesh-scoped top-level trigger:
     // not the local-only ",L" form, not one that arrived over the mesh, and not a nested body
@@ -7978,6 +8200,10 @@ void printPinSettings() {
 /// Processing Broadcast Function
 //*******************************
 void processBroadcastCommand(const String &cmd, int sourceID) {
+    // The mesh decision is taken NOW, from the origin loop() restored for this command, not after the local ports
+    // are written: a soft-port write blocks until its bytes are on the wire, and anything that changed the global in
+    // that window used to decide whether this broadcast reached the mesh (WCB coverage re-scan #3).
+    const bool meshOrigin = lastReceivedViaESPNOW;
     if (debugEnabled) {
         Serial.printf("Broadcasting command: %s\n", cmd.c_str());
     }
@@ -8117,8 +8343,10 @@ void processBroadcastCommand(const String &cmd, int sourceID) {
     // as an ETM frame but UNTRACKED (bestEffortTelemetry), so it is never retried. The
     // double-processing seen on the bench came from WCB_Client's ensured broadcast, and is
     // fixed there - forcing useETM=false here only changed the frame format.
-    sendESPNowMessage(0, cmd.c_str());
-    if (debugEnabled && !lastReceivedViaESPNOW) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    if (!meshOrigin) {          // a broadcast that came over the mesh is never sent back into it (rule 3)
+        sendESPNowMessage(0, cmd.c_str());
+        if (debugEnabled) { Serial.printf("Broadcasted via ESP-NOW: %s\n", cmd.c_str()); }
+    }
 }
 
 // processIncomingSerial for each serial port
@@ -8144,6 +8372,10 @@ static inline void releaseLineBuffer(String &buf) {
   if (buf.length() > 512) buf = (const char *)nullptr;
   else buf = "";
 }
+
+// The longest line a port may assemble. A device port: 4 KB, far above any real device line (a WDP-DA announce, a
+// command). USB: 32 KB, because a whole ?backup chain is pasted there as one line.
+static inline unsigned serialLineMax(int sourceID) { return sourceID == 0 ? 32768u : 4096u; }
 
 void processIncomingSerial(Stream &serial, int sourceID) {
   // The ownership checks below come BEFORE available(): on S3-S5 available() runs
@@ -8180,6 +8412,7 @@ void processIncomingSerial(Stream &serial, int sourceID) {
   if (!serial.available()) return;  // Exit if no data available
 
   static String serialBuffers[6];  // one for each serial port (0 = Serial, 1–5 = Serial1-5)
+  static bool serialLineOverflow[6];   // this port's line passed serialLineMax; reset at its line end
   String &serialBuffer = serialBuffers[sourceID];
   while (serial.available()) {
     if (sourceID != 0 && sourceID == maestroQueryPort) break;   // a get-query claimed this port mid-drain
@@ -8190,6 +8423,11 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     // to every port and the mesh as an EMPTY command and the real command was lost (tracker #79).
     if (c == '\0') continue;
     if (c == '\r' || c == '\n') {  // End of command
+      if (serialLineOverflow[sourceID]) {   // dropped whole: its head, run alone, would lose its ^?CHK and its tail
+        serialLineOverflow[sourceID] = false;
+        releaseLineBuffer(serialBuffer);
+        continue;
+      }
       if (!serialBuffer.isEmpty()) {
           serialBuffer.trim();  // Remove leading/trailing spaces
           // WDP-DA: a device on this port self-identifying with "@WDP1 {json}"
@@ -8207,12 +8445,10 @@ void processIncomingSerial(Stream &serial, int sourceID) {
               Serial.printf("Processing input from Serial%d: %s\n", sourceID, serialBuffer.c_str());
           }
 
-          // Reset last received flag since we are reading from Serial
-          lastReceivedViaESPNOW = false;
-          // A console command is always top-level, never a sequence body. Reset here too
-          // (mirrors lastReceivedViaESPNOW) so a value left over from a prior recall's body
-          // drain cannot latch and suppress this recall's mesh fan-out.
-          inSequenceBody = false;
+          // A console or port command is local and top-level. processSerialCommandHelper says so at every enqueue
+          // and to the timer engine (origin 0/0); nothing here writes lastReceivedViaESPNOW or inSequenceBody. This is
+          // serialCommandTask, not loop(): it shares core 1, and a write from here could land while loop() ran a
+          // mesh-received command and make it look local (WCB coverage re-scan #3).
 
           // Process the command
           processSerialCommandHelper(serialBuffer, sourceID);
@@ -8220,8 +8456,18 @@ void processIncomingSerial(Stream &serial, int sourceID) {
             // Clear buffer for next command (and give a long line's heap back)
           releaseLineBuffer(serialBuffer);
       }
-    } else {
+    } else if (serialLineOverflow[sourceID]) {
+      // the rest of an over-long line: dropped up to its end
+    } else if (serialBuffer.length() < serialLineMax(sourceID)) {
       serialBuffer += c;
+    } else {
+      // A device that never sends a line end - or streams binary at the wrong baud - grew this String until the
+      // allocation failed; in AP mode the whole byte heap is ~19 KB (CLAUDE.md rule 14). The whole line is dropped
+      // at its end: run alone, its head would lose the ^?CHK that verifies it and cut its last token mid-value
+      // (WCB coverage re-scan #23).
+      serialLineOverflow[sourceID] = true;
+      releaseLineBuffer(serialBuffer);
+      Serial.printf("[SERIAL] S%d: line longer than %u characters - dropped\n", sourceID, serialLineMax(sourceID));
     }
   }
 }
@@ -8296,7 +8542,7 @@ void processSerialCommandHelper(String &data, int sourceID) {
                 // enqueueCommand ran the lot as a single mangled command. Hand off to the worker
                 // (NOT parseCommandsAndEnqueue, which would re-enter the checksum gate and abort a
                 // payload legitimately containing an earlier checksum token).
-                parseCommandsNoChecksum(cmdWithoutChecksum, sourceID, -1, -1);
+                parseCommandsNoChecksum(cmdWithoutChecksum, sourceID, 0, 0);   // console/WebSocket: local
             } else {
                 Serial.println("✗ Command checksum FAILED!");
                 Serial.println("  Provided:   " + providedChecksum);
@@ -8306,28 +8552,26 @@ void processSerialCommandHelper(String &data, int sourceID) {
         } else {
             // No checksum — parse and enqueue normally so that chained strings
             // like "?CMDCHAR,;^?SEQ,SAVE,key,val^..." split into separate commands
-            // instead of being swallowed whole by processLocalCommand.
-            parseCommandsAndEnqueue(data, sourceID);
+            // instead of being swallowed whole by processLocalCommand. A chain with a real
+            // ;T token goes to the timer engine, as it would below (?CONFIG^;S1a^;T800^;S1b).
+            if (isTimerChain(data)) parseCommandGroups(data, sourceID, 0, 0);
+            else                    parseCommandsAndEnqueue(data, sourceID, 0, 0);   // console/WebSocket: local
             return;
         }
     }
 
-    // Timer-aware parsing: if command contains <CmdChar>T or <CmdChar>t, use grouped mode.
-    // Skip this for LocalFunctionIdentifier commands — the timer token may be
-    // embedded inside a sequence VALUE (e.g. ?SEQ,SAVE,key,;t500,CMD^...) and
-    // must NOT trigger group parsing.  parseCommandGroups splits naively on the
-    // delimiter, which would only save the first step of the sequence and execute
-    // the rest as independent commands.  All ?-prefixed commands go through
-    // parseCommandsAndEnqueue which has proper ?SEQ,SAVE boundary logic.
-    // isTimerCommand() uses the live CommandCharacter variable — no hardcoding.
-    if (!data.startsWith(String(LocalFunctionIdentifier)) && isTimerCommand(data) &&
-        !chainCarriesValueVerb(data)) {
-        parseCommandGroups(data, sourceID);   // keep the source port across the timer path
+    // Timer-aware parsing (isTimerChain): a chain with a ;T group runs grouped. Not one that carries a value verb:
+    // parseCommandGroups splits naively on the delimiter, so ?SEQ,SAVE,key,;t500,CMD^... would store the first step
+    // and run the rest; parseCommandsAndEnqueue has the ?SEQ,SAVE boundary logic.
+    if (isTimerChain(data)) {
+        parseCommandGroups(data, sourceID, 0, 0);   // keep the source port; console/WebSocket: local
         return;
     }
 
-    // USE parseCommandsAndEnqueue for ALL other cases
-    parseCommandsAndEnqueue(data, sourceID);
+    // USE parseCommandsAndEnqueue for ALL other cases. Its only callers are the serial reader and the WebSocket
+    // endpoint, so the origin is local, stated rather than snapshotted: loop() restores a queued command's origin
+    // into the same global, and the two tasks share core 1 (WCB coverage re-scan #3, second window).
+    parseCommandsAndEnqueue(data, sourceID, 0, 0);
 }
 
 
@@ -8901,6 +9145,7 @@ void syncActivePeerRegistrations() {
 // nothing else to store. Fingerprinted with the MAC octets so a mesh-group
 // change auto-invalidates the table instead of registering wrong-group peers.
 void saveLearnedPeers() {
+  if (learnedPeersFrozen) return;
   uint32_t mask = 0;
   for (int i = 0; i < MAX_WCB_COUNT; i++)
     if (wcbPeerLearned[i]) mask |= (1UL << i);
@@ -9091,6 +9336,11 @@ void setup() {
   // Mesh bytes for protected soft ports: written by loop(), never the WiFi task (meshSerialWrite).
   meshSerialOutQueue = xQueueCreate(MESH_SERIAL_OUT_SLOTS, sizeof(MeshSerialOutSlot));
 
+  // WCB_Number FIRST: it is one NVS read with no side effects, and the loads below read it. initPWM() drops a saved
+  // output's W<n> when n is this board (WCB_PWM.cpp) and wdpBegin() phases the adverts by it. Loaded after them, it
+  // still held its default of 1, so on every board but WCB1 a saved output to W1 came back as a LOCAL port - pulses
+  // left this board's own pin - and every board advertised in WCB1's slot (WCB coverage re-scan #1, #16).
+  loadWCBNumberFromPreferences();
   loadHWversion();
   loadStatusLEDPin();     // Override default LED pin if saved in NVS
   loadMaestroSettings();  // Load Maestro configurations from NVS
@@ -9108,9 +9358,7 @@ void setup() {
   loadKyberTargets();
   printResetReason();      // Show the exact cause of reset
   printBootloaderInfo();   // CUSTOM short-WDT bootloader vs stock
-  loadWCBNumberFromPreferences();
-  // Repair any legacy remote-to-self Maestro slot now that WCB_Number is known
-  // (loadMaestroSettings() above ran before this, with WCB_Number still default).
+  // Repair any legacy remote-to-self Maestro slot (WCB_Number was loaded first, above).
   normalizeMaestroSelfSlots();
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
@@ -9449,7 +9697,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // Record the bridge tasks FIRST: serialCommandTask consults these on its first pass.
   kyberLocalTaskStarted  = Kyber_Local;
   kyberRemoteTaskStarted = Maestro_Remote;
-  xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(serialCommandTask, "Serial Command Task", 4096, NULL, 1, &serialCommandTaskHandle, 1);
 
   // If bridging is enabled, create the bridging task
   if (kyberLocalTaskStarted) {
@@ -9586,6 +9834,12 @@ void loop() {
       restartWaitStarted = false;
       // Ungated: nothing else shows that commands were still arriving when the restart went.
       restartImminent = true;             // from here on no ETM command is ACKed (see its declaration)
+      // A learned-membership change is written LEARNED_FLUSH_DEBOUNCE_MS (5 s) after it, and this restart can come 4 s
+      // after the last command: ?WDP,ADD^?reboot came back without the ADD (WCB coverage re-scan #6).
+      if (learnedPeersDirty) {
+        saveLearnedPeers();
+        learnedPeersDirty = false;
+      }
       if (!quiet)
         Serial.printf("Restart held off %lu s by commands that kept arriving - restarting anyway\n",
                       (now - restartWaitSinceMs) / 1000UL);

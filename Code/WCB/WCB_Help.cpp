@@ -25,8 +25,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nCommands:"));
         Serial.println(F("  ON                Enable main debug output"));
         Serial.println(F("  OFF               Disable main debug output"));
-        Serial.println(F("  KYBER,ON          Enable Kyber serial forwarding debug"));
-        Serial.println(F("  KYBER,OFF         Disable Kyber serial forwarding debug"));
+        Serial.println(F("  MAESTRO,ON        Enable Maestro and Kyber frame debug"));
+        Serial.println(F("  MAESTRO,OFF       Disable it (KYBER,ON / KYBER,OFF set the same flag)"));
         Serial.println(F("  PWM,ON            Enable PWM passthrough debug"));
         Serial.println(F("                      Shows pulse widths and output routing"));
         Serial.println(F("  PWM,OFF           Disable PWM passthrough debug"));
@@ -53,7 +53,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - PWM debug will print for every pulse received"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?DON / ?DOFF           - Main debug"));
-        Serial.println(F("  ?DKON / ?DKOFF         - Kyber debug"));
+        Serial.println(F("  ?DMON / ?DMOFF         - Maestro/Kyber debug (also ?DKON / ?DKOFF)"));
         Serial.println(F("  ?DPWMON / ?DPWMOFF     - PWM debug"));
         Serial.println(F("  ?DETMON / ?DETMOFF     - ETM debug"));
 
@@ -135,7 +135,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Default baud rate for all ports is 9600"));
         Serial.println(F("  - Maestro servo controllers require 57600"));
-        Serial.println(F("  - Configure a Maestro with ?MAESTRO,<id>:S<port>:<baud> (see ?MAESTRO)"));
+        Serial.println(F("  - Configure a Maestro with ?MAESTRO,M<id>:W<wcb>S<port>:<baud> (see ?MAESTRO)"));
         Serial.println(F("  - Saved to NVS, persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?BAUDSx,rate  (e.g. ?BAUDS1,57600)"));
@@ -167,7 +167,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Labels appear in debug serial output when enabled"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?SLSx,label   - Set label  (e.g. ?SLS1,Marcduino)"));
-        Serial.println(F("  ?SLCSx        - Clear label (e.g. ?SLC1)"));
+        Serial.println(F("  ?SLCSx        - Clear label (e.g. ?SLCS1)"));
 
     // ================================================================
     } else if (c == "BCAST") {
@@ -312,7 +312,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - Boards not yet seen via heartbeat will still receive commands"));
         Serial.println(F("  - Run ?ETM,CHAR before setting TIMEOUT for best results"));
         Serial.println(F("  - Settings saved to NVS and persist across reboots"));
-        Serial.println(F("  - CHKSM adds 12 bytes overhead, reducing max command to 188 chars"));
+        Serial.println(F("  - CHKSM adds 12 bytes overhead, reducing max command to 187 chars"));
         Serial.println(F("  - CHKSM must match across all boards or all packets are rejected"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?ETMON / ?ETMOFF"));
@@ -345,7 +345,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  - ALL boards in the same system must have identical octets 2 and 3"));
         Serial.println(F("  - Default value is 0x00 for both octets"));
         Serial.println(F("  - Full MAC format: 02:xx:xx:00:00:WCB# (xx = your octets)"));
-        Serial.println(F("  - Reboot required after changing MAC octets"));
+        Serial.println(F("  - The receive filter changes at once, so this board stops hearing the old group;"));
+        Serial.println(F("    its own address and its peers' change at the next reboot - reboot every board"));
         Serial.println(F("  - Saved to NVS and persists across reboots"));
         Serial.println(F("\nLegacy commands:"));
         Serial.println(F("  ?M2xx   (e.g. ?M2AB)"));
@@ -386,7 +387,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  commands. Each board in a system must have a unique number."));
         Serial.println(F("  WCB1 is typically the primary/master board."));
         Serial.println(F("\nParameters:"));
-        Serial.println(F("  number        1-9, must be unique in the system"));
+        Serial.println(F("  number        1-20, must be unique in the system"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?WCB,1         - Set this board as WCB1"));
         Serial.println(F("  ?WCB,2         - Set this board as WCB2"));
@@ -487,7 +488,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    legacy Maestro on S1 (device id = WCB number) - unless S1 is the Kyber port or"));
         Serial.println(F("    an HCR/MP3/DFPlayer/WLED/PWM port, when nothing is sent."));
         Serial.println(F("\nLegacy commands:"));
-        Serial.println(F("  ?MAESTRO_LIST / ?MAESTRO_CLEAR,x / ?MAESTRO_DEFAULT"));
+        Serial.println(F("  ?MAESTRO_LIST / ?MAESTRO_CLEAR (every slot) / ?MAESTRO_DEFAULT"));
         Serial.println(F("  ?MAESTROconfig    (e.g. ?MAESTROM1:W1S1:57600)"));
 
     // ================================================================
@@ -832,7 +833,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ;V,volume,INC,5                - volume += 5 (volatile)"));
         Serial.println(F("  ;VP,startupmode,2              - persist a setting to NVS"));
         Serial.println(F("  IF,domeanimations=1^;M11       - run M1 sub1 only if flag is 1"));
-        Serial.println(F("  IF,mode>2,AND,armed=1^;PP100   - compound condition"));
+        Serial.println(F("  IF,mode>2,AND,armed=1^;M13     - compound condition"));
         Serial.println(F("  IF,flag=1^;t500^;M2,goHome     - if flag, wait 500ms, then home"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - IF gates its next command; ;t delays between them are fine"));
@@ -1193,7 +1194,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\n  INITIAL SETUP (do this first on a new board):"));
         Serial.println(F("    ?HW,x           Set hardware version (required before anything else)"));
         Serial.println(F("    ?LED,PIN,x      Set NeoPixel LED GPIO pin (HW 3.1/3.2, saved to NVS)"));
-        Serial.println(F("    ?WCB,x          Set this board's number (1-9)"));
+        Serial.println(F("    ?WCB,x          Set this board's number (1-20)"));
         Serial.println(F("    ?WCBQ,x         Set total boards in system"));
         Serial.println(F("    ?MAC,2,xx       Set 2nd MAC group octet (all boards must match)"));
         Serial.println(F("    ?MAC,3,xx       Set 3rd MAC group octet (all boards must match)"));

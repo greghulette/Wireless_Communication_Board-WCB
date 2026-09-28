@@ -20,7 +20,8 @@ import time
 from contextlib import contextmanager
 
 from hil.runner import Skip, test
-from suites.common import Console, Watch, config_guard, link, marker, nonce, require_tokens, snapshot, usb_wcb
+from suites.common import Console, Watch, config_guard, link, marker, nonce, require_tokens, snapshot, token, usb_wcb
+from suites.s22_maestro_kyber import _wdp_off
 
 LEARNED = {"HCR": ("HCR", "H"), "MP3": ("MP3", "A"), "DFP": ("DFPlayer", "D")}
 
@@ -1499,4 +1500,43 @@ def soft_ports_fast_baud(bench):
             _clear_all_w2(c2)
             _relabel(c2, before[2], "S3", "S4")
             _unlearn(bench, "MP3", learner=1)
+    assert not problems, "; ".join(problems)
+
+
+@test("devices.maestro_port_refused", "A local Maestro's port refuses a WLED, an MP3 Trigger, a DFPlayer and an HCR ('S2 is a local Maestro's port - config blocked'), and a port a WLED holds refuses a local Maestro; each refusal changes nothing (re-scan #15; W1's WDP off)", needs=["wcb1"], links=[])
+def maestro_port_refused(bench):
+    """WCB coverage re-scan #15 (docs/hil_plan/WCB.md WCB-WP26 row 3). The HCR, MP3, DFPlayer and WLED guards checked
+    each other, PWM and the Kyber but never a local Maestro, and a local ?MAESTRO add checked only the Kyber port: a
+    Maestro and a device could share a UART, and one module's CLEAR reset the port's baud and flags under the other.
+    The existing '... already in use by ...' lines are matched by tests and tools, so the Maestro conflict has its own
+    line. W1's WDP is off throughout, so no board or client learns the throwaway Maestro 5 or WLED 5 (s22's rules)."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        with _wdp_off(w, before[1]):
+            undo = []
+            try:
+                out = w.run("?MAESTRO,M5:W1S2:9600")
+                if not _has(out, "Maestro 5: Local S2 at 9600 baud"):
+                    raise AssertionError(f"setup: ?MAESTRO,M5:W1S2:9600 printed {out}")
+                undo.append("?MAESTRO,CLEAR,M5:W1S2")
+                for cmd, kind in (("?WLED,5:W1S2:9600", "WLED"), ("?MP3,S2:9600:V20", "MP3"), ("?DFP,S2", "DFP"),
+                                  ("?HCR,PORT,S2:9600", "HCR")):
+                    out = [x.rstrip() for x in w.run(cmd)]
+                    if f"[{kind}] S2 is a local Maestro's port - config blocked" not in out:
+                        problems.append(f"{cmd} beside Maestro 5 printed {out}")
+                w.run(undo.pop())
+                out = w.run("?WLED,5:W1S2:9600")
+                if not _has(out, "[WLED] WLED 5: local S2 at 9600 baud"):
+                    raise AssertionError(f"setup: ?WLED,5:W1S2:9600 printed {out}")
+                undo.append("?WLED,CLEAR,5")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S2:9600")]
+                if "❌ Maestro 5: S2 is the WLED port - use another port, or clear it first." not in out:
+                    problems.append(f"?MAESTRO,M5:W1S2:9600 beside WLED 5 printed {out}")
+            finally:
+                for cmd in reversed(undo):
+                    w.run(cmd)
+                # A WLED labels its port 'WLED <id>' and its CLEAR empties the label (s24 pins both), so S2's own
+                # label goes back by hand.
+                w.run(token(before[1], "?LABEL,S2,") or "?LABEL,CLEAR,S2")
     assert not problems, "; ".join(problems)

@@ -24,6 +24,7 @@ extern Stream      &getSerialStream(int port);
 extern void         applyLiveBaud(int port, uint32_t baud);
 extern bool         isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — for the port-conflict guard
 extern bool         isSerialPortUsedForDFP(int port);   // WCB_DFP.cpp  — for the port-conflict guard
+extern bool         isSerialPortUsedForMaestro(int port);  // WCB_Maestro.cpp — local Maestro slots only
 
 // Serial3-5 are WcbSoftSerial instances defined in WCB.ino (library RX + RMT TX).
 // Serial1/Serial2 are the ESP32 core HardwareSerial globals.
@@ -887,6 +888,13 @@ void configureHCR(const String &args) {
       isSerialPortUsedForMP3(serialPort) || isSerialPortUsedForWLED(serialPort) ||
       isSerialPortUsedForDFP(serialPort) || kyberModeReservesPort(serialPort)) {
     Serial.printf("[HCR] S%d already in use by PWM/Kyber/MP3/WLED/DFP - config blocked\n", serialPort);
+    return;
+  }
+  // A local Maestro owns its port as firmly: its frames and this device's bytes would share the wire, and this
+  // module's CLEAR would reset the port's baud and flags under it (WCB coverage re-scan #15). Its own line, because the
+  // one above is matched by tests and tools.
+  if (isSerialPortUsedForMaestro(serialPort)) {
+    Serial.printf("[HCR] S%d is a local Maestro's port - config blocked\n", serialPort);
     return;
   }
 

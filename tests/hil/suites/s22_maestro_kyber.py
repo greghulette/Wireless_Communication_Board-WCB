@@ -25,6 +25,7 @@ import time
 from contextlib import contextmanager, nullcontext
 
 from hil.runner import Skip, test
+from hil.wcb import WCB
 from suites.common import (Watch, config_guard, link, marker, nonce, padded, probe_in_mesh, require_tokens, snapshot,
                            token, usb_wcb)
 
@@ -1065,6 +1066,54 @@ def remote_roundtrip(bench):
     finally:
         w.run("?DEBUG,MAESTRO,OFF")
         _settle_maestro2(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("kyber.receive_one_write_per_port", "Kyber bytes bridged to W2 reach its S1 once each although a second local Maestro id sits on that port: the target-98 receive side writes once per port, not once per slot (re-scan #11)", needs=["wcb1", "wcb2"])
+def receive_one_write_per_port(bench):
+    """WCB coverage re-scan #11 (docs/hil_plan/WCB.md WCB-WP27 row 2, receive half). A Maestro_Remote board writes a
+    target-98 chunk to every local Maestro port - once per SLOT, so two daisy-chained ids on one line got every chunk
+    twice and each frame arrived as garbage. W2 gets a second local id on its S1 (M4; the real Maestro 2 stays M2) with
+    its WDP off, so no board or client learns an M4 proxy (see the module rules). The bytes are below 0x80, as in
+    kyber.remote_roundtrip, and ;M2,getErrors clears Maestro 2's error flags after. The channel is best-effort, so a
+    try that loses bytes is retried; a byte that arrives twice fails at once."""
+    s1, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
+    _, l2 = _require_remote_pair(bench)
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    port, baud = _slot(l2, 2, 2)
+    if _slot(l2, 4, 2):
+        raise Skip("W2 already has a Maestro 4")
+    bad = []
+    with config_guard(bench, 2) as before:
+        with _wdp_off(w2, before[2]):
+            added = False
+            try:
+                out = w2.run(f"?MAESTRO,M4:W2S{port}:{baud}")
+                added = True
+                if not any(re.search(rf"Maestro 4: Local S{port} at {baud} baud", x) for x in out):
+                    raise AssertionError(f"setup: ?MAESTRO,M4:W2S{port}:{baud} printed {out}")
+                s1.listen()
+                tap.listen()
+                payload = bytes(range(1, 41))
+                for attempt in range(1, 4):
+                    watch = Watch(tap)
+                    s1.send(payload)
+                    time.sleep(2.5)
+                    got = watch.got(tap)
+                    if got == payload:
+                        break
+                    it = iter(payload)
+                    if len(got) > len(payload) or not all(b in it for b in got):
+                        bad.append(f"try {attempt}: W2 S{port} got {got.hex(' ')} - bytes duplicated or out of order")
+                        break
+                    bench.note(f"try {attempt}: lost {len(payload) - len(got)} byte(s) on the best-effort channel")
+                    time.sleep(0.5)
+                else:
+                    bad.append("every one of 3 tries lost bytes - far above the ~1 % frame loss")
+            finally:
+                if added:
+                    w2.run(f"?MAESTRO,CLEAR,M4:W2S{port}")
+                _settle_maestro2(w)
     assert not bad, "; ".join(bad)
 
 

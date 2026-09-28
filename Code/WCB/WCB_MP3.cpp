@@ -22,6 +22,7 @@ extern void         recallCommandSlot(const String &key, int sourceID);
 extern bool         isSerialPortUsedForHCR(int port);  // WCB_HCR.cpp — for the port-conflict guard
 extern bool         isSerialPortUsedForWLED(int port); // WCB_WLED.cpp — for the port-conflict guard
 extern bool         isSerialPortUsedForDFP(int port);  // WCB_DFP.cpp  — for the port-conflict guard
+extern bool         isSerialPortUsedForMaestro(int port);  // WCB_Maestro.cpp — local Maestro slots only
 // PWM/MP3 predicates + kyberModeReservesPort come from WCB_Storage.h.
 
 // ---- Module globals -----------------------------------------------------
@@ -308,6 +309,13 @@ void configureMP3(const String &args) {
       isSerialPortUsedForHCR(serialPort) || isSerialPortUsedForWLED(serialPort) ||
       isSerialPortUsedForDFP(serialPort) || kyberModeReservesPort(serialPort)) {
     Serial.printf("[MP3] S%d already in use by PWM/Kyber/HCR/WLED/DFP - config blocked\n", serialPort);
+    return;
+  }
+  // A local Maestro owns its port as firmly: its frames and this device's bytes would share the wire, and this
+  // module's CLEAR would reset the port's baud and flags under it (WCB coverage re-scan #15). Its own line, because the
+  // one above is matched by tests and tools.
+  if (isSerialPortUsedForMaestro(serialPort)) {
+    Serial.printf("[MP3] S%d is a local Maestro's port - config blocked\n", serialPort);
     return;
   }
 

@@ -549,6 +549,12 @@ def run_tests(bench, tests, on_start=None, on_result=None, should_stop=None, *, 
         # 2026-09-22: the host ran on battery for 4 h, slept once and later hibernated at critical battery mid-run.
         bench.note("WARNING: the host is running on BATTERY - a long run can end in a critical-battery hibernate. "
                    "Plug it in.")
+    # Read every test's source NOW, while the files match the loaded code. links_of and drives_of read it with
+    # inspect.getsource, which re-reads the FILE: a suite edited mid-run hands back shifted lines, and run
+    # 20260927-174702 paused at 448/499 on a TokenError from reading the middle of a string.
+    for t in tests:
+        links_of(t)
+        drives_of(bench, t)
     _keep_awake(True)
     try:
         return _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_pause, on_requeue)

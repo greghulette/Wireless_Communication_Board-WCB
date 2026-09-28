@@ -261,16 +261,31 @@ found and never reaches NVS; erasing by such a name still drops it from `key_lis
 firmware before d83042e could list a key it had failed to store. The MP3 and DFPlayer
 `ONERR` callback key is held to the same 15 characters.
 
+**Two names are reserved.** `key_list` and `seq_mig_done` are the store's own records, kept in
+the same `stored_cmds` namespace as the sequences. `?SEQ,SAVE`, `?SEQ,CLEAR` and a `;C` / `;SEQ`
+recall refuse both (`seqKeyReserved`, `WCB_Storage.h`), a recall before its mesh fan-out. A save
+by either name corrupted the list or the migration flag, a clear unlisted every sequence or
+re-armed the legacy migration, and a recall ran the name list as broadcast text. `?SEQ,GET`
+still reads both: it is the only window onto them (HIL `seq.get_internal_keys`,
+`seq.reserved_bookkeeping_keys`).
+
 **A stored value ends only at delimiter + function identifier.** `?SEQ,SAVE`, `?CS` and `?MGMT,`
 carry values that may themselves contain the command delimiter and a `;t` token, so only the
 splitter that knows that boundary (`parseCommandsNoChecksum`) may walk such a chain. The timer
 splitter (`parseCommandGroups`) does not: it cuts on the bare delimiter and reads any `;t` as an
 inter-group delay, which truncated the stored value and ran its tail as live commands. Chains
 carrying one of those verbs are kept off the timer path by `chainCarriesValueVerb()` (`WCB.ino`) at
-all four routing gates - local serial, ETM receive, plain receive, and sequence recall. The test
-this replaced looked only at the chain's FIRST character, so a chain that merely began with
-something else still went to the naive walker. The cost is deliberate: a chain mixing a real `;t`
+every routing gate: `isTimerChain()` for the console and WebSocket reader, both ESP-NOW receive
+paths and the reassembly of a multi-chunk `?MGMT,FRAG` or fragmented client unicast, and the
+recall's own test in `recallCommandSlot()`. The cost is deliberate: a chain mixing a real `;t`
 timer with a `?SEQ,SAVE` loses its inter-group timing, traded against a truncated value in NVS.
+`isTimerChain()` also sends a chain that starts with the function identifier to the timer engine,
+but only when a token is a real `<cmdChar>T<digits>` and no token is a checksum (a verified chain
+goes through the checksum gate, which the timer path skips). Such a chain used to be refused
+outright, so `?VERSION^;S1a^;T800^;S1b` ran both writes together and printed `Invalid Serial
+Command` for the `;T`. A received chain longer than a timer-queue slot (219 characters) rides a
+heap buffer to `loop()`; one the heap or the full queue cannot take is reported there
+(`[TIMER] ... not run`), never cut.
 
 ### Confirming a write
 
@@ -338,8 +353,14 @@ refuses a *nested* expansion (lineage depth > 0, no `;t` in the body) when its t
 `Command queue nearly full — not expanding nested sequence '<key>'. Space repeated calls with ;T.`,
 and enqueues nothing. Without that check a full queue printed `Command queue is full!
 Discarding command.` once per dropped token on UART0, which has no TX buffer. That stalled
-`loop()`, dropped console commands and cut bodies short. Top-level recalls and timer-chain
-bodies are not checked, since the second enqueues one group at a time.
+`loop()`, dropped console commands and cut bodies short. A top-level recall (`;C`, `ONFIN`,
+`ONERR`) must fit too, with no reserve: one whose token count exceeds the free slots is refused
+whole, with one line (`Sequence '<key>' has <n> commands and the command queue has room for
+<m> — not run.`), where it used to run its first part and drop the rest one line per token. A
+body over 200 commands can therefore never run as one recall; split it with `;T`, whose groups
+enqueue one at a time and are not checked. The serial reader, a task of its own, waits up to
+2 s per command for queue room instead, so a pasted `?backup` of more than 200 tokens runs
+whole; the loop task, which drains the queue, and the WiFi task never wait.
 
 **Only one timer chain runs per board.** A called sequence that contains `;t` replaces the chain
 that is running (`parseCommandGroups()`, "Timer sequence replaced mid-run"), so the caller's
@@ -465,6 +486,8 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-27 | §3c: a top-level recall that cannot fit the command queue is refused whole, and the serial reader waits for queue room instead of dropping tokens (WCB coverage re-scan #24). | _(pending)_ |
+| 2026-09-27 | §2: `key_list` and `seq_mig_done` are refused as keys by save, clear and recall (WCB coverage re-scan #14). The timer-path paragraph names the gates as they are now: one `isTimerChain()` for four paths, which also takes a `?`-first chain with a real `;T` token and none with a checksum (#10), and a long received chain is carried whole or reported (#22). | _(pending)_ |
 | 2026-09-24 | §1: a pull that asks for parts (`?MGMT,PULL,<n>,P`) now gets a config over 2912 characters in parts; a plain pull gets CFGERR NOPARTS; older relays and targets stay silent (F13, tracker #91, MGMT_RELAY.md). | _(pending)_ |
 | 2026-09-24 | §1: the config pull's too-large case is no longer silent on the target, which measures the config first and prints why, ungated; the requester still gets nothing (tracker #90). Line references in §1 updated. | _(pending)_ |
 | 2026-09-23 | New §3c: the cycle guard is a per-item lineage (`seqDepth` + hashes in front of the queued text, restored into `seqCurPath` at drain, pushed by `recallCommandSlot()`, carried across `;t` by `commandGroupsPath`). It replaces the never-popped `activeChainKeys` set, which refused every second call to a sub-sequence in one run and counted a flat body's calls toward the depth limit (tracker #47). A nested expansion that would leave fewer than 16 queue slots free is refused whole, with one line, rather than flooding UART0 with one "queue is full" line per token. Refusal texts and the 8-level limit are unchanged. HIL `seq.cycle_guard_reuse`, `seq.reuse_queue_reserve`. | _(pending)_ |

@@ -13,6 +13,7 @@ import re
 import time
 
 from hil.runner import Skip, test
+from hil.wcb import WCB
 from suites.common import Console, Watch, config_guard, link, marker, quiet_lines, require_tokens, snapshot, token, usb_wcb
 
 
@@ -659,6 +660,78 @@ def passthrough_mesh(bench):
             w.run("?DEBUG,ETM,OFF")
 
 
+@test("pwm.w2_output_to_w1_survives_boot", "A mapping saved on W2 to an output on W1 comes back from W2's boot aimed at W1, not at W2's own port: listing, chain and pulses; W2's S4 stays a serial port (re-scan #1; W2 x2, W1 x1 reboots)", needs=["wcb1", "wcb2"])
+def w2_output_to_w1_survives_boot(bench):
+    """WCB coverage re-scan #1 (docs/hil_plan/WCB.md WCB-WP15). The load path turns a saved output's W<n> into a
+    local port when n is this board (initPWM, WCB_PWM.cpp), and setup() used to run it before loading WCB_Number,
+    which still held its default of 1. So on every board but WCB1 a mapping to W1 came back from the next boot as a
+    LOCAL port: pulses left the board's own pin, W1 got none, and the chain (built from RAM) reported the local form,
+    so a Wizard pull and push saved the damage. W1 is WCB 1, which is why the W1-side tests never saw it; this one
+    maps on W2. The boot after the mapping is the test."""
+    w1, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    src, dst, own = link(bench, 2, "S3"), link(bench, 1, "S4"), link(bench, 2, "S4")
+    _no_pwm(bench, 1, 2)
+    require_tokens(bench, 1, "?BCAST,OUT,S4,ON", "?BCAST,IN,S4,ON")
+    with config_guard(bench, 1, 2):
+        mapped = False
+        try:
+            src.pwm_out(0)
+            w2.run("?DEBUG,ETM,ON")
+            m = w2.send("?MAP,PWM,S3,W1S4")
+            mapped = True
+            seq = w2.dev.expect(r"^\[ETM\] Sent seq (\d+): \?MAP,PWM,OUT,S4", timeout=3, since=m).group(1)
+            w2.dev.expect(rf"^\[ETM\] Seq {seq} fully acknowledged", timeout=3, since=m)
+            _pwm_reboot(w2, m)
+            problems = []
+            boot = [x.rstrip() for x in w2.dev.since(m)]
+            if "Input: Serial3 -> Outputs: W1S4" not in boot:
+                problems.append(f"W2's boot banner lists {[x for x in boot if x.startswith('Input: Serial')]}")
+            listing = [x.rstrip() for x in w2.run("?MAP,PWM,LIST")]
+            if "Input: Serial3 -> Outputs: W1S4" not in listing:
+                problems.append(f"W2's ?MAP,PWM,LIST after its boot: {[x for x in listing if x.startswith('Input:')]}")
+            chain = snapshot(bench, 2)
+            if "?MAP,PWM,S3,W1S4" not in chain:
+                problems.append(f"W2's chain: {[x for x in chain if x.upper().startswith('?MAP,PWM')]}")
+            w2.run("?WDP,POLL")       # a rebooted board counts W1 offline until W1's next packet (F22)
+            dst.pwm_in()
+            own.pwm_in()
+            time.sleep(1.0)
+            for us in (1000, 1500, 2000):
+                pd, po = dst.probe.dev.mark(), own.probe.dev.mark()
+                src.pwm_out(us)
+                time.sleep(1.0)
+                problem = _step_problem(dst.pulses(pd), us, " on W1S4")
+                if problem:
+                    problems.append(problem)
+                if own.pulses(po):
+                    problems.append(f"step {us}: pulses on W2S4, W2's own port: {own.pulses(po)}")
+            own.pwm_stop()
+            text = marker()
+            om = own.mark()
+            w2.send(f";S4{text}")
+            try:
+                own.expect(text.encode() + b"\r", timeout=2, since=om)
+            except AssertionError:
+                problems.append(f"W2's S4 no longer transmits serial: got {own.received(om)!r}")
+            assert not problems, "; ".join(problems)
+        finally:
+            src.pwm_out(0)
+            dst.pwm_stop()
+            own.pwm_stop()
+            if mapped:
+                m1 = w1.dev.mark()
+                m2 = w2.send("?MAP,PWM,CLEAR,S3")
+                for w, since, who in ((w2, m2, "W2"), (w1, m1, "W1")):
+                    try:
+                        _pwm_reboot(w, since)
+                    except AssertionError:
+                        bench.note(f"{who} did not reboot after W2's ?MAP,PWM,CLEAR,S3")
+                if any(x.upper() == "?MAP,PWM,OUT,S4" for x in bench.config_tokens(1, refresh=True)):
+                    _inline_clear_out(w1, "S4")   # an output the boot turned local sends W1 no clear
+            src.pwm_stop()
+            w2.run("?DEBUG,ETM,OFF")
+
+
 @test("pwm.input_only_advertises_cap", "(should) A board whose PWM is input mappings only advertises the PWM capability (W1 x2, W2 x1 reboots)", needs=["wcb1"], links=["W1S3"])
 def input_only_advertises_cap(bench):
     """Probable firmware bug: wdpCapFlags sets WDP_CAP_PWM on pwmOutputCount > 0 || activePWMCount > 0
@@ -785,6 +858,131 @@ def clear_all_reaches_remote(bench):
             if any(t.startswith("?MAP,PWM") for t in snapshot(bench, 1)):
                 _clear_local_mapping(w, "S3")
             s3.pwm_stop()
+
+
+@test("pwm.clear_all_many_remote_outputs", "?MAP,PWM,CLEAR,ALL with six outputs aimed at W2 and one at WCB3: each W2 port's clear is sent once, WCB3's still names its own port, and W2 is left with no PWM outputs (re-scan #12; W1 x2, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S3", "W1S4", "W1S5"])
+def clear_all_many_remote_outputs(bench):
+    """WCB coverage re-scan #12 (docs/hil_plan/WCB.md WCB-WP15 row 5). clearAllPWMMappings (WCB_PWM.cpp) listed each
+    remote output in remotePorts[board][5] with no bound, one entry per mapping output. Two mappings with three W2
+    outputs each put six entries in W2's row, and the sixth landed in WCB3's first slot (for WCB20, past the end of
+    the array). WCB3's mapping is made first, so its slot is filled before the spill; it then printed the spilled W2
+    port, S5, instead of its own S4. The list is a per-board set now, so each W2 port's clear goes out once. WCB3 must
+    be a board this bench does not have: its sends fail, as in pwm.remote_unreachable_failed."""
+    ins = [link(bench, 1, p) for p in ("S3", "S4", "S5")]
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1, 2)
+    require_tokens(bench, 2, *[f"?BCAST,{d},S{p},ON" for d in ("OUT", "IN") for p in (3, 4, 5)])
+    if 3 in {int(n) for x in w.run("?WDP,DUMP", timeout=8) for n in re.findall(r"^\[WDP:N=(\d+),", x)}:
+        raise Skip("WCB3 is on this mesh; the spill test needs it absent")
+    problems = []
+    with config_guard(bench, 1, 2):
+        cleared = False
+        try:
+            for l in ins:
+                l.pwm_out(0)
+            m = w.send("?MAP,PWM,S3,W3S4")
+            w.send("?MAP,PWM,S4,W2S3,W2S4,W2S5")
+            w.send("?MAP,PWM,S5,W2S3,W2S4,W2S5")
+            _pwm_reboot(w, m)
+            listing = [x.rstrip() for x in w.run("?MAP,PWM,LIST")]
+            want = ["Input: Serial3 -> Outputs: W3S4", "Input: Serial4 -> Outputs: W2S3 W2S4 W2S5",
+                    "Input: Serial5 -> Outputs: W2S3 W2S4 W2S5"]
+            if [x for x in listing if x.startswith("Input:")] != want:
+                raise AssertionError(f"setup: W1's mappings are {listing}")
+            time.sleep(3.0)          # canSendESPNow: no remote PWM send in W1's first 5 s (pwm.clear_all_reaches_remote)
+            w.run("?DEBUG,ON")
+            m = w.send("?MAP,PWM,CLEAR,ALL")
+            w.dev.expect(r"All PWM mappings cleared", timeout=10, since=m)
+            cleared = True
+            sent = sorted(x.rstrip() for x in w.dev.since(m) if x.startswith("Sent PWM output removal to WCB"))
+            expect = sorted([f"Sent PWM output removal to WCB2: ?MAP,PWM,CLEAR,OUT,S{p}" for p in (3, 4, 5)] +
+                            ["Sent PWM output removal to WCB3: ?MAP,PWM,CLEAR,OUT,S4"])
+            if sent != expect:
+                problems.append(f"removal lines {sent}, expected {expect}")
+            _pwm_reboot(w, m)
+            time.sleep(15)           # W2 restarts on the ?REBOOT that follows its clears
+            left = [x for x in snapshot(bench, 2) if x.upper().startswith("?MAP,PWM")]
+            if left:
+                problems.append(f"W2 still has {left} after CLEAR,ALL")
+        finally:
+            for l in ins:
+                l.pwm_out(0)
+            if not cleared and any(x.upper().startswith("?MAP,PWM") for x in snapshot(bench, 1)):
+                m = w.send("?MAP,PWM,CLEAR,ALL")
+                try:
+                    _pwm_reboot(w, m)
+                except AssertionError:
+                    pass
+                time.sleep(15)
+            for p in (3, 4, 5):
+                if f"?MAP,PWM,OUT,S{p}" in snapshot(bench, 2):
+                    _clear_remote_out(w, f"S{p}")
+            w.run("?DEBUG,OFF")
+            for l in ins:
+                l.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.map_clear_all_without_pwm", "?MAP,CLEAR,ALL on a board with no PWM mapping clears the serial maps and does not reboot (re-scan #32)", needs=["wcb1"], links=[])
+def map_clear_all_without_pwm(bench):
+    """WCB coverage re-scan #32 (docs/hil_plan/WCB.md WCB-WP50 row 1). clearAllPWMMappings set pwmRebootPending whenever
+    its autoReboot argument was true, so ?MAP,CLEAR,ALL - often run just to clear serial maps - rebooted the board with
+    nothing mapped. It reboots now only when a PWM mapping or output existed. W1's serial maps are replayed after."""
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    with config_guard(bench, 1) as before:
+        maps = [x for x in before[1] if x.upper().startswith("?MAP,SERIAL")]
+        m = w.send("?MAP,CLEAR,ALL")
+        try:
+            w.dev.expect(r"^All serial and PWM mappings cleared", timeout=4, since=m)
+            time.sleep(7.0)                    # the 4 s quiet window and more
+            rebooted = w.rebooted_since(m) or any(x.startswith("Rebooting now") for x in w.dev.since(m))
+        finally:
+            if w.rebooted_since(m) or any(x.startswith("Rebooting now") for x in w.dev.since(m)):
+                w.wait_boot(m, timeout=30)
+            for x in maps:
+                w.run(x)
+    assert not rebooted, "W1 rebooted after ?MAP,CLEAR,ALL although it had no PWM mapping"
+
+
+@test("pwm.serial_mapped_input_refused", "A port a serial mapping reads is refused for PWM when PWM is configured: ?MAP,PWM,OUT on it, a mapping with it as input, and a mapping with it as a local output; nothing is saved and nothing reboots (re-scan #15)", needs=["wcb1"], links=[])
+def serial_mapped_input_refused(bench):
+    """WCB coverage re-scan #15 (docs/hil_plan/WCB.md WCB-WP51 row 1). ?MAP,SERIAL refuses a PWM port as its input,
+    and canUsePWMOnPort had no term the other way: PWM declared on a port a mapping reads was accepted, and a PWM
+    output port skips its UART at boot, so the mapping then read nothing. The rule, decided (docs/HIL_WEEK_DECISIONS.md):
+    PWM refuses a port a mapping reads as its INPUT, at configure time only (serialMapOwnsPort, WCB_PWM.cpp) - the boot
+    loaders would erase a pair saved by older firmware. A mapping's destinations are checked by neither side."""
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    problems = []
+    with config_guard(bench, 1) as before:
+        if any(x.upper().startswith("?MAP,SERIAL,S5") for x in before[1]):
+            raise Skip("W1 already maps S5")
+        mapped = False
+        try:
+            w.run("?MAP,SERIAL,S5,R,S4")
+            mapped = True
+            refusal = "❌ Cannot use PWM on Serial5 - a serial mapping reads that port"
+            for cmd, extra in (("?MAP,PWM,OUT,S5", None),
+                               ("?MAP,PWM,S5,S3", "PWM mapping blocked - a serial mapping reads the input port"),
+                               ("?MAP,PWM,S3,S5", "Skipping output Serial5 - a serial mapping reads it")):
+                m = w.dev.mark()
+                out = [x.rstrip() for x in w.run(cmd)]
+                if extra is None and refusal not in out:
+                    problems.append(f"{cmd} printed {out}")
+                if extra is not None and not _has(out, extra):
+                    problems.append(f"{cmd} printed {out}")
+                time.sleep(5.0)                           # a mapping that took would ask for a restart after 4 s
+                if any(x.startswith("Rebooting") for x in w.dev.since(m)):
+                    problems.append(f"{cmd} rebooted W1")
+                    w.wait_boot(m, timeout=30)
+            left = [x for x in snapshot(bench, 1) if x.upper().startswith("?MAP,PWM")]
+            if left:
+                problems.append(f"PWM tokens saved: {left}")
+        finally:
+            if mapped:
+                w.run("?MAP,SERIAL,CLEAR,S5")
+    assert not problems, "; ".join(problems)
 
 
 @test("pwm.wdp_autoconfig_and_selfheal", "WDP PWMTARGET auto-configures a remote output W2 lacks, and CLEAR,ALL leaves W2 without it (explicit clear or self-heal; several reboots)", needs=["wcb1"], links=["W1S3"])

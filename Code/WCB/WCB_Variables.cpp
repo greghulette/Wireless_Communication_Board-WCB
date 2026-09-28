@@ -82,7 +82,11 @@ bool isValidVariableName(const String &name) {
 }
 
 // ---- NVS persistence ----------------------------------------------------
-static void saveVarsToNVS() {
+// True when NVS now holds what RAM holds. putString returns the bytes written, 0 on a failed write - and 0 for an empty
+// blob too, so an empty store removes the key instead (a remove needs no free space, so the last clear works on a full
+// NVS). Callers that report success check this: ?VAR,SET's '[persistent]' line is the Wizard's push ACK, and it used to
+// print after a write a full NVS had refused, so the value was gone at the next boot (WCB coverage re-scan #13).
+static bool saveVarsToNVS() {
   String blob;
   for (int i = 0; i < WCB_MAX_VARIABLES; i++) {
     if (!vars[i].used || !vars[i].persist) continue;   // RAM-only vars never touch flash
@@ -93,12 +97,14 @@ static void saveVarsToNVS() {
   }
   if (!varPrefs.begin("wcb_vars", false)) {
     Serial.println("[VAR] ERROR: could not open NVS (wcb_vars) to save");
-    return;
+    return false;
   }
-  size_t written = varPrefs.putString("blob", blob);
+  bool ok = blob.length() ? varPrefs.putString("blob", blob) == blob.length()
+                          : (!varPrefs.isKey("blob") || varPrefs.remove("blob"));
   varPrefs.end();
-  if (blob.length() > 0 && written == 0)
-    Serial.println("[VAR] ERROR: NVS write returned 0 bytes -- variables NOT saved");
+  if (!ok)
+    Serial.println("[VAR] ERROR: NVS write failed (see ?NVS) -- variables NOT saved");
+  return ok;
 }
 
 void loadVariables() {
@@ -144,6 +150,7 @@ void loadVariables() {
 static bool setVariableImpl(const String &name, int32_t value, bool persist) {
   if (!isValidVariableName(name)) return false;
   int idx = findVarSlot(name);
+  const bool created = (idx < 0);
   if (idx < 0) {
     idx = findFreeSlot();
     if (idx < 0) idx = evictOneRamSlot();   // table full → recycle a RAM/telemetry slot so a
@@ -170,9 +177,21 @@ static bool setVariableImpl(const String &name, int32_t value, bool persist) {
     // correct.
     return true;
   }
+  const int32_t oldValue   = vars[idx].value;
+  const bool    oldPersist = vars[idx].persist;
   vars[idx].value   = value;
   vars[idx].persist = persist;
-  if (persist) saveVarsToNVS();   // RAM-only sets never write flash
+  if (persist && !saveVarsToNVS()) {   // RAM-only sets never write flash
+    // Not saved: put RAM back to what the next boot would load, so the variable reads what it will be.
+    if (created) {
+      vars[idx].used = false;
+      varCount--;
+    } else {
+      vars[idx].value   = oldValue;
+      vars[idx].persist = oldPersist;
+    }
+    return false;
+  }
   return true;
 }
 
@@ -200,7 +219,11 @@ bool clearVariable(const String &name) {
   if (idx < 0) return false;
   vars[idx].used = false;
   varCount--;
-  saveVarsToNVS();
+  if (vars[idx].persist && !saveVarsToNVS()) {   // a RAM-only variable has nothing in NVS to rewrite
+    vars[idx].used = true;                        // NVS still holds it and a boot would bring it back: keep it
+    varCount++;
+    return false;
+  }
   return true;
 }
 
@@ -350,8 +373,9 @@ void processVarConfig(const String &args) {
       clearAllVariables(); Serial.println("[VAR] All variables cleared"); return;
     }
     if (!target.length()) { Serial.printf("[VAR] Usage: %cVAR,CLEAR,<name|ALL>\n", LocalFunctionIdentifier); return; }
-    if (clearVariable(target)) Serial.printf("[VAR] Cleared '%s'\n", target.c_str());
-    else                       Serial.printf("[VAR] '%s' not found\n", target.c_str());
+    if (!variableExists(target)) Serial.printf("[VAR] '%s' not found\n", target.c_str());
+    else if (clearVariable(target)) Serial.printf("[VAR] Cleared '%s'\n", target.c_str());
+    // else saveVarsToNVS printed why, and the variable is still set
     return;
   }
 

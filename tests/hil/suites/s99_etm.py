@@ -9,7 +9,8 @@ import time
 
 from hil.runner import test
 from hil.wcb import WCB
-from suites.common import remote_wcbs, snapshot, usb_wcb
+from hil.runner import Skip
+from suites.common import Watch, config_guard, remote_wcbs, snapshot, token, usb_wcb
 
 
 @test("etm.remote_reboot", "W2 rebooted over the mesh announces itself and answers again", needs=["wcb1"])
@@ -189,17 +190,40 @@ _CHAR = {}
 
 
 def _char(bench):
-    """Run ?ETM,CHAR once per bench session -> (recommended_ms, [(phase, wcb, avg, max, missed%)]). It measures only
-    the peers W1 sees online, so it waits for them first (_peers_online), and an abort fails at once instead of
-    running out the 180 s."""
+    """Run ?ETM,CHAR once per bench session -> {rec: recommended ms, rows: [(phase, wcb, avg, max, missed%)], and what
+    the run shows the other tests: again (W1's reply to a second ?ETM,CHAR 1 s in), restored (W1 turned ?DEBUG,ETM
+    back on at the end), w2 (W2's console lines, None without its USB), w2_mark, ports ({wire: bytes}) }. ETM debug is
+    on at the start so the restore can be seen. It measures only the peers W1 sees online, so it waits for them first
+    (_peers_online), and an abort fails at once instead of running out the 180 s."""
     if id(bench) not in _CHAR:
         w = usb_wcb(bench)
         waited = _peers_online(bench, w)
-        m = w.send("?ETM,CHAR")
-        rec = w.dev.expect(r"Recommended ETM timeout: (\d+)ms|\[ETM\] Characterization aborted: (.*)", timeout=180,
-                           since=m)
-        assert rec.group(1), f"?ETM,CHAR aborted: {rec.group(2).strip()}"
-        time.sleep(1)
+        w2 = WCB(bench.dev("wcb2")) if bench.usb_wcbs().get(2) else None
+        ports = [l for l in (bench.links.get(n, s) for n in (1, 2) for s in ("S2", "S3", "S4", "S5")) if l]
+        w.run("?DEBUG,ETM,ON")
+        try:
+            watch = Watch(*ports)
+            m2 = w2.dev.mark() if w2 else None
+            m = w.send("?ETM,CHAR")
+            w.dev.expect(r"^Phase 1 - Individual Baseline", timeout=5, since=m)
+            time.sleep(1.0)
+            ma = w.send("?ETM,CHAR")               # a second start mid-run (re-scan #17)
+            time.sleep(1.0)
+            again = [x.rstrip() for x in w.dev.since(ma)]
+            rec = w.dev.expect(r"Recommended ETM timeout: (\d+)ms|\[ETM\] Characterization aborted: (.*)",
+                               timeout=180, since=m)
+            assert rec.group(1), f"?ETM,CHAR aborted: {rec.group(2).strip()}"
+            time.sleep(2)
+            restored = any(x.startswith("[ETM CHAR] ETM debug re-enabled.") for x in w.dev.since(m))
+            if w2:
+                try:                                   # a peer's load runs 10 s, longer than the whole run at COUNT 10
+                    w2.dev.expect(r"^ETM load test complete: ", timeout=14, since=m2)
+                except AssertionError:
+                    pass                               # etm.char_load_on_peers reports it
+            w2_lines = [x.rstrip() for x in w2.dev.since(m2)] if w2 else None
+            port_bytes = {l.key: watch.got(l) for l in ports}
+        finally:
+            w.run("?DEBUG,ETM,OFF")
         rows, phase = [], None
         for t in w.dev.since(m):
             p = re.match(r"^ Phase (\d) - ", t)     # results block; progress lines have no leading space
@@ -210,13 +234,14 @@ def _char(bench):
                 rows.append((phase, int(r.group(1)), int(r.group(3)), int(r.group(2)), int(r.group(4))))
         bench.note(f"peers online after {waited:.1f} s; ETM CHAR recommended {rec.group(1)} ms; " +
                    "; ".join(f"P{p} W{b} avg {a} max {mx} missed {ms}%" for p, b, a, mx, ms in rows))
-        _CHAR[id(bench)] = (int(rec.group(1)), rows)
+        _CHAR[id(bench)] = {"rec": int(rec.group(1)), "rows": rows, "again": again, "restored": restored,
+                            "w2": w2_lines, "w2_dev": w2.dev if w2 else None, "w2_mark": m2, "ports": port_bytes}
     return _CHAR[id(bench)]
 
 
 @test("etm.char_unicast", "?ETM,CHAR phases 1-2 (unicast, no load) lose under 5% to every peer", needs=["wcb1"])
 def char_unicast(bench):
-    _, rows = _char(bench)
+    rows = _char(bench)["rows"]
     rows = [r for r in rows if r[0] in (1, 2)]
     assert rows, "no phase 1/2 rows in ?ETM,CHAR output"
     lossy = [f"P{p} W{b} missed {ms}%" for p, b, _, _, ms in rows if ms > 5]
@@ -230,9 +255,87 @@ def char_loaded(bench):
     # share means the broadcasts were never transmitted, not lost: sendESPNowMessage returns
     # early for target 0 while the global lastReceivedViaESPNOW is latched (WCB.ino:2549), and
     # processETMChar runs from loop() outside any command snapshot. See docs/HIL_TESTING.md §5.
-    _, rows = _char(bench)
+    rows = _char(bench)["rows"]
     rows = [r for r in rows if r[0] == 3]
     assert rows, "no phase 3 rows in ?ETM,CHAR output"
     lossy = [f"W{b} missed {ms}%" for _, b, _, _, ms in rows if ms > 5]
     assert not lossy, (f"phase 3 lossy: {lossy} — 30% is exactly the broadcast share; "
                        "broadcasts suppressed by lastReceivedViaESPNOW (WCB.ino:2549)?")
+
+
+@test("etm.char_load_on_peers", "?ETM,CHAR phase 3 really loads the mesh: W2 runs its 10 s generator (start line, then 'complete: N frame(s) sent' about 10 s later), and no load text reaches a port on W1 or W2 (re-scan #4)", needs=["wcb1", "wcb2"])
+def char_load_on_peers(bench):
+    """WCB coverage re-scan #4 (docs/hil_plan/WCB.md WCB-WP24 row 1). Phase 3 sends ETMLOAD to every peer under ETM,
+    and the peer's ETM receive path ACKed it and did nothing (only the plain path, which an ETM peer never takes,
+    started the generator); the generator's own frames were plain, so ETM peers dropped them. Phase 3 "Loaded Network"
+    measured an idle mesh. The load is untracked ETM frames starting ETMCHAR_, which receivers ACK and drop unrun."""
+    c = _char(bench)
+    if c["w2"] is None:
+        raise Skip("W2 has no USB console on this bench")
+    started = [x for x in c["w2"] if x == "ETM load test started by remote board."]
+    done = [re.match(r"^ETM load test complete: (\d+) frame\(s\) sent\.$", x) for x in c["w2"]]
+    done = [d for d in done if d]
+    assert len(started) == 1, f"W2 printed {len(started)} load start line(s) during W1's ?ETM,CHAR"
+    assert len(done) == 1, f"W2 printed {len(done)} load completion line(s)"
+    t0 = _at(c["w2_dev"], r"^ETM load test started by remote board\.", c["w2_mark"])
+    t1 = _at(c["w2_dev"], r"^ETM load test complete: ", c["w2_mark"])
+    frames = int(done[0].group(1))
+    bench.note(f"W2's load ran {t1 - t0:.1f} s and sent {frames} frame(s)")
+    assert 9.0 <= t1 - t0 <= 13.0, f"W2's load ran {t1 - t0:.1f} s, not about 10 s"
+    assert frames >= 50, f"W2's load sent only {frames} frame(s) in 10 s (one per ?ETM,DELAY, 100 ms by default)"
+    leaked = {k: v for k, v in c["ports"].items() if any(s in v for s in (b"LOAD", b"ETMCHAR", b"ETMLOAD"))}
+    assert not leaked, f"load text reached ports: {leaked}"
+
+
+@test("etm.char_second_start_refused", "A second ?ETM,CHAR while one runs is refused ('already running'), and the run still turns ?DEBUG,ETM back on at its end (re-scan #17)", needs=["wcb1"])
+def char_second_start_refused(bench):
+    """WCB coverage re-scan #17 (WCB-WP24 row 4, case d). Neither local entry point checked etmCharRunning, and
+    startETMChar saved the ALREADY-suppressed debugETM as the state to restore, so a restarted run ended with
+    ?DEBUG,ETM off. The check is in startETMChar now, for every entry point."""
+    c = _char(bench)
+    assert "ETM characterization is already running." in c["again"], f"the second ?ETM,CHAR printed {c['again']}"
+    assert c["restored"], "the run did not print '[ETM CHAR] ETM debug re-enabled.' although ETM debug was on at its start"
+
+
+@test("etm.char_relay_refusal_reported", "A relayed ?MGMT,ETM,CHAR the target cannot start is answered at once with the reason, and the requester is released: W2's next local run sends W1 nothing (re-scan #18)", needs=["wcb1", "wcb2"])
+def char_relay_refusal_reported(bench):
+    """WCB coverage re-scan #18 (docs/hil_plan/WCB.md WCB-WP24 row 2, latch arm). handleETMReqPacket latched the
+    requester and then called startETMChar, whose early returns (ETM off, WCBQ < 2) neither told the requester nor
+    cleared the latch: the Wizard's Network Test waited for nothing, and the target's next LOCAL run sent its results
+    to that requester. W2's ?WCBQ goes to 1 for the refusal - live, and W1 stays in W2's floor (ids 1..WCBQ) - and
+    back from W2's chain. The request is one unACKed packet, so it is sent a second time if the first gets nothing."""
+    w1, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    problems = []
+    with config_guard(bench, 2) as before:
+        q = token(before[2], "?WCBQ,")
+        if not q or int(q.split(",")[1]) < 2:
+            raise Skip(f"W2's chain has {q}")
+        w1.run("?DEBUG,MGMT,ON")
+        try:
+            try:
+                w2.run("?WCBQ,1")
+                reply = None
+                for _ in range(2):
+                    m = w1.send("?MGMT,ETM,CHAR,2")
+                    try:
+                        reply = w1.dev.expect(r"^\[MGMT:ETM,2\](.*)", timeout=6, since=m).group(1)
+                        break
+                    except AssertionError:
+                        pass
+                if reply is None:
+                    problems.append("W1 got no [MGMT:ETM,2] reply to a request W2 could not start")
+                elif "ETM characterization could not run on WCB2: fewer than 2 WCBs in the network (?WCBQ)" not in reply:
+                    problems.append(f"W2's reply was {reply!r}")
+            finally:
+                w2.run(q)
+            m1 = w1.dev.mark()
+            m2 = w2.send("?ETM,CHAR")
+            end = w2.dev.expect(r"Recommended ETM timeout: (\d+)ms|\[ETM\] Characterization aborted: (.*)",
+                                timeout=180, since=m2)
+            time.sleep(3)
+            bench.note(f"W2's local run: {end.group(0).strip()}")
+            if any(x.startswith("[MGMT:ETM,2]") for x in w1.dev.since(m1)):
+                problems.append("W2's later LOCAL ?ETM,CHAR sent its results to W1: the requester stayed latched")
+        finally:
+            w1.run("?DEBUG,MGMT,OFF")
+    assert not problems, "; ".join(problems)

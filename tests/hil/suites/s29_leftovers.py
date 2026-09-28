@@ -139,6 +139,29 @@ def help_forms(bench):
 
 
 # ============================================================ ?BAUD and ?LABEL validation
+@test("help.corrected_pages", "The help pages the re-scan found contradicting the parser now say what it does: DEBUG's one Maestro/Kyber flag, the ?MAESTRO form on the BAUD page, ?SLCS1, 187 characters under CHKSM, ?MAC's receive filter changing at once, WCB numbers 1-20, the legacy ?MAESTRO_CLEAR, a real command in the IF example (re-scan #29)", needs=["wcb1"], links=[])
+def help_corrected_pages(bench):
+    """WCB coverage re-scan #29 (docs/hil_plan/WCB.md WCB-WP34 row 5). Each line is the corrected text, read from the
+    topic page that carries it. ?MAC's page keeps saying a reboot is needed: only the receive filter changes live, the
+    board's own address and its peers' are set at boot (setup(), esp_wifi_set_mac)."""
+    w = usb_wcb(bench)
+    checks = (("?DEBUG?", ["  MAESTRO,ON        Enable Maestro and Kyber frame debug",
+                           "  ?DMON / ?DMOFF         - Maestro/Kyber debug (also ?DKON / ?DKOFF)"]),
+              ("?BAUD?", ["  - Configure a Maestro with ?MAESTRO,M<id>:W<wcb>S<port>:<baud> (see ?MAESTRO)"]),
+              ("?LABEL?", ["  ?SLCSx        - Clear label (e.g. ?SLCS1)"]),
+              ("?ETM?", ["  - CHKSM adds 12 bytes overhead, reducing max command to 187 chars"]),
+              ("?MAC?", ["  - The receive filter changes at once, so this board stops hearing the old group;"]),
+              ("?WCB?", ["  number        1-20, must be unique in the system"]),
+              ("?MAESTRO?", ["  ?MAESTRO_LIST / ?MAESTRO_CLEAR (every slot) / ?MAESTRO_DEFAULT"]),
+              ("?VAR?", ["  IF,mode>2,AND,armed=1^;M13     - compound condition"]),
+              ("?", ["    ?WCB,x          Set this board's number (1-20)"]))
+    problems = []
+    for cmd, wants in checks:
+        out = [x.rstrip() for x in w.run(cmd, timeout=8)]
+        problems += [f"{cmd} lacks {want.strip()!r}" for want in wants if want not in out]
+    assert not problems, "; ".join(problems)
+
+
 @test("persist.baud_label_validation", "?BAUD and ?LABEL refusals: no rate, an unknown rate, a port outside 1-5, a soft port above 115200; the soft-port warning above 57600, where the rate still applies (put back at once); ?LABEL without text, an unknown form, a bad CLEAR target, and a port outside 1-5, which ?LABEL and the old ?SLCS spelling now name (F7); ?LABEL,CLEAR,ALL clears all five, put back from the baseline", needs=["wcb1"], links=[])
 def baud_label_validation(bench):
     """The ?BAUD and ?LABEL handlers (WCB.ino), updateBaudRate and saveSerialLabelToPreferences (WCB_Storage.cpp).
@@ -197,6 +220,93 @@ def baud_label_validation(bench):
             if cleared:
                 for t in labels:
                     w.run(t)
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.cmd.legacy_prefix_typos", "Near-miss typos no longer reach a legacy setter: ?CCLEAR,ALL leaves the command character ';', ?DA does not make 'A' the delimiter, and ?STAT, ?SBAUDS1,9600 and ?S69600 answer 'Unknown command' instead of silence (re-scan #8)", needs=["wcb1"], links=[])
+def legacy_prefix_typos(bench):
+    """WCB coverage re-scan #8 (docs/hil_plan/WCB.md WCB-WP34 row 1). The legacy chain in processLocalCommand matched
+    prefixes: ?CCLEAR,ALL (a plausible ?SEQ,CLEAR,ALL) reached ?CC<c> and saved 'L' as the command character, so every
+    ';' command became broadcast text; any two-character ?D<x> set the delimiter; and any other ?S... fell into the
+    legacy baud form and was dropped with no reply. ?CC and ?LF take one character now, a letter or digit is refused as
+    the delimiter, and only ?S<1-5><digits> reaches the baud form. Should one regress, the raw restore runs at once:
+    ?CMDCHAR,; for the command character, ?DELIM,^ for the delimiter (neither holds the character they would undo)."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1):
+        m = w.dev.mark()
+        w.dev.send("?CCLEAR,ALL")
+        time.sleep(0.6)
+        out = [x.rstrip() for x in w.dev.since(m)]
+        if _has(out, "CommandCharacter updated to"):
+            problems.append(f"?CCLEAR,ALL set the command character: {out}")
+            w.dev.send("?CMDCHAR,;")
+            time.sleep(0.5)
+        elif "Unknown command: CCLEAR,ALL" not in out:
+            problems.append(f"?CCLEAR,ALL printed {out}")
+        m = w.dev.mark()
+        w.dev.send("?DA")
+        time.sleep(0.6)
+        out = [x.rstrip() for x in w.dev.since(m)]
+        if _has(out, "Command delimiter updated to"):
+            problems.append("?DA made 'A' the delimiter")
+            w.dev.send("?DELIM,^")
+            time.sleep(0.5)
+        elif "'A' would split ordinary words. Pick a punctuation character for the delimiter." not in out:
+            problems.append(f"?DA printed {out}")
+        for cmd in ("?STAT", "?SBAUDS1,9600", "?S69600"):
+            out = [x.rstrip() for x in w.run(cmd)]
+            if f"Unknown command: {cmd[1:]}" not in out:
+                problems.append(f"{cmd} printed {out}")
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.cmd.legacy_s_baud_messages", "The legacy ?S<port><baud> says 'stored in NVS' only when the rate was taken - not after ?S54800's 'Invalid baud rate' - and ?BAUDS5 with no rate prints its usage instead of nothing (re-scan #28)", needs=["wcb1"], links=[])
+def legacy_s_baud_messages(bench):
+    """WCB coverage re-scan #28 (WCB-WP34 row 3). updateSerialSettings printed 'Updated Serial<n> baud rate to <b> and
+    stored in NVS' after updateBaudRate had refused the rate (4800 is not in the table), and the legacy ?BAUDS<n>
+    without a comma printed nothing. The rate re-applied here is S5's own."""
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?BAUD,S5,9600")
+    problems = []
+    with config_guard(bench, 1):
+        out = [x.rstrip() for x in w.run("?S59600")]
+        for want in ("Baud rate for Serial5 updated to 9600", "Updated Serial5 baud rate to 9600 and stored in NVS"):
+            if want not in out:
+                problems.append(f"?S59600 lacks {want!r}: {out}")
+        out = [x.rstrip() for x in w.run("?S54800")]
+        if "Invalid baud rate" not in out:
+            problems.append(f"?S54800 printed {out}")
+        if _has(out, "stored in NVS"):
+            problems.append("?S54800 said 'stored in NVS' after 'Invalid baud rate'")
+        out = [x.rstrip() for x in w.run("?BAUDS5")]
+        if "Invalid format. Use ?BAUDSx,yyyyy (e.g., ?BAUDS1,57600)" not in out:
+            problems.append(f"?BAUDS5 printed {out}")
+        if "?BAUD,S5,9600" not in snapshot(bench, 1):
+            problems.append("S5's rate changed")
+    assert not problems, "; ".join(problems)
+
+
+@test("persist.label_max_30", "?LABEL,Sx refuses a label over 30 characters ('Label too long. Maximum 30 characters.', as the legacy ?SLS and the help say) and keeps the old one; exactly 30 is stored (re-scan #27)", needs=["wcb1"], links=[])
+def label_max_30(bench):
+    """WCB coverage re-scan #27 (WCB-WP34 row 4). The help, the legacy ?SLS and the Wizard all cap a label at 30, and
+    the canonical ?LABEL stored any length. S5's own label, or none, is put back."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        old = token(before[1], "?LABEL,S5,")
+        try:
+            for cmd in ("?LABEL,S5," + "L" * 31, "?SLS5," + "L" * 31):
+                out = [x.rstrip() for x in w.run(cmd)]
+                if "Label too long. Maximum 30 characters." not in out:
+                    problems.append(f"{cmd[:6]}... (31 characters) printed {out}")
+                if token(snapshot(bench, 1), "?LABEL,S5,") != old:
+                    problems.append(f"{cmd[:6]}... (31 characters) changed S5's label")
+            w.run("?LABEL,S5," + "H" * 30)
+            if token(snapshot(bench, 1), "?LABEL,S5,") != "?LABEL,S5," + "H" * 30:
+                problems.append("a 30-character label was not stored")
+        finally:
+            w.run(old if old else "?LABEL,CLEAR,S5")
     assert not problems, "; ".join(problems)
 
 
@@ -267,6 +377,52 @@ def mesh_timer_chain(bench):
     gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
     bench.note(f"timer gap on W2: {gap} ms")
     assert 700 <= gap <= 1100, f"gap {gap} ms, expected ~800"
+
+
+@test("mesh.timer_chain_two_chunks", "A ;T chain split over a two-chunk ?MGMT,FRAG keeps its delay on W2: the reassembled chain goes through the timer gate (re-scan #10)", needs=["wcb1"], links=["W2S2"])
+def mesh_timer_chain_two_chunks(bench):
+    """WCB coverage re-scan #10 (WCB-WP29 row 1, arm 2). A multi-chunk FRAG - and a WCB_Client fragmented unicast - is
+    reassembled in handleMgmtPacket, which handed the chain straight to the plain splitter: the ;T printed 'Invalid
+    Serial Command' on W2 and both writes arrived together. mesh.timer_chain covers the single-chunk path."""
+    probe, ch = wire(bench, 2, "S2")
+    a, b = marker("a"), marker("b")
+    chain = f";S2{a}^;T800^;S2{b}"
+    half = len(chain) // 2
+    sid = marker()[3:7]
+    w = usb_wcb(bench)
+    m = probe.dev.mark()
+    w.send(f"?MGMT,FRAG,2,{sid},0,2,{chain[:half]}")
+    time.sleep(0.2)
+    w.send(f"?MGMT,FRAG,2,{sid},1,2,{chain[half:]}")
+    probe.expect_bytes(ch, b.encode(), timeout=5, since=m)
+    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
+    bench.note(f"timer gap on W2 (two chunks): {gap} ms")
+    assert 700 <= gap <= 1100, f"gap {gap} ms, expected ~800"
+
+
+@test("mesh.timer_chain_long", "A received ;T chain longer than the 219-character timer-queue slot runs whole and keeps its delay: a two-chunk FRAG of about 260 characters to W2 (re-scan #22)", needs=["wcb1"], links=["W2S2"])
+def mesh_timer_chain_long(bench):
+    """WCB coverage re-scan #22 (WCB-WP14 row 3). The receive paths hand a timer chain to loop() through an 8-slot
+    queue of 220-byte slots, and a longer chain was cut to the slot mid-token and run - the half after the cut never
+    ran. A long chain rides a heap buffer now; only a failed allocation or a full queue refuses one, and loop() says
+    so ('[TIMER] ... not run'). The first write carries 200 characters so the chain cannot fit a slot."""
+    probe, ch = wire(bench, 2, "S2")
+    a, b = marker("a"), marker("b")
+    chain = f";S2{a}{'P' * 200}^;T600^;S2{b}"
+    assert len(chain) > 219
+    cut = len(chain) // 2
+    sid = marker()[3:7]
+    w = usb_wcb(bench)
+    m = probe.dev.mark()
+    w.send(f"?MGMT,FRAG,2,{sid},0,2,{chain[:cut]}")
+    time.sleep(0.2)
+    w.send(f"?MGMT,FRAG,2,{sid},1,2,{chain[cut:]}")
+    probe.expect_bytes(ch, b.encode(), timeout=6, since=m)
+    got = probe.received(ch, m)
+    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
+    bench.note(f"long chain ({len(chain)} characters) on W2: gap {gap} ms")
+    assert (a + "P" * 200).encode() in got, "the long first write did not arrive whole"
+    assert 500 <= gap <= 1000, f"gap {gap} ms, expected ~600 (the delay, with the 200-byte write inside it)"
 
 
 # ============================================================ ?MGMT and ?RTERM error replies

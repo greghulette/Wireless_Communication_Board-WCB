@@ -107,6 +107,17 @@ bool canUsePWMOnPort(int port, bool quiet) {
     return true;
 }
 
+// A port a serial mapping reads (?MAP,SERIAL,<port>,...) is refused for PWM when PWM is CONFIGURED: a PWM input takes
+// its RX pin, and a PWM output port skips its UART at boot, so the mapping would read nothing - ?MAP,SERIAL refuses the
+// opposite order already (WCB coverage re-scan #15). Kept out of canUsePWMOnPort on purpose: the boot loaders call that
+// too, and the output loader ERASES a saved output on a refused port, so a pair saved by older firmware would lose its
+// PWM at the next boot.
+bool serialMapOwnsPort(int port, bool quiet) {
+    if (!isSerialPortMonitored(port)) return false;
+    if (!quiet) Serial.printf("❌ Cannot use PWM on Serial%d - a serial mapping reads that port\n", port);
+    return true;
+}
+
 // ISR handlers for each input port.
 //
 // Classic ESP32: LEVEL-emulated edges (tracker #78). ESP32 erratum GPIO-3.14 loses an EDGE interrupt on GPIO0-31
@@ -310,6 +321,10 @@ void addPWMMapping(const String &config, bool autoReboot) {
         Serial.println("PWM mapping blocked - input port in use by Kyber/Maestro");
         return;
     }
+    if (serialMapOwnsPort(inputPort)) {
+        Serial.println("PWM mapping blocked - a serial mapping reads the input port");
+        return;
+    }
     
     int slot = -1;
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
@@ -383,6 +398,8 @@ void addPWMMapping(const String &config, bool autoReboot) {
             // Validate local output ports aren't in use by Kyber
             if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
                 Serial.printf("⚠️  Skipping output Serial%d - reserved for Kyber\n", serialPort);
+            } else if (wcbNum == 0 && serialMapOwnsPort(serialPort, true)) {   // configure time only (re-scan #15)
+                Serial.printf("⚠️  Skipping output Serial%d - a serial mapping reads it\n", serialPort);
             } else {
                 mapping.outputs[mapping.outputCount].wcbNumber = wcbNum;
                 mapping.outputs[mapping.outputCount].serialPort = serialPort;
@@ -588,9 +605,15 @@ void listPWMMappingsBoot() {
 }
 
 void clearAllPWMMappings(bool autoReboot) {
-    bool remoteBoards[MAX_WCB_COUNT + 1] = {false};   // indexed by WCB number (0 = local), sized to the full peer range
-    int remotePorts[MAX_WCB_COUNT + 1][5];
-    int remotePortCounts[MAX_WCB_COUNT + 1] = {0};
+    // A SET of output ports per board (bit p = port p, 1-5), indexed by WCB number and sized to the full peer range.
+    // It was a list, remotePorts[wcb][5] filled with no bound: 10 mappings x 5 outputs can name one board 50 times, so
+    // a 6th entry spilled into the next board's row, and on WCB20 past the end of the array (WCB coverage re-scan
+    // #12). As a set, each port's clear is also sent once.
+    uint8_t remotePortMask[MAX_WCB_COUNT + 1] = {0};
+    // A restart re-attaches nothing when nothing was mapped: ?MAP,CLEAR,ALL, run to clear serial maps, rebooted the
+    // board every time (WCB coverage re-scan #32).
+    bool hadAny = pwmOutputCount > 0;
+    for (int i = 0; i < MAX_PWM_MAPPINGS; i++) hadAny = hadAny || pwmMappings[i].active;
     
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (pwmMappings[i].active) {
@@ -600,9 +623,10 @@ void clearAllPWMMappings(bool autoReboot) {
                 if (pwmMappings[i].outputs[j].wcbNumber == 0) {
                     removePWMOutputPort(pwmMappings[i].outputs[j].serialPort);
                 } else {
-                    int wcb = pwmMappings[i].outputs[j].wcbNumber;
-                    remoteBoards[wcb] = true;
-                    remotePorts[wcb][remotePortCounts[wcb]++] = pwmMappings[i].outputs[j].serialPort;
+                    int wcb  = pwmMappings[i].outputs[j].wcbNumber;
+                    int port = pwmMappings[i].outputs[j].serialPort;
+                    if (wcb >= 1 && wcb <= MAX_WCB_COUNT && port >= 1 && port <= 5)
+                        remotePortMask[wcb] |= (uint8_t)(1u << port);
                 }
             }
             
@@ -612,11 +636,12 @@ void clearAllPWMMappings(bool autoReboot) {
     
     if (canSendESPNow()) {
         for (int wcb = 1; wcb <= MAX_WCB_COUNT; wcb++) {
-            if (remoteBoards[wcb]) {
-                for (int p = 0; p < remotePortCounts[wcb]; p++) {
+            if (remotePortMask[wcb]) {
+                for (int port = 1; port <= 5; port++) {
+                    if (!(remotePortMask[wcb] & (1u << port))) continue;
                     char remoteCmd[40];
                     snprintf(remoteCmd, sizeof(remoteCmd), "%cMAP,PWM,CLEAR,OUT,S%d",
-                             LocalFunctionIdentifier, remotePorts[wcb][p]);
+                             LocalFunctionIdentifier, port);
                     sendESPNowMessage(wcb, remoteCmd, true);   // ETM: a plain packet is dropped
                     delay(50);
                     if (debugEnabled) {
@@ -652,7 +677,7 @@ void clearAllPWMMappings(bool autoReboot) {
     // Deferred, like addPWMMapping — see pwmRebootPending in WCB_PWM.h. Guarded on
     // autoReboot for the same reason as the remote ?REBOOT above: eraseNVSFlash() calls
     // this with false and performs its own restart afterwards.
-    if (autoReboot) {
+    if (autoReboot && hadAny) {
         pwmRebootPending = true;
         Serial.println("Rebooting once the command queue drains.");
     }
@@ -941,7 +966,7 @@ void addPWMOutputPort(int port, uint8_t wdpAutoSrc) {
     }
 
     // Check if port can be used for PWM
-    if (!canUsePWMOnPort(port)) {
+    if (!canUsePWMOnPort(port) || serialMapOwnsPort(port)) {
         return;
     }
 

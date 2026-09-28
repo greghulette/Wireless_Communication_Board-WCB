@@ -643,7 +643,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 | F12 | fixed 2026-09-24 (tracker #90), bench 20260924-133332 | `?backup` streams its chains through a 2 KB per-line write buffer with a running CRC; the mesh pull measures, reserves once, never sends a partial config, and says on the target when it is too large. `wcb.backup_large_config`, `wcb.pull_size_limit`. |
 | F13 | fixed 2026-09-24 (tracker #91), bench 20260924-190431 | Parts for `,P` pulls over 2912 characters; coded CFGERR replies; non-blocking target job; one-write relay lines; per-relay Wizard queue. [MGMT_RELAY.md](MGMT_RELAY.md). |
 | F14 | open (Wizard decision) | Check the relay push's size before the confirm and bootstrap, then split pushes over 2864 characters. |
-| F15 | open (firmware) | strncmp for the remaining mgmt password checks. |
+| F15 | fixed 2026-09-28 (WCB re-scan #26) | strncmp at all 13 password gates, `otaPktAuth` included; bench-verified with the batch image (`hil_plan/WCB.md` §3). |
 | F16 | open (NaviCore) | Drop, don't store, when `WsSink::pump()` cannot drain. |
 | F17 | closed 2026-09-25 (Greg: intended for now) | The example's credentials are Greg's development ones on purpose; nothing to change. |
 | F18 | open (firmware) | Queue the WiFi-task `came ONLINE` print for `loop()`. |

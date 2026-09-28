@@ -710,6 +710,50 @@ fix; per the conventions, each fix also needs its doc row.
 check (WP51 row 3). The new channel budget is untested: the 5th PWM port on a classic board bit-bangs (WP15 row 4), and
 on an S3 every port does (WP59 row 1).
 
+
+### Status of the §3 items
+
+Fixed 2026-09-27/28 on branch `WIFI`, one image for the batch (decisions D12-D28 in
+[../HIL_WEEK_DECISIONS.md](../HIL_WEEK_DECISIONS.md)). "Verified" means its test passed on the bench with that image, in
+run `20260928-004312` (31 tests: 28 passed, and the 3 whose own expectations were wrong passed in `20260928-004911`
+once fixed). The three high items' tests also ran on the old image first, in `20260928-003915`, and each failed on
+exactly its defect (#3: 0 of 30 typed lines reached the mesh under load).
+
+| # | Status | The fix | Proved by |
+|---|---|---|---|
+| 1, 16 | verified | `WCB_Number` loads first in `setup()` | `pwm.w2_output_to_w1_survives_boot` |
+| 2 | verified | `hwVersionFitsChip`, at save and at load | `ident.hw_other_chip_refused`; `ident.hw_setter` now uses a same-chip version |
+| 3 | verified | only the loop task writes the origin flags; `processBroadcastCommand` decides the mesh send at entry | `input.bcast_mesh_under_traffic` |
+| 4 | verified | ETMLOAD on the ETM path (`etmLoadRequested`); the load is untracked ETM `ETMCHAR_LOAD_*` | `etm.char_load_on_peers` |
+| 5 | verified | `?MAC,2\|3` takes one or two hex digits | `ident.mac_hex_refused` |
+| 6 | verified | learned peers flushed before the deferred restart; frozen after `?ERASE,NVS` | `wdp.peers.add_forget_survive_quick_reboot` |
+| 7 | verified | `delimCharOk`; `prefixCharOk` refuses the delimiter; DELIM exempt from the `?` help shortcut | `chars.delim_collision_refused` |
+| 8 | verified | `?CC`/`?LF` one character; `isLegacySerialSetting`; no letter or digit as delimiter | `wcb.cmd.legacy_prefix_typos` |
+| 9 | verified | a `STOP` root in `processLocalCommand` | `serial.timer_stop_mesh`, `serial.timer_stop_in_chain` |
+| 10 | verified | `isTimerChain` for the reader (incl. the `?C` branch), both receive paths and the FRAG reassembly | `serial.timer_after_func_command`, `mesh.timer_chain_two_chunks` |
+| 11 | verified | the target-98 receive side writes once per port | `kyber.receive_one_write_per_port` |
+| 12 | verified | `clearAllPWMMappings` keeps a port set per board | `pwm.clear_all_many_remote_outputs` |
+| 13 | verified | `saveVarsToNVS` returns the result; a refused set or clear rolls RAM back and prints no ACK | `seq.nvs_full_consistency` (opt-in `nvs_fill`) |
+| 14 | verified | `seqKeyReserved` in save, clear and recall (before the fan-out) | `seq.reserved_bookkeeping_keys` |
+| 15 | verified | devices refuse a local Maestro's port and vice versa; PWM refuses a serial-mapped input at configure time (D23, D24) | `devices.maestro_port_refused`, `pwm.serial_mapped_input_refused` |
+| 17, 18 | verified | `startETMChar` refuses a second start and returns why; the relay tells the requester and releases it | `etm.char_second_start_refused`, `etm.char_relay_refusal_reported` |
+| 19 | fixed | `nextEtmSeq` never sends 0 | none on the bench (65,535 sends); code review |
+| 20 | verified | `?config` prints the RAM tables; the baud, label and broadcast setters report a refused write | `seq.nvs_full_consistency` (opt-in `nvs_fill`) |
+| 21 | fixed | the non-ETM Maestro exemption needs `<cmdChar>M` | none yet (needs a crafted non-ETM frame, WP30 row 4) |
+| 22 | verified | a long received timer chain rides a heap buffer; refusals are reported (D14) | `mesh.timer_chain_long` |
+| 23 | verified | a line is capped (4 KB on S1-S5, 32 KB on USB) and dropped whole (D16) | `input.line_cap_drops_whole` |
+| 24 | open | | |
+| 25 | half not a defect | the "space" was a raw NUL byte (D20); the receive side now terminates the ETM command | code review |
+| 26 | fixed | `strncmp` at all 13 password gates, `otaPktAuth` included | code review |
+| 27 | verified | `?LABEL` caps at 30 | `persist.label_max_30` |
+| 28 | verified | "stored in NVS" only when stored; `?BAUDS<n>` prints its usage | `wcb.cmd.legacy_s_baud_messages` |
+| 29 | verified | eight help lines corrected; `?MAC` still says reboot (only the receive filter is live) | `help.corrected_pages` |
+| 30 | fixed | the legend names `D` | `wdp.cmd.*` (s18 pins the legend) |
+| 31 | comment fixed (D15) | | |
+| 32 | verified | clear-all restarts only when a PWM mapping or output existed | `pwm.map_clear_all_without_pwm` |
+
+The Wizard defects W-1 to W-12 are tracked with their specs (`tests/wizard`).
+
 ---
 
 ## 4. Well covered

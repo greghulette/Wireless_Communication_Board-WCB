@@ -156,6 +156,11 @@ bool chainCarriesValueVerb(const String &data);
 // "HILABCDEFGHIJKLM" reads, runs or erases the sequence stored under "HILABCDEFGHIJKL".
 #define SEQ_KEY_MAX_LEN 15
 
+// The sequence namespace ("stored_cmds") keeps its own records under these two names: the key list and the legacy-
+// migration flag. A user key by either name corrupted the list (SAVE), orphaned every sequence or re-armed the
+// migration (CLEAR), or ran the list as a command (recall), so all three refuse them (WCB coverage re-scan #14).
+inline bool seqKeyReserved(const String &key) { return key == "key_list" || key == "seq_mig_done"; }
+
 // Sequence recall lineage - the cycle guard's call stack (recallStoredCommand, WCB.ino). Each queued command
 // carries the keys whose expansion produced it (FNV-1a 32 of the EXACT key, outermost first), so a recall is
 // refused only when its key is on its OWN lineage (A->A, A->B->A), never because a sibling call to the same

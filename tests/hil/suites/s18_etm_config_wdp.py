@@ -999,25 +999,53 @@ def delim_change_restore(bench):
     assert "?DELIM,|" in factory and re.search(r"\^\?CHK[0-9A-F]{8}$", factory), factory[-60:]
 
 
-@test("chars.delim_comma_restore_path", "With delimiter ',' every comma-bearing command splits; the legacy ?D^ still restores", needs=["wcb1"], links=[])
-def delim_comma_restore_path(bench):
-    """Under a second: mesh-received comma commands also split and broadcast fragments meanwhile.
-
-    Each line waits for the previous reply. A USB line is split on the delimiter when it is READ (serialCommandTask ->
-    parseCommandsAndEnqueue, WCB.ino:2199), not when it runs, so lines sent back to back were all split on the old '^'."""
+@test("chars.delim_collision_refused", "?DELIM and the legacy ?D<x> refuse either prefix and ',' as the delimiter, and the delimiter stays '^'; ?DELIM,? (the erase-flash lockout) only after the recoverable arms proved the guard (re-scan #7)", needs=["wcb1"], links=[])
+def delim_collision_refused(bench):
+    """WCB coverage re-scan #7 (docs/hil_plan/WCB.md WCB-WP35 row 1). The delimiter splits every chain before anything
+    reads it. As the function identifier it split every function line at its own prefix, the ?DELIM that would undo
+    it included, so only an erase-flash recovered the board; as ';' it broke the ';' family; as ',' it split every
+    command's arguments and only the legacy ?D^ got the board back. delimCharOk (WCB.ino) now refuses all three in
+    both setters. A whole-line setter can never receive the live delimiter itself (the line is split first), so these
+    collisions only ever came from changing the delimiter. On a board with the default '?' the lockout was not
+    '?DELIM,?' - the trailing-'?' help shortcut printed the help page instead - but '!DELIM,!' with a '!' identifier,
+    or ?DELIM,<c> after ?FUNCCHAR,<c>. DELIM is now exempt from that shortcut, so '?DELIM,?' reaches the setter and
+    must be refused.
+    Order is safety: the recoverable arms go first (a ';' or ',' delimiter is undone by ?DELIM,^ or ?D^), and ?DELIM,?
+    is sent only once ?DELIM,; and ?D; were refused. Those prove the check is present in both setters, in the same
+    condition as the function-identifier test; should it ever regress there alone, the board needs an erase-flash."""
     w = usb_wcb(bench)
-    t = marker()
+    problems = []
+    same = "{} is the {} — every command would split at its own prefix. Pick a different delimiter."
+    comma = "',' separates every command's arguments. Pick a different delimiter."
+
+    def refused(line, text):
+        m = w.dev.mark()
+        w.dev.send(line)
+        time.sleep(0.6)
+        out = [x.rstrip() for x in w.dev.since(m)]
+        ok = text in out
+        if not ok:
+            problems.append(f"{line} printed {out}")
+        if _live_chars(w)[0] != "^":
+            problems.append(f"{line} changed the delimiter")
+            _restore_delim(w)
+            ok = False
+        return ok
+
     with config_guard(bench, 1):
         try:
-            _sent(w, "?DELIM,,", r"^Delimiter updated to: ','")
-            m = w.dev.mark()
-            w.dev.send(f";S0A{t},;S0B{t}")              # prints on USB only; runs both halves only if ',' splits
-            w.dev.expect(rf"^B{t}$", timeout=3, since=m)
-            split = f"A{t}" in [x.strip() for x in w.dev.since(m)]
-            _sent(w, "?D^", r"^Command delimiter updated to: '\^'")   # the legacy spelling holds no ','
+            gate = refused("?DELIM,;", same.format("';'", "command character"))
+            refused("?DELIM,,", comma)
+            refused("?DELIM,A", "'A' would split ordinary words. Pick a punctuation character for the delimiter.")
+            gate = refused("?D;", same.format("';'", "command character")) and gate
+            refused("?D,", comma)
+            if gate:
+                refused("?DELIM,?", same.format("'?'", "function identifier"))
+            else:
+                problems.append("?DELIM,? was not sent: the guard is missing from a setter")
         finally:
             _restore_delim(w)
-    assert split, "under ',' a comma chain did not run both halves"
+    assert not problems, "; ".join(problems)
 
 
 @test("chars.funcchar_change_restore", "?FUNCCHAR's collision guard; the '!' prefix works; an old '?' line becomes a broadcast; help-trap-exempt restore", needs=["wcb1"])
@@ -1187,7 +1215,7 @@ def list_detail_errors(bench):
         raise Skip("a neighbour WCB19 exists")
     for cmd in ("?WDP", "?WDP,LIST"):
         out = [x.rstrip() for x in w.run(cmd)]
-        if "Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller link" not in out:
+        if "Capability codes: M=Maestro host  R=Maestro remote  K=Kyber  H=HCR  3=MP3  W=WLED  P=PWM  C=Controller link  D=DFPlayer" not in out:
             bad.append(f"{cmd}: no capability legend")
         if not any(re.match(r"^Total WDP neighbors: \d+   \(\?WDP,<n> for detail\)$", x) for x in out):
             bad.append(f"{cmd}: no total line")

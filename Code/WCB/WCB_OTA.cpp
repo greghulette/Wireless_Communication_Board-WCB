@@ -389,8 +389,11 @@ static void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uin
 }
 
 // Password + addressed-to-us gate shared by the target-side handlers.
+// pw is a packet's 40-byte structPassword, terminated by the caller. strncmp, not two Strings: a String whose allocation
+// fails comes back empty (CLAUDE.md rule 14), and two empty ones compare equal - the check passed on a starved heap
+// (WCB coverage re-scan #26, HIL_TEST_AUDIT.md F15).
 static bool otaPktAuth(const char *pw, uint8_t targetWCB) {
-  return (String(pw) == String(espnowPassword)) && (targetWCB == (uint8_t)WCB_Number);
+  return strncmp(pw, espnowPassword, sizeof(espnowPassword)) == 0 && targetWCB == (uint8_t)WCB_Number;
 }
 
 // ── Target side (reuses otaBegin/otaWrite/otaEnd) ───────────────────────────
@@ -464,7 +467,7 @@ void handleOtaAckRelay(const uint8_t *raw) {
   espnow_struct_ota_ctrl pkt;
   memcpy(&pkt, raw, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (String(pkt.structPassword) != String(espnowPassword)) return;
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != (uint8_t)WCB_Number) return;   // ACK addressed to us (the relay)
   // This runs in the ESP-NOW receive callback (WiFi task). ESP32 Serial isn't
   // atomic across cores, and this [OTA:ACK,...] line is the browser's flow-control

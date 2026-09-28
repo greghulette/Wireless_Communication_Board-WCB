@@ -229,7 +229,15 @@ def _erase_cycle(bench, erase_cmd):
             if erased:
                 w.run(hw)                        # the pin map first: until a boot on it no serial port is usable
                 w.reboot()
+                # The erased board runs WDP, and an advert auto-adds its sender's Maestro proxies into the first free
+                # slots before the replay reaches its ?MAESTRO lines, so the table came back in another order (run
+                # 20260927-174702). WDP off and the table cleared first, as s22 rebuilds one; the chain turns WDP
+                # back on only if it was on, since ON is not saved as a token.
+                w.run("?WDP,OFF")
+                w.run("?MAESTRO,CLEAR,ALL", timeout=8)
                 refused = _replay(w, base)
+                if "?WDP,OFF" not in base:
+                    w.run("?WDP,ON")
                 if refused:
                     problems.append("lines refused on the restore: " + "; ".join(refused))
                 w.reboot()
@@ -307,7 +315,17 @@ def nvs_report(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9)", needs=["wcb1"], links=[], opt_in="nvs_fill")
+def _hil_vars(w):
+    """{name: value} of W1's hilnv* variables, from ?VAR,LIST."""
+    out = {}
+    for x in w.run("?VAR,LIST"):
+        m = re.match(r"^\s+(hilnv\w*) = (-?\d+)\s+\[(persistent|volatile)\]", x)
+        if m:
+            out[m.group(1)] = int(m.group(2))
+    return out
+
+
+@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9). Then persistent variables until one is refused: no ACK for it, and after a reboot W1 holds what it reported (re-scan #13; 1 reboot)", needs=["wcb1"], links=[], opt_in="nvs_fill")
 def nvs_full_consistency(bench):
     """saveStoredCommandsToPreferences / eraseStoredCommandByName (WCB_Storage.cpp). Before 2026-09-24 a failed write
     of the sequence list went unchecked: a clear on a full store left the key listed with no value, and a save could
@@ -319,7 +337,11 @@ def nvs_full_consistency(bench):
         raise Skip("W1 has no ?NVS (older firmware)")
     base_seq = spaces0.get("stored_cmds", 0)
     keys, problems, refused = [], [], []
-    with config_guard(bench, 1):
+    made, reported = [], None      # the variable arm (re-scan #13)
+    setters = None                 # the label and baud arm (re-scan #20): the tokens to put back
+    with config_guard(bench, 1) as before:
+        if _has(w.run("?VAR,SET,hilnvc,7"), "[VAR] hilnvc = 7  [persistent]"):
+            made.append("hilnvc")    # a persistent variable from before the fill, cleared on the full store below
         try:
             # Big values fill the store; once one is refused, smaller ones find the last gaps - the tier where a value
             # can still fit but the growing sequence list cannot is the new check. It ends when a 40-character save
@@ -363,11 +385,69 @@ def nvs_full_consistency(bench):
                 if not _has(out, f"Deleted stored command key: '{keys[-1]}'"):
                     problems.append(f"clearing {keys[-1]} on the full store printed {out}")
                 keys.pop()
+            # Variables (WCB-WP42 row 1). Every persistent set rewrites one blob, so they grow it until the store
+            # refuses one. A refused set used to print the ERROR and then the '[persistent]' ACK the Wizard waits for,
+            # and the value was gone at the next boot; a refused clear said 'Cleared' and the variable came back.
+            var_refused = None
+            for i in range(1, 61):
+                name, value = f"hilnv{i:02d}", 100000000 + i
+                out = w.run(f"?VAR,SET,{name},{value}")
+                acked = _has(out, f"[VAR] {name} = {value}  [persistent]")
+                if _has(out, "[VAR] ERROR"):
+                    var_refused = name
+                    if acked:
+                        problems.append(f"?VAR,SET,{name} printed the ERROR and then the '[persistent]' ACK")
+                    if not _has(w.run(f"?VAR,GET,{name}"), f"[VAR] '{name}' is not set"):
+                        problems.append(f"the refused {name} is set in RAM all the same")
+                    break
+                if not acked:
+                    problems.append(f"?VAR,SET,{name} printed {out}")
+                    break
+                made.append(name)
+            if "hilnvc" in made:
+                out = w.run("?VAR,CLEAR,hilnvc")
+                if _has(out, "[VAR] ERROR") and _has(out, "[VAR] Cleared 'hilnvc'"):
+                    problems.append("?VAR,CLEAR,hilnvc printed the ERROR and then 'Cleared'")
+            bench.note(f"{len(made)} persistent variable(s) set; refused: {var_refused or 'none - the blob still fit'}")
+            reported = _hil_vars(w)
+            # A label and a baud on the full store (re-scan #20, WCB-WP42 row 3). A refused label is not set - no
+            # 'label set to' line, the chain keeps the old one; a refused baud still runs, with a warning, and ?config
+            # shows the rate the port runs at: it used to re-read NVS and show the saved one instead.
+            setters = [token(before[1], "?LABEL,S5,") or "?LABEL,CLEAR,S5", token(before[1], "?BAUD,S5,") or "?BAUD,S5,9600"]
+            out = [x.rstrip() for x in w.run("?LABEL,S5,HILFULL")]
+            label_stored = _has(out, "Serial5 label set to")
+            if "⚠️  NVS could not store the Serial5 label (full? see ?NVS) - label unchanged" in out:
+                if _has(out, "Serial5 label set to"):
+                    problems.append("a refused label was reported set")
+                if token(snapshot(bench, 1), "?LABEL,S5,") != token(before[1], "?LABEL,S5,"):
+                    problems.append("a refused label changed the chain")
+            elif "Serial5 label set to: 'HILFULL'" not in out:
+                problems.append(f"?LABEL,S5,HILFULL on the full store printed {out}")
+            out = [x.rstrip() for x in w.run("?BAUD,S5,19200")]
+            if "Baud rate for Serial5 updated to 19200" not in out:
+                problems.append(f"?BAUD,S5,19200 on the full store printed {out}")
+            baud_refused = any(x.startswith("⚠️  NVS could not store it") for x in out)
+            if not any(re.search(r"Serial5.*19200", x) for x in w.run("?config", timeout=6)):
+                problems.append("?config does not show S5 at the 19200 it runs at")
+            bench.note(f"full store: label {'stored' if label_stored else 'refused'}, "
+                       f"baud {'refused (runs, warned)' if baud_refused else 'stored'}")
         finally:
             for k in keys:
                 w.run(f"?SEQ,CLEAR,{k}")
             for key, _, _ in refused:
                 w.run(f"?SEQ,CLEAR,{key}")                      # harmless when it was never stored
+            for cmd in setters or []:                           # after the clears: the store has room again
+                w.run(cmd)
+            try:
+                if reported is not None:                         # the store has room again: what boots is NVS
+                    w.reboot()
+                    booted = _hil_vars(w)
+                    if booted != reported:
+                        problems.append(f"after a reboot W1 holds variables {booted}, but reported {reported}: a set or "
+                                        f"clear it acknowledged did not reach NVS, or one it refused did")
+            finally:
+                for name in made:
+                    w.run(f"?VAR,CLEAR,{name}")
         left = [t for t in snapshot(bench, 1) if re.match(r"^\?SEQ,SAVE,HILF\d\d,", t, re.I)]
         if left:
             problems.append(f"fill sequences left in ?backup: {left}")

@@ -56,7 +56,8 @@ void processPWMPassthrough();
 void configureRemotePWMOutput(int serialPort);
 bool isSerialPortUsedForPWMInput(int port);
 // quiet=true skips the refusal print - for callers that pass over a reserved port routinely.
-bool canUsePWMOnPort(int port, bool quiet = false);   // false if the port is reserved (e.g. Kyber)
+bool canUsePWMOnPort(int port, bool quiet = false);
+bool serialMapOwnsPort(int port, bool quiet = false);   // configure-time only: a ?MAP,SERIAL reads the port   // false if the port is reserved (e.g. Kyber)
 
 
 extern int pwmOutputPorts[MAX_PWM_OUTPUT_PORTS];  // Ports configured as PWM output only

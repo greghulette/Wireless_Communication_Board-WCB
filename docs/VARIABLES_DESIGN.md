@@ -133,6 +133,14 @@ parseCommandsAndEnqueue / parseCommandGroups, while walking the tokens:
 
 ## 5. Backup
 
+A persistent set or clear **succeeds only if NVS takes it.** `saveVarsToNVS()` reports whether
+the store now holds what RAM holds. When a write fails (a full NVS), the set prints the
+`[VAR] ERROR` line, prints no `[persistent]` confirmation, which is the line the Wizard's push
+waits for, and puts RAM back as it was: a new variable is gone, an existing one keeps its old
+value and type. A refused clear keeps the variable. So what a board reports is what it will
+boot with. An empty store removes the NVS key instead of writing an empty blob, so clearing
+the last variable works even on a full store (HIL `seq.nvs_full_consistency`, opt-in `nvs_fill`).
+
 `?backup` emits one `?VAR,SET,<name>,<absolute-int>` config line per **persistent**
 variable, so persistent variables round-trip through a backup/restore and survive a
 reflash (not just a reboot). **Volatile** variables are RAM-only and are **not**
@@ -185,4 +193,5 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-09-27 | _(pending)_ | A persistent set or clear that NVS refuses prints no confirmation and leaves RAM as it was; an empty store removes the key. | On a full store `?VAR,SET` printed the ERROR and then its `[persistent]` ACK, so the Wizard counted a value that was gone at the next boot, and a cleared variable came back (WCB coverage re-scan #13). |
 | 2026-08-06 | — | Split variables into **volatile** (`;V`, now the default — RAM-only) and **persistent** (`;VP` / `?VAR,SET` — NVS). `;VP` promotes a volatile var; `;V` never demotes a persistent one. Dropped the no-comma `;Vname` shorthand; `?VAR,LIST` now shows the type. Also corrected §5 (backup emits `?VAR,SET`, not `;V`). | A `;V` in a fast loop rewrote the whole NVS blob on every value change — hundreds of writes/sec could wear out the shared 20 KB partition in hours. Making the churny default RAM-only protects the flash without the user having to know; persistence is now an explicit opt-in (`;VP`). |

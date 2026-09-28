@@ -397,8 +397,9 @@ void processWifiCommand(const String &args) {
     String ssid = (c2 < 0) ? rest : rest.substring(0, c2);
     String pass = (c2 < 0) ? String("") : rest.substring(c2 + 1);
     ssid.trim();
-    // Deliberately NOT trimmed: a trailing space is legal in a WPA2 passphrase,
-    // and silently eating it would lock the operator out of their own AP.
+    // Not trimmed here, so a passphrase keeps a LEADING space. It cannot END in one: every line reader trims the
+    // whole line before this (the serial readers in WCB.ino, WCB_WS.cpp), and exempting ?WIFI there would make a
+    // terminal's stray trailing space part of the credential instead (WCB coverage re-scan #31).
 
     if (ssid.length() == 0 && verb == "JOIN") {
         Serial.println("A network name is required: ?WIFI,JOIN,<ssid>,<pass>");

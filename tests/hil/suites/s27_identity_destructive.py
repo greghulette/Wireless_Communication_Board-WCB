@@ -261,7 +261,8 @@ def hw_setter(bench):
         orig = int(cur.split(",")[1]) if cur else 0
         if orig not in names:
             raise Skip(f"W1's chain says {cur}: no known hardware version to put back")
-        other = 32 if orig != 32 else 31
+        same_chip = (31, 32) if orig in (31, 32) else (24, 23, 21, 1)   # the other chip's are refused
+        other = next(v for v in same_chip if v != orig)                  # (ident.hw_other_chip_refused)
         changed = False
         try:
             for bad in (0, 99):
@@ -282,6 +283,76 @@ def hw_setter(bench):
         finally:
             if changed:
                 w.run(f"?HW,{orig}")
+    assert not problems, "; ".join(problems)
+
+
+@test("ident.hw_other_chip_refused", "?HW refuses a hardware version of the other chip family (3.1/3.2 are ESP32-S3 boards, the rest classic ESP32): the stored and running version stay put; no reboot (re-scan #2)", needs=["wcb1"], links=[])
+def hw_other_chip_refused(bench):
+    """WCB coverage re-scan #2 (docs/hil_plan/WCB.md WCB-WP16). The other chip's pin map puts serial ports on SPI-flash
+    pins - HW 3.2 on a classic ESP32 gives S2 GPIO6/7 and S5 GPIO9/10 - so the board boot-loops at its next restart
+    until a USB reflash, and one wrong ?HW in a Wizard push was enough. saveHWversion (WCB_Storage.cpp) now refuses it
+    (hwVersionFitsChip) and loadHWversion ignores one saved by older firmware. The chain reports the running value
+    (F3), so it shows a refused version never took. Nothing reboots here: should the refusal ever regress, the version
+    is put back at once, before anything restarts W1."""
+    w = usb_wcb(bench)
+    classic, s3 = (1, 21, 23, 24), (31, 32)
+    with config_guard(bench, 1) as before:
+        cur = token(before[1], "?HW,")
+        orig = int(cur.split(",")[1]) if cur else 0
+        if orig in classic:
+            others, says = s3, "is an ESP32-S3 board; this is a classic ESP32"
+        elif orig in s3:
+            others, says = classic, "is a classic-ESP32 board; this is an ESP32-S3"
+        else:
+            raise Skip(f"W1's chain says {cur}: no known hardware version to keep")
+        problems, took = [], False
+        try:
+            for v in others:
+                out = w.run(f"?HW,{v}")
+                if not _has(out, f"HW version {v} {says} — stored HW version unchanged."):
+                    problems.append(f"?HW,{v} printed {out}")
+                if f"?HW,{orig}" not in snapshot(bench, 1):
+                    took = True
+                    problems.append(f"?HW,{v} changed the version W1 reports")
+                    w.run(f"?HW,{orig}")
+        finally:
+            if took:
+                w.run(f"?HW,{orig}")
+    assert not problems, "; ".join(problems)
+
+
+@test("ident.mac_hex_refused", "?MAC,2|3 refuses a value that is not one or two hex digits (ZZ, empty, 1FF, 0x) as the legacy ?M2/?M3 do: the chain keeps W1's octets and W2 still acknowledges W1 (re-scan #5)", needs=["wcb1"], links=[])
+def mac_hex_refused(bench):
+    """WCB coverage re-scan #5 (docs/hil_plan/WCB.md WCB-WP16 row 2). The ?MAC,2|3 handler (WCB.ino) ran strtoul with
+    no end check, so 'ZZ' or an empty value saved 0x00 and '1FF' saved 0xFF. The octets are the receive filter and
+    apply at once, so the board went deaf to its mesh group until someone typed the right value on its USB. The
+    finally replays W1's own ?MAC tokens should the refusal ever regress."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        macs = [x for x in before[1] if x.upper().startswith("?MAC,")]
+        if len(macs) != 2:
+            raise Skip(f"W1's chain has {macs}, not one token per octet")
+        try:
+            for line, which in (("?MAC,2,ZZ", "2nd"), ("?MAC,2,", "2nd"), ("?MAC,3,1FF", "3rd"), ("?MAC,3,0x", "3rd")):
+                out = w.run(line)
+                if not _has(out, f"Invalid hex value for {which} MAC octet. Use two hex digits (00-FF)."):
+                    problems.append(f"{line} printed {out}")
+            now = [x for x in snapshot(bench, 1) if x.upper().startswith("?MAC,")]
+            if now != macs:
+                problems.append(f"the chain's MAC tokens changed: {now}, before {macs}")
+            w.run("?DEBUG,ETM,ON")
+            m = w.send(";W2,?VERSION")
+            try:
+                seq = w.dev.expect(r"^\[ETM\] Sent seq (\d+): \?VERSION", timeout=3, since=m).group(1)
+                w.dev.expect(rf"^\[ETM\] Seq {seq} fully acknowledged", timeout=5, since=m)
+            except AssertionError:
+                problems.append("W2 no longer acknowledges W1 after the refused ?MAC lines")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            if [x for x in snapshot(bench, 1) if x.upper().startswith("?MAC,")] != macs:
+                for x in macs:
+                    w.run(x)
     assert not problems, "; ".join(problems)
 
 
@@ -391,6 +462,57 @@ def clear_learned_relearn(bench):
             problems.append(f"learned peers after the restore: {final}, before: {learned}")
         if _live_peers(w) != count:
             problems.append(f"?PEERSLIVE after the restore: {_live_peers(w)}, before: {count}")
+    assert not problems, "; ".join(problems)
+
+
+@test("wdp.peers.add_forget_survive_quick_reboot", "A learned-peer change followed at once by ?reboot is kept: ?WDP,ADD,<id>^?reboot comes back with the id learned, ?WDP,FORGET,<id>^?reboot without it (re-scan #6; 2 reboots)", needs=["wcb1"], links=[])
+def add_forget_survive_quick_reboot(bench):
+    """WCB coverage re-scan #6 (WCB-WP16 row 3). Learned-peer membership is written to NVS 5 s after a change
+    (LEARNED_FLUSH_DEBOUNCE_MS), and a deferred restart fires once the queue has been quiet 4 s, without flushing, so a
+    change and a ?reboot in one line were lost at the boot. loop() now flushes a pending change just before the restart.
+    The id is one nothing uses: ADD then FORGET first proves W1 accepts it (the controller id is refused), and the 6 s
+    after lets that pair's own flush land before the timed lines. While it is learned, W1's ETM broadcasts wait on it."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        if "?WDP,OFF" in before[1]:
+            raise Skip("W1 has WDP off")
+        floor = int(token(before[1], "?WCBQ,").split(",")[1])
+        learned = _learned_peers(w, floor)
+        rows = _dump_rows(w)
+        k = None
+        for n in range(18, floor, -1):
+            if n in learned or n in rows:
+                continue
+            if _has(w.run(f"?WDP,ADD,{n}"), f"[WDP] added WCB{n} as a peer"):
+                w.run(f"?WDP,FORGET,{n}")
+                k = n
+                break
+        if k is None:
+            raise Skip(f"no unused id above the floor {floor} that ?WDP,ADD accepts")
+        time.sleep(6)                                  # the ADD/FORGET pair's own flush
+        added = False
+        try:
+            m = w.send(f"?WDP,ADD,{k}^?reboot")
+            added = True
+            w.dev.expect(r"^Rebooting now", timeout=w.REBOOT_DEFER_S, since=m)
+            w.wait_boot(m, timeout=30)
+            if k not in _learned_peers(w, floor):
+                problems.append(f"WCB{k}, added in the line that rebooted W1, was not learned after the boot")
+            m = w.send(f"?WDP,FORGET,{k}^?reboot")
+            w.dev.expect(r"^Rebooting now", timeout=w.REBOOT_DEFER_S, since=m)
+            w.wait_boot(m, timeout=30)
+            if k in _learned_peers(w, floor):
+                problems.append(f"WCB{k}, forgotten in the line that rebooted W1, was learned again after the boot")
+            else:
+                added = False
+        finally:
+            if added:
+                w.run(f"?WDP,FORGET,{k}")
+                time.sleep(6)
+        final = _learned_peers(w, floor)
+        if final != learned:
+            problems.append(f"learned peers after the test: {final}, before: {learned}")
     assert not problems, "; ".join(problems)
 
 

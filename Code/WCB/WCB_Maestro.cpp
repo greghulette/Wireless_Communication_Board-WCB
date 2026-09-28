@@ -109,16 +109,19 @@ bool isSerialPortUsedForMaestro(int port) {
 // an HCR/MP3/DFP/WLED on every board a ;M0 reached, and a get on the own id read its "reply" out of that
 // device's stream (tracker #73 D6, HIL kyber.local_s1_legacy_fallback_skips_kyber_port). Returns S1's
 // owner, or nullptr when S1 is free.
-static const char *legacyS1Owner() {
-  if (Kyber_Local && kyberLocalPort == 1) return "the Kyber port";
-  if (isSerialPortUsedForHCR(1))           return "the HCR port";
-  if (isSerialPortUsedForMP3(1))           return "the MP3 Trigger port";
-  if (isSerialPortUsedForDFP(1))           return "the DFPlayer port";
-  if (isSerialPortUsedForWLED(1))          return "the WLED port";
-  if (isSerialPortPWMOutput(1))            return "a PWM output";
-  if (isSerialPortUsedForPWMInput(1))      return "a PWM input";
+// The subsystem that owns a local port, or nullptr. A local Maestro is not counted: daisy-chained ids share a port.
+static const char *localPortOwner(int port) {
+  if (Kyber_Local && kyberLocalPort == port) return "the Kyber port";
+  if (isSerialPortUsedForHCR(port))           return "the HCR port";
+  if (isSerialPortUsedForMP3(port))           return "the MP3 Trigger port";
+  if (isSerialPortUsedForDFP(port))           return "the DFPlayer port";
+  if (isSerialPortUsedForWLED(port))          return "the WLED port";
+  if (isSerialPortPWMOutput(port))            return "a PWM output";
+  if (isSerialPortUsedForPWMInput(port))      return "a PWM input";
   return nullptr;
 }
+
+static const char *legacyS1Owner() { return localPortOwner(1); }
 
 // Kyber_Local + targeted: a LOCAL Kyber target follows its local slot (tracker #73 D7, HIL
 // kyber.local_clear_maestro_drops_target). forwardDataFromKyber writes kyberTargets[].targetPort with or
@@ -805,6 +808,13 @@ String remaining = message;
       if (Kyber_Local && serialPort == kyberLocalPort) {
         Serial.printf("❌ Maestro %d: S%d is the Kyber port - use another port, or move the Kyber first.\n",
                       maestroID, serialPort);
+        startIdx = nextComma + 1;
+        continue;
+      }
+      // Nor any other subsystem's port. The HCR/MP3/DFP/WLED guards refuse a Maestro's port in turn, so the two can
+      // never share a UART - one module's CLEAR reset baud and flags under the other (WCB coverage re-scan #15).
+      if (const char *owner = localPortOwner(serialPort)) {
+        Serial.printf("❌ Maestro %d: S%d is %s - use another port, or clear it first.\n", maestroID, serialPort, owner);
         startIdx = nextComma + 1;
         continue;
       }

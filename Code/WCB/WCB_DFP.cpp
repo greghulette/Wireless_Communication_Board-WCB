@@ -22,6 +22,7 @@ extern void         recallCommandSlot(const String &key, int sourceID);
 extern bool         isSerialPortUsedForHCR(int port);   // WCB_HCR.cpp  — port-conflict guard
 extern bool         isSerialPortUsedForWLED(int port);  // WCB_WLED.cpp — port-conflict guard
 extern bool         isSerialPortUsedForMP3(int port);   // WCB_MP3.cpp  — port-conflict guard
+extern bool         isSerialPortUsedForMaestro(int port);  // WCB_Maestro.cpp — local Maestro slots only
 
 // The DFPlayer's only supported line rate. Not configurable — the module has no
 // other mode, and letting a user set 38400 here would just produce silence.
@@ -269,6 +270,13 @@ void configureDFP(const String &args) {
       isSerialPortUsedForHCR(serialPort) || isSerialPortUsedForWLED(serialPort) ||
       isSerialPortUsedForMP3(serialPort) || kyberModeReservesPort(serialPort)) {
     Serial.printf("[DFP] S%d already in use by PWM/Kyber/HCR/MP3/WLED - config blocked\n", serialPort);
+    return;
+  }
+  // A local Maestro owns its port as firmly: its frames and this device's bytes would share the wire, and this
+  // module's CLEAR would reset the port's baud and flags under it (WCB coverage re-scan #15). Its own line, because the
+  // one above is matched by tests and tools.
+  if (isSerialPortUsedForMaestro(serialPort)) {
+    Serial.printf("[DFP] S%d is a local Maestro's port - config blocked\n", serialPort);
     return;
   }
 

@@ -241,8 +241,8 @@ def hash_algorithm(bench):
 
 @test("seq.get_internal_keys", "Read-only: ?SEQ,GET also reads the NVS bookkeeping keys key_list and seq_mig_done, which NAMES hides", needs=["wcb1"], links=[])
 def get_internal_keys(bench):
-    """Minor finding: ?SEQ,GET does not filter internal keys (WCB.ino:5532-5539), so they read back as if they were
-    sequences. Never recall ;Ckey_list (it runs the name list as a broadcast) or save to key_list."""
+    """?SEQ,GET does not filter the internal keys, so they read back as if they were sequences; that is kept, as the
+    only window onto them. Recalling, saving or clearing them is refused (seq.reserved_bookkeeping_keys)."""
     w = usb_wcb(bench)
     _, _, names = _names(w)
     kl, mig = _seqval(w, "key_list"), _seqval(w, "seq_mig_done")
@@ -250,6 +250,70 @@ def get_internal_keys(bench):
     assert kl and kl.startswith("[MGMT:SEQVAL,1]key_list,OK,"), kl
     assert mig in ("[MGMT:SEQVAL,1]seq_mig_done,OK,", "[MGMT:SEQVAL,1]seq_mig_done,NOTFOUND,"), mig
     assert "key_list" not in names and "seq_mig_done" not in names, names
+
+
+@test("seq.reserved_bookkeeping_keys", "The sequence store's own records (key_list, seq_mig_done) are refused as keys by ;C / ;SEQ, ?SEQ,SAVE and ?SEQ,CLEAR; the inventory and both records are unchanged (re-scan #14)", needs=["wcb1"], links=[])
+def reserved_bookkeeping_keys(bench):
+    """WCB coverage re-scan #14 (docs/hil_plan/WCB.md WCB-WP44 row 1). User keys live in "stored_cmds", the namespace
+    that also holds key_list and seq_mig_done, and nothing reserved the two names: ?SEQ,SAVE,key_list,x corrupted the
+    list, ?SEQ,CLEAR,key_list unlisted every sequence, ?SEQ,CLEAR,seq_mig_done re-armed the legacy migration, and
+    ;Ckey_list ran the name list as a broadcast. seqKeyReserved (WCB_Storage.h) refuses both names now. The local recall
+    goes first: on firmware without the guard it only broadcasts the names once, and the test stops before the arms
+    that would damage the store - which is why this is not behind the seq_wipe opt-in."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1):
+        inv = _names(w)
+        records = (_seqval(w, "key_list"), _seqval(w, "seq_mig_done"))
+        out = w.run(";Ckey_list,L")
+        if not _has(out, "'key_list' is a reserved name, not a sequence."):
+            raise AssertionError(f";Ckey_list,L printed {out}: no reserved-name guard, so SAVE and CLEAR were not sent")
+        not_seq = "'{}' is a reserved name, not a sequence."
+        for line, text in ((";Ckey_list", not_seq.format("key_list")),
+                           (";SEQseq_mig_done,L", not_seq.format("seq_mig_done")),
+                           ("?SEQ,SAVE,key_list,HILX", "'key_list' is a reserved name (the sequence store keeps its own records under it). Not stored."),
+                           ("?SEQ,SAVE,seq_mig_done,HILX", "'seq_mig_done' is a reserved name (the sequence store keeps its own records under it). Not stored."),
+                           ("?SEQ,CLEAR,key_list", not_seq.format("key_list") + " Nothing cleared."),
+                           ("?SEQ,CLEAR,seq_mig_done", not_seq.format("seq_mig_done") + " Nothing cleared.")):
+            out = w.run(line)
+            if not _has(out, text):
+                problems.append(f"{line} printed {out}")
+        if _names(w) != inv:
+            problems.append(f"the inventory changed: {_names(w)}, before {inv}")
+        if (_seqval(w, "key_list"), _seqval(w, "seq_mig_done")) != records:
+            problems.append("key_list or seq_mig_done changed")
+    assert not problems, "; ".join(problems)
+
+
+@test("seq.top_level_too_big_refused", "A top-level recall whose body cannot fit the command queue (210 commands, 200 slots) is refused whole with one line, and none of it runs (re-scan #24)", needs=["wcb1"], links=[])
+def top_level_too_big_refused(bench):
+    """WCB coverage re-scan #24 (docs/hil_plan/WCB.md WCB-WP55 row 1). The queue reserve that refuses a NESTED expansion
+    whole did not apply at the top level (;C, ONFIN, ONERR), so a body longer than the free queue ran its first part,
+    printed one "Command queue is full! Discarding command." line per dropped token - UART0 has no TX buffer - and lost
+    the rest. Every token here is ;S0<one short tag>, so what ran is counted on USB. Recalled local-only (,L). The tag is
+    4 characters: with a full marker the value was 2.9 KB, and the ?SEQ,SAVE line, copied several times while it is
+    parsed, ran W1's ~18 KB AP-mode heap out (CLAUDE.md rule 14; run 20260928-004312)."""
+    w = usb_wcb(bench)
+    m = "Q" + nonce()[:3]
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            out = w.run("?SEQ,SAVE,HILBIG," + "^".join([f";S0{m}"] * 210), timeout=8)
+            if not _has(out, "Stored: Key='HILBIG'"):
+                raise AssertionError(f"setup: the 210-command sequence was not stored: {out[:3]}")
+            wm = w.dev.mark()
+            w.dev.send(";CHILBIG,L")
+            w.dev.expect(r"^Sequence 'HILBIG' has 210 commands and the command queue has room for \d+ .* not run\.",
+                         timeout=5, since=wm)
+            time.sleep(3.0)
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            ran = sum(1 for x in lines if x == m)
+            full = sum(1 for x in lines if x.startswith("Command queue is full"))
+            if ran or full:
+                problems.append(f"{ran} of its commands ran and {full} 'queue is full' line(s) printed")
+        finally:
+            w.run("?SEQ,CLEAR,HILBIG")
+    assert not problems, "; ".join(problems)
 
 
 @test("seq.recall_forms", ";C / ;c / ;SEQ / ;seq recall with ,L / ,LOCAL / ,l; wrong-case and empty-key forms", needs=["wcb1"])

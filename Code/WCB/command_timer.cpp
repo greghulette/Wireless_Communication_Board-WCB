@@ -95,7 +95,7 @@ void printTimerDebugInfo(const String &delayStr, unsigned long parsedDelay, unsi
   Serial.printf("===================\n");
 }
 
-void parseCommandGroups(const String &input, int sourceID) {
+void parseCommandGroups(const String &input, int sourceID, int originEspnow, int originSeqBody) {
   // Single global timer state — only one timer sequence runs at a time. If one is
   // still in flight (e.g. a running sequence recalled another timer-bearing stored
   // sequence, or a new ;t… was issued mid-run) this replaces it. That used to be
@@ -112,8 +112,8 @@ void parseCommandGroups(const String &input, int sourceID) {
   commandTimerModeEnabled = true;
   waitingForNextGroup = false;
   // Capture the origin now; it's re-applied as each group fires (see processCommandGroups).
-  commandGroupsEspnowOrigin = lastReceivedViaESPNOW;
-  commandGroupsSequenceBody = inSequenceBody;   // same, for nested-recall fanout suppression
+  commandGroupsEspnowOrigin = (originEspnow >= 0) ? (originEspnow != 0) : lastReceivedViaESPNOW;
+  commandGroupsSequenceBody = (originSeqBody >= 0) ? (originSeqBody != 0) : inSequenceBody;   // nested-recall fanout
   commandGroupsSourceID     = sourceID;         // same, so each group keeps the source port
   // Only the loop task has a lineage; a chain typed on serialCommandTask is top-level. Off the loop task write the
   // depth byte ALONE - processCommandGroups may be copying this struct on the loop task right now, and a depth of 0

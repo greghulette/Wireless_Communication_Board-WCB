@@ -653,6 +653,14 @@ both. `python tests/hil/selftest.py` tests the checkpoint and the runner loop wi
   source's. A stale one that cannot be deleted (read-only, held open) is ignored until it
   changes.
 
+- **A harness error** pauses the run by itself (checkpoint reason `harness_error`, with the exception in
+  the reason text) instead of ending it: `run.py --resume --force` continues from the next test. Editing
+  a suite file during a run once caused one. The runner reads each test's source with
+  `inspect.getsource` to find its wires, and that re-reads the FILE: after a mid-run edit it read
+  shifted lines, and run `20260927-174702` paused at 448/499 on a `TokenError`. `run_tests` now reads
+  every test's source at the start of each segment (`hil/runner.py`), so a suite may be edited while a
+  run goes; the edit takes effect at the next segment.
+
 "Safe to disconnect" means the checkpoint and report are written, `session.log` is fsynced and
 closed, every COM port is closed (no reader thread is left reopening a COM name that another board
 may take), keep-awake is off, and the run lock is released. A pause asked for during the last test
@@ -852,6 +860,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-27 | _(pending)_ | §9: a harness error pauses a run (`harness_error`); a suite edited mid-run caused one, because the runner found each test's wires by re-reading its file, and every test's source is now read at the start of a segment. |
 | 2026-09-27 | _(pending)_ | **§10 Intellex tests.** `suites/s32_intellex.py`, `hil/intellex.py` (stage, a leashed host, Playwright and venv runners), `tests/intellex` (Playwright 1.63.0, headless); `hil/ws.py` keeps binary frames and sends an Origin header. 19 tests, none needing a board. |
 | 2026-09-27 | _(pending)_ | Tracker #94 (F23): PWM output pulses are RMT-clocked. `pwm.passthrough_local` and `pwm.passthrough_mesh` check each step's held (last) pulse; the filter check allows a late pulse of the previous step (run 20260927-131152). A §6 row records the re-send trap. |
 | 2026-09-25 | _(pending)_ | **Full run `20260925-092255` triaged (`HIL_TEST_AUDIT.md` §5).** `etm.reboot_defer_cap` passed its own check but its new cleanup failed: W2's `came ONLINE` glued onto the `;S0` sentinel. `WCB.run` now accepts a sentinel that starts its line, and the cleanup waits after its poll and never raises; a §6 row records the trap. `pwm.passthrough_local` found a firmware defect (audit F23). |

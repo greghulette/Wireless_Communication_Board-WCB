@@ -2,6 +2,7 @@
 #include <sys/_types.h>
 #include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
+#include <sdkconfig.h>   // CONFIG_IDF_TARGET_ESP32S3 (hwVersionFitsChip)
 #include <Preferences.h>
 #include <nvs.h>             // ?NVS usage and the whole-store erase
 #include "WCB_PWM.h"
@@ -25,6 +26,7 @@ extern char espnowPassword[40];
 extern String storedCommands[MAX_STORED_COMMANDS];
 extern int wcb_hw_version;
 extern char espnowPassword[40];
+extern bool learnedPeersFrozen;                     // defined in WCB.ino — saveLearnedPeers() writes nothing once set
 extern void updatePinMap();
 extern void applyLiveBaud(int port, uint32_t baud);  // defined in WCB.ino — live re-init incl. SW serial S3-S5
 extern volatile bool rebootPending;                 // defined in WCB.ino — loop() takes the restart
@@ -71,6 +73,18 @@ bool mappingDestinationExists(SerialMonitorMapping *mapping, uint8_t wcbNum, uin
 
 // ==================== Load & Save Functions ====================
 
+// Which hardware versions this chip can run (wcb_pin_map.cpp): 31/32 are the ESP32-S3 boards, the rest the classic
+// ESP32. The other chip's map puts serial ports on SPI-flash pins - HW 32 on a classic ESP32 gives S2 GPIO6/7 and S5
+// GPIO9/10 - and the board boot-loops until a USB reflash. One wrong ?HW in a Wizard push was enough (WCB coverage
+// re-scan #2), so it is refused at save and ignored at load.
+static bool hwVersionFitsChip(int v) {
+#if CONFIG_IDF_TARGET_ESP32S3
+  return v == 31 || v == 32;
+#else
+  return v == 1 || v == 21 || v == 23 || v == 24;
+#endif
+}
+
 void saveHWversion(int wcb_hw_version_f){
   // Validate BEFORE writing. The old order wrote the value first, so an
   // invalid ?HW,0 (e.g. a config push from a Wizard with no HW selected)
@@ -80,6 +94,16 @@ void saveHWversion(int wcb_hw_version_f){
       wcb_hw_version_f != 24 && wcb_hw_version_f != 31 && wcb_hw_version_f != 32) {
     Serial.printf("No valid HW version identified (%d) — stored HW version unchanged.\n",
                   wcb_hw_version_f);
+    return;
+  }
+  if (!hwVersionFitsChip(wcb_hw_version_f)) {
+#if CONFIG_IDF_TARGET_ESP32S3
+    Serial.printf("HW version %d is a classic-ESP32 board; this is an ESP32-S3 — stored HW version unchanged.\n",
+                  wcb_hw_version_f);
+#else
+    Serial.printf("HW version %d is an ESP32-S3 board; this is a classic ESP32 — stored HW version unchanged.\n",
+                  wcb_hw_version_f);
+#endif
     return;
   }
   preferences.begin("hw_version", false);
@@ -112,6 +136,13 @@ preferences.begin("hw_version", true);
 wcb_hw_version =  preferences.getInt("hw_version", 0);
 // Serial.printf("Pin out version %d\n", wcb_hw_version);
 preferences.end();
+// A version saved by older firmware for the other chip would map ports onto flash pins: boot with no pin map (the
+// ?backup warning asks for ?HW) rather than loop.
+if (wcb_hw_version != 0 && !hwVersionFitsChip(wcb_hw_version)) {
+  Serial.printf("[HW] Saved HW version %d is for the other chip - ignored. Set the right one with ?HW,<n>.\n",
+                wcb_hw_version);
+  wcb_hw_version = 0;
+}
 updatePinMap();
 }
 
@@ -196,10 +227,15 @@ void updateBaudRate(int port, int baud) {
   // Save to preferences
   preferences.begin("serial_baud", false);
   String key = String("Serial") + String(port);
-  preferences.putInt(key.c_str(), baud);
+  const bool saved = preferences.putInt(key.c_str(), baud) == sizeof(int32_t);
   preferences.end();
 
   Serial.printf("Baud rate for Serial%d updated to %d\n", port, baud);
+  // The port runs at the new rate either way; say when NVS refused it (full), or the next boot's revert is a surprise
+  // (WCB coverage re-scan #20).
+  if (!saved)
+    Serial.printf("⚠️  NVS could not store it (full? see ?NVS) - Serial%d goes back to its saved rate at the next reboot\n",
+                  port);
 }
 
 void loadWCBNumberFromPreferences() {
@@ -346,12 +382,16 @@ void printBaudRates() {
 
 void saveBroadcastSettingsToPreferences() {
     preferences.begin("bdcst_set", false);
+    bool saved = true;
     for (int i = 0; i < 5; i++) {
         String key = "S" + String(i + 1);
-        preferences.putInt(key.c_str(), serialBroadcastEnabled[i] ? 1 : 0);
+        saved = (preferences.putInt(key.c_str(), serialBroadcastEnabled[i] ? 1 : 0) == sizeof(int32_t)) && saved;
     }
-    preferences.putInt("S0", broadcastToS0 ? 1 : 0);   // S0/USB broadcast output (opt-in)
+    saved = (preferences.putInt("S0", broadcastToS0 ? 1 : 0) == sizeof(int32_t)) && saved;   // S0/USB output (opt-in)
     preferences.end();
+    // The flags run as set; say when NVS refused them (full) - re-scan #20.
+    if (!saved)
+        Serial.println("⚠️  NVS could not store the broadcast output flags (full? see ?NVS) - they revert at the next reboot");
 }
 
 void loadBroadcastSettingsFromPreferences() {
@@ -603,6 +643,10 @@ void recallCommandSlot(const String &key, int sourceID) {
         Serial.printf("No command stored under key: '%s'\n", key.c_str());
         return;
     }
+    if (seqKeyReserved(key)) {              // key_list would run the sequence list as a command
+        Serial.printf("'%s' is a reserved name, not a sequence.\n", key.c_str());
+        return;
+    }
     preferences.begin("stored_cmds", true);
     String recalledCommand = preferences.getString(key.c_str(), "");
     preferences.end();
@@ -662,6 +706,18 @@ void recallCommandSlot(const String &key, int sourceID) {
         if (commandQueueSpaces() < need + SEQ_QUEUE_RESERVE) {
             Serial.printf("Command queue nearly full — not expanding nested sequence '%s'. "
                           "Space repeated calls with ;T.\n", key.c_str());
+            return;
+        }
+    } else if (!viaTimer) {
+        // A TOP-LEVEL body (;C, ONFIN, ONERR) is refused whole too when it cannot fit: it used to run its first part,
+        // print one "queue is full" line per token it dropped (UART0 has no TX buffer), and lose the rest - a show
+        // cut short with no single line saying so (WCB coverage re-scan #24). No reserve here: nothing runs under it.
+        unsigned need = 1;
+        for (unsigned i = 0; i < stripped.length(); i++) if (stripped[i] == commandDelimiter) need++;
+        const unsigned room = commandQueueSpaces();
+        if (room < need) {
+            Serial.printf("Sequence '%s' has %u commands and the command queue has room for %u — not run. "
+                          "Split it with ;T, or into smaller sequences.\n", key.c_str(), need, room);
             return;
         }
     }
@@ -739,6 +795,11 @@ void saveStoredCommandsToPreferences(const String &message) {
                   key.c_str(), (unsigned)key.length());
     return;
   }
+  if (seqKeyReserved(key)) {
+    Serial.printf("'%s' is a reserved name (the sequence store keeps its own records under it). Not stored.\n",
+                  key.c_str());
+    return;
+  }
 
   preferences.begin("stored_cmds", false);
   if (!preferences.putString(key.c_str(), value)) {
@@ -782,6 +843,10 @@ void saveStoredCommandsToPreferences(const String &message) {
 void eraseStoredCommandByName(const String &name) {
     if (name.length() == 0) {
         Serial.println("Command name cannot be empty.");
+        return;
+    }
+    if (seqKeyReserved(name)) {   // clearing key_list orphaned every sequence; seq_mig_done re-armed the migration
+        Serial.printf("'%s' is a reserved name, not a sequence. Nothing cleared.\n", name.c_str());
         return;
     }
     preferences.begin("stored_cmds", false);
@@ -1154,6 +1219,9 @@ void printNvsUsage() {
 }
 
 void eraseNVSFlash() {
+    // The restart is deferred, and the learned-peer table is written 5 s after a change and again just before the
+    // restart (WCB.ino), so without this an erase could come back with the old peers in it.
+    learnedPeersFrozen = true;
     preferences.begin("serial_baud", false);
     preferences.clear();
     preferences.end();
@@ -1911,12 +1979,19 @@ void saveSerialLabelToPreferences(int port, const String &label) {
     
     preferences.begin("serial_labels", false);
     String key = "label" + String(port);
+    // A label changes nothing live, so one NVS refused (full) is not set at all: RAM keeps what the next boot loads, and
+    // the confirmation - the Wizard's push ACK - is not printed (WCB coverage re-scan #20). A removal needs no space.
+    bool saved = true;
     if (label.length() > 0) {
-        preferences.putString(key.c_str(), label);
-    } else {
-        preferences.remove(key.c_str());
+        saved = preferences.putString(key.c_str(), label) == label.length();
+    } else if (preferences.isKey(key.c_str())) {
+        saved = preferences.remove(key.c_str());
     }
     preferences.end();
+    if (!saved) {
+        Serial.printf("⚠️  NVS could not store the Serial%d label (full? see ?NVS) - label unchanged\n", port);
+        return;
+    }
     
     serialPortLabels[port - 1] = label;
     Serial.printf("Serial%d label set to: '%s'\n", port, label.c_str());
@@ -1998,11 +2073,14 @@ void loadBroadcastBlockSettings() {
 
 void saveBroadcastBlockSettings() {
     preferences.begin("bcast_block", false);
+    bool saved = true;
     for (int i = 0; i < 5; i++) {
         String key = "blk" + String(i + 1);
-        preferences.putBool(key.c_str(), blockBroadcastFrom[i]);
+        saved = (preferences.putBool(key.c_str(), blockBroadcastFrom[i]) == sizeof(bool)) && saved;
     }
     preferences.end();
+    if (!saved)   // as the output flags (re-scan #20)
+        Serial.println("⚠️  NVS could not store the broadcast input flags (full? see ?NVS) - they revert at the next reboot");
 }
 
 
@@ -2519,9 +2597,8 @@ void loadMaestroSettings() {
   }
 
   preferences.end();
-  // NOTE: cannot normalize remote-to-self slots here — this runs before
-  // loadWCBNumberFromPreferences() at boot, so WCB_Number is still the default.
-  // normalizeMaestroSelfSlots() is called from setup() once WCB_Number is known.
+  // Remote-to-self slots are normalised by normalizeMaestroSelfSlots(), which setup() calls after this (WCB_Number is
+  // loaded before either).
 }
 
 // Repair a legacy "remote-to-self" Maestro slot (remoteWCB == this board's own

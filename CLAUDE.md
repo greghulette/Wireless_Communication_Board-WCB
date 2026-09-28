@@ -43,11 +43,15 @@ changing before editing.**
    unacknowledged" and "every broadcast is acknowledged" are both true here, of different
    paths — check which one you're on before assuming delivery.
    **Loop prevention gates every broadcast on one global.** `sendESPNowMessage()` drops a
-   broadcast outright when `lastReceivedViaESPNOW` is set (`WCB.ino:2722`), and a queued command
-   carries the value it snapshotted at enqueue (`:2286`). Only a received *command* may set it:
-   JSON telemetry is consumed without ever running, so both receive paths skip the flag for a `{`
-   payload (`:4520`, `:4815`). Set it from a packet that never executes and a controller's 5 Hz
-   `rc_ch` silences locally-typed broadcasts at random — local ports still print them.
+   broadcast outright when `lastReceivedViaESPNOW` is set, and a queued command carries its origin
+   in the queue item, which `loop()` restores into the global just before running it. **Only the
+   loop task writes the global** (and `inSequenceBody`): both receive paths and the FRAG
+   reassembly enqueue with the origin stated (`parseCommandsAndEnqueue(..., origin)`,
+   `enqueuePendingTimerChain(..., origin)`), and the serial reader (`serialCommandTask`) states it
+   to the enqueue and to `parseCommandGroups(..., origin)` without touching the globals. Written from the receive callback, a command arriving while
+   `processBroadcastCommand` wrote a typed broadcast to the soft ports (a write blocks until the
+   bytes are on the wire) dropped its mesh copy - the local ports still printed it. So
+   `processBroadcastCommand` also decides the mesh send once, from the origin at its entry.
    A broadcast the board **originates from `loop()`** (no command around it) reads whatever the
    last received command left, so it must clear the flag for its own send — `sendOwnBroadcast()`
    in `WCB.ino`. `?ETM,CHAR` phase 3 lost its whole broadcast third to this.
