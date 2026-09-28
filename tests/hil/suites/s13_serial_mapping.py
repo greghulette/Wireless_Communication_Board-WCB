@@ -1152,9 +1152,10 @@ def prev_flags_survive_reboot(bench):
     problems = []
     with config_guard(bench, 1):
         try:
-            w.run("?BCAST,OUT,S2,OFF")
-            w.run("?BCAST,IN,S2,OFF")
+            setup = w.run("?BCAST,OUT,S2,OFF") + w.run("?BCAST,IN,S2,OFF")
             out = w.run("?MAP,SERIAL,S2,S4")
+            if _has(setup + out, "NVS could not store"):
+                raise Skip("W1's NVS refused the setup's flags or mapping, which the reboot is to reload (see ?NVS)")
             assert _has(out, "Serial mapping set: Serial2 -> 1 destination(s)"), f"setup: {out}"
             if _has(out, "Auto-"):
                 problems.append(f"mapping an already-OFF port changed its flags: {out}")

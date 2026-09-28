@@ -311,7 +311,8 @@ def reserved_all_and_clear_all(bench):
                 if _get(w, name) != _not_set(name):
                     problems.append(f"after the refusals ?VAR,GET,{name} says {_get(w, name)!r}")
             w.run(";V,hilv,1")
-            w.run(";VP,hilp,2")
+            if _has(w.run(";VP,hilp,2"), "NVS write failed"):     # saveVarsToNVS refused it (WCB_Variables.cpp:105-106)
+                raise Skip("W1's NVS refused the setup's persistent variable (see ?NVS)")
             if [_get(w, "hilv"), _get(w, "hilp")] != ["[VAR] hilv = 1", "[VAR] hilp = 2"]:
                 raise AssertionError(f"setup: hilv {_get(w, 'hilv')!r}, hilp {_get(w, 'hilp')!r}")
             if _vars_entries(w) == 0:

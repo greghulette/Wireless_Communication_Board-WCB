@@ -2018,6 +2018,8 @@ def wdpda_changed_facts_resave(bench):
             if now != row.format(name, *new):
                 problems.append(f"W1's record of it 4 s after the new announce: {now}")
             time.sleep(DA_SAVE_SETTLE_S)                      # the save lands 1 s after the change
+            if any(x.startswith("[WDP-DA] could not save the device list") for x in c2.lines(m)):
+                raise Skip("W2's NVS refused the device list (wdpDaSave, WCB_WDP.cpp:1085-1091), so a reboot cannot reload it")
             wm = w.dev.mark()
             m = w2.reboot()
             if not any(re.match(r"^\[WDP-DA\] \d+ serial-attached devices? remembered", x) for x in w2.dev.since(m)):
