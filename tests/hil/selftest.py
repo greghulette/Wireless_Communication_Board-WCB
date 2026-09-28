@@ -51,6 +51,7 @@ docs/HIL_TESTING.md §9.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1822,6 +1823,11 @@ GATED = {
     "sbus.signal_loss_controller_reset": ("sbus_reset", "reboots the SBUS controller"),
     "softrx.erratum_pairs": ("softrx_erratum", "about 15 minutes of soft-port input into W1 S3-S5; needs wcb_probe 4"),
     "soak.w1s4_wire": ("w1s4_soak", "loads W1's S2/S4 fan-out for soak_minutes, default 20"),
+    **{f"nccfg.{n}": ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s")
+       for n in ("persist_reboot", "reset_defaults_ram", "reset_defaults_keeps_identity")},
+    **{f"nccfg.{n}": ("navicore_fault", "injects faults into NaviCore's config storage (a NAVICORE_HIL_HOOKS build "
+                                        "only)")
+       for n in ("hook_save_fail", "hook_get_config_overflow", "hook_config_unreadable")},
 }
 
 
@@ -3950,6 +3956,1243 @@ def t_nc_guard_bench_test(tmp):
     b.close()
 
 
+# ---------------------------------------------------------------------------- NaviCore over the mesh (INF6, hil/ncmesh.py)
+# Payloads run through the config tool's real _fragChunks (NaviCore config_tool/index.html:5556-5594, extracted and run
+# in node 24 on 2026-09-28) and the length, in code points, of every chunk it cut. The Python mirror must cut the same.
+NCMESH_GOLDEN = [
+    ('{"sys":1,"type":"PING"}', 7, [23]),
+    ('{"sys":1,"type":"SET_CONFIG","saveId":4242,"data":{"mappings":{"136":{"t1":[{"type":"wcb_unicast","target":"1",'
+     '"cmd":";S2HIL\\"quoted\\"\\\\back"}],"t1note":"Dôme 中 \U0001f642"}},"serialLabels":{"S5":"tab\\there'
+     '\\nnl\\u0001ctl"}}}', 4242, [117, 97]),
+    ("x" * 1000, 65535, [143, 143, 143, 143, 143, 143, 142]),
+    ('"' * 300, 1, [71, 71, 71, 71, 16]),
+    ("\\" * 150 + "é" * 100 + "中" * 90 + "\U0001f642" * 80, 300, [71, 71, 71, 60, 47, 40, 35, 25]),
+    ("\u0001\u0002\u001f" * 70, 12, [23, 23, 23, 23, 23, 23, 23, 23, 23, 3]),
+]
+
+
+def t_ncmesh_fragments(tmp):
+    """hil/ncmesh.py fragments(), the config tool's _fragChunks and sendJSON envelopes (NAVICORE.md INF6): the same cuts
+    as the tool's own function on six payloads (quotes, backslashes, control characters, 2-, 3- and 4-byte UTF-8, an
+    emoji the tool walks as one code point); every envelope {"f","of","sid","s"} in that key order, at most 187 UTF-8
+    bytes, the slices joining back into the payload with no code point split; each slice but the last full (one more
+    code point would pass the 143-byte escaped budget); the escaping JSON.stringify writes; dict payloads serialised as
+    JSON.stringify does; the refusals (sid 0 or 65536, more than 192 parts unless lifted, an empty payload, a lone
+    surrogate); and the pacing: 100 ms between envelopes, the link term only for a line long enough, nothing after the
+    last, any order and repeats sent as asked."""
+    from hil import ncmesh as M
+    for payload, sid, cuts in NCMESH_GOLDEN:
+        envs = M.fragments(payload, sid)
+        objs = [json.loads(e) for e in envs]
+        assert [len(o["s"]) for o in objs] == cuts, (payload[:30], [len(o["s"]) for o in objs], cuts)
+        assert all(list(o) == ["f", "of", "sid", "s"] for o in objs), "key order f, of, sid, s"
+        assert [o["f"] for o in objs] == list(range(1, len(cuts) + 1)) and {o["of"] for o in objs} == {len(cuts)}
+        assert {o["sid"] for o in objs} == {sid} and "".join(o["s"] for o in objs) == payload
+        assert all(len(e.encode("utf-8")) <= M.ENV_MAX_BYTES for e in envs), [len(e.encode()) for e in envs]
+        for o, nxt in zip(objs, objs[1:]):
+            esc = sum(M.esc_bytes(c) for c in o["s"])
+            assert esc <= M.ENV_BUDGET < esc + M.esc_bytes(nxt["s"][0]), (esc, nxt["s"][0])
+        assert all(e == M.compact(o) for e, o in zip(envs, objs)), "each envelope is its own compact JSON"
+    assert M.fragments('{"sys":1,"type":"PING"}', 7) == ['{"f":1,"of":1,"sid":7,"s":"{\\"sys\\":1,\\"type\\":\\"PING\\"}"}']
+    assert M.envelope(1, 1, 3, 'a"\\\n\t\x01é') == '{"f":1,"of":1,"sid":3,"s":"a\\"\\\\\\n\\t\\u0001é"}'
+    assert [M.esc_bytes(c) for c in '"\\\b\t\n\f\r\x00\x1fa\x7fé中\U0001f642'] == [2, 2, 2, 2, 2, 2, 2, 6, 6, 1, 1,
+                                                                                            2, 3, 4]
+    obj = {"sys": 1, "type": "SET_CONFIG", "saveId": 5, "data": {"t": "é"}}
+    assert M.fragments(obj, 9) == M.fragments('{"sys":1,"type":"SET_CONFIG","saveId":5,"data":{"t":"é"}}', 9)
+    big = "y" * (M.ENV_BUDGET * M.MAX_PARTS + 1)            # 193 full slices
+    for bad in (lambda: M.fragments("x", 0), lambda: M.fragments("x", 65536), lambda: M.fragments("", 1),
+                lambda: M.fragments("a\ud800b", 1), lambda: M.fragments(big, 1)):
+        _raises(bad, ValueError)
+    assert len(M.fragments(big, 1, max_parts=None)) == M.MAX_PARTS + 1
+    import math
+    env = M.envelope(999, 999, 99999, "x" * M.ENV_BUDGET)    # the worst case the chunker plans for
+    assert len(env.encode()) == M.ENV_TARGET_BYTES and M.pace_s(env) == 0.1, "a 180-byte envelope: 17 ms, the floor wins"
+    assert M.pace_s(env, prefix="p" * 2000) == math.ceil((2000 + 180 + 1) / 11.52) * 2 / 1000, "a long line: the link"
+    sent, slept = [], []
+    w1 = FakeNaviDev(lambda text, n: sent.append(text) or [], name="wcb1")
+    from hil.wcb import WCB
+    envs = M.fragments("z" * 400, 77)
+    M.send_fragments(WCB(w1), envs, order=[2, 0, 0, 1], sleep=slept.append)
+    assert sent == [";W20," + envs[i] for i in (2, 0, 0, 1)], sent
+    assert slept == [M.pace_s(envs[i], ";W20,") for i in (2, 0, 0)] == [0.1, 0.1, 0.1], slept
+    sent.clear()
+    M.send_fragments(WCB(w1), envs, gap_s=0.25, sleep=slept.append)
+    assert len(sent) == 3 and slept[-2:] == [0.25, 0.25]
+    _raises(lambda: M.send_fragments(WCB(w1), ['{"s":"' + "q" * 190 + '"}'], sleep=slept.append), ValueError)
+
+
+def t_ncmesh_bridged_reassemble(tmp):
+    """bridged(): ';W20,<json>' typed on W1 exactly (a dict compacted with its key order kept), the {"sys":1 lines
+    parsed and W1's other lines kept, the first line matching the pattern returned, None - not a raise - when nothing
+    matches in time, and JSON refused that one mesh packet cannot hold (over 187 bytes, or two lines). reassemble(): the
+    tool's receive side - two interleaved sessions with a duplicate part, joined in completion order; envelopes with f 0,
+    f > of, of 0 or a negative sid ignored; a sid reused with another "of" starting over; a session that never completes
+    left out."""
+    from hil import ncmesh as M
+    from hil.wcb import WCB
+    pong = '{"sys":1,"type":"PONG","id":20,"version":"v0.2.0_TEST","model":0,"mode":1}'
+
+    def w1_script(text, n):
+        if text == ';W20,{"type":"PING"}':
+            return ['{"sys":1,"type":"rc_hb","id":20,"fw":"v0.2.0_TEST"}', "[ETM] WCB2 came ONLINE", pong, '{"sys":1,x']
+        return []
+    w1 = FakeNaviDev(w1_script, name="wcb1")
+    r = M.bridged(WCB(w1), {"type": "PING"}, r'"type":"PONG"', timeout=1.0)
+    assert w1.sent == [';W20,{"type":"PING"}'] and r.match and r.match.string == pong, (w1.sent, r)
+    assert [o["type"] for o in r.sys] == ["rc_hb", "PONG"] and "[ETM] WCB2 came ONLINE" in r.lines, r
+    t0 = time.monotonic()
+    r = M.bridged(WCB(w1), '{"type":"TRIGGER","mode":1,"btn":36,"tap":1}', r'"type":"ACK"', timeout=0.2)
+    assert r.match is None and r.lines == [] and time.monotonic() - t0 >= 0.2, r
+    r = M.bridged(WCB(w1), {"type": "PING"}, timeout=0.1)
+    assert r.match is None and len(r.sys) == 2
+    for bad in ({"type": "X", "pad": "p" * 180}, '{"type":"X"}\n{"type":"Y"}', {"type": "\ud800"}):
+        _raises(lambda: M.bridged(WCB(w1), bad, timeout=0.1), ValueError)
+    a, b = M.fragments("A" * 300 + '"', 5), M.fragments("B" * 150, 6)
+    lines = ["noise", a[0], b[0], a[1], a[1], M.envelope(0, 3, 5, "bad"), M.envelope(4, 3, 5, "bad"),
+             M.envelope(1, 0, 8, "bad"), M.envelope(1, 1, -1, "bad"), b[1], a[2], '{"f":1,"of":2}',
+             M.envelope(1, 2, 9, "old"), M.envelope(1, 3, 9, "N1"), M.envelope(3, 3, 9, "N3"), M.envelope(2, 3, 9, "N2"),
+             M.envelope(1, 4, 10, "never")]
+    assert len(a) == 3 and len(b) == 2, (len(a), len(b))
+    assert M.reassemble(lines) == [(6, "B" * 150), (5, "A" * 300 + '"'), (9, "N1N2N3")], M.reassemble(lines)
+
+
+def _fake_nc_mesh(board):
+    """A NaviCore console for burn_window: SET_DEBUG_FLAGS ACKed and remembered, #L12 answered; `board['rx']` is where
+    the fake probe delivers."""
+    def script(text, n):
+        if text.startswith('{"type":"SET_DEBUG_FLAGS"'):
+            board["flags"] = json.loads(text)["flags"]
+            return ['{"type":"ACK","ok":true}']
+        if text == "#L12":
+            return ["Mode=1  matrixBtn=0  matrixVal=992"]
+        if text == '{"type":"GET_WCB_STATUS"}':
+            return [board.get("status", '{"type":"WCB_STATUS","quantity":1,"self":20,"online":[1,1],"known":[1,1]}')]
+        if text == '{"type":"GET_CONFIG"}':
+            out = board.get("bcast_out", ())
+            bc = {p: {"out": p in out, "in": False} for p in ("S3", "S4", "S5")}
+            return ['{"type":"CONFIG","data":' + json.dumps({"chRateHz": 5, "serialBcast": bc}, separators=(",", ":"))
+                    + "}"]
+        return []
+    return FakeNaviDev(script, name="navicore")
+
+
+class FakeMeshProbe:
+    """A joined probe whose commands to NaviCore pass WCB_Client's duplicate window (hil.ncmesh.cmd_seq_dup, a port of
+    WCB_Client.cpp:879-898) with the numbers a fresh join uses, 1, 2, 3...; an accepted one appears on NaviCore's console
+    as onWCBCommand prints it under DBG_MAESTRO. `lost` drops a send on the air."""
+
+    def __init__(self, nav, board, device_id=16, window=None, lost=lambda k: False):
+        self.nav, self.board, self.id, self.seq, self.lost = nav, board, device_id, 0, lost
+        self.window = window if window is not None else {}
+        self.accepted = []
+
+    def mesh_send(self, target, text, ensured=True):
+        from hil import ncmesh as M
+        self.seq += 1
+        if self.lost(self.seq) or M.cmd_seq_dup(self.window, self.seq):
+            return True
+        self.accepted.append(self.seq)
+        if self.board.get("flags", 0) & 1:
+            self.nav._append(f"[WCB RX] from WCB{self.id}: {text}")
+        return True
+
+
+def _old_window(high, seen):
+    """NaviCore's window after an earlier session under the same id that it heard send `seen` numbers (the last one
+    `high`)."""
+    from hil import ncmesh as M
+    w = {}
+    for s in sorted(set(seen) | {high}):
+        M.cmd_seq_dup(w, s)
+    return w
+
+
+def t_ncmesh_burn_window(tmp):
+    """burn_window() and cmd_seq_dup(): the port of WCB_Client's duplicate window (the high always a duplicate, a seen
+    number up to 32 below it one, an unseen one there taken and marked, 33 below or more taken without a trace, a newer
+    one moving the window, the int16 wrap). Then the burn against it: with no earlier session, 66 sends and nothing
+    dropped; for every earlier session whose last number NaviCore heard was at most 66 - a dense one and a sparse one
+    (only that last number) - the burn sees the drop and goes 34 past it, after which the next 40 commands are all
+    taken; drops that go on (a lossy air) stop at the cap with an AssertionError, and so does a probe NaviCore never
+    hears. DBG_MAESTRO is set for the burn and cleared after."""
+    from hil import ncmesh as M
+    from hil.navicore import NaviCore
+    w = {}
+    assert [M.cmd_seq_dup(w, s) for s in (10, 10, 9, 9, 12, 11, 12, 45, 13, 13, 12)] == \
+        [False, True, False, True, False, False, True, False, False, True, False], w
+    w = {}
+    assert [M.cmd_seq_dup(w, s) for s in (65535, 1, 65535, 2)] == [False, False, True, False], "the int16 wrap"
+    for high in range(1, 67):
+        for seen in (range(1, high + 1), [high]):
+            board = {}
+            nav = _fake_nc_mesh(board)
+            probe = FakeMeshProbe(nav, board, window=_old_window(high, seen))
+            res = M.burn_window(NaviCore(nav), probe, 16, gap_s=0, settle_s=0)
+            assert high in res["dropped"] and res["sent"] >= max(66, high + 34), (high, res)
+            before = len(probe.accepted)
+            for _ in range(40):
+                probe.mesh_send(20, "HILtest")
+            assert len(probe.accepted) == before + 40, (high, len(seen), "a test command was dropped")
+            assert board["flags"] == 0, "the debug flags go back to 0"
+    board = {}
+    nav = _fake_nc_mesh(board)
+    res = M.burn_window(NaviCore(nav), FakeMeshProbe(nav, board), 16, gap_s=0, settle_s=0)
+    assert res["sent"] == 66 and res["dropped"] == [] and res["tag"].startswith("HILB"), res
+    board = {}
+    nav = _fake_nc_mesh(board)
+    lossy = FakeMeshProbe(nav, board, lost=lambda k: k % 20 == 0)
+    e = _raises(lambda: M.burn_window(NaviCore(nav), lossy, 16, gap_s=0, settle_s=0))
+    assert "still drops the burn" in str(e) and board["flags"] == 0, e
+    board = {}
+    nav = _fake_nc_mesh(board)
+    deafp = FakeMeshProbe(nav, board, lost=lambda k: True)
+    assert "printed none of the 66" in str(_raises(lambda: M.burn_window(NaviCore(nav), deafp, 16, gap_s=0,
+                                                                          settle_s=0)))
+
+
+def t_ncmesh_deaf_and_probe_peer(tmp):
+    """deaf(): the octet from the board's own chain, flipped (XOR 1) on the board's OWN console and flipped back however
+    the block ends - normally, on a failure (which still propagates), on an abort; a flip the board refuses fails the
+    test with the octet still sent back; a board that will not confirm the octet back fails it as STILL DEAF with the
+    command to type; a board with no console of its own is refused (Skip) before anything is sent. probe_peer():
+    refuses an id NaviCore knows, and a NaviCore that writes mesh text out an aux port (serialBcast out), before any
+    join; joins with quantity 20 unless told otherwise (so the probe has NaviCore as an ESP-NOW peer from begin()), and
+    burns the window before the body runs."""
+    from contextlib import contextmanager as _cm
+    from hil import ncmesh as M
+    from hil.runner import Skip
+    state = {"oct": "1A", "refuse": set(), "silent": False}
+
+    def w_script(text, n):
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        if text.startswith("?MAC,3,"):
+            val = text[len("?MAC,3,"):]
+            if state["silent"] or val in state["refuse"]:
+                return ["Invalid hex value for 3rd MAC octet. Use two hex digits (00-FF)."]
+            state["oct"] = val
+            return [f"Updated 3rd MAC octet to 0x{val}"]
+        return []
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    w2 = FakeNaviDev(w_script, name="wcb2")
+    b.dev = lambda name: {"wcb2": w2}[name]
+    b.config_tokens = lambda n, refresh=False: ["?HW,24", "?MAC,2,00", "?MAC,3,1A", "?WCB,2"]
+    with M.deaf(b, 2) as w:
+        assert state["oct"] == "1B" and w.dev is w2
+    assert state["oct"] == "1A" and [x for x in w2.sent if x.startswith("?MAC")] == ["?MAC,3,1B", "?MAC,3,1A"]
+
+    def failing():
+        with M.deaf(b, 2):
+            raise ValueError("the body failed")
+    assert "the body failed" in str(_raises(failing, ValueError)) and state["oct"] == "1A"
+    try:
+        with M.deaf(b, 2):
+            raise KeyboardInterrupt
+    except KeyboardInterrupt:
+        pass
+    assert state["oct"] == "1A", "an abort still puts the octet back"
+    state["refuse"] = {"1B"}
+    w2.sent.clear()
+    assert "did not take ?MAC,3,1B" in str(_raises(failing))
+    assert [x for x in w2.sent if x.startswith("?MAC")] == ["?MAC,3,1B", "?MAC,3,1A"], w2.sent
+    state["refuse"] = set()
+
+    def stays_deaf():
+        with M.deaf(b, 2):
+            state["silent"] = True
+    msg = str(_raises(stays_deaf))
+    assert "W2 IS STILL DEAF" in msg and "type ?MAC,3,1A on W2's own console" in msg, msg
+    state.update(silent=False, oct="1A")
+    b.cfg["devices"].pop("wcb2")
+    w2.sent.clear()
+    _raises(lambda: M.deaf(b, 2).__enter__(), Skip)
+    assert w2.sent == [], "nothing sent to a board with no console of its own"
+
+    import suites.common as C
+    board, joined = {}, []
+    nav = _fake_nc_mesh(board)
+
+    @_cm
+    def fake_join(bench, probe_name, device_id, forget=True, **overrides):
+        joined.append((probe_name, device_id, overrides))
+        yield FakeMeshProbe(nav, board, device_id=device_id)
+    b2 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    b2.new_session()
+    b2.dev = lambda name: {"navicore": nav}[name]
+    saved = (C.probe_in_mesh, M.burn_window)
+    C.probe_in_mesh = fake_join
+    M.burn_window = lambda nc, probe, device_id, target=20: {"sent": 66, "dropped": [], "tag": "HILBTEST"}
+    try:
+        with M.probe_peer(b2, 16) as probe:
+            assert probe.burn["sent"] == 66
+        assert joined == [("probe1", 16, {"quantity": 20})], joined
+        with M.probe_peer(b2, 15, probe_name="probe2", quantity=5, checksum=False):
+            pass
+        assert joined[-1] == ("probe2", 15, {"quantity": 5, "checksum": False}), joined
+        board["status"] = '{"type":"WCB_STATUS","quantity":1,"self":20,"online":[1],"known":[1,0,0,0,0,0,0,0,0,0,0,0,1]}'
+        _raises(lambda: M.probe_peer(b2, 13).__enter__(), Skip)
+        assert len(joined) == 2, "a known id is refused before any join"
+        board.pop("status")
+        board["bcast_out"] = ("S5",)
+        assert "out S5 (serialBcast out)" in str(_raises(lambda: M.probe_peer(b2, 14).__enter__(), Skip))
+        assert len(joined) == 2, "serialBcast out is refused before any join"
+    finally:
+        C.probe_in_mesh, M.burn_window = saved
+    b2.close()
+
+
+# ---------------------------------------------------------------------------- NaviCore's config surface (NC-WP1, s40)
+def _nm_cut(s, size):
+    """strlcpy(dst, s, size) as the harness then reads it: at most size-1 BYTES of the UTF-8, a cut character decoded
+    as U+FFFD (SerialDevice decodes errors='replace')."""
+    return (s if isinstance(s, str) else "").encode("utf-8")[:size - 1].decode("utf-8", errors="replace")
+
+
+def _nm_pick(obj, key, default):
+    """ArduinoJson 7's `obj[key] | default`: the value when it has the default's type (int for int, bool for bool,
+    str for str), else the default. A null object reads every key as the default."""
+    v = obj.get(key) if isinstance(obj, dict) else None
+    if isinstance(default, bool):
+        return v if isinstance(v, bool) else default
+    if isinstance(default, int):
+        return v if isinstance(v, int) and not isinstance(v, bool) else default
+    return v if isinstance(v, str) else default
+
+
+def _nm_as_int(v):
+    """`variant.as<int>()`: an int as it is, anything else 0."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
+def _nm_wrap(v, bits, signed=False):
+    v &= (1 << bits) - 1
+    return v - (1 << bits) if signed and v >= 1 << (bits - 1) else v
+
+
+def _nm_toint(key):
+    """Arduino String::toInt(): the leading integer, 0 without one."""
+    m = re.match(r"\s*([-+]?\d+)", key)
+    return int(m.group(1)) if m else 0
+
+
+NM_HCR_OK = {2: "emo", 3: "emo", 4: "emo", 5: None, 6: None, 8: None, 9: None, 11: None, 20: None, 21: None, 7: "gap",
+             10: "ovr", 13: "muse", 14: "wav", 16: "stop", 17: "vol", 18: "step", 19: "step"}
+
+
+def _nm_hcr_ok(fn, chan, track):
+    """HcrCodec::normalize (WcbCmd WcbHcr.cpp:7-43)."""
+    k = NM_HCR_OK.get(fn, "bad")
+    return {"bad": False, None: True, "emo": 0 <= chan <= 3 and 0 <= track <= 99, "gap": 0 <= chan <= 99 and 0 <= track <= 99,
+            "ovr": 0 <= chan <= 1, "muse": 0 <= track <= 1, "wav": 0 <= chan <= 2 and 0 <= track <= 9999,
+            "stop": 0 <= chan <= 2, "vol": 0 <= chan <= 3 and 0 <= track <= 100, "step": 0 <= track <= 99}[k]
+
+
+class NaviModel:
+    """NaviCore's USB console and config handling for the s40 suite, ported from the firmware this suite was written
+    against (NaviCore.ino processInputLine :3773-4257, execCliLine :3359-3693, applySerialBauds/applySbusOut/
+    applyConfigSideEffects :3229-3345; rc_config.h rcConfigLoadDefaults :801-968, actionToJson/actionFromJson
+    :970-1155, rcConfigToJSON :1211-1482, rcConfigFromJSON :1502-1905). It keeps RAM and flash apart (SET_CONFIG saves,
+    RESET_DEFAULTS does not, REBOOT reloads the flash copy) and a boot-time copy of the mesh identity, so the RTERM
+    split (D-NC17) shows. W1's console (w1_script) relays ;W20 JSON and CLI lines and lists NaviCore's advertised port
+    labels in its ?WDP,DUMP. What it does not model it answers with silence, and a forbidden command (#L2, #L20, #L21,
+    ?FORGET,ALL, ?REC,START...) fails the selftest outright."""
+    FW = "v0.2.0_102105QSEP26"
+    FACTORY_PW = "DomeNet"
+    BAND = [b for b in [("B1", 1799, 1823), ("B2", 1758, 1782), ("B3", 1718, 1742), ("B4", 1676, 1700),
+                        ("B5", 1634, 1658), ("B6", 1594, 1618), ("T4 Left", 1553, 1577), ("T4 Right", 1512, 1536),
+                        ("T5 Left", 1471, 1495), ("T5 Right", 1430, 1454), ("T3 Up", 1389, 1413),
+                        ("T3 Down", 1348, 1372), ("T2 Up", 1308, 1332), ("T2 Down", 1266, 1290),
+                        ("T6 Left", 1225, 1249), ("T6 Right", 1184, 1208), ("T1 Left", 1143, 1167),
+                        ("T1 Right", 1103, 1127), ("L-Stick Click", 1062, 1086), ("R-Stick Click", 1021, 1045),
+                        ("Unassigned", 0, 0)]] + [(f"Logical {i}", 0, 0) for i in range(1, 16)]
+    SW = ("SA", "SB", "SC", "SD", "SE", "SF", "SG", "SH", "SI", "SJ")
+    SW_CH, SW_POS = (8, 9, 10, 11, 12, 13, 14, 15, 0, 0), (3, 3, 3, 3, 3, 2, 3, 2, 2, 2)
+    KN = ("S1", "S2", "LS", "RS", "S3", "J1", "J2", "J3", "J4", "J5", "J6")
+    KN_CH = (5, 6, 0, 0, 0, 1, 2, 3, 4, 0, 0)
+    LBL = ("S3", "S4", "S5", "maestro")
+    FORBIDDEN = (re.compile(r"^#[Ll]0?2$"), re.compile(r"^#[Ll]2[01]"), re.compile(r"^\?FORGET,ALL", re.I),
+                 re.compile(r"^\?REC,(START|SAVE|RM|RENAME|EDIT|CLEAR|LOAD|PLAY|STOP)", re.I),
+                 re.compile(r'"type":"(REBOOT|FORGET_PEER)".*"all":true'))
+
+    def __init__(self):
+        self.c = self.defaults()
+        bench = {"sbusOutEnabled": True, "wifiEnabled": True, "wifiSsid": "HILap", "wifiPassword": "sekrit99",
+                 "wcbNetwork": {"password": "hunter2", "quantity": 1},
+                 "wcbProfiles": [{"name": "Dev", "macOct2": 0, "macOct3": 0, "password": "hunter2", "quantity": 1,
+                                  "deviceId": 20, "channel": 1},
+                                 {"name": "Droid", "macOct2": 0, "macOct3": 1, "password": "sekrit99", "quantity": 4,
+                                  "deviceId": 20, "channel": 1}],
+                 "hcrDest": {"transport": "wcb", "target": "2", "wcbPort": 1},
+                 "wledSlots": [{"id": 1, "port": 0, "wcb": 2, "configured": True}],
+                 "auxBaud": {"S3": 115200, "S4": 9600, "S5": 9600, "maestro": 57600},
+                 "maestros": [{"type": 1, "device": 1, "channels": [{"ch": 0, "name": "Pie 1", "min": 3968, "max": 8000},
+                                                                   {"ch": 2, "name": "Pie 2", "min": 4000, "max": 7600}]}]
+                             + [{"type": 2, "device": i} for i in range(2, 9)],
+                 "mappings": {"101": {"t1": [{"type": "wcb_unicast", "target": "1", "cmd": ";S2HILA"}], "t1note": "Dome"},
+                              "207": {"exclusive": True, "t2": [{"type": "maestro", "target": "1", "cmd": "goHome"}]}},
+                 "switches": {"SC": {"channel": 10, "positions": 3, "p1": [{"type": "maestro", "target": "1",
+                                                                             "cmd": "setEasing,p1"}]},
+                              "SI": {"channel": 16, "positions": 2, "p0": [{"type": "wcb_broadcast", "cmd": ";W1;S3x"}]},
+                              "SJ": {"channel": 17, "positions": 2, "p1": [{"type": "wcb_broadcast", "cmd": ";W2;S2y"}]}},
+                 "knobs": {"J2": {"channel": 24, "function": 1, "modeAware": True,
+                                  "outputs": [{"target": 1, "maestroCh": 0, "posMin": 4000, "posMax": 8000,
+                                               "releaseIdleMs": 1500}]},
+                           "J4": {"channel": 4, "function": 1, "smoothProfile": 1,
+                                  "outputs": [{"target": t, "maestroCh": 0, "posMin": 4000, "posMax": 8000}
+                                              for t in range(2, 8)]},
+                           "S1": {"channel": 5, "function": 2, "outputs": [{"target": 1, "maestroCh": 0, "posMin": 0,
+                                                                            "posMax": 99}]}},
+                 "smoothProfiles": [{"name": "Default", "entries": [{"mid": 1, "ch": 0, "spd": 20, "acc": 3}]},
+                                    {"name": "Snappy", "entries": [{"mid": 2, "ch": 0, "spd": 60, "acc": 0}]}]
+                                   + [{"name": ""}] * 4,
+                 "modeReport": {"enabled": True, "wcb": 2, "template": ";V,MODE,{mode}"},
+                 "statsReport": {"enabled": True, "wcb": 1}}
+        self.merge(bench)
+        self.flash = self.text()
+        self.cmdlib = '{"boards":[{"id":"HILboard","cmds":[";S1x"]}],"enums":{}}'
+        self.clips = ["intro"]
+        self.mode, self.flags, self.monitor, self.calib = 1, 0, False, False
+        self.channels = [992] * 24
+        self.channels[6], self.channels[11] = 992, 172
+        self.boot()
+        self.nav = self.w1 = None
+        self.received = []
+        self.seq_busy = False
+
+    # ------------------------------------------------------------ the config model
+    @classmethod
+    def defaults(cls):
+        return {"txModel": 0, "threeAxisGimbals": False, "sbusOutEnabled": False, "wifiEnabled": False, "wifiSsid": "",
+                "wifiPassword": "", "maeGateMs": 250, "boardType": 0, "tapWindowMs": 500, "holdMs": 750,
+                "switchSettleMs": 80, "chRateHz": 5, "matrixChannel": 7, "matrixDebounceFrames": 1, "modeSwitch": 4,
+                "peerAlert": True, "peerActions": [],
+                "thresholds": [{"id": i + 1, "label": b[0], "minPwm": b[1], "maxPwm": b[2]} for i, b in enumerate(cls.BAND)],
+                "mappings": {},
+                "switches": [{"channel": cls.SW_CH[i], "positions": cls.SW_POS[i], "t": [([], "")] * 3} for i in range(10)],
+                "knobs": [{"channel": cls.KN_CH[i], "function": 0, "reverse": False, "modeAware": False,
+                           "modeSwitchOverride": -1, "smoothProfile": -1, "easeSwitchOverride": False, "outputs": [],
+                           "outputs2": [], "outputs3": []} for i in range(11)],
+                "hcrDest": {"transport": 2, "target": "S3", "wcbPort": 1},
+                "maestros": [{"type": 0, "device": i + 1, "channels": {}} for i in range(8)],
+                "wcbNetwork": {"macOct2": 0, "macOct3": 0, "password": cls.FACTORY_PW, "quantity": 4, "deviceId": 20,
+                               "channel": 1},
+                "wcbProfiles": [], "mp3Dest": {"transport": 2, "target": "2"}, "dfpDest": {"transport": 2, "target": "S3"},
+                "wledSlots": [{"wledID": 0, "serialPort": 0, "remoteWCB": 0, "configured": False} for _ in range(4)],
+                "auxBaud": [9600, 9600, 9600], "maestroBaud": 115200, "serialLabels": ["", "", "", ""],
+                "bcastOut": [False] * 3, "bcastIn": [False] * 3,
+                "modeReport": {"enabled": False, "wcb": 0, "tmpl": "", "cmds": ["", "", ""]},
+                "statsReport": {"enabled": False, "wcb": 0},
+                "smooth": [{"name": "Default" if p == 0 else "", "entries": {}} for p in range(6)]}
+
+    @staticmethod
+    def action_from(o):
+        """actionFromJson (rc_config.h:1063-1155) -> the internal action, or None."""
+        o = o if isinstance(o, dict) else {}
+        t = _nm_pick(o, "type", "")
+        a = {"type": None, "target": "", "cmd": "", "delay": _nm_wrap(_nm_pick(o, "delay", 0), 16), "skipRunning": False,
+             "note": "", "fn": 0, "chan": 0, "track": 0}
+        if t in ("wcb_unicast", "maestro_remote", "maestro"):
+            a.update(type="maestro" if t != "wcb_unicast" else t, target=_nm_cut(_nm_pick(o, "target", ""), 6),
+                     cmd=_nm_cut(_nm_pick(o, "cmd", ""), 96), skipRunning=_nm_pick(o, "skipRunning", False))
+        elif t == "wcb_broadcast":
+            a.update(type=t, cmd=_nm_cut(_nm_pick(o, "cmd", ""), 96), skipRunning=_nm_pick(o, "skipRunning", False))
+        elif t in ("maestro_local", "wled", "record"):
+            a.update(type=t, cmd=_nm_cut(_nm_pick(o, "cmd", ""), 96))
+        elif t == "serial":
+            a.update(type=t, target=_nm_cut(_nm_pick(o, "port", ""), 6), cmd=_nm_cut(_nm_pick(o, "cmd", ""), 96))
+        elif t in ("hcr", "dfplayer", "mp3"):
+            a.update(type=t, fn=_nm_wrap(_nm_pick(o, "fn", 0), 8), track=_nm_wrap(_nm_pick(o, "track", 0), 16, True),
+                     chan=0 if t == "mp3" else _nm_wrap(_nm_pick(o, "chan", 0), 8, True))
+        elif t == "play":
+            a.update(type=t, cmd=_nm_cut(_nm_pick(o, "cmd", ""), 96), fn=_nm_wrap(_nm_pick(o, "fn", 0), 8))
+        elif t == "stop":
+            a.update(type=t)
+        else:
+            return None
+        a["note"] = _nm_cut(_nm_pick(o, "note", ""), 20)
+        return a
+
+    @staticmethod
+    def action_to(a):
+        """actionToJson (rc_config.h:970-1061)."""
+        o = {"type": a["type"]}
+        t = a["type"]
+        if t in ("wcb_unicast", "maestro"):
+            o.update(target=a["target"], cmd=a["cmd"])
+        elif t in ("wcb_broadcast", "maestro_local", "wled", "record"):
+            o["cmd"] = a["cmd"]
+        elif t == "serial":
+            o.update(port=a["target"], cmd=a["cmd"])
+        elif t in ("hcr", "dfplayer"):
+            o.update(fn=a["fn"], chan=a["chan"], track=a["track"])
+        elif t == "mp3":
+            o.update(fn=a["fn"], track=a["track"])
+        elif t == "play":
+            o.update(cmd=a["cmd"], fn=a["fn"])
+        if a["delay"]:
+            o["delay"] = a["delay"]
+        if t in ("wcb_unicast", "wcb_broadcast", "maestro") and a["skipRunning"]:
+            o["skipRunning"] = True
+        if a["note"]:
+            o["note"] = a["note"]
+        return o
+
+    def tier_from(self, obj, key):
+        out = []
+        if isinstance(obj, dict) and key in obj:
+            for o in obj[key] if isinstance(obj[key], list) else []:
+                if len(out) >= 5:
+                    break
+                a = self.action_from(o)
+                if a:
+                    out.append(a)
+        return out
+
+    @staticmethod
+    def read_outs(arr):
+        out = []
+        for o in arr if isinstance(arr, list) else []:
+            if len(out) >= 10:
+                break
+            o = o if isinstance(o, dict) else {}
+            out.append({"target": _nm_wrap(_nm_pick(o, "target", 0), 8) if "target" in o else (_nm_pick(o, "slot", 0) or 1),
+                        "maestroCh": _nm_wrap(_nm_pick(o, "maestroCh", 0), 8),
+                        "posMin": _nm_wrap(_nm_pick(o, "posMin", 4000), 16), "posMax": _nm_wrap(_nm_pick(o, "posMax", 8000), 16),
+                        "midClosed": _nm_pick(o, "midClosed", False),
+                        "releaseIdleMs": _nm_wrap(_nm_pick(o, "releaseIdleMs", 0), 16)})
+        return out
+
+    def merge(self, d):
+        """rcConfigFromJSON (rc_config.h:1502-1905): each branch only when its key is present. Always true."""
+        c = d if isinstance(d, dict) else {}
+        r = self.c
+        g = lambda k, dflt: _nm_pick(c, k, dflt)          # noqa: E731
+        if "txModel" in c:
+            r["txModel"] = _nm_wrap(g("txModel", 0), 8)
+        for k in ("threeAxisGimbals", "sbusOutEnabled", "wifiEnabled"):
+            if k in c:
+                r[k] = g(k, False)
+        if "wifiSsid" in c:
+            r["wifiSsid"] = _nm_cut(g("wifiSsid", r["wifiSsid"]), 33)
+        if "wifiPassword" in c:
+            r["wifiPassword"] = _nm_cut(g("wifiPassword", r["wifiPassword"]), 64)
+        if "maeGateMs" in c:
+            r["maeGateMs"] = _nm_wrap(g("maeGateMs", 250), 16)
+        if "boardType" in c:
+            r["boardType"] = _nm_wrap(g("boardType", 0), 8)
+        if "tapWindowMs" in c:
+            r["tapWindowMs"] = _nm_as_int(c["tapWindowMs"])
+        if r["tapWindowMs"] < 100:
+            r["tapWindowMs"] = 500
+        if "holdMs" in c:
+            r["holdMs"] = _nm_as_int(c["holdMs"])
+        if r["holdMs"] < r["tapWindowMs"] + 100:
+            r["holdMs"] = r["tapWindowMs"] + 250
+        if r["holdMs"] > 5000:
+            r["holdMs"] = 5000
+        if "switchSettleMs" in c:
+            r["switchSettleMs"] = max(0, min(1000, g("switchSettleMs", 80)))
+        if "chRateHz" in c:
+            hz = g("chRateHz", 5)
+            r["chRateHz"] = 5 if hz < 1 else min(hz, 20)
+        if "matrixChannel" in c:
+            r["matrixChannel"] = _nm_as_int(c["matrixChannel"])
+        if "matrixDebounceFrames" in c:
+            r["matrixDebounceFrames"] = max(1, min(4, g("matrixDebounceFrames", 1)))
+        if "funcBindings" in c:
+            r["modeSwitch"] = _nm_wrap(_nm_pick(c["funcBindings"], "mode", r["modeSwitch"]), 8, True)
+        if "peerEvent" in c:
+            pe = c["peerEvent"] if isinstance(c["peerEvent"], dict) else {}
+            r["peerAlert"] = _nm_pick(pe, "alert", r["peerAlert"])
+            if "actions" in pe:
+                r["peerActions"] = self.tier_from(pe, "actions")
+        if "thresholds" in c:
+            for i, th in enumerate((c["thresholds"] if isinstance(c["thresholds"], list) else [])[:36]):
+                th = th if isinstance(th, dict) else {}
+                r["thresholds"][i] = {"id": _nm_pick(th, "id", i + 1), "label": _nm_cut(_nm_pick(th, "label", ""), 24),
+                                      "minPwm": _nm_pick(th, "minPwm", 0), "maxPwm": _nm_pick(th, "maxPwm", 0)}
+        if "mappings" in c:
+            for k, v in (c["mappings"] if isinstance(c["mappings"], dict) else {}).items():
+                bid = _nm_toint(k)
+                mode, btn = int(bid / 100), bid - int(bid / 100) * 100
+                if not (1 <= mode <= 3 and 1 <= btn <= 36):
+                    continue
+                v = v if isinstance(v, dict) else {}
+                r["mappings"][f"{mode * 100 + btn}"] = {
+                    "exclusive": _nm_pick(v, "exclusive", False),
+                    "t": [(self.tier_from(v, f"t{t}"), _nm_cut(_nm_pick(v, f"t{t}note", ""), 20)) for t in range(1, 5)]}
+        if "switches" in c:
+            sw = c["switches"] if isinstance(c["switches"], dict) else {}
+            for i, label in enumerate(self.SW):
+                if label not in sw:
+                    continue
+                s = sw[label] if isinstance(sw[label], dict) else {}
+                r["switches"][i] = {"channel": _nm_pick(s, "channel", self.SW_CH[i]),
+                                    "positions": _nm_wrap(_nm_pick(s, "positions", self.SW_POS[i]), 8),
+                                    "t": [(self.tier_from(s, f"p{p}"), _nm_cut(_nm_pick(s, f"p{p}note", ""), 20))
+                                          for p in range(3)]}
+        if "knobs" in c:
+            kn = c["knobs"] if isinstance(c["knobs"], dict) else {}
+            for i, label in enumerate(self.KN):
+                if label not in kn:
+                    continue
+                k = kn[label] if isinstance(kn[label], dict) else {}
+                n = {"channel": _nm_pick(k, "channel", self.KN_CH[i]), "function": _nm_wrap(_nm_pick(k, "function", 0), 8),
+                     "reverse": _nm_pick(k, "reverse", False), "modeAware": _nm_pick(k, "modeAware", False),
+                     "modeSwitchOverride": _nm_wrap(_nm_as_int(k["modeSwitchOverride"]), 8, True)
+                     if "modeSwitchOverride" in k else -1,
+                     "smoothProfile": _nm_wrap(_nm_as_int(k["smoothProfile"]), 8, True) if "smoothProfile" in k else -1,
+                     "easeSwitchOverride": _nm_pick(k, "easeSwitchOverride", False),
+                     "outputs": self.read_outs(k.get("outputs")) if "outputs" in k else []}
+                n["outputs2"] = self.read_outs(k.get("outputs2")) if n["modeAware"] and "outputs2" in k else \
+                    (list(n["outputs"]) if n["modeAware"] else [])
+                n["outputs3"] = self.read_outs(k.get("outputs3")) if n["modeAware"] and "outputs3" in k else \
+                    (list(n["outputs"]) if n["modeAware"] else [])
+                r["knobs"][i] = n
+        if "smoothProfiles" in c:
+            r["smooth"] = [{"name": "", "entries": {}} for _ in range(6)]
+            for p, po in enumerate((c["smoothProfiles"] if isinstance(c["smoothProfiles"], list) else [])[:6]):
+                po = po if isinstance(po, dict) else {}
+                r["smooth"][p]["name"] = _nm_cut(_nm_pick(po, "name", ""), 24)
+                for e in po.get("entries") or [] if isinstance(po.get("entries"), list) else []:
+                    mid, ch = _nm_pick(e, "mid", 1), _nm_pick(e, "ch", 0)
+                    if 1 <= mid <= 8 and 0 <= ch < 32:
+                        r["smooth"][p]["entries"][(mid, ch)] = (_nm_wrap(_nm_pick(e, "spd", 0), 16),
+                                                                 _nm_wrap(_nm_pick(e, "acc", 0), 8))
+        if "maestros" in c:
+            for i, mo in enumerate((c["maestros"] if isinstance(c["maestros"], list) else [])[:8]):
+                mo = mo if isinstance(mo, dict) else {}
+                slot = r["maestros"][i]
+                slot["type"] = _nm_wrap(_nm_pick(mo, "type", 0), 8)
+                slot["device"] = _nm_wrap(_nm_as_int(mo["device"]), 8) if "device" in mo else i + 1
+                if "channels" in mo:
+                    slot["channels"] = {}
+                    for co in mo["channels"] if isinstance(mo["channels"], list) else []:
+                        if not isinstance(co, dict) or "ch" not in co or not 0 <= _nm_as_int(co["ch"]) < 32:
+                            continue
+                        slot["channels"][_nm_as_int(co["ch"])] = {"name": _nm_cut(_nm_pick(co, "name", ""), 24),
+                                                                  "min": _nm_wrap(_nm_pick(co, "min", 0), 16),
+                                                                  "max": _nm_wrap(_nm_pick(co, "max", 0), 16)}
+        for key, tdef, portdef in (("hcrDest", "serial", "S3"), ("mp3Dest", "wcb", "S3"), ("dfpDest", "serial", "S3")):
+            if key in c:
+                o = c[key] if isinstance(c[key], dict) else {}
+                tp = _nm_pick(o, "transport", tdef)
+                t = 2 if tp == "off" else 1 if tp == "wcb" else 0
+                r[key] = {"transport": t,
+                          "target": _nm_cut(_nm_pick(o, "target", "2"), 6) if t == 1 else _nm_cut(_nm_pick(o, "port", portdef), 6),
+                          "wcbPort": _nm_wrap(_nm_pick(o, "wcbPort", 1), 8) if t == 1 else 0}
+        if "wcbNetwork" in c:
+            o = c["wcbNetwork"] if isinstance(c["wcbNetwork"], dict) else {}
+            net = r["wcbNetwork"]
+            for k in ("macOct2", "macOct3"):
+                if k in o:
+                    net[k] = _nm_as_int(o[k]) & 0xFF
+            net["password"] = _nm_cut(_nm_pick(o, "password", net["password"]), 40)
+            net["quantity"] = _nm_wrap(_nm_pick(o, "quantity", net["quantity"]), 8)
+            net["deviceId"] = _nm_wrap(_nm_pick(o, "deviceId", net["deviceId"]), 8)
+            ch = _nm_pick(o, "channel", net["channel"])
+            net["channel"] = 1 if ch < 1 or ch > 11 else ch
+        if "wcbProfiles" in c:
+            r["wcbProfiles"] = []
+            for o in (c["wcbProfiles"] if isinstance(c["wcbProfiles"], list) else [])[:6]:
+                o = o if isinstance(o, dict) else {}
+                ch = _nm_pick(o, "channel", 1)
+                r["wcbProfiles"].append({"name": _nm_cut(_nm_pick(o, "name", ""), 24),
+                                         "macOct2": _nm_as_int(o.get("macOct2")) & 0xFF,
+                                         "macOct3": _nm_as_int(o.get("macOct3")) & 0xFF,
+                                         "password": _nm_cut(_nm_pick(o, "password", ""), 40),
+                                         "quantity": _nm_wrap(_nm_pick(o, "quantity", 4), 8),
+                                         "deviceId": _nm_wrap(_nm_pick(o, "deviceId", 20), 8),
+                                         "channel": 1 if ch < 1 or ch > 11 else ch})
+        if "wledSlots" in c:
+            arr = (c["wledSlots"] if isinstance(c["wledSlots"], list) else [])[:4]
+            for i in range(4):
+                o = arr[i] if i < len(arr) and isinstance(arr[i], dict) else None
+                r["wledSlots"][i] = {"wledID": 0, "serialPort": 0, "remoteWCB": 0, "configured": False} if o is None and \
+                    i >= len(arr) else {"wledID": _nm_as_int((o or {}).get("id")) & 0xFF,
+                                        "serialPort": _nm_as_int((o or {}).get("port")) & 0xFF,
+                                        "remoteWCB": _nm_as_int((o or {}).get("wcb")) & 0xFF,
+                                        "configured": _nm_pick(o or {}, "configured", False)}
+        if "auxBaud" in c:
+            o = c["auxBaud"] if isinstance(c["auxBaud"], dict) else {}
+            san = lambda b, d: b if 1200 <= b <= 115200 else d          # noqa: E731
+
+            def u32(k, cur):
+                v = o.get(k)
+                return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 0xFFFFFFFF else cur
+            r["auxBaud"] = [san(u32(p, r["auxBaud"][i]), 9600) for i, p in enumerate(("S3", "S4", "S5"))]
+            r["maestroBaud"] = san(u32("maestro", r["maestroBaud"]), 115200)
+        if "serialLabels" in c:
+            r["serialLabels"] = ["", "", "", ""]
+            for k, v in (c["serialLabels"] if isinstance(c["serialLabels"], dict) else {}).items():
+                if k in self.LBL:
+                    r["serialLabels"][self.LBL.index(k)] = _nm_cut(v if isinstance(v, str) else "", 25)
+        if "serialBcast" in c:
+            o = c["serialBcast"] if isinstance(c["serialBcast"], dict) else {}
+            for i, p in enumerate(("S3", "S4", "S5")):
+                if p in o:
+                    po = o[p] if isinstance(o[p], dict) else {}
+                    r["bcastOut"][i] = _nm_pick(po, "out", r["bcastOut"][i])
+                    r["bcastIn"][i] = _nm_pick(po, "in", r["bcastIn"][i])
+        if "modeReport" in c:
+            o = c["modeReport"] if isinstance(c["modeReport"], dict) else {}
+            mr = r["modeReport"]
+            mr["enabled"] = _nm_pick(o, "enabled", mr["enabled"])
+            mr["wcb"] = _nm_wrap(_nm_pick(o, "wcb", mr["wcb"]), 8)
+            if "template" in o:
+                mr["tmpl"] = _nm_cut(_nm_pick(o, "template", ""), 48)
+            if "cmds" in o:
+                arr = o["cmds"] if isinstance(o["cmds"], list) else []
+                mr["cmds"] = [_nm_cut(arr[i] if i < len(arr) and isinstance(arr[i], str) else "", 48) for i in range(3)]
+        if "statsReport" in c:
+            o = c["statsReport"] if isinstance(c["statsReport"], dict) else {}
+            r["statsReport"] = {"enabled": _nm_pick(o, "enabled", r["statsReport"]["enabled"]),
+                                "wcb": _nm_wrap(_nm_pick(o, "wcb", r["statsReport"]["wcb"]), 8)}
+        return True
+
+    def to_json(self):
+        """rcConfigToJSON (rc_config.h:1211-1482), key for key."""
+        r = self.c
+        d = {k: r[k] for k in ("txModel", "threeAxisGimbals", "sbusOutEnabled", "wifiEnabled", "wifiSsid",
+                               "wifiPassword", "maeGateMs", "boardType", "tapWindowMs", "holdMs", "switchSettleMs",
+                               "chRateHz", "matrixChannel", "matrixDebounceFrames")}
+        d["funcBindings"] = {"mode": r["modeSwitch"]}
+        d["peerEvent"] = {"alert": r["peerAlert"], "actions": [self.action_to(a) for a in r["peerActions"]]}
+        d["thresholds"] = [dict(t) for t in r["thresholds"]]
+        maps = {}
+        for mode in (1, 2, 3):
+            for btn in range(1, 37):
+                m = r["mappings"].get(f"{mode * 100 + btn}")
+                if not m or (not any(acts or note for acts, note in m["t"]) and not m["exclusive"]):
+                    continue
+                o = {"exclusive": m["exclusive"]}
+                for t, (acts, note) in enumerate(m["t"], 1):
+                    if acts:
+                        o[f"t{t}"] = [self.action_to(a) for a in acts]
+                    if note:
+                        o[f"t{t}note"] = note
+                maps[f"{mode * 100 + btn}"] = o
+        d["mappings"] = maps
+        d["switches"] = {}
+        for i, s in enumerate(r["switches"]):
+            o = {"channel": s["channel"], "positions": s["positions"]}
+            for p, (acts, note) in enumerate(s["t"]):
+                if acts:
+                    o[f"p{p}"] = [self.action_to(a) for a in acts]
+                if note:
+                    o[f"p{p}note"] = note
+            d["switches"][self.SW[i]] = o
+        d["knobs"] = {}
+        for i, k in enumerate(r["knobs"]):
+            o = {x: k[x] for x in ("channel", "function", "reverse", "modeAware", "modeSwitchOverride")}
+            if k["smoothProfile"] != -1:
+                o["smoothProfile"] = k["smoothProfile"]
+            if k["easeSwitchOverride"]:
+                o["easeSwitchOverride"] = True
+
+            def outs(lst):
+                res = []
+                for x in lst:
+                    y = {z: x[z] for z in ("target", "maestroCh", "posMin", "posMax")}
+                    if x["midClosed"]:
+                        y["midClosed"] = True
+                    if x["releaseIdleMs"]:
+                        y["releaseIdleMs"] = x["releaseIdleMs"]
+                    res.append(y)
+                return res
+            o["outputs"] = outs(k["outputs"])
+            if k["modeAware"]:
+                o["outputs2"], o["outputs3"] = outs(k["outputs2"]), outs(k["outputs3"])
+            d["knobs"][self.KN[i]] = o
+        names = {0: "serial", 1: "wcb", 2: "off"}
+        h = r["hcrDest"]
+        d["hcrDest"] = {"transport": names[h["transport"]], "target": h["target"], "wcbPort": h["wcbPort"]} \
+            if h["transport"] == 1 else {"transport": names[h["transport"]], "port": h["target"]}
+        d["maestros"] = []
+        for s in r["maestros"]:
+            o = {"type": s["type"], "device": s["device"]}
+            chs = [dict(ch=n, name=v["name"], min=v["min"], max=v["max"]) for n, v in sorted(s["channels"].items())
+                   if v["name"] or v["min"] or v["max"]]
+            if chs:
+                o["channels"] = chs
+            d["maestros"].append(o)
+        d["wcbNetwork"] = dict(r["wcbNetwork"])
+        d["wcbProfiles"] = [dict(p) for p in r["wcbProfiles"]]
+        for key in ("mp3Dest", "dfpDest"):
+            x = r[key]
+            d[key] = {"transport": names[x["transport"]], "target": x["target"]} if x["transport"] == 1 else \
+                {"transport": names[x["transport"]], "port": x["target"]}
+        d["wledSlots"] = [{"id": w["wledID"], "port": w["serialPort"], "wcb": w["remoteWCB"], "configured": w["configured"]}
+                          for w in r["wledSlots"]]
+        d["auxBaud"] = {"S3": r["auxBaud"][0], "S4": r["auxBaud"][1], "S5": r["auxBaud"][2], "maestro": r["maestroBaud"]}
+        labels = {self.LBL[i]: v for i, v in enumerate(r["serialLabels"]) if v}
+        if labels:
+            d["serialLabels"] = labels
+        d["serialBcast"] = {p: {"out": r["bcastOut"][i], "in": r["bcastIn"][i]} for i, p in enumerate(("S3", "S4", "S5"))}
+        mr = r["modeReport"]
+        d["modeReport"] = {"enabled": mr["enabled"], "wcb": mr["wcb"], "template": mr["tmpl"], "cmds": list(mr["cmds"])}
+        d["statsReport"] = dict(r["statsReport"])
+        d["smoothProfiles"] = [{"name": p["name"], "entries": [{"mid": m, "ch": ch, "spd": v[0], "acc": v[1]}
+                                                               for (m, ch), v in sorted(p["entries"].items()) if v[0] or v[1]]}
+                               for p in r["smooth"]]
+        return d
+
+    def text(self):
+        return json.dumps(self.to_json(), separators=(",", ":"), ensure_ascii=False)
+
+    def load_flash(self):
+        self.c = self.defaults()
+        self.merge(json.loads(self.flash))
+
+    # ------------------------------------------------------------ boot, identity, side effects
+    def boot(self):
+        """setup(): the pin profile and bauds applied, WCB_Client given the mesh identity (its own copy)."""
+        net = self.c["wcbNetwork"]
+        self.applied = {"board": self.c["boardType"], "aux": list(self.c["auxBaud"]), "mae": self.c["maestroBaud"],
+                        "sbusOut": self.c["sbusOutEnabled"]}
+        self.ident = {"oct2": net["macOct2"], "oct3": net["macOct3"], "id": net["deviceId"], "q": net["quantity"],
+                      "pw": net["password"]}
+
+    def labels(self):
+        """rcSerialLabel for WDP ports 1-4 (rc_config.h:1940-1958)."""
+        out = {}
+        for i, key in enumerate(("S3", "S4", "S5")):
+            v = self.c["serialLabels"][i]
+            if not v:
+                for dk, name in (("hcrDest", "HCR"), ("mp3Dest", "MP3"), ("dfpDest", "DFPlayer")):
+                    x = self.c[dk]
+                    if x["transport"] == 0 and x["target"] == key:
+                        v = name
+                        break
+            if v:
+                out[i + 1] = v
+        out[4] = self.c["serialLabels"][3] or "Maestro"
+        return out
+
+    def side_effects(self):
+        """applyConfigSideEffects (NaviCore.ino:3321-3345) -> the lines it prints, or None when boardType changed."""
+        if self.c["boardType"] != self.applied["board"]:
+            return None
+        out = []
+        if self.c["maestroBaud"] != self.applied["mae"]:
+            self.applied["mae"] = self.c["maestroBaud"]
+            out.append(f"[Serial2] Local Maestro re-open @ {self.c['maestroBaud']} baud  TX=GPIO6")
+        for i, p in enumerate(("S3", "S4", "S5")):
+            if self.c["auxBaud"][i] != self.applied["aux"][i]:
+                self.applied["aux"][i] = self.c["auxBaud"][i]
+                out.append(f"[AUX] {p} re-open @ {self.c['auxBaud'][i]} baud" + (" (hw UART0)" if p == "S3" else ""))
+        if self.c["sbusOutEnabled"] != self.applied["sbusOut"]:
+            self.applied["sbusOut"] = self.c["sbusOutEnabled"]
+            out.append("[SBUS] OUT enabled — re-emit on GPIO5 (100k 8E2 inverted)" if self.c["sbusOutEnabled"]
+                       else "[SBUS] OUT disabled (passthrough off — no CPU cost)")
+        return out
+
+    def save(self):
+        self.flash = self.text()
+        return f"RC config saved to LittleFS ({len(self.flash.encode('utf-8'))} bytes)."
+
+    # ------------------------------------------------------------ parsing, as ArduinoJson would
+    @staticmethod
+    def parse_header(line):
+        """(object or None, error code or None) for the filtered header parse (NaviCore.ino:3809-3832): a value the
+        filter skips is not escape-checked (skipQuotedString), so an invalid escape passes here and fails the full
+        parse; an unterminated line is IncompleteInput, anything else malformed InvalidInput."""
+        try:
+            return json.loads(line), None
+        except json.JSONDecodeError as e:
+            lenient = re.sub(r'\\([^"\\/bfnrtu])', r"\1", line)
+            try:
+                return json.loads(lenient), None
+            except json.JSONDecodeError as e2:
+                incomplete = e2.pos >= len(lenient) or "Unterminated string" in e2.msg
+                return None, "IncompleteInput" if incomplete else "InvalidInput"
+
+    # ------------------------------------------------------------ NaviCore's console
+    def out(self, *lines):
+        return list(lines)
+
+    def pong(self):
+        return f'{{"type":"PONG","version":"{self.FW}"}}'
+
+    def rc_trig(self, mode, btn, tap):
+        return f'{{"sys":1,"type":"rc_trig","id":{self.c["wcbNetwork"]["deviceId"]},"mode":{mode},"btn":{btn},"tap":{tap}}}'
+
+    def dlog(self, bit, text):
+        return [text] if self.flags & bit else []
+
+    def dispatch(self, a):
+        """rcExecuteActionNow (NaviCore.ino:2035-2112) -> its console lines; W1 gets a unicast to board 1."""
+        t, out = a["type"], []
+        if t == "wcb_unicast":
+            b = int(a["target"]) if a["target"].isdigit() else 0
+            if 1 <= b <= 20:
+                out += self.dlog(0x02, f"[DISPATCH] WCB→{b}  {a['cmd']}")
+                if b == 1 and self.w1 is not None and a["cmd"].startswith(";S0,"):
+                    self.w1._append(a["cmd"][4:])
+        elif t == "wcb_broadcast":
+            out += self.dlog(0x02, f"[DISPATCH] WCB broadcast  {a['cmd']}")
+        elif t == "maestro":
+            i = int(a["target"]) if a["target"].isdigit() else 0
+            out += [f"WARN: Maestro action with invalid ID {i} (target='{a['target']}')"] if not 1 <= i <= 8 else \
+                self.dlog(0x01, f"[DISPATCH] Maestro {i}  {a['cmd']}")
+        elif t == "serial":
+            lab = {"S3": "Serial 1", "S4": "Serial 2", "S5": "Serial 3"}.get(a["target"], a["target"])
+            out += self.dlog(0x20, f"[DISPATCH] Serial TX [{lab}]  {a['cmd']}")
+        elif t == "hcr":
+            d = self.c["hcrDest"]
+            if d["transport"] == 2:
+                out += self.dlog(0x08, "[DISPATCH] HCR is disabled in config — action skipped")
+            elif not _nm_hcr_ok(a["fn"], a["chan"], a["track"]):
+                out += self.dlog(0x08, f"[DISPATCH] HCR-{'WCB' if d['transport'] == 1 else 'Serial'}: bad/unsupported "
+                                       f"fn={a['fn']} chan={a['chan']} track={a['track']} — skipped")
+        elif t in ("mp3", "dfplayer"):
+            d = self.c["mp3Dest" if t == "mp3" else "dfpDest"]
+            name, top = ("MP3", 8) if t == "mp3" else ("DFP", 18)
+            if d["transport"] == 2:
+                out += self.dlog(0x10 if t == "mp3" else 0x40, "[DISPATCH] MP3 Trigger is disabled in config — action "
+                                 "skipped" if t == "mp3" else "[DISPATCH] DFPlayer is disabled in config — action skipped")
+            elif not 1 <= a["fn"] <= top:
+                out += self.dlog(0x10 if t == "mp3" else 0x40, f"[DISPATCH] {name}: bad fn={a['fn']} — skipped")
+        elif t == "wled":
+            s = a["cmd"].lstrip(" \t")
+            s = s[1:] if s.startswith(";") else s
+            if not s[:1] in ("L", "l"):
+                out += self.dlog(0x04, f"[DISPATCH] WLED: '{a['cmd']}' is not a ;L command — skipped")
+        return out
+
+    def script(self, text, n):
+        text = text[:98304]                        # handleSerialInput's cap: the rest of the line is dropped (:4291)
+        self.received.append(text)
+        for rx in self.FORBIDDEN:
+            if rx.search(text):
+                raise AssertionError(f"a test sent NaviCore a forbidden command: {text[:40]}")
+        if text == "WCB_WEBTOOL_CONFIG_PULL":
+            return self.backup()
+        if text.startswith("?"):
+            return self.cli(text)
+        if text.startswith("#"):
+            return self.hash_cmd(text)
+        if text.startswith("{"):
+            return self.json_line(text)
+        return []
+
+    def backup(self):
+        i = self.ident
+        return ["", "*** WCB Configuration Backup", "", "?HW,32", f"?MAC,2,{i['oct2']:02X}", f"?MAC,3,{i['oct3']:02X}",
+                f"?WCB,{i['id']}", "?RELAY,1", "?ALIAS,NaviCore", f"?WCBQ,{i['q']}",
+                f"?EPASS,{self.c['wcbNetwork']['password']}", "?CMDCHAR,;", "--------- End of Backup ---------", ""]
+
+    def version_lines(self):
+        return [f"Software Version: {self.FW}", "End of Version"]
+
+    def wdp_dump(self):
+        return [f"[WDP:N=20,CLIENT=0,ALIAS=NaviCore,HW=32,HWREV=,FW={self.FW},CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,AGE=0,"
+                f"SEEN=1,PEER=3]",
+                "[WDP:N=1,CLIENT=0,ALIAS=W1,HW=24,HWREV=,FW=6.2.1_TEST,CAP=0001,CTRL=20,CAPTAGS=,MAESTRO=-,AGE=3,SEEN=1,PEER=1]",
+                "[WDP:N=2,CLIENT=0,ALIAS=W2,HW=24,HWREV=,FW=6.2.1_TEST,CAP=0001,CTRL=20,CAPTAGS=,MAESTRO=-,AGE=5,SEEN=1,PEER=2]",
+                "[WDPCFG:EN=1,AUTOJOIN=1,PEERS=2]", "[WDP:END,count=2]"]
+
+    def cli(self, text):
+        if text.startswith("?OTALOCAL,"):
+            return [f"Chip:     ESP32-S3", f"Firmware: {self.FW}", "Running:  app0", "Next:     app1", "Session:  idle"]
+        low = text[1:].lower()
+        if low == "backup":
+            return self.backup()
+        if low == "version":
+            return self.version_lines()
+        if low.startswith("wdp,"):
+            return self.wdp_dump() if low == "wdp,dump" else [f"Unknown command: {text}"]
+        if low.startswith("mgmt,"):
+            n = len(text) - 6
+            return [f"[mgmt] line too long ({n} B) - dropped"] if n >= 400 else []
+        if low.startswith("forget"):
+            arg = text[8:].strip() if len(text) > 8 else ""
+            n = int(arg) if arg.isdigit() else 0
+            return [f"[WCB] WCB {n} is not a learned peer (nothing to forget)"] if 1 <= n <= 20 else \
+                ["[WCB] usage: ?FORGET,<id 1-20>  or  ?FORGET,ALL"]
+        if low.startswith("rec"):
+            if low == "rec,ls":
+                return ['[CLIPFS]{"total":12000000,"used":4096}', "[REC] clips:", "[CLIPLIST:BEGIN]"] + \
+                    [f'[CLIPITEM]{{"name":"{c}","bytes":296,"dur":1000,"n":2}}' for c in self.clips] + ["[CLIPLIST:END]"]
+            return ["[REC] state=idle  events=0/1000  dur=0ms  drops=0  buf=ok"]
+        return [f"Unknown command: {text}"]
+
+    def hash_cmd(self, text):
+        if len(text) < 3 or text[1] not in "Ll":
+            return []
+        fn = (ord(text[2]) - 48) * 10 + (ord(text[3]) - 48) if len(text) >= 4 else ord(text[2]) - 48
+        if fn == 12:
+            return [f"Mode={self.mode}  matrixBtn=0  matrixVal={self.channels[self.c['matrixChannel'] - 1]}"]
+        if fn == 9:
+            rows = [" ".join(f"{v:4d}" for v in self.channels[i:i + 8]) for i in range(0, 24, 8)]
+            return ["---- SBUS STATE ----", "  variant=SBUS-24 (24 ch, 36-byte frame)",
+                    "  frames=1000  fps=111  ageMs=4  lost=no  failsafe=no"] + \
+                [f"  CH{i * 8 + 1}-{i * 8 + 8}:   {r}" for i, r in enumerate(rows)]
+        if fn == 1:
+            return ["NaviCore — NaviCore v2"]
+        return [f"Unknown #L code {fn}. Valid: 1,2,9,10,11,12,13,20,21"]
+
+    def monitor_loop(self):
+        while self.monitor:
+            chans = ",".join(str(v) for v in self.channels)
+            ms = self.c["modeSwitch"]
+            mode_ch = self.c["switches"][ms]["channel"] if 0 <= ms < 10 else 0
+            self.nav._append(f'{{"type":"PWM_UPDATE","matrixCh":{self.c["matrixChannel"]},"modeCh":{mode_ch},'
+                             f'"matrixVal":992,"modeVal":172,"btn":0,"mode":{self.mode},"sbus":{{"ok":true,"fps":111,'
+                             f'"frames":1000,"ageMs":4,"lost":false,"failsafe":false,"chCount":24,"frameLen":36,'
+                             f'"channels":[{chans}]}}}}')
+            time.sleep(0.05)
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        if err:
+            return [f'{{"type":"ERROR","msg":"JSON parse failed ({err})","rxLen":{len(line.encode("utf-8"))}}}']
+        t = obj.get("type") if isinstance(obj, dict) and isinstance(obj.get("type"), str) else ""
+        ack = '{"type":"ACK","ok":true}'
+        if t in ("PING", "ping"):
+            self.calib = False
+            return [self.pong()]
+        if t == "GET_CONFIG":
+            return ['{"type":"CONFIG","data":' + self.text() + "}"]
+        if t == "GET_CMDLIB":
+            lib = self.cmdlib or '{"boards":[],"enums":{}}'
+            return [f'{{"type":"CMDLIB","size":{len(lib.encode())},"hash":{self._fnv(lib)},"data":{lib}}}']
+        if t == "GET_CMDLIB_META":
+            lib = self.cmdlib or ""
+            return [f'{{"type":"CMDLIB_META","size":{len(lib.encode())},"hash":{self._fnv(lib) if lib else 0}}}']
+        if t == "SET_CMDLIB":
+            k = line.find('"data":')
+            lib = None
+            if k >= 0:
+                s = k + 7
+                while s < len(line) and line[s].isspace():
+                    s += 1
+                if s < len(line) and line[s] in "{[":
+                    depth, in_str, esc = 0, False, False
+                    for i in range(s, len(line)):
+                        ch = line[i]
+                        if esc:
+                            esc = False
+                        elif in_str:
+                            esc, in_str = ch == "\\", in_str and ch != '"'
+                        elif ch == '"':
+                            in_str = True
+                        elif ch == line[s]:
+                            depth += 1
+                        elif ch == ("}" if line[s] == "{" else "]"):
+                            depth -= 1
+                            if depth == 0:
+                                lib = line[s:i + 1].strip()
+                                break
+            if lib:
+                self.cmdlib = lib
+                return [f'{{"type":"ACK","of":"SET_CMDLIB","ok":true,"size":{len(lib.encode())},"hash":{self._fnv(lib)}}}']
+            return ['{"type":"ACK","of":"SET_CMDLIB","ok":false,"size":0,"hash":0}']
+        if t == "SET_CONFIG":
+            try:
+                full = json.loads(line)
+            except ValueError:
+                return ['{"type":"ACK","of":"SET_CONFIG","ok":false,"msg":"parse failed"}']
+            sid = full["saveId"] if isinstance(full.get("saveId"), int) else 0
+            if "data" not in full:
+                return [f'{{"type":"ACK","of":"SET_CONFIG","ok":false,"msg":"missing data","saveId":{sid}}}']
+            self.merge(full["data"] if isinstance(full["data"], dict) else None)
+            out = [self.save()]
+            fx = self.side_effects()
+            out += [INFO_LINE] if fx is None else fx
+            return out + [f'{{"type":"ACK","of":"SET_CONFIG","ok":true,"saveId":{sid}}}']
+        if t == "START_MONITOR":
+            if not self.monitor:
+                self.monitor = True
+                threading.Thread(target=self.monitor_loop, daemon=True).start()
+            return [ack]
+        if t == "STOP_MONITOR":
+            self.monitor = self.calib = False
+            time.sleep(0.06)                       # let the loop see the flag before the ACK is written
+            return [ack]
+        if t == "CALIB":
+            self.calib = _nm_pick(obj, "on", False)
+            return [f"[CALIB] action dispatch {'SUPPRESSED (calibrating)' if self.calib else 'resumed'}", ack]
+        if t == "RESET_DEFAULTS":
+            self.c = self.defaults()
+            return [ack]
+        if t == "TEST_ACTION":
+            a = self.action_from(obj.get("action")) if isinstance(obj.get("action"), dict) else None
+            if a is None or (a["type"] == "wcb_unicast" and not (a["target"].isdigit() and 1 <= int(a["target"]) <= 20)):
+                return ['{"type":"ACK","of":"TEST_ACTION","ok":false}']
+            return self.dispatch(a) + ['{"type":"ACK","of":"TEST_ACTION","ok":true}']
+        if t == "REBOOT":
+            self.monitor = self.calib = False
+            self.flags = 0
+            self.load_flash()
+            self.boot()
+            self.nav.later(0.2, "<<reopened COMFAKE>>",
+                           "Reset reason: 3 - Software restart (incl. boot-guard retry)  (RTC codes core0=3 [SW system] "
+                           "core1=3 [SW CPU])", f"[NaviCore] Firmware {self.FW} — setup complete.")
+            return ['{"type":"ACK","ok":true,"msg":"rebooting"}']
+        if t == "TRIGGER":
+            mode, btn, tap = _nm_pick(obj, "mode", 1), _nm_pick(obj, "btn", 0), _nm_pick(obj, "tap", 1)
+            if not (1 <= btn <= 36 and 1 <= mode <= 3 and 1 <= tap <= 4):
+                return ['{"type":"ACK","ok":false,"msg":"bad mode/btn/tap"}']
+            m = self.c["mappings"].get(f"{mode * 100 + btn}")
+            if m and any(acts for acts, _ in m["t"]):
+                raise AssertionError(f"a test TRIGGERed mapped slot {mode * 100 + btn}")
+            return [f"[TRIGGER] mode={mode} btn={btn} tap={tap}", self.rc_trig(mode, btn, tap), ack]
+        if t == "WCB_SEND":
+            tgt, cmd = _nm_pick(obj, "target", 0), _nm_pick(obj, "cmd", "")
+            if tgt == 0:
+                if len(cmd) > 187:
+                    return [f"[WCB_Client] broadcast: command too long ({len(cmd)} > 187 chars) — fragmentation is "
+                            f"unicast-only. send() it to each board instead.",
+                            '{"type":"ACK","ok":false,"msg":"broadcast refused by WCB_Client"}']
+                raise AssertionError("a test broadcast a command over NaviCore's WCB_SEND")
+            if 1 <= tgt <= 20:
+                raise AssertionError("a test unicast over NaviCore's WCB_SEND")
+            return [f'{{"type":"ACK","ok":false,"msg":"target {tgt} out of range (0=broadcast, 1-20=unicast)"}}']
+        if t == "FORGET_PEER":
+            i = _nm_pick(obj, "id", 0)
+            if i != self.c["wcbNetwork"]["deviceId"]:
+                raise AssertionError(f"a test sent FORGET_PEER {i}")
+            return [f"[WCB] WCB {i} is not a learned peer (nothing to forget)",
+                    f'{{"type":"ACK","of":"FORGET_PEER","ok":true,"id":{i}}}']
+        if t == "SET_DEBUG_FLAGS":
+            self.flags = _nm_pick(obj, "flags", 0)
+            return [f"[DBG] flags=0x{self.flags:02X}", ack]
+        if t in ("GET_WCB_SEQ", "GET_WCB_SEQVAL"):
+            kind = t[4:]
+            b = _nm_pick(obj, "wcb", 0)
+            if not 1 <= b <= 20:
+                return [f'{{"sys":1,"type":"{kind}","ok":false,"wcb":0,"msg":"wcb out of range"}}']
+            if kind == "WCB_SEQVAL" and not _nm_pick(obj, "key", ""):
+                return [f'{{"sys":1,"type":"{kind}","ok":false,"wcb":{b},"msg":"key required"}}']
+            reply = f'{{"sys":1,"type":"WCB_SEQ","ok":true,"wcb":{b},"hash":123,"names":["intro"]}}' if kind == "WCB_SEQ" \
+                else f'{{"sys":1,"type":"WCB_SEQVAL","ok":true,"wcb":{b},"key":"{obj["key"]}","status":1,"value":""}}'
+            self.nav.later(0.2, reply)
+            return []
+        if t == "GET_WCB_STATUS":
+            return ['{"type":"WCB_STATUS","quantity":1,"self":20,"online":[1,1],"known":[1,1],"clients":[0,0],'
+                    '"temporary":[0,0],"aliases":["W1","W2"],"portLabels":[["","","","",""],["","","","",""]],'
+                    '"seqHash":[1,2]}']
+        return ['{"type":"ERROR","msg":"unknown type"}']
+
+    @staticmethod
+    def _fnv(s):
+        from hil.navicore import fnv1a32
+        return fnv1a32(s)
+
+    # ------------------------------------------------------------ W1's console
+    def w1_script(self, text, n):
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        if text == "?WDP,DUMP":
+            rows = [f"[WDP:N=20,CLIENT=1,ALIAS=NaviCore,HW=32,HWREV=NaviCore v2,FW={self.FW},CAP=0000,CTRL=0,CAPTAGS=,"
+                    f"MAESTRO=1,AGE=4,SEEN=1,PEER=0]"]
+            rows += [f"[WDPIF:N=20,S={p},DEV={v}]" for p, v in sorted(self.labels().items())]
+            return rows + ["[WDP:END,count=2]"]
+        m = re.match(r";W20,(.*)$", text)
+        if not m:
+            return []
+        body = m.group(1)
+        if body.startswith("{"):
+            obj, err = self.parse_header(body)
+            t = obj.get("type") if isinstance(obj, dict) else None
+            if t == "PING":
+                self.w1.later(0.3, f'{{"sys":1,"type":"rc_hb","id":20,"fw":"{self.FW}","up":1000,"mode":{self.mode},'
+                                   f'"model":{self.c["txModel"]},"sbusFps":111,"sbusAge":4,"sbusLost":0,"sbusFail":0}}')
+                return [f'{{"sys":1,"type":"PONG","id":20,"version":"{self.FW}","model":{self.c["txModel"]},"mode":{self.mode}}}']
+            if t == "SET_CONFIG":
+                self.nav._append("[RC] SET_CONFIG → deferred to main loop")
+                if not isinstance(obj.get("data"), dict):
+                    self.nav._append("[RC] reassembled SET_CONFIG missing 'data' object")
+                else:
+                    raise AssertionError("a test bridged a real SET_CONFIG")
+            return []
+        if body.startswith("?"):
+            lines = self.cli(body)
+            for x in lines:
+                self.nav._append(x)
+            if self.c["wcbNetwork"]["password"] == self.ident["pw"]:
+                return [f"[TERM:20]{x}" for x in lines if x]
+            return []
+        return []
+
+
+INFO_LINE = '{"type":"INFO","msg":"boardType changed — reboot to apply the new pin profile"}'
+NCCFG_SHOULD = {"nccfg.string_truncation_utf8", "nccfg.hold_exceeds_tap_window", "nccfg.dest_null_hazard",
+                "nccfg.mesh_creds_live_split", "nccfg.reset_defaults_keeps_identity"}
+
+
+def t_nccfg_suite_against_model(tmp):
+    """Every nccfg test in s40 run whole, through the runner, against NaviModel - a port of the config handling of the
+    NaviCore firmware the suite was written against - and a W1 console that relays to it: each normal test passes, each
+    (should) test fails on today's behaviour, the hook tests skip (no hook build), the model ends every test with the
+    config it started with (the guard restores it), and session.log carries no credential. Then
+    nccfg.mesh_creds_live_split, the RESET_DEFAULTS test restored without a restart, alone against two models whose SBUS
+    input the defaults would act on: CH7 inside a default band, and a mode switch other than SE on CH12. It skips
+    without sending RESET_DEFAULTS."""
+    saved = list(runner.REGISTRY)
+    try:
+        # t_nc_guard_bench_test imported the suite already, and an earlier case left its own entries here: a
+        # fresh import into an empty registry collects exactly the suite's tests, whatever ran before
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s40_navicore_config", None)
+        import suites.s40_navicore_config  # noqa: F401
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("nccfg.")]
+    finally:
+        runner.REGISTRY[:] = saved
+    model = NaviModel()
+    orig = model.flash
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}, "sbus": {"port": "COMS", "kind": "sbus"}})
+    b.cfg["opt_in"] = ["navicore_reboot", "navicore_fault"]
+    nav, w1 = FakeNaviDev(model.script, "navicore"), FakeNaviDev(model.w1_script, "wcb1")
+    model.nav, model.w1 = nav, w1
+    nav.log = w1.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1}[name]
+    tests = []
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+        tests.append(t)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, tests)
+    finally:
+        _slow_guard(saved_g)
+    res = {r["id"]: r for r in ck.data["results"]}
+    bad = []
+    for tid, r in res.items():
+        want = "SKIP" if "hook_" in tid else "FAIL" if tid in NCCFG_SHOULD else "PASS"
+        if r["status"] != want:
+            bad.append(f"{tid}: {r['status']} (expected {want}) {r['detail'][:300]}")
+    assert len(res) == len(mine) >= 35, (len(res), len(mine))
+    assert not bad, "\n".join(bad)
+    assert model.flash == orig and model.text() == orig, "the model's config was not left as found"
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    assert not any(s in log for s in SECRETS), "a credential reached session.log"
+    b.close()
+    split = next(t for t in tests if t["id"] == "nccfg.mesh_creds_live_split")
+    for want, prep in (("CH7 reads 1811", lambda m: m.channels.__setitem__(6, 1811)),
+                       ("move the mode off 2", lambda m: (m.c.update(modeSwitch=0), setattr(m, "mode", 2)))):
+        m2 = NaviModel()
+        prep(m2)
+        b2 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                        "navicore": {"port": "COMNAV", "kind": "navicore"}})
+        nav2, w12 = FakeNaviDev(m2.script, "navicore"), FakeNaviDev(m2.w1_script, "wcb1")
+        m2.nav, m2.w1 = nav2, w12
+        nav2.log = w12.log = b2.log
+        b2.dev = lambda name, d={"navicore": nav2, "wcb1": w12}: d[name]
+        saved_g = _fast_guard()
+        try:
+            ck2 = new_run(b2, [split])
+        finally:
+            _slow_guard(saved_g)
+        r = ck2.data["results"][0]
+        assert r["status"] == "SKIP" and want in r["detail"], (want, r["status"], r["detail"][:200])
+        assert not any('"RESET_DEFAULTS"' in x for x in nav2.sent), "RESET_DEFAULTS sent despite the SBUS check"
+        b2.close()
+
+
 # ---------------------------------------------------------------------------- NaviCore images (INF4, hil/ncflash.py)
 NC_VERSION = "v9.9.9_111111ZSEP26"
 NC_PARTITIONS = ("# Name, Type, SubType, Offset, Size, Flags\n"                   # NaviCore partitions.csv:14-21
@@ -4615,6 +5858,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_nc_transport, t_nc_fnv1a, t_nc_pwm_update, t_nc_mae_markers, t_nc_clip_items, t_nc_recorder_transfer,
          t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl,
          t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test,
+         t_ncmesh_fragments, t_ncmesh_bridged_reassemble, t_ncmesh_burn_window, t_ncmesh_deaf_and_probe_peer,
+         t_nccfg_suite_against_model,
          t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_status_parse, t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover]
 ORIG = {}   # the real functions main() patches, for a test that needs one

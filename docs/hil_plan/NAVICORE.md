@@ -749,6 +749,40 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 
 ### INF6 — `hil/ncmesh.py`
 
+> **Status 2026-09-28: built; no bench run yet.** `hil/ncmesh.py` holds `bridged` (returns `Reply(match, lines, sys)`:
+> the first W1 line matching the pattern or None, every W1 line, the parsed `{"sys":1` ones; silence is returned, not
+> raised), `fragments` with `chunks`, `envelope` and `esc_bytes` (the tool's `_fragChunks` and envelopes, code point for
+> code point), `pace_s` and `send_fragments` (the tool's pacing, any order, repeats), `reassemble` (the tool's receive
+> side, for NaviCore's fragmented replies on W1), `deaf`, `cmd_seq_dup` (a port of NaviCore's duplicate window),
+> `burn_window` and `probe_peer`. `selftest.py` has four cases: the chunker against cuts recorded from the real
+> `_fragChunks` run in node on six payloads (quotes, backslashes, control characters, 2- to 4-byte UTF-8), the byte
+> limits, escaping, envelope shape, refusals and pacing; `bridged` and `reassemble` against a scripted W1; the burn
+> against the window's port for every earlier-session high up to 66, dense and sparse; `deaf` (restored on a failure,
+> an abort, a refused flip) and `probe_peer` against fakes. Read in the source, and where the code differs from the plan
+> below:
+> - 33 no-ops do not clear NaviCore's window in general. It keeps the highest number H it heard from a sender and the
+>   32 below it (WCBClient `WCB_Client.cpp:879-898`, applied at `:2891-2895`); a probe restarts at 1 on every join, so
+>   after 33 sends a later command is still dropped when an earlier session's H was 34-65. `burn_window` watches which
+>   burn commands NaviCore printed (plain text under DBG_MAESTRO, `NaviCore.ino:3112-3113`), always sends at least 66,
+>   and goes 34 past the last one dropped (H itself is always dropped when reached). A high just above the burn is still
+>   unseen; its docstring says when.
+> - With W1's quantity the probe could not unicast NaviCore at all: WCB_Client transmits only to a registered peer
+>   (`WCB_Client.cpp:2349-2354`), registers boards 1..quantity at `begin()` (`:1643-1652`), and the probe sets no special
+>   peer (`wcb_probe/probe_main.cpp:1026-1031`); it would learn NaviCore after two adverts and keep it in its NVS for
+>   every later session. `probe_peer` joins with quantity 20.
+> - A current WCB_Client clears the window on the sender's boot announce (`:2744-2769`) and a client sends three at
+>   join (`:1819-1833`), but both are in WCBClient's uncommitted working tree, so neither end of the bench can be assumed
+>   to carry them.
+> - A NaviCore reply too long for one packet reaches W1 as fragment envelopes with no `"sys"` (`rc_telemetry.h:556-595`),
+>   so `bridged` keeps every W1 line and `reassemble` joins the envelopes.
+> - `_fragChunks` drops a carry its last flush could not place (`index.html:5561-5593`); its size estimate equals
+>   JSON.stringify byte for byte for any text without a lone surrogate, so the carry never forms, and `fragments`
+>   refuses a lone surrogate.
+> - `deaf` skips a board with no USB console of its own: a `?MAC,3` flip sent over the mesh would cut off the way back.
+> - `probe_peer` also skips while NaviCore has serialBcast out on for an aux port: it writes every unprefixed mesh
+>   command out such a port, a unicast included (`NaviCore.ino:3100-3101`), so the burn would put 66 or more lines on
+>   whatever is wired there. A test that needs the flag sets it after the burn.
+
 - `bridged(w1, obj, pattern)`: sends `;W20,{json}` and collects W1's `{"sys":1` lines in its relay window.
 - `fragments(payload, sid)`: mirrors the tool's `_fragChunks` (`index.html:5556`): envelopes
   `{"f":i,"of":n,"sid":s,"s":"..."}`, each at most 187 escaped UTF-8 bytes (NaviCore `CLAUDE.md` rule 2), paced at
@@ -847,6 +881,50 @@ add roughly 30-40 minutes, most of it the 60 s mode-report wait, the 50 s offlin
 (nightly only).
 
 ### NC-WP1 — config surface and persistence (`s40_navicore_config.py`, `nccfg.*`)
+
+> **Status 2026-09-28: written; no bench run yet.** `suites/s40_navicore_config.py` holds 34 tests beside
+> `nccfg.guard_selftest`: 23 normal; five `(should)`: `string_truncation_utf8` (D-NC42) and `hold_exceeds_tap_window`
+> (D-NC43), both found while writing these, `dest_null_hazard` (D-NC22), `mesh_creds_live_split` (D-NC17) and
+> `reset_defaults_keeps_identity` (D-NC16); three behind the new opt-in `navicore_reboot` (`persist_reboot`,
+> `reset_defaults_ram`, `reset_defaults_keeps_identity`); and three that need INF9's hook build and the new opt-in
+> `navicore_fault`, which skip until it exists (`hook_save_fail`, `hook_get_config_overflow`,
+> `hook_config_unreadable`). `nccfg.usb_no_late_reply` (NC-WP2 below) is here as well: the image on the board already
+> has `kickUsbCdcTx` (results/builds/FLASHED.md). The D-NC15 fixes are in: `navicore.bench_health` (s02), and s21's
+> route check reads the routing the firmware reads (`NaviCore.local_devices`). `sbus_out_toggle` and the restarting
+> tests are in `hil/servos.py` `SERVO_TESTS` (SBUS OUT stops). `selftest.py` runs every nccfg test through the runner
+> against `NaviModel`, a port of NaviCore's config handling (merge, printer, defaults, USB handlers, CLI quirks, RAM
+> against flash, the boot copy of the mesh identity) and a W1 that relays to it: each normal test passes, each
+> `(should)` test fails, the hook tests skip, the model ends as it began, and ten deliberate breaks of the model are
+> each caught. Where the code differs from the plan below:
+> - `parse failed` is not reached by a 20000-element array: NaviCore builds on ArduinoJson 7.4.3, where
+>   `DynamicJsonDocument`'s capacity is ignored (ArduinoJson `compatibility.hpp:124-139`), so the array parses; a data
+>   that is not an object then saves and answers ok:true (`nccfg.set_nonobject_data`). An invalid escape inside `data`
+>   reaches it: the filtered header parse skips that string without checking escapes (`JsonDeserializer.hpp:478-493`),
+>   the full parse rejects it (`:396-445`).
+> - `nccfg.mesh_creds_live_split` makes the split with RESET_DEFAULTS, which loads the compile-time password into RAM
+>   and saves nothing, instead of saving a throwaway password: no test changes a board's mesh password, and this way the
+>   flash never holds another one. It observes the arrival on NaviCore's own console (the RTERM tee) instead of a
+>   TRIGGER. It skips once D-NC16's fix keeps the identity through a reset.
+> - A RESET_DEFAULTS restored by SET_CONFIG, not a restart, is only safe while the defaults decode nothing from the live
+>   SBUS input. USB RESET_DEFAULTS skips the matrix re-arm SET_CONFIG does (`NaviCore.ino:3989-3992` against
+>   `:3942-3952`), so if the default matrix channel 7 reads inside a default band, the defaults see a held button; they
+>   have no long-press tier to consume it, so its tap stays parked (`:2347-2351`, `:2392-2415`), and the SET_CONFIG
+>   restore clears the debounce but not that tap: the release it causes fires the RESTORED mapping of that button
+>   (`:2367-2390`). A default mode switch (SE on CH12) reading another mode re-arms the mode-aware knobs (`:2787-2798`).
+>   `mesh_creds_live_split` checks both first and skips (`_defaults_live_effects`); the restarting tests need no check,
+>   since tap and mode state are RAM. The bench matches the defaults on both counts (matrix CH7, default bands, SE on
+>   CH12). The firmware side is D-NC44.
+> - The map's "SET_CMDLIB with unbalanced data gets ok:false 0/0" cannot happen over USB: the header parse fails first
+>   and answers `ERROR ... (InvalidInput)`; `nccfg.cmdlib_errors` checks that.
+> - `nccfg.filter_whitelist` does not probe `all`: its only positive probe forgets every learned peer, an NVS write
+>   (`ncmesh.wdp_learn_forget`, `navicore_nvs`).
+> - `nccfg.unvalidated_echo` leaves out matrixChannel, funcBindings.mode and the knob and switch channels, which index
+>   SBUS arrays live, and boardType (`boardtype_change_no_reboot`, `ncboot.boardtype2_mismatch`).
+> - `nccfg.clamps_baud` probes only ports already at 9600: an out-of-range baud falls back to the port's default, not
+>   its current rate (`rc_config.h:1495-1497`), so a probe of S3 (115200) or the Maestro (57600) would re-open it. The
+>   apply-time clamp (`NaviCore.ino:3229-3234`) needs INF9's `#L91`.
+> - The save-failure branch of `nccfg.set_ack_shapes` is its own test, `nccfg.hook_save_fail`.
+> - `nccfg.string_truncation` leaves out wifiSsid, wifiPassword and the mesh password (credentials and identity).
 
 Every write goes to fields with no live effect, to slot 136 (unmapped in every mode), or is restored at once;
 everything inside `nc_guard`.
@@ -1259,7 +1337,8 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins it.
+D-NC16 to D-NC36 and D-NC42 to D-NC44 are behaviour findings, each with the `(should)` test that pins it (D-NC44 has
+none yet).
 
 ### 7.1 Process and infrastructure
 
@@ -1311,11 +1390,15 @@ D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins
 | D-NC34 | "Full Wipe & Flash" says it erases the saved configuration; the config lives in LittleFS at 0x3D0000, which the flasher never touches. | Correct the text (erasing the config silently would be the more dangerous fix). | `nctool.fw_wipe_text`, `nctool.webserial_flash_same_image` |
 | D-NC35 | Two tool tabs both number saves from 1, so one tab's ACK can advance the other's baseline. | A random saveId base per tab. | `nctool.multi_tab_save` |
 | D-NC36 | Doc drift found while mapping: bare PING claimed to work (PROTOCOLS.md:225, `NaviCore.ino:20`, the banner at `:4922`); RX buffer 4 KB vs 8 KB (PROTOCOLS.md:16); incomplete ACK shapes (PROTOCOLS §2); CALIB's exemptions (PROTOCOLS.md:233); cumulative tiers fire together (ARCHITECTURE.md:294-295); a held 2nd tap fires mid-hold (:304); remote Maestro writes are a raw broadcast (:364, WCB_NATIVE_MAESTRO_DESIGN §2); `RA_SMOOTH_OVERRIDE` retired (:368); RecEvent is 140 bytes (the setup comment at `NaviCore.ino:4661` still says 136); `REC_MAX_MS` is 60 s (RECORD_REPLAY_DESIGN §6); setSpeed/setAccel are captured (§5); NVS is migration-only (CONFIG_SCHEMA §3); `rc_telemetry.h:44-47`; CONFIG_TOOL.md §1, §2, §6, §8. Line numbers per the map. | One docs commit in NaviCore with the first push (D-NC6), each page's revision log updated. | none |
+| D-NC42 | A string field is cut at its buffer size in bytes (`strlcpy`), so a cut through a multi-byte UTF-8 character keeps half of it: GET_CONFIG and `/config.json` then carry invalid UTF-8, and the tool writes U+FFFD back on its next save (`rc_config.h:1592` for a tier note; every note, label, name and command field alike). Found writing NC-WP1. | Cut back to a character boundary. | `nccfg.string_truncation_utf8` |
+| D-NC43 | `holdMs` is raised to `tapWindowMs` + 250 and then capped at 5000, while `tapWindowMs` has no upper bound (`rc_config.h:1516-1528`), so a `tapWindowMs` above 4900 leaves `holdMs` below it and the long press can never be recognised (the comment at `:656-660` says it must stay above). Found writing NC-WP1. | Cap `tapWindowMs` at 4900, or let the `holdMs` cap give way to it. | `nccfg.hold_exceeds_tap_window` |
+| D-NC44 | No config apply clears a parked tap or hold (`tapState`), and only the USB SET_CONFIG re-arms the matrix debounce (`NaviCore.ino:3942-3952`); the bridged SET_CONFIG (`rc_telemetry.h:1173-1190`) and both RESET_DEFAULTS paths (`NaviCore.ino:3989-3992`, `rc_telemetry.h:1538-1545`) do not. Defaults whose matrix channel reads inside a band register a press nobody made, and the release a later restore causes fires that button's restored mapping (`NaviCore.ino:2347-2415`). Found writing NC-WP1. | Every config apply, on either transport, clears `tapState` and re-arms the matrix. | none yet (needs a matrix button held across a save, `sbus.*`); `nccfg.mesh_creds_live_split` steers clear of it (`_defaults_live_effects`) |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | INF6 built (`hil/ncmesh.py`, four `selftest.py` cases) and NC-WP1 written (34 `nccfg` tests in `s40_navicore_config.py`, opt-ins `navicore_reboot` and `navicore_fault`, `navicore.bench_health`, the s21 route check); `selftest.py` runs the whole suite against `NaviModel`, a port of NaviCore's config handling. No bench run yet. The two status notes list where the code differed from the plan: the burn, the probe's peer table, the 'parse failed' trigger, the password split made by RESET_DEFAULTS (only when the defaults decode no button or mode from the live SBUS input: a SET_CONFIG restore leaves a parked tap to fire the restored mapping). New findings D-NC42 (strings cut through a UTF-8 character), D-NC43 (holdMs left under tapWindowMs) and D-NC44 (no config apply clears a parked tap). |
 | 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |
 | 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |
 | 2026-09-28 | _(pending)_ | INF3 built: `hil/nc_guard.py`, the credential filter in `Bench.log`, `redacted_diff`, the resume's NaviCore check, and `nccfg.guard_selftest` in the new `s40_navicore_config.py`. The INF3 status note lists where the code differed from the plan. |
