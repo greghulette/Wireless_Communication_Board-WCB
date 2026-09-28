@@ -481,7 +481,7 @@ Nine pieces, in the order they unblock tests. Effort is agent-hours of writing p
 
 ### INF1 — `hil/navicore.py`, the shared driver
 
-> **Status 2026-09-27: written; no bench run yet.** s21's twelve helpers are driver methods (`config`, `debug`,
+> **Status 2026-09-28: bench-verified** (every NaviCore test of full run `20260928-005805` and each NaviCore run since goes through it). s21's twelve helpers are driver methods (`config`, `debug`,
 > `cli` for both `_flushed` and `_cli`, `mae_get`, `local_slots`, `undriven_channel`, `ack_line` for `_ack`, `mode`,
 > `rec_info`, `clips`, `sbus_dump` for `_l09`), with `usable_slot`, `lines` and `rc_events` beside them; s08's and s22's
 > GET_CONFIG reads use `config()`. Every method below exists; `ota_status` and `ota_stream` are functions of
@@ -551,7 +551,7 @@ MESH_STATS pages, the boot banner, FNV-1a against a known vector, and INF6's fra
 
 ### INF2 — `hil/sbus.py`
 
-> **Status 2026-09-27: written; no bench run yet.** `SbusCtl` replaces the controller JSON in s11, s21 and
+> **Status 2026-09-28: bench-verified** (`sbus.*` in full run `20260928-005805` and in `20260928-123843`; its waits now ping every second, D29). `SbusCtl` replaces the controller JSON in s11, s21 and
 > `hil/resume.py`, and in gui.py's Devices *Check*, a fourth copy (`job_check_device`) the list below missed. The
 > suites send the same bytes; `cfg()` now hashes `wifiNets` in session.log, which s11 and s21 logged in clear.
 > `safe_channels`, `band` and `matrix_button` moved too. `encode`/`decode` pass `selftest.py` against a real frame
@@ -792,7 +792,7 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 
 ### INF7 — the config-tool rig
 
-> **Status 2026-09-28: built; L0 and L1 run with no bench, L2 written and not yet run on the bench.**
+> **Status 2026-09-28: built and bench-verified.** L0 and L1 run with no bench (83 expected headless, 15 of them `(should)`), and L2's `nctool.board_connect_config` passed on the bench (`20260928-134028`): the tool connected through the harness's own COM handle, applied the real config, and a Save right after sent nothing.
 > `docs/HIL_TESTING.md` §8 ("The NaviCore config tool") says how the rig works and how to run it. In `tests/wizard`:
 > `serve.js`'s `/NaviCore/` alias (`lib/navicore/paths.js` finds the sibling repo by walking up, so a worktree works;
 > `NAVICORE_REPO` overrides); `lib/navicore/shim.js` (the fake `navigator.serial` and `FakeSerial`, its Node side),
@@ -965,7 +965,7 @@ add roughly 30-40 minutes, most of it the 60 s mode-report wait, the 50 s offlin
 
 > **Status 2026-09-28: written and bench-verified** (`20260928-123843`, `-124821`; image `v0.2.0_102105QSEP26`). Every normal `nccfg` test passes, and the existing `navicore.*` and `sbus.*` suites pass on the changed driver. The five `(should)` tests fail as designed, reproducing D-NC42, D-NC43, D-NC22, D-NC17 and D-NC16 on the board. The three hook tests wait for INF9's build (`navicore_fault`, not ticked). `nccfg.monitor_stream` first skipped on a healthy 99 fps: every "full rate" check now uses `SBUS_FULL_FPS` (90) in `hil/navicore.py`.
 
-> **Status 2026-09-28: written; no bench run yet.** `suites/s40_navicore_config.py` holds 34 tests beside
+> **Status 2026-09-28: bench-verified** (`20260928-123843`, `-124821`; see the NC-WP1 note above). `suites/s40_navicore_config.py` holds 34 tests beside
 > `nccfg.guard_selftest`: 23 normal; five `(should)`: `string_truncation_utf8` (D-NC42) and `hold_exceeds_tap_window`
 > (D-NC43), both found while writing these, `dest_null_hazard` (D-NC22), `mesh_creds_live_split` (D-NC17) and
 > `reset_defaults_keeps_identity` (D-NC16); three behind the new opt-in `navicore_reboot` (`persist_reboot`,
@@ -1012,7 +1012,7 @@ add roughly 30-40 minutes, most of it the 60 s mode-report wait, the 50 s offlin
 Every write goes to fields with no live effect, to slot 136 (unmapped in every mode), or is restored at once;
 everything inside `nc_guard`.
 
-- `nccfg.guard_selftest`: INF3's proof (above). Runs first. Written 2026-09-28 (`s40_navicore_config.py`); no bench run
+- `nccfg.guard_selftest`: INF3's proof (above). Runs first. Written 2026-09-28 (`s40_navicore_config.py`); passes on the bench (`20260928-064402`, `-070951`, `-123843`)
   yet.
 - `nccfg.get_config_shape`: the key set of `rcConfigToJSON` (`rc_config.h:1211-1480`, per the map); arrays 36/8/4/6/3;
   switch and knob label keys; action type names.
