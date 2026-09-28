@@ -707,6 +707,13 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     (`ncflash`) is built and its NaviCore compile proven, with its first real flash still to run. Four agents died
     on the 05:30 session limit; wave 2 (s14/s22, s15/s24, s12/s13/s16/s17) resumes two at a time. Next: push,
     INF4's bench flash of the running image, wave 2's verification, then INF5-INF9 and the NaviCore work packages.
+  - 2026-09-28 08:05: INF3 and INF4 bench-verified, the whole NaviCore recovery ladder included (OTA flash of the
+    running image, then the esptool rung on the healthy board: D35). Wave 2's first two groups are merged and
+    bench-verified: s14/s22 (25 tests, 23 pass, one self-gated skip, one fail that exposed #98's incomplete first
+    fix) and s15/s24 (21 tests); all 22 pass on `6.2.1_280741RSEP2026` with tracker #98 (`?KYBER,LIST`'s setup
+    line) and #99 (devices vs serial mappings) fixed and verified; #100 (NVS keys left by cleared devices) is
+    deferred (D38). Next: the s12/s13/s16/s17 group (writing), INF6 plus NC-WP1 (writing), INF7, tonight's full
+    run on the new image.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
