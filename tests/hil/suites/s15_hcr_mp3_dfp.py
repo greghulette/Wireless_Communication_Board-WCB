@@ -2000,10 +2000,12 @@ def pwm_port_refused(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("devices.serial_mapped_port_refused", "(should) A port a serial mapping reads refuses an HCR, an MP3 Trigger and a DFPlayer, and a serial mapping refuses an HCR's port as its input, as both sides refuse PWM: the device owns the port's RX, so the mapping would read nothing (W2's WDP off)", needs=["wcb1"], links=[])
+@test("devices.serial_mapped_port_refused", "(should) A port a serial mapping reads refuses an HCR, an MP3 Trigger and a DFPlayer, and a serial mapping refuses an HCR's port as its input, as both sides refuse PWM: the device owns the port's RX, so a mapping there reads nothing or races the device for its bytes (W2's WDP off)", needs=["wcb1"], links=[])
 def serial_mapped_port_refused(bench):
     """Found while writing WCB-WP26 row 3; not a plan row. processIncomingSerial returns before reading an MP3,
-    DFPlayer or HCR port (WCB.ino:8404-8412), so a mapping whose input is such a port never sees a byte, and neither side
+    DFPlayer or HCR port (WCB.ino:8404-8412), so a text mapping whose input is such a port never sees a byte, and a raw
+    one races the device's own reader for them (RawSerialForwardingTask skips only a reconfiguring port, the Kyber port
+    and a Maestro query, WCB.ino:8744-8768). Neither side
     checks the other: configureHCR / configureMP3 / configureDFP have no serial-mapping term (WCB_HCR.cpp:887-899,
     WCB_MP3.cpp:308-320, WCB_DFP.cpp:269-281), and addSerialMonitorMapping refuses only PWM ports as its input
     (WCB_Storage.cpp:2119-2127). PWM got the rule both ways on 2026-09-27 (serialMapOwnsPort, WCB_PWM.cpp;
