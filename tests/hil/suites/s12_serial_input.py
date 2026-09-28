@@ -1105,6 +1105,278 @@ def softserial_tx_rmt(bench):
     assert not problems, "; ".join(problems)
 
 
+# ============================================================ soft-port TX rates, line buffers and live ?BAUD (WCB-WP32)
+# Every rate ?BAUD takes for a soft port: updateBaudRate (WCB_Storage.cpp:196-213) has no 4800, refuses 128000 and 256000
+# on S3-S5, and warns about INPUT only at 57600 and 115200. The RMT encoder clocks at 1 MHz below 4800 baud and at 10 MHz
+# from there (WCB_SoftSerial.cpp:14 resolutionFor), in 8- and 12-byte transactions on a classic ESP32 (:69-71), and
+# byteHalves splits a run longer than 32767 ticks into several halves (:91-120).
+SOFT_TX_BAUDS = (110, 300, 600, 1200, 2400, 9600, 14400, 19200, 38400, 57600, 115200)
+# The longest one-level runs a console line can carry (a NUL never reaches a command, WCB.ino:8437): DEL (0x7F) is 7 high
+# data bits in a row, and U+0080 goes out as C2 80, whose 0x80 frame opens with 8 low bits (start bit + data bits 0-6).
+# At 110 baud those runs are 63,636 and 72,727 ticks: two and three RMT halves. ;S<n> writes the line's bytes as they
+# are, UTF-8 included, plus CR (processSerialMessage WCB.ino:7802-7817, writeSerialString :2341-2344).
+LONG_RUNS = "\x7f\x7f\u0080\u0080@@~~"
+HEAP_RX = re.compile(r"^Heap: (\d+) free, largest block (\d+), min free since boot (\d+)")   # ?STATS, WCB.ino:2128-2131
+
+
+def _heap_free(w, reads=3):
+    """The highest 'Heap: <free>' of a few ?STATS reads: a WiFi packet buffer in flight lowers any single reading."""
+    vals = []
+    for _ in range(reads):
+        m = next((m for m in map(HEAP_RX.match, w.run("?STATS", timeout=6)) if m), None)
+        if m:
+            vals.append(int(m.group(1)))
+        time.sleep(0.2)
+    if not vals:
+        raise Skip("?STATS prints no 'Heap:' line (older firmware)")
+    return max(vals)
+
+
+@test("input.softserial_tx_baud_table", "W1 S4 transmits byte-exact at every rate ?BAUD takes for a soft port, 110 to 115200 baud: a ;S4 line holding 7- and 8-bit one-level runs (DEL, and U+0080 as C2 80) arrives whole on a probe UART with no framing error", needs=["wcb1"])
+def softserial_tx_baud_table(bench):
+    """WCB-WP32 row 1. RMT TX (WcbSoftSerial, CLAUDE.md rule 13) was measured only at 9600 and 38400-57600; below 4800
+    the encoder changes clock and transaction size and splits long runs across several 15-bit halves, and nothing ran it
+    there. Each rate is set with ?BAUD (a live re-begin: applyLiveBaud, WCB.ino:2453-2487) and read on a probe HARDWARE
+    channel, whose own framing is not in question at any rate (BIND takes 50-2000000 baud, probe_main.cpp); a rate the
+    probe cannot bind is recorded, not failed. At 110 baud the line takes about 2 s on the wire, and W1's loop task, which
+    writes it, waits that out."""
+    s4 = link(bench, 1, "S4")
+    require_tokens(bench, 1, "?BAUD,S4,9600")      # the restore below writes 9600
+    w = usb_wcb(bench)
+    results, problems, untested = {}, [], []
+    with config_guard(bench, 1):
+        try:
+            for baud in SOFT_TX_BAUDS:
+                out = w.run(f"?BAUD,S4,{baud}")
+                if not _has(out, f"Baud rate for Serial4 updated to {baud}"):
+                    problems.append(f"?BAUD,S4,{baud} printed {out}")
+                    continue
+                try:
+                    s4.listen(baud, hw=True)
+                except AssertionError as e:
+                    untested.append(f"{baud} ({str(e).splitlines()[0][:80]})")
+                    continue
+                time.sleep(0.3)
+                text = marker("b") + LONG_RUNS + "Z"
+                want = text.encode() + b"\r"
+                m = s4.mark()
+                w.dev.send(f";S4{text}")
+                try:
+                    s4.expect(want, timeout=len(want) * 10 / baud + 2.0, since=m)
+                except AssertionError:
+                    pass
+                time.sleep(0.3)
+                got, errs = s4.received(m), s4.errors(m)
+                results[baud] = ("exact" if got == want and not errs
+                                 else f"got {got.hex(' ')}, want {want.hex(' ')}, {len(errs)} RXERR")
+        finally:
+            w.run("?BAUD,S4,9600")
+            s4.listen()
+    bench.note(f"W1 S4 RMT TX per baud: {results}" + (f"; not measured: {untested}" if untested else ""))
+    bad = [f"{b} baud: {r}" for b, r in results.items() if r != "exact"]
+    assert not problems and not bad, "; ".join(problems + bad)
+    if not results:
+        raise Skip(f"the probe could bind no rate: {untested}")
+
+
+@test("input.line_buffer_heap", "A line that never ends holds no more than the 4 KB line cap: 12 KB with no CR/LF into W1 S3 leaves 'Heap: free' where it started once the cap drops the line, W1 keeps answering and prints no 'Out of memory', and the next line on S3 runs; a 3 KB USB line gives its buffer back afterwards", needs=["wcb1"])
+def line_buffer_heap(bench):
+    """WCB-WP32 row 2 (re-scan #23, fixed). processIncomingSerial caps a line at 4096 characters on S1-S5 and at 32 KB on
+    USB (serialLineMax, WCB.ino:8389-8391): the byte past the cap releases the buffer and prints one '[SERIAL] S3: line
+    longer than 4096 characters - dropped', and the rest is dropped up to the line end (:8472-8484). releaseLineBuffer
+    (:8380-8387) frees a buffer over 512 characters after every line, where a String would keep its capacity through
+    = "". input.line_cap_drops_whole checks what runs; this reads the byte-addressable heap ?STATS reports (WCB.ino:
+    2121-2131, CLAUDE.md rule 14). A buffer kept would show as 3-12 KB less free heap; the margins are well above the
+    few hundred bytes a WiFi buffer in flight takes. S3's broadcast input is blocked for the test, so a line a lost byte
+    ended early cannot reach the mesh."""
+    s3 = link(bench, 1, "S3")
+    require_tokens(bench, 1, "?BCAST,IN,S3,ON")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            w.run("?BCAST,IN,S3,OFF")
+            prime(s3)
+            time.sleep(0.5)
+            base = _heap_free(w)
+            m = w.dev.mark()
+            during = []
+            for k in range(1, 13):                   # 12 x 1000 bytes: about 12.5 s at 9600 baud
+                s3.send(b"X" * 1000)
+                if k in (6, 9, 12):
+                    during.append(_heap_free(w))
+            drops = [x for x in w.dev.since(m) if x.startswith("[SERIAL] S3: line longer than 4096 characters - dropped")]
+            s3.send(b"\r")
+            time.sleep(0.5)
+            t = marker()
+            s3.send(f";S0{t}\r".encode())
+            try:
+                w.dev.expect(rf"^{t}$", timeout=4, since=m)
+            except AssertionError:
+                problems.append("the ;S0 line after the over-long one did not run")
+            after_stream = _heap_free(w)
+            u = marker("u")
+            w.dev.send(f";S0{u}" + "Y" * 3000)
+            try:
+                w.dev.expect(rf"^{u}Y", timeout=5, since=m)
+            except AssertionError:
+                problems.append("the 3 KB USB line did not run")
+            time.sleep(1.0)
+            after_usb = _heap_free(w)
+            lines = [x.rstrip() for x in w.dev.since(m)]
+            rebooted = w.rebooted_since(m)
+        finally:
+            w.run("?BCAST,IN,S3,ON")
+    bench.note(f"W1 heap free: {base} before; {during} with 6, 9 and 12 KB of one S3 line; {after_stream} after it; "
+               f"{after_usb} after a 3 KB USB line; {len(drops)} drop line(s)")
+    assert not rebooted, "W1 rebooted during the over-long line"
+    assert not [x for x in lines if "Out of memory" in x], "W1 printed 'Out of memory'"
+    assert drops, "no '[SERIAL] S3: line longer than 4096 characters - dropped' line"
+    low = [d for d in during if d < base - 1536]
+    assert not low, f"free heap fell to {during} (from {base}) while S3's line grew past its cap: the buffer was kept"
+    assert after_usb >= after_stream - 1024, f"a 3 KB USB line left free heap at {after_usb}, from {after_stream}: its buffer was kept"
+    assert not problems, "; ".join(problems)
+
+
+@test("input.usb_line_over_heap_dropped_whole", "(should) A USB line longer than W1's heap can hold - over its largest free block, under the 32 KB USB line cap - is dropped whole with a '[SERIAL] S0: ... dropped' line, or runs whole and verified: never its head alone, which has lost the ^?CHK the tail carried", needs=["wcb1"], links=[])
+def usb_line_over_heap_dropped_whole(bench):
+    """Probable firmware defect, found while writing WCB-WP32 row 2. The USB line cap is 32 KB (serialLineMax, WCB.ino:
+    8389-8391, decision D16), but with WiFi in AP mode the largest free block is about 16-17 KB (CLAUDE.md rule 14), so a
+    longer line meets a failed allocation before the cap. processIncomingSerial ignores the append's result
+    (`serialBuffer += c`, WCB.ino:8474-8475; Arduino String::concat returns false and leaves the String as it was): the
+    line stops growing without a word, every later character is lost, and at the line end the head runs as if it were
+    the whole line. A chain loses its ^?CHK with the tail, so parseCommandsAndEnqueue runs the head unverified
+    (:2703-2768), its last token cut mid-value - what #23's cap drops a line whole to prevent (:8476-8484). Here every
+    token is ;S0<2-character tag><4 digits>, so what ran is counted on USB; the line is the largest free block plus
+    4 KB. W1's heap is nearly used up for the few seconds the line takes to read and parse. Skipped when a line that
+    long would pass the cap, which drops it whole anyway (input.line_cap_drops_whole)."""
+    w = usb_wcb(bench)
+    mm = next((m for m in map(HEAP_RX.match, w.run("?STATS", timeout=6)) if m), None)
+    if not mm:
+        raise Skip("?STATS prints no 'Heap:' line (older firmware)")
+    largest = int(mm.group(2))
+    size = largest + 4096
+    if size >= 32768:
+        raise Skip(f"W1's largest free block is {largest} bytes: a line past it passes the 32 KB cap, which drops it whole")
+    tag = "Q" + nonce()[:1]
+    tokens = [f";S0{tag}{k:04d}" for k in range(size // 10)]
+    chain = "^".join(tokens)
+    line = f"{chain}^?CHK{zlib.crc32(chain.encode()) & 0xFFFFFFFF:08X}"
+    m = w.dev.mark()
+    w.dev.send_paced(line)
+    last, still, end = -1, time.monotonic(), time.monotonic() + 40.0
+    while time.monotonic() < end:                     # until W1's console has been quiet for 3 s
+        n = len(w.dev.since(m))
+        if n != last:
+            last, still = n, time.monotonic()
+        elif time.monotonic() - still >= 3.0:
+            break
+        time.sleep(0.2)
+    out = [x.rstrip() for x in w.dev.since(m)]
+    ran = sum(1 for x in out if re.match(rf"^{tag}\d{{0,4}}$", x))
+    dropped = [x for x in out if x.startswith("[SERIAL] S0:") and "dropped" in x]
+    verified = any("Command checksum VERIFIED" in x for x in out)
+    rebooted = w.rebooted_since(m)
+    after = _heap_free(w)
+    bench.note(f"a {len(line)}-byte USB line (largest free block {largest}): {ran} of {len(tokens)} tokens ran, "
+               f"checksum verified {verified}, drop line {dropped[:1]}; heap free afterwards {after}")
+    assert not rebooted, "W1 rebooted while it read a USB line longer than its heap"
+    assert (ran == len(tokens) and verified) or (ran == 0 and dropped), \
+        (f"{ran} of {len(tokens)} tokens of a {len(line)}-byte checksummed USB line ran (checksum verified: {verified}, "
+         f"drop line: {dropped[:1]}): the head ran on its own")
+
+
+@test("input.live_baud_text_port", "?BAUD on a soft port while text streams into it neither reboots W1 nor wedges its command reader: five same-rate re-begins of S3 under a stream of comment lines, then 19200 and back with the line quiet, after which a ;S0 line typed into S3 runs", needs=["wcb1"])
+def live_baud_text_port(bench):
+    """WCB-WP32 row 3. applyLiveBaud (WCB.ino:2453-2487) sets serialReconfigPort, gives a reader already in a drain 12 ms,
+    and ends and re-begins the SoftwareSerial, which frees and reallocates its RX buffer; processIncomingSerial skips that
+    port meanwhile, before it calls available() (:8394-8400, :8421-8423). map.baud_on_raw_mapped_port covers the raw
+    forwarding task's skip (:8758-8760); this is the text parser's. The stream is *** comment lines, which only print
+    'Ignored chain command:', and S3's broadcast input is blocked for the test, so a line a re-begin garbles cannot reach
+    the mesh. The rate change itself runs with the line quiet: input at the wrong rate decodes as random bytes, and a
+    random ;M line would move a servo (W1's M1 has a proxy on NaviCore's dome Maestro, hil/servos.py)."""
+    s3 = link(bench, 1, "S3")
+    require_tokens(bench, 1, "?BAUD,S3,9600", "?BCAST,IN,S3,ON")
+    w = usb_wcb(bench)
+    problems = []
+    stop = threading.Event()
+
+    def streamer():
+        while not stop.is_set():
+            s3.send(("***" + padded("L", 40)).encode() + b"\r")
+            time.sleep(0.02)
+
+    with config_guard(bench, 1):
+        try:
+            w.run("?BCAST,IN,S3,OFF")
+            prime(s3)
+            time.sleep(0.3)
+            m = w.dev.mark()
+            th = threading.Thread(target=streamer, daemon=True)
+            th.start()
+            outs = []
+            try:
+                time.sleep(0.6)
+                for _ in range(5):
+                    outs.append(w.run("?BAUD,S3,9600"))
+                    time.sleep(0.3)
+            finally:   # a failed ?BAUD must not leave the streamer typing into S3 through every later test
+                stop.set()
+                th.join()
+            time.sleep(0.5)
+            outs.append(w.run("?BAUD,S3,19200"))
+            time.sleep(0.3)
+            outs.append(w.run("?BAUD,S3,9600"))
+            time.sleep(0.3)
+            read = sum(1 for x in w.dev.since(m) if x.startswith("Ignored chain command: ***HILL"))
+            prime(s3)
+            time.sleep(0.3)
+            t = marker()
+            s3.send(f";S0{t}\r".encode())
+            try:
+                w.dev.expect(rf"^{t}$", timeout=3, since=m)
+            except AssertionError:
+                problems.append("a ;S0 line typed into S3 after the re-begins did not run")
+            rebooted = w.rebooted_since(m)
+        finally:
+            stop.set()
+            w.run("?BCAST,IN,S3,ON")
+            w.run("?BAUD,S3,9600")
+    bench.note(f"{read} comment lines read from S3 across five live re-begins")
+    assert not rebooted, "W1 rebooted while S3 was re-begun under input"
+    missing = [o for o in outs if not any(x.startswith("Baud rate for Serial3 updated to ") for x in o)]
+    assert not missing, f"a ?BAUD,S3 did not confirm: {missing}"
+    assert read > 0, "no comment line from S3 was read while it streamed: the reader stalled"
+    assert not problems, "; ".join(problems)
+
+
+@test("input.baud_flush_before_rate_change", "A 120-character ;S2 line chained ahead of ?BAUD,S2,19200 reaches W1 S2's device whole at the old 9600 baud: the rate change waits for the UART to drain", needs=["wcb1"])
+def baud_flush_before_rate_change(bench):
+    """WCB-WP32 row 4. ;S<n> never flushes (processSerialMessage, WCB.ino:7818-7822): on S1/S2 the bytes queue in a 1 KB
+    TX buffer and drain on their own. applyLiveBaud drains that queue before it reprograms the divisor (WCB.ino:2461-2463),
+    so a line queued just before a rate change goes out at the rate it was written for; the 12 ms grace ahead of it (:2459)
+    is far shorter than the 126 ms this line takes. The probe stays at 9600 on a hardware channel, where a tail sent at
+    19200 arrives as framing errors or wrong bytes."""
+    s2 = link(bench, 1, "S2")
+    require_tokens(bench, 1, "?BAUD,S2,9600")
+    w = usb_wcb(bench)
+    text = padded("F", 120)
+    with config_guard(bench, 1):
+        try:
+            s2.listen(9600, hw=True)
+            time.sleep(0.3)
+            m, wm = s2.mark(), w.dev.mark()
+            w.dev.send(f";S2{text}^?BAUD,S2,19200")
+            w.dev.expect(r"^Baud rate for Serial2 updated to 19200", timeout=4, since=wm)
+            time.sleep(0.5)
+            got, errs = s2.received(m), s2.errors(m)
+        finally:
+            w.run("?BAUD,S2,9600")
+            s2.listen()
+    assert got == text.encode() + b"\r" and not errs, \
+        f"W1 S2 read at 9600 got {got!r} with {len(errs)} RXERR, expected the 121 bytes whole"
+
+
 # ============================================================ WDP device announce
 # Records are kept until forgotten (NVS wdp_da), so a test that creates one forgets it again in a finally, and each
 # first forgets any HIL-named leftovers on its ports (_da_scrub): a run killed between the two would otherwise leave
@@ -1651,6 +1923,347 @@ def wdpda_persists_reboot(bench):
         # advertise now, so the next test finds W1's WDP table as full as it was (NaviCore included).
         w.run("?WDP,POLL")
         time.sleep(2.0)
+
+
+# ------------------------------------------------------------ WDP-DA edge cases (WCB-WP49)
+def _da_print_on(c):
+    """The ?WDP,DA printout of the board behind a Console."""
+    m = c.send("?WDP,DA")
+    time.sleep(0.6)
+    return [x.rstrip() for x in c.lines(m)]
+
+
+def _da_entry(rows, port, type_):
+    """One device's ?WDP,DA line followed by its 'hw ...' / 'caps: ...' lines, stripped (wdpDaPrint,
+    WCB_WDP.cpp:1171-1198), or [] when the port does not list it."""
+    for i, x in enumerate(rows):
+        if re.match(rf"^\s+{port}\s+{re.escape(type_)}\s", x):
+            out = [x]
+            for y in rows[i + 1:]:
+                if not re.match(r"^\s+(hw |caps: )", y):
+                    break
+                out.append(y.strip())
+            return out
+    return []
+
+
+def _dump_on(c):
+    """?WDP,DUMP on the board behind a Console, through its [WDP:END] line."""
+    m = c.send("?WDP,DUMP")
+    c.expect(r"\[WDP:END,count=\d+\]", timeout=8, since=m)
+    return [x.rstrip() for x in c.lines(m)]
+
+
+def _wdp_label(text):
+    """A port label as ?WDP,DUMP prints it: at most 24 characters, with ',' ']' and control characters as '_'
+    (wdpScrub WCB_WDP.cpp:421-424; the advert's 24-character cut :318)."""
+    return "".join("_" if c in ",]" or ord(c) < 0x20 else c for c in text[:24])
+
+
+def _port_names(dump, n, port):
+    """The [WDPIF] rows a ?WDP,DUMP gives board n's port (1-5)."""
+    return [x for x in dump if x.startswith(f"[WDPIF:N={n},S={port},")]
+
+
+def _learned_peers(w, floor):
+    """The ids above the WCBQ floor that W1 will unicast to: its learned peers. Nothing lists them by id, so each
+    candidate is asked - a ;W<n> to a non-member prints the refusal instead of sending, and a member gets one read-only
+    ?PEERSLIVE (as wdp.clear_learned_relearn in s27 does). The controller id, 20, is never a learned peer."""
+    return [n for n in range(floor + 1, 20)
+            if not _has(w.run(f";W{n},?PEERSLIVE"), f"WCB {n} is not a reachable target")]
+
+
+@test("input.wdpda_changed_facts_resave", "A saved WDP-DA device announcing again with a new fw, hw and caps (a reflash) keeps its record and its place with the new facts: W2's ?WDP,DA and W1's view of W2 show them within seconds, and W2 reloads them after a reboot (1 W2 reboot)", needs=["wcb1", "wcb2"])
+def wdpda_changed_facts_resave(bench):
+    """WCB-WP49 row 1. wdpDaHandleLine refreshes a known type in place and marks the list dirty when its fw, hw or caps
+    changed (WCB_WDP.cpp:1016-1024); wdpDaTick saves it 1 s later (wdpDaMarkDirty :844-847, :1162), and wdpDaCheckChanged
+    sends the changed list with one re-send (:1368-1378). A change of facts prints nothing - only a new, a re-heard or a
+    newly saved device prints (:1048-1054) - so W2's console is recorded, not asserted. W2 reboots on its own USB, and W1
+    sees its boot announce before the test ends."""
+    s4 = link(bench, 2, "S4")
+    if token(bench.config_tokens(2, refresh=True), "?WDP,OFF"):
+        raise Skip("W2 has WDP off")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    name = "HILDC" + marker()[3:7]
+    ann = '@WDP1 {{"type":"{}","fw":"{}","hw":"{}","caps":["{}"]}}\n'
+    old, new = ("1.0", "revA", "hil.a"), ("2.0", "revB", "hil.b")
+    row = "[WDPDA:N=2,S=4,TYPE={},FW={},HW={},CAPS={},SEEN=1,AGE=-]"
+    problems = []
+    with Console(bench, 2) as c2:
+        _da_scrub_on(c2, "S4")
+        if len(_da_types_on(c2, "S4")) >= 4:
+            raise Skip("W2 S4 already holds four non-test devices")
+        try:
+            prime(s4)
+            time.sleep(0.3)
+            m = c2.mark()
+            line = ann.format(name, *old).encode()
+            s4.send(line)
+            time.sleep(0.3)
+            s4.send(line)                                     # saved on its second announce
+            c2.expect(rf"\[WDP-DA\] S4: {name} saved", timeout=4, since=m)
+            time.sleep(3.0)
+            first = _da_row(w.run("?WDP,DUMP", timeout=8), 2, 4, name)
+            if first != row.format(name, *old):
+                raise AssertionError(f"setup: W1's record of the saved device is {first}")
+            m = c2.mark()
+            s4.send(ann.format(name, *new).encode())
+            time.sleep(1.0)
+            printed = [x for x in c2.lines(m) if x.startswith("[WDP-DA]") and name in x]
+            entry = _da_entry(_da_print_on(c2), "S4", name)
+            if not (entry and re.search(r"\sfw 2\.0\s+\d+s ago$", entry[0]) and entry[1:] == ["hw revB", "caps: hil.b"]):
+                problems.append(f"W2's ?WDP,DA after the new announce: {entry}")
+            time.sleep(3.0)
+            now = _da_row(w.run("?WDP,DUMP", timeout=8), 2, 4, name)
+            if now != row.format(name, *new):
+                problems.append(f"W1's record of it 4 s after the new announce: {now}")
+            time.sleep(DA_SAVE_SETTLE_S)                      # the save lands 1 s after the change
+            wm = w.dev.mark()
+            m = w2.reboot()
+            if not any(re.match(r"^\[WDP-DA\] \d+ serial-attached devices? remembered", x) for x in w2.dev.since(m)):
+                problems.append("W2's boot log has no '[WDP-DA] ... remembered' line")
+            entry = _da_entry(_da_print_on(c2), "S4", name)
+            if not (entry and re.search(r"\sfw 2\.0\s+not heard since boot$", entry[0])
+                    and entry[1:] == ["hw revB", "caps: hil.b"]):
+                problems.append(f"after its reboot W2 lists {entry}")
+            try:
+                w.dev.expect(r"\[ETM\] WCB2 came ONLINE", timeout=25, since=wm)
+            except AssertionError:
+                problems.append("W1 did not see W2 come back online within 25 s of its reboot")
+            time.sleep(2.0)
+        finally:
+            _da_forget_on(c2, "S4", name)
+    bench.note(f"W2's console when the reflashed device announced: {printed or 'nothing'}")
+    assert not problems, "; ".join(problems)
+
+
+def _check_port_name(w, c2, me, n, dev, name, when, problems, advert):
+    """Check that W1's port n is named DEV=dev, with the saved device `name` still listed under it: in W1's own ?WDP,DUMP
+    and, unless advert is False, in W2's view of W1 (which follows W1's next advert). Returns whether W2's view carried
+    the port's name: advert=None asks, and a port with no row there means W1's 200-byte advert had no room for it."""
+    want = [f"[WDPIF:N={me},S={n},DEV={dev}]"]
+    dump = [x.rstrip() for x in w.run("?WDP,DUMP", timeout=8)]
+    if _port_names(dump, me, n) != want:
+        problems.append(f"{when}: W1's dump names S{n} {_port_names(dump, me, n)}, expected {want}")
+    if _da_row(dump, me, n, name) is None:
+        problems.append(f"{when}: W1's dump no longer lists {name} on S{n}")
+    if advert is False:
+        return False
+    deadline = time.monotonic() + 6.0
+    while True:
+        seen_dump = _dump_on(c2)
+        seen = _port_names(seen_dump, me, n)
+        if seen == want or time.monotonic() > deadline:
+            break
+        time.sleep(1.0)
+    if advert is None and not seen:
+        return False
+    if seen != want:
+        problems.append(f"{when}: W2's view of W1 S{n} is {seen}, expected {want}")
+    if _da_row(seen_dump, me, n, name) is None:
+        problems.append(f"{when}: W2's view of W1 no longer lists {name} on S{n}")
+    return True
+
+
+@test("input.wdpda_manual_label_wins", "A manual ?LABEL keeps naming its port - in W1's ?WDP,DUMP and, through W1's advert, in W2's - while a saved WDP-DA device is listed under it; with the label cleared the device's type names the port, and the label put back names it again", needs=["wcb1"], links=["W1S2|W1S3|W1S4|W1S5"])
+def wdpda_manual_label_wins(bench):
+    """WCB-WP49 row 2. The advert (WCB_WDP.cpp:312-316) and the dump's self row (:1777-1779) name a port by its ?LABEL and
+    fall back to the WDP-DA label - the port's first-heard saved device (wdpDaLabel :956-966) - only when it has none;
+    the device list is separate and lists the device either way (:1205-1219). The other s12 DA tests skip their label
+    checks on a labelled port, so this one takes a labelled W1 port when there is one (S3 and S5 are, on the bench) and
+    otherwise labels a free one for the test. W2 learns a label from W1's next advert, sent within about 0.5 s of a change
+    (the on-change check, :392-402); a label with no room in the 200-byte advert is left out of it (:309-311), and then
+    only W1's own view is checked. The device type is no longer than the label, so it fits where the label did."""
+    w = usb_wcb(bench)
+    me = usb_wcb_number(bench)
+    tokens = bench.config_tokens(1, refresh=True)
+    if token(tokens, "?WDP,OFF"):
+        raise Skip("W1 has WDP off")
+    wired = [p for p in ("S3", "S5", "S2", "S4") if bench.links.usable(1, p, send=True)]
+    if not wired:
+        raise Skip("no wired W1 port S2-S5 free of devices")
+    port = next((p for p in wired if token(tokens, f"?LABEL,{p},")), wired[0])
+    orig = token(tokens, f"?LABEL,{port},")
+    label = orig[len(f"?LABEL,{port},"):] if orig else "HILLBL" + nonce()[:4]
+    if "^" in label or label.endswith("?"):
+        raise Skip(f"W1 {port}'s label cannot be typed back on one console line")
+    l, n = bench.links.usable(1, port, send=True), int(port[1])
+    shown = _wdp_label(label)
+    name = ("HIL" + nonce())[:max(4, min(9, len(shown)))]
+    line = f'@WDP1 {{"type":"{name}","fw":"1"}}\n'.encode()
+    problems = []
+    advert = None
+    with config_guard(bench, 1):
+        _da_scrub(w, port)
+        if _da_types(w, port):
+            raise Skip(f"W1 {port} has non-test devices; one of them would name the port once its label is cleared")
+        try:
+            if not orig:
+                w.run(f"?LABEL,{port},{label}")
+            prime(l)
+            time.sleep(0.3)
+            m = w.dev.mark()
+            l.send(line)
+            time.sleep(0.3)
+            l.send(line)                                      # saved on its second announce
+            w.dev.expect(rf"^\[WDP-DA\] {port}: {name} saved$", timeout=3, since=m)
+            time.sleep(DA_SAVE_SETTLE_S)
+            with Console(bench, 2) as c2:
+                advert = _check_port_name(w, c2, me, n, shown, name, "while labelled", problems, None)
+                w.run(f"?LABEL,CLEAR,{port}")
+                _check_port_name(w, c2, me, n, name, name, "with the label cleared", problems, advert)
+                w.run(orig or f"?LABEL,{port},{label}")
+                _check_port_name(w, c2, me, n, shown, name, "with the label put back", problems, advert)
+        finally:
+            w.run(orig or f"?LABEL,CLEAR,{port}")
+            _da_forget(w, port, name)
+    if not advert:
+        bench.note(f"W2 never showed W1 {port}'s label (no room in W1's advert?): only W1's own dump was checked")
+    assert not problems, "; ".join(problems)
+
+
+@test("input.wdpda_multiframe_mesh", "Four WDP-DA devices with every field at full length on W2's S4 (120-byte records, one frame each) reach W1 whole and in order, W2 reports a 4-frame list, and ?WDP,2 lists them; forgetting the second on W2 leaves W1 three, in order", needs=["wcb1"])
+def wdpda_multiframe_mesh(bench):
+    """WCB-WP49 row 3. A device list longer than one 200-byte frame goes out a frame every 25 ms (wdpDaBuildFrame and
+    wdpDaSendStep, WCB_WDP.cpp:1290-1363), and a receiver shows a list only once it holds every frame of one hash, then
+    in list order (:1440-1500, :1503-1525). Every bench propagation test sends one or two short records, which fit one
+    frame. Here each record is 6 + 24 + 27 + 15 + 48 = 120 bytes, the most a record holds (WDP_DA_REC_MAX :830; hw is
+    capped at 15, WdpDaDevice WCB_WDP.h), so four make four frames. The four first announces go in first - heard once, in
+    RAM only - and then the four that save them, 0.3-0.5 s apart, so the NVS save (1 s after the last) never lands under
+    an announce on W2's soft port (docs/HIL_TESTING.md §6). Overflowing W1's 32-record pool needs more neighbours than
+    the bench has."""
+    s4 = link(bench, 2, "S4")
+    if token(bench.config_tokens(2, refresh=True), "?WDP,OFF"):
+        raise Skip("W2 has WDP off")
+    w = usb_wcb(bench)
+    tag = marker()[3:7]
+    devs = [((f"HILMF{i}{tag}" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ")[:24], (f"{i}.{tag}." + "0123456789" * 3)[:27],
+             (f"rev{i}" + "ABCDEFGHIJKLMNOP")[:15], (f"hil{i}." + "abcdefghijklmnopqrstuvwxyz0123456789" * 2)[:48])
+            for i in range(4)]
+    lines = [f'@WDP1 {{"type":"{t}","fw":"{f}","hw":"{h}","caps":["{c}"]}}\n'.encode() for t, f, h, c in devs]
+    want = [f"[WDPDA:N=2,S=4,TYPE={t},FW={f},HW={h},CAPS={c},SEEN=1,AGE=-]" for t, f, h, c in devs]
+    problems = []
+    with Console(bench, 2) as c2:
+        _da_scrub_on(c2, "S4")
+        if _da_types_on(c2, "S4"):
+            raise Skip("W2 S4 has non-test devices; four more would not fit its four places")
+        c2.expect(r"MGMT debugging enabled", timeout=3, since=c2.send("?DEBUG,MGMT,ON"))
+        try:
+            prime(s4)
+            time.sleep(0.3)
+            m = c2.mark()
+            for x in lines:                                   # heard once: RAM only, nothing saved yet
+                s4.send(x)
+                time.sleep(0.35)
+            for (t, *_), x in zip(devs, lines):               # each second announce saves one
+                s4.send(x)
+                c2.expect(rf"\[WDP-DA\] S4: {t} saved", timeout=4, since=m)
+            time.sleep(4.0)
+            # W2 may list devices on its other ports too, so its whole list is 4 devices and 4 frames or more.
+            sends = [tuple(int(g) for g in mm.groups()) for mm in
+                     (re.match(r"^\[WDP\] device list sent \((\d+) devices?, (\d+) frames?\)", x) for x in c2.lines(m)) if mm]
+            if not any(d >= 4 and f >= 4 for d, f in sends):
+                problems.append(f"W2 never sent its list of these four as 4 or more frames: (devices, frames) {sends}")
+            got = [x.rstrip() for x in w.run("?WDP,DUMP", timeout=8) if x.startswith("[WDPDA:N=2,S=4,")]
+            if got != want:
+                problems.append(f"W1's records of W2 S4: {got}, expected {want}")
+            detail = [x.strip() for x in w.run("?WDP,2")]
+            at = [next((k for k, x in enumerate(detail) if x.startswith(t) and f"fw {f[:14]}" in x), None) for t, f, _, _ in devs]
+            if None in at or at != sorted(at):
+                problems.append(f"?WDP,2 lists the four at {at}: {detail}")
+            m = c2.mark()
+            c2.send(f"?WDP,DA,FORGET,S4,{devs[1][0]}")
+            c2.expect(rf"\[WDP-DA\] S4: {devs[1][0]} forgotten", timeout=3, since=m)
+            time.sleep(DA_SAVE_SETTLE_S + 2.5)
+            got = [x.rstrip() for x in w.run("?WDP,DUMP", timeout=8) if x.startswith("[WDPDA:N=2,S=4,")]
+            if got != [want[0], want[2], want[3]]:
+                problems.append(f"after forgetting {devs[1][0]} W1 lists {got}")
+        finally:
+            c2.send("?DEBUG,MGMT,OFF")
+            time.sleep(0.3)
+            _da_forget_on(c2, "S4", *[d[0] for d in devs])
+    assert not problems, "; ".join(problems)
+
+
+@test("input.wdpda_wdp_clear_remote_lists", "?WDP,CLEAR on W1 drops the device lists its neighbours sent but keeps its own: a saved device on W2 S4 leaves W1's dump while W1's own saved device stays, and after ?WDP,POLL W2's unchanged list is taken again (auto-join off meanwhile; learned peers put back)", needs=["wcb1"], links=["W1S2|W1S3|W1S4|W1S5", "W2S4"])
+def wdpda_wdp_clear_remote_lists(bench):
+    """WCB-WP49 row 4. ?WDP,CLEAR wipes the neighbour table and, with it, the device lists received from neighbours and
+    their assembly state, while this board's own records stay (WCB_WDP.cpp:1919-1926). A frame is ignored while the list
+    it belongs to is the one already shown (:1451); the clear resets that, so W2's next send of the SAME list - the one
+    that follows its solicited advert (:338-346, :366-372) - is taken again. The clear also drops W1's learned peers:
+    they are listed first and put back with ?WDP,ADD, auto-join staying off until then, as in wdp.clear_learned_relearn
+    (s27). Learned peers are not in the config chain, so that restore is checked here."""
+    s24 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    me = usb_wcb_number(bench)
+    wired = [p for p in ("S2", "S3", "S4", "S5") if bench.links.usable(1, p, send=True)]
+    if not wired:
+        raise Skip("no wired W1 port S2-S5 free of devices")
+    port = wired[0]
+    l1, n1 = bench.links.usable(1, port, send=True), int(port[1])
+    if token(bench.config_tokens(2, refresh=True), "?WDP,OFF"):
+        raise Skip("W2 has WDP off")
+    tag = marker()[3:7]
+    own, far = "HILWO" + tag, "HILWR" + tag
+    problems = []
+    with config_guard(bench, 1) as before:
+        if "?WDP,OFF" in before[1] or "?WDP,AUTOJOIN,OFF" in before[1]:
+            raise Skip("W1 has WDP or auto-join off")
+        floor = int(token(before[1], "?WCBQ,").split(",")[1])
+        learned = _learned_peers(w, floor)
+        _da_scrub(w, port)
+        with Console(bench, 2) as c2:
+            _da_scrub_on(c2, "S4")
+            if len(_da_types_on(c2, "S4")) >= 4 or len(_da_types(w, port)) >= 4:
+                raise Skip(f"W2 S4 or W1 {port} already holds four devices")
+            try:
+                prime(l1, s24)
+                time.sleep(0.3)
+                m, cm = w.dev.mark(), c2.mark()
+                for wire, t in ((l1, own), (s24, far)):
+                    x = f'@WDP1 {{"type":"{t}","fw":"4.2"}}\n'.encode()
+                    wire.send(x)
+                    time.sleep(0.3)
+                    wire.send(x)                              # saved on its second announce
+                w.dev.expect(rf"^\[WDP-DA\] {port}: {own} saved$", timeout=3, since=m)
+                c2.expect(rf"\[WDP-DA\] S4: {far} saved", timeout=4, since=cm)
+                time.sleep(3.0)
+                dump = w.run("?WDP,DUMP", timeout=8)
+                far_row, own_row = _da_row(dump, 2, 4, far), _da_row(dump, me, n1, own)
+                if not far_row or not own_row:
+                    raise AssertionError(f"setup: W1's dump shows W2's device as {far_row} and its own as {own_row}")
+                own_before = _da_types(w, port)
+                if not _has(w.run("?WDP,AUTOJOIN,OFF"), "[WDP] auto-join disabled"):
+                    raise AssertionError("?WDP,AUTOJOIN,OFF did not confirm")
+                out = w.run("?WDP,CLEAR")
+                if not _has(out, "[WDP] neighbor table + learned peers cleared"):
+                    problems.append(f"?WDP,CLEAR printed {out}")
+                dump = w.run("?WDP,DUMP", timeout=8)
+                left = [x.rstrip() for x in dump if x.startswith("[WDPDA:N=2,")]
+                if left:
+                    problems.append(f"W2's device list survived ?WDP,CLEAR: {left}")
+                if _da_row(dump, me, n1, own) is None:
+                    problems.append(f"?WDP,CLEAR took W1's own device {own} off its dump")
+                if _da_types(w, port) != own_before:
+                    problems.append(f"?WDP,CLEAR changed W1's own ?WDP,DA on {port}: {_da_types(w, port)}, was {own_before}")
+                if not _has(w.run("?WDP,POLL"), "[WDP] polled"):
+                    problems.append("?WDP,POLL did not confirm")
+                time.sleep(4.0)
+                back = _da_row(w.run("?WDP,DUMP", timeout=8), 2, 4, far)
+                if back != far_row:
+                    problems.append(f"after ?WDP,POLL W1 shows W2's device as {back}; before the clear, {far_row}")
+            finally:
+                w.run("?WDP,AUTOJOIN,ON")
+                for k in learned:
+                    w.run(f"?WDP,ADD,{k}")
+                w.run("?WDP,POLL")
+                time.sleep(6.0)                               # the learned-peer NVS flush comes 5 s after a change
+                _da_forget_on(c2, "S4", far)
+                _da_forget(w, port, own)
+        final = _learned_peers(w, floor)
+        if final != learned:
+            problems.append(f"learned peers after the restore: {final}, before: {learned}")
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ probable bugs, asserted as intended

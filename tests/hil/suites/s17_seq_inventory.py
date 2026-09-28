@@ -15,9 +15,10 @@ WCB_WDP.cpp. Rules from the specs:
 import re
 import time
 
+from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
-from hil.wcb import chain_crc
-from suites.common import Console, config_guard, link, marker, nonce, snapshot, usb_wcb
+from hil.wcb import PULL_SPACING_S, PullCollector, PullRefused, chain_crc
+from suites.common import Console, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 
 NAMES_RX = re.compile(r"^\[MGMT:SEQ,(\d+)\]([0-9A-F]{8}),(\d+)((?:,[^,]+)*)$")
 
@@ -65,6 +66,21 @@ def _canonical(w, names):
 def _clear_seq(w, *keys):
     for k in keys:
         w.run(f"?SEQ,CLEAR,{k}")
+
+
+def _nvs_refused(out):
+    """A sequence store NVS refused (saveStoredCommandsToPreferences, WCB_Storage.cpp:804-835). W1's NVS is fragmented,
+    so a setup it cannot store is a Skip naming the cause, not a failure (as in seq.top_level_too_big_refused)."""
+    return _has(out, "NVS write rejected") or _has(out, "NVS could not update the sequence list")
+
+
+def _save_or_skip(w, key, value):
+    """?SEQ,SAVE a setup sequence, or Skip when NVS refuses it."""
+    out = w.run(f"?SEQ,SAVE,{key},{value}", timeout=8)
+    if _nvs_refused(out):
+        raise Skip(f"W1's NVS refused the {len(value)}-character setup sequence {key} (see ?NVS)")
+    if not _has(out, f"Stored: Key='{key}'"):
+        raise AssertionError(f"setup: {key} was not stored: {out[:3]}")
 
 
 # ============================================================ ?SEQ commands
@@ -127,7 +143,42 @@ def key_len_15(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("seq.list_format", "?SEQ,LIST header, rows in save order, footer", needs=["wcb1"], links=[])
+@test("seq.clear_overlong_key_keeps_prefix", "?SEQ,CLEAR and legacy ?CE with a 16-character key leave the sequence stored under its 15-character prefix: each says 'No stored value found', the inventory is unchanged, and the 15-character key still reads back and recalls", needs=["wcb1"])
+def clear_overlong_key_keeps_prefix(bench):
+    """WCB-WP55 row 2. NVS compares only 15 characters of a key, so removing by a 16-character one would delete the
+    15-character key's value. eraseStoredCommandByName never removes by a key over SEQ_KEY_MAX_LEN (WCB_Storage.cpp:
+    854-858) and only rewrites key_list, where the longer name matches nothing (:860-889), then says it found no value
+    (:898-902). ?SEQ,CLEAR (WCB.ino:6773-6781) and ?CE (:6985-6986 -> :7242-7244) both land there. seq.key_len_15 covers
+    SAVE, GET and recall with the long key."""
+    s1 = link(bench, 1, "S1")
+    w = usb_wcb(bench)
+    k15, k16 = "HILABCDEFGHIJKL", "HILABCDEFGHIJKLM"
+    a = marker("a")
+    bad = []
+    with config_guard(bench, 1):
+        try:
+            _save_or_skip(w, k15, f";S1{a}")
+            inv = _names(w)
+            for cmd in (f"?SEQ,CLEAR,{k16}", f"?CE{k16}"):
+                out = w.run(cmd)
+                if not _has(out, f"No stored value found for key: '{k16}', but removed from list if present."):
+                    bad.append(f"{cmd} printed {out}")
+            if _seqval(w, k15) != f"[MGMT:SEQVAL,1]{k15},OK,;S1{a}":
+                bad.append(f"after the clears the 15-character key reads {_seqval(w, k15)!r}")
+            if _names(w) != inv:
+                bad.append(f"the clears changed the inventory: {_names(w)}, before {inv}")
+            pm = s1.mark()
+            w.send(f";C{k15},L")
+            try:
+                s1.expect(a.encode() + b"\r", timeout=2, since=pm)
+            except AssertionError:
+                bad.append("the 15-character key no longer recalls")
+        finally:
+            _clear_seq(w, k15)
+    assert not bad, "; ".join(bad)
+
+
+@test("seq.list_format","?SEQ,LIST header, rows in save order, footer", needs=["wcb1"], links=[])
 def list_format(bench):
     w = usb_wcb(bench)
     a, b, c = marker("a"), marker("b"), marker("c")
@@ -145,13 +196,63 @@ def list_format(bench):
     assert [x for x in lst if x.startswith("---")][-1] == "--- End of Stored Commands ---", lst[-3:]
 
 
-@test("seq.clear_all_empty_hash", "OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences; an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[], opt_in="seq_wipe")
+def _config_section(lines, header):
+    """The lines under `header` in a ?config printout for as long as they are indented deeper than it, or None when the
+    header is missing. ?config prints the mesh password, so a test quotes a section, never the whole printout."""
+    lines = [x.rstrip() for x in lines]
+    if header not in lines:
+        return None
+    depth = len(header) - len(header.lstrip())
+    out = []
+    for x in lines[lines.index(header) + 1:]:
+        if not x.strip() or len(x) - len(x.lstrip()) <= depth:
+            break
+        out.append(x)
+    return out
+
+
+@test("seq.config_lists_sequences", "?config's 'Stored Sequences:' section lists each sequence as '  <key> = <value>' and drops it once cleared; its 'Serial Monitoring:' section reads None, since no command sets it", needs=["wcb1"], links=[])
+def config_lists_sequences(bench):
+    """WCB-WP55 row 4. printConfigInfo walks key_list and prints '  <key> = <value>' per sequence, or '  None' when none
+    is stored (WCB.ino:3006-3028). Its 'Serial Monitoring:' block names a port only when serialMonitorEnabled is set
+    (:2931-2945), which only loadSerialMonitorSettings writes, at boot, from the serial_monitor namespace
+    (WCB_Storage.cpp:2288-2297) - and nothing ever calls saveSerialMonitorSettings (:2054), so only an older firmware's
+    keys could make it name a port: that part is checked only while ?NVS lists no serial_monitor namespace (the dead
+    branch is WCB-WP59 row 14). ?config prints the mesh password, so only these two sections are quoted."""
+    w = usb_wcb(bench)
+    value = ";S0x"
+    with config_guard(bench, 1):
+        _clear_seq(w, "HILCF")
+        try:
+            _save_or_skip(w, "HILCF", value)
+            cfg = w.run("?config", timeout=8)
+            listed, monitoring = _config_section(cfg, "Stored Sequences:"), _config_section(cfg, "  Serial Monitoring:")
+            _clear_seq(w, "HILCF")
+            after = _config_section(w.run("?config", timeout=8), "Stored Sequences:")
+            stats, spaces = nvs_parse(w.run("?NVS", timeout=6))
+        finally:
+            _clear_seq(w, "HILCF")
+    assert listed is not None and f"  HILCF = {value}" in listed, f"'Stored Sequences:' with HILCF saved: {listed}"
+    assert after is not None and not any(x.startswith("  HILCF = ") for x in after), \
+        f"'Stored Sequences:' after ?SEQ,CLEAR,HILCF: {after}"
+    if stats and spaces.get("serial_monitor"):
+        bench.note(f"W1's NVS holds serial_monitor keys from older firmware; 'Serial Monitoring:' reads {monitoring}")
+    else:
+        assert monitoring == ["    None"], f"'Serial Monitoring:' reads {monitoring}, though nothing sets it"
+
+
+@test("seq.clear_all_empty_hash","OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences and each re-stamps seq_mig_done; an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[], opt_in="seq_wipe")
 def clear_all_empty_hash(bench):
     """Doc bug: docs/SEQUENCE_INVENTORY.md:137 and :249, docs/WDP_DESIGN.md:109, WCB_Storage.h:164, WCB_WDP.h:89,
     tests/wdp_wire_test.cpp:69 and WCBClient (WCB_Client.h:404, README.md:536) give the empty hash as 811C9DC5, but
-    sequenceInventoryHash() applies the 0xFF separator even to an empty key_list (WCB_Storage.cpp:792-798)."""
+    sequenceInventoryHash() applies the 0xFF separator even to an empty key_list (WCB_Storage.cpp:792-798).
+    WCB-WP44 row 2: preferences.clear() also removes seq_mig_done, which lives in the same namespace, so
+    clearAllStoredCommands writes it back at once (WCB_Storage.cpp:1025-1035); without it the legacy migration would
+    re-import the old CMD1..CMD80 sequences at the next boot. ?SEQ,GET reads a key that exists but holds no string as
+    '<key>,OK,' (isKey, WCB.ino:6756-6767)."""
     w = usb_wcb(bench)
     problems = []
+    stamped = "[MGMT:SEQVAL,1]seq_mig_done,OK,"
     with config_guard(bench, 1):
         saved = [t for t in snapshot(bench, 1) if t.upper().startswith("?SEQ,SAVE,")]
         if [t for t in saved if "^?" in t or len(t) > 1000]:
@@ -161,6 +262,9 @@ def clear_all_empty_hash(bench):
         try:
             if not _has(w.run("?SEQ,CLEAR,ALL"), "All stored sequences cleared"):
                 problems.append("?SEQ,CLEAR,ALL did not confirm")
+            if _seqval(w, "seq_mig_done") != stamped:
+                problems.append(f"after ?SEQ,CLEAR,ALL seq_mig_done reads {_seqval(w, 'seq_mig_done')!r}: the legacy "
+                                f"migration would run again at the next boot")
             if "No stored commands." not in [x.rstrip() for x in w.run("?SEQ,LIST")]:
                 problems.append("LIST is not empty")
             if _names(w) != ("7A0B824E", 0, []):
@@ -172,6 +276,8 @@ def clear_all_empty_hash(bench):
                 problems.append(f"one sequence {_names(w)} (host FNV-1a gives 0788F458)")
             if not _has(w.run("?CCLEAR"), "All stored sequences cleared"):
                 problems.append("?CCLEAR did not confirm")
+            if _seqval(w, "seq_mig_done") != stamped:
+                problems.append(f"after ?CCLEAR seq_mig_done reads {_seqval(w, 'seq_mig_done')!r}")
             if _names(w)[:2] != ("7A0B824E", 0):
                 problems.append(f"after ?CCLEAR {_names(w)}")
         finally:
@@ -411,7 +517,169 @@ def save_boundary(bench):
     assert not bad, "; ".join(bad)
 
 
-REFUSE = "Sequence '{}' recalls itself (directly or in a loop) — refusing to expand it again. Break the cycle in the stored sequence."
+def _live_funcchar(w):
+    """The live function identifier: the first character of the configured chain WCB_WEBTOOL_CONFIG_PULL prints - a
+    line W1 recognises whatever the identifier is (s18's _live_chars reads it the same way)."""
+    m = w.dev.mark()
+    w.dev.send("WCB_WEBTOOL_CONFIG_PULL")
+    w.dev.expect(r"For Configured Boards", timeout=5, since=m)
+    time.sleep(1.5)
+    lines = w.dev.since(m)
+    at = next(k for k, x in enumerate(lines) if "For Configured Boards" in x)
+    chain = next((x.strip() for x in lines[at + 1:] if re.search(r"CHK[0-9A-Fa-f]{8}\s*$", x)), "")
+    return chain[:1] or "?"
+
+
+def _pull_spaced(dev, wcb):
+    """Wait out PULL_SPACING_S from the harness's last pull of board wcb (hil.wcb.Pull stamps dev._last_pull): a target
+    answers one pull per requester per 1.5 s and drops the next as a duplicate."""
+    last = dev.__dict__.setdefault("_last_pull", {}).get(wcb)
+    if last is not None and PULL_SPACING_S - (time.monotonic() - last) > 0:
+        time.sleep(PULL_SPACING_S - (time.monotonic() - last))
+
+
+def _await_pull(dev, wcb, since, timeout=15.0):
+    """Read the reply to a hand-typed ?MGMT,PULL,<wcb> sent at `since` until it is whole or refused, then stamp it as
+    hil.wcb.Pull does, so the harness spaces its next pull of that board from it. Returns 'complete', the refusal's
+    code, or 'timeout' - never the reply itself, which carries the mesh password."""
+    col, i, result = PullCollector(wcb, since), since, "timeout"
+    deadline = time.monotonic() + timeout
+    while result == "timeout" and time.monotonic() < deadline:
+        for line in dev.since(i):
+            i += 1
+            try:
+                if col.feed(line) == "complete":
+                    result = "complete"
+                    break
+            except PullRefused as e:
+                result = e.code
+                break
+        if result == "timeout":
+            time.sleep(0.1)
+    dev.__dict__.setdefault("_last_pull", {})[wcb] = time.monotonic()
+    return result
+
+
+@test("seq.chain_edge_forms", "Chain-walker edge forms: with a letter as the function identifier ('x') 'xseq,save,' keeps its value whole, as does a lowercase '?seq,save,'; an IF-first line whose ?CS value holds ;T stores it whole and runs none of it; a ?MGMT, token that is not first takes the rest of its line (the ;S0 before it runs, ?MGMT,SEQ,2 is answered, the ?VERSION after it does not run); '?MGMT,PULL,2, p' is a parts request", needs=["wcb1"])
+def chain_edge_forms(bench):
+    """WCB-WP55 row 3. tokenHasVerb (WCB.ino:2616-2624) matches the function identifier exactly and the verb in any
+    case, so parseCommandsNoChecksum's whole-token branches - a ?CS or ?SEQ,SAVE value ends only at delimiter +
+    identifier, and ?MGMT, takes the rest of the line by design (:2797-2870) - hold for a letter identifier and a
+    lowercase verb. chainCarriesValueVerb (:2632-2645) keeps a line carrying one of those verbs off the timer splitter
+    wherever the verb sits (isTimerChain :2678-2682, the reader :8570-8587): isTimerCommand alone matches ';T' anywhere
+    in a line (command_timer.cpp:71-74). handleMgmtPullRequest trims and upper-cases the option, so ', p' asks for parts
+    (WCB.ino:5032-5036); both ends say so under ?DEBUG,MGMT (:5058-5060 on the relay, :3999-4000 on the target). A
+    relay's parts request can be lost whole while its plain copy lands (hil.wcb Pull), so the pull is sent a second time
+    before W2's missing '(parts accepted)' counts. While the identifier is 'x' every '?' line is plain text, so that
+    window sends none (chars.funcchar_change_restore). Every value's markers go to W1 S1, which must stay silent."""
+    s1 = link(bench, 1, "S1")
+    w = usb_wcb(bench)
+    mk = {k: marker(k) for k in "abcdef"}
+    v1, v2 = f";S1{mk['a']}^;S1{mk['b']}", f";S1{mk['c']}^;S1{mk['d']}"
+    v4 = f";S1{mk['e']}^;T300^;S1{mk['f']}"
+    problems, notes = [], []
+    with config_guard(bench, 1) as before:
+        if token(before[1], "?CMDCHAR,") != "?CMDCHAR,;":
+            raise Skip("W1's command character is not ';'")
+        _clear_seq(w, "HILLC", "HILLC2", "HILLT")
+        pm = s1.mark()
+        try:
+            # (1) a letter as the function identifier
+            changed = False
+            try:
+                out = w.run("?FUNCCHAR,x")
+                changed = _has(out, "Local function identifier updated to 'x'")
+                if not changed:
+                    problems.append(f"?FUNCCHAR,x printed {out}")
+                else:
+                    out = w.run(f"xseq,save,HILLC,{v1}")
+                    if _nvs_refused(out):
+                        raise Skip("W1's NVS refused a 30-character sequence (see ?NVS)")
+                    if not _has(out, f"Stored: Key='HILLC', Value='{v1}'"):
+                        problems.append(f"'xseq,save,' under the identifier 'x' printed {out}")
+                    got = next((x.rstrip() for x in w.run("xSEQ,GET,HILLC") if x.startswith("[MGMT:SEQVAL,")), None)
+                    if got != f"[MGMT:SEQVAL,1]HILLC,OK,{v1}":
+                        problems.append(f"xSEQ,GET,HILLC read {got!r}")
+            finally:
+                if changed and not _has(w.run("xFUNCCHAR,?"), "Local function identifier updated to '?'"):
+                    lfi = _live_funcchar(w)
+                    if lfi != "?":
+                        w.dev.send(f"{lfi}FUNCCHAR,?")
+                        time.sleep(0.5)
+            # (2) a lowercase verb
+            out = w.run(f"?seq,save,HILLC2,{v2}")
+            if _nvs_refused(out):
+                raise Skip("W1's NVS refused a 30-character sequence (see ?NVS)")
+            if not _has(out, f"Stored: Key='HILLC2', Value='{v2}'") or _seqval(w, "HILLC2") != f"[MGMT:SEQVAL,1]HILLC2,OK,{v2}":
+                problems.append(f"'?seq,save,' stored {_seqval(w, 'HILLC2')!r}: {out}")
+            # (4) an IF-first line whose ?CS value holds ;T (the IF reads an unset variable as 0, so it lets ?CS run)
+            out = w.run(f"IF,hilq{nonce().lower()[:4]}=0^?CSHILLT,{v4}")
+            if _nvs_refused(out):
+                raise Skip("W1's NVS refused a 40-character sequence (see ?NVS)")
+            if not _has(out, f"Stored: Key='HILLT', Value='{v4}'") or _seqval(w, "HILLT") != f"[MGMT:SEQVAL,1]HILLT,OK,{v4}":
+                problems.append(f"the IF-first ?CS stored {_seqval(w, 'HILLT')!r}: {out}")
+            time.sleep(1.0)                        # the ;T300 in the value, had it run
+            ran = [k for k, t in mk.items() if t.encode() in s1.received(pm)]
+            if ran:
+                problems.append(f"markers from the stored values reached W1 S1: {ran}")
+            if 2 in bench.wcb_numbers():
+                # (3) a ?MGMT, token that is not first
+                time.sleep(1.7)                    # W2 answers one SEQ_REQ per requester per 1.5 s
+                t = marker("m")
+                wm = w.dev.mark()
+                out = [x.rstrip() for x in w.run(f";S0{t}^?MGMT,SEQ,2^?VERSION")]
+                if t not in out:
+                    problems.append("the ;S0 token ahead of ?MGMT, did not run")
+                if _has(out, "Software Version:"):
+                    problems.append("the ?VERSION inside the ?MGMT, token ran as a command of its own")
+                try:
+                    w.dev.expect(r"^\[MGMT:SEQ,2\]", timeout=6, since=wm)
+                except AssertionError:
+                    problems.append("?MGMT,SEQ,2 behind a ;S0 token brought no [MGMT:SEQ,2] reply")
+                # (5) ', p' is a parts request
+                with Console(bench, 2) as c2:
+                    c2.expect(r"MGMT debugging enabled", timeout=3, since=c2.send("?DEBUG,MGMT,ON"))
+                    w.run("?DEBUG,MGMT,ON")
+                    try:
+                        relay_ok, target, reply = False, None, None
+                        for _ in range(2):
+                            _pull_spaced(w.dev, 2)
+                            wm, cm = w.dev.mark(), c2.mark()
+                            w.dev.send("?MGMT,PULL,2, p")
+                            try:
+                                w.dev.expect(r"^\[MGMT\] Config pull request sent for WCB2 \(x3, parts accepted\)",
+                                             timeout=4, since=wm)
+                                relay_ok = True
+                            except AssertionError:
+                                relay_ok = False
+                            try:
+                                target = c2.expect(r"\[MGMT\] Config request from WCB1( \(parts accepted\))?$",
+                                                   timeout=6, since=cm).group(1)
+                            except AssertionError:
+                                target = None
+                            reply = _await_pull(w.dev, 2, wm)
+                            if not relay_ok or target:
+                                break
+                        notes.append(f"', p' pull answered: {reply}")
+                        if not relay_ok:
+                            problems.append("W1 did not take '?MGMT,PULL,2, p' as a parts request: no '(x3, parts "
+                                            "accepted)' line under ?DEBUG,MGMT")
+                        elif not target:
+                            problems.append("W2 never logged the ', p' pull with '(parts accepted)' (twice)")
+                    finally:
+                        w.run("?DEBUG,MGMT,OFF")
+                        c2.send("?DEBUG,MGMT,OFF")
+                        time.sleep(0.3)
+            else:
+                notes.append("no WCB2: the ?MGMT forms were not run")
+        finally:
+            _clear_seq(w, "HILLC", "HILLC2", "HILLT")
+    if notes:
+        bench.note("; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+REFUSE ="Sequence '{}' recalls itself (directly or in a loop) — refusing to expand it again. Break the cycle in the stored sequence."
 
 
 @test("seq.cycle_guard", "Self-recursion (direct and ring) is refused after one expansion; nesting stops at 8; the queue keeps working", needs=["wcb1"])

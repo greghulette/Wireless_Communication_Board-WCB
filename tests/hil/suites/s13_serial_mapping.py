@@ -15,7 +15,8 @@ import time
 
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
-from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, require_tokens,
+from hil.wcb import BOOT_LINE
+from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, probe_in_mesh, require_tokens,
                            snapshot, token, usb_wcb)
 
 
@@ -1017,3 +1018,301 @@ def remote_leading_comma(bench):
             assert line.encode() + b"\r" in watch.got(w2s2), f"remote got {watch.got(w2s2)!r}, local got {watch.got(s4)!r}"
         finally:
             _clear(w, "S2")
+
+
+# ============================================================ clear-all, NVS keys, saved flags, the mesh-to-soft-port queue (WCB-WP50)
+def _settle_after_reboot(w):
+    """A rebooted W1 relearns each neighbour only from its next advert: ask the mesh to advertise now, so the next test
+    finds W1's WDP table as full as before (as input.wdpda_persists_reboot does)."""
+    w.run("?WDP,POLL")
+    time.sleep(2.0)
+
+
+@test("map.clear_all_combined", "?MAP,CLEAR,ALL clears a serial mapping and a PWM output port together: the serial clear with S2's flags put back, 'All PWM mappings cleared', the deferred-reboot line and 'All serial and PWM mappings cleared', in that order, then exactly one reboot, after which both lists are empty and the chain holds no ?MAP token (1 W1 reboot)", needs=["wcb1"], links=[])
+def clear_all_combined(bench):
+    """WCB-WP50 row 1. The combined root runs clearAllSerialMonitorMappings, then clearAllPWMMappings with its default
+    autoReboot, then prints its own line (WCB.ino:6240-6243). The serial clear puts each released port's flags back
+    (WCB_Storage.cpp:2490-2524); the PWM clear empties pwm_mappings and pwm_outputs and, since re-scan #32, asks for the
+    deferred restart only when a mapping or an output port existed (WCB_PWM.cpp:607-684), which loop() takes once the
+    queue has been quiet for 4 s (WCB.ino:9835-9864). pwm.map_clear_all_without_pwm (s14) covers the no-PWM case: no
+    reboot. A declared output port (?MAP,PWM,OUT) costs no reboot to set, so it is the PWM half here; a mapping's remote
+    outputs are cleared by the same clearAllPWMMappings, which pwm.clear_all_reaches_remote covers. S4 carries the PWM
+    output, as in pwm.out_port_lines_and_guards; the mapping reads S2 into S5."""
+    w = usb_wcb(bench)
+    _no_mappings(w)
+    if any(t.upper().startswith("?MAP,PWM") for t in bench.config_tokens(1, refresh=True)):
+        raise Skip("W1 already has PWM configuration")
+    require_tokens(bench, 1, "?BCAST,OUT,S2,ON", "?BCAST,IN,S2,ON")
+    problems = []
+    m = None
+    with config_guard(bench, 1):
+        try:
+            out = w.run("?MAP,SERIAL,S2,S5")
+            assert _has(out, "Serial mapping set: Serial2 -> 1 destination(s)"), f"?MAP,SERIAL,S2,S5 printed {out}"
+            out = w.run("?MAP,PWM,OUT,S4")
+            if not _has(out, "Serial4 configured as PWM output port"):
+                raise Skip(f"W1 S4 cannot be a PWM output port here: {out}")
+            m = w.send("?MAP,CLEAR,ALL")
+            w.dev.expect(r"^All serial and PWM mappings cleared", timeout=5, since=m)
+            w.dev.expect(r"^Rebooting now to apply PWM configuration", timeout=30, since=m)
+            w.wait_boot(m, timeout=30)
+            time.sleep(6.0)                        # past another quiet window: a second restart would show by now
+            lines = [x.rstrip() for x in w.dev.since(m)]
+            order = ["Restored broadcast input blocking on Serial2: allowed", "Restored broadcast output on Serial2: enabled",
+                     "All serial mappings cleared", "All PWM mappings cleared", "Rebooting once the command queue drains.",
+                     "All serial and PWM mappings cleared"]
+            at = [lines.index(x) if x in lines else None for x in order]
+            if None in at or at != sorted(at):
+                problems.append(f"?MAP,CLEAR,ALL printed {[x for x in lines[:12] if x in order or 'clear' in x.lower()]}")
+            boots = sum(1 for x in lines if re.search(BOOT_LINE, x))
+            if boots != 1:
+                problems.append(f"W1 booted {boots} times after ?MAP,CLEAR,ALL, not once")
+            if not _has(_list(w), "No serial mappings configured"):
+                problems.append(f"?MAP,SERIAL,LIST after the reboot: {_list(w)}")
+            pwm = [x.rstrip() for x in w.run("?MAP,PWM,LIST")]
+            if "No input mappings configured" not in pwm or any(x.startswith("Configured outputs:") for x in pwm):
+                problems.append(f"?MAP,PWM,LIST after the reboot: {pwm}")
+            tokens = snapshot(bench, 1)
+            left = [t for t in tokens if t.upper().startswith("?MAP,")]
+            if left:
+                problems.append(f"the chain still holds {left}")
+            flags = [t for t in ("?BCAST,OUT,S2,ON", "?BCAST,IN,S2,ON") if t not in tokens]
+            if flags:
+                problems.append(f"S2's broadcast flags were not put back: the chain lacks {flags}")
+        finally:
+            # A failure after ?MAP,CLEAR,ALL can leave its restart still pending: let it land before reading the config.
+            if m is not None and not w.rebooted_since(m) and _has(w.dev.since(m), "Rebooting once the command queue drains."):
+                try:
+                    w.dev.expect(r"^Rebooting now to apply PWM configuration", timeout=30, since=m)
+                    w.wait_boot(m, timeout=30)
+                except AssertionError:
+                    pass
+            try:
+                tokens = snapshot(bench, 1)
+            except AssertionError:
+                tokens = []                        # config_guard reads it again and reports what is left
+            if any(t.upper().startswith("?MAP,SERIAL,S2") for t in tokens):
+                _clear(w, "S2")
+            if "?MAP,PWM,OUT,S4" in tokens:
+                m = w.send("?MAP,PWM,CLEAR,OUT,S4")
+                try:
+                    w.dev.expect(r"^Rebooting now to apply PWM configuration", timeout=30, since=m)
+                    w.wait_boot(m, timeout=30)
+                except AssertionError:
+                    pass
+            w.send(";S4,")                         # one CR: a probe channel bound while S4 sat low reframes on it
+            _settle_after_reboot(w)
+    assert not problems, "; ".join(problems)
+
+
+@test("map.shrink_frees_output_keys", "Re-issuing a mapping with fewer destinations frees the keys of the ones it dropped: ten destinations to one leaves serial_map 18 entries smaller in ?NVS (two per dropped destination), and CLEAR takes it back to the baseline", needs=["wcb1"], links=[])
+def shrink_frees_output_keys(bench):
+    """WCB-WP50 row 2 (F20's cleanup on the replace path; map.nvs_keys_freed covers the clear path). A ?MAP,SERIAL carries
+    the whole destination list and replaces the old one (addSerialMonitorMapping, WCB_Storage.cpp:2129-2286), and
+    saveSerialMonitorMappings then erases the sm<i>_<j>w / p pair of every output past the new count (:2394-2432,
+    removeUnusedSerialMapKeys :2368-2392) - unless NVS could not store the new count, when it keeps them so the old
+    count cannot reload as extra USB destinations. The ten destinations are map.max_ten's, on boards that do not exist."""
+    w = usb_wcb(bench)
+    _no_mappings(w)
+    ten = "W3S1,W4S1,W5S1,W6S1,W7S1,W8S1,W9S1,W10S1,W11S1,W12S1"
+    with config_guard(bench, 1):
+        try:
+            base = _serial_map_entries(w)
+            out = w.run(f"?MAP,SERIAL,S2,{ten}")
+            if _has(out, "NVS could not store it"):
+                raise Skip("W1's NVS could not store the ten-destination mapping (see ?NVS)")
+            assert _has(out, "Serial mapping set: Serial2 -> 10 destination(s)"), f"setup: {out}"
+            wide = _serial_map_entries(w)
+            out = w.run("?MAP,SERIAL,S2,S4")
+            if _has(out, "NVS could not store it"):
+                raise Skip("W1's NVS could not store the shrunk mapping's count, so its old keys are kept by design")
+            assert _has(out, "Serial mapping set: Serial2 -> 1 destination(s)"), f"?MAP,SERIAL,S2,S4 printed {out}"
+            narrow = _serial_map_entries(w)
+            listed = _list(w)
+            _clear(w, "S2")
+            after = _serial_map_entries(w)
+        finally:
+            _clear(w, "S2")
+    bench.note(f"serial_map entries: baseline {base}, ten destinations {wide}, one {narrow}, cleared {after}")
+    assert any(re.search(r"Mapping \d+: Serial2 -> S4$", x.rstrip()) for x in listed), f"the shrunk mapping lists as {listed}"
+    assert wide - narrow == 18, f"shrinking ten destinations to one freed {wide - narrow} serial_map entries, not 18"
+    assert after <= base, f"after the clear serial_map holds {after} entries, above the baseline {base}"
+
+
+@test("map.prev_flags_survive_reboot", "The broadcast flags a port had before it was mapped are saved with the mapping: with S2 deliberately OFF both ways, mapped, and W1 rebooted, ?MAP,SERIAL,CLEAR,S2 leaves both flags OFF instead of the defaults (1 W1 reboot)", needs=["wcb1"], links=[])
+def prev_flags_survive_reboot(bench):
+    """WCB-WP50 row 3. A mapping records the port's flags when it first claims the slot (WCB_Storage.cpp:2247-2262) and
+    saves them as sm<i>_pbo / sm<i>_pbi (:2408-2415); the boot load reads them back, defaulting to ON and unblocked
+    (:2037-2040), and the clear restores what was loaded, printing only a flag it changes (:2462-2476).
+    map.clear_one_restores_flags checks this with no reboot, and map.persistence_reboot reboots only with default
+    flags, so neither can tell a saved OFF from a missing key."""
+    w = usb_wcb(bench)
+    _no_mappings(w)
+    require_tokens(bench, 1, "?BCAST,OUT,S2,ON", "?BCAST,IN,S2,ON")
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            w.run("?BCAST,OUT,S2,OFF")
+            w.run("?BCAST,IN,S2,OFF")
+            out = w.run("?MAP,SERIAL,S2,S4")
+            assert _has(out, "Serial mapping set: Serial2 -> 1 destination(s)"), f"setup: {out}"
+            if _has(out, "Auto-"):
+                problems.append(f"mapping an already-OFF port changed its flags: {out}")
+            m = w.reboot()
+            if not any(re.search(r"Mapping \d+: Serial2 -> S4$", x.rstrip()) for x in w.dev.since(m)):
+                problems.append("the boot log does not list the S2 mapping")
+            out = w.run("?MAP,SERIAL,CLEAR,S2")
+            if not _has(out, "Serial mapping removed for Serial2"):
+                problems.append(f"?MAP,SERIAL,CLEAR,S2 printed {out}")
+            if _has(out, "Restored broadcast"):
+                problems.append(f"the clear changed flags the port already had: {out}")
+            tokens = snapshot(bench, 1)
+            flags = [t for t in tokens if t.startswith(("?BCAST,OUT,S2,", "?BCAST,IN,S2,"))]
+            if "?BCAST,OUT,S2,OFF" not in tokens or "?BCAST,IN,S2,OFF" not in tokens:
+                problems.append(f"after a reboot the clear left S2's flags {flags}, not both OFF")
+        finally:
+            _clear(w, "S2")
+            w.run("?BCAST,OUT,S2,ON")
+            w.run("?BCAST,IN,S2,ON")
+            _settle_after_reboot(w)
+    assert not problems, "; ".join(problems)
+
+
+# The mesh-to-soft-port queue: MeshSerialOutTask reports new drops after each chunk it writes (WCB.ino:2536-2541).
+DROP_LINE = re.compile(r"^\[SOFTSERIAL\] mesh-to-port queue full: dropped (\d+) chunk\(s\), (\d+) in total")
+
+
+def _mraw_burst(probe, chunks, gap=0.01):
+    """Send one MRAW <1> <4> per chunk without waiting for each reply (hil/probe.py mesh_raw waits a USB round trip per
+    chunk, and the burst must outrun W1's drain), then read the replies: how many the probe handed to ESP-NOW."""
+    pm = probe.dev.mark()
+    for c in chunks:
+        probe.dev.send(f"MRAW 1 4 {c.hex().upper()}")
+        time.sleep(gap)
+    deadline = time.monotonic() + 5.0
+    while True:
+        replies = [x for x in probe.dev.since(pm) if x.startswith(("OK MRAW", "ERR"))]
+        if len(replies) >= len(chunks) or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    errs = [x for x in replies if x.startswith("ERR")]
+    assert not errs, f"the probe refused MRAW lines: {errs[:2]}"
+    return sum(1 for x in replies if x == "OK MRAW 1")
+
+
+def _quiet_after(l, since, gap=1.5, limit=25.0):
+    """Wait until wire l has taken no new byte for `gap` seconds (at most `limit` in all)."""
+    end = time.monotonic() + limit
+    last, still = -1, time.monotonic()
+    while time.monotonic() < end:
+        n = len(l.received(since))
+        if n != last:
+            last, still = n, time.monotonic()
+        elif time.monotonic() - still >= gap:
+            return
+        time.sleep(0.2)
+
+
+def _chunk_order(got, chunks):
+    """(indexes of the whole chunks `got` is made of, in the order they arrived; the bytes from the first place that is
+    not a whole chunk on). Every chunk starts with its own 12-character marker."""
+    first = {c[:12]: i for i, c in enumerate(chunks)}
+    order, pos = [], 0
+    while pos < len(got):
+        i = first.get(got[pos:pos + 12])
+        if i is None or got[pos:pos + len(chunks[i])] != chunks[i]:
+            break
+        order.append(i)
+        pos += len(chunks[i])
+    return order, got[pos:]
+
+
+@test("map.mesh_soft_out_queue", "Mesh raw chunks for a soft port queue for MeshSerialOutTask (16 slots): 30 back-to-back 177-byte chunks to W1 S4 at 9600 arrive as whole chunks in order, and the '[SOFTSERIAL] mesh-to-port queue full: dropped N chunk(s)' lines count exactly the rest; five ?BAUD re-begins of S4 while chunks stream neither reboot W1 nor garble the chunk after them", needs=["wcb1", "probe1", "probe2"], links=["W1S4"])
+def mesh_soft_out_queue(bench):
+    """WCB-WP50 row 4. The ESP-NOW receive callback writes no soft port: meshSerialWrite queues each S3-S5 chunk (the
+    raw-serial path, WCB.ino:5673-5683 -> :2506-2520) for MeshSerialOutTask on core 1 and, with the 16 slots full, drops
+    and counts it rather than block the WiFi task. The task writes a chunk at a time - a 177-byte chunk holds S4 for
+    about 184 ms at 9600 - reports new drops after each write (:2525-2543), and holds a chunk while ?BAUD re-begins its
+    port (serialReconfigPort :2530-2533, applyLiveBaud :2453-2487). The chunks come from a probe in mesh mode (WCB_Client
+    sendRaw, target 97), written 10 ms apart without waiting for replies, so the burst outruns the task. What arrives is
+    compared chunk by chunk: a chunk cut short or written twice fails like a lost one. In the second arm, chunks that
+    land during a re-begin are counted, not judged; the chunk after the re-begins must be exact. Only sendRaw is sent,
+    which carries no sequence number, so the probe shares s19's raw id 16."""
+    s4 = link(bench, 1, "S4")
+    require_tokens(bench, 1, "?BAUD,S4,9600")
+    w = usb_wcb(bench)
+    mesher = next((p for p in bench.probe_names() if p != s4.probe_name), None)
+    if mesher is None:
+        raise Skip("needs a second probe to send from the mesh")
+    if any(t.upper().startswith("?MAP,PWM") and "S4" in t.upper() for t in bench.config_tokens(1, refresh=True)):
+        raise Skip("W1 S4 carries PWM")
+    chunks = [padded(f"Q{i:02d}", 177).encode() for i in range(30)]
+    blocks = [padded(f"H{i:02d}", 40).encode() for i in range(40)]
+    problems = []
+    s4.listen(hw=True)                             # a probe UART: 5 KB back to back, framing not in question
+    with config_guard(bench, 1), probe_in_mesh(bench, mesher, 16) as probe:
+        m4, wm = s4.mark(), w.dev.mark()
+        sent = _mraw_burst(probe, chunks)
+        _quiet_after(s4, m4)
+        got, errs = s4.received(m4), s4.errors(m4)
+        dropped = sum(int(mm.group(1)) for mm in map(DROP_LINE.match, w.dev.since(wm)) if mm)
+        order, rest = _chunk_order(got, chunks)
+        arm_a = f"{sent} of 30 chunks sent, {len(order)} arrived whole, {dropped} counted dropped"
+        if sent < 20:
+            problems.append(f"the probe handed only {sent} of 30 chunks to ESP-NOW: the burst did not load the queue")
+        if rest:
+            problems.append(f"after chunks {order} W1 S4 got {len(rest)} bytes that are no whole chunk: {rest[:40]!r}")
+        if order != sorted(set(order)):
+            problems.append(f"chunks arrived out of order or twice: {order}")
+        if errs:
+            problems.append(f"{len(errs)} RXERR on W1 S4 during the burst")
+        if not dropped:
+            problems.append(f"no drop line: {arm_a}")
+        elif dropped != sent - len(order):
+            problems.append(f"the drop lines count {dropped}, but {sent - len(order)} sent chunks never arrived ({arm_a})")
+        # Arm C: re-begins of S4 while chunks stream, slower than S4 drains them (42 ms each, one every 120 ms).
+        stop, fed = threading.Event(), []
+
+        def feeder():
+            for b in blocks:
+                if stop.is_set():
+                    return
+                probe.dev.send(f"MRAW 1 4 {b.hex().upper()}")
+                fed.append(b)
+                time.sleep(0.12)
+
+        mc, wc = s4.mark(), w.dev.mark()
+        th = threading.Thread(target=feeder, daemon=True)
+        th.start()
+        outs = []
+        try:
+            time.sleep(0.5)
+            for _ in range(5):
+                outs.append(w.run("?BAUD,S4,9600"))
+                time.sleep(0.3)
+        finally:   # a failed ?BAUD must not leave the feeder sending
+            stop.set()
+            th.join()
+        _quiet_after(s4, mc)
+        churn = s4.received(mc)
+        exact = sum(1 for b in fed if b in churn)
+        churn_drops = [x for x in w.dev.since(wc) if DROP_LINE.match(x)]
+        final = padded("END", 40).encode()
+        fm = s4.mark()
+        if not probe.mesh_raw(1, 4, final):
+            problems.append("the probe could not send the final chunk")
+        try:
+            s4.expect(final, timeout=3, since=fm)
+        except AssertionError:
+            pass
+        after, after_errs = s4.received(fm), s4.errors(fm)
+        rebooted = w.rebooted_since(wm)
+    bench.note(f"mesh-to-S4 queue: {arm_a}; during five re-begins {exact} of {len(fed)} blocks arrived exact"
+               + (f", {churn_drops}" if churn_drops else ""))
+    assert not rebooted, "W1 rebooted during the mesh-to-port bursts"
+    missing = [o for o in outs if not any(x.startswith("Baud rate for Serial4 updated to 9600") for x in o)]
+    if missing:
+        problems.append(f"a ?BAUD,S4,9600 did not confirm: {missing}")
+    if after != final or after_errs:
+        problems.append(f"the chunk after the re-begins arrived as {after!r} with {len(after_errs)} RXERR")
+    assert not problems, "; ".join(problems)

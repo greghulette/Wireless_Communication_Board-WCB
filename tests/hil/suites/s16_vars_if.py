@@ -4,8 +4,9 @@ Built from the vars_seq_inventory specs; the console literals were re-checked ag
 Rules from the specs:
 - Volatile variables never reach ?backup or ?MGMT,PULL (WCB_Variables.cpp:479), so config_guard cannot see one leak:
   every test clears what it made.
-- ?VAR,CLEAR,ALL — or clearing a variable named 'all' in any case — wipes every variable, persistent ones included
-  (WCB_Variables.cpp:327-328). Only W1 is ever wiped, and its ?VAR,SET tokens are replayed afterwards.
+- ?VAR,CLEAR,ALL (any case) wipes every variable, persistent ones included (WCB_Variables.cpp:367-374); 'all' is
+  reserved as a name since tracker #39 (:67-70), so no test can create one. Only W1 is ever wiped, and its ?VAR,SET
+  tokens are replayed afterwards.
 - Every persistent write and every ?VAR,CLEAR rewrites the whole wcb_vars NVS blob (WCB_Variables.cpp:76-93), so the
   100-persistent-variable test is opt-in (bench.json "opt_in": ["nvs_wear"]).
 - The three mesh-client specs (var.mesh_client_sets and the sequence fan-out ones) live with the probe mesh-mode tests.
@@ -13,6 +14,7 @@ Rules from the specs:
 import re
 import time
 
+from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
 from suites.common import Console, config_guard, link, marker, nonce, snapshot, usb_wcb
 
@@ -276,30 +278,71 @@ def help_trap(bench):
         _clear(w, "hilq")
 
 
-@test("var.clear_all_name_collision", "(should) A variable named 'all' can be cleared on its own; ?VAR,CLEAR,all does not wipe every variable", needs=["wcb1"], links=[])
-def clear_all_name_collision(bench):
-    """Name collision: 'all' (any case) is a valid name (WCB_Variables.cpp:63-73), but ?VAR,CLEAR,<that name> clears the
-    whole table, persistent variables included (WCB_Variables.cpp:327-328). W1's ?VAR,SET tokens are replayed after."""
+def _vars_entries(w):
+    """wcb_vars' entry count in ?NVS (0: no key, so ?NVS does not list it), or None on firmware without ?NVS."""
+    stats, spaces = nvs_parse(w.run("?NVS", timeout=6))
+    return spaces.get("wcb_vars", 0) if stats else None
+
+
+@test("var.reserved_all_and_clear_all", "'all' in any case is refused as a variable name by ;V, ;VP and ?VAR,SET and creates nothing; ?VAR,CLEAR,ALL wipes every variable, persistent ones included, from RAM, NVS (wcb_vars leaves ?NVS) and ?backup, and nothing loads at the next boot (1 reboot)", needs=["wcb1"], links=[])
+def reserved_all_and_clear_all(bench):
+    """WCB-WP33 (tracker #39's fix). It replaces var.clear_all_name_collision, which the fix left passing vacuously: it
+    could no longer create 'all', so its check always held. isReservedVariableName (WCB_Variables.cpp:67-70) refuses the
+    name, in any case, in the ;V / ;VP path (:268-272) and in ?VAR,SET (:341-345), before anything is created, and says
+    so with the name as typed. ?VAR,CLEAR,ALL (:367-374) runs clearAllVariables (:230-234): the table empties, and
+    saveVarsToNVS removes the blob key once nothing persistent is left (:89-108), so ?NVS stops listing wcb_vars and
+    loadVariables prints no '[VAR] Loaded' line at the next boot (:146). A variable literally named 'all', kept from
+    firmware before the name was reserved, is cleared on its own instead (:370-372); the bench cannot create one any
+    more, so that branch is not reached. W1's ?VAR,SET tokens are replayed afterwards; its volatile variables are gone,
+    as after any reboot, and a controller's periodic ;V may land one in the list at any time, so only persistent and
+    test variables count as left over."""
     w = usb_wcb(bench)
-    with config_guard(bench, 1):
-        saved = _persistent_tokens(bench, 1)
-        w.run("?VAR,CLEAR,hila")
+    problems = []
+    with config_guard(bench, 1) as before:
+        saved = [t for t in before[1] if t.upper().startswith("?VAR,SET,")]
+        _clear(w, "hilv", "hilp")
         try:
-            w.run(";V,hila,1")
-            w.run(";V,all,1")
-            named = _get(w, "all")
-            out = [x.rstrip() for x in w.run("?VAR,CLEAR,all")]
-            survivor = _get(w, "hila")
+            for cmd, name in ((";V,all,1", "all"), (";VP,ALL,1", "ALL"), ("?VAR,SET,All,1", "All")):
+                out = [x.rstrip() for x in w.run(cmd)]
+                want = f"[VAR] '{name}' is reserved: ?VAR,CLEAR,ALL clears the whole table"
+                if want not in out:
+                    problems.append(f"{cmd} printed {out}")
+            for name in ("all", "ALL", "All"):
+                if _get(w, name) != _not_set(name):
+                    problems.append(f"after the refusals ?VAR,GET,{name} says {_get(w, name)!r}")
+            w.run(";V,hilv,1")
+            w.run(";VP,hilp,2")
+            if [_get(w, "hilv"), _get(w, "hilp")] != ["[VAR] hilv = 1", "[VAR] hilp = 2"]:
+                raise AssertionError(f"setup: hilv {_get(w, 'hilv')!r}, hilp {_get(w, 'hilp')!r}")
+            if _vars_entries(w) == 0:
+                problems.append("a persistent variable is set, yet ?NVS lists no wcb_vars")
+            out = [x.rstrip() for x in w.run("?VAR,CLEAR,ALL")]
+            if "[VAR] All variables cleared" not in out:
+                problems.append(f"?VAR,CLEAR,ALL printed {out}")
+            lst = _var_list(w)
+            left = [x for x in lst if re.match(r"^  \S+ = ", x) and ("[persistent]" in x or x.strip().startswith("hil"))]
+            if left:
+                problems.append(f"?VAR,CLEAR,ALL left {left}")
+            if lst[-1:] != ["  (none)"]:
+                bench.note(f"?VAR,LIST right after ?VAR,CLEAR,ALL: {lst} (a controller's periodic ;V can land here)")
+            if _vars_entries(w):
+                problems.append(f"?NVS still lists {_vars_entries(w)} wcb_vars entries after ?VAR,CLEAR,ALL")
+            chain = [t for t in snapshot(bench, 1) if t.upper().startswith("?VAR,SET,")]
+            if chain:
+                problems.append(f"?backup still carries {chain}")
+            m = w.reboot()
+            loaded = [x.rstrip() for x in w.dev.since(m) if x.startswith("[VAR] Loaded")]
+            if loaded:
+                problems.append(f"the boot after ?VAR,CLEAR,ALL printed {loaded}")
+            if _get(w, "hilp") != _not_set("hilp"):
+                problems.append(f"hilp came back at boot: {_get(w, 'hilp')!r}")
         finally:
-            w.run("?VAR,CLEAR,hila")
-            if _get(w, "all") != _not_set("all"):      # only reachable on firmware that clears just the one variable
-                w.run("?VAR,CLEAR,all")
-            now = _persistent_tokens(bench, 1)
-            if [t for t in saved if t not in now]:
-                for t in saved:
-                    w.run(t)
-    bench.note(f"'all': GET {named!r}, CLEAR printed {out}, hila afterwards {survivor!r}")
-    assert named != "[VAR] all = 1" or survivor == "[VAR] hila = 1", f"?VAR,CLEAR,all wiped every variable: {out}"
+            _clear(w, "hilv", "hilp")
+            for t in saved:
+                w.run(t)
+            w.run("?WDP,POLL")                  # the reboot: let W1 relearn its neighbours now, not in the next test
+            time.sleep(2.0)
+    assert not problems, "; ".join(problems)
 
 
 @test("var.cap_volatile_evicts", "At 100 variables a new ;V recycles the lowest-slot volatile one instead of failing (1 reboot)", needs=["wcb1"], links=[])
