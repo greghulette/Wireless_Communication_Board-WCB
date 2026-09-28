@@ -749,7 +749,7 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 
 ### INF6 — `hil/ncmesh.py`
 
-> **Status 2026-09-28: built; no bench run yet.** `hil/ncmesh.py` holds `bridged` (returns `Reply(match, lines, sys)`:
+> **Status 2026-09-28: built and bench-verified** through its users in NC-WP1 (`20260928-123843`). `hil/ncmesh.py` holds `bridged` (returns `Reply(match, lines, sys)`:
 > the first W1 line matching the pattern or None, every W1 line, the parsed `{"sys":1` ones; silence is returned, not
 > raised), `fragments` with `chunks`, `envelope` and `esc_bytes` (the tool's `_fragChunks` and envelopes, code point for
 > code point), `pace_s` and `send_fragments` (the tool's pacing, any order, repeats), `reassemble` (the tool's receive
@@ -881,6 +881,8 @@ add roughly 30-40 minutes, most of it the 60 s mode-report wait, the 50 s offlin
 (nightly only).
 
 ### NC-WP1 — config surface and persistence (`s40_navicore_config.py`, `nccfg.*`)
+
+> **Status 2026-09-28: written and bench-verified** (`20260928-123843`, `-124821`; image `v0.2.0_102105QSEP26`). Every normal `nccfg` test passes, and the existing `navicore.*` and `sbus.*` suites pass on the changed driver. The five `(should)` tests fail as designed, reproducing D-NC42, D-NC43, D-NC22, D-NC17 and D-NC16 on the board. The three hook tests wait for INF9's build (`navicore_fault`, not ticked). `nccfg.monitor_stream` first skipped on a healthy 99 fps: every "full rate" check now uses `SBUS_FULL_FPS` (90) in `hil/navicore.py`.
 
 > **Status 2026-09-28: written; no bench run yet.** `suites/s40_navicore_config.py` holds 34 tests beside
 > `nccfg.guard_selftest`: 23 normal; five `(should)`: `string_truncation_utf8` (D-NC42) and `hold_exceeds_tap_window`
@@ -1398,6 +1400,7 @@ none yet).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | NC-WP1 and INF6 bench-verified; `SBUS_FULL_FPS` replaces four bare `>= 100` checks. |
 | 2026-09-28 | _(pending)_ | INF6 built (`hil/ncmesh.py`, four `selftest.py` cases) and NC-WP1 written (34 `nccfg` tests in `s40_navicore_config.py`, opt-ins `navicore_reboot` and `navicore_fault`, `navicore.bench_health`, the s21 route check); `selftest.py` runs the whole suite against `NaviModel`, a port of NaviCore's config handling. No bench run yet. The two status notes list where the code differed from the plan: the burn, the probe's peer table, the 'parse failed' trigger, the password split made by RESET_DEFAULTS (only when the defaults decode no button or mode from the live SBUS input: a SET_CONFIG restore leaves a parked tap to fire the restored mapping). New findings D-NC42 (strings cut through a UTF-8 character), D-NC43 (holdMs left under tapWindowMs) and D-NC44 (no config apply clears a parked tap). |
 | 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |
 | 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |

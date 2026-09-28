@@ -290,6 +290,12 @@ def _clip_name(name):
     return name
 
 
+# A healthy SBUS stream reads 99 to 111 frames a second in #L09 (fps is counted over a window, so a 100 Hz stream
+# reads 99 or 100), and a stalled or failsafe one far below. Every "full rate" check uses this: a bare >= 100 skipped
+# nccfg.monitor_stream on a healthy 99 (run 20260928-123843).
+SBUS_FULL_FPS = 90
+
+
 class NaviCore:
     def __init__(self, dev):
         self.dev = dev

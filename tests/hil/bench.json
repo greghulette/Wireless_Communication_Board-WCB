@@ -80,6 +80,7 @@
     "wifi_modes",
     "mesh_password",
     "nvs_fill",
-    "w1s4_soak"
+    "w1s4_soak",
+    "navicore_reboot"
   ]
 }
