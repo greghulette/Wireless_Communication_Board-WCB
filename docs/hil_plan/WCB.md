@@ -315,6 +315,12 @@ s18_etm_config_wdp.py. **U, L.**
 | wcb.rx.debug_visibility_lines | Under `?DEBUG,ON` the receiver prints 'Processing ETM input from WCB<n>: …' (ETM path), or 'Processing ESP-NOW input:' and 'Sender ID:' (non-ETM path). An inbound `?STATS,RPT` is printed only under `?DEBUG,MGMT`. | WCB.ino:5295-5300, :5389-5391, :5602-5603 | Send `?DEBUG,ON` on W2. `;W2,;S2<m>` prints the ETM line. `;W2,?STATS,RPT,9,…` prints no Processing line under DEBUG,ON but one under DEBUG,MGMT; clean up with `;W2,?STATS,RESET`. The non-ETM line needs the whitelist path (W1 `?ETM,OFF` plus `;W2,;M2,getErrors`). | L |
 | wcb.mgmt.frag_single_chunk_chksm_boundary | Under `?ETM,CHKSM`, a single-chunk FRAG payload of 180-186 characters still goes as one SOH-marked ETM unicast. From 187 characters it is REJECTED as over 179. | WCB.ino:3288-3316 | Inside the CHKSM tests' window, `?MGMT,FRAG,2,<sid>,0,1,;S2<183-char marker>` arrives on W2S2. A 187-character payload prints '[MGMT] FRAG payload 187 > 179 chars — REJECTED' and nothing arrives. The CHKSM-off variant stays manual, because s18 forbids changing W2. | L |
 
+> **Written 2026-09-28 (`8775921`, not yet run on the bench).** Row 4's "today it does both" predates #21's fix:
+> only `<cmdChar>M` passes now. Row 2: NaviCore cannot go offline under a 5 s threshold, because its `rc_hb` every 2 s
+> is an ETM frame that refreshes it, so the tests make a probe W1's controller (`?CONTROLLER,ON,15`) and silence it
+> with `MESH LEAVE`. Rows 6 and 7, and row 1's "ran exactly once", need a lost ACK, which the plan gets by changing
+> `?MAC,3`; the bench tests do not change a board's MAC, so those are not written.
+
 ### WCB-WP31: Remote terminal (RTERM): volume, peer registration, STOP (M)
 s05_mesh.py. **U, M.**
 
@@ -759,10 +765,10 @@ exactly its defect (#3: 0 of 30 typed lines reached the mesh under load).
 | 17, 18 | verified | `startETMChar` refuses a second start and returns why; the relay tells the requester and releases it | `etm.char_second_start_refused`, `etm.char_relay_refusal_reported` |
 | 19 | fixed | `nextEtmSeq` never sends 0 | none on the bench (65,535 sends); code review |
 | 20 | verified | `?config` prints the RAM tables; the baud, label and broadcast setters report a refused write | `seq.nvs_full_consistency` (opt-in `nvs_fill`) |
-| 21 | fixed | the non-ETM Maestro exemption needs `<cmdChar>M` | none yet (needs a crafted non-ETM frame, WP30 row 4) |
+| 21 | fixed | the non-ETM Maestro exemption needs `<cmdChar>M` | `etm.nonetm_whitelist_scope` (written 2026-09-28, not yet run) |
 | 22 | verified | a long received timer chain rides a heap buffer; refusals are reported (D14) | `mesh.timer_chain_long` |
 | 23 | verified | a line is capped (4 KB on S1-S5, 32 KB on USB) and dropped whole (D16) | `input.line_cap_drops_whole` |
-| 24 | open | | |
+| 24 | verified | a top-level recall that cannot fit the queue is refused whole; the serial reader waits up to 2 s for queue room | `seq.top_level_too_big_refused`, `input.usb_long_chain_backpressure` |
 | 25 | half not a defect | the "space" was a raw NUL byte (D20); the receive side now terminates the ETM command | code review |
 | 26 | fixed | `strncmp` at all 13 password gates, `otaPktAuth` included | code review |
 | 27 | verified | `?LABEL` caps at 30 | `persist.label_max_30` |

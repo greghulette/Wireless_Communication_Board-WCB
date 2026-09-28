@@ -2777,13 +2777,15 @@ def autojoin_two_advert_vetting(bench):
     assert 1.0 <= gap <= 4.0, f"joined {gap} s after the first advert, expected one boot-burst advert later (~1.3 s)"
 
 
-@test("etm.learned_unreciprocated_not_expected", "A learned peer that has never ACKed W1 is left out of a broadcast's expected ACKs (no wait, no retry, its row stays at Sent 0); once it has ACKed, the next broadcast expects and counts it (probe as a permanent client at 13; ~40 s)", needs=["wcb1", "probe2"], links=[])
+@test("etm.learned_unreciprocated_not_expected", "A learned peer that has never ACKed W1 is left out of a broadcast's expected ACKs (no wait, no retry, its row stays at Sent 0); its ACK to that broadcast, even one arriving after W2's resolved it, makes the next broadcast expect and count it; a unicast to it is always expected (probe as a permanent client at 13; ~40 s)", needs=["wcb1", "probe2"], links=[])
 def learned_unreciprocated_not_expected(bench):
-    """WCB-WP19 row 2. etmAddToPendingTable (WCB.ino) skips a learned peer with no wcbPeerReciprocated on a broadcast
-    (the mixed-fleet guard: it may be a phantom), and etmProcessAck sets wcbPeerReciprocated for any ACK it matches to a
-    pending entry, expected or not. Whether the first broadcast's ACK promotes the probe depends on whether it beats
-    W2's, since W2's alone resolves the entry and a later ACK finds nothing; when it does not, a unicast - which always
-    expects a learned peer - does. The permanent probe is learned by W2 and NaviCore too, so all three forget it."""
+    """WCB-WP19 row 2 and tracker #96. etmAddToPendingTable (WCB.ino) skips a learned peer with no
+    wcbPeerReciprocated on a broadcast (the mixed-fleet guard: it may be a phantom), and etmProcessAck sets
+    wcbPeerReciprocated for any ACK from a learned peer. W2's ACK alone resolves the first broadcast, so the probe's
+    ACK often arrives after it ('ACK for unknown seq'); until #96 that ACK promoted nothing, and a peer that was only
+    ever broadcast to was never expected, so never retried. Either way the race goes (noted), the second broadcast
+    must expect and count the probe. Then a unicast, which always expects a learned peer. The permanent probe is
+    learned by W2 and NaviCore too, so all three forget it."""
     n = 13
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
@@ -2808,22 +2810,22 @@ def learned_unreciprocated_not_expected(bench):
             l1, row1 = [x.rstrip() for x in w.dev.since(bm)], _etm_row(_stats(w), n)
             s1 = _seq_of(l1, t1)
             promoted = s1 is not None and f"[ETM] ACK received from WCB{n} for seq {s1}" in l1
-            if not promoted:
-                um, pm = w.dev.mark(), probe.dev.mark()
-                w.send(f";W{n},{u}")
-                runs = _probe_rx(probe, pm, u, me)
-                time.sleep(0.5)
-                ulines = [x.rstrip() for x in w.dev.since(um)]
+            late = s1 is not None and any(x.startswith(f"[ETM] ACK for unknown seq {s1} from WCB{n}") for x in l1)
             mid = _etm_row(_stats(w), n)
             bm = w.dev.mark()
             w.send(t2)
             time.sleep(2.0)
             l2, row2 = [x.rstrip() for x in w.dev.since(bm)], _etm_row(_stats(w), n)
+            um, pm = w.dev.mark(), probe.dev.mark()
+            w.send(f";W{n},{u}")
+            runs = _probe_rx(probe, pm, u, me)
+            time.sleep(0.5)
+            ulines = [x.rstrip() for x in w.dev.since(um)]
             probe.mesh_leave()
     finally:
         w.run("?DEBUG,ETM,OFF")
         _forget_everywhere(bench, n, navicore=True)
-    bench.note(f"the first broadcast's ACK promoted WCB{n}: {promoted}")
+    bench.note(f"WCB{n}'s ACK to the first broadcast: {'in time' if promoted else 'after W2 resolved it' if late else 'none seen'}")
     if not row0 or not row0[4]:
         bad.append(f"WCB{n} was not an online learned peer before the first broadcast: {row0}")
     if not s1:
@@ -2835,15 +2837,17 @@ def learned_unreciprocated_not_expected(bench):
             bad.append("the first broadcast did not resolve")
     if not row1 or row1[:4] != (0, 0, 0, 0):
         bad.append(f"WCB{n} row after the first broadcast: {row1} (it was expected)")
-    if not promoted:
-        su = _seq_of(ulines, u)
-        if runs != 1 or not su or f"[ETM] Seq {su} fully acknowledged" not in ulines:
-            bad.append(f"the promoting unicast: received {runs} time(s), acknowledged {bool(su and f'[ETM] Seq {su} fully acknowledged' in ulines)}")
+    if s1 and not promoted and not late:
+        bad.append(f"no ACK from WCB{n} for the first broadcast (seq {s1}) under ?DEBUG,ETM")
     s2 = _seq_of(l2, t2)
     if not mid or not row2 or row2[0] != mid[0] + 1 or row2[1] != mid[1] + 1:
-        bad.append(f"the second broadcast did not expect and count WCB{n}: {mid} -> {row2}")
+        bad.append(f"the second broadcast did not expect and count WCB{n}: {mid} -> {row2}"
+                   f"{' (its first ACK came after W2 resolved the entry: tracker #96)' if late else ''}")
     if not s2 or f"[ETM] Seq {s2} fully acknowledged" not in l2:
         bad.append("the second broadcast was not fully acknowledged")
+    su = _seq_of(ulines, u)
+    if runs != 1 or not su or f"[ETM] Seq {su} fully acknowledged" not in ulines:
+        bad.append(f"the unicast: received {runs} time(s), acknowledged {bool(su and f'[ETM] Seq {su} fully acknowledged' in ulines)}")
     assert not bad, "; ".join(bad)
 
 

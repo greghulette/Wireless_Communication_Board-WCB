@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_280142RSEP2026                                  *****////
+///*****                                          Version 6.2.1_280150RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -197,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_280142RSEP2026";
+String SoftwareVersion = "6.2.1_280150RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1563,6 +1563,12 @@ int etmAddToPendingTable(uint16_t seqNum, const char* cmd, int targetWCB) {
 void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs) {
   if (senderWCB < 1 || senderWCB > MAX_WCB_COUNT) return;
   int boardIdx = senderWCB - 1;
+  // A learned peer that ACKs has proven it reciprocates ETM - from now on it may count toward broadcast completion
+  // (see etmAddToPendingTable). Before the pending lookup, not inside it: a broadcast does not expect an unproven
+  // learned peer, so the configured boards' ACKs usually resolve the entry first, and the peer's ACK then finds no
+  // entry. Promoted only there, a peer that is only ever broadcast to was never promoted, and so never retried
+  // (tracker #96).
+  if (wcbPeerLearned[boardIdx]) wcbPeerReciprocated[boardIdx] = true;
   for (int i = 0; i < ETM_PENDING_MAX; i++) {
     if (!etmPendingTable[i].active) continue;
     if (etmPendingTable[i].sequenceNumber != seqNum) continue;
@@ -1572,12 +1578,9 @@ void etmProcessAck(int senderWCB, uint16_t seqNum, unsigned long recvMs) {
       // Only an ACK this send ASKED for counts as delivered. A WCB_Client controller ACKs every
       // broadcast even though expectAckFrom never included it (see etmAddToPendingTable), so the
       // unguarded counter pushed Delivered above Attempts and the success rate above 100%.
-      // receivedAckFrom and the reciprocation promotion below stay OUTSIDE the gate: both are
+      // receivedAckFrom and the reciprocation promotion (above the loop) stay OUTSIDE the gate: both are
       // reachability facts, and an unexpected ACK still proves the peer is alive and answering.
       if (etmPendingTable[i].expectAckFrom[boardIdx]) etmStatsAckd[boardIdx]++;
-      // A learned peer that ACKs has proven it reciprocates ETM — from now on it
-      // may count toward broadcast completion (see etmAddToPendingTable).
-      if (wcbPeerLearned[boardIdx]) wcbPeerReciprocated[boardIdx] = true;
       if (debugETM) {
         Serial.printf("[ETM] ACK received from WCB%d for seq %d\n", senderWCB, seqNum);
       }

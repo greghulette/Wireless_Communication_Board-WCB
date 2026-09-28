@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#96 filed and FIXED (unverified)**: a learned peer's broadcast ACK that arrives after the configured boards' ACKs resolved the entry now promotes it too, so it is retried from then on. **#97 filed, deferred** (D32): on a full NVS a new mapping or device saves its port flags first and can leave the port blocked with nothing on it after a reboot. Both found by this wave's test writers (WCB-WP19, WP42). |
 | 2026-09-28 | **#95 filed and FIXED (unverified)**, found by the WCB-WP13 test writer: a data-carrying verb spelled in mixed case (`?Mgmt,`, `?Seq,`, `?Wifi,`) with a trailing '?' printed the help page, and `;Seq<key>` was refused. Decided in Greg's absence (`docs/HIL_WEEK_DECISIONS.md` D31). |
 | 2026-09-27 | **#94 VERIFIED** (decided in Greg's absence, D5): one RMT symbol per PWM output pulse. `pwm.*` 26/26 (20260927-130212); both passthrough tests five more times, with the new held-pulse check (20260927-131152 to -131509, 20260927-174251 to -174402, 3/3). The one failure among them was the test's filter check counting a late pulse of the previous step, a harness race now fixed. |
 | 2026-09-25 | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip (docs/HIL_TEST_AUDIT.md §5). Filed #94 (a bit-banged PWM output pulse is stretched by preemption, audit F23), TODO for Greg's decision. `etm.reboot_defer_cap` was the harness: fixed in `WCB.run` and the reboot cleanup. |
@@ -1961,3 +1962,50 @@ failure the exemption's own comment describes. The `;` dispatcher and `recallSto
 
 **Fix.** The exemption upper-cases the first 9 characters (`verbHead`) and compares once per verb; `isSeqRecall()`
 matches `;SEQ<key>` in any case for both the dispatcher and the key strip.
+
+**Left as is.** The 46 legacy spellings in `processLocalCommand`'s fallback chain (`?DMOFF`, `?LF`, `?WCBQ`, `?ETMHB`,
+`?BAUDS`, ...) still match all-upper or all-lower only. A mixed-case one answers `Unknown command:` (`WCB.ino`, the
+chain's last `else`), which is visible, so nothing is lost silently; they are the deprecated forms.
+
+#### 96. A learned peer whose broadcast ACK arrives after the entry resolved is never promoted, so never retried
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - not yet flashed |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `etm.learned_unreciprocated_not_expected` (checks the second broadcast counts the probe whichever way the first ACK raced) |
+| **Subsystem** | ETM |
+
+**Evidence.** Found writing the WCB-WP19 tests (2026-09-28, from the code); the test notes which way the race went.
+
+**Cause.** `etmAddToPendingTable` leaves a learned peer out of a broadcast's expected ACKs until it has ACKed once
+(`wcbPeerReciprocated`: the mixed-fleet guard against a phantom peer), and `etmProcessAck` set that flag only for an
+ACK it matched to a pending entry. The configured boards' ACKs resolve a broadcast's entry, usually before a learned
+peer's, whose ACK then finds nothing ('ACK for unknown seq'). A learned peer that is only ever broadcast to could stay
+unpromoted indefinitely, so a broadcast it missed was never retried to it.
+
+**Fix.** The promotion runs before the pending lookup: any ACK from a learned peer that passed the password gate proves
+it reciprocates ETM.
+
+#### 97. On a full NVS a new mapping or device can leave its port blocked with nothing on it after a reboot
+
+| | |
+|---|---|
+| **Status** | TODO - deferred (`docs/HIL_WEEK_DECISIONS.md` D32) |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`, `WCB_HCR.cpp`, `WCB_MP3.cpp`, `WCB_DFP.cpp`, `WCB_WLED.cpp`, `WCB_Maestro.cpp`) |
+| **Effort** | M |
+| **Tests** | none yet; `nvs.full_map_and_device_save` (opt-in `nvs_fill`) sets the flags beforehand so it does not reach this |
+| **Subsystem** | storage / serial mapping / devices |
+
+**Evidence.** Found writing the WCB-WP42 tests (2026-09-28, from the code).
+
+**Cause.** A new serial mapping (`WCB_Storage.cpp`, the add path) and each device configure (HCR, MP3, DFPlayer, WLED,
+a local Maestro, Kyber) save the port's broadcast flags (`saveBroadcastBlockSettings`,
+`saveBroadcastSettingsToPreferences`) before the mapping or device itself. On a nearly full NVS the small flag writes
+take the last free entries and the larger save after them fails; `saveSerialMonitorMappings` writes the slot's `_act`
+key last, so a new slot then loads inactive. After a reboot the port is blocked in and silent out, with no mapping or
+device to explain it. `saveSerialMonitorMappings` warns only when the count key fails, not when `_act` does.
+
+**Fix (proposed).** Save the mapping or device first and the flags only once it is stored, so a refused save leaves NVS
+as it was before the command; report a failed `_act` write like a failed count.

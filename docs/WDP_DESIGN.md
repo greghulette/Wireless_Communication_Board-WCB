@@ -236,7 +236,9 @@ active peers = {1..WCBQ}  ∪  {learned peers}  ∪  {temporary peers}  ∪  {co
   off the membership set. In‑flight messages evaluate against their own send‑time ACK snapshot,
   so membership changes can't race a pending broadcast. A learned peer is not counted against
   broadcast completion until it has ACKed at least once (protects mixed fleets with pre‑WDP
-  firmware).
+  firmware). Any ACK counts, including one that arrives after the configured boards' ACKs
+  already resolved the broadcast: that is the usual order for an unproven peer, which the
+  broadcast does not wait for (`etmProcessAck`, tracker #96).
 
 This all works because WCB MAC addresses are **derived, not learned**: every board and client
 forces its radio MAC to `02:<oct2>:<oct3>:00:00:<id>`. Knowing a board's number is knowing its
@@ -404,6 +406,7 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-28 | **A learned peer's late ACK promotes it.** `etmProcessAck` promoted a learned peer only for an ACK that matched a still-pending entry, so one that was only ever broadcast to, whose ACK usually lands after the configured boards resolved the entry, was never counted or retried (tracker #96). | _(pending)_ |
 | 2026-09-27 | **The advert stagger uses the board's own number.** `setup()` loaded `WCB_Number` after `wdpBegin()`, so the backstop phase was computed from the default 1 and every board advertised in WCB1's slot, in lockstep when powered together. `WCB_Number` now loads first; the same move fixes saved PWM outputs to W1 reloading as local ports (WCB coverage re-scan #1, #16). | _(pending)_ |
 | 2026-09-23 | **PWMTARGET auto-config can claim the free hardware port of a Kyber‑local board.** `canUsePWMOnPort` now reserves only the port a Kyber mode owns (the Kyber's own port; S1 under Maestro REMOTE — `kyberModeReservesPort`, WCB_Storage.cpp), so the other hardware port takes an auto-configured PWM output like any port; before, it was refused along with the Kyber port (tracker #73 D4, HIL `kyber.local_free_port_takes_pwm`). Nothing changes on the wire. | _(pending)_ |
 | 2026-09-23 | **WDP‑DA devices are persistent, advertised to every neighbor, and forgettable** (issue #19 follow‑up). A device is confirmed by its second announce (heard once = RAM only, dropped after 90 s: a record kept for good must not come from one collision‑garbled line); a confirmed one is saved to NVS `wdp_da`, reloaded at boot as "not heard since boot", and kept when it goes quiet — still listed (`SEEN=0`) and still naming its port. It leaves only through the new `?WDP,DA,FORGET,S<n>[,<type>]` / `?WDP,DA,CLEAR` (and a Wizard ✕); a full port no longer evicts a saved device, it refuses the newcomer. The whole list goes to every neighbor as **`PACKET_TYPE_WDP_DA` (17)** device‑list frames — a new type because old firmware and `WCB_Client` drop unknown ETM types, while on type 12 an old board would read it as an empty advert — assembled all‑or‑nothing per list hash into a 32‑record pool; `?WDP,<n>` and every board's `?WDP,DUMP` now list every board's devices. `[WDPDA:…]` gained `SEEN=` and `AGE=-`. Host test covers the frame codec and assembly. | _(pending)_ |
