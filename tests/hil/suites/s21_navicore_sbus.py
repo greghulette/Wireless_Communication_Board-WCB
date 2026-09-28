@@ -228,6 +228,81 @@ def maestro_mesh_fanout_0_9(bench):
     assert not bad, "; ".join(bad)
 
 
+@test("navicore.maestro_get_reply_mqr", "A plain ;M1,getPosition / getMovingState / getErrors that NaviCore sends W1 (WCB_SEND) is answered in the controller's format: W1 reads its local Maestro 1 (probe rules on W1 S1), stores m1pos0 / m1moving / m1err, and unicasts :MQR,1,0,POS,6000 / :MQR,1,0,MOV,1 / :MQR,1,0,ERR,4 to WCB20, which NaviCore's DBG_MAESTRO log shows arriving - never the ;M! form a WCB asker gets", needs=["navicore", "wcb1"], links=["W1S1"])
+def maestro_get_reply_mqr(bench):
+    """WCB-WP38 (maestro.mqr_reply_to_controller). The ETM receive path rewrites a standalone inbound ;M<dev>,get... to
+    ;MG<dev>,<sender>,... (maestroRewriteInboundGet, WCB_Maestro.cpp:665-679, called at WCB.ino:5534), and
+    handleMaestroGet reads a LOCAL slot first (:542-561, :583-596), stores the RAM variable (:607) and, for a replyTo
+    that is the controller (WCB_SPECIAL_PEER_ID, 20 here), sends ':MQR,<dev>,<chan|0>,POS|MOV|ERR,<value>' instead of
+    ';M!<var>=<value>' (:615-627). getMovingState is stored as 0/1 (:605). NaviCore logs the reply under DBG_MAESTRO
+    before it parses it (NaviCore.ino:3053-3056) and keeps it only for a slot of type 2 (remote) carrying that device
+    (maeConsumeRemoteReply, :796-812), which then surfaces as a [MAE:<slot>] marker (maePumpRemoteEmits, :817-835).
+    A query moves nothing. W1 is Maestro_Remote, so a reply byte arriving after the 25 ms read would be bridged to W2's
+    real Maestro 2: its error flags are read (cleared) at the end, as s22's _settle_maestro2 does (not imported: s22
+    sorts after this suite, and importing it here would register its tests first)."""
+    s1 = link(bench, 1, "S1")
+    nc, w = _nc(bench), usb_wcb(bench)
+    require_tokens(bench, 1, "?CONTROLLER,ON,20")
+    if not any(re.match(r"^\?MAESTRO,M1:W1S1:\d+$", t, re.I) for t in snapshot(bench, 1)):
+        raise Skip("W1 hosts no local Maestro 1 on S1")
+    remote_slot = next((i + 1 for i, m in enumerate(nc.config().get("maestros", []))
+                        if m.get("type") == 2 and m.get("device") == 1), None)
+    cases = ((";M1,getPosition,0", "AA011000", "m1pos0", 6000, ":MQR,1,0,POS,6000", '{"q":"pos","ch":0,"val":6000}'),
+             (";M1,getMovingState", "AA0113", "m1moving", 1, ":MQR,1,0,MOV,1", '{"q":"mov","val":1}'),
+             (";M1,getErrors", "AA0121", "m1err", 4, ":MQR,1,0,ERR,4", '{"q":"err","val":4}'))
+    bad, markers = [], []
+    try:
+        for case in cases:
+            w.run(f"?VAR,CLEAR,{case[2]}")
+        w.run("?DEBUG,MAESTRO,ON")
+        s1.listen()
+        s1.probe.rule_clear()
+        s1.rule(1, "AA011000", bytes.fromhex("7017"))   # 0x1770 = 6000, low byte first
+        s1.rule(2, "AA0113", bytes.fromhex("01"))       # moving
+        s1.rule(3, "AA0121", bytes.fromhex("0400"))     # error register 4
+        with nc.debug(DBG_MAESTRO):
+            for cmd, frame, name, value, reply, marker_json in cases:
+                wm, nm, pm = w.dev.mark(), nc.dev.mark(), s1.mark()
+                ack = nc.wcb_send(1, cmd)
+                if not ack.get("ok"):
+                    bad.append(f"{cmd}: WCB_SEND answered {ack}")
+                try:
+                    w.dev.expect(rf"^\[MAESTRO\] get reply -> WCB20: {re.escape(reply)}$", timeout=3, since=wm)
+                except AssertionError:
+                    bad.append(f"{cmd}: W1 printed no 'get reply -> WCB20: {reply}'")
+                time.sleep(0.4)
+                nc.dev.send("#L12")         # releases a [DISPATCH] line NaviCore holds back (HIL_TESTING.md §5)
+                try:
+                    nc.dev.expect(re.escape(f"[DISPATCH] Maestro RX reply  {reply}"), timeout=3, since=nm)
+                except AssertionError:
+                    bad.append(f"{cmd}: NaviCore logged no '[DISPATCH] Maestro RX reply  {reply}'")
+                if remote_slot:
+                    want = f"[MAE:{remote_slot}]{marker_json}"
+                    if not any(x.rstrip() == want for x in nc.dev.since(nm)):
+                        bad.append(f"{cmd}: NaviCore, with remote slot {remote_slot} on device 1, printed no {want}")
+                    markers.append(want)
+                lines = [x.rstrip() for x in w.dev.since(wm)]
+                if any(x.startswith("[MAESTRO] get reply -> WCB20: ;M!") for x in lines):
+                    bad.append(f"{cmd}: W1 answered the controller in the ;M! form")
+                got_frame = s1.received(pm)
+                if got_frame != bytes.fromhex(frame):
+                    bad.append(f"{cmd}: W1 S1 got {got_frame.hex(' ') or 'nothing'}, expected exactly {frame}")
+                got = next((x.rstrip() for x in w.run(f"?VAR,GET,{name}") if x.startswith("[VAR]")), None)
+                if got != f"[VAR] {name} = {value}":
+                    bad.append(f"{cmd}: W1 stored {got!r}, expected {name} = {value}")
+    finally:
+        s1.probe.rule_clear()
+        for case in cases:
+            w.run(f"?VAR,CLEAR,{case[2]}")
+        w.run("?DEBUG,MAESTRO,OFF")
+        w.send(";M2,getErrors")             # read (and so clear) Maestro 2's error flags
+        time.sleep(1.5)
+        w.run("?VAR,CLEAR,m2err")
+    bench.note("NaviCore " + (f"has remote slot {remote_slot} on device 1: markers {markers}" if remote_slot else
+                              "has no remote Maestro slot on device 1, so it logs each :MQR and keeps nothing"))
+    assert not bad, "; ".join(bad)
+
+
 @test("navicore.serial_route_dbg", ";W20,;s<n> from W1 reaches NaviCore's aux transmitter (seen through DBG_SERIAL); S0 and S4 are refused", needs=["navicore", "wcb1"], links=[])
 def serial_route_dbg(bench):
     """The bytes are physically written to NaviCore's S3-S5; a targeted write is never skipped even when a device owns
