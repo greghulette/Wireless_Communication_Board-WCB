@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#101 filed and FIXED (unverified)**, found by the WCB-WP32 test writer: a USB line the heap could not hold ran its head alone, unverified (D39). |
 | 2026-09-28 | **#98 and #99 VERIFIED** on `6.2.1_280741RSEP2026` (W1/W2 flashed about 07:50): `20260928-074616`, 22 of 22 (#98's test and the 21 s15/s24 tests). |
 | 2026-09-28 | The s14/s22 tests on `6.2.1_280727RSEP2026` (`20260928-073122`): 23 pass, `kyber.local_targets_one_write_per_port` skipped (W1 holds a Maestro 3 proxy), and #98's test failed on the first fix, which never matched a remote slot; corrected for the next image. **#100 filed, deferred** (D38): cleared devices and PWM outputs leave NVS keys (W1 +21 entries). |
 | 2026-09-28 | **#99 filed and FIXED (unverified)**, found by the WCB-WP26 test writer: a device and a serial mapping could share a port (D37). |
@@ -919,7 +920,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 | **Status** | VERIFIED — var.clear_all_name_collision PASS on the bench (20260922-125537) |
 | **Owner** | `WCB_firmware` |
 | **Effort** | S |
-| **Tests** | `var.clear_all_name_collision` |
+| **Tests** | `var.reserved_all_and_clear_all` |
 | **Subsystem** | vars-if-seq |
 
 **Mechanism.** isValidVariableName (WCB_Variables.cpp:63-73) accepts any 1-15 char [A-Za-z0-9_] string, so `all` / `ALL` / `All` are creatable by ;V, ;VP and ?VAR,SET, and they list and GET like any other variable. But the CLEAR handler uppercases the target first — `String targetU = target; targetU.toUpperCase(); if (targetU == "ALL") { clearAllVariables(); ... return; }` (WCB_Variables.cpp:326-328) — so the keyword wins before findVarSlot is ever consulted. clearAllVariables (:198-202) marks all 100 slots unused and calls saveVarsToNVS(), which rewrites the wcb_vars blob from the now-empty table (:76-93): persistent variables are gone from RAM and from NVS. Bench evidence (session.log:66031): `'all': GET '[VAR] all = 1', CLEAR printed ['[VAR] All variables cleared'], hila afterwards "[VAR] 'hila' is not set"`.
@@ -2088,3 +2089,25 @@ a clear (the HCR poll interval), and delete the per-port PWM output keys past th
 namespace, not per run, which is why it can wait; a board short of NVS is where it matters.
 
 **Update (run 20260928-074616).** `pwm_outputs` went away again when a later test cleared W1's PWM outputs, so the PWM half only holds keys between a change and the next full clear; `mp3_cfg` and `dfp_cfg` stay.
+
+#### 101. A USB line the heap cannot hold ran its head alone, unverified
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - not yet flashed |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `input.usb_line_over_heap_dropped_whole` (should) |
+| **Subsystem** | serial input |
+
+**Evidence.** Found writing the WCB-WP32 tests (2026-09-28, from the code).
+
+**Cause.** The USB line cap is 32 KB (re-scan #23, D16: a whole `?backup` chain is pasted as one line), but with WiFi in AP
+mode the largest free heap block is about 16-17 KB (CLAUDE.md rule 14). `processIncomingSerial` ignored the append's
+result, and a failed Arduino `String` append leaves the String unchanged, so a line between the two stopped growing
+without a word, and at its end the head ran as the whole line. A checksummed chain lost its `^?CHK` with the tail, so
+the head ran unverified with its last token cut mid-value: what the cap exists to prevent.
+
+**Fix.** The append is a `concat()` whose result is checked; a failed one drops the line whole exactly like the cap
+(`serialLineOverflow`), releasing the buffer before printing `[SERIAL] S<n>: line too long for the free heap (<n>
+characters) - dropped`.

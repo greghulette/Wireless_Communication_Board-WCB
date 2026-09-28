@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_280741RSEP2026                                  *****////
+///*****                                          Version 6.2.1_280758RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -197,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_280741RSEP2026";
+String SoftwareVersion = "6.2.1_280758RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -8472,7 +8472,16 @@ void processIncomingSerial(Stream &serial, int sourceID) {
     } else if (serialLineOverflow[sourceID]) {
       // the rest of an over-long line: dropped up to its end
     } else if (serialBuffer.length() < serialLineMax(sourceID)) {
-      serialBuffer += c;
+      if (!serialBuffer.concat(c)) {
+        // The heap could not grow the line: in AP mode the largest free block (~16-17 KB) is below the 32 KB USB cap,
+        // and a failed append leaves the String as it was, so every later character was lost and the head ran as the
+        // whole line - a chain without the ^?CHK its tail carried, unverified (tracker #101). Dropped whole, like an
+        // over-long line; the buffer goes back to the heap before anything is printed.
+        const unsigned got = serialBuffer.length();
+        serialLineOverflow[sourceID] = true;
+        releaseLineBuffer(serialBuffer);
+        Serial.printf("[SERIAL] S%d: line too long for the free heap (%u characters) - dropped\n", sourceID, got + 1);
+      }
     } else {
       // A device that never sends a line end - or streams binary at the wrong baud - grew this String until the
       // allocation failed; in AP mode the whole byte heap is ~19 KB (CLAUDE.md rule 14). The whole line is dropped
