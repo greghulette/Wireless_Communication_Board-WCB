@@ -693,6 +693,15 @@ fix; per the conventions, each fix also needs its doc row.
 > changing what an edited row sends: a row keeps the value it was built from and returns it while its text is
 > untouched. Left as found: a real edit to one mapping still re-sends every mapping (a PWM input one reboots the
 > board), and a mapping removed while disconnected is never cleared by a push (WP40 row 4).
+>
+> **2026-09-28, after a review of that commit (`b57fe2a`):** W-2's push check judged only the end state, but the board
+> checks each character change against its live characters as it lands (delimCharOk, prefixCharOk), so a push now
+> replays DELIM, CMDCHAR, FUNCCHAR from the board's own characters (`planCommandCharChange`, parser.js) and refuses a
+> change that needs two pushes, saying which two. A board still on `,` takes nothing until its delimiter moves: the
+> push sends the two-character `<func>D<x>` first, or refuses while General still says `,`. W-4's device syncs put a
+> port back to what the board reported when the table matches it again (an edit taken back sent a lone `?BAUD` that
+> left the port at a baud its WLED or Maestro does not use), and the Maestro table is compared by content, not key
+> order.
 - **W-1** ETM,DELAY 0 becomes 100 (parser.js:892, app.js:1363).
 - **W-2** `?DELIM,,` parses to '' (parser.js:587-588), and boardGo then bootstraps `?DELIM,^`.
 - **W-3** A disabled controller's custom id is dropped on a full push (parser.js:1346-1350).

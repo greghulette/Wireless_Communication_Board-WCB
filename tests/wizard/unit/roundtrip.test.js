@@ -83,6 +83,121 @@ test('W-2: commandCharProblem refuses what the firmware refuses, and each charac
   for (const c of ['?', '^', ' ']) assert.notEqual(why('cmdChar', c), '', `cmdChar ${JSON.stringify(c)}`);
 });
 
+// ── W-2 follow-up: the order a push changes the characters in ───────────────────────────────────────────────────────
+// A push sends DELIM, then CMDCHAR, then FUNCCHAR, each on its own line behind the function identifier the board still
+// has, and the board checks each against its LIVE characters (WCB.ino delimCharOk, prefixCharOk). The model below is
+// those two checks plus the line split every line goes through first (on the live delimiter).
+function boardTakes(live, cmd) {
+  if (cmd.includes(live.delimiter)) return null;                       // split before any setter reads it
+  if (!cmd.startsWith(live.funcChar)) return null;                     // not a local command at all
+  const body = cmd.slice(1);
+  let field, c;
+  if (/^D.$/.test(body)) [field, c] = ['delimiter', body[1]];         // the legacy two-character ?D<x>
+  else if (body.startsWith('DELIM,') && body.length === 7) [field, c] = ['delimiter', body[6]];
+  else if (body.startsWith('CMDCHAR,') && body.length === 9) [field, c] = ['cmdChar', body[8]];
+  else if (body.startsWith('FUNCCHAR,') && body.length === 10) [field, c] = ['funcChar', body[9]];
+  else return null;
+  if (c <= ' ' || c >= '\x7f') return null;
+  if (field === 'delimiter') {
+    if (c === live.funcChar || c === live.cmdChar || c === ',' || /[A-Za-z0-9]/.test(c)) return null;
+  } else if (c === (field === 'funcChar' ? live.cmdChar : live.funcChar) || c === live.delimiter) {
+    return null;
+  }
+  return { ...live, [field]: c };
+}
+
+test('W-2: planCommandCharChange replays DELIM, CMDCHAR, FUNCCHAR from the board\'s characters, and refuses what needs two pushes', () => {
+  const D = { delimiter: '^', funcChar: '?', cmdChar: ';' };
+  const plan = (cur, change) => P.planCommandCharChange(cur, { ...cur, ...change });
+  assert.deepEqual(plan(D, {}), { problem: '', commands: [] });
+  assert.deepEqual(plan(D, { delimiter: '|' }), { problem: '', commands: ['?DELIM,|'] });
+  assert.deepEqual(plan(D, { delimiter: '|', funcChar: '!', cmdChar: '/' }),
+                   { problem: '', commands: ['?DELIM,|', '?CMDCHAR,/', '?FUNCCHAR,!'] });
+  // A character freed earlier in the same push can be taken later in it.
+  assert.deepEqual(plan(D, { delimiter: '|', funcChar: '^' }), { problem: '', commands: ['?DELIM,|', '?FUNCCHAR,^'] });
+  assert.deepEqual(plan(D, { funcChar: ';', cmdChar: '/' }), { problem: '', commands: ['?CMDCHAR,/', '?FUNCCHAR,;'] });
+  // Each of these ends somewhere legal, but a step on the way is one the board refuses.
+  for (const [what, change, how] of [
+    ['function identifier ! then delimiter ? (the review\'s case)', { funcChar: '!', delimiter: '?' }, /first/],
+    ['a delimiter that is still the command character', { delimiter: ';', cmdChar: '/' }, /first/],
+    ['a command character that is still the function identifier', { funcChar: '!', cmdChar: '?' }, /first/],
+    ['swapping the function identifier and the command character', { funcChar: ';', cmdChar: '?' }, /unused character/],
+    ['swapping the delimiter and the function identifier', { delimiter: '?', funcChar: '^' }, /unused character/],
+    ['rotating all three', { delimiter: '?', funcChar: ';', cmdChar: '^' }, /unused character/],
+  ]) {
+    const r = plan(D, change);
+    assert.match(r.problem, how, what);
+    assert.deepEqual(r.commands, [], what);
+  }
+  // A character the firmware refuses anywhere is named as that, not as an ordering problem.
+  assert.match(plan(D, { delimiter: ',' }).problem, /comma/);
+  assert.match(plan(D, { funcChar: ';' }).problem, /already the Command Character/);
+  // A board still on ',' (an older firmware took it) splits every line at its commas: nothing reaches it until the
+  // delimiter changes, and that change only gets through as the two-character <func>D<x>.
+  const comma = { delimiter: ',', funcChar: '!', cmdChar: '/' };
+  assert.match(plan(comma, {}).problem, /','/);
+  assert.match(plan(comma, { funcChar: '#' }).problem, /','/);
+  assert.deepEqual(plan(comma, { delimiter: '^' }), { problem: '', commands: ['!D^'] });
+  assert.deepEqual(plan(comma, { delimiter: '^', funcChar: '#' }), { problem: '', commands: ['!D^', '!FUNCCHAR,#'] });
+  // No baseline: a fresh board is on the defaults.
+  assert.deepEqual(P.planCommandCharChange(null, { delimiter: '|', funcChar: '?', cmdChar: ';' }),
+                   { problem: '', commands: ['?DELIM,|'] });
+});
+
+test('W-2: every plan the board would take ends where it was asked to, and every refusal is one the board would make', () => {
+  const A = ['^', '|', '?', '!', ';', '/', ','];
+  const triples = [];
+  for (const delimiter of A) for (const funcChar of A) for (const cmdChar of A) triples.push({ delimiter, funcChar, cmdChar });
+  const legal = (t) => ['delimiter', 'funcChar', 'cmdChar'].every((f) => P.commandCharProblem(f, t) === '');
+  // Boards: every legal set, and the legacy ',' delimiter with two distinct prefixes that are not ','.
+  const boards = triples.filter((t) => legal(t) ||
+    (t.delimiter === ',' && t.funcChar !== ',' && t.cmdChar !== ',' && t.funcChar !== t.cmdChar));
+  const targets = triples.filter(legal);
+  const naive = (cur, tgt) => {   // the fixed order, in the verb form, with no plan
+    let live = cur;
+    for (const [f, verb] of [['delimiter', 'DELIM'], ['cmdChar', 'CMDCHAR'], ['funcChar', 'FUNCCHAR']]) {
+      if (tgt[f] === cur[f]) continue;
+      live = live && boardTakes(live, `${live.funcChar}${verb},${tgt[f]}`);
+    }
+    return live;
+  };
+  let taken = 0, refused = 0;
+  for (const cur of boards) {
+    for (const tgt of targets) {
+      const r = P.planCommandCharChange(cur, tgt);
+      if (!r.problem) {
+        let live = cur;
+        for (const cmd of r.commands) {
+          live = boardTakes(live, cmd);
+          assert.ok(live, `${JSON.stringify(cur)} -> ${JSON.stringify(tgt)}: the board refuses ${cmd}`);
+        }
+        assert.deepEqual(live, tgt);
+        taken++;
+      } else {
+        // Refused (every target here is legal): sent in the push's order, the board really would refuse a step...
+        const where = `${JSON.stringify(cur)} -> ${JSON.stringify(tgt)}`;
+        assert.ok(!naive(cur, tgt), `${where} refused needlessly: ${r.problem}`);
+        // ... and the two pushes the refusal suggests both go through.
+        const FIELD = { 'Command Delimiter': 'delimiter', 'Local Function Identifier': 'funcChar', 'Command Character': 'cmdChar' };
+        const first = /Push the new (.+?) first/.exec(r.problem);
+        const spare = /Set (the .+?) to unused characters? and push/.exec(r.problem);
+        assert.ok(first || spare, `${where}: no advice in "${r.problem}"`);
+        const mid = { ...cur };
+        if (first) {
+          mid[FIELD[first[1]]] = tgt[FIELD[first[1]]];
+        } else {
+          const unused = ['#', '~', '@', '$'].filter((c) => !Object.values(cur).includes(c) && !Object.values(tgt).includes(c));
+          spare[1].split(/, | and /).forEach((name, i) => { mid[FIELD[name.replace(/^the /, '')]] = unused[i]; });
+        }
+        assert.equal(P.planCommandCharChange(cur, mid).problem, '', `${where}: first push to ${JSON.stringify(mid)}`);
+        assert.equal(P.planCommandCharChange(mid, tgt).problem, '', `${where}: second push from ${JSON.stringify(mid)}`);
+        refused++;
+      }
+    }
+  }
+  assert.ok(taken > 1000 && refused > 100, `${taken} taken, ${refused} refused`);
+});
+
 // ── W-3: a disabled controller's custom id ───────────────────────────────────────────────────────────────────────────
 
 test('W-3: CONTROLLER,ON,15^CONTROLLER,OFF (how the firmware stores a disabled custom id) survives a full push', () => {
@@ -122,6 +237,18 @@ test('W-5: a mapping carrying the UI-only bidir key (and keys in another order) 
   // A real change is still sent.
   ui.mappings[0].rawMode = false;
   assert.ok(commands(ui, base, false).includes('?MAP,SERIAL,S2,S3,W2S4'));
+});
+
+test('W-4: a Maestro routing table with the same content as the board\'s Maestros is not a change', () => {
+  // After any Maestro edit, rebuildMaestroRoutingTables (app.js) gives every board a maestroTable built as
+  // { id, wcb, port, baud }; the builder derives the baseline's as { ...maestro, wcb } = { id, port, baud, wcb }. The
+  // same table in another key order re-sent ?MAESTRO after an edit the user had taken back.
+  const base = P.parseBackupString('?WCB,1^?MAESTRO,M1:W1S1:57600,M2:W1S2:115200');
+  const cfg = clone(base);
+  cfg.maestroTable = base.maestros.map((m) => ({ id: m.id, wcb: 1, port: m.port, baud: m.baud }));
+  assert.deepEqual(commands(cfg, base, false), []);
+  cfg.maestroTable[0].baud = 115200;   // a real change still goes out
+  assert.deepEqual(commands(cfg, base, false), ['?MAESTRO,M1:W1S1:115200,M2:W1S2:115200']);
 });
 
 // ── W-6: a client slot in a system file ──────────────────────────────────────────────────────────────────────────────

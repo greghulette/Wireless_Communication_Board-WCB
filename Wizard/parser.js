@@ -1597,8 +1597,11 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // Fall back to local maestros (with this board's WCB number) for normal edits.
   const effectiveTable  = config.maestroTable   ?? config.maestros.map(m => ({ ...m, wcb: config.wcbNumber }));
   const baselineTable   = baseline?.maestroTable ?? baseline?.maestros?.map(m => ({ ...m, wcb: config.wcbNumber }));
-  const maestrosChanged = fullPush || !baseline ||
-    JSON.stringify(baselineTable) !== JSON.stringify(effectiveTable);
+  // Compared by content: rebuildMaestroRoutingTables (app.js) builds { id, wcb, port, baud }, the fallback above
+  // { id, port, baud, wcb }, and as raw JSON the same table after any Maestro edit - one taken back included -
+  // re-sent ?MAESTRO for nothing.
+  const tableKey = (t) => JSON.stringify((t ?? []).map(m => [m.id, m.wcb, m.port, m.baud]));
+  const maestrosChanged = fullPush || !baseline || tableKey(baselineTable) !== tableKey(effectiveTable);
 
   if (maestrosChanged) {
     const bTbl = baselineTable ?? [];
@@ -1896,6 +1899,73 @@ function commandCharProblem(field, chars) {
   return '';
 }
 
+// The commands a push changes the characters with, in the order it sends them, or why it cannot. A push sends
+// DELIM, then CMDCHAR, then FUNCCHAR, each as its own line behind the function identifier the board still has
+// (FUNCCHAR last: the board switches its parser the moment it lands), ahead of everything else (boardGo,
+// boardGoRemote). The board checks each against its LIVE characters at that moment - delimCharOk a new delimiter
+// against the current function identifier and command character, prefixCharOk a new prefix against the current other
+// prefix and the current delimiter (WCB.ino) - so a legal end state is not enough. Checked only at the end, function
+// identifier '!' then delimiter '?' sent ?DELIM,? while '?' was still the function identifier: the board refused it,
+// took ?FUNCCHAR,!, and ran the rest of the relay push, joined with '?', as ONE command, and the Wizard reported
+// success. What a push cannot do in its order it refuses, saying how to do it in two.
+// A board still on ',' (older firmware took it) splits every line at its commas before reading it, ?DELIM,x included,
+// so nothing reaches it intact until its delimiter changes, and only the two-character legacy <func>D<x> (no comma)
+// does that.
+// current: the board's characters (its pulled baseline; null = a fresh board's defaults). target: what the push sets.
+// -> { problem, commands }: problem '' and the commands to send in order, or problem saying why not (no period).
+const _CHAR_DEFAULTS = { delimiter: '^', funcChar: '?', cmdChar: ';' };
+const _CHAR_PUSH_ORDER = [['delimiter', 'DELIM', ['funcChar', 'cmdChar']],
+                          ['cmdChar', 'CMDCHAR', ['funcChar', 'delimiter']],
+                          ['funcChar', 'FUNCCHAR', ['cmdChar', 'delimiter']]];
+function planCommandCharChange(current, target) {
+  const cur = {}, tgt = {};
+  for (const f of Object.keys(_CHAR_DEFAULTS)) {
+    cur[f] = current?.[f] || _CHAR_DEFAULTS[f];
+    tgt[f] = target?.[f]  || _CHAR_DEFAULTS[f];
+  }
+  if (cur.delimiter === ',' && tgt.delimiter === ',') {
+    return { problem: "The board's Command Delimiter is ',', and it splits every command it reads at its commas, so " +
+                      'nothing would arrive intact. Pick another Command Delimiter in General Settings (^ is the ' +
+                      'default) and push again: the push changes it first', commands: [] };
+  }
+  for (const f of Object.keys(_CHAR_DEFAULTS)) {
+    if (tgt[f] === cur[f]) continue;
+    const why = commandCharProblem(f, tgt);
+    if (why) return { problem: why, commands: [] };
+  }
+  const live = { ...cur };
+  const commands = [];
+  for (const [f, verb, against] of _CHAR_PUSH_ORDER) {
+    if (tgt[f] === cur[f]) continue;
+    const c = tgt[f];
+    const clash = against.find(o => live[o] === c);
+    if (clash) {
+      // '<c>' is still the board's <clash> when this step lands (<clash> is always a prefix that is changing: any other
+      // clash is an illegal end state, refused above). When moving <clash> on its own and then the rest are two pushes
+      // the board takes, say so. Otherwise (a swap, a rotation) the two pushes that always work: every changing prefix
+      // to an unused character - and the delimiter too on a ',' board, which takes nothing else until it has moved -
+      // then the new characters. No step of the second push can meet a character the board is still using.
+      const N = _CHAR_NAMES;
+      const alone = { ...cur, [clash]: tgt[clash] };
+      if (!planCommandCharChange(cur, alone).problem && !planCommandCharChange(alone, tgt).problem) {
+        return { commands: [], problem: `The push sets the ${N[f]} before the ${N[clash]}, and '${c}' is still the ` +
+                 `board's ${N[clash]} at that point, so the board would refuse it. Push the new ${N[clash]} first, ` +
+                 `then the ${N[f]}` };
+      }
+      const moving = Object.keys(_CHAR_DEFAULTS)
+        .filter(p => (p === 'delimiter' ? cur.delimiter === ',' : tgt[p] !== cur[p]))
+        .map(p => `the ${N[p]}`);
+      const list = moving.length > 1 ? `${moving.slice(0, -1).join(', ')} and ${moving.at(-1)}` : moving[0];
+      return { commands: [], problem: `'${c}' is still the board's ${N[clash]} when the push sets the new ${N[f]}, ` +
+               `and these characters cannot all change in one push. Set ${list} to unused ` +
+               `character${moving.length > 1 ? 's' : ''} and push, then set the new ones and push again` };
+    }
+    commands.push(f === 'delimiter' && live.delimiter === ',' ? `${live.funcChar}D${c}` : `${live.funcChar}${verb},${c}`);
+    live[f] = c;
+  }
+  return { problem: '', commands };
+}
+
 // ─────────────────────────────────────────────
 // Remote config pull (?MGMT,PULL through a relay) — the pure pieces, here so node --test reaches them
 // ─────────────────────────────────────────────
@@ -2107,6 +2177,7 @@ const WCB_PARSER_API = {
   getAvailablePorts,
   evaluatePortClaims,
   commandCharProblem,
+  planCommandCharChange,
   HW_VERSION_MAP,
   hwValueToDisplay,
   hwValueToBinary,

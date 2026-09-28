@@ -113,30 +113,50 @@ test('wizard.push_fake_noop every card of a pulled board, pushed with no edit, s
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.push_fake_one_edit one edit on a pulled card sends that edit, and a new Maestro or WLED still gets its defaults (W-4)', async ({ page }) => {
+test('wizard.push_fake_one_edit one edit on a pulled card sends that edit, an edit undone sends nothing, and a new Maestro or WLED still gets its defaults (W-4)', async ({ page }) => {
+  const MAESTRO_BAUD = '#b1-maestro-tbody tr [id$="-baud"]';
+  const MAESTRO_ID   = '#b1-maestro-tbody tr [id$="-id"]';
+  const WLED_BAUD    = '#b1-wled-tbody tr [id$="-baud"]';
   const cases = [
     // A label the board reports on a Maestro's port is kept: a Maestro edit must not rename it to 'Maestro 1'.
-    ["Maestro on S1 labelled 'Dome Maestro'", '#b1-maestro-tbody tr [id$="-baud"]', '115200',
-      ['?BAUD,S1,115200', '?MAESTRO,M1:W1S1:115200']],
+    ["Maestro on S1 labelled 'Dome Maestro'", [[MAESTRO_BAUD, '115200']], ['?BAUD,S1,115200', '?MAESTRO,M1:W1S1:115200']],
     // An empty or automatic label follows the Maestro it names.
-    ['Maestro on S1 with no label', '#b1-maestro-tbody tr [id$="-id"]', '2',
+    ['Maestro on S1 with no label', [[MAESTRO_ID, '2']],
       ['?LABEL,S1,Maestro 2', '?MAESTRO,CLEAR,M1:W1S1', '?MAESTRO,M2:W1S1:57600']],
     // A WLED line re-reserves its port on the board (wledReserveLocalPort: label, both broadcasts off, baud), so the
     // push says so too, and the next pull agrees with what the Wizard shows.
-    ['WLED 3 on S2 with its own label', '#b1-wled-tbody tr [id$="-baud"]', '57600',
+    ['WLED 3 on S2 with its own label', [[WLED_BAUD, '57600']],
       ['?BAUD,S2,57600', '?LABEL,S2,WLED 3', '?BCAST,OUT,S2,OFF', '?BCAST,IN,S2,OFF', '?WLED,3:W1S2:57600']],
-    ['MP3 on S2 at 38400, volume 3, ONERR', '#b1-mp3-vol', '5', ['?MP3,S2:38400:V5', '?MP3,ONERR,oops']],
-    ['HCR on S4 at 57600, poll 0', '#b1-hcr-poll', '30', ['?HCR,PORT,S4:57600', '?HCR,POLL,30']],
-    ['HW 3.2, LED on GPIO47', '#b1-led-pin', '38', ['?LED,PIN,38']],
-    ['WiFi JOIN, a comma in the passphrase', '#b1-wifi-join-pass', 'new,pass 2', ['?WIFI,JOIN,NaviCore-20,new,pass 2']],
-    ['variables', '#b1-var-tbody tr .var-value-input', '7', ['?VAR,SET,lights,7']],
+    // Edited and put back: nothing is sent. The first edit wrote the port's baud (and a WLED's label and flags); left
+    // there, the push sent a lone ?BAUD with no ?WLED/?MAESTRO line, and the port ran at a baud its device does not.
+    ['WLED 3 on S2, broadcasts left on', [[WLED_BAUD, '57600'], [WLED_BAUD, '115200']], []],
+    ['WLED 3 on S2 with its own label', [[WLED_BAUD, '57600'], [WLED_BAUD, '115200']], []],
+    ["Maestro on S1 labelled 'Dome Maestro'", [[MAESTRO_BAUD, '115200'], [MAESTRO_BAUD, '57600']], []],
+    ['Maestro on S1 with no label', [[MAESTRO_ID, '2'], [MAESTRO_ID, '1']], []],
+    ['MP3 on S2 at 38400, volume 3, ONERR', [['#b1-mp3-vol', '5']], ['?MP3,S2:38400:V5', '?MP3,ONERR,oops']],
+    ['HCR on S4 at 57600, poll 0', [['#b1-hcr-poll', '30']], ['?HCR,PORT,S4:57600', '?HCR,POLL,30']],
+    ['HW 3.2, LED on GPIO47', [['#b1-led-pin', '38']], ['?LED,PIN,38']],
+    ['WiFi JOIN, a comma in the passphrase', [['#b1-wifi-join-pass', 'new,pass 2']], ['?WIFI,JOIN,NaviCore-20,new,pass 2']],
+    ['variables', [['#b1-var-tbody tr .var-value-input', '7']], ['?VAR,SET,lights,7']],
   ];
-  for (const [card, selector, value, want] of cases) {
+  for (const [card, edits, want] of cases) {
     await openWizard(page);
     await pullFake(page, CARDS[card]);
-    await edit(page, selector, value);
+    for (const [selector, value] of edits) await edit(page, selector, value);
     const r = await push(page, { skipReboot: true });
-    expect.soft(r.sent, `${card}: ${selector} = ${value}`).toEqual(want);
+    expect.soft(r.sent, `${card}: ${edits.map(([s, v]) => `${s} = ${v}`).join(', ')}`).toEqual(want);
+  }
+
+  // A Maestro or WLED added on a free port and removed again leaves that port as the board has it.
+  for (const [what, add, tbody, remove] of [['Maestro', 'addMaestroRow', 'b1-maestro-tbody', 'removeMaestroRow'],
+                                            ['WLED', 'addWLEDRow', 'b1-wled-tbody', 'removeWLEDRow']]) {
+    await openWizard(page);
+    await pullFake(page, board());
+    await page.evaluate((add) => { window[add](1); }, add);
+    await edit(page, `#${tbody} tr [id$="-port"]`, '2');
+    await page.evaluate(({ tbody, remove }) => { window[remove](1, document.querySelector(`#${tbody} tr`).id); },
+                        { tbody, remove });
+    expect.soft(await push(page), `${what} added on S2 and removed`).toEqual(NO_CHANGES);
   }
 
   // A Maestro or WLED the user ADDS gets the defaults it always did: an automatic label, its baud on the port, and
@@ -176,15 +196,46 @@ test('wizard.push_fake_etm_delay the General ETM delay keeps 0: shown, kept when
   expect(page.wizErrors).toEqual([]);
 });
 
-test("wizard.push_fake_delimiter a ',' board keeps its delimiter, and the General inputs refuse a delimiter the firmware refuses (W-2)", async ({ page }) => {
+test("wizard.push_fake_delimiter the characters change in an order the board takes, a ',' board changes its delimiter first, and the General inputs refuse what the firmware refuses (W-2)", async ({ page }) => {
   await openWizard(page);
   await pullFake(page, COMMA_BOARD, '!');
   expect(await page.evaluate(() => [document.getElementById('g-delimiter').value, boardBaselines[1].delimiter,
                                     boardBaselines[1].funcChar, boardBaselines[1].cmdChar])).toEqual([',', ',', '!', '/']);
-  // An edit elsewhere goes out in the board's own characters, with no ?DELIM bootstrap to revert it to '^'.
+  // A board still on ',' splits every line it reads at its commas - !ALIAS,Dome arrives as !ALIAS and Dome, and
+  // !DELIM,^ is torn the same way - so with the delimiter left at ',' nothing is sent...
   await edit(page, '#b1-alias', 'Dome');
-  const r = await push(page);
-  expect(r.sent).toEqual(['!ALIAS,Dome']);
+  const stuck = await push(page);
+  expect(stuck.sent).toEqual([]);
+  expect(stuck.outcome.ok).toBe(false);
+  expect(stuck.outcome.reason).toMatch(/','/);
+  // ... and with another delimiter picked in General, it goes first, as the two-character !D^ a ',' board reads whole.
+  await edit(page, '#g-delimiter', '^');
+  expect((await push(page)).sent).toEqual(['!D^', '!ALIAS,Dome', '!DELIM,^']);
+
+  // The push replays the changes in its own order from the board's characters - DELIM, CMDCHAR, FUNCCHAR, each against
+  // the board's LIVE characters (WCB.ino delimCharOk, prefixCharOk). Each of these gets through the General inputs one
+  // edit at a time and ends somewhere legal, but has a step the board would refuse: nothing is sent.
+  for (const [what, edits, how] of [
+    ['function identifier ! then delimiter ?', [['#g-funcchar', '!'], ['#g-delimiter', '?']], /first/],
+    ['command character / then delimiter ;', [['#g-cmdchar', '/'], ['#g-delimiter', ';']], /first/],
+    ['function identifier ! then command character ?', [['#g-funcchar', '!'], ['#g-cmdchar', '?']], /first/],
+    ['the prefixes swapped, by way of /', [['#g-cmdchar', '/'], ['#g-funcchar', ';'], ['#g-cmdchar', '?']], /unused character/],
+  ]) {
+    await openWizard(page);
+    await pullFake(page, board());
+    for (const [selector, value] of edits) await edit(page, selector, value);
+    const r = await push(page);
+    expect.soft(r.sent, what).toEqual([]);
+    expect.soft(r.outcome.reason, what).toMatch(how);
+  }
+  // All three at once, every step legal where it lands: the bootstrap in the board's order, then the chain.
+  await openWizard(page);
+  await pullFake(page, board());
+  for (const [selector, value] of [['#g-delimiter', '|'], ['#g-cmdchar', '/'], ['#g-funcchar', '!']]) {
+    await edit(page, selector, value);
+  }
+  expect((await push(page)).sent)
+    .toEqual(['?DELIM,|', '?CMDCHAR,/', '?FUNCCHAR,!', '!DELIM,|', '!FUNCCHAR,!', '!CMDCHAR,/']);
 
   // Typed into the General delimiter: ',' (every command has commas), a letter, a digit, the function identifier or
   // the command character are put back to the last good value, with a toast saying why.
@@ -231,12 +282,15 @@ test("wizard.push_fake_delimiter a ',' board keeps its delimiter, and the Genera
     const clash = wizardValidateStep('network');
     set({ 'wiz-funcchar': '!' });
     const good = wizardValidateStep('network');
+    set({ 'wiz-delim': '?' });                     // legal at the end, but a fresh board still has '?' then
+    const order = wizardValidateStep('network');
     host.remove();
-    return { comma, clash, good };
+    return { comma, clash, good, order };
   });
   expect(step.comma).toMatch(/cannot be the Command Delimiter/);
   expect(step.clash).toMatch(/'\|' is already the Local Function Identifier/);
   expect(step.good).toBe(null);
+  expect(step.order).toMatch(/first/);
   expect(page.wizErrors).toEqual([]);
 });
 
@@ -329,6 +383,37 @@ test('wizard.push_fake_relay_cap a relay push over 16 chunks is refused before t
   expect(r.outcome.reason).toMatch(/too large/);
   expect(r.btn).toEqual([false, 'Push Config']);
   expect(await page.locator('#toast-container').textContent()).toContain('too large to push via a relay');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test("wizard.push_fake_relay_chars a relay push with a character change the board would refuse on the way sends nothing, and a ',' target takes ?D^ first (W-2)", async ({ page }) => {
+  // The review's case: function identifier '!' then delimiter '?' in General. The push used to send ?DELIM,? (refused:
+  // '?' was still the function identifier), then ?FUNCCHAR,!, then one session '!ALIAS,...?!DELIM,??!FUNCCHAR,!' that
+  // the board, still on '^', ran as a single command - and it reported ok with the baseline moved to '?'/'!'.
+  await relayBoard(page, RELAY_CHAIN);
+  await edit(page, '#g-funcchar', '!');
+  await edit(page, '#g-delimiter', '?');
+  await page.evaluate(() => { window.__go = boardGo(2); });
+  await page.waitForTimeout(1500);
+  const r = await page.evaluate(() => ({
+    modal: document.getElementById('network-group-change-modal').classList.contains('open'),
+    sent: [...__sent], outcome: boardPushOutcome[2], baseDelim: boardBaselines[2].delimiter,
+  }));
+  expect(r.modal).toBe(false);
+  expect(r.sent).toEqual([]);
+  expect(r.outcome.ok).toBe(false);
+  expect(r.outcome.reason).toMatch(/first/);
+  expect(r.baseDelim).toBe('^');
+
+  // A target still on ',': the delimiter goes first as the two-character ?D^ (a whole session is split at its commas
+  // too), then the chain in '^'.
+  await relayBoard(page, `${RELAY_CHAIN}^?DELIM,,`);
+  await edit(page, '#g-delimiter', '^');
+  const c = await page.evaluate(async () => { await boardGo(2); return { sent: [...__sent], outcome: boardPushOutcome[2] }; });
+  expect(c.outcome.ok).toBe(true);
+  expect(c.sent.length).toBe(4);
+  expect(c.sent.slice(0, 3).every((s) => /^\?MGMT,FRAG,2,[0-9A-F]{4},0,1,\?D\^$/.test(s))).toBe(true);   // sent 3x, unACKed
+  expect(c.sent[3]).toMatch(/^\?MGMT,FRAG,2,[0-9A-F]{4},0,1,\?DELIM,\^$/);
   expect(page.wizErrors).toEqual([]);
 });
 

@@ -113,7 +113,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.00:39.R.SEP.2026';
+const UI_VERSION = '28.01:20.R.SEP.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3023,6 +3023,20 @@ function onWLEDChange(n) {
   onBoardFieldChange(n);
 }
 
+// Put port p of board n back to what the board reported (its baseline): the given fields in the config, and the
+// label and baud in the serial section too - syncSerialUIToConfig reads those two back from the page at push time,
+// so a value left there is pushed. The device syncs below use it for ports a push will not touch, which undoes what
+// an earlier sync wrote for an edit the user has since taken back. A device-claimed port's own inputs are locked,
+// so there is no user edit on it to lose.
+function _restorePortFromBaseline(n, p, fields = ['label', 'broadcastIn', 'broadcastOut', 'baud']) {
+  const bp = boardBaselines[n]?.serialPorts?.[p - 1];
+  const sp = boardConfigs[n]?.serialPorts?.[p - 1];
+  if (!bp || !sp) return;
+  for (const f of fields) sp[f] = bp[f];
+  if (fields.includes('label')) { const el = document.getElementById(`b${n}-s${p}-label`); if (el) el.value = bp.label ?? ''; }
+  if (fields.includes('baud'))  { const el = document.getElementById(`b${n}-s${p}-baud`);  if (el) el.value = bp.baud; }
+}
+
 // Rebuild config.wleds + serial-port claims from the live WLED rows. Releases the WLED
 // claims no row holds any more, then claims each row's port - and, when the push will send
 // the table, mirrors the reservation the board makes (label 'WLED <id>', broadcast disabled
@@ -3041,18 +3055,25 @@ function syncWLEDsToConfig(n) {
   });
 
   // The board reserves a WLED's port only when a ?WLED line reaches it, and the push sends the whole local table
-  // exactly when any of it changed (buildCommandString) - so that is when the reservation is mirrored here. It used
-  // to be forced on every sync, and a pulled board pushed with no edit sent a label and both broadcast flags for a
-  // WLED port the user had renamed or re-enabled (W-4, docs/hil_plan/WCB.md).
-  const base    = boardBaselines[n];
-  const reserve = !base || JSON.stringify(base.wleds ?? []) !== JSON.stringify(rows);
-  const held    = new Set(rows.map(r => r.port));
+  // exactly when any of it changed (buildCommandString): then every WLED port takes the reservation here too. With
+  // the table as the board has it, nothing reaches those ports, so they go back to what the board reported - which
+  // also undoes an earlier sync's reservation once the user takes the edit back. Forced on every sync, the
+  // reservation made an unedited pulled board push a label and both broadcast flags (W-4, docs/hil_plan/WCB.md);
+  // written once and never put back, a WLED baud edit undone still pushed a lone ?BAUD with no ?WLED line, and the
+  // port ran at a baud its WLED does not use.
+  const base     = boardBaselines[n];
+  const reserve  = !base || JSON.stringify(base.wleds ?? []) !== JSON.stringify(rows);
+  const held     = new Set(rows.map(r => r.port));
+  const baseHeld = new Set((base?.wleds ?? []).map(w => w.port));
 
   for (let i = 0; i < config.serialPorts.length; i++) {
     const sp = config.serialPorts[i];
     if (sp.claimedBy?.type === 'wled') {
       sp.claimedBy = null;
       if (held.has(i + 1)) continue;   // still a WLED port: claimed again below
+      // A port only this session claimed (a WLED added here, then removed or moved on): no push touches it.
+      if (base && !baseHeld.has(i + 1)) { _restorePortFromBaseline(n, i + 1); continue; }
+      // A WLED the board has leaves it: the board releases the port (wledReleaseLocalPort), broadcasts back on.
       sp.broadcastIn  = true;
       sp.broadcastOut = true;
       // Clear only the auto-generated label — legacy 'WLED' or the new 'WLED <id>' —
@@ -3070,7 +3091,7 @@ function syncWLEDsToConfig(n) {
     config.wleds.push({ id, port, baud });
     const sp = config.serialPorts[port - 1];
     sp.claimedBy = { type: 'wled', id };
-    if (!reserve) continue;
+    if (!reserve) { _restorePortFromBaseline(n, port); continue; }
     sp.label        = 'WLED ' + id;
     sp.broadcastOut = false;
     sp.broadcastIn  = false;
@@ -3673,16 +3694,21 @@ function syncMaestrosToConfig(n) {
     if (id && port) rows.push({ id, port, baud });
   });
 
-  // A port's label and baud change here only where the push changes that Maestro. Both used to be rewritten for every
-  // row on every sync, so a pulled board pushed with no edit relabelled its Maestro port - 'Dome Maestro', or a port
-  // the board had left blank, became 'Maestro 1' (W-4, docs/hil_plan/WCB.md).
+  // A port's label and baud follow a Maestro only where the push changes it; everywhere else the port goes back to
+  // what the board reported, which also undoes an earlier sync's write once the user takes the edit back. Both used to
+  // be rewritten for every row on every sync, so a pulled board pushed with no edit relabelled its Maestro port -
+  // 'Dome Maestro', or a port the board had left blank, became 'Maestro 1' (W-4, docs/hil_plan/WCB.md); and written
+  // once and never put back, a Maestro baud edit undone still pushed a lone ?BAUD with no ?MAESTRO line, leaving the
+  // port at a baud its Maestro does not use.
   //  - Baud: a ?MAESTRO line sets its port to the Maestro's baud on the board (configureMaestro, WCB_Maestro.cpp), and
-  //    the push sends the whole table whenever any of it changed - so exactly then every port follows its row here.
+  //    the push sends the whole table whenever any of it changed - so then every port follows its row here.
   //  - Label: the Wizard's own; the board never sets one. A Maestro new on its port gets 'Maestro <id>' in place of
-  //    an empty or automatic label, and a label the user typed is never touched.
+  //    an empty or automatic label; a Maestro the board already has there keeps the label the board reported.
   const base         = boardBaselines[n];
-  const tableChanged = !base || JSON.stringify(base.maestros ?? []) !== JSON.stringify(rows);
-  const isNew        = (r) => !(base?.maestros ?? []).some(b => b.id === r.id && b.port === r.port);
+  const baseRows     = base?.maestros ?? [];
+  const tableChanged = !base || JSON.stringify(baseRows) !== JSON.stringify(rows);
+  const isNew        = (r) => !baseRows.some(b => b.id === r.id && b.port === r.port);
+  const baseHeld     = new Set(baseRows.map(m => m.port));
   const AUTO_LABEL   = /^Maestro \d+$/;
   const setLabel = (port, text) => {
     config.serialPorts[port - 1].label = text;
@@ -3690,13 +3716,16 @@ function syncMaestrosToConfig(n) {
     if (el) el.value = text;
   };
 
-  // Release the ports no row holds any more, with their automatic labels.
+  // Release the ports no row holds any more: one only this session claimed (a Maestro added here, then removed or
+  // moved on) goes back to what the board reported; one the board's own Maestro leaves loses its automatic label.
   const held = new Set(rows.map(r => r.port));
   for (let i = 0; i < config.serialPorts.length; i++) {
     const sp = config.serialPorts[i];
     if (sp.claimedBy?.type !== 'maestro') continue;
     sp.claimedBy = null;
-    if (!held.has(i + 1) && AUTO_LABEL.test(sp.label ?? '')) setLabel(i + 1, '');
+    if (held.has(i + 1)) continue;
+    if (base && !baseHeld.has(i + 1)) _restorePortFromBaseline(n, i + 1);
+    else if (AUTO_LABEL.test(sp.label ?? '')) setLabel(i + 1, '');
   }
 
   config.maestros = [];
@@ -3706,8 +3735,11 @@ function syncMaestrosToConfig(n) {
     config.maestros.push(r);
     const sp = config.serialPorts[r.port - 1];
     sp.claimedBy = { type: 'maestro', id: r.id };
-    if (isNew(r) && (!sp.label || AUTO_LABEL.test(sp.label))) setLabel(r.port, `Maestro ${r.id}`);
-    if (tableChanged) {
+    if (!isNew(r)) _restorePortFromBaseline(n, r.port, ['label']);
+    else if (!sp.label || AUTO_LABEL.test(sp.label)) setLabel(r.port, `Maestro ${r.id}`);
+    if (!tableChanged) {
+      _restorePortFromBaseline(n, r.port, ['baud']);
+    } else {
       sp.baud = r.baud;
       const serialBaudEl = document.getElementById(`b${n}-s${r.port}-baud`);
       if (serialBaudEl) serialBaudEl.value = r.baud;
@@ -7427,18 +7459,14 @@ async function _reshareAfterFlash(conn, n) {
   }
 }
 
-// The first command character this push would CHANGE to one the firmware refuses (WCBParser.commandCharProblem), or
-// ''. The General inputs refuse such a character when it is typed, but a loaded system file or the setup wizard
-// can still put one there. One equal to the board's current character is not judged: the bootstrap and the diff
-// never re-send it, which is how a board still on an older firmware's ',' delimiter keeps working.
-function _pushCharProblem(config, baseline) {
-  const current = { delimiter: baseline?.delimiter ?? '^', funcChar: baseline?.funcChar ?? '?', cmdChar: baseline?.cmdChar ?? ';' };
-  for (const field of ['delimiter', 'funcChar', 'cmdChar']) {
-    if (config[field] === current[field]) continue;
-    const why = WCBParser.commandCharProblem(field, config);
-    if (why) return why;
-  }
-  return '';
+// How this push changes the board's command characters: the bootstrap commands in the order they go out, or why
+// the push must not start (WCBParser.planCommandCharChange). Planned from the board's CURRENT characters - its
+// baseline, or the defaults a flashed or erased board has - because the board checks every change against its live
+// characters as it lands, and a push that ends somewhere legal can still take a step the board refuses. The General
+// inputs refuse a character the firmware never takes when it is typed, but a loaded system file can put one there,
+// and only the board's own characters say what order works.
+function _pushCharPlan(config, baseline) {
+  return WCBParser.planCommandCharChange(baseline ?? null, config);
 }
 
 async function boardGo(n, opts = {}) {
@@ -7904,15 +7932,6 @@ async function boardGo(n, opts = {}) {
     config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
     config.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
 
-    const charProblem = _pushCharProblem(config, boardBaselines[n]);
-    if (charProblem) {
-      boardPushOutcome[n].reason = charProblem;
-      showToast(`WCB ${n}: ${charProblem}. Nothing was sent — change it in General Settings.`, 'error', 10000);
-      btn.disabled = false;
-      btn.textContent = 'Push Config';
-      return;
-    }
-
     const fullPush  = !boardBaselines[n];
     const cmdString = WCBParser.buildCommandString(config, boardBaselines[n] ?? null, fullPush);
 
@@ -7924,31 +7943,32 @@ async function boardGo(n, opts = {}) {
       return;
     }
 
+    // Before anything is sent: the character changes must be ones the board takes in the order they arrive, and a
+    // board still on ',' takes nothing until its delimiter has moved (_pushCharPlan).
+    const charPlan = _pushCharPlan(config, boardBaselines[n]);
+    if (charPlan.problem) {
+      boardPushOutcome[n].reason = charPlan.problem;
+      showToast(`WCB ${n}: ${charPlan.problem}. Nothing was sent.`, 'error', 15000);
+      termLog(n, `Push refused, nothing sent: ${charPlan.problem}`, 'err');
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
+
     // ── Bootstrap: char-change commands must use the board's CURRENT funcChar ──
     // buildCommandString prefixes every command with the TARGET funcChar.  If the
     // user changed funcChar / delimiter / cmdChar, the board still speaks the OLD
     // char when the push starts, so the prefixed commands are silently ignored.
-    // Fix: send DELIM / FUNCCHAR / CMDCHAR first using the current (baseline) char
-    // so the board switches over before the rest of the push arrives.
-    const curFuncChar = boardBaselines[n]?.funcChar  ?? '?';
-    const curDelim    = boardBaselines[n]?.delimiter ?? '^';
-    const curCmdChar  = boardBaselines[n]?.cmdChar   ?? ';';
-    if (config.delimiter !== curDelim || config.funcChar !== curFuncChar || config.cmdChar !== curCmdChar) {
-      const bootstrap = [];
-      // DELIM and CMDCHAR first — still use the current funcChar prefix.
-      if (config.delimiter !== curDelim)
-        bootstrap.push(`${curFuncChar}DELIM,${config.delimiter}`);
-      if (config.cmdChar !== curCmdChar)
-        bootstrap.push(`${curFuncChar}CMDCHAR,${config.cmdChar}`);
-      // FUNCCHAR must be LAST — the board switches its parser immediately on receipt,
-      // so any bootstrap command after it would need the NEW prefix, not the current one.
-      // Setting it back to '?' IS now supported: the firmware exempts FUNCCHAR,/CMDCHAR, from the
-      // trailing-'?' help shortcut, so `xFUNCCHAR,?` reaches the setter. Suppressing it used to
-      // leave the board on the old char while the rest of the push went out with '?' —
-      // unrecognised, so the board sprayed every command to its serial ports and over the mesh.
-      if (config.funcChar !== curFuncChar)
-        bootstrap.push(`${curFuncChar}FUNCCHAR,${config.funcChar}`);
-      for (const cmd of bootstrap) {
+    // Fix: send DELIM, CMDCHAR, FUNCCHAR first, in that order, behind the current (baseline)
+    // char, so the board switches over before the rest of the push arrives - the plan's commands.
+    // FUNCCHAR must be LAST — the board switches its parser immediately on receipt,
+    // so any bootstrap command after it would need the NEW prefix, not the current one.
+    // Setting it back to '?' IS now supported: the firmware exempts FUNCCHAR,/CMDCHAR, from the
+    // trailing-'?' help shortcut, so `xFUNCCHAR,?` reaches the setter. Suppressing it used to
+    // leave the board on the old char while the rest of the push went out with '?' —
+    // unrecognised, so the board sprayed every command to its serial ports and over the mesh.
+    if (charPlan.commands.length) {
+      for (const cmd of charPlan.commands) {
         termLog(n, cmd, 'in');
         // These char-change commands gate every command that follows, so a
         // dropped one breaks the whole push. ACK-pace them with one retry.
@@ -8319,20 +8339,24 @@ async function boardGoRemote(n, opts = {}) {
   config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
   config.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
 
-  const charProblem = _pushCharProblem(config, boardBaselines[n]);
-  if (charProblem) {
-    boardPushOutcome[n].reason = charProblem;
-    showToast(`WCB ${n}: ${charProblem}. Nothing was sent — change it in General Settings.`, 'error', 10000);
-    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
-    return;
-  }
-
   // Diff-based push: only send commands that differ from the pulled baseline
   const fullPush  = !boardBaselines[n];
   const cmdString = WCBParser.buildCommandString(config, boardBaselines[n] ?? null, fullPush);
   // Nothing to send is a legitimate success, not a failure — same as the direct path.
   if (!cmdString) { boardPushOutcome[n] = { ok: true, aborted: false, reason: 'no changes to push' };
                     showToast('Nothing to push — no changes detected', 'info'); if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; } return; }
+
+  // As on the direct path, and before the size check, the confirm or any send: character changes the board takes in
+  // the order they arrive, from its own characters (_pushCharPlan). The relay push goes out as ONE session that the
+  // target splits on its live delimiter, so a refused bootstrap here turned the whole push into a single command.
+  const charPlan = _pushCharPlan(config, boardBaselines[n]);
+  if (charPlan.problem) {
+    boardPushOutcome[n].reason = charPlan.problem;
+    showToast(`WCB ${n}: ${charPlan.problem}. Nothing was sent.`, 'error', 15000);
+    termLog(relayN, `[Remote] Push for WCB ${n} refused, nothing sent: ${charPlan.problem}`, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
 
   const funcChar    = config.funcChar  || '?';
   const delim       = config.delimiter || '^';
@@ -8392,14 +8416,10 @@ async function boardGoRemote(n, opts = {}) {
   // the new ones (the chain then re-issues the same values harmlessly). FUNCCHAR goes LAST —
   // the target switches its parser the moment it lands. Placed AFTER the network-group
   // confirm so cancelling there cannot leave the board on a character set nothing else knows.
+  // The commands are the plan's (charPlan, checked above), so what is sent is exactly what was
+  // judged: the order, and the two-character ?D<x> a target still on ',' needs for its delimiter.
   {
-    const tgtFuncChar = boardBaselines[n]?.funcChar  ?? '?';
-    const tgtDelim    = boardBaselines[n]?.delimiter ?? '^';
-    const tgtCmdChar  = boardBaselines[n]?.cmdChar   ?? ';';
-    const bootstrap = [];
-    if (config.delimiter !== tgtDelim) bootstrap.push(`${tgtFuncChar}DELIM,${config.delimiter}`);
-    if (config.cmdChar   !== tgtCmdChar) bootstrap.push(`${tgtFuncChar}CMDCHAR,${config.cmdChar}`);
-    if (config.funcChar  !== tgtFuncChar) bootstrap.push(`${tgtFuncChar}FUNCCHAR,${config.funcChar}`);
+    const bootstrap = charPlan.commands;
     if (bootstrap.length) {
       const bootTargetWCB = boardConfigs[n]?.wcbNumber || n;
       termLog(relayN, `[Remote] WCB ${n}: switching command characters before the push`, 'sys');
@@ -11654,13 +11674,12 @@ function wizardValidateStep(key) {
       const m3 = document.getElementById('wiz-mac3')?.value?.trim() ?? '';
       if (!/^[0-9A-Fa-f]{2}$/.test(m2)) return 'MAC Octet 2 must be two hex digits (00–FF).';
       if (!/^[0-9A-Fa-f]{2}$/.test(m3)) return 'MAC Octet 3 must be two hex digits (00–FF).';
-      // The command characters, read the way wizardSaveStep reads them, against what the firmware accepts.
+      // The command characters, read the way wizardSaveStep reads them: ones the firmware accepts, reachable in one
+      // push from the ^ ? ; a fresh board starts on (the wizard's push is where they get set).
       const ch = (id, dflt) => document.getElementById(id)?.value.trim().charAt(0) || dflt;
       const chars = { delimiter: ch('wiz-delim', '^'), funcChar: ch('wiz-funcchar', '?'), cmdChar: ch('wiz-cmdchar', ';') };
-      for (const field of ['delimiter', 'funcChar', 'cmdChar']) {
-        const why = WCBParser.commandCharProblem(field, chars);
-        if (why) return `${why}.`;
-      }
+      const plan  = WCBParser.planCommandCharChange(null, chars);
+      if (plan.problem) return `${plan.problem}.`;
       break;
     }
     case 'identity': {
