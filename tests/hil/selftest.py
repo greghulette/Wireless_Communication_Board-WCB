@@ -977,6 +977,64 @@ class FakeJsonDev:
         raise resume.ExpectTimeout(f"sbus: no line matching /{pattern}/")
 
 
+class FakeStallDev(FakeJsonDev):
+    """The controller's USB outbox latch: a getcfg reply is held until `stall` pings have come in after it, then sent
+    ahead of that ping's pong (run 20260922-095341). stall=None never sends it. expect() waits its timeout out."""
+
+    def __init__(self, logged, stall):
+        super().__init__(logged)
+        self.stall, self.held, self.pings_since = stall, None, 0
+
+    def send(self, text, eol="\n"):
+        if '"getcfg"' in text and self.stall != 0:
+            self.sent.append(json.loads(text))
+            self.held, self.pings_since = json.dumps(self.CFG, separators=(",", ":")), 0
+            return
+        if '"ping"' in text and self.held is not None:
+            self.pings_since += 1
+            if self.stall is not None and self.pings_since >= self.stall:
+                self._rx(self.held)
+                self.held = None
+        super().send(text, eol)
+
+    def expect(self, pattern, timeout=3.0, since=None):
+        import re
+        for attempt in (0, 1):
+            for line in self.lines[since or 0:]:
+                m = re.search(pattern, line)
+                if m:
+                    return m
+            if attempt == 0:
+                time.sleep(timeout)
+        raise resume.ExpectTimeout(f"sbus: no line matching /{pattern}/ within {timeout}s; last lines:")
+
+
+def t_sbus_reply_nudged_by_ping(tmp):
+    """A controller reply stuck in its USB outbox is pinged loose (SbusCtl._reply); a prompt one sends no extra ping,
+    and one that never comes fails with the whole wait in its message."""
+    from hil.sbus import SbusCtl
+    d = FakeStallDev([], stall=0)
+    assert SbusCtl(d).cfg()["e"] == "cfg"
+    assert d.sent == [{"t": "ping"}, {"t": "getcfg"}], d.sent
+    d = FakeStallDev([], stall=1)
+    ctl = SbusCtl(d)
+    ctl.NUDGE_S = 0.02
+    assert ctl.cfg()["e"] == "cfg"
+    assert d.sent == [{"t": "ping"}, {"t": "getcfg"}, {"t": "ping"}], d.sent
+    i = next(k for k, x in enumerate(d.lines) if x.startswith('{"e":"cfg"'))
+    assert d.lines[i + 1].startswith('{"t":"pong"'), "the held reply goes out ahead of the nudge's pong"
+    d = FakeStallDev([], stall=None)
+    ctl = SbusCtl(d)
+    ctl.NUDGE_S = 0.02
+    try:
+        ctl.cfg(timeout=0.1)
+    except resume.ExpectTimeout as e:
+        assert "within 0.1s, pinging every 0.02s" in str(e), str(e)
+    else:
+        raise AssertionError("a reply that never comes must time out")
+    assert d.sent.count({"t": "ping"}) >= 3, d.sent
+
+
 def t_sbus_released_after_cutoff(tmp):
     """F5: a cut-off sbus.* test's held stick, buttons and button-mode trims are released; the cfg is never logged
     with its WiFi passwords."""
@@ -1245,11 +1303,13 @@ def t_redaction_free_text(tmp):
     for text in ("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']", "Password: hunter2",
                  "ESP-NOW Password: hunter2", 'got {"e":"cfg","wifiNets":[{"s":"DomeNet","p":"sekrit99"}]}',
                  "last lines:\n    ?epass,hunter2\n    !WIFI,JOIN,DomeNet,sekrit99",
+                 "last lines:\n    [SBUS] AP mode  SSID: SBUSCtrl  Pass: sekrit99",
                  "probe2: 'MESH JOIN ID=11 OCT2=AB OCT3=CD QTY=9 CHAN=1 CHK=1 TEMP=1 TYPE=HILProbe PASS=hunter2' -> "
                  "ERR already joined"):
         assert not any(s in rt(text) for s in SECRETS), rt(text)
     assert "extra ['?EPASS,<redacted:" in rt("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']")
     assert rt("AP password   : set") == "AP password   : set" and rt("?WIFI,OFF") == "?WIFI,OFF"
+    assert rt("PASS: 3, FAIL: 0") == "PASS: 3, FAIL: 0", "a status count is not a password"
     assert rt("MESH JOIN ... PASS=<pw>") == "MESH JOIN ... PASS=<pw>", "the usage text is left alone"
     # F13: a config part line in a tail - its secrets sit whole in part 1, where the token prefixes still find them
     part = "[MGMT:CFGPART,2]P1A2B,1,2:[VER:6.3.0]?HW,24^?WCB,2^?WIFI,AP,DomeNet,sekrit99^?EPASS,hunter2^?SEQ,SAVE,K,z~"
@@ -3356,7 +3416,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
          t_atomic_write_retry, t_redaction, t_run_busy, t_reidentify_never_guesses, t_identify_port_changed_chars,
          t_tmp_newer_than_main, t_finished_run_resumes_to_done, t_navicore_silent_blocks_on_navicore,
-         t_passing_wire_marked_verified, t_sbus_released_after_cutoff, t_wizard_abort_kills_tree, t_cli_ask_and_handler,
+         t_passing_wire_marked_verified, t_sbus_released_after_cutoff, t_sbus_reply_nudged_by_ping,
+         t_wizard_abort_kills_tree, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
          t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,

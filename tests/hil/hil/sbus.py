@@ -10,11 +10,12 @@ trims). It transmits SBUS-24 every 9 ms with a constant flags byte 0x00 (:110-12
 (NaviCore sbus_reader.h); every SBUS channel it moves, NaviCore re-emits on SBUS OUT (hil/servos.py).
 """
 import json
+import re
 import time
 
 from .checkpoint import redact_text
 from .navicore import entries
-from .serialdev import usb_jtag_reset
+from .serialdev import ExpectTimeout, usb_jtag_reset
 
 SBUS_MIN, SBUS_CENTER, SBUS_MAX = 172, 992, 1811          # SBUSController.ino:113-115
 HEADER, FOOTER = 0x0F, 0x00                               # :110-111; NaviCore sbus_reader.h checks both
@@ -117,6 +118,13 @@ def matrix_button(nc, cfg, ncfg, mode):
 class SbusCtl:
     """The SBUS controller on its USB port (a SerialDevice)."""
 
+    # A reply can sit in the controller's USB outbox until the host sends another byte: HWCDC latches `connected`
+    # false after 100 ms in which the host did not drain, the pump then holds everything queued, and only the RX path
+    # re-arms it (SBUSController.ino serialOutboxPump). The controller's own UI pings every 3 s, which is what lets it
+    # through there. Run 20260922-095341: a getcfg reply came 5.2 s late, 1 ms ahead of the next test's pong; runs
+    # 20260915-085309 and 20260928-005805 failed the same way. So a wait for a reply pings every NUDGE_S.
+    NUDGE_S = 1.0
+
     def __init__(self, dev):
         self.dev = dev
 
@@ -125,6 +133,20 @@ class SbusCtl:
         self.dev.send(json.dumps(obj, separators=(",", ":")))
 
     # ------------------------------------------------------------ replies
+    def _reply(self, pattern, since, timeout):
+        """The first line matching `pattern` at or after mark `since`, pinging every NUDGE_S until it comes (see
+        NUDGE_S). A pong is queued behind the reply in the same outbox, so it can never split the line."""
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            try:
+                return self.dev.expect(pattern, timeout=max(0.0, min(self.NUDGE_S, left)), since=since)
+            except ExpectTimeout as e:
+                if left <= self.NUDGE_S:
+                    raise ExpectTimeout(re.sub(r"within [0-9.e-]+s", f"within {timeout:g}s, pinging every "
+                                               f"{self.NUDGE_S:g}s", str(e), count=1)) from None
+            self.send({"t": "ping"})
+
     def ping_once(self, timeout=3.0):
         """One {"t":"ping"} -> the firmware version from its pong ({"t":"pong","ver":N,"fwver":"..."},
         SBUSController.ino:1048-1071); ExpectTimeout when none comes. A ping also opens the 5 s window in which the
@@ -162,7 +184,7 @@ class SbusCtl:
         try:
             m = self.dev.mark()
             self.send({"t": "getcfg"})
-            return json.loads(self.dev.expect(r'^\{"e":"cfg"', timeout=timeout, since=m).string)
+            return json.loads(self._reply(r'^\{"e":"cfg"', m, timeout).string)
         finally:
             self.dev.log = old
 
@@ -176,7 +198,7 @@ class SbusCtl:
             m = self.dev.mark()
             self.send({"t": "bootlog"})
             try:
-                return json.loads(self.dev.expect(r'^\{"e":"bootlog"', timeout=5, since=m).string)
+                return json.loads(self._reply(r'^\{"e":"bootlog"', m, 5.0).string)
             except AssertionError:
                 if k == tries - 1:
                     raise

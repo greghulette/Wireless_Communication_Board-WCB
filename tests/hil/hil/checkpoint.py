@@ -399,6 +399,10 @@ _SECRET_TEXT = (
                 r"((?!<redacted:)(?:(?!['\"](?:[,\])}]|[\r\n]|$))[^\^\r\n])+)", re.I), _hash_repl(1, 2)),
     (re.compile(r"((?<![A-Za-z])(?:ESP-NOW )?Password:[ \t]*)((?!<redacted:)\S+)", re.I), _hash_repl(1, 2)),
     (re.compile(r"(\"wifiNets\"\s*:\s*)(\[[^\]]*\])"), _hash_repl(1, 2)),
+    # The SBUS controller's boot banner names its AP's password: "[SBUS] AP mode  SSID: <ssid>  Pass: <password>"
+    # (SBUSController.ino:1483), and a failed sbus.* test's "last lines" can quote it. Case-sensitive, so a "PASS: 3"
+    # in a result detail is left alone.
+    (re.compile(r"((?<![A-Za-z])Pass:[ \t]*)((?!<redacted:)\S+)"), _hash_repl(1, 2)),
     # The probe's MESH JOIN quotes it as PASS=<password> (Probe._cmd's error names the whole command). The value ends at
     # whitespace, or at a quote followed by whitespace or the end - the close of "'<cmd>' -> ERR ...". The usage text
     # PASS=<pw> is left alone.
