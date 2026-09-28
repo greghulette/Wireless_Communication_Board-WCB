@@ -1290,8 +1290,13 @@ def monitor_stream(bench):
     equal #L09's."""
     nc = _nc(bench)
     cfg = nc.config()
-    if nc.sbus_dump()["fps"] < SBUS_FULL_FPS:
-        raise Skip("NaviCore sees no full-rate SBUS stream: the frames would carry no channels to compare")
+    # #L09's fps is counted over a window, so a stall just before (nccfg.line_framing_paced keeps NaviCore reading a
+    # 100 KB line for about a second) reads low for a moment: 73 fps in run 20260928-154700. Up to 4 s to recover.
+    deadline = time.monotonic() + 4.0
+    while nc.sbus_dump()["fps"] < SBUS_FULL_FPS:
+        if time.monotonic() >= deadline:
+            raise Skip("NaviCore sees no full-rate SBUS stream: the frames would carry no channels to compare")
+        time.sleep(1.0)
     m = nc.dev.mark()
     nc.ack({"type": "START_MONITOR"})
     time.sleep(2.0)

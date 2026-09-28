@@ -899,6 +899,8 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 
 ### INF9 — NaviCore test hooks (D-NC7)
 
+> **Status 2026-09-28: built, flashed and bench-verified.** NaviCore branch `hil-week` (local, not pushed; D43 in `docs/HIL_WEEK_DECISIONS.md`): `0a66ce0` Greg's working tree taken as-is, `1e15601` the `App SHA256` line (16 hex from `esp_app_get_description()->app_elf_sha256`; `esp_app_get_elf_sha256()` gives at most 9 in core 3.3.4), `703a0e7` the hooks in `navicore_hil.h` (all under `NAVICORE_HIL_HOOKS`; a hook-free build of the same tree differs only in its ELF SHA, build string and checksum), `6925773` docs. `results/builds/navicore-hil1` (`v0.2.0_281426QSEP26`, App SHA256 `529503cd35f1e5e5`) was flashed over `?OTALOCAL` at 15:46 (app0 -> app1, 79 s, no NAK); `ncflash` verified the App SHA. On it the NaviCore suite (`nccfg.*`, `navicore.*`, `sbus.*`) passes but for the five `(should)` tests, and the three hook tests pass (`20260928-154700`, `-155919`). `results/builds/navicore` stays the rollback image. `ncflash build --source` compiles a worktree.
+
 - **(a) Production:** `App SHA256: <16 hex>` from `esp_app_get_elf_sha256()` in `otaPrintStatus`
   (`navicore_ota.h:225-238`) and in the boot banner. It ends the image-identity problem (the DTG only changes on
   commit) and matches the ELF used to decode a crash.

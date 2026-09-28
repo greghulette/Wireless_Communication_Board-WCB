@@ -272,15 +272,16 @@ def _restore_peers(nc, snap, w1, note):
         problems.append(f"NaviCore learned WCB {', '.join(map(str, new))} during the test and keeps it in NVS (not "
                         f"forgotten here: FORGET_PEER is itself an NVS write)")
     lost, fell = _lost_peers(snap, rows, peers)
-    if not lost:
-        if fell:
-            problems.append(f"NaviCore's learned-peer count fell from {before} to {peers}: a peer that is not on the "
-                            f"air now, which a poll cannot bring back")
+    if not lost and not fell:
         return problems
+    # A fallen count with no row lost is a learned peer that was silent when the snapshot was taken (?WDP,DUMP lists
+    # only neighbours heard now): it may still be on the air - W2 between adverts - so it gets the polls too. Failing at
+    # once flagged hook_config_unreadable in run 20260928-154700, whose defaults boot drops a learned peer.
+    which = lost or f"(one not listed when the snapshot was taken: the count fell from {before} to {peers})"
     w1 = _w1_of(w1)
     if w1 is None:
-        return problems + [f"learned peer(s) {lost} lost, and there is no W1 to poll the mesh"]
-    note(f"NaviCore lost learned peer(s) {lost} - two ?WDP,POLL from W1, so it hears each WCB advertise twice")
+        return problems + [f"learned peer(s) {which} lost, and there is no W1 to poll the mesh"]
+    note(f"NaviCore lost learned peer(s) {which} - two ?WDP,POLL from W1, so it hears each WCB advertise twice")
     try:
         for _ in range(2):
             w1.run("?WDP,POLL", timeout=5)
@@ -298,7 +299,7 @@ def _restore_peers(nc, snap, w1, note):
             note("NaviCore re-learned its lost peer(s)")
             return problems
         if time.monotonic() >= deadline:
-            return problems + [f"learned peer(s) {lost or '(not on the air)'} not re-learned after two ?WDP,POLL"]
+            return problems + [f"learned peer(s) {lost or which} not re-learned after two ?WDP,POLL: not on the air now"]
         time.sleep(0.5)
 
 

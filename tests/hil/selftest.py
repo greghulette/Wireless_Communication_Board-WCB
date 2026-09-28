@@ -4034,6 +4034,16 @@ def t_nc_guard_state(tmp):
         msg = str(_raises(gone))
         assert "learned peer(s) [2] not re-learned after two ?WDP,POLL" in msg, msg
         assert G.load_snapshot(b.out_dir)["state"] == "restored", "the config itself came back"
+
+        # A learned peer that is silent when the snapshot is taken (no PEER=2 row, only the count) and lost during the
+        # test is polled for too, and comes back once it is on the air (run 20260928-154700: W2 between its adverts).
+        board.learned.add(2)
+        polls = board.w1_received.count("?WDP,POLL")
+        with G.nc_guard(b) as g2:
+            board.forget(2)
+            board.heard.add(2)
+        assert not g2.problems, g2.problems
+        assert 2 in board.learned and board.w1_received.count("?WDP,POLL") == polls + 2, board.w1_received
         b.close()
     finally:
         _slow_guard(saved)
