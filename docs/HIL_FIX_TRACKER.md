@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#98 filed and FIXED (unverified)**, found by the WCB-WP53 test writer: `?KYBER,LIST`'s copy-paste line for another board used this board's rate and label for the port number (D36). |
 | 2026-09-28 | **#95 and #96 VERIFIED** on `6.2.1_280150RSEP2026` (W1/W2 flashed 06:55): the wave-1 verification run `20260928-064402` (79 tests, 77 pass; the two failures were test bugs, fixed and passing in `20260928-070402`), and #96's late-ACK case in `20260928-070457`. |
 | 2026-09-28 | **#96 filed and FIXED (unverified)**: a learned peer's broadcast ACK that arrives after the configured boards' ACKs resolved the entry now promotes it too, so it is retried from then on. **#97 filed, deferred** (D32): on a full NVS a new mapping or device saves its port flags first and can leave the port blocked with nothing on it after a reboot. Both found by this wave's test writers (WCB-WP19, WP42). |
 | 2026-09-28 | **#95 filed and FIXED (unverified)**, found by the WCB-WP13 test writer: a data-carrying verb spelled in mixed case (`?Mgmt,`, `?Seq,`, `?Wifi,`) with a trailing '?' printed the help page, and `;Seq<key>` was refused. Decided in Greg's absence (`docs/HIL_WEEK_DECISIONS.md` D31). |
@@ -2010,3 +2011,25 @@ device to explain it. `saveSerialMonitorMappings` warns only when the count key 
 
 **Fix (proposed).** Save the mapping or device first and the flags only once it is stored, so a refused save leaves NVS
 as it was before the command; report a failed `_act` write like a failed count.
+
+#### 98. ?KYBER,LIST's copy-paste line for another board re-bauds and relabels that board's Maestro port
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - not yet flashed |
+| **Owner** | `WCB_firmware` (`WCB_Storage.cpp`) |
+| **Effort** | S |
+| **Tests** | `kyber.list_setup_line_matches_local` (should) |
+| **Subsystem** | Kyber / Maestro setup |
+
+**Evidence.** Found writing the WCB-WP53 tests (2026-09-28, from the code).
+
+**Cause.** Two generators print the copy-paste setup line for another board. `?KYBER,LOCAL` (`storeKyberSettings`)
+takes each Maestro's baud from the targets it was given and labels a Maestro port of that board `Maestro <id>`.
+`?KYBER,LIST` (`printKyberList`) builds the same line from `kyberTargets[]`, which hold no baud, so it printed
+`baudRates[targetPort - 1]`, this board's rate for a port of the same number, and this board's label for that port (or
+no label at all). Pasted on the other board, the line re-bauded its Maestro and relabelled its port.
+
+**Fix.** `kyberTargetBaud()` takes a target's baud from the Maestro table's slot for the same id, host and port (the
+rate `?KYBER,LOCAL` stored there), falling back to this board's rate only when no slot matches; the label is `Maestro
+<id>`, as `?KYBER,LOCAL` prints it.

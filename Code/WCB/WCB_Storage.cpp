@@ -2702,6 +2702,19 @@ void loadKyberTargets() {
   
   preferences.end();
 }
+// The baud a Kyber target's Maestro runs at: the Maestro table's slot for the same id, host and port (remoteWCB 0 is
+// this board), else this board's rate for that port number - right only for a local target. printKyberList used this
+// board's rate for every target, so its copy-paste line for another board could re-baud that board's Maestro port
+// (tracker #98). ?KYBER,LOCAL prints the rate it was given, which the table then holds.
+static uint32_t kyberTargetBaud(const KyberTarget &t) {
+  for (int j = 0; j < MAX_MAESTROS_PER_WCB; j++) {
+    const MaestroConfig &m = maestroConfigs[j];
+    if (!m.configured || m.maestroID != t.maestroID || m.serialPort != t.targetPort || m.baudRate == 0) continue;
+    if ((m.remoteWCB ? m.remoteWCB : WCB_Number) == t.targetWCB) return m.baudRate;
+  }
+  return (t.targetPort >= 1 && t.targetPort <= 5) ? (uint32_t)baudRates[t.targetPort - 1] : 0;
+}
+
 void printKyberList() {
   Serial.println("\n--- Kyber Configuration ---");
 
@@ -2742,7 +2755,7 @@ void printKyberList() {
         thisCmd += ",M" + String(kyberTargets[i].maestroID) +
                    ":W" + String(kyberTargets[i].targetWCB) +
                    "S" + String(kyberTargets[i].targetPort) +
-                   ":" + String(baudRates[kyberTargets[i].targetPort - 1]);
+                   ":" + String(kyberTargetBaud(kyberTargets[i]));
       }
     }
     Serial.printf("\nWCB%d (this board):\n%s\n\n", WCB_Number, thisCmd.c_str());
@@ -2776,17 +2789,15 @@ void printKyberList() {
           cmd += ",M" + String(kyberTargets[i].maestroID) +
                  ":W" + String(kyberTargets[i].targetWCB) +
                  "S" + String(kyberTargets[i].targetPort) +
-                 ":" + String(baudRates[kyberTargets[i].targetPort - 1]);
+                 ":" + String(kyberTargetBaud(kyberTargets[i]));
         }
       }
 
-      // Add label commands only for Maestros local to this WCB
+      // Label the Maestros on THAT board 'Maestro <id>', as ?KYBER,LOCAL's line does. This board's own label for the
+      // same port number named some other device (or nothing, and the label was left out) - tracker #98.
       for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
         if (kyberTargets[i].enabled && kyberTargets[i].targetWCB == wcb) {
-          String label = serialPortLabels[kyberTargets[i].targetPort - 1];
-          if (label.length() > 0) {
-            cmd += "^?" + String("SLS") + String(kyberTargets[i].targetPort) + "," + label;
-          }
+          cmd += "^?" + String("SLS") + String(kyberTargets[i].targetPort) + ",Maestro " + String(kyberTargets[i].maestroID);
         }
       }
 
