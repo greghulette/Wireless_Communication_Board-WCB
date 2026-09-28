@@ -231,11 +231,14 @@ def maestro_mesh_fanout_0_9(bench):
 @test("navicore.serial_route_dbg", ";W20,;s<n> from W1 reaches NaviCore's aux transmitter (seen through DBG_SERIAL); S0 and S4 are refused", needs=["navicore", "wcb1"], links=[])
 def serial_route_dbg(bench):
     """The bytes are physically written to NaviCore's S3-S5; a targeted write is never skipped even when a device owns
-    the port (NaviCore.ino:2939-2949), so the test skips when HCR/MP3/DFPlayer/WLED is routed to those ports."""
+    the port (auxPortHasDevice, NaviCore.ino:2946-2956), so the test skips when HCR/MP3/DFPlayer/WLED is routed to those
+    ports. Until 2026-09-28 the check read keys 'mp3', 'dfp' and 'wled', which GET_CONFIG never has, and 'hcrDest',
+    which it always has, so it only ever noted (NAVICORE.md D-NC15); it now reads the routing the firmware reads."""
     nc, w = _nc(bench), usb_wcb(bench)
     cfg = nc.config()
-    if any(cfg.get(k) for k in ("hcrDest", "mp3", "dfp", "wled")):
-        bench.note("NaviCore routes a serial device; its aux port receives HIL text in this test")
+    local = nc.local_devices(cfg)
+    if local:
+        raise Skip(f"NaviCore routes {', '.join(local)} to its own aux ports: this test's text would reach them")
     labels = ["Serial 3", "Serial 4", "Serial 5"] if cfg.get("boardType") == 1 else ["Serial 1", "Serial 2", "Serial 3"]
     tag = nonce()
     sends = [(f";s1HILA{tag}", f"[DISPATCH] Serial TX [{labels[0]}]  HILA{tag}"), (f";S2HILB{tag}", f"[DISPATCH] Serial TX [{labels[1]}]  HILB{tag}"),

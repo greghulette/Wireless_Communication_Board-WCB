@@ -52,3 +52,29 @@ def navicore_wdp(bench):
         row = rows[wcb_id]
         assert row["CLIENT"] == "0", f"WCB{wcb_id} advertised as a client: {row}"
         assert row["FW"] == fw, f"WCB{wcb_id} advertises FW={row['FW']}, WCB1 runs {fw}"
+
+
+@test("navicore.bench_health", "NaviCore sees the SBUS controller at full rate and its local Maestro answers ?MAE,GET: "
+      "a dead input or Maestro FAILS here instead of turning every test that needs it into a skip (read only)",
+      needs=["navicore", "sbus"])
+def bench_health(bench):
+    """NAVICORE.md D-NC15. The SBUS and Maestro tests skip when NaviCore sees no SBUS stream or its local Maestro does
+    not answer (s21 _sbus_setup, NaviCore.usable_slot), which is right for them and let a dead Maestro read as skips in
+    every run until 2026-09-22. This one fails instead. #L09 is NaviCore's own view of the stream (dumpSbusState,
+    NaviCore.ino:2885-2903); ?MAE,GET reads a local slot synchronously off Serial2 (maestroLocalQuery, :713-733) and
+    moves nothing. The Maestro part runs only when bench.json lists a Maestro on NaviCore ("maestros")."""
+    nc = _nc(bench)
+    problems = []
+    st = nc.sbus_dump()
+    if st["fps"] < 100 or st["lost"] != "no":
+        problems.append(f"NaviCore's SBUS input: {st['fps']} fps, lost={st['lost']}, variant {st['variant']}")
+    wants_maestro = any(m.get("where") == "navicore" for m in bench.cfg.get("maestros", []))
+    local = nc.local_slots(nc.config()) if wants_maestro else []
+    if wants_maestro and not local:
+        problems.append("bench.json lists a Maestro on NaviCore, and NaviCore's config has no local Maestro slot")
+    for slot, dev in local:
+        pos = nc.mae_get(slot, 0)
+        if not isinstance(pos, int):
+            problems.append(f"local Maestro slot {slot} (device {dev}) answers ?MAE,GET,{slot},0 with {pos!r}")
+    bench.note(f"SBUS {st['fps']} fps ({st['variant']}); local Maestro slots {[s for s, _ in local] or 'not checked'}")
+    assert not problems, "; ".join(problems)

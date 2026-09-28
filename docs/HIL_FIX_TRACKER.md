@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#101 VERIFIED** (`20260928-080619`). The s12/s13/s16/s17 tests on `6.2.1_280758RSEP2026`: 16 pass in `20260928-080156`, two ERRORs from a missing `nonce` import in s12 (an agent cannot run its tests), fixed and passing. |
 | 2026-09-28 | **#101 filed and FIXED (unverified)**, found by the WCB-WP32 test writer: a USB line the heap could not hold ran its head alone, unverified (D39). |
 | 2026-09-28 | **#98 and #99 VERIFIED** on `6.2.1_280741RSEP2026` (W1/W2 flashed about 07:50): `20260928-074616`, 22 of 22 (#98's test and the 21 s15/s24 tests). |
 | 2026-09-28 | The s14/s22 tests on `6.2.1_280727RSEP2026` (`20260928-073122`): 23 pass, `kyber.local_targets_one_write_per_port` skipped (W1 holds a Maestro 3 proxy), and #98's test failed on the first fix, which never matched a remote slot; corrected for the next image. **#100 filed, deferred** (D38): cleared devices and PWM outputs leave NVS keys (W1 +21 entries). |
@@ -2094,7 +2095,7 @@ namespace, not per run, which is why it can wait; a board short of NVS is where 
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - not yet flashed |
+| **Status** | VERIFIED - `input.usb_line_over_heap_dropped_whole` passes on `6.2.1_280758RSEP2026` (`20260928-080619`): a 20472-byte line with a 16372-byte largest block ran none of its 2046 tokens and printed the new drop line at 16848 characters, the heap back to 18044 bytes free; decided in Greg's absence (D39) |
 | **Owner** | `WCB_firmware` (`WCB.ino`) |
 | **Effort** | S |
 | **Tests** | `input.usb_line_over_heap_dropped_whole` (should) |
