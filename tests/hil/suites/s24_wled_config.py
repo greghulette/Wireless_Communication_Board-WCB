@@ -414,3 +414,226 @@ def soft_port_57600(bench):
                     bad.append("CLEAR did not put S4 back to 9600")
                 _relabel(w, before[1], "S4")
     assert not bad, "; ".join(bad)
+
+
+# ============================================================ WCB-WP39: one-hop cap, clear-all, first host, bare ;L
+@test("wled.one_hop_no_reforward", "A ;L<id> that reaches a board holding only a proxy over the mesh is not forwarded again: W1 and W2 proxy WLED 7 to each other, and W1's ;L7,ON makes one hop, not a ping-pong", needs=["wcb1"], links=[])
+def one_hop_no_reforward(bench):
+    """WCB-WP39 row 1. processWLEDRuntimeCommand (WCB_WLED.cpp:142-159) forwards ;L<id> to a proxy's host only when the
+    command did not arrive over the mesh (lastReceivedViaESPNOW, the one-hop cap), so two proxies pointing at each
+    other cannot bounce a command. Proxies are never advertised (only local WLEDs are, WCB_WDP.cpp:188-199), so nothing
+    here propagates. A remote target's port is ignored (WCB_WLED.cpp:289-309), so both are written W<n>S0, as the
+    chain does (emitWLEDBackup, :405-414)."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _ids_free(bench, 7)
+    bad = []
+    with config_guard(bench, 1, 2), Console(bench, 2) as c2:
+        try:
+            out = _crun(c2, f"?WLED,7:W{me}S0:115200")
+            if not _has(out, f"[WLED] WLED 7: remote on WCB{me} (slot "):
+                raise AssertionError(f"setup: W2's proxy add printed {out}")
+            out = [x.rstrip() for x in w.run("?WLED,7:W2S0:115200")]
+            if not _has(out, "[WLED] WLED 7: remote on WCB2 (slot "):
+                raise AssertionError(f"setup: W1's proxy add printed {out}")
+            w.run("?DEBUG,ETM,ON")
+            _crun(c2, "?DEBUG,ETM,ON")
+            cm, wm = c2.mark(), w.dev.mark()
+            w.send(";L7,ON")
+            time.sleep(3.5)
+            l1 = [x.rstrip() for x in w.dev.since(wm)]
+            l2 = [x.rstrip() for x in c2.lines(cm)]
+            sent = [m.group(1) for m in (re.search(r"\[ETM\] Sent seq (\d+): ;L7,ON$", x) for x in l1) if m]
+            if len(sent) != 1:
+                bad.append(f"W1 sent ;L7,ON {len(sent)} times, expected once")
+            elif not any(re.search(rf"\[ETM\] Received seq {sent[0]} from WCB{me}: ;L7,ON$", x) for x in l2):
+                bad.append("W2 never logged receiving W1's ;L7,ON, so its silence below proves nothing")
+            again = [x for x in l2 if re.search(r"\[ETM\] Sent seq \d+: ;L7", x)]
+            if again:
+                bad.append(f"W2 forwarded the mesh-received ;L7 again: {again}")
+            back = [x for x in l1 if re.search(r"\[ETM\] Received seq \d+ from WCB2: ;L7", x)]
+            if back:
+                bad.append(f"the command came back to W1: {back}")
+            if _has(l2, "[WLED] WLED 7 not configured"):
+                bad.append("W2 did not find its own proxy for WLED 7")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            _crun(c2, "?DEBUG,ETM,OFF")
+            w.run("?WLED,CLEAR,7")
+            _crun(c2, "?WLED,CLEAR,7")
+    assert not bad, "; ".join(bad)
+
+
+@test("wled.clear_all_releases_local", "?WLED,CLEAR releases every local WLED port - WLED 3 on W1 S4 and WLED 4 on S5 go back to 9600, broadcast in and out on, no label, a 'Released' line each - and wipes the proxies, which the chain puts back (WDP off)", needs=["wcb1"])
+def clear_all_releases_local(bench):
+    """WCB-WP39 row 2. clearWLEDConfig (WCB_WLED.cpp:201-214) notes every port a local slot holds, wipes the table and
+    saves it, then releases each port once (wledReleaseLocalPort, :185-197: both flags back on, 9600, empty label,
+    'Released'), and prints its summary line last. W1's WDP is off, so no board learns WLED 3 or 4 meanwhile.
+    docs/WLED_INTEGRATION.md §3 still gives '?WLED,PORT,CLEAR' as the release; the code reads it as a legacy
+    ?WLED,PORT,S<port>:<baud> with no S and no colon, prints the usage line and changes nothing (:244-252), which this
+    test pins before the real clear."""
+    s4 = link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_free(bench, 1, "S4")
+    _require_free(bench, 1, "S5")
+    _ids_free(bench, 3, 4)
+    bad = []
+    with config_guard(bench, 1) as before:
+        if any(re.match(rf"^\?WLED,\d+:W{me}S", t, re.I) for t in before[1]):
+            raise Skip("W1 hosts a WLED of its own, whose port ?WLED,CLEAR would release too")
+        proxies = _wled_tokens(before[1])
+        with _wdp_off(w, before[1]):
+            try:
+                for cmd, want in ((f"?WLED,3:W{me}S4:9600", "[WLED] WLED 3: local S4 at 9600 baud (slot "),
+                                  (f"?WLED,4:W{me}S5:9600", "[WLED] WLED 4: local S5 at 9600 baud (slot ")):
+                    out = [x.rstrip() for x in w.run(cmd)]
+                    if not _has(out, want):
+                        raise AssertionError(f"setup: {cmd} printed {out}")
+                out = [x.rstrip() for x in w.run("?WLED,PORT,CLEAR")]
+                if not _has(out, "[WLED] Legacy usage: ?WLED,PORT,S<port>:<baud>") or _has(out, "Released"):
+                    bad.append(f"?WLED,PORT,CLEAR printed {out}")
+                if len([x for x in w.run("?WLED,STATUS") if x.startswith(("[WLED:id=3,port=4,", "[WLED:id=4,port=5,"))]) != 2:
+                    bad.append("?WLED,PORT,CLEAR changed the local WLEDs")
+                out = [x.rstrip() for x in w.run("?WLED,CLEAR")]
+                bad += _in_order(out, ["Baud rate for Serial4 updated to 9600", "Serial4 label set to: ''",
+                                       "Released S4 (old WLED port)", "Baud rate for Serial5 updated to 9600",
+                                       "Serial5 label set to: ''", "Released S5 (old WLED port)",
+                                       "[WLED] All WLED configuration cleared"], "?WLED,CLEAR")
+                toks = snapshot(bench, 1)
+                bad += [f"after ?WLED,CLEAR the chain lacks {t}" for t in (
+                    "?BAUD,S4,9600", "?BCAST,OUT,S4,ON", "?BCAST,IN,S4,ON",
+                    "?BAUD,S5,9600", "?BCAST,OUT,S5,ON", "?BCAST,IN,S5,ON") if t not in toks]
+                left = _wled_tokens(toks) + [t for t in toks if t.upper().startswith(("?LABEL,S4,", "?LABEL,S5,"))]
+                if left:
+                    bad.append(f"after ?WLED,CLEAR the chain still holds {left}")
+                st = [x.rstrip() for x in w.run("?WLED,STATUS")]
+                if "[WLED:cnt=0]" not in st:
+                    bad.append(f"?WLED,STATUS after the clear: {st}")
+                watch = Watch(s4)
+                out = w.run(";L3,ON")
+                if not _has(out, "[WLED] WLED 3 not configured"):
+                    bad.append(f";L3,ON after the clear printed {out}")
+                time.sleep(0.5)
+                if watch.got(s4):
+                    bad.append(f"the released S4 still got WLED bytes: {watch.got(s4)!r}")
+            finally:
+                for wid in (3, 4):
+                    w.run(f"?WLED,CLEAR,{wid}")      # 'not configured' once the clear worked
+                have = _wled_tokens(snapshot(bench, 1))
+                for t in proxies:                     # in chain order, so the slots come back in the same order
+                    if t not in have:
+                        w.run(t)
+                _relabel(w, before[1], "S4", "S5")
+    assert not bad, "; ".join(bad)
+
+
+@test("wled.autoadd_first_host_wins", "A WLED advert never re-homes a proxy to another host or shadows a local WLED: W1 hosts WLED 3 (19200) and WLED 1 while W2 proxies 3 to WCB11 and hosts its own 1; W2 decodes W1's advert and changes nothing", needs=["wcb1"])
+def autoadd_first_host_wins(bench):
+    """WCB-WP39 row 3. wledAutoAddRemote (WCB_WLED.cpp:425-455): an id that already has a slot is only baud-refreshed,
+    and only when that slot is a proxy to the SAME host, so a local WLED and a proxy to another host are left alone.
+    W1's WLED 3 runs at 19200 against W2's 9600 proxy, so a re-home or a refresh would show. The plan's third case, a
+    full table, cannot be reached: 9 slots, ids 1-9 and one slot per id (WCB_WLED.h:52, WCB_WLED.cpp:43-47), so a full
+    table holds every id and findWLEDSlotByID answers first; the 'no free slot' branch (:444-448) is dead. W2 runs the
+    auto-add only with its WDP and auto-join on (WCB_WDP.cpp:725-750), which the test requires; its [WDPX] dump row
+    proves it decoded both WLEDs. WCB_Client (NaviCore) keeps no WLED slots."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_free(bench, 1, "S4")
+    _require_free(bench, 1, "S5")
+    _ids_free(bench, 3)
+    require_tokens(bench, 2, "?WLED,1:W2S2:115200")
+    t1, t2 = bench.config_tokens(1), bench.config_tokens(2)
+    if "?WDP,OFF" in t1 or "?WDP,OFF" in t2 or "?WDP,AUTOJOIN,OFF" in t2:
+        raise Skip("W1's or W2's WDP is off, or W2's auto-join")
+    if any(re.match(rf"^\?WLED,1:W{me}S[1-5]", t, re.I) for t in t1):
+        raise Skip("W1 already hosts WLED 1")
+    bad = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        proxy1 = next((t for t in _wled_tokens(before[1]) if re.match(r"^\?WLED,1:W\d+S", t, re.I)), None)
+        w1_hosts = False
+        try:
+            out = _crun(c2, "?WLED,3:W11S0:9600")
+            if not _has(out, "[WLED] WLED 3: remote on WCB11 (slot "):
+                raise AssertionError(f"setup: W2's proxy add printed {out}")
+            cm = c2.mark()
+            w1_hosts = True
+            for cmd, want in ((f"?WLED,3:W{me}S4:19200", "[WLED] WLED 3: local S4 at 19200 baud (slot "),
+                              (f"?WLED,1:W{me}S5:9600", "[WLED] WLED 1: local S5 at 9600 baud (slot ")):
+                out = [x.rstrip() for x in w.run(cmd)]
+                if not _has(out, want):
+                    raise AssertionError(f"setup: {cmd} printed {out}")
+            if not _has(w.run("?WDP,POLL"), "[WDP] polled"):
+                bad.append("W1's ?WDP,POLL did not confirm")
+            time.sleep(4.0)
+            l2 = [x.rstrip() for x in c2.lines(cm)]
+            row = next((x for x in _crun(c2, "?WDP,DUMP", 2.0) if x.startswith(f"[WDPX:N={me},")), "")
+            m = re.search(r"WL=([^,\]]*)", row)
+            heard = set(m.group(1).split(".")) if m else set()
+            if not {"3@19200", "1@9600"} <= heard:
+                bad.append(f"W2 has not decoded W1's advert with both WLEDs, so its silence proves nothing: {row!r}")
+            noisy = [x for x in l2 if "auto-added remote WLED" in x or "baud updated" in x]
+            if noisy:
+                bad.append(f"W2 acted on W1's WLED advert: {noisy}")
+            toks = snapshot(bench, 2)
+            bad += [f"W2's chain lost {t}" for t in ("?WLED,3:W11S0:9600", "?WLED,1:W2S2:115200") if t not in toks]
+            moved = [t for t in _wled_tokens(toks) if re.match(rf"^\?WLED,[13]:W{me}S", t, re.I)]
+            if moved:
+                bad.append(f"W2 now routes to W1: {moved}")
+            if "  WLED 1 : local S2 @ 115200 baud" not in _crun(c2, "?WLED,LIST"):
+                bad.append("W2's WLED 1 is no longer local on S2")
+        finally:
+            if w1_hosts:
+                w.run("?WLED,CLEAR,3")                # W1 first: its next advert offers no WLED 3 ...
+                w.run(proxy1 or "?WLED,CLEAR,1")      # ... and WLED 1 goes back to its host, releasing S5
+                _relabel(w, before[1], "S4", "S5")
+                w.run("?WDP,POLL")
+                time.sleep(2.0)                       # ... which W2 decodes before it drops its own proxy for 3
+            _crun(c2, "?WLED,CLEAR,3", 1.0)
+            if "?WLED,1:W2S2:115200" not in snapshot(bench, 2):
+                _crun(c2, "?WLED,1:W2S2:115200", 1.0)   # only if something moved it
+    assert not bad, "; ".join(bad)
+
+
+@test("wled.bare_l_lowest_local", "A bare ;L acts on the lowest-id LOCAL WLED, not on the first slot or a lower-id remote proxy: WLED 4 on W1 S4 added before WLED 3 on S5, and ;L,ON reaches S5 only (WDP off)", needs=["wcb1"])
+def bare_l_lowest_local(bench):
+    """WCB-WP39 row 4. The bare ;L branch (WCB_WLED.cpp:127-140) picks, among local slots only (remoteWCB 0, a port), the
+    one with the lowest id. WLED 4 is added first, so it holds the lower slot (LIST prints slot order) and a
+    first-slot pick would be seen; W1's proxy for WLED 1, a lower id, must be passed over, which W2 S2 (WLED 1's port on
+    W2) shows when it is wired."""
+    s4, s5 = link(bench, 1, "S4"), link(bench, 1, "S5")
+    w2s2 = bench.links.get(2, "S2")
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_free(bench, 1, "S4")
+    _require_free(bench, 1, "S5")
+    _ids_free(bench, 3, 4)
+    bad = []
+    with config_guard(bench, 1) as before:
+        with _wdp_off(w, before[1]):
+            try:
+                for cmd, want in ((f"?WLED,4:W{me}S4:9600", "[WLED] WLED 4: local S4 at 9600 baud (slot "),
+                                  (f"?WLED,3:W{me}S5:9600", "[WLED] WLED 3: local S5 at 9600 baud (slot ")):
+                    out = [x.rstrip() for x in w.run(cmd)]
+                    if not _has(out, want):
+                        raise AssertionError(f"setup: {cmd} printed {out}")
+                lst = [x.rstrip() for x in w.run("?WLED,LIST")]
+                rows = [x for x in lst if x in ("  WLED 4 : local S4 @ 9600 baud", "  WLED 3 : local S5 @ 9600 baud")]
+                if rows != ["  WLED 4 : local S4 @ 9600 baud", "  WLED 3 : local S5 @ 9600 baud"]:
+                    raise AssertionError(f"setup: WLED 4 is not in the lower slot, so lowest id and first slot agree: {lst}")
+                watch = Watch(s4, s5, w2s2)
+                w.send(";L,ON")
+                try:
+                    watch.expect(s5, ON, timeout=2)
+                except AssertionError:
+                    bad.append(f"bare ;L,ON did not reach WLED 3 on S5: {watch.got(s5)!r}")
+                time.sleep(0.8)
+                if watch.got(s4):
+                    bad.append(f"bare ;L,ON reached WLED 4 on S4 (the first slot): {watch.got(s4)!r}")
+                if w2s2 is not None and watch.got(w2s2):
+                    bad.append(f"bare ;L,ON went to a remote proxy (W2 S2 got {watch.got(w2s2)!r})")
+            finally:
+                for wid in (3, 4):
+                    w.run(f"?WLED,CLEAR,{wid}")
+                _relabel(w, before[1], "S4", "S5")
+    assert not bad, "; ".join(bad)

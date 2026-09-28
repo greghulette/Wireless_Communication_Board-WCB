@@ -19,8 +19,11 @@ import re
 import time
 from contextlib import contextmanager
 
+from hil.navicore import DBG_MAESTRO, NaviCore
 from hil.runner import Skip, test
-from suites.common import Console, Watch, config_guard, link, marker, nonce, require_tokens, snapshot, token, usb_wcb
+from suites.common import (NOISE, Console, Watch, config_guard, link, marker, nonce, probe_in_mesh, require_tokens,
+                           snapshot, token, usb_wcb)
+from suites.s14_pwm import _no_pwm, _pwm_reboot
 from suites.s22_maestro_kyber import _wdp_off
 
 LEARNED = {"HCR": ("HCR", "H"), "MP3": ("MP3", "A"), "DFP": ("DFPlayer", "D")}
@@ -1539,4 +1542,955 @@ def maestro_port_refused(bench):
                 # A WLED labels its port 'WLED <id>' and its CLEAR empties the label (s24 pins both), so S2's own
                 # label goes back by hand.
                 w.run(token(before[1], "?LABEL,S2,") or "?LABEL,CLEAR,S2")
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ capability routing (WCB-WP26 rows 1-2)
+CAP_HCR, CAP_MP3, CAP_DFP = 0x0001, 0x0002, 0x0100   # WDP_CAP_* (WCB_WDP.h:44-52)
+# The old MgmtRelay's id. No bench device or test ever transmits as it (common.FORBIDDEN_MESH_IDS), so W1 has never
+# heard it since its boot - unlike 3-18, which the s05/s18/s19/s21/s22 probe clients all take at some point of a run.
+NEVER_HEARD = 19
+PIN_ID = 7              # the probe's client id in route.pin_dead_fails_over; it only listens (the MESH_IDS rule, s19)
+
+
+def _wdp_row(w, n):
+    return next((x for x in w.run("?WDP,DUMP", timeout=8) if x.startswith(f"[WDP:N={n},")), None)
+
+
+def _cap_bits(w, n):
+    """W<n>'s capability bitmap in W1's WDP table, or None when W1 has no row for it."""
+    m = re.search(r"CAP=([0-9A-Fa-f]+)", _wdp_row(w, n) or "")
+    return int(m.group(1), 16) if m else None
+
+
+def _await_cap(w, n, bit, present, timeout=12.0):
+    """Wait until W1's WDP row for W<n> does (present) or does not advertise `bit`, with ?WDP,POLL between reads (W<n>
+    answers the solicit with an advert). -> whether it got there."""
+    deadline = time.monotonic() + timeout
+    while True:
+        cap = _cap_bits(w, n)
+        if cap is not None and bool(cap & bit) == present:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        w.run("?WDP,POLL")
+        time.sleep(1.5)
+
+
+def _routes(lines):
+    return [x.rstrip() for x in lines if x.startswith("[ROUTE]")]
+
+
+def _in_order_sub(lines, wanted):
+    """Like _in_order, but each wanted text only has to be IN its line, so the ✓ / ⚠️ prefixes need not match byte for
+    byte; returns the first one missing."""
+    i = 0
+    for x in lines:
+        if i < len(wanted) and wanted[i] in x:
+            i += 1
+    return None if i == len(wanted) else wanted[i]
+
+
+def _wait_mesh_rx(probe, since, sender, text, timeout=3.0):
+    """The first command the probe (a mesh client) received from W<sender> starting with `text`, or None."""
+    deadline = time.monotonic() + timeout
+    while True:
+        hit = next((x for s, x in probe.mesh_received(since) if s == sender and x.startswith(text)), None)
+        if hit is not None or time.monotonic() >= deadline:
+            return hit
+        time.sleep(0.1)
+
+
+@test("route.pin_never_heard_honoured", "A capability pinned to a board W1 has not heard since its boot (WCB19) is honoured: ;H,MUSE goes there, not to W2, the live HCR owner", needs=["wcb1"], links=["W2S4"])
+def pin_never_heard_honoured(bench):
+    """WCB-WP26 row 1, case (a). routeStoredOrCap (WCB.ino:7725-7743) fails over only when there is no pin, or the pin
+    is 'genuinely dead': heard this session (wcbPeerEverSeen, :9004-9007; lastSeenMs is never reset) and offline now
+    (wcbPeerOnline, :8985-8997). A pin not heard since boot is honoured even while another board advertises the
+    capability, so an operator's pin survives the boot window. The plan's id 7 does not work for this case in a full
+    run: probe clients take 7 earlier (s05 CLIENT_IDS, s19 MESH_IDS), and a board W1 has heard once is dead, not
+    unheard. WCB19 is never used (NEVER_HEARD)."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    if _wdp_row(w, NEVER_HEARD):
+        raise Skip(f"WCB{NEVER_HEARD} is in W1's WDP table, so W1 has heard it")
+    if any(re.match(rf"^  WCB{NEVER_HEARD}: ", x) for x in w.config_lines()):
+        raise Skip(f"WCB{NEVER_HEARD} is one of W1's peers")
+    problems = []
+    with _hcr_w2(bench):
+        try:
+            if not _await_cap(w, 2, CAP_HCR, True):
+                raise AssertionError("setup: W1 never saw W2 advertise its HCR, so no live owner competes with the pin")
+            out = [x.rstrip() for x in w.run(f"?HCR,REMOTE,W{NEVER_HEARD}")]
+            if not _has(out, f"[HCR] Routing ;H to WCB{NEVER_HEARD}"):
+                raise AssertionError(f"setup: ?HCR,REMOTE,W{NEVER_HEARD} printed {out}")
+            w.run("?DEBUG,ETM,ON")
+            sm, wm = s4.mark(), w.dev.mark()
+            w.send(";H,MUSE")
+            time.sleep(1.5)
+            routes = _routes(w.dev.since(wm))
+            if routes != [f"[ROUTE] ;H,MUSE -> host WCB{NEVER_HEARD}"]:
+                problems.append(f"W1 routed {routes} (WCB2 would mean the unheard pin was taken for a dead one)")
+            if s4.received(sm):
+                problems.append(f"W2, the live owner, got it anyway: {s4.received(sm)!r}")
+            if not _has(w.run("?HCR,LIST"), f"  Routes ;H to WCB{NEVER_HEARD} (remote host)"):
+                problems.append("?HCR,LIST does not show the pin")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?HCR,REMOTE,W2")
+    assert not problems, "; ".join(problems)
+
+
+@test("route.pin_dead_fails_over", "A pin W1 has heard and then lost fails over to W2, the live HCR owner, and the stored route is not rewritten; with no live owner left the dead pin stays the target; while the pinned client is alive it gets the command (probe as client 7, ~50 s)", needs=["wcb1", "probe1"], links=["W2S4"])
+def pin_dead_fails_over(bench):
+    """WCB-WP26 row 1, cases (b) and (c), plus the live pin. routeStoredOrCap (WCB.ino:7725-7743): a pin that is heard
+    and online is honoured; once it has been heard and is offline (pinGenuinelyDead, :7733) wdpCapOwner (WCB_WDP.cpp:
+    458-468) picks the lowest live owner, and with none the stored host stays the best-effort target (:7734-7738).
+    Neither case writes hcrConfig.remoteWCB. The pin is the probe as a temporary client: W1 adopts it (addTemporaryPeer
+    stamps lastSeenMs, WCB.ino:9086-9091) and marks it online on its heartbeat. The plan waits out the ~50 s eviction;
+    probe_in_mesh's ?WDP,FORGET does the same at once (removeActivePeer -> boardMarkOffline, :9101-9129, which keeps
+    lastSeenMs), so the pin is dead as soon as the probe has left. W1's route is pinned by hand before, so W2's HCR
+    advert changes nothing (hcrAutoAddRemote is first-host-wins, WCB_HCR.cpp:1021-1029)."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?HCR,REMOTE,W2")
+    _require_free(bench, 2, "S4")
+    if _device_tokens(bench, 2):
+        raise Skip(f"W2 already has HCR/MP3/DFP config: {_device_tokens(bench, 2)}")
+    if "?WDP,AUTOJOIN,OFF" in bench.config_tokens(1):
+        raise Skip("W1's auto-join is off, so it would never adopt the probe")
+    if _wdp_row(w, PIN_ID):
+        raise Skip(f"mesh id {PIN_ID} is already in W1's WDP table")
+    problems = []
+    alive = {}
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        hosted = False
+        try:
+            c2.expect(r"\[HCR\] Poll interval = 0s", since=c2.send("?HCR,POLL,OFF"))
+            m = c2.send("?HCR,PORT,S4:9600")
+            hosted = True
+            c2.expect(r"\[HCR\] Configured on S4 at 9600 baud", since=m)
+            if not _await_cap(w, 2, CAP_HCR, True):
+                raise AssertionError("setup: W1 never saw W2 advertise its HCR")
+            out = [x.rstrip() for x in w.run(f"?HCR,REMOTE,W{PIN_ID}")]
+            if not _has(out, f"[HCR] Routing ;H to WCB{PIN_ID}"):
+                raise AssertionError(f"setup: ?HCR,REMOTE,W{PIN_ID} printed {out}")
+            w.run("?DEBUG,ETM,ON")
+            wm = w.dev.mark()
+            with probe_in_mesh(bench, "probe1", PIN_ID) as probe:
+                w.dev.expect(rf"\[WDP\] temporarily joined WCB{PIN_ID} ", timeout=15, since=wm)
+                w.dev.expect(rf"\[ETM\] WCB{PIN_ID} came ONLINE", timeout=25, since=wm)
+                pm, sm, rm = probe.dev.mark(), s4.mark(), w.dev.mark()
+                w.send(";H,MUSE")
+                alive["rx"] = _wait_mesh_rx(probe, pm, bench.usb_wcb_number(), ";H,MUSE", timeout=3.0)
+                time.sleep(0.5)
+                alive["routes"], alive["s4"] = _routes(w.dev.since(rm)), s4.received(sm)
+            # Left and forgotten on every WCB: W1 has marked the client offline and keeps its lastSeenMs.
+            sm, rm = s4.mark(), w.dev.mark()
+            w.send(";H,MUSE")
+            try:
+                s4.expect(_lf("<MM>"), timeout=3, since=sm)
+            except AssertionError:
+                problems.append(f"the dead pin did not fail over to W2: W2 S4 got {s4.received(sm)!r}")
+            time.sleep(0.3)
+            routes = _routes(w.dev.since(rm))
+            if routes != ["[ROUTE] ;H,MUSE -> host WCB2"]:
+                problems.append(f"dead pin, live owner: W1 routed {routes}")
+            if f"?HCR,REMOTE,W{PIN_ID}" not in snapshot(bench, 1):
+                problems.append("the failover rewrote W1's stored route")
+            m = c2.send("?HCR,CLEAR")
+            c2.expect(r"  ✓ Released S4 \(old HCR port\)", since=m)
+            hosted = False
+            _relabel(c2, before[2], "S4")
+            if not _await_cap(w, 2, CAP_HCR, False):
+                problems.append("W1 still sees W2 advertise an HCR after its CLEAR")
+            sm, rm = s4.mark(), w.dev.mark()
+            w.send(";H,MUSE")
+            time.sleep(1.5)
+            routes = _routes(w.dev.since(rm))
+            if routes != [f"[ROUTE] ;H,MUSE -> host WCB{PIN_ID}"]:
+                problems.append(f"dead pin, no live owner: W1 routed {routes} (the pin should stay the target)")
+            if s4.received(sm):
+                problems.append(f"bytes on W2 S4 with no HCR there: {s4.received(sm)!r}")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            if hosted:
+                m = c2.send("?HCR,CLEAR")
+                c2.expect(r"  ✓ Released S4 \(old HCR port\)", since=m)
+                _relabel(c2, before[2], "S4")
+            w.run("?HCR,REMOTE,W2")
+    if alive.get("rx") is None:
+        problems.append(f"the pinned client, alive, never received ;H,MUSE (W1 routed {alive.get('routes')})")
+    if alive and alive.get("routes") != [f"[ROUTE] ;H,MUSE -> host WCB{PIN_ID}"]:
+        problems.append(f"live pin: W1 routed {alive.get('routes')}")
+    if alive.get("s4"):
+        problems.append(f"live pin: W2 S4 got {alive['s4']!r}")
+    assert not problems, "; ".join(problems)
+
+
+@test("route.offline_owner_skipped", "With no pin and auto-join off, ;H,MUSE goes to W2, the live HCR owner; once W1 has marked W2 offline (W2's ETM off for about a minute) it runs locally ('Not configured') instead of going to W2", needs=["wcb1", "wcb2"], links=["W2S4"])
+def offline_owner_skipped(bench):
+    """WCB-WP26 row 1, case (d). wdpCapOwner (WCB_WDP.cpp:458-468) skips an owner that is not wcbPeerOnline, because
+    WDP's 180 s TTL outlives the ETM offline window: W1's WDP row still says W2 hosts the HCR, and routing there would
+    lose the trigger. With no owner left and no pin, routeStoredOrCap runs the command locally (WCB.ino:7734-7738).
+    The plan deafens W2 with a ?MAC,3 flip; this week's bench rules forbid touching MAC octets, so W2's ETM goes off on
+    its own USB console instead: it then sends no heartbeat (processETMHeartbeats, WCB.ino:1361-1362) and W1 drops its
+    non-ETM frames before they refresh presence (:5194-5221, :5277-5302), so W1 marks W2 offline after
+    (HB+1)*MISS seconds (:1382). W1's auto-join is off and its route cleared, as in route.live_election_autojoin_off."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?HCR,REMOTE,W2", "?ETM,ON")
+    require_tokens(bench, 2, "?ETM,ON")
+    if "?WDP,AUTOJOIN,OFF" in bench.config_tokens(1):
+        raise Skip("W1 already has auto-join off")
+    _require_free(bench, 2, "S4")
+    if _device_tokens(bench, 2):
+        raise Skip(f"W2 already has HCR/MP3/DFP config: {_device_tokens(bench, 2)}")
+
+    def etm_value(wcb, key, default):
+        t = token(bench.config_tokens(wcb), f"?ETM,{key},")
+        return int(t.split(",")[2]) if t and t.split(",")[2].isdigit() else default
+
+    window = (etm_value(1, "HB", 10) + 1) * etm_value(1, "MISS", 5)
+    if window > 120:
+        raise Skip(f"W1's offline window is {window} s")
+    hb2 = etm_value(2, "HB", 10)
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        if c2.remote:
+            raise Skip("W2's ETM goes off, so its console must be its own USB port")
+        hosted = etm_off = False
+        try:
+            if not _has(w.run("?WDP,AUTOJOIN,OFF"), "[WDP] auto-join disabled"):
+                raise AssertionError("setup: ?WDP,AUTOJOIN,OFF did not confirm")
+            if not _has(w.run("?HCR,REMOTE,OFF"), "[HCR] Remote routing cleared"):
+                raise AssertionError("setup: ?HCR,REMOTE,OFF did not confirm")
+            c2.expect(r"\[HCR\] Poll interval = 0s", since=c2.send("?HCR,POLL,OFF"))
+            m = c2.send("?HCR,PORT,S4:9600")
+            hosted = True
+            c2.expect(r"\[HCR\] Configured on S4 at 9600 baud", since=m)
+            if not _await_cap(w, 2, CAP_HCR, True):
+                raise AssertionError("setup: W1 never saw W2 advertise its HCR")
+            w.run("?DEBUG,ETM,ON")
+            sm, rm = s4.mark(), w.dev.mark()
+            w.send(";H,MUSE")
+            try:
+                s4.expect(_lf("<MM>"), timeout=3, since=sm)
+            except AssertionError:
+                problems.append("control: with W2 online the live election did not reach W2 S4")
+            time.sleep(0.3)
+            if _routes(w.dev.since(rm)) != ["[ROUTE] ;H,MUSE -> host WCB2"]:
+                problems.append(f"control: W1 routed {_routes(w.dev.since(rm))}")
+            w.run("?DEBUG,ETM,OFF")
+            wm = w.dev.mark()
+            out = _run(c2, "?ETM,OFF")
+            if not _has(out, "ETM disabled"):
+                raise AssertionError(f"setup: W2's ?ETM,OFF printed {out}")
+            etm_off = True
+            w.dev.expect(r"\[ETM\] WCB2 went OFFLINE", timeout=window + 15, since=wm)
+            cap = _cap_bits(w, 2)
+            if cap is None or not cap & CAP_HCR:
+                raise AssertionError(f"setup: W1's WDP row for W2 no longer holds the HCR (CAP={cap}), so the gate is not "
+                                     "what would send ;H local")
+            w.run("?DEBUG,ETM,ON")
+            wm = w.dev.mark()
+            w.send(";H,MUSE")
+            time.sleep(1.5)
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            if not _has(lines, "[HCR] Not configured"):
+                problems.append("with W2 offline, ;H,MUSE did not run locally on W1 ('[HCR] Not configured')")
+            if _routes(lines):
+                problems.append(f"W1 still routed to the offline owner: {_routes(lines)}")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            if etm_off:
+                wm = w.dev.mark()
+                if not _has(_run(c2, "?ETM,ON"), "ETM enabled"):
+                    problems.append("W2's ?ETM,ON did not confirm")
+                try:
+                    w.dev.expect(r"\[ETM\] WCB2 came ONLINE", timeout=hb2 + 12, since=wm)
+                except AssertionError:
+                    problems.append("W2 did not come back online on W1 after ?ETM,ON")
+            if hosted:
+                m = c2.send("?HCR,CLEAR")
+                c2.expect(r"  ✓ Released S4 \(old HCR port\)", since=m)
+                _relabel(c2, before[2], "S4")
+            w.run("?HCR,REMOTE,W2")      # before auto-join returns, so no advert can race it
+            w.run("?WDP,AUTOJOIN,ON")
+    assert not problems, "; ".join(problems)
+
+
+@test("route.controller_pin", "A capability pinned to the controller (?HCR,REMOTE,W20) is honoured while NaviCore heartbeats: ;H,MUSE goes to WCB20, which ACKs and logs it, not to W2, the live HCR owner", needs=["wcb1", "navicore"], links=["W2S4"])
+def controller_pin(bench):
+    """WCB-WP26 row 2. The controller is never in wcbPeerActive[] (addActivePeer refuses it), so before wcbPeerOnline
+    counted the special peer (WCB.ino:8985-8997) a live controller read as unreachable, a pin to it was 'genuinely
+    dead' on every trigger (:7733) and was re-elected to the other owner. The ETM unicast to it expects its ACK
+    (etmAddToPendingTable's special-peer slot, :1527-1545). NaviCore does not act on ;H: onWCBCommand logs it as an
+    unhandled command under DBG_MAESTRO (NaviCore.ino, '[WCB RX] from WCB<n>: ...'); its one lone debug line is
+    released with #L12 (docs/HIL_TESTING.md §5)."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    require_tokens(bench, 1, "?CONTROLLER,ON,20")
+    if not w.etm_board_stats().get(20, {}).get("online"):
+        raise Skip("NaviCore (WCB20) is not online on W1")
+    nc = NaviCore(bench.dev("navicore"))
+    problems = []
+    with _hcr_w2(bench):
+        try:
+            if not _await_cap(w, 2, CAP_HCR, True):
+                raise AssertionError("setup: W1 never saw W2 advertise its HCR, so no live owner competes with the pin")
+            out = [x.rstrip() for x in w.run("?HCR,REMOTE,W20")]
+            if not _has(out, "[HCR] Routing ;H to WCB20"):
+                raise AssertionError(f"setup: ?HCR,REMOTE,W20 printed {out}")
+            w.run("?DEBUG,ETM,ON")
+            with nc.debug(DBG_MAESTRO):
+                nm, sm, wm = nc.dev.mark(), s4.mark(), w.dev.mark()
+                w.send(";H,MUSE")
+                time.sleep(2.0)
+                nc.mode()
+                ncl = [x.rstrip() for x in nc.dev.since(nm)]
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            if _routes(lines) != ["[ROUTE] ;H,MUSE -> host WCB20"]:
+                problems.append(f"W1 routed {_routes(lines)}")
+            seq = next((m.group(1) for m in (re.search(r"\[ETM\] Sent seq (\d+): ;H,MUSE$", x) for x in lines) if m), None)
+            if seq is None or f"[ETM] ACK received from WCB20 for seq {seq}" not in lines:
+                problems.append(f"no ACK from WCB20 for the ;H,MUSE unicast (seq {seq})")
+            if f"[WCB RX] from WCB{me}: ;H,MUSE" not in ncl:
+                problems.append("NaviCore did not log the inbound ;H,MUSE")
+            if s4.received(sm):
+                problems.append(f"W2, the other owner, got it anyway: {s4.received(sm)!r}")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?HCR,REMOTE,W2")
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ port ownership (WCB-WP26 row 3)
+BLOCKED = {"HCR": "[HCR] S{p} already in use by PWM/Kyber/MP3/WLED/DFP - config blocked",
+           "MP3": "[MP3] S{p} already in use by PWM/Kyber/HCR/WLED/DFP - config blocked",
+           "DFP": "[DFP] S{p} already in use by PWM/Kyber/HCR/MP3/WLED - config blocked",
+           "WLED": "[WLED] S{p} already in use by PWM/Kyber/MP3/HCR/DFP - config blocked"}
+TOOK = {"HCR": "[HCR] Configured on S", "MP3": "[MP3] Configured: S", "DFP": "[DFP] Configured: S",
+        "WLED": "[WLED] WLED 6: local S"}
+
+
+def _claim(kind, port, wcb):
+    """The command that configures `kind` on W<wcb> <port> (WLED id 6)."""
+    return {"HCR": f"?HCR,PORT,{port}:9600", "MP3": f"?MP3,{port}:9600:V20", "DFP": f"?DFP,{port}",
+            "WLED": f"?WLED,6:W{wcb}{port}:9600"}[kind]
+
+
+@contextmanager
+def _w2_wdp_off(c2, tokens):
+    """W2's WDP off for the block (its own console): a device it takes is not advertised, so W1 learns no route."""
+    if "?WDP,OFF" in tokens:
+        raise Skip("W2's WDP is already off, so this test could not tell its own ?WDP,OFF apart from the bench's")
+    if not _has(_run(c2, "?WDP,OFF"), "[WDP] disabled"):
+        raise AssertionError("W2's ?WDP,OFF did not confirm")
+    try:
+        yield
+    finally:
+        _run(c2, "?WDP,ON")
+
+
+def _config_diff(before, after):
+    return f"missing {[t for t in before if t not in after]} / extra {[t for t in after if t not in before]}"
+
+
+@test("devices.port_owner_refusals", "On W2 S4 an HCR refuses an MP3 Trigger, a DFPlayer and a WLED; an MP3 Trigger refuses an HCR, a DFPlayer and a WLED; a DFPlayer refuses an HCR, an MP3 Trigger and a WLED; each refusal prints its 'already in use' line and changes nothing (W2's WDP off)", needs=["wcb1"], links=[])
+def port_owner_refusals(bench):
+    """WCB-WP26 row 3, the device pairs. Each configure path refuses a port another device owns before it touches the
+    port: configureHCR (WCB_HCR.cpp:887-892), configureMP3 (WCB_MP3.cpp:308-313), configureDFP (WCB_DFP.cpp:269-274),
+    configureWLED (WCB_WLED.cpp:333-338). Covered elsewhere: a WLED port refusing the other three
+    (hcr/mp3/dfp.config_rejects on W2 S2), the first half of the DFPlayer pairs (conflict.dfp_port_unguarded) and a
+    local Maestro's port both ways (devices.maestro_port_refused, the plan's BUG-15, fixed). W2's WDP is off, so a
+    device the firmware took by mistake is never advertised and W1 learns no route."""
+    _require_free(bench, 2, "S4")
+    if _device_tokens(bench, 2):
+        raise Skip(f"W2 already has HCR/MP3/DFP config: {_device_tokens(bench, 2)}")
+    if any(t.upper().startswith("?WLED,6:") for t in bench.config_tokens(2)):
+        raise Skip("W2 already has a WLED 6")
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2, _w2_wdp_off(c2, before[2]):
+        try:
+            _run(c2, "?HCR,POLL,OFF")
+            for owner in ("HCR", "MP3", "DFP"):
+                out = _run(c2, _claim(owner, "S4", 2), 1.0)
+                if not _has(out, TOOK[owner] + "4"):
+                    raise AssertionError(f"setup: {_claim(owner, 'S4', 2)} printed {out}")
+                base = snapshot(bench, 2)
+                for kind in ("HCR", "MP3", "DFP", "WLED"):
+                    if kind == owner:
+                        continue
+                    cmd = _claim(kind, "S4", 2)
+                    out = _run(c2, cmd, 1.0)
+                    if not _has(out, BLOCKED[kind].format(p=4)):
+                        problems.append(f"{owner} on S4: {cmd} printed {out}")
+                after = snapshot(bench, 2)
+                if after != base:
+                    problems.append(f"{owner} on S4: the refusals changed W2's config: {_config_diff(base, after)}")
+                _run(c2, f"?{owner},CLEAR", 1.0)
+        finally:
+            _clear_all_w2(c2)
+            _run(c2, "?WLED,CLEAR,6")        # 'not configured' unless a refusal failed
+            _relabel(c2, before[2], "S4")
+    assert not problems, "; ".join(problems)
+
+
+@test("devices.pwm_port_refused", "On W1 a PWM input (S3), a PWM mapping's output (S4) and an output-only PWM port (S5) each refuse an HCR, an MP3 Trigger, a DFPlayer and a WLED ('already in use by PWM/...'), and nothing changes (W1's WDP off; 2 reboots)", needs=["wcb1"],
+      drives=["W1S4", "W1S5"])   # the mapping's output S4 and the output-only S5 are PWM outputs until the clear
+def pwm_port_refused(bench):
+    """WCB-WP26 row 3, a device against PWM. Every device guard starts with isSerialPortPWMOutput ||
+    isSerialPortUsedForPWMInput (WCB_HCR.cpp:887, WCB_MP3.cpp:308, WCB_DFP.cpp:269, WCB_WLED.cpp:333). The output
+    check has two branches, the output-only list and a mapping's local outputs (WCB_PWM.cpp:937-960), so one mapping
+    S3 -> S4 plus ?MAP,PWM,OUT,S5 covers all three owners: one reboot applies them, ?MAP,PWM,CLEAR,ALL's reboot undoes
+    both (clearAllPWMMappings, WCB_PWM.cpp:607-684). On W1, not W2 as the plan has it: the guards are the same code, and
+    W1's WDP is off, so a device the firmware took by mistake is never advertised. The PWM input is held LOW by the
+    probe (s14: never leave one floating)."""
+    s3 = link(bench, 1, "S3")
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _no_pwm(bench, 1)
+    for p in ("S3", "S4", "S5"):
+        _require_free(bench, 1, p)
+    if any(t.upper().startswith("?WLED,6:") for t in bench.config_tokens(1)):
+        raise Skip("W1 already has a WLED 6")
+    problems, taken = [], []
+    with config_guard(bench, 1) as before:
+        with _wdp_off(w, before[1]):
+            pwm = False
+            try:
+                s3.pwm_out(0)
+                out = w.run("?MAP,PWM,OUT,S5")
+                pwm = True
+                if not _has(out, "Serial5 configured as PWM output port"):
+                    raise AssertionError(f"setup: ?MAP,PWM,OUT,S5 printed {out}")
+                m = w.send("?MAP,PWM,S3,S4")
+                _pwm_reboot(w, m)
+                base = snapshot(bench, 1)
+                pwm_toks = [t for t in base if t.upper().startswith("?MAP,PWM")]
+                if "?MAP,PWM,OUT,S5" not in base or not any(t.upper().startswith("?MAP,PWM,S3") for t in base):
+                    raise AssertionError(f"setup: W1's chain holds {pwm_toks}")
+                for port in ("S3", "S4", "S5"):
+                    for kind in ("HCR", "MP3", "DFP", "WLED"):
+                        cmd = _claim(kind, port, me)
+                        out = [x.rstrip() for x in w.run(cmd)]
+                        if _has(out, TOOK[kind]):
+                            taken.append(kind)
+                        if not _has(out, BLOCKED[kind].format(p=port[1])):
+                            problems.append(f"{cmd} on a PWM port printed {out}")
+                after = snapshot(bench, 1)
+                if after != base:
+                    problems.append(f"the refusals changed W1's config: {_config_diff(base, after)}")
+            finally:
+                for kind in dict.fromkeys(taken):          # taken by mistake: undo it while W1's WDP is still off
+                    w.run("?WLED,CLEAR,6" if kind == "WLED" else f"?{kind},CLEAR")
+                if "HCR" in taken and "?HCR,REMOTE,W2" in before[1]:
+                    w.run("?HCR,REMOTE,W2")                 # a local HCR zeroes the route (WCB_HCR.cpp:736)
+                if taken:
+                    for p in ("S3", "S4", "S5"):
+                        w.run(token(before[1], f"?LABEL,{p},") or f"?LABEL,CLEAR,{p}")
+                if pwm:
+                    m = w.send("?MAP,PWM,CLEAR,ALL")
+                    try:
+                        _pwm_reboot(w, m)
+                    except AssertionError as e:
+                        problems.append(f"?MAP,PWM,CLEAR,ALL did not reboot W1: {e}")
+                s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("devices.serial_mapped_port_refused", "(should) A port a serial mapping reads refuses an HCR, an MP3 Trigger and a DFPlayer, and a serial mapping refuses an HCR's port as its input, as both sides refuse PWM: the device owns the port's RX, so the mapping would read nothing (W2's WDP off)", needs=["wcb1"], links=[])
+def serial_mapped_port_refused(bench):
+    """Found while writing WCB-WP26 row 3; not a plan row. processIncomingSerial returns before reading an MP3,
+    DFPlayer or HCR port (WCB.ino:8404-8412), so a mapping whose input is such a port never sees a byte, and neither side
+    checks the other: configureHCR / configureMP3 / configureDFP have no serial-mapping term (WCB_HCR.cpp:887-899,
+    WCB_MP3.cpp:308-320, WCB_DFP.cpp:269-281), and addSerialMonitorMapping refuses only PWM ports as its input
+    (WCB_Storage.cpp:2119-2127). PWM got the rule both ways on 2026-09-27 (serialMapOwnsPort, WCB_PWM.cpp;
+    docs/HIL_WEEK_DECISIONS.md D23), and the same shared port-owner check is what re-scan #15 recommends. A WLED is left
+    out: it only transmits, so a mapping can still read its port. Asserted on behaviour, not wording: whatever the
+    firmware takes is cleared at once, before the next is tried."""
+    _require_free(bench, 2, "S4")
+    if _device_tokens(bench, 2):
+        raise Skip(f"W2 already has HCR/MP3/DFP config: {_device_tokens(bench, 2)}")
+    if any(t.upper().startswith("?MAP,SERIAL,S4") for t in bench.config_tokens(2)):
+        raise Skip("W2 already maps S4")
+    took = {}
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2, _w2_wdp_off(c2, before[2]):
+        mapped = False
+        try:
+            _run(c2, "?HCR,POLL,OFF")
+            out = _run(c2, "?MAP,SERIAL,S4,S0", 1.0)
+            if not _has(out, "Serial mapping set: Serial4"):
+                raise AssertionError(f"setup: ?MAP,SERIAL,S4,S0 printed {out}")
+            mapped = True
+            for kind in ("HCR", "MP3", "DFP"):
+                out = _run(c2, _claim(kind, "S4", 2), 1.0)
+                took[f"{kind} on the mapped S4"] = _has(out, TOOK[kind] + "4")
+                if took[f"{kind} on the mapped S4"]:
+                    _run(c2, f"?{kind},CLEAR", 1.0)
+            _run(c2, "?MAP,SERIAL,CLEAR,S4", 1.0)
+            mapped = False
+            out = _run(c2, "?HCR,PORT,S4:9600", 1.0)
+            if not _has(out, TOOK["HCR"] + "4"):
+                raise AssertionError(f"setup: ?HCR,PORT,S4:9600 on the unmapped S4 printed {out}")
+            out = _run(c2, "?MAP,SERIAL,S4,S0", 1.0)
+            took["a mapping reading the HCR's S4"] = _has(out, "Serial mapping set: Serial4")
+            if took["a mapping reading the HCR's S4"]:
+                _run(c2, "?MAP,SERIAL,CLEAR,S4", 1.0)
+            _run(c2, "?HCR,CLEAR", 1.0)
+        finally:
+            if mapped:
+                _run(c2, "?MAP,SERIAL,CLEAR,S4", 1.0)
+            _clear_all_w2(c2)
+            _relabel(c2, before[2], "S4")
+    bench.note(f"serial mapping against a device port: {took}")
+    wrong = [k for k, v in took.items() if v]
+    assert not wrong, f"accepted: {wrong}"
+
+
+# ============================================================ HCR volume shadow and FN 20/21 (WCB-WP26 rows 4-5)
+def _hcr_vols(c2):
+    """(vV, vA, vB) and the rx count from ?HCR,STATUS, or (None, None)."""
+    line = next((x for x in _run(c2, "?HCR,STATUS", 1.0) if x.startswith("[HCR:cfg=")), "")
+    m = re.search(r"vV=(-?\d+),vA=(-?\d+),vB=(-?\d+),rx=(\d+)", line)
+    return (tuple(int(v) for v in m.groups()[:3]), int(m.group(4))) if m else (None, None)
+
+
+def _vol_replies(v):
+    return f"<QVV,{v}>\n<QVA,{v}>\n<QVB,{v}>\n".encode()
+
+
+@test("hcr.volume_shadow_seed_and_cache", "The HCR volume shadow: two agreeing QVx replies seed it (VOLUP then writes 75, not 55); a commanded volume shows in STATUS at once and STATUS transmits nothing; a reply already in flight after a write neither overwrites nor confirms it; after a fresh bind, disagreeing replies seed nothing", needs=["wcb1"], links=["W2S4"])
+def volume_shadow_seed_and_cache(bench):
+    """WCB-WP26 row 4. WcbHCR::onFrame (WCB_HCR.cpp:201-235) seeds HcrCodec's shadow from a QVx reply only while
+    _hcrSeedOk (re-armed by hcrPoll when no query is in flight, :187-196; cleared by every volume write, :106-109),
+    never mid-fade, and only when the channel's previous reply agreed (_hcrVolCand). A channel written since the last
+    clean poll (_hcrVolCopied) keeps showing the commanded value and its reply is not counted (:217-224). ?HCR,REFRESH
+    runs the same hcrPoll (:751-754) as the timed poll, one poll per command, so each reply set is placed exactly; the
+    timed poll's seeding shows in hcr.config_softport's cadence switch. beginHCR resets the seeding state (:273-282)
+    but not the codec's shadow (a module static, :99), so the plan's 'VOLUP gives 55' after a fresh bind holds only
+    from a shadow of 50: VOL,50 goes first."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    probe = s4.probe
+    problems = []
+
+    def refresh(c2, label):
+        pm = s4.mark()
+        out = _run(c2, "?HCR,REFRESH", 1.0)
+        if not _has(out, "[HCR] Refresh requested") or not probe.rule_hits(1, pm):
+            problems.append(f"{label}: REFRESH printed {out}, reply rule hits {probe.rule_hits(1, pm)}")
+
+    with _hcr_w2(bench) as c2:
+        try:
+            problems += _steps(s4, w.send, [(";H,VOL,50", _vol3(50))])
+            s4.rule(1, POLL_HEX, _vol_replies(70), delay_ms=50)
+            for k in range(3):
+                refresh(c2, f"seeding poll {k + 1}")
+            probe.rule_del(1)
+            problems += _steps(s4, w.send, [(";H,VOLUP", _vol3(75)), (";H,VOL,A,20", _lf("<PVA20>"))])
+            pm = s4.mark()
+            vols, rx0 = _hcr_vols(c2)
+            time.sleep(0.3)
+            if vols != (75, 20, 75):
+                problems.append(f"STATUS after VOLUP and VOL,A,20 shows vV/vA/vB {vols}, expected (75, 20, 75)")
+            if s4.received(pm):
+                problems.append(f"STATUS transmitted {s4.received(pm)!r}")
+            s4.send(b"<QVA,70>\n")        # a reply that was already on the wire when VOL,A,20 went out
+            time.sleep(0.6)
+            vols, rx1 = _hcr_vols(c2)
+            if rx0 is None or rx1 != rx0 + 1:
+                problems.append(f"the injected <QVA,70> was not parsed (rx {rx0} -> {rx1})")
+            if vols is None or vols[1] != 20:
+                problems.append(f"the stale reply replaced the commanded vA=20: {vols}")
+            problems += _steps(s4, w.send, [(";H,VOLUP,A", _lf("<PVA25>"))])
+            # A fresh bind with replies that disagree (70, then 71): nothing is seeded.
+            problems += _steps(s4, w.send, [(";H,VOL,50", _vol3(50))])
+            m = c2.send("?HCR,PORT,S4:9600")
+            c2.expect(r"\[HCR\] Configured on S4 at 9600 baud", since=m)
+            s4.rule(1, POLL_HEX, _vol_replies(70), delay_ms=50)
+            refresh(c2, "fresh bind, poll 1")
+            s4.rule(1, POLL_HEX, _vol_replies(71), delay_ms=50)
+            refresh(c2, "fresh bind, poll 2")
+            probe.rule_del(1)
+            problems += _steps(s4, w.send, [(";H,VOLUP", _vol3(55))])
+        finally:
+            probe.rule_del(1)
+    assert not problems, "; ".join(problems)
+
+
+@test("hcr.fn_graceful_stops", ";H,FN,20 gives <PSG> and ;H,FN,21 gives <PSG>, <PSA,QPA>, <PSB,QPB>, whatever their parameters (the shared WcbCmd HcrCodec, which NaviCore also compiles)", needs=["wcb1"], links=["W2S4"])
+def fn_graceful_stops(bench):
+    """WCB-WP26 row 5. The FN branch (WCB_HCR.cpp:429-467) hands every fn but 14 to HcrCodec::emit; normalize()
+    accepts 20 and 21 with any chan/track (WcbCmd WcbHcr.cpp:16-18) and format() emits them (:76-85). STOP,GRACEFUL and
+    STOPEMOTE,GRACEFUL reach the same bytes through the HCR library (hcr.cpp:482-499), so these rows pin the codec
+    NaviCore sends with. The comment above the branch (WCB_HCR.cpp:439-444) still says 'fns 2-13, 16, 17, 18, 19'."""
+    graceful_all = _lf("<PSG>", "<PSA,QPA>", "<PSB,QPB>")
+    bad, errs, lines = _routed_verbs(bench, [
+        (";H,FN,20", _lf("<PSG>")), (";H,FN,21", graceful_all),
+        (";H,FN,20,3,99", _lf("<PSG>")), (";H,FN,21,2,9999", graceful_all),
+    ])
+    assert not bad, "; ".join(bad)
+    assert not errs, f"RXERR: {errs}"
+    assert not lines, f"W2 printed HCR lines (a rejection?): {lines}"
+
+
+# ============================================================ HCR, MP3 and DFP leftovers (WCB-WP52)
+def _manual_route(bench, kind, cfg, cmd, frame, cap):
+    """WCB-WP52 row 1 for ?MP3 / ?DFP -> problems. A route pinned by hand is stored and listed; CLEAR on a board with
+    no local device keeps it; a host appearing does not override it (auto-join on); a pin to the host carries the verb
+    there; and a pin on the host itself releases its device first."""
+    s5 = link(bench, 2, "S5")
+    name, verb = LEARNED[kind]
+    w = usb_wcb(bench)
+    _require_free(bench, 2, "S5")
+    if _device_tokens(bench, 2) or _device_tokens(bench, 1, "MP3", "DFP"):
+        raise Skip("W1 or W2 already has MP3/DFP config")
+    if "?WDP,AUTOJOIN,OFF" in bench.config_tokens(1):
+        raise Skip("W1's auto-join is off, so it would learn no host whatever its route")
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        hosted = False
+        try:
+            out = [x.rstrip() for x in w.run(f"?{kind},REMOTE,W{NEVER_HEARD}")]
+            if not _has(out, f"[{kind}] Routing ;{verb} to WCB{NEVER_HEARD}"):
+                raise AssertionError(f"?{kind},REMOTE,W{NEVER_HEARD} printed {out}")
+            if f"?{kind},REMOTE,W{NEVER_HEARD}" not in snapshot(bench, 1):
+                problems.append("the pinned route is not in W1's chain")
+            if not _has(w.run(f"?{kind},LIST"), f"  Routes ;{verb} to WCB{NEVER_HEARD} (remote host)"):
+                problems.append(f"?{kind},LIST does not show the pin")
+            out = [x.rstrip() for x in w.run(f"?{kind},CLEAR")]
+            if not (_has(out, f"[{kind}] Local configuration cleared") and
+                    _has(out, f"still routing ;{verb} to WCB{NEVER_HEARD}")) or _has(out, "✓"):
+                problems.append(f"?{kind},CLEAR on a board that only routes printed {out}")
+            wm = w.dev.mark()
+            out = _run(c2, f"?{kind},{cfg}", 1.0)
+            hosted = True
+            if not _has(out, f"[{kind}] Configured: S5 at 9600 baud"):
+                raise AssertionError(f"setup: ?{kind},{cfg} on W2 printed {out}")
+            if not _await_cap(w, 2, cap, True):
+                problems.append(f"W1 never saw W2 advertise its {name}, so the stored route was never tested")
+            time.sleep(1.0)
+            learned = [x for x in w.dev.since(wm) if "host learned" in x]
+            if learned:
+                problems.append(f"auto-learn overrode a stored route: {learned}")
+            if f"?{kind},REMOTE,W{NEVER_HEARD}" not in snapshot(bench, 1):
+                problems.append("W1's stored route changed when W2 started hosting")
+            out = [x.rstrip() for x in w.run(f"?{kind},REMOTE,W2")]
+            if not _has(out, f"[{kind}] Routing ;{verb} to WCB2"):
+                problems.append(f"?{kind},REMOTE,W2 printed {out}")
+            w.run("?DEBUG,ETM,ON")
+            sm, wm = s5.mark(), w.dev.mark()
+            w.send(cmd)
+            try:
+                s5.expect(frame, timeout=3, since=sm)
+            except AssertionError:
+                pass
+            time.sleep(0.3)
+            if s5.received(sm) != frame:
+                problems.append(f"{cmd} put {s5.received(sm)!r} on W2 S5, expected {frame!r}")
+            if _routes(w.dev.since(wm)) != [f"[ROUTE] {cmd} -> host WCB2"]:
+                problems.append(f"W1 routed {_routes(w.dev.since(wm))}")
+            w.run("?DEBUG,ETM,OFF")
+            out = _run(c2, f"?{kind},REMOTE,W1", 1.0)
+            hosted = False
+            miss = _in_order_sub(out, [f"[{kind}] Local configuration cleared", "Re-enabled broadcast output on S5",
+                                       "Re-enabled broadcast input on S5", "Reset S5 baud rate to 9600",
+                                       "Serial5 label set to: ''", f"[{kind}] Routing ;{verb} to WCB1"])
+            if miss:
+                problems.append(f"?{kind},REMOTE,W1 on the host lacks {miss!r} (in order): {out}")
+            toks = snapshot(bench, 2)
+            problems += [f"W2's chain lacks {t}" for t in (f"?{kind},REMOTE,W1", "?BCAST,OUT,S5,ON", "?BCAST,IN,S5,ON")
+                         if t not in toks]
+            if [t for t in toks if t.upper().startswith(f"?{kind},S")]:
+                problems.append("W2 kept its local device after pinning a route")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            if hosted:
+                _run(c2, f"?{kind},CLEAR", 1.0)
+            _run(c2, f"?{kind},REMOTE,OFF")
+            _relabel(c2, before[2], "S5")
+            _unlearn(bench, kind, learner=1)       # W1's route off, and nothing re-learns it
+    return problems
+
+
+@test("mp3.remote_route_manual", "?MP3,REMOTE,W<n> by hand: stored and listed, kept by ?MP3,CLEAR, not overridden when a host appears, carries ;A to the host (W2 S5); on the host it releases the local MP3 Trigger first", needs=["wcb1"], links=["W2S5"])
+def mp3_remote_route_manual(bench):
+    """WCB-WP52 row 1 (MP3). configureMP3's REMOTE branch (WCB_MP3.cpp:211-234) clears a local host first, then stores
+    and saves the route; clearMP3Config keeps it (:145-165); mp3AutoAddRemote never overrides a stored host (:465-473);
+    emitMP3Backup emits it (:398-406); routeStoredOrCap sends ;A there (WCB.ino:7764). The plan unlearns a fixture's
+    route and turns auto-join off first; pinning before W2 hosts needs neither, and auto-join on is what makes 'never
+    overridden' mean something."""
+    problems = _manual_route(bench, "MP3", "S5:9600:V20", ";A,PLAY,5", bytes.fromhex("76147405"), CAP_MP3)
+    assert not problems, "; ".join(problems)
+
+
+@test("dfp.remote_route_manual", "?DFP,REMOTE,W<n> by hand: stored and listed, kept by ?DFP,CLEAR, not overridden when a host appears, carries ;D to the host (the 0x16 STOP frame on W2 S5); on the host it releases the local DFPlayer first", needs=["wcb1"], links=["W2S5"])
+def dfp_remote_route_manual(bench):
+    """WCB-WP52 row 1 (DFP). configureDFP's REMOTE branch (WCB_DFP.cpp:161-184), clearDFPConfig (:107-143),
+    dfpAutoAddRemote (:425-433), emitDFPBackup (:358-366) and routeStoredOrCap's ;D arm (WCB.ino:7766-7768)."""
+    problems = _manual_route(bench, "DFP", "S5", ";D,STOP", _dfp(0x16), CAP_DFP)
+    assert not problems, "; ".join(problems)
+
+
+@test("dfp.onerr_backup_and_clear", "?DFP,ONERR is saved right after ?DFP in the chain; ?DFP,ONERR,CLEAR removes it, and an error frame then recalls nothing", needs=["wcb1"], links=["W2S5", "W2S3"])
+def dfp_onerr_backup_and_clear(bench):
+    """WCB-WP52 row 2. emitDFPBackup puts ONERR right after the config token (WCB_DFP.cpp:368-378); ONERR,CLEAR empties
+    onErrCmd (:190-193), and the codec's error callback then has nothing to recall (:49; WcbCmd WcbDfPlayer.cpp:209-212)."""
+    s5, s3 = link(bench, 2, "S5"), link(bench, 2, "S3")
+    _no_recall_keys(bench)
+    ok, err = f"hilok{nonce().lower()}", f"hilerr{nonce().lower()}"
+    problems = []
+    with _w2_audio(bench, "DFP", "S5", "S5") as c2, _recall_keys(c2, "DFP", ok, err):
+        tokens = snapshot(bench, 2)
+        i = tokens.index("?DFP,S5:9600:V20") if "?DFP,S5:9600:V20" in tokens else -1
+        if i < 0 or tokens[i + 1:i + 2] != ["?DFP,ONERR,HILE"]:
+            problems.append(f"the chain does not hold ?DFP,S5:9600:V20^?DFP,ONERR,HILE: {[t for t in tokens if t.startswith('?DFP')]}")
+        lines, got3 = _inject(c2, s5, s3, _dfp(0x40, 6))
+        if not _has(lines, "[DFP] Error 0x06") or err.encode() + b"\r" not in got3:
+            problems.append(f"before the clear the error frame did not recall HILE: {lines} / S3 {got3!r}")
+        out = _run(c2, "?DFP,ONERR,CLEAR")
+        if not _has(out, "[DFP] Error callback cleared"):
+            problems.append(f"?DFP,ONERR,CLEAR printed {out}")
+        if [t for t in snapshot(bench, 2) if t.startswith("?DFP,ONERR")]:
+            problems.append("?DFP,ONERR,CLEAR left the ONERR token")
+        if not _has(_run(c2, "?DFP,LIST"), "  On Error      : (none)"):
+            problems.append("?DFP,LIST still shows an error callback")
+        time.sleep(0.15)
+        lines, got3 = _inject(c2, s5, s3, _dfp(0x40, 6))
+        if not _has(lines, "[DFP] Error 0x06") or _has(lines, "Recalling") or got3:
+            problems.append(f"after ONERR,CLEAR the error frame printed {lines} and put {got3!r} on S3")
+    assert not problems, "; ".join(problems)
+
+
+@test("dfp.port_move_release", "Re-issuing ?DFP on another port releases the old one (broadcast flags back on, label cleared, 'Released S4'), reserves the new one, and ;D follows the device", needs=["wcb1"], links=["W2S4", "W2S5"])
+def dfp_port_move_release(bench):
+    """WCB-WP52 row 3. configureDFP's move branch (WCB_DFP.cpp:283-299) re-enables the old port's flags, clears its
+    label and prints 'Released', then the new port is reserved (:301-331). A DFPlayer is always 9600, so the old port's
+    baud needs no reset here (an HCR or MP3 move does not reset it either, unlike their CLEAR)."""
+    s4, s5 = link(bench, 2, "S4"), link(bench, 2, "S5")
+    w = usb_wcb(bench)
+    for p in ("S4", "S5"):
+        _require_free(bench, 2, p)
+    if _device_tokens(bench, 2) or _device_tokens(bench, 1, "MP3", "DFP"):
+        raise Skip("W1 or W2 already has device config")
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        on = False
+        try:
+            wm = w.dev.mark()
+            m = c2.send("?DFP,S4")
+            on = True
+            c2.expect(r"\[DFP\] Configured: S4 at 9600 baud", since=m)
+            try:
+                w.dev.expect(r"\[WDP\] DFPlayer host learned — routing ;D to WCB2", timeout=5, since=wm)
+            except AssertionError:
+                problems.append("W1 did not learn the DFPlayer host")
+            m = c2.send("?DFP,S5")
+            c2.expect(r"\[DFP\] Configured: S5 at 9600 baud", since=m)
+            time.sleep(0.3)
+            move = [x.rstrip() for x in c2.lines(m)]
+            miss = _in_order_sub(move, ["Re-enabled broadcast output on S4 (old DFPlayer port)",
+                                        "Re-enabled broadcast input on S4 (old DFPlayer port)", "Serial4 label set to: ''",
+                                        "Released S4 (old DFPlayer port)", "Disabled broadcast output on S5 (DFPlayer port)",
+                                        "Disabled broadcast input on S5 (DFPlayer port)", "Serial5 label set to: 'DFPlayer'",
+                                        "[DFP] Configured: S5 at 9600 baud  default volume=20"])
+            if miss:
+                problems.append(f"the move lacks {miss!r} (in order): {move}")
+            toks = snapshot(bench, 2)
+            problems += [f"W2's chain lacks {t}" for t in ("?BCAST,OUT,S4,ON", "?BCAST,IN,S4,ON", "?BCAST,OUT,S5,OFF",
+                                                           "?BCAST,IN,S5,OFF", "?LABEL,S5,DFPlayer", "?DFP,S5:9600:V20")
+                         if t not in toks]
+            if [t for t in toks if t.upper().startswith(("?LABEL,S4,", "?DFP,S4"))]:
+                problems.append(f"S4 kept DFPlayer state: {[t for t in toks if t.upper().startswith(('?LABEL,S4,', '?DFP,S4'))]}")
+            watch = Watch(s4, s5)
+            w.send(";D,PLAY,5")
+            try:
+                watch.expect(s5, _dfp(0x03, 5), timeout=3)
+            except AssertionError:
+                problems.append(f";D,PLAY,5 did not follow the DFPlayer to S5: {watch.got(s5)!r}")
+            time.sleep(0.5)
+            if watch.got(s4):
+                problems.append(f"bytes on the old DFPlayer port: {watch.got(s4)!r}")
+        finally:
+            if on:
+                _run(c2, "?DFP,CLEAR", 1.0)
+            _relabel(c2, before[2], "S4", "S5")
+            if on:
+                _unlearn(bench, "DFP", learner=1)
+    assert not problems, "; ".join(problems)
+
+
+def _w2_s1_shielded(bench):
+    """Skip unless a broadcast cannot reach the real Maestro on W2 S1: its output flag is off, or it is a local Maestro
+    port, which the broadcast writer skips whatever the flag says (WCB.ino:8300-8315)."""
+    toks = bench.config_tokens(2, refresh=True)
+    if "?BCAST,OUT,S1,OFF" in toks or any(re.match(r"^\?MAESTRO,M\d+:W2S1:", t, re.I) for t in toks):
+        return
+    raise Skip("a broadcast from W2 S3 would reach W2 S1, where the real Maestro is")
+
+
+@test("mp3.bcast_skip_forced_on", "The MP3 Trigger port stays out of broadcasts even with ?BCAST,OUT forced back on, and what arrives on it never runs as a command", needs=["wcb1"], links=["W2S3", "W2S4", "W2S5"])
+def mp3_bcast_skip_forced_on(bench):
+    """WCB-WP52 row 4. The broadcast writer skips an MP3 Trigger port whatever its ?BCAST flag says (WCB.ino:8317-8323),
+    and processIncomingSerial never reads it (:8404); the reservation turns the flags off as well (WCB_MP3.cpp:345-355),
+    and here the output flag is forced back on. A plain line injected into W2 S3 is an ETM broadcast to every broadcast
+    port on both WCBs, so it is a lowercase non-command marker; W2 S1 (the real Maestro) is skipped as a Maestro port."""
+    s3, s4, s5 = link(bench, 2, "S3"), link(bench, 2, "S4"), link(bench, 2, "S5")
+    require_tokens(bench, 2, "?BCAST,IN,S3,ON", "?BCAST,OUT,S4,ON")
+    _w2_s1_shielded(bench)
+    t = f"hilbc{nonce().lower()}".encode()
+    with _w2_audio(bench, "MP3", "S5:9600:V20", "S5") as c2:
+        c2.expect(r"Broadcast OUTPUT on S5: Enabled", since=c2.send("?BCAST,OUT,S5,ON"))
+        watch = Watch(s3, s4, s5)
+        s3.send(t + b"\r")
+        watch.expect(s4, t + b"\r", timeout=3)
+        time.sleep(1.5)
+        got5, got3 = watch.got(s5), watch.got(s3)
+        cm = c2.mark()
+        watch = Watch(s4)
+        s5.send(b";s4hil12\r")
+        time.sleep(1.5)
+        ran = watch.got(s4)
+        printed = [x for x in c2.lines(cm) if x.strip() and not NOISE.search(x)]
+    assert t not in got5, f"a broadcast reached the MP3 Trigger port with its output forced on: {got5!r}"
+    assert t not in got3, "the source port echoed its own broadcast"
+    assert b"hil12" not in ran and not printed, f"the MP3 port's RX ran as a command: S4 {ran!r}, console {printed}"
+
+
+@test("hcr.poll_scheduler_edges", "With no volume replies the HCR poll repeats every 3 s ten times after the bind, then settles on POLL (10 s); a 2 s fade holds the poll, which resumes within 3 s of the fade's end (~75 s)", needs=["wcb1"], links=["W2S4"])
+def poll_scheduler_edges(bench):
+    """WCB-WP52 row 5. processHCRTick (WCB_HCR.cpp:293-318): while the three volumes are unseeded the next poll is
+    min(POLL, 3) s away, at most _hcrFastPolls = 10 times per bind (:282, :314-317), then POLL; and a poll is held while
+    a fade runs unless it is a whole POLL overdue (:299-307), because a fade step every 150 ms would land in the poll's
+    reply window. hcr.config_softport covers the switch when replies do seed the volumes."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?HCR,REMOTE,W2")
+    _require_free(bench, 2, "S4")
+    if _device_tokens(bench, 2):
+        raise Skip(f"W2 already has HCR/MP3/DFP config: {_device_tokens(bench, 2)}")
+    poll = POLL.decode().rstrip("\n")
+    problems = []
+    with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
+        configured = False
+        try:
+            c2.expect(r"\[HCR\] Poll interval = 10s", since=c2.send("?HCR,POLL,10"))
+            pm = s4.mark()
+            m = c2.send("?HCR,PORT,S4:9600")
+            configured = True
+            c2.expect(r"\[HCR\] Configured on S4 at 9600 baud", since=m)
+            time.sleep(53)
+            stream, times = _frame_times(s4, pm, POLL)
+            gaps = [b - a for a, b in zip(times, times[1:])]
+            bench.note(f"unanswered poll gaps on the probe clock: {gaps}")
+            if stream != POLL * len(times):
+                problems.append(f"bytes other than the poll on W2 S4: {stream!r}")
+            fast, slow = gaps[:10], gaps[10:]
+            if len(fast) < 10 or not all(2950 <= g <= 3400 for g in fast):
+                problems.append(f"the first ten gaps {fast} are not ~3 s")
+            if len(slow) < 2 or not all(9950 <= g <= 10400 for g in slow):
+                problems.append(f"after ten fast polls the gaps are {slow}, not ~10 s")
+            c2.expect(r"\[HCR\] Poll interval = 3s", since=c2.send("?HCR,POLL,3"))
+            m = s4.mark()
+            w.send(";H,VOL,A,50")
+            time.sleep(1.0)
+            if s4.received(m).replace(POLL, b"") != _lf("<PVA50>"):
+                problems.append(f"VOL,A,50 wrote {s4.received(m)!r}")
+            m = s4.mark()
+            w.send(";H,FADEOUT,A,2")
+            time.sleep(6.0)
+            frames = _timed_frames(s4, m)
+            texts = [x for _, x in frames]
+            bench.note(f"FADEOUT,A,2 under POLL,3: {frames}")
+            first = next((i for i, x in enumerate(texts) if x.startswith("<PVA")), None)
+            end = texts.index("<PSA,QPA>") if "<PSA,QPA>" in texts else None
+            if first is None or end is None or end < first:
+                problems.append(f"no fade ramp ending in <PSA,QPA>: {texts}")
+            else:
+                inside = [x for x in texts[first:end] if x == poll]
+                if inside:
+                    problems.append(f"{len(inside)} poll(s) went out during the fade: {texts}")
+                after = [ms for ms, x in frames[end:] if x == poll]
+                if not after:
+                    problems.append(f"no poll after the fade: {texts}")
+                elif after[0] - frames[end][0] > 3300:
+                    problems.append(f"the first poll came {after[0] - frames[end][0]} ms after the fade's end")
+        finally:
+            if configured:
+                m = c2.send("?HCR,CLEAR")
+                c2.expect(r"  ✓ Released S4 \(old HCR port\)", since=m)
+                _relabel(c2, before[2], "S4")
+    assert not problems, "; ".join(problems)
+
+
+@test("hcr.minor_verb_forms", ";H spellings no other test sends give their exact frames (VOLUME, OVERRIDE,1, MUSE,1, STOP,N, STOP,SOFT, STOPEMOTE,SOFT, MUSE,GAP with missing bounds); ?HCR,GET,EMOTION / PLAYING with a bad selector answer -1 and transmit nothing", needs=["wcb1"], links=["W2S4"])
+def minor_verb_forms(bench):
+    """WCB-WP52 row 6. VOLUME is VOL (WCB_HCR.cpp:574); OVERRIDE and MUSE take 1/ON for on and anything else for off
+    (:524-542); hcrStopStyle maps N/HARD to NOW and G/SOFT to GRACEFUL (:382-387). MUSE,GAP reads its bounds with
+    toInt(), so a missing one is 0 and the gap is sent, not refused (:533-537; the library only range-checks 0-99,
+    hcr.cpp:459-465): characterisation. GET,EMOTION and GET,PLAYING print -1 for a selector that is not H/S/M/C or
+    V/A/B, and only GET,VOL transmits (:810-834)."""
+    s4 = link(bench, 2, "S4")
+    w = usb_wcb(bench)
+    problems = []
+    with _hcr_w2(bench) as c2:
+        pm, cm = s4.mark(), c2.mark()
+        problems += _steps(s4, w.send, [
+            (";H,VOLUME,A,40", _lf("<PVA40>")), (";H,volume,40", _vol3(40)),
+            (";H,OVERRIDE,1", _lf("<O1,QO>")), (";H,OVERRIDE,OFF", _lf("<O0,QO>")),
+            (";H,MUSE,1", _lf("<M1,QM>")), (";H,MUSE,0", _lf("<M0,QM>")),
+            (";H,STOP,N", STOP_BURST), (";H,STOP,SOFT", _lf("<PSG>", "<PSA,QPA>", "<PSB,QPB>")),
+            (";H,STOPEMOTE,SOFT", _lf("<PSG>")),
+            (";H,MUSE,GAP", _lf("<MN0,MX0>")), (";H,MUSE,GAP,5", _lf("<MN5,MX0>")),
+        ])
+        errs = s4.errors(pm)
+        lines = [x.rstrip() for x in c2.lines(cm) if x.startswith("[HCR]")]
+        for field, want in (("EMOTION,X", "[HCR] EMOTION EMOTION,X = -1"), ("EMOTION", "[HCR] EMOTION EMOTION = -1"),
+                            ("PLAYING,X", "[HCR] PLAYING PLAYING,X = -1")):
+            m = s4.mark()
+            out = _run(c2, f"?HCR,GET,{field}")
+            if want not in out:
+                problems.append(f"?HCR,GET,{field} printed {out}")
+            if s4.received(m):
+                problems.append(f"?HCR,GET,{field} transmitted {s4.received(m)!r}")
+    assert not problems, "; ".join(problems)
+    assert not errs, f"RXERR: {errs}"
+    assert not lines, f"W2 printed HCR lines for the verbs: {lines}"
+
+
+@test("mp3.playfs_callbacks", ";A,PLAYFS,<n>,ONFIN,<key> and ;A,PLAYFS,<n>,<key> play by SD index (76 14 70 nn) with a finish callback: X recalls it once, x cancels it", needs=["wcb1"], links=["W2S5", "W2S3"])
+def mp3_playfs_callbacks(bench):
+    """WCB-WP52 row 7. PLAYFS has its own setPending in the shared codec (WcbCmd WcbMp3.cpp:53-63): the key after
+    ONFIN, or the bare field after the index, is recalled on the next 'X' and dropped on 'x' (:119-127, WCB_MP3.cpp:52)."""
+    s5, s3 = link(bench, 2, "S5"), link(bench, 2, "S3")
+    _no_recall_keys(bench)
+    w = usb_wcb(bench)
+    ok, err = f"hilok{nonce().lower()}", f"hilerr{nonce().lower()}"
+    recall = f"Recalling command for key 'HILK': ;S3{ok}"
+    problems = []
+    with _w2_audio(bench, "MP3", "S5:9600:V20", "S5") as c2, _recall_keys(c2, "MP3", ok, err):
+        try:
+            for cmd, frame, label in ((";A,PLAYFS,7,ONFIN,HILK", "76147007", "ONFIN form"),
+                                      (";A,PLAYFS,9,HILK", "76147009", "bare-key form")):
+                problems += _steps(s5, w.send, [(cmd, bytes.fromhex(frame))])
+                time.sleep(0.15)
+                lines, got3 = _inject(c2, s5, s3, b"X")
+                if not (_has(lines, "[MP3] Track finished") and _has(lines, recall) and ok.encode() + b"\r" in got3):
+                    problems.append(f"{label}: X did not recall HILK: {lines} / S3 {got3!r}")
+                lines, got3 = _inject(c2, s5, s3, b"X")
+                if not _has(lines, "[MP3] Track finished") or _has(lines, "Recalling") or got3:
+                    problems.append(f"{label}: a second X recalled again: {lines} / S3 {got3!r}")
+            problems += _steps(s5, w.send, [(";A,PLAYFS,8,HILK", bytes.fromhex("76147008"))])
+            time.sleep(0.15)
+            lines, _ = _inject(c2, s5, s3, b"x", 0.4)
+            if not _has(lines, "[MP3] Track cancelled"):
+                problems.append(f"x: {lines}")
+            lines, got3 = _inject(c2, s5, s3, b"X")
+            if not _has(lines, "[MP3] Track finished") or _has(lines, "Recalling") or got3:
+                problems.append(f"X after x recalled: {lines} / S3 {got3!r}")
+        finally:
+            s5.send(b"x")              # a key still pending is RAM in the codec: cancel it
+            time.sleep(0.3)
     assert not problems, "; ".join(problems)
