@@ -78,6 +78,14 @@ SERVO_TESTS = {
     "sbus.btn_double_triple_tap": "presses a matrix button: the matrix channel is re-emitted on SBUS OUT",
     "sbus.btn_hold_unconfigured_long": "holds a matrix button: the matrix channel is re-emitted on SBUS OUT",
     "sbus.signal_loss_controller_reset": "stops and restarts the SBUS stream that NaviCore's knobs and SBUS OUT follow",
+    "nccfg.sbus_out_toggle": "saves sbusOutEnabled off and on again: whatever is on J2 goes without SBUS for a second",
+    # A NaviCore restart stops SBUS OUT for a few seconds, and nc_guard sends a mesh SET_MODE afterwards if the mode that
+    # came back is not the one it snapshotted (a mode set over the mesh before the test): J2 moves then.
+    "nccfg.persist_reboot": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "nccfg.reset_defaults_ram": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "nccfg.reset_defaults_keeps_identity": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
+                                           "is sent back",
+    "nccfg.hook_config_unreadable": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
 }
 
 

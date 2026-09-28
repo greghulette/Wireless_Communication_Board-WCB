@@ -61,6 +61,21 @@ OPT_INS = {
         "why": "replays a saved clip: servo motion and recorded actions",
         "estimate_s": 30,
     },
+    "navicore_reboot": {
+        "title": "NaviCore restarts",
+        "what": "Restarts NaviCore in software (REBOOT): its USB port re-enumerates, the mesh loses WCB 20 and SBUS OUT "
+                "stops for about 5 s. A software restart never re-samples the boot strap, so it cannot leave the S3 in "
+                "ROM download mode (docs/hil_plan/NAVICORE.md §1.3).",
+        "why": "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s",
+        "estimate_s": 40,
+    },
+    "navicore_fault": {
+        "title": "NaviCore fault hooks (hook build)",
+        "what": "Uses the NAVICORE_HIL_HOOKS fault verbs (#L91-#L93: a corrupted /config.json, an overflowing "
+                "GET_CONFIG, a failed save) and restores what they break. On any other image the tests skip.",
+        "why": "injects faults into NaviCore's config storage (a NAVICORE_HIL_HOOKS build only)",
+        "estimate_s": 40,
+    },
     "sbus_reset": {
         "title": "SBUS controller reset",
         "what": "Reboots the SBUS controller to check NaviCore's signal-loss handling.",

@@ -573,6 +573,18 @@ class NaviCore:
         """[(slot, device)] for NaviCore's type-1 (local) Maestro slots in GET_CONFIG `cfg`."""
         return [(i + 1, m.get("device")) for i, m in enumerate(cfg.get("maestros", [])) if m.get("type") == 1]
 
+    @staticmethod
+    def local_devices(cfg):
+        """What GET_CONFIG `cfg` routes to NaviCore's OWN aux ports S3-S5, as the firmware derives it for the port labels
+        and the broadcast fan-out (rcSerialLabelAuto, rc_config.h:1940-1950; auxPortHasDevice, NaviCore.ino:2946-2956):
+        an HCR, MP3 Trigger or DFPlayer whose destination transport is "serial", and a configured WLED slot with a port
+        3-5 and no WCB -> ['HCR on S3', 'WLED 2 on S5', ...]."""
+        out = [f"{k[:-4].upper()} on {d.get('port')}" for k in ("hcrDest", "mp3Dest", "dfpDest")
+               for d in [cfg.get(k) or {}] if d.get("transport") == "serial"]
+        out += [f"WLED {w.get('id')} on S{w.get('port')}" for w in cfg.get("wledSlots") or []
+                if w.get("configured") and w.get("wcb") == 0 and w.get("port") in (3, 4, 5)]
+        return out
+
     def mae_get(self, slot, ch):
         """?MAE,GET,<slot>,<ch> (Get Position) -> int position (quarter-us), or the error word ('timeout',
         'disabled'). A local slot answers synchronously off Serial2 within 25 ms (maestroLocalQuery :713-733)."""
