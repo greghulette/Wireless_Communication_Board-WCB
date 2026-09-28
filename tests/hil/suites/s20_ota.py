@@ -11,6 +11,8 @@ Built from the verified ota specs. Rules from the specs:
 - ?OTALOCAL,BAUD switches the USB rate: sent with send(), never run() (the echo would cross the switch), and the host
   follows only after the ACK plus a margin. _recover_local leaves W1 idle at 115200 whatever happened.
 - Never send ?OTA,BEGIN with family 1, or any DATA/END, to NaviCore (20).
+- WCB-WP56: an accepted BEGIN abandons a config pull the board is sending (opt-in, a 4 KB erase on W2), and USB input
+  lost to a full RX ring shows in ?STATS (stats.usb_rx_overflow_line - no OTA session, so no opt-in).
 """
 import base64
 import glob
@@ -21,7 +23,9 @@ import zlib
 from contextlib import contextmanager
 
 from hil.runner import Skip, test
+from hil.wcb import WCB, Pull
 from suites.common import Console, Watch, config_guard, link, nonce, usb_wcb
+from suites.s03_wcb import _at, _clear, _factory_reply, _grow_over, _knob, _reply_problems
 
 SLOTS = {"app0": "010000", "app1": "1f0000"}          # min_spiffs.csv:4-5
 SLOT_SIZE = 1966080
@@ -294,6 +298,55 @@ def relay_navicore_brick_guard(bench):
     ack = _relay(w, f"?OTA,BEGIN,20,{s},4096,0", 20, s, timeout=8)
     nav.expect(r"\[OTA\] BEGIN rejected: image chip family 0 != this board 1 \(brick guard\)", timeout=5, since=nm)
     assert ack == (0, 1), f"NaviCore ACKed {ack}"
+
+
+# ============================================================ USB input lost to a full RX ring (WCB-WP56 row 2)
+RX_OVERFLOW = re.compile(r"USB/S0 input: (\d+) RX overflow\(s\) - bytes were lost")
+
+
+def _rx_overflows(w):
+    """The count on ?STATS's 'USB/S0 input: N RX overflow(s) - bytes were lost' line (buildStatsString, WCB.ino:2133-
+    2139), 0 when the line is absent: it prints only once N is above 0."""
+    for x in w.run("?STATS", timeout=15):
+        m = RX_OVERFLOW.search(x)
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+@test("stats.usb_rx_overflow_line", "USB input lost to a full RX ring is counted: 700 ?VERSION commands on one line fill the 200-slot command queue, so the console reader waits for room while 12 KB of bare CRs sent behind them overflow the 8 KB ring; ?STATS then prints 'USB/S0 input: N RX overflow(s) - bytes were lost' with N above its count before, every ?VERSION still ran and none was discarded (no OTA session; ~15 s)", needs=["wcb1"], links=[])
+def usb_rx_overflow_line(bench):
+    """WCB-WP56 row 2 (wcb.stats.rx_overflow_line). UART0's RX ring is 8 KB (Serial.setRxBufferSize, WCB.ino:9310) and
+    onReceiveError counts UART_BUFFER_FULL and FIFO_OVF (:9333-9336) into serialRxOverflows (:970), which ?STATS prints
+    only when it is not 0 (:2133-2139). The console reader stops reading while it waits for command-queue room
+    (enqueueCommand, :2591-2599): it reads the chain line whole as it arrives, then queues its 700 tokens, 200 at once
+    and the rest one per ?VERSION the loop prints (two lines, ~5 ms at 115200 - UART0 has no TX buffer), so it stops
+    reading for ~2.5 s while the 12 KB of CRs take ~1 s to arrive. A CR is a line end, and an empty line is skipped
+    (processIncomingSerial, :8438-8444), so the run of them the ring loses changes no command; nothing else is sent
+    until every ?VERSION has printed. The plan did this inside an ota_erase session at a raised ?OTALOCAL,BAUD; the
+    queue makes that unnecessary, so the test opens no session and needs no opt-in. CRs, not NULs (which the reader
+    also drops): a NUL in session.log makes grep treat the whole log as binary."""
+    w = usb_wcb(bench)
+    before = _rx_overflows(w)
+    m = w.dev.mark()
+    w.dev.send("^".join(["?VERSION"] * 700))
+    w.dev.send("\r" * 12000, eol="")
+    deadline, versions = time.monotonic() + 40, 0
+    while time.monotonic() < deadline:
+        versions = sum(x.count("Software Version:") for x in w.dev.since(m))
+        if versions >= 700:
+            break
+        time.sleep(0.5)
+    time.sleep(1.0)
+    after = _rx_overflows(w)
+    lines = w.dev.since(m)
+    discarded = sum(1 for x in lines if "Command queue is full" in x)
+    bench.note(f"stats.usb_rx_overflow_line: RX overflows {before} -> {after}; {versions} of 700 ?VERSION ran; "
+               f"{discarded} discarded")
+    assert versions == 700, f"{versions} of the 700 ?VERSION commands ran: the line itself lost bytes"
+    assert not discarded, f"{discarded} command(s) were discarded as the queue was full: the reader did not wait"
+    assert after >= before + 1, (f"?STATS counts {after} RX overflow(s), {before} before 12 KB arrived with the console "
+                                 f"reader held: the overflow was not counted, or the ring held it all")
 
 
 # ============================================================ OPT-IN ota_erase: small local sessions on W1
@@ -707,6 +760,71 @@ def cross_transport_remote_abort_kills_local(bench):
     assert first == ["[OTA:ACK,1024]"], first
     assert idle, "W1's session survived the remote abort"
     assert after == ["[OTA] DATA rejected at offset 1024 (write cursor at 0)", "[OTA:NAK,0]"], after
+
+
+@test("ota.begin_abandons_config_pull", "OPT-IN (ota_erase): an OTA BEGIN accepted on W2 while it sends W1 a config pull in 512-byte parts abandons the pull ('[MGMT] Config pull for WCB1 abandoned: OTA started.'): no part lands more than 0.5 s after it and W1 gets no whole reply; after ?OTALOCAL,ABORT the next pull is whole (erases 4 KB of W2's inactive slot)", needs=["wcb1", "wcb2"], links=[], opt_in="ota_erase")
+def begin_abandons_config_pull(bench):
+    """WCB-WP56 row 1 (ota.begin_aborts_config_pull, wcb.pull.ota_abort). otaBegin calls configPullJobAbort once the
+    BEGIN has passed its guards and before esp_ota_begin erases (WCB_OTA.cpp:126-131); it drops any parked request,
+    frees the reply buffer and says so whenever a job was running (WCB.ino:4029-4038). The requester is left to time
+    out and ask again. W2 is grown over the one-line limit with throwaway sequences and its part size cut to 512 (s03's
+    helpers, RAM knob), so the reply takes several parts, about 0.7 s each, and the BEGIN lands once W1 holds part 1.
+    A part already in the air may still land just after the abandon line; none may land later than 0.5 s after it.
+    Not covered: a parked request (a second requester's pull waiting behind the job, dropped with it), which needs a
+    second relay pulling W2 at the same moment. The throwaway sequences and the knob are removed again."""
+    w1, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    keys, problems, facts = [], [], {}
+    with config_guard(bench, 2):
+        try:
+            ver = w2.version()
+            facts["chars"] = _grow_over(w2, ver, keys)
+            want = _factory_reply(w2, ver)
+            _knob(w2, "?DEBUG,PULLPART,512")
+            with _local(w2):
+                p = Pull(w1.dev, 2, parts=True, timeout=10, retry_noparts=False)
+                deadline = time.monotonic() + 8
+                while not p.collector.parts and time.monotonic() < deadline:
+                    if p.poll():
+                        break
+                    time.sleep(0.01)
+                if not p.collector.parts or p.collector.reply is not None:
+                    raise AssertionError(f"the pull was not caught mid-reply: {p.collector.progress()}")
+                facts["parts_before"] = len(p.collector.parts)
+                bm = w2.dev.mark()
+                w2.dev.send("?OTALOCAL,BEGIN,4096,0")
+                try:
+                    w2.dev.expect(r"^\[OTA:BEGIN,OK,0\]$", timeout=10, since=bm)
+                except AssertionError:
+                    raise AssertionError("W2 did not accept ?OTALOCAL,BEGIN,4096,0") from None
+                t_ab, _ = _at(w2.dev, bm, r"^\[MGMT\] Config pull for WCB1 abandoned: OTA started\.$")
+                if t_ab is None:
+                    problems.append("W2 printed no '[MGMT] Config pull for WCB1 abandoned: OTA started.'")
+                    t_ab, _ = _at(w2.dev, bm, r"^\[OTA:BEGIN,OK,0\]$")
+                complete, end = False, time.monotonic() + 6
+                while time.monotonic() < end:
+                    try:
+                        if p.poll():
+                            complete = True
+                            break
+                    except AssertionError:          # the pull's own deadline, or a refusal: no whole reply either way
+                        break
+                    time.sleep(0.05)
+                late = [ts for ts, x in list(w1.dev.lines[p.mark:]) if x.startswith("[MGMT:CFGPART,2]") and ts > t_ab + 0.5]
+                facts["parts_after"] = len(p.collector.parts) - facts["parts_before"]
+                if complete:
+                    problems.append("W1 still got a whole reply after W2 abandoned the pull")
+                if late:
+                    problems.append(f"{len(late)} part line(s) reached W1 more than 0.5 s after the abandon")
+                abort = _ota(w2.run("?OTALOCAL,ABORT"))
+                if abort != [ABORTED]:
+                    problems.append(f"?OTALOCAL,ABORT on W2 printed {abort}")
+            r = w1.pull_reply(2, timeout=15, verify=False)
+            problems += [f"the pull after the abort: {x}" for x in _reply_problems(r, want, keys, "parts")]
+        finally:
+            _knob(w2, "?DEBUG,PULLPART,OFF", check=False)
+            _clear(w2, keys)
+    bench.note(f"ota.begin_abandons_config_pull: {facts}")
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ OPT-IN full-image transfers

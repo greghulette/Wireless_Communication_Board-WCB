@@ -10,21 +10,26 @@ Built from the verified client_mesh specs (plus the deferred mesh-mode ones). Ru
 - Broadcast byte tests use ;S4/;S5: NaviCore writes mesh ;s1-;s3 to its own aux ports (NaviCore.ino:3066-3076).
 - probe_in_mesh forgets the temporary peer on every WCB after leaving, so no 50 s stale-ACK window follows.
 """
+import json
 import re
 import time
 import zlib
 from contextlib import contextmanager
 
 from hil.runner import Skip, test
-from suites.common import (Console, Watch, config_guard, link, marker, mesh_params, nonce, padded, probe_in_mesh,
-                           remote_wcbs, require_tokens, snapshot, token, usb_wcb)
+from hil.wcb import WCB
+from suites.common import (Console, Watch, config_guard, link, marker, mesh_params, nonce, padded, prime,
+                           probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
 
 # One id per test that sends commands (see the module docstring); s18's etm.rx_crc_gate_probe holds 14. Tests that
 # only receive, only sendRaw (no sequence numbers), only send unensured JSON (never in the ring) or never reach a WCB
-# (auth) may share. rejoin reboots W1 before it starts.
+# (auth) may share. rejoin reboots W1 before it starts. The WCB-WP14 tests at the end reuse ids: their JSON-only and
+# sendRaw-only ones share as above, and the three that send ensured commands push a stale ring out first
+# (_burn_ring_of).
 MESH_IDS = {"adopt": 18, "unicast": 17, "raw": 16, "broadcast": 13, "json": 12, "frag": 11, "whoami": 10,
             "checksum": 8, "auth": 7, "rejoin": 18, "leave": 15, "maestro_return": 16, "bcast_ports": 5,
-            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 3, "seq_fanout": 4, "seq_body": 7}
+            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 3, "seq_fanout": 4, "seq_body": 7,
+            "json_flood": 12, "timer_origin": 17, "timer_queue": 11, "whoami_escape": 10, "nvs_tx": 16}
 
 
 def _has(lines, text):
@@ -740,3 +745,275 @@ def peer_body_broadcasts(bench):
     assert t.encode() + b"\r" in got, "the recalled plain-text body did not reach W1 S2"
     assert t in rx, f"the body was not broadcast to the mesh: client got {rx}"
     assert ";CHILPB" not in rx, "the mesh-received trigger was re-broadcast"
+
+
+# ============================================================ origin under live mesh traffic (WCB-WP14)
+# The loop-prevention flag is written by the loop task alone (CLAUDE.md rule 3): both receive paths enqueue with the
+# origin stated (WCB.ino:5539, :5544), JSON telemetry is consumed on the WiFi task and never enqueued (:5434-5463),
+# and processBroadcastCommand decides a broadcast's mesh copy once, from the origin at its entry (:8216-8219, :8359).
+# Row 1 arm B (received ETM commands every 50 ms while lines are typed) is input.bcast_mesh_under_traffic (s12); arm A,
+# the JSON flood, is input.bcast_under_json_flood below. Probe2 is the client throughout, so W1's wires (probe1) stay
+# free; a W2 wire rides probe2 and is bound before any mesh traffic starts.
+def _burn_ring_of(w, probe, target):
+    """Push a stale duplicate ring for this probe id out of W<target>: 17 no-op commands, then a marker W<target>
+    prints on its own console `w` (s22's _burn_ring, which is not imported: a suite importing one that sorts after it
+    would register that suite's tests ahead of its own). The ring holds ETM_SEQ_HISTORY = 16 seqs per sender
+    (WCB.ino:748), and the clear on a client's boot announce (:5290-5300) needs the client to be a peer already, which
+    a temporary client is only after its second advert."""
+    tag = marker("BURN")
+    for i in range(17):
+        probe.mesh_send(target, f";S0,{tag}{i:02d}")
+    ready = marker("RDY")
+    m = w.dev.mark()
+    probe.mesh_send(target, f";S0,{ready}")
+    w.dev.expect(rf"^{ready}$", timeout=5, since=m)
+    time.sleep(1.0)                  # let the last ACKs land: WCB_Client holds 10 ensured sends in flight at most
+
+
+def _json_flood_for(probe, seconds):
+    """_json_load that counts: unensured {"hil":1} broadcasts at ~50 Hz for `seconds` -> how many the probe queued."""
+    n, end = 0, time.monotonic() + seconds
+    while time.monotonic() < end:
+        n += bool(probe.mesh_broadcast('{"hil":1}', ensured=False))
+        time.sleep(0.02)
+    return n
+
+
+@test("input.bcast_under_json_flood", "Lines typed on W1's console reach W1's own port and W2's exactly once each, with one '[ETM] Sent seq' each, while a mesh client floods W1 with unensured JSON at ~50 Hz: JSON telemetry never decides a local broadcast's origin (a control arm without the flood first; ~40 s)", needs=["wcb1", "probe2"])
+def bcast_under_json_flood(bench):
+    """WCB-WP14 row 1, arm A (wcb.rx.json_does_not_latch_origin). A '{' payload is relayed or dropped on the WiFi task
+    and returns before any enqueue (WCB.ino:5434-5463), and the mesh copy of a typed line is decided from the origin
+    loop() restored for it (:9816, :8219, :8359), so a JSON frame landing while processBroadcastCommand writes the
+    local ports cannot drop the mesh copy. Before tracker #3/D19 the WiFi task wrote the flag on every received command,
+    and JSON at a controller's 5 Hz did it too (HIL_TESTING.md §6, 'JSON telemetry never sets ...'). The flood is
+    interleaved with the typing, ~7 frames after each line. With ?DEBUG,ETM on, W1 prints '[ETM] Sent seq N: <line>'
+    for every mesh copy it sends (:3115) and '[ETM] Received seq N from WCB<id>: {"hil":1}' for every JSON frame it
+    takes (:5417), which proves the load reached W1. The control arm is the same without the flood: a loss there is
+    the wiring, not the flood."""
+    near, far = link(bench, 1, "S3"), link(bench, 2, "S3")
+    require_tokens(bench, 1, "?BCAST,OUT,S3,ON", "?BCAST,OUT,S0,OFF")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    w = usb_wcb(bench)
+    results = {}
+    try:
+        w.run("?DEBUG,ETM,ON")
+        with _client(bench, "probe2", "json_flood") as (probe, cid, _):
+            for arm, count in (("C", 10), ("J", 40)):
+                prime(near, far)
+                time.sleep(0.5)
+                lines = [padded(arm, 40) for _ in range(count)]
+                watch, wm = Watch(near, far), w.dev.mark()
+                queued = 0
+                for x in lines:
+                    w.send(x)
+                    if arm == "J":
+                        queued += _json_flood_for(probe, 0.15)
+                    else:
+                        time.sleep(0.15)
+                time.sleep(2.0)
+                got_near, got_far = watch.got(near), watch.got(far)
+                log = [x.rstrip() for x in w.dev.since(wm)]
+                heard = sum(1 for y in log if re.match(rf'^\[ETM\] Received seq \d+ from WCB{cid}: \{{"hil":1\}}$', y))
+                results[arm] = dict(
+                    near=sum(got_near.count(x.encode() + b"\r") == 1 for x in lines),
+                    far=sum(got_far.count(x.encode() + b"\r") == 1 for x in lines),
+                    sent=sum(sum(1 for y in log if re.match(rf"^\[ETM\] Sent seq \d+: {x}$", y)) == 1 for x in lines),
+                    count=count, json_queued=queued, json_heard=heard)
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+    bench.note(f"typed lines exact at W1 S3 / W2 S3 / one Sent line, per arm: {results}")
+    c, j = results["C"], results["J"]
+    assert c["near"] == c["far"] == c["sent"] == c["count"], f"the control lost lines - suspect the wires, not the flood: {c}"
+    assert j["json_heard"] >= j["count"], (f"only {j['json_heard']} of the client's {j['json_queued']} JSON frames were "
+                                           f"seen by W1 while {j['count']} lines were typed: the flood did not load it")
+    assert j["near"] == j["count"], f"W1's own port lost typed lines under the JSON flood: {j}"
+    assert j["sent"] == j["count"], f"typed lines lost (or doubled) their mesh copy under the JSON flood: {j}"
+    assert j["far"] == j["count"], f"W2's port did not get every typed line exactly once under the JSON flood: {j}"
+
+
+@test("client_mesh.timer_chain_keeps_mesh_origin", "A client's ;T chain of plain text keeps its mesh origin across the delay: sent to W1, both lines reach W1's port ~600 ms apart and never W2's port or the mesh; broadcast, W1 and W2 each run it once, ~600 ms apart, and neither sends it on", needs=["wcb1", "wcb2", "probe2"])
+def timer_chain_keeps_mesh_origin(bench):
+    """WCB-WP14 row 2 (wcb.loopprev.mesh_timer_chain_origin, timer.mesh_origin_chain_no_rebroadcast). The ETM receive
+    path hands a ;T chain to loop() through the pending-timer queue with its origin stated, mesh unless the Wizard's
+    SOH marker came with it (WCB.ino:5535-5539). The drain puts that origin into the global for parseCommandGroups
+    (:511-518), which captures it for the deferred fire (command_timer.cpp:115), and processCommandGroups re-applies it
+    while each group is enqueued (command_timer.cpp:256-270), so a plain-text group runs processBroadcastCommand as
+    mesh-origin: every local port that takes broadcasts, never the mesh (WCB.ino:8359). A re-broadcast would reach the
+    probe itself (a client receives a WCB's broadcasts: client_mesh.wcb_broadcast_reaches_client) and W2's port. The
+    broadcast arm reaches NaviCore as plain text too, as input.mesh_bcast_to_ports does; NaviCore writes that only to
+    aux ports with serialBcast out, which none has on this bench."""
+    near, far = link(bench, 1, "S3"), link(bench, 2, "S3")
+    require_tokens(bench, 1, "?BCAST,OUT,S3,ON")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    bad, gaps = [], {}
+    with _client(bench, "probe2", "timer_origin") as (probe, cid, _):
+        _burn_ring_of(w, probe, 1)
+        _burn_ring_of(w2, probe, 2)
+        for arm in ("unicast", "broadcast"):
+            a, b = marker("A"), marker("B")
+            chain = f"{a}^;T600^{b}"
+            prime(near, far)
+            time.sleep(0.5)
+            watch, pm = Watch(near, far), probe.dev.mark()
+            ok = probe.mesh_send(1, chain, ensured=True) if arm == "unicast" else probe.mesh_broadcast(chain, ensured=True)
+            if not ok:
+                bad.append(f"{arm}: the probe could not queue the chain")
+                continue
+            for l in ((near, far) if arm == "broadcast" else (near,)):
+                try:
+                    watch.expect(l, b.encode() + b"\r", timeout=4)
+                except AssertionError:
+                    pass
+            time.sleep(1.5)                  # anything re-broadcast has landed by now
+            rx = [(s, x) for s, x in probe.mesh_received(pm) if a in x or b in x]
+            if rx:
+                bad.append(f"{arm}: the chain's lines went back onto the mesh: the probe received {rx}")
+            for l in ((near, far) if arm == "broadcast" else (near,)):
+                got = watch.got(l)
+                counts = (got.count(a.encode() + b"\r"), got.count(b.encode() + b"\r"))
+                if counts != (1, 1):
+                    bad.append(f"{arm}: {l.key} got the two lines {counts} times, expected once each")
+                    continue
+                ta, tb = l.time_of(a.encode(), watch.marks[l.key]), l.time_of(b.encode(), watch.marks[l.key])
+                gaps[f"{arm} {l.key}"] = None if None in (ta, tb) else tb - ta
+                if ta is None or tb is None or not 450 <= tb - ta <= 900:
+                    bad.append(f"{arm}: {l.key} put {tb - ta if None not in (ta, tb) else '?'} ms between the lines, "
+                               f"expected ~600")
+            if arm == "unicast":
+                stray = watch.got(far)
+                if a.encode() in stray or b.encode() in stray:
+                    bad.append(f"unicast: W2 S3 got the chain sent only to W1: {stray!r}")
+    bench.note(f"timer-chain gaps (ms): {gaps}")
+    assert not bad, "; ".join(bad)
+
+
+TIMER_REPLACED = re.compile(r"Timer sequence replaced mid-run \S+ (\d+) remaining group")
+TIMER_NOT_RUN = re.compile(r"^\[TIMER\] (\d+) received timer chain\(s\) not run: (.*)$")
+
+
+@test("client_mesh.timer_chain_queue_accounted", "Ten ;T chains a client sends W1 while W1's loop is busy printing ?backup are each run, cut short by the next ('Timer sequence replaced mid-run'), or refused with a '[TIMER] ... not run' line: all 20 of their groups are accounted for, none lost silently (re-scan #22)", needs=["wcb1", "probe2"])
+def timer_chain_queue_accounted(bench):
+    """WCB-WP14 row 3 (wcb.timerchain.queue_overflow_silent). The receive path queues a ;T chain in the 8-slot
+    pendingTimerChainQueue (WCB.ino:467-481); a full queue used to drop it silently (the plan's BUG-22). It now counts
+    the drop on the WiFi task (:543-546) and the next drain in loop() prints '[TIMER] <n> received timer chain(s) not
+    run: 8 already waiting' (:492-505). The drain parses every queued chain in turn, and each parse replaces the chain
+    before it with '... replaced mid-run - <n> remaining group(s) ... dropped' (command_timer.cpp:104-108), so of
+    chains drained together only the last runs. Every group of the 10 x 2 is therefore on W1 S2, in a replaced line's
+    count, or in a not-run chain (2 each): run + replaced + 2 x not-run = 20. ?backup holds the loop for about a second
+    of UART0 output (rule 11: UART0 has no TX buffer) while the WiFi task keeps taking the chains; whether the queue
+    actually filled is noted, not asserted - the accounting must hold either way. The ?backup chain goes to the
+    session log as always; nothing here quotes it."""
+    s2 = link(bench, 1, "S2")
+    w = usb_wcb(bench)
+    with _client(bench, "probe2", "timer_queue") as (probe, cid, _):
+        _burn_ring_of(w, probe, 1)
+        prime(s2)
+        time.sleep(0.5)
+        pairs = [(f"HT{k}{nonce()}", f"HU{k}{nonce()}") for k in range(10)]
+        m, wm = s2.mark(), w.dev.mark()
+        w.send("?backup")
+        time.sleep(0.05)
+        queued = [probe.mesh_send(1, f";S2{t}^;T50^;S2{u}", ensured=True) for t, u in pairs]
+        w.run("?PEERSLIVE", timeout=20)      # its echo prints once ?backup is done and the chains have drained
+        time.sleep(2.0)
+        got, lines = s2.received(m), [x.rstrip() for x in w.dev.since(wm)]
+    ran = sum(got.count(x.encode() + b"\r") for pair in pairs for x in pair)
+    twice = [x for pair in pairs for x in pair if got.count(x.encode() + b"\r") > 1]
+    replaced = sum(int(mm.group(1)) for mm in map(TIMER_REPLACED.search, lines) if mm)
+    not_run = [(int(mm.group(1)), mm.group(2)) for mm in map(TIMER_NOT_RUN.match, lines) if mm]
+    dropped = sum(n for n, _ in not_run)
+    bench.note(f"10 chains while W1 printed ?backup: {ran} groups ran, {replaced} dropped by replacement, {dropped} "
+               f"chain(s) refused ({not_run}); queued by the probe: {sum(queued)}")
+    assert all(queued), f"the probe queued only {sum(queued)} of the 10 chains"
+    assert not twice, f"groups ran more than once: {twice}"
+    assert ran + replaced + 2 * dropped == 20, (f"{20 - ran - replaced - 2 * dropped} of the 20 groups went missing "
+                                                f"with no line saying so: {ran} ran, {replaced} replaced, {dropped} "
+                                                f"chain(s) not run")
+
+
+@test("client_mesh.whoami_alias_escape", "A '\"' and a '\\' in W1's alias are kept by ?ALIAS and escaped in the ?WHOAMI reply, which a client parses back to the exact alias; the alias is put back", needs=["wcb1", "probe2"], links=[])
+def whoami_alias_escape(bench):
+    """WCB-WP14 row 4 (wcb.rx.whoami_alias_escape). saveWCBAlias replaces only ^ , ; ? CR and LF (WCB_Storage.cpp:270-
+    302), so '"' and '\\' reach NVS, the chain and the WDP advert. The ?WHOAMI reply escapes '\\' first, then '"'
+    (WCB.ino:5508-5516), and goes back untracked as an ETM frame (:5526). The alias is 13 characters, under the
+    24-character cap, and is W1's for a few seconds: its WDP advert carries it to W2 and NaviCore meanwhile, and the
+    on-change advert puts the old one back (NaviCore caches it in RAM only, rc_telemetry.h setWcbAlias)."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    alias = 'HIL"q\\x' + nonce()
+    replies, problems = [], []
+    with config_guard(bench, 1) as before:
+        orig = token(before[1], "?ALIAS,")
+        try:
+            out = [x.rstrip() for x in w.run(f"?ALIAS,{alias}")]
+            if f"WCB alias set to: {alias}" not in out:
+                problems.append(f"?ALIAS did not keep the quote and the backslash: {out}")
+            with _client(bench, "probe2", "whoami_escape") as (probe, cid, _):
+                _burn_ring_of(w, probe, 1)
+                for _ in range(3):                  # the reply is untracked: ask again after a radio loss
+                    pm = probe.dev.mark()
+                    probe.mesh_send(1, "?WHOAMI")
+                    got = _wait_rx(probe, pm, 1, lambda x: x.startswith('{"type":"wcb_alias"'), timeout=1.5)
+                    if got:
+                        replies.append(got)
+                        break
+        finally:
+            w.run(orig if orig else "?ALIAS,CLEAR")
+            time.sleep(2)                           # the on-change advert carries the old alias back out
+    assert not problems, "; ".join(problems)
+    assert replies, "W1 never answered the client's ?WHOAMI"
+    want = '{"type":"wcb_alias","id":%d,"alias":"%s"}' % (me, alias.replace("\\", "\\\\").replace('"', '\\"'))
+    assert replies[0] == want, f"the ?WHOAMI reply is {replies[0]!r}, expected {want!r}"
+    try:
+        parsed = json.loads(replies[0])
+    except ValueError as e:
+        raise AssertionError(f"the ?WHOAMI reply is not valid JSON ({e}): {replies[0]!r}") from None
+    assert parsed == {"type": "wcb_alias", "id": me, "alias": alias}, f"the reply parses to {parsed!r}"
+
+
+@test("input.softserial_tx_during_nvs_write", "Soft-port RMT TX stays byte-exact while the loop task writes NVS: 40 raw 80-byte lines a mesh client sends W1 S4 (written by MeshSerialOutTask on core 1) interleaved with 40 ?LABEL,S5 saves on W1's console, every line exact and no framing error", needs=["wcb1", "probe2"])
+def softserial_tx_during_nvs_write(bench):
+    """WCB-WP14 row 5 (softserial.tx_during_nvs_write). WcbSoftSerial::write sends a transmission's bytes in chunks
+    sized to the channel's memory, so each chunk is encoded in full before rmt_transmit starts it and the refill ISR,
+    which is not IRAM-safe and is held off during a flash write, is never needed mid-frame; a late 'done' interrupt only
+    stretches the idle gap (WCB_SoftSerial.cpp:63-70, :160-177). The plan had W2 send ;W1;S4 text, but a received ;S4
+    runs on W1's loop task (the ETM path enqueues it, WCB.ino:5544) - the same task that writes NVS for ?LABEL - so the
+    two could never overlap. A client's sendRaw frame is written by MeshSerialOutTask instead (meshSerialWrite,
+    WCB.ino:2506-2521, :2525-2540), a separate core-1 task, so a ?LABEL save on the loop task can land in the middle of
+    a line going out. Raw frames carry no sequence number, so the id is shared (MESH_IDS). The S5 label is set and put
+    back 20 times each; NVS refusing one (a full store) is a skip, since it would test nothing."""
+    s4 = link(bench, 1, "S4")
+    tokens = bench.config_tokens(1, refresh=True)
+    pwm = [t for t in tokens if t.upper().startswith("?MAP,PWM") and "S4" in t.upper()]
+    if pwm:
+        raise Skip(f"W1 S4 is a PWM port ({pwm}): a soft port declared for PWM drops serial writes")
+    w = usb_wcb(bench)
+    lines = [padded(f"N{i:02d}", 80).encode() + b"\r" for i in range(40)]
+    with config_guard(bench, 1) as before:
+        restore = token(before[1], "?LABEL,S5,") or "?LABEL,CLEAR,S5"
+        with _client(bench, "probe2", "nvs_tx") as (probe, cid, _):
+            s4.listen()
+            time.sleep(0.3)
+            m, wm = s4.mark(), w.dev.mark()
+            queued = 0
+            for i, x in enumerate(lines):
+                queued += bool(probe.mesh_raw(1, 4, x))
+                w.send(f"?LABEL,S5,HIL{i:02d}" if i % 2 == 0 else restore)
+                time.sleep(0.12)                # one 81-byte line at 9600 is ~84 ms: the 16-slot queue never fills
+            time.sleep(2.0)
+            got, errs = s4.received(m), s4.errors(m)
+            log = [x.rstrip() for x in w.dev.since(wm)]
+            w.run(restore)
+    refused = [x for x in log if "NVS could not store the Serial5 label" in x]
+    if refused:
+        raise Skip(f"W1's NVS refused {len(refused)} of the S5 label saves (full? see ?NVS): no write, nothing to overlap")
+    saved = sum(1 for x in log if re.match(r"^Serial5 label set to: 'HIL\d\d'$", x))
+    exact = sum(got.count(x) == 1 for x in lines)
+    queue_full = [x for x in log if x.startswith("[SOFTSERIAL] mesh-to-port queue full")]
+    bench.note(f"{exact}/40 raw lines exact on W1 S4 across {saved} label saves; RXERR {len(errs)}; stream identical: "
+               f"{got == b''.join(lines)}")
+    assert queued == 40, f"the probe queued {queued} of the 40 raw frames"
+    assert saved == 20, f"W1 confirmed {saved} of the 20 label saves"
+    assert not queue_full, f"W1's mesh-to-port queue overflowed - the pacing, not a TX fault: {queue_full}"
+    assert exact == 40 and not errs, f"S4 lines {exact}/40 exact, RXERR {len(errs)} ({errs[:3]})"

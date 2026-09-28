@@ -2038,6 +2038,12 @@ GATED = {
     "wifi.off_and_back": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
     "wifi.join_w2_ap": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
     "wifi.ap_derived_ssid_boot": ("wifi_modes", "changes W1's access point name and reboots it twice"),
+    "wifi.join_lost_and_rejoin": ("wifi_modes", "joins W1 to W2's access point, turns W2's access point off and back "
+                                                "on, and reboots each board twice"),
+    "wifi.join_absent_ssid_keeps_mesh": ("wifi_modes", "points W1's JOIN at a network nobody hosts for about 70 s and "
+                                                       "reboots W1 twice"),
+    "etm.seq_wrap": ("etm_seq_wrap", "floods the mesh with about 65,000 JSON broadcasts from W1 for several minutes "
+                                     "and reboots W2"),
     "wifi.pc_joins_ap_ws": ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard"),
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
@@ -2051,7 +2057,8 @@ GATED = {
         "local_bad_magic", "local_overrun", "local_base64_errors", "local_idle_timeout_nak_no_refresh",
         "local_write_refreshes_timeout", "local_baud_bump_abort", "local_baud_invalid", "local_baud_timeout_restore",
         "local_baud_rejected_rebegin_restores", "relay_cursor_dup_gap_wrong_session_abort", "relay_teardown_frame_err",
-        "relay_end_incomplete_and_verify_fail", "relay_timeout_keepalive", "cross_transport_remote_abort_kills_local")},
+        "relay_end_incomplete_and_verify_fail", "relay_timeout_keepalive", "cross_transport_remote_abort_kills_local",
+        "begin_abandons_config_pull")},
     "ota.local_sha_corrupt_full": ("ota_full", "erases the whole inactive app slot"),
     "ota.local_full_same_image_wcb1": ("ota_full", "erases and rewrites W1's inactive app slot and switches its boot "
                                                    "slot twice"),

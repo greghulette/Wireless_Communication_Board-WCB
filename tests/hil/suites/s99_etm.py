@@ -3,6 +3,10 @@
 The deferred-restart tests (tracker #93) reboot W1 once each and move nothing: W2 re-arms W1's remote terminal or
 reports stats to it, and W1's own console asks for its version. Restore if aborted: `;W1,?RTERM,STOP` on W2's console
 (the session and ?DEBUG,MGMT are RAM only, and W1's queued ?reboot clears both anyway).
+
+etm.seq_wrap (opt-in etm_seq_wrap, WCB-WP46) floods the mesh from W1 for several minutes to take its sequence counter
+past 65,535. Restore if aborted: `?DEBUG,ETM,OFF` on W1 and W2, and W1's `?BCAST,OUT,S<n>,ON` for each port its chain
+had on (the test turns them off for the flood).
 """
 import re
 import time
@@ -10,7 +14,8 @@ import time
 from hil.runner import test
 from hil.wcb import WCB
 from hil.runner import Skip
-from suites.common import Watch, config_guard, remote_wcbs, snapshot, token, usb_wcb
+from suites.common import (Watch, config_guard, link, marker, nonce, remote_wcbs, require_tokens, snapshot, token,
+                           usb_wcb)
 
 
 @test("etm.remote_reboot", "W2 rebooted over the mesh announces itself and answers again", needs=["wcb1"])
@@ -339,3 +344,128 @@ def char_relay_refusal_reported(bench):
         finally:
             w1.run("?DEBUG,MGMT,OFF")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ the sequence wrap (WCB-WP46, opt-in etm_seq_wrap)
+SEQ_TOP = 65535
+WRAP_MARGIN = 300       # the bulk flood stops this short of the top; the rest is counted with ?DEBUG,ETM on
+SENT_SEQ = re.compile(r"^\[ETM\] Sent seq (\d+): (.*)$")
+
+
+def _seq_now(w):
+    """W1's ETM sequence counter: one untracked JSON broadcast with ?DEBUG,ETM on names the number it spent
+    (sendESPNowMessage, WCB.ino:3099, printed at :3115) -> that number."""
+    tag = nonce()
+    w.run("?DEBUG,ETM,ON")
+    try:
+        out = w.run('{"hs":"%s"}' % tag)
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+    for x in out:
+        m = SENT_SEQ.match(x.rstrip())
+        if m and tag in m.group(2):
+            return int(m.group(1))
+    raise AssertionError("W1 printed no '[ETM] Sent seq' line for its JSON broadcast")
+
+
+def _json_burst(w, count, block=400):
+    """`count` untracked JSON broadcasts typed on W1's console, `block` to a line -> (the 'Send failed' lines, the
+    'Command queue is full' lines) seen. Each '{}' token is a plain-text broadcast (handleSingleCommand, WCB.ino:5996-
+    5999) that sendESPNowMessage sends as an ETM frame it does not track (:3101-3106): exactly one sequence number
+    (nextEtmSeq, :703-706), no ACK, no retry, no pending slot. The number is spent before the send, so a full ESP-NOW
+    TX queue ('Send failed', :3118) costs one too. The console reader waits for command-queue room (enqueueCommand,
+    :2591-2599), and each line's echo paces the next."""
+    failed = full = 0
+    left = count
+    while left > 0:
+        n = min(block, left)
+        out = w.run("^".join(["{}"] * n), timeout=120)
+        failed += sum(1 for x in out if x.startswith("[ETM] Send failed seq"))
+        full += sum(1 for x in out if "Command queue is full" in x)
+        left -= n
+    return failed, full
+
+
+@test("etm.seq_wrap", "OPT-IN (etm_seq_wrap): W1's ETM sequence counter, driven past 65,535 by about 65,000 untracked JSON broadcasts, skips 0: no '[ETM] Sent seq 0', the unicast sent right after 65,535 goes out as a small non-zero number, and W2 - rebooted first, so its duplicate ring for W1 still holds empty (0) slots - runs it: the marker reaches W2 S2 once and W2 logs no duplicate (re-scan #19; ~7 min, W2 reboots once)", needs=["wcb1", "wcb2"], links=["W2S2"], opt_in="etm_seq_wrap")
+def seq_wrap(bench):
+    """WCB-WP46 (wcb.etm.seq_wrap_zero). The counter is a uint16_t (WCB.ino:699) that nextEtmSeq pre-increments and
+    steps over 0 (:700-706, re-scan #19); a receiver's duplicate ring uses 0 for an empty slot (:737-751, filled at
+    :5352-5363), so a command numbered 0 reaching a ring with an empty slot for its sender would be ACKed and never
+    run. W2 is rebooted first to empty its ring for W1, and W1 sends W2 nothing tracked until the marker, so the ring
+    still has empty slots when W1 wraps (JSON broadcasts are never put in a ring, :5358-5364). The flood is '{}'
+    typed on W1's console: W1 prints nothing per frame, W2 and NaviCore consume JSON silently, and W1's port
+    broadcasts are off meanwhile (put back after), or each frame would also cost a write to every port. The count is
+    read before and after the bulk (_seq_now), and the last stretch runs with ?DEBUG,ETM on to see the numbers around
+    the wrap. The flood can starve W1's heartbeats for a while: the test ends by waiting for W1 to see W2 online."""
+    far = link(bench, 2, "S2")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    require_tokens(bench, 1, "?ETM,ON", "?BCAST,OUT,S0,OFF")
+    require_tokens(bench, 2, "?ETM,ON")
+    bad, facts = [], {}
+    with config_guard(bench, 1) as before:
+        ports = [p for p in ("S2", "S3", "S4", "S5") if f"?BCAST,OUT,{p},ON" in before[1]]
+        start = w.dev.mark()
+        try:
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},OFF")
+            w2.reboot()                                    # W2's duplicate ring for W1 starts empty
+            _peers_online(bench, w)
+            c0 = _seq_now(w)
+            t0 = time.monotonic()
+            bulk = SEQ_TOP - c0 - WRAP_MARGIN
+            if bulk > 0:
+                facts["send_failed"], facts["queue_full"] = _json_burst(w, bulk)
+            facts["flood_s"] = round(time.monotonic() - t0)
+            c1 = _seq_now(w)
+            facts["counter"] = (c0, c1)
+            if c1 < c0 or c1 > SEQ_TOP - 2:
+                raise AssertionError(f"W1's counter went from {c0} to {c1} over a flood of {max(bulk, 0)}: the last "
+                                     f"stretch before the wrap could not be counted (did W1 reboot, or wrap early?)")
+            w.run("?DEBUG,ETM,ON")
+            w2.run("?DEBUG,ETM,ON")
+            wm, m2 = w.dev.mark(), w2.dev.mark()
+            _json_burst(w, SEQ_TOP - c1)
+            t = marker("W")
+            watch = Watch(far)
+            w.run(f";W2,;S2{t}")
+            try:
+                watch.expect(far, t.encode() + b"\r", timeout=5)
+            except AssertionError:
+                pass
+            time.sleep(1.5)
+            lines, lines2 = [x.rstrip() for x in w.dev.since(wm)], [x.rstrip() for x in w2.dev.since(m2)]
+            seqs = [(int(m.group(1)), m.group(2)) for m in map(SENT_SEQ.match, lines) if m]
+            mine = next((s for s, text in seqs if text.startswith(f";S2{t}")), None)
+            top = max((s for s, text in seqs if text == "{}"), default=None)
+            facts.update(marker_seq=mine, top_json_seq=top)
+            if any(s == 0 for s, _ in seqs):
+                bad.append("W1 sent a command numbered 0")
+            if mine is None:
+                bad.append("W1 printed no '[ETM] Sent seq' line for the marker unicast")
+            elif not 1 <= mine <= 20:
+                bad.append(f"the unicast after the wrap went out as seq {mine}, expected a small number above 0")
+            if top is None or top < SEQ_TOP - 5:
+                bad.append(f"the last JSON broadcasts before the marker reached seq {top}, not the top ({SEQ_TOP}): the "
+                           f"wrap was not where the test looked")
+            if mine is not None and not any(re.match(rf"^\[ETM\] Received seq {mine} from WCB1: ;S2{t}", x) for x in lines2):
+                bad.append(f"W2 logged no '[ETM] Received seq {mine} from WCB1' for the marker")
+            dup = [x for x in lines2 if "Duplicate seq" in x and "from WCB1" in x]
+            if dup:
+                bad.append(f"W2 dropped W1's commands as duplicates: {dup[:2]}")
+            copies = watch.got(far).count(t.encode() + b"\r")
+            if copies != 1:
+                bad.append(f"W2 S2 got the marker {copies} time(s), expected once")
+            if w.rebooted_since(start):
+                bad.append("W1 rebooted during the test (brownout under the flood?)")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            try:
+                w2.run("?DEBUG,ETM,OFF")
+            except AssertionError:
+                pass
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},ON")
+            time.sleep(12.0)                               # a heartbeat period: every board hears W1 again
+            _peers_online(bench, w, strict=False)
+    bench.note(f"etm.seq_wrap: {facts}")
+    assert not bad, "; ".join(bad)

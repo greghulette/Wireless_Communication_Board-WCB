@@ -124,6 +124,14 @@ OPT_INS = {
         "why": "fills W1's settings storage with throwaway sequences, then removes them",
         "estimate_s": 60,
     },
+    "etm_seq_wrap": {
+        "title": "ETM sequence wrap (~7 min flood)",
+        "what": "Drives W1's 16-bit ETM sequence counter past 65,535 with about 65,000 untracked JSON broadcasts typed "
+                "on its console (its port broadcasts off meanwhile), then checks that a unicast sent right after the "
+                "wrap still runs on W2: the mesh carries W1's flood for several minutes, and W2 reboots once.",
+        "why": "floods the mesh with about 65,000 JSON broadcasts from W1 for several minutes and reboots W2",
+        "estimate_s": 420,
+    },
     "w1s4_soak": {
         "title": "W1S4 corruption soak (#78)",
         "what": "Loads W1's S2/S4 fan-out for bench.json soak_minutes (default 20), alternating W1S4's receiver.",

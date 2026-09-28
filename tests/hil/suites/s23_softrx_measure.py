@@ -14,21 +14,26 @@
   Short (~6 s) and not opt-in.
 - soak.w1s4_wire hunts the intermittent W1S4 episode of run 20260923-012123 (~3.5 % of lines lost with only one probe
   edge pin receiving, so NOT the erratum) and says which of W1's output, the wire or crosstalk from S2 it was.
+- softrx.pwm_input_nvs_and_restart and softrx.restart_under_rx_traffic (WCB-WP18) take the level arms through what
+  they must survive: NVS writes while a PWM input pulses, and a restart while an input pulses or text streams in.
 
 The two measurements are opt-in (bench.json "opt_in": "softrx_erratum", "w1s4_soak") and write a CSV into the run's
-results folder; softrx.erratum_pairs needs wcb_probe 4 (TXSKEW). All three run under config_guard.
+results folder; softrx.erratum_pairs needs wcb_probe 4 (TXSKEW). All of them run under config_guard.
 """
 import csv
 import difflib
 import os
 import random
 import re
+import threading
 import time
 
 from hil.links import SW_MAX_BAUD
 from hil.probe import HW_CHANNELS, HW_ONLY_HEADERS, PROBE_TXSKEW_VERSION
 from hil.runner import Skip, test
-from suites.common import Watch, config_guard, link, nonce, padded, prime, require_tokens, token, usb_wcb
+from hil.wcb import BOOT_LINE
+from suites.common import Watch, config_guard, link, marker, nonce, padded, prime, require_tokens, token, usb_wcb
+from suites.s14_pwm import _clear_local_mapping, _no_pwm, _pwm_reboot, _step_problem
 
 # W1 console lines the measurement reads. A *** comment line only prints "Ignored chain command: <line>"
 # (parseCommandsAndEnqueue, WCB.ino); one that lost its *** is plain text, which ?BCAST,IN,<port>,OFF stops at
@@ -506,6 +511,225 @@ def level_irq_stuck_line(bench):
                     msg = f"{body_exc}\n(and the restore afterwards failed: {restore_err})"
                     raise AssertionError(msg) from restore_err
                 raise restore_err
+
+
+# ============================================================ C. level arms across a restart and NVS writes (WCB-WP18)
+# Each soft port's RX pin per ?HW (updatePinMap, wcb_pin_map.cpp: HW 1 :27-45, 2.1 :46-62, 2.3 :63-79, 2.4 :80-96,
+# 3.1/3.2 :97-113): the pins clearStaleGpioInterrupts names at boot. A PWM input on S3 is S3's RX pin (pwmISR3,
+# WCB_PWM.cpp:165).
+RX_PINS = {"1": {"S3": 25, "S4": 21, "S5": 23}, "21": {"S3": 4, "S4": 27, "S5": 12},
+           "23": {"S3": 4, "S4": 27, "S5": 26}, "24": {"S3": 4, "S4": 27, "S5": 26},
+           "31": {"S3": 16, "S4": 18, "S5": 10}, "32": {"S3": 16, "S4": 18, "S5": 10}}
+STALE_CLEARED = re.compile(r"^\[BOOT\] Cleared a stale GPIO interrupt left armed by the restart on GPIO((?: \d+)+)\s*$")
+BOOT_COUNT = re.compile(r"^Boot attempts since power applied: (\d+)")
+RESET_REASON = re.compile(r"^Reset reason: \d+ - (.*)$")
+PANIC_LINE = re.compile(r"Guru Meditation|Interrupt wdt|abort\(\) was called|Backtrace:")
+ROM_RESET = re.compile(r"rst:0x[0-9a-fA-F]+")
+LABEL_REFUSED = "NVS could not store the Serial5 label"
+
+
+def _restart_record(dev, since):
+    """What W1 printed about restarting since `since`: its boot banners, reset reasons (printResetReason,
+    WCB.ino:8611-8640), the last 'Boot attempts since power applied' count, ROM reset lines, panic lines, and the GPIO
+    numbers of every '[BOOT] Cleared a stale GPIO interrupt' line (setup(), WCB.ino:9338-9342)."""
+    lines = dev.since(since)
+    counts = [int(m.group(1)) for m in map(BOOT_COUNT.match, lines) if m]
+    return dict(boots=sum(1 for x in lines if re.search(BOOT_LINE, x)),
+                reasons=[m.group(1).strip() for m in map(RESET_REASON.match, lines) if m],
+                count=counts[-1] if counts else None,
+                roms=sum(1 for x in lines if ROM_RESET.search(x)),
+                panics=[x for x in lines if PANIC_LINE.search(x)][:3],
+                stale=[int(p) for m in map(STALE_CLEARED.match, lines) if m for p in m.group(1).split()])
+
+
+def _one_clean_restart(rec, n0, pins, what):
+    """Problems with one restart record: not exactly one boot, not a software reset, a panic, more than one ROM reset
+    line, 'Boot attempts' not n0 + 1 (when n0 is known), or a pin in `pins` missing from the stale-arm line."""
+    problems = []
+    if rec["boots"] != 1:
+        problems.append(f"{what}: {rec['boots']} boot banners, expected exactly one")
+    if rec["reasons"] != ["Software Reset"]:
+        problems.append(f"{what}: reset reasons {rec['reasons']}, expected one 'Software Reset'")
+    if rec["panics"]:
+        problems.append(f"{what}: panic output {rec['panics']}")
+    if rec["roms"] > 1:
+        problems.append(f"{what}: {rec['roms']} ROM reset lines - the board reset more than once")
+    if n0 is not None and rec["count"] != n0 + 1:
+        problems.append(f"{what}: 'Boot attempts' went from {n0} to {rec['count']}, expected +1")
+    missing = [p for p in pins if p not in rec["stale"]]
+    if missing:
+        problems.append(f"{what}: the boot did not report clearing a stale arm on GPIO {missing} (it named "
+                        f"{rec['stale'] or 'none'})")
+    return problems
+
+
+@test("softrx.pwm_input_nvs_and_restart", "With W1 S3 a PWM input pulsing at 50 Hz, 20 NVS saves (?LABEL,S5 set and put back 10 times) reset nothing, and a ?reboot taken with the pulses running boots exactly once (a software reset, Boot attempts +1, no panic) and clears S3's stale level arm; passthrough to S4 follows the input again after the boot (tracker #78; 3 reboots)", needs=["wcb1"])
+def pwm_input_nvs_and_restart(bench):
+    """WCB-WP18 (pwm.gpio_level_arm_vs_restart_and_nvs, boot.stale_gpio_clear_under_traffic), the PWM half. On the
+    classic ESP32 pwmEdge re-arms a PWM input for the level its pin is not at after every edge (WCB_PWM.cpp:121-161),
+    so S3's RX pin is armed at every instant. The GPIO ISR service is installed without ESP_INTR_FLAG_IRAM (WCB.ino:
+    9326; the reason at :9312-9324, CLAUDE.md rule 13): an edge during an NVS write waits the write out, where an IRAM
+    service would run the flash-resident __onPinInterrupt with the cache off and panic - a PWM input pulses every
+    20 ms, so the next save would do it. A CPU-only restart (ESP.restart, the deferred ?reboot at :9844-9872) keeps
+    the arm, and one left with no handler re-fires until the interrupt watchdog resets the board, again and again, so
+    setup() clears every armed pin before the service goes in (clearStaleGpioInterrupts, :9274-9285, called at :9325)
+    and says which (:9338-9342). The mapping's own reboot gives the 'Boot attempts' count the ?reboot must raise by
+    exactly one. The S5 label churn is put back after each save; NVS refusing one is a skip."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    if s3.tap:
+        raise Skip(f"{s3} is listen-only, so W1's S3 input cannot be driven")
+    _no_pwm(bench, 1)
+    tokens = bench.config_tokens(1, refresh=True)
+    hw = (token(tokens, "?HW,") or "?HW,?").split(",")[1]
+    pin = RX_PINS.get(hw, {}).get("S3")
+    w = usb_wcb(bench)
+    probe = s4.probe
+    problems, notes = [], []
+    with config_guard(bench, 1) as before:
+        restore = token(before[1], "?LABEL,S5,") or "?LABEL,CLEAR,S5"
+        mapped = False
+        try:
+            s3.pwm_out(0)
+            m = w.send("?MAP,PWM,S3,S4")
+            mapped = True
+            _pwm_reboot(w, m)
+            if not any("PWM Task Created" in x for x in w.dev.since(m)):
+                raise AssertionError("the mapping's reboot did not start the PWM task")
+            n0 = _restart_record(w.dev, m)["count"]
+            s4.pwm_in()
+            s3.pwm_out(1500)
+            time.sleep(1.0)
+
+            # 1. twenty NVS writes while the input pulses
+            wm, tag = w.dev.mark(), nonce()
+            try:
+                for i in range(10):
+                    out = w.run(f"?LABEL,S5,HIL{i}{tag}")
+                    if any(LABEL_REFUSED in x for x in out):
+                        raise Skip("W1's NVS refused the S5 label (full? see ?NVS): no save, nothing to test")
+                    w.run(restore)
+            except AssertionError:
+                rec = _restart_record(w.dev, wm)
+                if rec["boots"] or rec["panics"] or rec["roms"]:
+                    try:
+                        w.wait_boot(wm, timeout=30)
+                    except AssertionError:
+                        pass
+                    raise AssertionError(f"W1 reset during the NVS saves with S3 pulsing at 50 Hz: {rec}") from None
+                raise
+            rec = _restart_record(w.dev, wm)
+            if rec["boots"] or rec["panics"] or rec["roms"]:
+                problems.append(f"the 20 NVS saves with S3 pulsing reset W1: {rec}")
+
+            # 2. a restart with the input pulsing
+            m = w.reboot()
+            rec = _restart_record(w.dev, m)
+            problems += _one_clean_restart(rec, n0, [pin] if pin else [], "?reboot under PWM input")
+            if pin is None:
+                notes.append(f"?HW,{hw} is not in RX_PINS: the stale-arm line was not checked for S3's pin")
+            notes.append(f"stale arms cleared at the ?reboot: GPIO {rec['stale']}; boot attempts {n0} -> {rec['count']}")
+
+            # 3. the input is read again: passthrough follows a new width
+            pm = probe.dev.mark()
+            s3.pwm_out(1200)
+            time.sleep(1.2)
+            step = _step_problem(s4.pulses(pm), 1200, " after the restart")
+            if step:
+                problems.append(f"passthrough did not follow S3 after the restart: {step}")
+        finally:
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            if mapped:
+                _clear_local_mapping(w, "S3")
+            s3.pwm_stop()
+    bench.note("softrx.pwm_input_nvs_and_restart: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+@test("softrx.restart_under_rx_traffic", "A ?reboot taken while a probe streams text into W1 S3 and S4 boots exactly once (a software reset, no panic) and clears both ports' stale level arms; each port then runs a ;S0 command exactly once (tracker #78; 1 reboot)", needs=["wcb1"])
+def restart_under_rx_traffic(bench):
+    """WCB-WP18, the soft-RX half (boot.stale_gpio_clear_under_traffic). The vendored EspSoftwareSerial arms each S3-S5
+    RX pin for the level the line is not at (CLAUDE.md rule 13), so the arms are live when ?reboot restarts the CPU
+    and stay armed through it; the stream keeps the lines toggling through the boot, which is when a stale arm with no
+    handler would storm (a v6 probe did exactly that, tracker #78). setup() must clear them before
+    gpio_install_isr_service (WCB.ino:9274-9285, :9325-9326) and name them (:9338-9342). The lines are *** comments
+    (printed as ignored, never run or broadcast, WCB.ino:2880-2882) and ?BCAST,IN is off on both ports meanwhile, so a
+    line cut in two at the boot cannot become a broadcast; both flags are put back. The restart waits out the 4 s
+    quiet window: a comment line is never queued, so it does not hold the restart off."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    taps = [l for l in (s3, s4) if l.tap]
+    if taps:
+        raise Skip(f"{taps[0]} is listen-only, so W1's RX cannot be driven")
+    tokens = bench.config_tokens(1, refresh=True)
+    busy = _not_text(tokens, ("S3", "S4"))
+    if busy:
+        raise Skip(f"W1 S3/S4 is not a text port ({busy}): both must be read as text")
+    fast = [p for p in ("S3", "S4") if bench.port_baud(1, p) > SW_MAX_BAUD]
+    if fast:
+        raise Skip(f"W1 {fast} runs above the {SW_MAX_BAUD} where one-port soft RX is exact")
+    hw = (token(tokens, "?HW,") or "?HW,?").split(",")[1]
+    pins = [RX_PINS[hw][p] for p in ("S3", "S4")] if hw in RX_PINS else []
+    w = usb_wcb(bench)
+    problems, errors, sent = [], [], [0]
+    with config_guard(bench, 1) as before:
+        saved = [token(before[1], f"?BCAST,IN,{p},") for p in ("S3", "S4")]
+        if not all(saved):
+            raise Skip("W1's chain lacks its ?BCAST,IN,S3 / S4 tokens, so they could not be put back")
+        stop, th = threading.Event(), None
+
+        def stream():
+            try:
+                while not stop.is_set():
+                    for l in (s3, s4):
+                        l.send(f"***{padded('RT', 20)}\r".encode())
+                        sent[0] += 1
+                    time.sleep(0.05)
+            except Exception as e:  # noqa: BLE001 - reported by the test once the thread is joined
+                errors.append(e)
+
+        try:
+            w.run("?BCAST,IN,S3,OFF")
+            w.run("?BCAST,IN,S4,OFF")
+            prime(s3, s4)
+            time.sleep(0.3)
+            earlier = [int(mm.group(1)) for mm in map(BOOT_COUNT.match, w.dev.since(0)) if mm]
+            th = threading.Thread(target=stream, name="softrx-stream", daemon=True)
+            th.start()
+            time.sleep(1.0)
+            try:
+                m = w.reboot()
+                time.sleep(1.0)
+            finally:
+                stop.set()
+                th.join(timeout=10)
+            if errors:
+                raise AssertionError(f"streaming into S3/S4 failed: {errors[0]}")
+            rec = _restart_record(w.dev, m)
+            problems += _one_clean_restart(rec, None, pins, f"?reboot with {sent[0]} lines streaming into S3/S4")
+            bench.note(f"softrx.restart_under_rx_traffic: {sent[0]} lines streamed; stale arms cleared on GPIO "
+                       f"{rec['stale']}; boot attempts {earlier[-1] if earlier else '?'} -> {rec['count']}"
+                       + ("" if pins else f"; ?HW,{hw} is not in RX_PINS, so the pins were not checked"))
+            prime(s3, s4)
+            time.sleep(0.5)
+            for l in (s3, s4):
+                t = marker("X")
+                wm = w.dev.mark()
+                l.send(f";S0,{t}\r".encode())
+                try:
+                    w.dev.expect(rf"^{t}$", timeout=3, since=wm)
+                except AssertionError:
+                    pass
+                time.sleep(0.5)
+                n = sum(1 for x in w.dev.since(wm) if x.rstrip() == t)
+                if n != 1:
+                    problems.append(f"after the restart W1 {l.port} ran ;S0,<marker> {n} times, expected once")
+        finally:
+            stop.set()
+            prime(s3, s4)
+            time.sleep(0.3)
+            for t in saved:
+                w.run(t)
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ B. the W1S4 episode

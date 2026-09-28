@@ -5,7 +5,9 @@
   own ?WIFI line in its finally and checks the chain holds it again.
 - `wifi_modes` (opt-in): W1 turns its access point off and back on, joins W2's access point and returns to its own,
   and hosts its access point under the derived name for one boot. A mode applies at boot, so each change is a W1 reboot
-  (six in all). Nothing needs the PC's WiFi adapter.
+  (six in all). Nothing needs the PC's WiFi adapter. JOIN robustness (WCB-WP45) adds two more under the same key: W1
+  losing W2's access point and joining it again (W2's own access point off and back: two W2 reboots), and W1 looking
+  for a network nobody hosts for 70 s without leaving the mesh channel (four more W1 reboots in all).
 - `wifi_pc` (attended): a WiFi adapter on the PC joins W1's access point, opens ws://192.168.4.1/ws and gets ?VERSION
   answered over it, then returns to the network it was on. It uses an adapter that does not carry the PC's internet
   when there is one (this bench's TP-Link "Wi-Fi 2"); with a single adapter the PC is offline for about 30 s.
@@ -27,8 +29,10 @@ import time
 
 from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
+from hil.wcb import WCB
 from hil.ws import WsClient
 from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
+from suites.s03_wcb import _w2_online
 
 
 def _has(lines, text):
@@ -404,6 +408,157 @@ def ap_derived_ssid_boot(bench):
         st = _status(w)
         if st.get("AP SSID") != ssid or st.get("Interface") != "up":
             problems.append(f"W1's access point did not come back under its own name (interface {st.get('Interface')!r})")
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ JOIN robustness (WCB-WP45, opt-in wifi_modes)
+def _w2_ap_back(w2, tok2, ssid2, problems):
+    """Replay W2's own ?WIFI,AP line on its own console and reboot it; the SoftAP boot line proves it is back. The
+    SSID is compared, never quoted."""
+    if not _has(w2.run(tok2), f'WiFi mode set to AP — SSID "{ssid2}"'):
+        problems.append("replaying W2's ?WIFI,AP line did not confirm")
+    bm = w2.reboot()
+    if not _has(w2.dev.since(bm), f'[WIFI] SoftAP "{ssid2}" up on channel'):
+        problems.append("W2's access point did not come back at boot")
+
+
+@test("wifi.join_lost_and_rejoin", "W1 joined to W2's access point notices it going away ('lost ... retrying every 5 s') while W2 boots with WiFi off, and joins it again by itself ('joined ... after N attempt(s)') once it is back; ?WIFI then shows the association connected and a unicast to W2 is delivered; both access points are put back (W1 x2, W2 x2 reboots)", needs=["wcb1", "wcb2"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="joins W1 to W2's access point, turns W2's access point off and back on, and reboots each board twice")
+def join_lost_and_rejoin(bench):
+    """WCB-WP45 row 1 (wifi.join_lost_and_rejoin). A JOIN that loses its association prints 'lost "<ssid>" - retrying
+    every 5 s' once and falls through to the retry, never latching (WCB_WiFi.cpp:239-289), and the next association
+    prints 'joined ... after N attempt(s)' (:261-267), N counting every attempt since boot. The plan rebooted W2 to
+    take its access point away, but a reboot has it back within a few seconds, under the station's beacon timeout, so
+    W1 might never see the loss; W2 boots with WiFi off instead, and its own ?WIFI,AP line and a reboot bring the
+    access point back (the same pair wifi.off_and_back runs on W1). W2's SSID and passphrase are read from its chain,
+    handed to W1 and back, and never quoted."""
+    w2s2 = link(bench, 2, "S2")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    problems, facts = [], {}
+    with config_guard(bench, 1, 2) as before:
+        tok1, mode1, ssid1, _ = _wifi_token(before[1])
+        tok2, mode2, ssid2, pw2 = _wifi_token(before[2])
+        if mode1 != "AP" or mode2 != "AP":
+            raise Skip("W1 and W2 must both host an access point (W2's is joined, W1's is put back)")
+        if not pw2:
+            raise Skip("W2's ?WIFI,AP line carries no password")
+        ch = _mesh_channel(before[1])
+        if _mesh_channel(before[2]) != ch:
+            raise Skip("W1 and W2 are on different mesh channels")
+        joined = rf'^\[WIFI\] joined "{re.escape(ssid2)}" on channel {ch} after (\d+) attempt\(s\) \S+ ws://\S+/ws$'
+        changed1 = changed2 = False
+        try:
+            out = w.run(f"?WIFI,JOIN,{ssid2},{pw2}")
+            changed1 = True
+            if not _has(out, f'WiFi mode set to JOIN — joining "{ssid2}"'):
+                problems.append("?WIFI,JOIN did not confirm")
+            bm = w.reboot()
+            try:
+                w.dev.expect(joined, timeout=45, since=bm)
+            except AssertionError:
+                raise AssertionError("W1 did not join W2's access point within 45 s of booting") from None
+            lm = w.dev.mark()
+            if not _has(w2.run("?WIFI,OFF"), "WiFi disabled — reboot to apply."):
+                problems.append("W2 did not take ?WIFI,OFF")
+            changed2 = True
+            w2.reboot()
+            try:
+                w.dev.expect(rf'^\[WIFI\] lost "{re.escape(ssid2)}" \S+ retrying every 5 s$', timeout=30, since=lm)
+                facts["lost"] = True
+            except AssertionError:
+                problems.append("W1 printed no 'lost ... retrying every 5 s' within 30 s of W2 turning its access point off")
+                facts["lost"] = False
+            rm = w.dev.mark()
+            _w2_ap_back(w2, tok2, ssid2, problems)
+            changed2 = False
+            try:
+                facts["attempts"] = int(w.dev.expect(joined, timeout=45, since=rm).group(1))
+            except AssertionError:
+                problems.append("W1 did not join W2's access point again within 45 s of it coming back")
+            _w2_online(bench, w)
+            st = _status(w)
+            if not (st.get("Association", "").startswith("connected (") and st.get("Interface") == "up"):
+                problems.append(f"after the rejoin: Association {st.get('Association')!r}, Interface {st.get('Interface')!r}")
+            radio = st.get("Radio channel", "")
+            if not radio.startswith(f"{ch}  (mesh channel {ch})") or "MISMATCH" in radio:
+                problems.append(f"after the rejoin the radio line is {radio!r}")
+            _unicast_ok(w, w2s2, problems, "after the rejoin")
+        finally:
+            if changed2:
+                _w2_ap_back(w2, tok2, ssid2, problems)
+            if changed1:
+                _restore_ap(w, tok1, ssid1, problems)
+        if _status(w).get("Mode") != "AP":
+            problems.append("W1 is not back in AP mode")
+    bench.note(f"wifi.join_lost_and_rejoin: {facts}")
+    assert not problems, "; ".join(problems)
+
+
+RETRY_ALLOWANCE = 2     # ETM retries a pinned-channel JOIN may cost in 70 s: radio noise, not a channel sweep
+
+
+@test("wifi.join_absent_ssid_keeps_mesh", "A JOIN to a network nobody hosts retries for ever on the mesh channel without sweeping: 'will join', 'still looking (attempt 1)', and '(attempt 12)' about 55 s later, while a unicast to W2 every 5 s for 70 s arrives with no failure and at most two retries and the ?WIFI radio line stays on the mesh channel; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="points W1's JOIN at a network nobody hosts for about 70 s and reboots W1 twice")
+def join_absent_ssid_keeps_mesh(bench):
+    """WCB-WP45 row 2 (wifi.join_absent_ssid_keeps_mesh). wcbWifiJoinTry passes meshChannel to WiFi.begin and keeps
+    auto-reconnect off, so the probe for the SSID stays on the channel the mesh already uses (WCB_WiFi.cpp:191-202),
+    and the state machine retries every JOIN_RETRY_MS (5 s, :36) for ever, saying so at attempt 1 and every 12th
+    (:279-287). A channel sweep would take the radio off the mesh for most of a second every 5 s, and W1's unicasts
+    would need retries or fail. The SSID and passphrase are throwaway (HIL + a nonce, never a network); W1's own ?WIFI
+    line is replayed at the end."""
+    w2s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems, radios, facts = [], [], {}
+    with config_guard(bench, 1) as before:
+        tok, mode, ssid, _ = _wifi_token(before[1])
+        if mode != "AP":
+            raise Skip("W1 does not host an access point")
+        ch = _mesh_channel(before[1])
+        nosuch, pw_x = f"HIL-NOSUCH-{nonce()}", f"hil{nonce().lower()}pass"
+        looking = rf'^\[WIFI\] still looking for "{re.escape(nosuch)}" \(attempt {{}}\)$'
+        changed = False
+        try:
+            out = w.run(f"?WIFI,JOIN,{nosuch},{pw_x}")
+            changed = True
+            if not _has(out, f'WiFi mode set to JOIN — joining "{nosuch}"'):
+                problems.append("?WIFI,JOIN to the absent network did not confirm")
+            bm = w.reboot()
+            if not _has(w.dev.since(bm), f'[WIFI] will join "{nosuch}" on channel {ch}'):
+                problems.append("no 'will join ... on channel <mesh channel>' boot line")
+            try:
+                w.dev.expect(looking.format(1), timeout=20, since=bm)
+            except AssertionError:
+                raise AssertionError("no 'still looking ... (attempt 1)' line within 20 s of the boot") from None
+            base = w.etm_board_stats().get(2) or {}
+            t0 = time.monotonic()
+            n = 0
+            while time.monotonic() - t0 < 70:
+                n += 1
+                _unicast_ok(w, w2s2, problems, f"(unicast {n}) while W1 looked for the absent network")
+                radio = _status(w).get("Radio channel", "")
+                if not radio.startswith(f"{ch}  (mesh channel {ch})") or "MISMATCH" in radio:
+                    radios.append(radio)
+                time.sleep(max(0.0, t0 + 5 * n - time.monotonic()))
+            after = w.etm_board_stats().get(2) or {}
+            lines = w.dev.since(bm)
+            facts.update(unicasts=n, stats_before=base, stats_after=after)
+            if not any(re.match(looking.format(12), x) for x in lines):
+                problems.append("no 'still looking ... (attempt 12)' line within 70 s of attempt 1")
+            if any(re.match(looking.format(k), x) for x in lines for k in (2, 3, 13)):
+                problems.append("'still looking' printed for an attempt other than 1 and every 12th")
+            if any("[ETM] WCB2 went OFFLINE" in x for x in lines):
+                problems.append("W1 marked W2 offline while it looked for the absent network")
+            if not base or not after:
+                problems.append("?STATS has no WCB2 row")
+            else:
+                failed, retries = after["failed"] - base["failed"], after["retries"] - base["retries"]
+                if failed or retries > RETRY_ALLOWANCE:
+                    problems.append(f"unicasts to W2 while looking: {failed} failed, {retries} retries (at most "
+                                    f"{RETRY_ALLOWANCE} allowed) - is the JOIN sweeping channels?")
+            if radios:
+                problems.append(f"the ?WIFI radio line left the mesh channel {len(radios)} time(s): {radios[:2]}")
+        finally:
+            if changed:
+                _restore_ap(w, tok, ssid, problems)
+    bench.note(f"wifi.join_absent_ssid_keeps_mesh: {facts}")
     assert not problems, "; ".join(problems)
 
 
