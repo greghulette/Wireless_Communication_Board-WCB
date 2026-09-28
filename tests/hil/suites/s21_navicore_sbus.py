@@ -883,12 +883,18 @@ def rec_info_list(bench):
 @test("navicore.rec_play_clip", "OPT-IN (navicore_clip, attended): play a saved clip of up to 30 s; the start line, REPLAYING state and completion timing", needs=["navicore", "wcb1"], links=[], opt_in="navicore_clip")
 def rec_play_clip(bench):
     """Drives every Maestro channel in the clip and re-fires its recorded actions, possibly WCB commands (hence
-    config_guard). The clip must hold no record/play/stop action: a recorded record would start a take that saves."""
+    config_guard). The clip must hold no record/play/stop action: a recorded record would start a take that saves.
+    The buffer keeps the last clip played or loaded until a take, a CLEAR or a reboot, so a buffer whose event count
+    and duration match a saved clip's is that copy, not a take. Until 2026-09-28 the test left its clip there: run
+    20260927-174702 played 8-2 (191 events, 1767 ms) and every later run skipped. It now puts the buffer back as found,
+    empty (?REC,CLEAR) or that clip (?REC,LOAD): both RAM only (navicore_record.h clearClip, loadClip)."""
     nc = _nc(bench)
     state = nc.rec_info()
-    if state[0] != "idle" or state[1] != "0":
+    clips = nc.clips()[1]
+    copy_of = next((c["name"] for c in clips if (str(c["n"]), str(c["dur"])) == (state[1], state[3])), None)
+    if state[0] != "idle" or (state[1] != "0" and not copy_of):
         raise Skip("the recorder is busy or holds an unsaved take")
-    clip = next((c for c in nc.clips()[1] if c["dur"] <= 30000), None)
+    clip = next((c for c in clips if c["dur"] <= 30000), None)
     if not clip:
         raise Skip("no saved clip of 30 s or less")
     with config_guard(bench, 1, 2):
@@ -907,11 +913,17 @@ def rec_play_clip(bench):
             if nc.rec_info()[0] == "REPLAYING":
                 nc.dev.send("?REC,STOP")
                 time.sleep(0.5)
-    bench.note(f"clip {clip['name']}: {events} events over {dur} ms, completed after {took:.0f} ms")
+            rm = nc.dev.mark()
+            nc.dev.send(f"?REC,LOAD,{copy_of}" if state[1] != "0" else "?REC,CLEAR")
+            nc.dev.expect(r"^\[REC\] (loaded|cleared)", timeout=3, since=rm)
+            back = nc.rec_info()
+    bench.note(f"clip {clip['name']}: {events} events over {dur} ms, completed after {took:.0f} ms; the buffer was "
+               f"{'a copy of ' + copy_of if state[1] != '0' else 'empty'} and is again")
     assert events == clip["n"], f"replaying {events} events, the clip lists {clip['n']}"
     assert during[0] == "REPLAYING", during
     assert dur - 50 <= took <= dur + 1500, f"completed after {took:.0f} ms for a {dur} ms clip"
     assert after[0] == "idle", after
+    assert (back[1], back[3]) == (state[1], state[3]), f"the recorder buffer was not left as found: {state} -> {back}"
 
 
 @test("navicore.cli_codes", "#L diagnostics: an unknown code, lowercase, #L1, the #L11 board list against GET_WCB_STATUS, the #L13 raw frame", needs=["navicore"], links=[])
