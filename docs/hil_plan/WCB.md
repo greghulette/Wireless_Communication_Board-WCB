@@ -754,6 +754,22 @@ exactly its defect (#3: 0 of 30 typed lines reached the mesh under load).
 
 The Wizard defects W-1 to W-12 are tracked with their specs (`tests/wizard`).
 
+**Wiki edits due at the `WIFI` to `main` merge** (D21; the wiki describes released firmware, present tense only):
+- `?HW` refuses the other chip's versions (3.1/3.2 on a classic ESP32 and the reverse), with the message.
+- `?MAC,2|3,<xx>` takes one or two hex digits and refuses anything else.
+- The delimiter (`?DELIM`, `?D<x>`) cannot be either prefix character, `,`, a letter or a digit; `?DELIM,?` now answers
+  with that refusal instead of the help page.
+- `?LABEL,Sx,<text>` caps at 30 characters, like `?SLS`.
+- `?STOP` stops a timer chain from the mesh (`;W<n>,?STOP`), inside a chain and from a sequence body.
+- A `;T` chain may start with a `?` command; long received timer chains run whole.
+- The legacy spellings match exactly: `?CC<c>` and `?LF<c>` take one character, unknown `?S...` forms answer `Unknown
+  command`, `?BAUDS<n>` without a rate prints its usage.
+- A device (HCR, MP3, DFPlayer, WLED) and a local Maestro cannot share a port; PWM refuses a port a serial mapping reads.
+- `key_list` and `seq_mig_done` are not usable as sequence names; a top-level sequence longer than the free command
+  queue is refused whole.
+- `?ETM,CHAR` phase 3 loads the mesh; each peer prints its load start and `complete: N frame(s) sent`.
+- A pasted one-line `?backup` of more than 200 tokens runs whole; a device line over 4 KB (32 KB on USB) is dropped.
+
 ---
 
 ## 4. Well covered

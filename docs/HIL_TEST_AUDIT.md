@@ -690,6 +690,14 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     `hil/intellex.py`, `tests/intellex`; 19 no-board tests pass standalone (the full run held the run lock). The
     three plans are in `docs/hil_plan/`. Next: fix the three high WCB defects (PWM load order, `?HW` chip check,
     the broadcast race) once the full run frees the bench, then WCB-WP12 onward.
+  - 2026-09-28 01:00: the WCB re-scan batch (hil_plan/WCB.md §3: every firmware item but #21's bench test and #31's
+    code) is fixed, bench-verified and pushed to WIFI (`cc2a8a9`): the three high tests failed on the old image
+    (`20260928-003915`) and all 31 new tests pass on the new one (`20260928-004312`, `-004911`). W1/W2 run the
+    committed image (`6.2.1_280049RSEP2026`, fallback `-f23`). The NaviCore driver (INF1, INF2) is merged
+    (`78c4ccc`); the Wizard's W-1..W-12 are fixed on a branch under review. Full run `20260927-174702` on the old
+    image: 493 pass, 2 fail (both explained). The first wave of WCB coverage tests (WP12/13/19/25/30/31/35/42/43/48/
+    54/57) is being written by three agents; tonight's full run on the committed image started 01:00. Next: merge
+    the Wizard branch, verify the wave on the bench, the next wave, then NaviCore INF3/INF4.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -700,10 +708,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
   3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
-- **Flashed:** W1 and W2 run the image in `tests/hil/results/builds/wcb-esp32-meshq` (`6.2.1_232316RSEP2026` + F1-F10,
-  F12, F13, F20 and F21, built 23:32 and flashed 23:36 on 2026-09-24; the CI release of that name is a different
-  image, see the folder's FLASHED.md). Tracker #81-#93 are VERIFIED. NaviCore (COM5) still runs the WCBClient library from
-  before F13; the updated library compiles in NaviCore and the MgmtRelay example but has not been flashed.
+- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `cc2a8a9` (the re-scan
+  batch, `6.2.1_280049RSEP2026`, flashed 2026-09-28 00:55/00:57; the CI build of that commit carries the same
+  string but is a different image, see the folder's FLASHED.md). The previous image is kept in `-f23`.
 - **COM11:** `Intellex.exe` held probe2's port from some time after 09:26 on 2026-09-24 until Greg had it stopped at
   13:28; every test that needs probe2 errored meanwhile (`20260924-120036`, `20260924-131417`) and re-ran in `20260924-133332`. If
   a probe port says "Access is denied", look for another program first.
@@ -711,11 +718,11 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   `ident.epass_live` (opt-in `mesh_password`) has not run yet.
 - **Not covered:** the Wizard beyond its parser (the flasher, a multi-board push, the editor screens, the shared-port
   hub), and what the bench lacks (§7 WP9).
-- **Open decisions:** F14-F16, F18, F19 (found during F13: relay push cap, String password checks, NaviCore WsSink,
+- **Open decisions:** F14, F16, F18, F19 (F15 is fixed by re-scan #26; found during F13: relay push cap, NaviCore WsSink,
   the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
   sees its peers offline for up to one heartbeat; recommend leave); A20 (probe literal,
   nit). F11 is deferred on Greg's word: revisit it if `results/nvs_history.csv` shows NVS filling.
-- **Everything is uncommitted.** Greg commits his own work.
+- **Committed and pushed to WIFI** through `78c4ccc` (this week's work, per Greg's standing OK).
 - **Bench:** free when this was written; `ListAgents` first.
 
 ## 7. Full-coverage plan (2026-09-24)
