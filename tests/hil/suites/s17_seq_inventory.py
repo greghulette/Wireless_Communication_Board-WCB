@@ -291,14 +291,20 @@ def top_level_too_big_refused(bench):
     whole did not apply at the top level (;C, ONFIN, ONERR), so a body longer than the free queue ran its first part,
     printed one "Command queue is full! Discarding command." line per dropped token - UART0 has no TX buffer - and lost
     the rest. Every token here is ;S0<one short tag>, so what ran is counted on USB. Recalled local-only (,L). The tag is
-    4 characters: with a full marker the value was 2.9 KB, and the ?SEQ,SAVE line, copied several times while it is
-    parsed, ran W1's ~18 KB AP-mode heap out (CLAUDE.md rule 14; run 20260928-004312)."""
+    2 characters, so the value is about 1.26 KB. With a full marker it was 2.9 KB, and the ?SEQ,SAVE line, copied several
+    times while it is parsed, ran W1's ~18 KB AP-mode heap out (CLAUDE.md rule 14; run 20260928-004312). And an NVS string
+    must fit in one 4 KB page: at 1.7 KB it needed about 54 contiguous free entries, which W1's pages no longer had late in
+    full run 20260928-005805 although 160 entries were free in all. A store NVS still refuses is a skip, not a failure:
+    the setup, not the firmware under test, is what could not run."""
     w = usb_wcb(bench)
-    m = "Q" + nonce()[:3]
+    m = "Q" + nonce()[:1]
     problems = []
     with config_guard(bench, 1):
         try:
             out = w.run("?SEQ,SAVE,HILBIG," + "^".join([f";S0{m}"] * 210), timeout=8)
+            if _has(out, "NVS write rejected"):
+                raise Skip("W1's NVS has no page with room for the 1.26 KB setup sequence (see ?NVS); the queue refusal "
+                           "was not exercised")
             if not _has(out, "Stored: Key='HILBIG'"):
                 raise AssertionError(f"setup: the 210-command sequence was not stored: {out[:3]}")
             wm = w.dev.mark()
