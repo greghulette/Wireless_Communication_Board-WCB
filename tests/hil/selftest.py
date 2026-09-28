@@ -19,7 +19,8 @@ Ctrl+C during the resume checks; a PAUSE file with an old mtime; secrets in free
 The config-pull collector (hil/wcb.py, F13) runs against a scripted relay console: one line, parts, refusals, timeouts,
 the one re-send after a NOPARTS, and the screening of a refusal's code and detail; so do navicore.pull_over_limit's
 verdict on NaviCore's library and wcb.pull_error_oom_parts' re-arm of the one-shot fault (s21 and s03 helpers).
-Outside pause/resume, it also checks that the probe's bundled EspSoftwareSerial is byte-identical to the WCB's; the
+Outside pause/resume, it also checks that the probe's bundled EspSoftwareSerial is byte-identical to the WCB's; that
+every Code/WCB/*.cpp and WCB.ino includes WCB_RemoteTerm.h first (CLAUDE.md rule 12), against planted violations too; the
 expected durations (hil/durations.py: checkpoint and report.md sources, the median of the newest five real results,
 SKIP and NOT A RESULT rows left out, the cache reused and invalidated, corrupt files tolerated); the runner's up-front
 opt-in skip with the exact message the tests' own checks used to raise; and run.py --list, in a subprocess that
@@ -1575,6 +1576,117 @@ def t_vendored_softserial_in_lockstep(tmp):
     assert not differ, f"tests/hil/wcb_probe/src/EspSoftwareSerial differs from Code/WCB/src/EspSoftwareSerial in {differ}"
 
 
+# ---------------------------------------------------------------------------- CLAUDE.md rule 12 (WCB-WP37)
+# The two files rule 12 exempts, and why. The wrapper is exempt outright; the other only while it prints nothing.
+RULE12_EXEMPT = {"WCB_RemoteTerm.cpp": "it is the wrapper the header redirects Serial to",
+                 "wcb_pin_map.cpp": "every print in it is commented out"}
+_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^>"\n]+)[>"]', re.M)
+
+
+def _strip_c_comments(text):
+    """C/C++ source with its // and /* */ comments blanked out, newlines kept so line numbers hold. String and character
+    literals are copied through untouched, so the '//' in "ws://%s/ws" does not start a comment."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j]))
+            i = j
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] not in (c, "\n"):
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def rule12_problems(code_dir):
+    """CLAUDE.md rule 12: every Code/WCB/*.cpp, and WCB.ino too (WCB_RemoteTerm.h's own usage note), #includes
+    WCB_RemoteTerm.h before any other header, so its '#define Serial WCBDebugSerial' (WCB_RemoteTerm.h:104) reaches the
+    file and everything it includes, and the file prints to the port setup() begins. Otherwise its lines go to the core's
+    raw Serial, which nothing ever begins: a handler that runs and says nothing, which cost a session on ?WIFI. The
+    first #include outside a comment is what counts; the manual check in CLAUDE.md greps the first three lines. -> one
+    line per file that breaks it, naming the file and line."""
+    problems = []
+    for name in sorted(f for f in os.listdir(code_dir) if f.endswith(".cpp") or f == "WCB.ino"):
+        if name == "WCB_RemoteTerm.cpp":
+            continue
+        with open(os.path.join(code_dir, name), encoding="utf-8", errors="replace") as f:
+            code = _strip_c_comments(f.read())
+        if name in RULE12_EXEMPT:
+            live = re.search(r"\bSerial\s*\.", code)
+            if live:
+                problems.append(f"{name}:{code.count(chr(10), 0, live.start()) + 1}: prints through Serial, so its "
+                                f"rule-12 exemption ({RULE12_EXEMPT[name]}) no longer holds")
+            continue
+        first = _INCLUDE.search(code)
+        if first is None:
+            problems.append(f"{name}: no #include at all, so WCB_RemoteTerm.h is not first")
+        elif first.group(1) != "WCB_RemoteTerm.h":
+            problems.append(f"{name}:{code.count(chr(10), 0, first.start()) + 1}: the first #include is "
+                            f"{first.group(1)}, not WCB_RemoteTerm.h")
+    return problems
+
+
+def t_rule12_remoteterm_first(tmp):
+    """CLAUDE.md rule 12 as a check that needs no bench (docs/hil_plan/WCB.md WCB-WP37): the firmware tree passes, and
+    each way to break the rule, planted in a copy of the tree, is caught with the file and line: a new subsystem file
+    without the include, the include after another header or only in a comment, an existing file given another header
+    first, and a print added to an exempt file. A comment header above the include, or '//' inside a string, is fine."""
+    code = os.path.normpath(os.path.join(HERE, "..", "..", "Code", "WCB"))
+    checked = sorted(f for f in os.listdir(code) if f.endswith(".cpp") or f == "WCB.ino")
+    assert "WCB.ino" in checked and len([f for f in checked if f.startswith("WCB_")]) >= 10, checked
+    found = rule12_problems(code)
+    assert not found, "CLAUDE.md rule 12 is broken: " + "; ".join(found)
+    copy = os.path.join(tmp.root, "WCB")
+    os.makedirs(copy)
+    for f in checked:
+        shutil.copy2(os.path.join(code, f), os.path.join(copy, f))
+    assert rule12_problems(copy) == []
+
+    def plant(name, text):
+        with open(os.path.join(copy, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    new = "WCB_HilPlanted.cpp"
+    for text, want in (
+            ('#include "WCB_HilPlanted.h"\n#include <Arduino.h>\nvoid hilPlanted() { Serial.println("x"); }\n',
+             [f"{new}:1: the first #include is WCB_HilPlanted.h, not WCB_RemoteTerm.h"]),
+            ('#include <Arduino.h>\n#include "WCB_RemoteTerm.h"\n',
+             [f"{new}:1: the first #include is Arduino.h, not WCB_RemoteTerm.h"]),
+            ('// #include "WCB_RemoteTerm.h"\n/* #include "WCB_RemoteTerm.h" */\n#include "WCB_WiFi.h"\n',
+             [f"{new}:3: the first #include is WCB_WiFi.h, not WCB_RemoteTerm.h"]),
+            ("int hilPlanted;\n", [f"{new}: no #include at all, so WCB_RemoteTerm.h is not first"]),
+            ('/* a header\n * over two lines */\n// and a line comment\n#include "WCB_RemoteTerm.h"\n'
+             'static const char *u = "ws://%s/ws"; // #include <Arduino.h>\n#include <Arduino.h>\n', [])):
+        plant(new, text)
+        got = rule12_problems(copy)
+        assert got == want, (text, got)
+    os.remove(os.path.join(copy, new))
+    with open(os.path.join(code, "WCB_WiFi.cpp"), encoding="utf-8", errors="replace") as f:
+        wifi = f.read()
+    plant("WCB_WiFi.cpp", "#include <WiFi.h>\n" + wifi)
+    assert rule12_problems(copy) == ["WCB_WiFi.cpp:1: the first #include is WiFi.h, not WCB_RemoteTerm.h"], \
+        rule12_problems(copy)
+    shutil.copy2(os.path.join(code, "WCB_WiFi.cpp"), os.path.join(copy, "WCB_WiFi.cpp"))
+    with open(os.path.join(code, "wcb_pin_map.cpp"), encoding="utf-8", errors="replace") as f:
+        pins = f.read()
+    plant("wcb_pin_map.cpp", pins + '\nvoid hilPlanted() { Serial.println("pins"); }\n')
+    got = rule12_problems(copy)
+    assert len(got) == 1 and got[0].startswith("wcb_pin_map.cpp:") and "exemption" in got[0], got
+    shutil.copy2(os.path.join(code, "wcb_pin_map.cpp"), os.path.join(copy, "wcb_pin_map.cpp"))
+    assert rule12_problems(copy) == []
+
+
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
 PROBE_BOOT = "BOOT wcb_probe 7 mac=AA:BB:CC:DD:EE:01"
 
@@ -1925,6 +2037,7 @@ GATED = {
     "seq.clear_all_empty_hash": ("seq_wipe", "wipes W1's sequences and replays them"),
     "wifi.off_and_back": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
     "wifi.join_w2_ap": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
+    "wifi.ap_derived_ssid_boot": ("wifi_modes", "changes W1's access point name and reboots it twice"),
     "wifi.pc_joins_ap_ws": ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard"),
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
@@ -5977,7 +6090,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_wizard_abort_kills_tree, t_nctool_pipe_bridge, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
-         t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
+         t_rule12_remoteterm_first, t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
