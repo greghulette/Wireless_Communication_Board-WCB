@@ -47,6 +47,7 @@ def kyber_auto_targets(bench):
 _FAKE_PULL = (
     ("api", "the page exposes the one parser API, crc32 matches zlib, and remoteBoardPull is on window"),
     ("legacy", "a single [MGMT:CONFIG,n] reply is stored exactly as before, and the pane shows only its length"),
+    ("legacy_crc", "a legacy [MGMT:CONFIG,n] reply that fails its checksum, or has none, is retried and never stored; the slot keeps its config and baseline (W-7)"),
     ("parts", "three parts out of order, with a duplicate, noise and another board's lines, join into one verified config"),
     ("timer", "every NEW part restarts the 6 s attempt timer, a duplicate does not, and the retry is a new job"),
     ("fifo", "one attempt on the air per relay: a second board waits until the first settles"),
@@ -60,6 +61,26 @@ for _key, _title in _FAKE_PULL:
     def _fake_pull(bench, _id=f"wizard.remote_pull_fake_{_key}"):
         run_wizard_test(bench, _id, device=None)
     test(f"wizard.remote_pull_fake_{_key}", f"{_title} (no board: a fake relay in the page, F13)")(_fake_pull)
+
+
+# The push generator against pulled fake boards (tests/wizard/specs/push_fake.spec.js): no board, so CI runs them too.
+# Each pins a Wizard defect from the coverage re-scan (docs/hil_plan/WCB.md section 3, W-1 to W-12).
+_FAKE_PUSH = (
+    ("noop", "every card of a pulled board, pushed with no edit, sends nothing (W-4, W-1, W-2)"),
+    ("one_edit", "one edit on a pulled card sends that edit, an edit undone sends nothing, and a new Maestro or WLED still gets its defaults (W-4)"),
+    ("etm_delay", "the General ETM delay keeps 0: shown, kept when another ETM field changes, and pushed when typed (W-1)"),
+    ("delimiter", "the characters change in an order the board takes, a ',' board changes its delimiter first, and the General inputs refuse what the firmware refuses (W-2)"),
+    ("bidir", "a mapping row touched but not changed re-sends no mapping, so a PWM input does not reboot the board (W-5)"),
+    ("reboot_matchers", "the reboot and network-group checks read each command, not a substring of a label or a sequence (W-8)"),
+    ("relay_cap", "a relay push over 16 chunks is refused before the network-group confirm, the bootstrap or any send (W-9, F14)"),
+    ("relay_chars", "a relay push with a character change the board would refuse on the way sends nothing, and a ',' target takes ?D^ first (W-2)"),
+    ("relay_push", "a relay push still asks before a network-group change, bootstraps a new function id first, and frames the chain in 179-char chunks"),
+    ("seq_roundtrip", "an untouched sequence row gives back its stored value exactly; an edited row is sent as before (W-10)"),
+)
+for _key, _title in _FAKE_PUSH:
+    def _fake_push(bench, _id=f"wizard.push_fake_{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.push_fake_{_key}", f"{_title} (no board: pulled fake boards in the page)")(_fake_push)
 
 
 @test("wizard.pull","The Wizard connects to W1 and shows its saved bauds and labels", needs=["wcb1"])

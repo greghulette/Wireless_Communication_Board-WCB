@@ -13,7 +13,8 @@ limit (see Limits).
 **A `[MGMT:CONFIG,<n>]` line carries a board's whole config or nothing.** Every Wizard released before 2026-09-24,
 including the copies frozen inside each Intellex install, stores ANY non-empty body under that tag as the board's
 config and baseline, without checking its `^?CHK`. A part, an error text or a truncated config printed under that
-tag would be written back to the board on the next push. So:
+tag would be written back to the board on the next push. (The current Wizard checks it, §6, but the old ones stay in
+the field.) So:
 
 - Packet type 6 (CONFIG_FRAG) carries only a complete reply, or the empty reply that means "out of memory".
 - Parts and errors travel as packet type 18 and are printed under `[MGMT:CFGPART,` / `[MGMT:CFGERR,`, which differ
@@ -144,8 +145,12 @@ are such relays: a config over 2912 characters does not come through them, and t
 - one attempt on the air per relay (a per-relay FIFO), because every relay has a single reassembly session;
 - a 6 s attempt timer that restarts on every new part; `PULL_DEADLINE_MS` (40 s) from the call caps a pull of up to
   3 attempts, queue wait included;
-- NOMEM, CHANGED, NOPARTS, a CRC failure and an empty reply are retried; TOOBIG stops at once; a joined text that is
-  not valid UTF-8 is retried once and stops on a second job's;
+- a single `[MGMT:CONFIG,<n>]` reply is checked like a join (`[VER:` head, `^?CHK` tail, CRC) before it is stored;
+  its CRC may lack leading zeros, as 6.0.x printed it with `String(crc, HEX)`. A reply that fails, or has no `^?CHK`,
+  never becomes the config or the baseline;
+- NOMEM, CHANGED, NOPARTS, a CRC failure (of a reply or a join) and an empty reply are retried; TOOBIG stops at once;
+  a reply or joined text that is not valid UTF-8 is retried once and stops on a second job's (every single reply
+  counts as its own job);
 - serial input is decoded with one streaming `TextDecoder` per connection (so a multi-byte character split across two
   reads is not replaced with U+FFFD); pull reply lines are summarised in the terminal, never shown raw, and kept out of
   STATS/ETM captures.
@@ -174,13 +179,15 @@ reports as "empty config response").
   receive masks and more static RAM on every board.
 - A pull is at most 16 parts of 2880 bytes (46080 characters).
 - The Wizard's relay **push** is still capped at 16 x 179 = 2864 characters of changes per push, including an
-  appended `?reboot`; a board pulled in parts may need a push split into several, or USB.
+  appended `?reboot`; a board pulled in parts may need a push split into several, or USB. A push over the cap is
+  refused before its network-group confirm, its character bootstrap or any send (`boardGoRemote`).
 
 ## 9. Tests
 
-Host: `tests/config_parts_test.cpp`. Wizard: `tests/wizard/unit/pull.test.js`, the no-board spec
-`tests/wizard/specs/remote_pull_fake.spec.js` (`wizard.remote_pull_fake_*`), and `wizard.remote_pull`,
-`wizard.remote_pull_parts` on the bench. HIL (`tests/hil/suites/s03_wcb.py`, `s21_navicore_sbus.py`):
+Host: `tests/config_parts_test.cpp`. Wizard: `tests/wizard/unit/pull.test.js`, the no-board specs
+`tests/wizard/specs/remote_pull_fake.spec.js` (`wizard.remote_pull_fake_*`; the legacy CRC check is
+`wizard.remote_pull_fake_legacy_crc`) and `specs/push_fake.spec.js` (`wizard.push_fake_relay_cap`), and
+`wizard.remote_pull`, `wizard.remote_pull_parts` on the bench. HIL (`tests/hil/suites/s03_wcb.py`, `s21_navicore_sbus.py`):
 `wcb.pull_size_limit`, `wcb.pull_plain_over_limit`, `wcb.pull_parts_many`, `wcb.pull_error_oom_legacy`,
 `wcb.pull_error_oom_parts`, `wcb.pull_nonblocking`, `navicore.mgmt_pull`, `navicore.pull_over_limit`.
 
@@ -189,3 +196,4 @@ Host: `tests/config_parts_test.cpp`. Wizard: `tests/wizard/unit/pull.test.js`, t
 | Date | Commit | Change |
 |---|---|---|
 | 2026-09-24 | _(pending)_ | Created with F13 (`docs/HIL_TEST_AUDIT.md`, tracker #91): configs over 2912 characters are pulled in parts (packet types 18/19, `?MGMT,PULL,<n>,P`, `[MGMT:CFGPART,`), refusals are coded errors (`[MGMT:CFGERR,`), the target's reply is a non-blocking job, relay lines are one write each, and the Wizard serialises pulls per relay. Verified on the bench (W1 relay, W2 target, NaviCore on the old library) and by host, unit and no-board browser tests. |
+| 2026-09-27 | _(pending)_ | Wizard (docs/hil_plan/WCB.md W-7, W-9): a single `[MGMT:CONFIG,<n>]` reply is CRC-checked before it becomes the config and baseline (unpadded 6.0.x CRCs accepted; a failure is retried, a second non-UTF-8 reply stops the pull), and a relay push over 16 chunks is refused before its network-group confirm and character bootstrap (F14, first half). Tests: `unit/pull.test.js`, `wizard.remote_pull_fake_legacy_crc`, `wizard.push_fake_relay_cap`. |

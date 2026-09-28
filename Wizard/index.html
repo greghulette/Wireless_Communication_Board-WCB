@@ -144,17 +144,17 @@
           <div class="field">
             <label>Command Delimiter <span class="wiz-hint" data-tip="Character that separates commands in a batch string. Default is ^. Must be identical on every board.">i</span></label>
             <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
           <div class="field">
             <label>Local Function Identifier <span class="wiz-hint" data-tip="Prefix character for commands processed only by this board and not relayed to others. Default is ?.">i</span></label>
             <input type="text" id="g-funcchar" value="?" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
           <div class="field">
             <label>Command Character <span class="wiz-hint" data-tip="Character that identifies a command string on the serial line. Default is ;. Must match across all boards.">i</span></label>
             <input type="text" id="g-cmdchar" value=";" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
         </div>
 

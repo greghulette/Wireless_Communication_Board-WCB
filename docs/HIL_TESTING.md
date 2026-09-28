@@ -611,15 +611,21 @@ that an unchanged board emits **no** commands and an edited one emits **only** i
 save and reload. That is where config loss would show: the Wizard pushes the diff against the baseline it pulled, so
 a field the parser drops rewrites a good board. `npm run unit` in `tests/wizard`, or `wizard.parser` in the harness. `unit/devices.test.js` does the same for the
 device cards (MP3 Trigger, HCR, DFPlayer, WLED, Maestro), stored sequences and variables: what each token parses to, what
-a change pushes, and an all-devices round trip.
+a change pushes, and an all-devices round trip. `unit/roundtrip.test.js` pins the fields that once failed a round trip
+(an ETM delay of 0, a `,` delimiter, a disabled controller's custom id, a client slot in a system file), diffs that
+must ignore a mapping row's UI-only `bidir` key and a Maestro table's key order, and `planCommandCharChange`, the order
+a push changes the command characters in: checked against a model of the firmware's `delimCharOk`/`prefixCharOk` for
+every combination of seven characters, including every refusal's two-push advice (`docs/hil_plan/WCB.md` §3,
+W-1 to W-11).
 Note `kyber.targets` (Maestros on other boards) is derived — the Wizard recomputes it from every connected board at
 push time — so the round-trip comparisons leave it out.
 
-**CI.** `.github/workflows/wizard-tests.yml` runs the unit tests and every no-board spec (`wizard.smoke`, the Kyber specs and the ten `wizard.remote_pull_fake_*` pulls against a fake relay in the page) on every push touching
+**CI.** `.github/workflows/wizard-tests.yml` runs the unit tests and every no-board spec (`wizard.smoke`, the Kyber specs, the eleven `wizard.remote_pull_fake_*` pulls against a fake relay in the page, and the ten `wizard.push_fake_*` pushes through fake connections: a pulled card pushed unedited sends nothing, one edit sends only itself and an edit taken back sends nothing, the command characters change in an order the board takes, the reboot and network-group checks read each command, the relay size cap comes before any confirm or send) on every push touching
 `Wizard/**` or `tests/wizard/**`. It is deliberately separate from `build.yml` and filtered to those paths, so a
 Wizard change never rebuilds firmware or publishes binaries (CLAUDE.md rule 9). The board tests need hardware and
 never run there; they skip themselves without `HIL_BRIDGE`. The page is served by `tests/wizard/serve.js`, Node's
-own http server, so a runner with no `python` on PATH behaves the same as this PC.
+own http server, so a runner with no `python` on PATH behaves the same as this PC. `suites/s30_wizard.py` registers
+every no-board spec too (`_FAKE_PULL`, `_FAKE_PUSH`), so a full run includes them and each runs by id.
 
 **Setup and running.** Once: `cd tests/wizard && npm install && npx playwright install chromium`. Then run
 `python tests/hil/run.py "wizard.*"` or pick them in the GUI. Chrome runs headed; `WIZ_HEADLESS=1` tries headless,
@@ -875,8 +881,10 @@ flashing (W2 only).
 | Date | Commit | Change |
 |---|---|---|
 | 2026-09-28 | _(pending)_ | §6: the SBUS controller can hold a reply in its USB outbox until the host sends again; `SbusCtl` now pings every second while it waits (`sbus.to_navicore` failed on it in three full runs). `checkpoint.redact_text` also hashes the controller's `Pass:` boot line, which a failed test's last lines can quote. |
+| 2026-09-28 | _(pending)_ | **Review of `b57fe2a` (§8).** `wizard.push_fake_relay_chars` (new), edit-then-undo and add-then-remove cases in `wizard.push_fake_one_edit`, the character-order and `,`-board cases in `wizard.push_fake_delimiter`, and three unit tests in `unit/roundtrip.test.js` (the push-order planner, exhaustively against a model of the firmware's checks; a Maestro table in another key order). Each failed on `b57fe2a`. |
 | 2026-09-27 | _(pending)_ | §9: a harness error pauses a run (`harness_error`); a suite edited mid-run caused one, because the runner found each test's wires by re-reading its file, and every test's source is now read at the start of a segment. |
 | 2026-09-27 | _(pending)_ | **NaviCore and SBUS drivers (`NAVICORE.md` INF1, INF2).** `hil/navicore.py` grows from 6 methods into the shared NaviCore driver, and the new `hil/sbus.py` holds `SbusCtl` and an SBUS frame codec; s21's NaviCore and controller helpers, s11's and `hil/resume.py`'s controller JSON, gui.py's controller ping and the GET_CONFIG reads in s08 and s22 now call them. A refactor: every suite sends the same lines with the same timeouts and assertions, `run.py --list` is byte-identical (518 tests) and every test's inferred wires and drives are unchanged. One deliberate difference: `SbusCtl.cfg()` hashes the controller's WiFi credentials in session.log, which s11 and s21 used to log in clear. `hil/serialdev.py` gains `send_paced` (512-byte writes 4 ms apart, as NaviCore's config tool) and `usb_jtag_reset`. The new methods (config writes, the recorder transfer, restarts) have not run on the bench. `selftest.py`: 12 new cases, 61 in all. |
+| 2026-09-27 | _(pending)_ | **Wizard defects W-1 to W-12 (`hil_plan/WCB.md` §3) fixed, with no-board tests (§8).** `unit/roundtrip.test.js` (10) and two W-7 tests in `unit/pull.test.js`; `specs/push_fake.spec.js` (9, `wizard.push_fake_*`: fake USB and relay connections driving the real `boardPull`/`boardGo`) and `wizard.remote_pull_fake_legacy_crc`. Each failed on the Wizard before the fix. They run in CI; registering them in `s30_wizard.py` is still to do. |
 | 2026-09-27 | _(pending)_ | **§10 Intellex tests.** `suites/s32_intellex.py`, `hil/intellex.py` (stage, a leashed host, Playwright and venv runners), `tests/intellex` (Playwright 1.63.0, headless); `hil/ws.py` keeps binary frames and sends an Origin header. 19 tests, none needing a board. |
 | 2026-09-27 | _(pending)_ | Tracker #94 (F23): PWM output pulses are RMT-clocked. `pwm.passthrough_local` and `pwm.passthrough_mesh` check each step's held (last) pulse; the filter check allows a late pulse of the previous step (run 20260927-131152). A §6 row records the re-send trap. |
 | 2026-09-25 | _(pending)_ | **Full run `20260925-092255` triaged (`HIL_TEST_AUDIT.md` §5).** `etm.reboot_defer_cap` passed its own check but its new cleanup failed: W2's `came ONLINE` glued onto the `;S0` sentinel. `WCB.run` now accepts a sentinel that starts its line, and the cleanup waits after its poll and never raises; a §6 row records the trap. `pwm.passthrough_local` found a firmware defect (audit F23). |
