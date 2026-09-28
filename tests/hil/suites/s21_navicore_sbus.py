@@ -6,8 +6,8 @@ Built from the verified navicore_sbus specs. Rules from the specs:
   NaviCore flash. Never #L2 (restart) or #L20/#L21 (HCR frames). The SBUS controller's serial lines always start with
   '{' ('m' and 'w' outside JSON save to flash); its mode/cfg/wificfg commands also save and are never sent (SbusCtl has
   no method for them).
-- GET_CONFIG prints the mesh password: it reaches session.log only (gitignored). getcfg's WiFi credentials are hashed
-  in session.log as they arrive (SbusCtl.cfg).
+- GET_CONFIG prints the mesh password, and getcfg the controller's WiFi credentials: session.log hashes both as they
+  arrive (Bench.log's filter on NaviCore and SBUS lines; SbusCtl.cfg hashes getcfg's line too).
 - NaviCore can hold a finished line unsent until more output follows it, so a ?MAE query is followed by a harmless #L12
   that releases its [MAE:n] marker (NaviCore.cli; the marker itself ends in a newline, NaviCore.ino:741-756).
 - Any ;W20,{json} from W1 opens a 20 s relay window: W1 USB then carries '"sys":1' lines; checks match by substring.

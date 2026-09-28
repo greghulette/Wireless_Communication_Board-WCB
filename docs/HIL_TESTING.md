@@ -28,14 +28,17 @@ python tests/hil/selftest.py                 # harness self-test: checkpoint and
 Each run writes `tests/hil/results/<stamp>/report.md` and `session.log` — every line sent and
 received on every port, timestamped, with `# =====` markers per test. Next to them are
 `checkpoint.json`, the run's resume state, written atomically when each test starts and ends, and
-`run.lock`, an OS lock that marks the run as live in some process. `report.md` is rebuilt from the
-checkpoint after every test. A run of five or more tests also reads `?NVS` on each WCB with its own USB cable at
+`run.lock`, an OS lock that marks the run as live in some process. Once a test has written NaviCore's
+config, `navicore_snapshot.json` holds NaviCore's exact config from before that test (§5, §9). `report.md` is rebuilt
+from the checkpoint after every test. A run of five or more tests also reads `?NVS` on each WCB with its own USB cable at
 its start and end: the settings-storage use goes into session.log, a line per board under the report's summary,
 and `tests/hil/results/nvs_history.csv`, so a store creeping towards full shows across runs (`hil/nvs.py`). Creating a file named `PAUSE` in the run folder, or `results/PAUSE`,
 pauses the run at the next test boundary (§9). The wires found last time are in
-`results/links.json`. The directory is gitignored: the log carries the mesh password (`?backup`,
-`?MGMT,PULL`). The checkpoint and the report do not: they store the password and WiFi credentials
-only as hashes, including where a failure message quotes them.
+`results/links.json`. The directory is gitignored: the log carries the mesh password in the WCBs' lines
+(`?backup`, `?MGMT,PULL`), and `navicore_snapshot.json` and `results/navicore_config_week_start.json` hold
+NaviCore's. NaviCore's and the SBUS controller's own lines in the log have every credential hashed (§5). The
+checkpoint and the report store the password and WiFi credentials only as hashes, including where a failure message
+quotes them.
 
 **Before a run, close anything holding a bench port** — the Arduino IDE serial monitor, Wizard
 or NaviCore tool tabs. A COM port has one owner. The GUI's *Close all ports* hands them back.
@@ -62,6 +65,9 @@ token is replayed from the baseline, or its CLEAR form sent when the baseline ne
 went out (`AUTO_RESTORE`, `suites/common.py`). Identity, radio, ETM, WDP, device and `?MAP,PWM` tokens are never
 touched — a replay there can reboot a board or persist a peer — and a leaked delimiter or command character stops the
 auto-restore altogether. The test still fails: leaking is a test bug, but the bench is left clean.
+
+A test that writes NaviCore's config runs inside `nc_guard` (`hil/nc_guard.py`, §5) the same way: it snapshots
+NaviCore first and fails the test unless NaviCore's config ends byte-identical.
 
 Two things are deliberately never done, because they cannot be cleanly undone:
 
@@ -345,11 +351,30 @@ with the recent lines attached), and skips by raising `Skip`.
   `trigger`, `test_action`, `wcb_send`, `monitor`), the CLI (`?MAE` queries, `#L09`/`#L13`, `?REC` including ranged
   clip download and indexed upload), the mesh views (`?WDP,DUMP`, `GET_MESH_STATS`, `?backup` with `?EPASS` hashed,
   sequence pulls, `version_surfaces`) and restarts (`reboot`, `wait_boot`, `hard_reset`). `SbusCtl` sends only JSON
-  lines (`m` and `w` save to flash) and has no method for the verbs that save (`mode`, `cfg`, `wificfg`); its `cfg()`
-  hashes the controller's WiFi credentials in session.log as they arrive, and its waits for a reply ping every
-  second (§6). `hil/sbus.py` also packs and unpacks SBUS frames (`encode`, `decode`: 25 bytes for SBUS-16, 36 for
+  lines (`m` and `w` save to flash) and has no method for the verbs that save (`mode`, `cfg`, `wificfg`), and its
+  waits for a reply ping every second (§6). `Bench.log` passes every line NaviCore and the controller send or receive
+  through `checkpoint.redact_text` (`runner.REDACT_KINDS`), so session.log and the GUI show their passwords, `?EPASS`
+  values and `wifiNets` only as `<redacted:sha12>`; a WCB's lines are left as they are. `hil/sbus.py` also packs and unpacks SBUS frames (`encode`, `decode`: 25 bytes for SBUS-16, 36 for
   SBUS-24). No driver message quotes a config line or a secret; `selftest.py` feeds every parser lines in the
   firmware's own formats.
+- **NaviCore config writes** go inside `with nc_guard(bench) as g:` (`hil/nc_guard.py`; `docs/hil_plan/NAVICORE.md`
+  INF3). The guard takes the snapshot when the block starts: GET_CONFIG's exact text (`g.before_text`) and dict
+  (`g.before`), the command library, the `?REC,LS` clip names, the learned peers and the mode. The block writes through
+  `g.nc`. At its end the guard restores, and proves the config byte-identical. If GET_CONFIG already equals the
+  snapshot, it writes nothing. Otherwise it sends the snapshot plus explicit clears: `{}` for each new mapping key,
+  `"channels": []` for each Maestro slot that had none, `"serialLabels": {}` when there were none. A plain re-send
+  cannot undo those three, because SET_CONFIG leaves alone what it does not name and GET_CONFIG leaves out what is
+  empty. RESET_DEFAULTS then the snapshot's exact text comes only if that read back different, because RESET_DEFAULTS
+  swaps the live mesh password until the snapshot lands. It then puts back the command library, deletes the `HIL*`
+  clips the test added, clears the debug flags, the monitor and CALIB, re-learns a lost learned peer with two
+  `?WDP,POLL` from W1, and sets the mode back with a mesh SET_MODE. A config that will not come back fails the test
+  with `NAVICORE CONFIG NOT RESTORED — <key paths>`, after the block's own failure if it had one; anything else left
+  over fails it with `NAVICORE STATE NOT RESTORED — ...`. Credentials appear only as `<redacted:sha12>`
+  (`checkpoint.redacted_diff`). The snapshot is written to `navicore_snapshot.json` before the block runs, so a test
+  killed inside it is restored by the resume (§9). The first snapshot ever taken is also kept, never overwritten, as
+  `results/navicore_config_week_start.json`. A second Ctrl+C skips the restore and leaves it to the resume. Guards
+  do not nest. `nccfg.guard_selftest` (`suites/s40_navicore_config.py`) proves the guard on the bench before any other
+  test writes NaviCore.
 - **Opt-in tests** declare the gate on the decorator: `@test(..., opt_in="ota_full")`, and optionally
   `opt_in_why="..."` when this test's reason differs from the key's default. The key must be in `hil/optin.py`
   `OPT_INS` (title, one line on what it does, the default reason, `estimate_s` per test); an unknown key fails at
@@ -706,7 +731,12 @@ The checkpoint holds:
   firmware of each device;
 - the bench.json and links fingerprints, each stored in full so a change can be shown as a diff;
 - the harness's git HEAD and source hashes;
-- `config_ref`, the saved-config reference.
+- `config_ref`, the saved-config reference;
+- `navicore`, NaviCore's snapshot record, once a test has written NaviCore's config: a hash of its redacted config
+  text, the guard's state (`guarding` while the test runs, then `restored` or `not_restored`), the test and a
+  sequence number. The exact snapshot is `navicore_snapshot.json` beside the checkpoint. That file is written first,
+  with the same sequence number, so the newer of the two always tells the state, even when a GUI closed with *No*
+  froze the checkpoint while the test ran on.
 
 In `config_ref`, the mesh password and WiFi credentials (`?EPASS,<pass>`,
 `?WIFI,AP|JOIN,<ssid>,<pass>`) are stored as `<prefix><redacted:sha256[:12]>`. Comparisons and
@@ -714,8 +744,9 @@ diffs only ever use that form. The free-text fields quote board output: a result
 detail, the pause reason and the last resume error. They pass through the same redaction
 (`redact_text`), which also covers `Password: <pw>` lines, the probe's `MESH JOIN ... PASS=<pw>`
 (also masked in the probe's own error) and the SBUS controller's `wifiNets`.
-So do the lines the pause and resume code adds to `session.log`. The log's serial traffic still
-carries the plain password in the `?backup` lines, as it always has.
+So do the lines the pause and resume code adds to `session.log`, and every line NaviCore and the SBUS controller send
+or receive, whose JSON password fields are hashed too (`Bench.log`, §5). A WCB's serial traffic in the log still
+carries the plain password in its `?backup` lines, as it always has.
 
 The remaining tests are the selection minus those with a result, in selection order. A cut-off or
 `NOT A RESULT` test has no result, so it comes first. A test renamed or removed since the start is
@@ -779,6 +810,13 @@ exits 3.
    difference". *No* leaves the run paused, to fix by hand. The reference is taken at the start
    (runs of 5 tests or more), at every pause, after a `CONFIG NOT RESTORED` test, and every 15 min
    of active time. Without a reference this step is skipped, with a note in the log.
+   Then **NaviCore's saved config** against the run's NaviCore snapshot (`resume.check_navicore`). When its record
+   says a guarded test was cut off (`guarding`) or could not restore it (`not_restored`), the restore `nc_guard`
+   would have made is offered, and recommended. The automatic resume makes it without asking. A restore that leaves
+   the config different blocks, naming the key paths. Otherwise the config is compared, and a difference is soft, as
+   above: *Yes* keeps NaviCore's config and makes it the run's reference. Nothing is restored from a snapshot
+   another run took, one that fails its own hash, or an older one holding a config the checkpoint did not record.
+   A run in which no test wrote NaviCore's config has no snapshot, and this half is skipped with a note.
 8. **Probes:** RESET. A probe still joined to the mesh leaves it, and `?WDP,FORGET` goes to every
    WCB, since RESET does not leave the mesh.
 9. **Wires:** every wire verified at the pause is checked again, at its port's configured baud,
@@ -793,9 +831,9 @@ exits 3.
 
 After a clean pause nothing else needs re-establishing: a reboot clears the WCBs' RAM-only state
 (`?DEBUG`, `?RTERM`, `;P` pins, queues). ETM and WDP rebuild from heartbeats, which step 5 waits
-for. After a cut-off test, step 4 covers what that test may have left on. Three things are not
-checked at all: NaviCore's saved config, a Maestro's servo positions or running script, and the
-SBUS controller's mode, switches and sliders. Module-level caches keyed per Bench, such as
+for. After a cut-off test, step 4 covers what that test may have left on. Two things are not
+checked at all: a Maestro's servo positions or running script, and the SBUS controller's mode, switches and
+sliders. Module-level caches keyed per Bench, such as
 `_CHAR` in `s99_etm.py`, survive a resume in the same GUI. If the firmware changed while the run
 was paused, restart the GUI before resuming.
 
@@ -833,6 +871,9 @@ paused value.
 - Cut-off leftovers: close the GUI with *No* during `chars.cmdchar_change_restore` (the resume
   blocks at once with `?CMDCHAR,;`, and nothing reaches the mesh) and during `sbus.to_navicore`
   (the re-run passes). A Ctrl+C does not leave these, because the test's `finally` still runs.
+- NaviCore: close the GUI with *No*, or press Ctrl+C twice, during `nccfg.guard_selftest`. The resume restores NaviCore
+  from `navicore_snapshot.json` ("NaviCore restored after the cut-off nccfg.guard_selftest (diff)"), and the re-run
+  passes.
 
 ---
 
@@ -874,6 +915,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | **`nc_guard`: NaviCore config snapshot and restore, and redaction (`NAVICORE.md` INF3).** New `hil/nc_guard.py`. A test that writes NaviCore's config runs inside `nc_guard` (§5), which restores by the snapshot plus explicit clears, and by RESET_DEFAULTS then the snapshot only when that fails, and proves the config byte-identical. It also restores the command library, `HIL*` clips, learned peers, the mode and the RAM toggles. The exact snapshot goes to `<run>/navicore_snapshot.json`, and a record with a redacted hash and the state into the checkpoint. The resume's step 7 checks NaviCore's config and restores it after a guarded test was cut off (§9). `Bench.log` hashes the credentials on NaviCore's and the SBUS controller's lines in both directions (`runner.REDACT_KINDS`). `redact_text` hashes any JSON `*password` field. New `checkpoint.redacted_diff`. New suite `s40_navicore_config.py` with `nccfg.guard_selftest`. `selftest.py` gains five cases against a fake NaviCore that merges SET_CONFIG as the firmware does. |
 | 2026-09-28 | _(pending)_ | §6: the SBUS controller can hold a reply in its USB outbox until the host sends again; `SbusCtl` now pings every second while it waits (`sbus.to_navicore` failed on it in three full runs). `checkpoint.redact_text` also hashes the controller's `Pass:` boot line, which a failed test's last lines can quote. |
 | 2026-09-27 | _(pending)_ | §9: a harness error pauses a run (`harness_error`); a suite edited mid-run caused one, because the runner found each test's wires by re-reading its file, and every test's source is now read at the start of a segment. |
 | 2026-09-27 | _(pending)_ | **NaviCore and SBUS drivers (`NAVICORE.md` INF1, INF2).** `hil/navicore.py` grows from 6 methods into the shared NaviCore driver, and the new `hil/sbus.py` holds `SbusCtl` and an SBUS frame codec; s21's NaviCore and controller helpers, s11's and `hil/resume.py`'s controller JSON, gui.py's controller ping and the GET_CONFIG reads in s08 and s22 now call them. A refactor: every suite sends the same lines with the same timeouts and assertions, `run.py --list` is byte-identical (518 tests) and every test's inferred wires and drives are unchanged. One deliberate difference: `SbusCtl.cfg()` hashes the controller's WiFi credentials in session.log, which s11 and s21 used to log in clear. `hil/serialdev.py` gains `send_paced` (512-byte writes 4 ms apart, as NaviCore's config tool) and `usb_jtag_reset`. The new methods (config writes, the recorder transfer, restarts) have not run on the bench. `selftest.py`: 12 new cases, 61 in all. |

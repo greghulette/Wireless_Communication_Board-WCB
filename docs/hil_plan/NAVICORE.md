@@ -569,6 +569,39 @@ unit-tested in `selftest.py` now and used when a probe taps SBUS OUT (NC-WP14).
 
 ### INF3 — `nc_guard`: NaviCore snapshot and restore, and redaction
 
+> **Status 2026-09-28: built; no bench run yet.** `hil/nc_guard.py` holds the guard (`nc_guard`, `NcGuard`) and its
+> parts: `take_snapshot`, `restore_config` (the ladder), `restore_state`, `restore`, `persist`, `load_snapshot` and
+> `reconcile`. `hil/checkpoint.py` gains the JSON password patterns in `_SECRET_TEXT`, `redacted_diff`, `SECRET_KEY`
+> and `Checkpoint.set_navicore_ref`. In `hil/runner.py`, `Bench.log` filters the device kinds in `REDACT_KINDS`
+> (navicore, sbus), and `bench.ckpt` holds the running checkpoint. `hil/resume.py` gains `check_navicore`, the second
+> half of step 7. `suites/s40_navicore_config.py` holds `nccfg.guard_selftest`. `selftest.py` has five cases against
+> `FakeNaviBoard`, a fake NaviCore whose GET_CONFIG and SET_CONFIG follow the firmware's sparse printing and merge. A
+> mutation check backs them: 14 deliberate breaks of the guard, the filter, the persistence and the resume, each
+> caught. The first bench check is `python tests/hil/run.py nccfg.guard_selftest`. Read in the source while building
+> it, and where the code differs from the plan below:
+> - The three `rc_config.h` ranges are right (:1580-1603, :1708-1721, :1854-1864, NaviCore working tree), and so is
+>   the trap. The printer leaves out an empty mapping (:1262), a slot with no channels (:1340-1341) and empty labels
+>   (:1419-1426), so a re-sent snapshot cannot undo them. RESET_DEFAULTS empties all three (:869, :927, :944) and
+>   reloads the compile-time mesh password (:957), in RAM only (`NaviCore.ino:3989-3992`).
+> - NaviCore's two-advert learn is at `WCB_Client.cpp:2166-2168` (WCBClient working tree). The plan's :1688-1720 is
+>   `_addLearnedPeer`, which persists the peer at once (:1717-1718).
+> - `?WDP,DUMP` prints only the neighbours NaviCore hears now (`WCB_Mgmt.h:232-233`), so "rows with PEER=2" misses a
+>   learned peer that is silent. The guard also records `[WDPCFG:...,PEERS=n]`, which counts the floor plus every
+>   learned peer (:231-232), and treats a fall in it as a loss.
+> - A peer NaviCore learns during a test is reported (`NAVICORE STATE NOT RESTORED`), not forgotten: FORGET_PEER is
+>   itself an NVS write. The plan says nothing about this case.
+> - SET_DEBUG_FLAGS 0 and STOP_MONITOR go first, before the config ladder rather than after the peers, to quiet
+>   NaviCore's console before the 14 KB transfers.
+> - `_SECRET_TEXT`'s JSON pattern takes any key ending in `password`, not only `password` and `wifiPassword`, and an
+>   escaped copy inside a JSON string. It leaves an empty value alone and hashes the decoded string, so the mesh
+>   password hashes alike in GET_CONFIG and in a WCB's `?EPASS`. `_SECRET_TEXT` is no longer at `checkpoint.py:397-406`.
+> - The snapshot file and the checkpoint record both carry a sequence number. A GUI closed with *No* freezes the
+>   checkpoint while the test runs on, so the file can be the newer of the two; `reconcile` then takes the file's state.
+> - The week-start copy (D-NC3) is written by the first guard that runs, and never overwritten.
+> - Not done here: the one-off scrub of `results/20260922-095852/report.md`, which lives in the bench checkout's
+>   gitignored `results/`. The bridge, WebSocket and Playwright paths (INF5, INF7) do not exist yet, and will need the
+>   same `redact_text` filter when they do.
+
 **Snapshot:** GET_CONFIG `data` (text and dict); GET_CMDLIB bytes when GET_CMDLIB_META reports a size; the
 `?REC,LS` names; the learned peers (`?WDP,DUMP` rows with PEER=2); the mode (`#L12`).
 
@@ -768,7 +801,8 @@ add roughly 30-40 minutes, most of it the 60 s mode-report wait, the 50 s offlin
 Every write goes to fields with no live effect, to slot 136 (unmapped in every mode), or is restored at once;
 everything inside `nc_guard`.
 
-- `nccfg.guard_selftest`: INF3's proof (above). Runs first.
+- `nccfg.guard_selftest`: INF3's proof (above). Runs first. Written 2026-09-28 (`s40_navicore_config.py`); no bench run
+  yet.
 - `nccfg.get_config_shape`: the key set of `rcConfigToJSON` (`rc_config.h:1211-1480`, per the map); arrays 36/8/4/6/3;
   switch and knob label keys; action type names.
 - `nccfg.set_ack_shapes`: `saveId` echoed on ok (`NaviCore.ino:3953`); `missing data` with saveId (`:3925`); `parse failed` without
@@ -1227,3 +1261,9 @@ D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins
 | D-NC34 | "Full Wipe & Flash" says it erases the saved configuration; the config lives in LittleFS at 0x3D0000, which the flasher never touches. | Correct the text (erasing the config silently would be the more dangerous fix). | `nctool.fw_wipe_text`, `nctool.webserial_flash_same_image` |
 | D-NC35 | Two tool tabs both number saves from 1, so one tab's ACK can advance the other's baseline. | A random saveId base per tab. | `nctool.multi_tab_save` |
 | D-NC36 | Doc drift found while mapping: bare PING claimed to work (PROTOCOLS.md:225, `NaviCore.ino:20`, the banner at `:4922`); RX buffer 4 KB vs 8 KB (PROTOCOLS.md:16); incomplete ACK shapes (PROTOCOLS §2); CALIB's exemptions (PROTOCOLS.md:233); cumulative tiers fire together (ARCHITECTURE.md:294-295); a held 2nd tap fires mid-hold (:304); remote Maestro writes are a raw broadcast (:364, WCB_NATIVE_MAESTRO_DESIGN §2); `RA_SMOOTH_OVERRIDE` retired (:368); RecEvent is 140 bytes (the setup comment at `NaviCore.ino:4661` still says 136); `REC_MAX_MS` is 60 s (RECORD_REPLAY_DESIGN §6); setSpeed/setAccel are captured (§5); NVS is migration-only (CONFIG_SCHEMA §3); `rc_telemetry.h:44-47`; CONFIG_TOOL.md §1, §2, §6, §8. Line numbers per the map. | One docs commit in NaviCore with the first push (D-NC6), each page's revision log updated. | none |
+
+## Revision log
+
+| Date | Commit | Change |
+|---|---|---|
+| 2026-09-28 | _(pending)_ | INF3 built: `hil/nc_guard.py`, the credential filter in `Bench.log`, `redacted_diff`, the resume's NaviCore check, and `nccfg.guard_selftest` in the new `s40_navicore_config.py`. The INF3 status note lists where the code differed from the plan. |

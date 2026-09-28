@@ -31,6 +31,12 @@ parser - PWM_UPDATE, [MAE:n], [CLIPITEM], MESH_STATS pages, the boot banner, #L0
 firmware's own formats; FNV-1a against the published vectors; the SBUS codec on a real frame NaviCore dumped, and in
 round trips; the paced write and the USB-Serial/JTAG reset pulse (hil/serialdev.py); and the protocols built on them
 (ranged clip download and indexed upload, SET_CONFIG's saveId, the command library's size and hash, ?backup hashed).
+And nc_guard (hil/nc_guard.py; NAVICORE.md INF3) against FakeNaviBoard, a NaviCore whose GET_CONFIG and SET_CONFIG
+follow the firmware's sparse printing and absent-keys-left-alone merge: the restore ladder's three paths and its
+failure, what it restores besides the config (command library, HIL clips, RAM toggles, the mode and learned peers
+through a scripted W1), the snapshot file and checkpoint record a killed test leaves, the resume's NaviCore check
+(restore, compare, accept, refuse a foreign snapshot), Bench.log's filter on NaviCore and SBUS lines, redacted_diff,
+and s40's nccfg.guard_selftest run whole against the fake.
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -3411,6 +3417,524 @@ def t_sbus_ctl(tmp):
     _raises(lambda: SB.matrix_button(rest, cfg, ncfg, 1), runner.Skip)
 
 
+# ---------------------------------------------------------------------------- nc_guard (NAVICORE.md INF3)
+class FakeNaviBoard:
+    """A NaviCore for hil/nc_guard.py, answering in the firmware's own line formats. GET_CONFIG prints in
+    rcConfigToJSON's key order and leaves out what is empty (an empty mapping, a slot's empty channels, empty
+    serialLabels: rc_config.h:1262, :1340-1341, :1419-1426). SET_CONFIG merges as rcConfigFromJSON does: only the
+    mapping keys it names, a slot's channels only when "channels" is present, serialLabels whole when present
+    (:1580-1603, :1705-1721, :1847-1864). RESET_DEFAULTS is RAM only and reloads the compile-time mesh password
+    (:801-972, NaviCore.ino:3989-3992). Also the command library by size and FNV-1a hash, ?REC,LS/RM, ?WDP,DUMP with
+    its PEER flags and WDPCFG count, #L12, and the RAM toggles. w1_script is W1's console: ?WDP,POLL makes every WCB
+    NaviCore hears advertise once (it learns a peer on the second advert, WCB_Client.cpp:2166-2168), and a relayed
+    SET_MODE sets the mode. Quirks model a firmware the ladder must survive: 'ignore_clears' skips an empty mapping
+    object, 'stuck_password' keeps the compile-time mesh password whatever arrives."""
+    FACTORY_PW = "DomeNet"                  # the fake's compile-time mesh password (a fake secret, like the others)
+    LABEL_KEYS = ("S3", "S4", "S5", "maestro")
+
+    def __init__(self):
+        self.c = self.factory()
+        self.c.update(wifiEnabled=True, wifiPassword="sekrit99")
+        self.c["wcbNetwork"].update(password="hunter2", quantity=1)
+        self.c["wcbProfiles"] = [{"name": "Dev", "macOct2": 0, "macOct3": 20, "password": "hunter2", "quantity": 1,
+                                  "deviceId": 20, "channel": 1}]
+        self.c["mappings"] = {"101": self._mapping({"t1": [{"type": "wcb_unicast", "target": "1", "cmd": "?HILA"}],
+                                                    "t1note": "Dome"}),
+                              "207": self._mapping({"exclusive": True, "t2": [{"type": "maestro", "target": "1",
+                                                                               "cmd": ";M11"}]})}
+        self.c["maestros"][0].update(type=1, channels={0: {"name": "Pie 1", "min": 3968, "max": 8000},
+                                                       2: {"name": "Pie 2", "min": 4000, "max": 7600}})
+        for s in self.c["maestros"][1:]:
+            s["type"] = 2
+        self.c["auxBaud"]["S3"] = 115200
+        self.cmdlib = '{"boards":[{"id":"HILboard"}],"enums":{}}'
+        self.clips = ["intro", "HILkeep"]
+        self.mode, self.quantity = 1, 1
+        self.heard, self.learned, self.adverts = {1, 2}, {2}, {1: 9, 2: 9}
+        self.debug, self.monitor, self.calib = 0, False, False
+        self.quirks, self.received, self.w1_received = set(), [], []
+
+    @classmethod
+    def factory(cls):
+        bands = [{"id": i + 1, "label": f"B{i + 1}", "minPwm": 0 if i >= 20 else 1799 - 41 * i,
+                  "maxPwm": 0 if i >= 20 else 1823 - 41 * i} for i in range(36)]
+        return {"txModel": 0, "wifiEnabled": False, "wifiSsid": "", "wifiPassword": "", "boardType": 0,
+                "tapWindowMs": 500, "holdMs": 750, "matrixChannel": 7, "thresholds": bands, "mappings": {},
+                "maestros": [{"type": 0, "device": i + 1, "channels": {}} for i in range(8)],
+                "wcbNetwork": {"macOct2": 0, "macOct3": 20, "password": cls.FACTORY_PW, "quantity": 4, "deviceId": 20,
+                               "channel": 1},
+                "wcbProfiles": [], "auxBaud": {"S3": 9600, "S4": 9600, "S5": 9600, "maestro": 57600},
+                "serialLabels": {k: "" for k in cls.LABEL_KEYS}}
+
+    @staticmethod
+    def _mapping(m):
+        out = {"exclusive": bool(m.get("exclusive", False))}           # memset, then what the object names
+        for t in range(1, 5):
+            if isinstance(m.get(f"t{t}"), list) and m[f"t{t}"]:
+                out[f"t{t}"] = m[f"t{t}"][:5]
+            if m.get(f"t{t}note"):
+                out[f"t{t}note"] = m[f"t{t}note"][:19]
+        return out
+
+    def text(self):
+        """GET_CONFIG's data, as rcConfigToJSON prints it."""
+        c, maps, maes = self.c, {}, []
+        for k in sorted(c["mappings"], key=int):
+            m = c["mappings"][k]
+            if m["exclusive"] or len(m) > 1:
+                maps[k] = m
+        for s in c["maestros"]:
+            o = {"type": s["type"], "device": s["device"]}
+            chs = [dict(ch=n, **v) for n, v in sorted(s["channels"].items()) if v["name"] or v["min"] or v["max"]]
+            if chs:
+                o["channels"] = chs
+            maes.append(o)
+        d = {k: c[k] for k in ("txModel", "wifiEnabled", "wifiSsid", "wifiPassword", "boardType", "tapWindowMs",
+                               "holdMs", "matrixChannel", "thresholds")}
+        d.update(mappings=maps, maestros=maes, wcbNetwork=dict(c["wcbNetwork"]),
+                 wcbProfiles=[dict(p) for p in c["wcbProfiles"]], auxBaud=dict(c["auxBaud"]))
+        labels = {k: v for k, v in c["serialLabels"].items() if v}
+        if labels:
+            d["serialLabels"] = labels
+        return json.dumps(d, separators=(",", ":"), ensure_ascii=False)
+
+    def merge(self, d):
+        """SET_CONFIG's data, as rcConfigFromJSON applies it."""
+        c = self.c
+        for k in ("txModel", "wifiEnabled", "wifiSsid", "wifiPassword", "boardType", "tapWindowMs", "holdMs",
+                  "matrixChannel"):
+            if k in d:
+                c[k] = d[k]
+        for i, t in enumerate((d.get("thresholds") or [])[:36]):
+            c["thresholds"][i] = {"id": t.get("id", i + 1), "label": t.get("label", ""), "minPwm": t.get("minPwm", 0),
+                                  "maxPwm": t.get("maxPwm", 0)}
+        for k, m in (d.get("mappings") or {}).items():
+            mode, btn = int(k) // 100, int(k) % 100
+            if not (1 <= mode <= 3 and 1 <= btn <= 36) or (m == {} and "ignore_clears" in self.quirks):
+                continue
+            c["mappings"][k] = self._mapping(m)
+        for i, s in enumerate((d.get("maestros") or [])[:8]):
+            slot = c["maestros"][i]
+            slot["type"], slot["device"] = s.get("type", 0), s.get("device", i + 1)
+            if "channels" in s:
+                slot["channels"] = {x["ch"]: {"name": x.get("name", ""), "min": x.get("min", 0), "max": x.get("max", 0)}
+                                    for x in s["channels"] if 0 <= x.get("ch", -1) < 32}
+        for k, v in (d.get("wcbNetwork") or {}).items():
+            if k in c["wcbNetwork"]:
+                c["wcbNetwork"][k] = v
+        if "wcbProfiles" in d:
+            c["wcbProfiles"] = [dict(p) for p in d["wcbProfiles"]]
+        c["auxBaud"].update({k: v for k, v in (d.get("auxBaud") or {}).items() if k in c["auxBaud"]})
+        if "serialLabels" in d:
+            c["serialLabels"] = {k: "" for k in self.LABEL_KEYS}
+            c["serialLabels"].update({k: v[:24] for k, v in d["serialLabels"].items() if k in self.LABEL_KEYS})
+        if "stuck_password" in self.quirks:
+            c["wcbNetwork"]["password"] = self.FACTORY_PW
+
+    def forget(self, n):
+        """FORGET_PEER: the peer must be heard twice again before it re-joins (WCB_Client.cpp forgetPeer)."""
+        self.learned.discard(n)
+        self.adverts[n] = 0
+
+    def script(self, text, n):
+        from hil.navicore import fnv1a32
+        self.received.append(text)
+        ack = '{"type":"ACK","ok":true}'
+        if text == '{"type":"GET_CONFIG"}':
+            return ['{"type":"CONFIG","data":' + self.text() + "}"]
+        if text.startswith('{"type":"SET_CONFIG"'):
+            obj = json.loads(text)
+            self.merge(obj["data"])
+            return [f'{{"type":"ACK","of":"SET_CONFIG","ok":true,"saveId":{obj["saveId"]}}}']
+        if text == '{"type":"RESET_DEFAULTS"}':
+            self.c = self.factory()
+            return [ack]
+        if text == '{"type":"GET_CMDLIB_META"}':
+            lib = self.cmdlib or ""
+            return [f'{{"type":"CMDLIB_META","size":{len(lib.encode())},"hash":{fnv1a32(lib) if lib else 0}}}']
+        if text == '{"type":"GET_CMDLIB"}':
+            lib = self.cmdlib or '{"boards":[],"enums":{}}'
+            return [f'{{"type":"CMDLIB","size":{len(lib.encode())},"hash":{fnv1a32(lib)},"data":{lib}}}']
+        if text.startswith('{"type":"SET_CMDLIB","data":'):
+            self.cmdlib = text[len('{"type":"SET_CMDLIB","data":'):-1].strip()
+            return [f'{{"type":"ACK","of":"SET_CMDLIB","ok":true,"size":{len(self.cmdlib.encode())},'
+                    f'"hash":{fnv1a32(self.cmdlib)}}}']
+        if text == "?REC,LS":
+            return (['[CLIPFS]{"total":12000000,"used":4096}', "[REC] clips:", "[CLIPLIST:BEGIN]"]
+                    + [f'[CLIPITEM]{{"name":"{c}","bytes":296,"dur":1000,"n":2}}' for c in self.clips]
+                    + ["[CLIPLIST:END]"])
+        if text.startswith("?REC,RM,"):
+            name = text[len("?REC,RM,"):]
+            if name in self.clips:
+                self.clips.remove(name)
+                return ["[REC] deleted"]
+            return ["[REC] delete failed"]
+        if text == "#L12":
+            return [f"Mode={self.mode}  matrixBtn=0  matrixVal=992"]
+        if text == "?WDP,DUMP":
+            rows = ["[WDP:N=20,CLIENT=0,ALIAS=NaviCore,HW=0,HWREV=,FW=v0.2.0_TEST,CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,"
+                    "AGE=0,SEEN=1,PEER=3]"]
+            for w in sorted(self.heard):
+                flag = 2 if w in self.learned else (1 if w <= self.quantity else 0)
+                rows.append(f"[WDP:N={w},CLIENT=0,ALIAS=W{w},HW=24,HWREV=,FW=6.2.1_TEST,CAP=0001,CTRL=20,CAPTAGS=,"
+                            f"MAESTRO=-,AGE=4,SEEN=1,PEER={flag}]")
+            peers = self.quantity + len([w for w in self.learned if w > self.quantity])
+            return rows + [f"[WDPCFG:EN=1,AUTOJOIN=1,PEERS={peers}]", f"[WDP:END,count={len(self.heard)}]"]
+        if text.startswith('{"type":"SET_DEBUG_FLAGS"'):
+            self.debug = json.loads(text)["flags"]
+            return [ack]
+        if text == '{"type":"STOP_MONITOR"}':
+            self.monitor = self.calib = False
+            return [ack]
+        if text == '{"type":"PING"}':
+            self.calib = False
+            return ['{"type":"PONG","version":"v0.2.0_TEST"}']
+        return []
+
+    def w1_script(self, text, n):
+        import re as _re
+        self.w1_received.append(text)
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        if text == "?WDP,POLL":
+            for w in sorted(self.heard):
+                self.adverts[w] = self.adverts.get(w, 0) + 1
+                if self.adverts[w] >= 2 and w > self.quantity:
+                    self.learned.add(w)
+            return ["[WDP] polled: advertised + solicited the mesh"]
+        m = _re.match(r';W20,\{"type":"SET_MODE","mode":(\d)\}$', text)
+        if m:
+            self.mode = int(m.group(1))
+        return []
+
+
+def _nc_bench(tmp, board):
+    """A Bench whose navicore and wcb1 are `board`'s scripted consoles, logging through Bench.log, so its filter runs
+    on every line as it would on the bench."""
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}, "sbus": {"port": "COMS", "kind": "sbus"}})
+    nav, w1 = FakeNaviDev(board.script, "navicore"), FakeNaviDev(board.w1_script, "wcb1")
+    nav.log = w1.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1}[name]
+    return b
+
+
+def _fast_guard():
+    """nc_guard's waits for the mesh cut to nothing: the fake answers at once. -> the saved values, for _slow_guard."""
+    from hil import nc_guard as G
+    saved = (G.POLL_GAP_S, G.RELEARN_WAIT_S, G.MODE_WAIT_S)
+    G.POLL_GAP_S, G.RELEARN_WAIT_S, G.MODE_WAIT_S = 0.0, 0.3, 0.3
+    return saved
+
+
+def _slow_guard(saved):
+    from hil import nc_guard as G
+    G.POLL_GAP_S, G.RELEARN_WAIT_S, G.MODE_WAIT_S = saved
+
+
+def _trap_change(orig_text, label="HILlabel"):
+    """The three changes a re-sent snapshot cannot undo: mapping 136, channels on slot 3 (which had none), a label."""
+    maes = json.loads(orig_text)["maestros"]
+    maes[2]["channels"] = [{"ch": 0, "name": "HILch", "min": 4000, "max": 8000}]
+    return {"mappings": {"136": {"t1": [{"type": "wcb_unicast", "target": "1", "cmd": "?HILNOOP"}], "t1note": "HILn"}},
+            "maestros": maes, "serialLabels": {"S5": label}}
+
+
+def t_nc_guard_ladder(tmp):
+    """nc_guard's restore ladder against FakeNaviBoard: nothing written when nothing changed; the trap (the snapshot
+    re-sent alone leaves a new mapping, a slot's new channels and a new label) undone by the snapshot plus exactly the
+    three clears, with no RESET_DEFAULTS; RESET_DEFAULTS then the snapshot's exact text only after the clears failed
+    (a firmware that skips an empty mapping); a config that will not come back failing the test with the body's own
+    failure first and the credential that differs only as a hash; guards that do not nest; an abort that skips the
+    restore."""
+    from hil import nc_guard as G
+    board = FakeNaviBoard()
+    orig = board.text()
+    b = _nc_bench(tmp, board)
+    b.new_session()
+    with G.nc_guard(b) as g:
+        assert g.before_text == orig and g.before["wcbNetwork"]["deviceId"] == 20 and g.snap["learned"] == [2]
+    assert g.path == "unchanged" and not [x for x in board.received if x.startswith('{"type":"SET_CONFIG"')], g.path
+    change = _trap_change(orig)
+    with G.nc_guard(b) as g:
+        g.nc.set_config(change)
+        g.nc.set_config(g.before_text)                     # the snapshot alone: the trap
+        left = G.config_diff(orig, board.text())
+        assert left == ["mappings.136 added", "maestros[2].channels added", "serialLabels added"], left
+        board.received.clear()
+    assert g.path == "diff" and board.text() == orig, (g.path, G.config_diff(orig, board.text()))
+    assert '{"type":"RESET_DEFAULTS"}' not in board.received, "the diff path never sends RESET_DEFAULTS"
+    sets = [json.loads(x)["data"] for x in board.received if x.startswith('{"type":"SET_CONFIG"')]
+    assert len(sets) == 1 and sets[0]["mappings"]["136"] == {} and sets[0]["serialLabels"] == {}, sets
+    want = [(True, json.loads(orig)["maestros"][0]["channels"])] + [(True, [])] * 7
+    assert [("channels" in s, s.get("channels")) for s in sets[0]["maestros"]] == want, \
+        "channels: [] for every slot with none"
+    assert sets[0]["wcbNetwork"]["password"] == "hunter2", "the password goes back unchanged"
+    target = json.loads(orig)
+    assert G.with_clears(target, target)["serialLabels"] == {} and "serialLabels" not in target and \
+        "channels" not in target["maestros"][2], "with_clears leaves its target alone"
+    board.quirks.add("ignore_clears")                      # a firmware whose empty mapping object does nothing
+    with G.nc_guard(b) as g:
+        g.nc.set_config(change)
+        board.received.clear()
+    assert g.path == "reset" and board.text() == orig, g.path
+    reset = board.received.index('{"type":"RESET_DEFAULTS"}')
+    sets = [i for i, x in enumerate(board.received) if x.startswith('{"type":"SET_CONFIG"')]
+    assert len(sets) == 2 and sets[0] < reset < sets[1], "RESET_DEFAULTS only after the snapshot plus clears failed"
+    assert board.received[sets[1]].endswith('"data":' + orig + "}"), "then the snapshot's exact text"
+    board.quirks.discard("ignore_clears")
+
+    def stuck():
+        with G.nc_guard(b) as g2:
+            g2.nc.set_config(change)
+            board.quirks.add("stuck_password")
+            raise ValueError("the body failed too")
+    msg = str(_raises(stuck))
+    assert msg.startswith("the body failed too\nNAVICORE CONFIG NOT RESTORED — wcbNetwork.password: <redacted:"), msg
+    assert not any(s in msg for s in SECRETS) and f"{G.SNAPSHOT_FILE} in this run's folder" in msg, msg
+    assert G.load_snapshot(b.out_dir)["state"] == "not_restored"
+    log = read(os.path.join(b.out_dir, "session.log"))
+    assert "NAVICORE LEAK NAVICORE CONFIG NOT RESTORED" in log and not any(s in log for s in SECRETS), \
+        "session.log: the guard's own notes and NaviCore's lines, all without a credential"
+    board.quirks.discard("stuck_password")
+    board.c = FakeNaviBoard().c
+
+    def nested():
+        with G.nc_guard(b):
+            with G.nc_guard(b):
+                pass
+    _raises(nested, RuntimeError)
+    board.received.clear()
+    try:
+        with G.nc_guard(b) as g:
+            g.nc.set_config(change)
+            raise KeyboardInterrupt                         # a second Ctrl+C: out at once, no restore
+    except KeyboardInterrupt:
+        pass
+    assert board.text() != orig and G.load_snapshot(b.out_dir)["state"] == "guarding", "left for the resume"
+    with G.nc_guard(b) as g:                                # no checkpoint here: the file alone says it is pending
+        pass
+    assert g.path == "unchanged" and g.before_text == orig and board.text() == orig, "restored first, then snapshotted"
+    assert "restoring its snapshot before this test's own" in read(os.path.join(b.out_dir, "session.log"))
+    b.close()
+
+
+def t_nc_guard_state(tmp):
+    """nc_guard's restore of what is not config: the command library put back by its bytes; new HIL* clips removed and
+    other clips kept; debug flags, the monitor and CALIB cleared; the mode set back by a mesh SET_MODE from W1; a lost
+    learned peer re-learned by two ?WDP,POLL from W1; and reported, failing the test as NAVICORE STATE NOT RESTORED: a
+    library written where none was stored, a peer learned during the test, a lost peer that is not on the air."""
+    from hil import nc_guard as G
+    saved = _fast_guard()
+    try:
+        board = FakeNaviBoard()
+        orig, lib = board.text(), board.cmdlib
+        b = _nc_bench(tmp, board)
+        b.new_session()
+        with G.nc_guard(b) as g:
+            g.nc.set_cmdlib('{"boards":[],"enums":{"HIL":1}}')
+            board.clips += ["HILtemp", "userclip"]
+            board.mode, board.debug, board.monitor, board.calib = 3, 0x7F, True, True
+            board.forget(2)
+        assert g.path == "unchanged" and not g.problems, g.problems
+        assert board.cmdlib == lib and board.clips == ["intro", "HILkeep", "userclip"], (board.cmdlib, board.clips)
+        assert (board.mode, board.debug, board.monitor, board.calib) == (1, 0, False, False)
+        assert 2 in board.learned and board.w1_received.count("?WDP,POLL") == 2, board.w1_received
+        assert ';W20,{"type":"SET_MODE","mode":1}' in board.w1_received and board.text() == orig
+        board.cmdlib = None
+
+        def new_lib():
+            with G.nc_guard(b) as g2:
+                g2.nc.set_cmdlib('{"boards":[]}')
+        msg = str(_raises(new_lib))
+        assert msg.startswith("NAVICORE STATE NOT RESTORED — a command library") and "D-NC13" in msg, msg
+        board.cmdlib = lib
+
+        def learns():
+            with G.nc_guard(b):
+                board.heard.add(9)
+                board.learned.add(9)
+        assert "NaviCore learned WCB 9 during the test" in str(_raises(learns))
+        board.heard.discard(9)
+        board.learned.discard(9)
+
+        def gone():
+            with G.nc_guard(b):
+                board.forget(2)
+                board.heard.discard(2)
+        msg = str(_raises(gone))
+        assert "learned peer(s) [2] not re-learned after two ?WDP,POLL" in msg, msg
+        assert G.load_snapshot(b.out_dir)["state"] == "restored", "the config itself came back"
+        b.close()
+    finally:
+        _slow_guard(saved)
+
+
+def t_nc_guard_persist_resume(tmp):
+    """D-NC3: a guarded test killed mid-way (a second Ctrl+C) leaves the exact snapshot in navicore_snapshot.json
+    and a 'guarding' record in the checkpoint that holds only the redacted hash; the week-start copy is written once.
+    resume.check_navicore restores NaviCore from it without asking on the automatic resume, and the record reads
+    'restored'; a clean NaviCore needs nothing; one changed while paused blocks the automatic resume with the key
+    paths (credentials hashed) and a Yes makes it the reference; a snapshot the checkpoint did not record is never
+    restored from; a newer file counts over a checkpoint record that was lost; and the next guarded test in a run
+    whose record is still 'guarding' restores it first."""
+    from hil import nc_guard as G
+    saved = _fast_guard()
+    try:
+        board = FakeNaviBoard()
+        orig = board.text()
+        b = _nc_bench(tmp, board)
+        change = _trap_change(orig)
+
+        def killed(bench):
+            with G.nc_guard(bench) as g:
+                g.nc.set_config(change)
+                raise KeyboardInterrupt
+        runner.REGISTRY[:] = [fake("nccfg.killed", killed), fake("after")]
+        ck = runner.start_run(b, runner.REGISTRY, "selftest")
+        _raises(lambda: runner.continue_run(b, ck, resuming=False), KeyboardInterrupt)
+        b.close()
+        assert ck.state == "paused" and ck.in_flight == "nccfg.killed", (ck.state, ck.in_flight)
+        ref = ck.data["navicore"]
+        assert ref["state"] == "guarding" and ref["test"] == "nccfg.killed" and ref["sha"] == G.redacted_sha(orig), ref
+        snap = G.load_snapshot(ck.out_dir)
+        assert snap["config"] == orig and snap["state"] == "guarding" and snap["cmdlib"] == board.cmdlib
+        assert (snap["clips"], snap["learned"], snap["peers"], snap["mode"]) == (["intro", "HILkeep"], [2], 2, 1), snap
+        for name in ("checkpoint.json", "report.md", "session.log"):
+            text = read(os.path.join(ck.out_dir, name))
+            assert not any(s in text for s in SECRETS), f"{name} holds a credential"
+        week = os.path.join(tmp.results, G.WEEK_START_FILE)
+        assert json.loads(read(week))["config"] == orig and board.text() != orig
+        b2 = _nc_bench(tmp, board)
+        b2.open_session(ck.out_dir, 2)
+        disk, logs = Checkpoint.load(ck.out_dir), []
+        changes = resume.check_navicore(b2, disk, None, logs.append)
+        assert board.text() == orig and changes == ["NaviCore restored after the cut-off nccfg.killed (diff)"], changes
+        assert disk.data["navicore"]["state"] == "restored" and G.load_snapshot(ck.out_dir)["state"] == "restored"
+        assert Checkpoint.load(ck.out_dir).data["navicore"]["state"] == "restored", "saved"
+        assert resume.check_navicore(b2, disk, None, logs.append) == []
+        assert logs[-1].endswith("matches the run's snapshot"), logs[-1]
+        board.c["tapWindowMs"] = 600
+        board.c["wcbNetwork"]["password"] = "sekrit99"
+        e = str(_raises(lambda: resume.check_navicore(b2, disk, None, logs.append), resume.ResumeBlocked))
+        assert "tapWindowMs: 500 -> 600" in e and "wcbNetwork.password: <redacted:" in e, e
+        assert not any(s in e for s in SECRETS), e
+        asked = []
+        changes = resume.check_navicore(b2, disk, lambda title, text, dflt: asked.append((title, dflt)) or True,
+                                        logs.append)
+        assert asked == [("NaviCore's saved config differs", False)] and changes[0].startswith(
+            "NaviCore config accepted with difference: tapWindowMs: 500 -> 600"), (asked, changes)
+        assert disk.data["navicore"]["sha"] == G.redacted_sha(board.text()) != G.redacted_sha(orig)
+        board.c = FakeNaviBoard().c                         # back to the bench's config for what follows
+        other = dict(G.load_snapshot(ck.out_dir), config=orig.replace('"holdMs":750', '"holdMs":800'))
+        other["sha"] = G.redacted_sha(other["config"])
+        checkpoint.atomic_write_json(G.snapshot_path(ck.out_dir), other)
+        disk.data["navicore"]["state"] = "guarding"
+        e = str(_raises(lambda: resume.check_navicore(b2, disk, None, logs.append), resume.ResumeBlocked))
+        assert "not the snapshot the checkpoint recorded" in e and board.text() == orig, e
+        # the checkpoint's record lost while the test ran on (a GUI closed with No froze it): the newer file's
+        # 'guarding' counts, and the resume restores from it
+        board.merge(change)
+        disk.data["navicore"]["state"] = "restored"
+        checkpoint.atomic_write_json(G.snapshot_path(ck.out_dir),
+                                     dict(snap, state="guarding", seq=disk.data["navicore"]["seq"] + 1))
+        changes = resume.check_navicore(b2, disk, None, logs.append)
+        assert board.text() == orig and changes == ["NaviCore restored after the cut-off nccfg.killed (diff)"], changes
+        # an older file holding the config the checkpoint recorded is used; the next guarded test in a run whose
+        # record still says 'guarding' puts NaviCore back before its own snapshot
+        snap["state"] = "guarding"
+        checkpoint.atomic_write_json(G.snapshot_path(ck.out_dir), snap)
+        disk.data["navicore"].update(sha=snap["sha"], state="guarding")
+        assert snap["seq"] < disk.data["navicore"]["seq"], "the file is the older of the two here"
+        board.merge(change)
+        b2.ckpt = disk
+        with G.nc_guard(b2) as g:
+            assert g.before_text == orig, "restored first, then snapshotted"
+        assert "restoring its snapshot before this test's own" in read(os.path.join(ck.out_dir, "session.log"))
+        b2.close()
+    finally:
+        _slow_guard(saved)
+
+
+def t_nc_log_filter(tmp):
+    """D-NC5: Bench.log hashes every credential on NaviCore's and the SBUS controller's lines, both directions and the
+    GUI's sink alike (the JSON password fields, ?EPASS alone or in a chain, wifiNets, the Pass: banner), and leaves a
+    WCB's lines as they were; redact_text stays idempotent, hashes a mesh password alike in JSON and in ?EPASS, leaves
+    an empty password alone and covers the escaped form; redacted_diff names key paths and shows a credential only as
+    its hash, at any depth."""
+    rt, rd = checkpoint.redact_text, checkpoint.redacted_diff
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}, "sbus": {"port": "COMS", "kind": "sbus"}})
+    sink = []
+    b.log_sink = sink.append
+    b.new_session()
+    for name, direction, text in (
+            ("navicore", "<", '{"type":"CONFIG","data":{"wifiPassword":"sekrit99","wcbNetwork":{"password":"hunter2"},'
+                              '"wcbProfiles":[{"name":"Dev","password":"hunter2"}]}}'),
+            ("navicore", ">", '{"type":"SET_CONFIG","saveId":5,"data":{"wcbNetwork":{"password":"hunter2"}}}'),
+            ("navicore", "<", "?EPASS,hunter2"),
+            ("navicore", "<", "?HW,32^?WCB,20^?EPASS,hunter2^?CMDCHAR,;"),
+            ("navicore", "#", "a note quoting ?EPASS,hunter2"),
+            ("sbus", "<", '{"e":"cfg","wifiNets":[{"s":"DomeNet","p":"sekrit99"}]}'),
+            ("sbus", "<", "[SBUS] AP mode  SSID: SBUSCtrl  Pass: sekrit99"),
+            ("wcb1", "<", "?EPASS,hunter2"),
+            ("runner", "#", "a plain note")):
+        b.log(name, direction, text)
+    b.close()
+    lines = read(os.path.join(b.out_dir, "session.log")).splitlines()
+    ours = [x for x in lines if " navicore " in x or "     sbus " in x]
+    assert len(ours) == 7 and all("<redacted:" in x for x in ours), ours
+    assert not any(s in x for x in ours for s in SECRETS), "a NaviCore or SBUS line kept a credential"
+    assert next(x for x in lines if " wcb1 " in x).endswith("?EPASS,hunter2"), "a WCB's lines are left as they were"
+    assert sink == lines, "the GUI's log view gets the same filtered lines"
+    j, e = rt('{"password":"hunter2"}'), rt("?EPASS,hunter2")
+    assert j[len('{"password":"'):-2] == e[len("?EPASS,"):] and rt(j) == j and rt(e) == e, (j, e)
+    assert rt('{"wifiPassword":""}') == '{"wifiPassword":""}', "an empty password is no secret"
+    esc = rt('{"line":"{\\"type\\":\\"SET_CONFIG\\",\\"data\\":{\\"wifiPassword\\":\\"sekrit99\\"}}"}')
+    assert "sekrit99" not in esc and rt(esc) == esc, esc
+    assert rt('{"meshPassword":"hunter2","apPass":"x"}').startswith('{"meshPassword":"<redacted:'), "any *password key"
+    a = {"tapWindowMs": 500, "mappings": {"101": {}}, "maestros": [{"type": 1}, {"type": 2}],
+         "wcbNetwork": {"password": "hunter2", "deviceId": 20}, "wcbProfiles": [{"password": "hunter2"}]}
+    z = json.loads(json.dumps(a))
+    z.update(tapWindowMs=600, serialLabels={"S5": "HIL"})
+    z["mappings"]["136"] = {"t1": [1]}
+    z["maestros"][1]["channels"] = []
+    z["wcbNetwork"]["password"] = "DomeNet"
+    z["wcbProfiles"][0]["password"] = "sekrit99"
+    got = rd(a, z)
+    assert got[:3] == ["tapWindowMs: 500 -> 600", "mappings.136 added", "maestros[1].channels added"], got
+    assert got[3].startswith("wcbNetwork.password: <redacted:") and got[4].startswith("wcbProfiles[0].password: "), got
+    assert got[5] == "serialLabels added" and not any(s in x for x in got for s in SECRETS), got
+    assert rd(a, a) == [] and len(rd({"k": list(range(50))}, {"k": list(range(1, 51))}, limit=5)) == 6
+    assert rd({"wifiNets": [{"p": "sekrit99"}]}, {"wifiNets": []})[0].startswith("wifiNets: <redacted:")
+
+
+def t_nc_guard_bench_test(tmp):
+    """suites/s40_navicore_config.py nccfg.guard_selftest's own logic, run by the runner against FakeNaviBoard: it
+    passes, NaviCore ends byte-identical, it notes that the snapshot alone left all three changes in place, and its
+    session.log scan finds the config lines it needs (so a PASS on the bench means the scan saw them there too)."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s40_navicore_config as S40
+    finally:
+        runner.REGISTRY[:] = saved              # the body only: the real test never joins a selftest run
+    board = FakeNaviBoard()
+    orig = board.text()
+    b = _nc_bench(tmp, board)
+    ck = new_run(b, [fake("nccfg.guard_selftest", S40.guard_selftest)])
+    r = ck.data["results"][0]
+    assert r["status"] == "PASS", r["detail"]
+    assert board.text() == orig and ck.data["navicore"]["state"] == "restored" and ck.data["navicore"]["path"] == "diff"
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    assert "the snapshot re-sent alone left ['mapping', 'channels', 'label'] in place" in log, "the trap, noted"
+    assert "traps exercised: mapping, channels, label" in log and not any(s in log for s in SECRETS)
+    board.c["mappings"]["136"] = board._mapping({"t1note": "taken"})   # 136 taken: the next inert key is used
+    board.c["maestros"][2]["channels"] = {1: {"name": "x", "min": 0, "max": 0}}
+    assert S40._inert_mapping_key(json.loads(board.text())) == "236"
+    assert S40._slot_without_channels(json.loads(board.text())) == (2, True)
+    b.close()
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -3426,7 +3950,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
          t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter,
          t_nc_transport, t_nc_fnv1a, t_nc_pwm_update, t_nc_mae_markers, t_nc_clip_items, t_nc_recorder_transfer,
-         t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl]
+         t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl,
+         t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

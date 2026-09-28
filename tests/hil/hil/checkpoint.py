@@ -10,7 +10,9 @@ so a checkpoint still saying "running" with its lock free is a run that was inte
 closed) and can be resumed. Pure data - nothing here opens a serial port.
 
 The saved-config reference (config_ref) never holds the mesh password or WiFi credentials: those tokens are stored as
-'<prefix><redacted:sha256[:12]>' (redact_token), and every comparison and diff uses that form.
+'<prefix><redacted:sha256[:12]>' (redact_token), and every comparison and diff uses that form. NaviCore's reference
+('navicore', set by hil/nc_guard.py) is a hash of its redacted config text and the guard's state; the exact snapshot
+lives beside the checkpoint in navicore_snapshot.json.
 """
 import copy
 import glob
@@ -390,6 +392,25 @@ def _hash_repl(prefix_group, value_group):
     return repl
 
 
+def _sha12(text):
+    return "<redacted:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] + ">"
+
+
+def _json_hash_repl(m):
+    """A JSON string value -> its hash, over the text it decodes to (so "a\\"b" hashes as a"b). One that does not
+    decode (cut short) is hashed as it stands."""
+    raw = m.group(2)
+    try:
+        value = json.loads('"' + raw + '"')
+    except ValueError:
+        value = raw
+    return m.group(1) + _sha12(value) + m.group(3)
+
+
+def _hash_repl3(m):
+    return m.group(1) + _sha12(m.group(2)) + m.group(3)
+
+
 # The same secrets inside free text: a test's failure detail (an ExpectTimeout's last-lines tail around ?backup,
 # ?config or a boot banner), a config diff, a resume block. The token payload runs to '^', the end of the line, or a
 # quote closing a Python list repr. ?config and the boot banner print "Password: <pw>" / "ESP-NOW Password: <pw>"
@@ -407,18 +428,83 @@ _SECRET_TEXT = (
     # whitespace, or at a quote followed by whitespace or the end - the close of "'<cmd>' -> ERR ...". The usage text
     # PASS=<pw> is left alone.
     (re.compile(r"((?<![A-Za-z0-9])PASS=)((?!<redacted:|<pw>)(?:(?!['\"](?:\s|$))\S)+)"), _hash_repl(1, 2)),
+    # NaviCore's GET_CONFIG, and every SET_CONFIG the harness sends back, carry "wifiPassword" (the AP passphrase,
+    # rc_config.h:1226), "wcbNetwork":{"password"} (the mesh password, :1354) and "wcbProfiles":[{"password"}] (:1367)
+    # as plain JSON strings (docs/hil_plan/NAVICORE.md D-NC5). Any key ending in "password" counts, so a renamed or new
+    # field is covered too. The value is hashed as the string it encodes, so a mesh password hashes the same here as in
+    # a WCB's ?EPASS token. An empty value is left alone: that it is empty is no secret.
+    (re.compile(r'("[A-Za-z_]*[Pp]assword"\s*:\s*")((?!<redacted:)(?:[^"\\]|\\.)+)(")'), _json_hash_repl),
+    # The same fields inside a JSON string (a SET_CONFIG line quoted in another JSON document), where every quote is
+    # escaped.
+    (re.compile(r'(\\"[A-Za-z_]*[Pp]assword\\"\s*:\s*\\")((?!<redacted:)(?:(?!\\").)+)(\\")'), _hash_repl3),
 )
 
 
 def redact_text(s):
     """`s` with every mesh password and WiFi credential it quotes replaced by <redacted:sha256[:12]>. Applied to
-    every free-text field the checkpoint stores (result and outage detail, the pause reason, the last resume error)
-    and to the log lines the pause/resume code adds; session.log's own serial traffic is left as it always was."""
+    every free-text field the checkpoint stores (result and outage detail, the pause reason, the last resume error),
+    to the log lines the pause/resume code adds, and by Bench.log to every line NaviCore and the SBUS controller send
+    or receive (docs/hil_plan/NAVICORE.md D-NC5). A WCB's own serial traffic reaches session.log as it always did.
+    Idempotent: a value already in the <redacted:...> form is never hashed again."""
     if not s:
         return s
     for rx, repl in _SECRET_TEXT:
         s = rx.sub(repl, s)
     return s
+
+
+# JSON keys whose values are credentials, wherever they sit: NaviCore's password fields (any key ending in "password")
+# and the SBUS controller's WiFi networks.
+SECRET_KEY = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiNets)$")
+
+
+def _is_scalar(v):
+    return not isinstance(v, (dict, list))
+
+
+def _shown(key, v, width=60):
+    """One value for a diff line: a credential as <redacted:sha12> (an empty string stays ""), anything else as
+    compact JSON, cut to `width` characters and passed through redact_text."""
+    if key is not None and SECRET_KEY.match(str(key)) and v not in ("", None):
+        return _sha12(v if isinstance(v, str) else json.dumps(v, sort_keys=True, separators=(",", ":")))
+    text = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    if len(text) > width:
+        text = text[:width - 3] + "..."
+    return redact_text(text)
+
+
+def redacted_diff(a, b, limit=30):
+    """Key paths where JSON-like `a` becomes `b`, one line each: 'mappings.136 added', 'maestros[2].channels added',
+    'serialLabels removed', 'tapWindowMs: 500 -> 600', 'wcbNetwork.password: <redacted:...> -> <redacted:...>'.
+    For failure messages and resume questions (docs/hil_plan/NAVICORE.md INF3): a credential is only ever shown as its
+    hash, whatever its depth, and every other value is cut short and passed through redact_text. Dicts compare by key
+    (a's order, then b's new keys), lists by index; a credential-valued key is compared whole. At most `limit` lines,
+    then '... and N more'."""
+    out = []
+
+    def walk(path, key, x, y):
+        if x == y:
+            return
+        if key is not None and SECRET_KEY.match(str(key)):
+            out.append(f"{path}: {_shown(key, x)} -> {_shown(key, y)}")
+        elif isinstance(x, dict) and isinstance(y, dict):
+            for k in list(x) + [k for k in y if k not in x]:
+                p = f"{path}.{k}" if path else str(k)
+                if k not in y:
+                    out.append(f"{p} removed")
+                elif k not in x:
+                    out.append(f"{p} added" + (f": {_shown(k, y[k])}" if _is_scalar(y[k]) else ""))
+                else:
+                    walk(p, k, x[k], y[k])
+        elif isinstance(x, list) and isinstance(y, list):
+            if len(x) != len(y):
+                out.append(f"{path or '(root)'}: {len(x)} -> {len(y)} items")
+            for i in range(min(len(x), len(y))):
+                walk(f"{path}[{i}]", key, x[i], y[i])
+        else:
+            out.append(f"{path or '(root)'}: {_shown(key, x)} -> {_shown(key, y)}")
+    walk("", None, a, b)
+    return out[:limit] + ([f"... and {len(out) - limit} more"] if len(out) > limit else [])
 
 
 # ---------------------------------------------------------------------------- the checkpoint
@@ -462,7 +548,7 @@ class Checkpoint:
             "results": [], "outages": [], "dropped": [], "segments": [], "devices": {},
             "bench": {"sha": sha(canon), "canon": canon},
             "links": {"sha": sha(lcanon), "canon": lcanon, "verified": verified},
-            "harness": {}, "config_ref": None,
+            "harness": {}, "config_ref": None, "navicore": None,
         }
         return cls(out_dir, data)
 
@@ -715,6 +801,17 @@ class Checkpoint:
                     new[str(w)] = redact_tokens(toks)
             self.data["config_ref"] = {"taken": taken, "at": now_iso(), "after_test": after,
                                        "active_s": round(self.active_s_now(), 1), "tokens": new}
+            self.save(report=False)
+
+    def set_navicore_ref(self, ref):
+        """NaviCore's snapshot reference (hil/nc_guard.py): {'sha', 'state', 'test', 'at', 'detail', ...}. The sha is
+        over the REDACTED config text; the exact snapshot is <run>/navicore_snapshot.json, never the checkpoint.
+        Written when a guard takes its snapshot and when it restores, so a run killed in between is restored by the
+        resume (docs/hil_plan/NAVICORE.md D-NC3). A frozen checkpoint records nothing."""
+        with self._mu:
+            if self._frozen:
+                return
+            self.data["navicore"] = ref
             self.save(report=False)
 
     def active_s_now(self):
