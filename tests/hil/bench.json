@@ -81,6 +81,8 @@
     "mesh_password",
     "nvs_fill",
     "w1s4_soak",
-    "navicore_reboot"
+    "navicore_reboot",
+    "etm_seq_wrap",
+    "navicore_fault"
   ]
 }

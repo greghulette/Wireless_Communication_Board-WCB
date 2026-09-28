@@ -90,9 +90,10 @@ OPT_INS = {
     },
     "wifi_modes": {
         "title": "WiFi mode changes on W1",
-        "what": "W1 turns its access point off and back on, joins W2's access point and returns to its own, and brings its "
-                "access point up under its derived name: six W1 reboots, and W1's WiFi is unreachable meanwhile.",
-        "why": "changes W1's WiFi mode and reboots it six times",
+        "what": "W1 turns its access point off and back on, joins W2's access point and returns to its own, brings its "
+                "access point up under its derived name, loses W2's access point and rejoins it, and looks for an absent "
+                "network: up to ten W1 and two W2 reboots across its tests, and W1's WiFi is unreachable meanwhile.",
+        "why": "changes W1's WiFi mode and reboots it four times",
         "estimate_s": 60,
     },
     "wifi_pc": {
