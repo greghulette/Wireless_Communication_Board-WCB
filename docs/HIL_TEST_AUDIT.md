@@ -714,6 +714,15 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     line) and #99 (devices vs serial mappings) fixed and verified; #100 (NVS keys left by cleared devices) is
     deferred (D38). Next: the s12/s13/s16/s17 group (writing), INF6 plus NC-WP1 (writing), INF7, tonight's full
     run on the new image.
+  - 2026-09-28 12:55: wave 2 complete and bench-verified: the s12/s13/s16/s17 group's 17 tests pass on
+    `6.2.1_280758RSEP2026` with tracker #101 (a USB line the heap cannot hold ran its head alone) fixed and
+    verified. NaviCore INF6 (`hil/ncmesh.py`) and NC-WP1 (35 `nccfg` tests) are merged and bench-verified
+    (`20260928-123843`): every normal test passes, and five `(should)` tests reproduce NaviCore defects D-NC16,
+    D-NC17, D-NC22, D-NC42, D-NC43; a shared SBUS full-rate threshold replaces four flaky literals. `navicore_reboot`
+    ticked (D40). Two agents hit the 11:30 session limit; INF7 resumed. Running: INF7 (NaviCore config-tool
+    Playwright rig, NC-WP3) and WCB wave 3's identity/WiFi/boot group. Next: their merges and bench runs, WCB wave
+    3's second group (GPIO arms, WDP side effects, `:MQR`, JOIN, ETM wrap, OTA), INF9 (NaviCore hooks) for NC-WP2,
+    tonight's full run.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests

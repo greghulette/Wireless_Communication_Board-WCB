@@ -43,6 +43,7 @@ from hil.navicore import (DBG_DFP, DBG_HCR, DBG_MAESTRO, DBG_MP3, DBG_SERIAL, DB
                           parse_boot)
 from hil.ncmesh import bridged
 from hil.runner import REDACT_KINDS, Skip, test
+from hil.navicore import SBUS_FULL_FPS
 from hil.wcb import WCB
 from suites.common import marker, nonce
 
@@ -1289,7 +1290,7 @@ def monitor_stream(bench):
     equal #L09's."""
     nc = _nc(bench)
     cfg = nc.config()
-    if nc.sbus_dump()["fps"] < 100:
+    if nc.sbus_dump()["fps"] < SBUS_FULL_FPS:
         raise Skip("NaviCore sees no full-rate SBUS stream: the frames would carry no channels to compare")
     m = nc.dev.mark()
     nc.ack({"type": "START_MONITOR"})

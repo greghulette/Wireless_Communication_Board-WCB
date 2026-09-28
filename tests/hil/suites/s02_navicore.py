@@ -1,7 +1,7 @@
 """NaviCore as a WCB_Client mesh member — read-only checks, nothing moves."""
 import time
 
-from hil.navicore import NaviCore
+from hil.navicore import NaviCore, SBUS_FULL_FPS
 from hil.runner import test
 from hil.wcb import WCB
 
@@ -66,7 +66,7 @@ def bench_health(bench):
     nc = _nc(bench)
     problems = []
     st = nc.sbus_dump()
-    if st["fps"] < 100 or st["lost"] != "no":
+    if st["fps"] < SBUS_FULL_FPS or st["lost"] != "no":
         problems.append(f"NaviCore's SBUS input: {st['fps']} fps, lost={st['lost']}, variant {st['variant']}")
     wants_maestro = any(m.get("where") == "navicore" for m in bench.cfg.get("maestros", []))
     local = nc.local_slots(nc.config()) if wants_maestro else []

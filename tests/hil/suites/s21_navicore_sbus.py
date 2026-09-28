@@ -19,7 +19,7 @@ The NaviCore and controller helpers live in hil/navicore.py and hil/sbus.py (doc
 import re
 import time
 
-from hil.navicore import DBG_MAESTRO, DBG_SERIAL, DBG_WCB, NaviCore
+from hil.navicore import DBG_MAESTRO, DBG_SERIAL, DBG_WCB, NaviCore, SBUS_FULL_FPS
 from hil.runner import Skip, test
 from hil.sbus import SBUS_CENTER, SBUS_MAX, SbusCtl, band, matrix_button, safe_channels
 from hil.wcb import PULL_MAX, WCB, Pull, PullRefused, pull_config
@@ -1050,7 +1050,7 @@ def _sbus_setup(bench):
     SBUS-24 stream."""
     ctl, nc = SbusCtl(bench.dev("sbus")), _nc(bench)
     state = nc.sbus_dump()
-    if state["fps"] < 100 or state["variant"] != "SBUS-24":
+    if state["fps"] < SBUS_FULL_FPS or state["variant"] != "SBUS-24":
         raise Skip(f"NaviCore sees no full-rate SBUS-24 stream (fps {state['fps']}, {state['variant']})")
     return ctl, nc, ctl.cfg(), nc.config()
 
@@ -1364,4 +1364,4 @@ def signal_loss_controller_reset(bench):
     assert all("lost=no" in x["text"] and "failsafe=no" in x["text"] for x in frozen), (
         "the frame flags changed without a decoded frame")
     assert not outage_trigs, f"dispatch during the outage: {outage_trigs}"
-    assert recovered["fps"] >= 100 and recovered["variant"] == base["variant"], f"after the reset: fps {recovered['fps']}, {recovered['variant']}"
+    assert recovered["fps"] >= SBUS_FULL_FPS and recovered["variant"] == base["variant"], f"after the reset: fps {recovered['fps']}, {recovered['variant']}"
