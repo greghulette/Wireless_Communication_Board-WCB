@@ -83,11 +83,17 @@ This drops into the **existing device‑feature‑module pattern** the WCB alrea
 
 **Config (claim a port):**
 ```
-?WLED,PORT,S1:115200      # reserve S1 for WLED at 115200
-?WLED,PORT,CLEAR          # release
-?WLED,STATUS              # show config
+?WLED,<id>:W<wcb>S<port>:<baud>   # WLED <id> (1-9) on a port of this or another WCB, e.g. ?WLED,1:W2S1:115200
+?WLED,CLEAR,<id>                  # release one WLED (its local port goes back to 9600, broadcasts on)
+?WLED,CLEAR                       # release every WLED slot and every local WLED port
+?WLED,LIST                        # the slots
+?WLED,STATUS                      # show config
+?WLED,PORT,S<port>:<baud>         # legacy spelling: WLED 1 on this board
 ```
-- Use **S1 or S2** — the real hardware UARTs that do 115200 reliably (S3‑S5 are software serial, unreliable above 9600).
+`?WLED,PORT,CLEAR` is not a command: the legacy parser prints its usage line and changes nothing (`WCB_WLED.cpp`,
+`configureWLED`); the clears are `?WLED,CLEAR` and `?WLED,CLEAR,<id>`.
+- A WLED defaults to 115200, which needs **S1 or S2**, the hardware UARTs. S3‑S5 are software serial, received exactly
+  through 57600 (CLAUDE.md rule 13), so a WLED set to 57600 or below can use them; above that the command is refused.
 - Reuses the same **port‑conflict guard** we just added for HCR/MP3 — WLED can't claim a port already owned by HCR/MP3/Maestro/Kyber/PWM, and vice versa.
 
 **Operate (compact verbs → one line of WLED JSON + newline):**
@@ -116,7 +122,8 @@ Per Jarrod's setup: **one WLED per WCB**, but **several across a droid network**
 - **One WLED per WCB port** — the normal case. No serial multi‑drop, no address field in the frame.
 - **Reach any WLED by targeting its WCB:** `;W3,;L,PS,2` fires preset 2 on WCB 3's WLED over the existing mesh.
 - **"Controlled together" (R2 + BB8):** multi‑target / broadcast the same command so every WCB's WLED fires the same preset in lockstep — reuses the existing fan‑out, no special support.
-- *(Several WLEDs on one WCB, or per‑node addressing within a single board, isn't needed — deferred.)*
+- **Several WLEDs on one WCB:** a board holds nine WLED slots (`MAX_WLED_PER_WCB`, local ports and remote proxies
+  together), one slot per id; `;L<id>,...` addresses one, and a bare `;L` takes the lowest-id local WLED.
 
 ---
 
@@ -154,3 +161,9 @@ Minimal and indirect. WLED nodes aren't WCBs and don't run our mesh discovery, s
 ---
 
 *Companion docs: `WDP_DESIGN.md` (the mesh discovery protocol this would advertise into). The WLED module would mirror the existing `WCB_HCR.*` / `WCB_MP3.*` modules.*
+
+## Revision log
+
+| Date | Commit | Change |
+|---|---|---|
+| 2026-09-28 | _(pending)_ | §3 and §4 describe the shipped commands: ID-addressed slots (`?WLED,<id>:W<wcb>S<port>:<baud>`), the two clears, soft ports through 57600, nine slots per board. `?WLED,PORT,CLEAR` never released anything (`wled.clear_all_releases_local` pins it). |

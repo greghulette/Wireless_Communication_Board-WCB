@@ -35,6 +35,8 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | The s14/s22 tests on `6.2.1_280727RSEP2026` (`20260928-073122`): 23 pass, `kyber.local_targets_one_write_per_port` skipped (W1 holds a Maestro 3 proxy), and #98's test failed on the first fix, which never matched a remote slot; corrected for the next image. **#100 filed, deferred** (D38): cleared devices and PWM outputs leave NVS keys (W1 +21 entries). |
+| 2026-09-28 | **#99 filed and FIXED (unverified)**, found by the WCB-WP26 test writer: a device and a serial mapping could share a port (D37). |
 | 2026-09-28 | **#98 filed and FIXED (unverified)**, found by the WCB-WP53 test writer: `?KYBER,LIST`'s copy-paste line for another board used this board's rate and label for the port number (D36). |
 | 2026-09-28 | **#95 and #96 VERIFIED** on `6.2.1_280150RSEP2026` (W1/W2 flashed 06:55): the wave-1 verification run `20260928-064402` (79 tests, 77 pass; the two failures were test bugs, fixed and passing in `20260928-070402`), and #96's late-ACK case in `20260928-070457`. |
 | 2026-09-28 | **#96 filed and FIXED (unverified)**: a learned peer's broadcast ACK that arrives after the configured boards' ACKs resolved the entry now promotes it too, so it is retried from then on. **#97 filed, deferred** (D32): on a full NVS a new mapping or device saves its port flags first and can leave the port blocked with nothing on it after a reboot. Both found by this wave's test writers (WCB-WP19, WP42). |
@@ -2030,6 +2032,56 @@ takes each Maestro's baud from the targets it was given and labels a Maestro por
 `baudRates[targetPort - 1]`, this board's rate for a port of the same number, and this board's label for that port (or
 no label at all). Pasted on the other board, the line re-bauded its Maestro and relabelled its port.
 
-**Fix.** `kyberTargetBaud()` takes a target's baud from the Maestro table's slot for the same id, host and port (the
-rate `?KYBER,LOCAL` stored there), falling back to this board's rate only when no slot matches; the label is `Maestro
-<id>`, as `?KYBER,LOCAL` prints it.
+**Fix.** `kyberTargetBaud()` takes a target's baud from the Maestro table's slot for the same id and host (the rate
+`?KYBER,LOCAL` stored there): a local slot on the same port, or the board's remote slot, which is keyed `(id, 0, wcb)`
+and records no port. It falls back to this board's rate only when no slot matches. The label is `Maestro <id>`, as
+`?KYBER,LOCAL` prints it. The first version (`8c51ca7`) also required the remote slot's port to match, so it always
+fell back: `kyber.list_setup_line_matches_local` still failed in `20260928-073122` (`M2:W2S1:57600` against
+`?KYBER,LOCAL`'s `:115200`), with the label already right.
+
+#### 99. A device and a serial mapping can share a port, and the mapping then goes deaf or races the device
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - not yet flashed |
+| **Owner** | `WCB_firmware` (`WCB_HCR.cpp`, `WCB_MP3.cpp`, `WCB_DFP.cpp`, `WCB_Storage.cpp`) |
+| **Effort** | S |
+| **Tests** | `devices.serial_mapped_port_refused` (should) |
+| **Subsystem** | devices / serial mapping |
+
+**Evidence.** Found writing the WCB-WP26 tests (2026-09-28, from the code).
+
+**Cause.** `processIncomingSerial` returns before reading an HCR, MP3 Trigger or DFPlayer port (each device's reader
+owns those bytes), so a text mapping whose input is such a port never sees a byte, and a raw one races the device's
+reader. Neither side checked the other: the device configures had no serial-mapping term, and
+`addSerialMonitorMapping` refused only PWM ports as its input. PWM got the rule both ways on 2026-09-27 (D23).
+
+**Fix.** Each of `configureHCR`, `configureMP3` and `configureDFP` refuses a port a serial mapping reads (`[HCR] S<n> is
+read by a serial mapping - config blocked`), and a mapping refuses an HCR, MP3 Trigger or DFPlayer port as its input. A
+WLED only transmits, so a mapping may still read its port.
+
+**Also noted, not changed** (low): a device port move (HCR, MP3, DFPlayer) leaves the old port's baud as it was, while
+their CLEARs and a WLED move reset it to 9600; `;H,MUSE,GAP` with a missing bound sends 0 instead of refusing; the HCR
+volume shadow is a module static that a re-bind does not reset. `hcr.minor_verb_forms` pins the GAP behaviour.
+
+#### 100. A cleared MP3 Trigger, DFPlayer or PWM output leaves its NVS keys behind
+
+| | |
+|---|---|
+| **Status** | TODO - deferred (`docs/HIL_WEEK_DECISIONS.md` D38) |
+| **Owner** | `WCB_firmware` (`WCB_MP3.cpp`, `WCB_DFP.cpp`, `WCB_HCR.cpp`, `WCB_PWM.cpp`) |
+| **Effort** | M |
+| **Tests** | none yet; the per-run `?NVS` record shows it |
+| **Subsystem** | storage |
+
+**Evidence (run 20260928-073122).** W1 ran the PWM guard tests, which configure an MP3 Trigger, a DFPlayer and PWM
+outputs on W1 and clear them. Every config guard passed, but W1 ended with three namespaces it did not have:
+`mp3_cfg` (8 entries), `dfp_cfg` (8) and `pwm_outputs` (5), 343 to 364 of 630 entries used.
+
+**Cause.** A device CLEAR saves the device as not configured instead of removing its keys, and
+`savePWMOutputPortsToPreferences` rewrites only the output count, never the per-port keys. The same class as #92
+(a cleared serial mapping's keys), which `removeUnusedSerialMapKeys` fixed.
+
+**Fix (proposed).** Remove the keys a cleared device no longer uses, as #92 does, keeping the settings meant to outlive
+a clear (the HCR poll interval), and delete the per-port PWM output keys past the count. The growth is one-time per
+namespace, not per run, which is why it can wait; a board short of NVS is where it matters.

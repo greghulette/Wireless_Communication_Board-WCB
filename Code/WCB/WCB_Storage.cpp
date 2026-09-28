@@ -2125,6 +2125,12 @@ void addSerialMonitorMapping(const String &message) {
         Serial.println("Cannot create mapping: Port is configured as PWM output");
         return;
     }
+    // An HCR, MP3 Trigger or DFPlayer reader owns its port's bytes (processIncomingSerial returns before reading one), so
+    // a text mapping there would read nothing and a raw one would race the device (tracker #99). A WLED only transmits.
+    if (isSerialPortUsedForHCR(inputPort) || isSerialPortUsedForMP3(inputPort) || isSerialPortUsedForDFP(inputPort)) {
+        Serial.println("Cannot create mapping: Port is used by an HCR, MP3 Trigger or DFPlayer");
+        return;
+    }
 
     // Find or create mapping for this input port.
     //
@@ -2702,15 +2708,17 @@ void loadKyberTargets() {
   
   preferences.end();
 }
-// The baud a Kyber target's Maestro runs at: the Maestro table's slot for the same id, host and port (remoteWCB 0 is
-// this board), else this board's rate for that port number - right only for a local target. printKyberList used this
-// board's rate for every target, so its copy-paste line for another board could re-baud that board's Maestro port
-// (tracker #98). ?KYBER,LOCAL prints the rate it was given, which the table then holds.
+// The baud a Kyber target's Maestro runs at: the Maestro table's slot for the same id and host - a local slot on the
+// same port, or the remote slot for that board, which is keyed (id, 0, wcb) and records no port (storeKyberSettings) -
+// else this board's rate for that port number, right only for a local target. printKyberList used this board's rate
+// for every target, so its copy-paste line for another board could re-baud that board's Maestro port (tracker #98).
+// ?KYBER,LOCAL prints the rate it was given, which the slot then holds.
 static uint32_t kyberTargetBaud(const KyberTarget &t) {
   for (int j = 0; j < MAX_MAESTROS_PER_WCB; j++) {
     const MaestroConfig &m = maestroConfigs[j];
-    if (!m.configured || m.maestroID != t.maestroID || m.serialPort != t.targetPort || m.baudRate == 0) continue;
-    if ((m.remoteWCB ? m.remoteWCB : WCB_Number) == t.targetWCB) return m.baudRate;
+    if (!m.configured || m.maestroID != t.maestroID || m.baudRate == 0) continue;
+    if (m.remoteWCB == 0 ? (t.targetWCB == WCB_Number && m.serialPort == t.targetPort) : m.remoteWCB == t.targetWCB)
+      return m.baudRate;
   }
   return (t.targetPort >= 1 && t.targetPort <= 5) ? (uint32_t)baudRates[t.targetPort - 1] : 0;
 }

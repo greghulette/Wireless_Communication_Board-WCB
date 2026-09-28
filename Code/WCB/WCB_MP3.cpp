@@ -318,6 +318,13 @@ void configureMP3(const String &args) {
     Serial.printf("[MP3] S%d is a local Maestro's port - config blocked\n", serialPort);
     return;
   }
+  // A serial mapping reads this port: processIncomingSerial returns before reading a device's port, so a text mapping
+  // on it would go deaf, and a raw one would race this device's reader for the bytes (tracker #99; PWM has the same
+  // rule both ways, D23).
+  if (isSerialPortMonitored(serialPort)) {
+    Serial.printf("[MP3] S%d is read by a serial mapping - config blocked\n", serialPort);
+    return;
+  }
 
   // ---- Release old port if moving to a different one --------------
   if (mp3Config.configured && mp3Config.serialPort > 0 &&
