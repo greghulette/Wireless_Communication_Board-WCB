@@ -733,7 +733,7 @@
      "cmd": ";W1;S3HILSIA"
     }
    ],
-   "p1": [
+   "p2": [
     {
      "type": "wcb_broadcast",
      "cmd": ";W2;S2HILSIB"

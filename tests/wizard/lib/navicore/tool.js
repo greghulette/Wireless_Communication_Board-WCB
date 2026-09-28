@@ -119,6 +119,27 @@ function answerDialogs(page, answers = []) {
   return seen;
 }
 
+// Every download the page offers, in order: { name, ready } where ready resolves to the file's text once Playwright
+// has saved it (the tool writes its backups through an <a download> click, _cfgDownloadTextFile).
+function captureDownloads(page) {
+  const fs = require('node:fs');
+  const got = [];
+  page.on('download', (d) => {
+    got.push({
+      name: d.suggestedFilename(),
+      ready: d.path().then((p) => fs.readFileSync(p, 'utf8'), (e) => `(unreadable: ${e.message})`),
+    });
+  });
+  return got;
+}
+
+// Answer the next file chooser the page opens with `name` holding `text`.
+async function chooseFile(page, click, name, text) {
+  const chooser = page.waitForEvent('filechooser');
+  await click();
+  await (await chooser).setFiles({ name, mimeType: /\.json$/.test(name) ? 'application/json' : 'text/plain', buffer: Buffer.from(text) });
+}
+
 // The fw buttons' enabled state (the transport gate, _updateFirmwareBtnState).
 function fwButtons(page) {
   return page.evaluate(() => Object.fromEntries(['btn-fw-flash', 'btn-fw-wipe', 'btn-fw-ota', 'btn-fw-ota-wcb']
@@ -127,5 +148,5 @@ function fwButtons(page) {
 
 module.exports = {
   TOOL_PATH, openTool, connectUsb, connectViaWcb, connectFast, state, termLines, toasts, waitRequests,
-  expectNoPageErrors, answerDialogs, fwButtons,
+  expectNoPageErrors, answerDialogs, fwButtons, captureDownloads, chooseFile,
 };

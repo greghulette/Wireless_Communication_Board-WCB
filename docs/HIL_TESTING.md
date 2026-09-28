@@ -568,6 +568,8 @@ the bench lacks its wiring).
 | `nctool.ota_usb_lost_chunk` | OTA over USB resends a lost DATA line once the chunks behind it are NAKed, not after its 10 s stall timeout | — |
 | `nctool.clip_record_refused` | A Record the board refuses because it is replaying does not arm Stop & Save, whose SAVE would store the replayed clip under the typed name | — |
 | `nctool.clip_restore_mode` | A restored clip keeps the mode it was recorded in, not whichever clip was loaded last (D-NC33) | — |
+| `nctool.csv_roundtrip` | The legacy CSV export imported straight back leaves nothing for Save to send (today every button band narrows from ±12 to ±10) | — |
+| `nctool.multi_tab_save` | With two tabs on one WCB, one tab's save ACK does not confirm the other tab's save (NAVICORE.md D-NC35) | — |
 
 ### Constraints the bench runs established
 
@@ -751,7 +753,8 @@ stream, a fatal one (NetworkError) leaves `readable` null and every write failin
 locked; a `disconnect` event reaches `navigator.serial`'s listeners with the port as its target. `setSignals()` is
 recorded and never applied. Bytes cross to Node through `exposeBinding` and back through `page.evaluate`, in order; one
 page holds a device open at a time, as with a real port. `FakeSerial.events` and `window.__hilSerial.log` record every
-open, close, write (with the page's own timestamp) and setSignals.
+open, close, write (with the page's own timestamp) and setSignals; `FakeSerial.events` also names the page (`pg`, in order
+of first contact), so a two-tab spec (the shared hub) can tell the tab that owns the port from the one that follows.
 
 **The emulator** (`lib/navicore/emulator.js`) answers as the firmware does, each branch citing the code it copies:
 `direct` (NaviCore on USB: `processInputLine`), `via-wcb` (a tethered WCB with NaviCore at mesh id 20: `;w20,<json>`
@@ -781,8 +784,8 @@ than assuming its content.
 **Rules the specs keep.** Every request that leaves 127.0.0.1 is aborted and recorded (Google Fonts, api.github.com,
 the esptool CDN, the cloud-backup Worker); a spec that needs one mocks it. `lib/navicore/firmware.js` mocks the Firmware
 tab's: GitHub's `firmware/` listing (with a decoy for each wrong pick the flasher guards against) and raw downloads, and
-stand-ins for CryptoJS and esptool-js (`fake_cryptojs.js`, `fake_esptool.mjs`) that record what the tool hands them. Specs are headless (`NCTOOL_HEADED=1` shows
-Chrome), get 90 s each and a 15 s action timeout, and open the page with the HTTP cache off and Playwright's clock
+stand-ins for CryptoJS and esptool-js (`fake_cryptojs.js`, `fake_esptool.mjs`) that record what the tool hands them.
+Specs are headless (`NCTOOL_HEADED=1` shows Chrome), get 90 s each and a 15 s action timeout, and open the page with the HTTP cache off and Playwright's clock
 installed, so the 4 s connect settle, the 12 s save watchdog or the 10 s keep-alive are stepped rather than waited
 out. Nothing reads the terminal wholesale: it holds the CONFIG echo, and `termLines()` drops any CONFIG or password line.
 L2 specs read counts, booleans and key names, never a value, and never press Save while a diff exists.
@@ -1060,7 +1063,8 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending)_ | The NaviCore config tool's Firmware-tab and clip specs (`NAVICORE.md` NC-WP3): §8 names the emulator's OTA and clip parts (`lib/navicore/ota.js`, `clips.js`) and the Firmware tab's mocks (`firmware.js`, the esptool-js and CryptoJS stand-ins); five `(should)` rows in §6. |
+| 2026-09-28 | _(pending)_ | The NaviCore config tool's Export/Import, two-tab and live-panel specs (`NAVICORE.md` NC-WP3): `FakeSerial.events` names the page; two `(should)` rows in §6. |
+| 2026-09-28 | `264583e` | The NaviCore config tool's Firmware-tab and clip specs (`NAVICORE.md` NC-WP3): §8 names the emulator's OTA and clip parts (`lib/navicore/ota.js`, `clips.js`) and the Firmware tab's mocks (`firmware.js`, the esptool-js and CryptoJS stand-ins); five `(should)` rows in §6. |
 | 2026-09-28 | `83684b3` | **The NaviCore config tool's rig and no-board specs (`NAVICORE.md` INF7, NC-WP3).** New §8 subsection. `serve.js` maps `/NaviCore/` to the sibling repo; the NaviCore specs use their own origin, 8779 (`playwright.config.js` starts a second server). New `lib/navicore/` (the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe, fixtures and page helpers), `unit/navicore/` (`nctool.static`, `nctool.unit`, the rig's self-test), `specs/navicore/`, `fixtures/navicore/config.bench.json` (bench-shaped, placeholders only) with `tools/make_nc_fixture.js` and `tools/scrub_nc_config.py`. `hil/bridge.py` gains `/serial/mark`, `/serial/read`, `/serial/write`, `/serial/signals` and `/sbus` for a piped device, outside the lock; `hil/wizard.py` gains `run_wizard_test(..., pipe=True)`, a NaviCore PING in `_reacquire`, and `run_unit_tests(files=...)`, which reports an all-skipped node run as SKIP and notes a failing `todo`. New suite `s49_navicore_tool.py`; eight `(should)` rows in §6. `selftest.py` gains `t_nctool_pipe_bridge` (75 cases). |
 | 2026-09-28 | _(pending)_ | WCB-WP32, WP49, WP50, WP33, WP44 row 2, WP55 (s12, s13, s16, s17): 16 tests; `var.clear_all_name_collision` retired for `var.reserved_all_and_clear_all`; the `(should)` `input.usb_line_over_heap_dropped_whole` (tracker #101, fixed). |
 | 2026-09-28 | _(pending)_ | WCB-WP26, WP52, WP39 (s15, s24; `a3a00ec`, `3f6ff73`): 21 tests covering pinned-host routing, device port ownership (the `(should)` `devices.serial_mapped_port_refused`, tracker #99, fixed), the HCR shadow, FN 20/21, the poll scheduler and spellings, manual MP3/DFP routes, DFP ONERR and port move, the MP3 broadcast skip, PLAYFS; WLED one-hop cap, clear-all, first-host-wins, bare `;L`. |

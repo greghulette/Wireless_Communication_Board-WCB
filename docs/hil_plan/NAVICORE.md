@@ -856,9 +856,22 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 >   a refused START is taken as started and the Stop & Save after it SAVEs the replayed buffer under the typed name;
 >   `clipRestoreOne` never sends the clip's mode (`:6834-6869`) and `editBegin` keeps whatever was resident
 >   (`navicore_record.h:883-888`) (D-NC33 confirmed); the flasher takes the first `NaviCore_*_ESP32S3.bin` the listing
->   names (`flasher.js:146-151`, `:174`), so a kept older build beside a newer one (the `-KeepOld` case its comment
+>   names (`flasher.js:151-153`, `:174`), so a kept older build beside a newer one (the `-KeepOld` case its comment
 >   mentions) is picked by GitHub's listing order; the "Latest on GitHub" check does not retry a throttled listing
 >   (`flasher.js:66-79`) while the flash's own listing does (`_fetchRetry`, `:106-129`).
+> - **Two tabs.** `FakeSerial` tags every open, write and setSignals with the page that made it (`pg`), so the shared-hub
+>   specs can tell the owner tab from the follower. The fixture's switch SI carried its Up action on `p1`; a 2-position
+>   switch reads as position 0 or 2 (`NaviCore.ino:555`, `t[1]` unused, `rc_config.h:206`) and the tool's editor shows
+>   Down/Up as `p0`/`p2`, so the action was dead config. `make_nc_fixture.js` now writes it on `p2`.
+> - Code facts from the Export/Import and two-tab specs: an Export, a board reset, an Import of that file and a Save put
+>   the board back exactly as it was; the legacy CSV importer rebuilds every button band as center ±10
+>   (`config_tool/index.html:19432-19433`) where the tool's defaults and the firmware's are ±12 (`:20600-20605`,
+>   `rc_config.h:831-850`), relabels the physical buttons (`:19431`) and turns `exclusive:false` into an absent key
+>   (`:18914`, `:19438`), so a CSV round trip followed by a Save narrows every band on the board; D-NC35 confirmed (a tab
+>   takes another tab's ACK for its own save, `_saveSeq` `:17006`, `:16948`, matched at `:9598`, `:9616`), and both tabs
+>   also number their fragment sessions from 1 (`_nextOutSid`, `:5508`), so two tabs' bridged saves at once would share
+>   a sid in NaviCore's reassembly pool; Save re-reads the General tab's tap window, hold, settle and channel-rate inputs
+>   into `config` first (`:16846-16872`).
 
 In `tests/wizard` (D-NC10); details in §5. `serve.js` maps `/NaviCore/` to the sibling repo; new files
 `lib/navicore/shim.js` (the fake `navigator.serial`), `lib/navicore/emulator.js`, `lib/navicore/pipe.js` (the
@@ -1051,7 +1064,7 @@ runs in CI, and can be written while the bench is busy with other plans.
 
 > **Status 2026-09-28: written, all run headless with no board** (`suites/s49_navicore_tool.py`; how to run them:
 > `docs/HIL_TESTING.md` §8). L0: `nctool.static` (9 checks) and `nctool.unit` (the page's pure functions, 10 checks,
-> one a `todo` for the latent `_fragChunks` tail drop; plus the rig's own 6). L1, by file in `tests/wizard/specs/navicore`:
+> one a `todo` for the latent `_fragChunks` tail drop; plus the rig's own 6). L1, 58 specs by file in `tests/wizard/specs/navicore`:
 > `load` (`load_smoke`, `connect_direct_sequence`); `transport` (`transport_flag_reset`, `disconnect_teardown`,
 > `link_loss_reconnect`, `link_loss_ambiguous_ports`, `via_wcb_hub`, `keepalive_via_wcb`, and the `(should)`
 > `pong_epoch_slow_direct` and `doorway_pong_misdetect`); `rx` (`rx_framing_markers`, `rx_fragments`,
@@ -1065,10 +1078,12 @@ runs in CI, and can be written while the bench is busy with other plans.
 > `(should)` `fw_refused_flash_keeps_session`, `fw_wipe_text` (D-NC34), `ota_usb_lost_chunk`); `clips`
 > (`clips_list_forms`, `clips_record_rename_delete`, `clip_download_verified`, `clip_backup_bundle`, `clip_restore`,
 > `clip_restore_bridged`, `timeline_editor_save`, and the `(should)` `clip_record_refused`, `clip_restore_mode`
-> (D-NC33)). The thirteen `(should)` specs each fail at their own assertion; the INF7 note lists what they found. Not yet
-> written from the §2 table: command-library sync and sequence-source, live monitor and rc telemetry, WCB status panel,
-> calibration, export/import, CSV, cloud backup, shared-hub, multi-tab, channels/transmitter and misc-editor, Maestro
-> XML and Intellex-contract specs.
+> (D-NC33)); `io` (`export_import_json`, the `(should)` `csv_roundtrip`); `hub` (`shared_hub_two_pages`, the `(should)`
+> `multi_tab_save` (D-NC35)); `live` (`live_monitor`, `wcb_status_panel`). The fifteen `(should)` specs each fail at
+> their own assertion; the INF7 note lists what they found. Not yet written from the §2 table: the command-library
+> catalog, sync and sequence-source specs, rc telemetry, calibration, cloud backup, channels/transmitter and
+> misc-editor, Maestro XML, and the Intellex contract, which needs Intellex's own transport stubbed (its shim is a
+> 1,600-line HTTP/WebSocket client); `nctool.static` already holds the byte identity and the shim's ids.
 
 ### NC-WP4 — the engine through TRIGGER and TEST_ACTION (`s41_navicore_engine.py`, `ncengine.*`)
 
@@ -1487,7 +1502,8 @@ none yet).
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending)_ | NC-WP3's Firmware-tab and clip specs (19, five `(should)`): `lib/navicore/ota.js` (`?OTALOCAL`, the `?OTA` relay, the restart), `clips.js` (`?REC`, the clip store), `firmware.js` with the esptool-js and CryptoJS stand-ins, and `FakeSerial`'s absent device. The INF7 note lists the code facts they found: D-NC33 and D-NC34 confirmed; a refused flash leaves the session disconnected; USB OTA waits out 10 s per lost chunk; a refused Record is taken as started. |
+| 2026-09-28 | _(pending)_ | NC-WP3's Export/Import, two-tab and live-panel specs (6, two `(should)`); `FakeSerial` tags events with their page; the fixture's switch SI Up action moves to `p2`. The INF7 note lists what they found: the CSV round trip narrows every button band; D-NC35 confirmed, and both tabs also share fragment-session numbers. |
+| 2026-09-28 | `264583e` | NC-WP3's Firmware-tab and clip specs (19, five `(should)`): `lib/navicore/ota.js` (`?OTALOCAL`, the `?OTA` relay, the restart), `clips.js` (`?REC`, the clip store), `firmware.js` with the esptool-js and CryptoJS stand-ins, and `FakeSerial`'s absent device. The INF7 note lists the code facts they found: D-NC33 and D-NC34 confirmed; a refused flash leaves the session disconnected; USB OTA waits out 10 s per lost chunk; a refused Record is taken as started. |
 | 2026-09-28 | `83684b3` | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
 | 2026-09-28 | _(pending)_ | INF6 built (`hil/ncmesh.py`, four `selftest.py` cases) and NC-WP1 written (34 `nccfg` tests in `s40_navicore_config.py`, opt-ins `navicore_reboot` and `navicore_fault`, `navicore.bench_health`, the s21 route check); `selftest.py` runs the whole suite against `NaviModel`, a port of NaviCore's config handling. No bench run yet. The two status notes list where the code differed from the plan: the burn, the probe's peer table, the 'parse failed' trigger, the password split made by RESET_DEFAULTS (only when the defaults decode no button or mode from the live SBUS input: a SET_CONFIG restore leaves a parked tap to fire the restored mapping). New findings D-NC42 (strings cut through a UTF-8 character), D-NC43 (holdMs left under tapWindowMs) and D-NC44 (no config apply clears a parked tap). |
 | 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |

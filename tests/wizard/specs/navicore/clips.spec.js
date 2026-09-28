@@ -36,18 +36,6 @@ const rowNames = (page) => page.locator('#clips-list > div > div:first-child > d
 const rowButton = (page, name, label) =>
   page.locator('#clips-list > div').filter({ has: page.getByText(name, { exact: true }) }).locator('button', { hasText: label });
 
-// Every download the page offers: { name, ready } where ready resolves to its text once Playwright has saved it.
-function captureDownloads(page) {
-  const got = [];
-  page.on('download', (d) => {
-    got.push({
-      name: d.suggestedFilename(),
-      ready: d.path().then((p) => fs.readFileSync(p, 'utf8'), (e) => `(unreadable: ${e.message})`),
-    });
-  });
-  return got;
-}
-
 test.describe('the Clips panel over Direct USB', () => {
   test.use({ emuOptions: { config: CFG, clips: CLIPS() } });
 
@@ -120,23 +108,25 @@ test.describe('the Clips panel over Direct USB', () => {
     test.fail(true, 'suspected tool/firmware contract gap: clipRecordToggle waits for a [CLIPUL:REC,...] marker (index.html:6469-6475) that no ' +
                     'NaviCore prints — ?REC,START answers "[REC] recording…" or "[REC] busy / no buffer" (NaviCore.ino:3451) — so a refused ' +
                     'START times out, is assumed to have worked, and the Stop & Save that follows SAVEs the RAM buffer: the clip just replayed');
-    const dialogs = T.answerDialogs(page);
+    // A minute-long clip, so the replay is certainly still running when START arrives.
+    emu.clips.set('minute', { mode: 1, events: [{ t: 0, k: 1, slot: 1, ch: 0, pos: 6000 }, { t: 60_000, k: 1, slot: 1, ch: 0, pos: 7000 }] });
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await openClips(page);
-    await expect.poll(() => rowNames(page)).toEqual(['wave', 'beep']);
-    await rowButton(page, 'wave', '▶ Play').click();                     // 2.76 s of replay
+    await expect.poll(() => rowNames(page)).toEqual(['wave', 'beep', 'minute']);
+    await rowButton(page, 'minute', '▶ Play').click();
     await expect.poll(() => emu.rec.state).toBe('replaying');
     await page.locator('#clip-record-name').fill('newtake');
     await page.locator('#clip-record-btn').click();
     await expect.poll(() => emu.lines(/^\?REC,START$/).length).toBe(1);
+    expect(emu.rec.state, 'START arrived during the replay').toBe('replaying');
     await page.clock.fastForward(1600);
     await expect(page.locator('#clip-record-btn'), 'the Record button after a refused START').toHaveText('● Record');
   });
 
   test('nctool.clip_download_verified a clip downloads to a file only when every event arrived: a lost line is re-requested by index, while a truncated buffer, a clip that changed mid-download and an event that never arrives each save nothing', async ({ page, emu }) => {
     const dialogs = T.answerDialogs(page);
-    const files = captureDownloads(page);
+    const files = T.captureDownloads(page);
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await openClips(page);
@@ -200,7 +190,7 @@ test.describe('the Clips panel over Direct USB', () => {
     emu.clips.set('huge', { mode: 3, events: waveEvents().map((ev) => ({ ...ev })) });
     emu.clipFault.dropAlways = new Set();
     const dialogs = T.answerDialogs(page, [false, true, null]);
-    const files = captureDownloads(page);
+    const files = T.captureDownloads(page);
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await openClips(page);

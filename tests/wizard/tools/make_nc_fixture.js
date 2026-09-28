@@ -74,7 +74,8 @@ const bench = {
           p0: [mae(1, 'setEasing,p0'), mae(2, 'setEasing,p0')],
           p1: [mae(1, 'setEasing,off'), mae(2, 'setEasing,off')],
           p2: [mae(1, 'setEasing,release'), mae(2, 'setEasing,release')], p2note: 'Release' },
-    SI: { channel: 16, positions: 2, p0: [bc(';W1;S3HILSIA')], p1: [bc(';W2;S2HILSIB')] },
+    // A 2-position switch reads as position 0 or 2 (NaviCore.ino:555; t[1] unused, rc_config.h:206): Down is p0, Up is p2.
+    SI: { channel: 16, positions: 2, p0: [bc(';W1;S3HILSIA')], p2: [bc(';W2;S2HILSIB')] },
     SJ: { channel: 17, positions: 2, p0: [bc(';W1;S1HILSJA')] },
   },
   knobs: {

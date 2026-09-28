@@ -199,6 +199,7 @@ class FakeSerial {
     this.events = [];                   // {t, op, ...}: open / close / write / signals, as Node saw them
     this._chains = new Map();           // page -> promise chain, so pushes arrive in order
     this._watched = new WeakSet();      // pages whose 'close' already releases the port
+    this._pages = new WeakMap();        // page -> pg, its number in order of first contact (events carry it)
     device.attach((bytes) => this.push(bytes), this);
   }
 
@@ -207,7 +208,13 @@ class FakeSerial {
     await context.addInitScript(pageShim, this.cfg);
   }
 
+  _pg(page) {
+    if (!this._pages.has(page)) this._pages.set(page, (this._pageCount = (this._pageCount || 0) + 1));
+    return this._pages.get(page);
+  }
+
   _ctl(page, msg) {
+    const pg = this._pg(page);
     const id = msg && msg.id;
     if (id !== this.id) {
       // A dummy port: granted, but nothing is on the other end.
@@ -217,11 +224,11 @@ class FakeSerial {
     switch (msg.op) {
       case 'open':
         if ((this.owner && this.owner !== page) || this.device.present === false) {
-          this.events.push({ t: Date.now(), op: 'openFail', absent: this.device.present === false });
+          this.events.push({ t: Date.now(), op: 'openFail', pg, absent: this.device.present === false });
           return { error: { name: 'NetworkError', message: 'Failed to open serial port.' } };
         }
         this.owner = page;
-        this.events.push({ t: Date.now(), op: 'open', opts: msg.opts });
+        this.events.push({ t: Date.now(), op: 'open', pg, opts: msg.opts });
         if (!this._watched.has(page)) {   // a closed tab releases the port, as the OS does for a dead browser context
           this._watched.add(page);
           page.on('close', () => { if (this.owner === page) { this.owner = null; this.device.onClose(page); } });
@@ -229,21 +236,21 @@ class FakeSerial {
         this.device.onOpen(msg.opts, page);
         return {};
       case 'close':
-        this.events.push({ t: Date.now(), op: 'close' });
+        this.events.push({ t: Date.now(), op: 'close', pg });
         if (this.owner === page) { this.owner = null; this.device.onClose(page); }
         return {};
       case 'signals':
-        this.events.push({ t: Date.now(), op: 'signals', signals: msg.signals });
+        this.events.push({ t: Date.now(), op: 'signals', pg, signals: msg.signals });
         if (this.device.onSignals) this.device.onSignals(msg.signals);
         return {};
       case 'closeAttempt':
-        this.events.push({ t: Date.now(), op: 'closeAttempt', readLocked: msg.readLocked, writeLocked: msg.writeLocked });
+        this.events.push({ t: Date.now(), op: 'closeAttempt', pg, readLocked: msg.readLocked, writeLocked: msg.writeLocked });
         return {};
       case 'write': {
         if (this.owner !== page) return { error: { name: 'InvalidStateError', message: 'The port is closed.' } };
         if (this.device.present === false) return { error: { name: 'NetworkError', message: 'The device has been lost.' } };
         const buf = Buffer.from(msg.b64, 'base64');
-        this.events.push({ t: Date.now(), op: 'write', pageT: msg.t, len: buf.length, head: buf.subarray(0, 48).toString('latin1') });
+        this.events.push({ t: Date.now(), op: 'write', pg, pageT: msg.t, len: buf.length, head: buf.subarray(0, 48).toString('latin1') });
         this.device.onWrite(buf, { pageT: msg.t });
         return {};
       }

@@ -89,6 +89,13 @@ _L1 = (
     ("clip_restore_mode", "(should) A restored clip keeps the mode it was recorded in (D-NC33)"),
     ("clip_restore_bridged", "Over the WCB an event line too long for one ESP-NOW packet is refused and the board left out of edit mode; a small clip restores through [TERM:20] ACKs"),
     ("timeline_editor_save", "The timeline loads through the verified download and saves exactly its model; an incomplete clip opens read-only; closing mid-save cancels and leaves the clip as it was"),
+    # Export / Import, two tabs on one WCB, the live panels.
+    ("export_import_json", "Export writes the whole config; after a board reset, Import of that file and a Save put the board back exactly; a Wizard file, a foreign JSON and {} are refused; an old file empties the full-replace branches (pinned)"),
+    ("csv_roundtrip", "(should) The legacy CSV export imported straight back leaves nothing for Save to send (today every button band narrows from +-12 to +-10)"),
+    ("shared_hub_two_pages", "Two tabs on one WCB: the owner holds the port, the follower handshakes through it and reads the same lines, DTR is never asserted, and the follower takes the port over when the owner closes"),
+    ("multi_tab_save", "(should) With two tabs on one WCB, one tab's save ACK does not confirm the other tab's save (D-NC35)"),
+    ("live_monitor", "The SBUS panel follows the frames; 4 s of silence marks it stale and re-sends START_MONITOR once, which brings the frames back; after a disconnect nothing is re-sent"),
+    ("wcb_status_panel", "The WCB chips follow the polled roster in both reply shapes; names come from WCB_META, asked at most 8 times while a board stays nameless; a learned peer is forgotten and stays gone"),
 )
 for _key, _title in _L1:
     def _l1(bench, _id=f"nctool.{_key}"):

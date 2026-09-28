@@ -237,7 +237,7 @@ test.describe('Full Wipe & Flash (not connected; the port was granted earlier)',
 });
 
 test.describe('OTA over USB (?OTALOCAL)', () => {
-  test.use({ emuOptions: { config: BENCH, otaNewVersion: SET.version, otaReboot: { afterMs: 2000, goneMs: 1800, bootMs: 800 } } });
+  test.use({ emuOptions: { config: BENCH, otaNewVersion: SET.version, otaReboot: { afterMs: 2000, goneMs: 3000, bootMs: 800 } } });
 
   test('nctool.ota_usb_state_machine the windowed sender survives coalesced and split markers and a lost last ACK (stall, rewind, the resend\'s NAK names the end), skips late cursor markers ahead of END,OK, locks the port while it streams, writes the image byte-exact, and reconnects across the restart', async ({ page, emu }) => {
     const gh = await F.mockFirmware(page, SET);
