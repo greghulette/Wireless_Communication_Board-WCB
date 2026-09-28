@@ -210,6 +210,48 @@ test('collector: a legacy line is taken as it always was; an empty one is its ow
   assert.deepEqual(collect(2, ['[MGMT:CFGERR,2]NOMEM,x', '[MGMT:CONFIG,2]']).map((x) => x.kind), ['error', 'empty']);
 });
 
+test('collector: a legacy reply is verified like a join - a changed byte, a missing ^?CHK or [VER:] is refused (W-7)', () => {
+  // Every Wizard before this one stored ANY non-empty body under [MGMT:CONFIG,n] as the config AND the baseline the
+  // next push diffs against (CLAUDE.md rule 15). A corrupted body is retried like a failed join, never stored.
+  const good = reply(CHAIN);
+  const bad = {
+    'one byte changed':  good.replace('Teeces', 'TeeceZ'),
+    'cut before ^?CHK':  good.slice(0, good.lastIndexOf('^?CHK')),
+    'no [VER:] head':    good.slice(good.indexOf(']') + 1),
+    'CRC of another':    good.replace(/CHK\w{8}$/, `CHK${hex8(P.crc32('?WCB,3'))}`),
+  };
+  for (const [what, body] of Object.entries(bad)) {
+    const r = collect(2, [`[MGMT:CONFIG,2]${body}`])[0];
+    assert.equal(r.kind, 'crcFail', what);
+    assert.equal(r.src, 2, what);
+    assert.ok(r.reason, what);
+  }
+  assert.match(collect(2, [`[MGMT:CONFIG,2]${bad['one byte changed']}`])[0].reason, /checksum/);
+  assert.match(collect(2, [`[MGMT:CONFIG,2]${bad['cut before ^?CHK']}`])[0].reason, /CHK/);
+  // 6.0.x printed the CRC without its leading zeros (String(crc, HEX), WCB.ino before 6.1): still a full 32-bit check.
+  let chain = '';
+  for (let i = 0; !chain; i++) {
+    const c = `?WCB,2^?LABEL,S1,pad${i}`;
+    if (P.crc32(c) < 0x10000000) chain = c;
+  }
+  const unpadded = `[VER:6.0.4_OLD]${chain}^?CHK${P.crc32(chain).toString(16).toUpperCase()}`;
+  assert.ok(/CHK[0-9A-F]{1,7}$/.test(unpadded));
+  assert.deepEqual(collect(2, [`[MGMT:CONFIG,2]${unpadded}`])[0], { kind: 'legacy', src: 2, body: unpadded });
+  // A parts join is not relaxed: its tail is always 8 digits.
+  assert.equal(P.verifyConfigReply(unpadded).ok, false);
+});
+
+test('collector: U+FFFD in a legacy reply that fails its CRC is NOTUTF8, and every reply is its own job (W-7)', () => {
+  // Latin-1 bytes in the target's NVS: every reply decodes them to U+FFFD, so none can verify. A legacy reply used to
+  // be stored with the U+FFFD in it - and pushed back. Each reply carries a job id of its own, so the pull stops on
+  // the second (app.js _pullNotUtf8), exactly as for parts.
+  const rawChain = Buffer.concat([utf8('?WCB,2^?LABEL,S1,Caf'), Buffer.from([0xE9]), utf8('^?BAUD,S1,9600')]);
+  const body = `[VER:T]${rawChain.toString('utf8')}^?CHK${hex8(P.crc32(rawChain))}`;
+  const [a, b] = collect(2, [`[MGMT:CONFIG,2]${body}`, `[MGMT:CONFIG,2]${body}`]);
+  assert.deepEqual([a.kind, a.code, a.retryable, b.kind, b.code], ['error', 'NOTUTF8', true, 'error', 'NOTUTF8']);
+  assert.ok(a.id && b.id && a.id !== b.id, `job ids ${a.id} / ${b.id}`);
+});
+
 test('collector: the tag is matched strictly and other boards are ignored', () => {
   for (const line of [
     `[MGMT:CONFIG,3]${reply(CHAIN)}`,                // another board

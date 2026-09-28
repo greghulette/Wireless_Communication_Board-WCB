@@ -682,6 +682,17 @@ fix; per the conventions, each fix also needs its doc row.
   An observation only.
 
 **Wizard defects (not firmware, but in this repo; verified in `Wizard/`; each fails its WP20/40/41 test today):**
+
+> **Status 2026-09-27: all twelve fixed in `Wizard/`** (W-12 is comments only), each pinned by a test that failed on the
+> Wizard before the fix: `tests/wizard/unit/roundtrip.test.js` and `unit/pull.test.js` (the WP40 rows),
+> `specs/push_fake.spec.js` (`wizard.push_fake_*`, WP20 rows 1-3 and the WP41 rows) and
+> `wizard.remote_pull_fake_legacy_crc` (W-7). They run in CI; `s30_wizard.py` does not register them yet. Two
+> corrections to the rows above: **`?WCBQ` needs no reboot** - the firmware reconciles peers live (`?WCBQ`, WCB.ino;
+> `saveWCBQuantityPreferences`, WCB_Storage.cpp) and the old substring check never matched `WCBQ,` either - so WP20's
+> "a WCBQ edit appends `^?reboot`" and the WCBQ entry in its reboot table are wrong. And W-10 was fixable without
+> changing what an edited row sends: a row keeps the value it was built from and returns it while its text is
+> untouched. Left as found: a real edit to one mapping still re-sends every mapping (a PWM input one reboots the
+> board), and a mapping removed while disconnected is never cleared by a push (WP40 row 4).
 - **W-1** ETM,DELAY 0 becomes 100 (parser.js:892, app.js:1363).
 - **W-2** `?DELIM,,` parses to '' (parser.js:587-588), and boardGo then bootstraps `?DELIM,^`.
 - **W-3** A disabled controller's custom id is dropped on a full push (parser.js:1346-1350).

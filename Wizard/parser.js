@@ -499,6 +499,13 @@ function parseToken(body, config) {
       config.isRelay = (parseInt(parts[1]) || 0) === 1;
       break;
 
+    case 'CLIENT':
+      // ?CLIENT,<alias> — Wizard-only: buildSystemFile writes it for a client slot (a WCB_Client device, shown as a
+      // card and never pushed). No firmware has the command, so a saved system file is the only place it appears.
+      config.type        = 'client';
+      config.clientAlias = _unescapeFileText(body.slice(cmd.length + 1)).slice(0, 24);
+      break;
+
     case 'LED':
       if (upperParts[1] === 'PIN') config.statusLedPin = parseInt(parts[2]) || 38;
       break;
@@ -584,17 +591,17 @@ function parseToken(body, config) {
       break;
 
     // ── Command Characters ──
+    // The value is ONE character, and it can be a comma: an older firmware accepted ?DELIM,, and a board still on it
+    // backs up as ?DELIM,,. parts[1] splits that into two empty fields and read as '', which boardGo then "fixed" by
+    // bootstrapping ?DELIM,^ onto the board. So the character is whatever follows the verb's own comma.
     case 'DELIM':
-      config.delimiter = parts[1] ?? '^';
-      break;
-
     case 'FUNCCHAR':
-      config.funcChar = parts[1] ?? '?';
+    case 'CMDCHAR': {
+      const ch  = body.slice(cmd.length + 1).charAt(0);
+      const key = cmd === 'DELIM' ? 'delimiter' : cmd === 'FUNCCHAR' ? 'funcChar' : 'cmdChar';
+      config[key] = ch || (cmd === 'DELIM' ? '^' : cmd === 'FUNCCHAR' ? '?' : ';');
       break;
-
-    case 'CMDCHAR':
-      config.cmdChar = parts[1] ?? ';';
-      break;
+    }
 
     // ── Serial Baud ──
     case 'BAUD': {
@@ -889,7 +896,13 @@ function parseToken(body, config) {
         case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 5;      break;
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 20;     break;
-        case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
+        // 0 is a legal delay (WCB.ino: 0-5000 ms), unlike every value above, so `|| 100` read a board's 0 as 100
+        // and the next full push wrote 100 onto it. Only a value that is not a number falls back.
+        case 'DELAY': {
+          const d = parseInt(parts[2]);
+          config.etm.messageDelayMs = Number.isNaN(d) ? 100 : d;
+          break;
+        }
         case 'CHKSM':   config.etm.checksumEnabled   = (parts[2]?.toUpperCase() === 'ON'); break;
       }
       break;
@@ -1343,11 +1356,27 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
   // network needs the same value so peer tables stay consistent. Canonical token
   // is CONTROLLER; firmware still accepts the legacy SPECIAL on input.
-  const curSpecial  = !!config.specialPeer;
-  const baseSpecial = !!baseline?.specialPeer;
-  if (fullPush || !baseline || curSpecial !== baseSpecial ||
-      (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
-    add(curSpecial ? `CONTROLLER,ON,${config.specialPeerId ?? 20}` : `CONTROLLER,OFF`);
+  // The firmware keeps the id while the controller is OFF, and only ON takes an id, so a disabled CUSTOM id is
+  // stored as ON,<id> then OFF - the pair its own backup emits (collectConfigCommands, WCB.ino). A full push that
+  // wrote only CONTROLLER,OFF re-parsed as id 20, and a restore quietly reverted the id.
+  {
+    const curSpecial  = !!config.specialPeer;
+    const curId       = config.specialPeerId ?? 20;
+    const baseSpecial = !!baseline?.specialPeer;
+    const baseId      = baseline?.specialPeerId ?? 20;
+    if (fullPush || !baseline) {
+      if (curSpecial) add(`CONTROLLER,ON,${curId}`);
+      else {
+        if (curId !== 20) add(`CONTROLLER,ON,${curId}`);
+        add('CONTROLLER,OFF');
+      }
+    } else if (curSpecial) {
+      if (!baseSpecial || curId !== baseId) add(`CONTROLLER,ON,${curId}`);
+    } else if (baseSpecial || curId !== baseId) {
+      if (curId !== baseId) add(`CONTROLLER,ON,${curId}`);
+      add('CONTROLLER,OFF');
+    }
+  }
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
@@ -1653,8 +1682,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   }
 
   // ── Mappings ──
+  // Compared as the board stores them (_mappingsKey): the rows' UI-only `bidir` made every mapping look changed.
   const mappingsChanged = fullPush || !baseline ||
-    JSON.stringify(baseline.mappings) !== JSON.stringify(config.mappings);
+    _mappingsKey(baseline.mappings) !== _mappingsKey(config.mappings);
   if (mappingsChanged) {
     for (const m of config.mappings) {
       let cmd = `MAP,${m.type.toUpperCase()},S${m.sourcePort}`;
@@ -1710,11 +1740,26 @@ function buildSystemFile(system) {
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
     const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
-    lines.push(buildCommandString(boardWithQty, null, true, FILE_OPTS));
+    let chain = buildCommandString(boardWithQty, null, true, FILE_OPTS);
+    // A client slot (a WCB_Client device: a card, never pushed) keeps its type and alias through the file as the
+    // Wizard-only ?CLIENT token; without it the slot reloaded as a WCB with no clientAlias. The slot's WCB config
+    // still rides along, as the slot keeps it for a flip back to WCB. Last in the chain, so a Wizard from before the
+    // token reads the rest as it always did and ignores it (parseToken's default case).
+    if (board.type === 'client') chain += `^?CLIENT,${_escapeFileText(board.clientAlias ?? '')}`;
+    lines.push(chain);
     lines.push('');
   }
 
   return lines.join('\n');
+}
+
+// Wizard-only free text inside a system file's ?-chain (the client alias): '%' and '^' are percent-encoded, so no
+// value can hold the '^?' the chain is split on (extractChainedTokens). Decoding leaves anything else alone.
+function _escapeFileText(s) {
+  return String(s).replace(/[%^]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+function _unescapeFileText(s) {
+  return String(s).replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
 // ─────────────────────────────────────────────
@@ -1733,7 +1778,15 @@ function diffConfigs(configA, configB) {
   }
 
   check('hwVersion',      configA.hwVersion,      configB.hwVersion);
+  check('statusLedPin',   configA.statusLedPin ?? 38, configB.statusLedPin ?? 38);
   check('wcbNumber',      configA.wcbNumber,       configB.wcbNumber);
+  // Every field the builder writes has to be compared here, or a builder that drops it passes every round-trip test.
+  // These six were missing, and a disabled controller's custom id was lost on every full push unnoticed (W-3).
+  check('alias',          configA.alias ?? '',     configB.alias ?? '');
+  check('specialPeer',    !!configA.specialPeer,   !!configB.specialPeer);
+  check('specialPeerId',  configA.specialPeerId ?? 20, configB.specialPeerId ?? 20);
+  check('wdpEnabled',     configA.wdpEnabled  !== false, configB.wdpEnabled  !== false);
+  check('wdpAutoJoin',    configA.wdpAutoJoin !== false, configB.wdpAutoJoin !== false);
   check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
   check('meshChannel',    configA.meshChannel ?? 1, configB.meshChannel ?? 1);
   check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
@@ -1749,7 +1802,8 @@ function diffConfigs(configA, configB) {
   check('wleds',          configA.wleds,           configB.wleds);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
-  check('mappings',       configA.mappings,        configB.mappings);
+  if (_mappingsKey(configA.mappings) !== _mappingsKey(configB.mappings))
+    diffs.push({ path: 'mappings', from: configA.mappings, to: configB.mappings });
   check('sequences',      configA.sequences,       configB.sequences);
   check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
@@ -1800,6 +1854,48 @@ function getNestedValue(obj, path) {
   return path.split('.').reduce((acc, key) => acc?.[key], obj);
 }
 
+// Mappings as the board stores them, for comparing. syncMappingsToConfig (app.js) adds the UI-only `bidir` (the
+// "mirror on the destination board" toggle, which the firmware never sees) and builds its keys in its own order, so
+// raw JSON said every mapping had changed after any touch of a mapping row. The push then re-sent them all, and a
+// re-sent PWM input mapping reboots the board (addPWMMapping, WCB_PWM.cpp) for nothing.
+function _mappingsKey(list) {
+  return JSON.stringify((list ?? []).map(m => ({
+    type:         String(m.type ?? '').toUpperCase(),
+    sourcePort:   m.sourcePort,
+    rawMode:      !!m.rawMode,
+    destinations: (m.destinations ?? []).map(d => ({ wcbNumber: d.wcbNumber, port: d.port })),
+  })));
+}
+
+// ─────────────────────────────────────────────
+// Command characters: what the firmware accepts
+// ─────────────────────────────────────────────
+// field is 'delimiter' | 'funcChar' | 'cmdChar'; chars holds all three. Returns '' when chars[field] is acceptable
+// next to the other two, else a sentence saying why not - the General inputs and the setup wizard show it, and a
+// push refuses to SET a character that fails it. Every character is one printable, non-space ASCII byte: the
+// setters take exactly one byte (args.length() == 1, WCB.ino) and prefixCharOk refuses space and control bytes.
+// The three must differ: a delimiter equal to a prefix splits every line at its own first character, and two equal
+// prefixes swallow a whole command family (prefixCharOk). The delimiter is also punctuation, and never ',' - every
+// command separates its fields with commas, so a ',' delimiter tears each one apart. The firmware refuses ',',
+// letters, digits and either prefix as the delimiter; a board still on ',' from an older firmware keeps it (the
+// parser reads it, and nothing here re-sends a character that did not change).
+const _CHAR_NAMES = { delimiter: 'Command Delimiter', funcChar: 'Local Function Identifier', cmdChar: 'Command Character' };
+function commandCharProblem(field, chars) {
+  const c = chars?.[field];
+  const name = _CHAR_NAMES[field];
+  if (!name) return `unknown command character field ${field}`;
+  if (typeof c !== 'string' || c.length !== 1 || c < '!' || c > '~')
+    return `The ${name} must be one printable character (not a space)`;
+  if (field === 'delimiter') {
+    if (c === ',') return "',' cannot be the Command Delimiter: every command separates its fields with commas";
+    if (/[A-Za-z0-9]/.test(c)) return 'The Command Delimiter must be a punctuation character such as ^ | ~ or #';
+  }
+  for (const other of Object.keys(_CHAR_NAMES)) {
+    if (other !== field && chars[other] === c) return `'${c}' is already the ${_CHAR_NAMES[other]}: pick a different ${name}`;
+  }
+  return '';
+}
+
 // ─────────────────────────────────────────────
 // Remote config pull (?MGMT,PULL through a relay) — the pure pieces, here so node --test reaches them
 // ─────────────────────────────────────────────
@@ -1816,6 +1912,7 @@ function getNestedValue(obj, path) {
 // The new tags differ from CONFIG BEFORE the comma on purpose. An old Wizard (including the copy frozen inside
 // every Intellex install) matches '[MGMT:CONFIG,' and stores ANY non-empty body under it as the board's config AND
 // the baseline the next push diffs against, with no CRC check - so a part or an error must never arrive under it.
+// This Wizard checks a CONFIG body like a join (createPullCollector) and stores nothing that fails.
 
 // CRC-32: reflected, poly 0xEDB88320, init and final XOR 0xFFFFFFFF - the firmware's calculateCRC32/crc32Update
 // (WCB.ino) and zlib's. Over UTF-8 BYTES: a string is encoded first, because the firmware sums the raw bytes of
@@ -1904,11 +2001,14 @@ function parseConfigError(body) {
 // A whole reply: [VER:<fw>] head, ^?CHK<8 hex> tail, and the CRC-32 of the chain between them. -> { ok, reason,
 // ver }. The tail is taken from the END: a sequence value can legitimately hold an earlier '^?CHK' (WCB.ino looks
 // for the checksum with lastIndexOf for the same reason).
-function verifyConfigReply(str) {
+// unpaddedCrc: accept 1-8 hex digits, for a legacy [MGMT:CONFIG,n] reply. 6.0.x printed the CRC with
+// String(crc, HEX), which drops leading zeros (about one config in 16); it is still compared as a full 32-bit number.
+// Parts only ever come from firmware that pads, so a join keeps the strict form.
+function verifyConfigReply(str, { unpaddedCrc = false } = {}) {
   if (typeof str !== 'string') return { ok: false, reason: 'no reply text' };
   const head = /^\[VER:([^\]]*)\]/.exec(str);
   if (!head) return { ok: false, reason: 'no [VER:] head' };
-  const tail = /\^\?CHK([0-9A-Fa-f]{8})$/.exec(str);
+  const tail = (unpaddedCrc ? /\^\?CHK([0-9A-Fa-f]{1,8})$/ : /\^\?CHK([0-9A-Fa-f]{8})$/).exec(str);
   if (!tail || tail.index < head[0].length) return { ok: false, reason: 'no ^?CHK tail' };
   const want = parseInt(tail[1], 16) >>> 0;
   const got = crc32(str.slice(head[0].length, tail.index));
@@ -1920,13 +2020,19 @@ function verifyConfigReply(str) {
 
 // The pull listener's state machine, one per pull: feed(line) -> { kind, src, ... } with kind
 //   'ignored'   not a pull reply for wantWCB (another board's, another tag, a malformed part: reason says which)
-//   'legacy'    [MGMT:CONFIG,n] with a body: { body } (trimmed), exactly what a legacy pull has always stored
+//   'legacy'    [MGMT:CONFIG,n] with a body that verifies: { body } (trimmed), the whole reply as it is stored
 //   'empty'     [MGMT:CONFIG,n] with no body: the target ran out of memory building a legacy reply
 //   'partial'   a part of the current id: { id, k, K, have, progress } - progress false for a duplicate
 //   'complete'  all K parts of one id, joined and CRC-checked: { id, K, text, ver }
-//   'crcFail'   all K parts in, but the join fails verifyConfigReply: { id, K, reason }
-//   'error'     a CFGERR ({ code, detail, retryable, reason }), or code NOTUTF8 when a failed join holds U+FFFD
-//               (with the join's { id, K } too)
+//   'crcFail'   all K parts in, but the join fails verifyConfigReply: { id, K, reason }; or a legacy body that fails
+//               it: { reason } (no id or K)
+//   'error'     a CFGERR ({ code, detail, retryable, reason }), or code NOTUTF8 when a failed join or legacy body
+//               holds U+FFFD (with the join's { id, K }; a legacy body gets an id of its own, 'L<n>')
+// A legacy body is verified like a join, [VER:] head, ^?CHK tail and CRC, with the tail's leading zeros optional
+// (verifyConfigReply, unpaddedCrc). The Wizard used to store it unchecked as the config AND the baseline the next
+// push diffs against (CLAUDE.md rule 15), so a body cut short or corrupted on the way was written back to the board
+// as a change. A failure is retried like a failed join. Every legacy reply is a job of its own: the target rebuilds
+// it for each request.
 // The tag is matched strictly: digits right up to the ']'. The old listener read the number with parseInt, so
 // '[MGMT:CONFIG,3,1/3]' counted as board 3 and '[MGMT:CONFIG,X]' (NaN) as every board.
 // Parts collect per id: a part of another id (a new target job - a retry, or a job restarted because the config
@@ -1937,9 +2043,11 @@ function verifyConfigReply(str) {
 // re-encodes as EF BF BD, so it never verifies). A second job is what tells them apart, so the caller stops on the
 // second NOTUTF8 of a pull from a new id (app.js _pullNotUtf8).
 const _MGMT_PULL_TAG_RE = /^\[MGMT:(CONFIG|CFGPART|CFGERR),(\d+)\]/;
+const _NOTUTF8_REASON  = 'config text is not valid UTF-8 (a byte lost on the way, or stored that way on the target)';
 function createPullCollector(wantWCB) {
   const want = Number(wantWCB);
   let cur = null;   // { id, K, parts: [data | undefined] x K, have }
+  let legacyJobs = 0;
   return {
     feed(line) {
       const m = _MGMT_PULL_TAG_RE.exec(typeof line === 'string' ? line : '');
@@ -1949,7 +2057,14 @@ function createPullCollector(wantWCB) {
       const body = line.slice(m[0].length);
       if (m[1] === 'CONFIG') {
         const text = body.trim();
-        return text ? { kind: 'legacy', src, body: text } : { kind: 'empty', src };
+        if (!text) return { kind: 'empty', src };
+        const v = verifyConfigReply(text, { unpaddedCrc: true });
+        if (v.ok) return { kind: 'legacy', src, body: text };
+        if (text.includes('�')) {
+          return { kind: 'error', src, id: `L${++legacyJobs}`, code: 'NOTUTF8', detail: v.reason, retryable: true,
+                   reason: _NOTUTF8_REASON };
+        }
+        return { kind: 'crcFail', src, reason: v.reason };
       }
       if (m[1] === 'CFGERR') return { kind: 'error', src, ...parseConfigError(body) };
       const p = parseConfigPart(body);
@@ -1967,7 +2082,7 @@ function createPullCollector(wantWCB) {
       if (v.ok) return { kind: 'complete', src, id: p.id, K: p.K, text, ver: v.ver };
       if (text.includes('\uFFFD')) {
         return { kind: 'error', src, id: p.id, K: p.K, code: 'NOTUTF8', detail: v.reason, retryable: true,
-                 reason: 'config text is not valid UTF-8 (a byte lost on the way, or stored that way on the target)' };
+                 reason: _NOTUTF8_REASON };
       }
       return { kind: 'crcFail', src, id: p.id, K: p.K, reason: v.reason };
     },
@@ -1991,6 +2106,7 @@ const WCB_PARSER_API = {
   collectAllMaestros,
   getAvailablePorts,
   evaluatePortClaims,
+  commandCharProblem,
   HW_VERSION_MAP,
   hwValueToDisplay,
   hwValueToBinary,

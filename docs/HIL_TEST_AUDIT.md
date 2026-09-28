@@ -429,10 +429,11 @@ fixed or recorded below); the protocol is [MGMT_RELAY.md](MGMT_RELAY.md).
 Found while doing F13, recorded for Greg's decision (none is fixed):
 
 **F14 — a relay PUSH is capped at 2864 characters of changes.** The Wizard's relay push (`boardGoRemote`,
-`Wizard/app.js`) sends at most 16 x 179 characters per push, including an appended `?reboot`, and checks the size
-only after the network-group confirm and the character-set bootstrap have run. A board pulled in parts may need a
-push split in several, or USB. Proposed: check the size first, then split pushes, keeping network-group commands,
-PWM input mappings and `?reboot` in the last one.
+`Wizard/app.js`) sends at most 16 x 179 characters per push, including an appended `?reboot`, and refuses a larger
+one before the network-group confirm and the character-set bootstrap run (the first half below, 2026-09-27, W-9 in
+[hil_plan/WCB.md](hil_plan/WCB.md)). A board pulled in parts may need a push split in several, or USB. Proposed:
+check the size first, then split pushes, keeping network-group commands, PWM input mappings and `?reboot` in the
+last one.
 
 **F15 — the other mgmt handlers still compare passwords as Strings.** STATS, ETM, SEQ and SEQVAL (and the relay's
 STATS/ETM/SEQ reassembly) use `String(pkt.structPassword) != String(espnowPassword)`; with the heap exhausted both
@@ -642,7 +643,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 | F11 | deferred 2026-09-24 (Greg) | `WiFi.persistent(false)` would drop the WiFi driver's duplicate settings (36 entries, about 1 KB, on an AP-mode board); left as it is while NVS has room, watched through `results/nvs_history.csv`. |
 | F12 | fixed 2026-09-24 (tracker #90), bench 20260924-133332 | `?backup` streams its chains through a 2 KB per-line write buffer with a running CRC; the mesh pull measures, reserves once, never sends a partial config, and says on the target when it is too large. `wcb.backup_large_config`, `wcb.pull_size_limit`. |
 | F13 | fixed 2026-09-24 (tracker #91), bench 20260924-190431 | Parts for `,P` pulls over 2912 characters; coded CFGERR replies; non-blocking target job; one-write relay lines; per-relay Wizard queue. [MGMT_RELAY.md](MGMT_RELAY.md). |
-| F14 | open (Wizard decision) | Check the relay push's size before the confirm and bootstrap, then split pushes over 2864 characters. |
+| F14 | half fixed 2026-09-27 (W-9), the rest open (Wizard decision) | The relay push's size is checked before the confirm and bootstrap (`wizard.push_fake_relay_cap`, no board); splitting pushes over 2864 characters is still open. |
 | F15 | open (firmware) | strncmp for the remaining mgmt password checks. |
 | F16 | open (NaviCore) | Drop, don't store, when `WsSink::pump()` cannot drain. |
 | F17 | closed 2026-09-25 (Greg: intended for now) | The example's credentials are Greg's development ones on purpose; nothing to change. |
@@ -763,3 +764,4 @@ the next starts; a row's status is `todo` / `written` / `bench <run>` / `blocked
 | 2026-09-24 | _(pending)_ | F20 and F21 verified on the bench (20260924-233628, 43/43), after three review fixes (`_act` last, keep a slot's output keys when its count was not stored, no ETM ACK once a restart is imminent). W1/W2 flashed 23:36. Harness: `--no-servos` (27 tests). |
 | 2026-09-25 | _(pending)_ | No-servo full run `20260924-234056`: 459 pass, 3 fail, 37 skip, all three test-side (§5). Test fixes: the offline-timing floor is 4.85 s plus an edge-alternation check (#80's fingerprint); the `?backup` parser searches each section for its chain; `?ETM,CHAR` waits for its peers and fails fast on an abort. F18 gains the header window and the right ring for its fix; F22 recorded (recommend leave). Verified `20260925-015720` (21/21); `selftest.py` 47/47. |
 | 2026-09-25 | _(pending)_ | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip, both triaged (§5). F23 recorded (bit-banged PWM pulses stretched by preemption). F18 corrected: a `Serial.println` is two writes, so the WiFi-task line can land inside one; the harness's sentinel read now allows for it. |
+| 2026-09-27 | _(pending)_ | F14 half fixed in the Wizard: `boardGoRemote` refuses a push over 16 chunks before the network-group confirm and the character bootstrap, so a push that cannot be sent no longer asks for approval or switches the target's characters first (W-9, `wizard.push_fake_relay_cap`). Splitting larger pushes is still open. |

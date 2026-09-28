@@ -150,6 +150,53 @@ test('wizard.remote_pull_fake_legacy a single [MGMT:CONFIG,n] reply is stored ex
   expect(page.wizErrors).toEqual([]);
 });
 
+// W-7 (docs/hil_plan/WCB.md §3). A legacy body used to become the config AND the baseline with no check of its
+// ^?CHK, so a reply corrupted on the way was pushed back to the board as a change (CLAUDE.md rule 15).
+test('wizard.remote_pull_fake_legacy_crc a legacy [MGMT:CONFIG,n] reply that fails its checksum, or has none, is retried and never stored; the slot keeps its config and baseline (W-7)', async ({ page }) => {
+  const idle = await setup(page);
+  // WCB2 already holds a pulled config: what a bad reply must not replace.
+  await page.evaluate(() => __pull(2));
+  await feed(page, [`[MGMT:CONFIG,2]${reply(chainFor(2))}`]);
+  await expectSettled(page, 2, idle, true);
+  const keep = () => page.evaluate(() => JSON.stringify([boardConfigs[2], boardBaselines[2]]));
+  const before = await keep();
+
+  const good = reply(chainFor(2, 1));
+  const bad = [good.replace('Clef', 'Cle f'),                   // a byte more on the way
+               good.slice(0, good.lastIndexOf('^?CHK')),        // cut before its checksum
+               good.slice(good.indexOf(']') + 1)];              // no [VER:] head
+  const asked = (await pulls(page, 2)).length;
+  await page.evaluate(() => __pull(2));
+  for (const b of bad) {
+    await feed(page, [`[MGMT:CONFIG,2]${b}`]);
+    await page.clock.runFor(2600);
+  }
+  expect((await pulls(page, 2)).length - asked).toBe(3);
+  expect((await done(page, 2)).map((x) => x.ok)).toEqual([false]);
+  expect(await keep()).toBe(before);
+  const pane = await page.evaluate(() => __pane());
+  expect(pane).toContain('config reply failed the checksum');
+  expect(pane).toContain('failed after 3 attempts');
+  expect(pane).not.toContain(SECRET);
+  expect(await page.locator('#toast-container').textContent()).toContain('config pull failed after 3 attempts');
+  await expectSettled(page, 2, idle, false);
+
+  // Latin-1 bytes in the target's NVS: no reply can verify, and each legacy reply is a new job, so the second one
+  // stops the pull (as for parts), where the unchecked store used to keep U+FFFD in the config.
+  const raw = Buffer.concat([utf8(chainFor(3)), Buffer.from([0x5E, 0x3F, 0x41, 0x4C, 0x49, 0x41, 0x53, 0x2C, 0xE9])]);
+  const latin1 = `[VER:6.2.1_FAKE]${raw.toString('utf8')}^?CHK${hex8(P.crc32(raw))}`;
+  await page.evaluate(() => __pull(3));
+  await feed(page, [`[MGMT:CONFIG,3]${latin1}`]);
+  await page.clock.runFor(2600);
+  await feed(page, [`[MGMT:CONFIG,3]${latin1}`]);
+  await page.clock.runFor(100);
+  expect((await done(page, 3)).map((x) => x.ok)).toEqual([false]);
+  expect(await page.evaluate(() => __pane())).toContain('not valid UTF-8 in two replies');
+  expect(await page.evaluate(() => JSON.stringify(boardBaselines[3] ?? null))).not.toContain(FFFD);
+  await expectSettled(page, 3, idle, false);
+  expect(page.wizErrors).toEqual([]);
+});
+
 test('wizard.remote_pull_fake_parts three parts out of order, with a duplicate, noise and another board\'s part in between, join to the config', async ({ page }) => {
   const idle = await setup(page);
   const chain = chainFor(2, 30);
