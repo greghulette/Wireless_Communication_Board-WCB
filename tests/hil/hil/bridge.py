@@ -7,7 +7,7 @@ would fight the harness for. Every route is a POST with a JSON body; a reply is 
 bench does not have). Routes run one at a time: the Bench is not thread-safe, and the harness's own test thread
 is parked in subprocess.wait() for the duration.
 
-    /context                               what the harness told this run: device, com, wcb, vid, pid, args
+    /context                               what the harness told this run: device, com, wcb, vid, pid, pipe, args
     /note        {text}                    a line in session.log, tagged 'wizard'
     /config      {wcb}                     comparable config tokens (?backup / ?MGMT,PULL) — not of the board
                                            Chrome is holding
@@ -15,6 +15,22 @@ is parked in subprocess.wait() for the duration.
     /wire/received {wcb, port, since}      {"hex": ...}
     /wire/expect {wcb, port, text|hex, since, timeout}
     /wire/send   {wcb, port, text|hex}     inject into the WCB port through the probe
+
+A pipe run (hil/wizard.py run_wizard_test(..., pipe=True)) keeps the device's port open in the harness and gives the
+page a FAKE Web Serial port (tests/wizard/lib/navicore/shim.js + pipe.js) whose bytes go through these, for the
+context's device only (docs/hil_plan/NAVICORE.md §5.2, INF7):
+
+    /serial/mark    {device}               {"mark": n}; the lines after it are what /serial/read returns
+    /serial/read    {device, since}        {"lines": [...], "next": n}: every line the device printed since `since`
+    /serial/write   {device, text}         one line to the device (paced as the config tool paces it past 512 bytes)
+    /serial/signals {device, dtr, rts}     a setSignals() call: recorded in session.log, NEVER applied (DTR/RTS reset
+                                           NaviCore's native-USB S3)
+    /sbus           {t, ...}               one RAM-only SBUS controller verb (a, sw, sl, tr, btn, lua, ping), for the
+                                           live-grid spec; the saving verbs are refused (hil/sbus.py)
+
+The /serial routes and /sbus run OUTSIDE the one-at-a-time lock: the pipe polls /serial/read every 20 ms while a
+paced /serial/write of a 14 KB SET_CONFIG can take ~120 ms, and SerialDevice has its own locks (hil/serialdev.py:36-41).
+The lines pass through SerialDevice, so Bench.log's credential filter (REDACT_KINDS) applies to both directions.
 """
 import json
 import threading
@@ -22,6 +38,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import read_config
 from .runner import Skip
+
+SBUS_VERBS = {"a", "sw", "sl", "tr", "btn", "lua", "ping"}     # RAM only; never mode/cfg/wificfg (they save)
+UNLOCKED = ("/serial/", "/sbus")
 
 
 def _data(body):
@@ -34,6 +53,7 @@ class Bridge:
     def __init__(self, bench, context=None):
         self.bench = bench
         self.context = context or {}
+        self.signals = []                 # every /serial/signals call, in order, for the harness test to check
         self._lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -51,6 +71,14 @@ class Bridge:
     # ------------------------------------------------------------ routes
     def _link(self, body):
         return self.bench.links.require(int(body["wcb"]), body["port"])
+
+    def _pipe_dev(self, body):
+        """The device a /serial route may touch: the one this run piped, and only in a pipe run."""
+        name = body.get("device") or self.context.get("device")
+        if not self.context.get("pipe") or name != self.context.get("device"):
+            raise AssertionError(f"no pipe to {name!r} in this run (pipe={bool(self.context.get('pipe'))}, "
+                                 f"device={self.context.get('device')!r})")
+        return name, self.bench.dev(name)
 
     def handle(self, path, body):
         b = self.bench
@@ -72,6 +100,35 @@ class Bridge:
         if path == "/wire/send":
             self._link(body).send(_data(body))
             return {}
+        if path == "/serial/mark":
+            return {"mark": self._pipe_dev(body)[1].mark()}
+        if path == "/serial/read":
+            dev = self._pipe_dev(body)[1]
+            since = int(body["since"])
+            lines = dev.since(since)
+            return {"lines": lines, "next": since + len(lines)}
+        if path == "/serial/write":
+            dev = self._pipe_dev(body)[1]
+            text = str(body["text"])
+            if "\n" in text or "\r" in text:
+                raise AssertionError("/serial/write takes one line (NaviCore ends a line at CR or LF)")
+            if len(text.encode()) + 1 > 512:
+                dev.send_paced(text)      # 512-byte writes 4 ms apart, as sendLine does (index.html:5313-5321)
+            else:
+                dev.send(text)
+            return {}
+        if path == "/serial/signals":
+            name, _ = self._pipe_dev(body)
+            sig = {"dtr": body.get("dtr"), "rts": body.get("rts")}
+            self.signals.append(sig)
+            b.log("wizard", "#", f"{name}: page setSignals dtr={sig['dtr']} rts={sig['rts']} (recorded, not applied)")
+            return {}
+        if path == "/sbus":
+            from .sbus import SbusCtl
+            if body.get("t") not in SBUS_VERBS:
+                raise AssertionError(f"/sbus refuses {body.get('t')!r}: only the RAM-only verbs {sorted(SBUS_VERBS)}")
+            SbusCtl(b.dev("sbus")).send(body)
+            return {}
         raise KeyError(path)
 
     def _handler(self):
@@ -82,8 +139,11 @@ class Bridge:
                 n = int(self.headers.get("Content-Length") or 0)
                 try:
                     body = json.loads(self.rfile.read(n) or b"{}")
-                    with bridge._lock:
+                    if self.path.startswith(UNLOCKED):
                         code, reply = 200, bridge.handle(self.path, body)
+                    else:
+                        with bridge._lock:
+                            code, reply = 200, bridge.handle(self.path, body)
                 except Skip as e:
                     code, reply = 424, {"skip": str(e)}
                 except AssertionError as e:

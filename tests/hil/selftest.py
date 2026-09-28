@@ -1170,6 +1170,133 @@ def t_wizard_abort_kills_tree(tmp):
         b.close()
 
 
+def t_nctool_pipe_bridge(tmp):
+    """INF7 (docs/hil_plan/NAVICORE.md §5.2): the bridge's /serial routes serve the piped device only, outside the
+    one-at-a-time lock; a line read comes back whole with the harness's synthetic lines left to the pipe; a write is one
+    line, paced past 512 bytes, and logged through Bench.log's credential filter; setSignals is recorded and NEVER reaches
+    the port; /sbus sends only the RAM-only verbs. run_wizard_test(pipe=True) keeps the port open, tells the page it is
+    piped, and pings NaviCore afterwards; run_unit_tests reports an all-skipped run as SKIP and notes a failing todo."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+    from types import SimpleNamespace
+    from hil import wizard
+    from hil.bridge import Bridge
+    from hil.serialdev import SerialDevice
+    b = tmp.bench({"navicore": {"port": "COMNC", "kind": "navicore"}, "sbus": {"port": "COMSB", "kind": "sbus"}})
+    b.new_session()
+    nc, sb = SerialDevice("navicore", "COMNC", log=b.log), SerialDevice("sbus", "COMSB", log=b.log)
+    nc._ser, sb._ser = RecSer(), RecSer()
+    b.devs.update(navicore=nc, sbus=sb)
+
+    def post(url, path, body):
+        req = urllib.request.Request(url + path, data=_json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, _json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, _json.loads(e.read())
+    try:
+        with Bridge(b, {"device": "navicore", "pipe": True}) as br:
+            with br._lock:                                   # served outside the lock: this must not block
+                code, got = post(br.url, "/serial/mark", {"device": "navicore"})
+            assert code == 200 and got == {"mark": 0}, (code, got)
+            nc._append('{"type":"PONG","version":"v0.2.0_X"}')
+            nc._append("<<reopened COMNC>>")
+            code, got = post(br.url, "/serial/read", {"device": "navicore", "since": 0})
+            assert got == {"lines": ['{"type":"PONG","version":"v0.2.0_X"}', "<<reopened COMNC>>"], "next": 2}, got
+            assert post(br.url, "/serial/read", {"device": "navicore", "since": 2})[1] == {"lines": [], "next": 2}
+            post(br.url, "/serial/write", {"device": "navicore", "text": '{"sys":1,"type":"PING"}'})
+            post(br.url, "/serial/write", {"device": "navicore", "text": '{"a":"' + "x" * 1300 + '","wifiPassword":"sekrit99"}'})
+            assert nc._ser.writes[0] == b'{"sys":1,"type":"PING"}\n', nc._ser.writes
+            assert [len(w) for w in nc._ser.writes[1:]] == [512, 512, 311], [len(w) for w in nc._ser.writes]
+            code, got = post(br.url, "/serial/write", {"device": "navicore", "text": "a\nb"})
+            assert code == 409 and "one line" in got["error"], (code, got)
+            code, got = post(br.url, "/serial/signals", {"device": "navicore", "dtr": False, "rts": True})
+            assert code == 200 and br.signals == [{"dtr": False, "rts": True}] and nc._ser.control == [], (br.signals, nc._ser.control)
+            code, got = post(br.url, "/serial/mark", {"device": "sbus"})
+            assert code == 409 and "no pipe to 'sbus'" in got["error"], (code, got)
+            assert post(br.url, "/sbus", {"t": "a", "rx": 100})[0] == 200
+            code, got = post(br.url, "/sbus", {"t": "mode", "sbus24": True})
+            assert code == 409 and "refuses 'mode'" in got["error"], (code, got)
+            assert sb._ser.writes == [b'{"t":"a","rx":100}\n'], sb._ser.writes
+        with Bridge(b, {"device": "navicore", "pipe": False}) as br:
+            code, got = post(br.url, "/serial/mark", {"device": "navicore"})
+            assert code == 409 and "pipe=False" in got["error"], (code, got)
+        b.sync_log()
+        log = read(os.path.join(b.out_dir, "session.log"))
+        assert "sekrit99" not in log and "<redacted:" in log, "a piped write must pass Bench.log's credential filter"
+        assert "setSignals dtr=False rts=True (recorded, not applied)" in log, log[-400:]
+
+        # run_wizard_test(pipe=True): the port is not handed over, the page is told, NaviCore is pinged afterwards.
+        fake_root = os.path.join(tmp.root, "wizard")
+        os.makedirs(os.path.join(fake_root, "node_modules", "@playwright", "test"))
+        open(os.path.join(fake_root, "node_modules", "@playwright", "test", "cli.js"), "w").close()
+        seen = {}
+
+        class FakeBridge:
+            url = "http://127.0.0.1:0"
+
+            def __init__(self, bench, context):
+                seen["context"] = context
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+        def popen(cmd, env=None, **kw):
+            report = {"suites": [{"specs": [{"title": "nctool.fake does a thing", "tests": [
+                {"status": "expected", "results": [{"status": "passed", "errors": []}]}]}]}]}
+            with open(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], "w", encoding="utf-8") as f:
+                _json.dump(report, f)
+            return subprocess.Popen([sys.executable, "-c", "print('[1/1] ok')"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+        saved = {n: getattr(wizard, n) for n in ("subprocess", "shutil", "WIZARD_TESTS", "usb_ids", "Bridge", "_reacquire")}
+        closed, pinged = [], []
+        real_close = b.close_device
+        b.close_device = lambda name, release=True: closed.append(name)
+        wizard.subprocess = SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
+                                            DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired,
+                                            CREATE_NEW_PROCESS_GROUP=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                                            run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, runs.pop(0), ""),
+                                            CompletedProcess=subprocess.CompletedProcess)
+        wizard.shutil = SimpleNamespace(which=lambda n: sys.executable)
+        wizard.WIZARD_TESTS = fake_root
+        wizard.usb_ids = lambda com: (0x303A, 0x1001)
+        wizard.Bridge = FakeBridge
+        wizard._reacquire = lambda bench, device, timeout=25.0: pinged.append(device)
+        try:
+            wizard.run_wizard_test(b, "nctool.fake", device="navicore", pipe=True, timeout=60)
+            assert closed == [] and pinged == ["navicore"], (closed, pinged)
+            ctx = seen["context"]
+            assert ctx["pipe"] is True and ctx["device"] == "navicore" and ctx["kind"] == "navicore", ctx
+            wizard.run_wizard_test(b, "nctool.fake", device=None, timeout=60)
+            assert closed == [] and seen["context"]["pipe"] is False and pinged == ["navicore"], (closed, seen, pinged)
+            # node --test: every test skipped -> SKIP with the reason; a failing todo -> PASS and a note. Both of node's
+            # reporters: spec (its default, even piped) and TAP.
+            runs = ["﹣ nctool.static: x (0.1ms) # the NaviCore repo is not beside this one\nℹ tests 1\nℹ pass 0\nℹ skipped 1\n",
+                    "TAP version 13\nok 1 - x # SKIP the NaviCore repo is not beside this one\n# pass 0\n# skipped 1\n",
+                    "✔ a (1ms)\n⚠ b (2ms) # known tool defect\nℹ pass 1\nℹ todo 1\n✖ failing tests:\n⚠ b (2ms) # known tool defect\n",
+                    "TAP version 13\nok 1 - a\nnot ok 2 - c # TODO known tool defect\n# pass 1\n# todo 1\n"]
+            for _ in range(2):
+                e = _raises(lambda: wizard.run_unit_tests(b, files=("unit/navicore/static.test.js",)), runner.Skip)
+                assert "not beside this one" in str(e), e
+            wizard.run_unit_tests(b, files=("unit/navicore/unit.test.js",))
+            wizard.run_unit_tests(b, files=("unit/navicore/unit.test.js",))
+            b.sync_log()
+            log = read(os.path.join(b.out_dir, "session.log"))
+            assert log.count("known defect (node todo, still failing): ⚠ b (2ms) # known tool defect") == 1, log[-600:]
+            assert "known defect (node todo, still failing): not ok 2 - c # TODO" in log
+        finally:
+            for n, v in saved.items():
+                setattr(wizard, n, v)
+            b.close_device = real_close
+    finally:
+        b.close()
+
+
 def _run_py_functions(*names):
     """make_ask / install_pause_handler from run.py without importing it (its import loads the real suites)."""
     import ast
@@ -5847,7 +5974,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_atomic_write_retry, t_redaction, t_run_busy, t_reidentify_never_guesses, t_identify_port_changed_chars,
          t_tmp_newer_than_main, t_finished_run_resumes_to_done, t_navicore_silent_blocks_on_navicore,
          t_passing_wire_marked_verified, t_sbus_released_after_cutoff, t_sbus_reply_nudged_by_ping,
-         t_wizard_abort_kills_tree, t_cli_ask_and_handler,
+         t_wizard_abort_kills_tree, t_nctool_pipe_bridge, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
          t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,

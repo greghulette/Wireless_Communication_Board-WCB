@@ -1,10 +1,10 @@
 {
   "name": "wcb-wizard-tests",
   "private": true,
-  "description": "Playwright tests for the WCB Wizard. Board tests run under the HIL harness: python tests/hil/run.py \"wizard.*\"",
+  "description": "Playwright tests for the WCB Wizard and the NaviCore config tool (specs/navicore, ids nctool.*). Board tests run under the HIL harness: python tests/hil/run.py \"wizard.*\" / \"nctool.*\"",
   "scripts": {
     "test": "playwright test",
-    "unit": "node --test \"unit/*.test.js\""
+    "unit": "node --test \"unit/*.test.js\" \"unit/navicore/*.test.js\""
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0"

@@ -571,6 +571,21 @@ the bench lacks its wiring).
 | `kyber.list_setup_line_matches_local` | ?KYBER,LIST's copy-paste line for another board is the one ?KYBER,LOCAL printed for it: each remote Maestro at its own baud and labelled 'Maestro <id>' | #98 |
 | `devices.serial_mapped_port_refused` | A port a serial mapping reads refuses an HCR, an MP3 Trigger and a DFPlayer, and a serial mapping refuses an HCR's port as its input, as both sides refuse PWM | #99 |
 | `input.usb_line_over_heap_dropped_whole` | A USB line longer than the heap can hold (over the largest free block, under the 32 KB USB cap) is dropped whole with a '[SERIAL] S0: ... dropped' line, or runs whole and verified; never its head alone | #101 |
+| `nctool.pong_epoch_slow_direct` | A direct NaviCore whose PONG comes 3.5 s late is still taken for a direct link, not "switched to Via WCB" (the NaviCore config tool, §8) | — |
+| `nctool.doorway_pong_misdetect` | A PONG relayed through a WCB (it carries `sys` and `id`) is not taken for a direct link: Via WCB, and USB OTA disabled (NAVICORE.md D-NC30) | — |
+| `nctool.refresh_overwrites_edits` | Refresh with unsaved edits asks first; declined, nothing is re-read (D-NC31) | — |
+| `nctool.push_refused_not_pending` | A bridged Save over the 192-fragment cap is refused before a byte is sent and leaves no save pending | — |
+| `nctool.noop_apply_every_editor` | Applying every button, switch and knob editor unchanged changes nothing, so Save sends nothing (D-NC32) | — |
+| `nctool.skip_running_saved` | An action's skip-if-running survives Apply and Save: the tool sends `skipRunning: 1`, which ArduinoJson 7's `\|` reads as false | — |
+| `nctool.test_action_refusal_shown` | A TEST_ACTION the board refuses (`ok:false`) is reported to the user (D-NC20) | — |
+| `nctool.command_view_cap_on_open` | A command stored with a `;W<n>;S<p>` prefix opens with the prefix already reserved in the field cap | — |
+| `nctool.fw_refused_flash_keeps_session` | An Update refused before anything is written (an incomplete firmware set on GitHub) leaves the live session connected | — |
+| `nctool.fw_wipe_text` | Nothing the Full Wipe shows promises the saved configuration is erased: the flasher never writes the config LittleFS (NAVICORE.md D-NC34) | — |
+| `nctool.ota_usb_lost_chunk` | OTA over USB resends a lost DATA line once the chunks behind it are NAKed, not after its 10 s stall timeout | — |
+| `nctool.clip_record_refused` | A Record the board refuses because it is replaying does not arm Stop & Save, whose SAVE would store the replayed clip under the typed name | — |
+| `nctool.clip_restore_mode` | A restored clip keeps the mode it was recorded in, not whichever clip was loaded last (D-NC33) | — |
+| `nctool.csv_roundtrip` | The legacy CSV export imported straight back leaves nothing for Save to send (today every button band narrows from ±12 to ±10) | — |
+| `nctool.multi_tab_save` | With two tabs on one WCB, one tab's save ACK does not confirm the other tab's save (NAVICORE.md D-NC35) | — |
 | `nccfg.string_truncation_utf8` | A string cut at its struct size is never cut through a UTF-8 character | — (NAVICORE.md D-NC42) |
 | `nccfg.hold_exceeds_tap_window` | holdMs stays at least tapWindowMs + 100: a tapWindowMs of 6000 must not leave holdMs at 5000 | — (D-NC43) |
 | `nccfg.dest_null_hazard` | An empty or null mp3Dest/dfpDest object reads as off, not as an enabled device | — (D-NC22) |
@@ -732,6 +747,88 @@ server that sends `Last-Modified` (`python -m http.server`, which `reuseExisting
 The Wizard's globals (`boardBaselines`, `_boardPullInFlight`, `boardPushOutcome`) are read by name from
 `page.evaluate`. `pushConfig()` wraps `boardGo` and awaits its promise, because `boardGo` writes a provisional
 `boardPushOutcome` before it marks the push in flight, so polling the outcome can read a stale "done".
+
+### The NaviCore config tool (`nctool.*`)
+
+The NaviCore config tool (`NaviCore/config_tool/index.html`) is tested from the same folder (`hil_plan/NAVICORE.md`
+§5, D-NC10), in `navicore/` subfolders: `specs/navicore/`, `lib/navicore/`, `unit/navicore/`, `fixtures/navicore/`,
+and `tools/`. `suites/s49_navicore_tool.py` registers every id. The tool is never copied: `serve.js` maps `/NaviCore/`
+to the NaviCore repo beside this one (`lib/navicore/paths.js` walks up from the repo root, so a git worktree finds it
+too; `NAVICORE_REPO` overrides), and every NaviCore test skips when it is not there. Its specs use their own origin,
+`http://127.0.0.1:8779` (a second `serve.js`, started by `playwright.config.js`): nothing they do reaches the Wizard's
+8778 grants, and since that server serves the same tree, the tool and the Wizard still share an origin there.
+
+Three layers, of the plan's four (L3, real Web Serial with a person at the bench, is not built):
+
+| Layer | What runs | Ids | Where |
+|---|---|---|---|
+| L0 | node only: `unit/navicore/static.test.js` (every inline script compiles, `flasher.js` and `serial-hub.js` pass `node --check`, the firmware/tool constant pairs of NaviCore's `CONFIG_SCHEMA.md` §6 and the field caps, every key `rcConfigToJSON` prints is read by `applyConfig`, Intellex's `src/webui` is byte-identical, the shared-hub protocol matches `Wizard/serial-hub.js`, what `intellex_shim.js` drives exists); `unit/navicore/unit.test.js` (the page's own pure functions, lifted into a `vm` sandbox by `extract.js`: the save diff, `_fragChunks`, the command-library codec over every command, `_seqValueToLines` against the Wizard's, `parseCsv`, `_cfgExtractConfig`); `unit/navicore/rig.test.js` (the rig's model of the firmware) | `nctool.static`, `nctool.unit` | `npm run unit`, CI, the harness |
+| L1 | the real page, with a fake `navigator.serial` backed by an in-Node NaviCore emulator | `nctool.<spec>` | `npx playwright test specs/navicore`, CI, the harness (no bench) |
+| L2 | the same fake port piped to the REAL NaviCore through the harness's own COM handle | `nctool.board_*` | the harness only, inside `nc_guard` |
+
+**The fake port** (`lib/navicore/shim.js`) is installed with `context.addInitScript`, before the page's scripts, as
+`Object.defineProperty(navigator, 'serial', ...)` (a plain assignment throws under strict mode; Intellex's shim hit it).
+It follows the Web Serial behaviour the tool relies on: `readable`/`writable` are made while the port is open; a
+reader's cancel or a recoverable read error (BreakError, FramingError, ParityError, BufferOverrunError) leaves a fresh
+stream, a fatal one (NetworkError) leaves `readable` null and every write failing; `close()` refuses while a stream is
+locked; a `disconnect` event reaches `navigator.serial`'s listeners with the port as its target. `setSignals()` is
+recorded and never applied. Bytes cross to Node through `exposeBinding` and back through `page.evaluate`, in order; one
+page holds a device open at a time, as with a real port. `FakeSerial.events` and `window.__hilSerial.log` record every
+open, close, write (with the page's own timestamp) and setSignals; `FakeSerial.events` also names the page (`pg`, in order
+of first contact), so a two-tab spec (the shared hub) can tell the tab that owns the port from the one that follows.
+
+**The emulator** (`lib/navicore/emulator.js`) answers as the firmware does, each branch citing the code it copies:
+`direct` (NaviCore on USB: `processInputLine`), `via-wcb` (a tethered WCB with NaviCore at mesh id 20: `;w20,<json>`
+reaches `rcTelemetry::handle`, replies come back as the bridge prints them, downloads fragmented as `_startFragSend`
+slices them, `;w20,<cli>` as `[TERM:20]` lines) and `doorway` (a WCB the tool was told is a NaviCore: bare JSON is
+answered in the relayed shapes). Its config is `lib/navicore/model.js`, a port of `rcConfigLoadDefaults`,
+`rcConfigFromJSON` and `rcConfigToJSON` that keeps the firmware's sparse printing, its per-branch merge (a named mapping
+is rebuilt from scratch, an omitted key is left alone) and ArduinoJson 7's type-strict `|` (an integer is not a bool,
+a number is not a string). So "what the board holds after this Save" is checkable. A spec bends it with `hold`, `delay`,
+`override`, `inject` and `injectRaw`; `rx` holds every line it received. `rig.test.js` holds the model and the emulator to
+those rules. Two more parts of the firmware ride on it: `lib/navicore/ota.js` (`?OTALOCAL` direct; via WCB, the relay's
+`?OTA` with its CRC-32 check in front of NaviCore's target; after a verified END the board restarts: off the bus, so
+`FakeSerial` refuses `open()` while the device's `present` is false, then deaf while it boots, then on the other slot)
+and `lib/navicore/clips.js` (`?REC` over a clip store, with the ranged and batched download and the indexed upload;
+relayed replies wrapped at 160 bytes as the RTERM sink wraps them). Each has fault hooks (`emu.otaFault`,
+`emu.clipFault`: lost lines and ACKs, mangled lines, coalesced and split markers, stale and foreign ACKs, a held window,
+a truncating buffer) and a log (`otaLog`, `recLog`) the specs read.
+
+**The fixture** `fixtures/navicore/config.bench.json` is shaped like the bench NaviCore's config (34 mappings, the
+Maestro, knob and switch layout of `NAVICORE.md` §1.4) and generated by `tools/make_nc_fixture.js` through the model, so
+it has the firmware's exact printed form. Every credential in it is a fixed `HIL...` placeholder. When the bench is
+free, `tools/scrub_nc_config.py --from tests/hil/results/<run>/navicore_snapshot.json` replaces it with the real
+config: one placeholder per distinct secret value (so a profile that holds the live mesh password still matches it),
+and it refuses to write if any original secret, raw or JSON-escaped, is still in the output. Specs read the file rather
+than assuming its content.
+
+**Rules the specs keep.** Every request that leaves 127.0.0.1 is aborted and recorded (Google Fonts, api.github.com,
+the esptool CDN, the cloud-backup Worker); a spec that needs one mocks it. `lib/navicore/firmware.js` mocks the Firmware
+tab's: GitHub's `firmware/` listing (with a decoy for each wrong pick the flasher guards against) and raw downloads, and
+stand-ins for CryptoJS and esptool-js (`fake_cryptojs.js`, `fake_esptool.mjs`) that record what the tool hands them.
+Specs are headless (`NCTOOL_HEADED=1` shows Chrome), get 90 s each and a 15 s action timeout, and open the page with the HTTP cache off and Playwright's clock
+installed, so the 4 s connect settle, the 12 s save watchdog or the 10 s keep-alive are stepped rather than waited
+out. Nothing reads the terminal wholesale: it holds the CONFIG echo, and `termLines()` drops any CONFIG or password line.
+L2 specs read counts, booleans and key names, never a value, and never press Save while a diff exists.
+
+**`(should)` specs** assert what the tool ought to do and carry `test.fail()`: standalone and in CI they count as
+expected failures (green), and they turn red the day the fix lands, which is the cue to remove the marker. The harness
+reads the last result's status, so it reports them FAIL until then, like every `(should)` test (§6). In node the
+equivalent is a `todo` test: it does not fail the run, and `run_unit_tests` notes it in `session.log` by name.
+
+**L2, the pipe.** `run_wizard_test(bench, id, device="navicore", pipe=True)` keeps the device's port open in the harness
+instead of handing it to Chrome, so the tool's own open cannot reset NaviCore's native-USB S3, and every line passes
+through `SerialDevice` and `Bench.log`'s credential filter. The page's fake port is backed by `lib/navicore/pipe.js`,
+which posts whole lines to the bridge's `/serial/write` (paced past 512 bytes, as the tool paces them) and polls
+`/serial/read` every 20 ms; `/serial/signals` records a setSignals call and never applies it; `/sbus` sends one
+RAM-only controller verb. These routes serve only the piped device, outside the bridge's one-at-a-time lock
+(`SerialDevice` has its own). `_reacquire` PINGs a NaviCore afterwards. `nctool.board_connect_config` is the pipe's
+proof: the tool connects to the real board, applies its CONFIG, and a Save right after sends nothing.
+
+**Running.** `cd tests/wizard && npx playwright test specs/navicore` (L1, about five minutes), `npm run unit` (L0 with
+the Wizard's), or `python tests/hil/run.py "nctool.*"` (L0 and L1 need no bench; `nctool.board_*` needs `navicore`).
+CI: `npm run unit` and `npx playwright test` already include them, but CI checks out only this repo, so the NaviCore
+tests skip there (the rig's own node test runs); running them in CI needs a NaviCore checkout step and `NAVICORE_REPO`.
 
 ---
 
@@ -987,6 +1084,9 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | The NaviCore config tool's Export/Import, two-tab and live-panel specs (`NAVICORE.md` NC-WP3): `FakeSerial.events` names the page; two `(should)` rows in §6. |
+| 2026-09-28 | `264583e` | The NaviCore config tool's Firmware-tab and clip specs (`NAVICORE.md` NC-WP3): §8 names the emulator's OTA and clip parts (`lib/navicore/ota.js`, `clips.js`) and the Firmware tab's mocks (`firmware.js`, the esptool-js and CryptoJS stand-ins); five `(should)` rows in §6. |
+| 2026-09-28 | `83684b3` | **The NaviCore config tool's rig and no-board specs (`NAVICORE.md` INF7, NC-WP3).** New §8 subsection. `serve.js` maps `/NaviCore/` to the sibling repo; the NaviCore specs use their own origin, 8779 (`playwright.config.js` starts a second server). New `lib/navicore/` (the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe, fixtures and page helpers), `unit/navicore/` (`nctool.static`, `nctool.unit`, the rig's self-test), `specs/navicore/`, `fixtures/navicore/config.bench.json` (bench-shaped, placeholders only) with `tools/make_nc_fixture.js` and `tools/scrub_nc_config.py`. `hil/bridge.py` gains `/serial/mark`, `/serial/read`, `/serial/write`, `/serial/signals` and `/sbus` for a piped device, outside the lock; `hil/wizard.py` gains `run_wizard_test(..., pipe=True)`, a NaviCore PING in `_reacquire`, and `run_unit_tests(files=...)`, which reports an all-skipped node run as SKIP and notes a failing `todo`. New suite `s49_navicore_tool.py`; eight `(should)` rows in §6. `selftest.py` gains `t_nctool_pipe_bridge` (75 cases). |
 | 2026-09-28 | _(pending)_ | **NaviCore over the mesh (`NAVICORE.md` INF6) and its config surface (NC-WP1; `5a1957d`).** New `hil/ncmesh.py` (§5). `s40_navicore_config.py` grows to 35 `nccfg` tests, every write inside `nc_guard`: five `(should)` (§6), opt-ins `navicore_reboot` and `navicore_fault` (§2; the hook tests skip until INF9's hook build). `navicore.bench_health` (s02) fails when NaviCore sees no full-rate SBUS or its local Maestro does not answer; `navicore.serial_route_dbg` (s21) now skips when NaviCore routes a device to its own aux ports. `selftest.py` (79 cases) runs every `nccfg` test through the runner against `NaviModel`, a port of NaviCore's config handling. |
 | 2026-09-28 | _(pending)_ | WCB-WP32, WP49, WP50, WP33, WP44 row 2, WP55 (s12, s13, s16, s17): 16 tests; `var.clear_all_name_collision` retired for `var.reserved_all_and_clear_all`; the `(should)` `input.usb_line_over_heap_dropped_whole` (tracker #101, fixed). |
 | 2026-09-28 | _(pending)_ | WCB-WP26, WP52, WP39 (s15, s24; `a3a00ec`, `3f6ff73`): 21 tests covering pinned-host routing, device port ownership (the `(should)` `devices.serial_mapped_port_refused`, tracker #99, fixed), the HCR shadow, FN 20/21, the poll scheduler and spellings, manual MP3/DFP routes, DFP ONERR and port move, the MP3 broadcast skip, PLAYFS; WLED one-hop cap, clear-all, first-host-wins, bare `;L`. |

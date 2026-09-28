@@ -1,0 +1,1392 @@
+{
+ "txModel": 0,
+ "threeAxisGimbals": false,
+ "sbusOutEnabled": true,
+ "wifiEnabled": true,
+ "wifiSsid": "HILssid",
+ "wifiPassword": "HILwifiPass",
+ "maeGateMs": 250,
+ "boardType": 0,
+ "tapWindowMs": 500,
+ "holdMs": 750,
+ "switchSettleMs": 80,
+ "chRateHz": 5,
+ "matrixChannel": 7,
+ "matrixDebounceFrames": 1,
+ "funcBindings": {
+  "mode": 4
+ },
+ "peerEvent": {
+  "alert": true,
+  "actions": []
+ },
+ "thresholds": [
+  {
+   "id": 1,
+   "label": "B1",
+   "minPwm": 1799,
+   "maxPwm": 1823
+  },
+  {
+   "id": 2,
+   "label": "B2",
+   "minPwm": 1758,
+   "maxPwm": 1782
+  },
+  {
+   "id": 3,
+   "label": "B3",
+   "minPwm": 1718,
+   "maxPwm": 1742
+  },
+  {
+   "id": 4,
+   "label": "B4",
+   "minPwm": 1676,
+   "maxPwm": 1700
+  },
+  {
+   "id": 5,
+   "label": "B5",
+   "minPwm": 1634,
+   "maxPwm": 1658
+  },
+  {
+   "id": 6,
+   "label": "B6",
+   "minPwm": 1594,
+   "maxPwm": 1618
+  },
+  {
+   "id": 7,
+   "label": "T4 Left",
+   "minPwm": 1553,
+   "maxPwm": 1577
+  },
+  {
+   "id": 8,
+   "label": "T4 Right",
+   "minPwm": 1512,
+   "maxPwm": 1536
+  },
+  {
+   "id": 9,
+   "label": "T5 Left",
+   "minPwm": 1471,
+   "maxPwm": 1495
+  },
+  {
+   "id": 10,
+   "label": "T5 Right",
+   "minPwm": 1430,
+   "maxPwm": 1454
+  },
+  {
+   "id": 11,
+   "label": "T3 Up",
+   "minPwm": 1389,
+   "maxPwm": 1413
+  },
+  {
+   "id": 12,
+   "label": "T3 Down",
+   "minPwm": 1348,
+   "maxPwm": 1372
+  },
+  {
+   "id": 13,
+   "label": "T2 Up",
+   "minPwm": 1308,
+   "maxPwm": 1332
+  },
+  {
+   "id": 14,
+   "label": "T2 Down",
+   "minPwm": 1266,
+   "maxPwm": 1290
+  },
+  {
+   "id": 15,
+   "label": "T6 Left",
+   "minPwm": 1225,
+   "maxPwm": 1249
+  },
+  {
+   "id": 16,
+   "label": "T6 Right",
+   "minPwm": 1184,
+   "maxPwm": 1208
+  },
+  {
+   "id": 17,
+   "label": "T1 Left",
+   "minPwm": 1143,
+   "maxPwm": 1167
+  },
+  {
+   "id": 18,
+   "label": "T1 Right",
+   "minPwm": 1103,
+   "maxPwm": 1127
+  },
+  {
+   "id": 19,
+   "label": "L-Stick Click",
+   "minPwm": 1062,
+   "maxPwm": 1086
+  },
+  {
+   "id": 20,
+   "label": "R-Stick Click",
+   "minPwm": 1021,
+   "maxPwm": 1045
+  },
+  {
+   "id": 21,
+   "label": "Unassigned",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 22,
+   "label": "Logical 1",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 23,
+   "label": "Logical 2",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 24,
+   "label": "Logical 3",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 25,
+   "label": "Logical 4",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 26,
+   "label": "Logical 5",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 27,
+   "label": "Logical 6",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 28,
+   "label": "Logical 7",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 29,
+   "label": "Logical 8",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 30,
+   "label": "Logical 9",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 31,
+   "label": "Logical 10",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 32,
+   "label": "Logical 11",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 33,
+   "label": "Logical 12",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 34,
+   "label": "Logical 13",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 35,
+   "label": "Logical 14",
+   "minPwm": 0,
+   "maxPwm": 0
+  },
+  {
+   "id": 36,
+   "label": "Logical 15",
+   "minPwm": 0,
+   "maxPwm": 0
+  }
+ ],
+ "mappings": {
+  "101": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL101",
+     "note": "Dome A"
+    }
+   ],
+   "t1note": "Pie open"
+  },
+  "102": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "restartScript,3",
+     "skipRunning": true
+    }
+   ],
+   "t2": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "goHome"
+    }
+   ]
+  },
+  "103": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "hcr",
+     "fn": 14,
+     "chan": 0,
+     "track": 0
+    }
+   ],
+   "t2": [
+    {
+     "type": "mp3",
+     "fn": 1,
+     "track": 5
+    }
+   ]
+  },
+  "104": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "serial",
+     "port": "S3",
+     "cmd": ":PP100"
+    }
+   ]
+  },
+  "105": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_broadcast",
+     "cmd": ":SE00"
+    }
+   ],
+   "t3": [
+    {
+     "type": "wcb_broadcast",
+     "cmd": ":SE01",
+     "delay": 250
+    }
+   ],
+   "t3note": "Scream"
+  },
+  "106": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wled",
+     "cmd": ";L1,ON"
+    }
+   ],
+   "t2": [
+    {
+     "type": "wled",
+     "cmd": ";L1,OFF"
+    }
+   ]
+  },
+  "107": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "play",
+     "cmd": "intro",
+     "fn": 0
+    }
+   ],
+   "t4": [
+    {
+     "type": "record",
+     "cmd": "take1"
+    }
+   ],
+   "t4note": "Record"
+  },
+  "108": {
+   "exclusive": true,
+   "t1": [
+    {
+     "type": "stop"
+    }
+   ],
+   "t2": [
+    {
+     "type": "play",
+     "cmd": "loopA",
+     "fn": 1
+    }
+   ]
+  },
+  "109": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "dfplayer",
+     "fn": 1,
+     "chan": 0,
+     "track": 3
+    }
+   ]
+  },
+  "110": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL110A"
+    },
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";S2HIL110B",
+     "delay": 500
+    },
+    {
+     "type": "wcb_broadcast",
+     "cmd": ";W1;S3HIL110C",
+     "note": "port S3"
+    }
+   ],
+   "t2": [
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";S2HIL110D"
+    }
+   ],
+   "t2note": "Double"
+  },
+  "111": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";M11",
+     "skipRunning": true
+    }
+   ]
+  },
+  "112": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";M12"
+    }
+   ]
+  },
+  "113": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL113^;S3HIL113"
+    }
+   ]
+  },
+  "114": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "2",
+     "cmd": "setTarget,0,6000"
+    }
+   ]
+  },
+  "115": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "stopScript"
+    }
+   ]
+  },
+  "116": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "hcr",
+     "fn": 1,
+     "chan": 1,
+     "track": 12
+    }
+   ]
+  },
+  "117": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "mp3",
+     "fn": 3,
+     "track": 0
+    }
+   ]
+  },
+  "118": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL118"
+    }
+   ],
+   "t4": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL118L"
+    }
+   ]
+  },
+  "201": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "2",
+     "cmd": "goHome"
+    }
+   ]
+  },
+  "207": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "3",
+     "cmd": "setTarget,4,6000"
+    }
+   ]
+  },
+  "208": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "4",
+     "cmd": "setTarget,5,6000"
+    }
+   ]
+  },
+  "209": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "5",
+     "cmd": "setSpeed,0,20"
+    }
+   ]
+  },
+  "210": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "6",
+     "cmd": "setAccel,0,5"
+    }
+   ]
+  },
+  "211": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "7",
+     "cmd": "restartScript,1"
+    }
+   ]
+  },
+  "212": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "8",
+     "cmd": "goHome"
+    }
+   ]
+  },
+  "213": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "maestro",
+     "target": "3",
+     "cmd": "stopScript"
+    }
+   ]
+  },
+  "218": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL218^;S3HIL218"
+    }
+   ]
+  },
+  "304": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "hcr",
+     "fn": 14,
+     "chan": 2,
+     "track": 0
+    }
+   ]
+  },
+  "305": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "hcr",
+     "fn": 2,
+     "chan": 0,
+     "track": 0
+    }
+   ]
+  },
+  "311": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";M13",
+     "skipRunning": true
+    }
+   ]
+  },
+  "312": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "2",
+     "cmd": ";M14"
+    }
+   ]
+  },
+  "313": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL313"
+    }
+   ]
+  },
+  "314": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL314"
+    }
+   ]
+  },
+  "315": {
+   "exclusive": false,
+   "t1": [
+    {
+     "type": "wcb_unicast",
+     "target": "1",
+     "cmd": ";S2HIL315"
+    }
+   ]
+  }
+ },
+ "switches": {
+  "SA": {
+   "channel": 8,
+   "positions": 3
+  },
+  "SB": {
+   "channel": 9,
+   "positions": 3
+  },
+  "SC": {
+   "channel": 10,
+   "positions": 3,
+   "p0": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "setEasing,p0"
+    },
+    {
+     "type": "maestro",
+     "target": "2",
+     "cmd": "setEasing,p0"
+    }
+   ],
+   "p1": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "setEasing,off"
+    },
+    {
+     "type": "maestro",
+     "target": "2",
+     "cmd": "setEasing,off"
+    }
+   ],
+   "p2": [
+    {
+     "type": "maestro",
+     "target": "1",
+     "cmd": "setEasing,release"
+    },
+    {
+     "type": "maestro",
+     "target": "2",
+     "cmd": "setEasing,release"
+    }
+   ],
+   "p2note": "Release"
+  },
+  "SD": {
+   "channel": 11,
+   "positions": 3
+  },
+  "SE": {
+   "channel": 12,
+   "positions": 3
+  },
+  "SF": {
+   "channel": 13,
+   "positions": 2
+  },
+  "SG": {
+   "channel": 14,
+   "positions": 3
+  },
+  "SH": {
+   "channel": 15,
+   "positions": 2
+  },
+  "SI": {
+   "channel": 16,
+   "positions": 2,
+   "p0": [
+    {
+     "type": "wcb_broadcast",
+     "cmd": ";W1;S3HILSIA"
+    }
+   ],
+   "p2": [
+    {
+     "type": "wcb_broadcast",
+     "cmd": ";W2;S2HILSIB"
+    }
+   ]
+  },
+  "SJ": {
+   "channel": 17,
+   "positions": 2,
+   "p0": [
+    {
+     "type": "wcb_broadcast",
+     "cmd": ";W1;S1HILSJA"
+    }
+   ]
+  }
+ },
+ "knobs": {
+  "S1": {
+   "channel": 5,
+   "function": 2,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": [
+    {
+     "target": 0,
+     "maestroCh": 0,
+     "posMin": 0,
+     "posMax": 99
+    }
+   ]
+  },
+  "S2": {
+   "channel": 6,
+   "function": 2,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": [
+    {
+     "target": 1,
+     "maestroCh": 0,
+     "posMin": 0,
+     "posMax": 99
+    }
+   ]
+  },
+  "LS": {
+   "channel": 0,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  },
+  "RS": {
+   "channel": 19,
+   "function": 1,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": [
+    {
+     "target": 1,
+     "maestroCh": 2,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 3,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 4,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 5,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 6,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 7,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 8,
+     "posMin": 4000,
+     "posMax": 8000
+    },
+    {
+     "target": 1,
+     "maestroCh": 9,
+     "posMin": 4000,
+     "posMax": 8000
+    }
+   ]
+  },
+  "S3": {
+   "channel": 0,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  },
+  "J1": {
+   "channel": 1,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  },
+  "J2": {
+   "channel": 24,
+   "function": 1,
+   "reverse": false,
+   "modeAware": true,
+   "modeSwitchOverride": -1,
+   "smoothProfile": 0,
+   "outputs": [
+    {
+     "target": 1,
+     "maestroCh": 0,
+     "posMin": 3968,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    }
+   ],
+   "outputs2": [
+    {
+     "target": 1,
+     "maestroCh": 0,
+     "posMin": 3968,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    }
+   ],
+   "outputs3": [
+    {
+     "target": 1,
+     "maestroCh": 0,
+     "posMin": 4400,
+     "posMax": 7600,
+     "releaseIdleMs": 1500
+    }
+   ]
+  },
+  "J3": {
+   "channel": 3,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  },
+  "J4": {
+   "channel": 4,
+   "function": 1,
+   "reverse": true,
+   "modeAware": true,
+   "modeSwitchOverride": -1,
+   "outputs": [
+    {
+     "target": 2,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 3,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 4,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 5,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 6,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 7,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    }
+   ],
+   "outputs2": [
+    {
+     "target": 2,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 3,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 4,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 5,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 6,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 7,
+     "maestroCh": 0,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    }
+   ],
+   "outputs3": [
+    {
+     "target": 2,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 3,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 4,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 5,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 6,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    },
+    {
+     "target": 7,
+     "maestroCh": 1,
+     "posMin": 4000,
+     "posMax": 8000,
+     "releaseIdleMs": 1500
+    }
+   ]
+  },
+  "J5": {
+   "channel": 0,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  },
+  "J6": {
+   "channel": 0,
+   "function": 0,
+   "reverse": false,
+   "modeAware": false,
+   "modeSwitchOverride": -1,
+   "outputs": []
+  }
+ },
+ "hcrDest": {
+  "transport": "wcb",
+  "target": "2",
+  "wcbPort": 1
+ },
+ "maestros": [
+  {
+   "type": 1,
+   "device": 1,
+   "channels": [
+    {
+     "ch": 0,
+     "name": "Pie 1",
+     "min": 3968,
+     "max": 8000
+    },
+    {
+     "ch": 1,
+     "name": "Pie 2",
+     "min": 3972,
+     "max": 7996
+    },
+    {
+     "ch": 2,
+     "name": "Pie 3",
+     "min": 3976,
+     "max": 7992
+    },
+    {
+     "ch": 3,
+     "name": "Pie 4",
+     "min": 3980,
+     "max": 7988
+    },
+    {
+     "ch": 4,
+     "name": "Pie 5",
+     "min": 3984,
+     "max": 7984
+    },
+    {
+     "ch": 5,
+     "name": "Pie 6",
+     "min": 3988,
+     "max": 7980
+    },
+    {
+     "ch": 6,
+     "name": "Pie 7",
+     "min": 3992,
+     "max": 7976
+    },
+    {
+     "ch": 7,
+     "name": "Pie 8",
+     "min": 3996,
+     "max": 7972
+    },
+    {
+     "ch": 8,
+     "name": "Pie 9",
+     "min": 4000,
+     "max": 7968
+    },
+    {
+     "ch": 9,
+     "name": "Pie 10",
+     "min": 4004,
+     "max": 7964
+    },
+    {
+     "ch": 10,
+     "name": "Pie 11",
+     "min": 4008,
+     "max": 7960
+    },
+    {
+     "ch": 11,
+     "name": "Pie 12",
+     "min": 4012,
+     "max": 7956
+    },
+    {
+     "ch": 12,
+     "name": "Panel 1",
+     "min": 4016,
+     "max": 7952
+    },
+    {
+     "ch": 13,
+     "name": "Panel 2",
+     "min": 4020,
+     "max": 7948
+    },
+    {
+     "ch": 14,
+     "name": "Panel 3",
+     "min": 4024,
+     "max": 7944
+    },
+    {
+     "ch": 15,
+     "name": "Panel 4",
+     "min": 4028,
+     "max": 7940
+    },
+    {
+     "ch": 16,
+     "name": "Panel 5",
+     "min": 4032,
+     "max": 7936
+    },
+    {
+     "ch": 17,
+     "name": "Panel 6",
+     "min": 4036,
+     "max": 7932
+    },
+    {
+     "ch": 18,
+     "name": "Panel 7",
+     "min": 4040,
+     "max": 7928
+    },
+    {
+     "ch": 19,
+     "name": "Panel 8",
+     "min": 4044,
+     "max": 7924
+    },
+    {
+     "ch": 20,
+     "name": "Panel 9",
+     "min": 4048,
+     "max": 7920
+    },
+    {
+     "ch": 21,
+     "name": "Panel 10",
+     "min": 4052,
+     "max": 7916
+    },
+    {
+     "ch": 22,
+     "name": "Panel 11",
+     "min": 4056,
+     "max": 7912
+    },
+    {
+     "ch": 23,
+     "name": "Panel 12",
+     "min": 4060,
+     "max": 7908
+    }
+   ]
+  },
+  {
+   "type": 2,
+   "device": 2
+  },
+  {
+   "type": 2,
+   "device": 3
+  },
+  {
+   "type": 2,
+   "device": 4
+  },
+  {
+   "type": 2,
+   "device": 5
+  },
+  {
+   "type": 2,
+   "device": 6
+  },
+  {
+   "type": 2,
+   "device": 7
+  },
+  {
+   "type": 2,
+   "device": 8
+  }
+ ],
+ "wcbNetwork": {
+  "macOct2": 10,
+  "macOct3": 11,
+  "password": "HILmeshPass",
+  "quantity": 1,
+  "deviceId": 20,
+  "channel": 1
+ },
+ "wcbProfiles": [
+  {
+   "name": "HILdev",
+   "macOct2": 10,
+   "macOct3": 11,
+   "password": "HILmeshPass",
+   "quantity": 1,
+   "deviceId": 20,
+   "channel": 1
+  },
+  {
+   "name": "HILdroid",
+   "macOct2": 12,
+   "macOct3": 13,
+   "password": "HILdroidPass",
+   "quantity": 4,
+   "deviceId": 20,
+   "channel": 6
+  }
+ ],
+ "mp3Dest": {
+  "transport": "off",
+  "port": "S3"
+ },
+ "dfpDest": {
+  "transport": "off",
+  "port": "S3"
+ },
+ "wledSlots": [
+  {
+   "id": 1,
+   "port": 0,
+   "wcb": 2,
+   "configured": true
+  },
+  {
+   "id": 0,
+   "port": 0,
+   "wcb": 0,
+   "configured": false
+  },
+  {
+   "id": 0,
+   "port": 0,
+   "wcb": 0,
+   "configured": false
+  },
+  {
+   "id": 0,
+   "port": 0,
+   "wcb": 0,
+   "configured": false
+  }
+ ],
+ "auxBaud": {
+  "S3": 115200,
+  "S4": 9600,
+  "S5": 9600,
+  "maestro": 57600
+ },
+ "serialBcast": {
+  "S3": {
+   "out": false,
+   "in": false
+  },
+  "S4": {
+   "out": false,
+   "in": false
+  },
+  "S5": {
+   "out": false,
+   "in": false
+  }
+ },
+ "modeReport": {
+  "enabled": true,
+  "wcb": 2,
+  "template": ";V,MODE,{mode}",
+  "cmds": [
+   "",
+   "",
+   ""
+  ]
+ },
+ "statsReport": {
+  "enabled": true,
+  "wcb": 1
+ },
+ "smoothProfiles": [
+  {
+   "name": "Default",
+   "entries": [
+    {
+     "mid": 1,
+     "ch": 0,
+     "spd": 20,
+     "acc": 5
+    },
+    {
+     "mid": 1,
+     "ch": 1,
+     "spd": 30,
+     "acc": 0
+    }
+   ]
+  },
+  {
+   "name": "Slow",
+   "entries": [
+    {
+     "mid": 1,
+     "ch": 0,
+     "spd": 8,
+     "acc": 2
+    }
+   ]
+  },
+  {
+   "name": "",
+   "entries": []
+  },
+  {
+   "name": "",
+   "entries": []
+  },
+  {
+   "name": "",
+   "entries": []
+  },
+  {
+   "name": "",
+   "entries": []
+  }
+ ]
+}
