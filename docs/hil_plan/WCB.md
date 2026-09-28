@@ -106,6 +106,8 @@ Totals: 214 distinct gaps, 295 entries, 48 WPs.
 
 ---
 
+> **Wave 1 (2026-09-28): WCB-WP12, 13, 19, 25, 30, 31, 35 (rows 2-4), 42 (rows 2, 4), 43, 48, 54 and 57 are written and bench-verified** on `6.2.1_280150RSEP2026` (runs `20260928-064402`, `-070402`): 52 tests in s03, s05, s18 and s31. Rows not written, and why, are in each suite's docstrings and `docs/HIL_WEEK_DECISIONS.md` (D29-D34). Their finds: tracker #95, #96 (fixed) and #97 (deferred).
+
 ### WCB-WP12: One-line `?backup` restore through the `?CHK` gate (H)
 s31_password_erase.py, beside backup.replay_idempotent. Reuse `_replayable` (skip if the chain holds `?MAP,PWM`) and its
 secret redaction. **U, M.**

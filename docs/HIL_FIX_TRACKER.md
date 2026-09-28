@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#95 and #96 VERIFIED** on `6.2.1_280150RSEP2026` (W1/W2 flashed 06:55): the wave-1 verification run `20260928-064402` (79 tests, 77 pass; the two failures were test bugs, fixed and passing in `20260928-070402`), and #96's late-ACK case in `20260928-070457`. |
 | 2026-09-28 | **#96 filed and FIXED (unverified)**: a learned peer's broadcast ACK that arrives after the configured boards' ACKs resolved the entry now promotes it too, so it is retried from then on. **#97 filed, deferred** (D32): on a full NVS a new mapping or device saves its port flags first and can leave the port blocked with nothing on it after a reboot. Both found by this wave's test writers (WCB-WP19, WP42). |
 | 2026-09-28 | **#95 filed and FIXED (unverified)**, found by the WCB-WP13 test writer: a data-carrying verb spelled in mixed case (`?Mgmt,`, `?Seq,`, `?Wifi,`) with a trailing '?' printed the help page, and `;Seq<key>` was refused. Decided in Greg's absence (`docs/HIL_WEEK_DECISIONS.md` D31). |
 | 2026-09-27 | **#94 VERIFIED** (decided in Greg's absence, D5): one RMT symbol per PWM output pulse. `pwm.*` 26/26 (20260927-130212); both passthrough tests five more times, with the new held-pulse check (20260927-131152 to -131509, 20260927-174251 to -174402, 3/3). The one failure among them was the test's filter check counting a late pulse of the previous step, a harness race now fixed. |
@@ -1942,7 +1943,7 @@ No free channel: the old bit-bang, and `[PWM] S<n>: no RMT channel` once.
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - not yet flashed; the tests below run on the bench next |
+| **Status** | VERIFIED - `mesh.frag_trailing_q_mixed_case`, `seq.save_boundary` and `seq.recall_forms` pass on `6.2.1_280150RSEP2026` (20260928-064402); decided in Greg's absence (D31) |
 | **Owner** | `WCB_firmware` (`WCB.ino`) |
 | **Effort** | S |
 | **Tests** | `mesh.frag_trailing_q_mixed_case` (should), `seq.save_boundary`, `seq.recall_forms` |
@@ -1971,7 +1972,7 @@ chain's last `else`), which is visible, so nothing is lost silently; they are th
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - not yet flashed |
+| **Status** | VERIFIED - `etm.learned_unreciprocated_not_expected` passes on `6.2.1_280150RSEP2026` five times, once with the late ACK this fixes (20260928-070457: 'after W2 resolved it', and the second broadcast still counted the peer); decided in Greg's absence (D32) |
 | **Owner** | `WCB_firmware` (`WCB.ino`) |
 | **Effort** | S |
 | **Tests** | `etm.learned_unreciprocated_not_expected` (checks the second broadcast counts the probe whichever way the first ACK raced) |

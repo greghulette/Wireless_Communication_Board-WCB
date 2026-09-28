@@ -1033,11 +1033,15 @@ def pull_wrong_target(bench):
 @test("wcb.pull_session_reaped", "A one-line pull session W1 is left holding half of (W1 deafened for 2 s after its first frags) is reaped 10 s after its last frag with '[MGMT] Config pull session <id> timed out' under ?DEBUG,MGMT, and the next pull of W2 arrives whole (WCB-WP25)", needs=["wcb1", "wcb2"])
 def pull_session_reaped(bench):
     """checkConfigPullTimeout (WCB.ino) drops a relay's pull session CONFIG_SESSION_TIMEOUT_MS (10 s) after its last
-    frag. W2 is grown to about 2.7 KB, a 15-frag reply of about 0.3 s a pass, and W1 is deafened the moment its
-    '[MGMT] Config pull session <id> from WCB2' line shows: '?MAC,3,<other>' changes W1's receive filter at once, but
-    not its radio address, which moves only at boot (the trick of s18's _deaf_w1; the octet is saved, so it is put
-    back first thing). Two tries: a deafening that lands after the last frag leaves nothing to reap. The SEQ-names half
-    of the plan row is not here: W2's name list fits one frag, which is never left half-received."""
+    frag. W2 is grown to about 2.7 KB, a 15-frag reply. '?MAC,3,<other>' changes W1's receive filter at once, but not
+    its radio address, which moves only at boot (the trick of s18's _deaf_w1; the octet is saved, so it is put back).
+    W1 deafens ITSELF, from a timer chain sent on the line right behind the pull:
+    ;S0<m>^;T<d>^?MAC,3,<other>^;T2000^?MAC,3,<orig>. The whole reply lands within one host read about 0.6 s after
+    the pull, so a ?MAC,3 the host sent on seeing the session line always came after the last frag (run
+    20260928-064402); a ?MGMT chain is never a timer chain (isTimerChain), so the delay cannot ride the pull's own
+    line; and a ?SEQ,SAVE value ends at '^?', so it cannot be a stored sequence. The chain also puts the octet back on
+    W1's clock, whatever happens to the host. The delay steps across tries until one lands inside the reply. The
+    SEQ-names half of the plan row is not here: W2's name list fits one frag, which is never left half-received."""
     w1, w2 = usb_wcb(bench), _w2(bench)
     keys, problems = [], []
     with config_guard(bench, 1, 2) as before:
@@ -1054,24 +1058,29 @@ def pull_session_reaped(bench):
             want = _factory_reply(w2, ver)
             w1.run("?DEBUG,MGMT,ON")
             reaped = None
-            for attempt in (1, 2):
+            for attempt, delay in enumerate((100, 200, 300, 400, 500, 650), 1):
+                mark = marker("d")
                 m1 = w1.dev.mark()
                 w1.dev.send("?MGMT,PULL,2")
+                w1.dev.send(f";S0{mark}^;T{delay}^?MAC,3,{other}^;T2000^?MAC,3,{orig}")
                 _stamp(w1.dev, 2)
-                sid = w1.dev.expect(r"^\[MGMT\] Config pull session ([0-9A-F]{4}) from WCB2 \(\d+ chunks\)", timeout=5,
-                                    since=m1).group(1)
-                w1.dev.send(f"?MAC,3,{other}")          # raw: every millisecond counts
                 deaf = True
-                time.sleep(2.0)
-                out = [x.rstrip() for x in w1.run(f"?MAC,3,{orig}")]
+                w1.dev.expect(rf"Updated 3rd MAC octet to 0x{orig}", timeout=delay / 1000 + 6, since=m1)
                 deaf = False
-                if f"Updated 3rd MAC octet to 0x{orig}" not in out:
-                    problems.append(f"?MAC,3,{orig} did not confirm: {out}")
-                    break
                 lines = list(w1.dev.lines[m1:])
+                if not any(f"Updated 3rd MAC octet to 0x{other}" in x for _, x in lines):
+                    problems.append(f"try {attempt}: W1 never deafened (no ?MAC,3,{other} line)")
+                    break
+                g = next((re.search(r"^\[MGMT\] Config pull session ([0-9A-F]{4}) from WCB2 \(\d+ chunks\)", x)
+                          for _, x in lines if x.startswith("[MGMT] Config pull session ")), None)
+                if not g:
+                    bench.note(f"try {attempt}: W1 deafened ;T{delay} before the first frag")
+                    time.sleep(2.0)
+                    continue
+                sid = g.group(1)
                 frags = [ts for ts, x in lines if re.search(rf"Config frag \d+/\d+ received \(session {sid}\)", x)]
                 if any(x.startswith("[MGMT:CONFIG,2]") for _, x in lines):
-                    bench.note(f"try {attempt}: W1 was deafened too late - session {sid} completed")
+                    bench.note(f"try {attempt}: W1 deafened ;T{delay} after the last frag - session {sid} completed")
                     time.sleep(2.0)
                     continue
                 w1.dev.expect(rf"^\[MGMT\] Config pull session {sid} timed out", timeout=14, since=m1)
@@ -1081,7 +1090,7 @@ def pull_session_reaped(bench):
                     problems.append(f"session {sid} was reaped {t_out - frags[-1]:.1f} s after its last frag, not ~10 s")
                 break
             if reaped is None and not problems:
-                problems.append("W1 was deafened too late on both tries: no half-received session to reap")
+                problems.append("no try deafened W1 inside the reply: no half-received session to reap")
             bench.note(f"W2 at {n} characters; reaped session: (frags received, seconds from the last to the "
                        f"timeout line) {reaped}")
             r = w1.pull_reply(2, timeout=10, verify=False)

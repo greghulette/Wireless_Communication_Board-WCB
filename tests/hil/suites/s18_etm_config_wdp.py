@@ -2280,7 +2280,12 @@ def frag_chksm_boundary(bench):
                 s22.expect(text.encode() + b"\r", timeout=3, since=pm)
             except AssertionError:
                 bad.append(f"the {n}-character payload did not run on W2")
-            if not _has(w.dev.since(wm), f"[MGMT] Single-chunk cmd → ETM unicast to WCB2 session {sid}: ;S2{text}"):
+            # Waited for, not read at once: the text reaches W2 S2 over the radio before W1 has printed its two
+            # ~260-character lines (the echo, then this one) on its 115200 USB (run 20260928-064402).
+            try:
+                w.dev.expect(re.escape(f"[MGMT] Single-chunk cmd → ETM unicast to WCB2 session {sid}: ;S2{text}"),
+                             timeout=3, since=wm)
+            except AssertionError:
                 bad.append(f"the {n}-character payload did not go as one ETM unicast")
         text = padded("F187", 184)
         pm, wm = s22.mark(), w.dev.mark()

@@ -699,6 +699,14 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     image: 493 pass, 2 fail (both explained). The first wave of WCB coverage tests (WP12/13/19/25/30/31/35/42/43/48/
     54/57) is being written by three agents; tonight's full run on the committed image started 01:00. Next: merge
     the Wizard branch, verify the wave on the bench, the next wave, then NaviCore INF3/INF4.
+  - 2026-09-28 07:15: full run `20260928-005805` (538 pass, 2 fail, 4 skip; both failures and the recorder skip
+    were test-side: D29, D33) is logged. Wave 1 is bench-verified: 52 new tests plus the fixes (run
+    `20260928-064402`, 77/79, both failures test bugs, fixed and passing in `-070402`), with tracker #95 and #96
+    fixed and verified in `6.2.1_280150RSEP2026` (W1/W2 flashed 06:55, fallback `-rescan`) and #97 deferred (D32).
+    The Wizard W-1..W-12 fixes are merged (D30). NaviCore INF3 (`nc_guard`) is built and bench-verified; INF4
+    (`ncflash`) is built and its NaviCore compile proven, with its first real flash still to run. Four agents died
+    on the 05:30 session limit; wave 2 (s14/s22, s15/s24, s12/s13/s16/s17) resumes two at a time. Next: push,
+    INF4's bench flash of the running image, wave 2's verification, then INF5-INF9 and the NaviCore work packages.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
