@@ -1381,7 +1381,7 @@ def _live_run(results):
 
 
 def main(argv=None):
-    """python -m hil.ncflash (from tests/hil): build | check | libs | status | flash | recover. The board commands
+    """python -m hil.ncflash (from tests/hil): build | check | libs | status | reset | flash | recover. The board commands
     open bench.json's navicore port with DTR/RTS low, refuse while a HIL run holds its run.lock, and log every line to
     results/builds/ncflash-logs/ (passwords and the SoftAP name hashed)."""
     import argparse
@@ -1401,13 +1401,14 @@ def main(argv=None):
     sub.add_parser("check", help="check an image without a board").add_argument("image")
     sub.add_parser("libs", help="the sketchbook's WCB_Client and WcbCmd against their repos")
     st = sub.add_parser("status", help="PING and ?OTALOCAL,STATUS (read-only)")
+    rs = sub.add_parser("reset", help="the ladder's rung 2 alone: the USB-Serial/JTAG reset, the boot, PING and STATUS")
     fl = sub.add_parser("flash", help="flash a build folder over ?OTALOCAL")
     fl.add_argument("image")
     fl.add_argument("--what", default="", help="what is in it, for FLASHED.md")
     rc = sub.add_parser("recover", help="the recovery ladder")
     rc.add_argument("--known-good", default=None)
     rc.add_argument("--allow-esptool", action="store_true", help="let the ladder use esptool (rungs 3 and 4)")
-    for p in (st, fl, rc):
+    for p in (st, rs, fl, rc):
         p.add_argument("--bench", default=os.path.join(HERE, "bench.json"))
         p.add_argument("--port", default=None, help="override bench.json's navicore port")
     args = ap.parse_args(argv)
@@ -1439,6 +1440,9 @@ def main(argv=None):
             nc = NaviCore(dev)
             if args.cmd == "status":
                 print(json.dumps({"pong": _ping(nc), "status": ota_status(nc)}, indent=2))
+            elif args.cmd == "reset":
+                lines = nc.wait_boot(since=nc.hard_reset(), timeout=45)
+                print(json.dumps({"boot": parse_boot(lines), "pong": _ping(nc), "status": ota_status(nc)}, indent=2))
             elif args.cmd == "flash":
                 out = flash(nc, args.image, args.what, progress=lambda w, s: print(f"  {w} / {s} B", flush=True))
                 print(json.dumps({k: out[k] for k in ("version", "secs", "stats", "app_sha", "row")}, indent=2,

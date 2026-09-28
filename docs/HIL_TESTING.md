@@ -409,8 +409,9 @@ with the recent lines attached), and skips by raising `Skip`.
   - Every flash that sent BEGIN, and every esptool write, adds a row to `results/builds/FLASHED.md` under "NaviCore
     flashes (hil/ncflash.py)": when, the folder, the ELF SHA-256, NaviCore's commit and dirty flag, how, the result and
     what is in it.
-  - Outside a run, from `tests/hil`: `python -m hil.ncflash build <tag>`, `check <folder>`, `libs`, `status`,
-    `flash <folder> --what "<text>"` and `recover [--allow-esptool]`. The board commands open `bench.json`'s NaviCore
+  - Outside a run, from `tests/hil`: `python -m hil.ncflash build <tag>`, `check <folder>`, `libs`, `status`, `reset`
+    (the ladder's second rung alone, to prove it before it is needed), `flash <folder> --what "<text>"` and
+    `recover [--allow-esptool]`. The board commands open `bench.json`'s NaviCore
     port with DTR and RTS low, refuse while a run holds its `run.lock`, and log every line to
     `results/builds/ncflash-logs/` with passwords and the SoftAP name hashed.
 - **Opt-in tests** declare the gate on the decorator: `@test(..., opt_in="ota_full")`, and optionally

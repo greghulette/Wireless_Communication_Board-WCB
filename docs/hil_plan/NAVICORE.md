@@ -650,7 +650,7 @@ slot 3 and a serialLabel; restore; byte-identical, and nothing secret in `sessio
 
 > **Status 2026-09-28: built; the build is proven, nothing has been flashed.** `hil/ncflash.py` holds `build`,
 > `check_image`, `ota_status`, `ota_begin`, `ota_stream`, `ota_abort`, `flash`, `recover` and `record_flash`, and a
-> command line (`python -m hil.ncflash build|check|libs|status|flash|recover`, run from `tests/hil`);
+> command line (`python -m hil.ncflash build|check|libs|status|reset|flash|recover`, run from `tests/hil`);
 > `docs/HIL_TESTING.md` §5 says how a test or a session uses them. `selftest.py` has seven cases: synthetic ESP32-S3
 > images, a scripted arduino-cli, a fake NaviCore that speaks `?OTALOCAL` (a damaged line, a lost or held ACK, the
 > idle reaper, a chunk written short, END's verify, the restart, the old slot, no return) and a scripted esptool.
