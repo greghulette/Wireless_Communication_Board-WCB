@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | Wave 3 group 2 on `6.2.1_280758RSEP2026` (`20260928-160300`): 17 pass. Filed **#102** (a mesh-send flood exhausts the heap and W1 aborts, `etm.seq_wrap`), **#103** (JOIN mode drops mesh unicasts while looking for an absent network; no loss or rejoin reported) and **#104** (`nvs.net80211` grows with every JOIN `WiFi.begin`). |
 | 2026-09-28 | **#101 VERIFIED** (`20260928-080619`). The s12/s13/s16/s17 tests on `6.2.1_280758RSEP2026`: 16 pass in `20260928-080156`, two ERRORs from a missing `nonce` import in s12 (an agent cannot run its tests), fixed and passing. |
 | 2026-09-28 | **#101 filed and FIXED (unverified)**, found by the WCB-WP32 test writer: a USB line the heap could not hold ran its head alone, unverified (D39). |
 | 2026-09-28 | **#98 and #99 VERIFIED** on `6.2.1_280741RSEP2026` (W1/W2 flashed about 07:50): `20260928-074616`, 22 of 22 (#98's test and the 21 s15/s24 tests). |
@@ -2112,3 +2113,65 @@ the head ran unverified with its last token cut mid-value: what the cap exists t
 **Fix.** The append is a `concat()` whose result is checked; a failed one drops the line whole exactly like the cap
 (`serialLineOverflow`), releasing the buffer before printing `[SERIAL] S<n>: line too long for the free heap (<n>
 characters) - dropped`.
+
+#### 102. A sustained flood of mesh sends exhausts the heap and the board aborts
+
+| | |
+|---|---|
+| **Status** | TODO - high; `etm_seq_wrap` unticked until it is fixed (`docs/HIL_WEEK_DECISIONS.md` D46) |
+| **Owner** | `WCB_firmware` (`WCB.ino`, the ESP-NOW send paths) |
+| **Effort** | M |
+| **Tests** | `etm.seq_wrap` (opt-in `etm_seq_wrap`) crashes W1 today |
+| **Subsystem** | ESP-NOW / heap |
+
+**Evidence (run 20260928-160300, `6.2.1_280758RSEP2026`).** About 7,500 frames into `etm.seq_wrap`'s flood of JSON
+broadcasts typed on W1's console, W1 printed a run of `[ETM] Send failed seq <n>, error: 12391`
+(`ESP_ERR_ESPNOW_NO_MEM`), then `abort() was called at PC 0x4008371b on core 0` and rebooted (Exception/Panic Reset).
+Decoded against the flashed ELF (SHA `df3252fe...`): `abort` <- `lock_init_generic` (newlib `locks.c:77`) <-
+`_lock_acquire_recursive` <- `uart_write` (`uart_vfs.c:236`) <- `esp_vfs_write`.
+
+**Cause.** A core-0 task printed through C stdio for the first time, most likely the WiFi driver logging its own
+out-of-memory error, and newlib creates that stream's lock on first use: the allocation failed and newlib aborts. The heap
+was gone because the sends outran the radio: every queued ESP-NOW frame holds a driver buffer from the same ~18 KB
+AP-mode heap (CLAUDE.md rule 14), and the firmware keeps sending after `ESP_ERR_ESPNOW_NO_MEM`. A console flood is the
+test's way in; a raw serial mapping streaming into the mesh at a high rate is the realistic one.
+
+**Fix (proposed).** Back-pressure on the send path: count frames in flight (the ESP-NOW send callback) and, at a cap or
+on `ESP_ERR_ESPNOW_NO_MEM`, wait from task context or drop with a counted line from the WiFi task, never keep queueing.
+The receive callback's rule (CLAUDE.md rule 11: never block there) decides which paths may wait.
+
+#### 103. JOIN mode drops mesh unicasts while it looks for an absent network, and reports no loss and no rejoin
+
+| | |
+|---|---|
+| **Status** | TODO - investigate |
+| **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
+| **Effort** | M |
+| **Tests** | `wifi.join_absent_ssid_keeps_mesh`, `wifi.join_lost_and_rejoin` (opt-in `wifi_modes`) |
+| **Subsystem** | WiFi JOIN |
+
+**Evidence (run 20260928-160300).** With W1 joining an SSID nobody hosts, unicasts to W2 were not delivered, one after
+another, over the 70 s. With W1 joined to W2's access point, W1 printed no `[WIFI] lost ... retrying every 5 s` within
+30 s of W2 turning its access point off, and had not joined again 45 s after it came back.
+
+**Cause.** Not yet known. `wcbWifiJoinTry` already pins the join to `meshChannel` and turns auto-reconnect off precisely
+so a search never leaves the mesh channel, and `wcbWifiService` prints the loss and retries every 5 s. The next step is
+the radio channel and the WiFi events during the search (the drift check prints only while `wifiUp`), and whether the
+driver's connect attempt still leaves the channel when the pinned one has no such AP.
+
+#### 104. Every WiFi.begin persists the station config into the WiFi driver's own NVS namespace
+
+| | |
+|---|---|
+| **Status** | TODO - low |
+| **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
+| **Effort** | S |
+| **Tests** | the per-run `?NVS` record |
+| **Subsystem** | WiFi / storage |
+
+**Evidence (run 20260928-160300).** W1's `nvs.net80211` namespace grew from 36 to 95 entries (W1 362 to 421 of 630
+entries used) during the JOIN tests, with every config guard passing.
+
+**Cause.** The firmware keeps its own WiFi settings (`saveWifiSettings`) but never calls `WiFi.persistent(false)`, so the
+Arduino core's default makes each `WiFi.begin` store the config again in the driver's `nvs.net80211`; the JOIN retry
+calls it every 5 s while it looks. **Fix (proposed).** `WiFi.persistent(false)` before the first `WiFi.mode`/`begin`.
