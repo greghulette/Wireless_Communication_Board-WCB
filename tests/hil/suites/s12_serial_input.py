@@ -16,7 +16,7 @@ from hil.links import SW_MAX_BAUD
 from hil.probe import HW_ONLY_HEADERS, PROBE_LEVELRX_VERSION, SW_CHANNELS
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, quiet_lines,
+from suites.common import (Console, Watch, config_guard, link, marker, nonce, padded, prime, quiet_lines,
                            require_tokens, send_chunked, token, usb_wcb, usb_wcb_number)
 
 
