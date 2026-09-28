@@ -385,6 +385,11 @@ with the recent lines attached), and skips by raising `Skip`.
     it. Line endings alone are not a difference. One build runs at a time, at below-normal priority, about two
     minutes. The folder gets `BUILD.json` (NaviCore's commit, whether its tree was dirty and a fingerprint of the
     change, both libraries, the image check) and `compile.log`. `hooks=True` adds `-DNAVICORE_HIL_HOOKS=1` (INF9).
+    `source=` compiles another NaviCore tree than the checkout beside this repo, such as a git worktree of it on a
+    branch. arduino-cli refuses a sketch folder not named after its main `.ino`, so a folder with another name is
+    compiled from a copy of its sketch files alone (`stage_sketch`: the top-level code files, `partitions.csv`, `src/`),
+    removed afterwards; the FQBN and version checks, the hooks scan and `BUILD.json`'s tree state all read the source
+    itself, and FLASHED.md's line names its branch when that is not main.
   - `check_image(folder)` checks an image as the board will, before anything is sent: the magic, chip id 9, every
     segment, the checksum and appended SHA-256 that `esp_ota_end` verifies, exactly one FW_VERSION string, the ELF
     beside it hashing to the SHA-256 at image offset 0xB0 (the image's identity: the version string only changes on a
@@ -409,7 +414,8 @@ with the recent lines attached), and skips by raising `Skip`.
   - Every flash that sent BEGIN, and every esptool write, adds a row to `results/builds/FLASHED.md` under "NaviCore
     flashes (hil/ncflash.py)": when, the folder, the ELF SHA-256, NaviCore's commit and dirty flag, how, the result and
     what is in it.
-  - Outside a run, from `tests/hil`: `python -m hil.ncflash build <tag>`, `check <folder>`, `libs`, `status`, `reset`
+  - Outside a run, from `tests/hil`: `python -m hil.ncflash build <tag> [--hooks] [--source <NaviCore tree>]`,
+    `check <folder>`, `libs`, `status`, `reset`
     (the ladder's second rung alone, to prove it before it is needed), `flash <folder> --what "<text>"` and
     `recover [--allow-esptool]`. The board commands open `bench.json`'s NaviCore
     port with DTR and RTS low, refuse while a run holds its `run.lock`, and log every line to
@@ -1086,6 +1092,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | `hil/ncflash.py` `build(source=...)` and `build --source`: a NaviCore git worktree (INF9's `hil-week` branch) is compiled from a staged copy named NaviCore, since arduino-cli refuses a sketch folder not named after its main `.ino`; the checks and `BUILD.json` read the source. `tree_state` records the branch and `tree_line` names one other than main or master. `selftest.py` `ncflash_build_source`. |
 | 2026-09-28 | _(pending)_ | WCB wave 3 group 1 (WCB-WP16, WP17, WP36, WP37, WP47; `33e1ddc`): identity (sender-id/MAC binding, learned-peer FORGET and fingerprint), `?WIFI` setter validation with no opt-in, boot timing and the announce/advert burst, the advert stagger, settings across a reboot, and the static CLAUDE.md rule-12 check in `selftest.py`. |
 | 2026-09-28 | _(pending)_ | The NaviCore config tool's Export/Import, two-tab and live-panel specs (`NAVICORE.md` NC-WP3): `FakeSerial.events` names the page; two `(should)` rows in §6. |
 | 2026-09-28 | `264583e` | The NaviCore config tool's Firmware-tab and clip specs (`NAVICORE.md` NC-WP3): §8 names the emulator's OTA and clip parts (`lib/navicore/ota.js`, `clips.js`) and the Firmware tab's mocks (`firmware.js`, the esptool-js and CryptoJS stand-ins); five `(should)` rows in §6. |

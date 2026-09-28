@@ -40,10 +40,11 @@ through a scripted W1), the snapshot file and checkpoint record a killed test le
 and s40's nccfg.guard_selftest run whole against the fake.
 NaviCore's image tooling (hil/ncflash.py, INF4): the image check on synthetic ESP32-S3 images and each defect it names;
 the sketchbook-against-repo library check; build()'s command line, BUILD.json and refusals against a scripted
-arduino-cli; ?OTALOCAL,STATUS parsing; flash() against a fake NaviCore that speaks ?OTALOCAL (ACK, a damaged line's
-NAK and the rewind, a lost ACK found by STATUS, an ACK held until the host sends, the idle reaper, a chunk written
-short, END's verify, the restart into the other slot, the old slot, no return); and the recovery ladder's decisions
-against a fake board and a scripted esptool, which may only ever write 0x10000 and 0xe000.
+arduino-cli, and a NaviCore git worktree compiled through a staged copy (build(source=...)); ?OTALOCAL,STATUS parsing;
+flash() against a fake NaviCore that speaks ?OTALOCAL (ACK, a damaged line's NAK and the rewind, a lost ACK found by
+STATUS, an ACK held until the host sends, the idle reaper, a chunk written short, END's verify, the restart into the
+other slot, the old slot, no return); and the recovery ladder's decisions against a fake board and a scripted esptool,
+which may only ever write 0x10000 and 0xe000.
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -5682,6 +5683,106 @@ def t_ncflash_build(tmp):
         F._run_cli, F.tree_state, F._core_version, F.cli_path = saved
 
 
+def t_ncflash_build_source(tmp):
+    """build(source=...) (hil/ncflash.py): a NaviCore git worktree, whose folder is not named NaviCore, is compiled from
+    a copy named NaviCore holding its sketch files and nothing else (arduino-cli refuses a sketch folder not named after
+    its main .ino), and the copy is gone afterwards, even when the build then fails; CLAUDE.md's FQBN, fw_version.h, the
+    hooks scan and the tree state come from the source itself, and FLASHED.md's line names its branch. A source already
+    named NaviCore compiles in place, no source is still <github>/NaviCore, and a folder without NaviCore.ino is refused
+    before anything runs. Then tree_state on a real git repository: the branch, and None once HEAD is detached."""
+    from hil import ncflash as F
+    gh, sb, builds = (os.path.join(tmp.root, n) for n in ("gh", "sb", "builds"))
+    wt = os.path.join(tmp.root, "worktrees", "hil-week")
+    named = os.path.join(tmp.root, "elsewhere", "NaviCore")
+    version = '#define FW_VERSION_BASE  "v9.9.9"\n#define FW_VERSION_DTG   "%s"\n'
+    sketch = {"NaviCore.ino": "void setup(){}\n", "partitions.csv": NC_PARTITIONS,
+              "fw_version.h": version % "111111ZSEP26", "navicore_hil.h": "#ifdef NAVICORE_HIL_HOOKS\n#endif\n",
+              "src/sub/a.cpp": "int a;\n"}
+    rest = {"CLAUDE.md": NC_FQBN_DOC, "README.md": "# x\n", "index.html": "<html></html>\n", "docs/y.md": "y\n",
+            "firmware/x.bin": "bin\n"}
+
+    def write(root, files):
+        for rel, text in files.items():
+            p = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+    for root in (wt, named, os.path.join(gh, "NaviCore")):
+        write(root, {**sketch, **rest})
+    for lib, repo in (("WCB_Client", "WCBClient"), ("WcbCmd", "WcbCmd")):
+        for root in (os.path.join(gh, repo), os.path.join(sb, "libraries", lib)):
+            write(root, {"src/x.h": "int x;\n"})
+    img, elf = _nc_image()
+    seen = []
+
+    def fake_cli(argv, low_priority=True, timeout_s=3600):
+        src, files = argv[-1], {}
+        for d, _, names in os.walk(src):
+            for n in names:
+                with open(os.path.join(d, n), "rb") as f:
+                    files[os.path.relpath(os.path.join(d, n), src).replace(os.sep, "/")] = f.read()
+        seen.append((src, files))
+        out = argv[argv.index("--build-path") + 1]
+        _nc_folder(os.path.dirname(out), os.path.basename(out), img, elf)
+        props = [F.HOOKS_PROPERTY] if "--build-property" in argv else ["compiler.cpp.extra_flags="]
+        used = [{"name": lib, "version": "1", "install_dir": os.path.join(sb, "libraries", lib)}
+                for lib in ("WCB_Client", "WcbCmd")]
+        return 0, json.dumps({"compiler_out": "", "compiler_err": "", "success": True,
+                              "builder_result": {"build_properties": props, "used_libraries": used,
+                                                 "build_platform": {"id": "esp32:esp32", "version": "3.3.4"}}}), "", 1.0
+
+    def fake_tree(repo):
+        return {"repo": repo, "head": "a" * 40, "short": "aaaaaaa", "subject": "s", "dirty": False, "files": [],
+                "diff": None, "branch": "hil-week" if "hil-week" in repo else "main"}
+    saved = (F._run_cli, F.tree_state, F._core_version, F.cli_path)
+    F._run_cli, F.tree_state = fake_cli, fake_tree
+    F._core_version, F.cli_path = lambda cli: "3.3.4", lambda: "arduino-cli"
+    try:
+        kw = dict(builds_root=builds, github=gh, sketchbook=sb)
+        man = F.build("w1", hooks=True, source=wt, **kw)
+        src, files = seen[-1]
+        assert os.path.basename(src) == "NaviCore" and os.path.normpath(src) != os.path.normpath(wt), src
+        assert sorted(files) == sorted(sketch), sorted(files)
+        assert all(files[k] == v.encode() for k, v in sketch.items()), "the staged copy differs from the source"
+        assert not os.path.exists(src), f"the staged copy {src} was left behind"
+        assert man["staged"] and man["navicore"]["repo"] == os.path.normpath(os.path.abspath(wt)), man["navicore"]
+        assert man["hooks"] and man["hooks_in_source"] and not man["warnings"], man
+        assert F.build_line(man).startswith("NaviCore `aaaaaaa` on hil-week clean; WCB_Client = "), F.build_line(man)
+        man = F.build("d1", **kw)
+        assert seen[-1][0] == os.path.join(gh, "NaviCore") and not man["staged"], (seen[-1][0], man["staged"])
+        assert F.build_line(man).startswith("NaviCore `aaaaaaa` clean; "), F.build_line(man)
+        man = F.build("n1", source=named, **kw)
+        assert seen[-1][0] == os.path.normpath(os.path.abspath(named)) and not man["staged"], seen[-1][0]
+        n = len(seen)
+        empty = os.path.join(tmp.root, "empty")
+        os.makedirs(empty)
+        assert "no NaviCore.ino" in str(_raises(lambda: F.build("x1", source=empty, **kw), F.BuildError))
+        write(wt, {"fw_version.h": version % "222222ZSEP26"})
+        e = str(_raises(lambda: F.build("w2", source=wt, **kw), F.BuildError))
+        assert "fw_version.h says v9.9.9_222222ZSEP26" in e and not os.path.exists(seen[-1][0]), (e, seen[-1][0])
+        write(wt, {"CLAUDE.md": NC_FQBN_DOC.replace(",PSRAM=opi", "")})
+        assert "does not name" in str(_raises(lambda: F.build("w3", source=wt, **kw), F.BuildError))
+        assert len(seen) == n + 1, "a refused source reached the compiler"
+    finally:
+        F._run_cli, F.tree_state, F._core_version, F.cli_path = saved
+    repo = os.path.join(tmp.root, "repo")
+    os.makedirs(repo)
+
+    def git(*args):
+        subprocess.run(["git", "-C", repo, "-c", "user.name=selftest", "-c", "user.email=selftest@invalid",
+                        "-c", "commit.gpgsign=false", *args], check=True, capture_output=True, timeout=60)
+    git("init", "-q", "-b", "hil-week")
+    write(repo, {"a.h": "int a;\n"})
+    git("add", "a.h")
+    git("commit", "-q", "-m", "a")
+    st = F.tree_state(repo)
+    assert st["branch"] == "hil-week" and not st["dirty"], st
+    assert F.tree_line(st) == f"`{st['short']}` on hil-week clean", F.tree_line(st)
+    git("checkout", "-q", "--detach")
+    st = F.tree_state(repo)
+    assert st["branch"] is None and F.tree_line(st) == f"`{st['short']}` clean", st
+
+
 class FakeOtaNavi(FakeNaviDev):
     """NaviCore's ?OTALOCAL (navicore_ota.h:244-310) behind FakeNaviDev: PING, #L12, STATUS, one session with a write
     cursor, the idle reaper (run when a line arrives, as checkOtaTimeout runs in loop()), END verifying the received
@@ -6100,7 +6201,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test,
          t_ncmesh_fragments, t_ncmesh_bridged_reassemble, t_ncmesh_burn_window, t_ncmesh_deaf_and_probe_peer,
          t_nccfg_suite_against_model,
-         t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_status_parse, t_ncflash_flash,
+         t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_build_source, t_ncflash_status_parse,
+         t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
