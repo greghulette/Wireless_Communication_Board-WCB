@@ -570,7 +570,7 @@ unit-tested in `selftest.py` now and used when a probe taps SBUS OUT (NC-WP14).
 
 ### INF3 — `nc_guard`: NaviCore snapshot and restore, and redaction
 
-> **Status 2026-09-28: built; no bench run yet.** `hil/nc_guard.py` holds the guard (`nc_guard`, `NcGuard`) and its
+> **Status 2026-09-28: built and bench-verified** (`nccfg.guard_selftest` in `20260928-064402` and `-070951`: the diff path, byte-identical, no credential in session.log). `hil/nc_guard.py` holds the guard (`nc_guard`, `NcGuard`) and its
 > parts: `take_snapshot`, `restore_config` (the ladder), `restore_state`, `restore`, `persist`, `load_snapshot` and
 > `reconcile`. `hil/checkpoint.py` gains the JSON password patterns in `_SECRET_TEXT`, `redacted_diff`, `SECRET_KEY`
 > and `Checkpoint.set_navicore_ref`. In `hil/runner.py`, `Bench.log` filters the device kinds in `REDACT_KINDS`
@@ -648,7 +648,7 @@ slot 3 and a serialLabel; restore; byte-identical, and nothing secret in `sessio
 
 ### INF4 — `hil/ncflash.py`: build, flash, recover
 
-> **Status 2026-09-28: built; the build is proven, nothing has been flashed.** `hil/ncflash.py` holds `build`,
+> **Status 2026-09-28: built and bench-verified.** The first flash (07:09) re-wrote the running image over `?OTALOCAL` from `app0` into `app1`: 1143 chunks in 79 s, no NAK, no resync, two nudges, END OK, PONG `v0.2.0_102105QSEP26` from the new slot; the reset rung was proven just before it (a USB chip reset, a flash boot, PONG at 2.7 s), and the NaviCore smoke tests and `nccfg.guard_selftest` passed afterwards (`20260928-070951`). The esptool rungs are not yet exercised. `hil/ncflash.py` holds `build`,
 > `check_image`, `ota_status`, `ota_begin`, `ota_stream`, `ota_abort`, `flash`, `recover` and `record_flash`, and a
 > command line (`python -m hil.ncflash build|check|libs|status|reset|flash|recover`, run from `tests/hil`);
 > `docs/HIL_TESTING.md` §5 says how a test or a session uses them. `selftest.py` has seven cases: synthetic ESP32-S3
@@ -1316,5 +1316,6 @@ D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |
 | 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |
 | 2026-09-28 | _(pending)_ | INF3 built: `hil/nc_guard.py`, the credential filter in `Bench.log`, `redacted_diff`, the resume's NaviCore check, and `nccfg.guard_selftest` in the new `s40_navicore_config.py`. The INF3 status note lists where the code differed from the plan. |
