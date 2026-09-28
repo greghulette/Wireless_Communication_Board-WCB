@@ -4,12 +4,20 @@
 //
 // The ORIGIN must never change: Chrome stores each board's Web Serial grant per origin, so a different host or
 // port would make every profile in .profiles/ need authorizing again.
+//
+// /NaviCore/... is an alias for the sibling NaviCore repo (lib/navicore/paths.js finds it), so the NaviCore config
+// tool loads from /NaviCore/config_tool/index.html with its relative cmdlib/ fetches working, and shares an origin
+// with /Wizard/ (the shared-hub specs need both tabs on one origin: Web Locks and BroadcastChannel are per origin).
+// The NaviCore specs use their own origin, 127.0.0.1:8779 (a second copy of this server), so they never touch the
+// Wizard's 8778 grants. A missing NaviCore repo is a 404 naming the fix, and the NaviCore specs skip.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const { navicoreRoot } = require('./lib/navicore/paths');
 
 const ROOT = path.join(__dirname, '..', '..');
 const PORT = Number(process.argv[2] || 8778);
+const NC_PREFIX = '/NaviCore/';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -28,9 +36,22 @@ const TYPES = {
 
 http.createServer((req, res) => {
   const url = decodeURIComponent((req.url || '/').split('?')[0]);
-  const file = path.join(ROOT, url.endsWith('/') ? path.join(url, 'index.html') : url);
-  // Never serve outside the repo, whatever the request says.
-  if (!path.resolve(file).startsWith(path.resolve(ROOT))) {
+  let base = ROOT;
+  let rel = url;
+  if (url === '/NaviCore' || url.startsWith(NC_PREFIX)) {
+    base = navicoreRoot();
+    if (!base) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' })
+        .end('NaviCore repo not found beside this one — clone it next to the WCB repo or set NAVICORE_REPO');
+      return;
+    }
+    rel = url.slice('/NaviCore'.length) || '/';
+  }
+  const file = path.join(base, rel.endsWith('/') ? path.join(rel, 'index.html') : rel);
+  // Never serve outside the repo (or the NaviCore repo, for the alias), whatever the request says.
+  const abs = path.resolve(file);
+  const top = path.resolve(base);
+  if (abs !== top && !abs.startsWith(top + path.sep)) {
     res.writeHead(403).end('forbidden');
     return;
   }

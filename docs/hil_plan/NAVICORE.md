@@ -758,6 +758,45 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 
 ### INF7 — the config-tool rig
 
+> **Status 2026-09-28: built; L0 and L1 run with no bench, L2 written and not yet run on the bench.**
+> `docs/HIL_TESTING.md` §8 ("The NaviCore config tool") says how the rig works and how to run it. In `tests/wizard`:
+> `serve.js`'s `/NaviCore/` alias (`lib/navicore/paths.js` finds the sibling repo by walking up, so a worktree works;
+> `NAVICORE_REPO` overrides); `lib/navicore/shim.js` (the fake `navigator.serial` and `FakeSerial`, its Node side),
+> `emulator.js` (direct, via-WCB and doorway modes), `model.js` (`rcConfigLoadDefaults`/`FromJSON`/`ToJSON` in JS, with
+> ArduinoJson 7's type-strict `|`), `pipe.js` (the bridge-backed port), `fixtures.js` and `tool.js` (page helpers);
+> `unit/navicore/` (`extract.js`, `static.test.js`, `unit.test.js`, `cmdlib.js`, and `rig.test.js`, which holds the
+> model and the emulator to the firmware's rules); `fixtures/navicore/config.bench.json`; `tools/make_nc_fixture.js`
+> and `tools/scrub_nc_config.py`. In `tests/hil`: `hil/bridge.py`'s `/serial/mark|read|write|signals` and `/sbus`,
+> `hil/wizard.py`'s `run_wizard_test(..., pipe=True)`, the NaviCore PING in `_reacquire` and `run_unit_tests(files=)`,
+> the suite `suites/s49_navicore_tool.py`, and `selftest.py`'s `t_nctool_pipe_bridge`. Where the build differs from the
+> plan below, and why:
+> - **Origin 8779, not 8778.** The specs never touch the Wizard's 8778 origin and its Web Serial grants (the plan's
+>   reason for sharing it). `playwright.config.js` starts a second `serve.js` on 8779 serving the same tree, so the
+>   shared-hub spec still has the tool and the Wizard on one origin.
+> - **Lines, not bytes, through the pipe.** `SerialDevice` is line-oriented (`hil/serialdev.py:98-108`), so
+>   `/serial/read` returns lines since a mark and `pipe.js` gathers the page's writes into whole lines. That also keeps
+>   `Bench.log`'s credential filter working: a 512-byte piece of a SET_CONFIG could split a password field.
+> - **The fixture is bench-shaped, not the bench's.** No bench this session, so `config.bench.json` is built from §1.4's
+>   facts through the model; `scrub_nc_config.py --from <run>/navicore_snapshot.json` replaces it with the real config,
+>   one placeholder per distinct secret value, and refuses to write a leak. The specs read the file, not its content.
+> - **Headless L1.** A fake port needs no grant, so nobody has to see Chrome (`NCTOOL_HEADED=1` shows it).
+> - **`(should)` specs are `test.fail()`** in Playwright (green standalone and in CI, red once fixed) and FAIL in the
+>   harness; the node layer uses `todo` tests, which `run_unit_tests` notes by name.
+> - **The L2 proof is `nctool.board_connect_config`**, read-only: it refuses to press Save while a diff exists.
+> - Code facts the specs found that the plan or the tool's comments do not say (each pinned by a spec, NC-WP3):
+>   the PONG epoch does not separate the probe phases: the handler stamps the epoch current when a reply LANDS
+>   (`config_tool/index.html:9515-9517`), so a late direct PONG satisfies the Via-WCB probe; `readActionFromFid` writes
+>   `skipRunning: 1` (`:15433`, `:15446`, `:15458`, and `_cmdlibUse` `:14166`) and `rcConfigFromJSON` reads `obj["skipRunning"] | false`, which in
+>   ArduinoJson 7.4.3 returns the default for any non-boolean (`VariantOperators.hpp:34-40`, `ConverterImpl.hpp:124-127`),
+>   so an Apply clears the gate on the board (D-NC32 is worse than a phantom diff); `_fragChunks` drops the tail of an
+>   input with lone surrogates (its last `flush()` leaves the carry unflushed, `:5556-5594`), latent because its callers
+>   pass `JSON.stringify` output; a bridged Save over 192 fragments is refused by `sendJSON` after `saveConfigToBoard`
+>   has latched the pending save (`:5663-5668`, `:16940`), so the tool shows "Saving…" for 12 s; `_appendCommandView`
+>   sets the field cap while the row is detached, so on open it is 95 instead of 95 minus the `;W<n>;S<p>` prefix
+>   (`:15108-15123`, reached from `sync()` at `:15192` and the render-time call at `:15235`); `_releaseSerialOnUnload`'s `try { p.close() } catch` cannot catch the promise's
+>   rejection (`:4501`); the WCB channel hint says "1-13" while the field caps at 11 (`:2862-2864`). The Wizard's
+>   `seqValueToLines` is at `Wizard/app.js:4485`, not :4404.
+
 In `tests/wizard` (D-NC10); details in §5. `serve.js` maps `/NaviCore/` to the sibling repo; new files
 `lib/navicore/shim.js` (the fake `navigator.serial`), `lib/navicore/emulator.js`, `lib/navicore/pipe.js` (the
 bridge-backed port) and a scrubbed fixture. `hil/bridge.py` gains `/serial/mark`, `/serial/read`, `/serial/write`
@@ -902,6 +941,23 @@ everything inside `nc_guard`.
 
 §5. `nctool.static` and `nctool.unit` (L0) and the ~55 L1 specs of the config-tool table in §2. No bench time;
 runs in CI, and can be written while the bench is busy with other plans.
+
+> **Status 2026-09-28: written, all run headless with no board** (`suites/s49_navicore_tool.py`; how to run them:
+> `docs/HIL_TESTING.md` §8). L0: `nctool.static` (9 checks) and `nctool.unit` (the page's pure functions, 10 checks,
+> one a `todo` for the latent `_fragChunks` tail drop; plus the rig's own 6). L1, by file in `tests/wizard/specs/navicore`:
+> `load` (`load_smoke`, `connect_direct_sequence`); `transport` (`transport_flag_reset`, `disconnect_teardown`,
+> `link_loss_reconnect`, `link_loss_ambiguous_ports`, `via_wcb_hub`, `keepalive_via_wcb`, and the `(should)`
+> `pong_epoch_slow_direct` and `doorway_pong_misdetect`); `rx` (`rx_framing_markers`, `rx_fragments`,
+> `config_error_no_baseline`); `save` (`apply_all_keys`, `no_phantom_diff`, `save_diff_payload`, `save_ack_correlation`,
+> `reset_defaults_flow`, `close_prompt`, the `(should)` `refresh_overwrites_edits`); `bridge` (`push_budget_prediction`,
+> `sendjson_fragments_exact`, `sendline_chunking`, the `(should)` `push_refused_not_pending`); `editors`
+> (`button_modal_trigger`, `test_action_button`, `command_view_limits`, `wcb_network_profiles`,
+> `wcb_network_bridged_strip`, and the `(should)` `noop_apply_every_editor`, `skip_running_saved`,
+> `test_action_refusal_shown`, `command_view_cap_on_open`). The eight `(should)` specs each fail at their own
+> assertion; the INF7 note lists what they found. Not yet written from the §2 table: the clips, timeline, command-library
+> sync and sequence-source, firmware (flash, wipe text, both OTAs), live monitor and rc telemetry, WCB status panel,
+> calibration, export/import, CSV, cloud backup, shared-hub, multi-tab, channels/transmitter and misc-editor, Maestro XML
+> and Intellex-contract specs.
 
 ### NC-WP4 — the engine through TRIGGER and TEST_ACTION (`s41_navicore_engine.py`, `ncengine.*`)
 
@@ -1316,6 +1372,7 @@ D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
 | 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |
 | 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |
 | 2026-09-28 | _(pending)_ | INF3 built: `hil/nc_guard.py`, the credential filter in `Bench.log`, `redacted_diff`, the resume's NaviCore check, and `nccfg.guard_selftest` in the new `s40_navicore_config.py`. The INF3 status note lists where the code differed from the plan. |
