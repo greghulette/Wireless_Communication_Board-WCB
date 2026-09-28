@@ -1,15 +1,23 @@
-"""WiFi modes and the WebSocket endpoint (docs/WIFI_DESIGN.md; docs/HIL_TEST_AUDIT.md WP7). All opt-in:
-- `wifi_modes`: W1 turns its access point off and back on, then joins W2's access point and returns to its own. A
-  mode applies at boot, so each change is a W1 reboot (four in all). Nothing needs the PC's WiFi adapter.
+"""WiFi modes and the WebSocket endpoint (docs/WIFI_DESIGN.md; docs/HIL_TEST_AUDIT.md WP7).
+- Setter validation, no opt-in (docs/hil_plan/WCB.md WCB-WP17): refusals that save nothing, and saves that change
+  nothing before a reboot - a derived SSID, passphrases ending in '?', holding commas, a leading or a trailing space.
+  A mode or name is applied only at boot (wcbWifiStart, WCB.ino:9619), and these tests never reboot: each replays W1's
+  own ?WIFI line in its finally and checks the chain holds it again.
+- `wifi_modes` (opt-in): W1 turns its access point off and back on, joins W2's access point and returns to its own,
+  and hosts its access point under the derived name for one boot. A mode applies at boot, so each change is a W1 reboot
+  (six in all). Nothing needs the PC's WiFi adapter.
 - `wifi_pc` (attended): a WiFi adapter on the PC joins W1's access point, opens ws://192.168.4.1/ws and gets ?VERSION
   answered over it, then returns to the network it was on. It uses an adapter that does not carry the PC's internet
   when there is one (this bench's TP-Link "Wi-Fi 2"); with a single adapter the PC is offline for about 30 s.
 
 Credentials: the AP and JOIN lines carry a password. It is read from the board's own chain at run time and given
 back to a board or to a Windows WiFi profile that is removed afterwards; it never goes into a note, a message or a
-file that stays. (?backup output, and so the session log, already carries it, as it always has.) A restore if aborted:
-replay W1's own ?WIFI line from its chain on its USB console and reboot; on the PC, `netsh wlan delete profile
-name=HIL-<W1's SSID> interface=<adapter>` and `netsh wlan connect name=<its network> interface=<adapter>`.
+file that stays. (?backup output, and so the session log, already carries it, as it always has.) Neither does an SSID:
+W1's own or derived name is compared, never quoted, and a token is shown only as its hash (redact_token). The setter
+tests' throwaway SSIDs and passphrases (HIL + a nonce) are never used for a network. A restore if aborted: replay W1's
+own ?WIFI line from its chain on its USB console (and reboot, if the board was rebooted since it changed); on the PC,
+`netsh wlan delete profile name=HIL-<W1's SSID> interface=<adapter>` and `netsh wlan connect name=<its network>
+interface=<adapter>`.
 """
 import os
 import re
@@ -17,10 +25,10 @@ import subprocess
 import tempfile
 import time
 
-from hil.checkpoint import redact_text
+from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
 from hil.ws import WsClient
-from suites.common import Console, Watch, config_guard, link, marker, token, usb_wcb
+from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 
 
 def _has(lines, text):
@@ -82,6 +90,180 @@ def _restore_ap(w, tok, ssid, problems):
     bm = w.reboot()
     if not _has(w.dev.since(bm), f'[WIFI] SoftAP "{ssid}" up on channel'):
         problems.append("W1's access point did not come back at boot")
+
+
+# ============================================================ setter validation (no opt-in: nothing applies before a reboot)
+def _derived_ssid(tokens, n):
+    """The name wcbWifiDefaultSsid() builds from the chain: 'WCB-<alias>', or 'WCB-<n>' with no alias, cut to 32
+    characters (WCB_WiFi.cpp:71-79). An SSID: compared, never printed."""
+    a = token(tokens, "?ALIAS,")
+    return ("WCB-" + (a.split(",", 1)[1] if a else str(n)))[:32]
+
+
+def _wifi_now(bench):
+    """W1's ?WIFI token as its chain holds it now, or None."""
+    return token(snapshot(bench, 1), "?WIFI,")
+
+
+def _put_back(w, bench, tok, problems):
+    """Replay W1's own ?WIFI line (never printed) and check its chain holds it again. A save only applies at the next
+    boot (wcbWifiStart, WCB.ino:9619), and these tests never reboot, so the access point itself is never touched."""
+    w.run(tok)
+    now = _wifi_now(bench)
+    if now != tok:
+        problems.append(f"W1's ?WIFI token did not come back ({redact_token(now or '(none)')}, expected "
+                        f"{redact_token(tok)}): replay W1's own ?WIFI line from its ?backup on its USB console before "
+                        f"anything reboots it")
+
+
+@test("wifi.setter_refusals", "?WIFI refuses and saves nothing for an AP password under 8 characters or none at all (the open-AP guard), JOIN with no network name, an SSID over 32 characters (AP and JOIN) and an unknown verb; W1's Mode line and ?WIFI token stay as they were (no opt-in: nothing is saved)", needs=["wcb1"], links=[])
+def setter_refusals(bench):
+    """WCB-WP17 row 1. processWifiCommand (WCB_WiFi.cpp:373-421) checks the verb, the JOIN network name, the SSID length
+    and the AP password before it stores anything (:423-432), so a refusal saves nothing and W1's access point is never
+    touched. The SSIDs and passphrases here are throwaway; W1's own token is compared by hash, and replayed at once
+    should a refusal ever regress into a save."""
+    w = usb_wcb(bench)
+    long_ssid = "HIL" + "X" * 30                                 # 33 characters
+    open_ap = ["Refusing to configure an OPEN access point — this interface accepts",
+               "commands for the whole mesh with no credential of its own."]
+    join_name = ["A network name is required: ?WIFI,JOIN,<ssid>,<pass>"]
+    too_long = ["SSID is 33 characters; the maximum is 32."]
+    checks = (
+        ("an AP password of 7 characters", "?WIFI,AP,HILX,abc1234",
+         ["AP password is 7 character(s); WPA2 requires at least 8."] + open_ap),
+        ("an AP with no password", "?WIFI,AP,HILX", ["AP password is 0 character(s); WPA2 requires at least 8."] + open_ap),
+        ("JOIN with no network", "?WIFI,JOIN", join_name),
+        ("JOIN with an empty network name", "?WIFI,JOIN,,hilpass99", join_name),
+        ("JOIN with a 33-character SSID", f"?WIFI,JOIN,{long_ssid},hilpass99", too_long),
+        ("an AP with a 33-character SSID", f"?WIFI,AP,{long_ssid},hilpass99", too_long),
+        ("an unknown verb", "?WIFI,BOGUS", ["Usage: ?WIFI | ?WIFI,OFF | ?WIFI,AP,<ssid>,<pass> | ?WIFI,JOIN,<ssid>,<pass>"]),
+    )
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok = token(before[1], "?WIFI,")
+        if tok is None:
+            raise Skip("the chain lacks a ?WIFI line")
+        mode0 = _status(w).get("Mode")
+        try:
+            for what, cmd, wants in checks:
+                out = [x.rstrip() for x in w.run(cmd)]
+                missing = [x for x in wants if x not in out]
+                if missing:
+                    problems.append(f"{what}: no {missing}")
+                if _has(out, "WiFi mode set to"):
+                    problems.append(f"{what} was saved")
+            mode = _status(w).get("Mode")
+            if mode != mode0:
+                problems.append(f"the Mode line went from {mode0!r} to {mode!r}")
+        finally:
+            if _wifi_now(bench) != tok:
+                problems.append("a refused ?WIFI line changed W1's ?WIFI token")
+                _put_back(w, bench, tok, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.ap_derived_ssid", "?WIFI,AP with an empty SSID and W1's own password saves the derived name WCB-<alias> (WCB-<n> with no alias): the confirmation names it, the status block shows it as '(derived)', the chain token's SSID is empty, and the running access point is untouched; W1's own ?WIFI line goes back at once (no opt-in: a name applies only at boot, and nothing boots here)", needs=["wcb1"], links=[])
+def ap_derived_ssid(bench):
+    """WCB-WP17 row 2. Only JOIN needs a network name (WCB_WiFi.cpp:404-407): an AP's empty SSID is stored as it is,
+    and the confirmation and the status block show wcbWifiDefaultSsid() instead (:434-443, :337-339; the name itself at
+    :71-79). A mode is applied only at boot (wcbWifiStart, WCB.ino:9619), so the access point keeps running under its own
+    name until W1's own line is replayed. The boot half, the SoftAP coming up under the derived name, is
+    wifi.ap_derived_ssid_boot (opt-in wifi_modes). The SSIDs and the password are compared, never printed."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok, mode, ssid, pw = _wifi_token(before[1])
+        if mode != "AP" or len(pw) < 8:
+            raise Skip("W1 does not host an access point with a password")
+        derived = _derived_ssid(before[1], bench.usb_wcb_number())
+        st0 = _status(w)
+        changed = False
+        try:
+            out = [x.rstrip() for x in w.run(f"?WIFI,AP,,{pw}")]
+            changed = True
+            if not any(x.startswith(f'WiFi mode set to AP — SSID "{derived}" on channel ') for x in out):
+                problems.append("the confirmation does not name the derived SSID (WCB- and the alias, or the number)")
+            st = _status(w)
+            if st.get("AP SSID") != f"{derived} (derived)":
+                problems.append("the status block's AP SSID is not the derived name marked '(derived)'")
+            if st.get("AP password") != "set":
+                problems.append(f"the status block's AP password line says {st.get('AP password')!r}")
+            for k in ("Mode", "Interface", "IP address", "Radio channel"):
+                if st.get(k) != st0.get(k):
+                    problems.append(f"the saved name changed the running {k} line: {st0.get(k)!r} -> {st.get(k)!r}")
+            if _wifi_now(bench) != f"?WIFI,AP,,{pw}":
+                problems.append("the chain token is not ?WIFI,AP with an empty SSID and W1's own password")
+        finally:
+            if changed:
+                _put_back(w, bench, tok, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.passphrase_trailing_q", "A ?WIFI passphrase ending in '?' is saved, not eaten as a help request, in the upper- and the mixed-case spelling (?Wifi, tracker #95): each confirms, prints no help, and the chain token ends in the '?'; W1's own ?WIFI line goes back at once (no opt-in: nothing applies before a reboot)", needs=["wcb1"], links=[])
+def passphrase_trailing_q(bench):
+    """WCB-WP17 row 3. A '?' command whose body ends in '?' is a help request (WCB.ino:6055-6059), but the data-bearing
+    verbs, WIFI among them and matched in any case since tracker #95 (docs/HIL_WEEK_DECISIONS.md D31), are exempt
+    (:6036-6053), so the line reaches processWifiCommand and saveWifiSettings (WCB_WiFi.cpp:423-432). Throwaway SSID and
+    passphrases; W1's own token is compared by hash and replayed in the finally."""
+    w = usb_wcb(bench)
+    s = f"HIL{nonce()}"
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok = token(before[1], "?WIFI,")
+        if tok is None:
+            raise Skip("the chain lacks a ?WIFI line")
+        changed = False
+        try:
+            for verb in ("?WIFI", "?Wifi"):
+                p = f"hil{nonce().lower()}?"
+                changed = True
+                out = [x.rstrip() for x in w.run(f"{verb},AP,{s},{p}")]
+                if _has(out, "Command Reference") or not any(x.startswith(f'WiFi mode set to AP — SSID "{s}"') for x in out):
+                    problems.append(f"{verb},AP with a passphrase ending in '?' was not saved ({len(out)} line(s), no "
+                                    f"confirmation{', the help page' if _has(out, 'Command Reference') else ''})")
+                if _wifi_now(bench) != f"?WIFI,AP,{s},{p}":
+                    problems.append(f"after {verb},AP the chain token is not the throwaway line ending in '?'")
+        finally:
+            if changed:
+                _put_back(w, bench, tok, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.passphrase_commas_spaces", "A ?WIFI passphrase is everything after the SSID: its commas stay and so does a leading space, while a trailing space is trimmed off the line before ?WIFI sees it (the documented rule since re-scan #31); each is read back from the chain token; W1's own ?WIFI line goes back at once (no opt-in: nothing applies before a reboot)", needs=["wcb1"], links=[])
+def passphrase_commas_spaces(bench):
+    """WCB-WP17 row 4. processWifiCommand splits only at the verb's and the SSID's commas and leaves the passphrase
+    untrimmed (WCB_WiFi.cpp:376-399); every line reader trims the whole line first (processIncomingSerial, WCB.ino:8445),
+    and the comment at WCB_WiFi.cpp:400-402 records that as the rule (re-scan #31, docs/HIL_WEEK_DECISIONS.md D15). AP,
+    not JOIN as the plan has it: the split is the same code for both verbs, and AP leaves W1's saved mode as it is.
+    Throwaway SSID and passphrases (each 8+ characters, so the AP check passes); W1's own token is compared by hash and
+    replayed in the finally."""
+    w = usb_wcb(bench)
+    s, n = f"HIL{nonce()}", nonce().lower()
+    cases = (("commas", f"ab,cd,ef{n}", f"ab,cd,ef{n}"),
+             ("a leading space", f" lead{n}", f" lead{n}"),
+             ("a trailing space", f"trail{n} ", f"trail{n}"))
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok = token(before[1], "?WIFI,")
+        if tok is None:
+            raise Skip("the chain lacks a ?WIFI line")
+        changed = False
+        try:
+            for what, sent, stored in cases:
+                changed = True
+                out = [x.rstrip() for x in w.run(f"?WIFI,AP,{s},{sent}")]
+                if not any(x.startswith(f'WiFi mode set to AP — SSID "{s}"') for x in out):
+                    problems.append(f"a passphrase with {what} was not saved")
+                    continue
+                now = _wifi_now(bench) or ""
+                if now != f"?WIFI,AP,{s},{stored}":
+                    got = now.split(",", 3)[3] if now.count(",") >= 3 else ""
+                    problems.append(f"a passphrase with {what} was stored as {len(got)} characters "
+                                    f"({redact_token(now)}), expected {len(stored)}")
+        finally:
+            if changed:
+                _put_back(w, bench, tok, problems)
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ modes (no PC adapter)
@@ -180,6 +362,48 @@ def join_w2_ap(bench):
                 _restore_ap(w, tok1, ssid1, problems)
         if _status(w).get("Mode") != "AP":
             problems.append("W1 is not back in AP mode")
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.ap_derived_ssid_boot", "An access point saved with an empty SSID comes up at boot under the derived name WCB-<alias> (the SoftAP boot line, and '(derived)' in the status block) while the mesh still delivers; W1's own ?WIFI,AP line and a reboot bring its own name back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="changes W1's access point name and reboots it twice")
+def ap_derived_ssid_boot(bench):
+    """WCB-WP17 row 2, the boot half (wifi.ap_derived_ssid is the rest, with no reboot). wcbWifiStartAP hosts
+    wcbWifiDefaultSsid() when the saved SSID is empty (WCB_WiFi.cpp:108, :71-79) and says so at boot:
+    '[WIFI] SoftAP "<ssid>" up on channel <n> - ws://...' (:180). Anything on W1's access point drops for the ~20 s the
+    other name is up; nothing on this bench uses it outside wifi.pc_joins_ap_ws. The derived name and W1's own are
+    compared, never printed."""
+    w2s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok, mode, ssid, pw = _wifi_token(before[1])
+        if mode != "AP" or len(pw) < 8:
+            raise Skip("W1 does not host an access point with a password")
+        if not ssid:
+            raise Skip("W1's access point already uses the derived name")
+        derived = _derived_ssid(before[1], bench.usb_wcb_number())
+        changed = False
+        try:
+            out = w.run(f"?WIFI,AP,,{pw}")
+            changed = True
+            if not _has(out, f'WiFi mode set to AP — SSID "{derived}"'):
+                problems.append("?WIFI,AP with an empty SSID did not confirm the derived name")
+            bm = w.reboot()
+            if not _has(w.dev.since(bm), f'[WIFI] SoftAP "{derived}" up on channel'):
+                problems.append("the boot did not bring the access point up under the derived name")
+            st = _status(w)
+            if st.get("AP SSID") != f"{derived} (derived)" or st.get("Interface") != "up":
+                problems.append(f"after the boot the status block's AP SSID is not the derived name, or the interface "
+                                f"is {st.get('Interface')!r}")
+            if not st.get("WS endpoint", "").startswith("ws://"):
+                problems.append(f"WS endpoint {st.get('WS endpoint')!r}")
+            _unicast_ok(w, w2s2, problems, "with the access point under the derived name")
+        finally:
+            if changed:
+                _restore_ap(w, tok, ssid, problems)
+        st = _status(w)
+        if st.get("AP SSID") != ssid or st.get("Interface") != "up":
+            problems.append(f"W1's access point did not come back under its own name (interface {st.get('Interface')!r})")
     assert not problems, "; ".join(problems)
 
 
