@@ -37,6 +37,12 @@ failure, what it restores besides the config (command library, HIL clips, RAM to
 through a scripted W1), the snapshot file and checkpoint record a killed test leaves, the resume's NaviCore check
 (restore, compare, accept, refuse a foreign snapshot), Bench.log's filter on NaviCore and SBUS lines, redacted_diff,
 and s40's nccfg.guard_selftest run whole against the fake.
+NaviCore's image tooling (hil/ncflash.py, INF4): the image check on synthetic ESP32-S3 images and each defect it names;
+the sketchbook-against-repo library check; build()'s command line, BUILD.json and refusals against a scripted
+arduino-cli; ?OTALOCAL,STATUS parsing; flash() against a fake NaviCore that speaks ?OTALOCAL (ACK, a damaged line's
+NAK and the rewind, a lost ACK found by STATUS, an ACK held until the host sends, the idle reaper, a chunk written
+short, END's verify, the restart into the other slot, the old slot, no return); and the recovery ladder's decisions
+against a fake board and a scripted esptool, which may only ever write 0x10000 and 0xe000.
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -3944,6 +3950,654 @@ def t_nc_guard_bench_test(tmp):
     b.close()
 
 
+# ---------------------------------------------------------------------------- NaviCore images (INF4, hil/ncflash.py)
+NC_VERSION = "v9.9.9_111111ZSEP26"
+NC_PARTITIONS = ("# Name, Type, SubType, Offset, Size, Flags\n"                   # NaviCore partitions.csv:14-21
+                 "nvs, data, nvs, 0x9000, 0x5000,\notadata, data, ota, 0xe000, 0x2000,\n"
+                 "app0, app, ota_0, 0x10000, 0x1e0000,\napp1, app, ota_1, 0x1f0000, 0x1e0000,\n"
+                 "spiffs, data, spiffs, 0x3d0000, 0x20000,\ncoredump, data, coredump, 0x3f0000, 0x10000,\n"
+                 "clips, data, spiffs, 0x400000, 0xc00000,\n")
+NC_FQBN_DOC = ("arduino-cli compile --fqbn \"esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=custom,"
+               "FlashSize=16M,PSRAM=opi\" NaviCore.ino\n")
+
+
+def _nc_image(version=NC_VERSION, elf=b"\x7fELF selftest", chip_id=9, body=6000, zero_sha=False,
+              desc_magic=0xABCD5432):
+    """A small ESP32-S3 app image in esptool's layout -> (image, elf): the 24-byte header (chip id at 12,
+    hash_appended at 23); two segments, the first holding esp_app_desc_t at file offset 0x20 with the ELF's SHA-256 at
+    0xB0 and a FW_VERSION string after it; the checksum byte ending a 16-byte block; the SHA-256 of all that."""
+    import hashlib
+    import struct
+    desc = bytearray(0x100)
+    struct.pack_into("<I", desc, 0, desc_magic)
+    if not zero_sha:
+        desc[0x90:0xB0] = hashlib.sha256(elf).digest()
+    seg0 = bytes(desc) + b"FW:" + version.encode() + b"\0"
+    seg0 += b"\0" * (-len(seg0) % 4)
+    seg1 = bytes((i * 7 + 3) & 0xFF for i in range(body))
+    seg1 += b"\0" * (-len(seg1) % 4)
+    img = bytearray(struct.pack("<BBBBIB3sHBHH4sB", 0xE9, 2, 2, 0x4F, 0x40376260, 0xEE, b"\0\0\0", chip_id, 0, 0,
+                                0xFFFF, b"\0" * 4, 1))
+    csum = 0xEF
+    for addr, data in ((0x3C0E0020, seg0), (0x42000020, seg1)):
+        img += struct.pack("<II", addr, len(data)) + data
+        for b in data:
+            csum ^= b
+    img += b"\0" * (15 - len(img) % 16) + bytes([csum])
+    img += hashlib.sha256(bytes(img)).digest()
+    return bytes(img), elf
+
+
+def _nc_folder(root, name, image, elf, csv=NC_PARTITIONS):
+    """A build folder as arduino-cli leaves one: the image, its ELF and the partitions.csv copy."""
+    folder = os.path.join(root, name)
+    os.makedirs(folder, exist_ok=True)
+    for fn, data in (("NaviCore.ino.bin", image), ("NaviCore.ino.elf", elf), ("partitions.csv", csv.encode())):
+        if data is not None:
+            with open(os.path.join(folder, fn), "wb") as f:
+                f.write(data)
+    return folder
+
+
+def _nc_otadata():
+    """The esp32 core's boot_app0.bin, byte for byte: sequence 1 and its CRC in the first sector, sequence 0 (whose CRC
+    0xFFFFFFFF happens to be right) in the second, everything else erased."""
+    import struct
+    import zlib
+    seq = struct.pack("<I", 1)
+    first = seq + b"\xFF" * 24 + struct.pack("<I", zlib.crc32(seq, 0xFFFFFFFF))
+    return first + b"\xFF" * (0x1000 - len(first)) + b"\0\0\0\0" + b"\xFF" * (0x1000 - 4)
+
+
+def t_ncflash_image_check(tmp):
+    """check_image (hil/ncflash.py, INF4) on synthetic ESP32-S3 images: a good one gives its version, its ELF SHA-256
+    (the ELF beside it hashing to the bytes at 0xB0) and the slot from its folder's partitions.csv; every defect is
+    named - the magic, the chip id, a corrupt segment (checksum), the appended SHA-256, trailing bytes, an ELF of
+    another build, a zero ELF SHA, no app descriptor, no or two version strings, too big for the slot (given or from
+    the csv), a BUILD.json describing another image. Also the tables the recovery trusts: partitions.csv (NaviCore's
+    rows), check_layout, and check_otadata on boot_app0.bin's bytes."""
+    import hashlib
+    import struct
+    import zlib
+    from hil import ncflash as F
+    img, elf = _nc_image()
+    good = _nc_folder(tmp.root, "good", img, elf)
+    info = F.check_image(good)
+    assert info["version"] == NC_VERSION and info["elf_sha"] == hashlib.sha256(elf).hexdigest(), info
+    assert info["elf_checked"] and info["slot"] == 0x1E0000 and info["size"] == len(img) and info["data"] == img, info
+    assert F.check_image(os.path.join(good, "NaviCore.ino.bin"))["folder"] == os.path.normpath(good)
+
+    def bad(name, data, want, elf_bytes=elf, csv=NC_PARTITIONS, slot=None):
+        folder = _nc_folder(tmp.root, name, data, elf_bytes, csv)
+        e = _raises(lambda: F.check_image(folder, slot=slot), F.ImageError)
+        assert want in str(e), (name, str(e))
+    magic = bytearray(img)
+    magic[0] = 0xE8
+    bad("magic", bytes(magic), "magic byte 0xE8")
+    bad("chip", _nc_image(chip_id=0)[0], "chip id 0, not 9")
+    seg = bytearray(img)
+    seg[0x200] ^= 0x01
+    bad("segment", bytes(seg), "checksum byte")
+    tail = bytearray(img)
+    tail[-1] ^= 0x01
+    bad("sha", bytes(tail), "appended SHA-256 does not match")
+    bad("trailing", img + b"\0" * 16, "+16 bytes after the image's end")
+    bad("elf", img, "are not one build", elf_bytes=b"another build")
+    bad("zero", _nc_image(zero_sha=True)[0], "all zero")
+    bad("desc", _nc_image(desc_magic=0)[0], "no app descriptor")
+    bad("noversion", _nc_image(version="none")[0], "no FW_VERSION string")
+    bad("two", _nc_image(version=NC_VERSION + "\0v1.0.0_010101ZJAN26")[0], "2 version strings")
+    bad("slot", img, f"{len(img)} B does not fit the 4096 B OTA slot", slot=4096)
+    bad("slotcsv", img, "does not fit the 4096 B OTA slot", csv=NC_PARTITIONS.replace("0x1e0000", "0x1000"))
+    folder = _nc_folder(tmp.root, "manifest", img, elf)
+    with open(os.path.join(folder, "BUILD.json"), "w", encoding="utf-8") as f:
+        json.dump({"image": {"elf_sha": "ab" * 32}}, f)
+    assert "records ELF abababababababab" in str(_raises(lambda: F.check_image(folder), F.ImageError))
+    parts = F.partitions(NC_PARTITIONS)
+    assert F.ota_slot(parts) == 0x1E0000 and parts["app0"]["offset"] == 0x10000, parts
+    assert (parts["otadata"]["offset"], parts["otadata"]["size"], parts["clips"]["size"]) == (0xE000, 0x2000, 0xC00000)
+    F.check_layout(NC_PARTITIONS)
+    _raises(lambda: F.check_layout(NC_PARTITIONS.replace("0xe000", "0xd000")), ValueError)
+    ota = _nc_otadata()
+    F.check_otadata(ota)
+    app1 = bytearray(ota)                                    # sequence 2 in the first sector would boot app1
+    app1[0:4], app1[28:32] = b"\x02\0\0\0", struct.pack("<I", zlib.crc32(b"\x02\0\0\0", 0xFFFFFFFF))
+    for broken in (ota[:4096], bytes(app1), b"\x09" + ota[1:], b"\xFF" * 0x2000):
+        _raises(lambda: F.check_otadata(broken), ValueError)
+
+
+def t_ncflash_libs(tmp):
+    """The library pre-check: compare_tree reads only src/ and library.properties, lists a CRLF-only difference as
+    eol_only (still the same), and names a real difference and a file on one side only; check_libs pairs the
+    sketchbook's WCB_Client and WcbCmd with the WCBClient and WcbCmd repos and never writes either; libs_line says so."""
+    from hil import ncflash as F
+    gh, sb = os.path.join(tmp.root, "gh"), os.path.join(tmp.root, "sb")
+
+    def lib(root, files):
+        for rel, text in files.items():
+            p = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(text)
+    base = {"src/a.h": b"int a;\n", "src/sub/b.cpp": b"int b;\n", "library.properties": b"name=X\nversion=1.2.3\n",
+            "examples/e.ino": b"one\n"}
+    lib(os.path.join(gh, "WCBClient"), base)
+    lib(os.path.join(sb, "libraries", "WCB_Client"), dict(base, **{"examples/e.ino": b"two\n"}))
+    lib(os.path.join(gh, "WcbCmd"), base)
+    lib(os.path.join(sb, "libraries", "WcbCmd"), dict(base, **{"src/a.h": b"int a;\r\n"}))
+    libs = F.check_libs(sketchbook=sb, github=gh)
+    assert libs["WCB_Client"]["same"] and not libs["WCB_Client"]["eol_only"], libs["WCB_Client"]   # examples ignored
+    assert libs["WcbCmd"]["same"] and libs["WcbCmd"]["eol_only"] == ["src/a.h"], libs["WcbCmd"]
+    assert libs["WCB_Client"]["version"] == "1.2.3" and libs["WCB_Client"]["repo_state"]["head"] is None
+    line = F.libs_line(libs)
+    assert line.startswith("WCB_Client = WCBClient 1.2.3 (not recorded)") and "1 files in other line endings" in line, line
+    lib(os.path.join(sb, "libraries", "WcbCmd"), {"src/sub/b.cpp": b"int c;\n", "src/extra.h": b"x\n"})
+    os.remove(os.path.join(gh, "WCBClient", "library.properties"))
+    libs = F.check_libs(sketchbook=sb, github=gh)
+    assert not libs["WcbCmd"]["same"] and libs["WcbCmd"]["differ"] == ["src/sub/b.cpp"], libs["WcbCmd"]
+    assert libs["WcbCmd"]["only_sketchbook"] == ["src/extra.h"] and libs["WCB_Client"]["only_sketchbook"] == \
+        ["library.properties"], libs
+    line = F.libs_line(libs)
+    assert "WcbCmd DIFFERS from WcbCmd 1.2.3: src/sub/b.cpp, src/extra.h (sketchbook only)" in line, line
+    shutil.rmtree(os.path.join(gh, "WcbCmd"))
+    assert F.check_libs(sketchbook=sb, github=gh)["WcbCmd"]["missing"] == [os.path.join(gh, "WcbCmd")]
+    assert F.tree_line({"head": "a" * 40, "short": "aaaaaaa", "dirty": True, "files": ["x", "y"], "diff": "0123"}) == \
+        "`aaaaaaa` + 2 dirty files (diff 0123)"
+
+
+def t_ncflash_build(tmp):
+    """build() against a scripted arduino-cli (ncflash._run_cli) and fixed tree states: the command line (NaviCore's
+    FQBN, --build-path the folder, --jobs, the hooks property only with hooks=True, never an upload or a port), the
+    BUILD.json it writes (commit and dirty flag, libraries, the image check), and every refusal before or after the
+    compile - an FQBN NaviCore/CLAUDE.md no longer names, library drift (allowed and recorded with allow_drift), a
+    folder that already holds a build (rebuild=True recompiles it), a tree that changed during the compile, a failed
+    compile (only its error lines quoted), a hooks property the build did not apply, and a library taken from
+    somewhere else."""
+    from hil import ncflash as F
+    gh, sb, builds = (os.path.join(tmp.root, n) for n in ("gh", "sb", "builds"))
+    nav = os.path.join(gh, "NaviCore")
+    os.makedirs(nav)
+    for fn, text in (("NaviCore.ino", "void setup(){}\n"), ("CLAUDE.md", NC_FQBN_DOC), ("partitions.csv", NC_PARTITIONS),
+                     ("fw_version.h", '#define FW_VERSION_BASE  "v9.9.9"\n#define FW_VERSION_DTG   "111111ZSEP26"\n')):
+        with open(os.path.join(nav, fn), "w", encoding="utf-8") as f:
+            f.write(text)
+    for lib, repo in (("WCB_Client", "WCBClient"), ("WcbCmd", "WcbCmd")):
+        for root in (os.path.join(gh, repo), os.path.join(sb, "libraries", lib)):
+            os.makedirs(os.path.join(root, "src"))
+            with open(os.path.join(root, "src", "x.h"), "w") as f:
+                f.write("int x;\n")
+    img, elf = _nc_image()
+    calls = []
+    script = {"rc": 0, "used_dir": None, "props": None, "err": ""}
+
+    def fake_cli(argv, low_priority=True, timeout_s=3600):
+        calls.append((list(argv), low_priority))
+        out = argv[argv.index("--build-path") + 1]
+        _nc_folder(os.path.dirname(out), os.path.basename(out), img, elf)
+        props = script["props"] if script["props"] is not None else \
+            (["compiler.cpp.extra_flags=-DNAVICORE_HIL_HOOKS=1"] if "--build-property" in argv else
+             ["compiler.cpp.extra_flags="])
+        used = [{"name": lib, "version": "1", "install_dir": script["used_dir"] or os.path.join(sb, "libraries", lib)}
+                for lib in ("WCB_Client", "WcbCmd")]
+        doc = {"compiler_out": "Sketch uses 1 bytes", "compiler_err": script["err"], "success": script["rc"] == 0,
+               "builder_result": {"build_properties": props, "used_libraries": used,
+                                  "build_platform": {"id": "esp32:esp32", "version": "3.3.4"}}}
+        return script["rc"], json.dumps(doc), "", 1.0
+    states = {"n": 0, "change": False}
+
+    def fake_tree(repo):
+        states["n"] += 1
+        diff = "0123456789ab" if not (states["change"] and states["n"] % 2 == 0) else "ffffffffffff"
+        return {"repo": repo, "head": "c" * 40, "short": "ccccccc", "subject": "s", "dirty": True, "files": ["NaviCore.ino"],
+                "diff": diff}
+    saved = (F._run_cli, F.tree_state, F._core_version, F.cli_path)
+    F._run_cli, F.tree_state, F._core_version, F.cli_path = fake_cli, fake_tree, lambda cli: "3.3.4", lambda: "arduino-cli"
+    try:
+        kw = dict(builds_root=builds, github=gh, sketchbook=sb)
+        man = F.build("t1", **kw)
+        argv, low = calls[-1]
+        assert argv[:4] == ["arduino-cli", "compile", "--json", "--fqbn"] and argv[4] == F.FQBN and low, argv
+        assert argv[argv.index("--build-path") + 1] == os.path.join(builds, "navicore-t1") and argv[-1] == nav, argv
+        assert "--jobs" in argv and "--build-property" not in argv, argv
+        assert not {"-u", "--upload", "-p", "--port"} & set(argv), argv
+        with open(os.path.join(builds, "navicore-t1", "BUILD.json"), encoding="utf-8") as f:
+            disk = json.load(f)
+        assert disk == man and man["navicore"]["short"] == "ccccccc" and man["navicore"]["dirty"], man["navicore"]
+        assert man["image"]["version"] == NC_VERSION and man["image"]["slot"] == 0x1E0000 and not man["hooks"], man
+        assert man["libraries"]["WcbCmd"]["same"] and not man["drift_allowed"], man["libraries"]
+        assert F.build_line(man).startswith("NaviCore `ccccccc` + 1 dirty files (diff 0123456789ab); WCB_Client = "), \
+            F.build_line(man)
+        assert "BUILD.json" in str(_raises(lambda: F.build("t1", **kw), F.BuildError))
+        man = F.build("t1", hooks=True, rebuild=True, **kw)
+        assert F.HOOKS_PROPERTY in calls[-1][0] and man["hooks"] and not man["hooks_in_source"] and man["warnings"], man
+        script["props"] = ["compiler.cpp.extra_flags="]
+        assert "lack" in str(_raises(lambda: F.build("t2", hooks=True, **kw), F.BuildError))
+        script["props"] = None
+        script["used_dir"] = os.path.join(tmp.root, "elsewhere")
+        assert "not the sketchbook copy" in str(_raises(lambda: F.build("t3", **kw), F.BuildError))
+        script["used_dir"] = None
+        states["change"] = True
+        assert "changed during the compile" in str(_raises(lambda: F.build("t4", **kw), F.BuildError))
+        states["change"] = False
+        script.update(rc=1, err="NaviCore.ino:9:1: error: 'x' was not declared\n    const char* pw = \"hunter2\";\n")
+        e = str(_raises(lambda: F.build("t5", **kw), F.BuildError))
+        assert "error: 'x' was not declared" in e and "hunter2" not in e, e
+        assert os.path.isfile(os.path.join(builds, "navicore-t5", "compile.log"))
+        script.update(rc=0, err="")
+        with open(os.path.join(sb, "libraries", "WcbCmd", "src", "x.h"), "w") as f:
+            f.write("int y;\n")
+        n = len(calls)
+        e = str(_raises(lambda: F.build("t6", **kw), F.BuildError))
+        assert "WcbCmd DIFFERS from WcbCmd: src/x.h" in e and len(calls) == n, e
+        man = F.build("t6", allow_drift=True, **kw)
+        assert man["drift_allowed"] and "built with library drift" in F.build_line(man), man
+        with open(os.path.join(nav, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write(NC_FQBN_DOC.replace(",PSRAM=opi", ""))
+        assert "does not name" in str(_raises(lambda: F.build("t7", allow_drift=True, **kw), F.BuildError))
+        _raises(lambda: F.build("../x", **kw), ValueError)
+    finally:
+        F._run_cli, F.tree_state, F._core_version, F.cli_path = saved
+
+
+class FakeOtaNavi(FakeNaviDev):
+    """NaviCore's ?OTALOCAL (navicore_ota.h:244-310) behind FakeNaviDev: PING, #L12, STATUS, one session with a write
+    cursor, the idle reaper (run when a line arrives, as checkOtaTimeout runs in loop()), END verifying the received
+    bytes' own appended SHA-256 as esp_ota_end does, and a restart that swaps the slots. `faults` by offset, each used
+    once: 'nak' (the line arrived damaged: rejected, NAK at the cursor), 'drop' (written, its ACK lost), 'stall'
+    (written, no ACK, and the host waits past the 30 s idle reaper, which fires on the next line), 'hold' (the ACK
+    held until the host sends again: the HWCDC stall), 'short' (base64 lost in transit: 3 bytes fewer written),
+    'flip' (a byte corrupted on the way). `boot`: 'banner' (setup()'s lines arrive), 'reopen' (the banner is lost to
+    the USB re-enumeration), 'old_slot' (the bootloader refused the new image), 'never'. `max_wait` caps how long a
+    wait on this fake lasts, so a board that stays silent costs the self-test a fraction of a second."""
+
+    def __init__(self, version=NC_VERSION, faults=None, boot="banner", report_sha=False, max_wait=0.4):
+        super().__init__(self._on, name="navicore")
+        self.version, self.faults, self.boot, self.report_sha = version, dict(faults or {}), boot, report_sha
+        self.slots, self.run_i, self.next_size = [("app0", 0x10000), ("app1", 0x1F0000)], 0, 0x1E0000
+        self.session, self.up, self.held, self.aborts, self.idle_s = None, True, [], 0, 30.0
+        self.connected, self.closed, self.app_sha, self.flashed, self.max_wait = True, False, None, None, max_wait
+
+    def expect(self, pattern, timeout=3.0, since=None):
+        return super().expect(pattern, min(timeout, self.max_wait), since)
+
+    def close(self):
+        self.closed, self.connected = True, False
+
+    def open(self):
+        self.closed, self.connected = False, True
+        return self
+
+    def status(self):
+        run, nxt = self.slots[self.run_i], self.slots[self.run_i ^ 1]
+        out = ["---------- OTA Status ----------", "Chip:        ESP32-S3 (family 1)", f"Firmware:    {self.version}",
+               f"Running:     '{run[0]}' @0x{run[1]:06x} (1966080 B)",
+               f"Next (OTA):  '{nxt[0]}' @0x{nxt[1]:06x} ({self.next_size} B)"]
+        if self.app_sha:
+            out.insert(3, f"App SHA256:  {self.app_sha}")
+        s = self.session
+        out.append(f"Session:     ACTIVE id=1  {s['written']} / {s['size']} B" if s else "Session:     idle")
+        return out + ["--------------------------------"]
+
+    def restart(self):
+        self.up = False
+
+        def back():
+            if self.boot == "never":
+                self._append("<<serial error: device gone>>", "<<reopened COMFAKE>>")
+                return
+            if self.boot != "old_slot":
+                self.run_i ^= 1
+                self.app_sha = self.flashed[0xB0:0xB8].hex() if self.report_sha is True else self.report_sha or None
+            self.up = True
+            if self.boot == "reopen":
+                self._append("<<serial error: device gone>>", "<<reopened COMFAKE>>")
+            else:
+                self._append("", "Reset reason: 3 - Software restart (incl. boot-guard retry)  (RTC codes core0=3 [SW "
+                             "system] core1=3 [SW system])", f"[NaviCore] Firmware {self.version} — setup complete.")
+        t = threading.Timer(0.1, back)
+        t.daemon = True
+        t.start()
+
+    def _on(self, text, n):
+        import base64
+        import hashlib
+        if not self.up:
+            return []
+        out, self.held = self.held, []
+        s = self.session
+        if s and time.monotonic() - s["t"] > self.idle_s:
+            self.session = s = None
+            out.append("[OTA] aborted: session timed out (current app intact)")
+        if text == "":
+            return out
+        if text == '{"type":"PING"}':
+            return out + [f'{{"type":"PONG","version":"{self.version}"}}']
+        if text == "#L12":
+            return out + [MODE_LINE]
+        if text == "?OTALOCAL,STATUS":
+            return out + self.status()
+        if text == "?OTALOCAL,ABORT":
+            self.aborts += 1
+            self.session = None
+            return out + (["[OTA] aborted: local abort command (current app intact)"] if s else [])
+        if text.startswith("?OTALOCAL,BEGIN,"):
+            size, fam = (int(v) for v in text.split(",")[2:4])
+            out += ["", "[OTA:BEGIN,START]"]
+            if fam != 1:
+                return out + [f"[OTA] BEGIN rejected: image chip family {fam} != this board 1 (brick guard)",
+                              "[OTA:BEGIN,ERR,0]"]
+            nxt = self.slots[self.run_i ^ 1]
+            self.session = {"size": size, "written": 0, "buf": bytearray(), "t": time.monotonic()}
+            return out + [f"[OTA] BEGIN ok: session 1, {size} B -> partition '{nxt[0]}' @0x{nxt[1]:06x} "
+                          f"({self.next_size} B)", "[OTA:BEGIN,OK,0]"]
+        if text.startswith("?OTALOCAL,DATA,"):
+            _, _, off, b64 = text.split(",", 3)
+            off, raw = int(off), base64.b64decode(b64)
+            fault = self.faults.pop(off, None) if s and off == s["written"] else None
+            if fault == "nak":
+                return out + [f"[OTA] DATA rejected at offset {off + 1} (write cursor at {off})", f"[OTA:NAK,{off}]"]
+            if not s or off != s["written"]:
+                cur = s["written"] if s else 0
+                return out + [f"[OTA] DATA rejected at offset {off} (write cursor at {cur})", f"[OTA:NAK,{cur}]"]
+            raw = raw[:-3] if fault == "short" else bytes([raw[0] ^ 0xFF]) + raw[1:] if fault == "flip" else raw
+            s["buf"] += raw
+            s["written"] += len(raw)
+            s["t"] = time.monotonic()
+            ack = f"[OTA:ACK,{s['written']}]"
+            if fault == "stall":
+                s["t"] -= self.idle_s + 1      # the host waits past the idle reaper: it fires on the next line
+                return out
+            if fault == "drop":
+                return out
+            if fault == "hold":
+                self.held.append(ack)
+                return out
+            return out + [ack]
+        if text == "?OTALOCAL,END":
+            if not s:
+                return out + ["[OTA] END: no matching active session", "[OTA:END,ERR]"]
+            self.session = None
+            buf = bytes(s["buf"])
+            if s["written"] != s["size"]:
+                return out + [f"[OTA] END rejected: incomplete {s['written']} / {s['size']} B", "[OTA:END,ERR]"]
+            if buf[:1] != b"\xE9" or hashlib.sha256(buf[:-32]).digest() != buf[-32:]:
+                return out + ["[OTA] END verify FAILED: ESP_ERR_OTA_VALIDATE_FAILED (image rejected, current app "
+                              "intact)", "[OTA:END,ERR]"]
+            self.flashed = buf
+            self.restart()
+            return out + [f"[OTA] END ok: verified {len(buf)} B -> next boot '{self.slots[self.run_i ^ 1][0]}'",
+                          "[OTA:END,OK]", "[OTA] rebooting into new firmware in 2s..."]
+        return out
+
+
+NC_FAST = dict(chunk_timeout=0.3, begin_timeout=1.0, end_timeout=1.0, boot_timeout=2.0, nudge_s=0.05)
+
+
+def t_ncflash_flash(tmp):
+    """flash() against FakeOtaNavi over a 13-chunk image: every chunk lands although one arrives damaged (NAK at the
+    cursor: sent again), one ACK is lost (?OTALOCAL,STATUS shows it written: go on), and one is held until the host
+    sends (a newline releases it); END verifies, the board restarts into the other slot, and STATUS, PING and the App
+    SHA256 line all match the image. The board receives exactly the image; session.log gets each DATA line as its
+    offset and length, never the base64; FLASHED.md gains a row under its own heading, the hand-kept text above it
+    untouched. Then the same with the banner lost to the USB re-enumeration (the reopened port and a PONG end the
+    wait), and the refusals that send nothing: an image that fails its check, a PONG that is not NaviCore's, an image
+    bigger than the board's Next slot."""
+    import re
+    from hil import ncflash as F
+    from hil import navicore as NC
+    img, elf = _nc_image(body=12000)
+    folder = _nc_folder(os.path.join(tmp.root, "builds"), "navicore-t", img, elf)
+    builds = os.path.join(tmp.root, "builds")
+    with open(os.path.join(builds, "FLASHED.md"), "w", encoding="utf-8") as f:
+        f.write("# Bench images\n\n| Folder | Board |\n|---|---|\n| `navicore/` | NaviCore |\n\nHand-kept notes.\n")
+    board = FakeOtaNavi(faults={2048: "nak", 4096: "drop", 6144: "hold"}, report_sha=True)
+    logged = []
+    board.log = lambda name, direction, text: logged.append((direction, text))
+    res = F.flash(NC.NaviCore(board), folder, "selftest image", builds_root=builds, **NC_FAST)
+    assert board.flashed == img and board.run_i == 1, "the board did not receive exactly the image"
+    st, sends = res["stats"], (len(img) + 1023) // 1024 + 1        # every chunk once, the damaged one twice
+    assert (st["chunks"], st["naks"], st["resyncs"], st["end"]) == (sends, 1, 1, "OK") and st["nudged"] >= 1, st
+    assert res["after"]["running"]["label"] == "app1" and res["before"]["running"]["label"] == "app0", res["after"]
+    assert res["version"] == NC_VERSION and res["app_sha"] == img[0xB0:0xB8].hex(), res
+    data_lines = [t for d, t in logged if d == ">" and t.startswith("?OTALOCAL,DATA,")]
+    assert len(data_lines) == sends and all(re.fullmatch(r"\?OTALOCAL,DATA,\d+,<\d+ base64 chars>", t)
+                                            for t in data_lines), data_lines[:3]
+    notes = [t for d, t in logged if d == "#"]
+    assert f"ncflash: {len(img)} / {len(img)} B (100%)" in notes and notes[-1].startswith("ncflash: OK: 'app0'"), notes
+    assert ("<", "(empty line: output nudge)") not in logged and any(t == "(empty line: output nudge)"
+                                                                   for d, t in logged if d == ">"), logged[-5:]
+    assert all(len(t) < 300 for d, t in logged if d == ">"), "base64 reached the log"
+    with open(os.path.join(builds, "FLASHED.md"), encoding="utf-8") as f:
+        text = f.read()
+    assert text.startswith("# Bench images\n\n| Folder | Board |\n|---|---|\n| `navicore/` | NaviCore |\n\nHand-kept notes.\n")
+    assert F.FLASH_LOG_HEADING in text and "| `navicore-t/` |" in text and f"`{res['elf_sha'][:16]}`" in text, text
+    assert "| ?OTALOCAL | OK: 'app0' @0x010000 -> 'app1' @0x1f0000, PONG " + NC_VERSION in text, text
+    board2 = FakeOtaNavi(boot="reopen")
+    board2.slots.reverse()                                    # running app1, so this one comes back on app0
+    res2 = F.flash(NC.NaviCore(board2), folder, builds_root=builds, **NC_FAST)
+    assert board2.flashed == img and res2["after"]["running"]["label"] == "app0" and res2["app_sha"] is None, res2
+    with open(os.path.join(builds, "FLASHED.md"), encoding="utf-8") as f:
+        rows = [x for x in f.read().splitlines() if x.startswith("| ") and "?OTALOCAL" in x]
+    assert len(rows) == 2 and "no App SHA256 line on the board" in rows[1], rows
+    corrupt = _nc_folder(tmp.root, "corrupt", img[:-1] + bytes([img[-1] ^ 1]), elf)
+    for dev_kw, image, exc, want in (({}, corrupt, F.ImageError, "appended SHA-256"),
+                                     ({"version": "1.0.3"}, folder, F.FlashError, "not a NaviCore version"),
+                                     ({}, folder, F.FlashError, "does not fit the board's")):
+        board = FakeOtaNavi(**dev_kw)
+        if want.startswith("does not fit"):
+            board.next_size = 4096
+        e = _raises(lambda: F.flash(NC.NaviCore(board), image, builds_root=builds, **NC_FAST), exc)
+        assert want in str(e) and not any(x.startswith("?OTALOCAL,BEGIN") for x in board.sent), (want, str(e))
+
+
+def t_ncflash_flash_failures(tmp):
+    """flash() where it must stop, and say where, with the running app intact: the board's idle reaper ends the
+    session while an ACK is lost (the STATUS resync finds it idle; an ABORT still goes out); a damaged chunk written
+    short (the cursor lands inside the chunk: aborted, since that image can no longer be completed); a byte corrupted
+    in transit (END's verify refuses it); BEGIN refused for the wrong chip family (ota_stream). After END,OK: the
+    board back on its old slot (the bootloader refused the image), the wrong App SHA256, and no board at all (NotBack,
+    the esptool rung named). Each writes a FAILED / VERIFY FAILED / NOT BACK row to FLASHED.md."""
+    from hil import ncflash as F
+    from hil import navicore as NC
+    img, elf = _nc_image(body=12000)
+    builds = os.path.join(tmp.root, "builds")
+    folder = _nc_folder(builds, "navicore-f", img, elf)
+
+    def run(board, exc=F.FlashError):
+        return _raises(lambda: F.flash(NC.NaviCore(board), folder, builds_root=builds, **NC_FAST), exc)
+    board = FakeOtaNavi(faults={4096: "stall"})
+    e = run(board)
+    assert e.stage == "data" and e.offset == 4096 and e.intact is True, (e.stage, e.offset, e.intact, str(e))
+    assert "the board ended the session: session timed out (current app intact)" in str(e) and board.aborts == 1, str(e)
+    assert "the running app is intact: STATUS shows 'app0' @0x010000 running, session idle" in str(e), str(e)
+    board = FakeOtaNavi(faults={5120: "short"})
+    e = run(board)
+    assert e.stage == "data" and e.offset == 6141 and e.intact is True and board.session is None, (e.offset, str(e))
+    assert [x for x in board.sent if x.startswith("?OTALOCAL,DATA,")][-1].startswith("?OTALOCAL,DATA,5120,"), \
+        "a chunk went out after the one the board wrote short"
+    assert "a damaged line was written, so this image cannot be completed" in str(e) and board.aborts == 1, str(e)
+    board = FakeOtaNavi(faults={1024: "flip"})
+    e = run(board)
+    assert e.stage == "end" and e.intact and "END refused: END verify FAILED: ESP_ERR_OTA_VALIDATE_FAILED" in str(e), str(e)
+    assert board.run_i == 0 and board.flashed is None
+    board = FakeOtaNavi()
+    e = _raises(lambda: F.ota_stream(NC.NaviCore(board), img, family=0, **{k: v for k, v in NC_FAST.items()
+                                                                              if k != "boot_timeout"}), F.FlashError)
+    assert e.stage == "begin" and "image chip family 0 != this board 1 (brick guard)" in str(e), str(e)
+    board = FakeOtaNavi(boot="old_slot")
+    e = run(board)
+    assert e.stage == "verify" and e.intact is True and "came back on the old slot 'app0' @0x010000: the bootloader " \
+        "refused the new image" in str(e), str(e)
+    board = FakeOtaNavi(report_sha="deadbeefdeadbeef")
+    e = run(board)
+    assert e.stage == "verify" and "App SHA256 deadbeefdeadbeef is not the image's" in str(e), str(e)
+    board = FakeOtaNavi(boot="never")
+    e = run(board, F.NotBack)
+    assert e.stage == "boot" and e.intact is False and "allow_esptool=True" in str(e) and "app1" in str(e), str(e)
+    with open(os.path.join(builds, "FLASHED.md"), encoding="utf-8") as f:
+        rows = [x for x in f.read().splitlines() if x.startswith("| ") and "`navicore-f/`" in x]
+    kinds = [r.split(" | ")[5].split(":")[0].split(" at ")[0] for r in rows]
+    assert kinds == ["FAILED", "FAILED", "FAILED", "VERIFY FAILED after the restart",
+                     "VERIFY FAILED after the restart", "NOT BACK after END"], kinds
+
+
+class _PulseSer:
+    """The pyserial handle NaviCore.hard_reset pulses: RTS released after being set is the chip's reset."""
+
+    def __init__(self, board):
+        object.__setattr__(self, "board", board)
+        object.__setattr__(self, "rts", False)
+        object.__setattr__(self, "pulses", 0)
+
+    def __setattr__(self, key, value):
+        if key == "rts" and self.rts and not value:
+            object.__setattr__(self, "pulses", self.pulses + 1)
+            self.board.on_reset()
+        object.__setattr__(self, key, value)
+
+
+class FakeLadderNavi(FakeOtaNavi):
+    """A NaviCore for the recovery ladder: `up` says whether its app answers, `after_reset` what a USB-Serial/JTAG
+    reset does ('boots', 'download' - the ROM banner, no app -, or 'dead')."""
+
+    def __init__(self, up, after_reset):
+        super().__init__(max_wait=0.2)
+        self.up, self.after_reset = up, after_reset
+        self._ser = _PulseSer(self)
+
+    def on_reset(self):
+        if self.after_reset == "boots":
+            self.restart_quick()
+        elif self.after_reset == "download":
+            self.later(0.05, "<<serial error: device gone>>", "<<reopened COMFAKE>>", "ESP-ROM:esp32s3-20210327",
+                       "waiting for download")
+
+    def restart_quick(self):
+        def back():
+            self.up = True
+            self._append("<<serial error: device gone>>", "<<reopened COMFAKE>>")
+        t = threading.Timer(0.05, back)
+        t.daemon = True
+        t.start()
+
+
+def t_ncflash_recover(tmp):
+    """recover()'s ladder against FakeLadderNavi and a scripted esptool: a PONG ends it at rung 1 with no reset; a board
+    that boots on the USB-Serial/JTAG reset ends it at rung 2; with neither, and esptool not allowed, RecoveryFailed
+    names both esptool commands and nothing runs; allowed, a chip in ROM download mode is left by the RTC watchdog
+    with nothing written (rung 3), and a hung app gets the known-good image in app0 and boot_app0.bin in otadata in one
+    connection (rung 4, a FLASHED.md row), with the port released while esptool holds it. Never an address other than
+    0x10000 and 0xe000; a known-good image that fails its check is not written; guard_writes refuses 0x0, 0x8000 and
+    any erase."""
+    from hil import ncflash as F
+    from hil import navicore as NC
+    img, elf = _nc_image()
+    builds = os.path.join(tmp.root, "builds")
+    good = _nc_folder(builds, "navicore", img, elf)
+    a15 = os.path.join(tmp.root, "a15")
+    parts = os.path.join(a15, "packages", "esp32", "hardware", "esp32", "3.3.4", "tools", "partitions")
+    os.makedirs(parts)
+    with open(os.path.join(parts, "boot_app0.bin"), "wb") as f:
+        f.write(_nc_otadata())
+    gh = os.path.join(tmp.root, "gh")
+    os.makedirs(os.path.join(gh, "NaviCore"))
+    with open(os.path.join(gh, "NaviCore", "partitions.csv"), "w", encoding="utf-8") as f:
+        f.write(NC_PARTITIONS)
+    env = {k: os.environ.get(k) for k in ("HIL_ARDUINO15", "HIL_GITHUB_ROOT")}
+    os.environ.update(HIL_ARDUINO15=a15, HIL_GITHUB_ROOT=gh)
+    calls = []
+
+    def esptool_for(board, kick_rc, write_rc=0):
+        def run(argv):
+            calls.append((list(argv), board.closed))
+            if "chip-id" in argv:
+                if kick_rc == 0:
+                    board.up = True
+                return kick_rc, "Chip is ESP32-S3" if kick_rc == 0 else "A fatal error occurred: Failed to connect"
+            if write_rc == 0:
+                board.up, board.run_i = True, 0
+            return write_rc, "Hash of data verified."
+        return run
+    fast = dict(builds_root=builds, boot_timeout=0.6, ping_tries=1)
+    try:
+        board = FakeLadderNavi(up=True, after_reset="dead")
+        r = F.recover(NC.NaviCore(board), **fast)
+        assert r["rung"] == "ping" and r["version"] == NC_VERSION and board._ser.pulses == 0, r
+        board = FakeLadderNavi(up=False, after_reset="boots")
+        r = F.recover(NC.NaviCore(board), **fast)
+        assert r["rung"] == "hard_reset" and board._ser.pulses == 1, r
+        board = FakeLadderNavi(up=False, after_reset="dead")
+        e = str(_raises(lambda: F.recover(NC.NaviCore(board), esptool=esptool_for(board, 0), **fast), F.RecoveryFailed))
+        assert "allow_esptool=True" in e and "--before no-reset --after watchdog-reset --connect-attempts 2 chip-id" in e \
+            and "write-flash" in e and "0x10000" in e and "0xe000" in e and not calls, e
+        board = FakeLadderNavi(up=False, after_reset="download")
+        r = F.recover(NC.NaviCore(board), allow_esptool=True, esptool=esptool_for(board, 0), **fast)
+        assert r["rung"] == "kick" and [c[0][-1] for c in calls] == ["chip-id"] and calls[0][1], (r, calls)
+        assert not board.closed and "ROM download mode" in r["tried"][-1], r
+        calls.clear()
+        board = FakeLadderNavi(up=False, after_reset="dead")
+        board.run_i = 1
+        r = F.recover(NC.NaviCore(board), allow_esptool=True, esptool=esptool_for(board, 2), **fast)
+        assert r["rung"] == "esptool" and r["status"]["running"]["label"] == "app0" and len(calls) == 2, (r, calls)
+        write, released = calls[1]
+        assert released and not board.closed and F.guard_writes(write) is write, calls
+        addrs = [write[i] for i in range(len(write)) if write[i].startswith("0x")]
+        assert addrs == ["0x10000", "0xe000"] and write[write.index("0x10000") + 1] == os.path.join(good,
+                                                                                                    "NaviCore.ino.bin")
+        assert write[write.index("0xe000") + 1] == os.path.join(parts, "boot_app0.bin") and "--after" in write and \
+            write[write.index("--after") + 1] == "watchdog-reset", write
+        with open(os.path.join(builds, "FLASHED.md"), encoding="utf-8") as f:
+            assert "| esptool app0 + otadata | written (recovery) |" in f.read()
+        calls.clear()
+        with open(os.path.join(good, "NaviCore.ino.bin"), "r+b") as f:
+            f.write(b"\xE8")
+        board = FakeLadderNavi(up=False, after_reset="dead")
+        e = str(_raises(lambda: F.recover(NC.NaviCore(board), allow_esptool=True, esptool=esptool_for(board, 2), **fast),
+                        F.RecoveryFailed))
+        assert "does not pass check_image" in e and not calls, e
+        port = "COM5"
+        for argv in (["--chip", "esp32s3", "-p", port, "write-flash", "0x0", "boot.bin"],
+                     ["-p", port, "write-flash", "-z", "0x8000", "part.bin"],
+                     ["-p", port, "write-flash", "0x10000", "a.bin", "0x9000", "nvs.bin"],
+                     ["-p", port, "erase-flash"], ["-p", port, "erase-region", "0xe000", "0x2000"]):
+            _raises(lambda: F.guard_writes(argv), ValueError)
+    finally:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def t_ncflash_status_parse(tmp):
+    """parse_ota_status on otaPrintStatus's format (navicore_ota.h:226-238): idle, an ACTIVE session with its cursor, no
+    spare slot, an App SHA256 line (INF9 a), and a stray line before the block; ota_status retries a block cut short."""
+    from hil import ncflash as F
+    from hil import navicore as NC
+    block = ["[DISPATCH] x", "---------- OTA Status ----------", "Chip:        ESP32-S3 (family 1)",
+             "Firmware:    v0.2.0_102105QSEP26", "Running:     'app0' @0x010000 (1966080 B)",
+             "Next (OTA):  'app1' @0x1f0000 (1966080 B)", "Session:     idle", "--------------------------------"]
+    st = F.parse_ota_status(block)
+    assert st == {"chip": "ESP32-S3", "family": 1, "firmware": "v0.2.0_102105QSEP26",
+                  "running": {"label": "app0", "addr": 0x10000, "size": 1966080},
+                  "next": {"label": "app1", "addr": 0x1F0000, "size": 1966080}, "active": False, "session": None,
+                  "app_sha": None}, st
+    active = block[:6] + ["App SHA256:  5c31d8b4678db243", "Session:     ACTIVE id=1  4096 / 1170096 B", block[-1]]
+    st = F.parse_ota_status(block + active)
+    assert st["active"] and st["session"] == {"id": 1, "written": 4096, "size": 1170096} and \
+        st["app_sha"] == "5c31d8b4678db243", st
+    assert F.parse_ota_status(block[:5] + ["Next (OTA):  none — partition table has no spare OTA slot!"] + block[6:])[
+        "next"] is None
+    cut = {"n": 0}
+
+    def script(text, n):
+        if text == "?OTALOCAL,STATUS":
+            cut["n"] += 1
+            return block[1:4] if cut["n"] == 1 else block[1:]
+        return [MODE_LINE] if text == "#L12" else []
+    assert F.ota_status(NC.NaviCore(FakeNaviDev(script)))["running"]["label"] == "app0" and cut["n"] == 2
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -3960,7 +4614,9 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter,
          t_nc_transport, t_nc_fnv1a, t_nc_pwm_update, t_nc_mae_markers, t_nc_clip_items, t_nc_recorder_transfer,
          t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl,
-         t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test]
+         t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test,
+         t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_status_parse, t_ncflash_flash,
+         t_ncflash_flash_failures, t_ncflash_recover]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

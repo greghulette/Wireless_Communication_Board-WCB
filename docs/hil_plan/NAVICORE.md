@@ -484,8 +484,9 @@ Nine pieces, in the order they unblock tests. Effort is agent-hours of writing p
 > **Status 2026-09-27: written; no bench run yet.** s21's twelve helpers are driver methods (`config`, `debug`,
 > `cli` for both `_flushed` and `_cli`, `mae_get`, `local_slots`, `undriven_channel`, `ack_line` for `_ack`, `mode`,
 > `rec_info`, `clips`, `sbus_dump` for `_l09`), with `usable_slot`, `lines` and `rc_events` beside them; s08's and s22's
-> GET_CONFIG reads use `config()`. Every method below exists except `ota_status`/`ota_stream` (INF4); `selftest.py` feeds
-> each parser firmware-format lines. The moved helpers send exactly what they did. Needs a first bench check: the writes
+> GET_CONFIG reads use `config()`. Every method below exists; `ota_status` and `ota_stream` are functions of
+> `hil/ncflash.py` that take the driver (INF4). `selftest.py` feeds each parser firmware-format lines. The moved
+> helpers send exactly what they did. Needs a first bench check: the writes
 > (`set_config`, `reset_defaults`, `set_cmdlib`: after INF3), `rec_download`/`rec_upload`, `reboot`/`wait_boot`/
 > `hard_reset` (no run has seen NaviCore boot), `monitor`, `seq`/`seqval`, `version_surfaces`. Read in the source
 > while writing it:
@@ -542,7 +543,7 @@ seq(wcb); seqval(wcb, key); version_surfaces(w1) -> {surface: version}
 # lifecycle
 reboot(how="json" | "l02") -> boot lines; wait_boot(timeout=20)   # to '— setup complete.' (NaviCore.ino:4918), then PING
 hard_reset()                                    # RTS=1/DTR=0, then RTS=0 and a DTR write (HIL_TESTING.md §2)
-ota_status() -> dict; ota_stream(image)         # INF4
+ota_status(nc) -> dict; ota_stream(nc, data)   # INF4: functions of hil/ncflash.py
 ```
 
 `selftest.py` gains a no-hardware case per parser, fed with captured lines: PWM_UPDATE, `[MAE:n]`, `[CLIPITEM]`,
@@ -646,6 +647,55 @@ checks NaviCore too (today it does not, `docs/HIL_TESTING.md:774-775`) and resto
 slot 3 and a serialLabel; restore; byte-identical, and nothing secret in `session.log`.
 
 ### INF4 — `hil/ncflash.py`: build, flash, recover
+
+> **Status 2026-09-28: built; the build is proven, nothing has been flashed.** `hil/ncflash.py` holds `build`,
+> `check_image`, `ota_status`, `ota_begin`, `ota_stream`, `ota_abort`, `flash`, `recover` and `record_flash`, and a
+> command line (`python -m hil.ncflash build|check|libs|status|flash|recover`, run from `tests/hil`);
+> `docs/HIL_TESTING.md` §5 says how a test or a session uses them. `selftest.py` has seven cases: synthetic ESP32-S3
+> images, a scripted arduino-cli, a fake NaviCore that speaks `?OTALOCAL` (a damaged line, a lost or held ACK, the
+> idle reaper, a chunk written short, END's verify, the restart, the old slot, no return) and a scripted esptool.
+> `build("inf4")` compiled NaviCore's working tree (`dda37f6` plus 5 uncommitted files) into
+> `results/builds/navicore-inf4` in 126 s at below-normal priority: 1,170,256 B, 59.5 % of the 0x1E0000 slot, ELF
+> SHA-256 `c6415851db1ef241...`, and arduino-cli reports WCB_Client 1.17.1 and WcbCmd 0.9.1 taken from the sketchbook
+> copies the pre-check compared. The image on the board (`results/builds/navicore`, 1,170,096 B, ELF `5c31d8b4...`)
+> passes `check_image` too. Read in the source while building it, and where the code differs from the plan below:
+> - A DATA line whose base64 does not decode gets no marker at all (`navicore_ota.h:278-281`), and a NAK's cursor
+>   reads 0 once the session is gone (`:119`, `:283-284`), so a NAK means "rewind" only when it names the chunk's own
+>   offset. The sender resends then, and settles everything else with `?OTALOCAL,STATUS`, whose
+>   `Session: ACTIVE id=1 <written> / <size> B` is the cursor; a cursor inside the chunk means a damaged line was
+>   written, and the session is aborted. One chunk is in flight. The config tool keeps eight (`otaUpdateOverUsb`,
+>   `config_tool/index.html:17412`) on the same protocol.
+> - There is no SHA line to match yet. `otaPrintStatus` prints Chip, Firmware, Running, Next and Session only
+>   (`navicore_ota.h:226-238`), and nothing in NaviCore prints `esp_app_get_elf_sha256` (INF9 a). `flash` checks an
+>   `App SHA256:` line when the board prints one, in STATUS or the boot banner. Until then the proof is the verified
+>   END plus STATUS showing the other slot running; the version string cannot tell two images of one commit apart.
+> - The image's app descriptor at 0x20 carries the Arduino library builder's version (`45c1b25`, project
+>   `arduino-lib-builder`), not NaviCore's, so "the version string" is FW_VERSION found in the image, exactly once.
+> - Recovery rung 3 is one esptool connection, `write-flash 0x10000 <known good> 0xe000 boot_app0.bin` with
+>   `--after watchdog-reset`, instead of `--after hard-reset` and a separate `erase-region 0xe000 0x2000`.
+>   `boot_app0.bin` is what every Arduino upload writes at 0xe000 (`platform.txt:180`, `:297`) and selects app0 as the
+>   erase would, and one connection needs no second entry into download mode. `watchdog-reset`, because on these
+>   native-USB S3 devkits a DTR/RTS reset after esptool can land back in download mode, which is why Greg's flasher
+>   leaves every S3 flash that way (`ESP-Flasher-Companion/src/esp_flasher_companion.py:1005-1008`). D-NC4's "otadata
+>   erase" is this write.
+> - A rung before it, still writing nothing: esptool `--before no-reset --after watchdog-reset chip-id` connects only
+>   to a chip already in ROM download mode, and leaves it by the RTC watchdog (the flasher's `_exit_download_mode`,
+>   `:918-953`). Both esptool rungs need `recover(..., allow_esptool=True)`; without it the ladder stops after the
+>   USB-Serial/JTAG reset and names both commands.
+> - The library pre-check: `BUILD_AND_RELEASE.md` §3 covers `WCB_Client`'s `src/` only; the check compares `src/` and
+>   `library.properties` of both libraries. Today `WCB_Client` equals the WCBClient working tree (1.17.1, `188bd4f`
+>   plus 7 uncommitted files), and five of `WcbCmd`'s `src/` files differ from the repo (0.9.1, `0ab4af5`) only in
+>   line endings (CRLF in the sketchbook), which compiles the same.
+> - `--build-path` isolates the sketch, but arduino-cli's core cache (`build_cache.path`, `%LOCALAPPDATA%/arduino`) is
+>   shared, so `build` holds a lock (`results/builds/.ncflash-build.lock`) and runs at below-normal priority, which the
+>   compiler processes inherit.
+> - NaviCore doc drift, not fixed here: `navicore_ota.h:9-11` says NaviCore builds with `PartitionScheme=min_spiffs`;
+>   it builds with `custom` (`partitions.csv`, NaviCore `CLAUDE.md:113`). The config tool's OTA comment says the
+>   board's serial RX buffer is 4 KB (`config_tool/index.html:17488`); it is 8 KB (`NaviCore.ino:4500`), the drift
+>   D-NC36 found in PROTOCOLS.md.
+> - FLASHED.md's rows go into a table of their own at the end of the file, "NaviCore flashes (hil/ncflash.py)", so
+>   the hand-kept table above it is never rewritten; a row also carries the NaviCore commit and dirty flag, how the
+>   image was written and the result.
 
 **Build**, into a private build folder (never the IDE's cache):
 
@@ -1266,4 +1316,5 @@ D-NC16 to D-NC36 are behaviour findings, each with the `(should)` test that pins
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |
 | 2026-09-28 | _(pending)_ | INF3 built: `hil/nc_guard.py`, the credential filter in `Bench.log`, `redacted_diff`, the resume's NaviCore check, and `nccfg.guard_selftest` in the new `s40_navicore_config.py`. The INF3 status note lists where the code differed from the plan. |

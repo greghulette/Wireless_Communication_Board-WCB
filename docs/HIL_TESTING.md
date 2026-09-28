@@ -375,6 +375,44 @@ with the recent lines attached), and skips by raising `Skip`.
   `results/navicore_config_week_start.json`. A second Ctrl+C skips the restore and leaves it to the resume. Guards
   do not nest. `nccfg.guard_selftest` (`suites/s40_navicore_config.py`) proves the guard on the bench before any other
   test writes NaviCore.
+- **Building, flashing and recovering NaviCore** go through `hil/ncflash.py` (`docs/hil_plan/NAVICORE.md` INF4), never
+  `arduino-cli upload` or a hand-typed esptool line: a cold power-up can leave the S3 in ROM download mode, and an
+  upload replaces NaviCore's custom short-watchdog bootloader.
+  - `build(tag, hooks=False)` compiles NaviCore's working tree into `results/builds/navicore-<tag>`, which is also the
+    build path, so the IDE's sketch cache is never used. It uses NaviCore's FQBN and refuses once `NaviCore/CLAUDE.md`
+    no longer names it; it refuses a core other than esp32 3.3.4, and a sketchbook `WCB_Client` or `WcbCmd` (the copies
+    every local compile uses) that differs from the WCBClient or WcbCmd repo, unless `allow_drift=True`, which records
+    it. Line endings alone are not a difference. One build runs at a time, at below-normal priority, about two
+    minutes. The folder gets `BUILD.json` (NaviCore's commit, whether its tree was dirty and a fingerprint of the
+    change, both libraries, the image check) and `compile.log`. `hooks=True` adds `-DNAVICORE_HIL_HOOKS=1` (INF9).
+  - `check_image(folder)` checks an image as the board will, before anything is sent: the magic, chip id 9, every
+    segment, the checksum and appended SHA-256 that `esp_ota_end` verifies, exactly one FW_VERSION string, the ELF
+    beside it hashing to the SHA-256 at image offset 0xB0 (the image's identity: the version string only changes on a
+    NaviCore commit), and the size against the OTA slot in `partitions.csv` (0x1E0000).
+  - `flash(nc, folder, what)` checks the image, PINGs (a NaviCore version, or nothing is sent), reads
+    `?OTALOCAL,STATUS` (chip family 1, a Next slot the image fits, no other session streaming), then streams the image
+    over NaviCore's own USB protocol one 1024-byte chunk at a time, paced as the config tool writes. An ACK naming the
+    chunk's end moves on; a NAK at the chunk's own offset sends it again; anything else is settled by
+    `?OTALOCAL,STATUS`. While it waits it writes a lone newline every 0.25 s, which NaviCore ignores but which releases
+    a reply its USB is holding. After `[OTA:END,OK]` NaviCore restarts: `flash` waits for it (`NaviCore.wait_boot`),
+    and STATUS must then show the other slot running with the image's version, and its `App SHA256` once the firmware
+    prints one. About a minute for the 1.17 MB image. A failure before END leaves the running app: `FlashError` says
+    the stage and offset where it stopped and what STATUS showed afterwards. `NotBack` means END was accepted but
+    NaviCore did not come back; `recover` is next. session.log shows each DATA line as its offset and length, not the
+    base64.
+  - `recover(nc, allow_esptool=False)` is the ladder: PING; the USB-Serial/JTAG reset (`NaviCore.hard_reset`); then,
+    only with `allow_esptool=True`, esptool from the core: a read-only probe that leaves ROM download mode by the RTC
+    watchdog, and last the known-good image (`results/builds/navicore`) written into app0, with the core's
+    `boot_app0.bin` into otadata, in one connection with `--after watchdog-reset`. It never writes 0x0 or 0x8000, and
+    closes the harness's port while esptool holds it. Without the flag it stops after the reset and names both esptool
+    commands.
+  - Every flash that sent BEGIN, and every esptool write, adds a row to `results/builds/FLASHED.md` under "NaviCore
+    flashes (hil/ncflash.py)": when, the folder, the ELF SHA-256, NaviCore's commit and dirty flag, how, the result and
+    what is in it.
+  - Outside a run, from `tests/hil`: `python -m hil.ncflash build <tag>`, `check <folder>`, `libs`, `status`,
+    `flash <folder> --what "<text>"` and `recover [--allow-esptool]`. The board commands open `bench.json`'s NaviCore
+    port with DTR and RTS low, refuse while a run holds its `run.lock`, and log every line to
+    `results/builds/ncflash-logs/` with passwords and the SoftAP name hashed.
 - **Opt-in tests** declare the gate on the decorator: `@test(..., opt_in="ota_full")`, and optionally
   `opt_in_why="..."` when this test's reason differs from the key's default. The key must be in `hil/optin.py`
   `OPT_INS` (title, one line on what it does, the default reason, `estimate_s` per test); an unknown key fails at
@@ -922,6 +960,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | **NaviCore build, flash and recovery (`NAVICORE.md` INF4).** New `hil/ncflash.py`: `build` (NaviCore's working tree into `results/builds/navicore-<tag>`, the sketchbook libraries checked against their repos, `BUILD.json`), `check_image`, `flash` over `?OTALOCAL` with one chunk in flight and STATUS settling anything but a clean ACK, `recover` (PING, the USB-Serial/JTAG reset, then esptool only when allowed, writing app0 and otadata only), a `FLASHED.md` row per flash, and `python -m hil.ncflash`. §5 says how a test or a session uses it. `selftest.py` gains seven cases (74 in all) against synthetic images, a scripted arduino-cli and esptool, and a fake NaviCore that speaks `?OTALOCAL`. `build("inf4")` compiled NaviCore for real; nothing has been flashed with it yet. |
 | 2026-09-28 | _(pending)_ | `checkpoint.redact_text` hashes the firmware's `ESP-NOW password updated to:` echo (both `?EPASS` setters print the new value), and a `Password:`/`Pass:` value runs to the end of its line, since a password may hold spaces. The WCB-WP12/25/42/43/57 tests (`wcb.pull_*`, `backup.one_line_restore`, `backup.chain_restore_funcchar`, `nvs.full_map_and_device_save`, `ident.epass_window_gates`, `nvs.erase_led_and_tails`) are in the group rows. |
 | 2026-09-28 | _(pending)_ | **`nc_guard`: NaviCore config snapshot and restore, and redaction (`NAVICORE.md` INF3).** New `hil/nc_guard.py`. A test that writes NaviCore's config runs inside `nc_guard` (§5), which restores by the snapshot plus explicit clears, and by RESET_DEFAULTS then the snapshot only when that fails, and proves the config byte-identical. It also restores the command library, `HIL*` clips, learned peers, the mode and the RAM toggles. The exact snapshot goes to `<run>/navicore_snapshot.json`, and a record with a redacted hash and the state into the checkpoint. The resume's step 7 checks NaviCore's config and restores it after a guarded test was cut off (§9). `Bench.log` hashes the credentials on NaviCore's and the SBUS controller's lines in both directions (`runner.REDACT_KINDS`). `redact_text` hashes any JSON `*password` field. New `checkpoint.redacted_diff`. New suite `s40_navicore_config.py` with `nccfg.guard_selftest`. `selftest.py` gains five cases against a fake NaviCore that merges SET_CONFIG as the firmware does. |
 | 2026-09-28 | _(pending)_ | §6: the SBUS controller can hold a reply in its USB outbox until the host sends again; `SbusCtl` now pings every second while it waits (`sbus.to_navicore` failed on it in three full runs). `checkpoint.redact_text` also hashes the controller's `Pass:` boot line, which a failed test's last lines can quote. |
