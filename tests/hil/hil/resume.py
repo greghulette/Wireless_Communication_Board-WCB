@@ -32,6 +32,7 @@ from .config import read_config
 from .links import LinkManager
 from .navicore import NaviCore
 from .probe import Probe
+from .sbus import SbusCtl
 from .serialdev import ExpectTimeout
 from .wcb import WCB
 
@@ -591,10 +592,7 @@ def check_controllers(bench, ckpt, log, should_abort=None):
             _abort(should_abort)
             try:
                 d = bench.dev("sbus")
-                m = d.mark()
-                d.send('{"t":"ping"}')
-                got = d.expect(r'^\{"t":"pong".*"fwver":"([^"]+)"', timeout=3, since=m)
-                out["sbus"] = got.group(1)
+                out["sbus"] = SbusCtl(d).ping_once()
                 log(f"sbus on {port}: firmware {out['sbus']}")
                 break
             except Exception as e:  # noqa: BLE001
@@ -611,33 +609,19 @@ def _release_sbus(dev, port, log, tid):
     """A cut-off sbus.* test skipped its finally. The controller keeps a held stick, button or button-mode trim in RAM
     with no timeout (SBUSController.ino "a"/"btn"/"tr" handlers), and opening its port does not reset it, so the
     re-run test would start displaced and record a false FAIL. Release them - the rest values the controller's boot
-    sets - with no reset. Switches and sliders are left alone: switch_exact and slider_exact take the current pos/pct
-    as their baseline. Every line starts with '{'. The cfg reply carries the controller's WiFi passwords (wifiNets),
-    so its session.log line is redacted.
+    sets - with no reset (SbusCtl.center_all). Switches and sliders are left alone: switch_exact and slider_exact take
+    the current pos/pct as their baseline. Every line starts with '{'. The cfg reply carries the controller's WiFi
+    passwords (wifiNets), so SbusCtl.cfg redacts its session.log line.
 
     Caveat for other benches: a released button writes 992 to its channel. On this bench every button and trim is on
     the matrix channel, so no switch or slider shares a channel with one."""
-    def send(o):
-        dev.send(json.dumps(o, separators=(",", ":")))
-    old_log = dev.log
-    if old_log:
-        dev.log = lambda name, direction, text: old_log(name, direction, ck.redact_text(text))
+    ctl = SbusCtl(dev)
     try:
-        m = dev.mark()
-        send({"t": "getcfg"})      # answered only within 5 s of a ping - the pong above was just received
-        try:
-            cfg = json.loads(dev.expect(r'^\{"e":"cfg"', timeout=5, since=m).string)
-        except (AssertionError, ValueError) as e:
-            raise ResumeBlocked(f"SBUS on {port} answered ping but not getcfg ({_first(e)}) - power-cycle it, then "
-                                f"resume again")
-    finally:
-        dev.log = old_log
-    send({"t": "a", "lx": 0, "ly": 0, "rx": 0, "ry": 0})
-    for i, _ in enumerate(cfg.get("btn") or []):
-        send({"t": "btn", "i": i, "p": False})
-    for i, tr in enumerate(cfg.get("tr") or []):
-        if tr.get("m") == 1:
-            send({"t": "tr", "i": i, "d": 1, "p": False})
+        cfg = ctl.cfg(ping=False)      # answered only within 5 s of a ping - the pong above was just received
+    except (AssertionError, ValueError) as e:
+        raise ResumeBlocked(f"SBUS on {port} answered ping but not getcfg ({_first(e)}) - power-cycle it, then "
+                            f"resume again")
+    ctl.center_all(cfg)
     log(f"SBUS controller: sticks centred, buttons and button-mode trims released after the cut-off test {tid}")
 
 

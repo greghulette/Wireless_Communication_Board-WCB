@@ -52,9 +52,9 @@ from hil.checkpoint import CheckpointError, RunBusy  # noqa: E402
 from hil.identify import ESP_VIDS, identify_port, usb_fingerprint  # noqa: E402
 from hil.navicore import NaviCore  # noqa: E402
 from hil.resume import ResumeAborted, ResumeBlocked  # noqa: E402
+from hil.sbus import SbusCtl  # noqa: E402
 from hil.runner import DEVICE_KINDS, describe_device, fmt_duration  # noqa: E402
 from hil.probe import HEADERS  # noqa: E402
-from hil.serialdev import ExpectTimeout  # noqa: E402
 from hil.wcb import WCB  # noqa: E402
 import suites  # noqa: E402
 
@@ -1355,18 +1355,8 @@ class App:
             elif kind == "navicore":
                 text = f"NaviCore   firmware {NaviCore(b.dev(name)).ping()}"
             else:
-                d = b.dev(name)
-                deadline = time.monotonic() + 60
-                while True:
-                    m = d.mark()
-                    d.send('{"t":"ping"}')
-                    try:
-                        got = d.expect(r'^\{"t":"pong".*"fwver":"([^"]+)"', timeout=3, since=m)
-                        break
-                    except ExpectTimeout:
-                        if time.monotonic() > deadline:
-                            raise
-                text = f"SBUS controller   firmware {got.group(1)}"
+                # Up to 60 s: opening the port can reset the controller, and its WiFi cascade holds its boot (§2).
+                text = f"SBUS controller   firmware {SbusCtl(b.dev(name)).ping(timeout=60)}"
             self.emit("identity", name, "✔ " + text)
         except Exception as e:
             self.emit("identity", name, "✘ " + str(e).splitlines()[0])

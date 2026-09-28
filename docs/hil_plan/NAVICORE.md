@@ -481,6 +481,32 @@ Nine pieces, in the order they unblock tests. Effort is agent-hours of writing p
 
 ### INF1 — `hil/navicore.py`, the shared driver
 
+> **Status 2026-09-27: written; no bench run yet.** s21's twelve helpers are driver methods (`config`, `debug`,
+> `cli` for both `_flushed` and `_cli`, `mae_get`, `local_slots`, `undriven_channel`, `ack_line` for `_ack`, `mode`,
+> `rec_info`, `clips`, `sbus_dump` for `_l09`), with `usable_slot`, `lines` and `rc_events` beside them; s08's and s22's
+> GET_CONFIG reads use `config()`. Every method below exists except `ota_status`/`ota_stream` (INF4); `selftest.py` feeds
+> each parser firmware-format lines. The moved helpers send exactly what they did. Needs a first bench check: the writes
+> (`set_config`, `reset_defaults`, `set_cmdlib`: after INF3), `rec_download`/`rec_upload`, `reboot`/`wait_boot`/
+> `hard_reset` (no run has seen NaviCore boot), `monitor`, `seq`/`seqval`, `version_surfaces`. Read in the source
+> while writing it:
+> - Only SET_CONFIG, SET_CMDLIB, TEST_ACTION, FORGET_PEER and RESET_MESH_STATS name themselves in their ACK; the rest
+>   answer a bare `{"type":"ACK","ok":...}` (NaviCore.ino:3914-4217), so `of` is checked only for those. `ack()` returns
+>   the dict, and `ack_line()` the exact line the existing tests compare byte for byte.
+> - The config tool paces every line over 512 bytes, not only those over the 8 KB ring (`sendLine`, index.html:5313-
+>   5321); `send_paced` does the same.
+> - setup() ends `[NaviCore] Firmware <v> — setup complete.` in three writes (:4916-4918). A restart re-enumerates the
+>   USB port, so the banner can be lost; `wait_boot` also accepts a PONG after the port reopens, and fails at once on
+>   the ROM's `waiting for download`.
+> - The USB rc_trig and PWM_UPDATE frames are dropped, not queued, when the TX ring is short (:2233-2266, :3150-3158),
+>   and STOP_MONITOR also ends a calibration (:3965-3970).
+> - `_clipPath` keeps only `[A-Za-z0-9_-]` and 32 characters of a clip name (navicore_record.h:522-533), so another
+>   name addresses a different clip: the driver refuses it. BEGIN and END also echo `nm`, the clip in the buffer,
+>   checked like `fp`.
+> - navicore_record.h's protocol comment (:695-697) still documents `?REC,EDITEV,<json>` answered `[CLIPUL:ACK,<count>]`;
+>   the code takes `<index>,<json>` and ACKs the index (NaviCore.ino:3575-3586). NaviCore doc drift, not fixed here.
+> - The `[MAE:n]` markers end in a newline (NaviCore.ino:741-756); the `#L12` after a `?MAE` query is for the held-line
+>   behaviour, not a missing line end (s21's docstring said otherwise and is corrected).
+
 Today it has six methods in 57 lines: `json_cmd` (:11-14), `ping` (:16-18), `wcb_status`/`online_ids` (:20-26),
 `wdp_dump` (:28-37), `sbus_state` (:39-54, which lacks the `#L12` flush that s21's own `_l09` adds) and
 `set_debug_flags` (:56-57). Every suite re-implements the rest; s21 alone has `_config` (:40), `_debug` (:51),
@@ -523,6 +549,14 @@ ota_status() -> dict; ota_stream(image)         # INF4
 MESH_STATS pages, the boot banner, FNV-1a against a known vector, and INF6's fragment builder.
 
 ### INF2 — `hil/sbus.py`
+
+> **Status 2026-09-27: written; no bench run yet.** `SbusCtl` replaces the controller JSON in s11, s21 and
+> `hil/resume.py`, and in gui.py's Devices *Check*, a fourth copy (`job_check_device`) the list below missed. The
+> suites send the same bytes; `cfg()` now hashes `wifiNets` in session.log, which s11 and s21 logged in clear.
+> `safe_channels`, `band` and `matrix_button` moved too. `encode`/`decode` pass `selftest.py` against a real frame
+> NaviCore dumped with `#L13` in run 20260922-120804, which decodes to the `#L09` values printed around it. The
+> controller's default is SBUS-24: 36-byte frames, 24 channels, flags at byte 34 and the footer at 35
+> (SBUSController.ino:122-129, :757-772); a 25-byte frame is the 16-channel variant. The INF8 verbs wait for INF8.
 
 The controller's JSON is duplicated in `s11_sbus.py:17-33`, `s21:1152-1207` and `hil/resume.py:568-641`. One class,
 `SbusCtl(dev)`: `ping(timeout=60)` (the controller may reset when its port opens), `cfg()` (the getcfg line carries
