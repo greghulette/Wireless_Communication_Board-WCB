@@ -175,9 +175,12 @@ function pageShim(cfg) {
 
 // ─── Node side ──────────────────────────────────────────────────────────────────────────────────────────────
 // A device is anything with:
-//   attach(sink)          sink(bytes) sends bytes to whichever page holds the port open (dropped when none does)
+//   attach(sink, port)    sink(bytes) sends bytes to whichever page holds the port open (dropped when none does);
+//                         port is this FakeSerial, for a device that errors a held port (a restart)
 //   onOpen(opts, page)    the port was opened        onClose(page)   it was closed
 //   onWrite(buf, meta)    bytes the page wrote       onSignals(s)    a setSignals() call (recorded, never applied)
+//   present               optional: false while the device is off the bus (a restarting NaviCore re-enumerating),
+//                         when open() fails as Chrome's does for an absent device and writes fail as for a lost one
 // Only one page may hold the device open at a time, as with a real port: a second open() fails the way Chrome's
 // does ("Failed to open serial port.", NetworkError).
 class FakeSerial {
@@ -196,7 +199,7 @@ class FakeSerial {
     this.events = [];                   // {t, op, ...}: open / close / write / signals, as Node saw them
     this._chains = new Map();           // page -> promise chain, so pushes arrive in order
     this._watched = new WeakSet();      // pages whose 'close' already releases the port
-    device.attach((bytes) => this.push(bytes));
+    device.attach((bytes) => this.push(bytes), this);
   }
 
   async install(context) {
@@ -213,7 +216,8 @@ class FakeSerial {
     }
     switch (msg.op) {
       case 'open':
-        if (this.owner && this.owner !== page) {
+        if ((this.owner && this.owner !== page) || this.device.present === false) {
+          this.events.push({ t: Date.now(), op: 'openFail', absent: this.device.present === false });
           return { error: { name: 'NetworkError', message: 'Failed to open serial port.' } };
         }
         this.owner = page;
@@ -237,6 +241,7 @@ class FakeSerial {
         return {};
       case 'write': {
         if (this.owner !== page) return { error: { name: 'InvalidStateError', message: 'The port is closed.' } };
+        if (this.device.present === false) return { error: { name: 'NetworkError', message: 'The device has been lost.' } };
         const buf = Buffer.from(msg.b64, 'base64');
         this.events.push({ t: Date.now(), op: 'write', pageT: msg.t, len: buf.length, head: buf.subarray(0, 48).toString('latin1') });
         this.device.onWrite(buf, { pageT: msg.t });

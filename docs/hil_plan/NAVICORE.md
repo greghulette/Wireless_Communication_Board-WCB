@@ -830,6 +830,35 @@ adapter only, and is deleted after; the PC keeps its internet on the other adapt
 >   (`:15108-15123`, reached from `sync()` at `:15192` and the render-time call at `:15235`); `_releaseSerialOnUnload`'s `try { p.close() } catch` cannot catch the promise's
 >   rejection (`:4501`); the WCB channel hint says "1-13" while the field caps at 11 (`:2862-2864`). The Wizard's
 >   `seqValueToLines` is at `Wizard/app.js:4485`, not :4404.
+> - **The Firmware tab and the clips.** `lib/navicore/ota.js` gives the emulator `?OTALOCAL` (`navicore_ota.h:244-305`)
+>   and, in via-WCB mode, the tethered WCB's `?OTA` relay with its CRC-32 check (`WCB_OTA.cpp:486-593`) in front of
+>   NaviCore's target handlers (`navicore_ota.h:346-411`); faults are a lost DATA line, a lost ACK, a mangled line,
+>   coalesced and split markers, stale and foreign ACKs and a held window. A verified END restarts the emulated board:
+>   off the bus (`FakeSerial` refuses `open()` and writes while the device's `present` is false), deaf while it boots,
+>   then back on the other slot as `otaNewVersion`; via WCB only NaviCore restarts, and the relay pauses its RC-JSON
+>   passthrough for 8 s after each `?OTA` line (`WCB.ino:395-402`, `:6607-6613`). `lib/navicore/clips.js` gives it
+>   `?REC` over a clip store (`NaviCore.ino:3440-3595`, `navicore_record.h`): the list, record/save/play, rename and
+>   delete, the ranged and batched EDITLOAD with `fp`/`fc`/`nm`, and the indexed upload; relayed replies go back as
+>   `[TERM:20]` packets of at most 160 bytes (`navicore_rterm.h:48-53`). `lib/navicore/firmware.js` serves GitHub's
+>   `firmware/` listing (with a decoy for each wrong pick `flasher.js` guards against), the raw downloads, and stand-ins
+>   for CryptoJS and esptool-js (`fake_cryptojs.js`, `fake_esptool.mjs`) by `page.route`; the esptool-js stand-in
+>   records the regions, bytes and options the tool hands `writeFlash`.
+> - Code facts from those specs: the Full Wipe texts promise the saved configuration is erased (`config_tool/index.html:3250`,
+>   `:3266-3269`, `:17957`, `:18057`, `:18124-18127`) while `flasher.js` erases only NVS and otadata (`flasher.js:363-370`)
+>   and `/config.json` lives in LittleFS at 0x3D0000 (`partitions.csv:19`), loaded first at boot (`NaviCore.ino:4565-4583`)
+>   (D-NC34 confirmed); the button title that warns clips are not erased (`:3250`) is replaced at load by one that does not
+>   (`:18057`); `runFirmwareFlash` disconnects before it downloads anything (`:17908-17917`) and reconnects only after a
+>   completed flash (`:17966-17970`), so a refused or failed download leaves the user disconnected from an untouched board;
+>   `otaUpdateOverUsb` rewinds after `WINDOW` cursor-stuck markers (`:17535`), but one lost chunk leaves only `WINDOW - 1`
+>   chunks behind it to NAK, so every loss waits out the 10 s marker timeout (`:17514-17523`; measured 11.0 s) where
+>   `otaUpdateOverWcb` counts to `WINDOW - 1` (`:17808`); `clipRecordToggle` waits for a `[CLIPUL:REC` marker
+>   (`:6469-6475`) that no firmware prints (`NaviCore.ino:3451` answers "[REC] recording…" or "[REC] busy / no buffer"), so
+>   a refused START is taken as started and the Stop & Save after it SAVEs the replayed buffer under the typed name;
+>   `clipRestoreOne` never sends the clip's mode (`:6834-6869`) and `editBegin` keeps whatever was resident
+>   (`navicore_record.h:883-888`) (D-NC33 confirmed); the flasher takes the first `NaviCore_*_ESP32S3.bin` the listing
+>   names (`flasher.js:146-151`, `:174`), so a kept older build beside a newer one (the `-KeepOld` case its comment
+>   mentions) is picked by GitHub's listing order; the "Latest on GitHub" check does not retry a throttled listing
+>   (`flasher.js:66-79`) while the flash's own listing does (`_fetchRetry`, `:106-129`).
 
 In `tests/wizard` (D-NC10); details in §5. `serve.js` maps `/NaviCore/` to the sibling repo; new files
 `lib/navicore/shim.js` (the fake `navigator.serial`), `lib/navicore/emulator.js`, `lib/navicore/pipe.js` (the
@@ -1031,11 +1060,15 @@ runs in CI, and can be written while the bench is busy with other plans.
 > `sendjson_fragments_exact`, `sendline_chunking`, the `(should)` `push_refused_not_pending`); `editors`
 > (`button_modal_trigger`, `test_action_button`, `command_view_limits`, `wcb_network_profiles`,
 > `wcb_network_bridged_strip`, and the `(should)` `noop_apply_every_editor`, `skip_running_saved`,
-> `test_action_refusal_shown`, `command_view_cap_on_open`). The eight `(should)` specs each fail at their own
-> assertion; the INF7 note lists what they found. Not yet written from the §2 table: the clips, timeline, command-library
-> sync and sequence-source, firmware (flash, wipe text, both OTAs), live monitor and rc telemetry, WCB status panel,
-> calibration, export/import, CSV, cloud backup, shared-hub, multi-tab, channels/transmitter and misc-editor, Maestro XML
-> and Intellex-contract specs.
+> `test_action_refusal_shown`, `command_view_cap_on_open`); `firmware` (`fw_flash_mocked`, `fw_flash_partial_refused`,
+> `fw_wipe_regions`, `ota_usb_state_machine`, `ota_usb_failures`, `ota_wcb_state_machine`, `ota_wcb_failures`, and the
+> `(should)` `fw_refused_flash_keeps_session`, `fw_wipe_text` (D-NC34), `ota_usb_lost_chunk`); `clips`
+> (`clips_list_forms`, `clips_record_rename_delete`, `clip_download_verified`, `clip_backup_bundle`, `clip_restore`,
+> `clip_restore_bridged`, `timeline_editor_save`, and the `(should)` `clip_record_refused`, `clip_restore_mode`
+> (D-NC33)). The thirteen `(should)` specs each fail at their own assertion; the INF7 note lists what they found. Not yet
+> written from the §2 table: command-library sync and sequence-source, live monitor and rc telemetry, WCB status panel,
+> calibration, export/import, CSV, cloud backup, shared-hub, multi-tab, channels/transmitter and misc-editor, Maestro
+> XML and Intellex-contract specs.
 
 ### NC-WP4 — the engine through TRIGGER and TEST_ACTION (`s41_navicore_engine.py`, `ncengine.*`)
 
@@ -1454,7 +1487,8 @@ none yet).
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending)_ | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
+| 2026-09-28 | _(pending)_ | NC-WP3's Firmware-tab and clip specs (19, five `(should)`): `lib/navicore/ota.js` (`?OTALOCAL`, the `?OTA` relay, the restart), `clips.js` (`?REC`, the clip store), `firmware.js` with the esptool-js and CryptoJS stand-ins, and `FakeSerial`'s absent device. The INF7 note lists the code facts they found: D-NC33 and D-NC34 confirmed; a refused flash leaves the session disconnected; USB OTA waits out 10 s per lost chunk; a refused Record is taken as started. |
+| 2026-09-28 | `83684b3` | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
 | 2026-09-28 | _(pending)_ | INF6 built (`hil/ncmesh.py`, four `selftest.py` cases) and NC-WP1 written (34 `nccfg` tests in `s40_navicore_config.py`, opt-ins `navicore_reboot` and `navicore_fault`, `navicore.bench_health`, the s21 route check); `selftest.py` runs the whole suite against `NaviModel`, a port of NaviCore's config handling. No bench run yet. The two status notes list where the code differed from the plan: the burn, the probe's peer table, the 'parse failed' trigger, the password split made by RESET_DEFAULTS (only when the defaults decode no button or mode from the live SBUS input: a SET_CONFIG restore leaves a parked tap to fire the restored mapping). New findings D-NC42 (strings cut through a UTF-8 character), D-NC43 (holdMs left under tapWindowMs) and D-NC44 (no config apply clears a parked tap). |
 | 2026-09-28 | _(pending)_ | INF3 and INF4 bench-verified: `nccfg.guard_selftest` passes; `ncflash` proved its reset rung and flashed the running image into `app1` (79 s, no NAK). |
 | 2026-09-28 | _(pending)_ | INF4 built: `hil/ncflash.py` (build, image check, `?OTALOCAL` flash, the recovery ladder, FLASHED.md rows, a command line), seven `selftest.py` cases, and a real compile of NaviCore through `build()`; nothing flashed yet. The INF4 status note lists where the code differed from the plan: no SHA line on the board yet, NAK and base64-error semantics, one esptool connection with `boot_app0.bin` and `--after watchdog-reset` instead of an otadata erase, and a read-only download-mode rung. |

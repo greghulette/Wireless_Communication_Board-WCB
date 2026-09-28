@@ -68,6 +68,27 @@ _L1 = (
     ("command_view_cap_on_open", "(should) An action stored with a ;W<n>;S<p> prefix opens with the prefix already reserved in the field cap"),
     ("wcb_network_profiles", "The dirty badge tracks the WCB Network fields, a USB Save carries the branch, a profile loads into the fields, and a seventh profile is refused"),
     ("wcb_network_bridged_strip", "Over the bridge a WCB Network edit is not sent: alone it says so, with other edits it is stripped and kept out of the new baseline"),
+    # The Firmware tab: GitHub, CryptoJS and esptool-js served by page.route; the emulator speaks ?OTALOCAL and the ?OTA relay.
+    ("fw_flash_mocked", "Update Firmware writes boot, partitions and app from GitHub's listing (never a decoy) with otadata reset, hands esptool-js the port with no stray writes and resumes the session; Latest on GitHub reads the same listing"),
+    ("fw_flash_partial_refused", "A firmware set with only one of the bootloader / partition-table pair is refused before the bootloader is touched; with neither, the flash is app-only"),
+    ("fw_refused_flash_keeps_session", "(should) An Update refused before anything is written leaves the live session connected"),
+    ("fw_wipe_regions", "Full Wipe asks first, then erases NVS and otadata ahead of boot, partitions and app on the granted port, and writes nothing at or above app1 (config LittleFS and clips untouched)"),
+    ("fw_wipe_text", "(should) Nothing the Full Wipe shows promises the saved configuration is erased, since the flasher never writes the config LittleFS (D-NC34)"),
+    ("ota_usb_state_machine", "OTA over USB survives coalesced and split markers and a lost last ACK, skips late cursor markers ahead of END,OK, locks the port while it streams, writes the image byte-exact and reconnects across the restart"),
+    ("ota_usb_failures", "OTA over USB: a rejected BEGIN and a failed verify are reported as failures and ABORTed, and the board keeps its image on the live session"),
+    ("ota_usb_lost_chunk", "(should) OTA over USB resends a lost DATA line once the chunks behind it are NAKed, not after the 10 s stall timeout"),
+    ("ota_wcb_state_machine", "OTA over WCB: 192-B CRC-suffixed chunks, eight in flight, one session; a CRC-dropped line is resent, other targets' and sessions' ACKs are ignored, only the offset-0 END answer counts"),
+    ("ota_wcb_failures", "OTA over WCB: a rejected BEGIN and an unverifiable END are reported as failures and ABORTed on the session; the target keeps its image"),
+    # Record/replay clips: the emulator holds a clip store and answers ?REC (lib/navicore/clips.js).
+    ("clips_list_forms", "Relayed clip lists parse in both wire forms (per-item with noise and a torn item; the old single marker wrapped at 160 B), the storage bar follows [CLIPFS], an empty list says so"),
+    ("clips_record_rename_delete", "Record saves under the typed name; a rename re-points the actions that name the clip, a clash or a board refusal changes nothing; a delete offers to remove its actions"),
+    ("clip_record_refused", "(should) A Record the board refuses because it is replaying does not arm Stop & Save (the tool waits for a [CLIPUL:REC] marker no firmware prints)"),
+    ("clip_download_verified", "A clip downloads to a file only when every event arrived: a lost line is re-requested by index; a truncated buffer, a mid-download change or a missing event save nothing"),
+    ("clip_backup_bundle", "All + config warns with size and time first, then writes the config and every clip that downloaded completely, naming the one that did not"),
+    ("clip_restore", "A restore asks per collision (skip, a re-checked new name, overwrite), writes at each index so a lost ACK's retry adds no duplicate, reads the list back and reports"),
+    ("clip_restore_mode", "(should) A restored clip keeps the mode it was recorded in (D-NC33)"),
+    ("clip_restore_bridged", "Over the WCB an event line too long for one ESP-NOW packet is refused and the board left out of edit mode; a small clip restores through [TERM:20] ACKs"),
+    ("timeline_editor_save", "The timeline loads through the verified download and saves exactly its model; an incomplete clip opens read-only; closing mid-save cancels and leaves the clip as it was"),
 )
 for _key, _title in _L1:
     def _l1(bench, _id=f"nctool.{_key}"):

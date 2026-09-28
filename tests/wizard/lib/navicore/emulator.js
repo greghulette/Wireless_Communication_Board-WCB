@@ -13,6 +13,9 @@
 //   doorway  a WCB (or relay) the tool was told is a NaviCore: a bare JSON line is forwarded to the mesh and answered
 //            in the RELAYED shapes ({"sys":1,...,"id":20}), and a ? line is the WCB's own (Intellex's case,
 //            intellex_shim.js:411-437).
+// Firmware OTA is lib/navicore/ota.js: ?OTALOCAL in direct mode, the tethered WCB's ?OTA relay in via-wcb mode, and
+// the restart after a verified image (off the bus, deaf while booting, back on the other slot). Record/replay clips are
+// lib/navicore/clips.js: ?REC over a clip store, with the ranged download and the indexed upload.
 // Anything a spec needs to bend: hold(type) swallows a request type's replies until release(type), delay[type] = ms
 // defers them, override[type] = (msg, emu) => [lines] | null replaces them, and inject(line) / injectRaw(bytes)
 // write whatever a spec wants the tool to read. Every received line is in rx (with the parsed JSON when it parsed).
@@ -101,10 +104,13 @@ class NaviEmulator {
     this._subscribedUntil = 0;                    // the bridge's rcJsonRelay window (WCB.ino: 20 s after a ;w20,{)
     this._pwmTimer = null;
     this.sink = () => {};
+    this.port = null;                             // the FakeSerial in front of it (a restart errors a held port)
+    this._otaInit(opts);                          // lib/navicore/ota.js: ?OTALOCAL, the ?OTA relay, the restart
+    this._clipsInit(opts);                        // lib/navicore/clips.js: ?REC, the clip store, EDITLOAD / EDITEV
   }
 
   // ── transport (lib/navicore/shim.js FakeSerial) ──────────────────────────────────────────────────────────
-  attach(sink) { this.sink = sink; }
+  attach(sink, port) { this.sink = sink; this.port = port || null; }
   onOpen() { this.opens++; this._buf = Buffer.alloc(0); }
   onClose() { this._stopMonitor(); this._buf = Buffer.alloc(0); }
   onSignals(s) { this.signals.push({ t: Date.now(), ...s }); }
@@ -128,7 +134,12 @@ class NaviEmulator {
     this._timers.add(h);
     return h;
   }
-  stop() { for (const h of this._timers) clearTimeout(h); this._timers.clear(); this._stopMonitor(); }
+  stop() {
+    for (const h of this._timers) clearTimeout(h);
+    this._timers.clear();
+    this._stopMonitor();
+    if (this._otaFlushTimer) { clearTimeout(this._otaFlushTimer); clearImmediate(this._otaFlushTimer); this._otaFlushTimer = null; }
+  }
   release(type) {
     this.hold.delete(type);
     const keep = [];
@@ -146,6 +157,7 @@ class NaviEmulator {
     const rec = { t: Date.now(), line, json: null, via: null };
     this.rx.push(rec);
     if (this.mode === 'silent') return;
+    if (this.booting) { rec.via = 'booting'; return; }   // restarting: setup() has not reached the serial loop
     if (this.mode === 'via-wcb') return this._bridgeLine(line, rec);
     if (this.mode === 'doorway') return this._doorwayLine(line, rec);
     return this._directLine(line, rec);
@@ -166,6 +178,7 @@ class NaviEmulator {
   // processInputLine (NaviCore.ino:3773-4282).
   _directLine(line, rec) {
     if (line === 'WCB_WEBTOOL_CONFIG_PULL') return;
+    if (line.startsWith('?OTALOCAL,')) return this._otaLocalLine(line);   // execCliLine :3360, case-sensitive
     if (line[0] === '?' || line[0] === '#') return this._cli(line, (l) => this.send(l));
     if (line[0] !== '{') return;
     let msg;
@@ -279,6 +292,8 @@ class NaviEmulator {
     if (line[0] === '?') out(`Unknown command: ${line}`);
   }
   _builtinCli(line, out) {
+    // ?REC,... (NaviCore.ino:3444: a case-insensitive "?REC" prefix) — lib/navicore/clips.js.
+    if (/^\?REC/i.test(line)) { this._recCli(line, out, !!this._relayedCli); return true; }
     // ?MAE,GET,<slot>,<ch> / MOVING,<slot> / ERR,<slot> / <slot>,<ch>,<pos> (NaviCore.ino:3396-3439): a query answers
     // with a [MAE:<slot>]{...} marker (maestroReportQuery :741-755); a remote slot's answer comes later, off the mesh.
     const m = /^\?MAE,(\w+)(?:,(\d+))?(?:,(\d+))?(?:,(\d+))?$/i.exec(line);
@@ -314,6 +329,7 @@ class NaviEmulator {
     }
     if (target !== RC_ID) return;
     rec.via = payload;
+    if (this.meshDown) return;                      // NaviCore is restarting: nothing on the mesh answers
     if (payload[0] === '{') {
       this._subscribedUntil = Date.now() + 20000;   // WCB.ino: a ;w20,{json} opens the ~20 s relay window
       let msg;
@@ -323,14 +339,22 @@ class NaviEmulator {
       return;
     }
     // A text command for NaviCore's remote terminal: every line it prints comes back as [TERM:20]<line>.
-    this._cli(payload, (l) => this._relay(`[TERM:${RC_ID}]${l}`));
+    // The capture sink is armed for this one command (rcSerial.captureArmed(): EDITLOAD's relay caps key off it), and
+    // each line goes back in 160-byte RTERM packets (clips.js _termOut).
+    this._relayedCli = true;
+    try { this._cli(payload, (l) => this._termOut(l)); } finally { this._relayedCli = false; }
   }
 
-  // What the bridge prints of a mesh JSON line: only inside its relay window (rcJsonRelaySubscribed).
-  _relay(line) { if (line[0] !== '{' || Date.now() < this._subscribedUntil) this.send(line); }
+  // What the bridge prints of a mesh JSON line: only inside its relay window (rcJsonRelaySubscribed), and not while it
+  // forwards an OTA (otaRelayForwarding, WCB.ino:395-402, :5454, :5762).
+  _relay(line) {
+    if (line[0] === '{' && (Date.now() >= this._subscribedUntil || Date.now() < this._otaForwardUntil)) return;
+    this.send(line);
+  }
 
-  // The bridge WCB's own console. Nothing a spec relies on yet beyond "it answers in text".
+  // The bridge WCB's own console: its ?OTA relay (lib/navicore/ota.js), then whatever a spec's wcbConsole answers.
   _wcbOwn(line) {
+    if (/^\?OTA,/i.test(line)) return this._otaRelayLine(line);
     if (this.wcbConsole) { const r = this.wcbConsole(line, this); if (r) for (const l of [].concat(r)) this.send(l); return; }
     if (/^\?/.test(line)) this.send(`WCB: ${line.slice(1)} ok`);
   }
@@ -610,5 +634,7 @@ function extractData(line) {
   }
   return null;
 }
+
+Object.assign(NaviEmulator.prototype, require('./ota').methods, require('./clips').methods);
 
 module.exports = { NaviEmulator, fnv1a, fragSlices, extractData, strl, RC_ID, FRAG_MAX_PARTS };
