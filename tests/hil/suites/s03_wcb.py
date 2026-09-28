@@ -1,14 +1,16 @@
-"""WCB console basics — config integrity and command parsing, and the mesh config pull at size (F13). Changes nothing,
-except the size and pull tests, which add throwaway sequences (HILB../HILP..) or arm a RAM-only ?DEBUG knob on W2 and
-remove them again."""
+"""WCB console basics — config integrity and command parsing, and the mesh config pull at size (F13) and its target-side
+scheduler (WCB-WP25). Changes nothing, except the size and pull tests, which add throwaway sequences (HILB../HILP..) or
+arm a RAM-only ?DEBUG knob on W2 and remove them again; wcb.pull_holds_restart reboots W2, wcb.pull_changed_restart
+changes W2's S5 label, wcb.chain_partial_tokens W1's controller id, and wcb.pull_session_reaped W1's third MAC octet,
+each for seconds and put back."""
 import math
 import re
 import time
 
-from hil.runner import test
-from hil.wcb import (CONFIG_TEXT, PULL_MAX, WCB, Pull, PullRefused, chain_crc, comparable, dev_note, group_tokens,
-                     parse_error, parse_part, parse_pull_line, screen_code)
-from suites.common import config_guard, remote_wcbs, usb_wcb
+from hil.runner import Skip, test
+from hil.wcb import (CONFIG_TEXT, PULL_MAX, WCB, Pull, PullCollector, PullRefused, chain_crc, comparable, dev_note,
+                     group_tokens, parse_error, parse_part, parse_pull_line, screen_code)
+from suites.common import config_guard, marker, remote_wcbs, token, usb_wcb
 
 CHK_LINE = re.compile(r"^(.*)\^[?]CHK([0-9A-Fa-f]{8})$")
 # PULL_MAX (hil/wcb.py) is MGMT_MAX_CHUNKS x (CONFIG_PAYLOAD_SIZE - 1) = 2912: the most one relay session carries. A
@@ -535,3 +537,560 @@ def pull_nonblocking(bench):
     assert len(slow) <= 1, f"{len(slow)} ?VERSION round trips took over 150 ms while W2 sent its config: {slow} ms"
     assert not slow or slow[0] < WALK_MAX_S * 1000, (f"a ?VERSION round trip took {slow[0]} ms while W2 sent its "
                                                      f"config: loop() blocked for the send, not just a config walk")
+
+
+# ------------------------------------------------------------------ the target's scheduler and the restart gate (WCB-WP25)
+# W2's ?DEBUG,MGMT lines (RAM only; a reboot clears the flag) are the scheduler's own record, all printed on the loop task:
+# cpjStart 'Config request from WCB<r>[ (parts accepted)]' for a request it takes, handleConfigReqPacket 'Duplicate config
+# request from WCB<r> ignored', '... ignored: reply in progress' and '... parked behind WCB<x>'s reply', cpjMessageDone
+# 'Config pull to WCB<r> sent (<L> chars)' (all WCB.ino). Line times are the host's (hil/serialdev.py): a line can be
+# stamped late, never early (HIL_TESTING.md §6).
+ACCEPTED_W1 = r"^\[MGMT\] Config request from WCB1(?: \(parts accepted\))?$"
+SENT_W1 = r"^\[MGMT\] Config pull to WCB1 sent \(\d+ chars\)$"
+QUIET_S = 4.0          # PWM_REBOOT_QUIET_MS (WCB.ino): a deferred restart waits this long with no command processed
+DEDUP_S = 1.5          # CPJ_DEDUP_MS (WCB.ino): a requester's requests are ignored this long after one is accepted
+
+
+def _at(dev, since, pattern):
+    """(host time, line index) of the first line after `since` matching `pattern`, or (None, None)."""
+    rx = re.compile(pattern)
+    for i, (t, x) in enumerate(list(dev.lines[since:])):
+        if rx.search(x):
+            return t, since + i
+    return None, None
+
+
+def _stamp(dev, wcb):
+    """Tell hil.wcb.Pull that a pull of W<wcb> just left `dev` by hand. Pull spaces a pull PULL_SPACING_S from its own
+    last stamp only (Pull._send), so after a raw ?MGMT,PULL the next Pull could go inside the target's 1.5 s dedup
+    window, be dropped, and time out."""
+    dev.__dict__.setdefault("_last_pull", {})[wcb] = time.monotonic()
+
+
+def _w2_ready(w2, wait=30.0):
+    """W2's version once it answers again: a finally can run while W2 is still booting from a restart this test asked
+    for, and a line sent in its first second after reset is flushed (HIL_TESTING.md §5)."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            return w2.version()
+        except AssertionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(1.0)
+
+
+def _w2_online(bench, w1, wait=25.0):
+    """After W2 restarted: ?WDP,POLL on W1, then wait for W1's ?STATS to show WCB2 online again - a peer that has just
+    booted is offline to W1 until its next packet (HIL_TESTING.md §6), and the next test's unicast would go unretried.
+    Notes instead of raising: it runs in a finally."""
+    t0 = time.monotonic()
+    w1.run("?WDP,POLL")
+    time.sleep(1.0)            # the adverts it asks for print '[ETM] WCBn came ONLINE' for up to ~0.7 s (F18)
+    while time.monotonic() - t0 < wait:
+        if w1.etm_board_stats().get(2, {}).get("online"):
+            return
+        time.sleep(1.0)
+    bench.note(f"W1 still saw WCB2 offline {wait:.0f} s after W2's restart")
+
+
+def _restart_arm(w1, w2, delay, want, keys):
+    """One ?reboot of W2 raced against a 6-part pull of it -> (problems, straddled, (accepted, sent, restart) seconds
+    after 'Reboot queued' or None). delay None: ?reboot once W2 has taken the pull; a number: the pull goes that many
+    seconds after W2's 'Reboot queued'. straddled: W2's own log shows the job taken before the quiet window ran out and
+    sent after it, with the restart right behind the 'sent' line - the case only the configPullJobActive() term covers.
+    Knobs first each time: a boot clears them."""
+    problems = []
+    _knob(w2, "?DEBUG,PULLPART,512")
+    _knob(w2, "?DEBUG,MGMT,ON")
+    m2 = w2.dev.mark()
+    if delay is None:
+        p = Pull(w1.dev, 2, parts=True, timeout=10)
+        w2.dev.expect(ACCEPTED_W1, timeout=4, since=m2)
+        w2.dev.send("?reboot")               # raw: WCB.run's echo would be one more command in the quiet window
+    else:
+        w2.dev.send("?reboot")
+        w2.dev.expect(r"^Reboot queued", timeout=3, since=m2)
+        tq, _ = _at(w2.dev, m2, r"^Reboot queued")
+        time.sleep(max(0.0, tq + delay - time.monotonic()))
+        p = Pull(w1.dev, 2, parts=True, timeout=10)
+    try:
+        while not p.poll():
+            time.sleep(0.05)
+        problems += _reply_problems(p.reply(verify=False), want, keys, "parts")
+    except AssertionError as e:               # PullRefused is one too
+        problems.append(f"the pull did not complete: {e}")
+    w2.wait_boot(m2, timeout=40)
+    tq, _ = _at(w2.dev, m2, r"^Reboot queued")
+    ta, _ = _at(w2.dev, m2, ACCEPTED_W1)
+    ts, i_sent = _at(w2.dev, m2, SENT_W1)
+    tb, i_boot = _at(w2.dev, m2, r"^Rebooting now")
+    if i_boot is None:
+        problems.append("W2 printed no 'Rebooting now...' before its boot banner")
+    elif i_sent is None or i_boot < i_sent:
+        problems.append("W2 restarted before 'Config pull to WCB1 sent': the restart did not wait for the job")
+    if None in (tq, ta, ts, tb):
+        return problems, False, None
+    t = (round(ta - tq, 2), round(ts - tq, 2), round(tb - tq, 2))
+    straddled = ta < tq + QUIET_S - 0.1 and ts > tq + QUIET_S + 0.1 and tb - ts < 0.5
+    return problems, straddled, t
+
+
+@test("wcb.pull_holds_restart", "A deferred ?reboot on W2 waits for a config pull W2 is sending: a 6-part pull (?DEBUG,PULLPART,512) running when ?reboot arrives, and one landing 3.3/3.6/3.9 s after it so the 4 s quiet window runs out mid-job, both arrive whole and CRC-valid at W1, and W2 restarts only after its 'Config pull to WCB1 sent' (WCB-WP25; 2-4 W2 reboots)", needs=["wcb1", "wcb2"])
+def pull_holds_restart(bench):
+    """The restart gate in loop() (WCB.ino) is '(quiet || capped) && !configPullJobActive()', and a config request
+    never moves the quiet clock: it reaches the target through drainMgmtReqs, not through the command queue that stamps
+    lastCommandProcessedMs. Arm 1 sends ?reboot while the parts flow; the job (~1 s) ends inside the 4 s window, so it
+    shows only that nothing restarts early. Arm 2 would catch a lost configPullJobActive() term: the pull lands just
+    before the window runs out, so the restart falls due mid-job and must wait for the job's end. An offset counts only
+    when W2's log shows it straddled that moment (see _restart_arm); a mesh command in the window moves the moment, and
+    the next offset is tried. The throwaway HILP sequences are removed again."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    keys, problems, seen = [], [], []
+    with config_guard(bench, 2):
+        try:
+            ver = w2.version()
+            n = _grow_over(w2, ver, keys)
+            want = _factory_reply(w2, ver)
+            got, straddled, t = _restart_arm(w1, w2, None, want, keys)
+            problems += [f"?reboot during the pull: {x}" for x in got]
+            seen.append(("during", t))
+            for delay in (3.3, 3.6, 3.9):
+                got, straddled, t = _restart_arm(w1, w2, delay, want, keys)
+                problems += [f"pull {delay} s after ?reboot: {x}" for x in got]
+                seen.append((delay, t))
+                if straddled or got:
+                    break
+            bench.note(f"W2 at {n} characters in 512-byte parts; (arm, (accepted, sent, restart) s after 'Reboot "
+                       f"queued'): {seen}")
+            if not problems and not straddled:
+                problems.append(f"no pull had the {QUIET_S:.0f} s quiet window run out mid-job, so the "
+                                f"configPullJobActive() term went untested: {seen}")
+        finally:
+            try:
+                _w2_ready(w2)
+                _knob(w2, "?DEBUG,PULLPART,OFF", check=False)
+                w2.run("?DEBUG,MGMT,OFF")
+            finally:
+                _clear(w2, keys)
+                _w2_online(bench, w1)
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_changed_restart", "A config that changes while W2 sends it in parts is sent again under a new part id, whole, with the change in it; one that keeps changing (a label every 150 ms) is answered [MGMT:CFGERR,2]CHANGED after 3 walks, which W2 also prints, and the next pull is whole (WCB-WP25)", needs=["wcb1", "wcb2"])
+def pull_changed_restart(bench):
+    """Every build walk re-checks the reply's length and CRC against the measure walk (cpjBuild, WCB.ino). A mismatch
+    starts the job over with a new id (cpjMeasure draws one that differs), at most CPJ_MAX_RESTARTS (2) times; then
+    cpjFail(CHANGED) sends 'ECHANGED,the config changed while it was sent (3 tries); retry' (cfgpErrorText,
+    WCB_ConfigParts.h) and prints the ungated '[MGMT] Config pull from WCB1: the config changed on every walk (3
+    tries).' line. The measure walk and part 1's build run in one step, so a change lands after part 1 at the
+    earliest - which is when this test makes it. The requester drops the parts of an id a new one replaces
+    (PullCollector.restarts counts that). The change is ?LABEL,S5 on W2's own USB, put back at the end."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    keys, problems = [], []
+    with config_guard(bench, 2) as before:
+        restore = token(before[2], "?LABEL,S5,") or "?LABEL,CLEAR,S5"
+        try:
+            ver = w2.version()
+            n = _grow_over(w2, ver, keys)
+            _knob(w2, "?DEBUG,PULLPART,512")
+            _knob(w2, "?DEBUG,MGMT,ON")
+            label = marker("L")
+            # One change, just after part 1 arrives.
+            m2 = w2.dev.mark()
+            p = Pull(w1.dev, 2, parts=True, timeout=10)
+            changed = False
+            while not p.poll():
+                if not changed and p.collector.parts:
+                    w2.dev.send(f"?LABEL,S5,{label}")
+                    changed = True
+                time.sleep(0.02)
+            r = p.reply(verify=False)
+            ids = sorted({x[0] for x in _pull_lines(w1.dev, r.mark, 2)["CFGPART"] if x})
+            want = _factory_reply(w2, ver)
+            bench.note(f"W2 at {n} characters in 512-byte parts, S5 relabelled after part 1: {r.count} parts under "
+                       f"{len(ids)} id(s), {p.collector.restarts} collector restart(s)")
+            problems += [f"one change: {x}" for x in _reply_problems(r, want, keys, "parts")]
+            if not changed:
+                problems.append("one change: the reply was whole before part 1 was seen, so nothing was changed")
+            elif p.collector.restarts < 1 or len(ids) < 2:
+                problems.append(f"one change: the reply came under {len(ids)} part id(s) with {p.collector.restarts} "
+                                f"restart(s); a change after part 1 must restart it under a new id")
+            if f"?LABEL,S5,{label}" not in r.tokens:
+                problems.append("one change: the reply lacks the new S5 label")
+            if not any(re.search(r"^\[MGMT\] Config pull to WCB1: the config changed between walks - starting over",
+                                 x) for x in w2.dev.since(m2)):
+                problems.append("one change: W2 did not log 'the config changed between walks - starting over'")
+            # A change every 150 ms: every walk sees a new config.
+            m2 = w2.dev.mark()
+            p = Pull(w1.dev, 2, parts=True, timeout=10, retry_noparts=False)
+            refused, i, nxt = None, 0, time.monotonic()
+            try:
+                while True:
+                    if time.monotonic() >= nxt:
+                        w2.dev.send(f"?LABEL,S5,{label}{i}")
+                        i, nxt = i + 1, time.monotonic() + 0.15
+                    if p.poll():
+                        break
+                    time.sleep(0.01)
+            except PullRefused as e:
+                refused = e
+            except AssertionError as e:
+                problems.append(f"churn: {e}")
+            time.sleep(0.5)
+            if refused is None and p.collector.reply is not None:
+                r = p.reply(verify=False)
+                problems.append(f"churn: the pull completed as {r.count} {r.kind} line(s) while S5 was relabelled "
+                                f"every 150 ms ({i} times)" + ("" if r.provided == r.calc else ", and fails its CRC"))
+            elif refused is not None and refused.code != "CHANGED":
+                problems.append(f"churn: refused {refused.code} ({refused.detail}), not CHANGED")
+            elif refused is not None and "(3 tries)" not in refused.detail:
+                problems.append(f"churn: the CHANGED detail does not say 3 tries: {refused.detail!r}")
+            if not any(x.startswith("[MGMT] Config pull from WCB1: the config changed on every walk (3 tries).")
+                       for x in w2.dev.since(m2)):
+                problems.append("churn: W2 did not print 'the config changed on every walk (3 tries)'")
+            problems += [f"churn: {x}" for x in _error_text_problems(_pull_lines(w1.dev, p.mark, 2))]
+            bench.note(f"churn: {i} relabels; W1's pull ended in "
+                       + (f"CFGERR {refused.code}" if refused else "no refusal"))
+            w2.run(restore)
+            want = _factory_reply(w2, ver)
+            r = w1.pull_reply(2, timeout=15, verify=False)
+            problems += [f"after the churn: {x}" for x in _reply_problems(r, want, keys, "parts")]
+        finally:
+            try:
+                w2.run(restore)
+                _knob(w2, "?DEBUG,PULLPART,OFF", check=False)
+                w2.run("?DEBUG,MGMT,OFF")
+            finally:
+                _clear(w2, keys)
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_dedup_window", "W2 answers a requester once per 1.5 s: W1's ?MGMT,PULL,2 sent 1.0 s after W2 took the previous one is dropped as a duplicate and gets no reply, one sent 1.7 s after it (the harness's PULL_SPACING_S) is answered whole (WCB-WP25)", needs=["wcb1", "wcb2"])
+def pull_dedup_window(bench):
+    """handleConfigReqPacket (WCB.ino) stamps a requester when it accepts a request (cpjStart) and ignores that
+    requester for CPJ_DEDUP_MS (1500) afterwards, whether the request is one of the relay's own copies or a genuine
+    re-pull, and an ignored one does not move the stamp. Both re-sends are timed from W2's own acceptance line, which
+    the host can only stamp late: the 1.0 s one reaches W2 well inside the window, the 1.7 s one never before its end.
+    A plain pull of W2's one-line config. Read-only apart from ?DEBUG,MGMT (RAM)."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems = []
+    try:
+        n = len(_factory_reply(w2, w2.version()))
+        if n > PULL_MAX:
+            raise Skip(f"W2's config is {n} characters, over the one-line limit - a leftover from an aborted size test?")
+        _knob(w2, "?DEBUG,MGMT,ON")
+        m1, m2 = w1.dev.mark(), w2.dev.mark()
+        w1.pull_reply(2, parts=False, timeout=10)
+        ta, _ = _at(w2.dev, m2, ACCEPTED_W1)
+        if ta is None:
+            raise AssertionError("W2 logged no 'Config request from WCB1' for the first pull (?DEBUG,MGMT)")
+        time.sleep(max(0.0, ta + 1.0 - time.monotonic()))
+        md = w2.dev.mark()
+        w1.dev.send("?MGMT,PULL,2")
+        _stamp(w1.dev, 2)
+        time.sleep(max(0.0, ta + 1.7 - time.monotonic()))
+        mr, m1r = w2.dev.mark(), w1.dev.mark()
+        w1.dev.send("?MGMT,PULL,2")
+        _stamp(w1.dev, 2)
+        w1.dev.expect(r"^\[MGMT:CONFIG,2\]", timeout=5, since=m1r)
+        time.sleep(1.0)
+        between = [x for _, x in list(w2.dev.lines[md:mr])]
+        if not any(x.startswith("[MGMT] Duplicate config request from WCB1 ignored") for x in between):
+            problems.append("W2 did not log the 1.0 s re-send as a duplicate")
+        if any(re.search(ACCEPTED_W1, x) for x in between):
+            problems.append(f"W2 took the pull re-sent 1.0 s after it took the first (the window is {DEDUP_S} s)")
+        if not any(re.search(ACCEPTED_W1, x) for x in w2.dev.since(mr)):
+            problems.append("W2 did not take the pull re-sent 1.7 s after the first")
+        seen = _pull_lines(w1.dev, m1, 2)
+        if seen["order"] != ["CONFIG", "CONFIG"]:
+            problems.append(f"W1 printed {seen['order']} for three pulls; expected two config lines, the 1.0 s "
+                            f"re-send unanswered")
+        col = PullCollector(2, m1r)
+        for x in w1.dev.since(m1r):
+            if col.feed(x) == "complete":
+                break
+        if col.reply is None:
+            problems.append("the reply to the 1.7 s re-send is not a whole config line")
+        else:
+            r = col.result()
+            if r.provided != r.calc:
+                problems.append(f"the reply to the 1.7 s re-send ({len(r.text)} characters) fails its CRC")
+        bench.note(f"W2 took the first pull; re-sends at +1.0 s and +1.7 s; W1 printed {seen['order']}")
+    finally:
+        w2.run("?DEBUG,MGMT,OFF")
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_park_second_requester", "Two relays pull W2 within 100 ms (W1 and NaviCore, ?MGMT,PULL,2,P): W2 serves one, parks the other behind it ('parked behind' under ?DEBUG,MGMT) and serves it next; both get W2's whole config, CRC-valid, and W1 prints only its own reply, not the one W2 then sends NaviCore (WCB-WP25)", needs=["wcb1", "wcb2", "navicore"])
+def pull_park_second_requester(bench):
+    """A request from another requester while a job runs is parked, then served oldest first when the job ends
+    (handleConfigReqPacket, cpjEnd; WCB.ino), and a relay prints only the frags whose requesterWCB is its own
+    (handleConfigFragPacket). W2 is grown to just under 2912 characters - a 16-frag one-line reply of about 0.6 s - so
+    the second request lands while the first job runs, and a NaviCore on a library from before F13 (which never asks
+    for parts and drops packet type 18) is answered like a new one. The throwaway HILP sequences are removed again."""
+    w1, w2, nc = usb_wcb(bench), _w2(bench), bench.dev("navicore")
+    keys, problems = [], []
+    with config_guard(bench, 2):
+        try:
+            ver = w2.version()
+            n = _grow(w2, ver, keys, PULL_MAX - 300)
+            assert n <= PULL_MAX, f"W2's config came to {n} characters, over the one-line limit"
+            want = _factory_reply(w2, ver)
+            _knob(w2, "?DEBUG,MGMT,ON")
+            m1, m2, mn = w1.dev.mark(), w2.dev.mark(), nc.mark()
+            pulls = {"W1": Pull(w1.dev, 2, parts=True, timeout=10)}
+            t0 = time.monotonic()
+            pulls["NaviCore"] = Pull(nc, 2, parts=True, timeout=10)
+            gap = time.monotonic() - t0
+            done = {}
+            while len(done) < len(pulls):
+                for name, p in pulls.items():
+                    if name in done:
+                        continue
+                    try:
+                        if p.poll():
+                            done[name] = p.reply(verify=False)
+                    except AssertionError as e:
+                        done[name] = e
+                time.sleep(0.05)
+            for name, r in done.items():
+                if isinstance(r, Exception):
+                    problems.append(f"{name}'s pull: {r}")
+                else:
+                    problems += [f"{name}'s pull: {x}" for x in _reply_problems(r, want, keys, "legacy", 1)]
+            time.sleep(1.5)                     # a reply printed for the other relay would be in by now
+            w2l = w2.dev.since(m2)
+            parked = [x for x in w2l if re.search(r"^\[MGMT\] Config request from WCB(1|20) parked behind WCB(1|20)'s "
+                                                  r"reply$", x)]
+            taken = {m.group(1) for m in (re.search(r"^\[MGMT\] Config request from WCB(1|20)(?: \(parts accepted\))?$",
+                                                    x) for x in w2l) if m}
+            if not parked:
+                problems.append(f"W2 logged no 'parked behind' for two pulls sent {gap * 1000:.0f} ms apart")
+            if taken != {"1", "20"}:
+                problems.append(f"W2 logged taking pulls from WCB{sorted(taken)}; expected both WCB1 and WCB20")
+            ours = _pull_lines(w1.dev, m1, 2)["CONFIG"]
+            if len(ours) != 1:
+                problems.append(f"W1 printed {len(ours)} [MGMT:CONFIG,2] lines; one is its own, a second is the reply "
+                                f"W2 sent NaviCore")
+            theirs = _pull_lines(nc, mn, 2)["CONFIG"]
+            bench.note(f"W2 at {n} characters; pulls sent {gap * 1000:.0f} ms apart; W2: {len(parked)} parked line(s), "
+                       f"took WCB{sorted(taken)}; config lines: W1 {len(ours)}, NaviCore {len(theirs)}")
+        finally:
+            try:
+                w2.run("?DEBUG,MGMT,OFF")
+            finally:
+                _clear(w2, keys)
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.chain_partial_tokens", "?PEERSLIVE rides only the factory chain (once), never the configured one; a custom controller id outlives a disable - ?CONTROLLER,ON,17 then ?CONTROLLER,OFF leaves '?CONTROLLER,ON,17^?CONTROLLER,OFF' in the chain - and W1's own controller line puts it back (auto-join off meanwhile; WCB-WP25)", needs=["wcb1"])
+def chain_partial_tokens(bench):
+    """collectConfigCommands (WCB.ino) emits PEERSLIVE with includeInLive=false, which printBackupConfig leaves out of
+    the configured chain, and emits a disabled controller only when its id is not the default 20, as ON,<id> then OFF.
+    With the controller off, a WDP advert from NaviCore would auto-join it as a persisted learned peer (the auto-join
+    block in WCB_WDP.cpp), so ?WDP,AUTOJOIN is off for the few seconds it is. Id 17 must be free on W1."""
+    w = usb_wcb(bench)
+    problems = []
+    chains = backup_chain_lines(w.run("?backup", timeout=10))
+    for name, want in (("configured", 0), ("factory", 1)):
+        got = [t for t in (chains[name] or "").split("^") if t.upper().startswith("?PEERSLIVE,")]
+        if len(got) != want:
+            problems.append(f"the {name} chain holds {len(got)} ?PEERSLIVE token(s), expected {want}")
+    if any(x.startswith("[WDP:N=17,") for x in w.run("?WDP,DUMP", timeout=8)):
+        raise Skip("W1 knows a device 17, so it cannot stand in for a controller id nobody uses")
+    with config_guard(bench, 1) as before:
+        own = [t for t in before[1] if t.upper().startswith("?CONTROLLER,")] or ["?CONTROLLER,ON,20", "?CONTROLLER,OFF"]
+        joined = "?WDP,AUTOJOIN,OFF" not in before[1]
+        try:
+            if joined and not any(x.startswith("[WDP] auto-join disabled") for x in w.run("?WDP,AUTOJOIN,OFF")):
+                problems.append("?WDP,AUTOJOIN,OFF did not confirm")
+            out = [x.rstrip() for x in w.run("?CONTROLLER,ON,17")]
+            if "Controller peer ID set to 17." not in out:
+                problems.append(f"?CONTROLLER,ON,17 printed {out}")
+            out = [x.rstrip() for x in w.run("?CONTROLLER,OFF")]
+            if "Controller peer (ID 17) DISABLED." not in out:
+                problems.append(f"?CONTROLLER,OFF printed {out}")
+            toks = w.backup_chain()[0]
+            i = next((k for k, t in enumerate(toks) if t == "?CONTROLLER,ON,17"), None)
+            if i is None or toks[i + 1:i + 2] != ["?CONTROLLER,OFF"]:
+                problems.append(f"the chain's controller tokens are {[t for t in toks if t.startswith('?CONTROLLER')]}, "
+                                f"expected ?CONTROLLER,ON,17 then ?CONTROLLER,OFF")
+        finally:
+            for t in own:
+                w.run(t)
+            if joined:
+                w.run("?WDP,AUTOJOIN,ON")
+    assert not problems, "; ".join(problems)
+
+
+PULLPART_BAD = "Invalid PULLPART size. Use 512-2880, or 0/OFF for the default (2880)"
+
+
+@test("wcb.pull_knobs", "?DEBUG edge forms on W2: KYBER,ON/OFF is the Maestro switch; an unknown ?DEBUG,<x> and a PULLPART of 511, 2881 or abc are refused; PULLPART,0 restores 2880; PULLFAULT,OFF disarms an armed fault, and an armed fault lapses unfired after 60 s - both followed by a whole pull (WCB-WP25; ~70 s)", needs=["wcb1", "wcb2"])
+def pull_knobs(bench):
+    """The ?DEBUG handler (WCB.ino) takes KYBER as an alias of MAESTRO; PULLPART accepts a number only when its text
+    is the number itself (v == String(req)), and cfgpPartDataSize (WCB_ConfigParts.h) maps 0 to 2880 and anything
+    outside 512-2880 to 0 = refused. configPullFaultArm stamps the arm time and cpjStart fires the fault only within
+    CPJ_FAULT_ARM_MS (60 s); either way the next accepted request disarms it. All RAM only."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems = []
+    try:
+        for cmd, want in (("?DEBUG,KYBER,ON", "Maestro debugging enabled"),
+                          ("?DEBUG,KYBER,OFF", "Maestro debugging disabled"),
+                          ("?DEBUG,HILNOPE", "Invalid DEBUG command. Use: ?DEBUG ?"),
+                          ("?DEBUG,PULLPART,511", PULLPART_BAD), ("?DEBUG,PULLPART,2881", PULLPART_BAD),
+                          ("?DEBUG,PULLPART,abc", PULLPART_BAD),
+                          ("?DEBUG,PULLPART,0", "Config pull part size: 2880 bytes (default)"),
+                          ("?DEBUG,PULLFAULT,OOM", "Config pull fault armed: the next accepted config request fails its "
+                                                   "reply buffer allocation (one-shot; disarms after firing or in 60 s)"),
+                          ("?DEBUG,PULLFAULT,OFF", "Config pull fault disarmed")):
+            out = [x.rstrip() for x in w2.run(cmd)]
+            if not any(x.startswith(want) for x in out):      # println: another task's line can glue onto its end
+                problems.append(f"{cmd} printed {out[:3]}, not {want!r}")
+        for when in ("after PULLFAULT,OFF", "61 s after PULLFAULT,OOM"):
+            if when.startswith("61"):
+                _knob(w2, "?DEBUG,PULLFAULT,OOM")
+                time.sleep(61)
+            try:
+                r = w1.pull_reply(2, timeout=10, verify=False)
+                if r.provided != r.calc:
+                    problems.append(f"the pull {when} ({len(r.text)} characters) fails its CRC")
+            except PullRefused as e:
+                problems.append(f"the pull {when} was refused {e.code}: the fault fired")
+    finally:
+        for cmd in ("?DEBUG,PULLFAULT,OFF", "?DEBUG,PULLPART,OFF", "?DEBUG,MAESTRO,OFF"):
+            w2.run(cmd)
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.mgmt_result_too_large", "A ?MGMT,STATS reply over 16 x 182 characters is refused in words: with 20 made-up ?STATS,RPT rows on W2, W1 prints [MGMT:STATS,2][ERROR] Result too large to relay (...) and W2 prints its own '[MGMT] Result too large to relay:' line; ?STATS,RESET clears the rows (WCB-WP25)", needs=["wcb1", "wcb2"])
+def mgmt_result_too_large(bench):
+    """sendResultFrags (WCB.ino) refuses a STATS, SEQ-names or ETM result longer than MGMT_MAX_CHUNKS x 182 with an
+    ungated line and a short '[ERROR] Result too large to relay (<n> chars, max 2912). ...' sent in its place. A row
+    storeReportedStats keeps prints about 156 characters with seven 10-digit counters, so 20 of them pass 2912 even if
+    NaviCore's own 30 s report overwrites one. RAM only: resetESPNowStats clears the reported rows too."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems = []
+    try:
+        for k in range(1, 21):
+            w2.run(f"?STATS,RPT,{k}" + ",4294967295" * 7)
+        rows = [x for x in w2.run("?STATS", timeout=6) if re.match(r"^WCB\d+: Sent: 4294967295, .*Unguaranteed", x)]
+        if len(rows) < 19:
+            problems.append(f"W2's ?STATS shows {len(rows)} of the 20 reported rows")
+        line = None
+        for _ in range(2):                      # sent once and unacknowledged (handleMgmtStatsRequest): ask twice
+            m1, m2 = w1.dev.mark(), w2.dev.mark()
+            w1.dev.send("?MGMT,STATS,2")
+            try:
+                line = w1.dev.expect(r"^\[MGMT:STATS,2\].*", timeout=5, since=m1).group(0)
+                break
+            except AssertionError:
+                continue
+        if line is None:
+            problems.append("W1 printed no [MGMT:STATS,2] line for two requests")
+        elif not re.match(r"^\[MGMT:STATS,2\]\[ERROR\] Result too large to relay \(\d+ chars, max 2912\)\.", line):
+            problems.append(f"W1's [MGMT:STATS,2] line is not the too-large error: {line[:100]!r}")
+        if line is not None and not any(re.match(r"^\[MGMT\] Result too large to relay: \d+ chars needs \d+ chunks, "
+                                                 r"max 16 \(2912 chars\)\.", x) for x in w2.dev.since(m2)):
+            problems.append("W2 did not print '[MGMT] Result too large to relay:'")
+    finally:
+        w2.run("?STATS,RESET")
+    left = [x for x in w2.run("?STATS", timeout=6) if "4294967295" in x]
+    assert not left, f"?STATS,RESET left {len(left)} made-up row(s) on W2"
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_wrong_target", "?MGMT,PULL,3,P - addressed to a board the bench does not have - is dropped by W2 before its dedup (no 'Config request' or 'Duplicate' line under ?DEBUG,MGMT) and brings W1 no pull line; the same pull of W2 is then taken and answered (WCB-WP25)", needs=["wcb1", "wcb2"])
+def pull_wrong_target(bench):
+    """handleConfigReqPacket (WCB.ino) returns on targetWCB != WCB_Number before anything else is logged; the relay
+    (handleMgmtPullRequest) accepts any target 1-20, so the request does go out. Read-only apart from ?DEBUG,MGMT."""
+    if 3 in bench.wcb_numbers():
+        raise Skip("WCB3 is on this bench")
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems = []
+    try:
+        _knob(w2, "?DEBUG,MGMT,ON")
+        m1, m2 = w1.dev.mark(), w2.dev.mark()
+        w1.dev.send("?MGMT,PULL,3,P")
+        time.sleep(3.0)
+        logged = [x for x in w2.dev.since(m2) if re.match(r"^\[MGMT\] (Config request|Duplicate config request) from "
+                                                         r"WCB1", x)]
+        if logged:
+            problems.append(f"W2 logged {len(logged)} config request line(s) for a pull addressed to WCB3")
+        stray = [x[:24] for x in w1.dev.since(m1) if parse_pull_line(x)]
+        if stray:
+            problems.append(f"W1 printed pull lines for a pull of WCB3: {stray}")
+        m2 = w2.dev.mark()
+        w1.pull_reply(2, timeout=10, verify=False)
+        if not any(re.search(ACCEPTED_W1, x) for x in w2.dev.since(m2)):
+            problems.append("W2 logged no 'Config request from WCB1' for a pull of W2 either: ?DEBUG,MGMT did not log")
+    finally:
+        w2.run("?DEBUG,MGMT,OFF")
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_session_reaped", "A one-line pull session W1 is left holding half of (W1 deafened for 2 s after its first frags) is reaped 10 s after its last frag with '[MGMT] Config pull session <id> timed out' under ?DEBUG,MGMT, and the next pull of W2 arrives whole (WCB-WP25)", needs=["wcb1", "wcb2"])
+def pull_session_reaped(bench):
+    """checkConfigPullTimeout (WCB.ino) drops a relay's pull session CONFIG_SESSION_TIMEOUT_MS (10 s) after its last
+    frag. W2 is grown to about 2.7 KB, a 15-frag reply of about 0.3 s a pass, and W1 is deafened the moment its
+    '[MGMT] Config pull session <id> from WCB2' line shows: '?MAC,3,<other>' changes W1's receive filter at once, but
+    not its radio address, which moves only at boot (the trick of s18's _deaf_w1; the octet is saved, so it is put
+    back first thing). Two tries: a deafening that lands after the last frag leaves nothing to reap. The SEQ-names half
+    of the plan row is not here: W2's name list fits one frag, which is never left half-received."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    keys, problems = [], []
+    with config_guard(bench, 1, 2) as before:
+        t = token(before[1], "?MAC,3,")
+        if t is None:
+            raise Skip("W1's chain lacks ?MAC,3")
+        orig = t[len("?MAC,3,"):]
+        other = "%02X" % (int(orig, 16) ^ 0x01)
+        deaf = False
+        try:
+            ver = w2.version()
+            n = _grow(w2, ver, keys, PULL_MAX - 200)
+            assert n <= PULL_MAX, f"W2's config came to {n} characters, over the one-line limit"
+            want = _factory_reply(w2, ver)
+            w1.run("?DEBUG,MGMT,ON")
+            reaped = None
+            for attempt in (1, 2):
+                m1 = w1.dev.mark()
+                w1.dev.send("?MGMT,PULL,2")
+                _stamp(w1.dev, 2)
+                sid = w1.dev.expect(r"^\[MGMT\] Config pull session ([0-9A-F]{4}) from WCB2 \(\d+ chunks\)", timeout=5,
+                                    since=m1).group(1)
+                w1.dev.send(f"?MAC,3,{other}")          # raw: every millisecond counts
+                deaf = True
+                time.sleep(2.0)
+                out = [x.rstrip() for x in w1.run(f"?MAC,3,{orig}")]
+                deaf = False
+                if f"Updated 3rd MAC octet to 0x{orig}" not in out:
+                    problems.append(f"?MAC,3,{orig} did not confirm: {out}")
+                    break
+                lines = list(w1.dev.lines[m1:])
+                frags = [ts for ts, x in lines if re.search(rf"Config frag \d+/\d+ received \(session {sid}\)", x)]
+                if any(x.startswith("[MGMT:CONFIG,2]") for _, x in lines):
+                    bench.note(f"try {attempt}: W1 was deafened too late - session {sid} completed")
+                    time.sleep(2.0)
+                    continue
+                w1.dev.expect(rf"^\[MGMT\] Config pull session {sid} timed out", timeout=14, since=m1)
+                t_out, _ = _at(w1.dev, m1, rf"^\[MGMT\] Config pull session {sid} timed out")
+                reaped = (len(frags), round(t_out - frags[-1], 1) if frags else None)
+                if frags and not 9.5 <= t_out - frags[-1] <= 11.5:
+                    problems.append(f"session {sid} was reaped {t_out - frags[-1]:.1f} s after its last frag, not ~10 s")
+                break
+            if reaped is None and not problems:
+                problems.append("W1 was deafened too late on both tries: no half-received session to reap")
+            bench.note(f"W2 at {n} characters; reaped session: (frags received, seconds from the last to the "
+                       f"timeout line) {reaped}")
+            r = w1.pull_reply(2, timeout=10, verify=False)
+            problems += [f"the pull after the reaping: {x}" for x in _reply_problems(r, want, keys, "legacy", 1)]
+        finally:
+            try:
+                if deaf:
+                    w1.run(f"?MAC,3,{orig}")
+                w1.run("?DEBUG,MGMT,OFF")
+            finally:
+                _clear(w2, keys)
+    assert not problems, "; ".join(problems)
