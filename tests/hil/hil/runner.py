@@ -6,7 +6,8 @@ Skip — or automatically when a device or wire it needs is not on the bench, wh
 (hil/servos.py), or when its opt-in (hil/optin.py) is not in bench.json "opt_in". When `links` is not
 given it is read from the test's source (`wire(bench, 1, "S3")` / `link(bench, 2, "S1")`, one
 level into module helpers), so the GUI can say which wire unlocks which test without anyone
-maintaining a list. Every serial line in and out is written to session.log.
+maintaining a list. Every serial line in and out is written to session.log; NaviCore's and the SBUS controller's with
+their credentials hashed (Bench.log, REDACT_KINDS).
 
 Every run has a checkpoint (hil/checkpoint.py) and can be paused between tests and resumed later, in the same folder,
 after the bench was unplugged and moved (docs/HIL_TESTING.md §9). start_run() makes a new run; continue_run() drives a
@@ -67,6 +68,12 @@ OUTAGE_GRACE_S = 120
 OUTAGE_SETTLE_S = 3          # boards reset by the re-enumeration finish booting before the checks
 SNAPSHOT_MIN_TESTS = 5       # a run this short takes no config baseline or firmware record at its start (~5 s)
 CONFIG_REF_EVERY_S = 15 * 60  # refresh the saved-config reference after this much active time
+# Device kinds whose serial lines Bench.log passes through checkpoint.redact_text, in both directions (docs/hil_plan/
+# NAVICORE.md D-NC5): NaviCore's GET_CONFIG carries the mesh and AP passwords, the harness sends them back in every
+# SET_CONFIG a restore makes (hil/nc_guard.py), its ?backup prints ?EPASS, and the SBUS controller's getcfg carries its
+# WiFi networks. A WCB's lines are left as they are (its ?backup and ?MGMT,PULL chains keep ?EPASS raw, as they always
+# have).
+REDACT_KINDS = ("navicore", "sbus")
 
 
 def test(test_id, title, needs=(), links=None, drives=(), opt_in=None, opt_in_why=None):
@@ -184,6 +191,7 @@ class Bench:
         self.reload_config()
         self.devs, self.probes, self.cache = {}, {}, {}
         self.out_dir = None
+        self.ckpt = None           # the running run's Checkpoint while continue_run() drives it (hil/nc_guard.py)
         self._log = None
         self._log_lock = threading.Lock()
         self._t0 = time.monotonic()
@@ -237,6 +245,11 @@ class Bench:
                     pass
 
     def log(self, name, direction, text):
+        """One session.log line (and the GUI's log view). A line of a device whose kind is in REDACT_KINDS has every
+        credential it carries replaced by <redacted:sha256[:12]> first, whichever way it went."""
+        dev = self.cfg.get("devices", {}).get(name)
+        if isinstance(dev, dict) and dev.get("kind") in REDACT_KINDS:
+            text = redact_text(text)
         line = f"{time.monotonic() - self._t0:9.3f} {name:>9} {direction} {text}"
         with self._log_lock:
             if self._log:
@@ -831,6 +844,7 @@ def continue_run(bench, ckpt, *, resuming, ask=None, log=None, on_start=None, on
     ckpt.acquire()                       # RunBusy when another process has it; a no-op after start_run
     ckpt.log, ckpt.sync_log = bench.note, bench.sync_log
     ckpt.registry_ids = [t["id"] for t in REGISTRY]
+    bench.ckpt = ckpt                    # nc_guard records NaviCore's snapshot state in it (checkpoint 'navicore')
 
     def aborting():
         return bool((should_stop and should_stop()) or (should_pause and should_pause()))
@@ -909,6 +923,7 @@ def continue_run(bench, ckpt, *, resuming, ask=None, log=None, on_start=None, on
     finally:
         _keep_awake(False)
         ckpt.release()
+        bench.ckpt = None
 
 
 def _cli_printer(t, status, detail, dur):

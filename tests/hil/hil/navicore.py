@@ -12,8 +12,8 @@ bare PING never answers. Three things every method here is shaped around:
   of room (NaviCore.ino:3150-3158, :2233-2266), so a missing one is not proof it never happened.
 - GET_CONFIG carries the mesh password and the AP password (rc_config.h:1226, :1354, :1367), ?backup prints ?EPASS,
   and GET_CMDLIB and ?REC replies can be large. A message raised here quotes counts and short status lines only, never
-  a config line or a secret (_await, backup()). session.log still carries the raw lines, as it always has (INF3's
-  device filter is what hashes them there).
+  a config line or a secret (_await, backup()). In session.log, Bench.log hashes the credentials on every line NaviCore
+  sends or receives (runner.REDACT_KINDS; NAVICORE.md INF3, D-NC5).
 
 Methods return parsed data and raise AssertionError for what the board did or did not say (a test FAILs on it),
 ValueError for a bad argument (a test bug), and runner.Skip only in the helpers that pick a Maestro channel to use.
@@ -392,7 +392,7 @@ class NaviCore:
         The ACK echoes the saveId (NaviCore.ino:3917-3958); one carrying another saveId answers an earlier save and is
         skipped, as the config tool's stale-ACK gate does. One without a saveId means the line did not parse, so it
         counts. check=True raises unless ok:true. Every SET_CONFIG rewrites /config.json (~14 KB of LittleFS), so
-        tests send it only inside the NaviCore guard (INF3)."""
+        tests send it only inside hil/nc_guard.py's nc_guard (INF3)."""
         text = data if isinstance(data, str) else json.dumps(data, separators=(",", ":"))
         if "\n" in text or "\r" in text:
             raise ValueError("SET_CONFIG data must be one line: NaviCore ends a line at CR or LF")
@@ -443,7 +443,7 @@ class NaviCore:
         """SET_CMDLIB with `raw` (bytes or str: one JSON object or array, on one line) -> the ACK as a dict, paced.
         NaviCore stores the bracket-matched value after "data": verbatim (NaviCore.ino:3879-3915), so `data` goes last
         and the stored bytes are `raw` stripped. check=True raises unless ok:true with the size and FNV-1a hash of
-        those bytes. It rewrites /cmdlib.json: tests send it only inside the NaviCore guard (INF3)."""
+        those bytes. It rewrites /cmdlib.json: tests send it only inside hil/nc_guard.py's nc_guard (INF3)."""
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
         body = text.strip()
         if "\n" in text or "\r" in text:

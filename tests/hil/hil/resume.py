@@ -7,7 +7,8 @@ check_bench() runs, in order:
   4. after a cut-off test: reboot the WCBs and zero NaviCore's debug flags (that test's cleanup never ran)
   5. wait for the mesh: every bench WCB online from WCB1 (and from NaviCore), then a short settle for WDP adverts
   6. firmware versions against the last segment's
-  7. saved config against the run's reference (config_ref), in redacted form
+  7. saved config against the run's reference (config_ref), in redacted form; then NaviCore's against the run's
+     NaviCore snapshot (hil/nc_guard.py), restored first when a guarded test was cut off or could not restore it
   8. probes: RESET, and out of the mesh if a cut-off test left one joined
   9. every wire that was verified: re-checked at its port's configured baud, in its recorded orientation, never
      rediscovered
@@ -28,6 +29,7 @@ from serial.tools import list_ports
 
 from . import checkpoint as ck
 from . import identify
+from . import nc_guard
 from .config import read_config
 from .links import LinkManager
 from .navicore import NaviCore
@@ -655,6 +657,93 @@ def _config_diffs(bench, ckpt):
     return diffs, current
 
 
+def check_navicore(bench, ckpt, ask, log, should_abort=None):
+    """Step 7's second half: NaviCore's saved config against the run's snapshot (docs/hil_plan/NAVICORE.md D-NC3) ->
+    the changes to record. The run's NaviCore record (nc_guard.reconcile: the checkpoint's 'navicore' entry, or
+    navicore_snapshot.json when that is newer) says whether a guarded test left NaviCore changed: 'guarding' (cut off
+    before its restore ran: a killed process, a second Ctrl+C, a GUI closed with No) or 'not_restored' (its restore
+    failed). Then the restore nc_guard would have made is offered, recommended, and made without asking on the
+    automatic resume; a restore that leaves the config different blocks. Otherwise the config is compared, and a
+    difference is a soft one, as a WCB's is in the first half: Yes keeps it and makes it the run's reference. Nothing
+    is ever restored from a snapshot another run took, one that fails its own hash, or an older one holding a config
+    the checkpoint did not record. Every line shown is key paths with credentials hashed (checkpoint.redacted_diff)."""
+    ref = ckpt.data.get("navicore") or {}
+    snap, state, problem = nc_guard.reconcile(ckpt.out_dir, ref)
+    if state is None:
+        log("no NaviCore snapshot in this run (no test wrote NaviCore's config) - its saved config is not compared")
+        return []
+    if not bench.has("navicore"):
+        log("the bench has no navicore device - NaviCore's saved config is not compared")
+        return []
+    test = (snap or ref).get("test") or "a guarded test"
+    dirty = state in nc_guard.DIRTY
+    if snap is None:
+        why = f"NaviCore's snapshot cannot be used: {problem}."
+        if dirty:
+            _confirm(ask, "NaviCore's config cannot be restored",
+                     [why, f"{test} ran under nc_guard and did not restore NaviCore, so its config may still hold "
+                           f"that test's changes. Check it with the NaviCore config tool.", "", "Resume anyway?"])
+            return [f"NaviCore not restored after {test}: no usable snapshot (accepted)"]
+        log(why + " Its saved config is not compared.")
+        return []
+    _abort(should_abort)
+    try:
+        return _navicore_against(bench, ckpt, ask, log, state, snap, test, dirty)
+    except (ResumeAborted, ResumeBlocked):
+        raise
+    except Exception as e:  # noqa: BLE001 - a port that went away mid-restore: say so, and stay paused
+        raise ResumeBlocked(f"NaviCore's config check stopped ({_first(e)}) - resume again once its port answers") \
+            from None
+
+
+def _navicore_against(bench, ckpt, ask, log, state, snap, test, dirty):
+    """check_navicore's part that talks to the boards: the offered restore, then the comparison."""
+    nc = NaviCore(bench.dev("navicore"))
+
+    def w1():
+        return WCB(bench.dev("wcb1")) if bench.has("wcb1") else None
+    changes = []
+    if dirty:
+        what = "was cut off before its restore ran" if state == "guarding" else "could not restore it"
+        text = (f"{test} changed NaviCore's config under nc_guard and {what}. Restore NaviCore's config, command "
+                f"library, HIL clips, learned peers and mode from the snapshot taken before it? (Recommended.)")
+        if ask is None or ask("Restore NaviCore first?", text, True):
+            path, left, problems = nc_guard.restore(nc, snap, w1, log)
+            nc_guard.persist(ckpt.out_dir, ckpt, snap, "not_restored" if left else "restored",
+                             detail="; ".join(left + problems) or None, restore_path=path, log=log)
+            if left:
+                raise ResumeBlocked(ck.redact_text(
+                    f"NAVICORE CONFIG NOT RESTORED — {'; '.join(left)}. The exact snapshot taken before {test} is "
+                    f"results/{ckpt.name}/{nc_guard.SNAPSHOT_FILE}: restore it by hand, then resume again."))
+            log(f"NaviCore restored from the snapshot taken before {test}"
+                + (" (it was already as found)" if path == "unchanged" else f" ({path})"))
+            changes.append(f"NaviCore restored after the cut-off {test} ({path})" if state == "guarding"
+                           else f"NaviCore restored after {test} ({path})")
+            if problems:
+                log("NaviCore state not restored: " + "; ".join(problems))
+                changes.append("NaviCore state not restored: " + "; ".join(problems))
+            return changes
+        log("the NaviCore restore was declined")
+    try:
+        cur = nc_guard.read_config(nc)
+    except AssertionError as e:
+        raise ResumeBlocked(f"NaviCore's config could not be read ({_first(e)}) - is its port held?") from None
+    if cur == snap["config"]:
+        log("NaviCore's saved config matches the run's snapshot")
+        return changes
+    diffs = nc_guard.config_diff(snap["config"], cur)
+    why = (f"{test} changed it and was not restored." if dirty else
+           "Something changed NaviCore's config while the run was paused.")
+    _confirm(ask, "NaviCore's saved config differs",
+             [f"NaviCore's saved config differs from the snapshot taken before {test} ({snap.get('taken')}):"] + diffs
+             + [why, "", "Yes = continue; NaviCore keeps this config and it becomes the run's reference. No = stay "
+                         "paused and fix it by hand."])
+    nc_guard.persist(ckpt.out_dir, ckpt, nc_guard.take_snapshot(nc, test=snap.get("test")), "restored",
+                     detail="accepted at a resume", log=log)
+    changes.append("NaviCore config accepted with difference: " + "; ".join(diffs))
+    return changes
+
+
 # ---------------------------------------------------------------------------- the whole sequence
 def check_bench(bench, ckpt, ask, log=None, should_abort=None, cut_off=False, on_bench_changed=None):
     """Steps 1-10 above, in order. Returns (changes accepted, firmware versions seen)."""
@@ -737,6 +826,8 @@ def check_bench(bench, ckpt, ask, log=None, should_abort=None, cut_off=False, on
         changes.append("config accepted with difference: " + "; ".join(diffs))
     else:
         log("saved config matches the run's reference")
+    _abort(should_abort)
+    changes += check_navicore(bench, ckpt, ask, log, should_abort)
     _abort(should_abort)
 
     # 8. probes
