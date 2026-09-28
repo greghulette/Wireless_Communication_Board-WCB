@@ -2,22 +2,29 @@
 
 Built from the verified etm_config_wdp specs; console literals re-checked with grep -a (WCB.ino holds a NUL byte, so
 ripgrep silently skips it). Rules from the specs:
-- Only W1's ETM settings are changed. ETM, CHKSM, MAC, EPASS or WCBCH changes on mesh-only-reachable W2 strand it.
+- Only W1's ETM settings are changed. ETM, CHKSM, MAC, EPASS or WCBCH changes on mesh-only-reachable W2 strand it; the
+  one exception, etm.off_fleet_normal_path, switches W2's ETM on W2's own USB and skips when W2 has none.
 - '?MAC,3,<other>' deafens W1 at once (its receive filter changes, its radio address only at boot) and writes NVS:
   it is restored in a finally, as the first command, and W1 is never reset in that window.
 - An ETM ACK does not mean execution (WCB.ino:4269-4272): delivery is asserted on the probe wire.
 - WCB.run() breaks while CMDCHAR is not ';', the delimiter is ',', or the LFI is ';'; those windows use dev.send.
 - Probe mesh ids are temporary and never 1/2/19/20 (probe_in_mesh); a temporary peer is evicted 50 s after it
   goes silent (WCB.ino:508), and until then every broadcast expects its ACK, so those tests run last.
+- The coverage re-scan tests at the end (docs/hil_plan/WCB.md WP19, WP30, WP35, WP48) never change ?MAC, ?EPASS, ?WCB
+  or ?WCBCH. Where the plan deafens W1 (_deaf_w1) to lose a controller's ACK, a probe stands in as the controller
+  (?CONTROLLER,ON,15) and MESH LEAVE silences it. A probe joined PERMANENTLY (ids 12 and 13) is learned and persisted
+  by every WCB and by NaviCore, so those tests forget it everywhere in their finally (_forget_everywhere).
 """
 import re
 import time
 import zlib
 from contextlib import contextmanager
 
+from hil.navicore import NaviCore
 from hil.runner import Skip, test
-from suites.common import (Console, Watch, config_guard, link, marker, nonce, padded, probe_in_mesh, require_tokens,
-                           snapshot, token, usb_wcb)
+from hil.wcb import WCB
+from suites.common import (FORBIDDEN_MESH_IDS, Console, Watch, config_guard, link, marker, mesh_params, nonce, padded,
+                           probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
 
 ETM_KEYS = ("TIMEOUT", "HB", "MISS", "BOOT", "COUNT", "DELAY")
 
@@ -1672,4 +1679,1292 @@ def wifi_status(bench):
     if not any(re.match(r"^Free heap     : \d+ bytes \(min since boot \d+\)$", x) for x in out):
         bad.append("no Free heap line")
     bench.note("W1 WiFi: " + "; ".join(x.strip() for x in out if x.startswith(("Mode", "Interface", "WS endpoint", "Radio channel"))))
+    assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan: WCB-WP35 rows 2-4, WP48, WP30, WP19
+# docs/hil_plan/WCB.md. Each docstring names its work-package row. None of these changes ?MAC, ?EPASS, ?WCB or ?WCBCH.
+_PRINTABLE = "Prefix characters must be printable, non-space characters."
+# WCB_WDP.cpp WDP_BAUD_TABLE: a baud with no code is shown as a bare id (wdpIdBaudStr, printWdpDetail).
+_WDP_BAUDS = (0, 110, 300, 600, 1200, 2400, 9600, 14400, 19200, 38400, 57600, 115200, 128000, 256000)
+# wdpCapCodes / wdpCapNames (WCB_WDP.cpp), in their print order.
+_CAPS = ((0x0080, "M", "Maestro host"), (0x0010, "R", "Maestro remote"), (0x0008, "K", "Kyber local"),
+         (0x0001, "H", "HCR"), (0x0002, "3", "MP3"), (0x0004, "W", "WLED"), (0x0020, "P", "PWM"),
+         (0x0040, "C", "Controller link"), (0x0100, "D", "DFPlayer"))
+
+
+def _prefix_chars(w):
+    """(delimiter, function identifier, command character), read with WCB_WEBTOOL_CONFIG_PULL, which is recognised
+    whatever they are (handleSingleCommand, WCB.ino). The command character is the live chain's CMDCHAR token, which
+    collectConfigCommands emits in both chains."""
+    m = w.dev.mark()
+    w.dev.send("WCB_WEBTOOL_CONFIG_PULL")
+    delim = w.dev.expect(r"For Configured Boards \(Current Delimiter: '(.)'\)", timeout=5, since=m).group(1)
+    time.sleep(1.5)
+    chain = _chains(w.dev.since(m))[0]
+    cc = next((t[9:10] for t in chain.split(delim) if t[1:9].upper() == "CMDCHAR,"), ";")
+    return delim, chain[:1] or "?", cc
+
+
+def _restore_prefixes(w):
+    """Put the delimiter, function identifier and command character back to ^ ? ; with dev.send (WCB.run needs them)."""
+    delim, lfi, cc = _prefix_chars(w)
+    if delim != "^":
+        w.dev.send(f"{lfi}D^" if delim == "," else f"{lfi}DELIM,^")     # the spelling must not contain the live delimiter
+        time.sleep(0.5)
+    if lfi != "?":
+        w.dev.send(f"{lfi}FUNCCHAR,?")                                    # e.g. '\x7fFUNCCHAR,?' after a DEL identifier
+        time.sleep(0.5)
+    if cc != ";":
+        w.dev.send("?CMDCHAR,;")
+        time.sleep(0.5)
+
+
+def _peers_back(w, wait=20):
+    """After a W1 reboot: ?WDP,POLL and wait until ?STATS shows W2 online again, so the next test finds the bench as it
+    was (docs/HIL_TESTING.md §6: a board that has just booted sees every peer offline until its next packet). Cleanup:
+    never raises. -> True once W2 is online."""
+    deadline = time.monotonic() + wait
+    try:
+        w.run("?WDP,POLL")
+        while time.monotonic() < deadline:
+            if any(x.startswith("WCB2: ") and "Online" in x for x in w.run("?STATS")):
+                return True
+            time.sleep(2)
+    except AssertionError:
+        pass
+    return False
+
+
+def _etm_row(stats, n, special=False):
+    """(sent, ackd, retries, failed, online) from ?STATS' ETM row for WCB<n> - 'WCB<n> (special): ' for the controller
+    (buildStatsString, WCB.ino) - or None."""
+    rx = re.compile(r"^WCB%d%s: Sent: (\d+), ACKd: (\d+), Retries: (\d+), Failed: (\d+), (Online|OFFLINE)"
+                    % (n, re.escape(" (special)") if special else ""))
+    m = next((m for x in stats for m in [rx.match(x.strip())] if m), None)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5) == "Online") if m else None
+
+
+def _stats(w):
+    return [x.rstrip() for x in w.run("?STATS")]
+
+
+@test("chars.format_refusals", "?DELIM / ?FUNCCHAR / ?CMDCHAR with anything but one character, the bare legacy ?LF and ?CC, and a DEL or control byte offered as a prefix or delimiter are each refused with their own line; the characters, ?config and the chain are unchanged", needs=["wcb1"], links=[])
+def format_refusals(bench):
+    """WCB-WP35 row 2. processLocalCommand's DELIM / FUNCCHAR / CMDCHAR branches print 'Invalid format. Use: ?<VERB>,x
+    where x is one character'; the legacy branch hands a bare ?LF / ?CC (three characters at most) to
+    updateLocalFunctionIdentifier / updateCommandCharacter, which print 'Invalid LocalFunctionIdentifier update command'
+    / 'Invalid CommandCharacter update command'; prefixCharOk and delimCharOk refuse a byte <= ' ' or DEL (all
+    WCB.ino). A space never reaches them from a console: processIncomingSerial trims every line, so '?CMDCHAR, '
+    arrives as '?CMDCHAR,' and gets the format line. Sent with dev.send and read after a pause, because WCB.run() stops
+    working if a refusal regresses; a regression is put back at once (_restore_prefixes)."""
+    w = usb_wcb(bench)
+    fmt = "Invalid format. Use: ?{},x where x is one character"
+    checks = [("?DELIM,ab", fmt.format("DELIM")), ("?FUNCCHAR,", fmt.format("FUNCCHAR")),
+              ("?CMDCHAR,xy", fmt.format("CMDCHAR")), ("?LF", "Invalid LocalFunctionIdentifier update command"),
+              ("?CC", "Invalid CommandCharacter update command"), ("?CMDCHAR,\x7f", _PRINTABLE),
+              ("?FUNCCHAR,\x7f", _PRINTABLE), ("?CC\x7f", _PRINTABLE), ("?CMDCHAR,\x01", _PRINTABLE),
+              ("?LF\x01", _PRINTABLE), ("?DELIM,\x7f", "The delimiter must be a printable, non-space character.")]
+    problems = []
+    with config_guard(bench, 1) as before:
+        if token(before[1], "?CMDCHAR,") != "?CMDCHAR,;":
+            raise Skip("W1's command character is not ';'")
+        try:
+            for line, want in checks:
+                m = w.dev.mark()
+                w.dev.send(line)
+                time.sleep(0.6)
+                out = [x.rstrip() for x in w.dev.since(m)]
+                if want not in out:
+                    problems.append(f"{line!r} printed {out}")
+                    chars = _prefix_chars(w)
+                    if chars != ("^", "?", ";"):
+                        problems.append(f"{line!r} changed the characters to {chars!r}")
+                        _restore_prefixes(w)
+        finally:
+            if _prefix_chars(w) != ("^", "?", ";"):
+                _restore_prefixes(w)
+        cfg = _cfg(w)
+    missing = [x for x in ("Delimiter Character:      ^", "Local Function Identifier: ?", "Command Character:         ;")
+               if x not in cfg]
+    assert not problems, "; ".join(problems)
+    assert not missing, f"?config lacks {missing}"
+
+
+@test("wcb.erase_bad_argument", "?ERASE, ?ERASE,NV and ?ERASE,NVSX print the usage line and erase nothing: no restart follows within 6 s, no NVS namespace loses an entry, and the chain is unchanged", needs=["wcb1"], links=[])
+def erase_bad_argument(bench):
+    """WCB-WP35 row 3. processLocalCommand's ERASE branch (WCB.ino) calls eraseNVSFlash only when the argument, upper-
+    cased, is NVS - so '?ERASE,nvs' erases too and is never sent - and prints 'Invalid format. Use: ?ERASE,NVS' for
+    anything else. A regression here wipes W1, so the test runs only when W1's chain can be replayed a line at a time,
+    the erase tests' restore path (s31 _replayable); the pre-test ?backup is in session.log."""
+    from suites.s31_password_erase import _nvs, _replayable       # at run time: a module-level import reorders the registry
+    w = usb_wcb(bench)
+    with config_guard(bench, 1) as before:
+        _replayable(before[1])
+        stats0, spaces0 = _nvs(w.run("?NVS", timeout=6))
+        if not stats0:
+            raise Skip("?NVS printed no usage line")
+        m = w.dev.mark()
+        outs = {cmd: [x.rstrip() for x in w.run(cmd)] for cmd in ("?ERASE", "?ERASE,NV", "?ERASE,NVSX")}
+        time.sleep(6)
+        after = [x.rstrip() for x in w.dev.since(m)]
+        _, spaces1 = _nvs(w.run("?NVS", timeout=6))
+    bad = [f"{cmd} printed {out}" for cmd, out in outs.items() if "Invalid format. Use: ?ERASE,NVS" not in out]
+    if any(x.startswith("Rebooting now") or "Booting up the Wireless Communication Board" in x for x in after):
+        bad.append("W1 restarted")
+    lost = {k: (v, spaces1.get(k)) for k, v in spaces0.items() if spaces1.get(k, 0) < v}
+    if lost:
+        bad.append(f"NVS namespaces lost entries (before, after): {lost}")
+    assert not bad, "; ".join(bad)
+
+
+@test("chars.legacy_lf_sets", "Legacy ?LF! sets the function identifier ('LocalFunctionIdentifier updated to '!''), !VERSION and !CONFIG answer under it, and !FUNCCHAR,? puts it back", needs=["wcb1"], links=[])
+def legacy_lf_sets(bench):
+    """WCB-WP35 row 4. updateLocalFunctionIdentifier (WCB.ino) is reached from processLocalCommand's legacy branch for
+    ?LF<c> only, separately from ?FUNCCHAR; only its refusals were tested (chars.legacy_lf_guard, chars.format_refusals).
+    While the identifier is '!' every '?' line is a plain broadcast, so the window uses dev.send and sends nothing
+    starting with '?' until '!FUNCCHAR,?' (FUNCCHAR is exempt from the trailing-'?' help shortcut)."""
+    w = usb_wcb(bench)
+    with config_guard(bench, 1) as before:
+        if token(before[1], "?CMDCHAR,") != "?CMDCHAR,;":
+            raise Skip("W1's command character is not ';'")
+        try:
+            _sent(w, "?LF!", r"^LocalFunctionIdentifier updated to '!'")
+            _sent(w, "!VERSION", r"^End of Version")
+            _sent(w, "!CONFIG", r"Local Function Identifier: !", timeout=5)
+            _sent(w, "!FUNCCHAR,?", r"^Local function identifier updated to '\?'")
+            _sent(w, "?VERSION", r"^End of Version")
+        finally:
+            _, lfi = _live_chars(w)
+            if lfi != "?":
+                w.dev.send(f"{lfi}FUNCCHAR,?")
+                time.sleep(0.5)
+
+
+@test("etm.query_range_forms", "Bare ?ETM,TIMEOUT / BOOT / DELAY are queries matching the chain; out-of-range values print their exact refusals; the legacy ?ETMTIMEOUT / ?ETMBOOT / ?ETMCHARDELAY / ?ETMMISS have the same query and range forms ('(currently N)'); nothing changes", needs=["wcb1"], links=[])
+def etm_query_range_forms(bench):
+    """WCB-WP48 row 8. processLocalCommand's ETM branch treats an empty value as a query for TIMEOUT, BOOT and DELAY
+    (a bare setter used to write 0 to NVS: etm.unvalidated_setters) and range-checks TIMEOUT 50-10000, BOOT 1-30 and
+    DELAY 0-5000; the legacy ?ETMTIMEOUT / ?ETMBOOT / ?ETMCHARDELAY / ?ETMMISS branches do the same in their own words
+    (all WCB.ino). Legacy ?ETMHB has no query form (a bare one is refused), so it is not in the list."""
+    w = usb_wcb(bench)
+    with config_guard(bench, 1) as before:
+        o = _etm(before[1])
+        checks = [("?ETM,TIMEOUT", f"ETM timeout is {o['TIMEOUT']} ms"), ("?ETM,BOOT", f"ETM boot window is {o['BOOT']} sec"),
+                  ("?ETM,DELAY", f"ETM char delay is {o['DELAY']} ms"),
+                  ("?ETM,TIMEOUT,49", "Invalid ETM timeout '49'. Use 50-10000 ms."),
+                  ("?ETM,TIMEOUT,10001", "Invalid ETM timeout '10001'. Use 50-10000 ms."),
+                  ("?ETM,BOOT,0", "Invalid ETM boot window '0'. Use 1-30 sec."),
+                  ("?ETM,BOOT,31", "Invalid ETM boot window '31'. Use 1-30 sec."),
+                  ("?ETM,DELAY,-1", "Invalid ETM char delay '-1'. Use 0-5000 ms."),
+                  ("?ETM,DELAY,5001", "Invalid ETM char delay '5001'. Use 0-5000 ms."),
+                  ("?ETMTIMEOUT", f"ETM timeout is {o['TIMEOUT']} ms"), ("?ETMBOOT", f"ETM boot window is {o['BOOT']} sec"),
+                  ("?ETMCHARDELAY", f"ETM char delay is {o['DELAY']} ms"),
+                  ("?ETMMISS", f"ETM missed heartbeats is {o['MISS']}"),
+                  ("?ETMTIMEOUT49", f"Invalid ETM timeout. Use 50-10000 ms (currently {o['TIMEOUT']})."),
+                  ("?ETMBOOT40", f"Invalid ETM boot window. Use 1-30 seconds (currently {o['BOOT']})."),
+                  ("?ETMCHARDELAY6000", f"Invalid ETM char delay. Use 0-5000 ms (currently {o['DELAY']})."),
+                  ("?ETMMISS101", f"Invalid ETM missed-heartbeat count. Use 1-100 (currently {o['MISS']}).")]
+        try:
+            bad = [f"{cmd}: {out}" for cmd, want in checks for out in [w.run(cmd)] if not _has(out, want)]
+        finally:
+            now = _etm(snapshot(bench, 1))
+            changed = tuple(k for k in ETM_KEYS if now[k] != o[k])
+            if changed:                         # nothing should have changed: put a regression back before the guard
+                _restore_etm(w, o, changed)
+    assert not bad, "; ".join(bad)
+
+
+@test("stats.rpt_large_ram_only", "?STATS,RPT stores a counter above 2^31 exactly (Sent: 3000000000), and reported rows live in RAM only: a W1 reboot clears them (1 reboot)", needs=["wcb1"], links=[])
+def rpt_large_ram_only(bench):
+    """WCB-WP48 row 9. storeReportedStats (WCB.ino) parses with strtoul into an unsigned long - toInt() saturated at 2^31
+    - and reportedStats[] is never persisted: a reboot clears it by design (the comment at its declaration). Reporter 7
+    is no bench board, so nothing can report as it again after the reboot."""
+    w = usb_wcb(bench)
+    if [x for x in w.run("?STATS") if x.startswith("WCB7: ")]:
+        raise Skip("WCB7 already reports to W1")
+    rebooted = False
+    try:
+        out = [x.rstrip() for x in w.run("?STATS,RPT,7,3000000000,1,1,1,1,1,1") if x.startswith("[STATS]")]
+        stats = _stats(w)
+        w.reboot()
+        rebooted = True
+        after = _stats(w)
+    finally:
+        if not rebooted and any(x.startswith("WCB7: ") for x in w.run("?STATS")):
+            w.run("?STATS,RESET")
+        _peers_back(w)
+    assert not out, f"a valid RPT printed {out}"
+    assert any(re.match(r"^WCB7: Sent: 3000000000, ACKd: 1, Retries: 1, Failed: 1, Unguaranteed: 1, Bcast: 1, Recv: 1  \(\d+s ago\)$", x)
+               for x in stats), f"no exact WCB7 row: {[x for x in stats if x.startswith('WCB7: ')]}"
+    assert not [x for x in after if x.startswith("WCB7: ")], "the reported WCB7 row survived the reboot"
+
+
+@test("alias.utf8_truncation", "?ALIAS cuts at 24 bytes on a UTF-8 boundary: 23 ASCII characters + 'é' keeps just the 23, 22 + 'é' keeps all 24 bytes; the alias is put back", needs=["wcb1"], links=[])
+def alias_utf8_truncation(bench):
+    """WCB-WP48 row 7. saveWCBAlias (WCB_Storage.cpp) caps the alias at 24 bytes and backs the cut up over UTF-8
+    continuation bytes (10xxxxxx), so NVS never holds half a character. 'é' is C3 A9; SerialDevice decodes the console
+    as UTF-8 with replacement, so a stray lead byte would show as U+FFFD and fail the comparison."""
+    w = usb_wcb(bench)
+    base = "HIL" + nonce() * 4
+    a23, a22 = base[:23], base[:22]
+    bad = []
+    with config_guard(bench, 1) as before:
+        orig = token(before[1], "?ALIAS,")
+        try:
+            for text, want in ((a23 + "é", a23), (a22 + "é", a22 + "é")):
+                out = [x.rstrip() for x in w.run(f"?ALIAS,{text}")]
+                if f"WCB alias set to: {want}" not in out:
+                    bad.append(f"?ALIAS,{text} printed {out}")
+                query = [x.rstrip() for x in w.run("?ALIAS")]
+                if f"Alias: {want}" not in query:
+                    bad.append(f"?ALIAS after {text!r}: {query}")
+        finally:
+            w.run(orig if orig else "?ALIAS,CLEAR")
+            time.sleep(2)           # the on-change advert (checked every 500 ms) carries the alias back out
+    assert not bad, "; ".join(bad)
+
+
+def _local_devices(tokens, n, verb):
+    """[(id, baud)] of W<n>'s own ?MAESTRO (verb 'MAESTRO,M') or ?WLED (verb 'WLED,') slots in chain order, which is
+    slot order: emitMaestroBackup / emitWLEDBackup and wdpLocalMaestroCfg / wdpLocalWLEDCfg all walk the slots in turn.
+    A remote proxy names another board (or S0) and is left out, as the advert leaves it out."""
+    rx = re.compile(rf"^\?{verb}(\d+):W{n}S([1-5]):(\d+)$", re.I)
+    return [(int(m.group(1)), int(m.group(3))) for t in tokens for m in [rx.match(t)] if m]
+
+
+def _id_baud(pairs):
+    """?WDP,DUMP's '<id>@<baud>' list, dot-joined ('-' when empty; wdpIdBaudStr)."""
+    return ".".join(f"{i}@{b}" if b in _WDP_BAUDS else f"{i}" for i, b in pairs) or "-"
+
+
+def _detail_list(pairs):
+    """printWdpDetail's Maestros / WLED value: ' <id>@<baud>' per device, ' -' when none."""
+    return "".join(f" {i}@{b}" if b in _WDP_BAUDS else f" {i}" for i, b in pairs) or " -"
+
+
+@test("wdp.dump_neighbor_fields", "?WDP,DUMP's HW=, MAESTRO= and [WDPX:MB=,WL=] for the self row and for W2's row match each board's own ?HW / ?MAESTRO / ?WLED config (id@baud in slot order; no WDPX line for a board that hosts neither)", needs=["wcb1"], links=[])
+def dump_neighbor_fields(bench):
+    """WCB-WP48 row 3. printWdpDump (WCB_WDP.cpp) builds the self row from wcb_hw_version, wdpLocalMaestroCfg and
+    wdpLocalWLEDCfg, and W2's row from its advert's HWVER, MAESTRO_CFG and WLED_CFG TLVs; wdpEmitDumpX writes
+    [WDPX:N=,MB=,WL=] only for a board that hosts a Maestro or a WLED, and wdpIdBaudStr prints a bare id for a baud with
+    no WDP code. The neighbour-side [WDPPWM:N=1,DST=2,S=3] edge of the plan's row belongs in pwm.passthrough_mesh
+    (s14_pwm.py) and is not checked here."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    dump = [x for x in _dump(w) if x.startswith("[WDP")]
+    bad = []
+    for n in (me, 2):
+        tokens = snapshot(bench, n)
+        row = _row(dump, n)
+        if row is None:
+            bad.append(f"no DUMP row for W{n}")
+            continue
+        hw = (token(tokens, "?HW,") or "?HW,?").split(",")[1]
+        if _field(row, "HW") != hw:
+            bad.append(f"W{n} HW={_field(row, 'HW')}, its chain says ?HW,{hw}")
+        maestros, wleds = _local_devices(tokens, n, "MAESTRO,M"), _local_devices(tokens, n, "WLED,")
+        ids = ".".join(str(i) for i, _ in maestros) or "-"
+        if _field(row, "MAESTRO") != ids:
+            bad.append(f"W{n} MAESTRO={_field(row, 'MAESTRO')}, expected {ids}")
+        rows_x = [x for x in dump if x.startswith(f"[WDPX:N={n},")]
+        want = [f"[WDPX:N={n},MB={_id_baud(maestros)},WL={_id_baud(wleds)}]"] if maestros or wleds else []
+        if rows_x != want:
+            bad.append(f"W{n} WDPX {rows_x}, expected {want}")
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.list_detail_content", "W2's ?WDP,LIST row (Platform, Cap codes, Maestros, live) and its ?WDP,2 detail (Platform, Capabilities with the controller id, Maestros and WLED id@baud) match W2's own config, and '(not heard)' marks exactly the WDP-DA devices W1's DUMP has as SEEN=0", needs=["wcb1"], links=[])
+def list_detail_content(bench):
+    """WCB-WP48 row 4. printWdpList and printWdpDetail (WCB_WDP.cpp): the Cap column is wdpCapCodes (M R K H 3 W P C D,
+    space-separated) cut to 12 characters by its %-12.12s column, Maestros is wdpMaestroStr (dot-joined ids) cut to 10;
+    the detail spells the same bits out with wdpCapNames and adds '(controller ID n)' when the Controller bit is set
+    and the advert carries an id. The legend's D=DFPlayer (re-scan #30, fixed) is pinned by wdp.list_detail_errors."""
+    w = usb_wcb(bench)
+    t2 = snapshot(bench, 2)
+    dump = [x.rstrip() for x in _dump(w)]
+    row2 = _row(dump, 2)
+    if row2 is None:
+        raise Skip("W1 has no WDP row for W2")
+    alias = (token(t2, "?ALIAS,") or "?ALIAS,")[len("?ALIAS,"):]
+    if not alias.isascii():
+        raise Skip("W2's alias is not ASCII: the LIST columns are sliced by character")
+    cap = _expected_cap(t2, 2)
+    codes = " ".join(c for bit, c, _ in _CAPS if cap & bit) or "-"
+    names = ", ".join(name for bit, _, name in _CAPS if cap & bit) or "none"
+    maestros, wleds = _local_devices(t2, 2, "MAESTRO,M"), _local_devices(t2, 2, "WLED,")
+    ids = ".".join(str(i) for i, _ in maestros) or "-"
+    hw = int((token(t2, "?HW,") or "?HW,0").split(",")[1] or 0)
+    platform = "ESP32-S3" if hw >= 31 else "ESP32" if hw > 0 else "?"
+    bad = []
+    if _field(row2, "CAP") != "%04X" % cap:
+        bad.append(f"W1's DUMP has W2 CAP={_field(row2, 'CAP')}, W2's config gives {cap:04X}")
+    line = next((x for x in (y.rstrip() for y in w.run("?WDP,LIST")) if x.startswith("2   ")), None)
+    if line is None:
+        bad.append("no ?WDP,LIST row for WCB2")
+    else:
+        # "%-4d  %-16.16s  %-10.10s  %-12.12s  %-10.10s  %-5s  %-5s": WCB, Alias, Platform, Cap, Maestros, Age, State
+        got = {"platform": line[24:34].strip(), "cap": line[36:48].strip(), "maestros": line[50:60].strip(),
+               "state": line[69:].strip()}
+        want = {"platform": platform[:10], "cap": codes[:12].strip(), "maestros": ids[:10], "state": "live"}
+        bad += [f"LIST {k} {got[k]!r}, expected {v!r}" for k, v in want.items() if got[k] != v]
+    detail = [x.rstrip() for x in w.run("?WDP,2")]
+    ctrl = _field(row2, "CTRL")
+    cap_line = f"  Capabilities: {names}" + (f"  (controller ID {ctrl})" if cap & 0x0040 and ctrl not in (None, "0") else "")
+    for want_line in (f"  Platform    : {platform} (hw {hw})", cap_line, "  Maestros    :" + _detail_list(maestros),
+                      "  WLED        :" + _detail_list(wleds), "  Interfaces  :"):
+        if want_line not in detail:
+            bad.append(f"?WDP,2 lacks {want_line!r}")
+    devices = [m for x in dump for m in [re.match(r"^\[WDPDA:N=2,S=(\d),TYPE=([^,]*),.*,SEEN=([01]),AGE=-\]$", x)] if m]
+    dev_lines = [x for x in detail if x.startswith("          ") and " fw " in x]
+    for m in devices:
+        kind, seen = m.group(2)[:24], m.group(3) == "1"
+        hit = next((x for x in dev_lines if x.strip().startswith(kind)), None)
+        if hit is None:
+            bad.append(f"?WDP,2 does not list the WDP-DA device {kind!r} on S{m.group(1)}")
+        elif ("(not heard)" in hit) == seen:
+            bad.append(f"?WDP,2 device line {hit.strip()!r} vs SEEN={m.group(3)} in W1's DUMP")
+    if not devices and any("(not heard)" in x for x in detail):
+        bad.append("'(not heard)' with no WDP-DA device of W2's in W1's DUMP")
+    bench.note(f"W2: CAP {cap:04X} ({codes}), Maestros {ids}, {len(devices)} WDP-DA device(s)")
+    assert not bad, "; ".join(bad)
+
+
+def _poll_fresh(w, n, tries=3):
+    """?WDP,POLL until W<n>'s row is at most 3 s old -> True when it was. The solicit and the answer are single
+    unacknowledged broadcasts, so one can be lost (wdp.poll_refreshes_age)."""
+    for _ in range(tries):
+        w.run("?WDP,POLL")
+        time.sleep(3)
+        if int(_field(_row(_dump(w), n), "AGE") or 99) <= 3:
+            return True
+    return False
+
+
+def _poll_learned(w, n, since, tries=3):
+    """?WDP,POLL until '[WDP] learned WCB<n>' shows after mark `since` -> True when it did (same loss as _poll_fresh)."""
+    for _ in range(tries):
+        w.run("?WDP,POLL")
+        try:
+            w.dev.expect(rf"\[WDP\] learned WCB{n}\b", timeout=3, since=since)
+            return True
+        except AssertionError:
+            continue
+    return False
+
+
+@test("wdp.controller_no_readopt_no_override", "Controller auto-adopt fires only on the first learn of a controller-type device, and only with no controller enabled: re-hearing NaviCore while the controller is OFF does not re-enable it, relearning NaviCore does not move a controller pinned at 17, and a 'Sabe' device at 14 is adopted once the controller is OFF (auto-join off; ~45 s)", needs=["wcb1", "probe2"], links=[])
+def controller_no_readopt_no_override(bench):
+    """WCB-WP48 row 5. wdpOnAdvertReceived (WCB_WDP.cpp) calls enableControllerPeer only for a neighbour's first advert
+    (!wasValid), a controller device type (wdpIsControllerType: NaviCore, Sabé or Sabe, any case) and no controller
+    enabled. Auto-join is off throughout: with the controller off or moved, NaviCore (non-temporary) would otherwise be
+    learned as a persisted peer. The probe joins as a temporary client of type 'Sabe' (MESH JOIN TYPE=), sends nothing
+    and leaves; ?CONTROLLER,ON,20 goes back in the finally."""
+    w = usb_wcb(bench)
+    bad = []
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1] or _row(_dump(w), 20) is None:
+            raise Skip("controller 20 is not enabled, or NaviCore is not in W1's WDP table")
+        _require_id_free(w, 14)
+        _require_id_free(w, 17)
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            # (a) NaviCore is heard again while the controller is OFF: its row is still valid, so no adopt
+            if not _has(w.run("?CONTROLLER,OFF"), "Controller peer (ID 20) DISABLED."):
+                bad.append("(a) ?CONTROLLER,OFF did not confirm")
+            am = w.dev.mark()
+            if not _poll_fresh(w, 20):
+                bench.note("(a) NaviCore's row was not refreshed by three polls: nothing was heard to re-adopt")
+            if _has(w.dev.since(am), "auto-enabling controller peer"):
+                bad.append("(a) re-hearing NaviCore re-enabled the controller")
+            if not _has(w.run("?CONTROLLER"), "Controller peer (ID 20) is currently DISABLED."):
+                bad.append("(a) the controller did not stay DISABLED")
+            # (b) NaviCore is relearned (FORGET, then POLL) while the controller is pinned at 17
+            on17 = [x.rstrip() for x in w.run("?CONTROLLER,ON,17")]
+            if "Controller peer (ID 17) ENABLED." not in on17:
+                bad.append(f"(b) ?CONTROLLER,ON,17 printed {on17}")
+            bm = w.dev.mark()
+            w.run("?WDP,FORGET,20")
+            if not _poll_learned(w, 20, bm):
+                raise Skip("NaviCore did not answer three polls after ?WDP,FORGET,20, so (b) and (c) cannot run")
+            time.sleep(0.5)
+            if _has(w.dev.since(bm), "auto-enabling controller peer"):
+                bad.append("(b) relearning NaviCore moved the pinned controller")
+            if not _has(w.run("?CONTROLLER"), "Controller peer (ID 17) is currently ENABLED."):
+                bad.append("(b) the controller did not stay at 17")
+            # (c) a 'Sabe' device appears while the controller is OFF: adopted at its id
+            if not _has(w.run("?CONTROLLER,OFF"), "Controller peer (ID 17) DISABLED."):
+                bad.append("(c) ?CONTROLLER,OFF did not confirm")
+            cm = w.dev.mark()
+            with _joined(bench, "probe2", 14, dev_type="Sabe"):
+                try:
+                    w.dev.expect(r'\[WDP\] heard controller "Sabe" \(WCB14\) — auto-enabling controller peer', timeout=15, since=cm)
+                except AssertionError:
+                    bad.append("(c) the 'Sabe' device was not adopted as the controller")
+                time.sleep(0.5)
+                adopted = [x.rstrip() for x in w.dev.since(cm)]
+                query = w.run("?CONTROLLER")
+            for want in ("[WDP] learned WCB14 Sabe", "Controller peer ID set to 14.", "Controller peer (ID 14) ENABLED."):
+                if not _has(adopted, want):
+                    bad.append(f"(c) no {want!r}")
+            if not _has(query, "Controller peer (ID 14) is currently ENABLED."):
+                bad.append(f"(c) ?CONTROLLER printed {query}")
+        finally:
+            if not _has(w.run("?CONTROLLER"), "Controller peer (ID 20) is currently ENABLED."):
+                w.run("?CONTROLLER,ON,20")
+            w.run("?WDP,AUTOJOIN,ON")
+            if _row(_dump(w), 20) is None:
+                w.run("?WDP,POLL")
+    assert not bad, "; ".join(bad)
+
+
+@test("peers.controller_other_id_persist", "?CONTROLLER,ON,17 moves the controller live and persists it: 'registered (live)', ?CONTROLLER says 17, the chain holds ?CONTROLLER,ON,17, ;W20 is refused and ?STATS has a 'WCB17 (special)' row - all still so after a reboot; ON,20 makes NaviCore answer again with ?PEERSLIVE unchanged (auto-join off; 1 reboot)", needs=["wcb1"], links=[])
+def controller_other_id_persist(bench):
+    """WCB-WP48 row 6. enableControllerPeer (WCB.ino) deletes the old out-of-band controller peer, saves the new id
+    (saveSpecialPeerIDToPreferences, WCB_Storage.cpp: 'Controller peer ID set to n.') and registers it live; setup()
+    registers the saved id at boot. Auto-join is off, so NaviCore - a plain client while 17 is the controller - is not
+    learned as a persisted peer. The other half of the row (a disabled controller's commands still run) is
+    peers.controller_off_still_executes."""
+    w = usb_wcb(bench)
+    bad = []
+    refused = "WCB 20 is not a reachable target — it isn't a configured or learned peer or the controller."
+
+    def check(when):
+        if not _has(w.run("?CONTROLLER"), "Controller peer (ID 17) is currently ENABLED."):
+            bad.append(f"{when}: ?CONTROLLER does not say 17 ENABLED")
+        if "?CONTROLLER,ON,17" not in snapshot(bench, 1):
+            bad.append(f"{when}: the chain lacks ?CONTROLLER,ON,17")
+        if not _has(w.run(";W20,x"), refused):
+            bad.append(f"{when}: ;W20 is still a target")
+        if _etm_row(_stats(w), 17, special=True) is None:
+            bad.append(f"{when}: ?STATS has no 'WCB17 (special)' row")
+
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        _require_id_free(w, 17)
+        n0, _ = _live_peers(w)
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            out = [x.rstrip() for x in w.run("?CONTROLLER,ON,17")]
+            for want in ("Controller peer ID set to 17.", "Controller peer WCB17 registered (live)."):
+                if want not in out:
+                    bad.append(f"?CONTROLLER,ON,17 lacks {want!r}")
+            check("live")
+            w.reboot()
+            check("after a reboot")
+        finally:
+            back = [x.rstrip() for x in w.run("?CONTROLLER,ON,20")]
+            w.run("?WDP,AUTOJOIN,ON")
+        if "Controller peer ID set to 20." not in back:
+            bad.append(f"?CONTROLLER,ON,20 printed {back}")
+        wm = w.dev.mark()
+        w.send(";W20,?version")
+        try:
+            w.dev.expect(r"^\[TERM:20\]End of Version", timeout=6, since=wm)
+        except AssertionError:
+            bad.append("NaviCore did not answer ;W20,?version after ON,20")
+        if _live_peers(w)[0] != n0:
+            bad.append(f"?PEERSLIVE went {n0} -> {_live_peers(w)[0]}")
+        _peers_back(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("peers.controller_off_still_executes", "With W1's controller OFF, a command NaviCore sends W1 (TEST_ACTION wcb_unicast ;S2<m>) is still ACKed and run: it arrives on W1 S2 once (auto-join off; under 20 s)", needs=["wcb1", "navicore"])
+def controller_off_still_executes(bench):
+    """WCB-WP48 row 6, second half. A disabled controller is not ignored on receive (docs/HIL_TESTING.md §6): the ETM
+    receive path of espNowReceiveCallback ACKs (etmSendAck, which re-adds the sender as an ESP-NOW peer on demand) and
+    runs a command from any valid in-group sender; only W1's own routing to it (;W20) is gated (WCB.ino). The ACK is
+    read from ?DEBUG,ETM: 'Sent ACK seq N to WCB20' for the seq W1 printed as received."""
+    s12 = link(bench, 1, "S2")
+    w = usb_wcb(bench)
+    nc = NaviCore(bench.dev("navicore"))
+    t = marker()
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            w.run("?DEBUG,ETM,ON")
+            off = w.run("?CONTROLLER,OFF")
+            pm, wm = s12.mark(), w.dev.mark()
+            ack = nc.ack_line({"type": "TEST_ACTION", "action": {"type": "wcb_unicast", "target": "1", "cmd": f";S2{t}"}})
+            try:
+                s12.expect(t.encode() + b"\r", timeout=3, since=pm)
+            except AssertionError:
+                pass
+            time.sleep(1.0)
+            got, lines = s12.received(pm), [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            if not _has(w.run("?CONTROLLER"), "Controller peer (ID 20) is currently ENABLED."):
+                w.run("?CONTROLLER,ON,20")
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?WDP,AUTOJOIN,ON")
+    assert _has(off, "Controller peer (ID 20) DISABLED."), f"?CONTROLLER,OFF printed {off}"
+    assert ack == '{"type":"ACK","of":"TEST_ACTION","ok":true}', ack
+    runs = got.count(t.encode() + b"\r")
+    assert runs == 1, f"W1 S2 got the command {runs} times: {got!r}"
+    seq = next((m.group(1) for x in lines for m in [re.search(rf"\[ETM\] Received seq (\d+) from WCB20: ;S2{t}$", x)] if m), None)
+    assert seq, "W1 printed no 'Received seq N from WCB20' for the command"
+    assert any(x.startswith(f"[ETM] Sent ACK seq {seq} to WCB20") for x in lines), f"W1 did not ACK seq {seq} to WCB20"
+
+
+def _seq_of(lines, text):
+    """The seq of W1's '[ETM] Sent seq N: <text>' debug line, or None."""
+    return next((m.group(1) for x in lines for m in [re.search(rf"\[ETM\] Sent seq (\d+): {re.escape(text)}$", x)] if m),
+                None)
+
+
+@test("etm.controller_unicast_tracked", "A ;W20 unicast to the controller (never a wcbPeerActive member) expects NaviCore's ACK and counts in the 'WCB20 (special)' ?STATS row; a plain broadcast does not expect the controller, so the row stays at Sent 1, ACKd 1", needs=["wcb1"], links=[])
+def controller_unicast_tracked(bench):
+    """WCB-WP30 row 1, tracked half. etmAddToPendingTable (WCB.ino) adds the controller's slot to expectAckFrom only for
+    a unicast addressed to it (isSpecialPeerSlot), never for a broadcast, on purpose; etmProcessAck counts only an ACK
+    it expected, so NaviCore's ACK of the broadcast (a WCB_Client ACKs every command) leaves the row alone (tracker
+    #22). The retry half is etm.controller_unicast_retry."""
+    w = usb_wcb(bench)
+    if "?CONTROLLER,ON,20" not in snapshot(bench, 1):
+        raise Skip("controller 20 is not enabled on W1")
+    row = _etm_row(_stats(w), 20, special=True)
+    if not row or not row[4]:
+        w.run("?WDP,POLL")
+        time.sleep(3)
+        row = _etm_row(_stats(w), 20, special=True)
+        if not row or not row[4]:
+            raise Skip("W1's ?STATS does not show the controller WCB20 online")
+    t = f"hilbc{nonce().lower()}"            # a plain broadcast reaches every broadcast port on both WCBs: inert text
+    try:
+        w.run("?DEBUG,ETM,ON")
+        w.run("?STATS,RESET")
+        wm = w.dev.mark()
+        w.send(";W20,?version")
+        w.dev.expect(r"^\[TERM:20\]End of Version", timeout=5, since=wm)
+        time.sleep(0.5)
+        lines = [x.rstrip() for x in w.dev.since(wm)]
+        row1 = _etm_row(_stats(w), 20, special=True)
+        bm = w.dev.mark()
+        w.send(t)
+        time.sleep(1.5)
+        blines = [x.rstrip() for x in w.dev.since(bm)]
+        row2 = _etm_row(_stats(w), 20, special=True)
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+    seq, bseq = _seq_of(lines, "?version"), _seq_of(blines, t)
+    assert seq, "no 'Sent seq' line for ;W20,?version"
+    assert f"[ETM] ACK received from WCB20 for seq {seq}" in lines and f"[ETM] Seq {seq} fully acknowledged" in lines, \
+        "the unicast to the controller was not tracked to its ACK"
+    assert row1 and row1[:2] == (1, 1) and row1[3] == 0, f"WCB20 (special) row after the unicast: {row1}"
+    assert bseq, "no 'Sent seq' line for the broadcast"
+    bench.note(f"NaviCore's ACK of the broadcast seen: {f'[ETM] ACK received from WCB20 for seq {bseq}' in blines}")
+    assert row2 and row2[:2] == (1, 1) and row2[3] == 0, f"the broadcast changed the WCB20 (special) row: {row1} -> {row2}"
+
+
+@test("mgmt.frag_chksm_boundary", "Under ?ETM,CHKSM a single-chunk ?MGMT,FRAG payload of 180 or 186 characters still goes to W2 as one SOH-marked ETM unicast and runs; 187 is refused as over 179 and nothing arrives", needs=["wcb1"])
+def frag_chksm_boundary(bench):
+    """WCB-WP30 row 9. handleMgmtForward (WCB.ino) sends a single-chunk FRAG as one ETM unicast behind a SOH marker while
+    the payload fits singleChunkMax - under ?ETM,CHKSM that is ETM_MAX_CMD_WITH_CRC - 1 = 186, since the marker and the
+    12-character '|CRC' suffix share the 199-character field - and otherwise falls to the fragment path, whose
+    MGMT_PAYLOAD_SIZE - 1 = 179 ceiling refuses it (ungated). The CHKSM-off variant stays manual: s18 never changes
+    W2's checksum setting."""
+    s22 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?ETM,CHKSM,ON")
+    bad = []
+    try:
+        w.run("?DEBUG,MGMT,ON")
+        for n in (180, 186):
+            text = padded(f"F{n}", n - 3)              # ';S2' + text = n characters
+            sid = nonce()[:4]
+            pm, wm = s22.mark(), w.dev.mark()
+            w.send(f"?MGMT,FRAG,2,{sid},0,1,;S2{text}")
+            try:
+                s22.expect(text.encode() + b"\r", timeout=3, since=pm)
+            except AssertionError:
+                bad.append(f"the {n}-character payload did not run on W2")
+            if not _has(w.dev.since(wm), f"[MGMT] Single-chunk cmd → ETM unicast to WCB2 session {sid}: ;S2{text}"):
+                bad.append(f"the {n}-character payload did not go as one ETM unicast")
+        text = padded("F187", 184)
+        pm, wm = s22.mark(), w.dev.mark()
+        w.send(f"?MGMT,FRAG,2,{nonce()[:4]},0,1,;S2{text}")
+        time.sleep(3)
+        lines, got = [x.rstrip() for x in w.dev.since(wm)], s22.received(pm)
+    finally:
+        w.run("?DEBUG,MGMT,OFF")
+    if "[MGMT] FRAG payload 187 > 179 chars — REJECTED (sender must fragment at 179)" not in lines:
+        bad.append("no REJECTED line for the 187-character payload")
+    if text.encode() in got:
+        bad.append("the 187-character payload arrived on W2 S2")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.rx_debug_lines", "W2 under ?DEBUG,ON prints 'Processing ETM input from WCB1: ...' for an ETM command from W1, but an inbound ?STATS,RPT only under ?DEBUG,MGMT, beside its '[STATS] RPT from' line", needs=["wcb1"], links=[])
+def rx_debug_lines(bench):
+    """WCB-WP30 row 8, ETM half (the non-ETM lines are in etm.nonetm_whitelist_scope). The ETM receive path of
+    espNowReceiveCallback (WCB.ino) mirrors a received command as 'Processing ETM input from WCB<n>: <cmd>' under
+    ?DEBUG,ON, except a ?STATS,RPT - high-rate telemetry - which rides ?DEBUG,MGMT like storeReportedStats' own
+    '[STATS] RPT from' line. The row W2 stores is cleared with ;W2,?STATS,RESET, as stats.rpt_remote does."""
+    w = usb_wcb(bench)
+    vals = [int(nonce(), 16) % 90000 + 10000 for _ in range(2)]
+    rpt = [f"?STATS,RPT,9,{v},1,2,3,4,5,6" for v in vals]
+    with Console(bench, 2) as c2:
+        try:
+            _crun(c2, "?DEBUG,ON")
+            m = c2.mark()
+            w.send(";W2,?PEERSLIVE")
+            time.sleep(1.5)
+            plain = [x.rstrip() for x in c2.lines(m)]
+            m = c2.mark()
+            w.send(f";W2,{rpt[0]}")
+            time.sleep(1.5)
+            quiet = [x.rstrip() for x in c2.lines(m)]
+            _crun(c2, "?DEBUG,MGMT,ON")
+            m = c2.mark()
+            w.send(f";W2,{rpt[1]}")
+            time.sleep(1.5)
+            mgmt = [x.rstrip() for x in c2.lines(m)]
+        finally:
+            _crun(c2, "?DEBUG,MGMT,OFF")
+            _crun(c2, "?DEBUG,OFF")
+            w.send(";W2,?STATS,RESET")
+            time.sleep(0.5)
+    assert "Processing ETM input from WCB1: ?PEERSLIVE" in plain, f"no 'Processing ETM input' line under ?DEBUG,ON: {plain}"
+    assert not _has(quiet, "Processing ETM input from WCB1: ?STATS,RPT") and not _has(quiet, "[STATS] RPT from WCB9"), \
+        f"?STATS,RPT printed under ?DEBUG,ON alone: {quiet}"
+    assert f"Processing ETM input from WCB1: {rpt[1]}" in mgmt, f"no 'Processing ETM input' line for RPT under ?DEBUG,MGMT: {mgmt}"
+    assert f"[STATS] RPT from WCB9: sent={vals[1]} ackd=1 retries=2 failed=3 unguaranteed=4 bcast=5 recv=6" in mgmt, \
+        "no '[STATS] RPT from WCB9' line under ?DEBUG,MGMT"
+
+
+@test("etm.nonetm_whitelist_scope", "While only W1's ETM is off (under 20 s) W2 lets through only <cmdChar>M frames: ;W2,;M2,getErrors reaches W2's Maestro and W2's ?DEBUG,ON prints its 'Sender ID' and 'Processing ESP-NOW input' lines, while ;W2,?MAESTRO,LIST, ;W2,?VERSION and a broadcast 'xM...' are dropped with the mismatch line (re-scan #21)", needs=["wcb1"])
+def nonetm_whitelist_scope(bench):
+    """WCB-WP30 row 4 and the non-ETM half of row 8. espNowReceiveCallback's ETM-mismatch gate (WCB.ino) lets a plain
+    frame through to an ETM board only as raw, PWM, RC JSON or a Maestro payload, and since re-scan #21 (fixed) a Maestro
+    payload must start with ';' or the command character: testing only the second byte let '?MAESTRO,LIST' and 'xM...'
+    through to run. The passed frame takes the normal receive path, which prints 'Sender ID: WCB1, Target ID: WCB2' and
+    'Processing ESP-NOW input: ...' under ?DEBUG,ON. W2's console must be its own USB: a relayed terminal rides ETM,
+    which W1 is not running. ;M2,getErrors only reads Maestro 2's error flags, as the bench's port_stimulus does."""
+    tap, s23 = link(bench, 2, "S1"), link(bench, 2, "S3")
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB connection of its own to read its console on")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    x = f"xMhil{nonce().lower()}"            # inert text on every port it reaches
+    with config_guard(bench, 1) as before:
+        if "?ETM,ON" not in before[1]:
+            raise Skip("ETM is already off on W1")
+        try:
+            w2.run("?DEBUG,ON")
+            off = w.run("?ETM,OFF")
+            m2, tm, sm = w2.dev.mark(), tap.mark(), s23.mark()
+            for cmd in (";W2,;M2,getErrors", ";W2,?MAESTRO,LIST", ";W2,?VERSION", x):
+                w.send(cmd)
+                time.sleep(0.8)
+            time.sleep(1.0)
+            lines2 = [y.rstrip() for y in w2.dev.since(m2)]
+            tapped, got3 = tap.received(tm), s23.received(sm)
+        finally:
+            try:
+                on = w.run("?ETM,ON")         # never leave W1 with ETM off: WDP and every ACK depend on it (rule 4)
+            finally:
+                w2.run("?DEBUG,OFF")
+            w.run("?WDP,POLL")
+    bad = []
+    if not _has(off, "ETM disabled") or not _has(on, "ETM enabled"):
+        bad.append(f"?ETM,OFF / ON on W1 printed {off} / {on}")
+    if bytes.fromhex("AA0221") not in tapped:
+        bad.append("the ;M2 getErrors frame did not reach W2's Maestro (the whitelist control)")
+    for want in ("Sender ID: WCB1, Target ID: WCB2", "Processing ESP-NOW input: ;M2,getErrors"):
+        if want not in lines2:
+            bad.append(f"W2 did not print {want!r}")
+    if _has(lines2, "------- Maestro Settings"):
+        bad.append("W2 ran ?MAESTRO,LIST from a non-ETM frame")
+    if "End of Version" in lines2:
+        bad.append("W2 ran ?VERSION from a non-ETM frame")
+    if x.encode() in got3:
+        bad.append("W2 printed the non-ETM broadcast 'xM...'")
+    drops = sum("Dropped non-ETM packet — ETM is ON here but sender has ETM OFF" in y for y in lines2)
+    if drops < 3:
+        bad.append(f"W2 printed the mismatch line {drops} times, expected 3 or more")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.off_fleet_normal_path", "With ETM off on both WCBs (under 40 s) the 249-byte normal path still delivers a ;W2 unicast, a plain broadcast, a single-chunk ?MGMT,FRAG (SOH marker stripped), a FRAG timer chain with its ~500 ms gap and a ;M2 get to W2's Maestro, and W1's ?STATS shows the MAC-level counters; both boards are put back to ETM on", needs=["wcb1"])
+def off_fleet_normal_path(bench):
+    """WCB-WP30 row 3. ETM off on every board is a supported mode (CLAUDE.md rule 4). sendESPNowMessage sends the plain
+    frame; espNowReceiveCallback's normal path applies the target filter, forces the NUL, strips the SOH marker
+    handleMgmtForward prepends, hands a timer chain to enqueuePendingTimerChain and rewrites an inbound ;M get
+    (maestroRewriteInboundGet); buildStatsString shows espnowCommandAttempts / Success / Failed (all WCB.ino). W2 is
+    switched on its own USB, never over the mesh, so either board can be put back whatever the mesh does, W2 first. WDP
+    and NaviCore's ETM frames are ignored while the window lasts, so it is kept short."""
+    s22, s23, tap = link(bench, 2, "S2"), link(bench, 2, "S3"), link(bench, 2, "S1")
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB connection of its own: its ETM is never switched over the mesh")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    a, b, c, d = (marker(k) for k in "abcd")
+    t = f"hilbc{nonce().lower()}"
+    bad = []
+    with config_guard(bench, 1, 2) as before:
+        if "?ETM,ON" not in before[1] or "?ETM,ON" not in before[2]:
+            raise Skip("ETM is not on on both WCBs")
+        t0 = time.monotonic()
+        try:
+            if not _has(w2.run("?ETM,OFF"), "ETM disabled") or not _has(w.run("?ETM,OFF"), "ETM disabled"):
+                bad.append("?ETM,OFF did not confirm")
+            w.run("?STATS,RESET")
+            pm = s22.mark()
+            w.send(f";W2,;S2{a}")
+            try:
+                s22.expect(a.encode() + b"\r", timeout=3, since=pm)
+            except AssertionError:
+                bad.append("the ;W2 unicast did not run")
+            stats = _stats(w)
+            sm = s23.mark()
+            w.send(t)
+            try:
+                s23.expect(t.encode() + b"\r", timeout=3, since=sm)
+            except AssertionError:
+                bad.append("the plain broadcast did not reach W2 S3")
+            pm = s22.mark()
+            w.send(f"?MGMT,FRAG,2,{nonce()[:4]},0,1,;S2{b}")
+            try:
+                s22.expect(b.encode() + b"\r", timeout=3, since=pm)
+            except AssertionError:
+                bad.append("the single-chunk FRAG did not run (SOH marker left on?)")
+            pm = s22.mark()
+            w.send(f"?MGMT,FRAG,2,{nonce()[:4]},0,1,;S2{c}^;T500^;S2{d}")
+            gap = None
+            try:
+                s22.expect(d.encode() + b"\r", timeout=4, since=pm)
+                tc, td = s22.time_of(c.encode(), pm), s22.time_of(d.encode(), pm)
+                gap = td - tc if tc is not None and td is not None else None
+            except AssertionError:
+                bad.append("the FRAG timer chain did not finish")
+            tm = tap.mark()
+            w.send(";W2,;M2,getErrors")
+            time.sleep(1.5)
+            tapped = tap.received(tm)
+        finally:
+            try:
+                on2 = w2.run("?ETM,ON")          # W2 first, on its own USB (rule 4: never leave the fleet split)
+            finally:
+                on1 = w.run("?ETM,ON")
+                window = round(time.monotonic() - t0, 1)
+                w.run("?WDP,POLL")
+    bench.note(f"ETM-off window {window} s; FRAG timer gap {gap} ms")
+    if not _has(on2, "ETM enabled") or not _has(on1, "ETM enabled"):
+        bad.append(f"?ETM,ON printed W2 {on2} / W1 {on1}")
+    if "  Transmission Attempts: 1, Delivered: 1, Failed: 0" not in stats or "  Delivery Success Rate: 100.00%" not in stats:
+        bad.append(f"?STATS with ETM off: {[x for x in stats if 'Transmission' in x or 'Success Rate' in x]}")
+    if _has(stats, "--------------- ETM Per-Board Statistics ---------------"):
+        bad.append("?STATS kept the ETM per-board block with ETM off")
+    if gap is not None and not 400 <= gap <= 900:
+        bad.append(f"the FRAG timer chain's gap was {gap} ms, expected ~500")
+    if bytes.fromhex("AA0221") not in tapped:
+        bad.append("the ;M2 get did not reach W2's Maestro")
+    if window > 40:
+        bad.append(f"the ETM-off window lasted {window} s")
+    assert not bad, "; ".join(bad)
+
+
+# ------------------------------------------------------------ the probe as a mesh client (slow; last)
+def _forget_everywhere(bench, n, navicore=False):
+    """?WDP,FORGET,<n> on every WCB and, after a PERMANENT join, FORGET_PEER to NaviCore over the mesh: a WCB_Client
+    learns and persists a non-temporary device as a WCB does. Each persists its removal."""
+    w = usb_wcb(bench)
+    w.run(f"?WDP,FORGET,{n}")
+    for k in remote_wcbs(bench):
+        w.send(f";W{k},?WDP,FORGET,{n}")
+        time.sleep(0.4)
+    if navicore:
+        w.send(f';W20,{{"type":"FORGET_PEER","id":{n}}}')
+    time.sleep(1.5)
+
+
+@contextmanager
+def _joined(bench, probe_name, device_id, temporary=True, dev_type="HILProbe", forget=True):
+    """probe_in_mesh (suites/common.py) with the two things it pins set free. temporary=False joins as a PERMANENT
+    client, which every WCB learns as a persisted peer on its second advert (wdpOnAdvertReceived, WCB_WDP.cpp) and
+    NaviCore too (WCB_Client auto-join); dev_type is the advertised device type (a controller type is adopted as the
+    controller by a WCB that has none). No PEER=2 refusal: the downgrade test rejoins its learned id on purpose. The
+    probe sends nothing unless a test makes it, so an id may be shared (the MESH_IDS rule, s19). forget=True forgets the
+    id on every WCB after the leave and, for a permanent join, on NaviCore."""
+    if device_id in FORBIDDEN_MESH_IDS:
+        raise AssertionError(f"mesh id {device_id} is reserved on this bench")
+    params = mesh_params(bench)
+    probe = bench.probe(probe_name)
+    for l in bench.links.all():
+        if l.probe_name == probe_name:
+            bench.links.release(l)
+    probe.mesh_join(device_id, params["oct2"], params["oct3"], params["password"], params["quantity"],
+                    channel=params["channel"], checksum=params["checksum"], temporary=temporary, dev_type=dev_type)
+    try:
+        yield probe
+    finally:
+        try:
+            if probe.mesh_id:             # a test that timed its own leave has left already
+                probe.mesh_leave()
+        finally:
+            bench.links.forget_probe(probe_name)
+            if forget:
+                _forget_everywhere(bench, device_id, navicore=not temporary)
+
+
+def _await_line(w, pattern, since, tries=3, wait=8.0):
+    """Wait for a W1 line after mark `since`, sending ?WDP,POLL between tries: the probe answers a solicit with an
+    advert, so a lost boot-burst advert costs a poll instead of the next periodic advert (60 s for a permanent client).
+    -> the re.Match; raises AssertionError after the last try."""
+    for k in range(tries):
+        try:
+            return w.dev.expect(pattern, timeout=wait, since=since)
+        except AssertionError:
+            if k == tries - 1:
+                raise
+            w.run("?WDP,POLL")
+
+
+def _probe_rx(probe, since, text, sender, timeout=3.0):
+    """How many commands starting with `text` the probe received from WCB<sender>, after waiting up to `timeout` for one
+    (a checksummed client strips the '|CRC' suffix; startswith covers one that does not)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not any(s == sender and x.startswith(text) for s, x in probe.mesh_received(since)):
+        time.sleep(0.1)
+    return sum(1 for s, x in probe.mesh_received(since) if s == sender and x.startswith(text))
+
+
+def _restored(lines):
+    """The count in setup()'s '[PEER] restored <n> learned peer(s) from NVS' (loadLearnedPeers, WCB.ino), 0 when there
+    is no such line (it is printed only for n > 0)."""
+    m = next((m for x in lines for m in [re.search(r"\[PEER\] restored (\d+) learned peer\(s\) from NVS", x)] if m), None)
+    return int(m.group(1)) if m else 0
+
+
+@test("etm.controller_unicast_retry", "With the probe standing in as W1's controller (?CONTROLLER,ON,15), a unicast to it is tracked to its ACK in the 'WCB15 (special)' row; once the probe has left (still online to W1) the next one is retried 3 times at the ?ETM,TIMEOUT spacing and counted failed (auto-join off; ~35 s)", needs=["wcb1", "probe2"], links=[])
+def controller_unicast_retry(bench):
+    """WCB-WP30 row 1, retry half. The plan loses NaviCore's ACK by deafening W1 with a live ?MAC,3 change (_deaf_w1);
+    these tests never change ?MAC, so the controller id moves to a probe, which MESH LEAVE silences while W1 still counts
+    it online. The special-peer path depends only on WCB_SPECIAL_PEER_ID: etmAddToPendingTable's isSpecialPeerSlot and
+    the 3 retries of processETMAcksAndRetries (WCB.ino). The id is set BEFORE the probe joins, so W1 never adopts it
+    as a temporary peer (addTemporaryPeer and auto-join both skip the controller); auto-join is off so NaviCore, a plain
+    client meanwhile, is not learned as a persisted peer."""
+    X = 15
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_id_free(w, X)
+    t1, t2 = marker("u"), marker("r")
+    bad = []
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        spacing = int(_etm(before[1])["TIMEOUT"])
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            w.run("?DEBUG,ETM,ON")
+            on = [x.rstrip() for x in w.run(f"?CONTROLLER,ON,{X}")]
+            w.run("?STATS,RESET")
+            wm = w.dev.mark()
+            with _joined(bench, "probe2", X) as probe:
+                _await_line(w, rf"\[ETM\] WCB{X} came ONLINE", wm)
+                pm, am = probe.dev.mark(), w.dev.mark()
+                w.send(f";W{X},{t1}")
+                runs = _probe_rx(probe, pm, t1, me)
+                time.sleep(0.5)
+                acked = [x.rstrip() for x in w.dev.since(am)]
+                row1 = _etm_row(_stats(w), X, special=True)
+                probe.mesh_leave()               # silent from here, but W1 counts it online for (HB+1) x MISS
+                rm = w.dev.mark()
+                w.send(f";W{X},{t2}")
+                time.sleep(4 * spacing / 1000 + 1.5)
+                entries = _timed(w.dev, rm)
+                row2 = _etm_row(_stats(w), X, special=True)
+            joined = [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            w.run("?CONTROLLER,ON,20")
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?WDP,AUTOJOIN,ON")
+    if f"Controller peer ID set to {X}." not in on:
+        bad.append(f"?CONTROLLER,ON,{X} printed {on}")
+    if _has(joined, f"temporarily joined WCB{X}") or _has(joined, f"[PEER] WCB{X} registered (live, TEMPORARY)."):
+        bad.append("W1 adopted its controller as a temporary peer")
+    seq1 = _seq_of(acked, t1)
+    if not seq1 or f"[ETM] ACK received from WCB{X} for seq {seq1}" not in acked or f"[ETM] Seq {seq1} fully acknowledged" not in acked:
+        bad.append("the unicast to the controller was not tracked to its ACK")
+    if runs != 1:
+        bad.append(f"the probe received the first unicast {runs} times")
+    if not row1 or row1[:2] != (1, 1) or row1[3] != 0 or not row1[4]:
+        bad.append(f"WCB{X} (special) row after the ACKed unicast: {row1}")
+    lines = [line for _, line in entries]
+    sent = _first(entries, rf"\[ETM\] Sent seq \d+: {t2}$")
+    retries = [ts for ts, line in entries if re.search(rf"\[ETM\] Retry [123] to WCB{X} for seq \d+: {t2}$", line)]
+    failed = _first(entries, rf"\[ETM\] WCB{X} failed to ACK seq \d+ after 3 retries: {t2}$")
+    if _has(lines, f"[ETM] WCB{X} offline, canceling retry"):
+        bad.append("W1 swept the controller offline mid-retry")
+    if sent is None or len(retries) != 3 or failed is None:
+        bad.append(f"after the leave: sent {sent is not None}, {len(retries)} retries, failed {failed is not None}")
+    else:
+        offsets = [round((r - sent) * 1000) for r in retries]
+        if any(not k * spacing - 50 <= o <= k * spacing + 250 for k, o in enumerate(offsets, 1)):
+            bad.append(f"retry offsets {offsets} ms at TIMEOUT {spacing}")
+    if not row2 or row2[:2] != (2, 1) or row2[3] != 1:
+        bad.append(f"WCB{X} (special) row after the unanswered unicast: {row2}")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.controller_offline_sweep", "With the probe as W1's controller and W1 at HB 4 / MISS 1, W1 sweeps the controller offline on its own (HB+1)xMISS = 5 s threshold, never sooner than ~4.85 s after its last packet; its OFFLINE and ONLINE edges alternate; a unicast sent while it is offline is neither tracked, retried nor counted (auto-join off; ~45 s)", needs=["wcb1", "probe2"], links=[])
+def controller_offline_sweep(bench):
+    """WCB-WP30 row 2. processETMHeartbeats (WCB.ino) sweeps the controller (special peer) with boardSweepOffline
+    against this board's own threshold, and etmAddToPendingTable skips an offline board even when it is the controller,
+    so such a unicast gets one try. The plan watches NaviCore, but its 0.5 Hz rc_hb (rc_telemetry.h) keeps it online
+    under a 5 s threshold; a probe stands in as the controller (see etm.controller_unicast_retry) and, heartbeating
+    about every 10 s (WCB_Client), drops offline between heartbeats. Only lines ?DEBUG,ETM prints count as packets (a WDP
+    advert refreshes presence silently), so a measured gap can only be longer than the real one: the 4.85 s floor
+    (etm.offline_detection_timing) cannot fail spuriously. A unicast that raced the probe's next packet (an ONLINE line
+    before its Sent line) went while it was online; the next edge is tried instead, and the row allows for it."""
+    X = 15
+    w = usb_wcb(bench)
+    _require_id_free(w, X)
+    off_rx = rf"\[ETM\] WCB{X} \(special peer\) went OFFLINE \(no heartbeat for 5s\)"
+    bad = []
+    result, raced = None, 0
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        orig = _etm(before[1])
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            w.run("?DEBUG,ETM,ON")
+            w.run(f"?CONTROLLER,ON,{X}")
+            w.run("?ETM,HB,4")
+            w.run("?ETM,MISS,1")
+            w.run("?STATS,RESET")
+            wm = w.dev.mark()
+            with _joined(bench, "probe2", X):
+                _await_line(w, rf"\[ETM\] WCB{X} came ONLINE", wm)
+                since = wm
+                for _ in range(3):
+                    w.dev.expect(off_rx, timeout=20, since=since)
+                    om = w.dev.mark()
+                    t = marker("o")
+                    w.send(f";W{X},{t}")
+                    time.sleep(2.5)
+                    after = [x.rstrip() for x in w.dev.since(om)]
+                    i = next((k for k, x in enumerate(after) if re.search(rf"\[ETM\] Sent seq \d+: {t}$", x)), None)
+                    if i is not None and not any(f"[ETM] WCB{X} came ONLINE" in x for x in after[:i]):
+                        result = (t, after)
+                        break
+                    raced += 1
+                    since = w.dev.mark()
+                row = _etm_row(_stats(w), X, special=True)
+                time.sleep(15)                      # more edges for the alternation check
+                entries = _timed(w.dev, wm)
+        finally:
+            _restore_etm(w, orig, ("HB", "MISS"))
+            w.run("?CONTROLLER,ON,20")
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?WDP,AUTOJOIN,ON")
+            w.run("?WDP,POLL")
+            time.sleep(2)
+    if result is None:
+        bad.append("the controller came back online before each of three unicasts meant for its offline window")
+    else:
+        t, after = result
+        seq = _seq_of(after, t)
+        if any(re.search(rf"\[ETM\] Retry [123] to WCB{X} for seq {seq}:", x) for x in after) \
+                or _has(after, f"[ETM] WCB{X} failed to ACK seq {seq} "):
+            bad.append("a unicast sent while the controller was offline was retried")
+        if f"[ETM] Seq {seq} resolved" not in after and f"[ETM] Seq {seq} fully acknowledged" not in after:
+            bad.append("the unicast sent while the controller was offline never resolved")
+    if not row or row[0] > raced or row[1] != row[0]:
+        bad.append(f"WCB{X} (special) row {row}: only the {raced} unicast(s) that raced an ONLINE edge may count")
+    pkt = re.compile(rf"\[ETM\] (Heartbeat from WCB{X}|Boot announce from WCB{X}|Received seq \d+ from WCB{X}|"
+                     rf"ACK received from WCB{X}|ACK for unknown seq \d+ from WCB{X})(?!\d)")
+    gaps, last, state, unpaired = [], None, None, []
+    for ts, line in entries:
+        if re.search(rf"\[ETM\] WCB{X} \(special peer\) went OFFLINE", line):
+            if last is not None:
+                gaps.append(round(ts - last, 2))
+            if state == "off":
+                unpaired.append(f"OFFLINE at {ts:.2f}")
+            state = "off"
+        elif re.search(rf"\[ETM\] WCB{X} came ONLINE", line):
+            if state == "on" and "(boot)" not in line:       # a boot announce re-prints ONLINE whatever the state
+                unpaired.append(f"ONLINE at {ts:.2f}")
+            state, last = "on", ts
+        elif pkt.search(line):
+            last = ts
+    bench.note(f"controller offline gaps {gaps} s; unicasts that raced an ONLINE edge: {raced}")
+    if not gaps:
+        bad.append("the controller never went offline with HB 4 / MISS 1")
+    elif min(gaps) < 4.85:
+        bad.append(f"offline sooner than the 5 s threshold: gaps {gaps}")
+    if unpaired:
+        bad.append(f"the controller's edges do not alternate (tracker #80's race): {unpaired}")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.forget_clears_pending", "?WDP,FORGET of a silent temporary peer while a broadcast waits on its ACK drops it from that broadcast: after 'Retry 1' to it there is no retry 2 or 3 and no failure line, and the broadcast resolves at the next scan (~35 s)", needs=["wcb1", "probe2"], links=[])
+def forget_clears_pending(bench):
+    """WCB-WP30 row 5. removeActivePeer (WCB.ino) - behind ?WDP,FORGET, a temporary peer's eviction and a WCBQ reduction -
+    calls etmClearPeerFromPending, which drops the peer from every in-flight entry's expected-ACK set (and counts one
+    failure, which no ?STATS row shows once the peer is gone). The probe joins as a temporary client and leaves (MESH
+    LEAVE reboots it) while W1 still counts it online - eviction is 50 s away - so W1's next broadcast waits on its ACK.
+    ?ETM,TIMEOUT,1500 leaves 1.5 s between retry 1 and retry 2 for the FORGET, sent once 'Retry 1' shows.
+    wdp.temp_probe_lifecycle is the control: there the same kind of broadcast retries 3 times and fails."""
+    w = usb_wcb(bench)
+    _require_id_free(w)
+    t = f"hilbc{nonce().lower()}"            # a plain broadcast reaches every broadcast port on both WCBs: inert text
+    bad = []
+    with config_guard(bench, 1) as before:
+        orig = _etm(before[1])
+        try:
+            w.run("?ETM,TIMEOUT,1500")
+            w.run("?DEBUG,ETM,ON")
+            wm = w.dev.mark()
+            with _joined(bench, "probe2", 15, forget=False) as probe:
+                _await_line(w, r"\[ETM\] WCB15 came ONLINE", wm)
+                probe.mesh_leave()
+            bm = w.dev.mark()
+            w.send(t)
+            seq = w.dev.expect(rf"\[ETM\] Sent seq (\d+): {t}$", timeout=3, since=bm).group(1)
+            try:
+                w.dev.expect(rf"\[ETM\] Retry 1 to WCB15 for seq {seq}: {t}$", timeout=4, since=bm)
+            except AssertionError:
+                raise Skip("the broadcast did not wait on WCB15's ACK (was it still online to W1?)") from None
+            fm = w.dev.mark()
+            w.send("?WDP,FORGET,15")
+            time.sleep(4.5)
+            lines, after = [x.rstrip() for x in w.dev.since(bm)], [x.rstrip() for x in w.dev.since(fm)]
+        finally:
+            w.run("?WDP,FORGET,15")                # a failed run's leftover; a no-op otherwise
+            _restore_etm(w, orig, ("TIMEOUT",))
+            w.run("?DEBUG,ETM,OFF")
+            for k in remote_wcbs(bench):
+                w.send(f";W{k},?WDP,FORGET,15")
+            time.sleep(1.0)
+    if "[WDP] forgot WCB15" not in after:
+        bad.append("?WDP,FORGET,15 did not confirm")
+    if any(re.search(rf"\[ETM\] Retry [23] to WCB15 for seq {seq}:", x) for x in lines):
+        bad.append("W1 kept retrying the forgotten peer")
+    if _has(lines, f"[ETM] WCB15 failed to ACK seq {seq} "):
+        bad.append("W1 printed a failure for the forgotten peer")
+    if f"[ETM] Seq {seq} resolved" not in after and f"[ETM] Seq {seq} fully acknowledged" not in after:
+        bad.append("the broadcast did not resolve after the FORGET")
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.autojoin_two_advert_vetting", "Auto-join acts only on a sender's SECOND advert: 'temporarily joined WCB15' comes at least ~1 s after 'learned WCB15' (a client's boot-burst adverts are 1.3 s apart) (~20 s)", needs=["wcb1", "probe2"], links=[])
+def autojoin_two_advert_vetting(bench):
+    """WCB-WP48 row 1. wdpOnAdvertReceived (WCB_WDP.cpp) joins only once wcbPeerAdvertCount reaches 2, so a single
+    stray or echoed packet cannot inject a peer; ?WDP,FORGET resets the count first (removeActivePeer, WCB.ino). A
+    WCB_Client sends its boot burst 0.3 s after setIdentity and then every 1.3 s (_wdpTick, WCB_Client.cpp), so the join
+    trails the learn by one advert whichever arrives first. A strict version needs a probe verb that sends exactly one
+    advert (WCB-WP59)."""
+    w = usb_wcb(bench)
+    _require_id_free(w)
+    if not _has(w.run("?WDP,AUTOJOIN"), "[WDP] auto-join is ON"):
+        raise Skip("auto-join is not ON on W1")
+    w.run("?WDP,FORGET,15")
+    wm = w.dev.mark()
+    with probe_in_mesh(bench, "probe2", 15):
+        _await_line(w, r"\[WDP\] temporarily joined WCB15\b", wm)
+        entries = _timed(w.dev, wm)
+    learned = _first(entries, r"\[WDP\] learned WCB15\b")
+    joined = _first(entries, r"\[WDP\] temporarily joined WCB15\b")
+    assert learned is not None, "no 'learned WCB15' line"
+    gap = round(joined - learned, 2)
+    bench.note(f"'temporarily joined' came {gap} s after 'learned'")
+    assert 1.0 <= gap <= 4.0, f"joined {gap} s after the first advert, expected one boot-burst advert later (~1.3 s)"
+
+
+@test("etm.learned_unreciprocated_not_expected", "A learned peer that has never ACKed W1 is left out of a broadcast's expected ACKs (no wait, no retry, its row stays at Sent 0); once it has ACKed, the next broadcast expects and counts it (probe as a permanent client at 13; ~40 s)", needs=["wcb1", "probe2"], links=[])
+def learned_unreciprocated_not_expected(bench):
+    """WCB-WP19 row 2. etmAddToPendingTable (WCB.ino) skips a learned peer with no wcbPeerReciprocated on a broadcast
+    (the mixed-fleet guard: it may be a phantom), and etmProcessAck sets wcbPeerReciprocated for any ACK it matches to a
+    pending entry, expected or not. Whether the first broadcast's ACK promotes the probe depends on whether it beats
+    W2's, since W2's alone resolves the entry and a later ACK finds nothing; when it does not, a unicast - which always
+    expects a learned peer - does. The permanent probe is learned by W2 and NaviCore too, so all three forget it."""
+    n = 13
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_id_free(w, n)
+    if not _has(w.run("?WDP,AUTOJOIN"), "[WDP] auto-join is ON"):
+        raise Skip("auto-join is not ON on W1")
+    t1, t2, u = f"hilbc{nonce().lower()}", f"hilbc{nonce().lower()}", marker("u")
+    bad = []
+    promoted, ulines, runs = None, [], None
+    w.run(f"?WDP,FORGET,{n}")                    # a clean advert count
+    try:
+        w.run("?DEBUG,ETM,ON")
+        wm = w.dev.mark()
+        with _joined(bench, "probe2", n, temporary=False, forget=False) as probe:
+            _await_line(w, rf"\[WDP\] auto-joined WCB{n} ", wm)
+            _await_line(w, rf"\[ETM\] WCB{n} came ONLINE", wm)
+            w.run("?STATS,RESET")
+            row0 = _etm_row(_stats(w), n)
+            bm = w.dev.mark()
+            w.send(t1)
+            time.sleep(2.0)
+            l1, row1 = [x.rstrip() for x in w.dev.since(bm)], _etm_row(_stats(w), n)
+            s1 = _seq_of(l1, t1)
+            promoted = s1 is not None and f"[ETM] ACK received from WCB{n} for seq {s1}" in l1
+            if not promoted:
+                um, pm = w.dev.mark(), probe.dev.mark()
+                w.send(f";W{n},{u}")
+                runs = _probe_rx(probe, pm, u, me)
+                time.sleep(0.5)
+                ulines = [x.rstrip() for x in w.dev.since(um)]
+            mid = _etm_row(_stats(w), n)
+            bm = w.dev.mark()
+            w.send(t2)
+            time.sleep(2.0)
+            l2, row2 = [x.rstrip() for x in w.dev.since(bm)], _etm_row(_stats(w), n)
+            probe.mesh_leave()
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+        _forget_everywhere(bench, n, navicore=True)
+    bench.note(f"the first broadcast's ACK promoted WCB{n}: {promoted}")
+    if not row0 or not row0[4]:
+        bad.append(f"WCB{n} was not an online learned peer before the first broadcast: {row0}")
+    if not s1:
+        bad.append("no 'Sent seq' line for the first broadcast")
+    else:
+        if any(re.search(rf"\[ETM\] Retry [123] to WCB{n} for seq {s1}:", x) for x in l1) or _has(l1, f"[ETM] WCB{n} failed to ACK seq {s1} "):
+            bad.append("the first broadcast waited on the unreciprocated learned peer")
+        if f"[ETM] Seq {s1} fully acknowledged" not in l1 and f"[ETM] Seq {s1} resolved" not in l1:
+            bad.append("the first broadcast did not resolve")
+    if not row1 or row1[:4] != (0, 0, 0, 0):
+        bad.append(f"WCB{n} row after the first broadcast: {row1} (it was expected)")
+    if not promoted:
+        su = _seq_of(ulines, u)
+        if runs != 1 or not su or f"[ETM] Seq {su} fully acknowledged" not in ulines:
+            bad.append(f"the promoting unicast: received {runs} time(s), acknowledged {bool(su and f'[ETM] Seq {su} fully acknowledged' in ulines)}")
+    s2 = _seq_of(l2, t2)
+    if not mid or not row2 or row2[0] != mid[0] + 1 or row2[1] != mid[1] + 1:
+        bad.append(f"the second broadcast did not expect and count WCB{n}: {mid} -> {row2}")
+    if not s2 or f"[ETM] Seq {s2} fully acknowledged" not in l2:
+        bad.append("the second broadcast was not fully acknowledged")
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.autojoin_permanent_downgrade", "A non-temporary client heard twice is auto-joined as a PERSISTED learned peer (DUMP PEER=2, ?PEERSLIVE +1, ;W12 reaches it and is ACKed, a member again after a W1 reboot); advertising TEMPORARY later downgrades it (PEER=4) and un-persists it, so the next reboot does not restore it (2 W1 reboots; ~2.5 min)", needs=["wcb1", "probe2"], links=[])
+def autojoin_permanent_downgrade(bench):
+    """WCB-WP19 row 1. wdpOnAdvertReceived (WCB_WDP.cpp) counts a sender's adverts and on the second one joins a
+    non-temporary device with addActivePeer(id, learned) - 'auto-joined', persisted by saveLearnedPeers 5 s later
+    (LEARNED_FLUSH_DEBOUNCE_MS) - and one advertising TEMPORARY with addTemporaryPeer, which clears a learned bit
+    ('downgraded to temporary'); loadLearnedPeers restores the mask at boot (WCB.ino). The probe is id 12 and only
+    receives (sharing the id is fine, s19 MESH_IDS). W2 and NaviCore learn it too, so the cleanup forgets it on every WCB
+    and sends NaviCore FORGET_PEER. The second join goes past probe_in_mesh, which refuses a PEER=2 id. The expected
+    restore counts come from the baseline ?PEERSLIVE: live = WCBQ floor peers + learned + temporary."""
+    n = 12
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _require_id_free(w, n)
+    if not _has(w.run("?WDP,AUTOJOIN"), "[WDP] auto-join is ON"):
+        raise Skip("auto-join is not ON on W1")
+    n0, line0 = _live_peers(w)
+    floor = int(re.search(r"WCBQ floor (\d+)", line0).group(1))
+    temps0 = sum(1 for x in _dump(w) if x.startswith("[WDP:N=") and x.endswith(",PEER=4]"))
+    learned0 = n0 - temps0 - (floor - 1 if me <= floor else floor)
+    t = marker("p")
+    bad = []
+    w.run(f"?WDP,FORGET,{n}")                    # a clean advert count, and no ESP-NOW peer left: both join lines print
+    try:
+        w.run("?DEBUG,ETM,ON")
+        wm = w.dev.mark()
+        with _joined(bench, "probe2", n, temporary=False, forget=False) as probe:
+            _await_line(w, rf"\[WDP\] auto-joined WCB{n} ", wm)
+            _await_line(w, rf"\[ETM\] WCB{n} came ONLINE", wm)
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            steps = [f"[WDP] learned WCB{n} HILProbe", f"[PEER] WCB{n} registered (live, learned).",
+                     f"[WDP] auto-joined WCB{n} HILProbe (client)"]
+            idx = [next((i for i, x in enumerate(lines) if s in x), -1) for s in steps]
+            if -1 in idx or idx != sorted(idx):
+                bad.append(f"join lines missing or out of order: {dict(zip(steps, idx))}")
+            if _field(_row(_dump(w), n), "PEER") != "2":
+                bad.append(f"DUMP PEER={_field(_row(_dump(w), n), 'PEER')} after the join, expected 2")
+            if _live_peers(w)[0] != n0 + 1:
+                bad.append(f"?PEERSLIVE {_live_peers(w)[0]} after the join, expected {n0 + 1}")
+            pm, am = probe.dev.mark(), w.dev.mark()
+            w.send(f";W{n},{t}")
+            runs = _probe_rx(probe, pm, t, me)
+            time.sleep(0.5)
+            acked = [x.rstrip() for x in w.dev.since(am)]
+            seq = _seq_of(acked, t)
+            if runs != 1 or not seq or f"[ETM] Seq {seq} fully acknowledged" not in acked:
+                bad.append(f";W{n}: received {runs} time(s), acknowledged {bool(seq and f'[ETM] Seq {seq} fully acknowledged' in acked)}")
+            time.sleep(6)                          # past the 5 s learned-peer flush
+            probe.mesh_leave()
+        boot = [x.rstrip() for x in w.dev.since(w.reboot())]
+        if _restored(boot) != learned0 + 1:
+            bad.append(f"the first reboot restored {_restored(boot)} learned peer(s), expected {learned0 + 1}")
+        if _has(w.run(f";W{n},?PEERSLIVE"), f"WCB {n} is not a reachable target"):
+            bad.append(f"WCB{n} is not a member after the reboot")
+        if _live_peers(w)[0] != n0 - temps0 + 1:
+            bad.append(f"?PEERSLIVE {_live_peers(w)[0]} after the first reboot, expected {n0 - temps0 + 1}")
+        dm = w.dev.mark()
+        with _joined(bench, "probe2", n, temporary=True, forget=False) as probe:
+            _await_line(w, rf"\[WDP\] downgraded to temporary WCB{n} HILProbe \(temporary\)", dm)
+            if _field(_row(_dump(w), n), "PEER") != "4":
+                bad.append(f"DUMP PEER={_field(_row(_dump(w), n), 'PEER')} after the downgrade, expected 4")
+            time.sleep(6)                          # the removal's own 5 s flush
+            probe.mesh_leave()
+        boot2 = [x.rstrip() for x in w.dev.since(w.reboot())]
+        if _restored(boot2) != learned0:
+            bad.append(f"the second reboot restored {_restored(boot2)} learned peer(s), expected {learned0}")
+        if not _has(w.run(f";W{n},x"), f"WCB {n} is not a reachable target"):
+            bad.append(f"WCB{n} is still a member after the downgrade and a reboot")
+        if _live_peers(w)[0] != n0 - temps0:
+            bad.append(f"?PEERSLIVE {_live_peers(w)[0]} after the second reboot, expected {n0 - temps0}")
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+        _forget_everywhere(bench, n, navicore=True)
+        _peers_back(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.neighbor_stale_after_ttl", "A WDP neighbour silent for over 180 s keeps its row but goes stale: DUMP SEEN=0, LIST 'stale', ?WDP,15 '(stale)' (a probe learned with auto-join off, so never joined or evicted; slow, ~200 s)", needs=["wcb1", "probe2"], links=[])
+def neighbor_stale_after_ttl(bench):
+    """WCB-WP48 row 2. wdpTick (WCB_WDP.cpp) clears a row's `confirmed` flag once its last advert is WDP_TTL_MS (180 s)
+    old and keeps the slot as topology memory; printWdpDump shows SEEN=0, printWdpList 'stale' and printWdpDetail
+    '(stale)'. With auto-join off the probe is learned but never becomes a temporary peer, so the 50 s eviction that
+    drops a temporary peer's row never applies. Auto-join is off only while the probe advertises: only an advert can
+    join it, and it is silent once it has left. W2 (auto-join on) does adopt it, so W2 forgets it at once."""
+    w = usb_wcb(bench)
+    _require_id_free(w)
+    bad = []
+    with config_guard(bench, 1):
+        try:
+            w.run("?WDP,AUTOJOIN,OFF")
+            wm = w.dev.mark()
+            with _joined(bench, "probe2", 15, forget=False) as probe:
+                _await_line(w, r"\[WDP\] learned WCB15\b", wm)
+                time.sleep(3)                      # the rest of its boot burst
+                probe.mesh_leave()
+            left = time.monotonic()
+            w.run("?WDP,AUTOJOIN,ON")
+            for k in remote_wcbs(bench):
+                w.send(f";W{k},?WDP,FORGET,15")
+            fresh = _row(_dump(w), 15)
+            time.sleep(max(0.0, left + 188 - time.monotonic()))
+            dump = _dump(w)
+            listing = [x.rstrip() for x in w.run("?WDP,LIST")]
+            detail = [x.rstrip() for x in w.run("?WDP,15")]
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            w.run("?WDP,AUTOJOIN,ON")
+            w.run("?WDP,FORGET,15")
+    stale = _row(dump, 15)
+    if _field(fresh, "SEEN") != "1" or _field(fresh, "PEER") != "0":
+        bad.append(f"row right after the probe left: {fresh}")
+    if stale is None:
+        bad.append("the silent neighbour's row was dropped")
+    elif _field(stale, "SEEN") != "0" or int(_field(stale, "AGE") or 0) < 180 or _field(stale, "PEER") != "0":
+        bad.append(f"row after 188 s of silence: {stale}")
+    if not any(re.match(r"^15\s{3}.*\sstale$", x) for x in listing):
+        bad.append(f"?WDP,LIST has no stale row 15: {[x for x in listing if x.startswith('15 ')]}")
+    if '==== Device 15  "HILProbe" ====' not in detail or not any(re.match(r"^  Last advert : \d+s ago  \(stale\)$", x) for x in detail):
+        bad.append(f"?WDP,15 detail: {detail}")
+    if _has(lines, "temporarily joined WCB15") or _has(lines, "[PEER] WCB15 registered") or _has(lines, "temporary WCB15 evicted"):
+        bad.append("W1 joined or evicted the probe with auto-join off")
     assert not bad, "; ".join(bad)
