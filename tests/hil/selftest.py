@@ -25,7 +25,12 @@ SKIP and NOT A RESULT rows left out, the cache reused and invalidated, corrupt f
 opt-in skip with the exact message the tests' own checks used to raise; and run.py --list, in a subprocess that
 imports the real suites (read-only: it writes no cache), for every gated test's declared opt-in and message. And the
 no-servos gate (hil/servos.py, run.py --no-servos): its skip, its flag across a pause and resume, and the real registry
-through the runner loop with fake bodies, skipping exactly the listed ids.
+through the runner loop with fake bodies, skipping exactly the listed ids. The NaviCore and SBUS drivers
+(hil/navicore.py, hil/sbus.py; docs/hil_plan/NAVICORE.md INF1, INF2) against scripted consoles (FakeNaviDev): every
+parser - PWM_UPDATE, [MAE:n], [CLIPITEM], MESH_STATS pages, the boot banner, #L09, #L13, ?WDP,DUMP - fed lines in the
+firmware's own formats; FNV-1a against the published vectors; the SBUS codec on a real frame NaviCore dumped, and in
+round trips; the paced write and the USB-Serial/JTAG reset pulse (hil/serialdev.py); and the protocols built on them
+(ranged clip download and indexed upload, SET_CONFIG's saveId, the command library's size and hash, ?backup hashed).
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -2683,6 +2688,669 @@ def t_intellex_stage_filter(tmp):
     assert IX._stage_ignore(True)(src, names) == {"webui", "webui_wcb", "__pycache__", "build_stamp.py", "design.zip"}
 
 
+# ---------------------------------------------------------------------------- NaviCore and SBUS drivers (INF1, INF2)
+MODE_LINE = "Mode=1  matrixBtn=0  matrixVal=992"        # #L12's answer (NaviCore.ino:3627): the driver's flush
+
+
+class FakeNaviDev:
+    """NaviCore's (or the SBUS controller's) USB console for hil/navicore.py and hil/sbus.py: each send() is answered by
+    script(text, n) - n counts the sends from 1 - with lines appended at once, and later(delay, *lines) appends lines
+    from a timer. Duck-types what the drivers read of a SerialDevice: name, port, lines [(t, text)], mark(), since(),
+    send(), expect() (it waits, as SerialDevice's does), log, and send_paced() (recorded in `paced`)."""
+
+    def __init__(self, script=None, name="fakenavi"):
+        self.name, self.port, self.log = name, "COMFAKE", None
+        self.lines, self.sent, self.paced = [], [], []
+        self._script = script or (lambda text, n: [])
+        self._lock = threading.Lock()
+
+    def _append(self, *texts):
+        with self._lock:
+            self.lines.extend((time.monotonic(), t) for t in texts)
+        for t in texts:
+            if self.log:
+                self.log(self.name, "<", t)
+
+    def later(self, delay, *texts):
+        t = threading.Timer(delay, self._append, texts)
+        t.daemon = True
+        t.start()
+
+    def mark(self):
+        with self._lock:
+            return len(self.lines)
+
+    def since(self, m):
+        with self._lock:
+            return [t for _, t in self.lines[m:]]
+
+    def send(self, text, eol="\n"):
+        if self.log:
+            self.log(self.name, ">", text)
+        self.sent.append(text)
+        self._append(*self._script(text, len(self.sent)))
+
+    def send_paced(self, text, chunk=512, gap_s=0.004):
+        self.paced.append((len(text), chunk, gap_s))
+        self.send(text)
+
+    def expect(self, pattern, timeout=3.0, since=None):
+        import re as _re
+        from hil.serialdev import ExpectTimeout
+        rx, start = _re.compile(pattern), (self.mark() if since is None else since)
+        deadline = time.monotonic() + timeout
+        while True:
+            for text in self.since(start):
+                m = rx.search(text)
+                if m:
+                    return m
+            if time.monotonic() >= deadline:
+                raise ExpectTimeout(f"{self.name}: no line matching /{pattern}/ within {timeout}s")
+            time.sleep(0.005)
+
+
+class RecSer:
+    """A pyserial handle that records its writes and its RTS/DTR changes, in order, and can fail a write."""
+
+    def __init__(self, fail_after=None, exc=None):
+        self.writes, self.control, self.fail_after, self.exc = [], [], fail_after, exc
+
+    def write(self, data):
+        if self.fail_after is not None and len(self.writes) >= self.fail_after:
+            raise self.exc
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def __setattr__(self, key, value):
+        if key in ("rts", "dtr"):
+            self.control.append((key, value))
+        object.__setattr__(self, key, value)
+
+
+def t_nc_transport(tmp):
+    """hil/serialdev.py's additions for the NaviCore driver: send_paced() writes a long line in 512-byte chunks (the
+    config tool's USB_CHUNK) and a short one in one write, logging it once; a write that fails part-way raises at once
+    naming how far it got, never resuming; usb_jtag_reset() sets RTS=1 then DTR=0, and releases with RTS=0 then a DTR
+    write (usbser.sys sends the line state only on a DTR write), and refuses a closed port; NaviCore.hard_reset()
+    returns the mark taken before the pulse, and NaviCore.send_paced() falls back to one send on a transport without
+    paced writes."""
+    import serial
+    from hil import navicore as NC
+    from hil.serialdev import ExpectTimeout, SerialDevice, usb_jtag_reset
+    dev, logged = SerialDevice("fakenc", "COMX"), []
+    dev.log = lambda name, direction, text: logged.append((direction, len(text)))
+    dev._ser = RecSer()
+    dev.send_paced("a" * 1300)
+    assert [len(w) for w in dev._ser.writes] == [512, 512, 277] and b"".join(dev._ser.writes) == b"a" * 1300 + b"\n"
+    assert logged == [(">", 1300)], logged
+    dev._ser = RecSer()
+    dev.send_paced("short")
+    assert dev._ser.writes == [b"short\n"], dev._ser.writes
+    for exc, why in ((serial.SerialException("gone"), "failed 512 bytes into a 1301-byte"),
+                     (serial.SerialTimeoutException("slow"), "timed out 512 bytes into a 1301-byte")):
+        dev._ser = RecSer(fail_after=1, exc=exc)
+        e = _raises(lambda: dev.send_paced("a" * 1300), ExpectTimeout)
+        assert why in str(e) and len(dev._ser.writes) == 1, (e, dev._ser.writes)
+    assert any(x.startswith("<<write error: gone") for x in dev.since(0)), dev.since(0)
+    dev._ser = RecSer()
+    usb_jtag_reset(dev, hold_s=0.01)
+    assert dev._ser.control == [("rts", True), ("dtr", False), ("rts", False), ("dtr", False)], dev._ser.control
+    before = dev.mark()
+    assert NC.NaviCore(dev).hard_reset(0.01) == before and len(dev._ser.control) == 8
+    dev._ser = None
+    _raises(lambda: usb_jtag_reset(dev, hold_s=0.01), ExpectTimeout)
+
+    class Plain(FakeNaviDev):
+        send_paced = None                          # a transport with no paced writes (a WebSocket, INF5)
+    plain = Plain()
+    NC.NaviCore(plain).send_paced("x" * 600)
+    assert plain.sent == ["x" * 600] and plain.paced == [], plain.sent
+
+
+def t_nc_fnv1a(tmp):
+    """hil/navicore.py fnv1a32 is rcCmdlibHash (NaviCore rc_config.h:2159-2164): the published FNV-1a 32 test vectors, str
+    and bytes alike. Then the command library against a scripted NaviCore: set_cmdlib() sends one paced line with
+    "data" last and checks the ACK's size and hash against its own FNV-1a of the UTF-8 bytes (a non-ASCII library
+    included); cmdlib() returns the exact bytes, and a reply whose bytes do not match its size and hash fails;
+    cmdlib_meta(); a library that is not one line of one JSON value is refused before sending."""
+    from hil import navicore as NC
+    # The FNV-1a 32 reference vectors (Fowler/Noll/Vo, isthe.com/chongo/tech/comp/fnv): "" is the offset basis itself.
+    assert (NC.fnv1a32(b""), NC.fnv1a32(b"a"), NC.fnv1a32("foobar")) == (0x811C9DC5, 0xE40C292C, 0xBF9CF968)
+    assert NC.NaviCore.fnv1a32("é") == NC.fnv1a32("é".encode("utf-8")) != NC.fnv1a32("é".encode("latin-1"))
+    lib = '{"boards":[{"id":"HILbrd","name":"Dôme","cmds":[";S1x"]}],"enums":{}}'
+    state = {"lib": '{"boards":[],"enums":{}}', "corrupt": False}   # the empty library GET_CMDLIB sends (:3866)
+
+    def script(text, n):
+        if text == '{"type":"GET_CMDLIB"}':
+            body = state["lib"]
+            size = len(body.encode()) + (1 if state["corrupt"] else 0)
+            return [f'{{"type":"CMDLIB","size":{size},"hash":{NC.fnv1a32(body)},"data":{body}}}']
+        if text == '{"type":"GET_CMDLIB_META"}':
+            return [f'{{"type":"CMDLIB_META","size":{len(state["lib"].encode())},"hash":{NC.fnv1a32(state["lib"])}}}']
+        if text.startswith('{"type":"SET_CMDLIB","data":'):
+            state["lib"] = text[len('{"type":"SET_CMDLIB","data":'):-1]         # "data" is last: the value, verbatim
+            body = state["lib"].encode()
+            return [f'{{"type":"ACK","of":"SET_CMDLIB","ok":true,"size":{len(body)},"hash":{NC.fnv1a32(body)}}}']
+        return []
+    d = FakeNaviDev(script)
+    nc = NC.NaviCore(d)
+    assert nc.cmdlib() == b'{"boards":[],"enums":{}}'
+    ack = nc.set_cmdlib("  " + lib + " ")
+    assert ack["ok"] and state["lib"] == lib and len(d.paced) == 1, (ack, d.paced)
+    assert (ack["size"], ack["hash"]) == (len(lib.encode()), NC.fnv1a32(lib)) and len(lib.encode()) > len(lib)
+    assert nc.cmdlib() == lib.encode() and nc.cmdlib_meta() == (len(lib.encode()), NC.fnv1a32(lib))
+    state["corrupt"] = True
+    assert "arrived; NaviCore sent" in str(_raises(nc.cmdlib))
+    sent = len(d.sent)
+    for bad in ('{"a":1}\n', "5", '{"a":'):
+        _raises(lambda: nc.set_cmdlib(bad), ValueError)
+    assert len(d.sent) == sent
+
+
+def t_nc_pwm_update(tmp):
+    """parse_pwm_update on a monitor frame built with NaviCore's own format string (sendPWMUpdate, NaviCore.ino:
+    3142-3147), and monitor() against a scripted NaviCore: START_MONITOR and STOP_MONITOR each ACKed, the frames
+    between them parsed in order, a frame cut short left out and noted in session.log, and lines that are not whole
+    frames refused."""
+    from hil import navicore as NC
+    fmt = ('{"type":"PWM_UPDATE","matrixCh":%d,"modeCh":%d,"matrixVal":%d,"modeVal":%d,"btn":%d,"mode":%d,'
+           '"sbus":{"ok":%s,"fps":%d,"frames":%lu,"ageMs":%lu,"lost":%s,"failsafe":%s,"chCount":%d,"frameLen":%d,'
+           '"channels":[%s]}}').replace("%lu", "%d")
+    chans = [992] * 7 + [173] * 6 + [992, 173, 173, 173] + [992] * 7
+
+    def frame(k):
+        return fmt % (7, 12, 992, 1811, 0, 1, "true", 111, 444673 + k, 4, "false", "false", 24, 36,
+                      ",".join(map(str, chans)))
+    f = NC.parse_pwm_update(frame(0))
+    assert (f["matrixCh"], f["modeCh"], f["mode"], f["sbus"]["fps"], f["sbus"]["channels"]) == (7, 12, 1, 111, chans)
+    for bad in ('{"type":"PWM_UPDATE","sbus":{"chCount":24,"channels":[1,2]}}', MODE_LINE, frame(0)[:-9]):
+        _raises(lambda: NC.parse_pwm_update(bad), ValueError)
+    notes = []
+
+    def script(text, n):
+        if text == '{"type":"START_MONITOR"}':
+            return ['{"type":"ACK","ok":true}', frame(1), frame(2), frame(3)[:50], frame(4)]
+        return ['{"type":"ACK","ok":true}'] if text == '{"type":"STOP_MONITOR"}' else []
+    d = FakeNaviDev(script)
+    d.log = lambda name, direction, text: notes.append(text) if direction == "#" else None
+    frames = NC.NaviCore(d).monitor(0.05)
+    assert [x["sbus"]["frames"] for x in frames] == [444674, 444675, 444677], frames
+    assert d.sent == ['{"type":"START_MONITOR"}', '{"type":"STOP_MONITOR"}'], d.sent
+    assert len(notes) == 1 and "1 PWM_UPDATE line(s)" in notes[0], notes
+
+
+def t_nc_mae_markers(tmp):
+    """parse_mae on every [MAE:n] shape maestroReportQuery prints (NaviCore.ino:741-756): values, error words, another
+    slot or channel never answering; then the Maestro methods against a scripted NaviCore - each ?MAE line followed by
+    the #L12 flush, answers as int or error word, a query with no marker failing with what was printed - and the
+    helpers that pick a slot: local slots only, a channel a passthrough knob drives passed over, Skip when none
+    answers."""
+    from hil import navicore as NC
+    text = "\n".join(['[MAE:1]{"q":"pos","ch":0,"val":6400}', '[MAE:9]{"q":"pos","ch":0,"err":"disabled"}',
+                      '[MAE:1]{"q":"mov","val":1}', '[MAE:0]{"q":"mov","err":"disabled"}', '[MAE:1]{"q":"err","val":0}',
+                      '[MAE:2]{"q":"pos","ch":5,"err":"timeout"}'])
+    assert (NC.parse_mae(text, 1, "pos", 0), NC.parse_mae(text, 9, "pos", 0)) == (6400, "disabled")
+    assert (NC.parse_mae(text, 1, "mov"), NC.parse_mae(text, 0, "mov"), NC.parse_mae(text, 1, "err")) == (1, "disabled", 0)
+    assert NC.parse_mae(text, 2, "pos", 5) == "timeout"
+    assert NC.parse_mae(text, 1, "pos", 1) is None and NC.parse_mae(text, 3, "mov") is None
+    assert NC.parse_mae('[MAE:11]{"q":"mov","val":0}', 1, "mov") is None      # slot 11 is not slot 1
+    answers = {"?MAE,GET,1,0": '[MAE:1]{"q":"pos","ch":0,"val":6000}', "?MAE,MOVING,1": '[MAE:1]{"q":"mov","val":0}',
+               "?MAE,ERR,1": '[MAE:1]{"q":"err","val":0}', "?MAE,GET,2,0": '[MAE:2]{"q":"pos","ch":0,"val":4000}',
+               "?MAE,GET,2,1": '[MAE:2]{"q":"pos","ch":1,"val":5000}',
+               "?MAE,GET,3,0": '[MAE:3]{"q":"pos","ch":0,"err":"timeout"}'}
+    d = FakeNaviDev(lambda text, n: [MODE_LINE] if text == "#L12" else ([answers[text]] if text in answers else []))
+    nc = NC.NaviCore(d)
+    assert (nc.mae_get(1, 0), nc.mae_moving(1), nc.mae_err(1)) == (6000, 0, 0)
+    nc.mae_set(1, 0, 6000)
+    nc.mae_free(1, 0)
+    assert d.sent == ["?MAE,GET,1,0", "#L12", "?MAE,MOVING,1", "#L12", "?MAE,ERR,1", "#L12", "?MAE,1,0,6000", "#L12",
+                      "?MAE,FREE,1,0", "#L12"], d.sent
+    e = _raises(lambda: nc.mae_get(4, 0))
+    assert "?MAE,GET,4,0 printed" in str(e) and MODE_LINE in str(e), e
+    cfg = {"maestros": [{"type": 2, "device": 2}, {"type": 1, "device": 1}],
+           "knobs": {"0": {"function": 1, "outputs": [{"target": 2, "maestroCh": 0}]}}}
+    assert nc.local_slots(cfg) == [(2, 1)]
+    assert nc.usable_slot(cfg) == (2, 1, 4000) and nc.undriven_channel(cfg) == (2, 1, 1, 5000)
+    _raises(lambda: nc.usable_slot({"maestros": [{}, {}, {"type": 1, "device": 3}]}), runner.Skip)
+
+
+def t_nc_clip_items(tmp):
+    """?REC,LS's [CLIPITEM] lines (navicore_record.h listClips :960-982) through parse_clip_items and rec_ls(); ?REC,INFO
+    through rec_info(); rec_rm() deleted and delete failed, and a clip name the board would rewrite (_clipPath keeps
+    only [A-Za-z0-9_-], 32 of them) refused before anything is sent."""
+    from hil import navicore as NC
+    ls = ['[CLIPFS]{"total":12582912,"used":811008}', "[REC] clips:", "[CLIPLIST:BEGIN]",
+          '[CLIPITEM]{"name":"HILa","bytes":26756,"dur":1767,"n":191}',
+          '[CLIPITEM]{"name":"HIL_b-2","bytes":140,"dur":0,"n":1}', "[CLIPLIST:END]"]
+    assert NC.parse_clip_items(ls) == [{"name": "HILa", "bytes": 26756, "dur": 1767, "n": 191},
+                                       {"name": "HIL_b-2", "bytes": 140, "dur": 0, "n": 1}]
+    replies = {"?REC,LS": ls, "?REC,INFO": ["[REC] state=idle  events=0/24000  dur=0ms  drops=0  buf=ok"],
+               "?REC,RM,HILa": ["[REC] deleted"], "?REC,RM,HILz": ["[REC] delete failed"], "#L12": [MODE_LINE]}
+    d = FakeNaviDev(lambda text, n: replies.get(text, []))
+    nc = NC.NaviCore(d)
+    assert nc.rec_ls() == [("HILa", 26756, 1767, 191), ("HIL_b-2", 140, 0, 1)]
+    assert nc.rec_info() == ("idle", "0", "24000", "0", "0", "ok")
+    assert nc.rec_rm("HILa") is True and "delete failed" in str(_raises(lambda: nc.rec_rm("HILz")))
+    sent = len(d.sent)
+    for bad in ("HIL x", "", "HIL/../x", "H" * 33, "HILé"):
+        _raises(lambda: nc.rec_rm(bad), ValueError)
+    assert len(d.sent) == sent, "a refused name was sent"
+
+
+def t_nc_recorder_transfer(tmp):
+    """rec_download() and rec_upload() against a scripted editStream (navicore_record.h :731-950): the (0,0) probe, then
+    ranges with batched keyframes ([CLIPDL:EVB]) and an action ([CLIPDL:EV]) rebuilt into the per-event shape, a stale
+    END from another clip ignored, a range with a cut line asked again; refused - a truncated clip (fc != count), a
+    buffer that changed between ranges, a missing clip, firmware without ranged download. The upload writes each event
+    at its index, retries a NAK, and on a refused EDITEND or EDITBEGIN fails, sending EDITCANCEL only once editing."""
+    import re as _re
+    from hil import navicore as NC
+    clip = [{"t": 0, "k": 1, "slot": 3, "ch": 0, "pos": 6000}, {"t": 20, "k": 1, "slot": 3, "ch": 1, "pos": 5000},
+            {"t": 40, "k": 0, "type": "wcb_unicast", "target": "1", "cmd": ";S2HILx"},
+            {"t": 60, "k": 2, "chan": 1, "vol": 40}, {"t": 80, "k": 1, "slot": 3, "ch": 0, "pos": 6400},
+            {"t": 90, "k": 1, "slot": 3, "ch": 1, "pos": 5200}, {"t": 100, "k": 1, "slot": 4, "ch": 2, "pos": 7000}]
+    j = lambda o: json.dumps(o, separators=(",", ":"))      # noqa: E731
+
+    def stream(name, first, want, st):
+        n = min(want, len(clip) - first)
+        fp = st["fp"].pop(0) if isinstance(st["fp"], list) else st["fp"]
+        head = {"count": len(clip), "durationMs": 100, "mode": 1, "from": first, "n": n, "fp": fp,
+                "fc": st.get("fc", len(clip)), "nm": name}
+        if st.get("legacy"):
+            head = {"count": len(clip), "durationMs": 100, "mode": 1}
+        out, rows, rfirst = ["[CLIPDL:BEGIN]" + j(head)], [], None
+        for i in range(first, first + n):
+            ev = clip[i]
+            if ev["k"]:
+                rfirst = i if not rows else rfirst
+                rows.append([ev["t"], 1, ev["slot"], ev["ch"], ev["pos"]] if ev["k"] == 1 else
+                            [ev["t"], 2, ev["chan"], ev["vol"], 0])
+                continue
+            if rows:
+                out.append(f"[CLIPDL:EVB,{rfirst}]" + j({"e": rows}))
+                rows = []
+            out.append(f"[CLIPDL:EV,{i}]" + j(ev))
+        if rows:
+            out.append(f"[CLIPDL:EVB,{rfirst}]" + j({"e": rows}))
+        if st.get("legacy"):
+            return out + ["[CLIPDL:END]"]                              # firmware from before the ranged form
+        return out + ["[CLIPDL:END]" + j({"from": first, "n": n, "fp": fp, "nm": name})]
+
+    def downloader(st):
+        def script(text, n):
+            if text == "#L12":
+                return [MODE_LINE]
+            m = _re.match(r"^\?REC,EDITLOAD,(\w+),(\d+),(\d+),B$", text)
+            if not m:
+                return []
+            name, first, want = m.group(1), int(m.group(2)), int(m.group(3))
+            if name != "HILclip":
+                return [f"[REC] clip '{name}' not found"]
+            st["asked"].append((first, want))
+            lines = stream(name, first, want, st)
+            if (first, want) == (0, 4) and st["asked"].count((0, 4)) == 1:
+                lines = ['[CLIPDL:END]{"from":0,"n":4,"fp":"00000000","nm":"HILold"}'] + lines   # a stale range
+                lines[2] = lines[2][:25]                                  # the first EVB line cut short
+            return lines
+        return script
+    st = {"fp": "1A2B3C4D", "asked": []}
+    d = FakeNaviDev(downloader(st))
+    nc = NC.NaviCore(d)
+    assert nc.rec_download("HILclip", chunk=4) == clip
+    assert st["asked"] == [(0, 0), (0, 4), (0, 4), (4, 3)], st["asked"]
+    assert d.sent[1::2] == ["#L12"] * 4 and all(x.startswith("?REC,EDITLOAD,HILclip,") for x in d.sent[::2]), d.sent
+    for st, why in (({"fp": "1A2B3C4D", "asked": [], "fc": 9}, "truncated on the board: its file holds 9 events"),
+                    ({"fp": ["AAAA0000", "BBBB1111"], "asked": []}, "changed on the board mid-download"),
+                    ({"fp": "1A2B3C4D", "asked": [], "legacy": True}, "no ranged download")):
+        assert why in str(_raises(lambda: NC.NaviCore(FakeNaviDev(downloader(st))).rec_download("HILclip", chunk=4)))
+    assert "not on NaviCore's clips partition" in str(_raises(lambda: nc.rec_download("HILnone")))
+
+    def uploader(st):
+        def script(text, n):
+            if text == "#L12":
+                return [MODE_LINE]
+            if text == "?REC,EDITBEGIN":
+                return [st.get("begin", "[CLIPUL:BEGIN,OK]")]
+            m = _re.match(r"^\?REC,EDITEV,(\d+),(.*)$", text)
+            if m:
+                i = int(m.group(1))
+                if i == 2 and not st.get("nakked"):
+                    st["nakked"] = True
+                    return ["[CLIPUL:NAK,bad event / bad index / not editing]"]
+                st["got"][i] = json.loads(m.group(2))
+                return [f"[CLIPUL:ACK,{i}]"]
+            if text.startswith("?REC,EDITEND,"):
+                return [st.get("end", "[CLIPUL:END,OK]")]
+            return ["[CLIPUL:CANCEL,OK]"] if text == "?REC,EDITCANCEL" else []
+        return script
+    st = {"got": {}}
+    d = FakeNaviDev(uploader(st))
+    assert NC.NaviCore(d).rec_upload("HILup", clip) == len(clip)
+    assert [st["got"][i] for i in range(len(clip))] == clip
+    assert sum(x.startswith("?REC,EDITEV,2,") for x in d.sent) == 2 and "?REC,EDITCANCEL" not in d.sent
+    assert d.sent[-2:] == ["?REC,EDITEND,HILup", "#L12"], d.sent[-2:]
+    st = {"got": {}, "end": "[CLIPUL:END,ERR,save-failed]"}
+    d = FakeNaviDev(uploader(st))
+    assert "save-failed" in str(_raises(lambda: NC.NaviCore(d).rec_upload("HILup", clip)))
+    assert d.sent[-1] == "?REC,EDITCANCEL", d.sent[-1]
+    st = {"got": {}, "begin": "[CLIPUL:BEGIN,ERR,busy]"}
+    d = FakeNaviDev(uploader(st))
+    assert "EDITBEGIN refused" in str(_raises(lambda: NC.NaviCore(d).rec_upload("HILup", clip)))
+    assert not any(x.startswith(("?REC,EDITEV", "?REC,EDITCANCEL")) for x in d.sent), d.sent
+    _raises(lambda: NC.NaviCore(d).rec_upload("HILup", []), ValueError)
+
+
+def t_nc_mesh_stats(tmp):
+    """merge_mesh_stats on the shapes buildMeshStatsPage writes (rc_telemetry.h:1361-1432): one USB page; bridged pages
+    (page 0 with the aggregate and no rows, page 1 with the rows and "last":1) merged by board id; a set with no last
+    page incomplete; and mesh_stats() sending the line navicore.mesh_stats_counts always sent."""
+    from hil import navicore as NC
+    usb = ('{"type":"MESH_STATS","pg":0,"self":20,"upMs":100955926,"agg":{"sent":5,"ackd":5,"rty":0,"fail":0,"ung":0,'
+           '"bcast":6,"recv":2},"peers":[[1,4,4,0,0,0,2],[2,1,1,0,0,0,0]],"last":1}')
+    s = NC.merge_mesh_stats([json.loads(usb)])
+    assert (s["self"], s["agg"]["bcast"], sorted(s["peers"]), s["peers"][1], s["complete"]) == \
+        (20, 6, [1, 2], [1, 4, 4, 0, 0, 0, 2], True), s
+    p0 = ('{"sys":1,"type":"MESH_STATS","pg":0,"self":20,"upMs":1,"agg":{"sent":9,"ackd":8,"rty":1,"fail":1,"ung":0,'
+          '"bcast":3,"recv":7},"peers":[]}')
+    p1 = '{"sys":1,"type":"MESH_STATS","pg":1,"self":20,"peers":[[1,5,4,1,1,0,6],[2,4,4,0,0,0,1]],"last":1}'
+    s = NC.merge_mesh_stats([json.loads(p0), json.loads(p1)])
+    assert s["agg"]["recv"] == 7 and s["peers"][2] == [2, 4, 4, 0, 0, 0, 1] and s["complete"], s
+    assert not NC.merge_mesh_stats([json.loads(p0)])["complete"]
+    assert NC.merge_mesh_stats([]) == {"self": None, "upMs": None, "agg": {}, "peers": {}, "complete": False, "pages": []}
+    d = FakeNaviDev(lambda text, n: [usb] if text == '{"type":"GET_MESH_STATS"}' else [])
+    assert NC.NaviCore(d).mesh_stats()["peers"][2][1] == 1 and d.sent == ['{"type":"GET_MESH_STATS"}'], d.sent
+
+
+def t_nc_boot_banner(tmp):
+    """parse_boot on a banner in setup()'s formats (NaviCore.ino printBootTelemetry :4367-4415, :4899-4918; a reset
+    reason whose name holds parentheses) and on the ROM's download-mode lines; then wait_boot() against a scripted
+    NaviCore - the banner ends it; with the banner lost to the USB re-enumeration, a PONG after '<<reopened' ends it
+    (no PING before the reopen); 'waiting for download' fails at once; silence fails at the timeout, saying the port
+    never reopened - and reboot() by REBOOT (ACKed) and by #L02."""
+    from hil import navicore as NC
+    banner = ["", "=== NaviCore ===",
+              "Reset reason: 3 - Software restart (incl. boot-guard retry)  (RTC codes core0=3 [SW system] core1=3 "
+              "[SW system])", "Boot attempts since power applied: 2   <-- board retried/reset before this boot",
+              "[WCB] Joined network as device ID 20 (quantity=1)", "[NaviCore] Firmware v9.9.9_TEST — setup complete.",
+              "  Connect config_tool/index.html via Web Serial for configuration."]
+    assert NC.parse_boot(banner) == {"complete": True, "version": "v9.9.9_TEST", "reset_code": 3,
+                                     "reset": "Software restart (incl. boot-guard retry)", "rtc": (3, 3),
+                                     "attempts": 2, "device_id": 20, "quantity": 1, "download_mode": False}
+    rom = NC.parse_boot(["ESP-ROM:esp32s3-20210327", "rst:0x1 (POWERON),boot:0x0 (DOWNLOAD(USB/UART0))",
+                         "waiting for download"])
+    assert rom["download_mode"] and not rom["complete"] and rom["version"] is None, rom
+    pong, ping = '{"type":"PONG","version":"v9.9.9_TEST"}', '{"type":"PING"}'
+
+    def board(st):
+        def script(text, n):
+            if text == ping:
+                return [pong] if st.get("up") else []
+            if text == '{"type":"REBOOT"}':
+                d.later(0.1, *banner)
+                return ['{"type":"ACK","ok":true,"msg":"rebooting"}']
+            if text == "#L02":
+                d.later(0.1, *banner)
+            return []
+        return script
+    d = FakeNaviDev(board({"up": True}))
+    m = d.mark()
+    d.later(0.1, *banner)
+    assert banner[5] in NC.NaviCore(d).wait_boot(since=m, timeout=3) and d.sent == [ping], d.sent
+    st = {}
+    d = FakeNaviDev(board(st))
+    m = d.mark()
+    booted = threading.Timer(0.2, st.update, [{"up": True}])      # up before the port reopens: no PING goes unanswered
+    booted.daemon = True
+    booted.start()
+    d.later(0.3, "<<serial error: device gone>>", "<<reopened COMFAKE>>")
+    lines = NC.NaviCore(d).wait_boot(since=m, timeout=3)
+    assert "<<reopened COMFAKE>>" in lines and d.sent == [ping, ping], d.sent
+    d = FakeNaviDev(board({"up": True}))
+    d.later(0.05, "waiting for download")
+    t0 = time.monotonic()
+    assert "ROM download mode" in str(_raises(lambda: NC.NaviCore(d).wait_boot(since=0, timeout=5)))
+    assert time.monotonic() - t0 < 1.5
+    e = _raises(lambda: NC.NaviCore(FakeNaviDev(board({}))).wait_boot(timeout=0.4))
+    assert "did not come back within 0.4 s" in str(e) and "never reopened" in str(e), e
+    for how, first in (("json", '{"type":"REBOOT"}'), ("l02", "#L02")):
+        d = FakeNaviDev(board({"up": True}))
+        lines = NC.NaviCore(d).reboot(how, timeout=3)
+        assert NC.parse_boot(lines)["complete"] and d.sent[0] == first, (how, d.sent)
+    _raises(lambda: NC.NaviCore(d).reboot("power"), ValueError)
+
+
+def t_nc_wdp_views(tmp):
+    """?WDP,DUMP through parse_wdp (WCB_Mgmt.h printWdpDump :221-262): the SELF row, a neighbour, a port label, the
+    WDPCFG summary and the END count; wdp_dump() rows (SELF included, as before), self_row(), wdpcfg(); and
+    version_surfaces() over a scripted NaviCore and a scripted W1 (hil.wcb.WCB), a silent surface reading None."""
+    from hil import navicore as NC
+    from hil import wcb as W
+    dump = ["[WDP:N=20,CLIENT=0,ALIAS=NaviCore,HW=32,HWREV=,FW=v9.9.9_TEST,CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,AGE=0,"
+            "SEEN=1,PEER=3]",
+            "[WDP:N=1,CLIENT=0,ALIAS=Body,HW=24,HWREV=,FW=6.2.1_TEST,CAP=0001,CTRL=20,CAPTAGS=maestro,MAESTRO=1,AGE=12,"
+            "SEEN=1,PEER=1]", "[WDPIF:N=1,S=1,DEV=Maestro 1]", "[WDPCFG:EN=1,AUTOJOIN=1,PEERS=2]", "[WDP:END,count=1]"]
+    v = NC.parse_wdp(dump)
+    assert [r["N"] for r in v["rows"]] == ["20", "1"] and v["rows"][1]["MAESTRO"] == "1" and v["count"] == 1, v
+    assert v["ifaces"] == [{"N": "1", "S": "1", "DEV": "Maestro 1"}], v["ifaces"]
+    assert v["cfg"] == {"EN": "1", "AUTOJOIN": "1", "PEERS": "2"}, v["cfg"]
+    status = ('{"type":"WCB_STATUS","quantity":1,"self":20,"online":[1,1],"known":[1,1],"clients":[0,0],'
+              '"temporary":[0,0],"aliases":["Body",""],"portLabels":[["","","","",""],["","","","",""]],'
+              '"seqHash":[1,2]}')
+    replies = {'{"type":"PING"}': ['{"type":"PONG","version":"v9.9.9_TEST"}'], "?WDP,DUMP": dump,
+               '{"type":"GET_WCB_STATUS"}': [status], "?version": ["Software Version: v9.9.9_TEST", "End of Version"],
+               "?OTALOCAL,STATUS": ["---------- OTA Status ----------", "Chip:        ESP32-S3 (family 1)",
+                                    "Firmware:    v9.9.9_TEST", "Session:     idle"], "#L12": [MODE_LINE]}
+    d = FakeNaviDev(lambda text, n: replies.get(text, []))
+    nc = NC.NaviCore(d)
+    assert [r["N"] for r in nc.wdp_dump()] == ["20", "1"] and nc.self_row()["FW"] == "v9.9.9_TEST"
+    assert nc.wdpcfg() == {"EN": "1", "AUTOJOIN": "1", "PEERS": "2"}
+    w1_replies = {';W20,{"type":"PING"}': ['{"sys":1,"type":"PONG","id":20,"version":"v9.9.9_TEST","model":0,"mode":1}'],
+                  "?WDP,DUMP": ["[WDP:N=20,CLIENT=1,ALIAS=NaviCore,HW=0,HWREV=NaviCore v2,FW=v9.9.9_TEST,CAP=0000,"
+                                "CTRL=0,CAPTAGS=rc sbus,MAESTRO=1,AGE=4,SEEN=1,PEER=0]", "[WDP:END,count=1]"]}
+    w1dev = FakeNaviDev(lambda text, n: [text[4:]] if text.startswith(";S0,") else w1_replies.get(text, []), "wcb1")
+    got = nc.version_surfaces(W.WCB(w1dev), timeout=0.3)
+    want = {k: "v9.9.9_TEST" for k in ("pong", "cli", "ota", "self_row", "mesh_pong", "w1_row")}
+    assert got == dict(want, rc_hb=None), got                   # no rc_hb in the window: None, not an error
+
+
+def t_nc_config_protocol(tmp):
+    """The config and JSON methods against a scripted NaviCore whose config holds a synthetic mesh password: config()
+    and config(raw=True), the exact text, a cut line failing without quoting it; set_config() paced, its data exact
+    (a dict or verbatim text), a stale ACK of another saveId skipped, ok:false raised unless check=False, a multi-line
+    value refused; reset_defaults(); ack() by 'of' past an unrelated ACK, ack_line() byte-exact; trigger() with its
+    rc_trig and without; rc_events(); backup() with ?EPASS hashed, and a cut backup failing without quoting it;
+    seq()/seqval(), their ok:false raised; cli(flush=False) needing `until`. No message quotes a secret."""
+    from hil import checkpoint as C
+    from hil import navicore as NC
+    cfg_text = '{"boardType":0,"wcbNetwork":{"deviceId":20,"password":"hunter2"},"wifiPassword":"sekrit99"}'
+    st = {"cut": False, "ok": True, "backup_end": True}
+    backup = ["", "*** ========================================", "*** WCB Configuration Backup", "", "?HW,32",
+              "?MAC,2,00", "?MAC,3,14", "?WCB,20", "?ALIAS,NaviCore", "?WCBQ,1", "?EPASS,hunter2", "?CMDCHAR,;"]
+
+    def script(text, n):
+        if text == '{"type":"GET_CONFIG"}':
+            line = '{"type":"CONFIG","data":' + cfg_text + "}"
+            return [line[:-12] if st["cut"] else line]
+        if text.startswith('{"type":"SET_CONFIG"'):
+            obj = json.loads(text)
+            st["set"], st["set_text"] = obj, text
+            ack = {"type": "ACK", "of": "SET_CONFIG", "ok": st["ok"]}
+            if not st["ok"]:
+                ack["msg"] = "config apply failed"
+            ack["saveId"] = obj["saveId"]
+            return ['{"type":"ACK","of":"SET_CONFIG","ok":true,"saveId":1}',          # a late ACK of an earlier save
+                    json.dumps(ack, separators=(",", ":"))]
+        if text == '{"type":"RESET_DEFAULTS"}':
+            return ['{"type":"ACK","ok":true}']
+        if text.startswith('{"type":"TEST_ACTION"'):
+            return ['{"type":"ACK","ok":true}', '{"type":"ACK","of":"TEST_ACTION","ok":false}']
+        if text == '{"type":"TRIGGER","mode":1,"btn":36,"tap":1}':
+            return ["[TRIGGER] mode=1 btn=36 tap=1", '{"sys":1,"type":"rc_trig","id":20,"mode":1,"btn":36,"tap":1}',
+                    '{"type":"ACK","ok":true}']
+        if text == '{"type":"TRIGGER","mode":1,"btn":37,"tap":1}':
+            return ['{"type":"ACK","ok":false,"msg":"bad mode/btn/tap"}']
+        if text == '{"type":"WCB_SEND","target":0,"cmd":";S3HILq"}':
+            return ['{"sys":1,"type":"rc_mode","id":20,"mode":2}', '{"type":"ACK","ok":true}']
+        if text == "?backup":
+            return backup + (["--------- End of Backup ---------", ""] if st["backup_end"] else [])
+        if text == '{"type":"GET_WCB_SEQ","wcb":2}':
+            return ['{"sys":1,"type":"WCB_SEQ","ok":true,"wcb":2,"hash":123,"names":["HILA","HILB"]}']
+        if text == '{"type":"GET_WCB_SEQ","wcb":25}':
+            return ['{"sys":1,"type":"WCB_SEQ","ok":false,"wcb":25,"msg":"wcb out of range"}']
+        if text == '{"type":"GET_WCB_SEQVAL","wcb":2,"key":"HILA"}':
+            return ['{"sys":1,"type":"WCB_SEQVAL","ok":true,"wcb":2,"key":"HILA","status":0,"value":";S1a^;S2b"}']
+        return [MODE_LINE] if text == "#L12" else []
+    d = FakeNaviDev(script)
+    nc = NC.NaviCore(d)
+    msgs = []
+    assert nc.config()["wcbNetwork"]["deviceId"] == 20 and nc.config(raw=True) == cfg_text
+    st["cut"] = True
+    msgs.append(str(_raises(lambda: nc.config(raw=True))))
+    st["cut"] = False
+    ack = nc.set_config({"boardType": 0, "hil": [1, 2]}, save_id=77)
+    assert ack == {"type": "ACK", "of": "SET_CONFIG", "ok": True, "saveId": 77} and len(d.paced) == 1, (ack, d.paced)
+    assert st["set"]["data"] == {"boardType": 0, "hil": [1, 2]}
+    nc.set_config(cfg_text)
+    assert st["set_text"].endswith('"data":' + cfg_text + "}") and 0 < st["set"]["saveId"] < 2 ** 31, st["set_text"]
+    st["ok"] = False
+    msgs.append(str(_raises(lambda: nc.set_config(cfg_text))))
+    assert "config apply failed" in msgs[-1] and nc.set_config(cfg_text, check=False)["ok"] is False
+    _raises(lambda: nc.set_config('{"a":\n1}'), ValueError)
+    assert nc.reset_defaults() == {"type": "ACK", "ok": True}
+    action = {"type": "wcb_unicast", "target": "25", "cmd": ";S2HILz"}
+    assert nc.test_action(action) == {"type": "ACK", "of": "TEST_ACTION", "ok": False}
+    assert nc.ack_line({"type": "TEST_ACTION", "action": action}) == '{"type":"ACK","ok":true}'
+    ack, trig = nc.trigger(1, 36, 1)
+    assert ack == {"type": "ACK", "ok": True} and trig == {"sys": 1, "type": "rc_trig", "id": 20, "mode": 1, "btn": 36,
+                                                           "tap": 1}, (ack, trig)
+    assert nc.trigger(1, 37, 1) == ({"type": "ACK", "ok": False, "msg": "bad mode/btn/tap"}, None)
+    m = d.mark()
+    assert nc.wcb_send(0, ";S3HILq")["ok"] and [o["mode"] for _, o in nc.rc_events(m, "rc_mode")] == [2]
+    tokens = nc.backup()
+    assert tokens == [C.redact_token(t) for t in backup if t.startswith("?")] and "?CMDCHAR,;" in tokens, tokens
+    assert not any("hunter2" in t for t in tokens) and any(t.startswith("?EPASS,<redacted:") for t in tokens), tokens
+    st["backup_end"] = False
+    msgs.append(str(_raises(lambda: nc.backup(timeout=0.2))))
+    assert "End of Backup" in msgs[-1], msgs[-1]
+    assert nc.seq(2) == {"hash": 123, "names": ["HILA", "HILB"]}
+    assert "wcb out of range" in str(_raises(lambda: nc.seq(25)))
+    assert nc.seqval(2, "HILA") == {"key": "HILA", "status": 0, "value": ";S1a^;S2b"}
+    _raises(lambda: nc.cli("#L11", flush=False), ValueError)
+    leaked = [x for x in msgs if "hunter2" in x or "sekrit99" in x]
+    assert not leaked, f"{len(leaked)} messages quote a secret"
+
+
+def t_sbus_codec(tmp):
+    """hil/sbus.py's SBUS codec. A known frame: the 36 bytes NaviCore dumped with #L13 in run 20260922-120804 (78.954 s;
+    sensor values only), read through parse_sbus_raw, decode to exactly the 24 channels its #L09 printed around it
+    (parse_sbus_dump), and encode() rebuilds them byte for byte - so the controller's packer (SBUSController.ino
+    buildSbusFrame) and NaviCore's unpacker (sbus_reader.h decodeFrame), both transliterated here, agree with the wire.
+    Then round trips for SBUS-16 and SBUS-24 with every flag bit and the 11-bit extremes, each data block checked
+    against the same packing said another way (one little-endian integer), and the refusals."""
+    import random
+    from hil import navicore as NC
+    from hil import sbus as SB
+    raw_dump = ["---- SBUS RAW ---- (36 bytes, SBUS-24)", "  [ 0] 0F E0 03 1F F8 C0 07 3E ",
+                "  [ 8] F0 81 AF 15 AD 68 45 2B ", "  [16] 5A D1 0A F0 B5 A2 15 AD ", "  [24] 00 1F F8 C0 07 3E F0 81 ",
+                "  [32] 0F 7C 00 00 ", "  byte 0       = header (expect 0F)", "  bytes 1-22   = CH1-16 data",
+                "  bytes 23-33  = CH17-24 data  ← check these", "  byte 34      = flags", "  byte 35      = footer (expect 00)"]
+    rows = [[992] * 7 + [173], [173] * 5 + [992, 173, 173], [173] + [992] * 7]
+    state = ["---- SBUS STATE ----", "  variant=SBUS-24 (24 ch, 36-byte frame)",
+             "  frames=453100  fps=106  ageMs=1  lost=no  failsafe=no"]
+    state += ["  CH%d-%d: " % (8 * r + 1, 8 * r + 8) + "".join("%4d " % v for v in vals) for r, vals in enumerate(rows)]
+    dump = NC.parse_sbus_dump(state + [MODE_LINE])
+    assert (dump["fps"], dump["variant"], dump["frames"], dump["age"], dump["lost"], dump["failsafe"]) == \
+        (106, "SBUS-24", "453100", 1, "no", "no"), dump
+    raw = NC.parse_sbus_raw(["#L13 below"] + raw_dump)
+    assert SB.decode(raw) == {"n": 24, "channels": dump["channels"], "flags": 0, "lost": False, "failsafe": False}
+    assert SB.encode(dump["channels"]) == raw and len(dump["channels"]) == 24
+    assert NC.parse_sbus_raw(["---- SBUS RAW ---- (no frame parsed yet)"]) == b""
+    _raises(lambda: NC.parse_sbus_raw(raw_dump[:4]))                      # rows short of the 36 bytes
+    rnd = random.Random(20260927)
+    for n in (16, 24):
+        for flags in (0, SB.FLAG_CH17, SB.FLAG_CH18, SB.FLAG_LOST, SB.FLAG_FAILSAFE, 0x0F):
+            ch = [rnd.randrange(0, 2048) for _ in range(n)]
+            ch[0], ch[-1] = 0x7FF, 0
+            frame = SB.encode(ch, flags, n)
+            assert len(frame) == SB.FRAME_LEN[n] and (frame[0], frame[-2], frame[-1]) == (0x0F, flags, 0x00)
+            assert frame[1:-2] == sum(c << (11 * i) for i, c in enumerate(ch)).to_bytes(n * 11 // 8, "little")
+            assert SB.decode(frame) == {"n": n, "channels": ch, "flags": flags, "lost": bool(flags & 0x04),
+                                        "failsafe": bool(flags & 0x08)}
+    for bad in (raw[:-1], b"\x0e" + raw[1:], raw[:-1] + b"\x01", b"\x0f" * 30):
+        _raises(lambda: SB.decode(bad))
+    for args in (([0] * 15, 0, 16), ([2048] + [0] * 23, 0, 24), ([0] * 24, 256, 24), ([0] * 16, 0, 12)):
+        _raises(lambda: SB.encode(*args), ValueError)
+
+
+def t_sbus_ctl(tmp):
+    """hil/sbus.py SbusCtl against a scripted controller: every verb sends exactly the JSON line the suites sent before the
+    move (s11, s21, hil/resume.py); ping() returns fwver; cfg() pings first unless told not to, hashes the WiFi
+    credentials in the device log while it reads and puts the log back; bootlog(); center_all() releases the sticks,
+    every button and the button-mode trims only; reset_rts() pulses RTS with a DTR write after each change. And
+    safe_channels, band and matrix_button against a NaviCore config: bound channels are unsafe, a 0/0 band is inert,
+    the first unmapped slot is chosen, and a resting value that decodes skips."""
+    import types
+    from hil import sbus as SB
+    j = lambda o: json.dumps(o, separators=(",", ":"))      # noqa: E731 - how the suites built each line before
+    cfg = {"e": "cfg", "sbus24": True, "lx": 3, "btn": [{"c": 7, "v": 350}, {"c": 7, "v": 550}],
+           "tr": [{"c": 7, "m": 1, "vR": 350, "vL": 550}, {"c": 9, "m": 0, "s": 10}],
+           "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
+
+    def script(text, n):
+        if text == '{"t":"ping"}':
+            return ['{"t":"pong","ver":3,"fwver":"sbus-9.9"}']
+        if text == '{"t":"getcfg"}':
+            return [j(cfg)]
+        return ['{"e":"bootlog","rst":3,"rstn":"SW","rtc0":3,"rtcn":"SW system","n":4,"prev":0,"up":1234,"log":[]}'] \
+            if text == '{"t":"bootlog"}' else []
+    logged = []
+    d = FakeNaviDev(script, "sbus")
+    d.log = lambda name, direction, text: logged.append(text)
+    own_log = d.log
+    ctl = SB.SbusCtl(d)
+    assert ctl.ping() == "sbus-9.9" and ctl.ping_once() == "sbus-9.9"
+    got = ctl.cfg()
+    assert got["wifiNets"][0]["p"] == "sekrit99" and d.sent[-2:] == ['{"t":"ping"}', '{"t":"getcfg"}'], d.sent
+    assert not any("sekrit99" in x for x in logged) and any('"e":"cfg"' in x for x in logged) and d.log is own_log
+    ctl.cfg(ping=False)
+    assert d.sent[-3:] == ['{"t":"ping"}', '{"t":"getcfg"}', '{"t":"getcfg"}'], d.sent
+    assert ctl.bootlog()["n"] == 4
+    d.sent.clear()
+    ctl.axes(1, 0, 0, 0)
+    ctl.axes(0, 0, 0, 0)
+    ctl.switch(2, 1)
+    ctl.slider(0, 75)
+    ctl.trim(3, 1)
+    ctl.trim(3, -1, True)
+    ctl.trim(3, 1, False)
+    ctl.button(4, True)
+    ctl.button(4, False)
+    ctl.lua(1, True)
+    assert d.sent == [j({"t": "a", "lx": 1, "ly": 0, "rx": 0, "ry": 0}), j({"t": "a", "lx": 0, "ly": 0, "rx": 0, "ry": 0}),
+                      j({"t": "sw", "i": 2, "p": 1}), j({"t": "sl", "i": 0, "v": 75}), j({"t": "tr", "i": 3, "d": 1}),
+                      j({"t": "tr", "i": 3, "d": -1, "p": True}), j({"t": "tr", "i": 3, "d": 1, "p": False}),
+                      j({"t": "btn", "i": 4, "p": True}), j({"t": "btn", "i": 4, "p": False}),
+                      j({"t": "lua", "i": 1, "p": True})], d.sent
+    assert d.sent[5] == '{"t":"tr","i":3,"d":-1,"p":true}'
+    d.sent.clear()
+    ctl.center_all(cfg)
+    assert d.sent == ['{"t":"a","lx":0,"ly":0,"rx":0,"ry":0}', '{"t":"btn","i":0,"p":false}',
+                      '{"t":"btn","i":1,"p":false}', '{"t":"tr","i":0,"d":1,"p":false}'], d.sent
+    d._ser = RecSer()
+    ctl.reset_rts(hold_s=0.01)
+    assert d._ser.control == [("rts", True), ("dtr", False), ("rts", False), ("dtr", False)], d._ser.control
+    ncfg = {"matrixChannel": 7, "switches": {"0": {"channel": 12}}, "knobs": [{"channel": 24}, {"c": 4}],
+            "thresholds": [{"minPwm": 0, "maxPwm": 0}, {"minPwm": 300, "maxPwm": 400}, [500, 600]],
+            "mappings": {"102": {"t1": []}}}
+    assert SB.safe_channels(ncfg) == set(range(1, 25)) - {4, 7, 12, 24}
+    assert (SB.band(ncfg, 350), SB.band(ncfg, 550), SB.band(ncfg, 0), SB.band(ncfg, 992)) == (2, 3, None, None)
+    nc = types.SimpleNamespace(sbus_dump=lambda: {"channels": [992] * 24})
+    assert SB.matrix_button(nc, cfg, ncfg, 1) == (1, {"c": 7, "v": 550}, 3)
+    assert SB.matrix_button(nc, cfg, ncfg, 2) == (0, {"c": 7, "v": 350}, 2)
+    rest = types.SimpleNamespace(sbus_dump=lambda: {"channels": [350] * 24})
+    _raises(lambda: SB.matrix_button(rest, cfg, ncfg, 1), runner.Skip)
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -2695,7 +3363,9 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
-         t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter]
+         t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter,
+         t_nc_transport, t_nc_fnv1a, t_nc_pwm_update, t_nc_mae_markers, t_nc_clip_items, t_nc_recorder_transfer,
+         t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

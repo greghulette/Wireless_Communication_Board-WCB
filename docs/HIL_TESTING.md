@@ -171,8 +171,9 @@ up with this open. The SBUS controller may still reset, so its tests wait up to 
 **Resetting a native-USB board on purpose needs a DTR write after every RTS change.** On an
 ESP32-S3's USB-Serial/JTAG port, RTS=1 with DTR=0 resets the chip. But Windows' usbser.sys sends
 the line state to the device only when DTR is written, so an RTS-only pulse silently does nothing.
-esptool works around the same thing (`_setRTS`, esptool `reset.py`). `sbus.signal_loss_controller_reset`
-pulses this way, and it reads the controller's boot record to prove the reset really happened.
+esptool works around the same thing (`_setRTS`, esptool `reset.py`). `usb_jtag_reset` (`hil/serialdev.py`) pulses
+this way, for `SbusCtl.reset_rts` and `NaviCore.hard_reset`. `sbus.signal_loss_controller_reset` uses it on the
+controller, and reads the controller's boot record to prove the reset really happened.
 
 ---
 
@@ -337,6 +338,17 @@ with the recent lines attached), and skips by raising `Skip`.
   until more output follows it, so a test that sends a single mesh command and waits times out no matter
   how long it waits — the line then appears the moment the next command goes out. Send `#L12` on
   NaviCore's own console after the command (the flush the `?MAE` markers already need), then wait.
+  `NaviCore.cli()` sends it after every CLI line unless told not to.
+- **NaviCore and the SBUS controller** are driven through `hil/navicore.py` `NaviCore(dev)` and `hil/sbus.py`
+  `SbusCtl(dev)` (`docs/hil_plan/NAVICORE.md` INF1, INF2), never hand-built JSON. The NaviCore driver covers the
+  JSON protocol (`ack`, `config`, `set_config` paced with its saveId, the command library by size and FNV-1a hash,
+  `trigger`, `test_action`, `wcb_send`, `monitor`), the CLI (`?MAE` queries, `#L09`/`#L13`, `?REC` including ranged
+  clip download and indexed upload), the mesh views (`?WDP,DUMP`, `GET_MESH_STATS`, `?backup` with `?EPASS` hashed,
+  sequence pulls, `version_surfaces`) and restarts (`reboot`, `wait_boot`, `hard_reset`). `SbusCtl` sends only JSON
+  lines (`m` and `w` save to flash) and has no method for the verbs that save (`mode`, `cfg`, `wificfg`); its `cfg()`
+  hashes the controller's WiFi credentials in session.log as they arrive. `hil/sbus.py` also packs and unpacks SBUS
+  frames (`encode`, `decode`: 25 bytes for SBUS-16, 36 for SBUS-24). No driver message quotes a config line or a
+  secret; `selftest.py` feeds every parser lines in the firmware's own formats.
 - **Opt-in tests** declare the gate on the decorator: `@test(..., opt_in="ota_full")`, and optionally
   `opt_in_why="..."` when this test's reason differs from the key's default. The key must be in `hil/optin.py`
   `OPT_INS` (title, one line on what it does, the default reason, `estimate_s` per test); an unknown key fails at
@@ -852,6 +864,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-27 | _(pending)_ | **NaviCore and SBUS drivers (`NAVICORE.md` INF1, INF2).** `hil/navicore.py` grows from 6 methods into the shared NaviCore driver, and the new `hil/sbus.py` holds `SbusCtl` and an SBUS frame codec; s21's NaviCore and controller helpers, s11's and `hil/resume.py`'s controller JSON, gui.py's controller ping and the GET_CONFIG reads in s08 and s22 now call them. A refactor: every suite sends the same lines with the same timeouts and assertions, `run.py --list` is byte-identical (518 tests) and every test's inferred wires and drives are unchanged. One deliberate difference: `SbusCtl.cfg()` hashes the controller's WiFi credentials in session.log, which s11 and s21 used to log in clear. `hil/serialdev.py` gains `send_paced` (512-byte writes 4 ms apart, as NaviCore's config tool) and `usb_jtag_reset`. The new methods (config writes, the recorder transfer, restarts) have not run on the bench. `selftest.py`: 12 new cases, 61 in all. |
 | 2026-09-27 | _(pending)_ | **§10 Intellex tests.** `suites/s32_intellex.py`, `hil/intellex.py` (stage, a leashed host, Playwright and venv runners), `tests/intellex` (Playwright 1.63.0, headless); `hil/ws.py` keeps binary frames and sends an Origin header. 19 tests, none needing a board. |
 | 2026-09-27 | _(pending)_ | Tracker #94 (F23): PWM output pulses are RMT-clocked. `pwm.passthrough_local` and `pwm.passthrough_mesh` check each step's held (last) pulse; the filter check allows a late pulse of the previous step (run 20260927-131152). A §6 row records the re-send trap. |
 | 2026-09-25 | _(pending)_ | **Full run `20260925-092255` triaged (`HIL_TEST_AUDIT.md` §5).** `etm.reboot_defer_cap` passed its own check but its new cleanup failed: W2's `came ONLINE` glued onto the `;S0` sentinel. `WCB.run` now accepts a sentinel that starts its line, and the cleanup waits after its poll and never raises; a §6 row records the trap. `pwm.passthrough_local` found a firmware defect (audit F23). |

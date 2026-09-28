@@ -2,10 +2,9 @@
 servo round trip on W2's Maestro 2 (setTarget, then getPosition read back over the mesh).
 
 Frames are built by WcbCmd's WcbMaestro (Pololu protocol, 14-bit values low-7 then high-7)."""
-import json
 import time
 
-from hil.navicore import NaviCore
+from hil.navicore import DBG_MAESTRO, NaviCore
 from hil.runner import Skip, test
 from suites.common import usb_wcb, wire
 
@@ -77,10 +76,8 @@ def fanout_remote(bench):
     dispatch line: a looser pattern also matched '[DISPATCH] Maestro: inbound device 1 matches no local slot' — what
     NaviCore prints when W1's proxy is stale because it hosts no device 1 — and passed falsely."""
     nc = NaviCore(bench.dev("navicore"))
-    got = nc.json_cmd({"type": "GET_CONFIG"}, r'^\{"type":"CONFIG","data":', timeout=10)
-    local = {s.get("device") for s in json.loads(got.string)["data"].get("maestros", []) if s.get("type") == 1}
-    nc.set_debug_flags(1)   # DBG_MAESTRO (NaviCore.ino:495)
-    try:
+    local = {dev for _, dev in nc.local_slots(nc.config())}
+    with nc.debug(DBG_MAESTRO):
         m = nc.dev.mark()
         _frame(bench, ";M11", bytes.fromhex("AA012701"))
         if 1 not in local:
@@ -88,8 +85,6 @@ def fanout_remote(bench):
             stale = any("inbound device 1 matches no local slot" in x for x in nc.dev.since(m))
             raise Skip("NaviCore hosts no Maestro device 1" + ("; W1's M1:W20 proxy is stale" if stale else ""))
         nc.dev.expect(r"^\[DISPATCH\] Maestro slot \d+ \(device 1\) <- mesh  cmd 0x27$", timeout=3, since=m)
-    finally:
-        nc.set_debug_flags(0)
 
 
 def _read_pos(w, dev, ch):

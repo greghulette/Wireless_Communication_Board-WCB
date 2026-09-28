@@ -172,6 +172,42 @@ class SerialDevice:
                                     f"{self.SEND_WAIT_S:.0f}s")
             time.sleep(0.1)
 
+    def send_paced(self, text, chunk=512, gap_s=0.004, eol="\n"):
+        """send() for a line longer than a board's USB receive ring takes at once: `chunk` bytes at a time, `gap_s`
+        apart, the way NaviCore's config tool writes a SET_CONFIG or SET_CMDLIB (sendLine, NaviCore
+        config_tool/index.html: USB_CHUNK 512, 4 ms). A line of `chunk` bytes or less goes out as send() sends it. The
+        write lock is held across the whole line, so no other send lands inside it. A write that fails part-way raises
+        at once and is never resumed: the board already holds the front of the line, and the rest sent later would
+        join a different line."""
+        data = text.encode() + eol.encode()
+        if len(data) <= chunk:
+            return self.send(text, eol)
+        if self.log:
+            self.log(self.name, ">", text)
+        deadline = time.monotonic() + self.SEND_WAIT_S
+        while True:
+            with self._wlock:
+                ser = self._ser
+                if ser is not None:
+                    done = 0
+                    try:
+                        while done < len(data):
+                            ser.write(data[done:done + chunk])
+                            done = min(done + chunk, len(data))
+                            time.sleep(gap_s)       # the board's loop() drains its RX ring between chunks
+                        return
+                    except serial.SerialTimeoutException:
+                        raise ExpectTimeout(f"{self.name}: write to {self.port} timed out {done} bytes into a "
+                                            f"{len(data)}-byte paced line - the board is not draining its port")
+                    except (serial.SerialException, OSError) as e:
+                        self._append(f"<<write error: {e}>>")
+                        raise ExpectTimeout(f"{self.name}: {self.port} failed {done} bytes into a {len(data)}-byte "
+                                            f"paced line ({e})")
+            if time.monotonic() > deadline:
+                raise ExpectTimeout(f"{self.name}: {self.port} is gone and did not come back within "
+                                    f"{self.SEND_WAIT_S:.0f}s")
+            time.sleep(0.1)
+
     def mark(self):
         with self._cv:
             return len(self.lines)
@@ -213,3 +249,24 @@ class SerialDevice:
         start = self.mark() if since is None else since
         time.sleep(window)
         return self.since(start)
+
+
+def usb_jtag_reset(dev, hold_s=0.2):
+    """Reset an ESP32-S3 into its app through its native USB-Serial/JTAG port (NaviCore, the SBUS controller): RTS=1
+    with DTR=0 holds the chip in reset, and DTR stays 0, so it boots the app, not download mode. On Windows,
+    usbser.sys sends SET_CONTROL_LINE_STATE only when DTR is written, so an RTS change alone never reaches the board:
+    DTR is re-written after every RTS change, as esptool's _setRTS does (esptool/reset.py:72-77). The port usually
+    drops as the chip resets; the reader reopens it (<<reopened>>). docs/HIL_TESTING.md §2."""
+    # A local handle: if the USB re-enumerates, the reader's _reopen() sets dev._ser = None before the release below.
+    # A closed handle is harmless - pyserial skips the hardware call once is_open is false.
+    s = dev._ser
+    if s is None:
+        raise ExpectTimeout(f"{dev.name}: {dev.port} is not open - no reset pulse sent")
+    s.rts = True
+    s.dtr = False
+    time.sleep(hold_s)
+    try:
+        s.rts = False
+        s.dtr = False
+    except (serial.SerialException, OSError):
+        pass    # the port went away with the reset; the reader reopens it

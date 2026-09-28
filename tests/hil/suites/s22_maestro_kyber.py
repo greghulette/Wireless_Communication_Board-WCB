@@ -19,7 +19,6 @@ Built from the maestro_kyber specs, re-verified against the code (several map li
   sender, WCB.ino:591) is cleared only by a boot announce. _burn_ring sends 17 no-op commands first, which always
   pushes a stale ring out, so a reused id cannot silently drop the test's own commands.
 """
-import json
 import re
 import time
 from contextlib import contextmanager, nullcontext
@@ -175,8 +174,7 @@ def _navicore_hosted(bench, w1_lines):
     try:
         from hil.navicore import NaviCore
         nc = NaviCore(bench.dev("navicore"))
-        got = nc.json_cmd({"type": "GET_CONFIG"}, r'^\{"type":"CONFIG","data":', timeout=10)
-        ids |= {s.get("device") for s in json.loads(got.string)["data"].get("maestros", []) if s.get("type") == 1}
+        ids |= {dev for _, dev in nc.local_slots(nc.config())}
     except Exception:  # noqa: BLE001 — NaviCore off USB: the proxies are the best available answer
         pass
     return ids
