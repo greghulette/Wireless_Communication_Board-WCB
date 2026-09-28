@@ -486,6 +486,7 @@ the bench lacks its wiring).
 | `kyber.maestro_s2_single_reader` | A local Maestro on S2 of a Maestro_Remote board has one reader: its bytes go to the Kyber bridge, not also to the serial parser | #59 |
 | `kyber.target_id9_rejected` | ?KYBER refuses Maestro id 9 as ?MAESTRO does, so ;M9... still reaches each local Maestro instead of a stored device 9 | #5 |
 | `softrx.erratum_pairs` | Two or three of W1's S3-S5 receiving at a sub-bit skew lose no more than single-port lines do (opt-in, ~15 min, wcb_probe 4). On the edge-triggered image it lost 227 of 10125 multi-port lines, every single exact (ESP32 erratum GPIO-3.14) | #78 |
+| `mesh.frag_trailing_q_mixed_case` | A ?Mgmt,FRAG line ending in '?' is forwarded like ?MGMT,FRAG, not taken for a help request | #95 |
 
 ### Constraints the bench runs established
 

@@ -454,11 +454,11 @@ def _seqget(w, key, tries=3):
 
 @test("mesh.frag_trailing_q_mixed_case", "(should) A ?Mgmt,FRAG line ending in '?' is forwarded like ?MGMT,FRAG: the trailing-'?' exemption matches the verb in any case, as the dispatcher does", needs=["wcb1"])
 def frag_trailing_q_mixed_case(bench):
-    """processLocalCommand (WCB.ino) dispatches every verb case-insensitively (rootUpper == "MGMT"), and the chain
-    splitter matches ?MGMT in any case (tokenHasVerb), but the trailing-'?' exemption tests only the spellings 'MGMT,'
-    and 'mgmt,' (message.startsWith). So ?Mgmt,FRAG,...,;S2<c>? is taken for a help request: W1 prints the help page
-    and nothing is forwarded. ?Seq,Save,<key>,<value ending in ?> and the other exempt verbs (FUNCCHAR, CMDCHAR, DELIM,
-    WIFI) share the gap. Expected: <c>? on W2 S2 and no help page on W1."""
+    """Tracker #95. processLocalCommand (WCB.ino) dispatches every verb case-insensitively (rootUpper == "MGMT"), and
+    the chain splitter matches ?MGMT in any case (tokenHasVerb); the trailing-'?' exemption matched only 'MGMT,' and
+    'mgmt,', so ?Mgmt,FRAG,...,;S2<c>? was taken for a help request: W1 printed the help page and forwarded nothing.
+    The exemption now upper-cases the verb first, for every exempt verb (MGMT, SEQ, FUNCCHAR, CMDCHAR, DELIM, WIFI;
+    seq.save_boundary checks ?Seq,SAVE). Expected: <c>? on W2 S2 and no help page on W1."""
     s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     c = marker("c")

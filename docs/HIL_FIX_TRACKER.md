@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#95 filed and FIXED (unverified)**, found by the WCB-WP13 test writer: a data-carrying verb spelled in mixed case (`?Mgmt,`, `?Seq,`, `?Wifi,`) with a trailing '?' printed the help page, and `;Seq<key>` was refused. Decided in Greg's absence (`docs/HIL_WEEK_DECISIONS.md` D31). |
 | 2026-09-27 | **#94 VERIFIED** (decided in Greg's absence, D5): one RMT symbol per PWM output pulse. `pwm.*` 26/26 (20260927-130212); both passthrough tests five more times, with the new held-pulse check (20260927-131152 to -131509, 20260927-174251 to -174402, 3/3). The one failure among them was the test's filter check counting a late pulse of the previous step, a harness race now fixed. |
 | 2026-09-25 | Full run `20260925-092255`: 493 pass, 2 fail, 4 skip (docs/HIL_TEST_AUDIT.md §5). Filed #94 (a bit-banged PWM output pulse is stretched by preemption, audit F23), TODO for Greg's decision. `etm.reboot_defer_cap` was the harness: fixed in `WCB.run` and the reboot cleanup. |
 | 2026-09-25 | **WcbCmd 0.9.1 pushed (`0ab4af5`)** with #2 and #21, on Greg's word. Before it, GitHub's WcbCmd (`e51c39b`) still had both bugs, so every CI build of WCB and NaviCore did: only local builds, from the sketchbook copy, had the fixes. The `DEVICE,2` golden vector added in 0.8.0 fails on that code, so the vectors had never been run. They now pass on a host build of the sketch (107 OK); not yet flashed to an ESP32. Version 0.9.1 rather than a re-used 0.9.0; not tagged. The WIFI binaries at `cd3746e` predate it and pick it up on the next `Code/**` push. |
@@ -1935,3 +1936,28 @@ pulse is one symbol, high for the width then low, with the line held low after i
 waits for the previous one (bounded, 100 ms) and re-routes the pin (`rmt_tx_switch_gpio`), since a mapping's `pinMode`
 or a soft port's serial write may have taken it. Local passthrough and `;P` both call it; PWMTask no longer busy-waits.
 No free channel: the old bit-bang, and `[PWM] S<n>: no RMT channel` once.
+
+#### 95. A data-carrying verb in mixed case ending in '?' prints the help page, and ;Seq<key> is refused
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - not yet flashed; the tests below run on the bench next |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `mesh.frag_trailing_q_mixed_case` (should), `seq.save_boundary`, `seq.recall_forms` |
+| **Subsystem** | command dispatch |
+
+**Evidence.** Found writing the WCB-WP13 tests (2026-09-28, from the code): `processLocalCommand` dispatches every verb
+case-insensitively (`rootUpper`), and the chain splitter matches verbs in any case (`tokenHasVerb`), but the
+trailing-'?' exemption tested only the all-upper and all-lower spellings. `seq.save_boundary` had pinned the result
+("'?Seq,' is not exempt from the help trap"), and `seq.recall_forms` pinned `;Seq<key>` answering `Invalid Serial
+Command`.
+
+**Cause.** `dataBearingVerb` (`WCB.ino`, before the help check) compared `message.startsWith("MGMT,") ||
+message.startsWith("mgmt,")` and the same pair for SEQ, FUNCCHAR, CMDCHAR, DELIM and WIFI. So `?Mgmt,FRAG,...;S2x?`,
+`?Seq,SAVE,k,v?` or `?Wifi,AP,<ssid>,<passphrase ending in ?>` printed the help page and did nothing: for WiFi, the
+failure the exemption's own comment describes. The `;` dispatcher and `recallStoredCommand` likewise matched `SEQ` and
+`seq` only, while every other `;` verb is one letter in either case.
+
+**Fix.** The exemption upper-cases the first 9 characters (`verbHead`) and compares once per verb; `isSeqRecall()`
+matches `;SEQ<key>` in any case for both the dispatcher and the key strip.

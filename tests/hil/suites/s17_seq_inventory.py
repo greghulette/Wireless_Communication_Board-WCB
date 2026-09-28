@@ -316,7 +316,7 @@ def top_level_too_big_refused(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("seq.recall_forms", ";C / ;c / ;SEQ / ;seq recall with ,L / ,LOCAL / ,l; wrong-case and empty-key forms", needs=["wcb1"])
+@test("seq.recall_forms", ";C / ;c and ;SEQ in any case recall with ,L / ,LOCAL / ,l; a wrong-case key and the empty-key forms are refused (;Seq since tracker #95)", needs=["wcb1"])
 def recall_forms(bench):
     s1 = link(bench, 1, "S1")
     w = usb_wcb(bench)
@@ -325,7 +325,8 @@ def recall_forms(bench):
     cases = [(";SEQHILR1,L", True, ["Recall stored command request received:SEQHILR1,L", "Recalling stored sequence command...",
                                      f"Recalling command for key 'HILR1': ;S1{a}"]),
              (";seqHILR1,L", True, []), (";cHILR1,LOCAL", True, []), (";CHILR1,l", True, []),
-             (";SeqHILR1,L", False, ["Invalid Serial Command"]), (";sEQHILR1,L", False, ["Invalid Serial Command"]),
+             (";SeqHILR1,L", True, ["Recalling stored sequence command..."]),
+             (";sEQHILR1,L", True, ["Recalling stored sequence command..."]),
              (";C", False, [c_usage]), (";SEQ", False, ["Invalid recall command. Use SEQkey (or SEQkey,L for local-only)."]),
              (";C,L", False, [c_usage]), (";CHILNOPE,L", False, ["No command stored under key: 'HILNOPE'"]),
              (";Chilr1,L", False, ["No command stored under key: 'hilr1'"])]
@@ -369,7 +370,7 @@ def comments_stripped(bench):
     assert _has(only, "Sequence contained only comments — nothing to execute."), only
 
 
-@test("seq.save_boundary", "A ?SEQ,SAVE value ends only at '^?'; '^;' and '^text' stay; a trailing '?' is kept; '?Seq,' is not exempt from the help trap", needs=["wcb1"])
+@test("seq.save_boundary", "A ?SEQ,SAVE value ends only at '^?'; '^;' and '^text' stay; a trailing '?' is kept, whatever the case of the verb ('?Seq,' since tracker #95)", needs=["wcb1"])
 def save_boundary(bench):
     s1 = link(bench, 1, "S1")
     w = usb_wcb(bench)
@@ -392,11 +393,13 @@ def save_boundary(bench):
                 s1.expect(f"{c}?\r".encode(), timeout=2, since=pm)
             except AssertionError:
                 bad.append("the recalled value lost its '?'")
+            # The dispatcher takes a verb in any case, so the trailing-'?' exemption does too (tracker #95): it used to
+            # print the help page here and store nothing.
             out = w.run(f"?Seq,SAVE,HILQ2,;S1{d}?")
-            if not _has(out, "  Wireless Communication Board (WCB) - Command Reference") or _has(out, "Stored:"):
-                bad.append(f"'?Seq,' was exempt from the help trap: {out[:3]}")
-            if _seqval(w, "HILQ2") != "[MGMT:SEQVAL,1]HILQ2,NOTFOUND,":
-                bad.append("'?Seq,SAVE' stored something")
+            if not _has(out, f"Stored: Key='HILQ2', Value=';S1{d}?'") or _has(out, "Command Reference"):
+                bad.append(f"'?Seq,SAVE' with a trailing '?' was not stored as typed: {out[:3]}")
+            if _seqval(w, "HILQ2") != f"[MGMT:SEQVAL,1]HILQ2,OK,;S1{d}?":
+                bad.append("'?Seq,SAVE' stored a different value")
         finally:
             _clear_seq(w, "HILB1", "HILB2", "HILQ", "HILQ2")
     assert not bad, "; ".join(bad)

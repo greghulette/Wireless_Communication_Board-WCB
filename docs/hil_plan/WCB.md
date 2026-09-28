@@ -789,6 +789,8 @@ The Wizard defects W-1 to W-12 are tracked with their specs (`tests/wizard`).
   queue is refused whole.
 - `?ETM,CHAR` phase 3 loads the mesh; each peer prints its load start and `complete: N frame(s) sent`.
 - A pasted one-line `?backup` of more than 200 tokens runs whole; a device line over 4 KB (32 KB on USB) is dropped.
+- A command's verb is matched in any case everywhere: `?Wifi,AP,...`, `?Seq,SAVE,...` and the other data-carrying
+  verbs keep a value that ends in `?`, and `;Seq<key>` recalls like `;SEQ<key>` (tracker #95).
 
 ---
 

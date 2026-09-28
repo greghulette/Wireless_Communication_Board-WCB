@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_280049RSEP2026                                  *****////
+///*****                                          Version 6.2.1_280142RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -197,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_280049RSEP2026";
+String SoftwareVersion = "6.2.1_280142RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -6026,24 +6026,28 @@ void processLocalCommand(const String &message) {
     //
     // Checked BEFORE the shortcut, and deliberately only for verbs whose tail is opaque data —
     // everything else keeps the convenient "?VERB?" help form.
-    bool dataBearingVerb = message.startsWith("MGMT,") || message.startsWith("mgmt,") ||
-                           message.startsWith("SEQ,")  || message.startsWith("seq,") ||
+    // Matched in any case, as the dispatcher matches every verb (rootUpper below): with only the two all-one-case
+    // spellings, '?Wifi,AP,R2,letmein?' or '?Mgmt,FRAG,...?' was still eaten as a help request (tracker #95).
+    String verbHead = message.substring(0, 9);   // "FUNCCHAR," is the longest verb here
+    verbHead.toUpperCase();
+    bool dataBearingVerb = verbHead.startsWith("MGMT,") ||
+                           verbHead.startsWith("SEQ,") ||
                            // FUNCCHAR/CMDCHAR take a literal character as their argument, and that
                            // character can be '?'. Without this exemption "set the function char
                            // back to ?" was unexpressible — the command was eaten as a help
                            // request whatever prefix carried it — so a board moved to a custom
                            // funcChar could never be returned to the default except by ?ERASE,NVS.
-                           message.startsWith("FUNCCHAR,") || message.startsWith("funcchar,") ||
-                           message.startsWith("CMDCHAR,")  || message.startsWith("cmdchar,") ||
+                           verbHead.startsWith("FUNCCHAR,") ||
+                           verbHead.startsWith("CMDCHAR,") ||
                            // DELIM likewise: '?DELIM,?' printed the whole help page, so it never reached the setter's
                            // refusal (delimCharOk); '?DELIM?' still asks for help.
-                           message.startsWith("DELIM,")    || message.startsWith("delim,") ||
+                           verbHead.startsWith("DELIM,") ||
                            // WIFI carries an SSID and a WPA2 passphrase, both of which may
                            // legally end in '?' (ASCII 32-126 is all valid). Without this,
                            // "?WIFI,AP,R2,letmein?" is eaten as a help request: the operator
                            // gets a help dump, saveWifiSettings() is never reached, and the
                            // board reboots with no AP and nothing saying why.
-                           message.startsWith("WIFI,")     || message.startsWith("wifi,");
+                           verbHead.startsWith("WIFI,");
 
     if (!dataBearingVerb && message.endsWith("?")) {  // no space required
         String cmd = message.substring(0, message.length() - 1);
@@ -7735,13 +7739,19 @@ void routeStoredOrCap(bool localHosted, uint8_t storedHost, uint16_t capBit,
     Serial.printf("[ROUTE] %c%s -> host WCB%d\n", CommandCharacter, message.c_str(), target);
 }
 
+// ;SEQ<key> is ;C<key>'s long form, matched in any case like every other ; verb: only SEQ and seq were, so ;Seq<key>
+// answered "Invalid Serial Command" (tracker #95).
+static bool isSeqRecall(const String &m) {
+    return m.length() >= 3 && m.substring(0, 3).equalsIgnoreCase("SEQ");
+}
+
 void processCommandCharcter(const String &message, int sourceID) {
     
      if ((message.startsWith("s") || message.startsWith("S")) && (message.length() > 1 && message.charAt(1) != 'e' && message.charAt(1) != 'E')) {
         processSerialMessage(message);
     } else if (message.startsWith("w") || message.startsWith("W")) {
         processWCBMessage(message);
-    } else if (message.startsWith("c") || message.startsWith("C") || message.startsWith(String("SEQ")) || message.startsWith(String("seq"))) {
+    } else if (message.startsWith("c") || message.startsWith("C") || isSeqRecall(message)) {
         recallStoredCommand(message, sourceID);
     } else if (message.startsWith("m") || message.startsWith("M")) {
         processMaestroCommand(message);
@@ -7987,7 +7997,7 @@ void recallStoredCommand(const String &message, int sourceID) {
     Serial.println(message);
 
     // Strip the SEQ/C prefix to get the key.
-    const bool isSeq = message.startsWith("SEQ") || message.startsWith("seq");
+    const bool isSeq = isSeqRecall(message);
     String key = isSeq ? message.substring(3) : message.substring(1);
     key.trim();
 
