@@ -14,7 +14,8 @@ import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import Console, Watch, config_guard, link, marker, quiet_lines, require_tokens, snapshot, token, usb_wcb
+from suites.common import (Console, Watch, config_guard, link, marker, probe_in_mesh, quiet_lines, require_tokens, snapshot,
+                           token, usb_wcb)
 
 
 def _has(lines, text):
@@ -1098,3 +1099,895 @@ def self_wcb_output(bench):
             s4.pwm_stop()
             _clear_local_mapping(w, "S3")
             s3.pwm_stop()
+
+
+# ============================================================ coverage re-scan: WCB-WP15 rows 2-4, WCB-WP51
+# docs/hil_plan/WCB.md. Each docstring names its row; where a row disagrees with the code, the test follows the code
+# and says so.
+def _in_order(lines, wanted):
+    """The first of `wanted` not found, in order, as a whole (rstripped) line of `lines`; None when all are."""
+    i = 0
+    for x in lines:
+        if i < len(wanted) and x.rstrip() == wanted[i]:
+            i += 1
+    return None if i == len(wanted) else wanted[i]
+
+
+def _unused_boards(w, n):
+    """n board numbers 3-18 no board on this mesh uses (W1's WDP table): outputs nobody answers, as in
+    pwm.remote_unreachable_failed."""
+    seen = {int(k) for x in w.run("?WDP,DUMP", timeout=8) for k in re.findall(r"^\[WDP:N=(\d+),", x)}
+    free = [k for k in range(3, 19) if k not in seen]
+    if len(free) < n:
+        raise Skip(f"fewer than {n} unused board numbers 3-18")
+    return free[:n]
+
+
+def _no_rmt(lines):
+    """'[PWM] S<n>: no RMT channel ...' (pwmPulseStart, WCB_PWM.cpp) or '[SOFTSERIAL] S<n>: no RMT channel ...'
+    (WCB_SoftSerial.cpp): a port whose output fell back to bit-banging."""
+    return [x for x in lines if "no RMT channel" in x]
+
+
+def _owners(tokens, wcb, port):
+    """The saved lines that give W<wcb> <port> to a device, a mapping or the Kyber. Matched by line prefix only: a
+    sequence body or the alias can hold 'S3' too, and ?EPASS / ?WIFI must never reach a Skip message."""
+    pats = (rf"^\?MAESTRO,M\d:W{wcb}{port}:", rf"^\?HCR,PORT,{port}\b", rf"^\?MP3,{port}\b", rf"^\?DFP,{port}\b",
+            rf"^\?WLED,\d+:W{wcb}{port}\b", rf"^\?MAP,(PWM|SERIAL),(OUT,)?{port}\b",
+            rf"^\?MAP,(PWM|SERIAL),S\d(,R)?(,[^,]+)*,(W{wcb})?{port}(,|$)", rf"^\?KYBER,LOCAL,{port}\b")
+    return [t for t in tokens if any(re.match(p, t, re.I) for p in pats)]
+
+
+def _require_free_ports(bench, wcb, *ports):
+    """Skip unless no device, mapping or Kyber owns any of W<wcb>'s <ports>; the owning lines are named."""
+    toks = bench.config_tokens(wcb, refresh=True)
+    busy = [t for p in ports for t in _owners(toks, wcb, p)]
+    if busy:
+        raise Skip(f"W{wcb} {'/'.join(ports)} in use: {busy}")
+
+
+def _line_time(dev, since, pattern):
+    """The host time (time.monotonic()) the first line matching `pattern` after `since` arrived, or None."""
+    rx = re.compile(pattern)
+    for t, text in list(dev.lines[since:]):
+        if rx.search(text):
+            return t
+    return None
+
+
+def _usb_reader_up(w, timeout=5.0):
+    """Send ?VERSION until the board's USB reader answers: it starts ~0.5 s after serialCommandTask (WCB.ino), and a
+    fixed wait would spend the seconds pwm.remote_config_right_after_boot is about."""
+    deadline = time.monotonic() + timeout
+    while True:
+        m = w.send("?VERSION")
+        try:
+            w.dev.expect(r"^Software Version: ", timeout=0.3, since=m)
+            return
+        except AssertionError:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"W1's USB reader did not answer ?VERSION within {timeout:.0f} s of its boot")
+
+
+def _nvs_counts(w):
+    """{namespace: used entries} from ?NVS (printNvsUsage, WCB_Storage.cpp: '  <namespace> <count>' per line)."""
+    out = {}
+    for x in w.run("?NVS", timeout=8):
+        m = re.match(r"^  (\S+)\s+(\d+)$", x.rstrip())
+        if m:
+            out[m.group(1)] = int(m.group(2))
+    return out
+
+
+_PWM_SEND = re.compile(r"^\[PWM\] Input S3: (\d+) \S+ -> (\d+) output\(s\)")
+
+
+def _change_rule_problems(values):
+    """Problems in a run of passthrough sends (the widths '[PWM] Input S3: <w> ...' printed, in order) against
+    shouldTransmitPWM_Port (WCB_PWM.cpp): a send 6 us or more from the one before it is a change and may be followed by
+    ONE smaller send (the settle send, which also needs a difference, so never an equal value); a second small send
+    before the next change breaks the rule. The run's first sends are not judged until a change is seen: the send
+    before the first one printed is unknown."""
+    problems, settled = [], None
+    for prev, v in zip(values, values[1:]):
+        if abs(v - prev) >= 6:
+            settled = False
+        elif settled is None:
+            continue
+        elif v == prev:
+            problems.append(f"a send equal to the one before it ({v} us)")
+        elif settled:
+            problems.append(f"a second small send {prev} -> {v} us since the last change")
+        else:
+            settled = True
+    return problems
+
+
+@test("pwm.valid_remap_updates_remote", "Re-mapping an input from W2S3 to W2S4 sends W2 a CLEAR,OUT for the dropped output, then an OUT for the new one; W2 restarts once holding OUT,S4 and not S3, with S3's broadcast flags as they were (W1 x2, W2 x2 reboots)", needs=["wcb1", "wcb2"], links=["W1S3"])
+def valid_remap_updates_remote(bench):
+    """WCB-WP15 row 2. addPWMMapping (WCB_PWM.cpp) snapshots the slot's remote outputs before it parses the new list,
+    then sends ?MAP,PWM,CLEAR,OUT,S<p> (ETM) to each one the new list dropped and ?MAP,PWM,OUT,S<p> to every remote
+    output it now holds; under ?DEBUG,ON each prints 'Sent PWM output clear/config to WCB<n>: <command>'. On W2 the
+    clear arms the deferred restart (the ?MAP,PWM,CLEAR,OUT handler, WCB.ino) and the OUT that follows lands in the same
+    quiet window, so W2 restarts once, with S4 declared and S3 released: removePWMOutputPort puts back the broadcast
+    flags S3 had when it was declared. The first mapping and the re-map share W1's one deferred restart; W2 must hold
+    OUT,S3 before the re-map goes out, or the clear would find nothing to remove."""
+    s3 = link(bench, 1, "S3")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    _no_pwm(bench, 1, 2)
+    require_tokens(bench, 2, *[f"?BCAST,{d},S{p},ON" for d in ("OUT", "IN") for p in (3, 4)])
+    _require_free_ports(bench, 2, "S3", "S4")
+    problems = []
+    with config_guard(bench, 1, 2):
+        mapped = False
+        try:
+            s3.pwm_out(0)
+            m2 = w2.dev.mark()
+            m = w.send("?MAP,PWM,S3,W2S3")
+            mapped = True
+            w.dev.expect(r"^PWM configuration stored", timeout=3, since=m)
+            w2.dev.expect(r"^Serial3 configured as PWM output port", timeout=5, since=m2)
+            w.run("?DEBUG,ON")
+            m2 = w2.dev.mark()
+            m = w.send("?MAP,PWM,S3,W2S4")
+            w.dev.expect(r"^PWM configuration stored", timeout=3, since=m)
+            try:
+                w.dev.expect(r"^Sent PWM output config to WCB2: \?MAP,PWM,OUT,S4", timeout=3, since=m)
+            except AssertionError:
+                pass
+            sent = [x.rstrip() for x in w.dev.since(m) if x.startswith("Sent PWM output ")]
+            want = ["Sent PWM output clear to WCB2: ?MAP,PWM,CLEAR,OUT,S3", "Sent PWM output config to WCB2: ?MAP,PWM,OUT,S4"]
+            if sent != want:
+                problems.append(f"W1 printed {sent}, expected {want}")
+            _pwm_reboot(w, m)
+            w2.wait_boot(m2, timeout=30)
+            lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+            miss = _in_order(lines2, ["Serial3 removed from PWM output ports; broadcasts re-enabled",
+                                      "PWM output cleared - rebooting once the command queue is quiet...",
+                                      "Serial4 configured as PWM output port", "Rebooting now to apply PWM configuration..."])
+            if miss:
+                problems.append(f"W2's console lacks (in order) {miss!r}")
+            boots = sum(1 for x in lines2 if x.startswith("Booting up the "))
+            if boots != 1:
+                problems.append(f"W2 booted {boots} times after the re-map, expected once")
+            toks2 = snapshot(bench, 2)
+            if "?MAP,PWM,OUT,S4" not in toks2 or "?MAP,PWM,OUT,S3" in toks2:
+                problems.append(f"W2's PWM tokens after its restart: {[t for t in toks2 if t.upper().startswith('?MAP,PWM')]}")
+            flags = sorted(t for t in toks2 if re.match(r"^\?BCAST,(OUT|IN),S3,", t))
+            if flags != ["?BCAST,IN,S3,ON", "?BCAST,OUT,S3,ON"]:
+                problems.append(f"W2 S3's broadcast flags after the release: {flags}")
+        finally:
+            s3.pwm_out(0)
+            if mapped:
+                w.run("?WDP,POLL")            # a just-booted W1 counts W2 offline until W2's next packet (F22)
+                time.sleep(1.0)
+                m = w.send("?MAP,PWM,CLEAR,S3")
+                try:
+                    _w2_reboot_wait(w, m)
+                except AssertionError:
+                    pass
+                try:
+                    w.wait_boot(m, timeout=30)
+                except AssertionError:
+                    pass
+                for p in ("S3", "S4"):
+                    if f"?MAP,PWM,OUT,{p}" in snapshot(bench, 2):
+                        _clear_remote_out(w, p)
+            w.run("?DEBUG,OFF")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.p_guard_device_ports", ";P is ignored, its pin untouched, on the ports an MP3 Trigger (S3), an HCR (S4) and a DFPlayer (S5) own, and each device's bytes still go out afterwards (W1, WDP off; no reboot)", needs=["wcb1"], links=["W1S3", "W1S4", "W1S5"])
+def p_guard_device_ports(bench):
+    """WCB-WP15 row 3, the MP3 / DFP / HCR terms of processPWMOutput's owned-port guard (WCB.ino): ;P on a port
+    isSerialPortUsedForMP3 / ForDFP / ForHCR claims prints '[PWM] Ignoring ;P on S<n> - the port is in use by another
+    device' under ?DEBUG,PWM,ON and never reaches pinMode. The WLED and Maestro terms have their own tests
+    (pwm.p_guard_wled_port_remote, pwm.p_refused_on_maestro_port); the raw-mapping term is pwm.p_guard_raw_mapped_input
+    and the Kyber term kyber.normal_mode_s1. The plan put the devices on W2 behind ;W2,;P; they sit on W1 here, with
+    W1's WDP off so no board learns and persists a route to them, and the forwarded ;P path is the one
+    pwm.p_guard_wled_port_remote covers. Hosting a device locally drops the board's remote route for it (hcrReservePort
+    and the MP3/DFP twins set remoteWCB = 0), so each baseline route is re-sent, which also releases the local port
+    (the REMOTE branch of configureHCR / configureMP3 / configureDFP); a kind with no baseline route is cleared."""
+    from suites.s15_hcr_mp3_dfp import _dfp, _lf, _steps
+    from suites.s22_maestro_kyber import _wdp_off
+    ls = {p: link(bench, 1, p) for p in ("S3", "S4", "S5")}
+    kinds = {"S3": "MP3", "S4": "HCR", "S5": "DFP"}
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    for p in ls:
+        require_tokens(bench, 1, f"?BAUD,{p},9600", f"?BCAST,OUT,{p},ON", f"?BCAST,IN,{p},ON")
+    _require_free_ports(bench, 1, *ls)
+    hosted = [t for t in bench.config_tokens(1) if t.upper().startswith(("?HCR,", "?MP3,", "?DFP,"))
+              and not re.match(r"^\?(HCR|MP3|DFP),REMOTE,W\d+$", t, re.I)]
+    if hosted:
+        raise Skip(f"W1 already hosts a device: {hosted}")
+    configs = (("?MP3,S3:9600:V64", r"^\[MP3\] Configured: S3 at 9600 baud"),
+               ("?HCR,PORT,S4:9600", r"^\[HCR\] Configured on S4 at 9600 baud"),
+               ("?DFP,S5:9600:V0", r"^\[DFP\] Configured: S5 at 9600 baud"))
+    device_bytes = {"S3": (";A,PLAY,5", bytes.fromhex("76407405")), "S4": (";H,OVERLOAD", _lf("<SE,QT>")),
+                    "S5": (";D,PLAY,5", _dfp(0x03, 5))}
+    problems = []
+    with config_guard(bench, 1) as before:
+        with _wdp_off(w, before[1]):
+            try:
+                if not _has(w.run("?HCR,POLL,OFF"), "[HCR] Poll interval = 0s (off)"):
+                    raise AssertionError("?HCR,POLL,OFF did not confirm")   # before PORT: a poll would go out at once
+                for cmd, want in configs:
+                    out = w.run(cmd)
+                    if not any(re.search(want, x) for x in out):
+                        raise AssertionError(f"setup: {cmd} printed {out}")
+                w.run("?DEBUG,PWM,ON")
+                for l in ls.values():
+                    l.pwm_in()
+                time.sleep(0.6)
+                for p, l in ls.items():
+                    pm, wm = l.probe.dev.mark(), w.dev.mark()
+                    w.send(f";P{p[1]}1500")
+                    time.sleep(0.8)
+                    if not any(re.search(rf"^\[PWM\] Ignoring ;P on {p} .* the port is in use by another device", x)
+                               for x in w.dev.since(wm)):
+                        problems.append(f";P{p[1]}1500 on the {kinds[p]} port printed no 'Ignoring ;P' line")
+                    if l.pulses(pm):
+                        problems.append(f";P{p[1]}1500 pulsed the {kinds[p]} port: {l.pulses(pm)}")
+                for l in ls.values():
+                    l.pwm_stop()
+                for p, (cmd, want) in device_bytes.items():
+                    problems += [f"after ;P on the {kinds[p]} port: {x}" for x in _steps(ls[p], w.send, [(cmd, want)])]
+            finally:
+                for l in ls.values():
+                    l.pwm_stop()
+                w.run("?DEBUG,PWM,OFF")
+                for kind in ("DFP", "MP3", "HCR"):   # HCR last: its release leaves S4 at 9600, ON/ON, no label
+                    route = token(before[1], f"?{kind},REMOTE,")
+                    w.run(route if route else f"?{kind},CLEAR")
+                for p in ls:
+                    orig = token(before[1], f"?LABEL,{p},")
+                    w.run(orig if orig else f"?LABEL,CLEAR,{p}")
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.p_guard_raw_mapped_input", ";P is ignored on a raw serial mapping's input port and bytes into it still reach the mapping's output raw; the output port itself takes ;P, as the configure-time rule leaves destinations alone (no reboot)", needs=["wcb1"], links=["W1S4", "W1S5"])
+def p_guard_raw_mapped_input(bench):
+    """WCB-WP15 row 3, the raw-mapping term: processPWMOutput refuses ;P on a port isSerialPortRawMapped names
+    (WCB.ino) - RawSerialForwardingTask owns its bytes, and a pulse would take its TX pin. The guard reads the
+    mapping's INPUT, as serialMapOwnsPort does at configure time (WCB_PWM.cpp; docs/HIL_WEEK_DECISIONS.md D23 checks no
+    destination), so the destination S4 is an ordinary soft port and pulses. The pulse leaves S4 LOW, so a throwaway
+    line follows it (HIL_TESTING.md §5)."""
+    s4, s5 = link(bench, 1, "S4"), link(bench, 1, "S5")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    require_tokens(bench, 1, "?BAUD,S4,9600", "?BAUD,S5,9600")
+    _require_free_ports(bench, 1, "S4", "S5")
+    problems = []
+    with config_guard(bench, 1):
+        mapped = False
+        try:
+            out = w.run("?MAP,SERIAL,S5,R,S4")
+            if not _has(out, "Serial mapping set: Serial5 (RAW) -> 1 destination(s)"):
+                raise AssertionError(f"?MAP,SERIAL,S5,R,S4 printed {out}")
+            mapped = True
+            w.run("?DEBUG,PWM,ON")
+            s5.pwm_in()
+            time.sleep(0.6)
+            pm, wm = s5.probe.dev.mark(), w.dev.mark()
+            w.send(";P51500")
+            time.sleep(0.8)
+            if not any(re.search(r"^\[PWM\] Ignoring ;P on S5 .* the port is in use by another device", x) for x in w.dev.since(wm)):
+                problems.append(";P51500 on the raw-mapped input printed no 'Ignoring ;P' line")
+            if s5.pulses(pm):
+                problems.append(f";P51500 pulsed the raw-mapped input S5: {s5.pulses(pm)}")
+            s5.pwm_stop()
+            data = marker("RAW").encode() + b"\r"
+            watch = Watch(s4)
+            s5.send(data)
+            try:
+                watch.expect(s4, data, timeout=3)
+            except AssertionError:
+                problems.append(f"bytes into W1 S5 no longer reach S4 raw after the refused ;P: got {watch.got(s4)!r}")
+            s4.pwm_in()
+            time.sleep(0.6)
+            pm = s4.probe.dev.mark()
+            w.send(";P41500")
+            time.sleep(0.8)
+            got = s4.pulses(pm)
+            if len(got) != 1 or abs(got[0][0] - 1500) > 40:
+                problems.append(f";P41500 on the mapping's destination S4 gave {got}, not one 1500 us pulse")
+        finally:
+            s4.pwm_stop()
+            s5.pwm_stop()
+            w.run("?DEBUG,PWM,OFF")
+            if mapped:
+                w.run("?MAP,SERIAL,CLEAR,S5")
+            w.send(";S4U")                       # S4 idles LOW after the pulse: one line puts it back HIGH
+            time.sleep(0.5)
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.multi_output_and_multi_input", "One PWM input drives two local outputs to the same width, a second input drives W2's S3 on its own, a sixth output in one mapping is neither kept nor sent its remote config, and no port falls back to bit-banging (W1 x2, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S2", "W1S3", "W1S4", "W1S5", "W2S3"])
+def multi_output_and_multi_input(bench):
+    """WCB-WP15 row 4. processPWMPassthrough (WCB_PWM.cpp) walks every active mapping and gives each output the measured
+    width - a local one as one RMT pulse (pwmPulse), a remote one as a non-ETM ;P - with a stability tracker per INPUT
+    port, so two inputs never mix. addPWMMapping's parse loop stops at five outputs (outputs[5], WCB_PWM.h) without a
+    word: a sixth is neither listed nor sent ?MAP,PWM,OUT. Every local output port takes its own RMT channel at its
+    first pulse (tracker #94); the classic ESP32 has 8, and here the two pulse ports need two beside the status LED's
+    (a NeoPixel's; HW 1.0's LED is a plain GPIO) while S3-S5 hold none, since a PWM port never begins its soft UART -
+    so nothing may print 'no RMT channel'. The plan's count ('the LED and three soft-TX ports leave 4') is the budget
+    of a board whose S3-S5 all run serial. The cap arm aims its extra outputs at board numbers no board uses, as
+    pwm.remote_unreachable_failed does, so W2 only ever has S3 declared; W2 S1 (the real Maestro) is never mapped.
+    ?MAP,PWM,CLEAR,ALL ends it and restarts W2 (?REBOOT)."""
+    ins = {"S2": link(bench, 1, "S2"), "S3": link(bench, 1, "S3")}
+    s4, s5, w2s3 = link(bench, 1, "S4"), link(bench, 1, "S5"), link(bench, 2, "S3")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1, 2)
+    _require_free_ports(bench, 1, "S2", "S3", "S4", "S5")
+    _require_free_ports(bench, 2, "S3")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON")
+    k1, k2, k3 = _unused_boards(w, 3)
+    problems = []
+    with config_guard(bench, 1, 2):
+        mapped = cleared = False
+        try:
+            for l in ins.values():
+                l.pwm_out(0)
+            w.run("?DEBUG,ETM,ON")
+            m0 = w.dev.mark()
+            w.send("?MAP,PWM,S3,S4,S5")
+            m = w.send("?MAP,PWM,S2,W2S3")
+            mapped = True
+            seq = w.dev.expect(r"^\[ETM\] Sent seq (\d+): \?MAP,PWM,OUT,S3", timeout=3, since=m).group(1)
+            w.dev.expect(rf"^\[ETM\] Seq {seq} fully acknowledged", timeout=3, since=m)
+            _pwm_reboot(w, m)
+            boot = [x.rstrip() for x in w.dev.since(m)]
+            for want in ("Input: Serial3 -> Outputs: S4 S5", "Input: Serial2 -> Outputs: W2S3", "PWM Task Created") + \
+                    tuple(f"Serial{p} reserved for PWM - skipping UART init" for p in (2, 3, 4, 5)):
+                if want not in boot:
+                    problems.append(f"W1's boot banner lacks {want!r}")
+            s4.pwm_in()
+            s5.pwm_in()
+            w2s3.pwm_in()
+            time.sleep(0.6)
+            for us in (1000, 1500, 2000):              # one input, two local outputs
+                p1, p2 = s4.probe.dev.mark(), w2s3.probe.dev.mark()
+                ins["S3"].pwm_out(us)
+                time.sleep(1.0)
+                for l in (s4, s5):
+                    problem = _step_problem(l.pulses(p1), us, f" on {l.key}")
+                    if problem:
+                        problems.append(problem)
+                if w2s3.pulses(p2):
+                    problems.append(f"W2S3 pulsed while its input (W1 S2) was held LOW: {w2s3.pulses(p2)}")
+            for a, b in ((1200, 1800), (1800, 1200)):   # two inputs, each with its own outputs
+                p1, p2 = s4.probe.dev.mark(), w2s3.probe.dev.mark()
+                ins["S3"].pwm_out(a)
+                ins["S2"].pwm_out(b)
+                time.sleep(1.2)
+                for l, us, pm in ((s4, a, p1), (s5, a, p1), (w2s3, b, p2)):
+                    problem = _step_problem(l.pulses(pm), us, f" on {l.key} (S3 at {a}, S2 at {b})")
+                    if problem:
+                        problems.append(problem)
+            fallbacks = _no_rmt(w.dev.since(m0))
+            if fallbacks:
+                problems.append(f"a PWM port fell back to bit-banged output: {fallbacks}")
+            for l in ins.values():
+                l.pwm_out(0)
+            time.sleep(0.5)
+            w.run("?DEBUG,ON")
+            m = w.send(f"?MAP,PWM,S3,S4,S5,W2S3,W{k1}S3,W{k2}S3,W{k3}S4")
+            w.dev.expect(r"^PWM configuration stored", timeout=5, since=m)
+            listing = [x.rstrip() for x in w.run("?MAP,PWM,LIST") if x.startswith("Input: Serial3")]
+            want = f"Input: Serial3 -> Outputs: S4 S5 W2S3 W{k1}S3 W{k2}S3"
+            if listing != [want]:
+                problems.append(f"after a seven-output ?MAP,PWM the listing is {listing}, expected [{want!r}]")
+            sent = [x.rstrip() for x in w.dev.since(m) if x.startswith("Sent PWM output config to WCB")]
+            if any(f"WCB{k3}:" in x for x in sent):
+                problems.append(f"the dropped sixth output was sent its remote config: {sent}")
+            for k in (k1, k2):
+                if f"Sent PWM output config to WCB{k}: ?MAP,PWM,OUT,S3" not in sent:
+                    problems.append(f"no remote config for the kept output W{k}S3: {sent}")
+            m = w.send("?MAP,PWM,CLEAR,ALL")
+            w.dev.expect(r"All PWM mappings cleared", timeout=10, since=m)
+            cleared = True
+            _pwm_reboot(w, m)
+            time.sleep(15)                              # W2 restarts on the ?REBOOT that follows its clear
+            left = [x for x in snapshot(bench, 2) if x.upper().startswith("?MAP,PWM")]
+            if left:
+                problems.append(f"W2 still has {left} after CLEAR,ALL")
+        finally:
+            for l in ins.values():
+                l.pwm_out(0)
+            for l in (s4, s5, w2s3):
+                l.pwm_stop()
+            if mapped and not cleared:
+                m = w.send("?MAP,PWM,CLEAR,ALL")
+                try:
+                    _pwm_reboot(w, m)
+                except AssertionError:
+                    pass
+                time.sleep(15)
+            if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
+                _clear_remote_out(w, "S3")
+            w.run("?DEBUG,OFF")
+            w.run("?DEBUG,ETM,OFF")
+            for l in ins.values():
+                l.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.declare_on_serial_map_destination", "A raw serial mapping's DESTINATION takes a PWM output declaration, since only a mapping's input is refused (D23): ?MAP,PWM,OUT,S4 is accepted beside ?MAP,SERIAL,S5,R,S4, S4 then pulses for ;P, and the mapping's bytes for it are dropped (1 reboot)", needs=["wcb1"], links=["W1S4", "W1S5"])
+def declare_on_serial_map_destination(bench):
+    """WCB-WP51 row 1, the open half of coverage re-scan #15, decided in docs/HIL_WEEK_DECISIONS.md D23: PWM is refused
+    on a port a ?MAP,SERIAL reads (serialMapOwnsPort, WCB_PWM.cpp; pwm.serial_mapped_input_refused pins that), and a
+    mapping's destinations are checked by neither side. So an output declared on a destination is accepted, and from
+    then on WcbSoftSerial::write drops every byte for that port (a declared PWM output carries pulses,
+    WCB_SoftSerial.cpp) - the mapping's included. The mapping stays set and delivers nothing there, with no warning at
+    either command. That is the decided behaviour, pinned here as the firmware has it; a configure-time warning would be
+    kinder. The declaration asks for no restart; its clear does (the ?MAP,PWM,CLEAR,OUT handler, WCB.ino)."""
+    s4, s5 = link(bench, 1, "S4"), link(bench, 1, "S5")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    require_tokens(bench, 1, "?BAUD,S4,9600", "?BAUD,S5,9600")
+    _require_free_ports(bench, 1, "S4", "S5")
+    problems = []
+    with config_guard(bench, 1):
+        mapped = declared = False
+        try:
+            out = w.run("?MAP,SERIAL,S5,R,S4")
+            if not _has(out, "Serial mapping set: Serial5 (RAW) -> 1 destination(s)"):
+                raise AssertionError(f"?MAP,SERIAL,S5,R,S4 printed {out}")
+            mapped = True
+            before_decl = marker("RAWA").encode() + b"\r"
+            watch = Watch(s4)
+            s5.send(before_decl)
+            try:
+                watch.expect(s4, before_decl, timeout=3)
+            except AssertionError:
+                raise AssertionError(f"control: bytes into W1 S5 never reached W1 S4 through the raw mapping: {watch.got(s4)!r}")
+            out = [x.rstrip() for x in w.run("?MAP,PWM,OUT,S5")]
+            if "❌ Cannot use PWM on Serial5 - a serial mapping reads that port" not in out:
+                problems.append(f"?MAP,PWM,OUT,S5 on the mapping's input printed {out}")
+            out = w.run("?MAP,PWM,OUT,S4")
+            declared = _has(out, "Serial4 configured as PWM output port")
+            if not declared:
+                raise AssertionError(f"?MAP,PWM,OUT,S4 on the mapping's destination printed {out} (D23 accepts it)")
+            toks = snapshot(bench, 1)
+            for t in ("?MAP,SERIAL,S5,R,S4", "?MAP,PWM,OUT,S4"):
+                if t not in toks:
+                    problems.append(f"the chain lacks {t}")
+            s4.listen()
+            time.sleep(0.5)                  # S4 went LOW at the declaration: that break is not a byte of this check
+            after_decl = marker("RAWB").encode() + b"\r"
+            watch = Watch(s4)
+            s5.send(after_decl)
+            time.sleep(2.0)
+            got = watch.got(s4)
+            if got:
+                problems.append(f"the raw mapping still wrote {got!r} onto the declared PWM output S4")
+            bench.note("a raw mapping's bytes for a destination declared a PWM output are dropped silently (D23)")
+            s4.pwm_in()
+            time.sleep(0.6)
+            pm = s4.probe.dev.mark()
+            w.send(";P41500")
+            time.sleep(0.8)
+            pulses = s4.pulses(pm)
+            if len(pulses) != 1 or abs(pulses[0][0] - 1500) > 40:
+                problems.append(f";P41500 on the declared destination gave {pulses}, not one 1500 us pulse")
+        finally:
+            s4.pwm_stop()
+            if mapped:
+                w.run("?MAP,SERIAL,CLEAR,S5")
+            if declared:
+                _inline_clear_out(w, "S4")
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.input_on_hw_uart_pin", "PWM capture on S2's hardware-UART RX pin drives a local output, a PWM output on S2's TX pin follows its own input, and an input held LOW stops the pulses (2 reboots)", needs=["wcb1"], links=["W1S2", "W1S3", "W1S4"])
+def input_on_hw_uart_pin(bench):
+    """WCB-WP51 row 2. attachPWMInterrupt (WCB_PWM.cpp) arms S2's RX pin like any input (level-emulated on the classic
+    ESP32, pwmEdge), and setup()'s Maestro_Remote branch skips Serial2.begin when a PWM input or output owns S2
+    (WCB.ino), so the pin is the ISR's alone; an output on S2 is pulsed through pwmPulse like a soft port's. S2 is one
+    mapping's input and another's output at once - different pins - and both share one deferred restart. The other PWM
+    tests use the soft ports S3-S5 only."""
+    s2, s3, s4 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    _require_free_ports(bench, 1, "S2", "S3", "S4")
+    problems = []
+    with config_guard(bench, 1):
+        mapped = False
+        try:
+            s2.pwm_out(0)
+            s3.pwm_out(0)
+            m = w.send("?MAP,PWM,S2,S4")
+            w.send("?MAP,PWM,S3,S2")
+            mapped = True
+            _pwm_reboot(w, m)
+            boot = [x.rstrip() for x in w.dev.since(m)]
+            for want in ("Serial2 reserved for PWM - skipping UART init", "Input: Serial2 -> Outputs: S4",
+                         "Input: Serial3 -> Outputs: S2", "Maestro_Remote Task Created"):
+                if want not in boot:
+                    problems.append(f"W1's boot banner lacks {want!r}")
+            s4.pwm_in()
+            s2.pwm_in()                      # S2's TX line; the probe keeps driving S2's RX with pwm_out
+            time.sleep(0.6)
+            for us in (1000, 1500, 2000):
+                pm = s4.probe.dev.mark()
+                s2.pwm_out(us)
+                time.sleep(1.0)
+                problem = _step_problem(s4.pulses(pm), us, " on W1S4, from S2's RX pin")
+                if problem:
+                    problems.append(problem)
+            s2.pwm_out(0)
+            time.sleep(0.4)
+            pm = s4.probe.dev.mark()
+            time.sleep(1.0)
+            if s4.pulses(pm):
+                problems.append(f"S4 kept pulsing with S2's input held LOW: {s4.pulses(pm)}")
+            for us in (1000, 1500, 2000):
+                pm = s2.probe.dev.mark()
+                s3.pwm_out(us)
+                time.sleep(1.0)
+                problem = _step_problem(s2.pulses(pm), us, " on W1S2's TX pin, from S3")
+                if problem:
+                    problems.append(problem)
+        finally:
+            s2.pwm_out(0)
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            if mapped:
+                m = w.send("?MAP,PWM,CLEAR,ALL")
+                try:
+                    _pwm_reboot(w, m)
+                except AssertionError:
+                    pass
+            s2.pwm_stop()
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.pulse_accuracy_under_mesh_load", "Local passthrough S3 -> S4 under mesh load - a mesh client broadcasting JSON at ~50 Hz and W1 sending ETM unicasts - puts every output width within 20 us of its input step (~40 s; 2 reboots)", needs=["wcb1", "probe2"], links=["W1S3", "W1S4"])
+def pulse_accuracy_under_mesh_load(bench):
+    """WCB-WP51 row 3, now a regression check: since tracker #94 (docs/HIL_WEEK_DECISIONS.md D5) a passthrough pulse is
+    one RMT symbol (pwmPulse, WCB_PWM.cpp), so nothing the CPUs do stretches it, and the error left is input capture and
+    the probe's own measurement. Before it, the bit-banged pulse came out as 1830 us for 1000 us under load (run
+    20260925-092255). The load is input.softserial_tx_integrity's: probe2 joins as a client and broadcasts unensured
+    JSON, which every WCB consumes without running (the id is s19's JSON id: unensured sends never enter a duplicate
+    ring), plus a ;W2 unicast from W1 every fourth step. The probe reports only the last pulse of each 200 ms window, so
+    the input alternates between 1200 and 1800 us and each report is held to the nearer of the two; that gives about
+    150 widths for the plan's 500, in 40 s instead of two minutes."""
+    steps = 150
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    _require_free_ports(bench, 1, "S3", "S4")
+    widths = []
+    with config_guard(bench, 1):
+        mapped = False
+        try:
+            s3.pwm_out(0)
+            m = w.send("?MAP,PWM,S3,S4")
+            mapped = True
+            _pwm_reboot(w, m)
+            s4.pwm_in()
+            time.sleep(0.6)
+            with probe_in_mesh(bench, "probe2", 12) as probe:
+                pm = s4.probe.dev.mark()
+                for i in range(steps):
+                    s3.pwm_out(1200 if i % 2 == 0 else 1800)
+                    if i % 4 == 0:
+                        w.send(f";W2,;S0,{marker('LD')}")
+                    end = time.monotonic() + 0.25
+                    while time.monotonic() < end:
+                        probe.mesh_broadcast('{"hil":1}', ensured=False)
+                        time.sleep(0.02)
+                time.sleep(0.6)
+                widths = [wd for wd, _ in s4.pulses(pm)]
+        finally:
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            if mapped:
+                _clear_local_mapping(w, "S3")
+            s3.pwm_stop()
+    errors = sorted(min(abs(wd - 1200), abs(wd - 1800)) for wd in widths)
+    bench.note(f"{len(widths)} S4 widths under mesh load; error median {errors[len(errors) // 2] if errors else '-'} us, "
+               f"max {errors[-1] if errors else '-'} us")
+    assert len(widths) >= steps // 2, f"only {len(widths)} output widths reported for {steps} input steps"
+    bad = [wd for wd in widths if min(abs(wd - 1200), abs(wd - 1800)) > 20]
+    assert not bad, f"{len(bad)} of {len(widths)} widths more than 20 us off their step: {bad[:10]}"
+
+
+@test("pwm.boot_conflict_cleanup", "A PWM output and a mapping input saved on S1 while W1 had no Kyber mode meet Maestro_Remote at the next boot: the output is skipped and dropped from NVS, the input is refused but stays in NVS, and neither reaches the chain (WDP off; 1 reboot)", needs=["wcb1"], links=[])
+def boot_conflict_cleanup(bench):
+    """WCB-WP51 row 4. setup() loads the Kyber mode before initPWM (WCB.ino), so both PWM loaders see S1 reserved on a
+    Maestro_Remote board (kyberModeReservesPort, WCB_Storage.cpp): loadPWMOutputPortsFromPreferences (WCB_PWM.cpp) skips
+    the saved output with 'Skipping PWM output port Serial1 - conflicts with Kyber' and rewrites pwm_outputs ('Cleaning
+    up conflicting PWM output ports from NVS...'), while loadPWMMappingsFromPreferences refuses the saved input (its
+    canUsePWMOnPort call prints the refusal) and never erases it - docs/hil_plan/WCB.md §3 lists that as untidy but
+    harmless; the ?NVS count shows it. ?MAESTRO,REMOTE has no PWM guard, which is how the pair gets saved: after
+    ?KYBER,CLEAR and with Maestro 1 cleared off S1, S1 takes both, then ?MAESTRO,REMOTE and the mapping's own deferred
+    restart. The plan expected a lower ?NVS pwm_outputs count; savePWMOutputPortsToPreferences rewrites 'count' and
+    never removes the old port<i>/auto<i>/pbo<i>/pbi<i> keys, so that count is only noted. ?MAP,PWM,CLEAR,ALL then
+    clears both namespaces with no restart (nothing was loaded), and the rebuild puts Maestro 1 back on S1."""
+    from suites.s22_maestro_kyber import (_m_lines, _port_tokens, _rebuild, _require_kyber_broadcast_remote,
+                                          _require_remote_pair, _require_replayable, _wdp_off)
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    _require_remote_pair(bench)
+    _require_kyber_broadcast_remote(w)
+    _require_free_ports(bench, 1, "S4")
+    refusal = "❌ Cannot use PWM on Serial1 - reserved for Maestro/Kyber"
+    problems = []
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
+        if shared:
+            raise Skip(f"W1 S1 carries more Maestros than M1: {shared}")
+        ports = _port_tokens(before[1], "S1")
+        remote_booted = False
+        with _wdp_off(w, before[1]):
+            try:
+                if not _has(w.run("?KYBER,CLEAR", timeout=6), "Kyber is Not used"):
+                    raise AssertionError("?KYBER,CLEAR did not print 'Kyber is Not used'")
+                out = w.run("?MAESTRO,CLEAR,M1:W1S1")
+                if not _has(out, "Cleared Maestro M1:W1S1"):
+                    raise AssertionError(f"?MAESTRO,CLEAR,M1:W1S1 printed {out}")
+                out = w.run("?MAP,PWM,OUT,S1")
+                if not _has(out, "Serial1 configured as PWM output port"):
+                    raise AssertionError(f"?MAP,PWM,OUT,S1 with no Kyber mode and no Maestro there printed {out}")
+                m = w.send("?MAP,PWM,S1,S4")
+                w.dev.expect(r"^PWM configuration stored", timeout=3, since=m)
+                if not _has(w.run("?MAESTRO,REMOTE", timeout=6), "Kyber is REMOTE (on another WCB)"):
+                    raise AssertionError("?MAESTRO,REMOTE did not print 'Kyber is REMOTE (on another WCB)'")
+                _pwm_reboot(w, m)
+                boot = [x.rstrip() for x in w.dev.since(m)]
+                remote_booted = "Maestro_Remote Task Created" in boot
+                if not remote_booted:
+                    raise AssertionError("W1 did not boot with the Maestro_Remote task")
+                for want in ("⚠️  Skipping PWM output port Serial1 - conflicts with Kyber",
+                             "Cleaning up conflicting PWM output ports from NVS...", "No input mappings configured"):
+                    if want not in boot:
+                        problems.append(f"the boot banner lacks {want!r}")
+                n = sum(1 for x in boot if x == refusal)
+                if n != 2:
+                    problems.append(f"the boot printed {refusal!r} {n} times, expected twice (the input and the output)")
+                for bad in ("Input: Serial1 -> Outputs:", "PWM Task Created", "Serial1 reserved for PWM"):
+                    if _has(boot, bad):
+                        problems.append(f"the boot still loaded the conflicting PWM: {bad!r}")
+                lst = [x.rstrip() for x in w.run("?MAP,PWM,LIST")]
+                if "No input mappings configured" not in lst or _has(lst, "Configured outputs:"):
+                    problems.append(f"?MAP,PWM,LIST after the boot: {lst}")
+                left = [t for t in snapshot(bench, 1) if t.upper().startswith("?MAP,PWM")]
+                if left:
+                    problems.append(f"the chain still carries {left}")
+                nvs = _nvs_counts(w)
+                bench.note(f"after the boot cleanup ?NVS reports pwm_mappings={nvs.get('pwm_mappings', 0)}, "
+                           f"pwm_outputs={nvs.get('pwm_outputs', 0)} (stale output keys are never removed)")
+                if nvs.get("pwm_mappings", 0) < 1:
+                    problems.append("the refused mapping input is gone from NVS (docs/hil_plan/WCB.md §3 says it is kept)")
+                mc = w.dev.mark()
+                out = [x.rstrip() for x in w.run("?MAP,PWM,CLEAR,ALL")]
+                if "All PWM mappings cleared" not in out or _has(out, "Rebooting once"):
+                    problems.append(f"?MAP,PWM,CLEAR,ALL with nothing loaded printed {out}")
+                time.sleep(6.0)
+                if w.rebooted_since(mc):
+                    problems.append("?MAP,PWM,CLEAR,ALL restarted W1 with nothing loaded")
+                    w.wait_boot(mc, timeout=30)
+                nvs = _nvs_counts(w)
+                if nvs.get("pwm_mappings", 0) or nvs.get("pwm_outputs", 0):
+                    problems.append(f"?MAP,PWM,CLEAR,ALL left NVS entries: {nvs.get('pwm_mappings', 0)} mapping(s), "
+                                    f"{nvs.get('pwm_outputs', 0)} output key(s)")
+            finally:
+                try:
+                    mc = w.dev.mark()
+                    out = w.run("?MAP,PWM,CLEAR,ALL")        # idempotent; restarts only if something is loaded
+                    if _has(out, "Rebooting once"):
+                        _pwm_reboot(w, mc)
+                        remote_booted = remote_booted or _has(w.dev.since(mc), "Maestro_Remote Task Created")
+                except AssertionError as e:
+                    problems.append(f"restore: {e}")
+                w.run("?MAESTRO,REMOTE", timeout=6)
+                problems += _rebuild(w, lines)
+                for t in ports:
+                    w.run(t)
+                if not remote_booted:
+                    bm = w.reboot()
+                    if not _has(w.dev.since(bm), "Maestro_Remote Task Created"):
+                        problems.append("W1 did not boot with the Maestro_Remote task after the restore")
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.passthrough_debug_and_settle", "?DEBUG,PWM,ON traces every passthrough send - input width and output count, the local pin, the remote ;P - one trace per pulse on the wire, and the sends keep the change rule: after a change of 6 us or more, at most one smaller settle send (2 reboots)", needs=["wcb1"], links=["W1S3", "W1S4"])
+def passthrough_debug_and_settle(bench):
+    """WCB-WP51 row 5. processPWMPassthrough (WCB_PWM.cpp) prints '[PWM] Input S<n>: <w> μs -> <k> output(s)' for each
+    send, then '[PWM] Local output -> S<p> pin <pin>: <w> μs' or '[PWM] Remote output -> WCB<n> S<p>: ;P<p><w>' per
+    output. shouldTransmitPWM_Port sends a reading 6 us or more from the last one sent, plus ONE settle send once five
+    readings agree within 6 us and differ from the last sent at all. The plan's '1500 to 1503 and hold gives exactly
+    one more pulse' holds only while no settle send has gone out since the last big change - capture jitter decides
+    that - so the test holds every send to the rule and notes what the small steps did. The remote output is a board
+    number no board uses (pwm.remote_unreachable_failed), so W2 is untouched and each remote send also prints
+    'ESP-NOW send failed'."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    _require_free_ports(bench, 1, "S3", "S4")
+    k = _unused_boards(w, 1)[0]
+    problems = []
+    with config_guard(bench, 1):
+        mapped = False
+        try:
+            s3.pwm_out(0)
+            m = w.send(f"?MAP,PWM,S3,S4,W{k}S3")
+            mapped = True
+            _pwm_reboot(w, m)
+            pin = next((g.group(1) for g in (re.match(r"^  Serial4: Reserved for PWM Output  Pins: Tx:(\d+)", x)
+                                             for x in w.dev.since(m)) if g), None)
+            if pin is None:
+                raise AssertionError("W1's boot banner lacks the S4 PWM output row")
+            w.run("?DEBUG,PWM,ON")
+            s4.pwm_in()
+            s3.pwm_out(1500)
+            time.sleep(2.0)
+            wm, pm = w.dev.mark(), s4.probe.dev.mark()
+            s3.pwm_out(2000)
+            time.sleep(1.5)
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            sends = [(int(g.group(1)), int(g.group(2))) for g in (_PWM_SEND.match(x) for x in lines) if g]
+            first = next((s for s in sends if abs(s[0] - 2000) <= 20), None)
+            if first is None or first[1] != 2:
+                problems.append(f"the step to 2000 us traced {sends}, expected a send near 2000 to 2 outputs")
+            else:
+                v = first[0]
+                if not any(re.match(rf"^\[PWM\] Local output -> S4 pin {pin}: {v} ", x) for x in lines):
+                    problems.append(f"no '[PWM] Local output -> S4 pin {pin}: {v} ...' line")
+                if not any(x.startswith(f"[PWM] Remote output -> WCB{k} S3: ;P3{v}") for x in lines):
+                    problems.append(f"no '[PWM] Remote output -> WCB{k} S3: ;P3{v}' line")
+            small = {}
+            for us in (2003, 1990, 1993, 1500):          # +3 after a settled input, a big change, +3 right after it
+                wm2 = w.dev.mark()
+                s3.pwm_out(us)
+                time.sleep(1.5)
+                small[us] = [g.group(1) for g in (_PWM_SEND.match(x) for x in w.dev.since(wm2)) if g]
+            bench.note("sends after each step (us): " + "; ".join(f"{us}: {v}" for us, v in small.items()))
+            values = [int(g.group(1)) for g in (_PWM_SEND.match(x) for x in w.dev.since(wm)) if g]
+            # Seeded with the settled 1500: the last value sent before the mark, to within the jitter that matters here.
+            problems += [f"change rule: {p}" for p in _change_rule_problems([1500] + values)]
+            local = sum(1 for x in w.dev.since(wm) if x.startswith("[PWM] Local output -> S4 "))
+            pulses = sum(n for _, n in s4.pulses(pm))
+            if abs(pulses - local) > 1:
+                problems.append(f"{local} local sends traced but {pulses} pulses on W1 S4")
+        finally:
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            w.run("?DEBUG,PWM,OFF")
+            if mapped:
+                _clear_local_mapping(w, "S3")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.remote_config_right_after_boot", "A PWM mapping sent within 5 s of W1's boot still configures its remote output: ?MAP,PWM,OUT,S3 goes to W2, is acknowledged, and W2's chain gains it (W1 x3, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S3"])
+def remote_config_right_after_boot(bench):
+    """WCB-WP51 row 6. canSendESPNow (WCB_PWM.cpp) gates remote PWM configuration on espNowInitialized, set right after
+    esp_now_init() in setup(). It used to be 'uptime > 5 s', which bit only commands arriving in the first five seconds
+    after a boot - a config push, a test - and changed, saved and reported the local mapping while the remote board was
+    never told (HIL_TESTING.md §6, constraints). The mapping goes out as soon as W1's USB reader answers after a
+    ?reboot, and its uptime is taken from the 'Rebooting now' line; one sent after 5 s would not show the old gate is
+    gone, so that fails too. A just-booted board counts W2 offline until W2's next packet and does not retry the send
+    (HIL_TEST_AUDIT.md F22); W2's ACK still resolves it."""
+    s3 = link(bench, 1, "S3")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1, 2)
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON")
+    _require_free_ports(bench, 2, "S3")
+    problems = []
+    with config_guard(bench, 1, 2):
+        mapped = False
+        try:
+            m = w.send("?reboot")
+            w.dev.expect(r"^Reboot queued", timeout=3, since=m)
+            w.dev.expect(r"^Rebooting now", timeout=WCB.REBOOT_DEFER_S, since=m)
+            t_reset = _line_time(w.dev, m, r"^Rebooting now")
+            w.dev.expect(r"^Raw Serial Forwarding Task Created", timeout=20, since=m)
+            _usb_reader_up(w)
+            s3.pwm_out(0)                                   # the new input must not float (module rules)
+            w.send("?DEBUG,ETM,ON")
+            t_send = time.monotonic()
+            m = w.send("?MAP,PWM,S3,W2S3")
+            mapped = True
+            uptime = t_send - t_reset
+            bench.note(f"?MAP,PWM,S3,W2S3 sent {uptime:.1f} s after W1's restart")
+            seq = w.dev.expect(r"^\[ETM\] Sent seq (\d+): \?MAP,PWM,OUT,S3", timeout=3, since=m).group(1)
+            w.dev.expect(rf"^\[ETM\] Seq {seq} fully acknowledged", timeout=5, since=m)
+            if _has(w.dev.since(m), "remote PWM configuration was NOT sent"):
+                problems.append("W1 still skipped the remote send")
+            _pwm_reboot(w, m)
+            if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
+                problems.append("W2's chain lacks ?MAP,PWM,OUT,S3")
+            if uptime >= 5.0:
+                problems.append(f"the mapping went out {uptime:.1f} s after W1's restart - too late to show the old 5 s gate is gone")
+        finally:
+            s3.pwm_out(0)
+            if mapped:
+                w.run("?WDP,POLL")                        # W1 counts W2 offline until W2's next packet (F22)
+                time.sleep(1.0)
+                m = w.send("?MAP,PWM,CLEAR,S3")
+                try:
+                    _w2_reboot_wait(w, m)
+                except AssertionError:
+                    pass
+                try:
+                    w.wait_boot(m, timeout=30)
+                except AssertionError:
+                    pass
+                if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
+                    _clear_remote_out(w, "S3")
+            w.run("?DEBUG,ETM,OFF")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.baud_on_pwm_ports_skipped", "?BAUD on a PWM input (S3) or output (S4) port stores the rate but re-begins no soft UART there: no soft-serial begin is logged (S5 is, as the control), passthrough keeps following, and S4 still idles LOW (2 reboots)", needs=["wcb1"], links=["W1S3", "W1S4"])
+def baud_on_pwm_ports_skipped(bench):
+    """WCB-WP51 row 7. updateBaudRate (WCB_Storage.cpp) always calls applyLiveBaud, which ends and re-begins Serial3-5
+    only when the port is neither a PWM input nor a PWM output (WCB.ino): a re-begin would put the soft UART's RX
+    interrupt on the input's pin and its TX on the output's. Under ?DEBUG,ON every soft-port begin logs
+    '[SOFTSERIAL] S<n> RX: ...' (applySoftSerialIntTx), so a skipped one logs nothing; ?BAUD,S5 at its own rate is the
+    control that shows the line would print. The rates go back before the mapping is cleared."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    require_tokens(bench, 1, "?BAUD,S3,9600", "?BAUD,S4,9600", "?BAUD,S5,9600")
+    _require_free_ports(bench, 1, "S3", "S4", "S5")
+    problems = []
+    with config_guard(bench, 1):
+        mapped = changed = False
+        try:
+            s3.pwm_out(0)
+            m = w.send("?MAP,PWM,S3,S4")
+            mapped = True
+            _pwm_reboot(w, m)
+            s4.pwm_in()
+            time.sleep(0.6)
+            for us in (1000, 2000):
+                pm = s4.probe.dev.mark()
+                s3.pwm_out(us)
+                time.sleep(1.0)
+                problem = _step_problem(s4.pulses(pm), us, " (before ?BAUD)")
+                if problem:
+                    problems.append(problem)
+            w.run("?DEBUG,ON")
+            wm = w.dev.mark()
+            changed = True
+            for p in ("S3", "S4"):
+                if not _has(w.run(f"?BAUD,{p},19200"), f"Baud rate for Serial{p[1]} updated to 19200"):
+                    problems.append(f"?BAUD,{p},19200 did not confirm")
+            begun = [x for x in w.dev.since(wm) if re.match(r"^\[SOFTSERIAL\] S[34] ", x)]
+            if begun:
+                problems.append(f"?BAUD re-began a soft UART on a PWM port: {begun}")
+            if not any(x.startswith("[SOFTSERIAL] S5 RX: ") for x in w.run("?BAUD,S5,9600")):
+                problems.append("control: ?BAUD,S5,9600 under ?DEBUG,ON logged no soft-serial begin, so the S3/S4 check proves nothing")
+            w.run("?DEBUG,OFF")
+            s4.pwm_stop()
+            if s4.line_level() != 0:
+                problems.append("W1 S4 no longer idles LOW after ?BAUD,S4: a soft UART took the PWM pin back")
+            s4.pwm_in()
+            time.sleep(0.6)
+            for us in (1500, 1000, 2000):
+                pm = s4.probe.dev.mark()
+                s3.pwm_out(us)
+                time.sleep(1.0)
+                problem = _step_problem(s4.pulses(pm), us, " (after ?BAUD)")
+                if problem:
+                    problems.append(problem)
+        finally:
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            w.run("?DEBUG,OFF")
+            if changed:
+                for p in ("S3", "S4"):
+                    w.run(f"?BAUD,{p},9600")
+            if mapped:
+                _clear_local_mapping(w, "S3")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
