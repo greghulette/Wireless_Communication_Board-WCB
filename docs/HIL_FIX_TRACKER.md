@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#98 and #99 VERIFIED** on `6.2.1_280741RSEP2026` (W1/W2 flashed about 07:50): `20260928-074616`, 22 of 22 (#98's test and the 21 s15/s24 tests). |
 | 2026-09-28 | The s14/s22 tests on `6.2.1_280727RSEP2026` (`20260928-073122`): 23 pass, `kyber.local_targets_one_write_per_port` skipped (W1 holds a Maestro 3 proxy), and #98's test failed on the first fix, which never matched a remote slot; corrected for the next image. **#100 filed, deferred** (D38): cleared devices and PWM outputs leave NVS keys (W1 +21 entries). |
 | 2026-09-28 | **#99 filed and FIXED (unverified)**, found by the WCB-WP26 test writer: a device and a serial mapping could share a port (D37). |
 | 2026-09-28 | **#98 filed and FIXED (unverified)**, found by the WCB-WP53 test writer: `?KYBER,LIST`'s copy-paste line for another board used this board's rate and label for the port number (D36). |
@@ -2018,7 +2019,7 @@ as it was before the command; report a failed `_act` write like a failed count.
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - not yet flashed |
+| **Status** | VERIFIED - `kyber.list_setup_line_matches_local` passes on `6.2.1_280741RSEP2026` (`20260928-074616`); decided in Greg's absence (D36) |
 | **Owner** | `WCB_firmware` (`WCB_Storage.cpp`) |
 | **Effort** | S |
 | **Tests** | `kyber.list_setup_line_matches_local` (should) |
@@ -2043,7 +2044,7 @@ fell back: `kyber.list_setup_line_matches_local` still failed in `20260928-07312
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - not yet flashed |
+| **Status** | VERIFIED - `devices.serial_mapped_port_refused` and the other 20 s15/s24 tests pass on `6.2.1_280741RSEP2026` (`20260928-074616`); decided in Greg's absence (D37) |
 | **Owner** | `WCB_firmware` (`WCB_HCR.cpp`, `WCB_MP3.cpp`, `WCB_DFP.cpp`, `WCB_Storage.cpp`) |
 | **Effort** | S |
 | **Tests** | `devices.serial_mapped_port_refused` (should) |
@@ -2085,3 +2086,5 @@ outputs on W1 and clear them. Every config guard passed, but W1 ended with three
 **Fix (proposed).** Remove the keys a cleared device no longer uses, as #92 does, keeping the settings meant to outlive
 a clear (the HCR poll interval), and delete the per-port PWM output keys past the count. The growth is one-time per
 namespace, not per run, which is why it can wait; a board short of NVS is where it matters.
+
+**Update (run 20260928-074616).** `pwm_outputs` went away again when a later test cleared W1's PWM outputs, so the PWM half only holds keys between a change and the next full clear; `mp3_cfg` and `dfp_cfg` stay.
