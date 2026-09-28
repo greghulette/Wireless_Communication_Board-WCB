@@ -42,6 +42,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 from contextlib import contextmanager
@@ -207,13 +208,16 @@ def _git(repo, *args, timeout=60):
 
 
 def tree_state(repo):
-    """{'repo', 'head', 'short', 'subject', 'dirty', 'files', 'diff'} of a working tree: HEAD, whether anything is
-    modified or untracked, those paths, and 'diff', the first 12 hex of a SHA-256 over `git diff HEAD --binary` plus
-    every untracked source file, so two builds of one dirty tree can be told apart. head None: not a git tree."""
+    """{'repo', 'head', 'short', 'branch', 'subject', 'dirty', 'files', 'diff'} of a working tree: HEAD, the branch
+    checked out (None when detached), whether anything is modified or untracked, those paths, and 'diff', the first 12
+    hex of a SHA-256 over `git diff HEAD --binary` plus every untracked source file, so two builds of one dirty tree can
+    be told apart. head None: not a git tree."""
     head = _git(repo, "rev-parse", "HEAD")
     if head is None:
-        return {"repo": repo, "head": None, "short": None, "subject": None, "dirty": None, "files": [], "diff": None}
+        return {"repo": repo, "head": None, "short": None, "branch": None, "subject": None, "dirty": None, "files": [],
+                "diff": None}
     head = head.decode().strip()
+    branch = (_git(repo, "symbolic-ref", "--short", "-q", "HEAD") or b"").decode("utf-8", "replace").strip() or None
     subject = (_git(repo, "log", "-1", "--format=%s") or b"").decode("utf-8", "replace").strip()[:100]
     status = (_git(repo, "status", "--porcelain", "--untracked-files=all") or b"").decode("utf-8", "replace")
     rows = [x for x in status.splitlines() if x.strip()]
@@ -226,17 +230,20 @@ def tree_state(repo):
             h.update(path.encode("utf-8"))
             with open(full, "rb") as f:
                 h.update(f.read())
-    return {"repo": repo, "head": head, "short": head[:7], "subject": subject, "dirty": bool(rows), "files": files,
-            "diff": h.hexdigest()[:12] if rows else None}
+    return {"repo": repo, "head": head, "short": head[:7], "branch": branch, "subject": subject, "dirty": bool(rows),
+            "files": files, "diff": h.hexdigest()[:12] if rows else None}
 
 
 def tree_line(state):
-    """One line for a report: '`dda37f6` + 5 dirty files (diff 1a2b3c4d5e6f)', '`dda37f6` clean', or 'not recorded'."""
+    """One line for a report: '`dda37f6` + 5 dirty files (diff 1a2b3c4d5e6f)', '`dda37f6` clean', or 'not recorded'; a
+    branch other than main or master is named ('`0a66ce0` on hil-week clean'), so a row says when an image came from a
+    local branch rather than the line of history everyone builds."""
     if not state or not state.get("head"):
         return "not recorded"
+    where = f" on {state['branch']}" if state.get("branch") not in (None, "main", "master") else ""
     if not state.get("dirty"):
-        return f"`{state['short']}` clean"
-    return f"`{state['short']}` + {len(state['files'])} dirty files (diff {state['diff']})"
+        return f"`{state['short']}`{where} clean"
+    return f"`{state['short']}`{where} + {len(state['files'])} dirty files (diff {state['diff']})"
 
 
 def _files(root, part):
@@ -346,6 +353,28 @@ def _hooks_in_source(navicore):
     return False
 
 
+# What a compile reads of a sketch folder: its top-level code files, partitions.csv, bootloader.bin and build_opt.h
+# (the esp32 3.3.4 platform.txt prebuild hooks 1, 4 and 5 copy them from {build.source.path}), sketch.yaml, and src/.
+SKETCH_EXT = (".ino", ".pde", ".h", ".hh", ".hpp", ".c", ".cc", ".cpp", ".cxx", ".s")
+SKETCH_FILES = ("partitions.csv", "bootloader.bin", "sketch.yaml", "sketch.yml")
+
+
+def stage_sketch(source, parent):
+    """Copy what a compile reads of the NaviCore sketch at `source` into <parent>/NaviCore -> that folder. arduino-cli
+    refuses a sketch folder not named after its main .ino ('main file missing from sketch: <folder>/hil-week.ino' for
+    a worktree at .../hil-week), so a git worktree of NaviCore, whose folder carries the worktree's name, is compiled
+    from this copy. The top-level files SKETCH_EXT and SKETCH_FILES name, and src/ whole; nothing else of the repo."""
+    dest = os.path.join(parent, "NaviCore")
+    os.makedirs(dest)
+    for name in sorted(os.listdir(source)):
+        full = os.path.join(source, name)
+        if os.path.isfile(full) and (name.lower().endswith(SKETCH_EXT) or name.lower() in SKETCH_FILES):
+            shutil.copy2(full, os.path.join(dest, name))
+    if os.path.isdir(os.path.join(source, "src")):
+        shutil.copytree(os.path.join(source, "src"), os.path.join(dest, "src"))
+    return dest
+
+
 # ---------------------------------------------------------------------------- build
 class _BuildLock(RunLock):
     """One compile at a time: two share arduino-cli's core cache (%LOCALAPPDATA%/arduino) and corrupt it. Not run.lock:
@@ -403,20 +432,22 @@ def _error_lines(text, n=12):
 
 
 def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=False, jobs=None, low_priority=True,
-          timeout_s=3600, github=None, sketchbook=None):
+          timeout_s=3600, github=None, sketchbook=None, source=None):
     """Compile NaviCore's working tree into <builds_root>/navicore-<tag> (the build path is the folder itself, so the
     IDE's sketch cache is never touched) and return its manifest, also written there as BUILD.json beside the
-    compiler's output (compile.log). hooks=True adds -DNAVICORE_HIL_HOOKS=1 (INF9). Before compiling: the FQBN must
-    still be the one NaviCore/CLAUDE.md names, the esp32 core must be 3.3.4, and the sketchbook's WCB_Client and WcbCmd
-    must equal the WCBClient and WcbCmd repos (line endings aside); BuildError names what differs, unless
-    allow_drift=True, which records it instead. The manifest records NaviCore's commit, whether its tree is dirty (and
-    a fingerprint of the change), both libraries, and the image check. BuildError also when the tree changed during
-    the compile, or when the folder already holds a build (rebuild=True recompiles it in place). One build at a time,
-    at below-normal priority."""
+    compiler's output (compile.log). hooks=True adds -DNAVICORE_HIL_HOOKS=1 (INF9). `source`: the NaviCore tree to
+    compile, a checkout or a git worktree of one (default <github>/NaviCore); a folder not named NaviCore is compiled
+    from a copy of its sketch files (stage_sketch; 'staged' in the manifest), while every check and the recorded tree
+    state read the source itself. Before compiling: the FQBN must still be the one the source's CLAUDE.md names, the
+    esp32 core must be 3.3.4, and the sketchbook's WCB_Client and WcbCmd must equal the WCBClient and WcbCmd repos
+    (line endings aside); BuildError names what differs, unless allow_drift=True, which records it instead. The
+    manifest records NaviCore's commit, whether its tree is dirty (and a fingerprint of the change), both libraries,
+    and the image check. BuildError also when the tree changed during the compile, or when the folder already holds a
+    build (rebuild=True recompiles it in place). One build at a time, at below-normal priority."""
     if not TAG.fullmatch(tag or ""):
         raise ValueError(f"tag {tag!r}: letters, digits, '_', '.', '-', at most 40, not starting with a symbol")
     github = github or github_root()
-    navicore = os.path.join(github, "NaviCore")
+    navicore = os.path.normpath(os.path.abspath(source)) if source else os.path.join(github, "NaviCore")
     if not os.path.isfile(os.path.join(navicore, SKETCH)):
         raise BuildError(f"no {SKETCH} in {navicore}")
     try:
@@ -450,9 +481,14 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
         lock.acquire(wait_s=1.0)
     except RunBusy:
         raise BuildError("another NaviCore build is running (results/builds/.ncflash-build.lock)") from None
+    stage = None
     try:
         before = tree_state(navicore)
-        argv = compile_argv(out, navicore, hooks, jobs, cli)
+        sketch_dir = navicore
+        if os.path.basename(navicore) != "NaviCore":
+            stage = tempfile.mkdtemp(prefix="ncflash-src-")
+            sketch_dir = stage_sketch(navicore, stage)
+        argv = compile_argv(out, sketch_dir, hooks, jobs, cli)
         started = datetime.now().astimezone()
         try:
             rc, stdout, stderr, secs = _run_cli(argv, low_priority, timeout_s)
@@ -460,6 +496,8 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
             raise BuildError(f"the compile of {tag} ran past {timeout_s} s and was stopped") from None
         after = tree_state(navicore)
     finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)    # a plain copy (stage_sketch), never a link to the source
         lock.release()
     try:
         doc = json.loads(stdout)
@@ -503,7 +541,7 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
     manifest = {
         "tag": tag, "folder": out, "built": started.isoformat(timespec="seconds"), "secs": round(secs),
         "fqbn": FQBN, "hooks": bool(hooks), "hooks_in_source": hooks_src, "core": f"{CORE_ID}@{CORE_VERSION}",
-        "arduino_cli": cli, "jobs": jobs, "navicore": before,
+        "arduino_cli": cli, "jobs": jobs, "navicore": before, "staged": bool(stage),
         "libraries": {lib: {k: r.get(k) for k in ("same", "eol_only", "differ", "only_sketchbook", "only_repo",
                                                   "missing", "sketchbook", "repo", "version", "repo_state")}
                       for lib, r in libs.items()},
@@ -1393,11 +1431,14 @@ def main(argv=None):
             pass
     ap = argparse.ArgumentParser(prog="python -m hil.ncflash", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build", help="compile NaviCore's working tree into results/builds/navicore-<tag>")
+    b = sub.add_parser("build", help="compile NaviCore's working tree (or --source's) into "
+                                     "results/builds/navicore-<tag>")
     b.add_argument("tag")
     b.add_argument("--hooks", action="store_true", help="-DNAVICORE_HIL_HOOKS=1 (INF9)")
     b.add_argument("--allow-drift", action="store_true", help="build although the sketchbook's libraries differ")
     b.add_argument("--rebuild", action="store_true", help="recompile a folder that already holds a build")
+    b.add_argument("--source", default=None, help="the NaviCore tree to compile, a checkout or a git worktree of one "
+                   "(default: the NaviCore folder beside this repo)")
     sub.add_parser("check", help="check an image without a board").add_argument("image")
     sub.add_parser("libs", help="the sketchbook's WCB_Client and WcbCmd against their repos")
     st = sub.add_parser("status", help="PING and ?OTALOCAL,STATUS (read-only)")
@@ -1414,7 +1455,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         if args.cmd == "build":
-            print(json.dumps(build(args.tag, args.hooks, allow_drift=args.allow_drift, rebuild=args.rebuild), indent=2))
+            print(json.dumps(build(args.tag, args.hooks, allow_drift=args.allow_drift, rebuild=args.rebuild,
+                                   source=args.source), indent=2))
             return 0
         if args.cmd == "check":
             info = check_image(args.image)
