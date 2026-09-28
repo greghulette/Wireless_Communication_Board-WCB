@@ -1304,12 +1304,15 @@ def t_redaction_free_text(tmp):
                  "ESP-NOW Password: hunter2", 'got {"e":"cfg","wifiNets":[{"s":"DomeNet","p":"sekrit99"}]}',
                  "last lines:\n    ?epass,hunter2\n    !WIFI,JOIN,DomeNet,sekrit99",
                  "last lines:\n    [SBUS] AP mode  SSID: SBUSCtrl  Pass: sekrit99",
+                 "last lines:\n    ESP-NOW password updated to: hunter2", "ESP-NOW Password updated to: x hunter2",
+                 "last lines:\n    Password: DomeNet sekrit99\n    ;S0marker",
                  "probe2: 'MESH JOIN ID=11 OCT2=AB OCT3=CD QTY=9 CHAN=1 CHK=1 TEMP=1 TYPE=HILProbe PASS=hunter2' -> "
                  "ERR already joined"):
         assert not any(s in rt(text) for s in SECRETS), rt(text)
     assert "extra ['?EPASS,<redacted:" in rt("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']")
     assert rt("AP password   : set") == "AP password   : set" and rt("?WIFI,OFF") == "?WIFI,OFF"
     assert rt("PASS: 3, FAIL: 0") == "PASS: 3, FAIL: 0", "a status count is not a password"
+    assert rt("Password: a b\n;S0next").endswith("\n;S0next"), "the value stops at the end of its line"
     assert rt("MESH JOIN ... PASS=<pw>") == "MESH JOIN ... PASS=<pw>", "the usage text is left alone"
     # F13: a config part line in a tail - its secrets sit whole in part 1, where the token prefixes still find them
     part = "[MGMT:CFGPART,2]P1A2B,1,2:[VER:6.3.0]?HW,24^?WCB,2^?WIFI,AP,DomeNet,sekrit99^?EPASS,hunter2^?SEQ,SAVE,K,z~"

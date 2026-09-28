@@ -189,11 +189,15 @@ Host: `tests/config_parts_test.cpp`. Wizard: `tests/wizard/unit/pull.test.js`, t
 `wizard.remote_pull_fake_legacy_crc`) and `specs/push_fake.spec.js` (`wizard.push_fake_relay_cap`), and
 `wizard.remote_pull`, `wizard.remote_pull_parts` on the bench. HIL (`tests/hil/suites/s03_wcb.py`, `s21_navicore_sbus.py`):
 `wcb.pull_size_limit`, `wcb.pull_plain_over_limit`, `wcb.pull_parts_many`, `wcb.pull_error_oom_legacy`,
-`wcb.pull_error_oom_parts`, `wcb.pull_nonblocking`, `navicore.mgmt_pull`, `navicore.pull_over_limit`.
+`wcb.pull_error_oom_parts`, `wcb.pull_nonblocking`, `wcb.pull_holds_restart` (a deferred restart waits for the reply),
+`wcb.pull_changed_restart` (CHANGED), `wcb.pull_dedup_window`, `wcb.pull_park_second_requester` (W1 and NaviCore at
+once), `wcb.pull_knobs` (the `?DEBUG` knobs), `wcb.mgmt_result_too_large`, `wcb.pull_wrong_target`,
+`wcb.pull_session_reaped`, `navicore.mgmt_pull`, `navicore.pull_over_limit`.
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | §9: the WCB-WP25 tests (the restart gate, CHANGED, the dedup window and the parked second requester, the knobs, an oversized result, a wrong target, a reaped session). |
 | 2026-09-24 | _(pending)_ | Created with F13 (`docs/HIL_TEST_AUDIT.md`, tracker #91): configs over 2912 characters are pulled in parts (packet types 18/19, `?MGMT,PULL,<n>,P`, `[MGMT:CFGPART,`), refusals are coded errors (`[MGMT:CFGERR,`), the target's reply is a non-blocking job, relay lines are one write each, and the Wizard serialises pulls per relay. Verified on the bench (W1 relay, W2 target, NaviCore on the old library) and by host, unit and no-board browser tests. |
 | 2026-09-27 | _(pending)_ | Wizard (docs/hil_plan/WCB.md W-7, W-9): a single `[MGMT:CONFIG,<n>]` reply is CRC-checked before it becomes the config and baseline (unpadded 6.0.x CRCs accepted; a failure is retried, a second non-UTF-8 reply stops the pull), and a relay push over 16 chunks is refused before its network-group confirm and character bootstrap (F14, first half). Tests: `unit/pull.test.js`, `wizard.remote_pull_fake_legacy_crc`, `wizard.push_fake_relay_cap`. |

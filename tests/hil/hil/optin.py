@@ -98,9 +98,9 @@ OPT_INS = {
     "nvs_erase": {
         "title": "Erase W1's NVS (attended)",
         "what": "Erases all of W1's settings, checks the factory defaults, then restores every setting from W1's own "
-                "chain and its learned peers: three reboots per test, two tests.",
+                "chain and its learned peers: three reboots per test (four for the LED pin test), three tests.",
         "why": "erases all of W1's settings and restores them from its chain",
-        "estimate_s": 120,
+        "estimate_s": 200,
     },
     "nvs_fill": {
         "title": "Fill W1's NVS with sequences",
