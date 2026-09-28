@@ -2036,7 +2036,7 @@ no label at all). Pasted on the other board, the line re-bauded its Maestro and 
 **Fix.** `kyberTargetBaud()` takes a target's baud from the Maestro table's slot for the same id and host (the rate
 `?KYBER,LOCAL` stored there): a local slot on the same port, or the board's remote slot, which is keyed `(id, 0, wcb)`
 and records no port. It falls back to this board's rate only when no slot matches. The label is `Maestro <id>`, as
-`?KYBER,LOCAL` prints it. The first version (`8c51ca7`) also required the remote slot's port to match, so it always
+`?KYBER,LOCAL` prints it. The first version (`f3e1215`) also required the remote slot's port to match, so it always
 fell back: `kyber.list_setup_line_matches_local` still failed in `20260928-073122` (`M2:W2S1:57600` against
 `?KYBER,LOCAL`'s `:115200`), with the label already right.
 
