@@ -166,4 +166,4 @@ Minimal and indirect. WLED nodes aren't WCBs and don't run our mesh discovery, s
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending)_ | §3 and §4 describe the shipped commands: ID-addressed slots (`?WLED,<id>:W<wcb>S<port>:<baud>`), the two clears, soft ports through 57600, nine slots per board. `?WLED,PORT,CLEAR` never released anything (`wled.clear_all_releases_local` pins it). |
+| 2026-09-28 | `1b8485c` | §3 and §4 describe the shipped commands: ID-addressed slots (`?WLED,<id>:W<wcb>S<port>:<baud>`), the two clears, soft ports through 57600, nine slots per board. `?WLED,PORT,CLEAR` never released anything (`wled.clear_all_releases_local` pins it). |
