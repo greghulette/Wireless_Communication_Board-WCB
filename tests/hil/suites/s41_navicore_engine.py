@@ -731,7 +731,7 @@ def _servo_channel(nc, cfg):
 def maestro_skip_running_slot(bench):
     """maestroSequenceBusy (NaviCore.ino:873-900): a LOCAL slot asks the Maestro (getMovingState on Serial2, cached for
     maeGateMs); a REMOTE slot reads the mesh cache and, when it is stale, broadcasts ';M<dev>,getMovingState'
-    (maestroBroadcastReadVerb, :703-722) and fails open. A channel no passthrough knob drives gets speed 4 (100
+    (maestroBroadcastReadVerb, :703-722) and fails open. A channel no passthrough knob drives gets speed 4 (400
     quarter-us/s, through TEST_ACTION with no gate) and a 400 quarter-us move, about a second: a gated setTarget sent at
     once must be skipped, and one sent after ?MAE,MOVING reads 0 must go (it moves the servo back). The action's own
     '[DISPATCH] Maestro <slot>  <cmd>' line prints before the gate (:2088-2089), so a skip shows as that line followed

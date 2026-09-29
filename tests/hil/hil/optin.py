@@ -106,6 +106,16 @@ OPT_INS = {
         "why": "takes NaviCore off the mesh with a saved invalid deviceId until it is restored over USB; attended only",
         "estimate_s": 60,
     },
+    "navicore_aux_tx": {
+        "title": "NaviCore device bytes on its own ports",
+        "what": "Routes an HCR, MP3 Trigger, DFPlayer or WLED to NaviCore's own S3-S5 for a few seconds and fires their "
+                "actions, and runs #L20/#L21: device-protocol bytes go out J4-J6, where nothing is recorded as attached "
+                "(docs/hil_plan/NAVICORE.md D-NC14, NC-WP7). A NAVICORE_HIL_HOOKS image's DBG_WIRE log is what reads "
+                "them back: no probe is wired to NaviCore.",
+        "why": "sends HCR, MP3 Trigger, DFPlayer and WLED bytes out NaviCore's own serial ports, where nothing records "
+               "what is attached",
+        "estimate_s": 30,
+    },
     "navicore_fault": {
         "title": "NaviCore fault hooks (hook build)",
         "what": "Uses the NAVICORE_HIL_HOOKS fault verbs (#L91-#L93: a corrupted /config.json, an overflowing "
