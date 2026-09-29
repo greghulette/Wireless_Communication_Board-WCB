@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | Full run `20260928-161745` triaged (768 pass, 28 fail, 7 skip): **#105** (a Kyber bridge task read a soft port while ?BAUD re-began it: W1 panicked) and **#106** (a stale RX-overflow claim on an OTA drop line) filed and FIXED (unverified) with **#104** (`WiFi.persistent(false)`); **#107** (the RTERM mirror loses lines of a long burst) filed. |
 | 2026-09-28 | Wave 3 group 2 on `6.2.1_280758RSEP2026` (`20260928-160300`): 17 pass. Filed **#102** (a mesh-send flood exhausts the heap and W1 aborts, `etm.seq_wrap`), **#103** (JOIN mode drops mesh unicasts while looking for an absent network; no loss or rejoin reported) and **#104** (`nvs.net80211` grows with every JOIN `WiFi.begin`). |
 | 2026-09-28 | **#101 VERIFIED** (`20260928-080619`). The s12/s13/s16/s17 tests on `6.2.1_280758RSEP2026`: 16 pass in `20260928-080156`, two ERRORs from a missing `nonce` import in s12 (an agent cannot run its tests), fixed and passing. |
 | 2026-09-28 | **#101 filed and FIXED (unverified)**, found by the WCB-WP32 test writer: a USB line the heap could not hold ran its head alone, unverified (D39). |
@@ -2163,7 +2164,7 @@ driver's connect attempt still leaves the channel when the pinned one has no suc
 
 | | |
 |---|---|
-| **Status** | TODO - low |
+| **Status** | FIXED (unverified) - `WiFi.persistent(false)` before the first `WiFi.mode` in `setup()` (D47) |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
 | **Effort** | S |
 | **Tests** | the per-run `?NVS` record |
@@ -2175,3 +2176,60 @@ entries used) during the JOIN tests, with every config guard passing.
 **Cause.** The firmware keeps its own WiFi settings (`saveWifiSettings`) but never calls `WiFi.persistent(false)`, so the
 Arduino core's default makes each `WiFi.begin` store the config again in the driver's `nvs.net80211`; the JOIN retry
 calls it every 5 s while it looks. **Fix (proposed).** `WiFi.persistent(false)` before the first `WiFi.mode`/`begin`.
+
+#### 105. A Kyber bridge task read a soft port while ?BAUD re-began it (LoadProhibited panic)
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - D47 |
+| **Owner** | `WCB_firmware` (`WCB.ino`) |
+| **Effort** | S |
+| **Tests** | `maestro.get_off_s1_ports` (it re-bauds S3 while W1 is Maestro_Remote) |
+| **Subsystem** | soft serial / Kyber |
+
+**Evidence (full run 20260928-161745, `6.2.1_280758RSEP2026`).** W1 panicked in `maestro.get_off_s1_ports`: `Guru
+Meditation Error: Core 1 panic'ed (LoadProhibited)`, `EXCVADDR 0x0000000c`. Decoded against the flashed ELF:
+`KyberRemoteTask` <- `forwardMaestroDataToRemoteKyber` (`WCB.ino`) <- `WcbSoftSerial::available` <-
+`EspSoftwareSerial::UARTBase::rxBits` <- the receive queue's `for_each` on a NULL queue.
+
+**Cause.** `applyLiveBaud` sets `serialReconfigPort`, waits 12 ms, then `end()`s and re-`begin()`s the soft port, freeing
+its receive queue. `serialCommandTask`, `RawSerialForwardingTask` and the mesh-out queue skip that port meanwhile; the
+three Kyber bridge drains (`forwardDataFromKyber`, `forwardMaestroDataToLocalKyber`, `forwardMaestroDataToRemoteKyber`,
+run every 1 ms) did not, so a local Maestro on S3-S5 being re-bauded was read through a freed queue.
+
+**Fix.** The three drains skip a port while `serialReconfigPort` names it, and check again inside their drain loops.
+
+#### 106. A dropped OTA relay line blamed an RX overflow that happened long before
+
+| | |
+|---|---|
+| **Status** | FIXED (unverified) - D47 |
+| **Owner** | `WCB_firmware` (`WCB.ino`, `WCB_OTA.cpp`) |
+| **Effort** | S |
+| **Tests** | `ota.local_sha_corrupt_full`, `ota.local_full_same_image_wcb1` (opt-in `ota_full`) after `stats.usb_rx_overflow_line` |
+| **Subsystem** | OTA diagnostics |
+
+**Evidence (full run 20260928-161745).** Both full-image USB OTA tests failed on `[OTA] relay DATA @0 DROPPED: crc
+0BC0B3E6 != DEADBEEF (b64 4 chars) — serial RX HAS OVERFLOWED, this is the cause`: the test's own bad-CRC probe, correctly
+dropped, blamed on an overflow `stats.usb_rx_overflow_line` had caused on purpose earlier. Both passed in every earlier
+full run.
+
+**Cause.** `serialRxOverflows` counts since boot; the relay DATA handler named any non-zero count as the cause.
+
+**Fix.** The UART error hook also stamps `serialRxOverflowLastMs`, and the drop line names an overflow only if one
+happened in the last 2 s (a DATA line arrives in milliseconds).
+
+#### 107. The RTERM mirror loses lines of a long burst (?backup)
+
+| | |
+|---|---|
+| **Status** | TODO - investigate |
+| **Owner** | `WCB_firmware` (`WCB_RemoteTerm.cpp`) |
+| **Effort** | M |
+| **Tests** | `mesh.rterm_long_output` |
+| **Subsystem** | remote terminal |
+
+**Evidence (full run 20260928-161745).** A W2 -> W1 mirror of `?backup` lost 10 of 69 lines (#40 `?VAR,SET,...` on);
+the same test passed whole in `20260928-064402`. **Suspected cause** (the test writer's reading): the relay's 16-deep
+queue drops when full, and the target never checks `esp_now_send`'s result, so a burst of long lines outruns it with no
+back-pressure. Needs a look at the queue and a counted drop.

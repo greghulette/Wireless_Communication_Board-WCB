@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_280758RSEP2026                                  *****////
+///*****                                          Version 6.2.1_282006RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -197,7 +197,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_280758RSEP2026";
+String SoftwareVersion = "6.2.1_282006RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -968,6 +968,9 @@ void identifyTask(void *parameter) {
 // SHA-256 at 100%. Counted here so it stops being invisible; see the OTA relay
 // DATA handler in WCB_OTA.cpp, which reports it alongside a CRC rejection.
 volatile uint32_t serialRxOverflows = 0;
+// When the last one happened: the OTA drop line names an overflow as the cause only if it is recent. The count is
+// cumulative since boot, so one test's deliberate overflow made every later CRC drop claim it (tracker #106).
+volatile uint32_t serialRxOverflowLastMs = 0;
 
 // CRC32 calculation for verification: reflected CRC-32, poly 0xEDB88320, init and final XOR 0xFFFFFFFF.
 // crc32Update() is the running form, for data that is never held in one buffer - the ?backup chains are
@@ -2446,10 +2449,12 @@ static void applySoftSerialIntTx(int port) {
 // Set to the port number while that port is being torn down and re-begun below. Every task that
 // drains a serial port checks this and skips the port for the duration.
 //
-// Without it, SoftwareSerial::end() frees the RX buffer while serialCommandTask (5 ms poll) or
-// RawSerialForwardingTask is inside available()/read() on the same object — a read against a
-// freed buffer. This is reachable from an ordinary ?BAUD,Sx change and from any config push that
-// alters a baud rate; it needs no raw mapping.
+// Without it, SoftwareSerial::end() frees the RX buffer while serialCommandTask (5 ms poll),
+// RawSerialForwardingTask or a Kyber bridge task (KyberLocalTask / KyberRemoteTask, 1 ms) is inside
+// available()/read() on the same object — a read against a freed buffer. This is reachable from an
+// ordinary ?BAUD,Sx change and from any config push that alters a baud rate; it needs no raw mapping.
+// The Kyber drains did not check it until tracker #105: KyberRemoteTask read S3's freed queue while
+// ?BAUD re-began it (a LoadProhibited panic in rxBits, HIL maestro.get_off_s1_ports).
 volatile int serialReconfigPort = 0;
 
 void applyLiveBaud(int port, uint32_t baud) {
@@ -5804,6 +5809,7 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
 //*******************************
 void forwardDataFromKyber() {
   if (kyberLocalPort == 0) return;  // Kyber port not configured
+  if (kyberLocalPort == serialReconfigPort) return;   // being torn down and re-begun (applyLiveBaud, tracker #105)
 
   // Drain the entire RX buffer in one pass.
   // Local UART targets get each byte immediately (hardware handles it).
@@ -5830,6 +5836,7 @@ void forwardDataFromKyber() {
   }
 
   while (kyberSerial.available() > 0) {
+    if (kyberLocalPort == serialReconfigPort) break;   // applyLiveBaud began tearing it down mid-drain
     uint8_t b = (uint8_t)kyberSerial.read();
 
     if (kyberUseTargeting) {
@@ -5901,6 +5908,7 @@ void forwardDataFromKyber() {
 
 void forwardMaestroDataToLocalKyber() {
   if (kyberLocalPort == 0) return;  // Kyber port not configured
+  if (kyberLocalPort == serialReconfigPort) return;   // being torn down and re-begun (applyLiveBaud, tracker #105)
   Stream &kyberSerial = getSerialStream(kyberLocalPort);
 
   static uint8_t remoteBuf[64];
@@ -5910,9 +5918,11 @@ void forwardMaestroDataToLocalKyber() {
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
     if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
+    if (maestroConfigs[i].serialPort == serialReconfigPort) continue; // being torn down and re-begun (tracker #105)
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
       if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
+      if (maestroConfigs[i].serialPort == serialReconfigPort) break; // applyLiveBaud began tearing it down
       uint8_t b = (uint8_t)maestroSerial.read();
       kyberSerial.write(b);
       if (Maestro_Remote && remoteLen < (int)sizeof(remoteBuf)) remoteBuf[remoteLen++] = b;
@@ -5937,9 +5947,11 @@ void forwardMaestroDataToRemoteKyber() {
   for (int i = 0; i < MAX_MAESTROS_PER_WCB; i++) {
     if (!maestroConfigs[i].configured || maestroConfigs[i].remoteWCB != 0 || maestroConfigs[i].serialPort == 0) continue;
     if (maestroConfigs[i].serialPort == maestroQueryPort) continue;   // a get-query owns this port's reply bytes
+    if (maestroConfigs[i].serialPort == serialReconfigPort) continue; // being torn down and re-begun (tracker #105)
     Stream &maestroSerial = getSerialStream(maestroConfigs[i].serialPort);
     while (maestroSerial.available() > 0) {
       if (maestroConfigs[i].serialPort == maestroQueryPort) break;   // a get-query claimed this port mid-drain
+      if (maestroConfigs[i].serialPort == serialReconfigPort) break; // applyLiveBaud began tearing it down
       uint8_t b = (uint8_t)maestroSerial.read();
       // FLUSH a full buffer and keep going, rather than reading the byte and throwing it away.
       // The old `if (remoteLen < sizeof(remoteBuf))` consumed bytes past 64 and discarded them,
@@ -9331,7 +9343,7 @@ void setup() {
   // Count RX overflows instead of losing them silently. Runs on the UART event
   // task, so it does NOTHING but increment — no Serial output, no allocation.
   Serial.onReceiveError([](hardwareSerial_error_t e) {
-    if (e == UART_BUFFER_FULL_ERROR || e == UART_FIFO_OVF_ERROR) serialRxOverflows++;
+    if (e == UART_BUFFER_FULL_ERROR || e == UART_FIFO_OVF_ERROR) { serialRxOverflows++; serialRxOverflowLastMs = millis(); }
   });
   delay(1000);  // allow USB to stabilize
   while (Serial.available()) Serial.read();  // 🔥 flush startup junk
@@ -9545,6 +9557,10 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
       Serial.println("Serial5 reserved for PWM - skipping UART init");
   }
   // Initialize Wi-Fi
+  // The firmware keeps its own WiFi settings (saveWifiSettings) and applies them at every boot, so the driver's copy is
+  // never read; persistent by default, every WiFi.begin/softAP stored it again in nvs.net80211 (the JOIN retry every
+  // 5 s: W1 grew 36 -> 95 entries in one test run, tracker #104).
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   // ESP-NOW needs the radio awake to hear the MAC-layer ACK that arrives a few
   // microseconds after every unicast TX. The Arduino/IDF default in STA mode with

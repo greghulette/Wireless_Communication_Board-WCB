@@ -16,6 +16,7 @@ extern uint8_t WCBMacAddresses[MAX_WCB_COUNT][6]; // P2: per-WCB MAC table
 extern void    otaRelayPrint(const char *line);  // defer relay-ACK Serial output to loop() (cross-core safe)
 extern uint32_t calculateCRC32(const String &data);   // WCB.ino — reflected CRC-32, poly 0xEDB88320
 extern volatile uint32_t serialRxOverflows;           // WCB.ino — UART RX overflow count
+extern volatile uint32_t serialRxOverflowLastMs;      // WCB.ino — millis() of the last one
 extern void    configPullJobAbort(const char *why);  // WCB.ino — frees a running mesh config pull (F13)
 
 // Struct sizes feed the size-based ESP-NOW router in WCB.ino — they MUST stay
@@ -549,10 +550,13 @@ void processOtaRelayCommand(const String &args) {
       const uint32_t want = (uint32_t)strtoul(crcHex.c_str(), nullptr, 16);
       const uint32_t have = calculateCRC32(offField + "," + b64);
       if (want != have) {
+        // Blame an overflow only if one happened while this line could have been arriving (a DATA line takes
+        // milliseconds): the count is cumulative since boot (tracker #106).
+        const bool rxOverflowNow = serialRxOverflows && (uint32_t)(millis() - serialRxOverflowLastMs) < 2000;
         Serial.printf("[OTA] relay DATA @%lu DROPPED: crc %08X != %08X (b64 %u chars)%s\n",
                       (unsigned long)offset, (unsigned)have, (unsigned)want,
                       (unsigned)b64.length(),
-                      serialRxOverflows ? " — serial RX HAS OVERFLOWED, this is the cause" : "");
+                      rxOverflowNow ? " — serial RX HAS OVERFLOWED, this is the cause" : "");
         return;   // sender rewinds to the target's stalled cursor and resends
       }
     } else {
