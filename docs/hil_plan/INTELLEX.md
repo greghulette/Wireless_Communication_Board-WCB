@@ -510,7 +510,7 @@ Never run `.venv\Scripts\esptool.exe` or `pip.exe` (finding 6). Always use `pyth
   - The preflight looks for `Intellex.exe`, and for a Python process running `src/app.py` or `src/host.py`. If one is
     running, it **skips** with a message and never kills anything.
   - This matters beyond the COM port: an Intellex session attached to NaviCore's AP made NaviCore re-arm `?RTERM` on
-    W1 once a second, which blocked W1's deferred reboots (F21, `docs/HIL_TEST_AUDIT.md:493-503`).
+    W1 once a second, which blocked W1's deferred reboots (F21, `docs/HIL_TEST_AUDIT.md:506-512`).
 - **Specs never receive, log or compare a credential.**
   - NaviCore's `GET_CONFIG` carries `wifiPassword` in clear (`NaviCore/rc_config.h:1224-1226`). Config pulls carry
     the mesh password.
@@ -946,13 +946,13 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 
 | Test id | Mode | Checks |
 |---|---|---|
-| `intellex.wifi_discover` | opt-in `navicore_wifi` | `discover.scan(['192.168.4.1'])`: kind `navicore`, a version equal to the PONG, and `via` on 192.168.4.x. `ssid_for_host()` names NaviCore's network (compared by SHA-256). `/_api/discover?hosts=192.168.4.1` gives the same. |
+| `intellex.wifi_discover` | opt-in `navicore_wifi` | `discover.scan(['192.168.4.1'])`: kind `navicore`, a version equal to the PONG, and `via` on 192.168.4.x. `ssid_for_host()` names NaviCore's network (compared by SHA-256). `/_api/discover?hosts=192.168.4.1` gives the same, and a bare `/_api/discover` under the leash's empty host list probes nothing. |
 | `intellex.wifi_nc_tool` | opt-in `navicore_wifi` | Attach `{kind:ws, host:192.168.4.1, role:navicore}`. The label reads `· WiFi 192.168.4.1 ▾`. The OTA button reads `Update over WiFi (OTA)` with the WiFi title. The flash buttons are disabled with the not-USB message. `POST /_api/flash` gets the USB 409. |
 | `intellex.wifi_wizard_via_navicore` | opt-in `navicore_wifi`; `config_guard` on every WCB; `?RTERM,STOP` on every WCB in `finally` | The Wizard through NaviCore as its doorway: a relay card at 20, or the plain-board route, and baselines for W1 and W2. This answers "still to verify on hardware" (`docs/WCB_WIZARD.md:321-323`). |
-| `intellex.wifi_rterm_rate` | opt-in `navicore_wifi` | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:499`). Count `RTERM,START` arrivals on W1's USB console for 60 s while the Wizard is attached through NaviCore. Record the rate, and fail above an agreed bound (DX10). |
+| `intellex.wifi_rterm_rate` | opt-in `navicore_wifi` | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:506-512`). Once the Wizard has pulled every WCB through NaviCore, count the `?RTERM,START,<NaviCore>` session starts on each WCB's own USB console for 60 s, beside the re-arms the page wrote. Record the rate, and fail any WCB above 6 (DX10, DX42). |
 | `intellex.wifi_link_loss` | opt-in `intellex_reboot` | NaviCore `REBOOT` through the link. The host notices within 15 s. The log has **no** `re-associating` line (`--no-auto-bounce`). It reattaches once the AP is back, and the pages see a PONG again. |
 | `intellex.wifi_ap_hop_reidentify` | attended, opt-in `intellex_wifi_join` | While attached, move Wi-Fi 2 from NaviCore's AP to W1's (a temporary `HIL-` profile, as in `s28_wifi.py:254-351`). `/_api/status` flips from role `navicore` to `wcb` with `relayId` 1, and the log shows that **before** the attach (rule 10). The NaviCore tool goes to Via WCB. Then move back. |
-| `intellex.wifi_bounce_scoped` | attended, opt-in `intellex_wifi_join` | `discover.wifi_bounce('NaviCore')` bounces only Wi-Fi 2, and "Wi-Fi" stays connected throughout. |
+| `intellex.wifi_bounce_scoped` | attended, opt-in `intellex_wifi_join` | `discover.wifi_bounce(<NaviCore's SSID>)` (the name in the script's environment only) bounces only Wi-Fi 2. "Wi-Fi" stays connected in every sample the harness takes while it runs, and its default route stays. Wi-Fi 2 ends back on NaviCore's network with a lease. |
 
 | | |
 |---|---|
