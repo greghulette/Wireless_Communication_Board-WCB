@@ -2165,6 +2165,8 @@ GATED = {
                                                            "and switches its boot slot twice (~25 min)"),
     "ncota.relay_full_to_w2": ("ota_full_wcb2", "erases and rewrites W2's inactive app slot and switches its boot slot "
                                                 "twice"),
+    # NC-WP6 (suites/s43_navicore_mesh.py), 2026-09-28
+    "ncmesh.wdp_learn_forget": ("navicore_nvs", "writes NaviCore's learned-peer list to its NVS four times"),
 }
 
 
@@ -7117,6 +7119,587 @@ def t_ncboot_mutations(tmp):
             assert model.restarts == [], f"a clamped boardType still restarted NaviCore: {model.restarts}"
 
 
+# ---------------------------------------------------------------------------- NC-WP6: NaviCore on the mesh (s43)
+def t_ncmesh_protocol_helpers(tmp):
+    """hil/ncmesh.py's ports of what NaviCore prints and advertises, against cases worked from the firmware: wdp_scrub
+    (WCB_Mgmt.h:169-174) and json_strip (rc_telemetry.h:340-346); rterm_pieces against CaptureSink's byte-wise wrap
+    (navicore_rterm.h:48-62) - 159, 160, 161 and 320 bytes, an empty line, a two-byte character across the cut;
+    port_labels against NaviModel.labels (NC-WP1's port of rcSerialLabel) on the bench config and on one with a user
+    label, a serial HCR and DFPlayer and a Maestro label, then the WLED rule and the 24-character cap; local_maestro_ids'
+    dedup; status_rows on a USB, a bridged positional and a sparse reply; stats_rows leaving out 'Reported by Other
+    Nodes'; bulk_frames' sizes, key order, base64 round trip, hash override and refusals."""
+    import base64 as b64
+    from hil import ncmesh as M
+    from hil.navicore import fnv1a32
+    assert M.wdp_scrub("a,b]c\x01d") == "a_b_c_d"
+    assert M.json_strip('a"b\\c\x02d') == "abcd"
+    for n, want in ((159, [159]), (160, [160]), (161, [160, 1]), (320, [160, 160]), (0, [])):
+        got = M.rterm_pieces(["x" * n])
+        assert [len(p.encode()) for p in got] == want, (n, [len(p) for p in got])
+    assert M.rterm_pieces(["a", "", "b\r\n"]) == ["a", "b"]
+    cut = M.rterm_pieces(["x" * 159 + "é" + "y"])      # the 2-byte e-acute straddles byte 160
+    assert len(cut) == 2 and cut[0].startswith("x" * 159) and cut[0].endswith("�") and cut[1] == "�y", cut
+    m = NaviModel()
+    cfg = json.loads(m.text())
+    assert M.port_labels(cfg) == m.labels() == {4: "Maestro"}, (M.port_labels(cfg), m.labels())
+    m.merge({"serialLabels": {"S4": "Dome lights", "maestro": "Dome"}, "hcrDest": {"transport": "serial", "port": "S3"},
+             "dfpDest": {"transport": "serial", "port": "S5"}})
+    cfg = json.loads(m.text())
+    assert M.port_labels(cfg) == m.labels() == {1: "HCR", 2: "Dome lights", 3: "DFPlayer", 4: "Dome"}, \
+        (M.port_labels(cfg), m.labels())
+    cfg["dfpDest"] = {"transport": "off", "port": "S5"}
+    cfg["wledSlots"] = [{"id": 2, "port": 5, "wcb": 0, "configured": True}]
+    cfg["serialLabels"] = {"S4": "L" * 30}
+    assert M.port_labels(cfg) == {1: "HCR", 2: "L" * 24, 3: "WLED", 4: "Maestro"}, M.port_labels(cfg)
+    assert M.local_maestro_ids({"maestros": [{"type": 1, "device": 1}, {"type": 2, "device": 2}, {"type": 1, "device": 1},
+                                             {"type": 1, "device": 5}]}) == [1, 5]
+    assert M.local_maestro_ids({}) == []
+    usb = {"online": [1, 0, 1], "known": [1, 1, 1], "clients": [0, 0, 1], "temporary": [0, 0, 1], "aliases": ["A", "", ""],
+           "portLabels": [["x", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""]], "seqHash": [5, 0, 0]}
+    r = M.status_rows(usb)
+    assert r[1] == {"online": 1, "known": 1, "client": 0, "temporary": 0, "alias": "A",
+                    "labels": ["x", "", "", "", ""], "seq": 5} and r[3]["temporary"] == 1, r
+    r = M.status_rows({"sys": 1, "type": "WCB_STATUS", "relay": 1, "online": [1, 1], "known": [1, 1], "clients": [0, 0]})
+    assert r[2] == {"online": 1, "known": 1, "client": 0, "temporary": None, "alias": None, "labels": None,
+                    "seq": None}, r
+    r = M.status_rows({"rows": [[1, 1, 0, 0], [16, 1, 1, 1]]})
+    assert set(r) == {1, 16} and (r[16]["client"], r[16]["temporary"], r[16]["alias"]) == (1, 1, None), r
+    text = ["--- WCB2 ESP-NOW Statistics (Since Last Reboot) ---",
+            "--------------- ETM Per-Board Statistics ---------------",
+            "WCB1: Sent: 5, ACKd: 5, Retries: 0, Failed: 0, Online (last seen 2s ago)",
+            "WCB20 (special): Sent: 1, ACKd: 1, Retries: 0, Failed: 0, OFFLINE",
+            "------------- Reported by Other Nodes -------------",
+            "WCB20: Sent: 9, ACKd: 9, Retries: 0, Failed: 0, Unguaranteed: 0, Bcast: 3, Recv: 4  (7s ago)"]
+    assert M.stats_rows(text) == {1: "Online", 20: "OFFLINE"}, M.stats_rows(text)
+    data = bytes(range(256)) * 2 + b"tail"                  # 516 bytes: 6 chunks, the last 36
+    begin, parts, done = M.bulk_frames(data, 4242)
+    assert begin.startswith('{"bb":4242,') and json.loads(begin) == {"bb": 4242, "n": 6, "t": 516, "h": fnv1a32(data),
+                                                                      "g": "cmdlib"}, begin
+    assert len(parts) == 6 and all(p.startswith('{"bc":4242,') for p in parts), parts[:1]
+    assert b"".join(b64.b64decode(json.loads(p)["s"]) for p in parts) == data
+    assert [json.loads(p)["q"] for p in parts] == list(range(6)) and max(len(p) for p in parts) <= M.ENV_MAX_BYTES - 12
+    assert done(2) == '{"bd":4242,"r":2}'
+    assert json.loads(M.bulk_frames("x" * 96, 1, hash_=7)[0]) == {"bb": 1, "n": 1, "t": 96, "h": 7, "g": "cmdlib"}
+    for bad in ((b"", 1), (b"x", 0), (b"x", 65536), (b"x" * (96 * 512 + 1), 1)):
+        try:
+            M.bulk_frames(*bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"bulk_frames accepted {len(bad[0])} bytes / sid {bad[1]}")
+
+
+def _nmm_strip(text):
+    return "".join(c for c in text if c not in '"\\' and ord(c) >= 0x20)
+
+
+def _nmm_bracket_value(text):
+    """The JSON object or array after '"data":' up to its matching bracket, as NaviCore's USB SET_CMDLIB takes it
+    (NaviCore.ino:3902-3935), or ""."""
+    k = text.find('"data":')
+    s = k + 7
+    while 0 <= k and s < len(text) and text[s].isspace():
+        s += 1
+    if k < 0 or s >= len(text) or text[s] not in "{[":
+        return ""
+    close, depth, in_str, esc = "}" if text[s] == "{" else "]", 0, False, False
+    for i in range(s, len(text)):
+        ch = text[i]
+        if esc:
+            esc = False
+        elif in_str:
+            esc, in_str = ch == "\\", ch != '"'
+        elif ch == '"':
+            in_str = True
+        elif ch == text[s]:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return text[s:i + 1].strip()
+    return ""
+
+
+class NaviMeshModel(NaviModel):
+    """NaviCore's mesh side for the s43 suite, on NaviModel's USB console: the JSON bridge and its fragment layer
+    (rc_telemetry.h handle() :2032-2460, the pool :160-227, _applyReassembled :1097-1237, the parked RESET_DEFAULTS and
+    WCB_SEND :1512-1546), the String- and file-backed fragment senders paced 150 ms (:557-733, :946-970), GET_WCB_META
+    (:1986-2030), the bulk sink (WCB_Client.cpp:959-1172, rc_telemetry.h:775-860), the remote terminal (onWCBCommand
+    NaviCore.ino:3025-3126, drainRemoteCli :5010-5024, CaptureSink navicore_rterm.h:48-86 with its byte-wise 160 wrap), and
+    W1's side of it: the 20 s relay window any ';W20,{' opens (WCB.ino:7964-7966), the relay it gates (:5468-5475), the
+    [TERM:20] lines it prints and drops when empty (WCB_RemoteTerm.cpp:176-205). W1's S2 is a byte buffer that ';S2'
+    writes land in; W2 is a console that stores and reads back sequences. As today's firmware: a bridged WCB_SEND answers
+    ok:true whatever the send did and a fragmented one is dropped (D-NC27), the strip leaves wifiEnabled (D-NC18),
+    RESET_DEFAULTS resets the identity too (D-NC16) and the RTERM reply uses the RAM password (D-NC17), and a sequence
+    value loses its quotes (D-NC46). `mut` fixes each finding, or breaks one behaviour a test exists to catch."""
+    ALIASES = ("Body", "Dome")
+    PORT_LABELS = (["", "Maestro S2", "", "", "Kyber"], ["HCR", "", "WLED 1", "", ""])
+    SEQHASH = (0x1234ABCD, 0x0BADF00D)
+
+    def __init__(self, mut=()):
+        super().__init__()
+        self.mut = set(mut)
+        self.w1s2 = bytearray()
+        self.window_until = 0.0
+        self.pool = []
+        self.next_sid = 1
+        self.w2_seqs = {}
+        self.rx = {}
+        self.bulk = None
+        self.w2 = None
+
+    # ------------------------------------------------------------ plumbing
+    def _later(self, delay, fn, *args):
+        t = threading.Timer(delay, fn, args)
+        t.daemon = True
+        t.start()
+
+    def relay(self, line):
+        """W1 prints a JSON line from the mesh only inside its relay window."""
+        if time.monotonic() < self.window_until:
+            self.w1._append(line)
+
+    def to_sender(self, sender, obj):
+        text = obj if isinstance(obj, str) else json.dumps(obj, separators=(",", ":"))
+        if sender == 1:
+            self.relay(text)
+
+    def w1_command(self, cmd):
+        """What W1 does with a command NaviCore sent it: only ';S2<text>' is modelled (its S2 probe wire)."""
+        if cmd.upper().startswith(";S2"):
+            self.w1s2 += (cmd[3:] + "\r").encode()
+
+    def dispatch(self, a):
+        out = super().dispatch(a)
+        if a["type"] == "wcb_unicast" and a["target"] == "1":
+            self.w1_command(a["cmd"])
+        return out
+
+    # ------------------------------------------------------------ W1 and W2
+    def w1_script(self, text, n):
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        if text == "?WDP,DUMP":
+            return NaviModel.w1_script(self, text, n)
+        m = re.match(r"^;W20,(.*)$", text, re.S)
+        if not m:
+            return []
+        body = m.group(1)
+        if body.startswith("{"):
+            self.window_until = time.monotonic() + 20.0
+        self.mesh(1, body)
+        return []
+
+    def w2_script(self, text, n):
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        m = re.match(r"^\?SEQ,SAVE,([^,]+),(.*)$", text)
+        if m:
+            self.w2_seqs[m.group(1)] = m.group(2)
+            return [f"Stored: Key='{m.group(1)}' ({len(m.group(2))} chars)"]
+        m = re.match(r"^\?SEQ,GET,(.+)$", text)
+        if m:
+            k = m.group(1)
+            return [f"[MGMT:SEQVAL,2]{k},OK,{self.w2_seqs[k]}" if k in self.w2_seqs else f"[MGMT:SEQVAL,2]{k},NOTFOUND,"]
+        return []
+
+    # ------------------------------------------------------------ NaviCore's USB, where the mesh model needs more
+    def roster(self):
+        return {"quantity": 1, "self": 20, "online": [1, 1], "known": [1, 1], "clients": [0, 0], "temporary": [0, 0],
+                "aliases": list(self.ALIASES), "portLabels": [list(x) for x in self.PORT_LABELS],
+                "seqHash": list(self.SEQHASH)}
+
+    def wdp_dump(self):
+        rows = super().wdp_dump()
+        wide = ("[WDP:N=14,CLIENT=1,ALIAS=HILProbe,HW=0,HWREV=wcb_probe-2,FW=wcb_probe-2,CAP=0000,CTRL=0,CAPTAGS="
+                + "hil " * 20 + ",MAESTRO=-,AGE=7,SEEN=1,PEER=0]")
+        return rows[:-2] + [wide, rows[-2], "[WDP:END,count=3]"]
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        t = obj.get("type") if isinstance(obj, dict) else None
+        if t == "GET_WCB_STATUS":
+            return [json.dumps(dict({"type": "WCB_STATUS"}, **self.roster()), separators=(",", ":"))]
+        if t == "WCB_SEND":
+            tgt, cmd = _nm_pick(obj, "target", 0), _nm_pick(obj, "cmd", "")
+            if 1 <= tgt <= 20:
+                if tgt in (1, 2):
+                    if tgt == 1:
+                        self.w1_command(cmd)
+                    return ['{"type":"ACK","ok":true}']
+                return ['{"type":"ACK","ok":false,"msg":"send refused by WCB_Client"}']
+        if t == "GET_WCB_SEQVAL" and _nm_pick(obj, "wcb", 0) == 2 and _nm_pick(obj, "key", ""):
+            key = obj["key"]
+            status, value = (0, self.w2_seqs[key]) if key in self.w2_seqs else (1, "")
+            if "seq_escape" not in self.mut:
+                value = _nmm_strip(value)
+            self.nav.later(0.2, json.dumps({"sys": 1, "type": "WCB_SEQVAL", "ok": True, "wcb": 2, "key": key,
+                                            "status": status, "value": value}, separators=(",", ":")))
+            return []
+        return super().json_line(line)
+
+    # ------------------------------------------------------------ onWCBCommand and the bridge
+    def mesh(self, sender, text):
+        if text.startswith(('{"bb":', '{"bc":', '{"bd":')):
+            self.bulk_in(sender, text)
+            return
+        self.rx[sender] = self.rx.get(sender, 0) + 1
+        if self.handle(sender, text):
+            return
+        if text[:1] in ("?", "#"):
+            self.remote_cli(sender, text[:199])
+            return
+        if self.flags & 0x01:
+            self.nav._append(f"[WCB RX] from WCB{sender}: {text}")
+
+    def remote_cli(self, sender, text):
+        lines = self.hash_cmd(text) if text.startswith("#") else self.cli(text)
+        self.nav._append(*lines)
+        if self.c["wcbNetwork"]["password"] != self.ident["pw"]:
+            return                                    # the RTERM reply carries the RAM password: W1 drops it (D-NC17)
+        for x in lines:
+            data = x.encode("utf-8")
+            if "rterm_no_wrap" in self.mut:
+                chunks = [data] if data else []
+            else:
+                chunks = [data[i:i + 160] for i in range(0, len(data), 160)]
+            for c in chunks:
+                if c:
+                    self.w1._append(f"[TERM:20]{c.decode('utf-8', errors='replace')}")
+
+    def handle(self, sender, text):
+        if not text.startswith("{"):
+            return False
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            return False
+        if not isinstance(doc, dict):
+            return False
+        if "f" in doc and "of" in doc and "sid" in doc:
+            self.fragment(sender, doc)
+            return True
+        t = doc.get("type") if isinstance(doc.get("type"), str) else ""
+        if not t:
+            return False
+        if t.startswith("rc_"):
+            return True
+        if t == "PING":
+            self.to_sender(sender, {"sys": 1, "type": "PONG", "id": 20, "version": self.FW, "model": 0, "mode": self.mode})
+            return True
+        if t in ("START_MONITOR", "STOP_MONITOR", "SET_DEBUG_FLAGS", "CALIB"):
+            return True
+        if t in ("SET_CONFIG", "SET_CMDLIB"):
+            self.nav._append(f"[RC] {t} → deferred to main loop")
+            self.apply(sender, text)
+            return True
+        if t == "TEST_ACTION":
+            self.test_action(sender, text)
+            return True
+        if t == "GET_CMDLIB_META":
+            lib = self.cmdlib or ""
+            self.to_sender(sender, {"sys": 1, "type": "CMDLIB_META", "size": len(lib.encode()),
+                                    "hash": self._fnv(lib) if lib else 0})
+            return True
+        if t == "GET_CMDLIB":
+            lib = self.cmdlib or '{"boards":[],"enums":{}}'
+            self.frag_send(sender, f'{{"type":"CMDLIB","size":{len(lib.encode())},"hash":{self._fnv(lib)},"data":{lib}}}',
+                           "CMDLIB", file_backed=True)
+            return True
+        if t == "GET_WCB_META":
+            r = self.roster()
+            self.frag_send(sender, json.dumps({"sys": 1, "type": "WCB_META", "aliases": r["aliases"],
+                                               "portLabels": r["portLabels"], "seqHash": r["seqHash"]},
+                                              separators=(",", ":")), "WCB_META")
+            return True
+        if t == "WCB_SEND":
+            self.wcb_send(sender, doc)
+            return True
+        if t == "RESET_DEFAULTS":
+            import copy
+            old = copy.deepcopy(self.c)
+            self.c = self.defaults()
+            if "keep_identity" in self.mut:
+                for k in ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword"):
+                    self.c[k] = old[k]
+            fx = [] if "reset_no_effects" in self.mut else (self.side_effects() or [])
+            self.nav._append(*fx, f"[RC] RESET_DEFAULTS from W{sender} → live config reset to factory defaults "
+                                  f"(not persisted)")
+            self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "RESET_DEFAULTS", "ok": True})
+            return True
+        if t in ("REBOOT", "FORGET_PEER", "SET_MODE", "TRIGGER"):
+            raise AssertionError(f"a test sent NaviCore {t} over the mesh")
+        self.nav._append(f"[RC] Unknown inbound type '{t}' from WCB{sender}")
+        return False
+
+    def wcb_send(self, sender, doc):
+        tgt = doc.get("target") if isinstance(doc.get("target"), int) else -1
+        cmd = doc.get("cmd") if isinstance(doc.get("cmd"), str) else ""
+        ok = 0 <= tgt <= 20 and bool(cmd)
+        sent = ok and tgt in (1, 2)                  # the model's peers; anything else esp_now refuses
+        if sent and tgt == 1:
+            self.w1_command(cmd)
+        if "wcb_send_fixed" in self.mut:
+            ok = sent
+        self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "WCB_SEND", "ok": ok})
+
+    def fragment(self, sender, doc):
+        from hil import ncmesh as M
+        f, of, sid = doc.get("f"), doc.get("of"), doc.get("sid")
+        if not all(isinstance(v, int) for v in (f, of, sid)):
+            return
+        if f < 1 or of < 1 or of > 192 or f > of or sid == 0:
+            return
+        now = time.monotonic()
+        self.pool = [p for p in self.pool if p["expire"] > now]
+        sess = next((p for p in self.pool if p["sid"] == sid and p["sender"] == sender), None)
+        if sess is None:
+            if len(self.pool) >= (4 if "pool_4" in self.mut else 3):
+                self.nav._append("[RC] Fragment pool exhausted — dropping")
+                return
+            sess = {"sid": sid, "sender": sender, "total": of, "parts": {}, "expire": now + M.FRAG_TIMEOUT_S}
+            self.pool.append(sess)
+        if of != sess["total"]:
+            return
+        sess["parts"].setdefault(f, doc.get("s") or "")
+        if "no_refresh" not in self.mut:
+            sess["expire"] = now + M.FRAG_TIMEOUT_S
+        if len(sess["parts"]) >= sess["total"]:
+            full = "".join(sess["parts"][k] for k in range(1, sess["total"] + 1))
+            self.pool.remove(sess)
+            self.nav._append(f"[RC] frag sid={sid} COMPLETE, deferring {len(full.encode())} bytes to main loop")
+            self.apply(sender, full)
+
+    def apply(self, sender, text):
+        """_applyReassembled (rc_telemetry.h:1097-1237)."""
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            self.nav._append("[RC] reassembled JSON parse failed")
+            return
+        t = doc.get("type") if isinstance(doc, dict) else None
+        if t == "SET_CONFIG":
+            data = doc.get("data")
+            if not isinstance(data, dict):
+                self.nav._append("[RC] reassembled SET_CONFIG missing 'data' object")
+                return
+            wnet = data.get("wcbNetwork")
+            if isinstance(wnet, dict):
+                if "deviceId" in wnet and "no_devid_line" not in self.mut:
+                    self.nav._append(f"[RC] SET_CONFIG: ignoring incoming wcbNetwork.deviceId={wnet['deviceId']} "
+                                     f"(WCB-transport saves can't change our own slot)")
+                for k in ("deviceId", "macOct2", "macOct3", "password", "quantity") + \
+                        (("channel",) if "strip_radio" in self.mut else ()):
+                    wnet.pop(k, None)
+                if not wnet:
+                    data.pop("wcbNetwork")
+            if "strip_radio" in self.mut:
+                for k in ("wifiEnabled", "wifiSsid", "wifiPassword"):
+                    data.pop(k, None)
+            self.merge(data)
+            fx = self.side_effects()
+            self.nav._append(self.save(), "[RC] SET_CONFIG → applied + saved to LittleFS", *(fx or []))
+            self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "SET_CONFIG", "id": 20, "ok": True,
+                                    "saveId": doc.get("saveId", 0)})
+        elif t == "SET_CMDLIB":
+            k, end = text.find('"data":'), text.rfind("}")
+            lib = text[k + 7:end].strip() if k >= 0 and end > k + 7 else ""
+            if "cmdlib_bracket" in self.mut:
+                lib = _nmm_bracket_value(text)
+            if lib:
+                self.cmdlib = lib
+            self.nav._append(f"[RC] SET_CMDLIB → {'saved to LittleFS' if lib else 'SAVE FAILED / empty'}")
+            self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "SET_CMDLIB", "ok": bool(lib),
+                                    "size": len(lib.encode()), "hash": self._fnv(lib) if lib else 0})
+        elif t == "TEST_ACTION":
+            self.test_action(sender, text)
+        elif t == "WCB_SEND" and "wcb_send_fixed" in self.mut:
+            self.wcb_send(sender, doc)
+        else:
+            self.nav._append(f"[RC] reassembled payload had unexpected type '{t}' — dropping")
+
+    def test_action(self, sender, text):
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            doc = {}
+        a = self.action_from(doc.get("action")) if isinstance(doc.get("action"), dict) else None
+        ok = a is not None and not (a["type"] == "wcb_unicast" and not (a["target"].isdigit()
+                                                                        and 1 <= int(a["target"]) <= 20))
+        if ok:
+            self.nav._append(*self.dispatch(a))
+        self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "TEST_ACTION", "ok": ok})
+
+    def frag_send(self, sender, payload, what, file_backed=False):
+        """_startFragSend / _startFragSendFile and the pump: code-point-safe slices (143 escaped bytes and 160 raw, or 80
+        raw from a file), one envelope per 150 ms, START and COMPLETE lines."""
+        data = payload.encode("utf-8")
+        cuts, i = [0], 0
+        while i < len(data):
+            take, esc = 0, 0
+            while i + take < len(data):
+                c = data[i + take]
+                cp = 1 if c < 0x80 else 2 if c >> 5 == 6 else 3 if c >> 4 == 0xE else 4 if c >> 3 == 0x1E else 1
+                if file_backed:
+                    if take + cp > 80:
+                        break
+                else:
+                    cost = sum(2 if b in (0x22, 0x5C, 8, 9, 10, 12, 13) else 6 if b < 0x20 else 1
+                               for b in data[i + take:i + take + cp])
+                    if esc + cost > 143 or take + cp > 160:
+                        break
+                    esc += cost
+                take += cp
+            i += take or 1
+            cuts.append(i)
+        sid, n = self.next_sid, len(cuts) - 1
+        self.next_sid += 1
+        self.nav._append(f"[RC] {what} {'file-send' if file_backed else 'send'} START: {len(data)} bytes → {n} "
+                         f"fragments to W{sender} (sid={sid})")
+        for k in range(n):
+            env = json.dumps({"f": k + 1, "of": n, "sid": sid, "s": data[cuts[k]:cuts[k + 1]].decode("utf-8")},
+                             separators=(",", ":"), ensure_ascii=False)
+            self._later(0.15 * k, self.to_sender, sender, env)
+        self._later(0.15 * (n - 1) + 0.02, self.nav._append, f"[RC] send COMPLETE: {n} fragments (sid={sid})")
+
+    def bulk_in(self, sender, text):
+        """WCB_Client's bulk receiver and rc_telemetry.h's sink, all chunks in order or not."""
+        import base64
+        from hil.navicore import fnv1a32
+        o = json.loads(text)
+        if "bb" in o:
+            n, size, h = o.get("n", 0), o.get("t", 0), o.get("h", 0)
+            if not (1 <= n <= 512 and (n - 1) * 96 < size <= n * 96) or o.get("g") != "cmdlib":
+                self.to_sender(sender, {"bs": o["bb"], "done": 1, "ok": 0, "hash": 0, "r": 0})
+                return
+            self.bulk = {"sid": o["bb"], "n": n, "t": size, "h": h, "got": {}}
+            self.nav._append(f"[RC] bulk cmdlib begin: sid={o['bb']} {size} bytes / {n} chunks")
+            return
+        b = self.bulk
+        sid = o.get("bc", o.get("bd"))
+        if not b or b["sid"] != sid:
+            self.to_sender(sender, {"bs": sid, "nb": 1})
+            return
+        if "bd" in o:
+            miss = [q for q in range(b["n"]) if q not in b["got"]][:20]
+            self.to_sender(sender, {"bs": sid, "got": len(b["got"]), "r": o.get("r", 0), "miss": miss})
+            return
+        b["got"].setdefault(o["q"], base64.b64decode(o["s"]))
+        if len(b["got"]) < b["n"]:
+            return
+        blob = b"".join(b["got"][q] for q in range(b["n"]))[:b["t"]]
+        ok = fnv1a32(blob) == b["h"] or "bulk_no_verify" in self.mut
+        if ok:
+            self.cmdlib = blob.decode("utf-8")
+            self.nav._append(f"[RC] bulk cmdlib sid={sid} published ({len(blob)} bytes, hash {b['h']})")
+        else:
+            self.nav._append(f"[RC] bulk cmdlib sid={sid} hash mismatch (got {fnv1a32(blob)} want {b['h']}, "
+                             f"{len(blob)} B) — discarded")
+        self.bulk = None
+        self.to_sender(sender, {"bs": sid, "done": 1, "ok": 1 if ok else 0, "hash": b["h"], "r": 0})
+
+
+MESH_MODEL_IDS = ("ncmesh.bridged_wcb_meta", "ncmesh.bridged_set_config", "ncmesh.bridged_set_config_strip",
+                  "ncmesh.bridged_reset_defaults", "ncmesh.bridged_reset_keeps_identity", "ncmesh.bridged_cmdlib",
+                  "ncmesh.bridged_cmdlib_keys_after_data", "ncmesh.fragment_reassembly_edges",
+                  "ncmesh.bridged_wcb_send_findings", "ncmesh.bridged_usb_only_types",
+                  "ncmesh.remote_cli_order_and_drop", "ncmesh.wdp_port_labels", "ncmesh.seqval_verbatim")
+MESH_SHOULD = {"ncmesh.bridged_set_config_strip", "ncmesh.bridged_reset_keeps_identity",
+               "ncmesh.bridged_cmdlib_keys_after_data", "ncmesh.bridged_wcb_send_findings", "ncmesh.seqval_verbatim"}
+
+
+def _run_mesh_suite(tmp, ids=MESH_MODEL_IDS, mut=(), tag="all"):
+    """The s43 tests named in `ids`, whole, through the runner, against a fresh NaviMeshModel(mut) behind NaviCore, W1
+    and W2 (NaviCore's fragment timeout cut to 1 s, the suite's W1 S2 wire the model's buffer, config_guard a no-op) ->
+    (results by id, the model, session.log)."""
+    import contextlib
+    from hil import ncmesh as M
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s43_navicore_mesh", None)
+        import suites.s43_navicore_mesh as S43
+        mine = [dict(t) for t in runner.REGISTRY if t["id"] in ids]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+    model = NaviMeshModel(mut=mut)
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    nav, w1, w2 = (FakeNaviDev(model.script, "navicore"), FakeNaviDev(model.w1_script, "wcb1"),
+                   FakeNaviDev(model.w2_script, "wcb2"))
+    model.nav, model.w1, model.w2 = nav, w1, w2
+    nav.log = w1.log = w2.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1, "wcb2": w2}[name]
+    patches = [(M, "FRAG_TIMEOUT_S", 1.0), (S43, "link", lambda bench, w, p: FakeLink(f"W{w}{p}", model.w1s2)),
+               (S43, "config_guard", lambda bench, *w: contextlib.nullcontext({n: [] for n in w}))]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        model.monitor = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return {r["id"]: r for r in ck.data["results"]}, model, log
+
+
+def t_ncmesh_suite_against_model(tmp):
+    """The bridge half of s43 - thirteen tests - run whole, through the runner, against NaviMeshModel: each normal test
+    passes and each (should) test fails, naming its D-NC, as on today's NaviCore; the model ends with the config and
+    command library it started with (nc_guard put them back after RESET_DEFAULTS, a bridged save and the library
+    writes, bulk transfers among them); session.log carries no credential. The rest of s43 needs timing the model does
+    not keep (a 50 s offline window, W1 reboots, a 60 s heartbeat) or the probe; t_ncmesh_protocol_helpers covers the
+    helpers they share."""
+    probe = NaviMeshModel()
+    orig = (probe.flash, probe.cmdlib)
+    res, model, log = _run_mesh_suite(tmp)
+    bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in MESH_SHOULD else 'PASS'}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != ("FAIL" if tid in MESH_SHOULD else "PASS")]
+    assert len(res) == len(MESH_MODEL_IDS), sorted(res)
+    assert not bad, "\n".join(bad)
+    for tid in MESH_SHOULD:
+        assert "(should, D-NC" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
+    assert (model.flash, model.cmdlib) == orig, "the model's saved config or command library changed"
+    assert model.text() == orig[0], "the model's live config is not the saved one"
+    assert not any(s in log for s in SECRETS), "a credential reached session.log"
+
+
+# (test, model mutation, the status it must then get, what its detail must say): each D-NC fix its (should) test asks
+# for, and a break of a behaviour each of five normal tests exists to catch.
+NCMESH_MUTATIONS = (
+    ("ncmesh.bridged_set_config_strip", "strip_radio", "PASS", ""),
+    ("ncmesh.bridged_reset_keeps_identity", "keep_identity", "PASS", ""),
+    ("ncmesh.bridged_wcb_send_findings", "wcb_send_fixed", "PASS", ""),
+    ("ncmesh.bridged_cmdlib_keys_after_data", "cmdlib_bracket", "PASS", ""),
+    ("ncmesh.seqval_verbatim", "seq_escape", "PASS", ""),
+    ("ncmesh.fragment_reassembly_edges", "no_refresh", "FAIL", "s apart: the action ran 0 time(s)"),
+    ("ncmesh.fragment_reassembly_edges", "pool_4", "FAIL", "no 'Fragment pool exhausted' line"),
+    ("ncmesh.bridged_set_config", "no_devid_line", "FAIL", "no 'deviceId ignored' line"),
+    ("ncmesh.remote_cli_order_and_drop", "rterm_no_wrap", "FAIL", "came back as pieces of"),
+    ("ncmesh.bridged_cmdlib", "bulk_no_verify", "FAIL", "with a wrong hash"),
+    ("ncmesh.bridged_reset_defaults", "reset_no_effects", "FAIL", "the live side effects did not run"),
+)
+
+
+def t_ncmesh_mutations(tmp):
+    """The s43 tests the model runs catch what they exist to catch: with each D-NC fix in the model (radio fields
+    stripped, the identity kept through RESET_DEFAULTS, WCB_SEND reporting the send and handling fragments, a bridged
+    library taken by bracket matching, sequence values escaped) its (should) test passes; and broken one way each - a
+    fragment session whose deadline is not renewed, a pool of four, no deviceId line, RTERM without its 160-byte wrap, a
+    bulk sink that publishes whatever the hash, a mesh RESET_DEFAULTS without its side effects - the test fails and says
+    why. Each runs alone on a fresh model."""
+    for tid, mut, want, why in NCMESH_MUTATIONS:
+        res, _, _ = _run_mesh_suite(tmp, ids=(tid,), mut={mut}, tag=mut)
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -7135,6 +7718,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl,
          t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test,
          t_ncmesh_fragments, t_ncmesh_bridged_reassemble, t_ncmesh_burn_window, t_ncmesh_deaf_and_probe_peer,
+         t_ncmesh_protocol_helpers, t_ncmesh_suite_against_model, t_ncmesh_mutations,
          t_nccfg_suite_against_model,
          t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_build_source, t_ncflash_status_parse,
          t_ncflash_flash,

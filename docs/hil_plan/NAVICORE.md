@@ -1210,6 +1210,49 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP6 — mesh, bridge, WDP, telemetry, relay, failure (`s43_navicore_mesh.py`, `ncmesh.*`)
 
+> **Status 2026-09-28: written, not bench-run** (`suites/s43_navicore_mesh.py`, 35 tests). Six `(should)`:
+> `bridged_set_config_strip` (D-NC18), `bridged_reset_keeps_identity` (D-NC16), `bridged_cmdlib_keys_after_data`
+> (D-NC47, new), `bridged_wcb_send_findings` (D-NC27), `long_command_truncation` (D-NC26) and `seqval_verbatim`
+> (D-NC46, new). `wdp_learn_forget` sits behind the new opt-in `navicore_nvs` (registered, off).
+> `bridged_reset_defaults`, `bridged_reset_keeps_identity` and `remote_cli_order_and_drop` (its `#L90` stall) are in
+> `hil/servos.py`. No test restarts NaviCore or sends SET_MODE. `selftest.py` runs the 13 bridge tests against
+> `NaviMeshModel` and 11 mutations of it. The other 22 need timing or hardware the model does not keep. Where the code
+> differs from the plan:
+> - `ncmesh.deaf` stops a board's reception, not its transmission. A deaf W2 keeps heartbeating, so NaviCore keeps it
+>   online. `online_tracking_flip` stretches W2's `?ETM,HB` to 60 s instead and restores it in a finally. The plan's
+>   11+ refused sends move to a new test, `ensured_degrade`: a deaf W2 never ACKs, NaviCore's 10 ETM slots fill, and the
+>   sends after that answer `ok:false` with `send refused by WCB_Client`. `mesh_loss_local_survives` deafens W1 and W2
+>   together, not in turn.
+> - A CRC-less command is ACKed before its CRC is checked, on purpose (`WCB_Client.cpp:2825-2845`). So in
+>   `crc_namespace_gates` the probe sends it once and it is rejected with `Missing CRC`. The plan expected no ACK.
+> - `long_command_truncation` (D-NC26) uses the CLI path: `?HILT...` at 300 characters answers `Unknown command:` with
+>   the first 199 (`NaviCore.ino:90`, `:2925-2930`). It does not send `;s1` to a port: no one watches NaviCore's aux
+>   ports on this bench, and `;M` already refuses an over-long line.
+> - `bridged_set_config_strip` (D-NC18) flips `wifiEnabled` rather than sending a channel. A valid other channel would be
+>   saved and take NaviCore off the mesh at its next boot.
+> - W1's console reaches session.log unredacted, so two things never cross W1. The plan's `bridged_get_config` is not
+>   run: a CONFIG reply carries the mesh password, the AP password and the AP's name. `bridged_wcb_meta` exercises the
+>   same fragment sender with a payload that holds no secret; GET_CONFIG's ERROR guard and single-flight line are not
+>   exercised. The `?backup` over RTERM in `remote_cli_order_and_drop` is not sent either.
+> - W1 opens its 20 s relay window for any `;W20,` payload that starts with `{`, fragment envelopes included
+>   (`WCB.ino:7964-7966`). `hil/ncmesh.py`'s `send_fragments` docstring said otherwise and is corrected.
+> - `mgmt_stats_etm_frag` is two tests, `mgmt_stats_frag` and `mgmt_etm_char`. The characterization loads the mesh for
+>   about 10 s and takes up to 2.5 min.
+> - The plan puts `nc.cmdlib.bridge_divergence` inside `bridged_cmdlib` as a `(should)`. It is a test of its own,
+>   `bridged_cmdlib_keys_after_data` (D-NC47), so `bridged_cmdlib` stays a normal test.
+> - The 5-line burst of `remote_cli_order_and_drop` needs INF9's `#L90` stall, so that part skips on a stock image.
+>   `dedup_after_w1_reboot` reboots W1 twice: after one reboot the new sequence numbers are too old to be remembered and
+>   pass anyway.
+> - `alias_whoami` empties NaviCore's alias cache with a `wcb_alias` message from W1, as W2 would answer. A WCB with no
+>   alias advertises no ALIAS TLV. The 4-query budget re-arms only on an offline-to-online edge, so the test skips when
+>   the budget was spent earlier.
+> - `wdp_identity_fields`: a WCB's row for NaviCore reads `PEER=0` only where NaviCore is that board's controller
+>   (`?CONTROLLER,ON,20`) and `PEER=2` where auto-join learned it. `HW` is 0, because NaviCore sends no HWVER TLV.
+> - Left out: `rc_mode` (`nc.telem.rc_mode`), because a mode change moves the dome (`ncengine.mode_report_content` and
+>   `navicore.set_mode` change modes, servo-listed). Also left out: `WCB_SEQVAL` status 2 (a WCB answers TOOBIG only
+>   when the key, the value and a 4-character header pass 2912 characters, `WCB.ino:4712-4718`) and the source-MAC
+>   namespace check (a probe on other octets could not address NaviCore at all).
+
 - Bridge: `ncmesh.bridged_get_config` (fragments on W1 reassemble to the USB `data`, compared by hash;
   single-flight; `#L09` fps unaffected), `ncmesh.bridged_set_config_strip`, `ncmesh.bridged_reset_defaults` (the
   mesh path runs the side effects the USB path skips, and the password split shows; restored over USB),
@@ -1566,7 +1609,7 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36 and D-NC42 to D-NC45 are behaviour findings, each with the `(should)` test that pins it.
+D-NC16 to D-NC36 and D-NC42 to D-NC47 are behaviour findings, each with the `(should)` test that pins it.
 
 ### 7.1 Process and infrastructure
 
@@ -1597,9 +1640,9 @@ D-NC16 to D-NC36 and D-NC42 to D-NC45 are behaviour findings, each with the `(sh
 
 | # | Finding (from reading the code; not bench-run unless a test says so) | Recommendation | Test |
 |---|---|---|---|
-| D-NC16 | USB `RESET_DEFAULTS` is RAM-only and skips `applyConfigSideEffects`, unlike the mesh path; any later save then persists the whole default block, the compile-time mesh password, deviceId 20 and boardType 0 included (`NaviCore.ino:3989-3992`; `rc_telemetry.h:1538-1546`, per the map). The tool's comment that the mesh has no RESET_DEFAULTS branch is stale (`index.html:17010`, per the map). | Keep the network identity through a reset (`wcbNetwork`, `wcbProfiles`, `boardType`, the `wifi*` fields) on both paths, run the side effects on USB too, and fix the comments. | `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_defaults` |
+| D-NC16 | USB `RESET_DEFAULTS` is RAM-only and skips `applyConfigSideEffects`, unlike the mesh path; any later save then persists the whole default block, the compile-time mesh password, deviceId 20 and boardType 0 included (`NaviCore.ino:3989-3992`; `rc_telemetry.h:1538-1546`, per the map). The tool's comment that the mesh has no RESET_DEFAULTS branch is stale (`index.html:17010`, per the map). | Keep the network identity through a reset (`wcbNetwork`, `wcbProfiles`, `boardType`, the `wifi*` fields) on both paths, run the side effects on USB too, and fix the comments. | `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity` (the mesh path); `ncmesh.bridged_reset_defaults` pins the side effects |
 | D-NC17 | An unrebooted password change (or a reset) splits OTA auth and ACKs, RTERM and WcbMgmt, which read the live value, from the ETM stack, which keeps the boot copy. | Those paths use the boot-time copy until a reboot, like the ETM stack. | `nccfg.mesh_creds_live_split` |
-| D-NC18 | A bridged SET_CONFIG strips deviceId, MAC octets, password and quantity but not `channel` or the `wifi*` fields (`rc_telemetry.h:1125-1156`, per the map). | Strip them too; the tool already strips channel. | `ncmesh.bridged_set_config_strip` |
+| D-NC18 | A bridged SET_CONFIG strips deviceId, MAC octets, password and quantity but not `channel` or the `wifi*` fields (`rc_telemetry.h:1137-1156`). | Strip them too; the tool already strips channel. | `ncmesh.bridged_set_config_strip` (sends `wifiEnabled`) |
 | D-NC19 | `boardType` is stored unchecked; 2 gives the v2 pins but advertises "WCB 3.2". | Clamp to 0-1 on input. | `ncboot.boardtype2_mismatch` |
 | D-NC20 | TEST_ACTION answers `ok:true` for an action the executor then skips (a disabled destination, an invalid slot, an unconfigured WLED id, a bad port); the tool never reads the ACK. | `ok:false` with a reason, and the tool shows it. | `ncengine.test_action_skipped_not_ok` (and the skip lines in `ncengine.test_action_matrix`), `nctool.test_action_button` |
 | D-NC21 | A deferred tap still fires during failsafe, and a press in flight when frames stop resolves once they return (`NaviCore.ino:2770-2783`, `:2356-2390`, per the map). | Failsafe and frame loss cancel any pending tap or hold; the press must be made again. | `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press` |
@@ -1622,12 +1665,15 @@ D-NC16 to D-NC36 and D-NC42 to D-NC45 are behaviour findings, each with the `(sh
 | D-NC43 | `holdMs` is raised to `tapWindowMs` + 250 and then capped at 5000, while `tapWindowMs` has no upper bound (`rc_config.h:1516-1528`), so a `tapWindowMs` above 4900 leaves `holdMs` below it and the long press can never be recognised (the comment at `:656-660` says it must stay above). Found writing NC-WP1. | Cap `tapWindowMs` at 4900, or let the `holdMs` cap give way to it. | `nccfg.hold_exceeds_tap_window` |
 | D-NC44 | No config apply clears a parked tap or hold (`tapState`), and only the USB SET_CONFIG re-arms the matrix debounce (`NaviCore.ino:3942-3952`); the bridged SET_CONFIG (`rc_telemetry.h:1173-1190`) and both RESET_DEFAULTS paths (`NaviCore.ino:3989-3992`, `rc_telemetry.h:1538-1545`) do not. Defaults whose matrix channel reads inside a band register a press nobody made, and the release a later restore causes fires that button's restored mapping (`NaviCore.ino:2347-2415`). Found writing NC-WP1. | Every config apply, on either transport, clears `tapState` and re-arms the matrix. | `sbus.reconfig_parked_tap_cleared`; `nccfg.mesh_creds_live_split` steers clear of it (`_defaults_live_effects`) |
 | D-NC45 | The dispatch trace reports sends that did not happen: a serial action prints `[DISPATCH] Serial TX [<port>]  <cmd>` before it looks at the port, and a port other than S3-S5 then writes nothing and says nothing (`NaviCore.ino:2093-2100`, the `hil-week` tree); a Maestro action prints `[DISPATCH] Maestro <slot>  <cmd>` before its skip-if-running gate, so a skipped one reads as sent until the next line (`:2088-2089`). The inbound `;M` case was fixed the same way (`navicore.maestro_skip_not_logged_as_dispatch`). Found writing NC-WP4. | Print the dispatch line after the checks, and a skip line with its reason otherwise. | `ncengine.skip_not_traced_as_sent` (the serial case; the Maestro one needs a moving servo) |
+| D-NC46 | `GET_WCB_SEQ` and `GET_WCB_SEQVAL` strip every `"`, backslash and control character from a sequence's names and value instead of escaping them (`_seqAppendJsonSafe`, `rc_telemetry.h:340-346`, used by `buildWcbSeq` `:352-375` and `buildWcbSeqVal` `:380-393`). The comment above `buildWcbSeqVal` says nothing may reformat the value (`:377-379`). A sequence holding JSON, a `;L` WLED command's body for instance, reaches the config tool without its quotes, and one saved back would be stored altered. Found writing NC-WP6. | JSON-escape names and values. | `ncmesh.seqval_verbatim` |
+| D-NC47 | A bridged SET_CMDLIB stores everything from after `"data":` to the message's last `}` (`rc_telemetry.h:1209-1216`), so a key after `data` is stored with the library. The USB handler matches brackets (`NaviCore.ino:3902-3935`), because the same bug once stored a trailing `,"sys":1`. The config tool avoids it by stamping `sys` first, and its comment says the firmware no longer depends on key order (`index.html:5611-5617`); that holds for USB only. Found writing NC-WP6. | One extraction for both paths: the USB path's bracket matching. | `ncmesh.bridged_cmdlib_keys_after_data` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending)_ | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |
+| 2026-09-28 | `4170a24` | NC-WP6 written, not bench-run: `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`). Opt-in `navicore_nvs` registered (off); three tests in `hil/servos.py`. `hil/ncmesh.py` gains pure predictors (`wdp_scrub`, `json_strip`, `rterm_pieces`, `port_labels`, `local_maestro_ids`, `status_rows`, `stats_rows`, `bulk_frames`). `selftest.py` runs the 13 bridge tests against `NaviMeshModel` and 11 mutations of it. New findings D-NC46 (sequence names and values stripped, not escaped) and D-NC47 (a bridged SET_CMDLIB stores the keys after `data`). The status note lists where the code differed from the plan. |
+| 2026-09-28 | `04e70d1` | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |
 | 2026-09-28 | `75d5e8d` | NC-WP2, NC-WP9 and NC-WP10 written, not bench-run: `s46_navicore_boot.py` (9 tests, 3 `(should)`) and `s47_navicore_ota.py` (11); opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_identity` registered and `navicore_esptool` added (off); `ncflash.BENCH_IMAGE`, `builds_with_sha`, `flash_rows`, `last_written`, `put_back`; `NaviCore.restart_blocker`; `redact_text` hashes a SoftAP name. `selftest.py` runs both suites against `NaviBootModel` and nine mutations of it. The three status notes list where the code differs from the plan: the roll call's floor (quantity 1 leaves W2 out; `deaf` stops reception only), NaviCore's `?OTALOCAL` without BAUD and with a case-sensitive prefix, and `recover()` calling a reset that did nothing a success. |
 | 2026-09-28 | `863462d` | NC-WP4 and NC-WP5 written, not bench-run: `s41_navicore_engine.py` (12 `ncengine` tests, two `(should)`) and `s42_navicore_sbus_engine.py` (21 `sbus` tests, one `(should)`); 23 of them in `hil/servos.py`. New finding D-NC45 (a skipped action is traced as sent); D-NC44 gets its `(should)`, `sbus.reconfig_parked_tap_cleared`. The two status notes list where the code differed from the plan. |
 | 2026-09-28 | `553236c` | NC-WP3's Export/Import, two-tab and live-panel specs (6, two `(should)`); `FakeSerial` tags events with their page; the fixture's switch SI Up action moves to `p2`. The INF7 note lists what they found: the CSV round trip narrows every button band; D-NC35 confirmed, and both tabs also share fragment-session numbers. |

@@ -106,6 +106,14 @@ OPT_INS = {
         "why": "takes NaviCore off the mesh with a saved invalid deviceId until it is restored over USB; attended only",
         "estimate_s": 60,
     },
+    "navicore_nvs": {
+        "title": "NaviCore learned peers (NVS)",
+        "what": "Has NaviCore learn a permanent probe client as a mesh peer, forget it with FORGET_PEER, learn it again "
+                "and drop it when it comes back temporary: four writes of NaviCore's learned-peer mask to its NVS (W1 "
+                "and W2 learn and forget the probe too). Every board forgets the probe afterwards.",
+        "why": "writes NaviCore's learned-peer list to its NVS four times",
+        "estimate_s": 60,
+    },
     "navicore_fault": {
         "title": "NaviCore fault hooks (hook build)",
         "what": "Uses the NAVICORE_HIL_HOOKS fault verbs (#L91-#L93: a corrupted /config.json, an overflowing "

@@ -467,6 +467,12 @@ def redact_text(s):
 # JSON keys whose values are credentials, wherever they sit: NaviCore's password fields (any key ending in "password")
 # and the SBUS controller's WiFi networks.
 SECRET_KEY = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiNets)$")
+# Keys a diff line shows only as a hash: the credentials, plus NaviCore's SoftAP name (wifiSsid), the droid's own name,
+# not a secret, but nothing a failure message should quote (s40's nccfg.reset_defaults_keeps_identity did). Deliberately
+# not in SECRET_KEY: nc_guard.secrets_of scans session.log for SECRET_KEY values, and GET_CONFIG's wifiSsid is logged as
+# it is (docs/HIL_WEEK_DECISIONS.md D49), so the scan would call every run a leak; and redact_text, which the snapshot
+# hash covers, is untouched.
+SHOWN_AS_HASH = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiNets|wifiSsid)$")
 
 
 def _is_scalar(v):
@@ -476,7 +482,7 @@ def _is_scalar(v):
 def _shown(key, v, width=60):
     """One value for a diff line: a credential as <redacted:sha12> (an empty string stays ""), anything else as
     compact JSON, cut to `width` characters and passed through redact_text."""
-    if key is not None and SECRET_KEY.match(str(key)) and v not in ("", None):
+    if key is not None and SHOWN_AS_HASH.match(str(key)) and v not in ("", None):
         return _sha12(v if isinstance(v, str) else json.dumps(v, sort_keys=True, separators=(",", ":")))
     text = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
     if len(text) > width:
@@ -496,7 +502,7 @@ def redacted_diff(a, b, limit=30):
     def walk(path, key, x, y):
         if x == y:
             return
-        if key is not None and SECRET_KEY.match(str(key)):
+        if key is not None and SHOWN_AS_HASH.match(str(key)):
             out.append(f"{path}: {_shown(key, x)} -> {_shown(key, y)}")
         elif isinstance(x, dict) and isinstance(y, dict):
             for k in list(x) + [k for k in y if k not in x]:

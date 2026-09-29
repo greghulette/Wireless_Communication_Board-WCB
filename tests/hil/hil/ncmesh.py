@@ -33,6 +33,7 @@ What every function here is shaped around:
 Credentials: bridged(), send_fragments() and the burn send no password. deaf() and probe_peer() read the mesh settings
 from W1's config chain; nothing here notes or raises a line that could hold one (mesh_params keeps it in memory).
 """
+import base64
 import json
 import math
 import re
@@ -58,6 +59,10 @@ LINK_BYTES_PER_MS = 11.52     # 115200 8N1 on the bridge WCB's UART0 (:5729)
 RECV_MAX_PARTS = 512          # FRAG_MAX_PARTS_RECV (:5502): what the tool accepts from NaviCore
 RELAY_WINDOW_S = 20.0         # W1 relays NaviCore's JSON to USB for this long after a ;W20,{...} (WCB.ino:7943)
 REPLAY_WINDOW = 32            # NaviCore's per-sender COMMAND window (WCB_Client.cpp:890-896)
+RTERM_TEXT = 160              # navicore_rterm.h:21: the text of one remote-terminal packet
+LABEL_MAX = 24                # WCB_Client setPortLabel keeps 24 characters (WCB_Client.cpp:1930-1941)
+BULK_CHUNK_RAW = 96           # WCB_BULK_CHUNK_RAW (WCB_Client.h:100): decoded bytes per bulk chunk
+BULK_MAX_CHUNKS = 512         # WCB_BULK_MAX_CHUNKS (WCB_Client.h:99)
 
 Reply = namedtuple("Reply", "match lines sys")
 Reply.__doc__ = """bridged()'s answer: `match` the re.Match of the first W1 line matching the pattern (None when none
@@ -171,8 +176,9 @@ def pace_s(env, prefix=f";w{NAVICORE_ID},"):
 def send_fragments(w1, envelopes, order=None, target=NAVICORE_ID, gap_s=None, sleep=time.sleep):
     """Type each envelope on W1's console as ';W<target>,<envelope>', paced as the tool paces them (pace_s, nothing after
     the last) or `gap_s` apart -> W1's console mark taken before the first. `order` is a list of indexes into
-    `envelopes`, repeats allowed, for out-of-order and duplicate delivery; None sends them in order. A fragment is not
-    JSON NaviCore acts on, so it does not open W1's relay window: the reassembled message, or a bridged() send, does."""
+    `envelopes`, repeats allowed, for out-of-order and duplicate delivery; None sends them in order. W1 opens (or renews)
+    its relay window for any ';W20,' payload that starts with '{' (WCB.ino:7964-7966), a fragment envelope included, so
+    the ACK NaviCore sends once the message is whole is printed on W1."""
     idx = list(range(len(envelopes))) if order is None else list(order)
     prefix = f";W{target},"
     m = w1.dev.mark()
@@ -212,6 +218,123 @@ def reassemble(lines):
             done.append((sid, "".join(sess["parts"][k] for k in range(1, of + 1))))
             del sessions[sid]
     return done
+
+
+# ------------------------------------------------------------------ what NaviCore prints and advertises (pure)
+def wdp_scrub(text):
+    """detail::wdpScrub (WCB_Client WCB_Mgmt.h:169-174): every ',' and ']' and every control character of a free-text
+    WDP field becomes '_', so NaviCore's ?WDP,DUMP rows stay parseable whatever a neighbour advertises."""
+    return "".join("_" if c in ",]" or ord(c) < 0x20 else c for c in text)
+
+
+def json_strip(text):
+    """What NaviCore does to external text it splices into hand-built JSON: every '"', backslash and control character
+    is dropped, not escaped - an alias (setWcbAlias, rc_telemetry.h:1787-1800), a port label (NaviCore.ino:4190-4201,
+    rc_telemetry.h:2007-2011), a stored-sequence key or value (_seqAppendJsonSafe, rc_telemetry.h:340-346)."""
+    return "".join(c for c in text if c not in '"\\' and ord(c) >= 0x20)
+
+
+def rterm_pieces(lines):
+    """The [TERM:<n>] texts a WCB relay prints for the console `lines` NaviCore's remote terminal captured: each line cut
+    into RTERM_TEXT-byte packets (CaptureSink.write hard-wraps at 160 bytes and flushes on '\\n', navicore_rterm.h:48-62),
+    and every empty packet - an empty line, or the flush after a line of exactly 160 bytes - dropped by the relay, which
+    also strips a trailing CR/LF (WCB_RemoteTerm.cpp:176, :194-205). The cut is by bytes, so a multi-byte character across
+    it arrives broken, as the relay's console decodes each piece on its own."""
+    out = []
+    for line in lines:
+        data = line.rstrip("\r\n").encode("utf-8")
+        for i in range(0, len(data), RTERM_TEXT):
+            piece = data[i:i + RTERM_TEXT].decode("utf-8", errors="replace").rstrip("\r\n")
+            if piece:
+                out.append(piece)
+    return out
+
+
+def port_labels(cfg):
+    """{WDP port: label} NaviCore advertises for GET_CONFIG `cfg` (rcSerialLabel, rcSerialLabelAuto, rcWdpPortForLabel,
+    rc_config.h:1957-2000; rcAdvertiseSerialLabels, NaviCore.ino:4453-4457): aux ports S3, S4, S5 are WDP ports 1-3 and
+    the local Maestro port 4. A user label wins; otherwise the device routed to that aux port - an HCR, MP3 Trigger or
+    DFPlayer whose transport is "serial" with that port, then a configured local WLED slot (wcb 0) on it - and the
+    Maestro port reads 'Maestro'. A port with no label is not advertised (and port 5 never is); setPortLabel keeps 24
+    characters."""
+    labels = cfg.get("serialLabels") or {}
+    out = {}
+    for i, key in enumerate(("S3", "S4", "S5")):
+        text = labels.get(key) or ""
+        if not text:
+            for dest, name in (("hcrDest", "HCR"), ("mp3Dest", "MP3"), ("dfpDest", "DFPlayer")):
+                d = cfg.get(dest) or {}
+                if d.get("transport") == "serial" and str(d.get("port", "")) == key:
+                    text = name
+                    break
+        if not text and any(w.get("configured") and w.get("wcb") == 0 and w.get("port") == i + 3
+                            for w in cfg.get("wledSlots") or []):
+            text = "WLED"
+        if text:
+            out[i + 1] = text[:LABEL_MAX]
+    out[4] = (labels.get("maestro") or "Maestro")[:LABEL_MAX]
+    return out
+
+
+def local_maestro_ids(cfg):
+    """The Maestro device numbers NaviCore advertises (WDP MAESTRO TLV): each local (type 1) slot's device, first
+    occurrence only, in slot order (rcAdvertiseSerialLabels, NaviCore.ino:4470-4483); a WCB shows them dot-joined in
+    MAESTRO= ('-' for none)."""
+    out = []
+    for m in cfg.get("maestros") or []:
+        if m.get("type") == 1 and m.get("device") not in out:
+            out.append(m.get("device"))
+    return out
+
+
+def status_rows(st):
+    """A WCB_STATUS reply - USB (NaviCore.ino:4136-4234) or bridged (rc_telemetry.h:1879-1979), positional or sparse -
+    -> {board: {'online', 'known', 'client', 'temporary', 'alias', 'labels', 'seq'}}; a field the reply does not carry
+    is None. The sparse form lists only known boards as [id, online, client, temporary]; the positional one has a slot
+    per id up to the highest known."""
+    if isinstance(st.get("rows"), list):
+        return {r[0]: {"online": r[1], "known": 1, "client": r[2], "temporary": r[3], "alias": None, "labels": None,
+                       "seq": None} for r in st["rows"] if isinstance(r, list) and len(r) >= 4}
+
+    def at(key, i):
+        v = st.get(key)
+        return v[i] if isinstance(v, list) and i < len(v) else None
+    return {i + 1: {"online": at("online", i), "known": at("known", i), "client": at("clients", i),
+                    "temporary": at("temporary", i), "alias": at("aliases", i), "labels": at("portLabels", i),
+                    "seq": at("seqHash", i)} for i in range(len(st.get("online") or []))}
+
+
+def stats_rows(lines):
+    """A WCB's ?STATS text (buildStatsString, WCB.ino:2076-2200) -> {board: 'Online' | 'OFFLINE'} for its 'ETM Per-Board
+    Statistics' rows, 'WCB<n>: Sent: ...' and 'WCB<n> (special): Sent: ...'. The 'Reported by Other Nodes' rows, which
+    carry 'Unguaranteed', are other boards' own numbers and are left out."""
+    out = {}
+    for x in lines:
+        m = re.match(r"^WCB(\d+)(?: \(special\))?: Sent: \d+, ACKd: \d+, Retries: \d+, Failed: \d+, (Online|OFFLINE)",
+                     x.strip())
+        if m and "Unguaranteed" not in x:
+            out[int(m.group(1))] = m.group(2)
+    return out
+
+
+def bulk_frames(data, sid, tag="cmdlib", hash_=None):
+    """The bulk-transfer envelopes a sender streams to a WCB_Client's bulk sink (parsed at WCB_Client.cpp:959-994,
+    handled :1029-1109) -> (begin, [chunk...], done(round)): BEGIN {"bb":sid,"n":chunks,"t":length,"h":FNV-1a,"g":tag},
+    one CHUNK {"bc":sid,"q":index,"s":"<base64 of 96 bytes>"} per BULK_CHUNK_RAW bytes, and DONE {"bd":sid,"r":round},
+    which asks for a STATUS with the missing indexes. The sink takes a message only when it starts with its own key, so
+    each is built key first. hash_ replaces "h" (a transfer that must be discarded). ValueError for a payload the sink
+    refuses on size ((n-1) x 96 < t <= n x 96, 1 <= n <= 512, :1031-1034) or a sid outside 1-65535."""
+    from .navicore import fnv1a32
+    data = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+    n = math.ceil(len(data) / BULK_CHUNK_RAW)
+    if not 1 <= n <= BULK_MAX_CHUNKS:
+        raise ValueError(f"{len(data)} bytes is {n} bulk chunks; the sink takes 1-{BULK_MAX_CHUNKS}")
+    if not isinstance(sid, int) or not 1 <= sid <= 65535:
+        raise ValueError(f"bulk sid {sid!r} outside 1-65535")
+    begin = compact({"bb": sid, "n": n, "t": len(data), "h": fnv1a32(data) if hash_ is None else hash_, "g": tag})
+    parts = [compact({"bc": sid, "q": q, "s": base64.b64encode(data[q * BULK_CHUNK_RAW:(q + 1) * BULK_CHUNK_RAW])
+                      .decode("ascii")}) for q in range(n)]
+    return begin, parts, (lambda rnd: compact({"bd": sid, "r": rnd}))
 
 
 # ------------------------------------------------------------------ bridged JSON through W1
