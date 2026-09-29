@@ -90,12 +90,17 @@ test('nctool.board_usb_probe_no_broadcast (should) Connect via USB on a tethered
   await page.locator('#connect-modal .connect-opt').first().click();   // Connect via USB (connectDirect, :4639-4645)
   await page.waitForFunction(() => window.__hilSerial.isOpen());
   await page.clock.fastForward(4000);                                 // the settle before the first PING
-  // The direct phase has ended once the tool switches itself to Via WCB (onViaWcbToggle(true), :4581).
-  await page.waitForFunction(() => viaWcbActive === true, null, { timeout: 30_000 });
+  // The direct phase has ended once the tool switches itself to Via WCB (onViaWcbToggle(true), :4581) - or once the
+  // handshake finished direct (isMonitoring, :4600): a PONG W1 printed from NaviCore over the mesh, inside the 20 s
+  // relay window a ;w20, line opens, is taken for a direct link (D-NC30), and board_via_wcb, run before this, opens it
+  // (run 20260929-172549 waited 30 s for a fallback that never came). The PINGs this test is about went out bare
+  // either way.
+  await page.waitForFunction(() => viaWcbActive === true || isMonitoring === true, null, { timeout: 30_000 });
+  const path = await page.evaluate(() => (viaWcbActive ? 'fell back to Via WCB' : 'took a mesh PONG for a direct link'));
   await device.flush();
   await page.waitForTimeout(1000);                                    // the last broadcast's bytes reach the probes
   const bare = device.sentLog.filter((l) => l.how === 'bare' && l.type === 'PING').length;
-  await hil.note(`board_usb_probe_no_broadcast: ${bare} bare PING line(s) written to W1's console before the fallback`);
+  await hil.note(`board_usb_probe_no_broadcast: ${bare} bare PING line(s) written to W1's console; the tool ${path}`);
   const hit = [];
   for (const w of wires) {
     const got = await w.h.received(w.since);

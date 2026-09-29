@@ -216,6 +216,22 @@ def _tap_count(out, key):
     return int(m.group(1)) if m else 0
 
 
+# The config tool's specs that meet a real NaviCore (L2 and L3, NAVICORE.md §5.4).
+BOARD_TOOL_TESTS = ("nctool.board_", "nctool.webserial_")
+
+
+def navicore_repo_env(bench, test_id, env):
+    """NAVICORE_REPO for a config-tool test that meets the board: bench.json "navicore_repo", the NaviCore tree the
+    bench's NaviCore image was built from, so the tool under test and the firmware on the board are one pair
+    (docs/HIL_WEEK_DECISIONS.md D71). Every other spec keeps D-NC10 - the tool as it is on disk in the sibling NaviCore
+    checkout, found by tests/wizard/lib/navicore/paths.js - since the no-board checks compare that tool with its own
+    firmware source (nctool.static) and with Intellex's copy. Unset, nothing changes."""
+    repo = bench.cfg.get("navicore_repo")
+    if repo and test_id.startswith(BOARD_TOOL_TESTS):
+        env["NAVICORE_REPO"] = repo
+    return env
+
+
 def run_unit_tests(bench, timeout=120.0, files=("unit/*.test.js",)):
     """Node tests under `node --test` (tests/wizard/unit): Wizard/parser.js by default, or the given files (the NaviCore
     config tool's L0 tests, unit/navicore/*.test.js, nctool.static and nctool.unit). No browser and no board — it is
@@ -274,7 +290,7 @@ def run_wizard_test(bench, test_id, device="wcb1", args=None, timeout=300.0, pip
 
     out_dir = bench.out_dir or tempfile.mkdtemp(prefix="wizard-")
     report_path = os.path.join(out_dir, f"{test_id}.playwright.json")
-    env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=report_path, FORCE_COLOR="0")
+    env = navicore_repo_env(bench, test_id, dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=report_path, FORCE_COLOR="0"))
     if test_id.startswith("nctool."):
         # A failed spec's test-results/<test>/error-context.md would carry an ARIA snapshot of the page, and on a real
         # NaviCore the config tool's page holds the CONFIG echo and the credential fields (NAVICORE.md D-NC5). This

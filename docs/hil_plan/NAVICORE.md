@@ -1535,7 +1535,7 @@ holding slot-4 keyframes: speed and accel 0 first, then a dense ramp, the last k
 
 The L2 and L3 tables of §5.4, each L2 spec wrapped in `nc_guard` by its harness test.
 
-> **Status 2026-09-29: written, not yet bench-run.** `suites/s49_navicore_tool.py` registers twelve new tests beside
+> **Status 2026-09-29: written and bench-verified** (`20260929-172500`, `-172549`, `-173044`: the nine L2 board tests pass - the tool's own USB OTA of NaviCore with the bench image included, `navicore_ota_full` - and both `(should)` tests fail as designed, D-NC70 with six bare PINGs out W1's ports and D-NC71; the two L3 tests wait for someone at the bench, `navicore_webserial`). The board tests serve the tool from `bench.json` `navicore_repo`, the `hil-week` tree the bench image was built from (D71). `board_usb_probe_no_broadcast` waits for the probe to end either way: right after `board_via_wcb`, W1's 20 s relay window was still open and the tool took NaviCore's mesh PONG for a direct link (D-NC30), so it never fell back to Via WCB. `suites/s49_navicore_tool.py` registers twelve new tests beside
 > `board_connect_config`. L2, NaviCore piped (`specs/navicore/board.spec.js`): `board_save_one_field`,
 > `board_test_action_wire`, `board_live_grid`, `board_clips_list`, `board_cmdlib_load`, and behind `navicore_ota_full`
 > `board_ota_usb_same_image`; with no page (`contract.spec.js`): `emulator_contract`. L2, W1 piped (`board_wcb.spec.js`):
