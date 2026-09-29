@@ -61,6 +61,15 @@ OPT_INS = {
         "why": "replays a saved clip: servo motion and recorded actions",
         "estimate_s": 30,
     },
+    "navicore_clip_write": {
+        "title": "NaviCore clip writes",
+        "what": "Records, uploads, saves, renames and deletes HIL<nonce> clips on NaviCore's 12 MB clips partition (a "
+                "few hundred bytes each, removed again by the test) and replays them; one take runs 60 s to the "
+                "recorder's backstop. Greg's own clips are never written: each test fails unless ?REC,LS ends as it "
+                "began (docs/hil_plan/NAVICORE.md NC-WP12).",
+        "why": "writes and removes HIL* clips on NaviCore's clips partition",
+        "estimate_s": 30,
+    },
     "navicore_reboot": {
         "title": "NaviCore restarts",
         "what": "Restarts NaviCore in software (REBOOT): its USB port re-enumerates, the mesh loses WCB 20 and SBUS OUT "

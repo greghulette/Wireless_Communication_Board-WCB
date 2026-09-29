@@ -941,7 +941,7 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 | `navicore_reboot` | software restarts of NaviCore (REBOOT, `#L02`, the mesh REBOOT): USB re-enumerates, the mesh sees 20 drop for ~5 s | on |
 | `navicore_wifi` | the PC's spare adapter joins NaviCore's AP for ~30 s per test (`ncwifi.ws_ping_soak`: 5 minutes); registered with NC-WP8 | on; the test skips when the only adapter carries the default route |
 | `navicore_nvs` | learns and forgets a peer (NaviCore's NVS peer mask) | on |
-| `navicore_clip_write` | writes and removes `HIL*` clips in the 12 MB clips partition | on |
+| `navicore_clip_write` | writes and removes `HIL*` clips in the 12 MB clips partition (a take saved, a clip uploaded, renamed or deleted; one take runs 60 s to the backstop); registered with NC-WP12 | on |
 | `navicore_aux_tx` | routes HCR/MP3/DFPlayer/WLED to NaviCore's own S3-S5 (bytes out J4-J6, where nothing is recorded as attached), and `#L20`/`#L21` | on |
 | `navicore_ota_erase` | small OTA sessions that erase part of the inactive slot | on |
 | `navicore_ota_full` | full same-image OTA over USB, twice (a few minutes) | on |
@@ -1525,6 +1525,51 @@ original slot), `ncota.relay_full_via_w1` (`navicore_ota_relay_full`), `ncota.re
 
 ### NC-WP12 — record and replay (`s48_navicore_rec.py`, `ncrec.*`, opt-in `navicore_clip_write`)
 
+> **Status 2026-09-29: written, not yet bench-run** (`suites/s48_navicore_rec.py`, 12 tests, three `(should)`; opt-in
+> `navicore_clip_write` registered, not ticked). Behind `navicore_clip_write`, each writing a clip file:
+> `record_save_list_rm`, `stop_semantics`, `play_timing_markers`, `replay_interpolation_remote`, `backstop_60s`.
+> Unattended, RAM and guarded config only: `capture_scope`, `replay_gate`, `calib_drops_take`, `v1_clip_migration`, and
+> the findings `replay_only_clip_channels` (D-NC64), `busy_load_not_missing` (D-NC65) and `editcancel_empties`
+> (D-NC66). The six that replay are in `hil/servos.py` (D-NC64). Every test holds the recorder through s48 `rec_guard`:
+> it skips unless `?REC,INFO` shows the recorder idle and empty (D33), names its clips `HIL<tag><nonce>` and deletes
+> them, leaves the buffer empty, and fails when `?REC,LS` does not end as it began (a clip gone or changed, or one the
+> test never named). `selftest.py`: `t_ncrec_helpers`, and the suite run whole against `NaviRecModel` and 15 mutations
+> of it (`t_ncrec_suite_against_model`, `t_ncrec_mutations`). Where the code differs from the plan below:
+> - **No take starts with `?REC,START`.** Its take has no name (startRecord clears it, navicore_record.h:294), and a
+>   stop action, a record toggle or the 60 s backstop then saves it as the next free `rec_<N>` (`_takeName`
+>   :1005-1009, `_autoClipName` :986-994): `rec_11` on this bench, beside Greg's `rec_1` to `rec_10`. Every take starts
+>   with a record action carrying a HIL name (a TEST_ACTION, which no gate stops, NaviCore.ino:2155-2168), and a take
+>   not meant for flash ends with `?REC,STOP`, which never saves (navicore_record.h:315-328).
+> - **A take need not touch flash.** `?REC,STOP` keeps it in RAM, `?REC,PLAY` with no name plays it, and the bare
+>   `?REC,EDITLOAD` streams it in the legacy form (it reads the buffer when no named clip is resident, NaviCore.ino:3550;
+>   s48 `parse_resident`). So capture scope, the replay gate, CALIB and the three findings need no opt-in; only saving,
+>   uploading and the backstop do.
+> - **Capture scope is its own test** (`capture_scope`, not a part of `record_save_list_rm`): TEST_ACTION, a TRIGGERed
+>   tier and its delayed action are captured, the delayed one at its fire time with its `delay` kept in the record; a
+>   Maestro setSpeed action is captured; a play action sent meanwhile is neither captured nor ends the take.
+> - **The v1 migration is a bench read, not a host test** (`v1_clip_migration`; §6.1): eight of the bench's clips are in
+>   the 136-byte format (`rec_1` to `rec_5`, `long`, `repeat` and `test` list 16 + 136 n bytes, run 20260929-120840).
+>   Loading one migrates it in memory and writes nothing (navicore_record.h:56-58, :626-642); the smallest of each
+>   stride is downloaded and checked against its listing. A truncated file still needs a crafted one.
+> - **`replay_gate` also pins the calibration exemption** the plan gives it: a CALIB mid-replay mutes live dispatch, but
+>   the clip dispatches on (recCbDispatch has no calibration gate, NaviCore.ino:2192; PROTOCOLS.md's "mutes all" is
+>   D-NC36's drift); and the record/play/stop exemption, with a mapped stop action ending the replay.
+> - **Interpolation**: a clip uploaded with keyframes (0 ms, 6000), (1000, 6100), (1500, 6050) on a free channel of
+>   remote slot 4, played with that channel's pose unknown (a `?MAE` target of 0 first, NaviCore.ino:1038-1045), so the
+>   first keyframe snaps. It is judged on W1 S1 (speed 0 and accel 0 first, then a monotone ramp per segment with at
+>   least 10 interpolated values, the last keyframe last, the keyframes' span); the hook image's DBG_WIRE copy decides a
+>   second play when the unacknowledged broadcast lost frames. Other channels' frames there are D-NC64's.
+> - **The play action only toggles**: a Play for another clip while one plays stops the playing clip and never starts the
+>   other (pollControl, navicore_record.h:1045-1047, ignores the name), so a Play event inside a clip ends that clip.
+>   Noted, not asserted: whether a Play should chain is a design call for Greg.
+> - **A stopped replay keeps the easing it zeroed** until the next stick move: loop() re-applies easing only on the
+>   completion edge (NaviCore.ino:5483-5490), as applyConfigSideEffects' comment says (:3350-3352). Noted, not a finding.
+>
+> NaviCore doc drift found (for D-NC36's docs commit): RECORD_REPLAY_DESIGN.md §4 says stored events carry delay 0 (a
+> delayed action keeps its pending copy's delay in the record; replay ignores it); rc_config.h:43-45 and :1044 say
+> RA_RECORD's name is for a future clip library and the build keeps one in-RAM clip (the take is saved under that name on
+> the clips partition); editCancel's comment says it discards the staged events (navicore_record.h:948-949; D-NC66).
+
 `ncrec.record_save_list_rm` (record through TEST_ACTION `{"type":"record","cmd":"HILrec<n>"}`, three spaced W1S2
 markers, stop and save, `?REC,LS` n=3, ranged download, RENAME refuses to overwrite, RM), `ncrec.play_timing_markers`,
 `ncrec.stop_semantics`, `ncrec.replay_gate`, `ncrec.replay_interpolation_remote` (a clip uploaded with EDITBEGIN/EV/END
@@ -1760,7 +1805,7 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36, D-NC42 to D-NC48 and D-NC56 to D-NC63 are behaviour findings, each with the `(should)` test
+D-NC16 to D-NC36, D-NC42 to D-NC48 and D-NC56 to D-NC66 are behaviour findings, each with the `(should)` test
 that pins it.
 
 ### 7.1 Process and infrastructure
@@ -1828,11 +1873,15 @@ that pins it.
 | D-NC61 | A line from the WebSocket is not trimmed, while every USB line is: `handleSerialInput` trims before it dispatches (NaviCore.ino:4296-4306), and `wsHandler` queues the bytes between line ends as they are (navicore_wsserver.h:447-468) for `drain()` to pass on (:545). `processInputLine` switches on the first character (NaviCore.ino:3814, :3820, :4281), so a leading space or tab drops the line with no reply, and a trailing space makes `?version` an unknown command (WcbMgmt matches whole, `WCB_Mgmt.h:166`, :373). The file's header and PROTOCOLS.md §1 say the socket speaks the same protocol because it feeds the same dispatcher (navicore_wsserver.h:5-8); the WCB's endpoint trims (`ws.line_framing`). Found writing NC-WP8. | Trim each line in `drain()` and skip one left empty, as `handleSerialInput` does. | `ncwifi.ws_line_trim` |
 | D-NC62 | One WebSocket client that stops reading blocks every client, and is then left deaf. Every socket write is a work item on the single httpd task (`wsSendWork`, navicore_wsserver.h:274-294), sent to each client in turn with a blocking send whose timeout is HTTPD_DEFAULT_CONFIG's 5 s (`begin()` keeps it, :478-492). While a stalled client holds the task, `pump()` goes on queueing (:196-233) into a control socket that holds 6 messages (CONFIG_LWIP_UDP_RECVMBOX_SIZE; CONFIG_HTTPD_QUEUE_WORK_BLOCKING is off in core 3.3.4's sdkconfig), so later work items are refused or lost, and a lost item's PSRAM copy is never freed. A refused one leaves its bytes in the sink, and once the sink is full `write()` stores past the end of its 2 KB buffer: it writes `_buf[_len++]` after a `pump()` that could not drain it (:151-167 with :212-227). When a send to the stalled client finally fails, `wsSendWork` drops it from the sink (:288-289) but leaves its session open, and only a handshake adds a client (:395-398): it can still send lines that run, and never receives another, the silent deafness the sink's own comment says it exists to prevent (:119-128). From the code, not bench-run; found writing NC-WP8. | Close a client's session when a send to it fails (`httpd_sess_trigger_close`), bound how long one client can hold the send task (a short send timeout), and make `write()` drop the whole line when `pump()` cannot free room. | `ncwifi.ws_stalled_client` |
 | D-NC63 | While any WebSocket client is connected, a `?REC,EDITLOAD` over USB is handled as one relayed over the mesh. EDITLOAD takes "relayed" from `rcSerial.captureArmed()` (NaviCore.ino:3559-3564), which meant a relayed CLI line was running (rc_serial.h:85-87) until the socket's tee became a standing arrangement for a client's whole session (navicore_wsserver.h:88-93, :526-530; `drain()` re-arms it every pass before `handleSerialInput()` runs, NaviCore.ino:5444, :5525). So with a socket open, a USB download is cut to 512 events a range (NaviCore.ino:3573-3575; BEGIN and END echo the cut count, navicore_record.h:750-753, :876-877), a whole clip over 3000 events is refused with 'connect over USB' to a client that is on USB (:3576-3579), and the stream is paced for RTERM without the wait for USB room (navicore_record.h:809-812, :829, :859) that stopped events vanishing when a host fell behind. Found writing NC-WP8. | Take "relayed" from the transport the line came in on (drainRemoteCli knows it), not from the capture slot. | `ncwifi.usb_editload_with_socket` |
+| D-NC64 | A replay resets speed and accel to 0 and re-sends the last-commanded target on every channel NaviCore knows the position of, not only the channels its clip drives: `_buildCurveIndex` makes every known channel active (`cv.active = known`, navicore_record.h:371-376) and resets and re-anchors each active one (:390-398, through `recCbResetChan`, NaviCore.ino:2194); the clip's keyframes only add channels (navicore_record.h:380-389). RECORD_REPLAY_DESIGN.md resets 'every (slot,ch) the clip drives' (§3 precondition 1, §6). So any clip, even one with no Maestro event, zeroes the easing of every servo NaviCore has moved since boot (the dome's J2 channel on this bench). The completion re-applies only knob-managed channels (`reapplyMaestroEasing`, NaviCore.ino:1147-1170, from :5489), so a channel whose limits live in the Maestro's own settings loses them - the very write `reassertMaestroEasing` refuses for that reason (:1198-1210) - and a channel a Maestro script moved since (`maestroRestartScript` leaves the shadow as it was, :1085-1089) snaps back to its stale target at full speed. Found writing NC-WP12. | Activate, reset and anchor only the channels the clip has keyframes for. | `ncrec.replay_only_clip_channels` |
+| D-NC65 | A clip asked for while the recorder is busy is reported missing: `loadClip` returns false when the recorder is not idle (navicore_record.h:595), the same false as for a clip that is not there (:597-601), and `?REC,EDITLOAD` answers `[REC] clip '<name>' not found` (NaviCore.ino:3550-3556), as `?REC,PLAY,<name>` does (:3469; `?REC,LOAD` says 'load failed (not found / no FS)', :3484). The config tool's ranged download does not read that line (`_clipRangeFeed`, config_tool/index.html:6553-6599), so a backup taken while a clip plays - an idle-animation loop - waits out its 15 s budget on every clip but the playing one and skips each as 'timed out waiting for the board' (`clipDownloadVerified` :6636-6700, the backup loop :6808-6817). Found writing NC-WP12. | Tell busy from missing: EDITLOAD answers `[CLIPDL:ERR]recorder busy (<state>)`, which the tool's ranged download already raises as an error (:6582); PLAY and LOAD say busy. | `ncrec.busy_load_not_missing` |
+| D-NC66 | The recorder's discard verbs report what they did not do. `?REC,EDITCANCEL` answers `[CLIPUL:CANCEL,OK]` but only drops ST_EDITING (navicore_record.h:950): the staged events stay in the buffer, where `?REC,PLAY` plays and `?REC,SAVE` saves them, though editCancel's comment says it discards them (:948-949) and stop()'s says a partial upload must not be left exposed to a STOP+SAVE (:316-323); the config tool sends EDITCANCEL after a failed upload (config_tool/index.html:6957, :7183, :7367). `?REC,CLEAR` answers `[REC] cleared` whatever `clearClip` did (NaviCore.ino:3605), and `clearClip` clears only when idle (navicore_record.h:308), so during a take or a replay it answers 'cleared' and clears nothing. Found writing NC-WP12. | EDITCANCEL empties the buffer; CLEAR answers busy (or discards the take) when the recorder is not idle. | `ncrec.editcancel_empties` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | NC-WP12 written, not bench-run: `s48_navicore_rec.py` (12 `ncrec` tests, three `(should)`; the six that replay in `hil/servos.py`; five behind the new opt-in `navicore_clip_write`, registered, not ticked) and its `rec_guard` (the recorder idle and empty, HIL clips only, `?REC,LS` as found). New findings D-NC64 (a replay resets every channel with a known position, not only its clip's), D-NC65 (a busy recorder reports a listed clip missing) and D-NC66 (EDITCANCEL and CLEAR report what they did not do). `selftest.py` runs the suite against `NaviRecModel` and 15 mutations of it. The status note lists where the code differs from the plan (among them: the v1 clip migration is a bench read of Greg's 136-byte clips) and NaviCore doc drift for D-NC36. |
 | 2026-09-29 | _(pending)_ | INF5 built and NC-WP8 written, not bench-run: `hil/wlan.py` (s28's PC-side helpers moved unchanged, `pc_on_ap`'s `spare_only`, a scanned network list), `hil/ncws.py` (`NcWs`, the socket as a line device the INF1 driver runs over), `hil/ws.py` `rcvbuf`; `s45_navicore_wifi.py` (15 `ncwifi` tests, three `(should)`); opt-in `navicore_wifi` registered; three tests in `hil/servos.py`. New findings D-NC61 (a socket's lines are not trimmed), D-NC62 (a stalled client blocks every client and is left deaf, and `WsSink::write()` can overrun its buffer) and D-NC63 (a USB EDITLOAD is handled as relayed while a socket is open). `selftest.py`: `t_wlan_pc_on_ap`, `t_ncws_line_device`, `t_ncwifi_helpers`. The two status notes list where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-29 | `bfc5754` | NC-WP6 bench-verified (`20260929-050214`): the last four fixed tests pass; D-NC46 and D-NC48 fail as designed. |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): five of the eight fixed tests pass and `seqval_verbatim` fails as designed. New finding D-NC48 (a multi-chunk `?MGMT,FRAG` push through NaviCore goes out in the wrong frame and never arrives) with its `(should)`, `ncmesh.mgmt_frag_multichunk`, split out of `mgmt_stats_frag`. Test fixes, not yet re-run: `mgmt_etm_char` compares the relayed block with W2's own (the tag line is bare); `mgmt_stats_frag`, `seq_pull` and `seqval_verbatim` ask once more after a reply lost on the air (tracker #109; `_seq_ask`, `_reply_leg`); the SBUS gate re-reads for 4 s. |
