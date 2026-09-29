@@ -344,7 +344,14 @@ with the recent lines attached), and skips by raising `Skip`.
   until more output follows it, so a test that sends a single mesh command and waits times out no matter
   how long it waits — the line then appears the moment the next command goes out. Send `#L12` on
   NaviCore's own console after the command (the flush the `?MAE` markers already need), then wait.
-  `NaviCore.cli()` sends it after every CLI line unless told not to.
+  `NaviCore.cli()` sends it after every CLI line unless told not to. **Whoever sends a poke waits for its own
+  `Mode=` reply** (`NaviCore._eat_poke`) even after the line it wanted arrived: a reply left behind lands after the
+  caller returns and ends the next `cli()`'s wait for *its* `Mode=` line early. That returned `#L13` with no dump
+  (run `20260928-212848`), so `sbus_dump()` and `cli(until=...)` consume theirs.
+- **NaviCore's `#L09` fps is a one-second average.** A stall just before a reading, such as the previous test's
+  `nc_guard` restore saving the config, reads low for that window. A full-rate gate reads through
+  `NaviCore.sbus_full_rate()`, which re-reads for up to 4 s. The first reading alone skipped 17 `s42` tests at 42 and
+  15 fps between readings of 111.
 - **NaviCore and the SBUS controller** are driven through `hil/navicore.py` `NaviCore(dev)` and `hil/sbus.py`
   `SbusCtl(dev)` (`docs/hil_plan/NAVICORE.md` INF1, INF2), never hand-built JSON. The NaviCore driver covers the
   JSON protocol (`ack`, `config`, `set_config` paced with its saveId, the command library by size and FNV-1a hash,
@@ -1128,6 +1135,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | §5: a NaviCore `#L12` poke's sender consumes its reply (`_eat_poke`), and a full-rate SBUS gate re-reads a stalled fps window (`sbus_full_rate`): both from the first bench pass of the NaviCore engine, boot and OTA suites (`20260928-204259`, `-212848`, `-215752`). |
 | 2026-09-28 | `75d5e8d` | NaviCore boot and OTA (`NAVICORE.md` NC-WP2, NC-WP9, NC-WP10): `s46_navicore_boot.py`, `s47_navicore_ota.py`; opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_esptool`, `navicore_identity` (§2); `ncflash.BENCH_IMAGE` and helpers, the restart rules (§5); three `(should)` rows (§6); two coverage rows (§7). |
 | 2026-09-28 | `eea29ca` | NaviCore's RC engine (`NAVICORE.md` NC-WP4, NC-WP5; `863462d`, `5b1afc6`): `s41_navicore_engine.py` (12 `ncengine` tests) and `s42_navicore_sbus_engine.py` (21 `sbus` tests), 23 of them in `hil/servos.py`; §5's engine observation windows; §6's SBUS-stall, trigger-queue and pinned-behaviour rows, three `(should)` rows (D-NC20, D-NC44, D-NC45) and a doc-disagreement row; a §7 `ncengine.*` row. |
 | 2026-09-28 | `f84bacc` | WCB wave 3 group 2 (WCB-WP14, WP18, WP28, WP38, WP45, WP46, WP56; `69d03cc`): 21 tests, a new opt-in `etm_seq_wrap`; §1's one exception to the WDP-off rule; §5's ring holds 16 seqs, not 8. |

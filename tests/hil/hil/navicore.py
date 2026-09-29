@@ -327,12 +327,25 @@ class NaviCore:
         m = self.dev.mark()
         self.dev.send(cmd)
         if flush:
+            mp = self.dev.mark()
             self.dev.send("#L12")
             self.dev.expect(until or r"Mode=\d+", timeout=timeout, since=m)
+            if until:
+                self._eat_poke(mp)
             return self.dev.since(m)
         self.dev.expect(until, timeout=timeout, since=m)
         time.sleep(0.3)
         return [x.rstrip() for x in self.dev.since(m)]
+
+    def _eat_poke(self, mp):
+        """Wait (up to 1 s) for the Mode= line of the #L12 poke sent after mark `mp`. A caller that returns on its own
+        pattern must, or that line lands after it returns and ends the NEXT cli()'s wait for ITS Mode= line early:
+        sbus_raw's #L13 then came back with the previous poke's line and no dump (sbus.prefix_ambiguity_ch17, run
+        20260928-212848)."""
+        try:
+            self.dev.expect(r"Mode=\d+", timeout=1.0, since=mp)
+        except AssertionError:
+            pass
 
     def lines(self, since, pattern):
         """The console lines after mark `since` that match `pattern`."""
@@ -548,8 +561,10 @@ class NaviCore:
         m = self.dev.mark()
         self.dev.send("#L09")
         time.sleep(0.15)
+        mp = self.dev.mark()
         self.dev.send("#L12")
         self.dev.expect(r"^\s*CH17-24:", timeout=3, since=m)
+        self._eat_poke(mp)                  # its Mode= line must not end the next cli()'s wait (_eat_poke)
         return parse_sbus_dump(self.dev.since(m))
 
     def sbus_full_rate(self, timeout=4.0):
@@ -576,7 +591,10 @@ class NaviCore:
 
     def sbus_raw(self):
         """#L13 -> the last SBUS frame NaviCore parsed (parse_sbus_raw); hil.sbus.decode() reads it."""
-        return parse_sbus_raw(self.cli("#L13"))
+        # Until the dump's own last line, not any Mode= line (_eat_poke): the footer row for SBUS-16 or SBUS-24
+        # (NaviCore.ino:3663-3671), or the header alone when nothing was parsed or the length is unknown.
+        return parse_sbus_raw(self.cli(
+            "#L13", until=r"^\s*byte \d+\s+= footer|^---- SBUS RAW ---- \((no frame|\d+ bytes, unknown)"))
 
     def wcb_status(self):
         got = self.json_cmd({"type": "GET_WCB_STATUS"}, r'^\{"type":"WCB_STATUS".*\}$')

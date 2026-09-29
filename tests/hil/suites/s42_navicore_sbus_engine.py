@@ -705,7 +705,7 @@ def switch_tiers_settle_seed(bench):
                 problems.append(f"a {mid:.0f} ms pass through position 1 fired its tier")
             if _count(got, tags[2]) != 1:
                 problems.append(f"after the sweep position 2's marker x{_count(got, tags[2])}")
-            tags2 = dict(tags, **{2: marker("W2b")})
+            tags2 = {**tags, 2: marker("W2b")}
             pm = l12.mark()
             nc.set_config({"switches": {label: {"channel": ch, "positions": 3, **_sw_tiers(tags2)}}})
             time.sleep(1.5)
@@ -1160,15 +1160,17 @@ def knob_hcr_volume(bench):
                     problems.append(f"sends {gaps} ms apart: the limit is one per 80 ms")
                 if len(sweep) >= 12:
                     problems.append(f"{len(sweep)} sends for 12 steps in 300 ms: nothing was rate-limited")
+                # Two positions whose volumes are both over 99 (the knob spans 0-150, so anything above ~1254):
+                # 1600/1610 skipped the whole test on a controller whose rx stick tops out at 1606 (run 20260928-212848).
                 nm = nc.dev.mark()
-                sticks.set("rx", 1600)
+                sticks.set("rx", 1500)
                 time.sleep(0.6)
-                sticks.set("rx", 1610)
+                sticks.set("rx", 1510)
                 time.sleep(0.6)
                 _flushed(nc, nm, 0.05)
                 top = [v for _, v in sends(nm)]
                 if top != [99]:
-                    problems.append(f"1600 then 1610 (volumes {knob_pos(1600, 0, 150)}, {knob_pos(1610, 0, 150)}) sent "
+                    problems.append(f"1500 then 1510 (volumes {knob_pos(1500, 0, 150)}, {knob_pos(1510, 0, 150)}) sent "
                                     f"{top}, expected 99 once")
         finally:
             sticks.center()

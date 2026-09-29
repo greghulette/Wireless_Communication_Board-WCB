@@ -585,7 +585,10 @@ def mesh_reboot(bench):
         resets = sum(1 for x in lines if x.startswith("Reset reason:"))
         t_ack = _line_time(w1.dev, wm, r'^\{"sys":1,"type":"ACK"')
         t_rst = _line_time(g.nc.dev, m, r"^(ESP-ROM:|Reset reason:)")
-    if requests != 1:
+    # The line itself is not evidence: it is printed on the receive callback 100 ms before ESP.restart(), and
+    # NaviCore's USB-Serial/JTAG holds a short line until more output follows it, so the restart usually takes it
+    # (run 20260928-212848: none arrived, and the uptime proved the one restart). Only a second one would say much.
+    if requests > 1:
         problems.append(f"NaviCore printed {requests!r} '{REMOTE_REBOOT}' lines for one relayed REBOOT")
     if not _restarted(up1, since_ms):
         problems.append(f"NaviCore's uptime is {up1} ms, {since_ms:.0f} ms after the REBOOT (was {up0} ms): it did not "

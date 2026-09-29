@@ -1051,7 +1051,7 @@ everything inside `nc_guard`.
 
 ### NC-WP2 — this week's image, flash and recovery
 
-> **Status 2026-09-28: written, not bench-run** (`suites/s47_navicore_ota.py`; a full run held every port). Steps 2-4
+> **Status 2026-09-28: written and bench-verified** (`20260928-212818`: `ncota.image_identity` and `ncota.recovery_hard_reset` pass; `suites/s47_navicore_ota.py`). Steps 2-4
 > were done by INF9 (D45: `navicore-hil1` is on the board). `ncota.recovery_hard_reset` (`navicore_reboot`) runs the
 > real `ncflash.recover()` with its PING rung withheld (`_Withheld`), so the ladder climbs to rung 2 as it would for a
 > hung app. The proof the chip restarted is its uptime: GET_MESH_STATS `upMs` below the time since the reset, exact
@@ -1108,7 +1108,7 @@ runs in CI, and can be written while the bench is busy with other plans.
 
 ### NC-WP4 — the engine through TRIGGER and TEST_ACTION (`s41_navicore_engine.py`, `ncengine.*`)
 
-> **Status 2026-09-28: written, not bench-run** (written while a full run held the bench). `suites/s41_navicore_engine.py`
+> **Status 2026-09-28: written and bench-verified** (`20260928-204259`: 9 pass; the two `(should)` tests fail as designed, D-NC20 and D-NC45; `maestro_skip_running_slot` skips, no undriven local Maestro channel reading a position in range). `suites/s41_navicore_engine.py`
 > holds 12 tests: the ten below, plus two `(should)`: `ncengine.test_action_skipped_not_ok` (D-NC20) and
 > `ncengine.skip_not_traced_as_sent` (D-NC45, found writing these). `maestro_skip_running_slot`, `mode_report_content`
 > and `mesh_trigger_burst` are in `hil/servos.py`. Line numbers in the docstrings are the `hil-week` tree, the image on
@@ -1152,7 +1152,7 @@ the W1S2 probe:
 
 ### NC-WP5 — the engine through SBUS (`s42_navicore_sbus_engine.py`, `sbus.*`, all servo-listed)
 
-> **Status 2026-09-28: written, not bench-run.** `suites/s42_navicore_sbus_engine.py` holds 21 tests: the twenty below,
+> **Status 2026-09-28: written and bench-verified** (`20260928-212848`, `-215752`: every test passes but the `(should)` `reconfig_parked_tap_cleared`, which fails as designed, D-NC44. The first pass, `20260928-204259`, skipped 17 of them on a stale one-second fps window after a config restore, now waited out by `NaviCore.sbus_full_rate`; a stale `#L12` reply ended `#L13`'s read early, now consumed by `_eat_poke`; `knob_hcr_volume` moves 1500/1510, since this controller's rx stick tops out at 1606). `suites/s42_navicore_sbus_engine.py` holds 21 tests: the twenty below,
 > plus one `(should)`, `sbus.reconfig_parked_tap_cleared` (D-NC44, which had none). All but `sbus.lock_under_load`
 > (reads only, nothing moves) are in `hil/servos.py`. The sticks are driven to exact counts: `axis_arg` inverts the
 > controller's `axisToSbusRange`, checked offline against a float32 model of it for every count on all four axes, and
@@ -1262,7 +1262,7 @@ line and no AP; restored; the AP is back).
 
 ### NC-WP9 — boot, reboot, failure (`s46_navicore_boot.py`, `ncboot.*`, opt-in `navicore_reboot`)
 
-> **Status 2026-09-28: written, not bench-run** (`suites/s46_navicore_boot.py`). Under `navicore_reboot`:
+> **Status 2026-09-28: written and bench-verified** (`20260928-212848`, `-215752`: `banner_order`, `reboot_resets_ram_state`, `wcbs_see_reboot`, `roll_call_missing_board` and `sbus.boot_quiet` pass; the three `(should)` tests fail as designed, D-NC25, D-NC29, D-NC19; `bad_device_id` is attended. `mesh_reboot` no longer requires the `[RC] Remote REBOOT` line: it is printed 100 ms before the restart, which usually takes it). (`suites/s46_navicore_boot.py`). Under `navicore_reboot`:
 > `ncboot.banner_order`, `reboot_resets_ram_state` (REBOOT and `#L02`), `wcbs_see_reboot` (with the healthy roll
 > call), `new_peer_after_boot` (should, D-NC25), `roll_call_missing_board`, `mesh_reboot` (should, D-NC29),
 > `boardtype2_mismatch` (should, D-NC19) and `sbus.boot_quiet`; `ncboot.bad_device_id` under `navicore_identity`
@@ -1296,7 +1296,7 @@ positions and errors unchanged). `ncboot.bad_device_id` stays behind `navicore_i
 
 ### NC-WP10 — OTA (`s47_navicore_ota.py`, `ncota.*`)
 
-> **Status 2026-09-28: written, not bench-run** (`suites/s47_navicore_ota.py`). Unattended: `local_status_parse`,
+> **Status 2026-09-28: written and bench-verified** (`20260928-212818`, `-212848`: every ticked test passes - the five unattended ones, `local_begin_abort_timeout`, `local_full_same_image` (two USB flashes, 161 s) and `relay_full_to_w2` (two W2 flashes through NaviCore, 940 s); `recovery_esptool` and `relay_full_via_w1` stay off). (`suites/s47_navicore_ota.py`). Unattended: `local_status_parse`,
 > `local_nosession_errors`, `relay_target_nosession`, `navicore_as_relay_nonerasing`. Opt-in: `local_begin_abort_timeout`
 > (`navicore_ota_erase`), `local_full_same_image` (`navicore_ota_full`), `relay_full_via_w1` (`navicore_ota_relay_full`,
 > off), `relay_full_to_w2` (`ota_full_wcb2`, ticked, so it runs nightly beside its W1-relayed twin). Where the code
@@ -1627,6 +1627,7 @@ D-NC16 to D-NC36 and D-NC42 to D-NC45 are behaviour findings, each with the `(sh
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |
 | 2026-09-28 | `75d5e8d` | NC-WP2, NC-WP9 and NC-WP10 written, not bench-run: `s46_navicore_boot.py` (9 tests, 3 `(should)`) and `s47_navicore_ota.py` (11); opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_identity` registered and `navicore_esptool` added (off); `ncflash.BENCH_IMAGE`, `builds_with_sha`, `flash_rows`, `last_written`, `put_back`; `NaviCore.restart_blocker`; `redact_text` hashes a SoftAP name. `selftest.py` runs both suites against `NaviBootModel` and nine mutations of it. The three status notes list where the code differs from the plan: the roll call's floor (quantity 1 leaves W2 out; `deaf` stops reception only), NaviCore's `?OTALOCAL` without BAUD and with a case-sensitive prefix, and `recover()` calling a reset that did nothing a success. |
 | 2026-09-28 | `863462d` | NC-WP4 and NC-WP5 written, not bench-run: `s41_navicore_engine.py` (12 `ncengine` tests, two `(should)`) and `s42_navicore_sbus_engine.py` (21 `sbus` tests, one `(should)`); 23 of them in `hil/servos.py`. New finding D-NC45 (a skipped action is traced as sent); D-NC44 gets its `(should)`, `sbus.reconfig_parked_tap_cleared`. The two status notes list where the code differed from the plan. |
 | 2026-09-28 | `553236c` | NC-WP3's Export/Import, two-tab and live-panel specs (6, two `(should)`); `FakeSerial` tags events with their page; the fixture's switch SI Up action moves to `p2`. The INF7 note lists what they found: the CSV round trip narrows every button band; D-NC35 confirmed, and both tabs also share fragment-session numbers. |
