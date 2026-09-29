@@ -2154,7 +2154,7 @@ in the command queue and the UART ring, which count what they lose.
 
 | | |
 |---|---|
-| **Status** | PARTLY FIXED (unverified) - the sweep (a scan of the mesh channel before each connect); the missed loss and rejoin still to investigate |
+| **Status** | FIXED (unverified) - the sweep half VERIFIED in `20260928-211051` (`wifi.join_absent_ssid_keeps_mesh` passes); the loss and rejoin half fixed, not yet on the bench |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
 | **Effort** | M |
 | **Tests** | `wifi.join_absent_ssid_keeps_mesh`, `wifi.join_lost_and_rejoin` (opt-in `wifi_modes`) |
@@ -2184,10 +2184,21 @@ scan starts ("Channel hint ... scan starting from the specified channel", `wifi_
 `WCB_WiFi.cpp` `wcbWifiJoinScan`), and only an AP heard there gets a `WiFi.begin`, with its BSSID, so the driver's own
 scan finds it on the first channel it tries.
 
-**Still open: the loss and the rejoin.** "Association connected" with "Interface down" means `WiFi.status()` read
-`WL_CONNECTED` while `wifiUp` stayed false, which `wcbWifiService` allows only once `joinSettled` is set: the off-mesh
-guard sets it when an association lands on another channel, which a sweep could do. The next bench run shows whether the
-fix above also cures the rejoin; if not, the WiFi events around the AP's disappearance need logging.
+**Evidence (run 20260928-211051, `6.2.1_282108RSEP2026`, the sweep fix).** `wifi.join_absent_ssid_keeps_mesh` passed.
+`wifi.join_lost_and_rejoin` failed as before, and W1's log showed why: 80 ms after W2 restarted with its AP off, W1
+printed `[WIFI] joined "..." but the radio is on channel 2, not 1 — that is OFF-MESH. Disconnecting.`, which settles
+the join for good, so no `lost` line and no retry followed.
+
+**Cause of the missed loss.** The Arduino core (3.3.4 `STA.cpp`) reconnects once on the first disconnect after every
+boot, whatever `setAutoReconnect(false)` says (`first_connect`), with an unpinned connect scan, and for some disconnect
+reasons (its `WIFI_REASON_AUTH_EXPIRE` branch is empty) it leaves `WiFi.status()` at `WL_CONNECTED`. The service trusted
+that status and read the radio's momentary channel, so it took the sweep for an association on channel 2.
+
+**Fix (the loss).** JOIN asks the driver whether it is associated (`esp_wifi_sta_get_ap_info`) and checks the AP's own
+channel from its record; an address is `WiFi.STA.hasIP()`. On a loss it prints `lost`, cancels the core's reconnect
+(`WiFi.disconnect()`) and goes back to the mesh-channel scan; an association with no address after 20 s starts over.
+`?WIFI`'s Association line reads the driver too. What remains: the core's one forced reconnect can scan off the channel
+for the few milliseconds before `loop()` cancels it.
 
 #### 104. Every WiFi.begin persists the station config into the WiFi driver's own NVS namespace
 

@@ -27,6 +27,7 @@ static bool          joinSettled     = false;   // JOIN reached a terminal state
 static unsigned long joinNextAttempt = 0;
 static uint16_t      joinAttempts    = 0;
 static bool          joinScanning    = false;   // a scan of the mesh channel for the SSID is running
+static unsigned long joinAssocMs     = 0;       // when an association still waiting for its address began (0: none)
 static unsigned long lastChannelWarn = 0;
 
 // Retry cadence for JOIN. Deliberately unbounded in total: on a shared power
@@ -38,6 +39,9 @@ static const unsigned long JOIN_RETRY_MS   = 5000;
 // How often to re-check that the radio is still on the mesh channel, and how
 // often we are willing to complain about it.
 static const unsigned long CHAN_CHECK_MS   = 30000;
+// An association that has not been given an address in this long is dropped and
+// the join starts over, rather than sitting associated and unreachable for good.
+static const unsigned long JOIN_ADDR_MS    = 20000;
 
 // ════════════════════════════════════════════════════════════════════════════
 //  NVS
@@ -267,15 +271,25 @@ void wcbWifiService() {
     // band), so if this loop stops retrying nothing else will, and the board is off
     // the network until someone power-cycles it.
     if (wcbWifiMode == WCB_WIFI_JOIN && !joinSettled) {
-        if (WiFi.status() == WL_CONNECTED) {
+        // ASK THE DRIVER, NOT WiFi.status(). The core keeps that status from its
+        // event task, and it can be wrong both ways: its WIFI_REASON_AUTH_EXPIRE
+        // branch leaves WL_CONNECTED standing after the AP has gone, and on the
+        // first disconnect after every boot it reconnects once whatever
+        // setAutoReconnect says (STA.cpp, first_connect) — a connect scan that
+        // sweeps the band. Reading the RADIO's channel mid-sweep, the guard below
+        // took a lost AP for an association on channel 2 and settled for good: no
+        // "lost" line and no rejoin (tracker #103). esp_wifi_sta_get_ap_info
+        // answers from the driver, and its record names the AP's own channel.
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             // VERIFY WHERE THE ASSOCIATION ACTUALLY LEFT US. An AP owns the
             // channel once associated. A NaviCore raises its SoftAP on its own
             // mesh channel, so joining it is a no-op channel-wise — but if we
             // land anywhere else we are off the mesh, and being deaf is worse
             // than having no WiFi. Hang up rather than sit there silently.
-            const uint8_t ch = wcbWifiRadioChannel();
+            const uint8_t ch = ap.primary;
             if (ch != meshChannel) {
-                Serial.printf("[WIFI] joined \"%s\" but the radio is on channel %u, not %u — "
+                Serial.printf("[WIFI] joined \"%s\" but its AP is on channel %u, not %u — "
                               "that is OFF-MESH. Disconnecting.\n",
                               wcbWifiJoinSsid.c_str(), ch, meshChannel);
                 Serial.println("[WIFI] Move that AP to the mesh channel, or change ?WCBCH to match it.");
@@ -289,20 +303,35 @@ void wcbWifiService() {
                 joinSettled = true;      // do not thrash: the operator must fix one end
                 return;
             }
-            if (!wifiUp) {               // edge — announce once, not every pass
-                wifiUp = true;
-                Serial.printf("[WIFI] joined \"%s\" on channel %u after %u attempt(s) — ws://%s/ws\n",
-                              wcbWifiJoinSsid.c_str(), ch, joinAttempts,
-                              WiFi.localIP().toString().c_str());
+            if (!wifiUp) {
+                if (WiFi.STA.hasIP()) {  // edge — announce once, not every pass
+                    wifiUp = true;
+                    joinAssocMs = 0;
+                    Serial.printf("[WIFI] joined \"%s\" on channel %u after %u attempt(s) — ws://%s/ws\n",
+                                  wcbWifiJoinSsid.c_str(), ch, joinAttempts,
+                                  WiFi.localIP().toString().c_str());
+                } else if (!joinAssocMs) {
+                    joinAssocMs = now | 1;   // associated; the address is on its way
+                } else if (now - joinAssocMs >= JOIN_ADDR_MS) {
+                    Serial.printf("[WIFI] associated with \"%s\" but no address after %lu s — starting over\n",
+                                  wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_ADDR_MS / 1000));
+                    WiFi.disconnect();
+                    joinAssocMs = 0;
+                }
             }
-            return;
+            return;                      // associated: nothing to retry
         }
+        joinAssocMs = 0;
 
-        // Not connected. If we WERE, the association just dropped: say so, clear the
-        // status so ?WIFI stops claiming "up" with no address, and fall through to
-        // the retry below rather than latching.
+        // Not associated. If we WERE up, the association just dropped: say so,
+        // clear the status so ?WIFI stops claiming "up" with no address, cancel
+        // whatever reconnect the core started on its own (its connect scan sweeps
+        // the band; ours below stays on the mesh channel), and fall through to the
+        // retry below rather than latching. WiFi.disconnect(), NOT disconnect(true):
+        // see the off-mesh guard above.
         if (wifiUp) {
             wifiUp = false;
+            WiFi.disconnect();
             Serial.printf("[WIFI] lost \"%s\" — retrying every %lu s\n",
                           wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_RETRY_MS / 1000));
         }
@@ -345,7 +374,7 @@ bool wcbWifiReady() {
 String wcbWifiIP() {
     if (!wifiUp) return String("");
     if (wcbWifiMode == WCB_WIFI_AP)   return WiFi.softAPIP().toString();
-    if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
+    if (WiFi.STA.hasIP()) return WiFi.localIP().toString();   // not WiFi.status(): it can stay stale (#103)
     return String("");
 }
 
@@ -374,8 +403,9 @@ static void wcbWifiPrintStatus() {
     } else if (wcbWifiMode == WCB_WIFI_JOIN) {
         Serial.printf("Join SSID     : %s\n",
                       wcbWifiJoinSsid.length() ? wcbWifiJoinSsid.c_str() : "NOT SET");
+        wifi_ap_record_t ap;             // the driver's answer, not WiFi.status() (tracker #103)
         Serial.printf("Association   : %s (%u attempt(s))\n",
-                      WiFi.status() == WL_CONNECTED ? "connected" : "not connected",
+                      esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? "connected" : "not connected",
                       joinAttempts);
     }
     Serial.printf("Interface     : %s\n", wifiUp ? "up" : "down");
