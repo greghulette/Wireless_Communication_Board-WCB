@@ -1210,7 +1210,7 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP6 — mesh, bridge, WDP, telemetry, relay, failure (`s43_navicore_mesh.py`, `ncmesh.*`)
 
-> **Status 2026-09-28: written, not bench-run** (`suites/s43_navicore_mesh.py`, 35 tests). Six `(should)`:
+> **Status 2026-09-29: first bench pass** (`20260929-025701`): 21 of the 29 normal tests pass and the six `(should)` tests fail as designed; eight are being fixed (five left W2's config for the guard to put back, `bridged_cmdlib`'s SBUS rate read 88 fps against 90, `fragment_reassembly_edges`' reorder and duplicate cases, `mgmt_etm_char` got no reply, and `crc_namespace_gates`' control case did not reach NaviCore). (`suites/s43_navicore_mesh.py`, 35 tests). Six `(should)`:
 > `bridged_set_config_strip` (D-NC18), `bridged_reset_keeps_identity` (D-NC16), `bridged_cmdlib_keys_after_data`
 > (D-NC47, new), `bridged_wcb_send_findings` (D-NC27), `long_command_truncation` (D-NC26) and `seqval_verbatim`
 > (D-NC46, new). `wdp_learn_forget` sits behind the new opt-in `navicore_nvs` (registered, off).
@@ -1275,7 +1275,7 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP7 — device transports and the Maestro (`s44_navicore_devices.py`, `ncdev.*`)
 
-> **Status 2026-09-29: written, not bench-run.** `suites/s44_navicore_devices.py` holds 23 tests: the 18 below, plus
+> **Status 2026-09-29: written and bench-verified** (`20260929-025701`: all 14 normal tests pass; the four `(should)` tests that run fail as designed, D-NC23, D-NC56, D-NC58, D-NC60; the five behind `navicore_aux_tx` skip, D56; `navicore.mae_cli_local` and `navicore.maestro_mesh_fanout_0_9` pass as changed). `suites/s44_navicore_devices.py` holds 23 tests: the 18 below, plus
 > five `(should)` for findings made writing them: `ncdev.mae_verb_no_alias` (D-NC56), `ncdev.hcr_local_volstep_cap`
 > (D-NC57), `ncdev.serial_action_paced` (D-NC58), `ncdev.hcr_level_same_both_ways` (D-NC59) and
 > `ncdev.wled_forward_normalised` (D-NC60); `ncdev.mae_subroutine_msb` is D-NC23's. In `hil/servos.py`: the three
@@ -1733,6 +1733,7 @@ that pins it.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | NC-WP7 bench-verified and NC-WP6's first bench pass (`20260929-025701`): 37 pass, the ten `(should)` tests that ran fail as designed, eight NC-WP6 tests being fixed. |
 | 2026-09-29 | `ede3aca` | NC-WP7 written, not bench-run: `s44_navicore_devices.py` (23 `ncdev` tests, six `(should)`; five in `hil/servos.py`; five behind the new opt-in `navicore_aux_tx`, registered and off). In s21, `navicore.mae_cli_local` needs a value (D-NC15) and `navicore.maestro_mesh_fanout_0_9` reads each target back; s41's speed-4 figure corrected. New findings D-NC56 to D-NC60. `selftest.py` runs the suite against `NaviDevModel` and twelve mutations of it. The status note lists where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-28 | `4170a24` | NC-WP6 written, not bench-run: `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`). Opt-in `navicore_nvs` registered (off); three tests in `hil/servos.py`. `hil/ncmesh.py` gains pure predictors (`wdp_scrub`, `json_strip`, `rterm_pieces`, `port_labels`, `local_maestro_ids`, `status_rows`, `stats_rows`, `bulk_frames`). `selftest.py` runs the 13 bridge tests against `NaviMeshModel` and 11 mutations of it. New findings D-NC46 (sequence names and values stripped, not escaped) and D-NC47 (a bridged SET_CMDLIB stores the keys after `data`). The status note lists where the code differed from the plan. |
 | 2026-09-28 | `04e70d1` | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |

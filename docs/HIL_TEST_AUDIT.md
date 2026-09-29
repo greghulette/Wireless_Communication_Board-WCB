@@ -741,6 +741,14 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     fail as designed. Two harness traps were found on the way: a stale `#L12` reply and a stalled fps window.
     Running: NC-WP6 and NC-WP7 (agents). Next: tonight's full run on `6.2.1_282121RSEP2026`, then #108, then
     Intellex IX-WP3/4 remnants and IX-WP5/6.
+  - 2026-09-29 03:00: full run `20260928-220200` (816 pass, 31 fail, 9 skip; 26 `(should)`) is triaged and its
+    five real failures fixed and verified (`20260929-023811`, 29 of 29 but a known skip; D54): the #102 pacing
+    retuned after a 50 ms give-up lost a Kyber frame, the RTERM ring back to 2.5 KB, an out-of-memory `?SEQ,SAVE`
+    copy named, and three test fixes. #108 (an ETM command ACKed and then lost to a full queue) is fixed and
+    verified. NaviCore NC-WP6 (35 `ncmesh`) and NC-WP7 (23 `ncdev`) are merged (D53, D55; findings D-NC46/47 and
+    D-NC56-60), so every NaviCore work package that needs no new hardware or firmware has its tests; their first
+    bench pass is running. All pushed to WIFI (`3c823b3`). Next: triage that pass, the Intellex agent (IX-WP3/4
+    remnants, IX-WP5/6, resumed after the 00:50 limit), then tonight's full run.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -751,9 +759,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
   3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
-- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `e55ba82` (#102-#107 and #103,
-  `6.2.1_282121RSEP2026`, flashed 2026-09-28 about 21:23). The previous image is kept in `-wave2f`; the folder's
-  FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
+- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `e33b0c7` (#108, the pacing
+  retune, `6.2.1_290236RSEP2026`, flashed 2026-09-29 about 02:37). The previous image is kept in `-wave2g`; the
+  folder's FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
 - **COM11:** `Intellex.exe` held probe2's port from some time after 09:26 on 2026-09-24 until Greg had it stopped at
   13:28; every test that needs probe2 errored meanwhile (`20260924-120036`, `20260924-131417`) and re-ran in `20260924-133332`. If
   a probe port says "Access is denied", look for another program first.
@@ -765,7 +773,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
   sees its peers offline for up to one heartbeat; recommend leave); A20 (probe literal,
   nit). F11 is deferred on Greg's word: revisit it if `results/nvs_history.csv` shows NVS filling.
-- **Committed and pushed to WIFI** through the 2026-09-28 22:05 docs commit (this week's work, per Greg's standing OK).
+- **Committed and pushed to WIFI** through `3c823b3` and the 2026-09-29 03:00 docs commit (this week's work, per Greg's standing OK).
 - **Bench:** free when this was written; `ListAgents` first.
 
 ## 7. Full-coverage plan (2026-09-24)
