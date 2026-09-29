@@ -543,6 +543,7 @@ Each of these is current firmware behaviour that a test, or a tool, walks into.
 | NaviCore's relayed CLI queues 3 lines and drops a 4th that arrives while `loop()` is busy, after ACKing it; its RTERM output is cut every 160 bytes, and a WCB relay drops an empty packet (an empty line, or the flush after a line of exactly 160 bytes). | `NaviCore.ino:4843`, `:2925-2930`; `navicore_rterm.h:48-62`; `WCB_RemoteTerm.cpp` (`rtermRelayHandlePacket`) | `ncmesh.rterm_pieces` predicts the pieces; `ncmesh.remote_cli_order_and_drop` needs the `#L90` stall for the queue. |
 | A WCB's WDP row for NaviCore reads `PEER=0` only while NaviCore is that board's controller (the special peer is never auto-joined), else `PEER=2`; it reads `HW=0` (NaviCore sends no HWVER TLV). | `WCB_WDP.cpp:671-678`, `:1817-1822` | `ncmesh.wdp_identity_fields` reads each board's `?CONTROLLER` token. |
 | NaviCore sends a board `?WHOAMI` at most 4 times per online session, only while its cached alias is empty, re-armed only by an offline-to-online edge; a WCB with no alias advertises no ALIAS TLV. | `rc_telemetry.h:1808-1831`; `WCB_WDP.cpp:248-251` | `ncmesh.alias_whoami` empties the cache with a `wcb_alias` message from W1 and skips when the budget is spent. |
+| Resetting the SBUS controller through its port (`SbusCtl.reset_rts`: RTS and DTR written while the chip's USB re-enumerates) can block for tens of seconds on Windows, 30 s in run `20260928-220200`, longer than the whole signal outage it causes. | `hil/serialdev.py` `usb_jtag_reset` | `sbus.signal_loss_controller_reset` polls NaviCore from a thread started before the pulse. |
 
 ### `(should)` tests
 
@@ -1158,6 +1159,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | §6: resetting the SBUS controller can block its port write for tens of seconds, so the signal-loss test polls from before the pulse (full run `20260928-220200`). |
 | 2026-09-28 | `4170a24` | NaviCore on the mesh (`NAVICORE.md` NC-WP6): `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`), opt-in `navicore_nvs` (§2); §5's mesh bullet and the `deaf` wording; §6's relay-window, deaf-WCB, CRC-ACK, remote-CLI, WDP PEER and `?WHOAMI` rows; six `(should)` rows (D-NC16, D-NC18, D-NC26, D-NC27, D-NC46, D-NC47); a §7 `ncmesh.*` row. |
 | 2026-09-28 | _(pending)_ | §5: a NaviCore `#L12` poke's sender consumes its reply (`_eat_poke`), and a full-rate SBUS gate re-reads a stalled fps window (`sbus_full_rate`): both from the first bench pass of the NaviCore engine, boot and OTA suites (`20260928-204259`, `-212848`, `-215752`). |
 | 2026-09-28 | `75d5e8d` | NaviCore boot and OTA (`NAVICORE.md` NC-WP2, NC-WP9, NC-WP10): `s46_navicore_boot.py`, `s47_navicore_ota.py`; opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_esptool`, `navicore_identity` (§2); `ncflash.BENCH_IMAGE` and helpers, the restart rules (§5); three `(should)` rows (§6); two coverage rows (§7). |

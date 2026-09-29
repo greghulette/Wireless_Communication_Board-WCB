@@ -18,10 +18,12 @@
 // which caused the WiFi watchdog to fire and restart the board.
 // The relay prints each line with a "[TERM:n]" prefix at the same baud rate the
 // target printed it, so a burst of short lines always leaves a backlog here. A
-// ring of variable-length items holds ~100 short lines in the heap the old 16
-// fixed 163-byte slots took, which lost ten short ?backup lines in a row
-// (tracker #107). A line that still does not fit is counted and reported.
-#define RTERM_RING_BYTES  3072
+// ring of variable-length items holds ~80 short lines in the heap the old 16
+// fixed 163-byte slots took (2.6 KB), which lost ten short ?backup lines in a
+// row (tracker #107). A line that still does not fit is counted and reported.
+// Not bigger: on a WiFi-AP board every KB is felt (CLAUDE.md rule 14) - a 3 KB
+// ring was enough to move where a 2950-character ?SEQ,SAVE ran out of heap.
+#define RTERM_RING_BYTES  2560
 
 static RingbufHandle_t s_rtermRing = nullptr;
 static std::atomic<uint32_t> s_rtermLost{0};   // lines the ring had no room for

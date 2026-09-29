@@ -17,6 +17,7 @@ Built from the verified navicore_sbus specs. Rules from the specs:
 The NaviCore and controller helpers live in hil/navicore.py and hil/sbus.py (docs/hil_plan/NAVICORE.md INF1, INF2).
 """
 import re
+import threading
 import time
 
 from hil.navicore import DBG_MAESTRO, DBG_SERIAL, DBG_WCB, NaviCore, SBUS_FULL_FPS
@@ -1389,18 +1390,31 @@ def signal_loss_controller_reset(bench):
     base = nc.sbus_dump()
     b0 = ctl.bootlog()
     nm = nc.dev.mark()
+    # The polls run on their own thread from before the pulse: the port write that resets the controller can itself
+    # hang while its USB re-enumerates - 30 s in run 20260928-220200, and the whole outage was over before a poll
+    # that started after it could see it.
+    samples, stop = [], threading.Event()
+
+    def poll():
+        while not stop.is_set():
+            samples.append(nc.sbus_dump())
+            time.sleep(0.4)
+
+    poller = threading.Thread(target=poll, daemon=True)
+    poller.start()
     t_pulse = time.monotonic()
-    ctl.reset_rts()             # the port may go away with the reset; it is reopened below
+    try:
+        ctl.reset_rts()         # the port may go away with the reset; it is reopened below
+        time.sleep(max(0.0, t_pulse + 4 - time.monotonic()))
+    finally:
+        stop.set()
+        poller.join(timeout=10)
     # Poll through the outage. While no frame arrives NaviCore's frame counter stays put and its ageMs must rise. The
     # outage is the longest run of polls on one frame count, not "the poll where fps reads 0": fps is a one-second
     # average, so it can still read 6 on the last frozen poll and reach 0 only once frames are back (run
     # 20260924-112929: frames 1030039 at ageMs 204, 856, 1507, then fps=0 with the counter moving again). And a later
     # poll proves nothing - the controller can be back within a second (run 20260924-092602). fps reaching 0 is
     # checked on its own.
-    samples, deadline = [], time.monotonic() + 4
-    while time.monotonic() < deadline:
-        samples.append(nc.sbus_dump())
-        time.sleep(0.4)
     runs = []
     for x in samples:
         if runs and x["frames"] == runs[-1][-1]["frames"]:

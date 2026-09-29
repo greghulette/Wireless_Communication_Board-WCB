@@ -8,16 +8,19 @@
 
 // Why every send goes through here: WCB_EspNow.h.
 //
-// A frame of up to 252 bytes takes about 3 ms of air at ESP-NOW's 1 Mbps, so six in flight keep the
-// radio busy for longer than a waiter's 1 ms sleep - the cap costs no throughput - and twelve hold
-// the driver's share of the heap to a few KB.
-static constexpr int      ESPNOW_INFLIGHT_TASK = 6;
-static constexpr int      ESPNOW_INFLIGHT_MAX  = 12;
-static constexpr uint32_t ESPNOW_SEND_WAIT_MS  = 50;
-// The count says the radio is full, yet no frame has completed and none been accepted for this long:
-// completions were lost (ESP-NOW re-initialised with frames queued), so the count starts over. A
-// unicast that fails spends its MAC retries in ~30 ms, well inside it.
-static constexpr uint32_t ESPNOW_STALL_MS      = 250;
+// A frame of up to 252 bytes takes about 3 ms of air at ESP-NOW's 1 Mbps, so a dozen in flight keep the radio busy
+// for far longer than a waiter's 1 ms sleep - the cap costs no throughput - and twenty hold the driver's share of the
+// heap to about 6 KB. The wait is long because a slow radio is not a stuck one: a unicast to a peer that does not
+// answer spends tens of ms in MAC retries, and 50 ms gave up a Kyber bridge frame the old unpaced send would have
+// queued and delivered (HIL kyber.remote_byte_transparency, run 20260928-220200). Losing a byte-stream frame is worse
+// than a task waiting a fraction of a second.
+static constexpr int      ESPNOW_INFLIGHT_TASK = 12;
+static constexpr int      ESPNOW_INFLIGHT_MAX  = 20;
+static constexpr uint32_t ESPNOW_SEND_WAIT_MS  = 300;
+// The count says the radio is full, yet no frame has completed and none been accepted for this long: completions were
+// lost (ESP-NOW re-initialised with frames queued), so the count starts over. A unicast that fails spends its MAC
+// retries in well under 100 ms, so frames still in the air always complete inside it.
+static constexpr uint32_t ESPNOW_STALL_MS      = 500;
 
 static std::atomic<int>      s_inFlight{0};
 static std::atomic<uint32_t> s_progressMs{0};   // millis() of the last completion or accepted send

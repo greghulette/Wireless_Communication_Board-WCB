@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-29 | Full run `20260928-220200` triaged (816 pass, 31 fail, 9 skip; 26 fails are `(should)` tests): the #102 pacing retuned (a 50 ms give-up lost a Kyber frame), the RTERM ring back to 2.5 KB, and `?SEQ,SAVE` names an out-of-memory argument copy instead of 'Invalid format' (D54). |
 | 2026-09-28 | **#103** VERIFIED on `6.2.1_282121RSEP2026` (`20260928-212350`, 11 of 11 `wifi.*`): JOIN scans the mesh channel before each connect (`5770675`) and reads its association from the driver (`e55ba82`). |
 | 2026-09-28 | Filed **#108** (an ETM command is ACKed before it is queued, so a full command queue loses it; seen as seven discards during `etm.seq_wrap` on the #102 image). |
 | 2026-09-28 | Run `20260928-205106` on `6.2.1_282046RSEP2026` (all 65 `etm.*`, `mesh.*` and `mgmt.*` pass): **#102** and **#107** VERIFIED; `etm.seq_wrap` survived its whole flood. |
@@ -2143,9 +2144,10 @@ AP-mode heap (CLAUDE.md rule 14), and the firmware keeps sending after `ESP_ERR_
 test's way in; a raw serial mapping streaming into the mesh at a high rate is the realistic one.
 
 **Fix.** All 22 ESP-NOW sends go through `wcbEspNowSend` (`WCB_EspNow.{h,cpp}`, CLAUDE.md rule 16), which counts the
-frames in flight through the send callback. A task waits in 1 ms sleeps while 6 are in flight, for up to 50 ms, and then
+frames in flight through the send callback. A task waits in 1 ms sleeps while 12 are in flight, for up to 300 ms, and then
 gives the frame up with `ESP_ERR_ESPNOW_NO_MEM`. The WiFi task (the receive callback's ACKs, rule 11) never waits: it
-sends up to 12 and then drops. A frame given up is counted (`?STATS`: `ESP-NOW: N frame(s) not sent`) and `loop()` says
+sends up to 20 and then drops. (First shipped at 6, 50 ms and 12: full run `20260928-220200` lost a Kyber bridge frame to
+the 50 ms give-up that the unpaced send would have queued and delivered, D54.) A frame given up is counted (`?STATS`: `ESP-NOW: N frame(s) not sent`) and `loop()` says
 so at most once a second (`[MESH] N ESP-NOW frame(s) not sent: the radio's queue stayed full`). If no frame completes
 and none is accepted for 250 ms while the count says the radio is full, the count starts over: completions lost to an
 ESP-NOW re-init must not wedge every sender. A flood now goes at the radio's pace, and the console input behind it waits
@@ -2286,8 +2288,9 @@ short lines that outran the radio lost frames to `ESP_ERR_ESPNOW_NO_MEM`. The re
 
 **Fix.** The target's sends go through `wcbEspNowSend` (#102's fix), and `_flushLine` takes the line out of the shared
 buffer before the send, which may now wait, so a print from another task meanwhile is not thrown away. The relay keeps its
-lines in a 3 KB ring of variable-length items (about 100 short lines, where 16 fitted before), and a line that still
-does not fit is counted and reported as `[RTERM] N line(s) from WCB<n> lost at this relay: its queue was full`.
+lines in a 2.5 KB ring of variable-length items (about 80 short lines, where 16 fitted before, in the old queue's heap:
+a 3 KB ring moved where `inv.seqget_largest`'s save ran out, D54), and a line that still does not fit is counted and
+reported as `[RTERM] N line(s) from WCB<n> lost at this relay: its queue was full`.
 
 #### 108. An ETM command is ACKed before it is queued, so a full command queue loses an ACKed command
 

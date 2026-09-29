@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_282212RSEP2026                                  *****////
+///*****                                          Version 6.2.1_290236RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -198,7 +198,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_282212RSEP2026";
+String SoftwareVersion = "6.2.1_290236RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -6847,7 +6847,16 @@ void processLocalCommand(const String &message) {
                 eraseStoredCommandByName(seqArgs);
             }
         } else if (seqCmdUpper == "SAVE") {
-            saveStoredCommandsToPreferences(seqArgs);
+            // seqArgs is a copy, and an Arduino String whose allocation fails comes back EMPTY (CLAUDE.md rule 14):
+            // a long value on a busy heap reached the save with no comma and read as 'Invalid format' (HIL
+            // inv.seqget_largest, run 20260928-220200). Name the cause, as the save's own copy check does.
+            if (seqArgs.length() == 0 && secondComma != -1 && args.length() > (unsigned)secondComma + 1) {
+                Serial.printf("Out of memory: could not copy a %u-character value (largest free block %u bytes). "
+                              "Not stored.\n", (unsigned)(args.length() - secondComma - 1),
+                              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            } else {
+                saveStoredCommandsToPreferences(seqArgs);
+            }
         } else {
             Serial.println("Invalid SEQ command. Use: ?SEQ ?");
         }

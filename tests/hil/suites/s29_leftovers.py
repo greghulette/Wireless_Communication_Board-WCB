@@ -413,11 +413,19 @@ def mesh_timer_chain_long(bench):
     cut = len(chain) // 2
     sid = marker()[3:7]
     w = usb_wcb(bench)
-    m = probe.dev.mark()
-    w.send(f"?MGMT,FRAG,2,{sid},0,2,{chain[:cut]}")
-    time.sleep(0.2)
-    w.send(f"?MGMT,FRAG,2,{sid},1,2,{chain[cut:]}")
-    probe.expect_bytes(ch, b.encode(), timeout=6, since=m)
+    # W2's console is read so a miss names its cause: a refused chain prints '[TIMER] ... not run' there, while a lost
+    # broadcast part prints nothing anywhere (run 20260928-220200 missed with no W2 console to tell which).
+    with Console(bench, 2) as c2:
+        m, cm = probe.dev.mark(), c2.mark()
+        w.send(f"?MGMT,FRAG,2,{sid},0,2,{chain[:cut]}")
+        time.sleep(0.2)
+        w.send(f"?MGMT,FRAG,2,{sid},1,2,{chain[cut:]}")
+        try:
+            probe.expect_bytes(ch, b.encode(), timeout=6, since=m)
+        except AssertionError as e:
+            said = [x[:120] for x in c2.lines(cm) if re.search(r"\[TIMER\]|\[MGMT\]|FRAG|[Hh]eap|memory", x)]
+            raise AssertionError(f"{e}; W2 said {said[:4] or 'nothing about it (a lost broadcast part prints nothing)'}"
+                                 ) from None
     got = probe.received(ch, m)
     gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
     bench.note(f"long chain ({len(chain)} characters) on W2: gap {gap} ms")

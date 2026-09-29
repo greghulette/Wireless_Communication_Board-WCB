@@ -66,7 +66,10 @@ def wdp_selfheal_missed_clear(bench):
             time.sleep(2.0)
             assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "setup: WDP auto-config did not declare W2 S3"
 
-            # 2. W2 goes deaf: the explicit clear W1 is about to send never arrives.
+            # 2. W2 goes deaf: the explicit clear W1 is about to send never arrives. W1 must see W2 online first:
+            #    a peer is offline to a W1 that has just rebooted until its next packet, and a unicast to an offline
+            #    peer goes out once, untracked, so no 'failed to ACK' would ever come (run 20260928-220200).
+            _w2_online(bench, w)
             out = _crun(c2, f"?MAC,3,{other}")
             if not _has(out, f"Updated 3rd MAC octet to 0x{other}"):
                 raise AssertionError(f"W2 did not take ?MAC,3,{other}: {out}")
@@ -574,7 +577,11 @@ def _auto_configure_w2_s3(bench, w, w2):
 def _clear_all_while_deaf(bench, w, bad):
     """W2 deaf (hil.ncmesh.deaf, its own console): W1's ?MAP,PWM,CLEAR,ALL and its reboot, whose explicit clear to W2
     is not heard. Returns W2's console mark taken before W2 can hear again: W1's boot burst of adverts may heal W2 the
-    moment its octet comes back (pwm.wdp_selfheal_missed_clear, run 20260924-190733)."""
+    moment its octet comes back (pwm.wdp_selfheal_missed_clear, run 20260924-190733). W1 must see W2 online first: a
+    peer is offline to a W1 that has just rebooted until its next packet, and a unicast to an offline peer goes out
+    once, untracked, so no 'failed to ACK' would ever come (pwm.wdp_selfheal_spares_manual_output, run
+    20260928-220200)."""
+    _w2_online(bench, w)
     with deafened(bench, 2) as w2:
         w.run("?DEBUG,ETM,ON")
         wm = w.dev.mark()

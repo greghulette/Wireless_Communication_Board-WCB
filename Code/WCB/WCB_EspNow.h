@@ -10,12 +10,12 @@
 // So EVERY ESP-NOW send goes through wcbEspNowSend(), never esp_now_send() directly (CLAUDE.md
 // rule 16; tests/hil/selftest.py checks the tree). It bounds the frames in flight:
 //  - A task - loop(), the serial, Kyber, raw-forwarding, mesh-out and PWM tasks - sleeps in 1 ms
-//    ticks while ESPNOW_INFLIGHT_TASK frames are in flight, for up to ESPNOW_SEND_WAIT_MS, and
-//    gives the frame up after that. Its output then goes at the radio's pace, and input backs up
-//    into the queues and UART rings behind it, which count what they lose.
+//    ticks while ESPNOW_INFLIGHT_TASK (12) frames are in flight, for up to ESPNOW_SEND_WAIT_MS
+//    (300 ms), and gives the frame up after that. Its output then goes at the radio's pace, and input
+//    backs up into the queues and UART rings behind it, which count what they lose.
 //  - The WiFi task never waits (CLAUDE.md rule 11): the send callbacks that free a slot run on that
 //    same task. It sends the ETM ACKs from the receive callback, and anything it prints while an
-//    ?RTERM session mirrors the console. It may go on to ESPNOW_INFLIGHT_MAX, then drops.
+//    ?RTERM session mirrors the console. It may go on to ESPNOW_INFLIGHT_MAX (20), then drops.
 // A frame given up is counted (?STATS) and reported by loop(), at most one line a second.
 #include <stdint.h>
 #include <stddef.h>

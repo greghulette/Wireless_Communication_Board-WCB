@@ -448,6 +448,9 @@ _SECRET_TEXT = (
     # can put one in a failure's last-lines tail. hil/ncflash.py's logs hash it alike. A config's "wifiSsid" is left as
     # it is: hashing it would change redacted_sha of every stored NaviCore snapshot, which a paused run must still match.
     (re.compile(r'(SoftAP ")((?!<redacted:)[^"\r\n]+)(")'), _hash_repl3),
+    # The SBUS controller's boot names the network it joins: '[SBUS] Trying "<network>"...' (SBUSController.ino).
+    # A home or venue WiFi name has no place in session.log or a failure's tail.
+    (re.compile(r'(\[SBUS\] Trying ")((?!<redacted:)[^"\r\n]+)(")'), _hash_repl3),
 )
 
 

@@ -242,9 +242,10 @@ changing before editing.**
     A console flood of JSON broadcasts filled the driver's queue until the ~18 KB AP-mode heap was gone and the driver's
     next allocation aborted the board (tracker #102). An `?RTERM` mirror lost ten short `?backup` lines in a row, each
     `ESP_ERR_ESPNOW_NO_MEM` unnoticed (#107). The wrapper counts frames in flight through the send callback:
-    - A task waits in 1 ms sleeps while 6 are in flight, for up to 50 ms, then gives the frame up and returns
-      `ESP_ERR_ESPNOW_NO_MEM`.
-    - The WiFi task never waits (rule 11: the send callbacks that free a slot run on it). It sends up to 12 in flight,
+    - A task waits in 1 ms sleeps while 12 are in flight, for up to 300 ms, then gives the frame up and returns
+      `ESP_ERR_ESPNOW_NO_MEM`. Not shorter: a slow radio is not a stuck one (a unicast to a silent peer spends tens of
+      ms in MAC retries), and a 50 ms wait lost a Kyber bridge frame the unpaced send would have delivered.
+    - The WiFi task never waits (rule 11: the send callbacks that free a slot run on it). It sends up to 20 in flight,
       then drops.
     - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
     So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
