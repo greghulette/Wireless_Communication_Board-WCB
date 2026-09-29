@@ -160,6 +160,20 @@ test.describe('via a WCB', () => {
     T.expectNoPageErrors(page);
   });
 
+  // NAVICORE.md D-NC71, found writing NC-WP13 (nctool.board_via_wcb's dry run). A WCB runs any console line that starts
+  // with neither '?' nor ';' as a broadcast out of its ports and onto the mesh (handleSingleCommand, WCB.ino:6153-6164),
+  // so on a Via-WCB link every line must be ;w20,-wrapped.
+  test('nctool.via_wcb_nothing_bare (should) connecting Via a WCB writes only ;w20,-wrapped lines to the WCB; today the first status poll goes out bare, before the tool has set its Via-WCB flag (D-NC71)', async ({ page, emu }) => {
+    test.fail(true, "known tool defect D-NC71: connectSharedPort sets sharedActive (index.html:4715) and waits for the hub's port " +
+                    '(:4717), whose state event runs onSharedState -> setConnected(true) (:4672-4674) -> startWcbStatusPoll, which sends ' +
+                    'GET_WCB_STATUS at once (:5091) while viaWcbActive is still false (set at :4743), so sendJSON writes it unwrapped (:5618-5620)');
+    await T.openTool(page);
+    await T.connectViaWcb(page);
+    const bare = emu.rx.filter((r) => !/^;w\d+,/i.test(r.line)).map((r) => (/"type"\s*:\s*"(\w+)"/.exec(r.line) || [, r.line[0]])[1]);
+    expect(bare, 'lines written to the WCB console without the ;w20, wrapper').toEqual([]);
+    T.expectNoPageErrors(page);
+  });
+
   test('nctool.keepalive_via_wcb bridged, a silent PING goes out every 10 s so the RC keeps its rc_ch subscription', async ({ page, emu }) => {
     await T.openTool(page);
     await T.connectViaWcb(page);

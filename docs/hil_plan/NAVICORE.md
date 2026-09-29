@@ -409,10 +409,10 @@ A feature counts once, by its main test; one whose main test is unattended but h
 |---|---|---|---|---|
 | `nct.load.parse_and_wiring` (H) | gap (pages-deploy.yml has no check) | `nctool.static` (L0: inline blocks compile, node --check); `nctool.load_smoke` (L1: no pageerror, modals open) | L0, L1 | WP3 |
 | `nct.load.cmdlib_autoload` (M) | gap | `nctool.load_smoke` (NC_COMMAND_LIBRARY boards, wcb-native hidden) | L1 | WP3 |
-| `nct.conn.direct` (H) | gap | `nctool.connect_direct_sequence` (PING..., GET_CONFIG, GET_CMDLIB_META, START_MONITOR, SET_DEBUG_FLAGS; DTR/RTS false right after open) | L1; L2 `nctool.board_connect_config` | WP3/13 |
+| `nct.conn.direct` (H) | gap | `nctool.connect_direct_sequence` (PING..., GET_CONFIG, GET_CMDLIB_META, START_MONITOR, SET_DEBUG_FLAGS; DTR/RTS false right after open); `nctool.board_usb_probe_no_broadcast` (should, D-NC70: the probe's bare PINGs on a WCB) | L1; L2 `nctool.board_connect_config`, W1's port for D-NC70; L3 `nctool.webserial_connect_reset` | WP3/13 |
 | `nct.conn.pong_epoch` (H) | gap | `nctool.pong_epoch_slow_direct` (a PONG after 3.5 s leaves viaWcbActive false) | L1 | WP3 |
 | `nct.conn.any_pong_misdetect` (H) | gap (finding) | `nctool.doorway_pong_misdetect` (should, D-NC30: a relayed PONG {sys,id} is not a direct link) | L1 | WP3 |
-| `nct.conn.via_wcb_hub` (H) | gap | `nctool.via_wcb_hub` (';w20,{"sys":1,"type":"PING"}'; WCB chip; no-port toast); L2 `nctool.board_via_wcb` | L1; L2 (W1's port through the pipe) | WP3/13 |
+| `nct.conn.via_wcb_hub` (H) | gap | `nctool.via_wcb_hub` (';w20,{"sys":1,"type":"PING"}'; WCB chip; no-port toast); `nctool.via_wcb_nothing_bare` (should, D-NC71); L2 `nctool.board_via_wcb` | L1; L2 (W1's port through the pipe) | WP3/13 |
 | `nct.conn.transport_flag_reset` (H) | gap | `nctool.transport_flag_reset` (button states after Via WCB, disconnect, USB) | L1 | WP3 |
 | `nct.conn.disconnect` (H) | gap | `nctool.disconnect_teardown` | L1 | WP3 |
 | `nct.conn.link_loss` (M) | gap | `nctool.link_loss_reconnect` (NetworkError tears down and reconnects; BreakError keeps the session) | L1 | WP3 |
@@ -949,7 +949,7 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 | `navicore_esptool` | the recovery ladder's esptool rungs on the healthy board (`ncota.recovery_esptool`): download mode, the bench image into app0, `boot_app0.bin` into otadata | off: watched runs only (added 2026-09-28 with NC-WP2) |
 | `navicore_fault` | the HIL-hook faults (corrupt then restore `/config.json`, a failed save) | on once the hook image is flashed |
 | `navicore_identity` | persisted deviceId/channel/password changes that take NaviCore off the mesh until restored over USB | off: attended only |
-| `navicore_webserial` | the config tool over real Web Serial and esptool-js (L3): needs Chrome's one-time grant | off: attended only |
+| `navicore_webserial` | the config tool over real Web Serial and esptool-js (L3): Chrome's one-time grant in `.profiles/navicore`, its open restarts NaviCore, and the Full Wipe & Flash test rewrites the bootloader, the table and app0 and erases NVS and otadata | off: attended only (registered 2026-09-29 with NC-WP13) |
 
 ## 4. Work packages
 
@@ -1535,6 +1535,71 @@ holding slot-4 keyframes: speed and accel 0 first, then a dense ramp, the last k
 
 The L2 and L3 tables of §5.4, each L2 spec wrapped in `nc_guard` by its harness test.
 
+> **Status 2026-09-29: written, not yet bench-run.** `suites/s49_navicore_tool.py` registers twelve new tests beside
+> `board_connect_config`. L2, NaviCore piped (`specs/navicore/board.spec.js`): `board_save_one_field`,
+> `board_test_action_wire`, `board_live_grid`, `board_clips_list`, `board_cmdlib_load`, and behind `navicore_ota_full`
+> `board_ota_usb_same_image`; with no page (`contract.spec.js`): `emulator_contract`. L2, W1 piped (`board_wcb.spec.js`):
+> `board_via_wcb` and the `(should)` `board_usb_probe_no_broadcast` (D-NC70). L3, attended, behind the newly registered
+> opt-in `navicore_webserial` (`webserial.spec.js`, fixtures in `lib/navicore/webserial.js`): `webserial_connect_reset`
+> and `webserial_flash_same_image`. One more `(should)`, L1: `via_wcb_nothing_bare` (D-NC71). Four are in
+> `hil/servos.py` (`board_live_grid`, `board_ota_usb_same_image` and both L3). Only `board_save_one_field` and
+> `board_via_wcb` write NaviCore's config (port labels, which nc_guard restores), only the two flash tests write its
+> firmware (an app slot; the Full Wipe also the bootloader, the table, NVS and otadata), and nothing writes a clip or
+> the command library. Every L2 spec passed a dry run against the emulator behind a stand-in bridge (the `(should)`
+> failing at its own assertion, as the L1 one does headless); the L3 specs could not be run without the bench and a
+> Chrome grant. Where the code differs from the plan below, and why:
+> - **`board_via_wcb` connects with "Via a WCB", not by the USB auto-detect** §5.2 expects. "Connect via USB" first
+>   PINGs the port with bare JSON (`openPortAndStart`, `config_tool/index.html:4568-4578`), which a WCB broadcasts out
+>   of its ports and onto the mesh (`handleSingleCommand`, `WCB.ino:6153-6164`; `processBroadcastCommand` `:8494-8563`):
+>   D-NC70, with its own `(should)` test. "Via a WCB" (`connectSharedPort`, `:4676-4756`) wraps every line but one
+>   (D-NC71: the first status poll leaves bare before the Via-WCB flag is set); the spec tolerates that one and notes it.
+> - **The bridged CONFIG crosses W1's USB, so the log hides it.** The tool cannot connect Via WCB without pulling
+>   NaviCore's whole CONFIG (passwords and the AP name) through W1, the pull s43 avoids: W1's lines are not redacted by
+>   kind (`runner.REDACT_KINDS`), and a password can straddle two envelopes. `hil/wizard.py` `PipeLog` now wraps a piped
+>   device's session.log copy: every fragment envelope's slice is logged as its length, every line passes through
+>   `redact_text`, and after the page closes it waits until no envelope has come for 2 s (at most 30 s) before it lets
+>   go. `run_wizard_test` also sets `PLAYWRIGHT_NO_COPY_PROMPT` for `nctool.*` ids: a failed spec's `error-context.md`
+>   would otherwise hold an ARIA snapshot of the page (Playwright `lib/index.js` `_takePageSnapshot`).
+> - **The fragmented one-field save is every free port label at 24 characters.** One label makes a 98-byte
+>   SET_CONFIG, a single packet (`sendJSON`, `:5648-5652`); all four make 199 bytes and two envelopes. The harness skips
+>   when the free labels would fit one packet, and checks GET_CONFIG changed by the labels alone (`_labels_problems`).
+> - **`board_cmdlib_load` is read-only on the board**, as §5.4 says: "Load from NaviCore" only sends GET_CMDLIB
+>   (`loadCmdlibFromBoard`, `:14500-14505`) and merges the boards into the page's catalog and localStorage (`:9159-9169`;
+>   `_cmdlibMergeLibraryData` counts every board with an id, `:14248-14280`). "Save to NaviCore" is never pressed: a
+>   library written where none was stored cannot be removed (D-NC13).
+> - **`emulator_contract` drives no page and checks more than key sets:** the emulator's config model must print the
+>   board's own GET_CONFIG back byte for byte (a miss is reported by key path and value type, `expect.soft`). Reading the
+>   firmware for it found two drifts, fixed in the emulator before the contract could trip on them: MESH_STATS carried
+>   flat keys (`sent`, `retries`, ...) where `buildMeshStatsPage` prints an `agg` object and positional peer rows
+>   (`rc_telemetry.h:1371-1432`), and `?OTALOCAL,STATUS` lacked the `App SHA256:` line (`navicore_ota.h:256`).
+>   `unit/navicore/rig.test.js` holds `lib/navicore/contract.js` to lines assembled from the firmware's printf formats.
+> - **`board_live_grid` checks each stick count with `#L09` first** (s42 `axis_arg`, `_check_value`), so a miss tells a
+>   controller mapping error from a tool one; the grid shows SBUS counts in a fresh profile (`fmtVal`, `:3418-3420`).
+> - **`board_test_action_wire` uses a free slot's editor** (the first unmapped mode and button), "Send to" WCB 1 with
+>   Serial auto (the dropdowns' `sync()`, `:15168-15192`) and `;S2<marker>` typed in; the harness proves the config
+>   byte-identical without nc_guard's help.
+> - **`board_ota_usb_same_image` serves the bench image as the whole GitHub listing, app only** (no bootloader/table
+>   pair: `fetchFirmwareImages` then flashes app only, `flasher.js:185-220`, and OTA takes only the 0x10000 image), and
+>   hil/ncflash's second pass puts the boot slot back, as `ncota.local_full_same_image` does; a FLASHED.md row for each.
+>   A page write that fails at the bridge across the restart is noted, not failed.
+> - **L3: the profile, the origin and the chooser.** `.profiles/navicore` on origin 8779, which never moves (the grant
+>   is per origin); the new `NCTOOL_ORIGIN` override moves only the fake-port layers, so a worktree's no-board specs can
+>   run beside a bench run that holds 8778/8779. The specs connect through the tool's own `openPortAndStart(port, 4000)`
+>   on the granted port: `connectDirect` only adds `requestPort()`, Chrome's native chooser, which Playwright cannot
+>   answer (`:4639-4645`). The first run's grant goes through a `requestPort` filtered to NaviCore's USB ids;
+>   `WIZ_NO_AUTHORIZE=1` skips instead. The SBUS controller is the same 303A:1001, so the harness holds its port
+>   meanwhile and a grant of it can only fail to open.
+> - **`webserial_flash_same_image` is the Full Wipe**, the case D-NC34 is about. The app is the bench image (only while
+>   NaviCore runs it); the partition table is the bench build's `NaviCore.ino.partitions.bin`, which the spec requires
+>   byte-identical to the table NaviCore publishes in `firmware/` (true on 2026-09-29:
+>   `NaviCore_v0.2.0_101419QSEP26_ESP32S3_part.bin`), and the harness requires the board's layout to be
+>   `partitions.csv`'s (STATUS's app0/app1, a 12 MB `[CLIPFS]`); the bootloader is the NaviCore repo's
+>   `WCB_S3_custom_bootloader_16MB_wdt3s.bin` (20256 bytes), never the build's `NaviCore.ino.bootloader.bin` (stock,
+>   20224). esptool-js 0.4.7 and CryptoJS 4.2.0 come from this repo's `Wizard/vendor` copies, the versions
+>   `flasher.js:26-27` names, so nothing is fetched. The NVS erase loses NaviCore's learned peers (WCB_Client
+>   `wcb_peers`; its own `rcfg` is a dead migration source, `rc_config.h:2213-2220`), which nc_guard re-learns from W1's
+>   adverts, so the test needs `wcb1`. When NaviCore had been on app1, hil/ncflash puts the boot slot back.
+
 ### NC-WP14 — NaviCore's own pins (blocked: hardware)
 
 Designed now so it runs the day a probe is wired (D-NC37): `ncwire.aux_bytes`, `ncwire.soft_tx_integrity` (200 long
@@ -1760,8 +1825,8 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36, D-NC42 to D-NC48 and D-NC56 to D-NC63 are behaviour findings, each with the `(should)` test
-that pins it.
+D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC63 and D-NC70 to D-NC71 are behaviour findings, each with the
+`(should)` test that pins it.
 
 ### 7.1 Process and infrastructure
 
@@ -1828,11 +1893,14 @@ that pins it.
 | D-NC61 | A line from the WebSocket is not trimmed, while every USB line is: `handleSerialInput` trims before it dispatches (NaviCore.ino:4296-4306), and `wsHandler` queues the bytes between line ends as they are (navicore_wsserver.h:447-468) for `drain()` to pass on (:545). `processInputLine` switches on the first character (NaviCore.ino:3814, :3820, :4281), so a leading space or tab drops the line with no reply, and a trailing space makes `?version` an unknown command (WcbMgmt matches whole, `WCB_Mgmt.h:166`, :373). The file's header and PROTOCOLS.md §1 say the socket speaks the same protocol because it feeds the same dispatcher (navicore_wsserver.h:5-8); the WCB's endpoint trims (`ws.line_framing`). Found writing NC-WP8. | Trim each line in `drain()` and skip one left empty, as `handleSerialInput` does. | `ncwifi.ws_line_trim` |
 | D-NC62 | One WebSocket client that stops reading blocks every client, and is then left deaf. Every socket write is a work item on the single httpd task (`wsSendWork`, navicore_wsserver.h:274-294), sent to each client in turn with a blocking send whose timeout is HTTPD_DEFAULT_CONFIG's 5 s (`begin()` keeps it, :478-492). While a stalled client holds the task, `pump()` goes on queueing (:196-233) into a control socket that holds 6 messages (CONFIG_LWIP_UDP_RECVMBOX_SIZE; CONFIG_HTTPD_QUEUE_WORK_BLOCKING is off in core 3.3.4's sdkconfig), so later work items are refused or lost, and a lost item's PSRAM copy is never freed. A refused one leaves its bytes in the sink, and once the sink is full `write()` stores past the end of its 2 KB buffer: it writes `_buf[_len++]` after a `pump()` that could not drain it (:151-167 with :212-227). When a send to the stalled client finally fails, `wsSendWork` drops it from the sink (:288-289) but leaves its session open, and only a handshake adds a client (:395-398): it can still send lines that run, and never receives another, the silent deafness the sink's own comment says it exists to prevent (:119-128). From the code, not bench-run; found writing NC-WP8. | Close a client's session when a send to it fails (`httpd_sess_trigger_close`), bound how long one client can hold the send task (a short send timeout), and make `write()` drop the whole line when `pump()` cannot free room. | `ncwifi.ws_stalled_client` |
 | D-NC63 | While any WebSocket client is connected, a `?REC,EDITLOAD` over USB is handled as one relayed over the mesh. EDITLOAD takes "relayed" from `rcSerial.captureArmed()` (NaviCore.ino:3559-3564), which meant a relayed CLI line was running (rc_serial.h:85-87) until the socket's tee became a standing arrangement for a client's whole session (navicore_wsserver.h:88-93, :526-530; `drain()` re-arms it every pass before `handleSerialInput()` runs, NaviCore.ino:5444, :5525). So with a socket open, a USB download is cut to 512 events a range (NaviCore.ino:3573-3575; BEGIN and END echo the cut count, navicore_record.h:750-753, :876-877), a whole clip over 3000 events is refused with 'connect over USB' to a client that is on USB (:3576-3579), and the stream is paced for RTERM without the wait for USB room (navicore_record.h:809-812, :829, :859) that stopped events vanishing when a host fell behind. Found writing NC-WP8. | Take "relayed" from the transport the line came in on (drainRemoteCli knows it), not from the capture slot. | `ncwifi.usb_editload_with_socket` |
+| D-NC70 | "Connect via USB" on a port that is a tethered WCB types bare JSON onto the WCB's console: the transport probe PINGs up to six times, 500 ms apart, before it falls back to Via WCB (`openPortAndStart`, `config_tool/index.html:4568-4593`). A WCB runs any console line that starts with neither its function nor its command character as a broadcast (`handleSingleCommand`, `WCB.ino:6153-6164`): `processBroadcastCommand` writes `{"sys":1,"type":"PING"}` out of every port with broadcast output on that no Maestro, MP3 Trigger, DFPlayer or HCR is configured on, and onto the mesh (`:8494-8563`). Whatever device takes plain serial text on such a port reads six lines of JSON as its input; and within 20 s of the tool's last Via-WCB line (the relay window, `WCB.ino:8142-8144`, gate `:5611`) the WCB also prints NaviCore's reply to that broadcast PING, which is D-NC30's misdetection. Found writing NC-WP13. | Never write bare JSON to a port that may be a WCB: probe with a `?` line, which a WCB runs locally and broadcasts nothing for, and choose the transport from the answer. | `nctool.board_usb_probe_no_broadcast` |
+| D-NC71 | Connecting "Via a WCB" writes one bare `{"sys":1,"type":"GET_WCB_STATUS"}` to the WCB before anything is wrapped: `connectSharedPort` sets `sharedActive` (`config_tool/index.html:4715`) and waits for the hub's port (`:4717`), the hub's state event runs `onSharedState` -> `setConnected(true)` (`:4672-4674`) -> `startWcbStatusPoll`, which sends its first GET_WCB_STATUS at once (`:5091`), and `viaWcbActive` is only set at `:4743`, so `sendJSON` writes it unwrapped (`:5618-5620`). The comment at `:5068-5069` knows the flag comes later but only for the timer's gate. The WCB broadcasts that line as D-NC70 describes, once per connect. Found writing NC-WP13 (the L2 dry run of `nctool.board_via_wcb`). | Set `viaWcbActive` before `sharedHub.join()`, or have `onSharedState` leave the status poll to `connectSharedPort`. | `nctool.via_wcb_nothing_bare` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | NC-WP13 written, not bench-run: nine new L2 tests in `s49_navicore_tool.py` (`board_save_one_field`, `board_test_action_wire`, `board_live_grid`, `board_clips_list`, `board_cmdlib_load`, `emulator_contract`, `board_ota_usb_same_image` behind `navicore_ota_full`, `board_via_wcb`, the `(should)` `board_usb_probe_no_broadcast`) and two L3 tests behind the newly registered, attended opt-in `navicore_webserial`; the L1 `(should)` `via_wcb_nothing_bare`; four in `hil/servos.py`. New `lib/navicore/contract.js` and `lib/navicore/webserial.js`; `pipe.js` records what the page wrote by kind; the emulator's MESH_STATS and `?OTALOCAL,STATUS` follow the firmware. `hil/wizard.py` `PipeLog` keeps a bridged CONFIG's fragment envelopes out of session.log, and `nctool.*` specs run without Playwright's page snapshot. New findings D-NC70 (Connect via USB types bare JSON PINGs on a WCB, which broadcasts them) and D-NC71 (Via a WCB, the first status poll leaves bare). The status note lists where the code differs from the plan. |
 | 2026-09-29 | _(pending)_ | INF5 built and NC-WP8 written, not bench-run: `hil/wlan.py` (s28's PC-side helpers moved unchanged, `pc_on_ap`'s `spare_only`, a scanned network list), `hil/ncws.py` (`NcWs`, the socket as a line device the INF1 driver runs over), `hil/ws.py` `rcvbuf`; `s45_navicore_wifi.py` (15 `ncwifi` tests, three `(should)`); opt-in `navicore_wifi` registered; three tests in `hil/servos.py`. New findings D-NC61 (a socket's lines are not trimmed), D-NC62 (a stalled client blocks every client and is left deaf, and `WsSink::write()` can overrun its buffer) and D-NC63 (a USB EDITLOAD is handled as relayed while a socket is open). `selftest.py`: `t_wlan_pc_on_ap`, `t_ncws_line_device`, `t_ncwifi_helpers`. The two status notes list where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-29 | `bfc5754` | NC-WP6 bench-verified (`20260929-050214`): the last four fixed tests pass; D-NC46 and D-NC48 fail as designed. |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): five of the eight fixed tests pass and `seqval_verbatim` fails as designed. New finding D-NC48 (a multi-chunk `?MGMT,FRAG` push through NaviCore goes out in the wrong frame and never arrives) with its `(should)`, `ncmesh.mgmt_frag_multichunk`, split out of `mgmt_stats_frag`. Test fixes, not yet re-run: `mgmt_etm_char` compares the relayed block with W2's own (the tag line is bare); `mgmt_stats_frag`, `seq_pull` and `seqval_verbatim` ask once more after a reply lost on the air (tracker #109; `_seq_ask`, `_reply_leg`); the SBUS gate re-reads for 4 s. |

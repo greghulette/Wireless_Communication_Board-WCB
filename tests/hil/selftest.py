@@ -1251,6 +1251,7 @@ def t_nctool_pipe_bridge(tmp):
                 return False
 
         def popen(cmd, env=None, **kw):
+            seen["env"] = env
             report = {"suites": [{"specs": [{"title": "nctool.fake does a thing", "tests": [
                 {"status": "expected", "results": [{"status": "passed", "errors": []}]}]}]}]}
             with open(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], "w", encoding="utf-8") as f:
@@ -1276,6 +1277,10 @@ def t_nctool_pipe_bridge(tmp):
             assert closed == [] and pinged == ["navicore"], (closed, pinged)
             ctx = seen["context"]
             assert ctx["pipe"] is True and ctx["device"] == "navicore" and ctx["kind"] == "navicore", ctx
+            # NC-WP13: the pipe's log filter is off again, and a NaviCore spec's error-context.md gets no page snapshot.
+            assert nc.log == b.log, "run_wizard_test left PipeLog on the piped device's log"
+            no_prompt = seen["env"].get("PLAYWRIGHT_NO_COPY_PROMPT")
+            assert no_prompt == "1", "an nctool spec must run without the page snapshot"
             wizard.run_wizard_test(b, "nctool.fake", device=None, timeout=60)
             assert closed == [] and seen["context"]["pipe"] is False and pinged == ["navicore"], (closed, seen, pinged)
             # node --test: every test skipped -> SKIP with the reason; a failing todo -> PASS and a note. Both of node's
@@ -2189,6 +2194,13 @@ GATED = {
                  "refuse_short_password", "ws_line_trim", "ws_stalled_client", "usb_editload_with_socket")},
     "ncwifi.ws_ping_soak": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 6 "
                                              "minutes while NaviCore streams to it"),
+    # NC-WP13 (suites/s49_navicore_tool.py), 2026-09-29
+    "nctool.board_ota_usb_same_image": ("navicore_ota_full", "rewrites NaviCore's inactive app slot and switches its "
+                                                             "boot slot twice"),
+    **{f"nctool.{n}": ("navicore_webserial", "NaviCore's port goes to Chrome over real Web Serial, which restarts it, "
+                                             "and one test rewrites its bootloader, partition table and app and erases "
+                                             "its NVS with esptool-js; attended only")
+       for n in ("webserial_connect_reset", "webserial_flash_same_image")},
 }
 
 
@@ -9722,6 +9734,105 @@ def t_wizard_spec_ids(tmp):
 
 
 TESTS.append(t_wizard_spec_ids)
+
+
+def t_nctool_spec_ids(tmp):
+    """The NaviCore config tool's harness tests and its Playwright specs name each other exactly, as t_wizard_spec_ids
+    checks for the Wizard: every nctool.* id suites/s49_navicore_tool.py registers (but nctool.static and nctool.unit,
+    which run node tests) has one spec titled with it in tests/wizard/specs/navicore, every nctool spec title there is
+    registered once, and a spec that expects to fail (test.fail: a (should) spec) is registered with a title that starts
+    '(should)'. run_wizard_test finds a spec by --grep on its id, so a typo otherwise shows only on the bench."""
+    specs_dir = os.path.normpath(os.path.join(HERE, "..", "wizard", "specs", "navicore"))
+    titles, fails = [], set()
+    for name in sorted(os.listdir(specs_dir)):
+        if not name.endswith(".spec.js"):
+            continue
+        src = read(os.path.join(specs_dir, name))
+        for chunk in re.split(r"\n(?=[ \t]*test\()", src):
+            m = re.match(r"\s*test\(\s*['\"`](nctool\.[a-z0-9_]+)[\s'\"`]", chunk)
+            if m:
+                titles.append(m.group(1))
+                if re.search(r"^\s+(?:if \(.*\) \{\} else )?test\.fail\(\s*true", chunk, re.M):
+                    fails.add(m.group(1))
+    probe = (
+        "import importlib, json, pkgutil, sys\n"
+        f"sys.path.insert(0, {HERE!r})\n"
+        "from hil import runner\n"
+        "import suites\n"
+        "for m in pkgutil.iter_modules(suites.__path__):\n"
+        "    importlib.import_module('suites.' + m.name)\n"
+        "print(json.dumps([[t['id'], t['title']] for t in runner.REGISTRY if t['id'].startswith('nctool.')]))\n")
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert out.returncode == 0, out.stderr
+    reg = json.loads(out.stdout)
+    ids = [tid for tid, _ in reg]
+    dup_ids = sorted({t for t in ids if ids.count(t) > 1})
+    dup_specs = sorted({t for t in titles if titles.count(t) > 1})
+    assert not dup_ids and not dup_specs, f"registered twice: {dup_ids}; titled twice: {dup_specs}"
+    no_spec = sorted(set(ids) - set(titles) - {"nctool.static", "nctool.unit"})
+    no_test = sorted(set(titles) - set(ids))
+    assert not no_spec, f"s49 registers nctool tests no spec is titled with: {no_spec}"
+    assert not no_test, f"NaviCore specs titled with ids no suite registers (the harness never runs them): {no_test}"
+    unmarked = sorted(t for t, title in reg if t in fails and not title.startswith("(should)"))
+    marked = sorted(t for t, title in reg if title.startswith("(should)") and t not in fails)
+    assert not unmarked, f"test.fail specs registered without '(should)' at the start of their title: {unmarked}"
+    assert not marked, f"'(should)' titles whose spec does not expect to fail (test.fail): {marked}"
+    n_titles = len(titles)
+    assert n_titles >= 70, f"only {n_titles} nctool spec titles read: the title pattern no longer matches the specs"
+
+
+TESTS.append(t_nctool_spec_ids)
+
+
+def t_nctool_pipe_log_filter(tmp):
+    """NC-WP13: while a device is piped (hil/wizard.py PipeLog), its session.log copy hides the slice of every fragment
+    envelope, wherever it sits in the line - NaviCore's whole CONFIG crosses a WCB's USB as envelopes, and a password
+    can straddle two - and passes every line through redact_text (a WCB's own lines are not redacted by kind); the
+    device's own lines are untouched; the old log comes back on exit; settle() waits until the envelopes stop."""
+    from hil import wizard
+    from hil.serialdev import SerialDevice
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}})
+    b.new_session()
+    try:
+        dev = SerialDevice("wcb1", "COMW1", log=b.log)
+        dev._ser = RecSer()
+        secret = "HILs3cr3tPw9"
+        env1 = '{"f":7,"of":90,"sid":3,"s":"...\\"password\\":\\"' + secret[:6] + '"}'
+        env2 = '{"f":8,"of":90,"sid":3,"s":"' + secret[6:] + '\\",\\"quantity\\":1,"}'
+        with wizard.PipeLog(dev) as plog:
+            dev._append(env1)
+            dev._append("[ETM] relayed " + env2)
+            dev._append('{"sys":1,"type":"PONG","id":20,"version":"v0.2.0_X"}')
+            dev._append('{"type":"CONFIG","data":{"wifiPassword":"' + secret + '"}}')
+            dev.send(';w20,{"f":1,"of":2,"sid":1,"s":"{\\"sys\\":1,\\"type\\":\\"SET_CONFIG\\",\\"x\\":\\"'
+                     + secret + '"}')
+            assert plog.last is not None
+            t0 = time.monotonic()
+            plog.settle(quiet_s=0.3, max_s=5)
+            waited = time.monotonic() - t0
+            assert 0.25 <= waited < 2.5, f"settle waited {waited:.2f} s after the last envelope"
+            assert dev.lines[0][1] == env1, "the page's copy of a line must stay whole"
+        assert dev.log == b.log, "PipeLog must put the device's own log back"
+        b.sync_log()
+        log = read(os.path.join(b.out_dir, "session.log"))
+        for part in (secret, secret[:6], secret[6:]):
+            assert part not in log, f"a piece of the secret reached session.log: {part!r}"
+        assert log.count("characters not logged>") == 3, log[-800:]
+        assert '{"sys":1,"type":"PONG","id":20,"version":"v0.2.0_X"}' in log
+        assert "<redacted:" in log
+        dev._append("HILafter the pipe")
+        b.sync_log()
+        assert "HILafter the pipe" in read(os.path.join(b.out_dir, "session.log"))
+        # No envelope at all: settle() still waits quiet_s from the call (a transfer may be about to start).
+        with wizard.PipeLog(dev) as plog:
+            t0 = time.monotonic()
+            plog.settle(quiet_s=0.3, max_s=5)
+            assert 0.25 <= time.monotonic() - t0 < 2.5
+    finally:
+        b.close()
+
+
+TESTS.append(t_nctool_pipe_log_filter)
 
 
 def t_parked_device_reused(tmp):

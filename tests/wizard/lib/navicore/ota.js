@@ -76,6 +76,9 @@ const methods = {
     this.otaSlot = { running: 'app0', next: 'app1' };
     this.otaBootNext = false;
     this.otaImage = null;                     // the last image a verified END accepted
+    // STATUS's 'App SHA256:' (otaAppSha16, navicore_ota.h:238-248): the first 8 bytes of the running image's ELF SHA-256,
+    // which elf2image stamps at 0xB0 of the app image; after a verified END, the new image's (see _restart).
+    this.appSha = opts.appSha || '5a17c0de00c0ffee';
     this.otaLog = [];                         // { op, ... } for the specs: data / lost / mangled / crcDrop / nak / ack ...
     this.present = true;                      // on USB (shim.js FakeSerial refuses open() and writes while false)
     this.booting = false;                     // restarting: lines arrive and are ignored
@@ -199,12 +202,14 @@ const methods = {
     if (this.ota.active) this._otaSay(`[OTA] aborted: ${reason} (current app intact)`);
     this._otaTeardown();
   },
+  // otaPrintStatus (navicore_ota.h:250-263).
   _otaStatus() {
     const s = this.otaSlot;
     const lines = [
       '---------- OTA Status ----------',
       'Chip:        ESP32-S3 (family 1)',
       `Firmware:    ${this.version}`,
+      `App SHA256:  ${this.appSha}`,
       `Running:     '${s.running}' @0x${hex6(SLOTS[s.running])} (${SLOT_SIZE} B)`,
       `Next (OTA):  '${s.next}' @0x${hex6(SLOTS[s.next])} (${SLOT_SIZE} B)`,
       this.ota.active ? `Session:     ACTIVE id=${this.ota.session}  ${this.ota.written} / ${this.ota.size} B` : 'Session:     idle',
@@ -227,6 +232,7 @@ const methods = {
       this.otaBootNext = false;
       this.otaSlot = { running: this.otaSlot.next, next: this.otaSlot.running };
       if (this.otaNewVersion) this.version = this.otaNewVersion;
+      if (this.otaImage && this.otaImage.length >= 0xB8) this.appSha = this.otaImage.subarray(0xB0, 0xB8).toString('hex');
     }
     const r = this.otaReboot;
     this.otaLog.push({ op: 'restart', t: Date.now() });

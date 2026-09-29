@@ -584,12 +584,18 @@ class NaviEmulator {
     if (!(key in store)) return `${pre}"type":"WCB_SEQVAL","ok":true,"wcb":${n},"key":${JSON.stringify(key)},"status":1,"value":""}`;
     return `${pre}"type":"WCB_SEQVAL","ok":true,"wcb":${n},"key":${JSON.stringify(key)},"status":0,"value":${JSON.stringify(store[key])}}`;
   }
+  // buildMeshStatsPage (rc_telemetry.h:1361-1432), one page: the aggregate under "agg" with its abbreviated keys, one
+  // positional row [id, sent, ackd, rty, fail, ung, recv] per known board but this one (:1395-1407), "last":1 (:1430).
+  // "sys" only bridged (:1377). nctool.emulator_contract holds this to the real board.
   _meshStats(sys) {
     const custom = this.meshStats;
     if (custom) return custom(sys, this);
     const pre = sys ? '{"sys":1,' : '{';
-    return `${pre}"type":"MESH_STATS","pg":0,"self":${this.config.s.wcbNetwork.deviceId},"upMs":123456,` +
-      '"sent":0,"ackd":0,"retries":0,"failed":0,"unguaranteed":0,"bcast":0,"recv":0,"peers":[],"last":1}';
+    const self = this.config.s.wcbNetwork.deviceId;
+    const peers = this._roster().rows.filter((r) => r.id !== self && r.known).map((r) => `[${r.id},0,0,0,0,0,0]`);
+    return `${pre}"type":"MESH_STATS","pg":0,"self":${self},"upMs":123456,` +
+      '"agg":{"sent":0,"ackd":0,"rty":0,"fail":0,"ung":0,"bcast":0,"recv":0},' +
+      `"peers":[${peers.join(',')}],"last":1}`;
   }
 
   // ── the live monitor (sendPWMUpdate, NaviCore.ino:3119-3160) ───────────────────────────────────────────────
