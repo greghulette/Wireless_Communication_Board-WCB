@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#103** VERIFIED on `6.2.1_282121RSEP2026` (`20260928-212350`, 11 of 11 `wifi.*`): JOIN scans the mesh channel before each connect (`5770675`) and reads its association from the driver (`e55ba82`). |
 | 2026-09-28 | Filed **#108** (an ETM command is ACKed before it is queued, so a full command queue loses it; seen as seven discards during `etm.seq_wrap` on the #102 image). |
 | 2026-09-28 | Run `20260928-205106` on `6.2.1_282046RSEP2026` (all 65 `etm.*`, `mesh.*` and `mgmt.*` pass): **#102** and **#107** VERIFIED; `etm.seq_wrap` survived its whole flood. |
 | 2026-09-28 | **#102** and **#107** FIXED (unverified): every ESP-NOW send is paced by `wcbEspNowSend` (CLAUDE.md rule 16), and the RTERM relay keeps its lines in a byte ring and reports what it loses (D50). |
@@ -2154,7 +2155,7 @@ in the command queue and the UART ring, which count what they lose.
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - the sweep half VERIFIED in `20260928-211051` (`wifi.join_absent_ssid_keeps_mesh` passes); the loss and rejoin half fixed, not yet on the bench |
+| **Status** | VERIFIED - both halves (D52): run `20260928-212350` on `6.2.1_282121RSEP2026`, all 11 `wifi.*` pass. W1 printed `lost` as W2's AP went away, stayed on the mesh channel, and joined again 4.4 s after the AP came back (5 attempts); `wifi.join_absent_ssid_keeps_mesh` passed as in `20260928-211051` |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
 | **Effort** | M |
 | **Tests** | `wifi.join_absent_ssid_keeps_mesh`, `wifi.join_lost_and_rejoin` (opt-in `wifi_modes`) |
