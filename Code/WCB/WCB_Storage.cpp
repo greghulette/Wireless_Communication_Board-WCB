@@ -2,6 +2,7 @@
 #include <sys/_types.h>
 #include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
+#include "WCB_SeqStore.h"  // stored sequences: a file of their own, not NVS
 #include <sdkconfig.h>   // CONFIG_IDF_TARGET_ESP32S3 (hwVersionFitsChip)
 #include <Preferences.h>
 #include <nvs.h>             // ?NVS usage and the whole-store erase
@@ -647,11 +648,13 @@ void recallCommandSlot(const String &key, int sourceID) {
         Serial.printf("'%s' is a reserved name, not a sequence.\n", key.c_str());
         return;
     }
-    preferences.begin("stored_cmds", true);
-    String recalledCommand = preferences.getString(key.c_str(), "");
-    preferences.end();
-
-    if (recalledCommand.isEmpty()) {
+    String recalledCommand;
+    const int got = seqStoreGet(key, recalledCommand);
+    if (got < 0) {
+        Serial.printf("Could not read sequence '%s' (%s) - not run.\n", key.c_str(), seqStoreError(got));
+        return;
+    }
+    if (got == SEQ_NOTFOUND || recalledCommand.isEmpty()) {
         Serial.printf("No command stored under key: '%s'\n", key.c_str());
         return;
     }
@@ -760,12 +763,12 @@ void recallCommandSlot(const String &key, int sourceID) {
     if (onLoop) seqCurPath = _savedPath;
 }
 
-// Save stored commands to preferences
-void saveStoredCommandsToPreferences(const String &message) {
+// Save a stored sequence ("<key>,<value>", from ?SEQ,SAVE / ?C). True when it was stored.
+bool saveStoredCommandsToPreferences(const String &message) {
   int commaIndex = message.indexOf(',');
   if (commaIndex == -1 || commaIndex == 0) {
     Serial.println("Invalid format. Use ?Ckey,value");
-    return;
+    return false;
   }
 
   String key = message.substring(0, commaIndex);
@@ -776,67 +779,43 @@ void saveStoredCommandsToPreferences(const String &message) {
     Serial.printf("Out of memory: could not copy a %u-character value (largest free block %u bytes). Not stored.\n",
                   (unsigned)(message.length() - commaIndex - 1),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));   // not ESP.getMaxAllocHeap(): see ?STATS
-    return;
+    return false;
   }
   key.trim();
   value.trim();
 
   if (key.length() == 0 || value.length() == 0) {
     Serial.println("Key or value cannot be empty.");
-    return;
+    return false;
   }
 
-  // An ESP32 NVS key is capped at 15 characters. A longer one makes putString fail while the name
-  // was still appended to key_list below — so the sequence was listed, reported as "Stored:", and
-  // advertised to peers, but recalling it found nothing. Both shipping clients already enforce 15
-  // (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
+  // A key is at most 15 characters: the ESP32 NVS key limit, which the sequence store keeps so a sequence can live in
+  // either store (WCB_SeqStore.h). A longer one once made the NVS write fail while the name was still listed - so the
+  // sequence was reported as "Stored:" and advertised to peers, but recalling it found nothing. Both shipping clients
+  // already enforce 15 (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
   if (key.length() > SEQ_KEY_MAX_LEN) {
     Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
                   key.c_str(), (unsigned)key.length());
-    return;
+    return false;
   }
   if (seqKeyReserved(key)) {
     Serial.printf("'%s' is a reserved name (the sequence store keeps its own records under it). Not stored.\n",
                   key.c_str());
-    return;
+    return false;
   }
 
-  preferences.begin("stored_cmds", false);
-  if (!preferences.putString(key.c_str(), value)) {
-    preferences.end();
-    Serial.printf("Failed to store sequence '%s' (NVS write rejected). Not added to the list.\n",
-                  key.c_str());
-    return;
+  const int rc = seqStorePut(key, value);
+  if (rc != SEQ_OK) {
+    if (rc == SEQ_E_TOOBIG)
+      Serial.printf("Failed to store sequence '%s' (it is %u characters - the limit is %u). Not stored.\n",
+                    key.c_str(), (unsigned)value.length(), (unsigned)SEQ_VALUE_MAX);
+    else
+      Serial.printf("Failed to store sequence '%s' (%s). Not stored.\n", key.c_str(), seqStoreError(rc));
+    return false;
   }
-
-  String existingKeys = preferences.getString("key_list", "");
-  bool alreadyExists = false;
-
-  // Check against variations to catch duplicates
-  if (existingKeys == key + "," ||
-      existingKeys.startsWith(key + ",") ||
-      existingKeys.endsWith("," + key + ",") ||
-      existingKeys.indexOf("," + key + ",") != -1) {
-    alreadyExists = true;
-  }
-
-  if (!alreadyExists) {
-    existingKeys += key + ",";
-    // Checked (HIL_TEST_AUDIT.md F9): on a full NVS this write fails, and the value just stored would be a sequence
-    // no list names - never shown by ?SEQ,NAMES or ?backup, never cleared, and holding NVS space for good. Take the
-    // value back out (an erase needs no free space) and say it was not stored.
-    if (preferences.putString("key_list", existingKeys) != existingKeys.length()) {
-      preferences.remove(key.c_str());
-      preferences.end();
-      Serial.printf("Failed to store sequence '%s' (NVS could not update the sequence list). Not stored.\n",
-                    key.c_str());
-      return;
-    }
-  }
-
-  preferences.end();
   invalidateSequenceInventoryHash();   // WDP re-advertises the new fingerprint within ~500 ms
   Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+  return true;
 }
 
 
@@ -845,95 +824,40 @@ void eraseStoredCommandByName(const String &name) {
         Serial.println("Command name cannot be empty.");
         return;
     }
-    if (seqKeyReserved(name)) {   // clearing key_list orphaned every sequence; seq_mig_done re-armed the migration
+    if (seqKeyReserved(name)) {   // NVS layout: clearing key_list orphaned every sequence; seq_mig_done re-armed the migration
         Serial.printf("'%s' is a reserved name, not a sequence. Nothing cleared.\n", name.c_str());
         return;
     }
-    preferences.begin("stored_cmds", false);
-
-    // Step 1: Remove the key from NVS — but never by a key longer than SEQ_KEY_MAX_LEN. No such key can be stored,
-    // and NVS compares only its first 15 characters, so the remove would delete the shorter key's sequence. The
-    // key_list rewrite below still runs: firmware before d83042e listed an over-long key it had failed to store, and
-    // erasing by that name is the only way to drop the phantom from the list.
-    bool removed = (name.length() <= SEQ_KEY_MAX_LEN) && preferences.remove(name.c_str());
-
-    // Step 2: Retrieve and split key_list safely
-    String existingKeys = preferences.getString("key_list", "");
-    existingKeys.trim();
-
-    // Split into an array
-    std::vector<String> keys;
-    int start = 0;
-    while (start < existingKeys.length()) {
-        int comma = existingKeys.indexOf(',', start);
-        if (comma == -1) break;
-        String k = existingKeys.substring(start, comma);
-        if (k != name) {
-            keys.push_back(k);  // only keep keys not matching `name`
-        }
-        start = comma + 1;
-    }
-
-    // Rebuild the key_list
-    String updatedList = "";
-    for (const auto& k : keys) {
-        updatedList += k + ",";
-    }
-
-    // Checked (HIL_TEST_AUDIT.md F9). The value goes first on purpose: on a full NVS, removing it is what frees the
-    // room this rewrite needs. If the rewrite still fails, the name stays listed with no value - an empty
-    // ?SEQ,SAVE,<key>, in ?backup - so say so instead of reporting a clean delete.
-    bool listed = (updatedList != existingKeys);
-    bool listOk = !listed ||
-                  (updatedList.length() ? preferences.putString("key_list", updatedList) == updatedList.length()
-                                        : preferences.remove("key_list"));
-    preferences.end();
+    const int rc = seqStoreRemove(name);
     invalidateSequenceInventoryHash();
-
-    if (!listOk) {
+    if (rc == SEQ_OK) {
+        Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
+    } else if (rc == SEQ_NOTFOUND) {
+        Serial.printf("No stored value found for key: '%s', but removed from list if present.\n", name.c_str());
+    } else if (rc == SEQ_E_LIST) {
+        // NVS fallback only (HIL_TEST_AUDIT.md F9): the value is gone but the list still names it, empty.
         Serial.printf("Removed the value of '%s', but NVS could not update the sequence list: it is still listed, "
                       "empty. See ?NVS, free space, then clear it again.\n", name.c_str());
-        return;
-    }
-    if (removed) {
-        Serial.printf("Deleted stored command key: '%s'\n", name.c_str());
     } else {
-        Serial.printf("No stored value found for key: '%s', but removed from list if present.\n", name.c_str());
+        Serial.printf("Could not delete sequence '%s' (%s). Nothing changed.\n", name.c_str(), seqStoreError(rc));
     }
 }
 
 
 
 void listStoredCommands() {
-    preferences.begin("stored_cmds", true); // Open in read mode
-    String keyList = preferences.getString("key_list", ""); // Retrieve stored keys
-    preferences.end();
-
-    if (keyList.length() == 0) {
-        Serial.println("No stored commands.");
+    int n = 0;
+    const int rc = seqStoreForEach([&n](const char *key, const String &value) {
+        if (n++ == 0) Serial.println("\n--- Stored Commands ---");
+        if (value.length()) Serial.printf("Key: '%s' -> Value: '%s'\n", key, value.c_str());
+        else                Serial.printf("Key: '%s' -> (its value could not be read)\n", key);
+        return true;
+    });
+    if (rc != SEQ_OK) Serial.printf("Could not read the sequence store (%s).\n", seqStoreError(rc));
+    if (n == 0) {
+        if (rc == SEQ_OK) Serial.println("No stored commands.");
         return;
     }
-
-    Serial.println("\n--- Stored Commands ---");
-    int startIdx = 0;
-while (startIdx < keyList.length()) {
-    int commaIndex = keyList.indexOf(',', startIdx);
-    if (commaIndex == -1) commaIndex = keyList.length();
-
-    String key = keyList.substring(startIdx, commaIndex);
-    key.trim();
-
-    if (key.length() > 0) {
-        preferences.begin("stored_cmds", true);
-        String value = preferences.getString(key.c_str(), "");
-        preferences.end();
-        Serial.printf("Key: '%s' -> Value: '%s'\n", key.c_str(), value.c_str());
-    }
-
-    startIdx = commaIndex + 1;
-}
-
-
     Serial.println("--- End of Stored Commands ---");
 }
 
@@ -943,95 +867,76 @@ while (startIdx < keyList.length()) {
 
 // Cached inventory hash. Recomputed lazily, and ONLY after a write — the WDP
 // dirty-check rebuilds the whole advert payload twice a second (WCB_WDP.cpp), and
-// hashing values there uncached would mean N NVS reads at 2 Hz forever.
+// hashing values there uncached would mean a walk of the whole store at 2 Hz forever.
 static uint32_t seqInvHashCache  = 0;
 static bool     seqInvHashValid  = false;
+static uint32_t seqInvHashFailMs = 0;   // when the store last could not be hashed (0: it could)
 
 void invalidateSequenceInventoryHash() { seqInvHashValid = false; }
 
 uint32_t sequenceInventoryHash() {
     if (seqInvHashValid) return seqInvHashCache;
-
-    preferences.begin("stored_cmds", true);
-    String keyList = preferences.getString("key_list", "");
-    preferences.end();
-
-    uint32_t h = 2166136261u;                     // FNV-1a 32-bit offset basis
-    auto feed = [&h](const String &s) {
-        for (unsigned i = 0; i < s.length(); i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
-        h ^= 0xFF; h *= 16777619u;                // record separator — "ab"+"c" != "a"+"bc"
-    };
-
-    feed(keyList);
-
-    // Hash the VALUES too, not just the names. Editing a sequence in place doesn't
-    // touch key_list, so a keys-only hash would leave every peer believing its
-    // cached copy was still current — the exact failure this fingerprint exists to
-    // prevent. Walked in key_list order so the result is stable.
-    int startIdx = 0;
-    while (startIdx < (int)keyList.length()) {
-        int commaIndex = keyList.indexOf(',', startIdx);
-        if (commaIndex == -1) commaIndex = keyList.length();
-        String key = keyList.substring(startIdx, commaIndex);
-        key.trim();
-        if (key.length() > 0) {
-            preferences.begin("stored_cmds", true);
-            String value = preferences.getString(key.c_str(), "");
-            preferences.end();
-            feed(value);
-        }
-        startIdx = commaIndex + 1;
+    // A store that cannot be read right now (it will not mount below SEQ_MIN_FREE_HEAP) keeps the last fingerprint and
+    // is tried again every few seconds - not at the WDP dirty-check's 2 Hz, and never cached wrong: a value that
+    // could not be read used to be hashed as empty and advertised until the next save.
+    if (seqInvHashFailMs && millis() - seqInvHashFailMs < 5000) return seqInvHashCache;
+    uint32_t h;
+    if (seqStoreHash(h) != SEQ_OK) {
+        seqInvHashFailMs = millis() | 1;
+        return seqInvHashCache;
     }
-
-    seqInvHashCache = h;
-    seqInvHashValid = true;
+    seqInvHashFailMs = 0;
+    seqInvHashCache  = h;
+    seqInvHashValid  = true;
     return h;
 }
 
 String buildSequenceNamesString() {
-    preferences.begin("stored_cmds", true);
-    String keyList = preferences.getString("key_list", "");
-    preferences.end();
+    String keyList;
+    if (seqStoreKeyList(keyList) != SEQ_OK) return String();
 
     // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
-    // the two directly, so they must never be computed two different ways.
-    uint32_t h = sequenceInventoryHash();
+    // the two directly, so they must never be computed two different ways. One
+    // that could not be computed now makes no answer: a stale hash beside a
+    // current list would read as current.
+    const uint32_t h = sequenceInventoryHash();
+    if (!seqInvHashValid) return String();
 
-    // Walk key_list exactly as listStoredCommands does — trailing comma, possible
-    // empty entries from a legacy erase — but emit only the names.
+    // Walk the key list — trailing comma, and in the NVS layout possible empty
+    // entries from a legacy erase — but emit only the names. Every append is
+    // checked: a failed one would drop names from a list that still reads as whole.
     String names = "";
     int    count = 0;
     int    startIdx = 0;
-    while (startIdx < (int)keyList.length()) {
+    bool   ok = true;
+    while (ok && startIdx < (int)keyList.length()) {
         int commaIndex = keyList.indexOf(',', startIdx);
         if (commaIndex == -1) commaIndex = keyList.length();
 
         String key = keyList.substring(startIdx, commaIndex);
+        ok = key.c_str() != nullptr;
         key.trim();
-        if (key.length() > 0) {
-            names += ",";
-            names += key;
+        if (ok && key.length() > 0) {
+            ok = names.concat(',') && names.concat(key);
             count++;
         }
         startIdx = commaIndex + 1;
     }
+    if (!ok) return String();
 
     char hdr[16];
     snprintf(hdr, sizeof(hdr), "%08X,%d", h, count);
-    return String(hdr) + names;
+    String out = hdr;
+    if (!out.concat(names)) return String();
+    return out;
 }
 
-// Clear all stored commands
-void clearAllStoredCommands() {
-  preferences.begin("stored_cmds", false);
-    preferences.clear();
-    // clear() also removes seq_mig_done, which lives in THIS namespace — so without re-setting it
-    // the legacy migration re-armed and re-imported every CMD1..CMD80 from "stored_commands" on
-    // the next boot, resurrecting the sequences the user just deleted. Re-stamp it: this board has
-    // already migrated, and deleting sequences is not a request to import the old ones back.
-    preferences.putBool("seq_mig_done", true);
-    preferences.end();
+// Clear all stored sequences - the sequence store and whatever NVS still holds of them. True when all are gone.
+bool clearAllStoredCommands() {
+    const int rc = seqStoreClear();
     invalidateSequenceInventoryHash();
+    if (rc != SEQ_OK) Serial.printf("Could not clear the stored sequences (%s).\n", seqStoreError(rc));
+    return rc == SEQ_OK;
 }
 
 // Normalise legacy ^*** inline-comment markers in a stored sequence value.
@@ -1073,7 +978,6 @@ void migrateOldStoredCommands() {
     // Skip if already done
     preferences.begin("stored_cmds", true);
     bool already = preferences.getBool("seq_mig_done", false);
-    String keyList = preferences.getString("key_list", "");
     preferences.end();
     if (already) return;
 
@@ -1095,26 +999,27 @@ void migrateOldStoredCommands() {
         Serial.printf("[MIGRATION] Recovered from 'stored_commands': key='%s'\n", key.c_str());
     }
 
-    // ── Case 2: "stored_cmds" namespace, CMD# keys missing from key_list ──
+    // ── Case 2: "stored_cmds" namespace, CMD# keys missing from the sequence list ──
     for (int i = 1; i <= MAX_STORED_COMMANDS; i++) {
         String key = "CMD" + String(i);
 
-        // Check if already in key_list (re-read it in case Case 1 added entries)
         preferences.begin("stored_cmds", true);
-        keyList = preferences.getString("key_list", "");
         String value = preferences.getString(key.c_str(), "");
         preferences.end();
 
         if (value.length() == 0) continue;
 
-        bool inList = (keyList == key + "," ||
-                       keyList.startsWith(key + ",") ||
-                       keyList.endsWith("," + key + ",") ||
-                       keyList.indexOf("," + key + ",") != -1);
-        if (inList) continue;
+        // Already a sequence under that name? (Re-read each time: Case 1 may have added it.) With the sequence store on
+        // its file, what NVS still holds under CMD# is never listed - seqStoreBegin() moved every listed one.
+        String listed;
+        if (seqStoreKeyList(listed) != SEQ_OK || seqListHas(listed, key)) continue;
 
         value = normaliseSeqComments(value);
-        saveStoredCommandsToPreferences(key + "," + value);
+        if (saveStoredCommandsToPreferences(key + "," + value) && seqStoreOnFile()) {
+            preferences.begin("stored_cmds", false);   // it lives in the file now
+            preferences.remove(key.c_str());
+            preferences.end();
+        }
         recovered++;
         Serial.printf("[MIGRATION] Recovered orphaned key in 'stored_cmds': key='%s'\n", key.c_str());
     }
@@ -1215,6 +1120,7 @@ void printNvsUsage() {
         }
         Serial.printf("  %-15s %u\n", names[i], (unsigned)used);
     }
+    seqStoreReport();   // stored sequences are not in NVS: one line on their own store
     Serial.println("End of NVS");
 }
 
@@ -1222,6 +1128,9 @@ void eraseNVSFlash() {
     // The restart is deferred, and the learned-peer table is written 5 s after a change and again just before the
     // restart (WCB.ino), so without this an erase could come back with the old peers in it.
     learnedPeersFrozen = true;
+    // Stored sequences live in their own store (WCB_SeqStore.h), not in NVS: clear it too. (A boot that finds the
+    // file with NVS blank clears it anyway - this makes it immediate.)
+    clearAllStoredCommands();
     preferences.begin("serial_baud", false);
     preferences.clear();
     preferences.end();
@@ -1325,7 +1234,7 @@ void eraseNVSFlash() {
 
     // Then every namespace, whoever wrote it (F8). The named clears above stay as the readable list of what this
     // firmware keeps; this pass catches the rest (wifi_cfg, wdp_da, the radio's data, older firmware's leftovers).
-    Serial.printf("NVS: erased %d storage area(s) - every setting, WiFi and learned peers included.\n",
+    Serial.printf("NVS: erased %d storage area(s) - every setting, WiFi, learned peers and stored sequences included.\n",
                   eraseAllNvsNamespaces());
 
     // hw_version is cleared above, which is deliberate and documented (?HELP,ERASE and the

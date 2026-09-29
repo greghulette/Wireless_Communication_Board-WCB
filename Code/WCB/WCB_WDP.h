@@ -85,7 +85,7 @@ struct WdpNeighbor {
   char          hwRev[16];     // client hardware revision string ("" = none)
   char          capTags[49];   // client capability tags, space-separated ("" = none)
   // ---- Stored-sequence inventory fingerprint (WDP_TLV_SEQHASH) ------------
-  // FNV-1a over this board's NVS key_list — changes whenever a sequence is saved,
+  // FNV-1a over this board's stored-sequence key list and values — changes whenever a sequence is saved,
   // renamed or erased. A consumer (NaviCore's command picker) caches the names it
   // pulled with ?MGMT,SEQ,<n> and re-pulls only when this value moves, instead of
   // polling. 0 = the neighbor advertised no hash (older firmware) — treat as

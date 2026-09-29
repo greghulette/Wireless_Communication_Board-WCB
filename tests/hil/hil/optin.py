@@ -211,10 +211,11 @@ OPT_INS = {
     },
     "nvs_fill": {
         "title": "Fill W1's NVS with sequences",
-        "what": "Saves throwaway sequences on W1 until its settings storage refuses one, checks nothing is left "
-                "half-saved or listed empty, then removes them. Other NVS writes on W1 may fail for those seconds.",
-        "why": "fills W1's settings storage with throwaway sequences, then removes them",
-        "estimate_s": 60,
+        "what": "Boots W1 once with its stored sequences in NVS (?DEBUG,SEQNVS, the sequence store's fallback), "
+                "saves throwaway sequences until its settings storage refuses one, checks nothing is left half-saved "
+                "or listed empty, then removes them and boots back. Other NVS writes on W1 may fail for those seconds.",
+        "why": "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)",
+        "estimate_s": 90,
     },
     "etm_seq_wrap": {
         "title": "ETM sequence wrap (~7 min flood)",

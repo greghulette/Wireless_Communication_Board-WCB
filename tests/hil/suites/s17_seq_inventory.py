@@ -7,7 +7,9 @@ WCB_WDP.cpp. Rules from the specs:
 - ';W2,?SEQ,SAVE,k,a^b' is split by the sender (W2 stores 'a', 'b' runs on W1, WCB.ino:2367-2389): values with '^'
   go to W2 through ?MGMT,FRAG.
 - ?SEQ,CLEAR,ALL / ?CCLEAR wipe every sequence; that test is opt-in (bench.json "opt_in": ["seq_wipe"]) and replays
-  the snapshot's ?SEQ,SAVE tokens in order, since key_list order drives both backup order and the SEQHASH.
+  the snapshot's ?SEQ,SAVE tokens in order, since save order drives both backup order and the SEQHASH.
+- Sequences live in their own store, a file (WCB_SeqStore.h), since 2026-09-29; NVS keeps only the stored_cmds
+  marker seq_mig_done. ?SEQ,GET answers NOTFOUND for the NVS layout's records, so ?NVS is the window onto them.
 - A target answers one SEQ_REQ per requester, and one SEQVAL_REQ per (requester, last key), per 1500 ms
   (WCB.ino:3593-3601, 3634-3646): identical relay requests are spaced 1.7 s apart.
 - The mesh-client specs (seq.fanout_wire_probe, seq.peer_body_broadcasts) live with the probe mesh-mode tests.
@@ -17,8 +19,9 @@ import time
 
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
-from hil.wcb import PULL_SPACING_S, PullCollector, PullRefused, chain_crc
+from hil.wcb import PULL_SPACING_S, PullCollector, PullRefused, chain_crc, pull_config
 from suites.common import Console, config_guard, link, marker, nonce, snapshot, token, usb_wcb
+from suites.s03_wcb import backup_chain_problems
 
 NAMES_RX = re.compile(r"^\[MGMT:SEQ,(\d+)\]([0-9A-F]{8}),(\d+)((?:,[^,]+)*)$")
 
@@ -46,8 +49,16 @@ def _seqval(w, key):
     return next((x.rstrip("\r\n") for x in w.run(f"?SEQ,GET,{key}") if x.startswith("[MGMT:SEQVAL,")), None)
 
 
+def _stored_cmds(w):
+    """Entries the stored_cmds NVS namespace uses (?NVS), or None on firmware without ?NVS. With the sequence store on
+    its file that is 1 - seq_mig_done - once no fallback boot or older firmware left sequences there."""
+    stats, spaces = nvs_parse(w.run("?NVS", timeout=6))
+    return None if stats is None else spaces.get("stored_cmds", 0)
+
+
 def _inventory_hash(strings):
-    """FNV-1a 32 over key_list and then each value, each followed by a 0xFF separator (WCB_Storage.cpp:792-817)."""
+    """FNV-1a 32 over the key list and then each value, each followed by a 0xFF separator (seqStoreHash,
+    WCB_SeqStore.cpp)."""
     h = 0x811C9DC5
     for s in strings:
         for b in s.encode("utf-8"):
@@ -57,9 +68,12 @@ def _inventory_hash(strings):
 
 
 def _canonical(w, names):
-    """key_list is 'a,b,' exactly when nothing (a migration, a hand edit) left it irregular; only then does a clear
-    and replay reproduce the hash."""
+    """The key list is 'a,b,' exactly, so a clear and replay reproduces the hash. The sequence store builds it from its
+    records, so it always is (?SEQ,GET,key_list is NOTFOUND there); in the NVS layout a migration or a hand edit
+    could leave key_list irregular, and older firmware reads it back through ?SEQ,GET."""
     kl = _seqval(w, "key_list") or ""
+    if kl.endswith("key_list,NOTFOUND,"):
+        return True
     return kl == "[MGMT:SEQVAL,1]key_list,OK," + "".join(f"{n}," for n in names)
 
 
@@ -69,9 +83,11 @@ def _clear_seq(w, *keys):
 
 
 def _nvs_refused(out):
-    """A sequence store NVS refused (saveStoredCommandsToPreferences, WCB_Storage.cpp:804-835). W1's NVS is fragmented,
-    so a setup it cannot store is a Skip naming the cause, not a failure (as in seq.top_level_too_big_refused)."""
-    return _has(out, "NVS write rejected") or _has(out, "NVS could not update the sequence list")
+    """A save the store refused for want of room (saveStoredCommandsToPreferences, WCB_Storage.cpp): the sequence
+    store full, or - on the NVS layout - NVS full or fragmented. A setup it cannot store is a Skip naming the cause,
+    not a failure (as in seq.top_level_too_big_refused)."""
+    return (_has(out, "NVS write rejected") or _has(out, "NVS could not update the sequence list")
+            or _has(out, "the sequence store is full"))
 
 
 def _save_or_skip(w, key, value):
@@ -241,18 +257,17 @@ def config_lists_sequences(bench):
         assert monitoring == ["    None"], f"'Serial Monitoring:' reads {monitoring}, though nothing sets it"
 
 
-@test("seq.clear_all_empty_hash","OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences and each re-stamps seq_mig_done; an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[], opt_in="seq_wipe")
+@test("seq.clear_all_empty_hash","OPT-IN (seq_wipe): ?SEQ,CLEAR,ALL and ?CCLEAR wipe W1's sequences and each re-stamps seq_mig_done (stored_cmds keeps exactly that one entry); an empty inventory hashes to 7A0B824E, not the documented 811C9DC5", needs=["wcb1"], links=[], opt_in="seq_wipe")
 def clear_all_empty_hash(bench):
     """Doc bug: docs/SEQUENCE_INVENTORY.md:137 and :249, docs/WDP_DESIGN.md:109, WCB_Storage.h:164, WCB_WDP.h:89,
     tests/wdp_wire_test.cpp:69 and WCBClient (WCB_Client.h:404, README.md:536) give the empty hash as 811C9DC5, but
     sequenceInventoryHash() applies the 0xFF separator even to an empty key_list (WCB_Storage.cpp:792-798).
-    WCB-WP44 row 2: preferences.clear() also removes seq_mig_done, which lives in the same namespace, so
-    clearAllStoredCommands writes it back at once (WCB_Storage.cpp:1025-1035); without it the legacy migration would
-    re-import the old CMD1..CMD80 sequences at the next boot. ?SEQ,GET reads a key that exists but holds no string as
-    '<key>,OK,' (isKey, WCB.ino:6756-6767)."""
+    WCB-WP44 row 2: preferences.clear() also removes seq_mig_done, which lives in the same namespace, so the clear
+    writes it back at once (nvsClear, WCB_SeqStore.cpp); without it the legacy migration would re-import the old
+    CMD1..CMD80 sequences at the next boot, and a boot would take the sequence store's file for one a factory reset
+    left behind. ?SEQ,GET no longer reads it; ?NVS shows stored_cmds holding that one entry and nothing else."""
     w = usb_wcb(bench)
     problems = []
-    stamped = "[MGMT:SEQVAL,1]seq_mig_done,OK,"
     with config_guard(bench, 1):
         saved = [t for t in snapshot(bench, 1) if t.upper().startswith("?SEQ,SAVE,")]
         if [t for t in saved if "^?" in t or len(t) > 1000]:
@@ -262,9 +277,9 @@ def clear_all_empty_hash(bench):
         try:
             if not _has(w.run("?SEQ,CLEAR,ALL"), "All stored sequences cleared"):
                 problems.append("?SEQ,CLEAR,ALL did not confirm")
-            if _seqval(w, "seq_mig_done") != stamped:
-                problems.append(f"after ?SEQ,CLEAR,ALL seq_mig_done reads {_seqval(w, 'seq_mig_done')!r}: the legacy "
-                                f"migration would run again at the next boot")
+            if _stored_cmds(w) != 1:
+                problems.append(f"after ?SEQ,CLEAR,ALL stored_cmds holds {_stored_cmds(w)} NVS entries, not 1 "
+                                f"(seq_mig_done): without it the legacy migration would run again at the next boot")
             if "No stored commands." not in [x.rstrip() for x in w.run("?SEQ,LIST")]:
                 problems.append("LIST is not empty")
             if _names(w) != ("7A0B824E", 0, []):
@@ -276,8 +291,8 @@ def clear_all_empty_hash(bench):
                 problems.append(f"one sequence {_names(w)} (host FNV-1a gives 0788F458)")
             if not _has(w.run("?CCLEAR"), "All stored sequences cleared"):
                 problems.append("?CCLEAR did not confirm")
-            if _seqval(w, "seq_mig_done") != stamped:
-                problems.append(f"after ?CCLEAR seq_mig_done reads {_seqval(w, 'seq_mig_done')!r}")
+            if _stored_cmds(w) != 1:
+                problems.append(f"after ?CCLEAR stored_cmds holds {_stored_cmds(w)} NVS entries, not 1 (seq_mig_done)")
             if _names(w)[:2] != ("7A0B824E", 0):
                 problems.append(f"after ?CCLEAR {_names(w)}")
         finally:
@@ -322,39 +337,41 @@ def names_order_hash(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("seq.hash_algorithm", "?SEQ,NAMES hash == FNV-1a over the raw key_list then each value, each followed by a 0xFF separator", needs=["wcb1"], links=[])
+@test("seq.hash_algorithm", "?SEQ,NAMES hash == FNV-1a over the key list ('k1,k2,...,' in save order, NVS's key_list format) then each value, each followed by a 0xFF separator", needs=["wcb1"], links=[])
 def hash_algorithm(bench):
+    """The sequence store keeps NVS's key_list format and order (seqStoreHash, WCB_SeqStore.cpp), so peers holding a
+    fingerprint from before the move see the same one after it. The list is built from ?SEQ,NAMES, which carries the
+    names in store order."""
     w = usb_wcb(bench)
     a, b, c = marker("a"), marker("b"), marker("c")
     with config_guard(bench, 1):
         try:
             w.run(f"?SEQ,SAVE,HILH1,;S1{a}^;S1{b}")
             w.run(f"?SEQ,SAVE,HILH2,{c},x")
-            kl = _seqval(w, "key_list")
-            assert kl and kl.startswith("[MGMT:SEQVAL,1]key_list,OK,"), kl
-            keys = kl[len("[MGMT:SEQVAL,1]key_list,OK,"):]
+            h, _, names = _names(w)
+            keys = "".join(f"{n}," for n in names)
             values = []
-            for k in (x.strip() for x in keys.split(",")):
-                if k:
-                    v = _seqval(w, k)
-                    values.append(v[len(f"[MGMT:SEQVAL,1]{k},OK,"):] if v and ",OK," in v else "")
-            h = _names(w)[0]
+            for k in names:
+                v = _seqval(w, k)
+                values.append(v[len(f"[MGMT:SEQVAL,1]{k},OK,"):] if v and ",OK," in v else "")
         finally:
             _clear_seq(w, "HILH1", "HILH2")
-    assert keys.endswith(",") and "HILH1,HILH2," in keys, f"key_list {keys!r}"
+    assert keys.endswith("HILH1,HILH2,"), f"key list {keys!r}"
     assert _inventory_hash([keys] + values) == h, f"W1 says {h}, host FNV-1a gives {_inventory_hash([keys] + values)}"
 
 
-@test("seq.get_internal_keys", "Read-only: ?SEQ,GET also reads the NVS bookkeeping keys key_list and seq_mig_done, which NAMES hides", needs=["wcb1"], links=[])
+@test("seq.get_internal_keys", "Read-only: ?SEQ,GET answers NOTFOUND for the NVS layout's records key_list and seq_mig_done, and NAMES hides them", needs=["wcb1"], links=[])
 def get_internal_keys(bench):
-    """?SEQ,GET does not filter the internal keys, so they read back as if they were sequences; that is kept, as the
-    only window onto them. Recalling, saving or clearing them is refused (seq.reserved_bookkeeping_keys)."""
+    """Until the sequence store moved to its own file (2026-09-29), ?SEQ,GET read these two NVS records back as if they
+    were sequences - the only window onto them. They are no sequence in either layout, so GET refuses them like
+    every other path (seqStoreGet, WCB_SeqStore.cpp); ?NVS shows the stored_cmds namespace instead. Recalling,
+    saving or clearing them is refused too (seq.reserved_bookkeeping_keys)."""
     w = usb_wcb(bench)
     _, _, names = _names(w)
     kl, mig = _seqval(w, "key_list"), _seqval(w, "seq_mig_done")
-    bench.note(f"key_list canonical: {_canonical(w, names)}; seq_mig_done: {mig!r}")
-    assert kl and kl.startswith("[MGMT:SEQVAL,1]key_list,OK,"), kl
-    assert mig in ("[MGMT:SEQVAL,1]seq_mig_done,OK,", "[MGMT:SEQVAL,1]seq_mig_done,NOTFOUND,"), mig
+    bench.note(f"stored_cmds NVS entries: {_stored_cmds(w)}")
+    assert kl == "[MGMT:SEQVAL,1]key_list,NOTFOUND,", kl
+    assert mig == "[MGMT:SEQVAL,1]seq_mig_done,NOTFOUND,", mig
     assert "key_list" not in names and "seq_mig_done" not in names, names
 
 
@@ -370,7 +387,7 @@ def reserved_bookkeeping_keys(bench):
     problems = []
     with config_guard(bench, 1):
         inv = _names(w)
-        records = (_seqval(w, "key_list"), _seqval(w, "seq_mig_done"))
+        records = _stored_cmds(w)
         out = w.run(";Ckey_list,L")
         if not _has(out, "'key_list' is a reserved name, not a sequence."):
             raise AssertionError(f";Ckey_list,L printed {out}: no reserved-name guard, so SAVE and CLEAR were not sent")
@@ -386,8 +403,8 @@ def reserved_bookkeeping_keys(bench):
                 problems.append(f"{line} printed {out}")
         if _names(w) != inv:
             problems.append(f"the inventory changed: {_names(w)}, before {inv}")
-        if (_seqval(w, "key_list"), _seqval(w, "seq_mig_done")) != records:
-            problems.append("key_list or seq_mig_done changed")
+        if _stored_cmds(w) != records:
+            problems.append(f"the stored_cmds NVS namespace went from {records} entries to {_stored_cmds(w)}")
     assert not problems, "; ".join(problems)
 
 
@@ -408,9 +425,9 @@ def top_level_too_big_refused(bench):
     with config_guard(bench, 1):
         try:
             out = w.run("?SEQ,SAVE,HILBIG," + "^".join([f";S0{m}"] * 210), timeout=8)
-            if _has(out, "NVS write rejected"):
-                raise Skip("W1's NVS has no page with room for the 1.26 KB setup sequence (see ?NVS); the queue refusal "
-                           "was not exercised")
+            if _nvs_refused(out):
+                raise Skip("W1's store has no room for the 1.26 KB setup sequence (see ?NVS); the queue refusal was not "
+                           "exercised")
             if not _has(out, "Stored: Key='HILBIG'"):
                 raise AssertionError(f"setup: the 210-command sequence was not stored: {out[:3]}")
             wm = w.dev.mark()
@@ -1313,3 +1330,201 @@ def mgmt_seq_w2_relay(bench):
                 if attempt == 3:
                     raise
                 bench.note(f";W2,?MGMT,SEQ,1 try {attempt}: no reply (a lost frag); retrying")
+
+
+# ============================================================ the sequence store: a file of its own (2026-09-29)
+STORE_RX = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes")
+STORE_FULL = "the sequence store is full - see ?NVS"
+NVS_BOOT = "Stored sequences are kept in the settings store this boot"
+
+
+def _store(w):
+    """(count, bytes, cap) from ?NVS's 'Sequences:' line, or None when W1 keeps its sequences in NVS (firmware before
+    the store, or the store's fallback this boot)."""
+    for x in w.run("?NVS", timeout=6):
+        m = STORE_RX.match(x.rstrip())
+        if m:
+            return tuple(int(v) for v in m.groups())
+    return None
+
+
+def _store_or_skip(w):
+    s = _store(w)
+    if s is None:
+        raise Skip("W1 keeps its sequences in NVS: no 'Sequences: ... in the sequence store' line in ?NVS")
+    return s
+
+
+@test("seq.store_accounting", "?NVS reports the sequence store: its count matches ?SEQ,NAMES; a save grows it by exactly key + value + 2 bytes (one '<key>,<value>' line), an edit in place by the difference and keeps the name's place, a re-save of the same value changes nothing, and a clear gives it all back; none of it touches NVS's stored_cmds; the store holds 32768 bytes", needs=["wcb1"], links=[])
+def store_accounting(bench):
+    """WCB_SeqStore.h: the sequences are the lines of one file, '<key>,<value>' in save order, on the 128 KB 'spiffs'
+    partition; NVS keeps only the stored_cmds marker seq_mig_done."""
+    w = usb_wcb(bench)
+    _store_or_skip(w)
+    k, v1, v2 = "HILSA", f";S1{marker('a')}", f";S1{marker('b')}^;S1{marker('c')}"
+    problems = []
+    with config_guard(bench, 1):
+        _clear_seq(w, k)
+        n0, b0, cap = _store_or_skip(w)
+        e0 = _stored_cmds(w)
+        _, count0, names0 = _names(w)
+        if count0 != n0:
+            problems.append(f"?NVS counts {n0} sequences, ?SEQ,NAMES {count0}")
+        if cap != 32768:
+            problems.append(f"the store holds {cap} bytes, not 32768")
+        try:
+            w.run(f"?SEQ,SAVE,{k},{v1}")
+            s1 = _store(w)
+            if s1[:2] != (n0 + 1, b0 + len(k) + len(v1) + 2):
+                problems.append(f"after a save the store reads {s1[:2]}, not {(n0 + 1, b0 + len(k) + len(v1) + 2)}")
+            if not _has(w.run(f"?SEQ,SAVE,{k},{v1}"), f"Stored: Key='{k}'"):
+                problems.append("re-saving the same value was not confirmed")
+            if _store(w) != s1:
+                problems.append(f"re-saving the same value changed the store: {_store(w)} after {s1}")
+            w.run(f"?SEQ,SAVE,{k},{v2}")
+            s2 = _store(w)
+            _, _, names2 = _names(w)
+            if s2[:2] != (n0 + 1, b0 + len(k) + len(v2) + 2):
+                problems.append(f"after an edit the store reads {s2[:2]}, not {(n0 + 1, b0 + len(k) + len(v2) + 2)}")
+            if names2 != names0 + [k]:
+                problems.append(f"after an edit the names end {names2[-3:]}: the edit moved '{k}'")
+            if _seqval(w, k) != f"[MGMT:SEQVAL,1]{k},OK,{v2}":
+                problems.append(f"after the edit {k} reads {_seqval(w, k)!r}")
+            if _stored_cmds(w) != e0:
+                problems.append(f"stored_cmds went from {e0} NVS entries to {_stored_cmds(w)}: a save touched NVS")
+        finally:
+            _clear_seq(w, k)
+        if _store(w)[:2] != (n0, b0):
+            problems.append(f"after the clear the store reads {_store(w)[:2]}, not {(n0, b0)}")
+    assert not problems, "; ".join(problems)
+
+
+@test("seq.store_full", "The sequence store fills to its 32768 bytes and no further: the save that does not fit says 'the sequence store is full' and leaves nothing listed or in ?backup; every stored one is in ?backup, whose chains stay whole; W2 still pulls W1's whole config in parts; a clear on the full store works and makes room for a save; all of it comes back out", needs=["wcb1", "wcb2"], links=[])
+def store_full(bench):
+    """SEQ_FILE_MAX (WCB_SeqStore.h). Under half the 128 KB partition, so replacing or removing a sequence (a second
+    copy of the file, then a rename) always has room - the clear here runs on the full store; and small enough that
+    the whole config still fits a config pull's 16 parts of 2880 bytes (48 KB answered ERROR TOOBIG). The fill values
+    are a ;S0 marker and a comment, and nothing recalls them."""
+    w = usb_wcb(bench)
+    n0, b0, cap = _store_or_skip(w)
+    keys, refused, problems = [], [], []
+    with config_guard(bench, 1):
+        try:
+            # 1000-character values fill the store; smaller ones then find what is left. It ends when a 40-character
+            # save is refused: 7 + 40 + 2 bytes that do not fit. Not bigger: a save costs about 7 times its length in
+            # heap while it runs, and W1 hosting its access point has about 19 KB (SEQUENCE_INVENTORY.md 3b).
+            n = 0
+            for size in (1000, 200, 40):
+                while n < 60:
+                    n += 1
+                    key = f"HILSF{n:02d}"
+                    head = f";S0{marker('f')}^***"
+                    out = w.run(f"?SEQ,SAVE,{key},{head}{'x' * (size - len(head))}", timeout=8)
+                    if _has(out, f"Stored: Key='{key}'"):
+                        keys.append(key)
+                        continue
+                    refused.append((key, size, next((x.rstrip() for x in out if "Failed to store sequence" in x), None)))
+                    break
+            full = _store(w)
+            bench.note(f"stored {len(keys)} fill sequence(s); the store then {full}; refused "
+                       f"{[(r[0], r[1]) for r in refused]}")
+            if not refused or refused[-1][1] != 40:
+                problems.append("the store never refused a 40-character save")
+            if full[1] > cap:
+                problems.append(f"the store holds {full[1]} bytes, over its {cap}")
+            elif refused and full[1] + len(refused[-1][0]) + refused[-1][1] + 2 <= cap:
+                problems.append(f"a {refused[-1][1]}-character save was refused with {cap - full[1]} bytes free")
+            for key, size, line in refused:
+                if not line or STORE_FULL not in line:
+                    problems.append(f"the refused {size}-character save of {key} printed {line!r}")
+            _, _, names = _names(w)
+            listed = [r[0] for r in refused if r[0] in names]
+            if listed:
+                problems.append(f"refused key(s) listed by ?SEQ,NAMES: {listed}")
+            # Every stored one in ?backup, and both one-line chains whole and CRC-valid at this size (tracker #90).
+            backup = w.run("?backup", timeout=40)
+            saved = {x.split(",")[2] for x in backup if x.upper().startswith("?SEQ,SAVE,") and x.count(",") >= 3}
+            problems += backup_chain_problems(backup, "?backup with the store full")
+            missing = [k for k in keys if k not in saved]
+            if missing:
+                problems.append(f"stored fill sequence(s) missing from ?backup: {missing}")
+            leaked = [r[0] for r in refused if r[0] in saved]
+            if leaked:
+                problems.append(f"refused key(s) in ?backup: {leaked}")
+            # The whole config still pulls: the reason the store stops at 32 KB.
+            with Console(bench, 2) as c2:
+                try:
+                    r = pull_config(c2.dev, 1, parts=True, timeout=20)
+                    got = sum(1 for k in keys if f"?SEQ,SAVE,{k}," in r.text)
+                    bench.note(f"W2 pulled W1's config with the store full: {len(r.text)} characters in "
+                               f"{len(r.part_lengths)} part(s), {got} of {len(keys)} fill sequences in it")
+                    if got != len(keys):
+                        problems.append(f"W2's pull of W1's config carries {got} of the {len(keys)} fill sequences")
+                except PullRefused as e:
+                    problems.append(f"W2's pull of W1's config with the store full was refused: {e}")
+            # A clear on the full store, then a save into the room it made.
+            if keys:
+                k = keys.pop()
+                if not _has(w.run(f"?SEQ,CLEAR,{k}"), f"Deleted stored command key: '{k}'"):
+                    problems.append(f"clearing {k} on the full store was not confirmed")
+                if not _has(w.run(f"?SEQ,SAVE,{k},;S0{marker('g')}"), f"Stored: Key='{k}'"):
+                    problems.append(f"a save after the clear did not fit")
+                keys.append(k)
+        finally:
+            for k in keys:
+                w.run(f"?SEQ,CLEAR,{k}")
+            for key, _, _ in refused:
+                w.run(f"?SEQ,CLEAR,{key}")                   # harmless when it was never stored
+        if _store(w)[:2] != (n0, b0):
+            problems.append(f"after the clears the store reads {_store(w)[:2]}, not {(n0, b0)}")
+    assert not problems, "; ".join(problems)
+
+
+@test("seq.store_moves_from_nvs", "Sequences a boot on the store's NVS fallback saved (?DEBUG,SEQNVS) move into the store at the next boot: it says how many, a key both held takes NVS's value in its own place, a new one goes last, each reads back exactly, and stored_cmds is back to its size before; on the fallback boot the store's own sequences are unseen (2 reboots)", needs=["wcb1"], links=[])
+def store_moves_from_nvs(bench):
+    """seqStoreBegin -> moveNvsSequences (WCB_SeqStore.cpp). NVS only holds a sequence while the file exists when a
+    fallback boot or an older firmware saved it - which is newer - so NVS wins a key both hold. The same move is what
+    an update from firmware before the store runs once, for every sequence the board has."""
+    w = usb_wcb(bench)
+    _store_or_skip(w)
+    a, a2, b = f";S1{marker('a')}", f";S1{marker('d')}", f";S1{marker('b')}"
+    problems = []
+    on_nvs = False
+    with config_guard(bench, 1):
+        _clear_seq(w, "HILMA", "HILMB")
+        e0 = _stored_cmds(w)
+        w.run(f"?SEQ,SAVE,HILMA,{a}")
+        _, _, names0 = _names(w)
+        try:
+            if not _has(w.run("?DEBUG,SEQNVS"), "The next boot keeps stored sequences in NVS"):
+                raise AssertionError("?DEBUG,SEQNVS was not accepted")
+            m = w.reboot()
+            on_nvs = True
+            if not any(NVS_BOOT in x for x in w.dev.since(m)):
+                problems.append("the ?DEBUG,SEQNVS boot did not say it keeps sequences in NVS")
+            if _store(w) is not None:
+                problems.append("?NVS reports the sequence store on the fallback boot")
+            _, _, names = _names(w)
+            if "HILMA" in names:
+                problems.append(f"on the fallback boot ?SEQ,NAMES lists HILMA, which is in the store: {names}")
+            w.run(f"?SEQ,SAVE,HILMA,{a2}")
+            w.run(f"?SEQ,SAVE,HILMB,{b}")
+            m = w.reboot()
+            on_nvs = False
+            boot = [x.rstrip() for x in w.dev.since(m)]
+            if "[SEQ] Moved 2 sequence(s) from the settings store into the sequence store." not in boot:
+                problems.append(f"the boot after did not report moving 2: {[x for x in boot if x.startswith('[SEQ]')]}")
+            _, _, names1 = _names(w)
+            if names1 != names0 + ["HILMB"]:
+                problems.append(f"after the move the names end {names1[-3:]}, not {(names0 + ['HILMB'])[-3:]}")
+            for k, want in (("HILMA", a2), ("HILMB", b)):
+                if _seqval(w, k) != f"[MGMT:SEQVAL,1]{k},OK,{want}":
+                    problems.append(f"{k} reads {_seqval(w, k)!r} after the move, not {want!r}")
+            if _stored_cmds(w) != e0:
+                problems.append(f"stored_cmds went from {e0} NVS entries to {_stored_cmds(w)}: NVS kept what moved")
+        finally:
+            if on_nvs:                                      # NVS's copies go before the boot that would move them
+                _clear_seq(w, "HILMA", "HILMB")
+                w.reboot()
+            _clear_seq(w, "HILMA", "HILMB")
+    assert not problems, "; ".join(problems)

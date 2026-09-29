@@ -11,7 +11,7 @@ changing before editing.**
 |---|---|
 | WDP — discovery, device announce, election | [docs/WDP_DESIGN.md](docs/WDP_DESIGN.md), [docs/WDP_DEVICE_ANNOUNCE.md](docs/WDP_DEVICE_ANNOUNCE.md) |
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
-| Stored sequences — nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
@@ -255,6 +255,23 @@ changing before editing.**
     - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
     So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
     not, because the task's wait sleeps. `selftest.py` (`t_rule16_espnow_send_wrapped`) fails on any other call.
+
+17. **Stored sequences are not in NVS.** They are the lines of one file, `/seqs` (`<key>,<value>` in save order), in a
+    LittleFS on the min_spiffs table's 128 KB `spiffs` partition, behind `WCB_SeqStore.{h,cpp}`. Go through its calls
+    (`seqStoreGet/Put/Remove/Clear/ForEach/KeyList/Hash`); `preferences` on `stored_cmds` for a sequence reads the old
+    layout, which only the NVS fallback uses. See docs/SEQUENCE_INVENTORY.md §3d.
+    - **Mounted only while used**, about 2 KB of heap, unmounted after 3 s idle, refused below 6 KB free (rule 14): a
+      store call can fail for want of heap, so every caller handles `SEQ_E_*`. Loop task only, never the ESP-NOW
+      receive callback (rule 11): a replace rewrites the whole file.
+    - **`SEQ_FILE_MAX` (32 KB) is set by the config pull, not the partition**: a full store's config must still fit 16
+      parts of 2880 bytes (`WCB_ConfigParts.h`), and 48 KB did not. Raise one and you must re-derive the other.
+    - **NVS still decides when sequences are erased.** The Wizard's factory reset blanks only the NVS partition; a boot
+      that finds the file without `stored_cmds/seq_mig_done` clears it. Keep that marker in NVS and keep it written
+      at every boot that lacks it (`migrateOldStoredCommands`), or a factory reset stops clearing sequences.
+    - **A boot that crashed mid-mount runs on the NVS fallback** (an RTC word; the core builds LittleFS with asserts
+      on, so a damaged file system can `abort()` in the mount and would boot-loop). So does one after `?DEBUG,SEQNVS`,
+      which the full-NVS HIL tests use to fill NVS with sequences. Every boot that mounts moves what NVS lists into
+      the file, NVS winning a key both hold.
 
 ## Verifying
 

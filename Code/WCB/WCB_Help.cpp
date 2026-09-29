@@ -42,6 +42,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      pull) loses its WCBCH line as if out of"));
         Serial.println(F("                      memory: ?backup warns, a pull answers NOMEM"));
         Serial.println(F("  PULLFAULT,OFF     Disarm PULLFAULT (both kinds)"));
+        Serial.println(F("  SEQNVS            The next boot (once) keeps stored sequences in"));
+        Serial.println(F("                      NVS, the sequence store's fallback; the boot"));
+        Serial.println(F("                      after moves them back into the store"));
         Serial.println(F("  PULLPART,<n>      Data bytes per part when this board sends a"));
         Serial.println(F("                      config in parts (512-2880; 0 or OFF = 2880)"));
         Serial.println(F("\nExamples:"));
@@ -51,7 +54,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?DEBUG,PULLPART,600    - Split a large config into more parts"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Debug settings are NOT saved to NVS and reset on reboot"));
-        Serial.println(F("  - PULLFAULT and PULLPART are RAM-only and never in ?backup"));
+        Serial.println(F("  - PULLFAULT, PULLPART and SEQNVS are RAM-only and never in ?backup"));
         Serial.println(F("  - ETM debug is very verbose during characterization runs"));
         Serial.println(F("  - PWM debug will print for every pulse received"));
         Serial.println(F("\nLegacy commands:"));
@@ -857,7 +860,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("---------------------------------------------------"));
         Serial.println(F("\nUsage: ?SEQ,<command>[,key[,value]]"));
         Serial.println(F("\nDescription:"));
-        Serial.println(F("  Stores and manages named command sequences in NVS flash memory."));
+        Serial.println(F("  Stores and manages named command sequences in the board's sequence"));
+        Serial.println(F("  store: a small file system in flash, apart from the settings (NVS)."));
         Serial.println(F("  A sequence is a string of chained commands saved under a short"));
         Serial.println(F("  key name. Once saved, sequences can be triggered from any serial"));
         Serial.println(F("  port or ESP-NOW using the recall command. Sequences can contain"));
@@ -888,7 +892,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?SEQ,CLEAR,ALL                     - Delete everything"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Key names are case sensitive"));
-        Serial.println(F("  - Maximum value length is approximately 1800 characters"));
+        Serial.println(F("  - A key is at most 15 characters; a sequence at most 3999"));
+        Serial.println(F("  - The store holds 32 KB of sequences - hundreds; ?NVS shows how full"));
         Serial.println(F("  - A top-level ;Ckey fires on ALL boards that have 'key' (once each)."));
         Serial.println(F("    Same name on several boards = they all trigger together."));
         Serial.println(F("  - Add ,L to fire local-only: ;Ckey,L runs just this board."));

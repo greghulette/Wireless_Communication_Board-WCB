@@ -97,7 +97,7 @@ static void wdpDaTxTick(unsigned long now);
                                  // no facts; a receiver schedules a prompt advert and does NOT
                                  // record the solicit as a neighbor (it would wipe real facts).
 #define WDP_TLV_SEQHASH  0x13    // [hash:4 LE] — FNV-1a over this board's stored-sequence
-                                 // key_list. A change means "my sequence inventory moved,
+                                 // key list and values. A change means "my sequence inventory moved,
                                  // re-pull it with ?MGMT,SEQ,<n>". Names themselves are NOT
                                  // advertised: ~16 B each would evict the port labels from
                                  // the 200 B payload. 4 bytes buys the same freshness signal.

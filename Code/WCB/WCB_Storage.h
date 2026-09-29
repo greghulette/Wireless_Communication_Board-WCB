@@ -153,12 +153,15 @@ bool chainCarriesValueVerb(const String &data);
 
 // A stored-sequence key is at most this long: the ESP32 NVS key limit. NVS also compares only this many characters
 // of a lookup, so every path that reads, recalls or erases by a user-given key must refuse a longer one — otherwise
-// "HILABCDEFGHIJKLM" reads, runs or erases the sequence stored under "HILABCDEFGHIJKL".
+// "HILABCDEFGHIJKLM" reads, runs or erases the sequence stored under "HILABCDEFGHIJKL". The sequence store's file
+// (WCB_SeqStore.h) keeps the same limit, so a sequence can move between it and NVS.
 #define SEQ_KEY_MAX_LEN 15
 
 // The sequence namespace ("stored_cmds") keeps its own records under these two names: the key list and the legacy-
 // migration flag. A user key by either name corrupted the list (SAVE), orphaned every sequence or re-armed the
 // migration (CLEAR), or ran the list as a command (recall), so all three refuse them (WCB coverage re-scan #14).
+// Sequences live in a file now (WCB_SeqStore.h), but its NVS fallback and every older firmware keep that layout, and
+// seq_mig_done is also the marker a factory reset clears - so both names stay reserved.
 inline bool seqKeyReserved(const String &key) { return key == "key_list" || key == "seq_mig_done"; }
 
 // Sequence recall lineage - the cycle guard's call stack (recallStoredCommand, WCB.ino). Each queued command
@@ -177,7 +180,7 @@ unsigned commandQueueSpaces();
 
 void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
-void saveStoredCommandsToPreferences(const String &message);
+bool saveStoredCommandsToPreferences(const String &message);   // true when stored
 void listStoredCommands();
 
 // ── Stored-sequence INVENTORY (names only, no values) ──────────────────────
@@ -194,28 +197,29 @@ void listStoredCommands();
 //
 // Comma separation is safe: saveStoredCommandsToPreferences() takes the key as
 // everything BEFORE the first comma, so a stored key can never contain one.
+// Empty when the store could not be read right now (a valid inventory never is).
 // The empty case is "811C9DC5,0" — the FNV offset basis and a zero count, so a
 // parser needs no special case for "board has no sequences".
 String   buildSequenceNamesString();
 
-// FNV-1a over the NVS key_list AND every stored value. Cheap content fingerprint of
-// "what sequences this board has" — NOT security, and order-sensitive (key_list
-// preserves save order), which is what we want: it answers "did MY inventory
-// change", not "do two boards match".
+// FNV-1a over the key list ("k1,k2,...," in save order - NVS's key_list format, which
+// the sequence store keeps) AND every stored value. Cheap content fingerprint of
+// "what sequences this board has" — NOT security, and order-sensitive, which is what
+// we want: it answers "did MY inventory change", not "do two boards match".
 //
 // It covers VALUES, not just names, because editing a sequence in place never
-// touches key_list — a keys-only hash would leave every peer holding a stale copy
+// touches the key list — a keys-only hash would leave every peer holding a stale copy
 // while believing it current. That is the whole point of the fingerprint.
 //
 // Advertised as WDP_TLV_SEQHASH, so a peer re-pulls only when something actually
 // changed. CACHED: the WDP dirty-check rebuilds the advert twice a second, and
-// hashing values uncached would mean N NVS reads at 2 Hz forever. Every write path
-// must call invalidateSequenceInventoryHash().
+// hashing values uncached would mean a walk of the whole store at 2 Hz forever. Every
+// write path must call invalidateSequenceInventoryHash().
 uint32_t sequenceInventoryHash();
 void     invalidateSequenceInventoryHash();
 void eraseStoredCommandByName(const String &name);
 
-void clearAllStoredCommands();
+bool clearAllStoredCommands();   // the store and NVS; says so and returns false on a failure
 void migrateOldStoredCommands();
 
 void storeKyberSettings(const String &message);

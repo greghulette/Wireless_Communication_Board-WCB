@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_291138RSEP2026                                  *****////
+///*****                                          Version 6.2.1_291933RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -85,6 +85,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include <WiFi.h>
 #include <HardwareSerial.h>
 #include "WCB_Storage.h"
+#include "WCB_SeqStore.h"   // stored sequences: their own store, not NVS
 #include <WcbCmd.h>          // shared ;M/;A/;L/;H/;D → native-byte translators (WCBCMD_VERSION); the SAME lib NaviCore compiles
 #include "WCB_Maestro.h"
 #include "WCB_MP3.h"
@@ -198,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_291138RSEP2026";
+String SoftwareVersion = "6.2.1_291933RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3053,27 +3054,17 @@ void printConfigInfo() {
   if (specialPeerEnabled) Serial.printf("Controller Peer:          ENABLED (ID %d)\n", WCB_SPECIAL_PEER_ID);
 
   // Stored sequences
-  preferences.begin("stored_cmds", true);
-  String keyList = preferences.getString("key_list", "");
-  preferences.end();
   Serial.println("Stored Sequences:");
-  if (keyList.length() == 0) {
-    Serial.println("  None");
-  } else {
-    int startIdx = 0;
-    while (startIdx < keyList.length()) {
-      int commaIdx = keyList.indexOf(',', startIdx);
-      if (commaIdx == -1) commaIdx = keyList.length();
-      String key = keyList.substring(startIdx, commaIdx);
-      key.trim();
-      if (key.length() > 0) {
-        preferences.begin("stored_cmds", true);
-        String val = preferences.getString(key.c_str(), "");
-        preferences.end();
-        Serial.printf("  %s = %s\n", key.c_str(), val.c_str());
-      }
-      startIdx = commaIdx + 1;
-    }
+  {
+    int n = 0;
+    const int rc = seqStoreForEach([&n](const char *key, const String &value) {
+      n++;
+      if (value.length()) Serial.printf("  %s = %s\n", key, value.c_str());
+      else                Serial.printf("  %s = (its value could not be read)\n", key);
+      return true;
+    });
+    if (rc != SEQ_OK) Serial.printf("  (the sequence store could not be read: %s)\n", seqStoreError(rc));
+    else if (n == 0)  Serial.println("  None");
   }
 
   // ---- ETM Settings ----
@@ -3870,28 +3861,17 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   if (!wdpEnabled)  emit("WDP,OFF", true);
   if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
 
-  // Stored sequences. A key_list or a key that could not be read (an invalidated String) is a lost
-  // line, not an empty list; a value that could not be read makes its SEQ,SAVE token lost the same way.
-  preferences.begin("stored_cmds", true);
-  String keyList = preferences.getString("key_list", "");
-  preferences.end();
-  if (keyList.c_str() == nullptr) emit(String(), true);
-  if (keyList.length() > 0) {
-    int startIdx = 0;
-    while (startIdx < (int)keyList.length()) {
-      int ci = keyList.indexOf(',', startIdx);
-      if (ci == -1) ci = keyList.length();
-      String key = keyList.substring(startIdx, ci);
-      if (key.c_str() == nullptr) { emit(String(), true); startIdx = ci + 1; continue; }
-      key.trim();
-      if (key.length() > 0) {
-        preferences.begin("stored_cmds", true);
-        String value = preferences.getString(key.c_str(), "");
-        preferences.end();
-        emit("SEQ,SAVE," + key + "," + value, true);
-      }
-      startIdx = ci + 1;
-    }
+  // Stored sequences (WCB_SeqStore.h). A value that could not be held, or a SEQ,SAVE line that could not be built,
+  // is a lost token; a store that could not be read, or a walk that broke off, is one more - never a shorter list
+  // that reads as whole.
+  {
+    const int rc = seqStoreForEach([&emit](const char *key, const String &value) {
+      String line = "SEQ,SAVE,";
+      const bool ok = value.length() && line.concat(key) && line.concat(',') && line.concat(value);
+      emit(ok ? line : String(), true);
+      return true;
+    });
+    if (rc != SEQ_OK) emit(String(), true);
   }
 
   // PWM output ports + mappings (mappings LAST — restore triggers a reboot)
@@ -4759,8 +4739,8 @@ void handleStatsReqPacket(const uint8_t *data) {
 }
 
 // ── Target side: handle SEQ_REQ → send this board's sequence NAMES back ──────
-// Reads NVS (key_list + nothing else) and fragments the inventory back to the
-// requester. Deferred out of the WiFi callback via enqueueMgmtReq like its peers.
+// Reads the sequence store's key list (names only) and fragments the inventory back
+// to the requester. Deferred out of the WiFi callback via enqueueMgmtReq like its peers.
 void handleSeqReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
@@ -4785,6 +4765,13 @@ void handleSeqReqPacket(const uint8_t *data) {
 
   if (debugMGMT) Serial.printf("[MGMT] Sequence-names request from WCB%d\n", pkt.requesterWCB);
   String result = buildSequenceNamesString();
+  if (result.length() == 0) {
+    // The store could not be read right now (it will not mount on a low heap). No answer rather than a wrong one
+    // (a WCB_Client reads any reply as an inventory): clearing the dedup lets the requester's retry be answered.
+    Serial.printf("[MGMT] Could not read the sequence store for WCB%d's request - not answered\n", pkt.requesterWCB);
+    lastSeqReqFrom = 0;
+    return;
+  }
   sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_SEQ_FRAG);
 }
 
@@ -4828,18 +4815,20 @@ void handleSeqValReqPacket(const uint8_t *data) {
   lastSeqValKey  = key;
   lastSeqValMs   = nowMs;
 
-  // A key longer than SEQ_KEY_MAX_LEN is never stored, and NVS would match its first 15 characters.
-  bool   exists = false;
-  String value  = "";
-  if (key.length() <= SEQ_KEY_MAX_LEN) {
-    preferences.begin("stored_cmds", true);
-    exists = preferences.isKey(key.c_str());
-    value  = preferences.getString(key.c_str(), "");
-    preferences.end();
+  // seqStoreGet answers NOTFOUND for a key longer than SEQ_KEY_MAX_LEN (never stored; NVS would match its first
+  // 15 characters) and for the NVS layout's own records. A store it could not read makes no answer: a WCB_Client
+  // reads any status it does not know as NOTFOUND, and clearing the dedup lets the requester's retry be answered.
+  String value;
+  const int got = seqStoreGet(key, value);
+  if (got < 0) {
+    Serial.printf("[MGMT] Could not read sequence '%s' for WCB%d (%s) - not answered\n", key.c_str(),
+                  pkt.requesterWCB, seqStoreError(got));
+    lastSeqValFrom = 0;
+    return;
   }
 
   String reply;
-  if (!exists && value.length() == 0) {
+  if (got == SEQ_NOTFOUND) {
     reply = key + ",NOTFOUND,";
   } else {
     // Budget check BEFORE sending: sendResultFrags silently refuses anything over
@@ -6305,6 +6294,12 @@ void processLocalCommand(const String &message) {
             configPullFaultArm(false);
             configLineFaultArm(false);
             Serial.println("Config pull fault disarmed");
+        } else if (argsUpper == "SEQNVS") {
+            // Test knob (RTC memory, never saved): the next boot keeps stored sequences in NVS - the sequence store's
+            // fallback - so the HIL harness can run the NVS layout (F9's full-NVS paths, the fill that makes NVS full)
+            // and the move back into the file at the boot after (WCB_SeqStore.h).
+            seqStoreForceNvsNextBoot();
+            Serial.println("The next boot keeps stored sequences in NVS (once). Reboot to apply.");
         } else if (argsUpper.startsWith("PULLPART,")) {
             // Test knob (RAM only): a smaller part size, so a bench config splits into 3+ parts.
             String v = argsUpper.substring(9);
@@ -6925,14 +6920,14 @@ void processLocalCommand(const String &message) {
             String gk = seqArgs; gk.trim();
             if (gk.length() == 0) {
                 Serial.println("Usage: ?SEQ,GET,<key>");
-            } else if (gk.length() > SEQ_KEY_MAX_LEN) {   // never stored; NVS would match its first 15 characters
-                Serial.printf("[MGMT:SEQVAL,%d]%s,NOTFOUND,\n", WCB_Number, gk.c_str());
             } else {
-                preferences.begin("stored_cmds", true);
-                bool   ex = preferences.isKey(gk.c_str());
-                String v  = preferences.getString(gk.c_str(), "");
-                preferences.end();
-                if (!ex && v.length() == 0)
+                // seqStoreGet answers NOTFOUND for a key longer than SEQ_KEY_MAX_LEN (never stored; NVS would match
+                // its first 15 characters) and for the NVS layout's own records, key_list and seq_mig_done.
+                String v;
+                const int got = seqStoreGet(gk, v);
+                if (got < 0)
+                    Serial.printf("Could not read sequence '%s' (%s).\n", gk.c_str(), seqStoreError(got));
+                else if (got == SEQ_NOTFOUND)
                     Serial.printf("[MGMT:SEQVAL,%d]%s,NOTFOUND,\n", WCB_Number, gk.c_str());
                 else
                     Serial.printf("[MGMT:SEQVAL,%d]%s,OK,%s\n", WCB_Number, gk.c_str(), v.c_str());
@@ -6941,13 +6936,14 @@ void processLocalCommand(const String &message) {
             // Machine-readable inventory — names only, one line, same string the
             // SEQ_REQ mesh path returns. Prefixed like the relay output so a host
             // parsing this board's console uses ONE parser for local and remote.
-            Serial.printf("[MGMT:SEQ,%d]%s\n", WCB_Number, buildSequenceNamesString().c_str());
+            const String names = buildSequenceNamesString();
+            if (names.length()) Serial.printf("[MGMT:SEQ,%d]%s\n", WCB_Number, names.c_str());
+            else                Serial.println("Could not read the sequence store right now - try again.");
         } else if (seqCmdUpper == "CLEAR") {
             String seqArgsUpper = seqArgs;
             seqArgsUpper.toUpperCase();
             if (seqArgsUpper == "ALL") {
-                clearAllStoredCommands();
-                Serial.println("All stored sequences cleared");
+                if (clearAllStoredCommands()) Serial.println("All stored sequences cleared");
             } else {
                 eraseStoredCommandByName(seqArgs);
             }
@@ -7156,8 +7152,7 @@ void processLocalCommand(const String &message) {
     } else if ((message.startsWith("lf") || message.startsWith("LF")) && message.length() <= 3) {
         updateLocalFunctionIdentifier(message);   // ?LF<c> only: a longer word is a typo, not a setter (re-scan #8)
     } else if (message.equals("cclear") || message.equals("CCLEAR")) {
-        clearAllStoredCommands();
-        Serial.println("All stored sequences cleared");
+        if (clearAllStoredCommands()) Serial.println("All stored sequences cleared");
     } else if ((message.startsWith("cc") || message.startsWith("CC")) && message.length() <= 3) {
         // ?CC<c> only: ?CCLEAR,ALL (a plausible ?SEQ,CLEAR,ALL) saved 'L' as the command character (re-scan #8).
         updateCommandCharacter(message);
@@ -9639,6 +9634,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("Number of WCBs in the system: %d\n", Default_WCB_Quantity);
   Serial.println("-------------------------------------------------------");
   // Serial.println("PWM Mappings:");
+  seqStoreBegin();                  // stored sequences: open their store, move any NVS ones in (WCB_SeqStore.h)
   migrateOldStoredCommands();       // One-time recovery of pre-key_list sequences
   loadBaudRatesFromPreferences();
   loadSerialLabelsFromPreferences();  //
@@ -9989,6 +9985,7 @@ void loop() {
   serviceConfigPullJob();  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
   drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
   drainStatusOut();        // and the callback's status lines ("[ETM] WCBn came ONLINE")
+  seqStoreService();       // unmount the sequence store once idle: mounted, it holds ~2 KB of heap
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)

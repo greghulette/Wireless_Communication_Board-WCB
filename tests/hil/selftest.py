@@ -2130,8 +2130,8 @@ GATED = {
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
-    "seq.nvs_full_consistency": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them"),
-    "nvs.full_map_and_device_save": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them"),
+    "seq.nvs_full_consistency": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
+    "nvs.full_map_and_device_save": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
     "ident.epass_window_gates": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_led_and_tails": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     **{f"ota.{n}": ("ota_erase", _ERASE) for n in (

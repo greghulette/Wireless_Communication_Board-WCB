@@ -8,7 +8,8 @@ The problem it solves: anything that offers "run a sequence" needs the list of s
 Hard-coding it goes stale silently the first time someone saves one from the Wizard.
 
 Three operations, covered in §3 (list), §3a (fetch one), §3b (write). §3c covers how a
-recalled sequence runs: nested recall and the cycle guard.
+recalled sequence runs: nested recall and the cycle guard. §3d covers where sequences are
+stored: a file of their own, not NVS.
 
 ---
 
@@ -63,14 +64,17 @@ boards, are what this feature routes around.
 Two halves.
 
 **A 4-byte fingerprint rides the WDP advert.** `WDP_TLV_SEQHASH` (`0x13`) is FNV-1a over
-the board's NVS `key_list` **and every stored value**. It changes whenever a sequence is
-saved, edited, renamed or erased. Six bytes on the wire, which the advert can afford.
+the board's key list (`k1,k2,...,` in save order) **and every stored value**. It changes
+whenever a sequence is saved, edited, renamed or erased. Six bytes on the wire, which the
+advert can afford.
 
-It covers values, not just names, because editing a sequence in place never touches
-`key_list` — a keys-only hash would leave every peer holding a stale copy while believing
+It covers values, not just names, because editing a sequence in place never touches the
+key list — a keys-only hash would leave every peer holding a stale copy while believing
 it current, which is the exact failure the fingerprint exists to prevent. It is cached in
 RAM and invalidated at each write path: the WDP dirty-check rebuilds the advert twice a
-second, and hashing values uncached would mean N NVS reads at 2 Hz forever.
+second, and hashing values uncached would mean a walk of the whole store at 2 Hz forever. A
+store that cannot be read at that moment (§3d: it will not mount on a low heap) keeps the last
+fingerprint and is tried again every 5 s; a value it could not read is never hashed as empty.
 
 **The names are pulled on demand** with a dedicated request/response pair, only when the
 hash a consumer sees differs from the hash it cached.
@@ -87,7 +91,7 @@ alias 26 + fwver 24 + hwver/capflags/ctrlid/flags 13 + maestro & wled cfg 40 + p
 labels are built last and documented as dropped gracefully on overflow
 (`WCB_WDP.cpp:276`).
 
-Sequence keys are capped at 15 chars by the **NVS key limit**, so ~20 names is ~320 bytes —
+Sequence keys are capped at 15 chars (the **NVS key limit**, which the store keeps), so ~20 names is ~320 bytes —
 more than the entire payload. Advertising them would silently evict the port labels, which
 drive Maestro/WLED auto-config. `SEQHASH` is placed **before** PORTLABEL in the build order
 for the same reason PWMTARGET is: it is functional, labels are cosmetic.
@@ -112,9 +116,11 @@ Sent **three times** — a first broadcast frame to a given board is routinely d
 busy mesh. The target dedups repeats from the same requester inside 1.5 s
 (`handleSeqReqPacket`), so three sends still produce exactly one response.
 
-The request touches NVS, so it is **deferred out of the WiFi callback** onto the loop task
-via `enqueueMgmtReq` / `drainMgmtReqs`, exactly like CONFIG/STATS/ETM. Running it inline
-stalls ESP-NOW and drops other inbound packets.
+The request reads the sequence store, so it is **deferred out of the WiFi callback** onto the
+loop task via `enqueueMgmtReq` / `drainMgmtReqs`, exactly like CONFIG/STATS/ETM. Running it
+inline stalls ESP-NOW and drops other inbound packets. A store it cannot read right then (§3d)
+gets **no answer**, not an empty inventory: a `WCB_Client` reads any reply as the inventory. The
+handler clears its dedup so the requester's retry is answered.
 
 ### Response — `PACKET_TYPE_SEQ_FRAG` (14)
 
@@ -182,7 +188,9 @@ Same 230-byte frag struct, through the same `sendResultFrags()`. Payload:
 ```
 
 `status` is `OK`, `NOTFOUND`, or `TOOBIG`. The value may itself contain commas, so a
-parser takes everything after the **second** comma verbatim.
+parser takes everything after the **second** comma verbatim. A store the target cannot read
+right then (§3d) gets no answer at all, and the requester retries: `WCB_Client` reads any
+status it does not know as `NOTFOUND`, which would be wrong.
 
 **The reply is sent once and nothing acknowledges it.** Every chunk is one ESP-NOW
 broadcast, 20 ms apart, with no second pass (unlike the config pull, which sends two).
@@ -196,11 +204,10 @@ first try.
 over 16 chunks, so the handler checks the budget first and answers with a status
 instead of nothing. Silence is what makes a config pull through older firmware unusable here (§1) and
 reintroducing it in the replacement would recreate the very bug this routes around.
-In practice `TOOBIG` is rare. The budget allows a 2,903-character value, but NVS on a
-configured board refuses long values well before that, and the limit falls as NVS fills. On
-2026-09-22 bench board W1 refused 1,400 characters and stored 1,200. So `TOOBIG` only appears
-if a board once stored a longer value. HIL `inv.seqget_largest` finds the largest value a
-board actually stores and round-trips it.
+The budget allows a 2,903-character value, and the store takes up to 3,999 (§3d), so a
+long enough sequence answers `TOOBIG`. What usually stops a long value first is the heap a
+save costs (§3b): on a classic ESP32 about 2,400 characters. HIL `inv.seqget_largest` finds the
+largest value a board actually stores and round-trips it.
 
 ### Why one at a time
 
@@ -245,28 +252,30 @@ almost every layer of the dispatcher before `saveStoredCommandsToPreferences()` 
 own copy: the port's line buffer, the queue item, `args`, its upper-cased twin and the SEQ
 arguments. A classic-ESP32 board has about 24 KB of byte-addressable heap after boot, so
 a value of about 2,400 characters or more either fails with "Out of memory: could not copy"
-or reaches NVS with little heap left. In practice NVS refuses such values anyway (§3a).
+or reaches the store with little heap left.
 `?STATS`'s "min free since boot" is the sum of each heap region's own low point, not one
 moment's free heap. After such a save it can read near 0 until the next reboot, without the
 board ever having been out of memory (tracker #75).
 
 **Key rules** (enforced client-side so a bad write fails loudly instead of silently):
-1–15 chars (NVS key limit), and **no comma** — `saveStoredCommandsToPreferences()`
+1–15 chars (the NVS key limit, which the store keeps so a sequence can move between the two),
+and **no comma** — `saveStoredCommandsToPreferences()`
 takes the key as everything before the first comma, so a comma would truncate it on
 save and then never match on read. The firmware refuses a longer key on **every** path, not
 only on save (`SEQ_KEY_MAX_LEN`, `WCB_Storage.h`): NVS compares only the first 15 characters of
 a lookup, so `?SEQ,GET`, `;C` recall, the `SEQGET` relay and `?SEQ,CLEAR` would otherwise read,
 run or erase the sequence stored under the 15-character prefix. A longer key is reported as not
-found and never reaches NVS; erasing by such a name still drops it from `key_list`, where
-firmware before d83042e could list a key it had failed to store. The MP3 and DFPlayer
+found and never reaches the store; on the NVS fallback, erasing by such a name still drops it
+from `key_list`, where firmware before d83042e could list a key it had failed to store. The MP3 and DFPlayer
 `ONERR` callback key is held to the same 15 characters.
 
-**Two names are reserved.** `key_list` and `seq_mig_done` are the store's own records, kept in
-the same `stored_cmds` namespace as the sequences. `?SEQ,SAVE`, `?SEQ,CLEAR` and a `;C` / `;SEQ`
-recall refuse both (`seqKeyReserved`, `WCB_Storage.h`), a recall before its mesh fan-out. A save
-by either name corrupted the list or the migration flag, a clear unlisted every sequence or
-re-armed the legacy migration, and a recall ran the name list as broadcast text. `?SEQ,GET`
-still reads both: it is the only window onto them (HIL `seq.get_internal_keys`,
+**Two names are reserved.** `key_list` and `seq_mig_done` are the NVS layout's own records, kept
+in the `stored_cmds` namespace beside the sequences it holds (§3d: the fallback, and every
+firmware before the store). `?SEQ,SAVE`, `?SEQ,CLEAR`, `?SEQ,GET` and a `;C` / `;SEQ` recall
+refuse both (`seqKeyReserved`, `WCB_Storage.h`), a recall before its mesh fan-out; `GET` answers
+`NOTFOUND`. In that layout a save by either name corrupted the list or the migration flag, a clear
+unlisted every sequence or re-armed the legacy migration, and a recall ran the name list as
+broadcast text. `?NVS` shows what `stored_cmds` holds (HIL `seq.get_internal_keys`,
 `seq.reserved_bookkeeping_keys`).
 
 **A stored value ends only at delimiter + function identifier.** `?SEQ,SAVE`, `?CS` and `?MGMT,`
@@ -278,7 +287,7 @@ carrying one of those verbs are kept off the timer path by `chainCarriesValueVer
 every routing gate: `isTimerChain()` for the console and WebSocket reader, both ESP-NOW receive
 paths and the reassembly of a multi-chunk `?MGMT,FRAG` or fragmented client unicast, and the
 recall's own test in `recallCommandSlot()`. The cost is deliberate: a chain mixing a real `;t`
-timer with a `?SEQ,SAVE` loses its inter-group timing, traded against a truncated value in NVS.
+timer with a `?SEQ,SAVE` loses its inter-group timing, traded against a truncated stored value.
 `isTimerChain()` also sends a chain that starts with the function identifier to the timer engine,
 but only when a token is a real `<cmdChar>T<digits>` and no token is a checksum (a verified chain
 goes through the checksum gate, which the timer path skips). Such a chain used to be refused
@@ -311,10 +320,81 @@ Conflating these makes an old board look like an empty one. `?WDP,DUMP` omits th
 `[WDPSEQ:...]` record entirely rather than emitting `HASH=00000000`, preserving the
 distinction.
 
-The hash is **order-sensitive** (`key_list` preserves save order). That is intended: it
+The hash is **order-sensitive** (the key list keeps save order). That is intended: it
 answers "did *my* inventory change", not "do two boards match".
 
 ---
+
+## 3d. Where sequences are stored
+
+**In a file of their own, not NVS** (`WCB_SeqStore.{h,cpp}`). The sequences are the lines of
+`/seqs` - `<key>,<value>`, one per line, in save order - in a LittleFS on the 128 KB `spiffs`
+data partition that the min_spiffs table carries and nothing else on a WCB uses. NVS keeps
+one entry for them, the `stored_cmds/seq_mig_done` marker.
+
+| Limit | Value | Why |
+|---|---|---|
+| Key | 1-15 characters, no comma | The NVS key limit, kept so a sequence can move between the two stores |
+| Value | 1-3,999 characters, no line break | What NVS held (4,000 with the NUL); the file is one sequence per line |
+| Store | 32,768 bytes of lines (`SEQ_FILE_MAX`) | A config pull carries at most 16 parts of 2,880 bytes (46 KB, `WCB_ConfigParts.h`), every sequence riding it as a `?SEQ,SAVE` token beside the other settings: at 32 KB a full store still pulls. It is also under half the partition, which a replace needs (below) |
+
+`?NVS` ends with one line on it: `Sequences: <n> in the sequence store, <bytes> of 32768 bytes
+(partition spiffs: <used> of <total> bytes used)`.
+
+**Writes.** A new key appends one line. LittleFS commits a write only when the file is
+closed, and not at all once a write to it failed, so a reset mid-append leaves the file as it
+was. Replacing or removing a sequence writes the whole file to `/seqs.tmp` and renames it over
+`/seqs`: a reset leaves the old store or the new one, never half of each. That copy needs room
+for a second file, so a full store can still remove a sequence. A re-save of the value already
+stored writes nothing, so a re-pushed config costs reads only. A replace keeps the key's place;
+a clear and re-save moves it last - the same order rules the NVS key list had, so the hash is
+byte-identical across the move from NVS.
+
+**Mounted only while used.** A mount holds about 1.9 KB of heap and each open file about
+0.7 KB more, a tenth of what a classic ESP32 hosting its access point has free (CLAUDE.md rule
+14). Each call mounts on demand (about 12 ms) and `loop()` unmounts it after 3 s unused
+(`seqStoreService`). Below 6 KB of free heap it refuses to mount, and the caller says so: a
+save prints `Failed to store sequence '<key>' (out of memory)`, a recall `Could not read
+sequence`, a mesh request goes unanswered until its retry. Every call is from the loop task;
+never from the ESP-NOW receive callback.
+
+**Reads.** A recall, `?SEQ,GET`, `?SEQ,LIST`, `?config`, the config walk (`?backup`, the config
+pull) and the hash are each a walk of the file, with no copy of it in RAM: a value is held only
+while it is used, and the hash reads none. A value the heap cannot hold is a lost token to the
+config walk (F19): `?backup` warns, a pull answers `NOMEM`. A line no key can address (no
+comma, or a key over 15 characters) is skipped, and the next replace or remove drops it.
+
+**The settings store still decides when sequences are erased.** `?ERASE,NVS` and
+`?SEQ,CLEAR,ALL` clear the file too. A factory reset that blanks only NVS - the Wizard's writes
+0xFF over the NVS partition and leaves `spiffs` alone - takes the `seq_mig_done` marker with it,
+and a boot that finds the file without the marker clears it: `[SEQ] The settings store was
+erased since these sequences were saved (a factory reset): cleared them too.` The marker is
+written at every boot that lacks it (`migrateOldStoredCommands`), so only a wipe removes it.
+
+**The NVS fallback.** A boot that cannot mount the partition runs the store on the old NVS
+layout (`key_list` plus one string per key) for that boot, and says why:
+`[SEQ] Stored sequences are kept in the settings store this boot: <why>`. The reasons: no
+`spiffs` partition (a build with another partition scheme), the last boot crashed while mounting
+it, or `?DEBUG,SEQNVS` asked for it (a test knob, RTC memory, one boot). The crash check exists
+because the core builds LittleFS with its asserts on: a damaged file system can `abort()` inside
+the mount, and every later boot would mount it and crash the same way. An RTC word holds a
+marker while a mount runs; a boot after a panic or a watchdog reset that still finds it skips
+the mount. `?SEQ,CLEAR,ALL` on a fallback boot formats the file store, which is how a damaged
+one is started over.
+
+**Moving NVS sequences in.** Every boot that mounts moves whatever NVS still lists into the
+file, in one rewrite, then reads each back before removing it from NVS: `[SEQ] Moved <n>
+sequence(s) from the settings store into the sequence store.` That is how the first boot of this
+firmware on a board moves every sequence it has, and how a fallback boot's saves come back. NVS
+wins a key both hold, in the file's place: NVS only holds a sequence while the file exists when
+a fallback boot or an older firmware saved it, which is newer. A listed name with no value is
+dropped from the list; a value the file cannot take (a line break, or no room) stays in NVS,
+unused, and the boot says so. A reset anywhere in the move loses nothing: the next boot moves
+again.
+
+**Going back to firmware before the store** shows no sequences: they are in the file, which
+older firmware does not read. Restore them from a backup there. Coming forward again, the file
+is still there, and what the older firmware saved in NVS moves in beside it.
 
 ## 3c. Running sequences: nested recall and the cycle guard
 
@@ -467,6 +547,13 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 - Inventory string + hash (single source of truth for both the console command and the mesh
   reply): `Code/WCB/WCB_Storage.cpp` — `buildSequenceNamesString()`,
   `sequenceInventoryHash()`, `invalidateSequenceInventoryHash()`.
+- Where sequences are stored (§3d): `Code/WCB/WCB_SeqStore.{h,cpp}` — `seqStoreBegin()` (mount,
+  factory-reset check, `moveNvsSequences()`), `seqStoreGet/Put/Remove/Clear/ForEach/KeyList/Hash`,
+  `seqStoreService()` (idle unmount), `seqStoreReport()` (`?NVS`), the NVS fallback (`nvs*`).
+  Callers: `recallCommandSlot()`, `saveStoredCommandsToPreferences()`,
+  `eraseStoredCommandByName()`, `listStoredCommands()`, `clearAllStoredCommands()`
+  (`WCB_Storage.cpp`); `collectConfigCommands()`, `printConfigInfo()`, the `?SEQ` handler,
+  `handleSeqReqPacket()`, `handleSeqValReqPacket()` (`WCB.ino`).
 - Packets, handlers, `?MGMT,SEQ`, `?SEQ,NAMES`: `Code/WCB/WCB.ino`.
 - TLV advertise/decode + `?WDP` display: `Code/WCB/WCB_WDP.cpp`, `WdpNeighbor::seqHash` in
   `WCB_WDP.h`.
@@ -486,6 +573,7 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-09-29 | §3d: sequences move out of NVS into a file of their own, `/seqs` on the 128 KB `spiffs` partition (`WCB_SeqStore`), capped at 32 KB so a full store's config still pulls; NVS keeps the `seq_mig_done` marker, whose absence clears the file (a factory reset that blanks only NVS). Every boot that mounts moves what NVS lists into the file; a boot that cannot mount runs on the NVS layout (`?DEBUG,SEQNVS` forces one). `?SEQ,GET` answers `NOTFOUND` for `key_list` and `seq_mig_done`; a mesh request the store cannot answer right then gets no reply; a value that cannot be read is never hashed. §3a `TOOBIG` is reachable now that the store takes 3,999 characters. | _(pending)_ |
 | 2026-09-27 | §3c: a top-level recall that cannot fit the command queue is refused whole, and the serial reader waits for queue room instead of dropping tokens (WCB coverage re-scan #24). | `cc2a8a9` |
 | 2026-09-27 | §2: `key_list` and `seq_mig_done` are refused as keys by save, clear and recall (WCB coverage re-scan #14). The timer-path paragraph names the gates as they are now: one `isTimerChain()` for four paths, which also takes a `?`-first chain with a real `;T` token and none with a checksum (#10), and a long received chain is carried whole or reported (#22). | `cc2a8a9` |
 | 2026-09-24 | §1: a pull that asks for parts (`?MGMT,PULL,<n>,P`) now gets a config over 2912 characters in parts; a plain pull gets CFGERR NOPARTS; older relays and targets stay silent (F13, tracker #91, MGMT_RELAY.md). | `337f5df` |

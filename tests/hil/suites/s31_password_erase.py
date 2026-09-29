@@ -349,12 +349,31 @@ def _hil_vars(w):
     return out
 
 
-@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9). Then persistent variables until one is refused: no ACK for it, and after a reboot W1 holds what it reported (re-scan #13; 1 reboot)", needs=["wcb1"], links=[], opt_in="nvs_fill")
+def _sequences_into_nvs(w):
+    """Reboot W1 once with its stored sequences in NVS - the sequence store's fallback (?DEBUG,SEQNVS,
+    WCB_SeqStore.h) - so throwaway sequences fill NVS as they did before the store had a file of its own. Call it
+    inside config_guard: W1's own sequences stay in the file, unseen until the next boot, so the guard's snapshot must
+    come first. True when W1 was rebooted for it: the caller clears its sequences and reboots once more, before the
+    guard compares - that boot moves whatever NVS still lists into the store. False on firmware whose sequences are in
+    NVS anyway (no 'Sequences:' line in ?NVS)."""
+    if not any(x.startswith("Sequences:") for x in w.run("?NVS", timeout=6)):
+        return False
+    if not _has(w.run("?DEBUG,SEQNVS"), "The next boot keeps stored sequences in NVS"):
+        raise AssertionError("?DEBUG,SEQNVS was not accepted")
+    m = w.reboot()
+    if not any("Stored sequences are kept in the settings store this boot" in x for x in w.dev.since(m)):
+        raise AssertionError("after ?DEBUG,SEQNVS and a reboot W1 did not say it keeps its sequences in NVS")
+    return True
+
+
+@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): on the sequence store's NVS fallback (?DEBUG,SEQNVS), W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9). Then persistent variables until one is refused: no ACK for it, and after a reboot W1 holds what it reported (re-scan #13; 2 reboots)", needs=["wcb1"], links=[], opt_in="nvs_fill")
 def nvs_full_consistency(bench):
     """saveStoredCommandsToPreferences / eraseStoredCommandByName (WCB_Storage.cpp). Before 2026-09-24 a failed write
     of the sequence list went unchecked: a clear on a full store left the key listed with no value, and a save could
     leave a value no list names (docs/HIL_TEST_AUDIT.md F9, run 20260924-092602). The values are a ;S0 marker and a
-    comment, and nothing recalls them. Other NVS writers on W1 may fail while it is full; that lasts seconds."""
+    comment, and nothing recalls them. Other NVS writers on W1 may fail while it is full; that lasts seconds. Stored
+    sequences have their own store since 2026-09-29, so the fill runs on its NVS fallback, one boot long
+    (_sequences_into_nvs); the reboot that checks the variables takes W1 back."""
     w = usb_wcb(bench)
     before, spaces0 = _nvs(w.run("?NVS", timeout=6))
     if not before:
@@ -363,10 +382,12 @@ def nvs_full_consistency(bench):
     keys, problems, refused = [], [], []
     made, reported = [], None      # the variable arm (re-scan #13)
     setters = None                 # the label and baud arm (re-scan #20): the tokens to put back
+    on_nvs = False                 # W1 booted onto the NVS fallback, and must boot back
     with config_guard(bench, 1) as before:
         if _has(w.run("?VAR,SET,hilnvc,7"), "[VAR] hilnvc = 7  [persistent]"):
             made.append("hilnvc")    # a persistent variable from before the fill, cleared on the full store below
         try:
+            on_nvs = _sequences_into_nvs(w)
             # Big values fill the store; once one is refused, smaller ones find the last gaps - the tier where a value
             # can still fit but the growing sequence list cannot is the new check. It ends when a 40-character save
             # is refused. Every refused key must leave nothing behind.
@@ -463,8 +484,9 @@ def nvs_full_consistency(bench):
             for cmd in setters or []:                           # after the clears: the store has room again
                 w.run(cmd)
             try:
-                if reported is not None:                         # the store has room again: what boots is NVS
-                    w.reboot()
+                if reported is not None or on_nvs:               # the store has room again: what boots is NVS
+                    w.reboot()                                   # (and a fallback boot moves back to the file)
+                if reported is not None:
                     booted = _hil_vars(w)
                     if booted != reported:
                         problems.append(f"after a reboot W1 holds variables {booted}, but reported {reported}: a set or "
@@ -753,7 +775,8 @@ def full_map_and_device_save(bench):
     ten-destination mappings (about 26 new one-entry keys each) take the last entries first, on S3 and S4 with their
     broadcast flags set beforehand so a mapping writes nothing else. Whichever writes the store refused, the reboot
     must bring each mapping back exactly as issued or as last stored and warned about. When no refusal happens at all,
-    nothing was tested and the test skips. Everything is put back; the device is forgotten."""
+    nothing was tested and the test skips. Everything is put back; the device is forgotten. The sequences fill NVS on
+    the sequence store's NVS fallback, one boot long (_sequences_into_nvs); the reboot the test takes goes back."""
     w = usb_wcb(bench)
     s5 = bench.links.usable(1, "S5", send=True)
     stats0, spaces0 = _nvs(w.run("?NVS", timeout=6))
@@ -761,6 +784,7 @@ def full_map_and_device_save(bench):
         raise Skip("W1 has no ?NVS (older firmware)")
     keys, refused, problems, warned = [], [], [], {}
     name, da_refused = "HILNF" + nonce()[:4], None
+    on_nvs = rebooted = False
     with config_guard(bench, 1) as before:
         for p in TEN:
             if token(before[1], f"?MAP,SERIAL,{p},"):
@@ -769,6 +793,7 @@ def full_map_and_device_save(bench):
         if s5 is not None:
             _da_scrub(w, "S5")
         try:
+            on_nvs = _sequences_into_nvs(w)
             for p in ("S3", "S4"):
                 w.run(f"?BCAST,IN,{p},OFF")
                 w.run(f"?BCAST,OUT,{p},OFF")
@@ -792,6 +817,7 @@ def full_map_and_device_save(bench):
                 if sum(x.startswith(DA_REFUSED) for x in w.dev.since(mda)) > 1:
                     problems.append("the WDP-DA list save was refused again 60 s later, with room in the store")
             w.reboot()
+            rebooted = True
             after = snapshot(bench, 1)
             want = f"?MAP,SERIAL,S2,{TEN['S2']}" if warned["S2"] else "?MAP,SERIAL,S2,S4"
             got = token(after, "?MAP,SERIAL,S2,")
@@ -818,6 +844,8 @@ def full_map_and_device_save(bench):
                 w.run(t)
             if s5 is not None:
                 _da_forget(w, "S5", name)
+            if on_nvs and not rebooted:                      # back to the sequence store before the guard compares
+                w.reboot()
     stats1, spaces1 = _nvs(w.run("?NVS", timeout=6))
     if stats1 and spaces1.get("serial_map", 0) != spaces0.get("serial_map", 0):
         problems.append(f"serial_map used {spaces0.get('serial_map', 0)} entries before and "
