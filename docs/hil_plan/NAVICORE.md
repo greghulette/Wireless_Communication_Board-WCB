@@ -1151,6 +1151,9 @@ the W1S2 probe:
 > - `sbus.mode_switch_decode`: the decode reads the value only; `positions` plays no part (a 2-position switch gives
 >   modes 1 and 3 because it only sends 173 and 1811). The deadband is `> 5`: 586 after 581, and 1405 after 1400, are
 >   not looked at.
+> - `sbus.knob_mode_aware` rebinds the override knob's switch to the resting ry stick. An override switch with no
+>   channel reads -1, and the knob then follows the global mode after all (`NaviCore.ino:2622-2623`), so it would
+>   re-dispatch at every SET_MODE like a plain mode-aware knob.
 > - `sbus.knob_hcr_volume` reads NaviCore's own DBG_HCR trace, on audio channel B (the bench's volume knobs drive V and
 >   A, and the 80 ms throttle is per channel). W2's bytes are left to NC-WP7's `ncdev.hcr_remote_verbs`. The knob clamps
 >   at 99 while the codec takes 100: pinned.

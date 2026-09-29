@@ -1,7 +1,8 @@
 """NaviCore's RC engine driven the way a pilot drives it, through SBUS from the bench controller: the button matrix and
 its taps, switch tiers, the mode switch, knobs, and the SBUS reader under load and after stalls
 (docs/hil_plan/NAVICORE.md NC-WP5, ids sbus.*; the USB-driven half is s41, whose helpers these tests share). Every test
-here moves an SBUS channel or can make NaviCore move a servo, so every one is in hil/servos.py.
+but sbus.lock_under_load (it only reads) moves an SBUS channel or can make NaviCore move a servo, and those are in
+hil/servos.py.
 
 The inputs. The controller (hil/sbus.py SbusCtl) is driven with JSON only. Its rx and ry sticks (CH1 and CH2 on this
 bench: getcfg rx/ry) are channels NaviCore binds to nothing (NAVICORE.md §1.4; _stick re-checks against the running
@@ -608,7 +609,7 @@ def held_second_tap_midhold(bench):
     """RCRadio_Matrix_Buttons opens a hold only on the first press of a gesture (holdActive = tapCount == 1,
     NaviCore.ino:2345-2352), so checkDeferredTap does not park a second press (:2404-2426) and rcMatrixRelease ignores
     its release (:2379-2381): tap 2 fires at the second press + tapWindowMs with the button still down. The comment
-    beside that line says 'a held 2nd tap simply dispatches its tier when the button comes up', and ARCHITECTURE.md:304
+    beside that line says 'a held 2nd tap simply dispatches its tier when the button comes up', and ARCHITECTURE.md:308-309
     likewise (NAVICORE.md D-NC36's doc list): pinned here; the comment is the bug. Unmapped slot: rc_trig only."""
     ctl, nc, cfg, ncfg = _sbus_setup(bench)
     mode = nc.mode()
@@ -941,9 +942,12 @@ def knob_mode_aware(bench):
     resetModeAwareKnobs, called on every global mode change (SET_MODE, rc_telemetry.h:2236-2243), re-arms only the
     mode-aware knobs with no modeSwitchOverride (NaviCore.ino:2709-2720), and a re-armed knob dispatches at the current
     stick value on the next frame. Two free knobs on the rx stick: K with a different remote-slot channel per mode, K2
-    with modeSwitchOverride on a switch that does not move and one channel in every set. The bench's J4 also sends a
-    frame for slot 4 at each change, on channel 0, which these channels (5 and up) leave out."""
+    with one channel in every set and modeSwitchOverride on a free switch rebound to the resting ry stick. A switch
+    with no channel would not do: it reads -1, and the knob then follows the global mode after all (NaviCore.ino:
+    2622-2623), so it would re-dispatch at every change. The bench's J4 also sends a frame for slot 4 at each change,
+    on channel 0, which these channels (5 and up) leave out."""
     ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, chans, wire = _knob_rig(bench, 4)
+    ch2 = _stick(nc, cfg, ncfg, "ry")
     x1, x2, x3, x4 = chans
     w = Watch11(l11, nc, dev, chans, wire)
     w1 = usb_wcb(bench)
@@ -954,7 +958,7 @@ def knob_mode_aware(bench):
         knobs, switches = _free_knobs(g.before), _free_switches(g.before)
         if len(knobs) < 2 or not switches:
             raise Skip("fewer than two free knobs, or no switch for the override")
-        (k1, k2), ovr = knobs[:2], switches[0][0]
+        (k1, k2), (ovr, ovr_label) = knobs[:2], switches[0]
         m0 = nc.mode()
         m1 = next(m for m in (2, 1, 3) if m != m0)
         per_mode = {1: x1, 2: x2, 3: x3}
@@ -966,7 +970,7 @@ def knob_mode_aware(bench):
             while nc.mode() != m and time.monotonic() < deadline:
                 time.sleep(0.2)
         try:
-            nc.set_config({"knobs": {
+            nc.set_config({"switches": {ovr_label: {"channel": ch2, "positions": 3}}, "knobs": {
                 k1: _knob(ch, modeAware=True, outputs=[_out(x1, target=slot)], outputs2=[_out(x2, target=slot)],
                           outputs3=[_out(x3, target=slot)]),
                 k2: _knob(ch, modeAware=True, modeSwitchOverride=ovr, outputs=one, outputs2=one, outputs3=one)}})
@@ -1252,8 +1256,8 @@ def lock_under_load(bench):
     sendPWMUpdate's guard, :3168-3181); a local Maestro read blocks at most 25 ms (maestroLocalQuery :725-752). The
     load: SET_DEBUG_FLAGS with every dispatch family, START_MONITOR (a frame every 50 ms), then four rounds of five
     ?MAE,GET on the first local slot and a GET_CONFIG, with #L09 sampled each round and every monitor frame checked.
-    Nothing is written; nothing moves (it is listed in hil/servos.py only because a stall past ~100 ms could make the
-    reader decode garbage, sbus.stall_no_phantom's question)."""
+    Nothing is written and nothing moves, so it is not in hil/servos.py. Whether a stall past ~100 ms can make the
+    reader decode garbage is sbus.stall_no_phantom's question; that test makes everything inert before it stalls."""
     ctl, nc, cfg, ncfg = _sbus_setup(bench)
     slots = nc.local_slots(ncfg)
     base = nc.sbus_dump()
@@ -1357,10 +1361,10 @@ def prefix_ambiguity_ch17(bench):
     assert not problems, "; ".join(sorted(set(problems))[:10])
 
 
-@test("sbus.stall_no_phantom", "After loop() stalls long enough to overflow the SBUS UART (20 stalls of 110-490 ms, "
-      "every input still) NaviCore decodes no phantom frame: no detector knob sends a frame, no rc_trig, no dispatch, "
-      "no mode change, no monitor excursion, and the stream recovers to full rate", needs=["sbus", "navicore", "wcb1"],
-      links=["W1S1"])
+@test("sbus.stall_no_phantom", "After loop() stalls long enough to overflow the SBUS UART (20 stalls, the #L90 ones "
+      "110-485 ms, every input still) NaviCore decodes no phantom frame: no detector knob sends a frame, no rc_trig, "
+      "no dispatch, no mode change, no monitor excursion, and the stream recovers to full rate",
+      needs=["sbus", "navicore", "wcb1"], links=["W1S1"])
 def stall_no_phantom(bench):
     """The plan's nc.sbus.overflow_misalign hypothesis. Serial1 keeps the core's 256-byte RX ring (HardwareSerial.cpp:123,
     core 3.3.4; NaviCore sets only its TX buffer, NaviCore.ino:4658) beside the 128-byte FIFO, and no UART event task

@@ -20,9 +20,9 @@ moves: a USB TRIGGER names its mode explicitly, so an inert key fires only when 
 Bench facts relied on (NAVICORE.md §1.4): NaviCore is WCB 20; W1 has probe wires on S1 and S2; slot 4 is a remote
 Maestro slot (type 2, device 4) that nothing hosts, so its Pololu frames reach W1's S1 probe (W1 is Maestro_Remote and
 writes a broadcast Kyber chunk to its local Maestro port, WCB.ino:5626-5676) and move nothing; Maestro 2 is hosted by
-W2; NaviCore's own Maestro 1 (slot 1, local) is the dome, and the one test here that moves it is listed in
-hil/servos.py, as is the one that changes the mode (mode-aware knobs re-dispatch); modeReport goes to W2 and statsReport
-to W1.
+W2; NaviCore's own Maestro 1 (slot 1, local) is the dome. hil/servos.py lists the one test here that moves it, the one
+that changes the mode (mode-aware knobs re-dispatch) and the one that stalls loop() (SBUS OUT stops meanwhile).
+modeReport goes to W2 and statsReport to W1.
 """
 import re
 import time
