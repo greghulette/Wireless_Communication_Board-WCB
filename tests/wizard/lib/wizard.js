@@ -140,4 +140,93 @@ async function pushConfig(page, n) {
   return page.evaluate(async (n) => { await window.__hilPush; return boardPushOutcome[n]; }, n);
 }
 
-module.exports = { openWizard, connectBoard, setField, pushConfig };
+// connectBoard's board as a DIRECT connection. boardManualConnect makes the first board of a page the shared-hub port
+// (establishConnection's auto-share), which some paths treat differently - a reboot push stays on the port instead
+// of closing and reopening it (boardGo) - so a test of the direct path connects through here: allowShare=false, as the
+// bulk auto-detect does. The open asserts DTR, which resets the board, so the pull waits 3 s as boardManualConnect's
+// does, and once more on an incomplete answer.
+async function connectBoardDirect(page, ctx) {
+  const n = ctx.wcb;
+  let matches = await grantedMatches(page, ctx);
+  if (matches.length === 0) {
+    await authorize(page, ctx);
+    matches = await grantedMatches(page, ctx);
+  }
+  if (matches.length !== 1) {
+    throw new Error(`${matches.length} granted ports in .profiles/${ctx.device} match ${ctx.device}'s VID/PID`);
+  }
+  await page.evaluate(async ({ n, idx }) => {
+    const port = (await navigator.serial.getPorts())[idx];
+    await establishConnection(n, port, new Set(), false);
+    delete remoteRelayForBoard[n];
+    updateConnectionUI(n, true);
+    for (let i = 0; i < 2 && !boardBaselines[n]; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      await boardPull(n);
+    }
+  }, { n, idx: matches[0] });
+  await page.waitForFunction((n) => boardBaselines[n] && !_boardPullInFlight.has(n), n, { timeout: 45_000 });
+  const got = await page.evaluate((n) => [boardBaselines[n].wcbNumber, !!boardConnections[n]?._shared], n);
+  if (got[0] !== n) throw new Error(`connected to WCB ${got[0]}, expected WCB ${n} on ${ctx.com}`);
+  if (got[1]) throw new Error('the connection came up shared, not direct');
+  return n;
+}
+
+// Manage WCB<target> through the relay in slot <relay> and pull its config, as "Manage via relay" does: resolves true
+// once remoteBoardPull's onComplete says the pull landed (it retries on its own, within PULL_DEADLINE_MS).
+function manageRemote(page, relay, target) {
+  return page.evaluate(({ relay, target }) => new Promise((resolve) => {
+    if (!document.getElementById(`section-board-${target}`)) addDiscoveredBoards([target]);
+    setRemoteConnected(target, relay);
+    const guard = setTimeout(() => resolve(false), 55_000);
+    const r = remoteBoardPull(relay, target, 1, 3, (ok) => { clearTimeout(guard); resolve(ok); });
+    if (r && typeof r.catch === 'function') r.catch(() => {});
+  }), { relay, target });
+}
+
+// Keep every line slot <n>'s connection hears, with its time, in the page. Nothing is returned wholesale: a board's
+// output includes its config (and so its passwords) on every pull, so a spec reads only the lines it matches.
+async function recordLines(page, n) {
+  await page.evaluate((n) => {
+    window.__lines = window.__lines || {};
+    const rec = (window.__lines[n] = []);
+    boardConnections[n].onData((line) => rec.push({ at: Date.now(), line }));
+  }, n);
+}
+// The recorded lines of slot <n> matching `re` (a RegExp source), from index `since` on; with their times.
+function linesMatching(page, n, re, since = 0) {
+  return page.evaluate(({ n, re, since }) => (window.__lines?.[n] || []).slice(since)
+    .filter((x) => new RegExp(re).test(x.line)).map((x) => ({ at: x.at, line: x.line })), { n, re, since });
+}
+function lineMark(page, n) {
+  return page.evaluate((n) => (window.__lines?.[n] || []).length, n);
+}
+
+// What a push of slot <n> would send, as its commands' verbs (LABEL, HW, ...), without sending anything: boardGo's and
+// boardGoRemote's own preparation (the sync*ToConfig reads, autoComputeKyberTargets, the General inputs) on a copy of the
+// config, then buildCommandString against the baseline. A bench spec checks this before it pushes, so an edit that
+// would carry anything it did not intend - another board's WCB quantity (W-16), a Kyber line (W-20) - stops the test
+// before a real board is written. Verbs only: a command's value can be a password.
+function plannedVerbs(page, n) {
+  return page.evaluate((n) => {
+    syncSerialUIToConfig(n); syncMaestrosToConfig(n); syncKyberToConfig(n); syncMP3ToConfig(n);
+    syncHCRToConfig(n); syncDFPToConfig(n); syncWLEDsToConfig(n); autoComputeKyberTargets(n);
+    const c = JSON.parse(JSON.stringify(boardConfigs[n]));
+    c.sequences = getSequencesFromUI(n);
+    c.variables = getVariablesFromUI(n) ?? c.variables;
+    const g = (id) => document.getElementById(id);
+    c.espnowPassword = g('g-password').value || 'change_me_or_risk_takeover';
+    c.macOctet2 = g('g-mac2').value?.toUpperCase() || '00';
+    c.macOctet3 = g('g-mac3').value?.toUpperCase() || '00';
+    c.meshChannel = parseInt(g('g-meshch')?.value) || 1;
+    c.delimiter = g('g-delimiter').value || '^';
+    c.funcChar = g('g-funcchar').value || '?';
+    c.cmdChar = g('g-cmdchar').value || ';';
+    c.wcbQuantity = parseInt(g('g-wcbq').value) || 1;
+    const s = WCBParser.buildCommandString(c, boardBaselines[n] ?? null, !boardBaselines[n]);
+    return s ? s.split(c.delimiter + c.funcChar).map((x, i) => (i === 0 ? x.slice(1) : x).split(',')[0]) : [];
+  }, n);
+}
+
+module.exports = { openWizard, connectBoard, connectBoardDirect, manageRemote, recordLines, linesMatching, lineMark,
+                   plannedVerbs, setField, pushConfig };
