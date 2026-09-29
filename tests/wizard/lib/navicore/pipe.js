@@ -31,6 +31,11 @@ class BridgePipe {
     this.linesOut = 0;
     this.linesIn = 0;
     this.sentTypes = [];              // the "type" of every JSON line written, in order (never the line itself)
+    // Every line written, as {how, type} and nothing of its content: how is 'bare' (a JSON line, as on a direct link),
+    // 'wrapped' (;w<n>,{...}, the Via-WCB bridge), 'frag' (a bridged fragment envelope), 'cli' ('?'/'#') or 'text'.
+    this.sentLog = [];
+    this.sentFrags = [];              // {f, of, sid, bytes} per fragment envelope written: its header and size, never the slice
+    this.sentCli = [];                // the first two comma fields of each '?'/'#' line written ('?REC,LS', '#L12')
     this.synthetic = [];
   }
 
@@ -60,6 +65,13 @@ class BridgePipe {
       this.linesOut++;
       const t = /"type"\s*:\s*"([A-Za-z0-9_]+)"/.exec(line);   // the request TYPE only: a line may carry a password
       this.sentTypes.push(t ? t[1] : line[0] === '{' ? 'json' : 'text');
+      // A bridged fragment envelope, {"f":N,"of":M,"sid":S,"s":"..."} after ;w<n>, (sendJSON, index.html:5686-5697).
+      const env = /^;w\d+,\{"f":(\d+),"of":(\d+),"sid":(\d+),"s":/.exec(line);
+      const how = env ? 'frag' : line[0] === '{' ? 'bare' : /^;w\d+,\{/i.test(line) ? 'wrapped'
+        : line[0] === '?' || line[0] === '#' ? 'cli' : 'text';
+      this.sentLog.push({ how, type: t ? t[1] : null });
+      if (env) this.sentFrags.push({ f: +env[1], of: +env[2], sid: +env[3], bytes: Buffer.byteLength(line.slice(line.indexOf(',') + 1)) });
+      if (how === 'cli') this.sentCli.push(line.split(',').slice(0, 2).join(','));
       this.chain = this.chain.then(() => post('/serial/write', { device: this.device, text: line }))
         .catch((e) => this.errors.push(String(e)));
     }

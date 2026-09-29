@@ -115,3 +115,66 @@ test('rig: via WCB, the emulator reassembles a fragmented SET_CONFIG, strips the
   assert.equal(c.wcbNetwork.channel, 3, 'channel is NOT stripped by the firmware (D-NC18)');
   emu.stop();
 });
+
+// nctool.emulator_contract's helpers (lib/navicore/contract.js), on the emulator and on lines put together from the
+// firmware's own printf formats, so the L2 contract fails on a real drift and on nothing else.
+const C = require('../../lib/navicore/contract');
+const { normEvent } = require('../../lib/navicore/clips');
+
+async function answers(emu) {
+  const tap = new C.LineTap(emu);
+  await tap.open();
+  const out = {};
+  for (const r of C.REQUESTS) out[r.id] = await tap.ask(r, 2000);
+  return out;
+}
+
+test('rig: the contract finds no drift between two emulators, with and without clips', async () => {
+  const one = new NaviEmulator({ config: BENCH, clips: { HILc: { mode: 1, events: [normEvent({ t: 0, k: 1, slot: 4, ch: 0, pos: 6000 })] } } });
+  const two = new NaviEmulator({ config: BENCH, roster: { known: [1, 1], online: [1, 0] } });
+  const a = await answers(one), b = await answers(two);
+  for (const r of C.REQUESTS) assert.deepEqual(C.compare(r, a[r.id], b[r.id]), [], r.id);
+  assert.deepEqual(C.recLsShape(a['?REC,LS']).markers, ['[CLIPFS]', '[REC] clips:', '[CLIPLIST:BEGIN]', '[CLIPITEM]*', '[CLIPLIST:END]']);
+  one.stop(); two.stop();
+});
+
+test("rig: the contract accepts the firmware's own formats and names each drift by path and type only", async () => {
+  const emu = new NaviEmulator({ config: BENCH });
+  const sim = await answers(emu);
+  const byId = (id) => C.REQUESTS.find((r) => r.id === id);
+  // buildMeshStatsPage (rc_telemetry.h:1373-1431), a USB page: aggregate under "agg", positional rows, "last":1.
+  const mesh = ['{"type":"MESH_STATS","pg":0,"self":20,"upMs":98765,"agg":{"sent":5,"ackd":5,"rty":0,"fail":0,"ung":1,' +
+                '"bcast":3,"recv":9},"peers":[[1,5,5,0,0,1,9],[2,0,0,0,0,0,0]],"last":1}'];
+  assert.deepEqual(C.compare(byId('GET_MESH_STATS'), mesh, sim.GET_MESH_STATS), []);
+  // The dense USB WCB_STATUS (NaviCore.ino:4149-4234), two boards.
+  const st = ['{"type":"WCB_STATUS","quantity":1,"self":20,"online":[1,1],"known":[1,1],"clients":[0,0],"temporary":[0,0],' +
+              '"aliases":["body",""],"portLabels":[["","","","",""],["","HCR","","",""]],"seqHash":[123,0]}'];
+  assert.deepEqual(C.compare(byId('GET_WCB_STATUS'), st, sim.GET_WCB_STATUS), []);
+  // otaPrintStatus (navicore_ota.h:250-263) and ?REC,LS with a clip (NaviCore.ino:3485-3491, navicore_record.h:960-982).
+  const ota = ['---------- OTA Status ----------', 'Chip:        ESP32-S3 (family 1)', 'Firmware:    v0.2.0_281426QSEP26',
+               'App SHA256:  529503cd35f1e5e5', "Running:     'app1' @0x1f0000 (1966080 B)",
+               "Next (OTA):  'app0' @0x010000 (1966080 B)", 'Session:     idle', '--------------------------------'];
+  assert.deepEqual(C.compare(byId('?OTALOCAL,STATUS'), ota, sim['?OTALOCAL,STATUS']), []);
+  const ls = ['[CLIPFS]{"total":12582912,"used":8192}', '[REC] clips:', '[CLIPLIST:BEGIN]',
+              '[CLIPITEM]{"name":"wave","bytes":4216,"dur":2760,"n":30}', '[CLIPLIST:END]'];
+  assert.deepEqual(C.compare(byId('?REC,LS'), ls, sim['?REC,LS']), []);
+  // Drifts are reported, without a value: the old flat MESH_STATS keys, a STATUS without its App SHA256 line.
+  const flat = ['{"type":"MESH_STATS","pg":0,"self":20,"upMs":1,"sent":0,"ackd":0,"retries":0,"failed":0,"unguaranteed":0,' +
+                '"bcast":0,"recv":0,"peers":[],"last":1}'];
+  const d = C.compare(byId('GET_MESH_STATS'), mesh, flat);
+  assert.ok(d.includes('GET_MESH_STATS: agg: only on the board') && d.includes('GET_MESH_STATS: retries: only in the emulator'), d.join('; '));
+  assert.equal(C.compare(byId('?OTALOCAL,STATUS'), ota, ota.filter((l) => !l.startsWith('App SHA256'))).length, 1);
+  assert.deepEqual(C.compare(byId('PING'), ['{"type":"PONG","version":"v1"}'], ['{"type":"PONG","version":2}']),
+                   ['PING: version: string vs number']);
+  emu.stop();
+});
+
+test("rig: the contract's value diff names paths and types, never a value", () => {
+  const a = clone(BENCH), b = clone(BENCH);
+  b.wcbNetwork.password = 'HILotherSecret';
+  b.tapWindowMs = 610;
+  delete b.statsReport;
+  const d = C.valuePaths(a, b);
+  assert.deepEqual(d.sort(), ['statsReport: only on the board', 'tapWindowMs: number vs number', 'wcbNetwork.password: string vs string']);
+  assert.ok(!d.join(' ').includes('HILotherSecret') && !d.join(' ').includes(BENCH.wcbNetwork.password));
+});

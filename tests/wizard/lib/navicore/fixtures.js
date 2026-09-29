@@ -15,7 +15,11 @@ const { NaviEmulator } = require('./emulator');
 const { navicoreRoot } = require('./paths');
 const hil = require('../hil');
 
-const NC_ORIGIN = 'http://127.0.0.1:8779';   // playwright.config.js: the second serve.js
+// playwright.config.js: the second serve.js. NCTOOL_ORIGIN moves the L0-L2 specs to another port, for a second checkout
+// (a git worktree) that must run its no-board specs while a bench run holds 8778/8779: a config that reuses an existing
+// server would otherwise serve that run's tree. The L3 specs never take it (lib/navicore/webserial.js): Chrome keeps
+// the NaviCore profile's Web Serial grant for 8779 only.
+const NC_ORIGIN = process.env.NCTOOL_ORIGIN || 'http://127.0.0.1:8779';
 
 const test = base.test.extend({
   // What the harness told this run; null when run standalone (same as the Wizard's fixture).

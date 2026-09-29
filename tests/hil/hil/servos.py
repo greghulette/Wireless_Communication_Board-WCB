@@ -164,6 +164,17 @@ SERVO_TESTS = {
     "ncwifi.refuse_short_password": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
     "ncwifi.ws_stalled_client": "listed on doubt: a stalled socket can crash NaviCore (D-NC62), which restarts it: SBUS "
                                 "OUT stops for a few seconds",
+    # suites/s49_navicore_tool.py, the config tool with the board (NC-WP13). The other L2 specs read, save a port label,
+    # or fire a marker at W1 S2; these four move an SBUS channel or restart NaviCore.
+    "nctool.board_live_grid": "moves the controller's rx stick (CH1) through the bridge's /sbus route: NaviCore re-emits "
+                              "it on SBUS OUT, and the controller's own RC PWM 1 follows CH1",
+    "nctool.board_ota_usb_same_image": "two OTA flashes (the tool's, then hil/ncflash's put-back) restart NaviCore twice: "
+                                       "SBUS OUT stops for a few seconds each time; a mode set before it is sent back",
+    "nctool.webserial_connect_reset": "Chrome's open restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before "
+                                      "it is sent back",
+    "nctool.webserial_flash_same_image": "esptool-js holds NaviCore in its ROM bootloader for a minute or two, then restarts "
+                                         "it (hil/ncflash may restart it once more): SBUS OUT stops meanwhile; a mode set "
+                                         "before it is sent back",
     # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
     "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                             "is sent back",

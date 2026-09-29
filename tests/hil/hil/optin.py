@@ -142,6 +142,20 @@ OPT_INS = {
         "why": "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s",
         "estimate_s": 90,
     },
+    "navicore_webserial": {
+        "title": "NaviCore config tool over real Web Serial (attended)",
+        "what": "Hands NaviCore's own port to Chrome and runs its config tool over real Web Serial (a one-time grant in "
+                "tests/wizard/.profiles/navicore: the first run asks someone to pick NaviCore's COM port in Chrome's "
+                "dialog). Chrome's open restarts NaviCore, and the flash test runs the tool's Full Wipe & Flash with "
+                "esptool-js: the custom bootloader, the partition table and the bench image NaviCore already runs go into "
+                "0x0, 0x8000 and app0, its NVS (the learned peers, which W1 then re-advertises) and otadata are erased, "
+                "and it boots app0; the config and clips partitions are never written. Stay at the bench: a flash that "
+                "stops half-way leaves NaviCore in its ROM bootloader until `python -m hil.ncflash recover "
+                "--allow-esptool` (from tests/hil) writes the bench image back.",
+        "why": "NaviCore's port goes to Chrome over real Web Serial, which restarts it, and one test rewrites its "
+               "bootloader, partition table and app and erases its NVS with esptool-js; attended only",
+        "estimate_s": 240,
+    },
     "sbus_reset": {
         "title": "SBUS controller reset",
         "what": "Reboots the SBUS controller to check NaviCore's signal-loss handling.",

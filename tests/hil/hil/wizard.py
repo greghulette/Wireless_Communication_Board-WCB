@@ -8,7 +8,8 @@ because the bench's CP210x boards (wcb2, both probes) all report the same VID/PI
 
 The NaviCore config tool's specs (tests/wizard/specs/navicore, ids nctool.*) never use real Web Serial unattended: the
 page gets a fake port. With no device it talks to an in-Node emulator; with pipe=True the harness keeps the device's
-port and the fake port's lines go through the bridge's /serial routes (docs/hil_plan/NAVICORE.md §5.2).
+port and the fake port's lines go through the bridge's /serial routes (docs/hil_plan/NAVICORE.md §5.2). Their L3 specs
+(nctool.webserial_*, attended) hand NaviCore's port to Chrome like any Wizard test.
 """
 import json
 import os
@@ -20,9 +21,54 @@ import threading
 import time
 
 from .bridge import Bridge
+from .checkpoint import redact_text
 from .runner import Skip
 from .serialdev import ExpectTimeout
 from .wcb import WCB
+
+# A bridged fragment envelope anywhere in a line: NaviCore's (rc_telemetry.h:513, {"f":N,"of":M,"sid":S,"s":"..."}) as
+# a WCB prints it on USB, or the config tool's own after ;w<n>, (sendJSON, NaviCore config_tool/index.html:5686).
+FRAG_ENVELOPE = re.compile(r'\{"f":\d+,"of":\d+,"sid":\d+,"s":')
+
+
+class PipeLog:
+    """session.log for a piped device while its pipe is up: every line through redact_text, and the slice of every
+    fragment envelope replaced by its length. Through a WCB the config tool pulls NaviCore's whole CONFIG - the mesh
+    password, the AP password and the AP's name (NaviCore rc_config.h:1226-1236, :1365) - as ~100 envelopes that the WCB
+    prints on its USB, and Bench.log redacts only NaviCore's and the controller's own lines (runner.REDACT_KINDS): a
+    secret cut across two envelopes passes any line-by-line filter (s43 never pulls a bridged GET_CONFIG for this
+    reason; the config tool cannot connect without one). The page still gets every line whole: only the log copy is cut.
+    settle() then waits out a transfer the spec left running, so no envelope reaches the log after the filter is off."""
+
+    def __init__(self, dev):
+        self.dev, self.old, self.last = dev, dev.log, None
+
+    def filt(self, text):
+        m = FRAG_ENVELOPE.search(text)
+        if m:
+            self.last = time.monotonic()
+            text = f"{text[:m.end()]}<{len(text) - m.end()} characters not logged>"
+        return redact_text(text)
+
+    def __enter__(self):
+        old = self.old
+        if old:
+            self.dev.log = lambda name, direction, text: old(name, direction, self.filt(text))
+        return self
+
+    def settle(self, quiet_s=2.0, max_s=30.0):
+        """Wait until no envelope has arrived for quiet_s, counted from now at the earliest; at most max_s. NaviCore
+        sends one envelope per 150 ms (FRAG_PACING_MS, rc_telemetry.h:529), so a CONFIG the page no longer wants still
+        arrives for up to ~15 s after a failed spec or an early disconnect."""
+        start = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if now - max(self.last or start, start) >= quiet_s or now - start >= max_s:
+                return
+            time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        self.dev.log = self.old
 
 WIZARD_TESTS = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "wizard"))
 
@@ -229,13 +275,22 @@ def run_wizard_test(bench, test_id, device="wcb1", args=None, timeout=300.0, pip
     out_dir = bench.out_dir or tempfile.mkdtemp(prefix="wizard-")
     report_path = os.path.join(out_dir, f"{test_id}.playwright.json")
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=report_path, FORCE_COLOR="0")
+    if test_id.startswith("nctool."):
+        # A failed spec's test-results/<test>/error-context.md would carry an ARIA snapshot of the page, and on a real
+        # NaviCore the config tool's page holds the CONFIG echo and the credential fields (NAVICORE.md D-NC5). This
+        # variable is Playwright's own switch for that snapshot (playwright lib/index.js _takePageSnapshot); the error
+        # messages the harness reports come from the JSON report and stay.
+        env["PLAYWRIGHT_NO_COPY_PROMPT"] = "1"
     # --grep sees "<project> <file> <describe> <title>", so the id is delimited by spaces, not anchored with ^.
     # node on the CLI directly, never the npx .cmd shim: cmd.exe would read the regex's | as a pipe.
     cmd = [node, cli, "test", "--reporter=line,json", "--grep", r"(^|\s)" + re.escape(test_id) + r"(\s|$)"]
 
     global _LIVE
+    plog = None
     if device and pipe:
-        bench.dev(device)                 # opened (or kept open) here: the page reaches it only through the bridge
+        # Opened (or kept open) here: the page reaches it only through the bridge. Its session.log copy goes through
+        # PipeLog while the page runs (a bridged CONFIG crosses a WCB's USB in fragment envelopes).
+        plog = PipeLog(bench.dev(device)).__enter__()
     elif device:
         bench.close_device(device)
     aborted = None
@@ -260,6 +315,11 @@ def run_wizard_test(bench, test_id, device="wcb1", args=None, timeout=300.0, pip
         raise
     finally:
         _LIVE = None
+        if plog is not None and aborted is None:
+            # Not on an abort: then the filter stays on (it only ever hides and redacts), so nothing slips out after it.
+            if context.get("kind") != "navicore" or plog.last is not None:
+                plog.settle()
+            plog.__exit__()
         if device:
             try:
                 _reacquire(bench, device)
