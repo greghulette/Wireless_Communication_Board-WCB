@@ -1210,6 +1210,8 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP6 — mesh, bridge, WDP, telemetry, relay, failure (`s43_navicore_mesh.py`, `ncmesh.*`)
 
+> **Status 2026-09-29: bench-verified** after three runs (`20260929-025701`, `-042105`, `-050214`): every normal `ncmesh` test has passed on the bench, and the seven `(should)` tests fail as designed (D-NC16, 18, 26, 27, 46, 47, 48). The notes below record what the first two runs showed.
+>
 > **Status 2026-09-29: bench runs `20260929-025701` and `20260929-042105`; the four failures of the second fixed, not
 > yet re-run** (`suites/s43_navicore_mesh.py`, 36 tests). The first run failed eight tests on their own faults (the
 > five bullets before the last); after those fixes the second passed five of them and ran for the first time what they
@@ -1762,6 +1764,7 @@ that pins it.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | `bfc5754` | NC-WP6 bench-verified (`20260929-050214`): the last four fixed tests pass; D-NC46 and D-NC48 fail as designed. |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): five of the eight fixed tests pass and `seqval_verbatim` fails as designed. New finding D-NC48 (a multi-chunk `?MGMT,FRAG` push through NaviCore goes out in the wrong frame and never arrives) with its `(should)`, `ncmesh.mgmt_frag_multichunk`, split out of `mgmt_stats_frag`. Test fixes, not yet re-run: `mgmt_etm_char` compares the relayed block with W2's own (the tag line is bare); `mgmt_stats_frag`, `seq_pull` and `seqval_verbatim` ask once more after a reply lost on the air (tracker #109; `_seq_ask`, `_reply_leg`); the SBUS gate re-reads for 4 s. |
 | 2026-09-29 | `bfe55e5` | NC-WP6's first bench run (`20260929-025701`): 21 of 35 passed, the six `(should)` failed as designed, and eight failed on the tests' own faults, fixed and not yet re-run: W2 writes undone by each test (`_put_back`, `_seq_clear`) in `mgmt_stats_frag`, `wdp_neighbour_table`, `alias_whoami`, `seq_pull` and `seqval_verbatim`; `fragment_reassembly_edges` waits for each case's ACKs (no NaviCore finding); `bridged_cmdlib` and `bridged_wcb_meta` judge SBUS by the frame counter (`_sbus_kept_up`); `mgmt_etm_char` waits for W2's send line and asks once more, because W2 sends that reply once under its own load; `crc_namespace_gates` sets DBG_MAESTRO after the burn, which clears it. `NaviMeshModel` gains a moving frame counter, an `sbus_starved` mutation and the ACK's 0.1 s lag. The status note lists what the run showed. |
 | 2026-09-29 | `6da1180` | NC-WP7 bench-verified and NC-WP6's first bench pass (`20260929-025701`): 37 pass, the ten `(should)` tests that ran fail as designed, eight NC-WP6 tests being fixed. |
