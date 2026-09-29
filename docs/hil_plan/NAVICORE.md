@@ -39,7 +39,7 @@ password field deleted before anything was printed. Every `file:line` below was 
 - **Blocked this week:** every byte on NaviCore's own pins (S3-S5, SBUS OUT, the Maestro bus), because no probe
   header is free and nobody can wire one (§6); the failsafe path waits for RAM-only test verbs in SBUSController
   (D-NC8).
-- **41 decisions** are listed in §7, each with a recommendation. Those that change firmware or tool behaviour get a
+- **45 decisions** are listed in §7, each with a recommendation. Those that change firmware or tool behaviour get a
   `(should)` test first, as the WCB review did.
 
 ## 1. Approach
@@ -1091,6 +1091,29 @@ runs in CI, and can be written while the bench is busy with other plans.
 
 ### NC-WP4 — the engine through TRIGGER and TEST_ACTION (`s41_navicore_engine.py`, `ncengine.*`)
 
+> **Status 2026-09-28: written, not bench-run** (written while a full run held the bench). `suites/s41_navicore_engine.py`
+> holds 12 tests: the ten below, plus two `(should)`: `ncengine.test_action_skipped_not_ok` (D-NC20) and
+> `ncengine.skip_not_traced_as_sent` (D-NC45, found writing these). `maestro_skip_running_slot`, `mode_report_content`
+> and `mesh_trigger_burst` are in `hil/servos.py`. Line numbers in the docstrings are the `hil-week` tree, the image on
+> the bench. Where the code differs from the plan below:
+> - `ncengine.skip_running_fail_open` gates on the remote slot whose device a WCB really hosts (Maestro 2 on W2), with
+>   query verbs (`;M2,getErrors`), not device 4 on W1. Nothing hosts device 4, and W1 neither forwards nor answers a `;M4`
+>   verb or get that arrived over the mesh (WCB `WCB_Maestro.cpp:490-497`, `:566`), so the warm-up is never answered and
+>   the cached half cannot be shown. `maeGateMs` is raised to 5000 inside the guard, so the fresh window outlasts the
+>   harness's round trip. The host must carry `?CONTROLLER,ON,20` (both WCBs do).
+> - `ncengine.mesh_trigger_burst` needs `loop()` stalled while the triggers land. It uses INF9's `#L90` (it skips on
+>   another image), and first makes the SBUS side of the engine inert (s41 `_engine_inert`: no bands, no mode function,
+>   every knob off), because a stall past ~100 ms overflows the SBUS UART (NC-WP5's `sbus.stall_no_phantom`). Pinned:
+>   of 12 triggers, exactly 8 dispatch, in order; the rest are dropped with no log line.
+> - `ncengine.test_action_matrix` asserts what each action does (the bytes, the skip line), not the `ok` of a skipped one,
+>   so D-NC20's fix will not break it; `ncengine.test_action_skipped_not_ok` asserts `ok:false`.
+> - `ncengine.stats_report_content` cannot compare equal values: the counters keep moving. It brackets W1's reported row
+>   between GET_MESH_STATS read just before and just after the report (the counters only rise).
+> - `ncengine.calibration_gate`: a delayed action that comes due under CALIB is dropped, not deferred (its slot is freed
+>   either way, `NaviCore.ino:2202-2220`).
+> - `ncengine.maestro_skip_running_slot` leaves the moved channel at speed 0 ("no limit"): Pololu has no speed readback,
+>   so a Control Center speed limit on that channel, if it had one, is gone until the Maestro resets.
+
 A guarded temporary mapping on slot 136 whose actions are `wcb_unicast` to W1 with `;S2HIL<tier><nonce>`, read on
 the W1S2 probe:
 
@@ -1111,6 +1134,43 @@ the W1S2 probe:
   `ncengine.stats_report_content`.
 
 ### NC-WP5 — the engine through SBUS (`s42_navicore_sbus_engine.py`, `sbus.*`, all servo-listed)
+
+> **Status 2026-09-28: written, not bench-run.** `suites/s42_navicore_sbus_engine.py` holds 21 tests: the twenty below,
+> plus one `(should)`, `sbus.reconfig_parked_tap_cleared` (D-NC44, which had none). All but `sbus.lock_under_load`
+> (reads only, nothing moves) are in `hil/servos.py`. The sticks are driven to exact counts: `axis_arg` inverts the
+> controller's `axisToSbusRange`, checked offline against a float32 model of it for every count on all four axes, and
+> #L09 confirms the count where a test depends on it. Knob frames are read on W1 S1 (the hook image's `DBG_WIRE` copy is
+> quoted when they disagree). Where the code differs from the plan below:
+> - `sbus.matrix_logical_band` keeps the matrix on CH7 and presses the controller's lua buttons, whose values (274,
+>   376, ...) fall between the physical bands, instead of rebinding the matrix to a stick.
+> - `sbus.matrix_debounce_n`: the controller cannot send a one-frame press on demand (INF8's `dip` does not exist yet),
+>   so the test presses for 4-12 ms on the host, two frames at most: at debounce 1 some of these commit, at 4 none may,
+>   and real taps 1-3 still resolve at 4. Tries whose host-side hold ran past 12 ms are not counted.
+> - `sbus.switch_easing_seed` also needs a passthrough knob with an output on the slot: `reapplyMaestroEasing` drives
+>   only knob-driven channels. The knob sits on channel 0, never dispatched but counted by the re-apply.
+> - `sbus.mode_switch_decode`: the decode reads the value only; `positions` plays no part (a 2-position switch gives
+>   modes 1 and 3 because it only sends 173 and 1811). The deadband is `> 5`: 586 after 581, and 1405 after 1400, are
+>   not looked at.
+> - `sbus.knob_mode_aware` rebinds the override knob's switch to the resting ry stick. An override switch with no
+>   channel reads -1, and the knob then follows the global mode after all (`NaviCore.ino:2622-2623`), so it would
+>   re-dispatch at every SET_MODE like a plain mode-aware knob.
+> - `sbus.knob_hcr_volume` reads NaviCore's own DBG_HCR trace, on audio channel B (the bench's volume knobs drive V and
+>   A, and the 80 ms throttle is per channel). W2's bytes are left to NC-WP7's `ncdev.hcr_remote_verbs`. The knob clamps
+>   at 99 while the codec takes 100: pinned.
+> - `sbus.prefix_ambiguity_ch17`: this bench sits in the ambiguous state at rest (CH17 = 173 from switch SJ, CH18 = 992,
+>   so frame byte 24 is 0x00 and byte 23 is 0xAD); nothing needs moving.
+> - `sbus.stall_no_phantom`: on the hook image, 16 `#L90` stalls of 110-485 ms plus 4 no-op saves (20 saves on another
+>   image). Everything that could act on a phantom frame is made inert first, and free knobs on the matrix, mode and
+>   Maestro-knob channels become detectors passing through to remote slot 4. Serial1 keeps the core's 256-byte RX ring
+>   (`HardwareSerial.cpp:123`, core 3.3.4) and no UART event task flushes it. If the code is read right, a stall that
+>   overflows leaves one seam, which passes the reader's header/length/footer check for about 3 of the 36 possible
+>   offsets (the resting frame has 0x00 at bytes 24, 34 and 35), so this test should fail on most runs if the hypothesis
+>   holds. No unexplained rc_trig appeared across the ~30 saves of run `20260928-123843`, so a save's own stall may be
+>   too short to overflow.
+> - `sbus.reconfig_live`: a matrix button held across a USB save and across a bridged save behaves the same (one tap at
+>   most), so the plan's "USB vs mesh matrix reset" difference is not observable that way; the parked tap itself is
+>   D-NC44's `(should)`. "A delayed copy survives" is in `ncengine.delay_queue`.
+> - `sbus.lock_under_load` uses `SBUS_FULL_FPS` (90), not 100 (the harness's rule since NC-WP1).
 
 Inputs are the free channels: the rx and ry sticks (CH1, CH2), fine-steerable through `{"t":"a"}`. Outputs go to
 remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
@@ -1445,8 +1505,7 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36 and D-NC42 to D-NC44 are behaviour findings, each with the `(should)` test that pins it (D-NC44 has
-none yet).
+D-NC16 to D-NC36 and D-NC42 to D-NC45 are behaviour findings, each with the `(should)` test that pins it.
 
 ### 7.1 Process and infrastructure
 
@@ -1481,7 +1540,7 @@ none yet).
 | D-NC17 | An unrebooted password change (or a reset) splits OTA auth and ACKs, RTERM and WcbMgmt, which read the live value, from the ETM stack, which keeps the boot copy. | Those paths use the boot-time copy until a reboot, like the ETM stack. | `nccfg.mesh_creds_live_split` |
 | D-NC18 | A bridged SET_CONFIG strips deviceId, MAC octets, password and quantity but not `channel` or the `wifi*` fields (`rc_telemetry.h:1125-1156`, per the map). | Strip them too; the tool already strips channel. | `ncmesh.bridged_set_config_strip` |
 | D-NC19 | `boardType` is stored unchecked; 2 gives the v2 pins but advertises "WCB 3.2". | Clamp to 0-1 on input. | `ncboot.boardtype2_mismatch` |
-| D-NC20 | TEST_ACTION answers `ok:true` for an action the executor then skips (a disabled destination, an invalid slot, an unconfigured WLED id, a bad port); the tool never reads the ACK. | `ok:false` with a reason, and the tool shows it. | `ncengine.test_action_matrix`, `nctool.test_action_button` |
+| D-NC20 | TEST_ACTION answers `ok:true` for an action the executor then skips (a disabled destination, an invalid slot, an unconfigured WLED id, a bad port); the tool never reads the ACK. | `ok:false` with a reason, and the tool shows it. | `ncengine.test_action_skipped_not_ok` (and the skip lines in `ncengine.test_action_matrix`), `nctool.test_action_button` |
 | D-NC21 | A deferred tap still fires during failsafe, and a press in flight when frames stop resolves once they return (`NaviCore.ino:2770-2783`, `:2356-2390`, per the map). | Failsafe and frame loss cancel any pending tap or hold; the press must be made again. | `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press` |
 | D-NC22 | A null or empty `hcrDest`/`mp3Dest`/`dfpDest` object enables the device (serial S3, or WCB 2). | Read it as off. | `nccfg.dest_null_hazard` |
 | D-NC23 | Subroutine numbers 128-255 go out unmasked (`restartScript`, `subParam`, inbound `;M<dev>,<n>`), a command-range byte inside a Pololu frame. Cross-repo: `WcbMaestro` accepts up to 255. | Refuse n > 127 in WcbCmd (both firmwares; push WcbCmd first, WCB rule 1). | `ncdev.mae_subroutine_msb` and a WCB twin |
@@ -1500,12 +1559,14 @@ none yet).
 | D-NC36 | Doc drift found while mapping: bare PING claimed to work (PROTOCOLS.md:225, `NaviCore.ino:20`, the banner at `:4922`); RX buffer 4 KB vs 8 KB (PROTOCOLS.md:16); incomplete ACK shapes (PROTOCOLS §2); CALIB's exemptions (PROTOCOLS.md:233); cumulative tiers fire together (ARCHITECTURE.md:294-295); a held 2nd tap fires mid-hold (:304); remote Maestro writes are a raw broadcast (:364, WCB_NATIVE_MAESTRO_DESIGN §2); `RA_SMOOTH_OVERRIDE` retired (:368); RecEvent is 140 bytes (the setup comment at `NaviCore.ino:4661` still says 136); `REC_MAX_MS` is 60 s (RECORD_REPLAY_DESIGN §6); setSpeed/setAccel are captured (§5); NVS is migration-only (CONFIG_SCHEMA §3); `rc_telemetry.h:44-47`; CONFIG_TOOL.md §1, §2, §6, §8. Line numbers per the map. | One docs commit in NaviCore with the first push (D-NC6), each page's revision log updated. | none |
 | D-NC42 | A string field is cut at its buffer size in bytes (`strlcpy`), so a cut through a multi-byte UTF-8 character keeps half of it: GET_CONFIG and `/config.json` then carry invalid UTF-8, and the tool writes U+FFFD back on its next save (`rc_config.h:1592` for a tier note; every note, label, name and command field alike). Found writing NC-WP1. | Cut back to a character boundary. | `nccfg.string_truncation_utf8` |
 | D-NC43 | `holdMs` is raised to `tapWindowMs` + 250 and then capped at 5000, while `tapWindowMs` has no upper bound (`rc_config.h:1516-1528`), so a `tapWindowMs` above 4900 leaves `holdMs` below it and the long press can never be recognised (the comment at `:656-660` says it must stay above). Found writing NC-WP1. | Cap `tapWindowMs` at 4900, or let the `holdMs` cap give way to it. | `nccfg.hold_exceeds_tap_window` |
-| D-NC44 | No config apply clears a parked tap or hold (`tapState`), and only the USB SET_CONFIG re-arms the matrix debounce (`NaviCore.ino:3942-3952`); the bridged SET_CONFIG (`rc_telemetry.h:1173-1190`) and both RESET_DEFAULTS paths (`NaviCore.ino:3989-3992`, `rc_telemetry.h:1538-1545`) do not. Defaults whose matrix channel reads inside a band register a press nobody made, and the release a later restore causes fires that button's restored mapping (`NaviCore.ino:2347-2415`). Found writing NC-WP1. | Every config apply, on either transport, clears `tapState` and re-arms the matrix. | none yet (needs a matrix button held across a save, `sbus.*`); `nccfg.mesh_creds_live_split` steers clear of it (`_defaults_live_effects`) |
+| D-NC44 | No config apply clears a parked tap or hold (`tapState`), and only the USB SET_CONFIG re-arms the matrix debounce (`NaviCore.ino:3942-3952`); the bridged SET_CONFIG (`rc_telemetry.h:1173-1190`) and both RESET_DEFAULTS paths (`NaviCore.ino:3989-3992`, `rc_telemetry.h:1538-1545`) do not. Defaults whose matrix channel reads inside a band register a press nobody made, and the release a later restore causes fires that button's restored mapping (`NaviCore.ino:2347-2415`). Found writing NC-WP1. | Every config apply, on either transport, clears `tapState` and re-arms the matrix. | `sbus.reconfig_parked_tap_cleared`; `nccfg.mesh_creds_live_split` steers clear of it (`_defaults_live_effects`) |
+| D-NC45 | The dispatch trace reports sends that did not happen: a serial action prints `[DISPATCH] Serial TX [<port>]  <cmd>` before it looks at the port, and a port other than S3-S5 then writes nothing and says nothing (`NaviCore.ino:2093-2100`, the `hil-week` tree); a Maestro action prints `[DISPATCH] Maestro <slot>  <cmd>` before its skip-if-running gate, so a skipped one reads as sent until the next line (`:2088-2089`). The inbound `;M` case was fixed the same way (`navicore.maestro_skip_not_logged_as_dispatch`). Found writing NC-WP4. | Print the dispatch line after the checks, and a skip line with its reason otherwise. | `ncengine.skip_not_traced_as_sent` (the serial case; the Maestro one needs a moving servo) |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | NC-WP4 and NC-WP5 written, not bench-run: `s41_navicore_engine.py` (12 `ncengine` tests, two `(should)`) and `s42_navicore_sbus_engine.py` (21 `sbus` tests, one `(should)`); 23 of them in `hil/servos.py`. New finding D-NC45 (a skipped action is traced as sent); D-NC44 gets its `(should)`, `sbus.reconfig_parked_tap_cleared`. The two status notes list where the code differed from the plan. |
 | 2026-09-28 | _(pending)_ | NC-WP3's Export/Import, two-tab and live-panel specs (6, two `(should)`); `FakeSerial` tags events with their page; the fixture's switch SI Up action moves to `p2`. The INF7 note lists what they found: the CSV round trip narrows every button band; D-NC35 confirmed, and both tabs also share fragment-session numbers. |
 | 2026-09-28 | `264583e` | NC-WP3's Firmware-tab and clip specs (19, five `(should)`): `lib/navicore/ota.js` (`?OTALOCAL`, the `?OTA` relay, the restart), `clips.js` (`?REC`, the clip store), `firmware.js` with the esptool-js and CryptoJS stand-ins, and `FakeSerial`'s absent device. The INF7 note lists the code facts they found: D-NC33 and D-NC34 confirmed; a refused flash leaves the session disconnected; USB OTA waits out 10 s per lost chunk; a refused Record is taken as started. |
 | 2026-09-28 | `83684b3` | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
