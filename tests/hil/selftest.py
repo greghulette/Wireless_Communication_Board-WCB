@@ -2165,6 +2165,9 @@ GATED = {
                                                            "and switches its boot slot twice (~25 min)"),
     "ncota.relay_full_to_w2": ("ota_full_wcb2", "erases and rewrites W2's inactive app slot and switches its boot slot "
                                                 "twice"),
+    # IX-WP5 (suites/s33_intellex_bench.py), 2026-09-29
+    "intellex.serial_device_loss_navicore": ("intellex_reboot", "restarts NaviCore through Intellex's transport: the "
+                                                                "mesh and SBUS OUT lose it for about 5 s"),
 }
 
 
@@ -3110,6 +3113,206 @@ def t_intellex_stage_filter(tmp):
     assert IX._stage_ignore(False)(src, names) == {"wiki", "webui", "webui_wcb", "firmware", "__pycache__",
                                                    "build_stamp.py", "design.zip"}
     assert IX._stage_ignore(True)(src, names) == {"webui", "webui_wcb", "__pycache__", "build_stamp.py", "design.zip"}
+
+
+def t_intellex_py_judge(tmp):
+    """hil/intellex.py judges a tests/intellex/py results file: py_outcome sorts the cases (an unknown status counts as
+    failed); judge_py names every failed case, and fails a missing results file, a run with no case and a non-zero exit
+    with nothing failed; every case skipped is a Skip with the first reason; passes and skips together pass."""
+    from hil import intellex as IX
+    from hil.runner import Skip
+
+    def rep(*cs):
+        return {"cases": [{"name": n, "status": s, "message": m} for n, s, m in cs]}
+    assert IX.py_outcome(rep(("a", "passed", ""), ("b", "failed", "boom"), ("c", "skipped", "why"), ("d", "odd", "?"))) \
+        == ([("b", "boom"), ("d", "?")], [("c", "why")], [("a", "")])
+    for report, rc, want in ((None, 1, "no results file"), (rep(), 0, "ran no case"),
+                             (rep(("a", "passed", "")), 3, "exited 3 with no failed case"),
+                             (rep(("a", "failed", "x broke"), ("b", "failed", "y broke")), 1, "a: x broke\nb: y broke")):
+        msg = None
+        try:
+            IX.judge_py("ix.t", report, rc, ["tail line"])
+        except AssertionError as e:
+            msg = str(e)
+        assert msg is not None and want in msg, (report, rc, msg)
+    got = None
+    try:
+        IX.judge_py("ix.t", rep(("a", "skipped", "no AP"), ("b", "skipped", "later")), 0, [])
+    except Skip as e:
+        got = str(e)
+    assert got == "no AP", got
+    IX.judge_py("ix.t", rep(("a", "passed", ""), ("b", "skipped", "n/a")), 0, [])
+
+
+def t_intellex_stream_helpers(tmp):
+    """hil/intellex.py's stream and seeding helpers: window() takes the bytes strictly between a start line and the next
+    end line, whatever came before; line_spans() finds every whole line holding a repeated needle (NaviCore's PONG);
+    boot_markers_in(); fw_key() flattens a branch as Intellex's fwcache._key does; seed_firmware() writes a set and a
+    GitHub-shaped listing where a non-frozen host caches; seed_wiki() copies the crafted wiki."""
+    from hil import intellex as IX
+    data = b"old\r\nnoise X-SYNC tail\r\nline 1\r\nline 2\r\nX-END\r\nafter\n"
+    assert IX.window(data, b"X-SYNC", b"X-END") == b"line 1\r\nline 2\r\n"
+    assert IX.window(data, b"X-SYNC", b"NOPE") is None
+    assert IX.window(b"X-SYNC and no newline yet", b"X-SYNC", b"X-END") is None
+    assert IX.window(b"X-END\nX-SYNC\nmid\nX-END\n", b"X-SYNC", b"X-END") == b"mid\n"
+    pong = b'{"type":"PONG","version":"v"}'
+    d2 = b"a\n" + pong + b"\n" + b"m1\n" + pong + b"\r\n" + b"m2\nm3\n" + pong + b"\n" + pong
+    spans = IX.line_spans(d2, b'"type":"PONG"')
+    assert len(spans) == 3 and d2[spans[1][1]:spans[2][0]] == b"m2\nm3\n", spans
+    assert IX.boot_markers_in(b"x rst:0x1 (POWERON_RESET)\nBooting up the Wireless Communication Board\n",
+                              IX.WCB_BOOT_MARKERS) == ["rst:0x", "Booting up the Wireless Communication Board"]
+    assert IX.boot_markers_in(b'{"type":"PONG"}\n', IX.NAVICORE_BOOT_MARKERS) == []
+    assert (IX.fw_key("feature/x"), IX.fw_key(""), IX.fw_key("a\\b")) == ("feature__x", "main", "a__b")
+    d = IX.seed_firmware(tmp.root, "wcb", "feature/x", {"WCB_1_ESP32.bin": b"\x01\x02"})
+    assert d == os.path.join(tmp.root, "src", "firmware", "wcb", "feature__x"), d
+    with open(os.path.join(d, "WCB_1_ESP32.bin"), "rb") as f:
+        assert f.read() == b"\x01\x02"
+    with open(os.path.join(d, "listing.json"), encoding="utf-8") as f:
+        listing = json.load(f)
+    assert listing == [{"name": "WCB_1_ESP32.bin", "path": "Code/bin/WCB_1_ESP32.bin", "type": "file", "size": 2,
+                        "download_url": "https://raw.githubusercontent.com/greghulette/Wireless_Communication_Board-WCB/"
+                                        "feature/x/Code/bin/WCB_1_ESP32.bin"}], listing
+    w = IX.seed_wiki(tmp.root)
+    for rel in (("wcb", "Home.md"), ("wcb", "_Sidebar.md"), ("wcb", "Images", "pic.png"), ("intellex", "Home.md")):
+        assert os.path.isfile(os.path.join(w, *rel)), rel
+
+
+def t_intellex_link_tap(tmp):
+    """hil/intellex.py LinkTap against a stand-in /_link on a local socket: BINARY and TEXT frames are kept in order as
+    bytes, the host's heartbeat ping gets a pong with the same payload, send() writes one masked TEXT frame, wait_for()
+    finds a marker and on a timeout names the marker and a byte count - never the stream - and a close frame is recorded."""
+    import socket
+    import threading
+    from hil import intellex as IX
+    from hil import ws
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    seen, go_close = {}, threading.Event()
+
+    def frames(c, n):
+        buf, out = b"", []
+        while len(out) < n:
+            got = ws.parse(buf)
+            if got:
+                out.append(got[:2])
+                buf = buf[got[2]:]
+                continue
+            buf += c.recv(4096)
+        return out
+
+    def server():
+        c, _ = srv.accept()
+        req = b""
+        while b"\r\n\r\n" not in req:
+            req += c.recv(4096)
+        c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        seen["sent"] = frames(c, 1)
+        text = "d€ secret-looking\n".encode()
+        c.sendall(b"\x82\x05abc\r\n" + b"\x81" + bytes([len(text)]) + text + b"\x89\x02hb")
+        seen["pong"] = frames(c, 1)
+        go_close.wait(5)
+        c.sendall(b"\x88\x00")
+        time.sleep(0.3)
+        c.close()
+
+    th = threading.Thread(target=server, daemon=True)
+    th.start()
+    tap = IX.LinkTap(port, name="T")
+    try:
+        tap.send("?VERSION\r")
+        i = tap.wait_for("d€".encode(), timeout=3)
+        data = tap.snapshot()
+        assert data == b"abc\r\nd\xe2\x82\xac secret-looking\n" and i == data.find(b"d\xe2\x82\xac") + 4, data
+        deadline = time.monotonic() + 3
+        while "pong" not in seen and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert seen["sent"] == [(0x1, b"?VERSION\r")] and seen.get("pong") == [(0xA, b"hb")], seen
+        msg = None
+        try:
+            tap.wait_for(b"HILNOPE", timeout=0.3)
+        except AssertionError as e:
+            msg = str(e)
+        assert msg and "HILNOPE" in msg and "bytes so far" in msg and "secret" not in msg, msg
+        go_close.set()
+        deadline = time.monotonic() + 3
+        while tap.closed is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert tap.closed == "the host closed the socket", tap.closed
+        msg = None
+        try:
+            tap.wait_for(b"HILNOPE", timeout=2)
+        except AssertionError as e:
+            msg = str(e)
+        assert msg and "ended" in msg, msg
+    finally:
+        tap.close()
+        th.join(3)
+        srv.close()
+
+
+def t_intellex_github_dir(tmp):
+    """hil/intellex.py finds the sibling repos (Intellex, NaviCore) beside the main checkout, also when it runs from a git
+    worktree under <repo>/.claude/worktrees/<name>, where there are none beside .claude/worktrees."""
+    from hil import intellex as IX
+    j = os.path.join
+    main = j("C:" + os.sep, "Users", "g", "GitHub", "Wireless_Communication_Board-WCB")
+    assert IX.github_dir(main) == j("C:" + os.sep, "Users", "g", "GitHub"), IX.github_dir(main)
+    wt = j(main, ".claude", "worktrees", "agent-abc123")
+    assert IX.github_dir(wt) == j("C:" + os.sep, "Users", "g", "GitHub"), IX.github_dir(wt)
+    assert IX.github_dir(j(main, "claude", "worktrees", "x")) == j(main, "claude", "worktrees")
+
+
+def t_intellex_handed_over(tmp):
+    """hil/intellex.py handed_over: the port is released first and taken back after, the board checked; a board that
+    does not come back fails a passing block, is named after a failing block's own failure, and after an abort is only
+    noted so the abort stays an abort."""
+    from hil import intellex as IX
+
+    class B:
+        cfg = {"devices": {"wcb1": {"port": "COM6", "kind": "wcb"}}}
+
+        def __init__(self):
+            self.calls, self.notes = [], []
+
+        def close_device(self, name):
+            self.calls.append(("close", name))
+
+        def note(self, text):
+            self.notes.append(text)
+
+    real = IX._reacquire
+    try:
+        b = B()
+        IX._reacquire = lambda bench, dev: bench.calls.append(("back", dev))
+        with IX.handed_over(b, "wcb1") as port:
+            assert port == "COM6" and b.calls == [("close", "wcb1")]
+        assert b.calls == [("close", "wcb1"), ("back", "wcb1")], b.calls
+
+        def gone(bench, dev):
+            raise AssertionError("wcb1 did not come back")
+        IX._reacquire = gone
+        for body, want in ((None, "wcb1 did not come back"), (AssertionError("the body failed"),
+                                                              "the body failed\nwcb1 did not come back afterwards")):
+            msg = None
+            try:
+                with IX.handed_over(B(), "wcb1"):
+                    if body:
+                        raise body
+            except AssertionError as e:
+                msg = str(e)
+            assert msg is not None and msg.startswith(want), (want, msg)
+        b = B()
+        aborted = False
+        try:
+            with IX.handed_over(b, "wcb1"):
+                raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            aborted = True
+        assert aborted and b.notes and "not reacquired after the abort" in b.notes[0], b.notes
+    finally:
+        IX._reacquire = real
 
 
 # ---------------------------------------------------------------------------- NaviCore and SBUS drivers (INF1, INF2)
@@ -7130,7 +7333,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
-         t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter,
+         t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter, t_intellex_py_judge,
+         t_intellex_stream_helpers, t_intellex_link_tap, t_intellex_handed_over, t_intellex_github_dir,
          t_nc_transport, t_nc_fnv1a, t_nc_pwm_update, t_nc_mae_markers, t_nc_clip_items, t_nc_recorder_transfer,
          t_nc_mesh_stats, t_nc_boot_banner, t_nc_wdp_views, t_nc_config_protocol, t_sbus_codec, t_sbus_ctl,
          t_nc_log_filter, t_nc_guard_ladder, t_nc_guard_state, t_nc_guard_persist_resume, t_nc_guard_bench_test,

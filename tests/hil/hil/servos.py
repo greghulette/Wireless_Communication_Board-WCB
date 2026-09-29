@@ -135,6 +135,9 @@ SERVO_TESTS = {
     "ncota.recovery_esptool": "resets NaviCore into ROM download mode for an esptool write: SBUS OUT stops for ~30 s",
     "ncota.local_full_same_image": "two OTA flashes restart NaviCore twice: SBUS OUT stops for a few seconds each time",
     "ncota.relay_full_via_w1": "two relayed OTA flashes restart NaviCore twice: SBUS OUT stops each time",
+    # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
+    "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
+                                            "is sent back",
 }
 
 

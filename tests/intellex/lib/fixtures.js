@@ -44,3 +44,41 @@ exports.expect = base.expect;
 exports.skipUnlessHost = (test) =>
   test.skip(!process.env.INTELLEX_URL,
             'INTELLEX_URL is not set - run it through the harness: python tests/hil/run.py "intellex.*"');
+
+// Every route that reaches past the host, answered for the WHOLE browser context - the page, its frames (the shell's
+// tools, the chooser overlay) and any popup it opens - so no spec, frame or popup can open a COM port, probe the droid's
+// access point, attach a transport, bounce the PC's WiFi, reach GitHub or start esptool. A spec that wants a route to
+// answer a certain way passes answers[<last path segment>] = (route, request) => route.fulfill(...); anything else gets
+// a 403. Each call it answers is recorded in calls[] as {name, body}. The host is leashed as well (hil/intellex.py).
+const REACH = /\/_api\/(identify|discover|attach|wifi-bounce|update-webui|update-firmware|update-wiki|flash|flash-wcb|signals)(\?|$)/;
+exports.hostGuard = async (context, rec, answers = {}) => {
+  const calls = [];
+  await context.route(REACH, route => {
+    const req = route.request();
+    const name = new URL(req.url()).pathname.split('/').pop();
+    let body = null;
+    try { body = req.postDataJSON(); } catch (_) { body = req.postData(); }
+    calls.push({ name, body });
+    if (rec) rec.fulfilled.add(req.url());
+    const h = answers[name];
+    if (h) return h(route, req);
+    return route.fulfill({ status: 403, contentType: 'application/json',
+                           body: JSON.stringify({ ok: false, error: 'guarded by the HIL spec' }) });
+  });
+  return calls;
+};
+
+// What the harness passed this run (hil/intellex.py run_intellex_test -> Bridge /context): {device, args, intellex}.
+exports.hilContext = async () => {
+  if (!process.env.HIL_BRIDGE) return { args: {} };
+  const r = await fetch(process.env.HIL_BRIDGE + '/context', { method: 'POST', body: '{}',
+                                                              headers: { 'Content-Type': 'application/json' } });
+  return r.json();
+};
+
+// POST to the host from Node, with no Origin (a native client, which the host allows): settings the page would set.
+exports.hostPost = async (path, body) => {
+  const r = await fetch(process.env.INTELLEX_URL + path, { method: 'POST', body: JSON.stringify(body || {}),
+                                                           headers: { 'Content-Type': 'application/json' } });
+  return { status: r.status, json: await r.json().catch(() => null) };
+};
