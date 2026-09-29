@@ -383,6 +383,25 @@ simulated (the IX-WP7/8 status notes).
     therefore neither cleared nor re-armed when W1's link drops. Confirmed in the page:
     `intellex.wizard_mesh_relay_slot_number` (`(should)`).
 
+Found while writing IX-WP9 and IX-WP10 (2026-09-29, Intellex `e9f95f2`):
+
+18. **A WCB flash Intellex refuses after detecting the chip leaves the board in its ROM loader.**
+    - `wcb_flash.detect()` runs `esptool --chip auto --before default-reset --after no-reset flash-id`
+      (`wcb_flash.py:254-256`): esptool resets the chip into its ROM loader, loads its stub and leaves it there
+      (`Staying in bootloader.`). That is right on the way to a write, whose `--after hard-reset` boots the app.
+    - Every refusal after detection raises out of `wcb_flash.flash` (`:398-415`) with nothing written: no cached image,
+      two app images (`_pick_app` `:128-133`), a full flash of a build with no bootloader or table (`write_list`
+      `:309-323`). `host.py` `_start_flash_job` (`:1021-1057`) then reports the error and reattaches the port, opened
+      with DTR and RTS low (`serial_transport.py:65-68`), and nothing resets the chip. The board answers nothing until
+      someone presses EN or replugs it; the Wizard shows "Flash failed" and then a board that never becomes ready.
+    - The Wizard's own flasher gets out of this by closing and reopening its port, whose DTR/RTS toggle resets the
+      board (`Wizard/flasher.js:736-761`, the comment on the reset).
+    - Confirmed at the host in a dry run (the real host, a fake esptool and port: only `flash-id --after no-reset` ran,
+      nothing was written, the port was reattached). `intellex.flash_refused_board_runs` (`(should)`) makes the
+      refusal on W2 and then asks it for `?VERSION` over a port opened with both lines low; the harness resets a W2 it
+      finds in the loader. It costs no flash write either way: a refusal that did not hold would write the image W2
+      already runs.
+
 ---
 
 ## 2. Running Intellex under test
@@ -589,6 +608,8 @@ Wireless_Communication_Board-WCB/
   tests/hil/suites/s32_intellex.py         no board (DX15)
   tests/hil/suites/s33_intellex_bench.py   the transports and the bridge on the boards (IX-WP5, IX-WP6)
   tests/hil/suites/s34_intellex_tools.py   the tools on the boards (IX-WP7, IX-WP8; DX26)
+  tests/hil/suites/s35_intellex_wifi.py    over WiFi, through NaviCore's AP (IX-WP9; DX34)
+  tests/hil/suites/s36_intellex_flash.py   flashing W2 and NaviCore's app (IX-WP10)
   tests/hil/hil/optin.py      + the intellex_* keys (§3.4)
   tests/hil/bench.json        + "intellex_dir" (default: an Intellex checkout beside this repo), optional "intellex_python"
 ```
@@ -780,10 +801,12 @@ simulated port and a faked WebSocket (every group's control flow); never against
   once, unattended, like the other reboot tests, and ends with `_peers_online`.
 - No-reset oracles beyond the stream: W2 prints `[ETM] WCB1 came ONLINE (boot)` for each boot announce it hears, W1
   does the same for NaviCore (WCB 20), and NaviCore's `GET_MESH_STATS` `upMs` must keep counting.
-- Changed from the plan: `ws_transport_navicore` does not read `netsh` or compare an SSID (credential rule). It skips
-  unless the PC has an address on 192.168.4.x and the host there answers with a DIRECT PONG (no `sys`, no `id`)
-  carrying the version NaviCore gives over USB, which a WCB doorway at the same address cannot. It never joins,
-  bounces or changes WiFi. `serial_contract_w1` adds a check the plan lacked: a second open of a held port raises.
+- Changed from the plan: `ws_transport_navicore`'s script does not read `netsh` or compare an SSID (credential rule).
+  It needs an address on 192.168.4.x and a DIRECT PONG (no `sys`, no `id`) from the host there, carrying the version
+  NaviCore gives over USB, which a WCB doorway at the same address cannot give. Since IX-WP9 the harness joins
+  NaviCore's AP for it first (`navicore_wifi`, DX34), and with the harness joined a missing address or PONG fails
+  rather than skips; the script itself never joins, bounces or changes WiFi. `serial_contract_w1` adds a check the
+  plan lacked: a second open of a held port raises.
 
 #### IX-WP6: The bridge end to end on bench boards (harness side, raw `/_link` clients)
 
@@ -913,18 +936,20 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 
 **Bench facts:**
 
-- NaviCore has `wifiEnabled:true` and SSID `NaviCore` (bench session log `20260927-174702`). The SSID is derived in
-  `NaviCore.ino:4694-4695`.
-- "Wi-Fi 2" (the TP-Link) is usually already on that AP; "Wi-Fi" carries the internet.
-- The precondition check is read-only: `netsh wlan show interfaces` must show Wi-Fi 2 on `NaviCore`, and
-  `local_ip_for('192.168.4.1')` must be on 192.168.4.x. When the check fails, the unattended tests skip.
+- NaviCore has `wifiEnabled:true` and hosts its own access point (bench session log `20260927-174702`); the SSID is
+  `wifiSsid`, or derived as `NaviCore-<deviceId>` when that is empty (`NaviCore.ino:4711-4726`).
+- "Wi-Fi 2" (the TP-Link) is the spare adapter, and its own network IS NaviCore's AP; "Wi-Fi" carries the internet.
+- The harness puts Wi-Fi 2 on NaviCore's AP for each test and back afterwards (`suites/s45_navicore_wifi.py` `_on_ap`,
+  `hil/wlan.py` `pc_on_ap(..., spare_only=True)`): a temporary `HIL-` profile holding the SSID and password it reads from
+  NaviCore's GET_CONFIG, a wait for the 192.168.4.x lease, the profile deleted afterwards. A PC whose only adapter carries
+  its internet skips (D-NC14). The tests are behind `navicore_wifi`, the key s45 uses for the same act (DX34).
 
 | Test id | Mode | Checks |
 |---|---|---|
-| `intellex.wifi_discover` | unattended when the precondition holds | `discover.scan(['192.168.4.1'])`: kind `navicore`, a version equal to the PONG, and `via` on 192.168.4.x. `ssid_for_host()` returns `NaviCore`. `/_api/discover?hosts=192.168.4.1` gives the same. |
-| `intellex.wifi_nc_tool` | unattended | Attach `{kind:ws, host:192.168.4.1, role:navicore}`. The label reads `· WiFi 192.168.4.1 ▾`. The OTA button reads `Update over WiFi (OTA)` with the WiFi title. The flash buttons are disabled with the not-USB message. `POST /_api/flash` gets the USB 409. |
-| `intellex.wifi_wizard_via_navicore` | unattended; `config_guard(1,2)`; `?RTERM,STOP` on W1 and W2 in `finally` | The Wizard through NaviCore as its doorway: a relay card at 20, or the plain-board route, and baselines for W1 and W2. This answers "still to verify on hardware" (`docs/WCB_WIZARD.md:321-323`). |
-| `intellex.wifi_rterm_rate` | unattended | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:499`). Count `RTERM,START` arrivals on W1's USB console for 60 s while the Wizard is attached through NaviCore. Record the rate, and fail above an agreed bound (DX10). |
+| `intellex.wifi_discover` | opt-in `navicore_wifi` | `discover.scan(['192.168.4.1'])`: kind `navicore`, a version equal to the PONG, and `via` on 192.168.4.x. `ssid_for_host()` names NaviCore's network (compared by SHA-256). `/_api/discover?hosts=192.168.4.1` gives the same. |
+| `intellex.wifi_nc_tool` | opt-in `navicore_wifi` | Attach `{kind:ws, host:192.168.4.1, role:navicore}`. The label reads `· WiFi 192.168.4.1 ▾`. The OTA button reads `Update over WiFi (OTA)` with the WiFi title. The flash buttons are disabled with the not-USB message. `POST /_api/flash` gets the USB 409. |
+| `intellex.wifi_wizard_via_navicore` | opt-in `navicore_wifi`; `config_guard` on every WCB; `?RTERM,STOP` on every WCB in `finally` | The Wizard through NaviCore as its doorway: a relay card at 20, or the plain-board route, and baselines for W1 and W2. This answers "still to verify on hardware" (`docs/WCB_WIZARD.md:321-323`). |
+| `intellex.wifi_rterm_rate` | opt-in `navicore_wifi` | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:499`). Count `RTERM,START` arrivals on W1's USB console for 60 s while the Wizard is attached through NaviCore. Record the rate, and fail above an agreed bound (DX10). |
 | `intellex.wifi_link_loss` | opt-in `intellex_reboot` | NaviCore `REBOOT` through the link. The host notices within 15 s. The log has **no** `re-associating` line (`--no-auto-bounce`). It reattaches once the AP is back, and the pages see a PONG again. |
 | `intellex.wifi_ap_hop_reidentify` | attended, opt-in `intellex_wifi_join` | While attached, move Wi-Fi 2 from NaviCore's AP to W1's (a temporary `HIL-` profile, as in `s28_wifi.py:254-351`). `/_api/status` flips from role `navicore` to `wcb` with `relayId` 1, and the log shows that **before** the attach (rule 10). The NaviCore tool goes to Via WCB. Then move back. |
 | `intellex.wifi_bounce_scoped` | attended, opt-in `intellex_wifi_join` | `discover.wifi_bounce('NaviCore')` bounces only Wi-Fi 2, and "Wi-Fi" stays connected throughout. |
@@ -934,13 +959,55 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 | Effort | 12 h. |
 | Bench | About 10 minutes, plus the attended part. |
 
+**Status (2026-09-29): written and dry-run; not yet run on the bench.** In `suites/s35_intellex_wifi.py`, with
+`tests/intellex/specs/wifi_board.spec.js` and the venv script `tests/intellex/py/wifi_units.py`; every row above is
+written, and `intellex.ws_transport_navicore` (s33, IX-WP5) now joins the same way (DX34), which is what left it skipped
+in `20260929-122112`. A leashed host allowed no COM port is attached to `ws://192.168.4.1/ws` with role `navicore`, as
+Intellex's chooser attaches an identified droid.
+
+- The credential rule (DX36): a host attached over WiFi records the SSID it asks Windows for (`host.py` api_attach,
+  `discover.ssid_for_host`) and names both networks when the adapter moves (`_reidentify_if_moved`: `network changed
+  "<a>" -> "<b>"`, and the same in `/_api/status` `lastError` while it holds). So `IntellexHost(hide=...)` takes the
+  names out of every line it keeps and logs, `copy_logs` out of the stage's and the copied log files, and
+  `status_view` out of `lastError` before a hook hands the status to a spec. `wifi_units.py` gets a SHA-256 of the
+  SSID (discover) or the SSID in its environment (the bounce), never in argv or its results.
+- Mid-spec bench actions are bridge hooks (DX35): `run_intellex_test(hooks=...)`, the bridge's `/hook` route and
+  `tests/intellex/lib/board.js` `hil.hook`. The rate test marks and counts every WCB's own USB console
+  (`rterm_mark`, `rterm_count`); the AP hop moves the adapter (`hop`: s28 `_pc_on_w1_ap` nested inside `_on_ap`;
+  `hop_back` leaves it, back to NaviCore's temporary profile) and waits for the host to reattach with the role it
+  re-identified.
+- Plan-vs-code: `/_api/discover` answers `{"candidates": [...]}` (`host.py:393-402`), not a bare list; with the
+  leash's empty `INTELLEX_DISCOVER_HOSTS` a call without `?hosts=` probes nothing and answers none. The dry run caught
+  the harness reading it as a list.
+- `wifi_rterm_rate` counts, after every board is pulled and 10 s more, the `[RTERM] Session started -> relay WCB20`
+  lines each WCB prints in 60 s, beside the `?MGMT,FRAG,...,?RTERM,START` frames the page wrote (`summarise`'s new
+  `inner`), and bounds each board at DX10's 6. Reading the current Wizard, only setRemoteConnected, a pull that
+  succeeded, an ETM came-ONLINE edge through the relay and relayRouteAll's re-arm of a board already managed send it,
+  three frames a call (sendMgmtReliable); relayRouteAll runs again from the shim's 2 s poll only while the relay card
+  shows a board unmanaged. F21 was seen with the bundle Intellex ships, which predates that code; the bench run
+  measures the working-tree Wizard (DX3).
+- `wifi_link_loss` is behind `intellex_reboot` and checks `navicore_wifi` in its body; it runs harness-side with raw
+  `/_link` clients and `nc_guard`. What brings the adapter back is not Intellex's (`--no-auto-bounce`): Windows
+  reassociates through a profile in auto mode, and `pc_on_ap`'s temporary profile is manual, so `hil/wlan.py` `rejoin`
+  connects it again after 30 s without an association, and the note says which happened.
+- `wifi_ap_hop_reidentify` asserts the tool's state after a reload at each end (a connect made there is what rule 10
+  guards) and notes whether the shim's `watchLink` switched it without one.
+- Dry runs (DX44): a real staged host, the real tools under Playwright and the harness bodies themselves, against a
+  fake NaviCore endpoint on 127.0.0.1:80 (the repo's NaviCore emulator behind a minimal WebSocket server that also
+  answers the WCB_Mgmt relay surface with W1 and W2 behind it, and turns into a W1 doorway on request), with the staged
+  `discover.ssid_for_host` reading a scratch file instead of netsh and `_on_ap` replaced: `wifi_discover`,
+  `wifi_nc_tool`, `wifi_wizard_via_navicore`, `wifi_rterm_rate`, `wifi_link_loss` and `wifi_ap_hop_reidentify` pass
+  there, and no network name reached session.log, the stage's log or the copied log. `wifi_bounce_scoped` ran only its
+  script, with `wifi_bounce` stubbed (its netsh is the test). Nothing joined, bounced or read the PC's WiFi.
+
 #### IX-WP10: Flashing
 
 **Which board. W2.**
 
 - It is a classic ESP32 (HW 2.4, CP210x) running the bench image
-  `tests/hil/results/builds/wcb-esp32-meshq` (`WCB.ino.bin`, `.bootloader.bin` and `.partitions.bin`; version
-  `6.2.1_250646RSEP2026`), per that folder's `FLASHED.md`.
+  `tests/hil/results/builds/wcb-esp32-meshq` (`WCB.ino.bin`, `.bootloader.bin` and `.partitions.bin`), per that
+  folder's `FLASHED.md`. Its version moves with every bench image (`6.2.1_291138RSEP2026` since `cf93348`), so a test
+  reads it from W2 and skips unless the image carries it (DX39).
 - Seeded as a test branch, that image makes the flash **identity-preserving**: W2 ends the test running the image it
   started with. Its bootloader and partition table are the same files `arduino-cli upload` wrote.
 - Not a probe:
@@ -951,31 +1018,38 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 
 **The seed** (`<stage>/src/firmware`), used with H1:
 
-- `wcb/hil-bench/WCB_6.2.1_250646RSEP2026_hilbench_ESP32.bin`, with `_part.bin` and `_boot.bin` beside it, and a
+- `wcb/hil-bench/WCB_<version>_hilbench_ESP32.bin`, with `_part.bin` and `_boot.bin` beside it, and a
   `listing.json` of `{name, type:"file", download_url}` entries.
-- `navicore/hil-bench/NaviCore_<tag>_ESP32S3.bin` from `results/builds/navicore`. This is the app **only**, so
-  `flash.py` takes its app-only path (`:356-358`) and leaves NaviCore's bootloader alone.
-- `settings.json` sets the branch to `hil-bench`.
+- `navicore/hil-bench/NaviCore_<version>_ESP32S3.bin` from `results/builds/navicore-hil1` (`hil/ncflash.py`
+  `BENCH_IMAGE`). This is the app **only**, so `flash.py` takes its app-only path (`:356-358`) and leaves NaviCore's
+  bootloader alone.
+- `settings.json` sets the flashed product's branch to `hil-bench` and the other's to `hil-none`, which nothing is
+  cached for, so no flash of the other product could find an image.
 
 Even without H1, a missing branch gets a 404 from GitHub, and both the flashers and the proxy then fall back to the
 cached listing. H1 just makes that deterministic.
 
 | Test id | Mode | Checks |
 |---|---|---|
-| `intellex.flash_w2_update` | opt-in `intellex_flash`; `config_guard(2)` | The Wizard auto-connects W2. `boardGo(<its slot>, {mode:'update'})` (`Wizard/app.js:7381-7386`) goes to the shim's `flashFirmware`, then to `/_api/flash-wcb {appOnly:true}`. The log shows `ESP32`, `offline - using the cached hil-bench copy`, and `Hash of data verified` for 0xE000 and 0x10000. `/_api/flash-status` has `ok:true` and version `6.2.1_250646RSEP2026_hilbench`. W2 reattaches, and the Wizard's re-push changes nothing. After the test: W2 `?VERSION` is unchanged, W1 sees W2 back online, and the guard passes. |
+| `intellex.flash_w2_update` | opt-in `intellex_flash`; `config_guard` on every WCB | The Wizard auto-connects W2. `boardGo(<its slot>, {mode:'update'})` (`Wizard/app.js:7472`) goes to the shim's `flashFirmware`, then to `/_api/flash-wcb {appOnly:true}`. The log shows `ESP32`, `offline - using the cached hil-bench copy`, and `Hash of data verified` for 0xE000 and 0x10000. `/_api/flash-status` has `ok:true` and version `<version>_hilbench`. W2 reattaches, and the Wizard pulls it again. After the test: W2 `?VERSION` is unchanged, it runs app0, W1 heard it boot, and the guard passes. |
 | `intellex.flash_w2_full` | opt-in `intellex_flash` | `mode:'flash'`: bootloader at 0x1000, partitions at 0x8000, app, and otadata erased. The same checks. |
-| `intellex.flash_one_at_a_time` | opt-in `intellex_flash` | While the Wizard is flashing, a `POST /_api/flash` from the NaviCore pane gets 409 `a flash is already running`. |
+| `intellex.flash_one_at_a_time` | opt-in `intellex_flash` | While the Wizard is flashing, a `POST /_api/flash` (the NaviCore tool's route) and a second `/_api/flash-wcb` from the page get 409 `a flash is already running`. |
+| `intellex.flash_refused_board_runs` | opt-in `intellex_flash`; `(should)`, finding 18 | A full flash the host refuses after detecting the chip (a seeded build with no bootloader) writes nothing and leaves W2 running its app: it answers `?VERSION` on its own port with no reset from anyone. |
 | `intellex.flash_w2_factory` | attended, opt-in `intellex_flash_factory` | `mode:'factory'` erases W2's NVS. Restore it from its pre-test chain and learned peers, with `s31_password_erase.py`'s restore generalised to W2. The guard must pass. |
 | `intellex.flash_navicore_app` | opt-in `intellex_flash_navicore` | The NaviCore tool's Update Firmware button is intercepted and goes to `/_api/flash`. The log says the app is written alone. Afterwards: the PONG version is unchanged, `GET_CONFIG` is unchanged, and NaviCore is back on the mesh. |
 
 **Recovery**, from `results/builds/FLASHED.md`:
 
-- **If a flash fails:** run the same Intellex flash again. The ESP32 ROM loader always answers on auto-reset.
+- **If a flash fails:** run the same Intellex flash again. The ESP32 ROM loader always answers on auto-reset. The W2
+  tests do it themselves (DX38): an EN reset into the app first (`reset_into_app`), then the image flashed again in
+  full through the host's own `/_api/flash-wcb` (`s36 reflash_w2`).
 - **W2, last resort:** `arduino-cli upload --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --input-dir
   tests/hil/results/builds/wcb-esp32-meshq -p COM15`.
-- **NaviCore:** `arduino-cli upload --fqbn
+- **NaviCore:** its ladder, `python -m hil.ncflash recover --allow-esptool --known-good
+  results/builds/navicore-hil1` from `tests/hil` (the test runs it without the esptool rungs unless
+  `navicore_esptool` is ticked); last, `arduino-cli upload --fqbn
   esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=custom,FlashSize=16M,PSRAM=opi --input-dir
-  tests/hil/results/builds/navicore -p COM5`.
+  tests/hil/results/builds/navicore-hil1 -p COM5`.
 - **Permission:** a Claude session in auto mode is refused bench uploads, so Greg must run these, or the session must
   be in bypass mode.
 
@@ -983,6 +1057,43 @@ cached listing. H1 just makes that deterministic.
 |---|---|
 | Effort | 12 h. |
 | Bench | About 3 minutes per flash. |
+
+**Status (2026-09-29): written and dry-run; not yet run on the bench.** In `suites/s36_intellex_flash.py`, with
+`tests/intellex/specs/flash_board.spec.js`. Every row above is written, plus the `(should)` test
+`intellex.flash_refused_board_runs` for the new finding 18. The four W2 flashes (`flash_w2_update`, `flash_w2_full`,
+`flash_one_at_a_time`, `flash_refused_board_runs`) are behind `intellex_flash`; the Factory Reset behind the attended
+`intellex_flash_factory`; the NaviCore app behind `intellex_flash_navicore` (all registered in `hil/optin.py`,
+unticked).
+
+- Identity (DX39): each W2 test reads W2's version and skips unless `results/builds/wcb-esp32-meshq`'s app carries it,
+  checks the three files (the app's magic, version and size; the bootloader's magic; a table with app0 at 0x10000 and
+  otadata at 0xE000) and seeds them as `WCB_<version>_hilbench_ESP32*.bin`. Afterwards W2 answers the same version,
+  runs app0 (Intellex writes the app there and erases otadata), W1 heard it boot, and `config_guard` on every WCB
+  passes (the shim routes W1 through W2 and arms W1's remote terminal there, so W1 is guarded and its `?RTERM`
+  stopped, DX30).
+- The flash goes through the Wizard as a user runs it: its auto-connect, the shim's mesh routing through W2, then
+  `boardGo(2, {mode})`. The spec follows `/_api/flash-status` from Node (every percent it read is noted: finding 13),
+  waits for boardGo, the reconnect and a fresh pull of W2, then asks the harness (hook `flash_done`) to judge the host's
+  flash log (`flash_log_problems`): the regions esptool wrote, each verified, the offline cache, the mode's own lines,
+  no esptool 4 spelling on the WCB path.
+- Plan-vs-code: outside the guided setup an Update re-pulls the board and pushes nothing (`app.js` boardGo, the isUpdate
+  branch); a Flash or Factory Reset pushes the whole pre-flash config back unless `pushConfig:false`. The W2 Flash and
+  Factory Reset pass `pushConfig:false` (DX37); the Factory Reset's restore is the harness's own (s31's `_erase_cycle`
+  generalised to W2 over its USB).
+- `flash_one_at_a_time` asks for the second flash from the page (DX40): `/_api/flash` - the NaviCore tool's route - and
+  `/_api/flash-wcb` again, once the first shows running; both must answer 409 `a flash is already running`, and the
+  host must have started exactly one.
+- The NaviCore flash clicks Update Firmware on the Hardware Setup dialog's Firmware tab, where the button lives
+  (`#btn-hwsetup`, `data-tab="firmware"`), follows the host's flash, and waits for the shim's `watchLink` to reconnect
+  the tool. NaviCore ends on app0 whatever slot it ran (the image is the same); a FLASHED.md row records the flash,
+  `OK` only when `?OTALOCAL,STATUS` shows the image's App SHA256 running from app0 (DX41).
+- Dry runs (DX44): all five specs against a real staged host whose pyserial was a fake wired to a simulated W2 console
+  (and to the repo's NaviCore emulator) and whose esptool was the repo's fake: each passes, the esptool calls wrote
+  exactly the mode's regions (Update 0xE000 and the 1,394,864-byte bench app at 0x10000; Flash 0x1000, 0x8000, 0xE000,
+  0x10000; Factory Reset 0x9000 too; NaviCore 0xE000 and 0x10000 with six `Deprecated:` lines, finding 14), and the
+  progress read 0 throughout (finding 13). The harness bodies of `flash_w2_update`, `flash_refused_board_runs` and
+  `flash_navicore_app` ran with the bench mocked; the refused flash ran `flash-id --after no-reset` alone, wrote
+  nothing, and the host reattached the port with no reset (finding 18). No port was opened and nothing was flashed.
 
 #### IX-WP11: OTA through Intellex (opt-in `intellex_ota`)
 
@@ -1042,12 +1153,12 @@ About 6 GitHub API calls per run, well under the limit.
 
 | Key | What it does to the bench | Estimate |
 |---|---|---|
-| `intellex_flash` | Re-flashes W2, through Intellex's esptool path, with the bench image: app-only, then full. W2 is off the mesh about 1 minute each time. | 300 s |
-| `intellex_flash_factory` | Attended. Erases W2's NVS through Intellex, then restores it from its chain. | 180 s |
-| `intellex_flash_navicore` | Re-flashes NaviCore's app with its bench build. NaviCore is off the mesh about 1 minute. | 150 s |
+| `intellex_flash` | Re-flashes W2, through Intellex's esptool path, with the bench image: app-only, full, app-only with a second flash refused, and a full flash the host refuses. W2 is off the mesh about 1 minute each time. Registered, unticked. | 240 s |
+| `intellex_flash_factory` | Attended. Erases W2's NVS through Intellex, then restores it from its chain. Registered, unticked. | 300 s |
+| `intellex_flash_navicore` | Re-flashes NaviCore's app with its bench build (`navicore-hil1`). NaviCore is off the mesh about 1 minute. Registered, unticked. | 180 s |
 | `intellex_ota` | OTA of NaviCore through Intellex. Erases and rewrites NaviCore's inactive slot, then reboots it. | 600 s |
 | `intellex_reboot` | Reboots NaviCore through the link, to exercise device loss and reconnect. | 60 s |
-| `intellex_wifi_join` | Attended. Moves Wi-Fi 2 between APs through temporary `HIL-` profiles, and bounces it once. | 120 s |
+| `intellex_wifi_join` | Attended. Moves Wi-Fi 2 between APs through temporary `HIL-` profiles, and bounces it once. Registered, unticked. The unattended WiFi tests use `navicore_wifi` instead (DX34). | 180 s |
 | `intellex_window` | Attended. Opens Intellex app windows on the desktop. | 120 s |
 | `intellex_nc_save` | Saves NaviCore's config from the tool twice, `chRateHz` one step away and back: two rewrites of its `/config.json` (LittleFS), inside `nc_guard`. Registered in `hil/optin.py`, unticked (DX29). | 90 s |
 
@@ -1157,6 +1268,22 @@ suites that follow are not affected (the F21 precedent).
 | DX32 | Findings 16 and 17 get their own `(should)` tests, and every W1 test hands a W1 that does not answer afterwards to `reset_into_app` (an EN pulse with GPIO0 high), failing the test with it. | DX16; and a W1 left in the ROM loader would fail every test after it. |
 | DX33 | `nc_via_usb_doorway` waits 21 s with nothing attached to W1 before its first connect. | A relay window left open by the test before (a `;W20,{...}` line) made the cold connect come up direct too in the dry run, and the companion data could not tell the two cases apart. |
 
+### 4.6 Decisions taken writing IX-WP9 and IX-WP10 (2026-09-29)
+
+| # | Decision | Why |
+|---|---|---|
+| DX34 | The WiFi tests put the PC's spare adapter on NaviCore's AP themselves (`s45 _on_ap`: `hil/wlan.py` `pc_on_ap`, spare adapter only) behind `navicore_wifi`, the key s45 uses for the same act, and `ws_transport_navicore` moves onto it. Replaces DX8's "use Wi-Fi 2 as it is, skip otherwise" and DX19's "never joins"; the attended hop and bounce keep `intellex_wifi_join`. | Waiting for the adapter to be there left `ws_transport_navicore` skipped in `20260929-122112`; `pc_on_ap` is the join s45's fifteen tests run nightly; the effect on the bench is the same as theirs, so the gate is the same (ticked, D70). DX19's direct-PONG proof stays. |
+| DX35 | A step the spec must sequence with the bench goes through a bridge hook: `run_intellex_test(hooks={name: fn(host, body)})`, the bridge's `/hook`, `board.js` `hil.hook`. | The harness's test thread is parked while Playwright runs; moving the adapter, counting a console over a window the page defines and judging the host's flash log each need the harness at a moment only the spec knows. Timers or files would race. |
+| DX36 | No network name reaches a spec, session.log or a log file: `IntellexHost(hide=...)` scrubs the host's lines, `copy_logs` the stage's and the copied logs, `status_view` the status's `lastError`; a venv script gets a SHA-256 of the SSID, or the SSID in its environment for the bounce. | A host attached over WiFi records the SSID and names both networks when the adapter moves (`host.py` `_reidentify_if_moved`); the rule every WiFi test here keeps (s28, D63). |
+| DX37 | The W2 Flash and Factory Reset pass the Wizard's `pushConfig:false`, so it re-pulls W2 instead of pushing its whole pre-flash config back; the Factory Reset's restore is the harness's s31 procedure over W2's USB. | A Flash keeps NVS, and the Factory Reset's config comes back through a restore the harness has proved (`nvs_erase`); a full push is the Wizard's own feature, never run on the bench, and a defect in it would leak into W2's config inside a flash test. An Update outside the guided setup only re-pulls anyway. |
+| DX38 | A W2 that does not answer after a flash gets an EN reset (`reset_into_app`), then the same image flashed again in full through the host's own `/_api/flash-wcb` (`reflash_w2`); only then the `arduino-cli upload` last resort. | The plan's first recovery ("run the same Intellex flash again"; the ESP32 ROM loader answers every auto-reset), and one bad flash must not fail every W2 test after it in an unattended run. |
+| DX39 | Identity: a W2 test reads W2's version at run time, skips unless `results/builds/wcb-esp32-meshq`'s app carries it, checks the three files, and seeds them as `WCB_<version>_hilbench_ESP32*.bin`; the other product's branch is `hil-none`. Afterwards: the same version, app0 running, a boot heard by W1, `config_guard`. | W2 moved to `6.2.1_291138RSEP2026` after the plan was written, and the CI release carries the same version string: the bytes come from the bench folder only (§4.1, "never flash without the seed"). Nothing cached for the other product means no stray flash of it can find an image. |
+| DX40 | `flash_one_at_a_time` asks for the second flash from the Wizard's page (the NaviCore tool's route and the Wizard's again), not from a shell's NaviCore pane. | The host's claim does not know panes; a NaviCore pane attached through W2 would put its handshake on the mesh during a flash. |
+| DX41 | The NaviCore flash records a FLASHED.md row (`ncflash.record_flash`), `OK` only when `?OTALOCAL,STATUS` shows the image's App SHA256 on app0; it leaves NaviCore on app0 whatever slot it ran; its recovery is `ncflash.recover`, with the esptool rungs only when `navicore_esptool` is ticked. | Every flash that reaches NaviCore is recorded (INF4), and `last_written()` takes an OK row as what NaviCore runs. Intellex writes app0 and erases otadata, so the slot is not the test's to choose. |
+| DX42 | `wifi_rterm_rate` counts each WCB's own USB console (the harness's hooks) and the re-arms the page wrote, and bounds each board at DX10's 6 a minute. A normal test, not `(should)`. | The console count is the effect, the page's frames the cause. Reading the current Wizard and shim finds no periodic re-arm, so a failure is a measurement to triage, not a known defect. |
+| DX43 | Finding 18's test drives the host's API with no page: a full flash of a seed with no bootloader, then `?VERSION` on W2's own port opened with both lines low; a stranded W2 is reset into its app. | The defect is the host's; the page adds nothing. Nothing is written either way: a refusal that did not hold would write the image W2 already runs. |
+| DX44 | The dry runs run the real staged host, the real tools under Playwright and the harness bodies against fakes: a fake pyserial for the host (a simulated W2 console, the NaviCore emulator), the repo's fake esptool, and a fake NaviCore endpoint on 127.0.0.1:80 that can turn into a W1 doorway; the staged `discover.ssid_for_host` reads a scratch file. None of it is committed. | No bench, no port, no netsh; the scaffolding stands in only for what the bench provides, so what runs is the code the bench run will run. |
+
 ---
 
 ## Revision log
@@ -1167,3 +1294,4 @@ suites that follow are not affected (the F21 precedent).
 | 2026-09-29 | IX-WP3 and IX-WP4 finished, IX-WP5 and IX-WP6 written (35 tests; `s32` additions, `s33_intellex_bench.py`, `tests/intellex/py`, `fixtures`, five specs). Findings 12-15 and three harness notes (§1.6); status notes on IX-WP3 to IX-WP6; decisions DX15-DX25 (§4.4). The no-board tests ran standalone against Intellex `e9f95f2`; the board tests are not yet run on the bench. Commit `_(pending)_`. |
 | 2026-09-29 | IX-WP3 to IX-WP6 bench-verified (`20260929-043806`, 54 `intellex.*`): 45 pass; the seven `(should)` tests fail as designed (findings 1-3, 5, 12-15); `ws_transport_navicore` skips until the PC's second adapter is on NaviCore's AP (IX-WP9) and `serial_device_loss_navicore` ran behind `intellex_reboot`, now ticked (D59). |
 | 2026-09-29 | IX-WP7 and IX-WP8 written: 15 tests in `suites/s34_intellex_tools.py` (the 13 plan rows, plus `(should)` tests for the new findings 16 and 17), specs `wizard_board.spec.js` and `nc_board.spec.js`, `tests/intellex/lib/board.js`. `run_intellex_test` gains `link_check` (the rawLink) and `recover`; `boot_check` and `reset_into_app`; opt-in `intellex_nc_save` registered, unticked. Finding 4 narrowed to W1's relay window. Status notes on IX-WP7 and IX-WP8; decisions DX26-DX33 (§4.5). Dry-run against simulated boards; not yet run on the bench. Commit `_(pending)_`. |
+| 2026-09-29 | IX-WP9 and IX-WP10 written: 13 tests. `suites/s35_intellex_wifi.py` (seven: discovery, the config tool and the Wizard over WiFi through NaviCore, the RTERM re-arm rate, the link lost to a NaviCore restart, and the attended AP hop and bounce) and `suites/s36_intellex_flash.py` (six: W2's Update, Flash and one-at-a-time, the `(should)` test for the new finding 18, the attended Factory Reset, NaviCore's app); `intellex.ws_transport_navicore` now joins NaviCore's AP itself. Specs `wifi_board.spec.js` and `flash_board.spec.js`, venv script `wifi_units.py`. `run_intellex_test` gains `seed`, `hide` and `hooks` (the bridge's `/hook`); `IntellexHost` and `copy_logs` take network names out; `hil/wlan.py` `rejoin`. Opt-ins `intellex_flash`, `intellex_flash_factory`, `intellex_flash_navicore` and `intellex_wifi_join` registered, unticked; the unattended WiFi tests use `navicore_wifi`. Finding 18; status notes on IX-WP9 and IX-WP10; decisions DX34-DX44 (§4.6). Dry-run against a fake endpoint, a simulated W2 and the fake esptool; not yet run on the bench. Commit `_(pending)_`. |

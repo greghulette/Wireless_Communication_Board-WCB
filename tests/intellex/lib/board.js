@@ -1,14 +1,16 @@
-// Board specs: a tool page through a staged Intellex host attached to a bench board's COM port (INTELLEX.md IX-WP7 and
-// IX-WP8). The harness test of the same id (tests/hil/suites/s34_intellex_tools.py) releases that one port to the host,
-// keeps every other board and probe, and reaches the bench for the spec through its bridge (tests/hil/hil/bridge.py:
-// /context, /note, /wire/*). The pages connect on their own: Intellex's shim replaces navigator.serial and auto-connects
-// (intellex_shim.js autoConnect, autoConnectWcb), so there is no port picker and no Chrome profile.
+// Board specs: a tool page through a staged Intellex host attached to a bench board - its COM port (INTELLEX.md IX-WP7,
+// IX-WP8, the flashes of IX-WP10) or NaviCore's access point over the PC's spare WiFi adapter (IX-WP9). The harness test
+// of the same id (tests/hil/suites/s34_intellex_tools.py, s35_intellex_wifi.py, s36_intellex_flash.py) releases that one
+// port to the host or joins the access point, keeps every other board and probe, and reaches the bench for the spec
+// through its bridge (tests/hil/hil/bridge.py: /context, /note, /wire/*, and /hook for a step the spec sequences). The
+// pages connect on their own: Intellex's shim replaces navigator.serial and auto-connects (intellex_shim.js autoConnect,
+// autoConnectWcb), so there is no port picker and no Chrome profile.
 //
 // Credentials: through NaviCore the link carries GET_CONFIG, through a WCB its ?backup and every pull - the mesh
 // password and the WiFi passphrase. Nothing here keeps a line's text: watchLink keeps the JSON type (and a SET_CONFIG's
 // branch names) of each line a page wrote, a command's first word, and first-seen times of the markers a spec asks
 // about; the tools' own state is read by name, one field at a time. Never read the NaviCore tool's #terminal-output
-// (D-NC5): it holds the CONFIG echo.
+// (D-NC5): it holds the CONFIG echo. A spec is never handed a network name: over WiFi the harness's hooks scrub them.
 const { expect } = require('@playwright/test');
 const { hostGuard } = require('./fixtures');
 
@@ -23,7 +25,20 @@ async function call(path, body = {}) {
   return reply;
 }
 
-// The harness bridge: what it decided for this run, a line in session.log, and the probe wires.
+// A bench action the harness test offers this spec (hil/intellex.py run_intellex_test hooks=, the bridge's /hook route):
+// its reply, or {skip} when the harness raised Skip. The harness's own test thread is parked while Playwright runs, so a
+// step the spec must sequence - moving the PC's WiFi adapter, counting a console's lines, judging the host's flash log -
+// is asked for here, by name.
+async function hook(name, body = {}) {
+  const r = await fetch(BRIDGE + '/hook', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify(Object.assign({}, body, { name })) });
+  const reply = await r.json();
+  if (r.status === 424) return { skip: reply.skip };
+  if (!r.ok) throw new Error(`harness hook ${name}: ${reply.error}`);
+  return reply;
+}
+
+// The harness bridge: what it decided for this run, a line in session.log, the probe wires, and the test's hooks.
 const hil = {
   present: !!BRIDGE,
   context: () => call('/context'),
@@ -33,7 +48,29 @@ const hil = {
     received: async (since) => Buffer.from((await call('/wire/received', { wcb, port, since })).hex, 'hex'),
     expect: (text, since, timeout = 3) => call('/wire/expect', { wcb, port, text, since, timeout }),
   }),
+  hook,
 };
+
+// GET from the host from Node (no Origin: a native client) -> {status, json}. Never read /_api/status's lastError into a
+// message from a WiFi test: a host held off an access-point move names both networks there (the harness's hooks hand
+// it over scrubbed instead).
+async function hostGet(path) {
+  const r = await fetch(process.env.INTELLEX_URL + path);
+  return { status: r.status, json: await r.json().catch(() => null) };
+}
+
+// /_api/signals through to the host, each call recorded with its answer: {body, status, ok}.
+function passSignals(signals) {
+  return async (route, req) => {
+    let body = null;
+    try { body = req.postDataJSON(); } catch (_) { body = null; }
+    const resp = await route.fetch();
+    let ok = null;
+    try { ok = (await resp.json()).ok; } catch (_) { ok = null; }
+    signals.push({ body, status: resp.status(), ok });
+    return route.fulfill({ response: resp });
+  };
+}
 
 // hostGuard for a board run: every route that reaches past the host is still answered here (a COM-port probe, the
 // droid's access point, GitHub, esptool, an attach) except /_api/signals, which a tool's DTR/RTS must really reach -
@@ -41,22 +78,92 @@ const hil = {
 // host's answer: {body, status, ok}.
 async function boardGuard(context, rec) {
   const signals = [];
-  const calls = await hostGuard(context, rec, {
-    signals: async (route, req) => {
-      let body = null;
-      try { body = req.postDataJSON(); } catch (_) { body = null; }
-      const resp = await route.fetch();
-      let ok = null;
-      try { ok = (await resp.json()).ok; } catch (_) { ok = null; }
-      signals.push({ body, status: resp.status(), ok });
-      return route.fulfill({ response: resp });
-    },
-  });
+  const calls = await hostGuard(context, rec, { signals: passSignals(signals) });
   return { calls, signals };
 }
 
+// boardGuard for a flash run (INTELLEX.md IX-WP10): /_api/flash-wcb and /_api/flash reach the host too - a flash is what
+// the test is about - each call recorded with the host's answer: {name, body, status, ok, error}. Everything else that
+// reaches past the host is still answered here. The harness seeds the only firmware the host can find, for one product.
+async function flashGuard(context, rec) {
+  const signals = [];
+  const flashes = [];
+  const pass = (name) => async (route, req) => {
+    let body = null;
+    try { body = req.postDataJSON(); } catch (_) { body = null; }
+    const resp = await route.fetch();
+    let reply = null;
+    try { reply = await resp.json(); } catch (_) { reply = null; }
+    flashes.push({ name, body, status: resp.status(), ok: reply && reply.ok, error: reply && reply.error });
+    return route.fulfill({ response: resp });
+  };
+  const calls = await hostGuard(context, rec, { signals: passSignals(signals), 'flash-wcb': pass('flash-wcb'),
+                                                flash: pass('flash') });
+  return { calls, signals, flashes };
+}
+
+// Follow the host's flash on /_api/flash-status until it has run and ended -> {final, percents, sawRunning}: every
+// percent read while it ran (INTELLEX.md finding 13: under esptool 5 it reads 0 until the end). during(st) runs once, at
+// the first reading that shows it running. stopIf(sawRunning) -> a reason to give up (the page failed before the flash
+// started), checked each round.
+async function followFlash({ startTimeout = 90_000, timeout = 420_000, during = null, stopIf = null } = {}) {
+  const t0 = Date.now();
+  const percents = [];
+  let saw = false, ran = false, st = null;
+  for (;;) {
+    st = (await hostGet('/_api/flash-status')).json || {};
+    if (st.running) {
+      saw = true;
+      percents.push(st.percent || 0);
+      if (during && !ran) { ran = true; await during(st); }
+    } else if (saw) {
+      break;
+    }
+    if (stopIf) {
+      const why = await stopIf(saw);
+      if (why) throw new Error(why);
+    }
+    if (!saw && Date.now() - t0 > startTimeout) throw new Error(`no flash started within ${startTimeout / 1000} s`);
+    if (Date.now() - t0 > timeout) throw new Error(`the host's flash still ran after ${timeout / 1000} s`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return { final: st, percents, sawRunning: saw };
+}
+
+// Record every toast the Wizard shows (showToast is a top-level function, so reassigning it on window reaches its own
+// calls): window.__hilToasts [{message, type}]. Toasts are how boardGo reports a flash's outcome.
+async function recordToasts(page) {
+  await page.evaluate(() => {
+    if (window.__hilToasts) return;
+    const toasts = window.__hilToasts = [];
+    const real = window.showToast;
+    window.showToast = (message, type, duration) => {
+      toasts.push({ message: String(message), type: type || 'info' });
+      return real(message, type, duration);
+    };
+  });
+}
+
+// Count the Wizard's config pulls of one slot (boardPull, a top-level function): window.__hilBoardPulls
+// [{n, at, ok}] - ok is what the pull's promise settled to, or 'error'. After a flash the Wizard pulls the board again.
+async function spyBoardPulls(page) {
+  await page.evaluate(() => {
+    if (window.__hilBoardPulls) return;
+    const rec = window.__hilBoardPulls = [];
+    const real = window.boardPull;
+    window.boardPull = function (n, ...rest) {
+      const e = { n: Number(n), at: Date.now(), ok: null };
+      rec.push(e);
+      const p = real.call(this, n, ...rest);
+      Promise.resolve(p).then((v) => { e.ok = v === undefined ? true : !!v; }, () => { e.ok = 'error'; });
+      return p;
+    };
+  });
+}
+
 // One line a page wrote, summarised: its JSON type after an optional ;w<n>, prefix (wrapped: the tool's Via-WCB form),
-// with a SET_CONFIG's branch names and never a value; or a console command's first word (up to a comma or a space).
+// with a SET_CONFIG's branch names and never a value; or a console command's first word (up to a comma or a space) -
+// and for a ?MGMT,FRAG, the board it goes to and the inner command's first two words ('RTERM,START'), never its values.
 function summarise(line) {
   const t = String(line).trim();
   const m = /^;w(\d+),([\s\S]*)$/i.exec(t);
@@ -72,6 +179,8 @@ function summarise(line) {
     }
   } else {
     out.cmd = body.split(/[,\s]/)[0].slice(0, 24);
+    const f = /^.MGMT,FRAG,(\d+),[0-9A-Fa-f]+,\d+,\d+,.([A-Za-z]+)(?:,([A-Za-z]+))?/.exec(body);
+    if (f) { out.frag = Number(f[1]); out.inner = f[2].toUpperCase() + (f[3] ? `,${f[3].toUpperCase()}` : ''); }
   }
   return out;
 }
@@ -147,6 +256,18 @@ async function openWizard(page, path = '/wcb/Wizard/') {
 async function waitPulled(target, n, timeout = 45_000) {
   await target.waitForFunction((n) => !!boardBaselines[n] && !_boardPullInFlight.has(n), n, { timeout });
   return target.evaluate((n) => boardBaselines[n].wcbNumber, n);
+}
+
+// Wait until every board in `boards` has a baseline and no pull of it is running, or `ms` passed -> the boards still
+// missing (reported by the caller). The shim pulls each mesh board it routes through the doorway (routeMeshThroughBoard,
+// or relayRouteAll through a relay card); a flash or a push started meanwhile would share the doorway's stream with it.
+async function meshSettled(page, boards, ms = 60_000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const left = await page.evaluate((bs) => bs.filter((b) => !boardBaselines[b] || _pullingBoards.has(b)), boards);
+    if (!left.length || Date.now() > until) return left;
+    await page.waitForTimeout(1000);
+  }
 }
 
 // The Wizard's slots whose connection is up.
@@ -289,7 +410,7 @@ function ncToasts(target) {
 }
 
 module.exports = {
-  hil, boardGuard, summarise, watchLink, NC_READ_ONLY, unaskedWrites, pressF5, expectClean,
-  openWizard, waitPulled, liveSlots, setField, pushConfig, spyRemotePulls, pullResult,
-  ncState, ncHandshake, ncToasts,
+  hil, hostGet, boardGuard, flashGuard, followFlash, summarise, watchLink, NC_READ_ONLY, unaskedWrites, pressF5,
+  expectClean, openWizard, waitPulled, meshSettled, liveSlots, setField, pushConfig, spyRemotePulls, pullResult,
+  recordToasts, spyBoardPulls, ncState, ncHandshake, ncToasts,
 };

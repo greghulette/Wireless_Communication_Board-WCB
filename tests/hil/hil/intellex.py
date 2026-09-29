@@ -35,20 +35,37 @@ from contextlib import contextmanager
 from .bridge import Bridge
 from .runner import Skip
 from .wizard import _kill_tree, _outcomes, _reacquire, _wait_node
+from .wlan import scrub
 from .ws import WsClient, frame
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+
+def main_checkout(repo):
+    """The main checkout of this repo: `repo` itself, or - from a git worktree under <main>/.claude/worktrees/<name>,
+    where the week's agents write and run tests - <main>."""
+    parts = os.path.normpath(repo).split(os.sep)
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees" and i:
+            return os.sep.join(parts[:i])
+    return os.path.normpath(repo)
 
 
 def github_dir(repo):
     """The folder holding this repo and its siblings (Intellex, NaviCore): the repo's parent, or - from a git worktree
     under <repo>/.claude/worktrees/<name>, where the week's agents write and run tests - the MAIN checkout's parent.
     Beside .claude/worktrees there is no Intellex, and every Intellex test skipped 'no Intellex checkout' there."""
-    parts = os.path.normpath(repo).split(os.sep)
-    for i in range(len(parts) - 1):
-        if parts[i] == ".claude" and parts[i + 1] == "worktrees" and i:
-            return os.path.dirname(os.sep.join(parts[:i]))
-    return os.path.dirname(repo)
+    return os.path.dirname(main_checkout(repo))
+
+
+def builds_dir():
+    """tests/hil/results/builds, where the harness keeps the bench images (results/builds/FLASHED.md): this checkout's,
+    or - from a git worktree, which has no results/ (gitignored) - the main checkout's, which the bench boards were
+    flashed from."""
+    here = os.path.join(REPO, "tests", "hil", "results", "builds")
+    if os.path.isdir(here):
+        return here
+    return os.path.join(main_checkout(REPO), "tests", "hil", "results", "builds")
 
 
 GITHUB = github_dir(REPO)
@@ -230,12 +247,16 @@ class IntellexHost:
 
     allow_ports: the COM ports it may touch (INTELLEX_SERIAL_ALLOW; none by default).
     discover_hosts: the hosts discovery may probe (INTELLEX_DISCOVER_HOSTS; none by default).
-    offline: INTELLEX_OFFLINE (on by default: no GitHub, a 2 s start)."""
+    offline: INTELLEX_OFFLINE (on by default: no GitHub, a 2 s start).
+    hide: network names (SSIDs) to take out of every line the host prints before it is kept or logged: a host attached
+    over WiFi records the SSID it asks Windows for (host.py api_attach, ssid_for_host) and names both networks when the
+    adapter moves ('network changed "<a>" -> "<b>"', _reidentify_if_moved). A name is never logged (hil/wlan.py)."""
 
-    def __init__(self, bench, stage_dir, allow_ports=(), discover_hosts=(), offline=True, env=None, args=()):
+    def __init__(self, bench, stage_dir, allow_ports=(), discover_hosts=(), offline=True, env=None, args=(), hide=()):
         self.bench, self.stage = bench, stage_dir
         self.allow_ports, self.discover_hosts, self.offline = list(allow_ports), list(discover_hosts), offline
         self.extra_env, self.args = dict(env or {}), list(args)
+        self.hide = tuple(h for h in hide if h)
         self.proc = self.url = None
         self.port = 0
         self.lines = []
@@ -273,7 +294,7 @@ class IntellexHost:
 
     def _drain(self):
         for line in self.proc.stdout:
-            line = line.rstrip()
+            line = scrub(line.rstrip(), *self.hide)
             if line:
                 self.lines.append(line)
                 del self.lines[:-400]
@@ -344,9 +365,31 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def copy_logs(bench, stage_dir, test_id):
-    """The staged host's own log files, next to the run's report (they are in the stage, which may be deleted)."""
+def scrub_logs(folder, hide):
+    """Every file under `folder` with each name in `hide` replaced (hil/wlan.py scrub), in place: the host's own log
+    files tee what it prints, network names included."""
+    names = tuple(h for h in hide if h)
+    if not names or not os.path.isdir(folder):
+        return
+    for root, _, files in os.walk(folder):
+        for f in files:
+            p = os.path.join(root, f)
+            try:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                clean = scrub(text, *names)
+                if clean != text:
+                    with open(p, "w", encoding="utf-8") as fh:
+                        fh.write(clean)
+            except OSError:
+                pass
+
+
+def copy_logs(bench, stage_dir, test_id, hide=()):
+    """The staged host's own log files, next to the run's report (they are in the stage, which may be deleted). hide:
+    network names taken out of them first, in the stage and in the copy (IntellexHost hide)."""
     logs = os.path.join(stage_dir, "appdata", "Intellex", "logs")
+    scrub_logs(logs, hide)
     if bench.out_dir and os.path.isdir(logs):
         dst = os.path.join(bench.out_dir, "intellex-logs", test_id)
         shutil.copytree(logs, dst, dirs_exist_ok=True)
@@ -355,11 +398,17 @@ def copy_logs(bench, stage_dir, test_id):
 # ------------------------------------------------------------------ Playwright and venv scripts
 def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", settings=None, allow_ports=None,
                       discover_hosts=(), offline=True, env=None, args=None, timeout=300.0, wiki=False,
-                      link_check=None, recover=None):
+                      link_check=None, recover=None, seed=None, hide=(), hooks=None):
     """Run the Playwright test titled `<test_id> ...` in tests/intellex against a staged host. device: a bench device
     whose port the host is given (released from the harness first, taken back and checked after). attach: the
-    /_api/attach body, or None to leave the host unattached. wiki: seed the crafted wiki (seed_wiki). Raises
-    AssertionError / Skip like run_wizard_test.
+    /_api/attach body, or None to leave the host unattached. wiki: seed the crafted wiki (seed_wiki). seed: seed(stage)
+    runs once the stage exists, before the host starts (seed_firmware: a firmware cache). hide: network names the host's
+    lines and logs never carry (IntellexHost hide, copy_logs). Raises AssertionError / Skip like run_wizard_test.
+
+    hooks: {name: fn(host, body) -> reply}, bench actions the spec asks for mid-run through the bridge's /hook route
+    (tests/intellex/lib/board.js hil.hook): the harness test's own thread is parked while Playwright runs, so a step
+    the spec must sequence - move the PC's WiFi adapter, mark and count a console, judge the host's flash log - is a
+    hook. One runs at a time, under the bridge's lock; a Skip it raises reaches the spec as {skip}.
 
     link_check (with `attach`): a raw /_link client of the harness's own ('rawLink', a LinkTap) reads every byte the host
     fans out for the whole Playwright run, and link_check(bytes) -> [problem] judges them afterwards - boot_check: the
@@ -385,11 +434,15 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
     sd = stage(bench, test_id, tools=tools, settings=settings)
     if wiki:
         seed_wiki(sd)
+    if seed is not None:
+        seed(sd)
     out_dir = bench.out_dir or tempfile.mkdtemp(prefix="intellex-")
     report_path = os.path.join(out_dir, f"{test_id}.playwright.json")
     if device:
         bench.close_device(device)
-    host = IntellexHost(bench, sd, allow_ports=allow_ports, discover_hosts=discover_hosts, offline=offline, env=env)
+    host = IntellexHost(bench, sd, allow_ports=allow_ports, discover_hosts=discover_hosts, offline=offline, env=env,
+                        hide=hide)
+    bound = {name: (lambda body, f=f: f(host, body)) for name, f in (hooks or {}).items()}
     aborted = None
     proc = None
     tail = []
@@ -401,8 +454,9 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
             host.attach(attach)
             if link_check is not None:
                 rawlink = LinkTap(host.port, name="rawLink")
-        context = {"device": device, "args": args or {}, "intellex": {"url": host.url, "stage": sd, "target": attach}}
-        with Bridge(bench, context) as bridge:
+        context = {"device": device, "args": args or {}, "intellex": {"url": host.url, "stage": sd, "target": attach},
+                   "hooks": sorted(bound)}
+        with Bridge(bench, context, **({"hooks": bound} if bound else {})) as bridge:
             penv = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=report_path, FORCE_COLOR="0", INTELLEX_URL=host.url,
                         INTELLEX_STAGE=sd, HIL_BRIDGE=bridge.url)
             import re as _re
@@ -429,7 +483,7 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
             for p in link_problems:
                 bench.note(f"{test_id}: rawLink: {p}")
         host.stop()
-        copy_logs(bench, sd, test_id)
+        copy_logs(bench, sd, test_id, tuple(hide))
         if device:
             try:
                 _reacquire(bench, device)

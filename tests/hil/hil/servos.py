@@ -194,6 +194,12 @@ SERVO_TESTS = {
     # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
     "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                             "is sent back",
+    # suites/s35_intellex_wifi.py, s36_intellex_flash.py: NaviCore restarted through Intellex, inside nc_guard. W2's
+    # flashes are left out: a WCB restart writes nothing to a Maestro (the note above).
+    "intellex.wifi_link_loss": "a REBOOT through Intellex over WiFi restarts NaviCore: SBUS OUT stops for a few "
+                               "seconds; a mode set before it is sent back",
+    "intellex.flash_navicore_app": "an esptool flash through Intellex restarts NaviCore: SBUS OUT stops for about a "
+                                   "minute; a mode set before it is sent back",
 }
 
 

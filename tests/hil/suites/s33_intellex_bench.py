@@ -158,21 +158,28 @@ def serial_device_loss_navicore(bench):
         assert up < gone + 5000, f"NaviCore's uptime is {up} ms {gone:.0f} ms after the REBOOT: it did not restart"
 
 
-@test("intellex.ws_transport_navicore", "Intellex's WebSocketTransport on NaviCore's own access point: PING gets a direct "
-      "PONG, a GET_CONFIG over 10 KB is reassembled from frames and parses, a non-UTF-8 write and a write after close "
-      "raise; skips unless this PC is already on NaviCore's AP (IX-WP5)", needs=["navicore"])
+@test("intellex.ws_transport_navicore", "Intellex's WebSocketTransport on NaviCore's own access point, the PC's spare "
+      "WiFi adapter joined to it for the test: PING gets a direct PONG, a GET_CONFIG over 10 KB is reassembled from "
+      "frames and parses, a non-UTF-8 write and a write after close raise (opt-in navicore_wifi; IX-WP5)",
+      needs=["navicore"], opt_in="navicore_wifi")
 def ws_transport_navicore(bench):
-    """INTELLEX.md DX8: the PC's second adapter is used as it is, never joined or bounced. The script skips unless the PC
-    has an address on 192.168.4.x and the host there answers with a DIRECT PONG carrying the version NaviCore gives over
-    USB (a WCB's AP at the same address mirrors a mesh PONG, which carries sys and id). No COM port is touched: the
-    harness keeps NaviCore's (tests/intellex/py/transport_ws.py)."""
+    """INTELLEX.md DX34: the harness puts the PC's spare adapter on NaviCore's access point for the test (s45 _on_ap:
+    hil/wlan.py pc_on_ap, a temporary HIL- profile with the SSID and password from NaviCore's GET_CONFIG, spare adapter
+    only) and back afterwards; before IX-WP9 the test used the adapter as it was and skipped when it was elsewhere (run
+    20260929-122112). The script still proves the AP is NaviCore's by a DIRECT PONG carrying the version NaviCore gives
+    over USB (DX19; a WCB's AP at the same address mirrors a mesh PONG, which carries sys and id), and it never changes
+    the network itself. No COM port is touched: the harness keeps NaviCore's (tests/intellex/py/transport_ws.py)."""
+    from suites.s45_navicore_wifi import NC_AP_IP, _on_ap
     require(bench)
     others = running_intellex()
     if others:
         raise Skip(f"another Intellex is running (PID {others[0][0]}) and may hold NaviCore's WebSocket - close it first")
-    version = NaviCore(bench.dev("navicore")).ping()
-    run_intellex_py(bench, "intellex.ws_transport_navicore", "transport_ws.py", timeout=120,
-                    args={"group": "navicore", "host": "192.168.4.1", "version": version})
+    problems = []
+    with _on_ap(bench, problems) as (nc, _, _name):
+        version = nc.ping()
+        run_intellex_py(bench, "intellex.ws_transport_navicore", "transport_ws.py", timeout=120,
+                        args={"group": "navicore", "host": NC_AP_IP, "version": version, "joined": True})
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================================================ IX-WP6: the bridge

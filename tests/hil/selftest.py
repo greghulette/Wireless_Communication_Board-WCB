@@ -2205,6 +2205,24 @@ GATED = {
     **{f"ncrec.{n}": ("navicore_clip_write", "writes and removes HIL* clips on NaviCore's clips partition")
        for n in ("record_save_list_rm", "stop_semantics", "play_timing_markers", "replay_interpolation_remote",
                  "backstop_60s")},
+    # IX-WP9 (suites/s33_intellex_bench.py, s35_intellex_wifi.py), 2026-09-29: the spare adapter joins NaviCore's AP
+    # (INTELLEX.md DX34); the link loss also needs navicore_wifi, checked in its body
+    **{f"intellex.{n}": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s")
+       for n in ("ws_transport_navicore", "wifi_discover", "wifi_nc_tool", "wifi_wizard_via_navicore",
+                 "wifi_rterm_rate")},
+    "intellex.wifi_link_loss": ("intellex_reboot", "restarts NaviCore through Intellex's transport: the mesh and SBUS "
+                                                   "OUT lose it for about 5 s"),
+    **{f"intellex.{n}": ("intellex_wifi_join", "moves the PC's spare WiFi adapter between access points and has "
+                                               "Intellex bounce it; attended only")
+       for n in ("wifi_ap_hop_reidentify", "wifi_bounce_scoped")},
+    # IX-WP10 (suites/s36_intellex_flash.py), 2026-09-29
+    **{f"intellex.{n}": ("intellex_flash", "re-flashes W2 through Intellex's esptool path with the bench image it runs")
+       for n in ("flash_w2_update", "flash_w2_full", "flash_one_at_a_time", "flash_refused_board_runs")},
+    "intellex.flash_w2_factory": ("intellex_flash_factory", "erases W2's NVS through Intellex and restores it from its "
+                                                            "chain; attended only"),
+    "intellex.flash_navicore_app": ("intellex_flash_navicore", "rewrites NaviCore's app0 through Intellex's esptool "
+                                                               "path and restarts it; SBUS OUT stops for about a "
+                                                               "minute"),
 }
 
 
@@ -10585,6 +10603,331 @@ def t_parked_device_reused(tmp):
 TESTS.append(t_parked_device_reused)
 TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (suites/s34_intellex_tools.py)
 TESTS += [t_ncrec_helpers, t_ncrec_suite_against_model, t_ncrec_mutations]   # NC-WP12 (suites/s48_navicore_rec.py)
+
+
+def t_bridge_hooks(tmp):
+    """hil/bridge.py /hook (IX-WP9/10): a spec's call runs the harness's function with the request body and answers what
+    it returns; a name the run does not offer is a 409 naming the ones it has (none, with no hooks at all); a hook that
+    raises Skip answers 424 {skip}, which tests/intellex/lib/board.js hil.hook hands the spec as {skip}. And
+    hil/intellex.py run_intellex_test binds each hook to its host (fn(host, body)), lists the names in /context, hands
+    `hide` to the host and runs `seed` on the stage before the host starts - with the host, Playwright and the board
+    faked."""
+    import shutil as _shutil
+    import types
+    import urllib.error
+    import urllib.request
+    from hil import intellex as IX
+    from hil.bridge import Bridge
+    from hil.runner import Skip as _Skip
+    seen = []
+
+    def hop(body):
+        seen.append(body)
+        return {"status": {"role": "wcb"}}
+
+    def skipper(body):
+        raise _Skip("W1 hosts no access point")
+
+    class B:
+        cfg = {"devices": {}}
+
+        def __init__(self):
+            self.out_dir, self.notes = tmp.root, []
+
+        def log(self, *a):
+            pass
+
+        def note(self, text):
+            self.notes.append(text)
+
+        def close_device(self, name):
+            pass
+
+    def post(url, body):
+        req = urllib.request.Request(url + "/hook", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+    with Bridge(B(), {"x": 1}, hooks={"hop": hop, "skipper": skipper}) as br:
+        assert post(br.url, {"name": "hop", "a": 2}) == (200, {"status": {"role": "wcb"}})
+        assert seen == [{"name": "hop", "a": 2}], seen
+        st, body = post(br.url, {"name": "nope"})
+        assert st == 409 and "no hook 'nope'" in body["error"] and "'hop'" in body["error"], (st, body)
+        assert post(br.url, {"name": "skipper"}) == (424, {"skip": "W1 hosts no access point"})
+    with Bridge(B(), {}) as br:
+        st, body = post(br.url, {"name": "hop"})
+        assert st == 409 and "[]" in body["error"], (st, body)
+
+    captured, seeded = {}, []
+
+    class FakeBridge:
+        def __init__(self, bench, ctx, hooks=None):
+            captured.update(ctx=ctx, hooks=hooks)
+            self.url = "http://127.0.0.1:2"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+    class Host:
+        def __init__(self, bench, sd, **k):
+            captured["host_kw"] = k
+            self.port, self.url, self.proc = 1, "http://127.0.0.1:1", None
+
+        def start(self):
+            return self
+
+        def attach(self, spec):
+            return {"ok": True}
+
+        def stop(self):
+            pass
+
+    class Proc:
+        returncode = 0
+
+    def popen(cmd, **k):
+        with open(os.path.join(tmp.root, "ix.t.playwright.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        return Proc()
+    cli = os.path.join(tmp.root, "node_modules", "@playwright", "test", "cli.js")
+    os.makedirs(os.path.dirname(cli))
+    with open(cli, "w", encoding="utf-8") as f:
+        f.write("")
+    names = ("require", "running_intellex", "stage", "IntellexHost", "Bridge", "_wait_node", "_outcomes", "copy_logs",
+             "subprocess", "INTELLEX_TESTS")
+    saved = {n: getattr(IX, n) for n in names}
+    real_which = _shutil.which
+    try:
+        IX.require = lambda bench: ("x", "y")
+        IX.running_intellex = lambda: []
+        IX.stage = lambda bench, test_id, tools="worktree", settings=None: tmp.root
+        IX.IntellexHost, IX.Bridge = Host, FakeBridge
+        IX._wait_node = lambda bench, proc, timeout: ([], False)
+        IX._outcomes = lambda report: [("t", "passed", "")]
+        IX.copy_logs = lambda *a: captured.setdefault("copy_logs", a)
+        IX.subprocess = types.SimpleNamespace(Popen=popen, PIPE=-1, STDOUT=-2)
+        IX.INTELLEX_TESTS = tmp.root
+        _shutil.which = lambda name: "node"
+        IX.run_intellex_test(B(), "ix.t", hooks={"hop": lambda host, body: {"host": host.url, "body": body}},
+                             hide=("Droid AP",), seed=seeded.append)
+        assert captured["ctx"]["hooks"] == ["hop"], captured["ctx"]
+        assert captured["hooks"]["hop"]({"a": 1}) == {"host": "http://127.0.0.1:1", "body": {"a": 1}}
+        assert captured["host_kw"]["hide"] == ("Droid AP",) and seeded == [tmp.root], (captured, seeded)
+        assert captured["copy_logs"][3] == ("Droid AP",), captured["copy_logs"]
+        captured.clear()
+        IX.run_intellex_test(B(), "ix.t")
+        assert captured["hooks"] is None and captured["ctx"]["hooks"] == [], captured
+    finally:
+        for n, v in saved.items():
+            setattr(IX, n, v)
+        _shutil.which = real_which
+
+
+def t_intellex_wifi_flash_helpers(tmp):
+    """suites/s35_intellex_wifi.py and s36_intellex_flash.py's pure helpers and the harness pieces IX-WP9/10 added:
+    status_view keeps what the host is attached to and scrubs lastError's network names; rterm_starts counts one relay's
+    session starts; move_order_problems wants each 'network changed' before its 'reconnected'; bounce_problems fails
+    any sample of the internet adapter off 'connected'; the W2 image's checks (partition rows, the version it carries),
+    its release names and seed (a file left out on request); flash_log_problems on an Update's log, a region missing or
+    unverified, an esptool 4 spelling, a refusal; percent_path; w2_want / nc_want; IntellexHost hide and copy_logs take
+    network names out of the lines kept, the log and the files; main_checkout from a worktree; wlan.rejoin reconnects
+    the temporary profile only when Windows did not, naming the adapter and never the network; wifi_units.scrubbed."""
+    import struct
+    import types
+    from hil import intellex as IX
+    from hil import wlan
+    from hil.runner import Skip as _Skip
+    from suites import s35_intellex_wifi as S35
+    from suites import s36_intellex_flash as S36
+
+    # ---- s35
+    v = S35.status_view({"attached": True, "kind": "ws", "role": "wcb", "relayId": 1, "target": "WCB 192.168.4.1 → mesh",
+                         "lastError": 'now on "W1 net", not "Droid AP" - not reattaching blind'}, ("W1 net", "Droid AP"))
+    assert v["role"] == "wcb" and v["relayId"] == 1 and v["attached"] is True, v
+    assert "W1 net" not in v["lastError"] and "Droid AP" not in v["lastError"] and "<network>" in v["lastError"], v
+    lines = ["[RTERM] Session started → relay WCB20", "[RTERM] Session started → relay WCB2", "noise",
+             "[RTERM] Session started → relay WCB20 ", "[RTERM] Session stopped"]
+    assert S35.rterm_starts(lines, 20) == 2 and S35.rterm_starts(lines, 2) == 1
+    good = ['network changed "<network>" -> "<network>": 192.168.4.1 is now Board1, a WCB',
+            "reconnected  WCB 192.168.4.1 → mesh", 'network changed "<network>" -> "<network>": 192.168.4.1 is now a '
+            'NaviCore', "reconnected  ws://192.168.4.1/ws"]
+    assert S35.move_order_problems(good) == []
+    assert len(S35.move_order_problems(["reconnected  ws://192.168.4.1/ws"])) == 1
+    p = S35.move_order_problems(["reconnected  WCB 192.168.4.1 → mesh"] + good[:1])
+    assert any("before its first" in x for x in p) and any("no 'reconnected'" in x for x in p), p
+    ok = [(0.0, {"Wi-Fi": "connected", "Wi-Fi 2": "connected"}), (0.5, {"Wi-Fi": "Connected", "Wi-Fi 2": "disconnected"})]
+    assert S35.bounce_problems(ok, "Wi-Fi", "Wi-Fi 2") == ([], {"samples": 2, "spare_not_connected": 1})
+    bad, _ = S35.bounce_problems(ok + [(1.0, {"Wi-Fi": "disconnecting", "Wi-Fi 2": "connected"})], "Wi-Fi", "Wi-Fi 2")
+    assert len(bad) == 1 and "1 of 3 samples" in bad[0] and "disconnecting" in bad[0], bad
+    assert S35.bounce_problems([], "Wi-Fi", "Wi-Fi 2")[0]
+
+    # ---- s36: the image, its names and its seed
+    def row(t, s, off, size, label):
+        return struct.pack("<2sBBII16sI", b"\xaa\x50", t, s, off, size, label.encode().ljust(16, b"\0"), 0)
+    table = (row(1, 2, 0x9000, 0x5000, "nvs") + row(1, 0, 0xE000, 0x2000, "otadata") +
+             row(0, 0x10, 0x10000, 0x1E0000, "app0") + row(0, 0x11, 0x1F0000, 0x1E0000, "app1") + b"\xeb\xeb" + b"\xff" * 30)
+    table += b"\xff" * (3072 - len(table))
+    assert S36.partition_rows(table) == [(1, 2, 0x9000, 0x5000, "nvs"), (1, 0, 0xE000, 0x2000, "otadata"),
+                                         (0, 0x10, 0x10000, 0x1E0000, "app0"), (0, 0x11, 0x1F0000, 0x1E0000, "app1")]
+    files = {"app": b"\xe9" + b"x" * 64 + b"6.2.1_291138RSEP2026" + b"y" * 64, "part": table, "boot": b"\xe9" + b"b" * 99}
+    assert S36.w2_image_problems(files, "6.2.1_291138RSEP2026") == []
+    p = S36.w2_image_problems(dict(files, app=b"\x00" * 10, part=table[96:], boot=b""), "6.2.1_291138RSEP2026")
+    assert len(p) == 5 and any("carry the version" in x for x in p) and any("app partition" in x for x in p) and \
+        any("otadata" in x for x in p), p
+    assert S36.release_names("6.2.1_X") == ("6.2.1_X_hilbench", {"app": "WCB_6.2.1_X_hilbench_ESP32.bin",
+                                                                 "part": "WCB_6.2.1_X_hilbench_ESP32_part.bin",
+                                                                 "boot": "WCB_6.2.1_X_hilbench_ESP32_boot.bin"})
+    folder = os.path.join(tmp.root, "img")
+    os.makedirs(folder)
+    for k, name in S36.W2_FILES.items():
+        with open(os.path.join(folder, name), "wb") as f:
+            f.write(files[k])
+    img = S36.bench_w2_image("6.2.1_291138RSEP2026", folder)
+    assert img["tag"] == "6.2.1_291138RSEP2026_hilbench" and img["files"] == files, img["tag"]
+    for version, why in (("6.2.1_999999RSEP2026", "does not carry"),):
+        try:
+            S36.bench_w2_image(version, folder)
+            raise AssertionError("an image of another version was accepted")
+        except _Skip as e:
+            assert why in str(e), e
+    os.remove(os.path.join(folder, "WCB.ino.bootloader.bin"))
+    try:
+        S36.bench_w2_image("6.2.1_291138RSEP2026", folder)
+        raise AssertionError("a set with no bootloader was accepted")
+    except _Skip as e:
+        assert "no WCB.ino.bootloader.bin" in str(e), e
+    sd = os.path.join(tmp.root, "stage")
+    S36.seed_w2(img, boot=False)(sd)
+    d = os.path.join(sd, "src", "firmware", "wcb", "hil-bench")
+    listing = json.loads(read(os.path.join(d, "listing.json")))
+    assert sorted(f["name"] for f in listing) == [img["names"]["app"], img["names"]["part"]], listing
+    assert read(os.path.join(d, img["names"]["app"]), "rb") == files["app"]
+
+    # ---- s36: the flash log
+    app = img["names"]["app"]
+    log = ["Chip: ESP32 -> ESP32 binary, 4 MB flash", "WARNING firmware source branch is 'hil-bench', not the released "
+           "'main'", "  offline - using the cached firmware listing", f"  offline - using the cached hil-bench copy of {app}",
+           "Update: app only (bootloader and partition table left as they are).",
+           "OTA boot selector (0xE000) reset to ota_0; NVS/config preserved.",
+           "Writing at 0x0000e000 [==============================] 100.0% 33/33 bytes...",
+           "Wrote 8192 bytes (33 compressed) at 0x0000e000 in 0.1 seconds (1024.0 kbit/s).", "Hash of data verified.",
+           "Wrote 1394864 bytes (905432 compressed) at 0x00010000 in 13.4 seconds (833.6 kbit/s).",
+           "Hash of data verified.", "Hard resetting via RTS pin...", f"Done — board is running {img['tag']}."]
+    st = {"running": False, "ok": True, "error": "", "version": img["tag"], "percent": 100, "log": log}
+    want = S36.w2_want(img, "update")
+    probs, facts = S36.flash_log_problems(st, want)
+    assert probs == [] and facts["written"] == ["0xe000", "0x10000"] and facts["verified"] == 2, (probs, facts)
+    probs, _ = S36.flash_log_problems(dict(st, log=log[:-3] + log[-2:]), want)
+    assert probs == ["1 'Hash of data verified.' line(s) for 2 region(s) written"], probs
+    probs, _ = S36.flash_log_problems(dict(st, log=["Wrote 25184 bytes (1 compressed) at 0x00001000 in 1 s.",
+                                                    "Hash of data verified."] + log), want)
+    assert probs == ["esptool wrote ['0x1000', '0xe000', '0x10000'], expected ['0xe000', '0x10000']"], probs
+    probs, facts = S36.flash_log_problems(dict(st, log=log + ["Warning: Deprecated: Command 'write_flash' is "
+                                                              "deprecated."]), want)
+    assert probs == ["the flash log has 1 line(s) with 'Deprecated'"] and facts["deprecated"] == 1, probs
+    probs, _ = S36.flash_log_problems({"running": True, "ok": None, "log": []}, want)
+    assert probs[0] == "the flash is still running" and any("ok is None" in x for x in probs), probs
+    refused = {"running": False, "ok": False, "error": "Cannot do a full flash: no bootloader (WCB_x_ESP32_boot.bin) in "
+               "this build.\nWriting the app ...", "log": ["Chip: ESP32 -> ESP32 binary, 4 MB flash", "Staying in "
+                                                           "bootloader."]}
+    assert S36.flash_log_problems(refused, S36.w2_want(img, "refused")) == (
+        [], {"written": [], "verified": 0, "lines": 2, "deprecated": 0, "percent": None})
+    wrong = S36.flash_log_problems(dict(refused, ok=True), S36.w2_want(img, "refused"))[0]
+    assert len(wrong) == 1 and wrong[0].startswith("flash-status ok is True, expected False (error: Cannot do a full "
+                                                   "flash: no bootloader"), wrong
+    assert S36.w2_want(img, "flash")["writes"] == [0x1000, 0x8000, 0xE000, 0x10000]
+    assert S36.w2_want(img, "factory")["writes"] == [0x1000, 0x8000, 0x9000, 0xE000, 0x10000]
+    assert S36.nc_want("v1", "NaviCore_v1_ESP32S3.bin")["writes"] == [0xE000, 0x10000]
+    try:
+        S36.w2_want(img, "bogus")
+        raise AssertionError("an unknown mode was accepted")
+    except ValueError:
+        pass
+    assert S36.percent_path([0, 0, 0, 25, 25, 100]) == [0, 25, 100] and S36.percent_path(None) == []
+
+    # ---- hil/intellex.py: hide, copy_logs, main_checkout
+    class B:
+        def __init__(self, out):
+            self.out_dir, self.logged = out, []
+
+        def log(self, name, direction, text):
+            self.logged.append(text)
+    bench = B(tmp.root)
+    h = IX.IntellexHost(bench, tmp.root, hide=("Droid AP", "W1 net", ""))
+    h.proc = types.SimpleNamespace(stdout=iter(['network changed "Droid AP" -> "W1 net": now a WCB\n', "\n",
+                                                "reconnected  ws://192.168.4.1/ws\n"]))
+    h._drain()
+    assert h.lines == ['network changed "<network>" -> "<network>": now a WCB', "reconnected  ws://192.168.4.1/ws"], \
+        h.lines
+    assert not any("Droid" in x or "W1 net" in x for x in bench.logged), bench.logged
+    logs = os.path.join(tmp.root, "st", "appdata", "Intellex", "logs")
+    os.makedirs(logs)
+    with open(os.path.join(logs, "intellex-1.log"), "w", encoding="utf-8") as f:
+        f.write('attached\nnetwork changed "Droid AP" -> "W1 net"\n')
+    IX.copy_logs(bench, os.path.join(tmp.root, "st"), "ix.t", ("Droid AP", "W1 net"))
+    for p in (os.path.join(logs, "intellex-1.log"), os.path.join(tmp.root, "intellex-logs", "ix.t", "intellex-1.log")):
+        text = read(p)
+        assert "Droid AP" not in text and "W1 net" not in text and text.count("<network>") == 2, (p, text)
+    j = os.path.join
+    main = j("C:" + os.sep, "Users", "g", "GitHub", "Wireless_Communication_Board-WCB")
+    assert IX.main_checkout(j(main, ".claude", "worktrees", "agent-x")) == main and IX.main_checkout(main) == main
+
+    # ---- hil/wlan.py rejoin
+    class N:
+        def __init__(self):
+            self.notes = []
+
+        def note(self, text):
+            self.notes.append(text)
+    saved = {k: getattr(wlan, k) for k in ("netsh", "address_wait", "wait")}
+    try:
+        wlan.address_wait = lambda name, subnet="192.168.4.": ("192.168.4.2", 2.5, "")
+        wlan.wait = lambda pred, timeout, step=1.0: pred()
+        fn = wlan.netsh = FakeNetsh()
+        fn.state["Wi-Fi 2"] = ["connected", "Droid AP", "Droid AP"]
+        n = N()
+        said = wlan.rejoin(n, "Wi-Fi 2", "Droid AP", "NaviCore's")
+        assert said.startswith("Windows reassociated Wi-Fi 2") and "lease 192.168.4.2" in said, said
+        assert [c for c in fn.calls if c[0] != "show"] == [], fn.calls
+        fn = wlan.netsh = FakeNetsh()
+        fn.profiles["HIL-Droid AP"] = "Droid AP"
+        n = N()
+        said = wlan.rejoin(n, "Wi-Fi 2", "Droid AP", "NaviCore's")
+        assert "connected Wi-Fi 2's temporary profile again" in said, said
+        assert [c for c in fn.calls if c[0] != "show"] == [("connect", "name=HIL-Droid AP", "ssid=Droid AP",
+                                                            "interface=Wi-Fi 2")], fn.calls
+        assert not any("Droid AP" in x for x in n.notes + [said]), (n.notes, said)
+        fn = wlan.netsh = FakeNetsh(refuse=True)
+        fn.profiles["HIL-Droid AP"] = "Droid AP"
+        try:
+            wlan.rejoin(N(), "Wi-Fi 2", "Droid AP", "NaviCore's")
+            raise AssertionError("a refused reassociation passed")
+        except AssertionError as e:
+            assert "did not reassociate with NaviCore's access point" in str(e) and "Droid AP" not in str(e), e
+    finally:
+        for k, val in saved.items():
+            setattr(wlan, k, val)
+
+    # ---- tests/intellex/py/wifi_units.py scrubbed (its own module, read without the venv)
+    sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "intellex", "py")))
+    try:
+        import wifi_units
+        msg = 'no wireless interface is associated with "Droid AP" — Wi-Fi is on "HomeNet"'
+        assert wifi_units.scrubbed(msg, "Droid AP") == ('no wireless interface is associated with "<network>" — Wi-Fi '
+                                                        'is on "<network>"'), wifi_units.scrubbed(msg, "Droid AP")
+        assert wifi_units.scrubbed("Wi-Fi 2: reconnecting to Droid AP", "Droid AP") == \
+            "Wi-Fi 2: reconnecting to <network>"
+    finally:
+        sys.path.pop(0)
+
+
+TESTS += [t_bridge_hooks, t_intellex_wifi_flash_helpers]      # IX-WP9/10 (suites/s35, s36)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 
