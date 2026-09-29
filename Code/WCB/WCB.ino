@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_282121RSEP2026                                  *****////
+///*****                                          Version 6.2.1_282212RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -198,7 +198,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_282121RSEP2026";
+String SoftwareVersion = "6.2.1_282212RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1202,6 +1202,20 @@ static_assert(sizeof(CommandQueueItem) <= 12, "commandQueue has 200 slots - ever
 static inline char *commandItemBlock(char *cmd, uint8_t depth) { return cmd - (size_t)depth * sizeof(uint32_t); }
 
 static QueueHandle_t commandQueue = nullptr;
+
+// Whether the command queue can take every command a received ETM payload holds: one slot per delimiter-separated
+// token, an upper bound (a ;T chain goes to its own queue and needs none). Read on the WiFi task before the ACK, so a
+// full queue refuses the command unacknowledged instead of ACKing it and then discarding it (tracker #108).
+// `cmd` need not be terminated: a fixed field is scanned to its end.
+static bool commandQueueCanTake(const char *cmd, size_t maxLen) {
+  if (!commandQueue) return true;
+  UBaseType_t tokens = 1;
+  for (size_t i = 0; i < maxLen && cmd[i]; i++)
+    if (cmd[i] == commandDelimiter) tokens++;
+  return uxQueueSpacesAvailable(commandQueue) >= tokens;
+}
+// ETM commands refused for a full command queue (the WiFi task counts; loop() reports, reportEtmQueueRefusals).
+static volatile uint32_t etmQueueFullRefused = 0;
 // Quiet window for a deferred restart (PWM mapping). A Wizard push is ACK-paced, so the
 // command queue empties briefly between every pair of commands — restarting on "queue is
 // empty" alone would still land mid-push. 4 s comfortably outlasts the pacing gap.
@@ -1471,6 +1485,21 @@ void etmEnqueueAck(int sender, uint16_t seq) {   // WiFi callback task
     etmAckQTail = next;
   }
   portEXIT_CRITICAL(&etmAckQMux);
+}
+
+// loop(): one line a second while ETM commands are being refused for a full command queue (etmQueueFullRefused).
+// The senders retry them; a line here with no "[ETM] ... FAILED" on the sender means the retries got through.
+void reportEtmQueueRefusals() {
+  static uint32_t reported = 0, lastMs = 0;
+  const uint32_t n = etmQueueFullRefused;
+  if (n < reported) reported = n;                 // ?STATS,RESET cleared the count
+  if (n == reported) return;
+  const uint32_t now = millis();
+  if (lastMs && (uint32_t)(now - lastMs) < 1000) return;
+  Serial.printf("[ETM] %lu command(s) refused unacknowledged: the command queue was full (the senders retry)\n",
+                (unsigned long)(n - reported));
+  reported = n;
+  lastMs = now;
 }
 
 void etmDrainAckQueue() {                         // loop task, before the retry scan
@@ -2139,6 +2168,13 @@ String buildStatsString() {
     // Printed only when non-zero, like the overflow line below.
     snprintf(buf, sizeof(buf), "ESP-NOW: %lu frame(s) not sent - the radio's queue stayed full\n",
              (unsigned long)wcbEspNowDropped());
+    out += buf;
+  }
+  if (etmQueueFullRefused > 0) {
+    // ETM commands refused unacknowledged because the command queue could not take them (tracker #108): their
+    // senders retried, and report a failure if every retry met a full queue too.
+    snprintf(buf, sizeof(buf), "ETM: %lu command(s) refused unacknowledged - the command queue was full\n",
+             (unsigned long)etmQueueFullRefused);
     out += buf;
   }
   if (serialRxOverflows > 0) {
@@ -5357,6 +5393,15 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
         bool bestEffortTelemetry =
             (targetWCB == 0 && etmReceived.structCommand[0] == '{');
         if (restartImminent) return;          // not ACKed, not queued: the sender retries after the reboot
+        // Nor when the command queue cannot take it. The ACK tells the sender it arrived, and a full queue then
+        // discarded it (tracker #108: seven times during etm.seq_wrap's console flood). Unacknowledged, the sender
+        // retries, and by then the queue has usually drained; if it has not, the sender reports the failure. The
+        // window between this check and the enqueue below stays open to another task filling the queue meanwhile.
+        if (!bestEffortTelemetry &&
+            !commandQueueCanTake(etmReceived.structCommand, sizeof(etmReceived.structCommand))) {
+          etmQueueFullRefused++;
+          return;
+        }
         if (!bestEffortTelemetry)
             etmSendAck(senderWCB, etmReceived.structSequenceNumber);
 
@@ -7209,6 +7254,7 @@ void processLocalCommand(const String &message) {
 
 void resetESPNowStats() {
     wcbEspNowResetStats();
+    etmQueueFullRefused = 0;
     espnowCommandAttempts = 0;
     espnowCommandSuccess = 0;
     espnowCommandFailed = 0;
@@ -9793,6 +9839,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
 void loop() {
   rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
   wcbEspNowReportDrops();   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
+  reportEtmQueueRefusals(); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
   drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();

@@ -2293,10 +2293,10 @@ does not fit is counted and reported as `[RTERM] N line(s) from WCB<n> lost at t
 
 | | |
 |---|---|
-| **Status** | TODO - medium |
+| **Status** | FIXED (unverified) - `etm.full_queue_refused_not_lost` is its test |
 | **Owner** | `WCB_firmware` (`WCB.ino`, the ETM receive path) |
 | **Effort** | S |
-| **Tests** | none yet; seen during `etm.seq_wrap` (opt-in `etm_seq_wrap`) |
+| **Tests** | `etm.full_queue_refused_not_lost` (W1's queue held full by a console flood while W2 sends it markers: each must run or be reported failed) |
 | **Subsystem** | ETM / command queue |
 
 **Evidence (run 20260928-205106, `6.2.1_282046RSEP2026`).** During `etm.seq_wrap`'s console flood W1 printed `Command
@@ -2310,6 +2310,9 @@ that finds the queue full is discarded after its sender was told it arrived, so 
 a failure. It predates #102's fix, which makes it likelier: a board that paces its sends to the radio drains its queue
 at the radio's pace, so a flood holds the queue full for longer.
 
-**Fix (proposed).** Treat a full queue like `restartImminent`: when `uxQueueSpacesAvailable(commandQueue)` cannot hold
-the command's tokens, neither ACK nor queue it, so the sender's retry comes back once there is room. And name the
-source and the first characters of a discarded command in the discard line.
+**Fix.** A full queue is treated like `restartImminent`: when `commandQueueCanTake` (the free slots against one per
+delimiter-separated token, an upper bound) says the queue cannot hold the command, it is neither ACKed nor queued, so
+the sender's retry comes back once there is room, and a sender whose every retry meets a full queue reports the
+failure. The refusal is counted (`?STATS`: `ETM: N command(s) refused unacknowledged`), and `loop()` prints `[ETM] N
+command(s) refused unacknowledged: the command queue was full (the senders retry)` at most once a second. The window
+between the check and the enqueue stays open to another task filling the queue meanwhile.

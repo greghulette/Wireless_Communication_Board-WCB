@@ -34,7 +34,9 @@ changing before editing.**
    (`WCB.ino:1484` "send to broadcast but track per-board via ACKs"), so a single unreachable
    board leaves the broadcast pending until it times out or is removed
    (`WCB.ino:6497`, `:6521`). Sizing timeouts or reading "why is this slow" without knowing
-   this leads you to the wrong place.
+   this leads you to the wrong place. **An ACK means the command was queued:** a board whose command queue cannot
+   take a received command's tokens refuses it unacknowledged (`commandQueueCanTake`, counted in `?STATS`), so the
+   sender's retries decide - ACKing first let a full queue discard commands their senders took as delivered (#108).
 3. **But several broadcast paths deliberately bypass ETM and are never ACKed:** PWM
    passthrough and raw Kyber data (latency), boot announce (`WCB.ino:966` — sent redundantly
    *because* it is unacknowledged), RC JSON telemetry `rc_hb`/`rc_ch` (`WCB.ino:2170`), the

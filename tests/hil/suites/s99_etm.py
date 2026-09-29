@@ -9,6 +9,7 @@ past 65,535. Restore if aborted: `?DEBUG,ETM,OFF` on W1 and W2, and W1's `?BCAST
 had on (the test turns them off for the flood).
 """
 import re
+import threading
 import time
 
 from hil.runner import test
@@ -469,3 +470,106 @@ def seq_wrap(bench):
             _peers_online(bench, w, strict=False)
     bench.note(f"etm.seq_wrap: {facts}")
     assert not bad, "; ".join(bad)
+
+
+# ============================================================ a full command queue (tracker #108)
+FAILED_TO_ACK = re.compile(r"^\[ETM\] WCB1 failed to ACK seq (\d+) after 3 retries: (.*)$")
+CANCELED = re.compile(r"^\[ETM\] WCB1 offline, canceling retry for seq (\d+)")
+REFUSED = re.compile(r"^\[ETM\] (\d+) command\(s\) refused unacknowledged")
+
+
+@test("etm.full_queue_refused_not_lost", "An ETM command that finds W1's command queue full is refused unacknowledged, "
+      "never ACKed and then discarded: with the queue held full by a console flood, each ;W1,;S2<marker> W2 sends "
+      "either reaches W1 S2 or W2 reports it failed (tracker #108; ~40 s)", needs=["wcb1", "wcb2"], links=["W1S2"])
+def full_queue_refused_not_lost(bench):
+    """Tracker #108. espNowReceiveCallback sent the ETM ACK (etmSendAck) before it parsed and queued the command, and a
+    WiFi-task enqueue never waits (CLAUDE.md rule 11), so a command that found W1's 200-slot queue full was discarded
+    after its sender was told it arrived: seven such during etm.seq_wrap's flood, each 'Command queue is full!
+    Discarding command.' The fix refuses it unacknowledged when the queue cannot take its tokens
+    (commandQueueCanTake), counts it, and loop() says '[ETM] N command(s) refused unacknowledged'; the sender retries
+    and, if every retry meets a full queue, prints '[ETM] WCB1 failed to ACK seq N after 3 retries: <cmd>'. So every
+    marker W2 sent (its '[ETM] Sent seq N' line, ?DEBUG,ETM) must reach W1 S2 or be named in a failure on W2, or be
+    in a retry W2 cancelled for W1 going offline. The flood is etm.seq_wrap's: '{}' tokens typed on W1's console, which
+    the console reader keeps the queue topped up with while loop() drains it at the radio's pace (tracker #102's
+    pacing); W1's port broadcasts are off meanwhile. It skips when no refusal and no discard showed that the queue was
+    ever full while the markers arrived."""
+    near = link(bench, 1, "S2")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    require_tokens(bench, 1, "?ETM,ON")
+    require_tokens(bench, 2, "?ETM,ON")
+    tags = [marker(f"Q{k:02d}") for k in range(24)]
+    facts = {"send_failed": 0, "queue_full": 0}
+    stop = threading.Event()
+    flood_err = []
+
+    def flood():
+        left = 4000
+        try:
+            while left > 0 and not stop.is_set():
+                n = min(400, left)
+                out = w.run("^".join(["{}"] * n), timeout=120)
+                facts["send_failed"] += sum(1 for x in out if x.startswith("[ETM] Send failed seq"))
+                facts["queue_full"] += sum(1 for x in out if "Command queue is full" in x)
+                left -= n
+        except Exception as e:                    # reported below; the main thread still puts W1 back
+            flood_err.append(e)
+
+    with config_guard(bench, 1) as before:
+        ports = [p for p in ("S2", "S3", "S4", "S5") if f"?BCAST,OUT,{p},ON" in before[1]]
+        th = None
+        try:
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},OFF")
+            w2.run("?DEBUG,ETM,ON")
+            watch = Watch(near)
+            m1, m2 = w.dev.mark(), w2.dev.mark()
+            th = threading.Thread(target=flood, daemon=True)
+            th.start()
+            time.sleep(3.0)                       # the console reader has the queue full by now
+            for t in tags:
+                if not th.is_alive():
+                    break
+                w2.send(f";W1,;S2{t}")
+                time.sleep(0.3)
+            th.join(timeout=180)
+            time.sleep(4.0)                       # three retries at the ETM timeout, then loop()'s report line
+            got = watch.got(near)
+            lines1 = [x.rstrip() for x in w.dev.since(m1)]
+            lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+        finally:
+            stop.set()
+            if th is not None:
+                th.join(timeout=150)              # never type on W1's console alongside the flood
+            try:
+                w2.run("?DEBUG,ETM,OFF")
+            except AssertionError:
+                pass
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},ON")
+    if flood_err:
+        raise AssertionError(f"W1's console flood failed: {flood_err[0]}")
+    sent = {}                                     # seq -> marker, for the markers W2 really sent
+    for x in lines2:
+        m = SENT_SEQ.match(x)
+        if m and m.group(2).startswith(";S2"):
+            sent[int(m.group(1))] = m.group(2)[3:]
+    mine = {seq: t for seq, t in sent.items() if t in tags}
+    arrived = {t for t in mine.values() if (t.encode() + b"\r") in got}
+    failed = {m.group(2)[3:] for m in map(FAILED_TO_ACK.match, lines2) if m and m.group(2).startswith(";S2")}
+    canceled = {mine[int(m.group(1))] for m in map(CANCELED.match, lines2) if m and int(m.group(1)) in mine}
+    refused = sum(int(m.group(1)) for m in map(REFUSED.match, lines1) if m)
+    discarded = sum(1 for x in lines1 if "Command queue is full" in x) + facts["queue_full"]
+    lost = sorted(t for t in mine.values() if t not in arrived | failed | canceled)
+    bench.note(f"etm.full_queue_refused_not_lost: {len(mine)} markers sent, {len(arrived)} arrived, {len(failed)} "
+               f"reported failed, {len(canceled)} cancelled offline; W1 refused {refused}, discarded {discarded}; "
+               f"flood {facts}")
+    if not mine:
+        raise AssertionError("W2 printed no '[ETM] Sent seq' line for any marker (is ?DEBUG,ETM on, is W1 a peer?)")
+    if lost:
+        raise AssertionError(f"(tracker #108) {len(lost)} of {len(mine)} markers W2 sent neither reached W1 S2 nor "
+                             f"were reported failed on W2 - ACKed, then discarded for a full queue ({discarded} "
+                             f"discard line(s) on W1): {lost[:6]}")
+    if not refused and not discarded:
+        raise Skip(f"W1's queue never refused or discarded a command while the markers arrived ({len(arrived)} of "
+                   f"{len(mine)} ran): nothing was tested")
+
