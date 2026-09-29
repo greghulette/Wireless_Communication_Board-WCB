@@ -276,14 +276,15 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
    - The Wizard's `latestFirmwareVersion` is a top-level `let` (`Wizard/app.js:128`), and the shim's own comment
      (`:1176-1181`) says assigning on `window` cannot reach one of those.
    - `boardGo` therefore labels the card with the page's GitHub "latest", not with the build the host actually wrote
-     (`app.js:7479-7480`).
+     (`app.js:7586-7587` on 2026-09-29). Confirmed in the page: `intellex.ui_latest_fw_version` (`(should)`).
 2. **Two Wizard images are never bundled.**
-   - `../Images/LabelOnly.jpg` (`Wizard/app.js:10550`) and `../Images/PololuLogo.png` (`:10811`) are missing from
-     `WCB_IMAGES` (`tools/fetch_webui.py:150`).
-   - Inside Intellex, the Setup Wizard's hardware-version and Maestro steps show broken images.
-3. **`identify_serial()` accepts any PONG** (`discover.py:217`). Its own docstring says only a direct PONG counts
-   (`:153-157`), and `probe()` does tell the two apart (`:347-359`). Low impact today, because the launcher only
-   asks 303A ports (`launcher.html:805`).
+   - `../Images/LabelOnly.jpg` (`Wizard/app.js:10691`, the identity step) and `../Images/PololuLogo.png` (`:10952`, the
+     Maestro step) are missing from `WCB_IMAGES` (`tools/fetch_webui.py:150`).
+   - Inside Intellex, the Setup Wizard's hardware-version and Maestro steps show broken images. Confirmed in the page:
+     `intellex.ui_wizard_setup_images` (`(should)`).
+3. **`identify_serial()` accepts any PONG** (`discover.py:221-222` at `e9f95f2`). Its own docstring says only a direct
+   PONG counts (`:154-158`), and `probe()` does tell the two apart (`:351-363`). Low impact today, because the launcher
+   only asks 303A ports (`launcher.html:805`). `intellex.identify_direct_pong` is its `(should)` test (DX11).
 4. **A USB-cabled WCB doorway probably leaves the NaviCore tool out of Via WCB mode.**
    - Intellex records a role only for a `ws` attach (`host.py:1138-1182`). A serial attach reports `role: ""`, so the
      shim never forces Via WCB (`intellex_shim.js:440-444`).
@@ -296,10 +297,11 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
 5. **Update FW does not fully match the Wizard's.**
    - `wcb_flash.write_list(app_only=True)` writes the app alone (`wcb_flash.py:302-307`).
    - `flasher.js` first reads the board's partition table. When it differs, it escalates once to a full,
-     NVS-preserving flash (`Wizard/flasher.js:466-504`, `:246-260`).
+     NVS-preserving flash (`Wizard/flasher.js:465-511`, `:245-260`).
    - A board still on the default table would take a min_spiffs-sized app (1.38 MB) into a 1.25 MB slot. The module
      header claims parity with `flasher.js` (`wcb_flash.py:11-14`).
-   - The bench boards are min_spiffs, so only a unit test can show this.
+   - The bench boards are min_spiffs, so only a unit test can show this: `intellex.flash_update_partition_escalates`
+     (`(should)`, confirmed: an Update onto a board holding a different table writes 0xe000 and 0x10000 only).
 6. **Stale doc about the clone directory.**
    - Intellex `CLAUDE.md:19-21` says the Windows clone is still named `NaviLink`. It is `Intellex`.
    - The venv was created at `...\NaviLink\.venv` (`.venv/pyvenv.cfg`, `command =`). So `.venv/Scripts/esptool.exe`
@@ -318,6 +320,36 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
 11. **A commit that is not pushed yet.** Local `main` holds `d615344` ("Wizard: reconnect the link at its own slot"),
     and its doc row says "Not yet verified on hardware" (`docs/WCB_WIZARD.md:546`). The first Intellex push
     (IX-WP1) publishes it too.
+
+Found while writing IX-WP3 to IX-WP6 (2026-09-29, Intellex `e9f95f2`). Each has a `(should)` test that fails until it
+is fixed; none can cost a board.
+
+12. **The branch whitelist lets `..` through.** `settings.py:33-37` says the whitelist keeps URL operators such as
+    `/../` out, but `^[A-Za-z0-9._/-]+$` accepts `../x` (`valid_branch`, `:61-62`), and `tool_base()` puts the branch in
+    a URL path (`:104-110`), so the tool update would fetch from another of Greg's Pages sites. Only the launcher (same
+    origin) can set it. `intellex.settings_branch_dotdot`.
+13. **Flash progress never moves under esptool 5.** Intellex installs esptool 5.3.1 (`requirements.txt:17` asks for
+    `>=4.7`), which prints `Writing at 0x00010000 [=====>    ]  25.0% ...` (esptool `logger.py:223-248`). `_PCT_RE`
+    (`flash.py:414`, used at `:459` and by `wcb_flash.py:38-39`, `:390`) matches esptool 4's `(25 %)` only, so `/_api/flash-status`
+    reads 0 % for the whole write and then 100. `intellex.flash_esptool5_output`.
+14. **The NaviCore flash still spells esptool 4's options.** `flash.py:434-438` passes `write_flash`, `--flash_mode`,
+    `default_reset` and `hard_reset`, and esptool 5 answers each with a `Deprecated:` warning in the user's flash log
+    (esptool `cli_util.py:35-44`, `:350-383`), the thing `wcb_flash.py:352-354` says it avoids. Same test as 13.
+15. **`[[wiki links]]` are rewritten inside code.** `_wikilinks_to_md` runs a regex over the whole markdown source
+    before parsing (`wikidocs.py:88-101`, called at `:215` and `:227`), so `[[Target]]` in a fenced block or in
+    backticks is shown as `[Target](Target)`. The module header says its rewriting is done in the renderer so that code
+    and examples are left alone (`:9-16`). Nothing becomes a live link. `intellex.wiki_code_verbatim`.
+
+Harness notes from the same work (not Intellex defects):
+
+- From a git worktree under `.claude/worktrees/<name>`, `hil/intellex.py` looked for Intellex and NaviCore beside
+  `.claude/worktrees`, so every Intellex test skipped there. Fixed: `github_dir()` resolves the main checkout's parent
+  (`selftest.py` `intellex_github_dir`).
+- A staged host's `/_api/version` names this WCB repo's commit: the stage has no build stamp and no `.git`, and
+  `version.py:43-67`'s git fallback walks up into the WCB repo. Nothing compares it; `stage()` logs Intellex's real HEAD.
+- Stage paths come close to Windows' 260-character limit. From a worktree (42 characters longer than the main
+  checkout) the `include_data` stages of `intellex.smoke_repo_probe_identity` and `_reconnect_identity` fail to copy
+  Greg's downloaded wiki images and firmware cache. The venv scripts keep their own branch and file names short.
 
 ---
 
@@ -627,6 +659,28 @@ def flash_w2_update(bench): ...
 | Effort | 12 h. |
 | Mode | Unattended; no board. |
 
+**Status (2026-09-29): done, run standalone (no bench).** In `suites/s32_intellex.py`; the venv checks are scripts in
+`tests/intellex/py` run by `hil/intellex.py run_intellex_py` (a shared runner, `_ixpy.py`, and a JSON results file).
+
+- New tests: `intellex.routes_api`, `.wiki_security`, `.offline_gh_proxy`, `.flash_rules_unit`,
+  `.flash_pipeline_fake`, `.ghget_retry_unit`, `.paths_logs_unit`, and the `(should)` tests
+  `.settings_branch_dotdot` (finding 12), `.flash_update_partition_escalates` (finding 5),
+  `.flash_esptool5_output` (findings 13 and 14), `.wiki_code_verbatim` (finding 15) and `.identify_direct_pong`
+  (finding 3, DX11). All normal tests pass; each `(should)` test fails on its finding.
+- Where the plan and the code disagree, the tests follow the code:
+  - `intellex.attach_validation`: a port outside `INTELLEX_SERIAL_ALLOW` is refused, but `wantsLink` stays true until
+    `/_api/detach`, because `api_attach` records the target before trying (`host.py:1191-1194`). The plan said false.
+  - `intellex.settings_branch`: `../x` is accepted (`settings.py:37`, `:61-62`). The refusal the plan expected is the
+    `(should)` test `intellex.settings_branch_dotdot`.
+  - `intellex.flash_pipeline_fake`: "progress never goes backwards" holds only because, with esptool 5.3.1, there is
+    no progress at all (finding 13); `intellex.flash_esptool5_output` asserts that it moves.
+- Split from the plan's rows: the proxy half of `intellex.offline_con_floor` is `intellex.offline_gh_proxy` (its own
+  seeded cache), which also covers `settings_branch`'s `/_api/firmware` check; `intellex.routes_api` covers the GET
+  routes `intellex.routes` does not; finding 5's case is its own test id, so `flash_rules_unit` can pass.
+- Fixtures: `detect()` reads flash-id output built from esptool 5.3.1's own print statements (no board on this bench has
+  recorded one); the pipeline runs a fake esptool (`tests/intellex/fixtures/fake_esptool`), checked by its signature
+  before any flash route is called, against a fake transport on a port name that exists nowhere (`COMFAKE`).
+
 #### IX-WP4: No-board Playwright (UI with nothing attached, dangerous routes guarded)
 
 | Test id | Checks |
@@ -645,6 +699,22 @@ def flash_w2_update(bench): ...
 | Effort | 12 h. |
 | Mode | Unattended; no board. Later CI-able (decision DX12). |
 
+**Status (2026-09-29): done, run standalone (no bench).** Specs in `tests/intellex/specs`, one harness test each in
+`suites/s32_intellex.py`. `lib/fixtures.js` gained `hostGuard` (answers every route that reaches past the host for the
+whole browser context, frames and popups included), `hilContext` and `hostPost`.
+
+- New tests: `intellex.ui_tools_load_shipped` (DX3), `.ui_tools_glue`, `.ui_contract_wizard`, `.ui_contract_navicore`,
+  `.ui_contract_wizard_shipped`, `.ui_contract_navicore_shipped`, `.ui_launcher`, `.ui_shell`, `.ui_wiki`, and the
+  `(should)` tests `.ui_wizard_setup_images` (finding 2) and `.ui_latest_fw_version` (finding 1). All normal tests pass,
+  the shipped bundles included; both `(should)` tests fail on their findings.
+- `intellex.ui_tools_glue` is the rest of the plan's `ui_tools_load` row. `ui_contract_*` also checks, functionally,
+  that each tool's own GitHub constants, fetched through the shim, land on a repository Intellex's proxy serves.
+- Code over plan: finding 2's images are at `Wizard/app.js:10691` (the identity step) and `:10952` (the Maestro step),
+  not `:10550`/`:10811`. `launcher.html:343-347` says a problem "opens the section"; `paintMaint` (`:363-385`) never
+  does, and `:350-352` says it shows without opening. `intellex.ui_launcher` asserts what the code does.
+- Not covered: the Docs popup with docs stored, the identify "connected right now" state, and the attached label
+  strings (they need an attached host, IX-WP7/WP8). `ui_wiki` has no `https` image, so no request may leave 127.0.0.1.
+
 #### IX-WP5: Transports against bench boards (Intellex venv; the harness hands the port over)
 
 | Test id | Needs | Checks |
@@ -661,6 +731,21 @@ def flash_w2_update(bench): ...
 | Effort | 6 h. |
 | Bench | About 5 minutes. |
 | Mode | Unattended, except where marked. |
+
+**Status (2026-09-29): written, not yet run on the bench.** In `suites/s33_intellex_bench.py`, with the venv side in
+`tests/intellex/py/transport_serial.py` and `transport_ws.py`. The harness releases the one port a test names and takes
+it back afterwards (`hil/intellex.py handed_over`); `INTELLEX_SERIAL_ALLOW` names that port alone. Dry-run against a
+simulated port and a faked WebSocket (every group's control flow); never against a board.
+
+- All six tests are written. `serial_device_loss_navicore` is behind the new opt-in `intellex_reboot`, runs inside
+  `nc_guard`, skips on `restart_blocker()` (D33) and is listed in `hil/servos.py`. `serial_signals_reset_w1` resets W1
+  once, unattended, like the other reboot tests, and ends with `_peers_online`.
+- No-reset oracles beyond the stream: W2 prints `[ETM] WCB1 came ONLINE (boot)` for each boot announce it hears, W1
+  does the same for NaviCore (WCB 20), and NaviCore's `GET_MESH_STATS` `upMs` must keep counting.
+- Changed from the plan: `ws_transport_navicore` does not read `netsh` or compare an SSID (credential rule). It skips
+  unless the PC has an address on 192.168.4.x and the host there answers with a DIRECT PONG (no `sys`, no `id`)
+  carrying the version NaviCore gives over USB, which a WCB doorway at the same address cannot. It never joins,
+  bounces or changes WiFi. `serial_contract_w1` adds a check the plan lacked: a second open of a held port raises.
 
 #### IX-WP6: The bridge end to end on bench boards (harness side, raw `/_link` clients)
 
@@ -679,7 +764,22 @@ def flash_w2_update(bench): ...
 | Bench | About 5 minutes. |
 | Mode | Unattended. |
 
-#### IX-WP7: The Wizard through Intellex, on W1 (and W2 over the mesh)
+**Status (2026-09-29): written, not yet run on the bench.** In `suites/s33_intellex_bench.py`. A staged, leashed host
+attached to the board's COM port (`hil/intellex.py attached_host`), and raw `/_link` clients (`LinkTap`) standing in
+for the tool pages. Streams are compared by length and SHA-256, never quoted (through NaviCore they carry GET_CONFIG).
+`bridge_terminators_w1`, `bridge_reboot_w1` and `bridge_load_navicore` were dry-run end to end through a real staged
+host whose pyserial was replaced by simulated boards on fake port names; the other three need real port ownership.
+
+- `bridge_wire_w1` also needs W2: the "mesh traffic" is W2 sending `;W1,;S0,<marker>` over ETM, beside console lines
+  from client A. Both clients must hold identical bytes between a sync line and an end line; every console line must
+  arrive, in order; at least one mesh line must.
+- Two clients compare only from a line both saw: the host drops a chunk while no page is bound (`host.py:329-331`)
+  and binds a page just after its handshake (`:1292-1294`). NaviCore's PONG is the same every time, so
+  `bridge_load_navicore` compares between the 2nd and 3rd PONG (`line_spans`).
+- `bridge_load_navicore`: a JSON line cut short identically on both clients is noted, not failed: it happened upstream
+  of the fan-out. Afterwards the harness sends STOP_MONITOR and SET_DEBUG_FLAGS 0 (the baseline `nc_guard` restores).
+- `bridge_failed_attach_w1` adds: while the harness holds the port, the reconnect loop's retries (one a second) never
+  attach it; after detach and release, the host does not take the port.
 
 Ports of the `wizard.*` board tests. Intellex replaces the port picker with its own auto-connect, so the specs need
 no Chrome profile.
@@ -938,6 +1038,22 @@ suites that follow are not affected (the F21 precedent).
 | DX13 | Nightly full runs. | Include every unattended `intellex.*` test (no board, serial, WiFi when on the AP, online). Leave the new opt-ins unticked (D7 runs only what Greg ticked). Run each opt-in once in a targeted run and log it. |
 | DX14 | The stray zip and the stale docs (findings 6-10). | Fix the docs in the IX-WP1 push. Remove the zip from the Intellex tree in the same push; it stays in history, which is acceptable for a non-secret design asset. |
 
+### 4.4 Decisions taken writing IX-WP3 to IX-WP6 (2026-09-29)
+
+| # | Decision | Why |
+|---|---|---|
+| DX15 | The board tests go in a new `suites/s33_intellex_bench.py`; `s32_intellex.py` stays board-free. | `s32` runs while a bench run holds every port; one file per kind keeps that true and the needs visible. |
+| DX16 | Each `(should)` case is its own test id, not a case inside a normal test. | A normal test must be able to pass while a finding is open; each finding is then one visible failure. |
+| DX17 | Venv checks are scripts under `tests/intellex/py` with one runner (`_ixpy.py`): cases grouped, a JSON results file, judged by `hil/intellex.py judge_py`. | The harness stays stdlib plus pyserial (DX6); one script serves several test ids through its groups. |
+| DX18 | No real esptool in IX-WP3. `detect()` reads flash-id output built from esptool 5.3.1's own print statements; the pipeline runs a fake esptool, checked by its signature first, against a fake transport on `COMFAKE`. | Nothing may reach a port; no board has recorded esptool 5 output here. |
+| DX19 | `ws_transport_navicore` proves it is on NaviCore's AP by a direct PONG carrying the USB version, never by reading or comparing an SSID. | The credential rule; and the PONG is the stronger proof (a WCB AP at the same address mirrors a mesh PONG). |
+| DX20 | "Nothing reset the board" is proved off the stream too: W2's `(boot)` edge for W1, W1's for WCB 20, NaviCore's uptime. | A reset while the port is closed never reaches the stream. |
+| DX21 | `serial_signals_reset_w1` and `bridge_reboot_w1` reset W1 unattended and end with `_peers_online`; `serial_device_loss_navicore` is behind the new opt-in `intellex_reboot` (unticked), in `nc_guard`, and in `hil/servos.py`. | The same rules every W1 and NaviCore restart already follows (`docs/HIL_TESTING.md` §5). |
+| DX22 | `bridge_wire_w1` needs W2 as well as W1 and probe1: W2 sends the mesh traffic. | "30 s of mesh traffic" needs a sender; W2's `;W1,;S0` lines are ETM-delivered and land on W1's USB. |
+| DX23 | The wiki tests use a crafted wiki (`tests/intellex/fixtures/wiki`), never Greg's downloaded wikis. | The pages must carry the links, images and script under test, and nothing in a test should depend on real docs. |
+| DX24 | `hil/intellex.py` finds the sibling repos from a git worktree (`github_dir()`). | Every Intellex test skipped from a worktree, which is where the week's agents write tests. |
+| DX25 | Specs set a 15 s default action timeout; `ui_launcher` runs at 1280x1000. | A hidden control fails in 15 s, not at the 300 s test timeout; the app window is 1280x880, and at Playwright's 720 px the folded maintenance bar covers the device list. |
+
 ---
 
 ## Revision log
@@ -945,3 +1061,4 @@ suites that follow are not affected (the F21 precedent).
 | Date | Change |
 |---|---|
 | 2026-09-27 | Created. Map of Intellex at `d615344`, how to run it under test, IX-WP1-14, risks and decisions. Research only: nothing run, nothing changed. |
+| 2026-09-29 | IX-WP3 and IX-WP4 finished, IX-WP5 and IX-WP6 written (35 tests; `s32` additions, `s33_intellex_bench.py`, `tests/intellex/py`, `fixtures`, five specs). Findings 12-15 and three harness notes (§1.6); status notes on IX-WP3 to IX-WP6; decisions DX15-DX25 (§4.4). The no-board tests ran standalone against Intellex `e9f95f2`; the board tests are not yet run on the bench. Commit `_(pending)_`. |

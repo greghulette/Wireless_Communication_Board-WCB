@@ -197,6 +197,14 @@ OPT_INS = {
         "default_minutes": 20,
         "overhead_s": 60,
     },
+    "intellex_reboot": {
+        "title": "NaviCore restart through Intellex",
+        "what": "Sends NaviCore a REBOOT through Intellex's own serial transport, to see how the transport meets a device "
+                "that goes away: NaviCore's USB port re-enumerates, the mesh loses WCB 20 and SBUS OUT stops for about "
+                "5 s. Runs inside nc_guard, like every NaviCore restart.",
+        "why": "restarts NaviCore through Intellex's transport: the mesh and SBUS OUT lose it for about 5 s",
+        "estimate_s": 60,
+    },
 }
 
 

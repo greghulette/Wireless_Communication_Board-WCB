@@ -1,10 +1,12 @@
 // Both tools load through Intellex with nothing attached (IX-WP4). The harness starts the host unattached, offline
 // and with no serial port allowed, so any request the page makes past the host is either guarded or fails loudly.
+// intellex.ui_tools_load stages the tools from the working trees; intellex.ui_tools_load_shipped runs the same body
+// against Intellex's own bundles, which is what a user of the current Intellex runs (INTELLEX.md DX3).
 const { test, expect, skipUnlessHost } = require('../lib/fixtures');
 
 skipUnlessHost(test);
 
-test('intellex.ui_tools_load both tools load with nothing attached', async ({ page, rec, guarded }) => {
+async function toolsLoad({ page, rec }) {
   for (const [path, tool] of [['/', 'NaviCore config tool'], ['/wcb/Wizard/', 'WCB Wizard']]) {
     rec.reset();
     await page.goto(path, { waitUntil: 'load' });
@@ -27,4 +29,12 @@ test('intellex.ui_tools_load both tools load with nothing attached', async ({ pa
     const info = await page.evaluate(async () => (await navigator.serial.requestPort()).getInfo());
     expect(info.usbVendorId, `${path}: requestPort() did not return the shim's port`).toBe(0x303A);
   }
+}
+
+test('intellex.ui_tools_load both tools load with nothing attached', async ({ page, rec, guarded }) => {
+  await toolsLoad({ page, rec });
+});
+
+test('intellex.ui_tools_load_shipped both shipped tools load with nothing attached', async ({ page, rec, guarded }) => {
+  await toolsLoad({ page, rec });
 });

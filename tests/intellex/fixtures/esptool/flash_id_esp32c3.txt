@@ -1,0 +1,21 @@
+esptool v5.3.1
+Connecting....
+Connected to ESP32-C3 on COMFAKE:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                00:11:22:33:44:04
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: 20
+Device: 4016
+Detected flash size: 4MB
+Flash voltage set by eFuse: 3.3V
+
+Staying in bootloader.

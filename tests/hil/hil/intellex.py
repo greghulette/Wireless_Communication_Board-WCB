@@ -30,13 +30,28 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 
 from .bridge import Bridge
 from .runner import Skip
 from .wizard import _kill_tree, _outcomes, _reacquire, _wait_node
+from .ws import WsClient, frame
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-GITHUB = os.path.dirname(REPO)
+
+
+def github_dir(repo):
+    """The folder holding this repo and its siblings (Intellex, NaviCore): the repo's parent, or - from a git worktree
+    under <repo>/.claude/worktrees/<name>, where the week's agents write and run tests - the MAIN checkout's parent.
+    Beside .claude/worktrees there is no Intellex, and every Intellex test skipped 'no Intellex checkout' there."""
+    parts = os.path.normpath(repo).split(os.sep)
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees" and i:
+            return os.path.dirname(os.sep.join(parts[:i]))
+    return os.path.dirname(repo)
+
+
+GITHUB = github_dir(REPO)
 INTELLEX_TESTS = os.path.join(REPO, "tests", "intellex")
 _NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 STAGE_DIR = "ixstage"      # <out>/ixstage/<test id>: a staged Intellex (running_intellex() tells ours apart by it)
@@ -339,10 +354,11 @@ def copy_logs(bench, stage_dir, test_id):
 
 # ------------------------------------------------------------------ Playwright and venv scripts
 def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", settings=None, allow_ports=None,
-                      discover_hosts=(), offline=True, env=None, args=None, timeout=300.0):
+                      discover_hosts=(), offline=True, env=None, args=None, timeout=300.0, wiki=False):
     """Run the Playwright test titled `<test_id> ...` in tests/intellex against a staged host. device: a bench device
     whose port the host is given (released from the harness first, taken back and checked after). attach: the
-    /_api/attach body, or None to leave the host unattached. Raises AssertionError / Skip like run_wizard_test."""
+    /_api/attach body, or None to leave the host unattached. wiki: seed the crafted wiki (seed_wiki). Raises
+    AssertionError / Skip like run_wizard_test."""
     import shutil as _sh
     node = _sh.which("node")
     if not node:
@@ -358,6 +374,8 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
     if allow_ports is None:
         allow_ports = [bench.cfg["devices"][device]["port"]] if device else []
     sd = stage(bench, test_id, tools=tools, settings=settings)
+    if wiki:
+        seed_wiki(sd)
     out_dir = bench.out_dir or tempfile.mkdtemp(prefix="intellex-")
     report_path = os.path.join(out_dir, f"{test_id}.playwright.json")
     if device:
@@ -427,3 +445,309 @@ def run_venv(bench, argv, cwd, timeout=600.0, env=None):
         if line.strip():
             bench.log("intellex", "<", line.rstrip())
     return p.returncode, out
+
+
+# ------------------------------------------------------------------ seeded data: a crafted wiki, a firmware cache
+FIXTURES = os.path.join(INTELLEX_TESTS, "fixtures")
+
+
+def seed_wiki(stage_dir):
+    """Copy tests/intellex/fixtures/wiki/<product>/ into the stage's src/wiki/, where a non-frozen host reads its wikis
+    (Intellex paths.data_subdir). A crafted wiki, not Greg's downloaded one: its pages carry the links, images and
+    script the viewer must rewrite or keep inert, and none of it is real documentation -> the directory."""
+    dst = os.path.join(stage_dir, "src", "wiki")
+    shutil.copytree(os.path.join(FIXTURES, "wiki"), dst, dirs_exist_ok=True)
+    return dst
+
+
+def fw_key(branch):
+    """The cache directory name Intellex gives a branch (fwcache._key): '/' and '\\' flattened to '__', so 'feature/x'
+    is one directory and the summary walk sees it."""
+    return (branch or "main").replace("/", "__").replace("\\", "__")
+
+
+FW_REPOS = {"wcb": ("greghulette", "Wireless_Communication_Board-WCB", "Code/bin"),
+            "navicore": ("greghulette", "NaviCore", "firmware")}      # Intellex wcb_flash.py / flash.py GITHUB_*
+
+
+def seed_firmware(stage_dir, product, branch, files):
+    """A firmware set for (product, branch) where a non-frozen host keeps its cache (src/firmware/<product>/<branch>/,
+    fwcache._dirs), with the listing.json both native flashers and the GitHub proxy fall back to offline. files:
+    {name: bytes}. The listing has GitHub's contents shape and GitHub download URLs, as a cached one does -> the
+    directory."""
+    owner, repo, path = FW_REPOS[product]
+    d = os.path.join(stage_dir, "src", "firmware", product, fw_key(branch))
+    os.makedirs(d, exist_ok=True)
+    listing = []
+    for name, data in files.items():
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(data)
+        listing.append({"name": name, "path": f"{path}/{name}", "type": "file", "size": len(data),
+                        "download_url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}/{name}"})
+    with open(os.path.join(d, "listing.json"), "w", encoding="utf-8") as f:
+        json.dump(listing, f)
+    return d
+
+
+# ------------------------------------------------------------------ scripts under Intellex's venv (tests/intellex/py)
+PY_DIR = os.path.join(INTELLEX_TESTS, "py")
+
+
+def py_outcome(report):
+    """(failed, skipped, passed) from a tests/intellex/py results file - {"cases": [{"name", "status", "message"}],
+    "notes": [...]}, status passed | failed | skipped; anything else counts as failed. Each list holds (name, message)."""
+    out = {"passed": [], "failed": [], "skipped": []}
+    for c in (report or {}).get("cases") or []:
+        st = c.get("status")
+        out[st if st in out else "failed"].append((c.get("name", "?"), c.get("message", "")))
+    return out["failed"], out["skipped"], out["passed"]
+
+
+def judge_py(test_id, report, rc, tail):
+    """Raise for a venv script's result: AssertionError naming each failed case (a crash, a missing results file, no case
+    at all or a non-zero exit with nothing failed are failures too), Skip when every case skipped."""
+    if report is None:
+        raise AssertionError(f"{test_id}: the venv script exited {rc} with no results file:\n    " + "\n    ".join(tail))
+    failed, skipped, passed = py_outcome(report)
+    if failed:
+        raise AssertionError("\n".join(f"{n}: {m}" for n, m in failed))
+    if rc not in (0, None):
+        raise AssertionError(f"{test_id}: the venv script exited {rc} with no failed case:\n    " + "\n    ".join(tail))
+    if not passed and not skipped:
+        raise AssertionError(f"{test_id}: the venv script ran no case")
+    if skipped and not passed:
+        raise Skip(skipped[0][1] or f"{skipped[0][0]} skipped")
+
+
+def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none", stage_dir=None, env=None,
+                    timeout=600.0, allow_ports=None):
+    """Run tests/intellex/py/<script> under Intellex's venv against a staged Intellex (the script puts its src/ and tools/
+    first on the import path), with `args` as JSON, and judge its results file (judge_py) -> the report. device: a bench
+    device whose COM port the script gets as args["port"]; the harness releases it first and takes it back after,
+    checking the board answers (handed_over). The script runs leashed: offline, no discovery host, LOCALAPPDATA in the
+    stage, and INTELLEX_SERIAL_ALLOW naming that port alone (nothing without a device)."""
+    require(bench)
+    args = dict(args or {})
+    sd = stage_dir or stage(bench, test_id, tools=tools)
+    out_dir = bench.out_dir or tempfile.mkdtemp(prefix="intellex-")
+    out = os.path.join(out_dir, f"{test_id}.py.json")
+    if os.path.exists(out):
+        os.remove(out)
+    port = bench.cfg["devices"][device]["port"] if device else None
+    if port:
+        args.setdefault("port", port)
+    if allow_ports is None:
+        allow_ports = [port] if port else []
+    e = {"LOCALAPPDATA": os.path.join(sd, "appdata"), "INTELLEX_OFFLINE": "1",
+         "INTELLEX_SERIAL_ALLOW": ",".join(allow_ports), "INTELLEX_DISCOVER_HOSTS": ""}
+    e.update(env or {})
+    argv = [os.path.join(PY_DIR, script), "--stage", sd, "--args", json.dumps(args), "--out", out]
+
+    def go():
+        try:
+            return run_venv(bench, argv, cwd=sd, timeout=timeout, env=e)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"{test_id}: {script} still running after {timeout:.0f} s - killed") from None
+
+    if device:
+        others = running_intellex()
+        if others:
+            raise Skip(f"another Intellex is running (PID {others[0][0]}) and may hold {port} - close it first")
+        with handed_over(bench, device):
+            rc, text = go()
+    else:
+        rc, text = go()
+    try:
+        with open(out, encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, ValueError):
+        report = None
+    for n in (report or {}).get("notes") or []:
+        bench.note(f"{test_id}: {n}")
+    judge_py(test_id, report, rc, [x for x in text.splitlines() if x.strip()][-12:])
+    return report
+
+
+# ------------------------------------------------------------------ bench boards behind a host
+@contextmanager
+def handed_over(bench, device):
+    """Release `device`'s COM port for Intellex (a host or a venv script) -> its name, and take it back afterwards,
+    proving the board still answers (hil/wizard.py _reacquire: ?VERSION for a WCB, PING for NaviCore). A board that does
+    not come back fails the test after the block's own failure, both named; after an abort (Ctrl+C) it is only noted,
+    so the abort stays an abort."""
+    port = bench.cfg["devices"][device]["port"]
+    bench.close_device(device)
+    failure = None
+    try:
+        yield port
+    except BaseException as e:
+        failure = e
+        raise
+    finally:
+        try:
+            _reacquire(bench, device)
+        except AssertionError as e:
+            if failure is None:
+                raise
+            if not isinstance(failure, Exception):
+                bench.note(f"{device} not reacquired after the abort: {e}")
+            else:
+                raise AssertionError(f"{failure}\n{device} did not come back afterwards: {e}") from None
+
+
+@contextmanager
+def attached_host(bench, test_id, device, tools="none", attach=True):
+    """A leashed host holding `device`'s COM port -> the IntellexHost: stage Intellex, release the port from the harness,
+    start the host allowed that port alone, and attach it with POST /_api/attach (attach=False leaves it unattached).
+    On the way out: detach, kill the host's process tree (a host left running reopens its target every second, forever:
+    the COM11 incident), copy its log, then take the port back and check the board answers (handed_over)."""
+    require(bench)
+    others = running_intellex()
+    if others:
+        raise Skip(f"another Intellex is running (PID {others[0][0]}); a test host would contend for its ports - close "
+                   f"it first")
+    sd = stage(bench, test_id, tools=tools)
+    port = bench.cfg["devices"][device]["port"]
+    host = IntellexHost(bench, sd, allow_ports=[port])
+    with handed_over(bench, device):
+        try:
+            host.start()
+            if attach:
+                host.attach({"kind": "serial", "port": port})
+            yield host
+        finally:
+            host.stop()
+            copy_logs(bench, sd, test_id)
+
+
+class LinkTap:
+    """One raw /_link client, read on its own thread: every byte the host fans out to a page, in arrival order - the
+    oracle for what a tool receives. BINARY frames carry the transport's bytes; the host's own TEXT line (the ERROR
+    reply to a failed write) is kept too, as UTF-8. send() writes one TEXT frame, terminator included, as the shim does
+    per line. Never log what it holds: through NaviCore that includes GET_CONFIG and its passwords."""
+
+    def __init__(self, port, origin=None, name="tap"):
+        self.name = name
+        self.ws = WsClient("127.0.0.1", port, "/_link", origin=origin)
+        self.data = bytearray()
+        self.frames = 0
+        self.closed = None              # why the socket ended, once it has
+        self._lock = threading.Lock()
+        self._wlock = threading.Lock()  # a pong from the reader and a send from the test are both frames
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"link-{name}", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        ws = self.ws
+        while not self._stop.is_set():
+            try:
+                ws.sock.settimeout(0.5)
+                op, payload = ws._frame()
+            except socket.timeout:
+                continue
+            except (ConnectionError, OSError) as e:
+                if not self._stop.is_set():
+                    self.closed = f"{type(e).__name__}: {e}"
+                return
+            if op in (0x1, 0x2):
+                with self._lock:
+                    self.data += payload
+                    self.frames += 1
+            elif op == 0x9:             # aiohttp's heartbeat (30 s): answer it, or the host drops the page
+                try:
+                    with self._wlock:
+                        ws.sock.sendall(frame(payload, opcode=0xA))
+                except OSError:
+                    pass
+            elif op == 0x8:
+                self.closed = "the host closed the socket"
+                return
+
+    def send(self, text):
+        with self._wlock:
+            self.ws.send_text(text)
+
+    def snapshot(self):
+        with self._lock:
+            return bytes(self.data)
+
+    def wait_for(self, needle, timeout=5.0, start=0):
+        """The offset just past the first `needle` (bytes) at or after `start`; AssertionError on a timeout or a closed
+        socket. The message quotes the needle (a test's own marker) and a byte count, never the stream."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                i = self.data.find(needle, start)
+                n = len(self.data)
+            if i >= 0:
+                return i + len(needle)
+            if self.closed is not None:
+                raise AssertionError(f"{self.name}: /_link ended ({self.closed}) before {needle[:48]!r} arrived")
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"{self.name}: no {needle[:48]!r} on /_link within {timeout:g} s ({n} bytes "
+                                     f"so far)")
+            time.sleep(0.02)
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(2)
+        try:
+            self.ws.close()
+        except OSError:
+            pass
+
+
+def line_after(data, needle, start=0):
+    """The offset just past the line holding `needle` (its '\\n' included), or -1 when the needle or the line's end is
+    not there yet."""
+    i = data.find(needle, start)
+    if i < 0:
+        return -1
+    j = data.find(b"\n", i + len(needle))
+    return -1 if j < 0 else j + 1
+
+
+def line_start(data, needle, start=0):
+    """The offset where the line holding the first `needle` at or after `start` begins, or -1."""
+    i = data.find(needle, start)
+    if i < 0:
+        return -1
+    return max(start, data.rfind(b"\n", 0, i) + 1)
+
+
+def window(data, first, last):
+    """The bytes strictly between the line holding `first` and the next line holding `last` -> bytes, or None when either
+    is missing: the part of two taps' streams that must be byte-identical, whatever each saw before it connected."""
+    a = line_after(data, first)
+    if a < 0:
+        return None
+    b = line_start(data, last, a)
+    return None if b < 0 else data[a:b]
+
+
+def line_spans(data, needle):
+    """[(start, end)] of every whole line holding `needle`, in order; end is just past its '\\n'. For a sync line that
+    is not unique - NaviCore's PONG is the same every time - the k-th span in two taps is the same line, provided both
+    were connected before the first one was asked for."""
+    out, i = [], data.find(needle)
+    while i >= 0:
+        j = data.find(b"\n", i)
+        if j < 0:
+            break
+        out.append((data.rfind(b"\n", 0, i) + 1, j + 1))
+        i = data.find(needle, j + 1)
+    return out
+
+
+# What a board prints as it starts, as it reaches a transport or a /_link: a classic ESP32 WCB's ROM reset line, then
+# setup()'s first and last lines (hil/wcb.py BOOT_LINE, WCB.wait_boot); NaviCore's ROM line, banner and reset reason
+# (suites/s46_navicore_boot.py BANNER_START, hil/navicore.py parse_boot). The ROM's 'ets <date>' banner is left out: its
+# date differs between ESP32 silicon revisions.
+WCB_BOOT_MARKERS = ("rst:0x", "Booting up the Wireless Communication Board", "Raw Serial Forwarding Task Created")
+NAVICORE_BOOT_MARKERS = ("ESP-ROM:", "=== NaviCore ===", "Reset reason:")
+
+
+def boot_markers_in(data, markers):
+    """The boot markers present in `data` (bytes), in the order given."""
+    return [m for m in markers if m.encode() in data]
