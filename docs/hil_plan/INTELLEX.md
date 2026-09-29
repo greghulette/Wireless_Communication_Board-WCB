@@ -732,7 +732,7 @@ whole browser context, frames and popups included), `hilContext` and `hostPost`.
 | Bench | About 5 minutes. |
 | Mode | Unattended, except where marked. |
 
-**Status (2026-09-29): written, not yet run on the bench.** In `suites/s33_intellex_bench.py`, with the venv side in
+**Status (2026-09-29): written and bench-verified** (`20260929-043806`: every IX-WP5 test passes but `ws_transport_navicore`, which skips until the PC's second adapter is on NaviCore's AP (IX-WP9), and `serial_device_loss_navicore`, behind `intellex_reboot`). In `suites/s33_intellex_bench.py`, with the venv side in
 `tests/intellex/py/transport_serial.py` and `transport_ws.py`. The harness releases the one port a test names and takes
 it back afterwards (`hil/intellex.py handed_over`); `INTELLEX_SERIAL_ALLOW` names that port alone. Dry-run against a
 simulated port and a faked WebSocket (every group's control flow); never against a board.
@@ -764,7 +764,7 @@ simulated port and a faked WebSocket (every group's control flow); never against
 | Bench | About 5 minutes. |
 | Mode | Unattended. |
 
-**Status (2026-09-29): written, not yet run on the bench.** In `suites/s33_intellex_bench.py`. A staged, leashed host
+**Status (2026-09-29): written and bench-verified** (`20260929-043806`: all six IX-WP6 tests pass). In `suites/s33_intellex_bench.py`. A staged, leashed host
 attached to the board's COM port (`hil/intellex.py attached_host`), and raw `/_link` clients (`LinkTap`) standing in
 for the tool pages. Streams are compared by length and SHA-256, never quoted (through NaviCore they carry GET_CONFIG).
 `bridge_terminators_w1`, `bridge_reboot_w1` and `bridge_load_navicore` were dry-run end to end through a real staged
@@ -1062,3 +1062,4 @@ suites that follow are not affected (the F21 precedent).
 |---|---|
 | 2026-09-27 | Created. Map of Intellex at `d615344`, how to run it under test, IX-WP1-14, risks and decisions. Research only: nothing run, nothing changed. |
 | 2026-09-29 | IX-WP3 and IX-WP4 finished, IX-WP5 and IX-WP6 written (35 tests; `s32` additions, `s33_intellex_bench.py`, `tests/intellex/py`, `fixtures`, five specs). Findings 12-15 and three harness notes (§1.6); status notes on IX-WP3 to IX-WP6; decisions DX15-DX25 (§4.4). The no-board tests ran standalone against Intellex `e9f95f2`; the board tests are not yet run on the bench. Commit `_(pending)_`. |
+| 2026-09-29 | IX-WP3 to IX-WP6 bench-verified (`20260929-043806`, 54 `intellex.*`): 45 pass; the seven `(should)` tests fail as designed (findings 1-3, 5, 12-15); `ws_transport_navicore` skips until the PC's second adapter is on NaviCore's AP (IX-WP9) and `serial_device_loss_navicore` ran behind `intellex_reboot`, now ticked (D59). |

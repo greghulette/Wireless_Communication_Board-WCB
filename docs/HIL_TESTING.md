@@ -1214,9 +1214,9 @@ on purpose: were the Origin guard broken, that request would run `netsh` against
 
 The plan is IX-WP1 to IX-WP14 in [hil_plan/INTELLEX.md](hil_plan/INTELLEX.md). Done: the hooks (Intellex
 `e9f95f2`), the plumbing, IX-WP3 (the API, guard, docs and proxy tests, and the venv checks in
-`tests/intellex/py`) and IX-WP4 (the Playwright specs), all without a board, in `s32_intellex.py`. Written, not
-yet run on the bench: IX-WP5 and IX-WP6 in `s33_intellex_bench.py` (Intellex's transports, and the bridge end to
-end with raw `/_link` clients). Next: both tools through Intellex (IX-WP7, IX-WP8), WiFi, and flashing (W2
+`tests/intellex/py`) and IX-WP4 (the Playwright specs), all without a board, in `s32_intellex.py`; and, on the
+bench (`20260929-043806`), IX-WP5 and IX-WP6 in `s33_intellex_bench.py` (Intellex's transports, and the bridge end
+to end with raw `/_link` clients). Next: both tools through Intellex (IX-WP7, IX-WP8), WiFi, and flashing (W2
 only).
 
 ## Revision log

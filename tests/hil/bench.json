@@ -86,6 +86,7 @@
     "navicore_ota_erase",
     "navicore_ota_full",
     "etm_seq_wrap",
-    "navicore_nvs"
+    "navicore_nvs",
+    "intellex_reboot"
   ]
 }

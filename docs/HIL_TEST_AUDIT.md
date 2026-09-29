@@ -749,6 +749,13 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     D-NC56-60), so every NaviCore work package that needs no new hardware or firmware has its tests; their first
     bench pass is running. All pushed to WIFI (`3c823b3`). Next: triage that pass, the Intellex agent (IX-WP3/4
     remnants, IX-WP5/6, resumed after the 00:50 limit), then tonight's full run.
+  - 2026-09-29 04:45: Intellex IX-WP3 to IX-WP6 are merged (35 tests, D58) and bench-verified (`20260929-043806`:
+    45 of 54, the seven `(should)` findings failing as designed, the WiFi test waiting for IX-WP9; D59). NC-WP7 is
+    bench-verified; NC-WP6's first two passes (`20260929-025701`, `-042105`) were test-side and are fixed but
+    for three `?MGMT` relay tests, back with their writer. Probe lines are now redacted in session.log (D57);
+    #109 (single-pass relayed replies) filed. Next: NC-WP6's last three, then Intellex IX-WP7/8 (both tools
+    through Intellex), tonight's full run, and the WCB remnants (ETM characterisation, timers, legacy spellings,
+    the Wizard).
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
