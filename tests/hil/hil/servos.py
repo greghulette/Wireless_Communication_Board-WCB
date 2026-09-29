@@ -86,6 +86,38 @@ SERVO_TESTS = {
     "nccfg.reset_defaults_keeps_identity": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                            "is sent back",
     "nccfg.hook_config_unreadable": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
+    # ---- NC-WP4, the engine through TRIGGER and TEST_ACTION (s41). The rest of s41 fires markers at W1 S2, queries
+    # Maestro 2 (getMovingState / getErrors) or writes frames for remote slot 4, which no Maestro answers.
+    "ncengine.maestro_skip_running_slot": "sets speed 4 on one undriven channel of NaviCore's Maestro 1 (the dome), "
+                                          "moves it 100 us and back, then sets its speed to 0",
+    "ncengine.mode_report_content": "two mesh SET_MODEs: J2 moves NaviCore's Maestro slot 1 ch 0, J4 Maestro 2",
+    "ncengine.mesh_trigger_burst": "stalls loop() 4 s (#L90): SBUS OUT, which re-emits the controller's stream, stops "
+                                   "meanwhile (knobs, bands and the mode function are made inert for it)",
+    # ---- NC-WP5, the engine through SBUS (s42): the controller's sticks, switches and matrix buttons move SBUS
+    # channels that NaviCore re-emits on SBUS OUT; the rx/ry sticks (CH1-2) also drive the controller's own RC PWM 1-2.
+    # Knob outputs go to remote slot 4 (nothing moves); a mode change snaps J2 (the dome) and J4 (Maestro 2).
+    "sbus.matrix_logical_band": "presses two controller lua buttons on the matrix channel",
+    "sbus.matrix_debounce_n": "presses a matrix button about 25 times",
+    "sbus.tap_saturation_4": "presses a matrix button nine times",
+    "sbus.other_button_commits": "presses two matrix buttons",
+    "sbus.mode_latched_at_press": "holds a matrix button and changes the mode twice over the mesh: J2 and J4 move",
+    "sbus.long_press_configured": "holds a matrix button, up to holdMs + 0.5 s",
+    "sbus.held_second_tap_midhold": "presses and holds a matrix button",
+    "sbus.switch_tiers_settle_seed": "moves the rx stick through its range",
+    "sbus.switch_easing_seed": "moves the rx stick; the easing frames go to remote slot 4",
+    "sbus.mode_switch_decode": "moves the controller's mode switch and changes NaviCore's mode about ten times: J2 "
+                               "and J4 snap to their sticks each time",
+    "sbus.knob_passthrough_remote": "moves the rx stick; the knob drives remote slot 4",
+    "sbus.knob_mode_aware": "moves the rx stick and changes the mode twice over the mesh: J2 and J4 move",
+    "sbus.knob_auto_release": "moves the rx stick; the knob drives remote slot 4",
+    "sbus.knob_easing_resolve": "moves the rx stick; the knob drives remote slot 4",
+    "sbus.knob_hcr_volume": "moves the rx stick; the knob sends HCR channel B volumes to the HCR's WCB",
+    "sbus.calibration_mutes_knobs": "moves the rx stick; the knob drives remote slot 4",
+    "sbus.prefix_ambiguity_ch17": "presses a matrix button (and puts the CH17 switch low only if it is not already)",
+    "sbus.stall_no_phantom": "stalls loop() 20 times: SBUS OUT stops during each; were a stall to make NaviCore "
+                             "decode garbage, only the remote-slot detector knobs could act (the rest is made inert)",
+    "sbus.reconfig_live": "moves the rx stick and holds a matrix button across saves",
+    "sbus.reconfig_parked_tap_cleared": "holds a matrix button across a save",
 }
 
 
