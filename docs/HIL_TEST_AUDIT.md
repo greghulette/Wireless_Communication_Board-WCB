@@ -756,6 +756,14 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     #109 (single-pass relayed replies) filed. Next: NC-WP6's last three, then Intellex IX-WP7/8 (both tools
     through Intellex), tonight's full run, and the WCB remnants (ETM characterisation, timers, legacy spellings,
     the Wizard).
+  - 2026-09-29 09:45: WCB-WP22 (the WebSocket endpoint with the PC on W1's access point) is finished and
+    bench-verified (`20260929-055154`, `-055837`; `4333dd5`): five new `wifi_pc` tests and `wifi.join_w2_ap`'s
+    ready line and PC half. Two firmware findings: #110 (a lease from W1's access point takes 1.8-46.7 s; the
+    join now waits 60 s, D61) and #111 (the heap's low-water mark reaches 48-76 bytes with a PC attached, noted
+    not asserted, D62); the join's notes no longer name a network (D63). ETM characterisation, the timers and
+    the legacy spellings (WP24/29/34) were finished before it. The Wizard and Intellex agents, stopped by the
+    07:10 usage limit, are resumed; an agent writes INF5 (`hil/wlan.py`, `hil/ncws.py`) and NC-WP8 (`s45`).
+    Next: merge and bench-run each as it lands, then tonight's full run.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
