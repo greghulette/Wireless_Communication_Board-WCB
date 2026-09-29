@@ -49,7 +49,7 @@ from hil.runner import Skip, test
 from hil.wcb import PULL_MAX, WCB, Pull
 from suites.common import config_guard, link, marker, nonce, probe_in_mesh, require_tokens, token, usb_wcb
 from suites.s03_wcb import _factory_reply, _reply_problems
-from suites.s05_mesh import FRAG_CHUNK
+from suites.s05_mesh import FRAG_CHUNK, FRAG_GAP_S
 from suites.s05_mesh import _sid as _frag_sid
 from suites.s17_seq_inventory import _names, _seqval
 from suites.s18_etm_config_wdp import _etm, _forget_everywhere, _joined
@@ -60,6 +60,7 @@ from suites.s41_navicore_engine import _count, _engine_inert, _wait_all
 
 KEEPALIVE = {"type": "STOP_MONITOR"}    # accepted over the mesh and ignored (rc_telemetry.h:2399-2402)
 KEEPALIVE_S = 8.0                       # a renewal well inside W1's 20 s relay window
+SEQ_FRAG, SEQVAL_FRAG = 14, 16          # PACKET_TYPE_SEQ_FRAG / SEQVAL_FRAG: a WCB's sequence replies (WCB.ino:281-287)
 ETM_RUN_MAX_S = 60.0                    # W2's characterization with one peer took about 4 s (run 20260929-025701)
 ETM_REPLY_WAIT_S = 3.0                  # after W2's last frag, for NaviCore's [MGMT:ETM,2] line
 ACK_SETTLE_S = 0.8                      # after a TEST_ACTION's ACK, room for a second run's (fragment_reassembly_edges)
@@ -156,9 +157,10 @@ def _envelope_times(w1, since, sid):
 
 
 def _full_fps(nc):
-    """#L09's fps once it reads full rate, retried once over about a second (a save or a long line just before can
-    leave one low one-second window: NaviCore.sbus_full_rate)."""
-    return nc.sbus_full_rate(timeout=1.2)["fps"]
+    """#L09's fps once it reads full rate, re-read once a second for up to 4 s (NaviCore.sbus_full_rate): a save or a
+    long transfer just before leaves low one-second windows for a while - nc_guard's snapshot, which reads the whole
+    command library, left 27 and then 77 before bridged_cmdlib's gate (run 20260929-042105) while no frame was lost."""
+    return nc.sbus_full_rate()["fps"]
 
 
 def _require_full_rate(nc):
@@ -208,6 +210,54 @@ def _seq_clear(w, *keys):
     key list if it is there ("No stored value found ... removed from list if present")."""
     for k in keys:
         w.run(f"?SEQ,CLEAR,{k}", timeout=8)
+
+
+def _reply_leg(w, since, n, nid, ptype):
+    """Which leg of a W<n> management reply to NaviCore went missing, from W<n>'s ?DEBUG,MGMT lines since `since`: each
+    request handler prints '[MGMT] ... request ... from WCB<nid>' (WCB.ino:4659, :4689, :4760, :4772) and
+    sendResultFrags prints 'Sent result frags (<k> chunks, type <ptype>) to WCB<nid>' (:4648-4649)."""
+    lines = [x.rstrip() for x in w.dev.since(since)]
+    sent = [m.group(1) for x in lines
+            for m in [re.search(rf"^\[MGMT\] Sent result frags \((\d+) chunks, type {ptype}\) to WCB{nid}\b", x)] if m]
+    if sent:
+        return f"W{n} sent its reply in {sent[-1]} broadcast frag(s) and NaviCore took none (tracker #109)"
+    if any(re.search(rf"^\[MGMT\] .*request.* from WCB{nid}\b", x) for x in lines):
+        return f"W{n} logged the request and sent no reply"
+    return f"W{n} logged no request: NaviCore's request was lost"
+
+
+def _seq_ask(w, n, nid, call, ptype, notes):
+    """call(), a NaviCore sequence pull of W<n> that raises on ok:false (NaviCore.seq / seqval), with W<n>'s ?DEBUG,MGMT
+    on (console `w`, RAM only), asked once more after 'no reply' -> its result. W<n> answers a pull once, in broadcast
+    frames with no second pass (sendResultFrags, WCB.ino:4611-4650; tracker #109), and NaviCore's request is itself
+    three unacknowledged broadcast frames (WCB_Client.cpp:1284-1291): one lost frame costs the answer, and NaviCore says
+    'no reply' 6 s later (rc_telemetry.h:1559-1562; seq_pull's first W2 pull in run 20260929-042105). The note names
+    the lost leg (_reply_leg); a second 'no reply' raises with it."""
+    w.debug("MGMT", True)
+    try:
+        for ask in (1, 2):
+            m = w.dev.mark()
+            try:
+                return call()
+            except AssertionError as e:
+                if "no reply" not in str(e):
+                    raise
+                leg = _reply_leg(w, m, n, nid, ptype)
+                if ask == 2:
+                    raise AssertionError(f"{e}, twice; the second time {leg}") from None
+                notes.append(f"a pull of W{n} got no reply ({leg}); asked once more")
+    finally:
+        w.debug("MGMT", False)
+
+
+def _etm_block(lines):
+    """The ETM characterization result block in console `lines` (right-stripped): its 'WCB<n> ETM Network
+    Characterization' header to the closing rule (buildETMCharResultsString, WCB.ino:2298-2344), or []."""
+    start = next((k for k, x in enumerate(lines) if re.match(r"^-+ WCB\d+ ETM Network Characterization -+$", x)), None)
+    if start is None:
+        return []
+    end = next((k for k in range(start + 1, len(lines)) if re.match(r"^-{20,}$", lines[k])), len(lines) - 1)
+    return lines[start:end + 1]
 
 
 def _no_plain_fanout(nc):
@@ -1076,34 +1126,47 @@ FILL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 12
 
 
 @test("ncmesh.mgmt_stats_frag", "NaviCore's management relay: ?MGMT,STATS,2 answers [MGMT:STATS,2] carrying W2's own "
-      "per-board ETM rows; ?MGMT,FRAG pushes a one-chunk and a three-chunk ?SEQ,SAVE that W2 stores whole (read back on "
-      "W2 and through GET_WCB_SEQVAL); an over-long ?MGMT line is refused with '[mgmt] line too long' and sends nothing",
-      needs=["navicore", "wcb1", "wcb2"], links=[])
+      "per-board ETM rows (asked once more when the reply is lost on the air, tracker #109); a one-chunk ?MGMT,FRAG "
+      "?SEQ,SAVE reaches W2 as an ordinary command and is stored; an over-long ?MGMT line is refused with '[mgmt] line "
+      "too long' and sends nothing", needs=["navicore", "wcb1", "wcb2"], links=[])
 def mgmt_stats_frag(bench):
     """WcbMgmt::handleLine (WCB_Client WCB_Mgmt.h:367-403). STATS sends one PT_STATS_REQ (7) raw packet (:398); W2
-    answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments, which service() prints in ONE
-    printf as '[MGMT:STATS,2]<text>' (WCB_Mgmt.h:496-511) - the text keeps its newlines, so its rows follow on lines of
-    their own. FRAG (handleMgmtFrag, WCB_Mgmt.h:323-361): a one-chunk session goes to W2 as an ordinary command
-    ('[relay] MGMT -> WCB2 (1/1): <payload>'), a longer one chunk by chunk as raw type-3 frags that W2 reassembles by
-    session ('[relay] MGMT -> WCB2 frag i/n (session XXXX)'). Chunks are the Wizard's 179 characters, 0.25 s apart (s05
-    FRAG_CHUNK, FRAG_GAP_S). A line whose text after '?MGMT,' is 400 bytes or more is refused before anything is parsed
-    (WCB_Mgmt.h:389-393). All typed on NaviCore's USB. The pushes run in config_guard(bench, 2), and the test clears
-    both sequences in a finally (the guard fails a test that leaves one, run 20260929-025701); a multi-chunk push that
-    W2 did not store goes once more under a new session."""
+    answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments, once, in broadcast frames with no
+    second pass (sendResultFrags, WCB.ino:4611-4650; tracker #109), which service() prints in ONE printf as
+    '[MGMT:STATS,2]<text>' (WCB_Mgmt.h:496-511) - the text keeps its newlines, so its rows follow on lines of their own.
+    A reply that never came is asked for once more, with ?DEBUG,MGMT on W2 (RAM only) so the note says which leg was
+    lost (_reply_leg). A one-chunk FRAG goes to W2 as an ordinary command ('[relay] MGMT -> WCB2 (1/1): <payload>',
+    WCB_Mgmt.h:336-342); the multi-chunk form is ncmesh.mgmt_frag_multichunk (D-NC48). A line whose text after '?MGMT,'
+    is 400 bytes or more is refused before anything is parsed (WCB_Mgmt.h:389-393). All typed on NaviCore's USB. The
+    push runs in config_guard(bench, 2), and the test clears its sequence in a finally (the guard fails a test that
+    leaves one, run 20260929-025701)."""
     nc, w2 = _nc(bench), _w2(bench)
-    problems = []
-    nm = nc.dev.mark()
-    nc.dev.send("?MGMT,STATS,2")
-    _nav_regex(nc, nm, r"^\[MGMT:STATS,2\]", 8, "[MGMT:STATS,2] reply")
-    time.sleep(1.0)
-    block = nc.dev.since(nm)
+    nid = _nid(nc)
+    problems, notes = [], []
+    block = None
+    w2.debug("MGMT", True)
+    try:
+        for ask in (1, 2):
+            nm, m2 = nc.dev.mark(), w2.dev.mark()
+            nc.dev.send("?MGMT,STATS,2")
+            try:
+                _nav_regex(nc, nm, r"^\[MGMT:STATS,2\]", 6, "[MGMT:STATS,2] reply")
+            except AssertionError:
+                notes.append(f"ask {ask}: no [MGMT:STATS,2] reply ({_reply_leg(w2, m2, 2, nid, 9)})")
+                continue
+            time.sleep(1.0)
+            block = nc.dev.since(nm)
+            break
+    finally:
+        w2.debug("MGMT", False)
+    if block is None:
+        raise AssertionError("NaviCore printed no [MGMT:STATS,2] reply to two asks: " + "; ".join(notes))
     i = next(k for k, x in enumerate(block) if x.startswith("[MGMT:STATS,2]"))
     relayed, own = ncmesh.stats_rows(block[i:]), ncmesh.stats_rows(w2.run("?STATS", timeout=8))
     if not relayed or set(relayed) != set(own):
         problems.append(f"[MGMT:STATS,2] lists boards {sorted(relayed)}; W2's own ?STATS lists {sorted(own)}")
-    key1, key2 = f"HILF{nonce()[:4]}", f"HILG{nonce()[:4]}"
+    key1 = f"HILF{nonce()[:4]}"
     val1 = f";S3{marker('F')}"
-    val2 = f";S3{marker('G')}{FILL}"[:395]
     with config_guard(bench, 2):
         nm = nc.dev.mark()
         try:
@@ -1115,34 +1178,8 @@ def mgmt_stats_frag(bench):
             time.sleep(1.0)
             if _seqval(w2, key1) != f"[MGMT:SEQVAL,2]{key1},OK,{val1}":
                 problems.append(f"the one-chunk push: W2 reads {key1} as {_seqval(w2, key1)!r}")
-            payload = f"?SEQ,SAVE,{key2},{val2}"
-            parts = [payload[k:k + FRAG_CHUNK] for k in range(0, len(payload), FRAG_CHUNK)]
-            stored, relay_lines = False, []
-            for _ in range(2):
-                sid = _frag_sid()
-                nm = nc.dev.mark()
-                for k, part in enumerate(parts):
-                    if k:
-                        time.sleep(0.25)
-                    nc.dev.send(f"?MGMT,FRAG,2,{sid},{k},{len(parts)},{part}")
-                time.sleep(1.5)
-                relay_lines = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[relay] MGMT -> WCB2 frag ")]
-                stored = _seqval(w2, key2) == f"[MGMT:SEQVAL,2]{key2},OK,{val2}"
-                if stored:
-                    break
-                bench.note(f"the {len(parts)}-chunk push under session {sid} left nothing on W2; pushing again")
-            want = [f"[relay] MGMT -> WCB2 frag {k + 1}/{len(parts)} (session {sid.upper()})" for k in range(len(parts))]
-            if relay_lines != want:
-                problems.append(f"relay lines {relay_lines}, expected {want}")
-            if not stored:
-                problems.append(f"the {len(parts)}-chunk push never stored {key2} whole on W2 (reads "
-                                f"{(_seqval(w2, key2) or '')[:60]!r}...)")
-            got = nc.seqval(2, key2)
-            if (got.get("status"), got.get("value")) != (0, val2):
-                problems.append(f"GET_WCB_SEQVAL 2 {key2}: status {got.get('status')}, a {len(got.get('value') or '')}-"
-                                f"character value (W2 holds {len(val2)})")
         finally:
-            _seq_clear(w2, key1, key2)
+            _seq_clear(w2, key1)
     nm = nc.dev.mark()
     nc.dev.send("?MGMT,HIL" + "x" * 420)
     try:
@@ -1151,12 +1188,64 @@ def mgmt_stats_frag(bench):
         problems.append(str(e))
     if any(x.startswith("[relay]") for x in nc.dev.since(nm)):
         problems.append("the over-long line was relayed")
+    if notes:
+        bench.note("; ".join(notes))
     assert not problems, "; ".join(problems)
 
 
+@test("ncmesh.mgmt_frag_multichunk", "(should) A three-chunk ?MGMT,FRAG push through NaviCore reaches W2 and is stored "
+      "whole, as through a WCB relay: NaviCore sends each chunk in the 226-byte MGMT frame a WCB takes",
+      needs=["navicore", "wcb2"], links=[])
+def mgmt_frag_multichunk(bench):
+    """NAVICORE.md D-NC48 (found by the second bench run, 20260929-042105). WcbMgmt forwards each chunk of a multi-chunk
+    FRAG as a raw type-3 packet built in its 230-byte config_frag struct (WCB_Client WCB_Mgmt.h:343-360, the struct at
+    :97-106: sourceWCB, requesterWCB, payload[183]). A WCB takes a MGMT frag only as its 226-byte espnow_struct_mgmt
+    (targetWCB, payload[180]; WCB.ino:1077-1086), matched by size (:5181-5183); a 230-byte frame goes to the config-frag
+    branch, which knows no type 3 and drops it without a word (:5202-5213). So no chunk of a multi-chunk push through
+    NaviCore reaches W2, while NaviCore prints '[relay] MGMT -> WCB2 frag i/n (session XXXX)' for each: both bench runs
+    left the key NOTFOUND on W2 after two sessions. WCB_Client's own MgmtRelay example builds the right frame
+    (wcb_packet_mgmt_t, WCB_Client.h:197-205; MgmtRelay.ino:859-869), and so does a WCB relay. The push is a
+    395-character ?SEQ,SAVE in the Wizard's 179-character chunks 0.25 s apart (s05 FRAG_CHUNK, FRAG_GAP_S), read back on
+    W2's console; a push W2 did not store goes once more under a new session. Inside config_guard(bench, 2), and the
+    test clears the sequence in a finally. Recommendation: build the frame from wcb_packet_mgmt_t in
+    WcbMgmt::handleMgmtFrag, as MgmtRelay.ino does."""
+    nc, w2 = _nc(bench), _w2(bench)
+    key = f"HILG{nonce()[:4]}"
+    val = f";S3{marker('G')}{FILL}"[:395]
+    payload = f"?SEQ,SAVE,{key},{val}"
+    parts = [payload[k:k + FRAG_CHUNK] for k in range(0, len(payload), FRAG_CHUNK)]
+    notes, stored = [], False
+    with config_guard(bench, 2):
+        try:
+            for ask in (1, 2):
+                sid = _frag_sid()
+                nm = nc.dev.mark()
+                for k, part in enumerate(parts):
+                    if k:
+                        time.sleep(FRAG_GAP_S)
+                    nc.dev.send(f"?MGMT,FRAG,2,{sid},{k},{len(parts)},{part}")
+                time.sleep(1.5)
+                relay = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[relay] MGMT -> WCB2 frag ")]
+                want = [f"[relay] MGMT -> WCB2 frag {k + 1}/{len(parts)} (session {sid.upper()})"
+                        for k in range(len(parts))]
+                if relay != want:
+                    raise AssertionError(f"NaviCore printed the relay lines {relay}, expected {want}: nothing to judge")
+                stored = _seqval(w2, key) == f"[MGMT:SEQVAL,2]{key},OK,{val}"
+                notes.append(f"push {ask} (session {sid}, {len(parts)} chunks): W2 stored it {stored}")
+                if stored:
+                    break
+        finally:
+            _seq_clear(w2, key)
+    bench.note("; ".join(notes))
+    assert stored, (f"(should, D-NC48) a {len(parts)}-chunk push through NaviCore never reached W2 ({key} NOTFOUND "
+                    f"after two sessions): WCB_Mgmt.h:343-360 sends each chunk as a 230-byte config_frag, and a WCB "
+                    f"takes a MGMT frag only as its 226-byte espnow_struct_mgmt (WCB.ino:1077-1086)")
+
+
 @test("ncmesh.mgmt_etm_char", "?MGMT,ETM,CHAR,2 on NaviCore asks W2 for its ETM characterization with one request (W2 "
-      "logs one from WCB20 per ask), and the answer comes back as one [MGMT:ETM,2] reply; a reply W2 sent that never "
-      "arrived is asked for once more (slow: about 10 s an ask)", needs=["navicore", "wcb2"], links=[])
+      "logs one from WCB20 per ask), and the answer comes back as one [MGMT:ETM,2] reply whose text is the result block "
+      "W2 printed; a reply W2 sent that never arrived is asked for once more (slow: about 10 s an ask)",
+      needs=["navicore", "wcb2"], links=[])
 def mgmt_etm_char(bench):
     """WcbMgmt sends ONE PT_ETM_REQ (8) raw packet for ETM,CHAR (WCB_Mgmt.h:399; a PULL goes three times, :265-267). W2
     runs its characterization for NaviCore (handleETMReqPacket, WCB.ino:4766-4785; a request while a run is going is
@@ -1168,7 +1257,11 @@ def mgmt_etm_char(bench):
     150 s. A config reply goes in two passes for this (WCB.ino:4552-4556); STATS, ETM and sequence replies do not. So
     the test waits for W2's own send line (?DEBUG,MGMT, RAM only, on meanwhile), then ETM_REPLY_WAIT_S for NaviCore's
     '[MGMT:ETM,2]<text>' (WCB_Mgmt.h:496-511), and asks once more when W2 sent and NaviCore printed nothing (noted).
-    Skips while NaviCore writes plain mesh text out an aux port: the run's traffic reaches NaviCore too."""
+    The text starts with a newline (buildETMCharResultsString, WCB.ino:2298-2344), so the tag line is bare and the
+    block follows on lines of its own, as a STATS reply's rows do: it must equal the block W2 printed on its own console
+    for the same run, header to closing rule (in run 20260929-042105 it did, and the tag line alone read as an empty
+    reply). A run that could not start answers with its reason on the tag line (noted). Skips while NaviCore writes
+    plain mesh text out an aux port: the run's traffic reaches NaviCore too."""
     nc, w2 = _nc(bench), _w2(bench)
     _no_plain_fanout(nc)
     nid = _nid(nc)
@@ -1189,27 +1282,36 @@ def mgmt_etm_char(bench):
             except AssertionError:
                 pass
             time.sleep(1.0)
-            replies = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[MGMT:ETM,2]")]
-            reqs = [x for x in w2.dev.since(m2) if x.startswith(f"[MGMT] ETM char request from WCB{nid}")]
-            asks.append((len(reqs), frags, replies))
+            got = [x.rstrip() for x in nc.dev.since(nm)]
+            own = [x.rstrip() for x in w2.dev.since(m2)]
+            replies = [k for k, x in enumerate(got) if x.startswith("[MGMT:ETM,2]")]
+            reqs = [x for x in own if x.startswith(f"[MGMT] ETM char request from WCB{nid}")]
+            relayed = ([got[replies[0]][len("[MGMT:ETM,2]"):]] if replies and got[replies[0]] != "[MGMT:ETM,2]"
+                       else _etm_block(got[replies[0] + 1:]) if replies else [])
+            asks.append((len(reqs), frags, len(replies), relayed, _etm_block(own)))
             if replies:
                 break
             notes.append(f"ask {ask}: W2 sent its reply in {frags} broadcast frag(s) and NaviCore printed none within "
                          f"{ETM_REPLY_WAIT_S + 1:g} s (a frag lost under the run's own load)")
     finally:
         w2.debug("MGMT", False)
-    reqs, frags, replies = asks[-1]
-    body = replies[0][len("[MGMT:ETM,2]"):] if replies else ""
-    notes.append(f"{len(asks)} ask(s); the last: {len(replies)} [MGMT:ETM,2] reply(ies) from {frags} frag(s), starting "
-                 f"{body[:100]!r}" + (" - the run could not start" if "could not run" in body else ""))
+    _, frags, replies, relayed, own = asks[-1]
+    could_not = bool(relayed) and "could not run" in relayed[0]
+    notes.append(f"{len(asks)} ask(s); the last: {replies} [MGMT:ETM,2] reply(ies) from {frags} frag(s), "
+                 f"{len(relayed)} line(s) of text" + (f" - the run could not start: {relayed[0][:100]!r}"
+                                                      if could_not else ""))
     bench.note("; ".join(notes))
     problems = [f"ask {k + 1}: W2 logged {n} ETM char requests from WCB{nid}; the relay sends one"
-                for k, (n, _, _) in enumerate(asks) if n != 1]
-    if len(replies) != 1:
-        problems.append(f"W2 sent its reply {len(asks)} time(s) and NaviCore printed {len(replies)} [MGMT:ETM,2] line(s) "
+                for k, (n, *_) in enumerate(asks) if n != 1]
+    if replies != 1:
+        problems.append(f"W2 sent its reply {len(asks)} time(s) and NaviCore printed {replies} [MGMT:ETM,2] line(s) "
                         f"for the last")
-    elif not body.strip():
-        problems.append("the [MGMT:ETM,2] reply is empty")
+    elif not relayed:
+        problems.append("the [MGMT:ETM,2] reply carries no text: neither on its tag line nor a result block after it")
+    elif not could_not and relayed != own:
+        first = next((k for k, (a, b) in enumerate(zip(relayed, own)) if a != b), min(len(relayed), len(own)))
+        problems.append(f"the relayed block ({len(relayed)} lines) differs from the {len(own)} W2 printed for the same "
+                        f"run, first at line {first}")
     assert not problems, "; ".join(problems)
 
 
@@ -2237,14 +2339,16 @@ def seq_pull(bench):
     '[MGMT:SEQ,n]<hash>,<count>,<names>' (s17 _names). The value test writes its own plain sequence on W2 inside
     config_guard(bench, 2); the bench's sequences' values are never pulled (a value could hold a credential and the
     bridged reply crosses W1's unredacted console) - names only. The test clears its sequence in a finally; config_guard
-    only proves it (it fails a test that leaves one, run 20260929-025701)."""
+    only proves it (it fails a test that leaves one, run 20260929-025701). Every pull that reaches a WCB is asked once
+    more after 'no reply' (_seq_ask; the busy pair and the bridged pull likewise): the WCB answers once, in broadcast
+    frames, and a lost frame cost the first W2 pull its answer in run 20260929-042105 (tracker #109)."""
     nc, w1, w2 = _nc(bench), usb_wcb(bench), _w2(bench)
-    me = bench.usb_wcb_number()
+    me, nid = bench.usb_wcb_number(), _nid(nc)
     problems, notes = [], []
     usb = {}
     for n, w in ((me, w1), (2, w2)):
         h, count, names = _names(w)
-        got = nc.seq(n)
+        got = _seq_ask(w, n, nid, lambda n=n: nc.seq(n), SEQ_FRAG, notes)
         usb[n] = got
         want = [ncmesh.json_strip(x[:15]) for x in names]     # cut to 15, then stripped, as buildWcbSeq does
         notes.append(f"W{n}: {count} sequences")
@@ -2256,18 +2360,24 @@ def seq_pull(bench):
         try:
             if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
                 raise AssertionError(f"W2 did not store the test sequence {key}")
-            got = nc.seqval(2, key)
+            got = _seq_ask(w2, 2, nid, lambda: nc.seqval(2, key), SEQVAL_FRAG, notes)
             if (got["key"], got["status"], got["value"]) != (key, 0, val):
                 problems.append(f"GET_WCB_SEQVAL 2 {key}: {got}, expected status 0 and the stored value")
-            missing = nc.seqval(2, f"HILNO{nonce()[:6]}")
+            nokey = f"HILNO{nonce()[:6]}"
+            missing = _seq_ask(w2, 2, nid, lambda: nc.seqval(2, nokey), SEQVAL_FRAG, notes)
             if missing["status"] != 1:
                 problems.append(f"GET_WCB_SEQVAL of a missing key: status {missing['status']}, expected 1 (NOTFOUND)")
         finally:
             _seq_clear(w2, key)
-    nm = nc.dev.mark()
-    nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": me}, separators=(",", ":")))
-    nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": 2}, separators=(",", ":")))
-    first, second = _seq_reply(nc, nm, "WCB_SEQ", me), _seq_reply(nc, nm, "WCB_SEQ", 2)
+    for ask in (1, 2):
+        nm = nc.dev.mark()
+        nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": me}, separators=(",", ":")))
+        nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": 2}, separators=(",", ":")))
+        first, second = _seq_reply(nc, nm, "WCB_SEQ", me), _seq_reply(nc, nm, "WCB_SEQ", 2)
+        if ask == 1 and first and first.get("msg") == "no reply":
+            notes.append(f"the busy pair's pull of W{me} got no reply (tracker #109); asked once more")
+            continue
+        break
     if not (first and first.get("ok")) or not second or second.get("ok") is not False or second.get("msg") != "busy":
         problems.append(f"two pulls back to back: {first and first.get('ok')} / {second}; expected the second 'busy'")
     for b in (0, 21):
@@ -2291,18 +2401,25 @@ def seq_pull(bench):
         elif why == "no reply" and not 5.0 <= took <= 7.5:
             problems.append(f"'no reply' for board {ghost} came {took:.1f} s after the request; NaviCore waits 6 s")
     nid = _open_relay(nc, w1)
-    nm, wm = nc.dev.mark(), w1.dev.mark()
-    w1.send(f';W{nid},{{"type":"GET_WCB_SEQ","wcb":2}}')
-    try:
-        start = _nav_regex(nc, nm, r"\[RC\] WCB_SEQ send START: \d+ bytes \S+ (\d+) fragments to W\d+ \(sid=(\d+)\)", 10,
-                           "'WCB_SEQ send START' line")
+    for ask in (1, 2):
+        nm, wm = nc.dev.mark(), w1.dev.mark()
+        w1.send(f';W{nid},{{"type":"GET_WCB_SEQ","wcb":2}}')
+        try:
+            start = _nav_regex(nc, nm, r"\[RC\] WCB_SEQ send START: \d+ bytes \S+ (\d+) fragments to W\d+ "
+                                       r"\(sid=(\d+)\)", 10, "'WCB_SEQ send START' line")
+        except AssertionError as e:
+            err = _json_since(w1, wm, lambda o: o.get("type") == "WCB_SEQ" and o.get("ok") is False)
+            if ask == 1 and err and err[-1].get("msg") == "no reply":
+                notes.append("the bridged pull of W2 got no reply (tracker #109); asked once more")
+                continue
+            problems.append(f"the bridged GET_WCB_SEQ 2: {e}" + (f"; W1 got {err[-1]}" if err else ""))
+            break
         text = _await_reassembled(w1, nid, wm, int(start.group(2)), 10)
         o = json.loads(text) if text else None
         if not o or (o.get("names"), o.get("hash")) != (usb[2]["names"], usb[2]["hash"]):
             problems.append(f"the bridged GET_WCB_SEQ 2 came back {o and (len(o.get('names') or []), o.get('hash'))}, "
                             f"USB {len(usb[2]['names'])} names hash {usb[2]['hash']}")
-    except AssertionError as e:
-        problems.append(f"the bridged GET_WCB_SEQ 2: {e}")
+        break
     bench.note("; ".join(notes))
     assert not problems, "; ".join(problems)
 
@@ -2320,15 +2437,18 @@ def seqval_verbatim(bench):
     it is pulled over USB, and the test clears it in a finally (config_guard fails a test that leaves it).
     Recommendation: JSON-escape the value (and the names) instead of stripping it."""
     nc, w2 = _nc(bench), _w2(bench)
+    nid, notes = _nid(nc), []
     key, val = f"HILQ{nonce()[:4]}", f';L9,{{"hil":"{nonce()}"}}'
     with config_guard(bench, 2):
         try:
             if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
                 raise AssertionError(f"W2 did not store the test sequence {key}")
             stored = _seqval(w2, key)
-            got = nc.seqval(2, key)
+            got = _seq_ask(w2, 2, nid, lambda: nc.seqval(2, key), SEQVAL_FRAG, notes)
         finally:
             _seq_clear(w2, key)
+    if notes:
+        bench.note("; ".join(notes))
     assert stored == f"[MGMT:SEQVAL,2]{key},OK,{val}", f"W2 reads its own sequence back as {stored!r}"
     assert got["status"] == 0 and got["value"] == val, (f"(should, D-NC46) GET_WCB_SEQVAL returned {got['value']!r} for a "
                                                         f"sequence W2 stores as {val!r}: rc_telemetry.h:340-346 drops "
