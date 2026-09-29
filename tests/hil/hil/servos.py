@@ -118,6 +118,15 @@ SERVO_TESTS = {
                              "decode garbage, only the remote-slot detector knobs could act (the rest is made inert)",
     "sbus.reconfig_live": "moves the rx stick and holds a matrix button across saves",
     "sbus.reconfig_parked_tap_cleared": "holds a matrix button across a save",
+    # ---- NC-WP6, NaviCore on the mesh (s43). The rest of s43 reads, writes markers to probe wires or W2's Maestro with
+    # getErrors (read only), or saves config that applies nothing that moves (chRateHz, a label, an inert mapping).
+    "ncmesh.bridged_reset_defaults": "a bridged RESET_DEFAULTS applies the factory defaults live until nc_guard's USB "
+                                     "restore a few seconds later: SBUS OUT stops, and the local Maestro's port re-opens "
+                                     "at the default baud and back",
+    "ncmesh.bridged_reset_keeps_identity": "the same bridged RESET_DEFAULTS: SBUS OUT stops until nc_guard's restore",
+    "ncmesh.remote_cli_order_and_drop": "on a hook image it stalls loop() 3 s (#L90): SBUS OUT, which re-emits the "
+                                        "controller's stream, stops meanwhile (knobs, bands and the mode function are "
+                                        "made inert for it)",
     # suites/s46_navicore_boot.py and s47_navicore_ota.py: every NaviCore restart, whether by REBOOT, #L02, a relayed
     # REBOOT, the USB-Serial/JTAG reset, an OTA END or the esptool rung, stops SBUS OUT for a few seconds, and nc_guard
     # sends a mesh SET_MODE back if the mode that came back is not the one it snapshotted (J2 moves then).
