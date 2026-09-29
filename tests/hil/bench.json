@@ -84,6 +84,7 @@
     "navicore_reboot",
     "navicore_fault",
     "navicore_ota_erase",
-    "navicore_ota_full"
+    "navicore_ota_full",
+    "etm_seq_wrap"
   ]
 }

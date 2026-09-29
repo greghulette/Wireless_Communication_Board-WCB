@@ -35,6 +35,8 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | Filed **#108** (an ETM command is ACKed before it is queued, so a full command queue loses it; seen as seven discards during `etm.seq_wrap` on the #102 image). |
+| 2026-09-28 | Run `20260928-205106` on `6.2.1_282046RSEP2026` (all 65 `etm.*`, `mesh.*` and `mgmt.*` pass): **#102** and **#107** VERIFIED; `etm.seq_wrap` survived its whole flood. |
 | 2026-09-28 | **#102** and **#107** FIXED (unverified): every ESP-NOW send is paced by `wcbEspNowSend` (CLAUDE.md rule 16), and the RTERM relay keeps its lines in a byte ring and reports what it loses (D50). |
 | 2026-09-28 | Run `20260928-201415` on `6.2.1_282006RSEP2026` (14 pass, 2 fail): **#104**, **#105** and **#106** VERIFIED; the two JOIN failures (#103) showed the radio off the mesh channel during the search; `mesh.rterm_long_output` passed whole (#107 intermittent). |
 | 2026-09-28 | Full run `20260928-161745` triaged (768 pass, 28 fail, 7 skip): **#105** (a Kyber bridge task read a soft port while ?BAUD re-began it: W1 panicked) and **#106** (a stale RX-overflow claim on an OTA drop line) filed and FIXED (unverified) with **#104** (`WiFi.persistent(false)`); **#107** (the RTERM mirror loses lines of a long burst) filed. |
@@ -2121,7 +2123,7 @@ characters) - dropped`.
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - every ESP-NOW send is paced by `wcbEspNowSend` (D50); `etm_seq_wrap` goes back on once `etm.seq_wrap` passes on it |
+| **Status** | VERIFIED - D50; run `20260928-205106` on `6.2.1_282046RSEP2026`: `etm.seq_wrap` flooded W1 with about 65,000 broadcasts in 393 s and W1 never restarted (it aborted about 7,500 frames in before); two frames were given up after the 50 ms wait, each reported; `etm_seq_wrap` is ticked again (D51) |
 | **Owner** | `WCB_firmware` (`WCB.ino`, the ESP-NOW send paths) |
 | **Effort** | M |
 | **Tests** | `etm.seq_wrap` (opt-in `etm_seq_wrap`) crashes W1 today |
@@ -2237,7 +2239,7 @@ happened in the last 2 s (a DATA line arrives in milliseconds).
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - D50: the target's sends are paced, and the relay keeps its lines in a byte ring and reports what it loses |
+| **Status** | VERIFIED - D50; `mesh.rterm_long_output` passes on `6.2.1_282046RSEP2026` (run `20260928-205106`). It also passed once without the fix (the loss was intermittent), so the nightly runs keep watching it |
 | **Owner** | `WCB_firmware` (`WCB_RemoteTerm.cpp`) |
 | **Effort** | M |
 | **Tests** | `mesh.rterm_long_output` |
@@ -2261,3 +2263,28 @@ short lines that outran the radio lost frames to `ESP_ERR_ESPNOW_NO_MEM`. The re
 buffer before the send, which may now wait, so a print from another task meanwhile is not thrown away. The relay keeps its
 lines in a 3 KB ring of variable-length items (about 100 short lines, where 16 fitted before), and a line that still
 does not fit is counted and reported as `[RTERM] N line(s) from WCB<n> lost at this relay: its queue was full`.
+
+#### 108. An ETM command is ACKed before it is queued, so a full command queue loses an ACKed command
+
+| | |
+|---|---|
+| **Status** | TODO - medium |
+| **Owner** | `WCB_firmware` (`WCB.ino`, the ETM receive path) |
+| **Effort** | S |
+| **Tests** | none yet; seen during `etm.seq_wrap` (opt-in `etm_seq_wrap`) |
+| **Subsystem** | ETM / command queue |
+
+**Evidence (run 20260928-205106, `6.2.1_282046RSEP2026`).** During `etm.seq_wrap`'s console flood W1 printed `Command
+queue is full! Discarding command.` seven times, spread over the flood. The serial reader waits up to 2 s for room
+(`enqueueCommand`, `WCB.ino` "Only the serial reader may wait for room"), so these were most likely commands that
+arrived over the mesh while the flood held the queue full; the line does not name the command or its source.
+
+**Cause (from the code).** `espNowReceiveCallback` sends the ETM ACK for a command (`etmSendAck`, after the
+`restartImminent` check) and only then parses and enqueues it, and a WiFi-task enqueue never waits (rule 11). A command
+that finds the queue full is discarded after its sender was told it arrived, so the sender neither retries nor reports
+a failure. It predates #102's fix, which makes it likelier: a board that paces its sends to the radio drains its queue
+at the radio's pace, so a flood holds the queue full for longer.
+
+**Fix (proposed).** Treat a full queue like `restartImminent`: when `uxQueueSpacesAvailable(commandQueue)` cannot hold
+the command's tokens, neither ACK nor queue it, so the sender's retry comes back once there is room. And name the
+source and the first characters of a discarded command in the discard line.
