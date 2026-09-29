@@ -167,7 +167,8 @@ OPT_INS = {
     },
     "sbus_reset": {
         "title": "SBUS controller reset",
-        "what": "Reboots the SBUS controller to check NaviCore's signal-loss handling.",
+        "what": "Reboots the SBUS controller: NaviCore's signal-loss handling, and that the controller's INF8 test verbs "
+                "saved nothing.",
         "why": "reboots the SBUS controller",
         "estimate_s": 15,
     },

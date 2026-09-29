@@ -557,13 +557,18 @@ class NaviCore:
         follows it (module docstring), so the harmless #L12 releases it: without it the block sat unsent and the wait
         timed out while the block arrived the moment the NEXT test wrote. Measured at 3.07 s held (run
         20260916-135810, sbus.btn_hold_unconfigured_long: the 32.838 s block and the 35.843 s one both landed at
-        35.905)."""
+        35.905). The block ends at the last row of the channels NaviCore detected (dumpSbusState :2897-2915): CH17-24 for
+        SBUS-24, CH9-16 for SBUS-16 (sbus.sbus16_autodetect), and no row at all before any frame locked."""
         m = self.dev.mark()
         self.dev.send("#L09")
         time.sleep(0.15)
         mp = self.dev.mark()
         self.dev.send("#L12")
-        self.dev.expect(r"^\s*CH17-24:", timeout=3, since=m)
+        got = self.dev.expect(r"^\s*CH17-24:|variant=(SBUS-16|\(none yet\))", timeout=3, since=m)
+        if got.group(1) == "SBUS-16":
+            self.dev.expect(r"^\s*CH9-16:", timeout=3, since=m)
+        elif got.group(1):
+            self.dev.expect(r"frames=\d+", timeout=3, since=m)
         self._eat_poke(mp)                  # its Mode= line must not end the next cli()'s wait (_eat_poke)
         return parse_sbus_dump(self.dev.since(m))
 
