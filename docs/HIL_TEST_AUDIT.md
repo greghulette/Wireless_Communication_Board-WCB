@@ -786,6 +786,14 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     D70). All pushed to WIFI (`1ee970f`). The post-phase full run started about 12:30; agents write NC-WP12
     (record and replay) and NC-WP13 (the config tool with the board). Next: triage the full run, merge and run
     NC-WP12/13, then NC-WP11 (the SBUS controller's test verbs) and Intellex IX-WP9 onward.
+  - 2026-09-29 18:00: the post-phase-1 full run `20260929-122112` ended clean: 960 pass, 59 fail, 16 skip, and
+    every failure a `(should)` test failing as designed (logged). NaviCore NC-WP13 (the config tool with the
+    board: nine L2 pass, D-NC70/71; board tests serve the image's `hil-week` tool tree, D71) and NC-WP12 (the
+    recorder: nine pass, D-NC64-66, Greg's 15 clips untouched; D72) are merged and bench-verified (`7a10af5`).
+    Agents write INF8 with NC-WP11 (the SBUS controller's RAM-only test verbs on a local `hil-week` branch of
+    SBUSController, not pushed; the SBUS fault tests) and Intellex IX-WP9/10 (over WiFi through NaviCore's
+    access point via `hil/wlan.py`; flashing W2 through Intellex). Next: flash the controller and run NC-WP11,
+    run IX-WP9/10, then an overnight full run after phase 2.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
