@@ -1275,6 +1275,61 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP7 — device transports and the Maestro (`s44_navicore_devices.py`, `ncdev.*`)
 
+> **Status 2026-09-29: written, not bench-run.** `suites/s44_navicore_devices.py` holds 23 tests: the 18 below, plus
+> five `(should)` for findings made writing them: `ncdev.mae_verb_no_alias` (D-NC56), `ncdev.hcr_local_volstep_cap`
+> (D-NC57), `ncdev.serial_action_paced` (D-NC58), `ncdev.hcr_level_same_both_ways` (D-NC59) and
+> `ncdev.wled_forward_normalised` (D-NC60); `ncdev.mae_subroutine_msb` is D-NC23's. In `hil/servos.py`: the three
+> local-Maestro tests, and `serial_action_paced` and `mesh_forward_burst`, which stall `loop()` (so SBUS OUT pauses)
+> with the engine made inert first (s41 `_engine_inert`). Opt-in `navicore_aux_tx`, registered in `hil/optin.py` and
+> off in `bench.json`: `hcr_local_payload`, `local_device_bytes`, `cli_hcr_test_codes`, `hcr_local_volstep_cap`,
+> `hcr_level_same_both_ways`. `hcr_local_payload`, `local_device_bytes`, `serial_action_bytes` and
+> `mesh_forward_burst` skip on an image without the hooks. In s21, `navicore.mae_cli_local` now needs a value, not
+> `timeout` (D-NC15), and `navicore.maestro_mesh_fanout_0_9` reads back the target on each slot. `selftest.py` runs
+> every test but `knob_local_readback` (it needs the controller) against `NaviDevModel`, a port of the paths they
+> drive: the normal and opt-in tests pass, each `(should)` fails naming its D-NC; six breaks of the model each make
+> their test fail, and each D-NC fix makes its `(should)` test pass. Line numbers are the `hil-week` tree and the
+> WcbCmd 0.9.1 it compiles. Where the code differs from the plan below:
+> - The local 'a target of 16384 reads 16383' (§2 `nc.mae.frames`) is asserted as bytes on the remote slot
+>   (`mae_remote_verbs`: `setTarget,5,20000` sends 16383). A Maestro clamps a target to the channel's own range, so on
+>   a real channel the test would read that range's end, after a full-travel move.
+> - The local tests use `NaviCore.undriven_channel` (ch 1 of Maestro 1, the channel
+>   `navicore.maestro_mesh_settarget_readback` already moves). It is off at rest (it reads 0), so the tests work around
+>   6000 and turn it off again; the easing test first puts it at 6000 with speed 0, since a channel switched on by a
+>   target jumps there.
+> - `mae_remote_read` uses whichever remote slot's device a WCB hosts (s41 `_hosted_remote_slot`: slot 2, Maestro 2 on
+>   W2) and also checks W2's RAM copy of each value (`?VAR,GET,m2pos0`, `m2moving`, `m2err`), which it clears after.
+> - `mae_remote_verbs` and the `(should)` Maestro tests give restartScript a profile with no entries for the slot, so
+>   the switch easing never adds frames before the subroutine frame. `mae_subroutine_msb` is remote only: the local
+>   variant would set Maestro 1's serial-error bit.
+> - `easing_repeat_frames` needs a passthrough knob with an output on the slot, as NC-WP5's `sbus.switch_easing_seed`
+>   does: a free knob on SBUS channel 0, never dispatched but counted by the re-apply, and two borrowed profiles with
+>   random speeds.
+> - Every config save re-applies easing and schedules two repeats 500 ms apart on every slot (processSwitches'
+>   seed, `NaviCore.ino:2466-2478`), which on this bench puts J4's Snappy speed on slot 2 into the stream. So
+>   `mae_remote_stream_exact` waits 1.5 s at its start and after its own save, `serial_action_bytes` checks only the
+>   aux ports for stray writes, and `mae_local_frames_readback` compares only its own channel's frames on Serial2.
+> - The device tests compare each transport with one byte table (s15's and s09's, WcbCmd's vectors) instead of running
+>   a W2 leg beside every local test: both transports equal the same table. Only `hcr_level_same_both_ways` runs both
+>   legs, which keeps W1's route learning and W2's config writes down.
+> - `serial_action_bytes` sends its 106-character line to S3, the hardware UART. On a bit-banged S4/S5 a long line
+>   blocks `loop()` for its whole length (D-NC58), which `serial_action_paced` measures through the delay of the USB
+>   ACK; the §2 'fps dip' is a note in that test, not asserted.
+> - `mesh_forward_burst` makes the plan's 'the 5th dropped' deterministic with INF9's `#L90`: of 6 forwards sent
+>   during a 3 s stall exactly the first 4 go out, in order, and one sent after the burst goes out.
+> - `bcast_out_opt_in`'s device-owned-port part (an MP3 Trigger routed to S4) runs only with `navicore_aux_tx`.
+> - `hcr_local_payload` pins what a save that moves `hcrDest` to a WCB does to a local fade: the ramp stops in that
+>   pass, no StopWAV or restore goes out, and the local HCR is left at the ramp's level (`NaviCore.ino:5548-5552`).
+>   Fade steps on a real wire stay NC-WP14's.
+> - Not checked: the MP3 shadow's 20 after boot (it needs a restart; each device table sets its volume first). The new
+>   read-back in `maestro_mesh_fanout_0_9` is weak on this bench: ch 0 of every slot is off at rest, so the target
+>   sent and the value read are both 0.
+> - Doc drift found in NaviCore, for D-NC36's docs commit: `docs/TROUBLESHOOTING.md:55` says the WCB-side remote
+>   Maestro read has not shipped (it has: `mae_remote_read`); the comments at `NaviCore.ino:1435-1447` and `:1500`
+>   still describe the emotion-4 Overload shortcut that WcbCmd 0.9 removed; the `#L20`/`#L21` comment (`:3678-3679`)
+>   names GPIO15/GPIO17, while v2's S3/S4 TX are GPIO8/GPIO10 (`:183-186`); `hcrFormatWcbCommand`'s default branch is
+>   commented unreachable, but fn 20 and 21 reach it (`:1551`); `rc_config.h:117` lists RA_SERIAL's ports as S3/S4
+>   (S5 works too).
+
 - Remote Maestro, servo-free: `ncdev.mae_remote_stream_exact`, `ncdev.mae_remote_verbs`, `ncdev.easing_repeat_frames`,
   `ncdev.mae_subroutine_msb` (should, D-NC23). Every frame is predicted from `WcbMaestro` and checked on W1S1 and the
   W2S1 tap.
@@ -1609,7 +1664,8 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36 and D-NC42 to D-NC47 are behaviour findings, each with the `(should)` test that pins it.
+D-NC16 to D-NC36, D-NC42 to D-NC47 and D-NC56 to D-NC60 are behaviour findings, each with the `(should)` test
+that pins it.
 
 ### 7.1 Process and infrastructure
 
@@ -1667,11 +1723,17 @@ D-NC16 to D-NC36 and D-NC42 to D-NC47 are behaviour findings, each with the `(sh
 | D-NC45 | The dispatch trace reports sends that did not happen: a serial action prints `[DISPATCH] Serial TX [<port>]  <cmd>` before it looks at the port, and a port other than S3-S5 then writes nothing and says nothing (`NaviCore.ino:2093-2100`, the `hil-week` tree); a Maestro action prints `[DISPATCH] Maestro <slot>  <cmd>` before its skip-if-running gate, so a skipped one reads as sent until the next line (`:2088-2089`). The inbound `;M` case was fixed the same way (`navicore.maestro_skip_not_logged_as_dispatch`). Found writing NC-WP4. | Print the dispatch line after the checks, and a skip line with its reason otherwise. | `ncengine.skip_not_traced_as_sent` (the serial case; the Maestro one needs a moving servo) |
 | D-NC46 | `GET_WCB_SEQ` and `GET_WCB_SEQVAL` strip every `"`, backslash and control character from a sequence's names and value instead of escaping them (`_seqAppendJsonSafe`, `rc_telemetry.h:340-346`, used by `buildWcbSeq` `:352-375` and `buildWcbSeqVal` `:380-393`). The comment above `buildWcbSeqVal` says nothing may reformat the value (`:377-379`). A sequence holding JSON, a `;L` WLED command's body for instance, reaches the config tool without its quotes, and one saved back would be stored altered. Found writing NC-WP6. | JSON-escape names and values. | `ncmesh.seqval_verbatim` |
 | D-NC47 | A bridged SET_CMDLIB stores everything from after `"data":` to the message's last `}` (`rc_telemetry.h:1209-1216`), so a key after `data` is stored with the library. The USB handler matches brackets (`NaviCore.ino:3902-3935`), because the same bug once stored a trailing `,"sys":1`. The config tool avoids it by stamping `sys` first, and its comment says the firmware no longer depends on key order (`index.html:5611-5617`); that holds for USB only. Found writing NC-WP6. | One extraction for both paths: the USB path's bracket matching. | `ncmesh.bridged_cmdlib_keys_after_data` |
+| D-NC56 | `executeMaestroCmd` casts every number before anything checks it: `(uint8_t)atoi` for the channel, the accel and the subroutine, `(uint16_t)atoi` for the target, the speed and subParam's parameter (`NaviCore.ino:1316`, `:1320`, `:1324`, `:1331`, `:1372`, `:1388`, the `hil-week` tree). So `setTarget,261,6000` moves channel 5, `setAccel,5,300` sends accel 44, `setTarget,5,70000` sends 4464 (under the clamp whose comment says a value is 'capped, not wrapped', `:1035-1036`), `setSpeed,5,65537` sends speed 1, `subParam,3,70000` sends 4464 and `restartScript,300` runs subroutine 44: each a valid command for something else. WcbCmd's `;M` parser casts the channel, the target and the speed the same way before `buildSetTarget`'s range check sees them (`WcbMaestro.cpp:141`, `:147`, `:153`, 0.9.1), so the inbound `;M` on both firmwares shares it. Found writing NC-WP7. | Parse into a long; refuse a channel, subroutine or accel out of range with a line; clamp a target, speed or parameter from the long. The same in WcbCmd's parser, pushed first (WCB rule 1). | `ncdev.mae_verb_no_alias` |
+| D-NC57 | A per-channel HCR Volume Up/Down on NaviCore's own port (fn 18/19, chan 1-3) steps the codec's shadow in NaviCore and clamps it to 0-99 (`NaviCore.ino:1705-1714`, the 99 at `:1712`), while HcrCodec's SetVolume and all-channel steps take 0-100 (`WcbHcr.cpp:47`, `:113`; the 99 cap was WCB issue #16, fixed in WcbCmd 0.9.0) and so does a WCB's `;H,VOLUP,<ch>` (`WCB_HCR.cpp:609-632`). The same action sends `<PVA99>` locally and `<PVA100>` through a WCB, and a Volume Up on a channel at 100 turns it down. Found writing NC-WP7. | Clamp at 100. | `ncdev.hcr_local_volstep_cap` |
+| D-NC58 | A serial action writes its whole line to S4 or S5 at once (`writeS4`/`writeS5`, `NaviCore.ino:1401-1402`, from `:2098-2099`). Those ports are bit-banged and a write returns when its last bit is out, so `loop()` stops for the line: about 100 ms for 95 characters and a CR at 9600, past the ~96 ms of SBUS-24 that Serial1 buffers. The mesh-to-serial path to the same ports hands them a few bytes a pass for exactly this reason (`auxTxPump`, `:5026-5086`). Found writing NC-WP7. | Send RA_SERIAL through the paced auxTx queue. | `ncdev.serial_action_paced` |
+| D-NC59 | An HCR Trigger/Stimulate level of 2 or more goes out as the number on NaviCore's own port (HcrCodec formats it, `WcbHcr.cpp:65-67`; its golden vector pins `<SM30,QEM,QT>`) but as STRONG, level 1, through a WCB (`hcrFormatWcbCommand`, `NaviCore.ino:1516-1517`). The config tool offers Moderate (0) and Strong (1) and shows a legacy value of 2 or more as Strong (`config_tool/index.html:12640-12643`), so one saved action is two different commands by transport. Found writing NC-WP7. | Normalise the level to 0/1 before either transport, as the tool reads it, or send the numeric `;H,FN` form over the mesh. | `ncdev.hcr_level_same_both_ways` |
+| D-NC60 | A WLED action written without its `;` (`L1,ON`) is routed by the id after the L (`NaviCore.ino:1962-1977`): on a local slot WcbWled gets the verb body (`:2009`), but to a remote slot the command is forwarded as written (`:2013`), and a WCB runs a unicast without its command character as plain broadcast text (`WCB.ino:6010-6020`). The WLED gets nothing, and `L1,ON` goes out every port with broadcast output on. The same saved action works or not by where the WLED is. Found writing NC-WP7. | Forward `;L<id>,<body>` rebuilt from what was parsed. | `ncdev.wled_forward_normalised` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | `ede3aca` | NC-WP7 written, not bench-run: `s44_navicore_devices.py` (23 `ncdev` tests, six `(should)`; five in `hil/servos.py`; five behind the new opt-in `navicore_aux_tx`, registered and off). In s21, `navicore.mae_cli_local` needs a value (D-NC15) and `navicore.maestro_mesh_fanout_0_9` reads each target back; s41's speed-4 figure corrected. New findings D-NC56 to D-NC60. `selftest.py` runs the suite against `NaviDevModel` and twelve mutations of it. The status note lists where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-28 | `4170a24` | NC-WP6 written, not bench-run: `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`). Opt-in `navicore_nvs` registered (off); three tests in `hil/servos.py`. `hil/ncmesh.py` gains pure predictors (`wdp_scrub`, `json_strip`, `rterm_pieces`, `port_labels`, `local_maestro_ids`, `status_rows`, `stats_rows`, `bulk_frames`). `selftest.py` runs the 13 bridge tests against `NaviMeshModel` and 11 mutations of it. New findings D-NC46 (sequence names and values stripped, not escaped) and D-NC47 (a bridged SET_CMDLIB stores the keys after `data`). The status note lists where the code differed from the plan. |
 | 2026-09-28 | `04e70d1` | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |
 | 2026-09-28 | `75d5e8d` | NC-WP2, NC-WP9 and NC-WP10 written, not bench-run: `s46_navicore_boot.py` (9 tests, 3 `(should)`) and `s47_navicore_ota.py` (11); opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_identity` registered and `navicore_esptool` added (off); `ncflash.BENCH_IMAGE`, `builds_with_sha`, `flash_rows`, `last_written`, `put_back`; `NaviCore.restart_blocker`; `redact_text` hashes a SoftAP name. `selftest.py` runs both suites against `NaviBootModel` and nine mutations of it. The three status notes list where the code differs from the plan: the roll call's floor (quantity 1 leaves W2 out; `deaf` stops reception only), NaviCore's `?OTALOCAL` without BAUD and with a case-sensitive prefix, and `recover()` calling a reset that did nothing a success. |

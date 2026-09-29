@@ -2167,6 +2167,11 @@ GATED = {
                                                 "twice"),
     # NC-WP6 (suites/s43_navicore_mesh.py), 2026-09-28
     "ncmesh.wdp_learn_forget": ("navicore_nvs", "writes NaviCore's learned-peer list to its NVS four times"),
+    # NC-WP7 (suites/s44_navicore_devices.py), 2026-09-28
+    **{f"ncdev.{n}": ("navicore_aux_tx", "sends HCR, MP3 Trigger, DFPlayer and WLED bytes out NaviCore's own serial "
+                                         "ports, where nothing records what is attached")
+       for n in ("hcr_local_payload", "local_device_bytes", "cli_hcr_test_codes", "hcr_local_volstep_cap",
+                 "hcr_level_same_both_ways")},
 }
 
 
@@ -7700,6 +7705,1060 @@ def t_ncmesh_mutations(tmp):
         assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
 
 
+# ---------------------------------------------------------------------------- NaviCore device transports (s44)
+class DevLink:
+    """A probe wire as s44 reads one (hil.links.Link): the bytes the model writes, mark() offsets, bursts stamped with
+    the host clock in ms (s41 _probe_ms reads them as the probe's), expect() that waits and raises AssertionError."""
+
+    def __init__(self, key, tap=False):
+        self.key, self.tap = key, tap
+        self.buf, self.chunks = bytearray(), []
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        if data:
+            with self._lock:
+                self.chunks.append((len(self.buf), int(time.monotonic() * 1000), bytes(data)))
+                self.buf += data
+
+    def mark(self):
+        with self._lock:
+            return len(self.buf)
+
+    def received(self, since):
+        with self._lock:
+            return bytes(self.buf[since or 0:])
+
+    def bursts(self, since):
+        with self._lock:
+            return [(ms, c[max(0, since - off):]) for off, ms, c in self.chunks if off + len(c) > since]
+
+    def expect(self, data, timeout=3.0, since=None):
+        deadline = time.monotonic() + timeout
+        while data not in self.received(since):
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"{self.key}: {data!r} never arrived")
+            time.sleep(0.01)
+
+
+class HcrPy:
+    """WcbCmd's HcrCodec (WcbHcr.cpp:7-122), as NaviCore's local HCR and W2 both run it: normalize, then format, with the
+    V/A/B volume shadow that SetVolume and the all-channel steps (0-100) keep. fmt() -> the bytes as text, "" when
+    refused."""
+    E, A = "HSMC", "VAB"
+
+    def __init__(self):
+        self.vol = [50, 50, 50]
+
+    def fmt(self, fn, chan, track):
+        if not _nm_hcr_ok(fn, chan, track):
+            return ""
+        E, A = self.E, self.A
+        if fn in (2, 3, 4):
+            return f"<O{E[chan]}{track},QE{E[chan]}>\n" if fn == 2 else f"<S{E[chan]}{track},QE{E[chan]},QT>\n"
+        if fn == 7:
+            return f"<MN{chan},MX{track}>\n"
+        if fn == 10:
+            return f"<O{chan},QO>\n"
+        if fn == 13:
+            return f"<M{track},QM>\n"
+        if fn == 14:
+            return f"<C{A[chan]}{track:04d},QP{A[chan]}>\n"
+        if fn == 16:
+            return f"<PS{A[chan]},QP{A[chan]}>\n"
+        if fn == 17:
+            for c in (range(3) if chan == 3 else [chan]):
+                self.vol[c] = track
+            return "".join(f"<PV{A[c]}{track}>\n" for c in (range(3) if chan == 3 else [chan]))
+        if fn in (18, 19):
+            step = (track or 5) * (-1 if fn == 19 else 1)
+            self.vol = [max(0, min(100, v + step)) for v in self.vol]
+            return "".join(f"<PV{A[c]}{self.vol[c]}>\n" for c in range(3))
+        return {5: "<SE,QT>\n", 6: "<MM>\n", 8: "<PSV,QT>\n<PSV,QPV>\n<PSA,QPA>\n<PSB,QPB>\n", 9: "<PSV,QT>\n",
+                11: "<OR,QE>\n", 20: "<PSG>\n", 21: "<PSG>\n<PSA,QPA>\n<PSB,QPB>\n"}[fn]
+
+
+def _nm_hcr_local(codec, fn, chan, track, cap=99):
+    """What executeHcrAction's local branch sends for a non-fade action (NaviCore.ino:1652-1725): a per-channel
+    VOLUP/VOLDN (chan 1-3 = V/A/B) is a SetVolume made from the codec's shadow and clamped 0-`cap` (99 today, :1712,
+    D-NC57); the rest is HcrCodec's format."""
+    if fn in (18, 19) and 1 <= chan <= 3 and _nm_hcr_ok(fn, chan, track):
+        c = chan - 1
+        return codec.fmt(17, c, max(0, min(cap, codec.vol[c] + (track or 5) * (-1 if fn == 19 else 1))))
+    return codec.fmt(fn, chan, track)
+
+
+def _nm_fade_now(codec, fn, ch, base):
+    """HcrFade::start with 0 s on channel ch (1 = A, 2 = B) (WcbCmd WcbHcrFade.cpp): a FadeIn is one SetVolume to `base`;
+    a FadeOut is SetVolume 0, StopWAV, then `base` back."""
+    if fn == 12:
+        return codec.fmt(17, ch, base)
+    return codec.fmt(17, ch, 0) + codec.fmt(16, ch, 0) + codec.fmt(17, ch, base)
+
+
+def _nm_hcr_wcb(fn, chan, track):
+    """The ;H command executeHcrAction's WCB branch sends (NaviCore.ino:1610-1650): ;H,FADEIN/FADEOUT on A or B for a
+    fade (:1628-1635), else HcrCodec::normalize and hcrFormatWcbCommand (:1499-1555); "" when refused."""
+    if fn in (12, 15):
+        return f";H,{'FADEIN' if fn == 12 else 'FADEOUT'},{'A' if chan == 1 else 'B'},{track}" if chan in (1, 2) else ""
+    if not _nm_hcr_ok(fn, chan, track):
+        return ""
+    emo = "HSMC"[chan] if 0 <= chan <= 3 else "?"
+    vab = "VAB"[chan] if 0 <= chan <= 2 else "V"
+    lv = "STRONG" if track >= 1 else "MOD"
+    if fn in (18, 19):
+        return (";H,VOLUP" if fn == 18 else ";H,VOLDN") + (f",{'VAB'[chan - 1]}" if 1 <= chan <= 3 else "") + \
+            (f",{track}" if track > 0 else "")
+    return {2: f";H,SETEMOTION,{emo},{track}", 3: f";H,TRIGGER,{emo},{lv}", 4: f";H,STIM,{emo},{lv}", 5: ";H,OVERLOAD",
+            6: ";H,MUSE", 7: f";H,MUSE,GAP,{chan},{track}", 8: ";H,STOP", 9: ";H,STOPEMOTE", 10: f";H,OVERRIDE,{chan}",
+            11: ";H,RESETEMOTIONS", 13: f";H,MUSE,{track}",
+            14: f";H,FN,14,0,{track}" if chan == 0 else f";H,PLAY,{vab},{track}",
+            16: f";H,FN,16,0,{track}" if chan == 0 else f";H,STOPWAV,{vab}",
+            17: f";H,VOL,{track}" if chan == 3 else f";H,VOL,{vab},{track}"}.get(fn, f";H,FN,{fn},{chan},{track}")
+
+
+class W2HcrPy:
+    """W2's ;H handler (WCB_HCR.cpp processHCRRuntimeCommand :428-650) for the commands NaviCore sends, over its own
+    HcrPy: what W2 writes to its HCR port (s15's hcr.verbs_* and hcr.fn_codec). run() takes what follows ';H,'."""
+    CH = {"V": 0, "A": 1, "B": 2}
+
+    def __init__(self, link):
+        self.codec, self.link = HcrPy(), link
+
+    def run(self, body):
+        f = body.split(",")
+        v, c, CH = f[0].upper(), self.codec, self.CH
+        arg = lambda i: f[i] if len(f) > i else ""          # noqa: E731
+        out = ""
+        if v == "FN":
+            out = c.fmt(_nm_toint(arg(1)), _nm_toint(arg(2)), _nm_toint(arg(3)))
+        elif v in ("STIM", "TRIGGER"):
+            out = f"<S{arg(1)}{1 if arg(2) == 'STRONG' else 0},QE{arg(1)},QT>\n"
+        elif v == "SETEMOTION" and arg(1) in ("H", "S", "M", "C"):
+            out = c.fmt(2, "HSMC".index(arg(1)), _nm_toint(arg(2)))       # over 99: dropped, as the library does
+        elif v in ("OVERLOAD", "RESETEMOTIONS", "STOP", "STOPEMOTE"):
+            out = c.fmt({"OVERLOAD": 5, "RESETEMOTIONS": 11, "STOP": 8, "STOPEMOTE": 9}[v], 0, 0)
+        elif v == "OVERRIDE":
+            out = c.fmt(10, 1 if arg(1) in ("1", "ON") else 0, 0)
+        elif v == "MUSE":
+            out = c.fmt(6, 0, 0) if len(f) == 1 else c.fmt(7, _nm_toint(arg(2)), _nm_toint(arg(3))) \
+                if arg(1) == "GAP" else c.fmt(13, 0, 1 if arg(1) in ("1", "ON") else 0)
+        elif v in ("PLAY", "STOPWAV") and arg(1) in ("A", "B"):
+            out = c.fmt(14, CH[arg(1)], _nm_toint(arg(2))) if v == "PLAY" else c.fmt(16, CH[arg(1)], 0)
+        elif v == "VOL":
+            out = c.fmt(17, CH[arg(1)], _nm_toint(arg(2))) if arg(1) in CH else c.fmt(17, 3, _nm_toint(arg(1)))
+        elif v in ("VOLUP", "VOLDN"):
+            one = arg(1) in CH
+            step = (_nm_toint(arg(2) if one else arg(1)) or 5) * (1 if v == "VOLUP" else -1)
+            out = "".join(c.fmt(17, ch, max(0, min(100, c.vol[ch] + step))) for ch in ([CH[arg(1)]] if one else range(3)))
+        elif v in ("FADEIN", "FADEOUT") and arg(1) in ("A", "B") and _nm_toint(arg(2)) <= 0:
+            out = _nm_fade_now(c, 12 if v == "FADEIN" else 15, CH[arg(1)], c.vol[CH[arg(1)]])
+        self.link.write(out.encode())
+
+
+def _nm_mp3_verb(fn, track):
+    """mp3FormatCommand (NaviCore.ino:1734-1760), the verb after ';A,' -> "" when refused."""
+    return {1: f"PLAY,{track}" if 1 <= track <= 255 else "", 2: f"PLAYFS,{track}" if 0 <= track <= 255 else "",
+            3: "STOP", 4: "NEXT", 5: "PREV", 6: f"VOL,{track}" if 0 <= track <= 64 else "", 7: "VOLUP",
+            8: "VOLDN"}.get(fn, "")
+
+
+def _nm_dfp_verb(fn, chan, track):
+    """dfpFormatCommand (NaviCore.ino:1838-1880), the verb after ';D,' -> "" when refused."""
+    return {1: f"PLAY,{track}" if 1 <= track <= 2999 else "",
+            2: f"FOLDER,{chan},{track}" if 1 <= chan <= 99 and 1 <= track <= 255 else "",
+            3: f"MP3FOLDER,{track}" if 1 <= track <= 9999 else "", 4: "STOP", 5: "NEXT", 6: "PREV", 7: "PAUSE",
+            8: "RESUME", 9: f"VOL,{track}" if 0 <= track <= 30 else "", 10: "VOLUP", 11: "VOLDN",
+            12: f"LOOP,{track}" if 1 <= track <= 2999 else "", 13: f"LOOPALL,{chan}" if 0 <= chan <= 1 else "",
+            14: f"LOOPFOLDER,{chan}" if 1 <= chan <= 99 else "", 15: "RANDOM", 16: f"EQ,{chan}" if 0 <= chan <= 5 else "",
+            17: f"DEVICE,{chan}" if 1 <= chan <= 5 else "", 18: "RESET"}.get(fn, "")
+
+
+class Mp3Py:
+    """WcbCmd's Mp3Codec::handle (WcbMp3.cpp:32-95) for a verb (what follows ';A,') -> the MP3 Trigger bytes, or None:
+    'v' <volume> before every play, VOLUP/VOLDN 5 at a time (a lower number is louder)."""
+
+    def __init__(self, vol=20):
+        self.vol = vol
+
+    def handle(self, verb):
+        U = verb.upper()
+        if U.startswith(("PLAY,", "PLAYFS,")):
+            fs = U.startswith("PLAYFS,")
+            n = _nm_toint(verb[7 if fs else 5:])
+            return bytes([0x76, self.vol, 0x70 if fs else 0x74, n]) if (0 if fs else 1) <= n <= 255 else None
+        if U in ("STOP", "NEXT", "PREV"):
+            return {"STOP": b"O", "NEXT": b"F", "PREV": b"R"}[U]
+        if U.startswith("VOL,"):
+            if not 0 <= _nm_toint(verb[4:]) <= 64:
+                return None
+            self.vol = _nm_toint(verb[4:])
+        elif U in ("VOLUP", "VOLDN"):
+            self.vol = max(0, self.vol - 5) if U == "VOLUP" else min(64, self.vol + 5)
+        else:
+            return None
+        return bytes([0x76, self.vol])
+
+
+class DfpPy:
+    """WcbCmd's DfPlayerCodec::handle (WcbDfPlayer.cpp:51-171) for a verb (what follows ';D,') -> the 10-byte frame, or
+    None: VOLUP/VOLDN are absolute SetVolume frames 2 apart, clamped 0-30."""
+    SIMPLE = {"STOP": 0x16, "NEXT": 0x01, "PREV": 0x02, "PAUSE": 0x0E, "RESUME": 0x0D, "RANDOM": 0x18, "RESET": 0x0C}
+    ONE = (("LOOPALL,", 0x11, 0, 1), ("LOOPFOLDER,", 0x17, 1, 99), ("LOOP,", 0x08, 1, 2999), ("EQ,", 0x07, 0, 5),
+           ("DEVICE,", 0x09, 1, 5), ("PLAY,", 0x03, 1, 2999), ("MP3FOLDER,", 0x12, 1, 9999))
+
+    def __init__(self, vol=20):
+        self.vol = vol
+
+    @staticmethod
+    def frame(cmd, param=0):
+        body = bytes([0xFF, 0x06, cmd, 0x00, (param >> 8) & 0xFF, param & 0xFF])
+        ck = -sum(body) & 0xFFFF
+        return b"\x7e" + body + bytes([ck >> 8, ck & 0xFF, 0xEF])
+
+    def handle(self, verb):
+        U = verb.upper()
+        if U in self.SIMPLE:
+            return self.frame(self.SIMPLE[U])
+        if U.startswith("FOLDER,"):
+            fo, _, tr = verb[7:].partition(",")
+            ok = tr and 1 <= _nm_toint(fo) <= 99 and 1 <= _nm_toint(tr) <= 255
+            return self.frame(0x0F, _nm_toint(fo) << 8 | _nm_toint(tr)) if ok else None
+        if U.startswith("VOL,") or U in ("VOLUP", "VOLDN"):
+            if U.startswith("VOL,"):
+                if not 0 <= _nm_toint(verb[4:]) <= 30:
+                    return None
+                self.vol = _nm_toint(verb[4:])
+            else:
+                self.vol = min(30, self.vol + 2) if U == "VOLUP" else max(0, self.vol - 2)
+            return self.frame(0x06, self.vol)
+        for pre, cmd, lo, hi in self.ONE:
+            if U.startswith(pre):
+                n = _nm_toint(verb[len(pre):])
+                return self.frame(cmd, n) if lo <= n <= hi else None
+        return None
+
+
+def _nm_wled(body):
+    """WcbWled::build (WcbCmd WcbWled.cpp) for the verbs s09's table uses -> the JSON, "" for an unknown verb."""
+    f = [x.strip() for x in body.split(",")]
+    v = f[0].upper()
+    num = lambda i: _nm_toint(f[i]) if len(f) > i else 0      # noqa: E731
+    if v in ("ON", "OFF", "TOGGLE"):
+        return {"ON": '{"on":true}', "OFF": '{"on":false}', "TOGGLE": '{"on":"t"}'}[v]
+    if v == "BRI" and len(f) > 1:
+        return '{"bri":%d}' % max(0, min(255, num(1)))
+    if v in ("PS", "PAL") and len(f) > 1:
+        return '{"ps":%d}' % num(1) if v == "PS" else '{"seg":[{"pal":%d}]}' % num(1)
+    if v == "COL" and len(f) > 1 and len(f[1].lstrip("#")) in (6, 8):
+        h = f[1].lstrip("#")
+        return '{"seg":[{"col":[[%s]]}]}' % ",".join(str(int(h[i:i + 2], 16)) for i in range(0, len(h), 2))
+    if v == "FX" and len(f) > 1:
+        extra = "".join(',"%s":%d' % (k, max(0, min(255, num(i)))) for i, k in ((2, "sx"), (3, "ix")) if len(f) > i)
+        return '{"seg":[{"fx":%d%s}]}' % (num(1), extra)
+    if v == "JSON" and "," in body:
+        return body.split(",", 1)[1]
+    return ""
+
+
+class FakeMaestro:
+    """NaviCore's Maestro 1 on Serial2: per channel a target and a speed (S x 100 quarter-us a second, 0 = none); a
+    channel that was off (target 0) jumps to its first target; getPosition, getMovingState and getErrors as ?MAE reads
+    them (reading the errors clears them)."""
+
+    def __init__(self):
+        self.ch, self.err = {}, 0
+
+    def _s(self, c):
+        return self.ch.setdefault(c, {"from": 0, "to": 0, "t0": 0.0, "speed": 0})
+
+    def pos(self, c):
+        s = self._s(c)
+        if not (s["to"] and s["speed"] and s["from"]):
+            return s["to"]
+        d = s["speed"] * 100 * (time.monotonic() - s["t0"])
+        if d >= abs(s["to"] - s["from"]):
+            return s["to"]
+        return int(s["from"] + (d if s["to"] > s["from"] else -d))
+
+    def moving(self):
+        return int(any(self.pos(c) != s["to"] for c, s in list(self.ch.items())))
+
+    def read_err(self):
+        e, self.err = self.err, 0
+        return e
+
+    def frame(self, f):
+        if any(b >= 0x80 for b in f[3:]):
+            self.err |= 0x10                     # a command-range byte inside a frame: a serial protocol error
+        elif f[2] in (0x04, 0x07):
+            s = self._s(f[3])
+            s.update({"from": self.pos(f[3]), "t0": time.monotonic()})
+            s["to" if f[2] == 0x04 else "speed"] = f[4] | f[5] << 7
+
+
+class NaviDevModel(NaviModel):
+    """NaviModel plus the device paths s44 drives, from NaviCore hil-week 6925773 and the WcbCmd 0.9.1 it compiles:
+    executeMaestroCmd with its 35-character copy, casts and clamps (NaviCore.ino:1307-1390); maestroWrite to Serial2
+    (a FakeMaestro) or into the broadcast WCBStream (177 bytes, sent before a frame that would not fit and at the end
+    of the command), whose packets both Maestro_Remote WCBs write to their S1 (the W1 S1 probe and the W2 S1 tap); the
+    easing rules (setEasing's re-apply and two repeats 500 ms apart that re-send only positive limits, restartScript's
+    own/switch/override/Off, the re-apply and repeats after every config save, :1106-1250); ?MAE on a local slot and on
+    a remote one (;M<dev>,<verb> read by W2's Maestro 2, the marker printed later and mirrored to W1 when the read came
+    over the bridge); the HCR, MP3 Trigger, DFPlayer and WLED on either transport (ports of HcrCodec, Mp3Codec,
+    DfPlayerCodec and WcbWled, and of W2's handlers; a local fade ticked from a thread that loop() stops once hcrDest is
+    not local); a serial action whose ACK waits out a bit-banged write; the 4-deep mesh-to-serial queue and the
+    broadcast fan-out; #L90, #L20/#L21 and DBG_WIRE of a hook image. `mut` breaks the model in one way, or applies a
+    D-NC fix, by name (NCDEV_MUTATIONS; see where each is read)."""
+    FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if rx.pattern != r"^#[Ll]2[01]")
+    CAP = 177
+    LINKS = ("W1S1", "W2S1", "W2S2", "W2S3", "W2S4", "W2S5")
+
+    def __init__(self, mut=()):
+        self.mut = set(mut)
+        self.lock = threading.RLock()
+        super().__init__()
+        self.links = {k: DevLink(k, tap=k == "W2S1") for k in self.LINKS}
+        self.w2 = self.w2hcr = self.w2audio = None
+        self.stream, self.spd, self.acc, self.sw_ease = bytearray(), {}, {}, [-1] * 8
+        self.mae1, self.m2, self.w2vars = FakeMaestro(), {"pos": 6000, "mov": 0, "err": 0}, {}
+        self.hcr, self.mp3, self.dfp, self.fades = HcrPy(), Mp3Py(20), DfpPy(20), {}
+        self.fwd, self.stall_until, self._relay, self.block_s, self.alive = [], 0.0, False, 0.0, True
+        threading.Thread(target=self._fade_loop, daemon=True).start()
+
+    def label(self, port):
+        """auxPortLabel (NaviCore.ino:274-279)."""
+        if port not in ("S3", "S4", "S5"):
+            return port
+        i = int(port[1]) - 3
+        return f"Serial {i + 1 if self.c['boardType'] == 0 else i + 3}"
+
+    # ------------------------------------------------------------ Maestro frames
+    def wire(self, port, data):
+        """navihil::wire: '[WIRE] <port> <off>/<len>: <hex>', one line per 48 bytes of a block, under DBG_WIRE."""
+        if not self.flags & 0x80 or not data:
+            return []
+        return [f"[WIRE] {port} {o}/{len(data)}: {data[o:o + 48].hex(' ').upper()}" for o in range(0, len(data), 48)]
+
+    def flush(self):
+        """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1."""
+        if not self.stream:
+            return []
+        pkt = bytes(self.stream)
+        self.stream.clear()
+        for k in ("W1S1", "W2S1"):
+            self.links[k].write(pkt)
+        return [f"[WCBStream] Broadcast (Kyber) {len(pkt)} bytes — OK"]
+
+    def mwrite(self, i, cmd, payload=b""):
+        """maestroWrite (NaviCore.ino:647-701) -> (written, console lines)."""
+        if not 1 <= i <= 8 or self.c["maestros"][i - 1]["type"] == 0:
+            return False, []
+        slot = self.c["maestros"][i - 1]
+        frame = bytes([0xAA, slot["device"], cmd & 0x7F]) + bytes(payload)
+        blocks = [frame] if cmd == 0xA7 or not payload else [frame[:3], bytes(payload)]
+        if slot["type"] == 1:
+            self.mae1.frame(frame)
+            return True, [y for b in blocks for y in self.wire("Serial2", b)]
+        out = []
+        if self.CAP - len(self.stream) < len(frame) and "cut_mid_frame" not in self.mut:   # break: fill to the brim
+            out += self.flush()
+        for b in blocks:
+            out += self.wire("WCBStream", b)
+            for byte in b:
+                if len(self.stream) >= self.CAP:
+                    out += self.flush()
+                self.stream.append(byte)
+        return True, out
+
+    def u(self, s, bits):
+        """(uint8_t) / (uint16_t)atoi, as executeMaestroCmd casts (D-NC56); the 'no_alias' fix keeps the number."""
+        v = _nm_toint(s)
+        return v if "no_alias" in self.mut else v & ((1 << bits) - 1)
+
+    def refuse(self, i, ch):
+        return self.dlog(1, f"[DISPATCH] Maestro {i}: channel {ch} out of range (0-31) — skipped")
+
+    def set_target(self, i, ch, pos):
+        if ch > 31:
+            return self.refuse(i, ch)
+        pos = min(pos, 16383)
+        return self.mwrite(i, 0x84, bytes([ch, pos & 0x7F, pos >> 7 & 0x7F]))[1]
+
+    def set_speed(self, i, ch, spd):
+        if ch > 31:
+            return self.refuse(i, ch)
+        spd = min(spd, 16383)
+        ok, out = self.mwrite(i, 0x87, bytes([ch, spd & 0x7F, spd >> 7 & 0x7F]))
+        if ok:
+            self.spd[(i, ch)] = spd
+        return out + (self.dlog(1, f"[DISPATCH] Maestro {i} ch {ch}  SetSpeed {spd}") if ok else [])
+
+    def set_accel(self, i, ch, acc):
+        if ch > 31:
+            return self.refuse(i, ch)
+        if acc > 255:                                    # reached only with the 'no_alias' fix
+            return self.dlog(1, f"[DISPATCH] Maestro {i}: accel {acc} out of range (0-255) — skipped")
+        ok, out = self.mwrite(i, 0x89, bytes([ch, acc & 0x7F, acc >> 7 & 0x7F]))
+        if ok:
+            self.acc[(i, ch)] = acc
+        return out + (self.dlog(1, f"[DISPATCH] Maestro {i} ch {ch}  SetAccel {acc}") if ok else [])
+
+    def invalidate(self, i):
+        """maeSmoothInvalidateSlot (:1022-1025) on a script start or stop."""
+        for k in [k for k in self.spd if k[0] == i]:
+            self.spd[k] = None
+        for k in [k for k in self.acc if k[0] == i]:
+            self.acc[k] = None
+
+    def entry(self, p, i, ch):
+        return self.c["smooth"][p]["entries"].get((i, ch), (0, 0)) if 0 <= p < 6 else (0, 0)
+
+    def knob_outs(self, i):
+        """(knob, channel) for every passthrough output on Maestro slot i, each output set of a mode-aware knob."""
+        for kn in self.c["knobs"]:
+            if kn["function"] != 1:
+                continue
+            for outs in [kn["outputs"]] + ([kn["outputs2"], kn["outputs3"]] if kn["modeAware"] else []):
+                for o in outs:
+                    if o["target"] == i and o["maestroCh"] < 32:
+                        yield kn, o["maestroCh"]
+
+    def resolve(self, kn, i):
+        """resolveKnobEasing (:1010-1015)."""
+        own, sw = kn["smoothProfile"], self.sw_ease[i - 1]
+        return (sw if kn["easeSwitchOverride"] and sw != -1 else own) if own >= 0 else sw
+
+    def reapply(self, i):
+        """reapplyMaestroEasing (:1147-1170): the effective easing, 0 when none, cache-gated."""
+        out = []
+        for kn, ch in self.knob_outs(i):
+            eff = self.resolve(kn, i)
+            s, a = self.entry(eff, i, ch) if eff >= 0 else (0, 0)
+            if self.spd.get((i, ch), 0) != min(s, 16383):
+                out += self.set_speed(i, ch, s)
+            if self.acc.get((i, ch), 0) != a:
+                out += self.set_accel(i, ch, a)
+        return out
+
+    def reassert(self, i):
+        """reassertMaestroEasing (:1212-1233): only an effective profile's non-zero entries, unconditionally."""
+        out = []
+        for kn, ch in self.knob_outs(i):
+            eff = self.resolve(kn, i)
+            if eff < 0:
+                if "repeat_zero" in self.mut:                  # break: a repeat that drives 0 like the re-apply
+                    out += self.set_speed(i, ch, 0) + self.set_accel(i, ch, 0)
+                continue
+            if self.entry(eff, i, ch) != (0, 0):
+                out += self.set_speed(i, ch, self.entry(eff, i, ch)[0]) + self.set_accel(i, ch, self.entry(eff, i, ch)[1])
+        return out
+
+    def schedule(self, i):
+        """scheduleEasingRepeat (:1185-1194): EASE_REPEATS (2), EASE_REPEAT_MS (500) apart."""
+        for k in (1, 2):
+            t = threading.Timer(0.5 * k, self._repeat, (i,))
+            t.daemon = True
+            t.start()
+
+    def _repeat(self, i):
+        with self.lock:
+            if self.alive:
+                lines = self.reassert(i) + self.flush()
+                if lines:
+                    self.nav._append(*lines)
+
+    def script_easing(self, i, use):
+        """applyScriptEasing (:1106-1138): a profile's entries, or with Off every channel any profile manages zeroed."""
+        out = []
+        for ch in range(32):
+            if 0 <= use < 6 and self.entry(use, i, ch) != (0, 0):
+                out += self.set_speed(i, ch, self.entry(use, i, ch)[0]) + self.set_accel(i, ch, self.entry(use, i, ch)[1])
+            elif use == -2 and any(self.entry(p, i, ch) != (0, 0) for p in range(6)):
+                out += self.set_speed(i, ch, 0) + self.set_accel(i, ch, 0)
+        return out
+
+    def sub_ok(self, i, sub):
+        """The D-NC23 fix ('msb_fixed') refuses a subroutine over 127; the D-NC56 fix one over 255."""
+        if sub > 255 or (sub > 127 and "msb_fixed" in self.mut):
+            return self.dlog(1, f"[DISPATCH] Maestro {i}: subroutine {sub} out of range — skipped")
+        return None
+
+    def mae_cmd(self, i, cmd):
+        """executeMaestroCmd (:1307-1390): char buf[36], strtok on ','."""
+        toks = [t for t in cmd[:35].split(",") if t]
+        if not toks:
+            return []
+        tok, a = toks[0], toks[1:]
+        if tok in ("goHome", "stopScript"):
+            out = self.mwrite(i, 0xA2 if tok == "goHome" else 0xA4)[1]
+            self.invalidate(i)
+            return out
+        if tok == "setTarget" and len(a) >= 2:
+            return self.set_target(i, self.u(a[0], 8), self.u(a[1], 16))
+        if tok == "setSpeed" and len(a) >= 2:
+            return self.set_speed(i, self.u(a[0], 8), self.u(a[1], 16))
+        if tok == "setAccel" and len(a) >= 2:
+            return self.set_accel(i, self.u(a[0], 8), self.u(a[1], 8))
+        if tok == "setSpeedAccel" and len(a) >= 3:
+            ch = self.u(a[0], 8)
+            return self.set_speed(i, ch, self.u(a[1], 16)) + self.set_accel(i, ch, self.u(a[2], 8))
+        if tok == "setEasing":
+            s = a[0] if a else ""
+            self.sw_ease[i - 1] = -2 if s[:1] in ("o", "O") else \
+                _nm_toint(s[1:]) if s[:1] in ("p", "P") and 0 <= _nm_toint(s[1:]) < 6 else -1
+            out = self.reapply(i)
+            self.schedule(i)
+            return out
+        if tok == "restartScript":
+            sub = self.u(a[0], 8) if a else 0
+            spec, ovr = (a[1] if len(a) > 1 else ""), (a[2] if len(a) > 2 else "")
+            own = _nm_toint(spec[1:]) if spec[:1] in ("p", "P") and 0 <= _nm_toint(spec[1:]) < 6 else -1
+            sw = self.sw_ease[i - 1]
+            use = (sw if ovr[:1] in ("o", "O") and sw != -1 else own) if own >= 0 else sw
+            out = self.script_easing(i, use)
+            refused = self.sub_ok(i, sub)
+            if refused is not None:
+                return out + refused
+            out += self.mwrite(i, 0xA7, bytes([sub]))[1]
+            self.invalidate(i)
+            return out
+        if tok == "subParam" and len(a) >= 2:
+            sub, par = self.u(a[0], 8), min(self.u(a[1], 16), 16383)
+            refused = self.sub_ok(i, sub)
+            if refused is not None:
+                return refused
+            out = self.mwrite(i, 0xA8, bytes([sub, par & 0x7F, par >> 7 & 0x7F]))[1]
+            self.invalidate(i)
+            return out
+        return []
+
+    # ------------------------------------------------------------ the devices
+    def device_on(self, port):
+        """auxPortHasDevice (:2946-2968)."""
+        return any(self.c[k]["transport"] == 0 and self.c[k]["target"] == port for k in ("hcrDest", "mp3Dest", "dfpDest")) \
+            or any(w["configured"] and w["remoteWCB"] == 0 and f"S{w['serialPort']}" == port for w in self.c["wledSlots"])
+
+    def fade_start(self, port, fn, ch, sec):
+        """HcrFade::start on local channel ch (1 = A, 2 = B): a FadeIn anchors at 0 and ramps to the level, a FadeOut
+        ramps from the level to 0 and then sends StopWAV and the level back; 0 s is instant (_nm_fade_now)."""
+        old = self.fades.pop(ch, None)
+        base = old["restore"] if old else self.hcr.vol[ch]
+        if sec <= 0:
+            return self.wire(port, _nm_fade_now(self.hcr, fn, ch, base).encode())
+        frm, to = (0, base) if fn == 12 else (self.hcr.vol[ch], 0)
+        out = self.hcr.fmt(17, ch, frm) if frm != self.hcr.vol[ch] else ""
+        self.fades[ch] = {"from": frm, "to": to, "t0": time.monotonic(), "dur": float(sec), "next": 0.0, "last": frm,
+                          "stop": fn == 15, "restore": base, "port": port}
+        return self.wire(port, out.encode())
+
+    def _fade_loop(self):
+        """loop()'s HcrFade tick (:5537-5552), 150 ms steps; a fade is cancelled in the pass that sees hcrDest is no
+        longer local, so nothing follows the save that moved it. Lines are appended under the lock, in order."""
+        while self.alive:
+            time.sleep(0.05)
+            with self.lock:
+                if self.c["hcrDest"]["transport"] != 0 and "fade_not_cancelled" not in self.mut:   # break: keep going
+                    self.fades.clear()
+                lines, now = [], time.monotonic()
+                for ch, f in list(self.fades.items()):
+                    el = now - f["t0"]
+                    if el >= f["dur"]:
+                        out = self.hcr.fmt(17, ch, f["to"])
+                        if f["stop"]:
+                            out += self.hcr.fmt(16, ch, 0) + self.hcr.fmt(17, ch, f["restore"])
+                        lines += self.wire(f["port"], out.encode())
+                        del self.fades[ch]
+                    elif now >= f["next"]:
+                        f["next"] = now + 0.15
+                        v = f["from"] + int((f["to"] - f["from"]) * el / f["dur"])
+                        if v != f["last"]:
+                            f["last"] = v
+                            lines += self.wire(f["port"], self.hcr.fmt(17, ch, v).encode())
+                if lines and self.nav is not None:
+                    self.nav._append(*lines)
+
+    def hcr_action(self, a):
+        """executeHcrAction (:1600-1725): the WCB branch sends the ;H command (to W2HcrPy while s15's fixture holds it);
+        the local branch writes the port through the tap and shows its payload in the trace."""
+        d, fn, ch, tr = self.c["hcrDest"], a["fn"], a["chan"], a["track"]
+        if d["transport"] == 2:
+            return self.dlog(8, "[DISPATCH] HCR is disabled in config — action skipped")
+        kind = "WCB" if d["transport"] == 1 else "Serial"
+        if fn in (12, 15) and ch not in (1, 2):
+            return self.dlog(8, f"[DISPATCH] HCR-{kind}: fade chan must be A(1)/B(2), got {ch} — skipped")
+        if d["transport"] == 1:
+            cmd = _nm_hcr_wcb(fn, ch, tr)
+            if not cmd:
+                return self.dlog(8, f"[DISPATCH] HCR-WCB: bad/unsupported fn={fn} chan={ch} track={tr} — skipped")
+            if self.w2hcr is not None:
+                self.w2hcr.run(cmd[3:])
+            return self.dlog(8, f"[DISPATCH] HCR→WCB{d['target']}  {cmd}  OK")
+        port = d["target"]
+        if fn in (12, 15):
+            return self.fade_start(port, fn, ch, tr) + \
+                self.dlog(8, f"[DISPATCH] HCR→{port}  Fade{'In' if fn == 12 else 'Out'} ch={ch} {tr}s")
+        level = min(tr, 1) if fn in (3, 4) and "level_same" in self.mut else tr          # the D-NC59 fix
+        payload = _nm_hcr_local(self.hcr, fn, ch, level, cap=100 if "volstep_100" in self.mut else 99)  # D-NC57 fix
+        if not payload:
+            return self.dlog(8, f"[DISPATCH] HCR-Serial: bad/unsupported fn={fn} chan={ch} track={tr} — skipped")
+        shown = [y for x in self.dlog(8, f"[DISPATCH] HCR→{port}  fn={fn} chan={ch} track={tr}  {payload}")
+                 for y in x.rstrip("\n").split("\n")]
+        return shown + self.wire(port, payload.encode())
+
+    def audio_action(self, a, mp3):
+        """executeMp3Action / executeDfpAction (:1776-1835, :1901-1958): one verb for both transports; local through the
+        codec on the port's tap, remote as ;A / ;D to W2 (whose codec, while s15's fixture holds it, writes its S5)."""
+        d = self.c["mp3Dest" if mp3 else "dfpDest"]
+        bit, tag, fn, ch, tr = (0x10 if mp3 else 0x40), ("MP3" if mp3 else "DFP"), a["fn"], a["chan"], a["track"]
+        if d["transport"] == 2:
+            return self.dlog(bit, "[DISPATCH] MP3 Trigger is disabled in config — action skipped" if mp3 else
+                             "[DISPATCH] DFPlayer is disabled in config — action skipped")
+        verb = _nm_mp3_verb(fn, tr) if mp3 else _nm_dfp_verb(fn, ch, tr)
+        if d["transport"] == 0:
+            port, codec = d["target"], (self.mp3 if mp3 else self.dfp)
+            if not verb:
+                return self.dlog(bit, f"[DISPATCH] MP3-local: bad/out-of-range fn={fn} arg={tr} — skipped" if mp3 else
+                                 f"[DISPATCH] DFP-local: bad/out-of-range fn={fn} chan={ch} track={tr} — skipped")
+            out = codec.handle(verb) or b""
+            ok = "OK" if out else "FAIL"
+            return self.dlog(bit, f"[DISPATCH] MP3→{port}  fn={fn} arg={tr} vol={codec.vol}  {ok}" if mp3 else
+                             f"[DISPATCH] DFP→{port}  fn={fn} chan={ch} track={tr} vol={codec.vol}  {ok}") + \
+                self.wire(port, out)
+        if not verb:
+            return self.dlog(bit, f"[DISPATCH] {tag}: bad fn={fn} — skipped")
+        if self.w2audio is not None and self.w2audio[0] == tag:
+            self.links["W2S5"].write(self.w2audio[1].handle(verb) or b"")
+        return self.dlog(bit, f"[DISPATCH] {tag}→WCB{d['target']}  ;{'A' if mp3 else 'D'},{verb}  OK")
+
+    def w2_command(self, cmd):
+        """W2 running a unicast from NaviCore: ;L1 is its WLED on S2; a command without its ';' is plain broadcast text
+        (WCB.ino:6010-6020), out its S3-S5."""
+        m = re.match(r"^;L(\d*),?(.*)$", cmd)
+        if m:
+            js = _nm_wled(m.group(2)) if m.group(1) == "1" else ""
+            if js:
+                self.links["W2S2"].write(js.encode() + b"\n")
+        elif not cmd.startswith((";", "?")):
+            for p in ("W2S3", "W2S4", "W2S5"):
+                self.links[p].write(cmd.encode() + b"\r")
+
+    def wled_action(self, a):
+        """executeWledAction (:1960-2020)."""
+        s = a["cmd"].lstrip(" \t")
+        s = s[1:] if s.startswith(";") else s
+        if s[:1] not in ("L", "l"):
+            return self.dlog(4, f"[DISPATCH] WLED: '{a['cmd']}' is not a ;L command — skipped")
+        m = re.match(r"^(\d*)(.*)$", s[1:])
+        wid = _nm_toint(m.group(1)) if m.group(1) else 0
+        if wid > 9:
+            return self.dlog(4, f"[DISPATCH] WLED: id {wid} out of range (1-9) — skipped")
+        body = m.group(2)[1:] if m.group(2).startswith(",") else m.group(2)
+        slots = [w for w in self.c["wledSlots"] if w["configured"]]
+        if wid == 0:
+            local = [w for w in slots if w["remoteWCB"] == 0 and 3 <= w["serialPort"] <= 5]
+            if not local:
+                return self.dlog(4, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped")
+            w = min(local, key=lambda x: x["wledID"])
+        else:
+            w = next((x for x in slots if x["wledID"] == wid), None)
+            if w is None:
+                return self.dlog(4, f"[DISPATCH] WLED {wid} not configured — skipped")
+        if w["remoteWCB"] == 0:
+            js, port = _nm_wled(body), f"S{w['serialPort']}"
+            wires = self.wire(port, js.encode()) + self.wire(port, b"\n") if js else []
+            return self.dlog(4, f"[DISPATCH] WLED {w['wledID']}→{port}  {body}  {'OK' if js else 'no-op'}") + wires
+        cmd = f";L{wid},{body}" if "wled_semicolon" in self.mut else a["cmd"]         # the D-NC60 fix
+        self.w2_command(cmd)
+        return self.dlog(4, f"[DISPATCH] WLED {w['wledID']}→WCB{w['remoteWCB']}  {cmd}  OK")
+
+    def serial_action(self, a):
+        """RA_SERIAL (:2093-2100): the text and a CR, two blocks through the tap; writeS4/S5 block loop(), and so the USB
+        ACK, for the line (D-NC58; the 'serial_paced' fix queues it instead)."""
+        port, cmd = a["target"], a["cmd"]
+        out = self.dlog(0x20, f"[DISPATCH] Serial TX [{self.label(port)}]  {cmd}")
+        if port in ("S3", "S4", "S5"):
+            out += self.wire(port, cmd.encode()) + self.wire(port, b"\r")
+            if port != "S3" and "serial_paced" not in self.mut:
+                self.block_s += (len(cmd.encode()) + 1) * 10 / self.c["auxBaud"][int(port[1]) - 3]
+        return out
+
+    def dispatch(self, a):
+        t = a["type"]
+        if t == "maestro":
+            i = int(a["target"]) if a["target"].isdigit() else 0
+            if not 1 <= i <= 8:
+                return [f"WARN: Maestro action with invalid ID {i} (target='{a['target']}')"]
+            return self.dlog(1, f"[DISPATCH] Maestro {i}  {a['cmd']}") + self.mae_cmd(i, a["cmd"])
+        if t == "maestro_local":
+            return self.dlog(1, f"[DISPATCH] Maestro (legacy local → ID 1)  {a['cmd']}") + self.mae_cmd(1, a["cmd"])
+        if t == "hcr":
+            return self.hcr_action(a)
+        if t in ("mp3", "dfplayer"):
+            return self.audio_action(a, t == "mp3")
+        if t == "wled":
+            return self.wled_action(a)
+        if t == "serial":
+            return self.serial_action(a)
+        return super().dispatch(a)
+
+    # ------------------------------------------------------------ NaviCore's console
+    def script(self, text, n):
+        with self.lock:
+            return super().script(text, n)
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        t = obj.get("type") if isinstance(obj, dict) else None
+        if t == "TEST_ACTION":
+            a = self.action_from(obj.get("action")) if isinstance(obj.get("action"), dict) else None
+            if a is None or (a["type"] == "wcb_unicast" and not (a["target"].isdigit() and 1 <= int(a["target"]) <= 20)):
+                return ['{"type":"ACK","of":"TEST_ACTION","ok":false}']
+            self.block_s = 0.0
+            lines, ack = self.dispatch(a) + self.flush(), '{"type":"ACK","of":"TEST_ACTION","ok":true}'
+            if self.block_s:
+                self.nav.later(self.block_s, ack)             # the ACK after the action has run (:4017-4027)
+                return lines
+            return lines + [ack]
+        out = super().json_line(line)
+        if t == "SET_CONFIG" and out and '"ok":true' in out[-1]:
+            extra = [y for i in range(1, 9) for y in self.reapply(i)] + self.flush()   # processSwitches :2466-2478
+            for i in range(1, 9):
+                self.schedule(i)
+            out = out[:-1] + extra + out[-1:]
+        return out
+
+    def hash_cmd(self, text):
+        m = re.match(r"^#[Ll](\d+)(?:,(.*))?$", text)
+        fn = int(m.group(1)) if m else -1
+        if fn == 90:
+            ms = _nm_toint(m.group(2) or "0")
+            if ms <= 0:
+                return ["[HIL] #L90: loop() stalls 0 ms at its next pass", "[HIL] #L90: loop() resumed after 0 ms"]
+            self.stall_until = time.monotonic() + ms / 1000
+            t = threading.Timer(ms / 1000, self._resume, (ms,))
+            t.daemon = True
+            t.start()
+            return [f"[HIL] #L90: loop() stalls {ms} ms at its next pass"]
+        if fn in (20, 21):
+            port = "S3" if fn == 20 else "S4"
+            return [f"[HCR TEST] -> {port} : SetEmotion(HAPPY,80) via hcrFormatCommand + raw frame"] + \
+                self.wire(port, HcrPy().fmt(2, 0, 80).encode()) + self.wire(port, b"<OH80,QEH>\n") + \
+                ["[HCR TEST] sent — watch the HCR; check TX wiring to HCR RX, common ground"]
+        return super().hash_cmd(text)
+
+    def _resume(self, ms):
+        with self.lock:
+            self.stall_until = 0.0
+            queued, self.fwd = self.fwd, []
+            self.nav._append(f"[HIL] #L90: loop() resumed after {ms} ms",
+                             *[y for fw, text in queued for y in self.write_fwd(fw, text)])
+
+    def marker(self, slot, q, ch, val=None, err=None):
+        body = f'"val":{val}' if err is None else f'"err":"{err}"'
+        return f'[MAE:{slot}]{{"q":"pos","ch":{ch},{body}}}' if q == "pos" else f'[MAE:{slot}]{{"q":"{q}",{body}}}'
+
+    def remote_read(self, slot, q, ch):
+        """maestroBroadcastReadVerb (:703-745): W2 hosts Maestro 2, reads it (the request frame on its S1 tap), keeps the
+        value in m2pos<ch>/m2moving/m2err and answers :MQR; the marker lands later (maePumpRemoteEmits :829-850), and
+        on W1 too as [TERM:20] when the read came over the bridge (maeLatchRemoteRelay :802-804)."""
+        dev = self.c["maestros"][slot - 1]["device"]
+        if dev == 2:
+            self.links["W2S1"].write(bytes([0xAA, 2, {"pos": 0x10, "mov": 0x13, "err": 0x21}[q]]) +
+                                     (bytes([ch]) if q == "pos" else b""))
+            val = self.m2[q]
+            if q == "err":
+                self.m2["err"] = 0
+            self.w2vars[{"pos": f"m{dev}pos{ch}", "mov": f"m{dev}moving", "err": f"m{dev}err"}[q]] = val
+            relay, mk = self._relay, self.marker(slot, q, ch, val)
+
+            def land():
+                self.nav._append(mk)
+                if relay and "no_relay_marker" not in self.mut:                  # break: never mirrored to W1
+                    self.w1._append(f"[TERM:20]{mk}")
+            t = threading.Timer(0.05, land)
+            t.daemon = True
+            t.start()
+        return self.dlog(1, f"[DISPATCH] Maestro {slot} remote read sent — awaiting :MQR")
+
+    def cli(self, text):
+        if text[:5].upper() != "?MAE,":
+            return super().cli(text)
+        p = [x.strip() for x in text[5:].split(",")]
+        verb = p[0].upper()
+        if verb == "FREE" and len(p) >= 3:
+            slot, ch = _nm_toint(p[1]) & 0xFF, _nm_toint(p[2]) & 0xFF
+            return self.set_speed(slot, ch, 0) + self.set_accel(slot, ch, 0) + self.flush()
+        if verb in ("GET", "MOVING", "ERR") and len(p) >= 2:
+            slot, q = _nm_toint(p[1]) & 0xFF, {"GET": "pos", "MOVING": "mov", "ERR": "err"}[verb]
+            ch = _nm_toint(p[2]) & 0xFF if verb == "GET" and len(p) > 2 else 0
+            kind = self.c["maestros"][slot - 1]["type"] if 1 <= slot <= 8 else 0
+            if kind == 0:
+                return [self.marker(slot, q, ch, err="disabled")]
+            if kind == 2:
+                return self.remote_read(slot, q, ch)
+            val = self.mae1.pos(ch) if q == "pos" else self.mae1.moving() if q == "mov" else self.mae1.read_err()
+            return [self.marker(slot, q, ch, val)]
+        if len(p) >= 3 and p[0].isdigit():
+            return self.set_target(_nm_toint(p[0]) & 0xFF, _nm_toint(p[1]) & 0xFF, _nm_toint(p[2]) & 0xFFFF) + self.flush()
+        return []
+
+    def wdp_dump(self):
+        """W2's row lists the Maestro it hosts (MAESTRO=2)."""
+        return [r.replace("MAESTRO=-,AGE=5", "MAESTRO=2,AGE=5") for r in super().wdp_dump()]
+
+    # ------------------------------------------------------------ the mesh: W1, W2 and the serial bridge
+    def write_fwd(self, fw, text):
+        """auxTxPump's finished write (:5062-5105)."""
+        port = f"S{fw}"
+        return self.wire(port, text.encode() + b"\r") + \
+            self.dlog(0x20, f"[DISPATCH] Serial TX [{self.label(port)}]  {text}")
+
+    def forward(self, fw, text):
+        """queueSerialFwd (:2937-2943, 4 deep, a full queue drops) while loop() is stalled; written at once otherwise."""
+        if time.monotonic() < self.stall_until:
+            if len(self.fwd) < (5 if "queue_5" in self.mut else 4):              # break: a 5-deep queue
+                self.fwd.append((fw, text))
+            return
+        self.nav._append(*self.write_fwd(fw, text))
+
+    def fan_out(self, text):
+        """queueSerialBroadcastOut (:3100-3117): every port with serialBcast out that no device owns; never JSON."""
+        if text.startswith("{") and "json_fanned" not in self.mut:                # break: JSON fanned out too
+            return
+        for i, p in enumerate(("S3", "S4", "S5")):
+            if self.c["bcastOut"][i] and not self.device_on(p):
+                self.forward(i + 3, text)
+
+    def w1_script(self, text, n):
+        with self.lock:
+            m = re.match(r"^;W20,(.*)$", text)
+            if m:
+                body = m.group(1)
+                if re.match(r"^;[sS][1-3]", body):
+                    self.forward(int(body[2]) + 2, body[3:])
+                    return []
+                if body.startswith("?"):
+                    self._relay = True
+                    try:
+                        return super().w1_script(text, n)
+                    finally:
+                        self._relay = False
+                if body.startswith("{"):
+                    self.fan_out(body)
+                    return super().w1_script(text, n)
+                if not body.startswith((";", "#")):
+                    self.fan_out(body)                      # a unicast with no ';': handed to the broadcast fan-out
+                return []
+            if text and not text.startswith((";", "?", "#", "{")):
+                self.fan_out(text)                          # plain text typed on W1 is a mesh broadcast
+                return []
+            return super().w1_script(text, n)
+
+    def w2_script(self, text, n):
+        m = re.match(r"^\?VAR,(GET|CLEAR),(\w+)$", text)
+        if m and m.group(1) == "GET":
+            v = self.w2vars.get(m.group(2))
+            return [f"[VAR] {m.group(2)} = {v}" if v is not None else f"[VAR] {m.group(2)} not found"]
+        if m:
+            self.w2vars.pop(m.group(2), None)
+            return [f"[VAR] Cleared {m.group(2)}"]
+        return [text[4:]] if text.startswith(";S0,") else []
+
+
+def t_ncdev_helpers(tmp):
+    """The pure parts of s44: wire_log joins one port's [WIRE] blocks and names each block a lost line left short (a
+    missing head, a missing middle, a missing tail) while other ports are ignored; kyber_packets reads the WCBStream's
+    flush lines; stream_packets cuts a burst between frames only (32 six-byte frames and a subroutine frame: 174 + 22);
+    pololu, frame_lengths and dev_stream build, measure and filter Pololu frames; hcr_payload reassembles a local HCR
+    dispatch line whose payload spans lines; aux_label, free_profiles, profile_without and managed_channels read a
+    config. And the tables agree with this file's ports of the WcbCmd codecs and of NaviCore's formatters - HcrCodec and
+    W2's ;H handler, hcrFormatWcbCommand, Mp3Codec, DfPlayerCodec, WcbWled - so a typo in a table or a port shows here,
+    with the DEVICE 2 regression frame equal to s15's _dfp; every mae_cases frame string is whole frames."""
+    import suites.s44_navicore_devices as S
+    from suites.s09_wled import CASES
+    from suites.s15_hcr_mp3_dfp import _dfp
+    a48, b12 = " ".join(["41"] * 48), " ".join(["42"] * 12)
+    lines = [f"[WIRE] S4 0/60: {a48}", "noise", "[WIRE] S3 0/2: 00 01", f"[WIRE] S4 48/60: {b12}", "[WIRE] S4 0/1: 0D"]
+    assert S.wire_log(lines, "S4") == (b"A" * 48 + b"B" * 12 + b"\r", []), S.wire_log(lines, "S4")
+    assert S.wire_log(lines, "S3") == (b"\x00\x01", []) and S.wire_log(lines, "S5") == (b"", [])
+    assert S.wire_log([lines[3], lines[4]], "S4") == (b"B" * 12 + b"\r",
+                                                       ["S4: bytes 0-47 of a 60-byte block were never logged"])
+    assert S.wire_log([lines[0], lines[4]], "S4")[1] == ["S4: a 60-byte block stopped at byte 48"]
+    assert S.wire_log([lines[0]], "S4")[1] == ["S4: a 60-byte block stopped at byte 48"]
+    assert S.wire_log(["[WIRE] WCBStream 0/3: AA 04 22"], "WCBStream") == (b"\xaa\x04\x22", [])
+    assert S.kyber_packets(["[WCBStream] Broadcast (Kyber) 174 bytes — OK", "x",
+                            "[WCBStream] Broadcast (Kyber) 22 bytes — FAIL"]) == [(174, "OK"), (22, "FAIL")]
+    assert S.stream_packets([6] * 32 + [4]) == [174, 22] and S.stream_packets([6] * 29) == [174]
+    assert S.stream_packets([6] * 30) == [174, 6] and S.stream_packets([3, 4]) == [7] and S.stream_packets([]) == []
+    assert S.pololu(4, 0x84, 5, 6000) == bytes.fromhex("AA 04 04 05 70 2E")
+    assert S.pololu(4, 0x27, 200) == b"\xaa\x04\x27\xc8" and S.pololu(2, 0x22) == b"\xaa\x02\x22"
+    burst = S.pololu(4, 0x07, 5, 105) + S.pololu(2, 0x22) + S.pololu(4, 0x27, 0)
+    assert S.frame_lengths(burst) == [6, 3, 4], S.frame_lengths(burst)
+    assert S.dev_stream(burst, 4) == S.pololu(4, 0x07, 5, 105) + S.pololu(4, 0x27, 0)
+    _raises(lambda: S.frame_lengths(b"\x01\x02\x03"), ValueError)
+    trace = ["[DISPATCH] HCR→S4  fn=17 chan=3 track=40  <PVV40>", "<PVA40>", "<PVB40>", "[WIRE] S4 0/24: 3C",
+             "[DISPATCH] HCR→S4  fn=5 chan=0 track=0  <SE,QT>"]
+    assert S.hcr_payload(trace, "S4", 17, 3, 40) == "<PVV40>\n<PVA40>\n<PVB40>\n"
+    assert S.hcr_payload(trace, "S4", 5, 0, 0) == "<SE,QT>\n" and S.hcr_payload(trace, "S3", 5, 0, 0) is None
+    assert S.aux_label({"boardType": 0}, "S4") == "Serial 2" and S.aux_label({"boardType": 1}, "S5") == "Serial 5"
+    cfg = {"smoothProfiles": [{"entries": [{"mid": 1, "ch": 0, "spd": 20, "acc": 3}]},
+                              {"entries": [{"mid": 4, "ch": 0, "spd": 60, "acc": 0}]}, {"entries": []}, {"entries": []},
+                              {"entries": [{"mid": 4, "ch": 7, "spd": 0, "acc": 9}]}, {"entries": []}],
+           "knobs": {"J4": {"smoothProfile": 3}},
+           "mappings": {"101": {"t1": [{"type": "maestro", "target": "4", "cmd": "restartScript,1,p5"}]}}}
+    assert S.free_profiles(cfg) == [2], S.free_profiles(cfg)
+    assert S.profile_without(cfg, 4) == 0 and S.profile_without(cfg, 1) == 1
+    assert S.managed_channels(cfg, 4) == [0, 7] and S.managed_channels(cfg, 2) == []
+    assert S.DFP_DEVICE_2 == _dfp(0x09, 2) == DfpPy.frame(0x09, 2)
+    local, w2 = HcrPy(), W2HcrPy(DevLink("W2S4"))
+    for fn, chan, track, verb, want in S.HCR_CASES:
+        assert _nm_hcr_wcb(fn, chan, track) == verb, (fn, chan, track, _nm_hcr_wcb(fn, chan, track), verb)
+        m = w2.link.mark()
+        w2.run(verb[3:])
+        assert w2.link.received(m) == want, (verb, w2.link.received(m), want)
+        got = _nm_fade_now(local, fn, chan, local.vol[chan]) if fn in (12, 15) else _nm_hcr_local(local, fn, chan, track)
+        assert got.encode() == want, ("local", fn, chan, track, got, want)
+    for fn, chan, track, kind in S.HCR_REFUSED:
+        assert not _nm_hcr_wcb(fn, chan, track), (fn, chan, track)
+        assert (kind == "fade") == (fn in (12, 15)) and (kind == "fade" or not HcrPy().fmt(fn, chan, track))
+    mp3 = Mp3Py(20)
+    for fn, track, verb, hexb, vol in S.MP3_CASES:
+        assert f";A,{_nm_mp3_verb(fn, track)}" == verb, (fn, track, verb)
+        assert mp3.handle(verb[3:]) == bytes.fromhex(hexb) and mp3.vol == vol, (verb, mp3.vol)
+    assert not any(_nm_mp3_verb(fn, track) for fn, track in S.MP3_REFUSED)
+    dfp = DfpPy(20)
+    assert len(S.DFP_VOLS) == len(S.DFP_CASES)
+    for (fn, chan, track, verb, want), vol in zip(S.DFP_CASES, S.DFP_VOLS):
+        assert f";D,{_nm_dfp_verb(fn, chan, track)}" == verb, (fn, chan, track, verb)
+        assert dfp.handle(verb[3:]) == want and dfp.vol == vol, (verb, dfp.vol)
+    assert not any(_nm_dfp_verb(fn, chan, track) for fn, chan, track in S.DFP_REFUSED)
+    for verb, want in CASES:
+        assert _nm_wled(verb).encode() + b"\n" == want, (verb, _nm_wled(verb))
+    assert _nm_wled("BOGUS") == ""
+    cases = S.mae_cases(4, 0)
+    for cmd, want in cases:
+        assert sum(S.frame_lengths(want)) == len(want) and all(d == 4 for d, *_ in S.pololu_frames(want)), cmd
+    assert [c for c, _ in cases if len(c) > S.MAE_CMD_KEEP] == ["setTarget,5," + "0" * 20 + "6000"]
+
+
+def _run_dev_suite(tmp, ids=None, mut=()):
+    """A fake bench for s44: NaviDevModel(mut) behind NaviCore, W1 and W2, its DevLinks as the probe wires, s15's W2 device
+    fixtures replaced by the model's own (W2HcrPy, Mp3Py, DfpPy on W2's S4/S5), config_guard by nothing (the model's
+    W2 has no config to put back), W2's WLED 1 on S2 as bench config has it, every opt-in on. Runs the ncdev tests
+    named in `ids` (default: all but ncdev.knob_local_readback, which needs the SBUS controller) through the runner and
+    puts every patch back -> (results by id, the model, facts: the config text before, session.log, the count)."""
+    import contextlib
+    model = NaviDevModel(mut=mut)
+    orig = model.text()
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}, "sbus": {"port": "COMS", "kind": "sbus"}})
+    b.cfg["opt_in"] = list(optin.OPT_INS)
+    nav, w1, w2 = (FakeNaviDev(model.script, "navicore"), FakeNaviDev(model.w1_script, "wcb1"),
+                   FakeNaviDev(model.w2_script, "wcb2"))
+    model.nav, model.w1, model.w2 = nav, w1, w2
+    nav.log = w1.log = w2.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1, "wcb2": w2}[name]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s44_navicore_devices", None)
+        import suites.s44_navicore_devices as S44
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncdev.") and t["id"] != "ncdev.knob_local_readback"
+                and (ids is None or t["id"] in ids)]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+
+    @contextlib.contextmanager
+    def hcr_w2(bench, port="S4", poll="OFF", debug=False):
+        model.w2hcr = W2HcrPy(model.links["W2S4"])
+        try:
+            yield None
+        finally:
+            model.w2hcr = None
+
+    @contextlib.contextmanager
+    def w2_audio(bench, kind, cfg, port):
+        model.w2audio = (kind, Mp3Py(20) if kind == "MP3" else DfpPy(20))
+        try:
+            yield None
+        finally:
+            model.w2audio = None
+    patches = [(S44, "link", lambda bench, w, p: model.links[f"W{w}{p}"]), (S44, "_hcr_w2", hcr_w2),
+               (S44, "_w2_audio", w2_audio), (S44, "config_guard", lambda bench, *w: contextlib.nullcontext()),
+               (S44, "snapshot", lambda bench, n: ["?WLED,1:W2S2:115200"]), (S44, "_settle_maestro2", lambda w: None)]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        model.alive = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return {r["id"]: r for r in ck.data["results"]}, model, dict(orig=orig, log=log, count=len(mine))
+
+
+NCDEV_SHOULD = {"ncdev.mae_verb_no_alias": "D-NC56", "ncdev.mae_subroutine_msb": "D-NC23",
+                "ncdev.hcr_local_volstep_cap": "D-NC57", "ncdev.hcr_level_same_both_ways": "D-NC59",
+                "ncdev.serial_action_paced": "D-NC58", "ncdev.wled_forward_normalised": "D-NC60"}
+
+
+def t_ncdev_suite_against_model(tmp):
+    """Every ncdev test but ncdev.knob_local_readback (it needs the SBUS controller) run whole, through the runner,
+    against NaviDevModel with every opt-in on: each normal and opt-in test passes, and each (should) test fails, as on
+    today's NaviCore, naming its D-NC; NaviCore's config ends as it began, in RAM and saved (every nc_guard restored
+    it); the local Maestro channel the servo tests moved is off again with no speed limit; no credential reached
+    session.log."""
+    res, model, x = _run_dev_suite(tmp)
+    bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCDEV_SHOULD else 'PASS'}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCDEV_SHOULD else "PASS")]
+    assert len(res) == x["count"] == 22, (len(res), x["count"])
+    assert not bad, "\n".join(bad)
+    for tid, dnc in NCDEV_SHOULD.items():
+        assert f"(should, {dnc})" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
+    assert model.text() == x["orig"] and model.flash == x["orig"], "the model's config was not left as found"
+    assert model.mae1.pos(1) == 0 and model.mae1.ch[1]["speed"] == 0, model.mae1.ch.get(1)
+    assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
+
+
+# (test, model mutation, the status it must then get, a piece of its detail): a break of the behaviour each test exists
+# to catch, and each D-NC fix its (should) test asks for. The byte tables need no break of their own here: every row is
+# compared byte-exact, t_ncdev_helpers checks each against its codec port, and the whole-suite run passes on them.
+NCDEV_MUTATIONS = (
+    ("ncdev.mae_remote_stream_exact", "cut_mid_frame", "FAIL", "expected [174, 22]"),
+    ("ncdev.easing_repeat_frames", "repeat_zero", "FAIL", "setEasing,off"),
+    ("ncdev.mae_remote_read", "no_relay_marker", "FAIL", "[TERM:20]"),
+    ("ncdev.mesh_forward_burst", "queue_5", "FAIL", "expected the first 4"),
+    ("ncdev.bcast_out_opt_in", "json_fanned", "FAIL", "declined JSON"),
+    ("ncdev.hcr_local_payload", "fade_not_cancelled", "FAIL", "the fade kept writing S4"),
+    ("ncdev.mae_verb_no_alias", "no_alias", "PASS", ""),
+    ("ncdev.mae_subroutine_msb", "msb_fixed", "PASS", ""),
+    ("ncdev.hcr_local_volstep_cap", "volstep_100", "PASS", ""),
+    ("ncdev.hcr_level_same_both_ways", "level_same", "PASS", ""),
+    ("ncdev.serial_action_paced", "serial_paced", "PASS", ""),
+    ("ncdev.wled_forward_normalised", "wled_semicolon", "PASS", ""),
+)
+
+
+def t_ncdev_mutations(tmp):
+    """The s44 tests catch what they exist to catch: against a NaviDevModel broken in one way each - a burst cut inside a
+    frame, an easing repeat that drives 0, a remote read never mirrored to the bridge, a 5-deep forward queue, declined
+    JSON fanned out, a local fade that outlives the save that moved the HCR - the test fails and says why; and with
+    each D-NC fix in the model (D-NC56, D-NC23, D-NC57, D-NC59, D-NC58, D-NC60) its (should) test passes. Each runs
+    alone on a fresh model."""
+    for tid, mut, want, why in NCDEV_MUTATIONS:
+        res, _, _ = _run_dev_suite(tmp, ids={tid}, mut={mut})
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -7723,7 +8782,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_build_source, t_ncflash_status_parse,
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
-         t_ncboot_mutations]
+         t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

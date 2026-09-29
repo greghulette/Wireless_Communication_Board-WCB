@@ -127,6 +127,20 @@ SERVO_TESTS = {
     "ncmesh.remote_cli_order_and_drop": "on a hook image it stalls loop() 3 s (#L90): SBUS OUT, which re-emits the "
                                         "controller's stream, stops meanwhile (knobs, bands and the mode function are "
                                         "made inert for it)",
+    # ---- NC-WP7, device transports and the Maestro (s44). The remote-slot and device tests move nothing (device 4 is
+    # hosted nowhere; getErrors only reads Maestro 2). These three move the lowest undriven channel of NaviCore's
+    # Maestro 1, the one navicore.maestro_mesh_settarget_readback already moves every run (ch 1, off at rest), and put
+    # it back; the two that stall loop() past the SBUS UART's buffer make the engine inert first (SBUS OUT pauses).
+    "ncdev.mae_local_frames_readback": "moves one undriven channel of NaviCore's Maestro 1 to 6000-6200 (or p0..p0+200) "
+                                       "and back where it was, speed and accel left 0",
+    "ncdev.mae_local_easing_timing": "moves that channel 400 quarter-us at speed 4 and back, then speed/accel 0 and "
+                                     "its starting target",
+    "ncdev.knob_local_readback": "moves the rx stick; a borrowed knob drives that channel of NaviCore's Maestro 1 within "
+                                 "5800-6200 and its idle release turns it off; left as found",
+    "ncdev.serial_action_paced": "95-character writes to NaviCore's bit-banged S4 stall loop() ~100 ms each (today): "
+                                 "SBUS OUT pauses meanwhile (bands, the mode function and the knobs are made inert)",
+    "ncdev.mesh_forward_burst": "stalls loop() 3 s (#L90): SBUS OUT, which re-emits the controller's stream, stops "
+                                "meanwhile (knobs, bands and the mode function are made inert for it)",
     # suites/s46_navicore_boot.py and s47_navicore_ota.py: every NaviCore restart, whether by REBOOT, #L02, a relayed
     # REBOOT, the USB-Serial/JTAG reset, an OTA END or the esptool rung, stops SBUS OUT for a few seconds, and nc_guard
     # sends a mesh SET_MODE back if the mode that came back is not the one it snapshotted (J2 moves then).

@@ -64,7 +64,9 @@ def maestro_inventory(bench):
 @test("navicore.mae_cli_local", "?MAE query markers for an out-of-range, a disabled and each local slot (NaviCore USB)", needs=["navicore"], links=[])
 def mae_cli_local(bench):
     """Never ?MAE,ERR (clears the error register), ?MAE,FREE (rewrites speed/accel) or a type-2 slot (broadcasts a
-    query onto the mesh)."""
+    query onto the mesh). A local slot must answer with a value: until 2026-09-28 a '"err":"timeout"' - no Maestro on
+    Serial2, or its TX not wired back - passed too (NAVICORE.md D-NC15, fixed with NC-WP7), which is how a dead Maestro
+    read as a pass here while the tests that need it skipped."""
     nc = _nc(bench)
     cfg = nc.config()
     text = "\n".join(nc.cli("?MAE,GET,9,0") + nc.cli("?MAE,MOVING,0"))
@@ -75,7 +77,7 @@ def mae_cli_local(bench):
         assert f'[MAE:{disabled}]{{"q":"pos","ch":0,"err":"disabled"}}' in text, f"lowercase query on disabled slot {disabled}: {text!r}"
     for slot, _ in nc.local_slots(cfg):
         text = "\n".join(nc.cli(f"?MAE,MOVING,{slot}"))
-        assert re.search(rf'\[MAE:{slot}\]\{{"q":"mov",("val":[01]|"err":"timeout")\}}', text), f"slot {slot}: {text!r}"
+        assert re.search(rf'\[MAE:{slot}\]\{{"q":"mov","val":[01]\}}', text), f"local slot {slot} did not answer: {text!r}"
 
 
 @test("navicore.maestro_mesh_settarget_readback", ";W20,;M<D>,setTarget from W1 moves NaviCore's own Maestro, not W1's; read back with ?MAE,GET", needs=["navicore", "wcb1"])
@@ -195,8 +197,13 @@ def maestro_skip_not_logged_as_dispatch(bench):
     assert skipped != claimed, "NaviCore printed neither the skip nor the dispatch line: the ;M never reached it"
 
 
-@test("navicore.maestro_mesh_fanout_0_9", ";W20,;M9 and ;W20,;M0 fire each local NaviCore Maestro once per distinct device", needs=["navicore", "wcb1"])
+@test("navicore.maestro_mesh_fanout_0_9", ";W20,;M9 and ;W20,;M0 fire each local NaviCore Maestro once per distinct device, and each reads back the target sent", needs=["navicore", "wcb1"])
 def maestro_mesh_fanout_0_9(bench):
+    """The target sent is channel 0's own position, so nothing moves; the ?MAE,GET read-back after each fan-out
+    (NAVICORE.md NC-WP7, nc.mae.inbound_mesh) catches a frame built for the wrong channel or value, which would move
+    it. It reads 0.5 s after the send: channel 0 is J2's, whose idle release turns a live target off 1.5 s after it
+    once armed (NaviCore.ino maestroIdleReleaseTick). On this bench channel 0 is off at rest, so the target is 0 and
+    the read-back 0."""
     w1s1 = link(bench, 1, "S1")
     nc, w = _nc(bench), usb_wcb(bench)
     cfg = nc.config()
@@ -214,7 +221,9 @@ def maestro_mesh_fanout_0_9(bench):
             for fan in (9, 0):
                 nm, pm = nc.dev.mark(), w1s1.mark()
                 w.send(f";W20,;M{fan},setTarget,0,{pfirst}")
-                time.sleep(2.0)
+                time.sleep(0.5)
+                backs = {slot_id: nc.mae_get(slot_id, 0) for slot_id in first_by_device.values()}
+                time.sleep(1.5)
                 lines = [x.rstrip() for x in nc.dev.since(nm)]
                 fired = {(int(m.group(1)), int(m.group(2))) for x in lines for m in [re.match(r"^\[DISPATCH\] Maestro slot (\d+) \(device (\d+)\) <- mesh  cmd 0x04$", x)] if m}
                 if fired != {(s, d) for d, s in first_by_device.items()}:
@@ -223,6 +232,10 @@ def maestro_mesh_fanout_0_9(bench):
                     bad.append(f";M{fan}: a no-local-slot line")
                 if w1s1.received(pm):
                     bad.append(f";M{fan}: W1 wrote its own Maestro port")
+                for dev_id, slot_id in sorted(first_by_device.items()):
+                    if backs[slot_id] != pfirst:
+                        bad.append(f";M{fan}: slot {slot_id} (device {dev_id}) ch 0 read {backs[slot_id]}, not the "
+                                   f"{pfirst} sent")
         finally:
             for s, _, p in slots:
                 nc.mae_set(s, 0, p)
