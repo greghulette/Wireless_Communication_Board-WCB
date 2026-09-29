@@ -681,3 +681,56 @@ def char_per_board_clamp(bench):
     assert peers >= 2 and per == 200 // peers, f"the notice says {peers} peers sampled at {per} each"
     assert phases == {1, 2, 3}, f"the results block names phases {sorted(phases)}, not all three"
 
+
+# ============================================================ F18: the WiFi task's came-ONLINE line, queued for loop()
+@test("etm.came_online_outside_backup", "A peer's '[ETM] WCBn came ONLINE' line is queued for loop() (F18): while W2 reboots, none of W1's back-to-back ?backup outputs has one inside it, both chains of each pass their CRC, and W1 prints W2's boot announces as whole lines", needs=["wcb1", "wcb2"])
+def came_online_outside_backup(bench):
+    """espNowReceiveCallback runs on the WiFi task and used to print the line there, where it landed between the two
+    writes of a Serial.println in loop() - a ?backup section header and its chain (wizard.remote_pull, run
+    20260924-234056) - and inside a line on the WebSocket and RTERM tees. It now goes through statusQueueOut and is
+    printed by drainStatusOut beside drainMgmtOut (WCB.ino), between commands, so a whole ?backup runs in one loop()
+    pass with none inside it. W2's reboot sends three boot announces about 1.2 s apart (a line each on W1, marked
+    '(boot)'); W1 prints ?backup the whole time."""
+    from suites.s03_wcb import CHK_LINE, backup_chain_lines
+    from hil.wcb import chain_crc
+    own = bench.usb_wcbs().get(2)
+    if not own:
+        raise Skip("W2 has no USB console here to restart it from")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own))
+    boot = re.compile(r"^\[ETM\] WCB2 came ONLINE \(boot\) \(src MAC: [0-9A-F]{2}(:[0-9A-F]{2}){5}\)$")
+    problems, inside, backups, broken = [], 0, 0, 0
+    m2 = w2.dev.mark()
+    w2.dev.send("?reboot")
+    w2.dev.expect(r"^Rebooting now", timeout=WCB.REBOOT_DEFER_S, since=m2)
+    m1 = w.dev.mark()
+    end = time.monotonic() + 12.0
+    while time.monotonic() < end:
+        lines = [x.rstrip() for x in w.run("?backup", timeout=10)]
+        backups += 1
+        a = next((i for i, x in enumerate(lines) if "WCB Configuration Backup" in x), None)
+        b = next((i for i, x in enumerate(lines) if "End of Backup" in x), None)
+        if a is None or b is None:
+            problems.append(f"backup {backups} is not whole")
+            continue
+        inside += sum(1 for x in lines[a:b] if x.startswith("[ETM]") and "came ONLINE" in x)
+        chains = backup_chain_lines(lines)
+        for name in ("configured", "factory"):
+            c = CHK_LINE.match(chains.get(name) or "")
+            if not c or chain_crc(c.group(1)) != c.group(2).upper():
+                broken += 1
+        if sum(1 for x in w.dev.since(m1) if boot.match(x.strip())) >= 3:
+            break
+    seen = [x.strip() for x in w.dev.since(m1) if "came ONLINE" in x]
+    whole = [x for x in seen if boot.match(x)]
+    w2.wait_boot(m2)
+    bench.note(f"etm.came_online_outside_backup: {backups} backups on W1, {len(seen)} came-ONLINE line(s) "
+               f"({len(whole)} whole boot lines), {inside} inside a backup, {broken} broken chain(s)")
+    if not whole:
+        problems.append("W1 printed none of W2's boot announces as a whole '[ETM] WCB2 came ONLINE (boot)' line")
+    if inside:
+        problems.append(f"{inside} came-ONLINE line(s) printed inside a ?backup output")
+    if broken:
+        problems.append(f"{broken} chain(s) failed their CRC")
+    if len(whole) != len(seen):
+        problems.append(f"{len(seen) - len(whole)} came-ONLINE line(s) not whole: {[x[:60] for x in seen if not boot.match(x)][:2]}")
+    assert not problems, "; ".join(problems)

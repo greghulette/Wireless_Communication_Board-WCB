@@ -466,11 +466,23 @@ lines that the Wizard and the harness wait for. `?backup` runs in `loop()`, so t
 `End of Backup`. A cheaper partial fix: put each header into its chain's `BackupWriter`, so header and chain leave
 in one write under 2 KB, as they did before F12; likewise the `;S0` echo as one write
 (`Serial.printf("%s\r\n", ...)`; vprintf allocates for 62 characters or more and prints nothing if that fails).
+*Fixed 2026-09-29 as proposed (D69):* the receive callback queues the line with `statusQueueOut` in a ring of its own
+(6 slots of 64 bytes, sized to the longest line: `.bss` comes out of the heap's DRAM), and `loop()` prints each line
+and its CRLF in one write (`drainStatusOut`, beside `drainMgmtOut`); a full ring drops and counts, and `loop()` says
+so. A `?backup` runs within one `loop()` pass, so the line now prints before or after it, never inside.
+Test: `etm.came_online_outside_backup` (W2 reboots while W1 prints `?backup` back to back).
 
 **F19 — some config lines can still be lost silently to the heap.** Inside `collectConfigCommands`, a failed
 in-place `cmd += ...` (the MAP,SERIAL / MAP,PWM output loops, the KYBER,LOCAL target loop) leaves a line truncated,
 and a failed read of `key_list` or a key substring skips a sequence; neither is visible to `?backup` or to the
 pull's walk check (which does catch a token whose String failed outright, as NOMEM). The same class as #90/#58.
+*Fixed 2026-09-29 (D69):* `collectConfigCommands` emits a line it could not build as an EMPTY token - each append in
+the mapping and Kyber lines checks `concat`'s result, and a `key_list` or key read that returns an invalidated String
+(`c_str()` nullptr) is a lost line, not an empty list. Both callers count an empty token: the pull walk answers
+ERROR NOMEM as before, and `printBackupConfig` leaves it out and prints `*** WARNING: <n> command(s) could not be
+built (out of memory) - this backup is INCOMPLETE. Run ?backup again.` after each output that lost one. The RAM-only
+test knob `?DEBUG,PULLFAULT,LINE` loses the WCBCH line in every walk for 60 s (`PULLFAULT,OFF` disarms it).
+Tests: `wcb.backup_lost_line_warns`, `wcb.pull_error_lost_line`.
 
 Found by full run `20260924-190733` (see §5):
 
@@ -521,6 +533,7 @@ hears a peer's first boot announce pulls its own next heartbeat forward by a ran
 WDP SOLICIT: an older WCB_Client decodes one as an empty advert and blanks the sender (`WDP_DESIGN.md`).
 Recommendation: leave it. ESP-NOW still retries a unicast at the MAC layer, and the window is one heartbeat long.
 Revisit if commands sent right after a reboot go missing.
+*Left as recommended, 2026-09-29 (D69).*
 
 Found by full run `20260925-092255` (see §5):
 
@@ -647,11 +660,11 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
 | F15 | fixed 2026-09-28 (WCB re-scan #26) | strncmp at all 13 password gates, `otaPktAuth` included; bench-verified with the batch image (`hil_plan/WCB.md` §3). |
 | F16 | open (NaviCore) | Drop, don't store, when `WsSink::pump()` cannot drain. |
 | F17 | closed 2026-09-25 (Greg: intended for now) | The example's credentials are Greg's development ones on purpose; nothing to change. |
-| F18 | open (firmware) | Queue the WiFi-task `came ONLINE` print for `loop()`. |
-| F19 | open (firmware) | Make `collectConfigCommands` report a failed append or NVS read. |
+| F18 | fixed 2026-09-29 (D69), bench _(pending)_ | `statusQueueOut` / `drainStatusOut` (`WCB.ino`): the callback queues the line in a ring of its own (6 x 64 bytes), `loop()` prints it with one write beside `drainMgmtOut`; `etm.came_online_outside_backup`. |
+| F19 | fixed 2026-09-29 (D69), bench _(pending)_ | A line it could not build is emitted empty (appends checked, an invalidated read is lost); `?backup` leaves it out and prints a WARNING per output, a pull answers NOMEM; test knob `?DEBUG,PULLFAULT,LINE`; `wcb.backup_lost_line_warns`, `wcb.pull_error_lost_line`. |
 | F20 | fixed 2026-09-24 (tracker #92), bench 20260924-233628 | The save removes every `serial_map` key no active mapping uses; `map.nvs_keys_freed`. |
 | F21 | fixed 2026-09-24 (tracker #93), bench 20260924-233628 | RTERM re-arms of the running session and `?STATS,RPT` do not reset the quiet window; `RESTART_MAX_DEFER_MS` = 20 s; `etm.reboot_rterm_rearm`, `etm.reboot_stats_rpt`, `etm.reboot_defer_cap`. |
-| F22 | open (firmware; recommend leave) | A rebooted WCB sees no peer online until its next packet (up to HB+1 s); unicasts meanwhile are not ETM-retried. |
+| F22 | left 2026-09-29 as recommended (D69) | A rebooted WCB sees no peer online until its next packet (up to HB+1 s); unicasts meanwhile are not ETM-retried. |
 | F23 | fixed 2026-09-27 (tracker #94, D5), bench 20260927-130212 | One RMT symbol per PWM output pulse (`pwmPulse()`); both passthrough tests check the held pulse. |
 | Run 20260925-092255 | 493 pass, 2 fail, 4 skip in 2:35:02 (F20/F21 image, servos on) | Both triaged by an analyst and a skeptic. `pwm.passthrough_local`: W1 put out one 1830 µs pulse for a 1000 µs input, a firmware defect from 2025-11 (F23); Greg's rerun `20260925-132403` passed it, every width within 5 µs. `etm.reboot_defer_cap`: the test itself passed (the restart came at the 20 s cap); then the reboot cleanup added the night before (`?WDP,POLL`, then `?STATS`) failed its read, because W2's `came ONLINE` (F18) landed between the `;S0` sentinel's text and its CRLF, the only glued sentinel in 68,887. `WCB.run` now accepts a sentinel that starts its line, the cleanup waits 1 s after the poll and never raises; `selftest.py` 48/48. |
 | Run 20260924-234056 | 459 pass, 3 fail, 37 skip (27 servo, 10 opt-in/attended/label) with `--no-servos` (F20/F21 image) | None is F13, F20 or F21 (one analyst per failure plus a skeptic, both reading the session log and the code). `etm.offline_detection_timing` measured 4.93 s against a 4.95 s floor. It was host timing: a line is stamped when SerialDevice splits it out of a read, so one with more output behind it in the same read (here NaviCore's `rc_hb`) is stamped up to one read late. The floor is now 4.85 s, and the test checks the edges alternate, which is #80's real fingerprint. Replayed over all 31 recorded runs, that fails every run the race hit (5 of which the old test passed) and passes every run since the #80 fix. `wizard.remote_pull`: W1's third boot announce after Chrome returned COM6 printed `[ETM] WCB1 came ONLINE (boot)` on W2 between the factory header and its chain (F18, a window F12 opened), and the parser took the line after the header; it now searches the section, and `_factory_reply` re-reads a chain that fails its CRC. `etm.char_unicast`: `etm.reboot_defer_cap` had just rebooted W1, which saw no peer online yet (F22) and aborted; `_char` now polls until every bench WCB is online and fails at once on an abort, and the reboot tests leave W1 seeing its peers. Rerun `20260925-013055` (unchanged tests, different order) passed all three; the fixed tests in `20260925-015720`: 21/21. |

@@ -38,7 +38,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      reply buffer allocation and answers CFGERR"));
         Serial.println(F("                      NOMEM (+ an empty reply if it fits one line)."));
         Serial.println(F("                      One-shot; disarms after firing or after 60 s"));
-        Serial.println(F("  PULLFAULT,OFF     Disarm PULLFAULT"));
+        Serial.println(F("  PULLFAULT,LINE    For 60 s every config walk (?backup, a config"));
+        Serial.println(F("                      pull) loses its WCBCH line as if out of"));
+        Serial.println(F("                      memory: ?backup warns, a pull answers NOMEM"));
+        Serial.println(F("  PULLFAULT,OFF     Disarm PULLFAULT (both kinds)"));
         Serial.println(F("  PULLPART,<n>      Data bytes per part when this board sends a"));
         Serial.println(F("                      config in parts (512-2880; 0 or OFF = 2880)"));
         Serial.println(F("\nExamples:"));

@@ -138,7 +138,9 @@ changing before editing.**
     task: UART0 has no TX buffer, so a multi-KB `Serial.printf` there blocks for ~235 ms and,
     with HAL locks on, holds the UART0 mutex against `loop()` too. That is what fired the WiFi
     watchdog before (`WCB_RemoteTerm.cpp:14`). Queue the line and print it in `loop()`
-    (`mgmtQueueOut` / `drainMgmtOut`).
+    (`mgmtQueueOut` / `drainMgmtOut`; a short status line such as `[ETM] WCBn came ONLINE`: `statusQueueOut` /
+    `drainStatusOut`). Even a short print there lands between the two writes of a `Serial.println` in `loop()` - a
+    `?backup` header and its chain - and inside a line on the WebSocket and RTERM tees (audit F18).
 
 12. **Every new `WCB_<area>.cpp` must `#include "WCB_RemoteTerm.h"` FIRST, or its output
     vanishes silently.** That header ends with `#define Serial WCBDebugSerial`, and
@@ -228,6 +230,9 @@ changing before editing.**
     (#58). Stream big output in pieces (`printBackupConfig`), or walk the config once per piece
     and check each walk (the config pull's `configPullWalk`, which also counts a token whose
     String failed and reports it as out of memory instead of shipping the config without it).
+    `collectConfigCommands` emits a line it could not build as an EMPTY token, never a truncated one: check every
+    append (`concat` returns a bool) and treat a read that returns an invalidated String (`c_str()` nullptr) as lost.
+    Both callers count empty tokens - the pull answers NOMEM, `?backup` prints a WARNING (audit F19).
 
 15. **`[MGMT:CONFIG,<n>]` (packet type 6) carries a board's whole config or nothing.** Every Wizard
     from before 2026-09-24, including the copies frozen inside Intellex installs, stores ANY non-empty

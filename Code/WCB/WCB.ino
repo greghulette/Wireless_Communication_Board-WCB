@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_290236RSEP2026                                  *****////
+///*****                                          Version 6.2.1_291138RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -198,7 +198,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_290236RSEP2026";
+String SoftwareVersion = "6.2.1_291138RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3685,7 +3685,25 @@ void checkMgmtTimeout() {
 // BOTH printBackupConfig() (serial backup) and configPullWalk() (ESP-NOW relay
 // pull) drive this, so a setting added here is emitted by both automatically — no
 // more "works on serial, missing on relay" drift (the bug that dropped SPECIAL).
+//
+// A LINE IT COULD NOT BUILD IS EMITTED EMPTY, never truncated and never skipped. The heap is small
+// (CLAUDE.md rule 14): a String whose allocation fails comes back empty (c_str() nullptr), and a
+// failed in-place append leaves the line cut short - a mapping or a Kyber line missing destinations,
+// well-formed, restored as the wrong config - while a failed read of key_list or of a key skipped
+// sequences with no trace (docs/HIL_TEST_AUDIT.md F19). An empty token is what both callers count as
+// lost: the pull walk answers ERROR NOMEM, and ?backup prints a WARNING. So each composed line checks
+// its appends (concat's bool), and a read that returns an invalidated String is emitted as lost.
 // ───────────────────────────────────────────────────────────────────────────
+// ?DEBUG,PULLFAULT,LINE (test knob, RAM only, never saved): for CFG_LINE_FAULT_MS every walk loses its WCBCH
+// line as if that String had failed, so the harness can drive both callers' lost-line paths - ?backup's
+// WARNING and a pull's NOMEM - which no bench board reaches on its own. ?DEBUG,PULLFAULT,OFF disarms it.
+static const uint32_t CFG_LINE_FAULT_MS = 60000;
+static uint32_t s_cfgLineFaultArmMs = 0;   // 0 = off
+void configLineFaultArm(bool on) { s_cfgLineFaultArmMs = on ? (millis() | 1) : 0; }
+static bool configLineFaultActive() {
+  return s_cfgLineFaultArmMs && (millis() - s_cfgLineFaultArmMs) < CFG_LINE_FAULT_MS;
+}
+
 void collectConfigCommands(const std::function<void(const String &cmd, bool includeInLive)> &emit,
                            int frozenPeersLive) {
   String cmd;
@@ -3712,7 +3730,8 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
-  emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
+  if (configLineFaultActive()) emit(String(), true);           // the test knob's lost line (above)
+  else emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
   // WiFi (?WIFI). Emitted so a backup captures it and a restore replays it. The
   // password rides along because a restore that brought the AP back WITHOUT its
   // passphrase would silently fail closed at boot — the board would come up with
@@ -3759,20 +3778,21 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   for (int i = 0; i < 5; i++)
     emit("BCAST,IN,S"  + String(i + 1) + "," + (blockBroadcastFrom[i]    ? "OFF" : "ON"), true);
 
-  // Serial monitor mappings
+  // Serial monitor mappings (a line whose appends failed is emitted empty: see above)
   for (int i = 0; i < MAX_SERIAL_MONITOR_MAPPINGS; i++) {
     if (!serialMonitorMappings[i].active) continue;
     cmd = "MAP,SERIAL,S" + String(serialMonitorMappings[i].inputPort);
-    if (serialMonitorMappings[i].rawMode) cmd += ",R";
+    bool ok = cmd.length() > 0;
+    if (serialMonitorMappings[i].rawMode) ok &= cmd.concat(",R");
     for (int j = 0; j < serialMonitorMappings[i].outputCount; j++) {
-      cmd += ",";
+      ok &= cmd.concat(',');
       if (serialMonitorMappings[i].outputs[j].wcbNumber == 0)
-        cmd += "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
+        ok &= cmd.concat("S" + String(serialMonitorMappings[i].outputs[j].serialPort));
       else
-        cmd += "W" + String(serialMonitorMappings[i].outputs[j].wcbNumber) +
-               "S" + String(serialMonitorMappings[i].outputs[j].serialPort);
+        ok &= cmd.concat("W" + String(serialMonitorMappings[i].outputs[j].wcbNumber) +
+                         "S" + String(serialMonitorMappings[i].outputs[j].serialPort));
     }
-    emit(cmd, true);
+    if (ok) emit(cmd, true); else emit(String(), true);
   }
 
   // Kyber LOCAL: claim late (the release is emitted before the BAUD lines). A Kyber_Local board's
@@ -3780,11 +3800,13 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // refuses a port that hosts a local Maestro, and ?MAESTRO refuses the current Kyber port, so a
   // restore that moves the two must place the Maestros first (tracker #28 follow-up).
   String kyberCmd;
+  bool   kyberOk = true;
   if (Kyber_Local) {
     preferences.begin("kyber_settings", true);
     int kPort = preferences.getInt("K_Port", 2);
     preferences.end();
     kyberCmd = "KYBER,LOCAL,S" + String(kPort);
+    kyberOk  = kyberCmd.length() > 0;
     // Append all enabled Kyber targets so the backup fully restores the routing table
     for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
       if (!kyberTargets[i].enabled) continue;
@@ -3797,10 +3819,10 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
                  kyberTargets[i].targetPort >= 1 && kyberTargets[i].targetPort <= 5) {
         baud = baudRates[kyberTargets[i].targetPort - 1];
       }
-      kyberCmd += ",M" + String(kyberTargets[i].maestroID) +
-                  ":W" + String(kyberTargets[i].targetWCB) +
-                  "S" + String(kyberTargets[i].targetPort) +
-                  ":" + String(baud);
+      kyberOk &= kyberCmd.concat(",M" + String(kyberTargets[i].maestroID) +
+                                 ":W" + String(kyberTargets[i].targetWCB) +
+                                 "S" + String(kyberTargets[i].targetPort) +
+                                 ":" + String(baud));
     }
   }
 
@@ -3814,7 +3836,9 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
     emitWLEDBackup(sub);
     emitVariablesBackup(sub);   // user variables - config form ?VAR,SET, never the runtime ;V
   }
-  if (kyberCmd.length()) emit(kyberCmd, true);   // Kyber_Local: claimed after the Maestros (see above)
+  if (Kyber_Local) {                              // claimed after the Maestros (see above)
+    if (kyberOk) emit(kyberCmd, true); else emit(String(), true);
+  }
 
   // ETM settings
   emit(etmEnabled ? "ETM,ON" : "ETM,OFF", true);
@@ -3846,16 +3870,19 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   if (!wdpEnabled)  emit("WDP,OFF", true);
   if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
 
-  // Stored sequences
+  // Stored sequences. A key_list or a key that could not be read (an invalidated String) is a lost
+  // line, not an empty list; a value that could not be read makes its SEQ,SAVE token lost the same way.
   preferences.begin("stored_cmds", true);
   String keyList = preferences.getString("key_list", "");
   preferences.end();
+  if (keyList.c_str() == nullptr) emit(String(), true);
   if (keyList.length() > 0) {
     int startIdx = 0;
     while (startIdx < (int)keyList.length()) {
       int ci = keyList.indexOf(',', startIdx);
       if (ci == -1) ci = keyList.length();
       String key = keyList.substring(startIdx, ci);
+      if (key.c_str() == nullptr) { emit(String(), true); startIdx = ci + 1; continue; }
       key.trim();
       if (key.length() > 0) {
         preferences.begin("stored_cmds", true);
@@ -3873,15 +3900,16 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
     if (!pwmMappings[i].active) continue;
     cmd = "MAP,PWM,S" + String(pwmMappings[i].inputPort);
+    bool ok = cmd.length() > 0;
     for (int j = 0; j < pwmMappings[i].outputCount; j++) {
-      cmd += ",";
+      ok &= cmd.concat(',');
       if (pwmMappings[i].outputs[j].wcbNumber == 0)
-        cmd += "S" + String(pwmMappings[i].outputs[j].serialPort);
+        ok &= cmd.concat("S" + String(pwmMappings[i].outputs[j].serialPort));
       else
-        cmd += "W" + String(pwmMappings[i].outputs[j].wcbNumber) +
-               "S" + String(pwmMappings[i].outputs[j].serialPort);
+        ok &= cmd.concat("W" + String(pwmMappings[i].outputs[j].wcbNumber) +
+                         "S" + String(pwmMappings[i].outputs[j].serialPort));
     }
-    emit(cmd, true);
+    if (ok) emit(cmd, true); else emit(String(), true);
   }
 }
 
@@ -4520,6 +4548,75 @@ void drainMgmtOut() {
     portENTER_CRITICAL(&s_mgmtOutMux);
     s_mgmtOutTail = (uint8_t)((tail + 1) % MGMT_OUT_SLOTS);   // free the slot only now
     portEXIT_CRITICAL(&s_mgmtOutMux);
+  }
+}
+
+// ── Deferred status lines from the WiFi task ────────────────────────────────
+// "[ETM] WCBn came ONLINE" is decided where the packet arrives, in espNowReceiveCallback on the WiFi
+// task, and printed there it broke rule 11: on the UART it landed between the two writes of any
+// Serial.println in loop() - between a ?backup section header and its chain, and between the harness's
+// ;S0 echo and its CRLF - and the WebSocket and RTERM tees copy a line a byte at a time, so there it
+// could land inside a chain or a pull part (docs/HIL_TEST_AUDIT.md F18). The callback queues the line;
+// loop() prints it with ONE write, beside drainMgmtOut(). Its own ring, not the MGMT one: that holds
+// three config-sized slots and drops when full, and a fleet powering up sends a burst of these. Same
+// SPSC scheme as the MGMT ring (the mux guards the indices; a slot is written before head moves on).
+// .bss comes out of the heap's DRAM (rule 14), so the slots are sized to the longest line: "[ETM] WCB255 came
+// ONLINE (boot) (src MAC: 02:05:4B:00:00:FF)" is 60 characters, 63 with CRLF and NUL. Six slots: loop() drains them
+// every pass, so they fill only while it is busy (a ?backup, a blocking soft-port write) and peers boot together.
+#define STATUS_OUT_SLOTS 6
+#define STATUS_OUT_BUFSZ 64
+static char s_statusOut[STATUS_OUT_SLOTS][STATUS_OUT_BUFSZ];
+static volatile uint8_t  s_statusOutHead  = 0;   // written by the WiFi task
+static volatile uint8_t  s_statusOutTail  = 0;   // written by loop()
+static volatile uint32_t s_statusOutDrops = 0;   // lines the full ring could not take; reported by loop()
+static portMUX_TYPE s_statusOutMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Queue one printf-formatted status line (no newline: it gets CRLF) for loop(). Safe from the WiFi
+// task: no heap (integer and string formats only), no print, and a full ring drops the line and
+// counts it instead of waiting.
+static void statusQueueOut(const char *fmt, ...) {
+  portENTER_CRITICAL(&s_statusOutMux);
+  const uint8_t head = s_statusOutHead;
+  const uint8_t next = (uint8_t)((head + 1) % STATUS_OUT_SLOTS);
+  const bool    full = (next == s_statusOutTail);
+  if (full) s_statusOutDrops++;
+  portEXIT_CRITICAL(&s_statusOutMux);
+  if (full) return;
+  char *slot = s_statusOut[head];
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(slot, STATUS_OUT_BUFSZ - 2, fmt, ap);   // room kept for the CRLF
+  va_end(ap);
+  size_t len = n < 0 ? 0 : (size_t)n;
+  if (len > STATUS_OUT_BUFSZ - 3) len = STATUS_OUT_BUFSZ - 3;
+  slot[len]     = '\r';
+  slot[len + 1] = '\n';
+  slot[len + 2] = '\0';
+  portENTER_CRITICAL(&s_statusOutMux);
+  s_statusOutHead = next;              // publish only after the slot is fully written
+  portEXIT_CRITICAL(&s_statusOutMux);
+}
+
+// Print any queued status lines, each line and its CRLF in one write. Called from loop().
+void drainStatusOut() {
+  for (;;) {
+    portENTER_CRITICAL(&s_statusOutMux);
+    const uint8_t tail  = s_statusOutTail;
+    const bool    empty = (tail == s_statusOutHead);
+    portEXIT_CRITICAL(&s_statusOutMux);
+    if (empty) break;
+    Serial.write((const uint8_t *)s_statusOut[tail], strlen(s_statusOut[tail]));
+    portENTER_CRITICAL(&s_statusOutMux);
+    s_statusOutTail = (uint8_t)((tail + 1) % STATUS_OUT_SLOTS);
+    portEXIT_CRITICAL(&s_statusOutMux);
+  }
+  if (s_statusOutDrops) {
+    portENTER_CRITICAL(&s_statusOutMux);
+    const uint32_t n = s_statusOutDrops;
+    s_statusOutDrops = 0;
+    portEXIT_CRITICAL(&s_statusOutMux);
+    Serial.printf("[ETM] %lu status line(s) dropped - more peers came online at once than the queue holds\n",
+                  (unsigned long)n);
   }
 }
 
@@ -5333,10 +5430,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
       // the board was up) so the wizard re-establishes the relay session after a
       // reboot too fast to have crossed our offline threshold (e.g. an OTA).
       if (wasOffline || isBootAnnounce) {
-        Serial.printf("[ETM] WCB%d came ONLINE%s (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
-                      senderWCB, isBootAnnounce ? " (boot)" : "",
-                      info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                      info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+        // Queued, not printed: this is the WiFi task (rule 11, F18); loop() prints it (drainStatusOut).
+        statusQueueOut("[ETM] WCB%d came ONLINE%s (src MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
+                       senderWCB, isBootAnnounce ? " (boot)" : "",
+                       info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                       info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
       // A rebooted peer restarts its sequence counter at 1, but our duplicate ring still holds
       // the seqs it used before the reboot — so its first commands matched a "already seen" entry
@@ -6197,8 +6295,15 @@ void processLocalCommand(const String &message) {
             configPullFaultArm(true);
             Serial.println("Config pull fault armed: the next accepted config request fails its reply "
                            "buffer allocation (one-shot; disarms after firing or in 60 s)");
+        } else if (argsUpper == "PULLFAULT,LINE") {
+            // Test knob (RAM only): for 60 s every config walk loses its WCBCH line as if out of memory (F19),
+            // so ?backup's WARNING and a pull's NOMEM for a lost line can be driven on the bench.
+            configLineFaultArm(true);
+            Serial.println("Config line fault armed: for 60 s every config walk (?backup, a config pull) loses its "
+                           "WCBCH line as if out of memory");
         } else if (argsUpper == "PULLFAULT,OFF") {
             configPullFaultArm(false);
+            configLineFaultArm(false);
             Serial.println("Config pull fault disarmed");
         } else if (argsUpper.startsWith("PULLPART,")) {
             // Test knob (RAM only): a smaller part size, so a bench config splits into 3+ parts.
@@ -7721,10 +7826,23 @@ void updateHWVersion(const String &message) {
     // One line per command - what the Wizard reads from a live board. Every command, the factory-only
     // DELIM/FUNCCHAR and the read-only PEERSLIVE included. Each goes out whole in one write; never as a
     // concatenation, which is one more allocation and, failed, an empty line in place of the command.
+    // A token that comes back empty is a line collectConfigCommands could not build (out of memory, F19):
+    // it is left out, counted, and each output that lost one says so right after itself - the Wizard and
+    // an operator restoring by hand would otherwise take a short backup for the whole config.
+    unsigned lost = 0;
+    const auto warnLost = [&lost]() {
+        if (lost) Serial.printf("%s WARNING: %u command(s) could not be built (out of memory) - this backup is "
+                                "INCOMPLETE. Run ?backup again.\r\n", commentDelimiter.c_str(), lost);
+        lost = 0;
+    };
     {
         BackupWriter out;
-        collectConfigCommands([&](const String &c, bool /*includeInLive*/) { out.line(lfi, c); });
+        collectConfigCommands([&](const String &c, bool /*includeInLive*/) {
+            if (!c.length()) { lost++; return; }
+            out.line(lfi, c);
+        });
     }
+    warnLost();
 
     // ---- Checksums ----
     // Format as zero-padded 8 hex chars (%08X) — matches the verifier at
@@ -7739,11 +7857,14 @@ void updateHWVersion(const String &message) {
     {
         BackupWriter live;
         collectConfigCommands([&](const String &c, bool includeInLive) {
-            if (includeInLive) live.token(commandDelimiter, lfi, c);
+            if (!includeInLive) return;
+            if (!c.length()) { lost++; return; }
+            live.token(commandDelimiter, lfi, c);
         });
         const String checksumCmd = live.finish(commandDelimiter, lfi);
         Serial.println(commentDelimiter + " Checksum: " + checksumCmd);
     }
+    warnLost();
 
     // FACTORY-RESET chain: the fixed '^' separator and the '?' a fresh board starts with. After
     // ?FUNCCHAR the func id flips, so SUBSEQUENT tokens carry the new prefix (governs DISPATCH at
@@ -7755,12 +7876,14 @@ void updateHWVersion(const String &message) {
         BackupWriter factory;
         String defaultFunc = "?";
         collectConfigCommands([&](const String &c, bool /*includeInLive*/) {
+            if (!c.length()) { lost++; return; }
             factory.token('^', defaultFunc, c);
             if (c.startsWith("FUNCCHAR,")) defaultFunc = lfi;
         });
         const String checksumCmdDefault = factory.finish('^', "?");
         Serial.println(commentDelimiter + " Checksum: " + checksumCmdDefault);
     }
+    warnLost();
 
     Serial.println("--------- End of Backup ---------\n");
 }
@@ -9865,6 +9988,7 @@ void loop() {
   drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
   serviceConfigPullJob();  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
   drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
+  drainStatusOut();        // and the callback's status lines ("[ETM] WCBn came ONLINE")
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)

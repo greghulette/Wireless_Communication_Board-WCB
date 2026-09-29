@@ -1103,3 +1103,62 @@ def pull_session_reaped(bench):
             finally:
                 _clear(w2, keys)
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ F19: a config line that could not be built
+LOST_WARNING = ("*** WARNING: 1 command(s) could not be built (out of memory) - this backup is INCOMPLETE. "
+                "Run ?backup again.")
+
+
+@test("wcb.backup_lost_line_warns", "A config line that could not be built is reported, never dropped quietly (F19): with ?DEBUG,PULLFAULT,LINE (RAM only, 60 s) W1's ?backup leaves WCBCH out of all three outputs and prints one WARNING after each, both chains still pass their CRC, and once disarmed the backup is whole again", needs=["wcb1"])
+def backup_lost_line_warns(bench):
+    """collectConfigCommands (WCB.ino) emits a line it could not build - a failed String, a failed append, a failed
+    key_list read - as an empty token; printBackupConfig counts one, leaves it out and prints LOST_WARNING after the
+    output that lost it (the per-command lines, the configured chain, the factory chain). The knob loses the WCBCH line
+    in every walk, which no bench board does on its own (its heap never runs that low on demand)."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            _knob(w, "?DEBUG,PULLFAULT,LINE")
+            lines = [x.rstrip() for x in w.run("?backup", timeout=10)]
+            warns = [x for x in lines if x == LOST_WARNING]
+            if len(warns) != 3:
+                problems.append(f"{len(warns)} WARNING line(s) for a lost line, expected 3 (one per output)")
+            if any(x.upper().startswith("?WCBCH,") for x in lines):
+                problems.append("the per-command lines still carry WCBCH")
+            chains = backup_chain_lines(lines)
+            for name in ("configured", "factory"):
+                m = CHK_LINE.match(chains.get(name) or "")
+                if not m or chain_crc(m.group(1)) != m.group(2).upper():
+                    problems.append(f"the {name} chain fails its CRC with a line left out")
+                elif "?WCBCH," in m.group(1).upper():
+                    problems.append(f"the {name} chain still carries WCBCH")
+        finally:
+            _knob(w, "?DEBUG,PULLFAULT,OFF", check=False)
+        lines = [x.rstrip() for x in w.run("?backup", timeout=10)]
+        if any("WARNING" in x and "could not be built" in x for x in lines):
+            problems.append("a WARNING after the fault was disarmed")
+        if not any(x.upper().startswith("?WCBCH,") for x in lines):
+            problems.append("WCBCH missing after the fault was disarmed")
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.pull_error_lost_line", "A config pull whose walk loses a line answers CFGERR NOMEM, never a config without it (F19): with ?DEBUG,PULLFAULT,LINE on W2, W1's ?MGMT,PULL,2 is refused NOMEM with no config text, and once disarmed the next pull is whole", needs=["wcb1", "wcb2"])
+def pull_error_lost_line(bench):
+    """configPullWalk counts an empty token as lost (cfgpReplyToken, WCB_ConfigParts.h), and the job answers NOMEM after
+    its 1 s of retries - each retry walks again and loses the line again, since the knob stays armed for 60 s."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems = []
+    with config_guard(bench, 2):
+        try:
+            _knob(w2, "?DEBUG,PULLFAULT,LINE")
+            mark, e = _refused(w1, "NOMEM", problems)
+            time.sleep(2.0)
+            problems += _error_text_problems(_pull_lines(w1.dev, mark, 2))
+        finally:
+            _knob(w2, "?DEBUG,PULLFAULT,OFF", check=False)
+        r = w1.pull_reply(2, timeout=10)
+        if r.kind not in ("legacy", "parts"):
+            problems.append(f"the pull after the fault was disarmed came back as {r.kind}")
+    assert not problems, "; ".join(problems)
