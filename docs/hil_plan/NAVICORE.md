@@ -741,6 +741,30 @@ Every flash appends a row to `results/builds/FLASHED.md` (folder, ELF SHA, what 
 
 ### INF5 — `hil/ncws.py` and `hil/wlan.py`
 
+> **Status 2026-09-29: built and bench-verified** through NC-WP8 (`20260929-114842`, `-114920`, `-120603`, `-120840`) and WCB-WP22's s28 tests. `hil/wlan.py` holds s28's PC-side helpers, moved unchanged:
+> `netsh`, `wlan_interfaces`, `iface`, `joined`, `internet_adapter`, `pick_adapter`, `wait`, `profile_xml`, `scrub`,
+> `ps`, `ipv4`, `ADDR_WAIT_S`/`ADDR_RENEW_S`, `address_wait`, `pc_on_ap` and `default_routes` (s28 imports the two it
+> calls under their old names; `_pc_on_w1_ap` and the `_ws_*` helpers stay in s28). `wlan_interfaces` and
+> `pick_adapter` now call pure halves, `parse_interfaces` (which also keeps each adapter's GUID) and `choose_adapter`,
+> with the same logic. New: `pc_on_ap(..., spare_only=True)` skips instead of taking the adapter that carries the
+> default route (D-NC14; s28 still takes it when it is the only one), and `parse_networks`, `request_scan` (wlanapi's
+> WlanScan through ctypes: netsh has no scan verb) and `networks`, for a test that must know an access point is down.
+> `hil/ncws.py` `NcWs(ip)` is the socket as a line device: SerialDevice's `name`, `port`, `lines`, `mark`, `since`,
+> `expect` (failing at once on a closed socket), `expect_none`, `collect` and `log`, over a reader thread that answers
+> the board's PINGs and records its PONGs, every TEXT frame's bytes and a close; `send` writes one frame,
+> `send_frames` several, `send_frame` a raw one, `pause`/`resume` stop reading, `abort` resets the connection. It has
+> no `send_paced`, so `NaviCore.send_paced` sends a long line whole, in one frame, which is what the endpoint takes. It
+> logs every line through `redact_text` (Bench.log redacts by device kind, and this is no bench device) and cuts a line
+> over 4 KB only after that: cut first, a GET_CONFIG line could lose the quote after its `wifiPassword` value and log
+> part of it. A failed `expect` never quotes a CONFIG line (`shown`). `hil/ws.py` `WsClient` gains `rcvbuf`, a receive buffer set before
+> connecting. `selftest.py`: `t_wlan_pc_on_ap` (the parsers on captured netsh text; `pc_on_ap` against a fake netsh)
+> and `t_ncws_line_device` (NcWs against a stand-in endpoint on a local socket, the INF1 driver through it). Where the
+> build differs from the plan below:
+> - The plan moved five helpers (s28 :187-266); the join itself moved too (`pc_on_ap`, the lease wait, the routes),
+>   since the NaviCore suite needs all of it.
+> - NaviCore's socket is a console mirror, not a reply channel (navicore_wsserver.h:88-93): a NcWs sees the replies to
+>   USB's commands and USB sees the socket's, so a read follows a barrier on its transport (s45 `_sync`).
+
 `_netsh`, `_wlan_interfaces`, `_internet_adapter`, `_pick_adapter` and `_profile_xml` move out of `s28_wifi.py`
 (:187-266) into `hil/wlan.py`, so s28 and the NaviCore suite share one tested copy. `NcWs(ip)` wraps `WsClient`
 (`hil/ws.py:51`) with the SerialDevice-style `mark`/`expect`/`since` over split lines, so the INF1 driver runs over
@@ -915,7 +939,7 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 | Key | What it does to the bench | This week (D-NC14) |
 |---|---|---|
 | `navicore_reboot` | software restarts of NaviCore (REBOOT, `#L02`, the mesh REBOOT): USB re-enumerates, the mesh sees 20 drop for ~5 s | on |
-| `navicore_wifi` | the PC's spare adapter joins NaviCore's AP for ~30 s per test | on; the test skips when the only adapter carries the default route |
+| `navicore_wifi` | the PC's spare adapter joins NaviCore's AP for ~30 s per test (`ncwifi.ws_ping_soak`: 5 minutes); registered with NC-WP8 | on; the test skips when the only adapter carries the default route |
 | `navicore_nvs` | learns and forgets a peer (NaviCore's NVS peer mask) | on |
 | `navicore_clip_write` | writes and removes `HIL*` clips in the 12 MB clips partition | on |
 | `navicore_aux_tx` | routes HCR/MP3/DFPlayer/WLED to NaviCore's own S3-S5 (bytes out J4-J6, where nothing is recorded as attached), and `#L20`/`#L21` | on |
@@ -1380,6 +1404,48 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP8 — SoftAP and WebSocket (`s45_navicore_wifi.py`, `ncwifi.*`, opt-in `navicore_wifi`)
 
+> **Status 2026-09-29: written and bench-verified** (`20260929-114842`, `-114920`, `-120603`, `-120840`: the twelve normal tests pass, `ws_ping_soak` included; the three `(should)` tests fail as designed - D-NC61, D-NC62 with 2 of a second client's PINGs unanswered while one stalled and NaviCore up, D-NC63 with a USB range of 600 cut to 512 under a socket; `navicore_wifi` ticked, D70). On this bench the spare adapter's own network is NaviCore's access point: a test that leaves `pc_on_ap` with that access point down only notes the missed reconnect, and a socket whose PC end went away with a temporary profile stays in NaviCore's sink until a send to it fails, which a vanished peer never makes happen - so `usb_editload_with_socket` restarts NaviCore once when its no-socket baseline comes back cut (`navicore_reboot`). (`suites/s45_navicore_wifi.py`, 15 tests, three `(should)`;
+> opt-in `navicore_wifi` registered). `pc_joins_ws_ping`, `ws_parity`, `ws_console_mirror`, `ws_multi_client`,
+> `ws_line_framing`, `ws_utf8_and_latch`, `ws_wizard_surface`, `mesh_coexist`, `ws_capture_slot`, `ws_ping_soak`; with
+> `navicore_reboot` ticked too (checked in the body): `ap_boot_lines`, `refuse_short_password`; the findings
+> `ws_line_trim` (D-NC61), `ws_stalled_client` (D-NC62, `navicore_reboot` too) and `usb_editload_with_socket`
+> (D-NC63). Three are in `hil/servos.py`. NaviCore's SSID and password come from its GET_CONFIG at run time and reach
+> only Windows' temporary profile; they are compared, never shown. Where the code differs from the plan below:
+> - **The socket mirrors the console** (navicore_wsserver.h:88-93, :515-530): every loop-core line goes to every
+>   client and to USB. So each read follows a barrier on its own transport (`_sync`: `?HILB<nonce>`, whose `Unknown
+>   command:` echo NaviCore prints for any `?` line nobody owns, NaviCore.ino:3814-3816, then the `#L12` poke).
+> - **No line cap, and no trim.** The WCB's endpoint drops a line over 1535 characters and trims a leading space
+>   (`ws.line_framing`); NaviCore's takes any line under 98304 bytes, and a frame of 98304 or more, or an unended line
+>   past 100352, closes that socket (:406-408, :436-438). A line runs exactly as sent: D-NC61.
+> - **"A 4th evicts the oldest"** is httpd's LRU purge (:488-489; esp_http_server.h:1591-1597): the least recently
+>   active session is closed before the newcomer's handshake, so the sink's own evict-slot-0 branch (:141-142) is not
+>   reached.
+> - **UTF-8 needs no config write.** NaviCore echoes an unowned `?` line whole, so 3000 bytes of 2-, 3- or 4-byte
+>   characters behind 0-2 pad characters put WsSink's 2048-byte flush inside a character in five of nine lines, with
+>   nothing to restore. The plan's multi-byte label in a guarded config gives no control over where the flush falls.
+> - **"No AP seen by the PC"** is a fresh scan (`hil/wlan.py` `networks`: WlanScan, then netsh; netsh alone lists a
+>   scan up to a minute old) showing no open network under the AP's name, and a join with the real password failing
+>   to associate. Whether the name is still listed is noted, not failed: Windows can keep a network it no longer hears
+>   in its list for a while.
+> - **"No missed heartbeats"**: no WCB prints anything per heartbeat. `mesh_coexist` checks that W1 prints no offline or
+>   online edge for WCB 20 (WCB.ino:1406-1416, :5336) and that NaviCore's own ETM counters show no failed send to
+>   either WCB, over 40 s of the monitor streaming to a socket.
+> - **Heap**: NaviCore prints none outside the boot banner's free PSRAM, which `ap_boot_lines` notes (#111 is the WCB's
+>   AP heap).
+> - `ws_console_mirror` also runs with nothing reading NaviCore's USB (its port handed over, `hil/intellex.py`
+>   `handed_over`), the realistic WiFi session, where PWM_UPDATE, rc_trig and the dispatch trace reach the socket only
+>   through their fallbacks (navicore_wsserver.h:296-325).
+> - `ws_capture_slot` asserts that the socket gets the console again after each use of the single capture slot; whether
+>   a relayed CLI line's output or a bridge-asked read's marker also reach the socket is noted, not asserted.
+> - REBOOT deauthenticates nobody, so `ap_boot_lines` joins after NaviCore is back, not across the restart.
+>
+> NaviCore doc drift found (for D-NC36's docs commit): the REBOOT comment says a deauthentication precedes the restart
+> (NaviCore.ino:4034-4047), but `otaFarewellAP()` is deliberately empty (navicore_ota.h:184-204); navicore_wsserver.h
+> :553-557 says an asynchronous reply reaches Serial only, which the standing tee (:88-93) made untrue, and
+> PROTOCOLS.md §3 still says the sink is armed around `processInputLine()`; rc_serial.h:85-87 says `captureArmed()`
+> means a relayed command is running (D-NC63); navicore_wsserver.h:5-8 and PROTOCOLS.md §1 say the socket needs
+> nothing kept in step with USB (D-NC61).
+
 `ncwifi.pc_joins_ws_ping` (join, DHCP gives 192.168.4.x with no default route, PONG; six PINGs in one frame give six
 PONGs), `ncwifi.ws_parity` (PING, GET_CONFIG by hash, TRIGGER, TEST_ACTION, `?REC,LS` equal USB),
 `ncwifi.ws_console_mirror`, `ncwifi.ws_multi_client`, `ncwifi.ws_line_framing`, `ncwifi.ws_utf8_and_latch`,
@@ -1694,7 +1760,7 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36, D-NC42 to D-NC48 and D-NC56 to D-NC60 are behaviour findings, each with the `(should)` test
+D-NC16 to D-NC36, D-NC42 to D-NC48 and D-NC56 to D-NC63 are behaviour findings, each with the `(should)` test
 that pins it.
 
 ### 7.1 Process and infrastructure
@@ -1759,11 +1825,15 @@ that pins it.
 | D-NC58 | A serial action writes its whole line to S4 or S5 at once (`writeS4`/`writeS5`, `NaviCore.ino:1401-1402`, from `:2098-2099`). Those ports are bit-banged and a write returns when its last bit is out, so `loop()` stops for the line: about 100 ms for 95 characters and a CR at 9600, past the ~96 ms of SBUS-24 that Serial1 buffers. The mesh-to-serial path to the same ports hands them a few bytes a pass for exactly this reason (`auxTxPump`, `:5026-5086`). Found writing NC-WP7. | Send RA_SERIAL through the paced auxTx queue. | `ncdev.serial_action_paced` |
 | D-NC59 | An HCR Trigger/Stimulate level of 2 or more goes out as the number on NaviCore's own port (HcrCodec formats it, `WcbHcr.cpp:65-67`; its golden vector pins `<SM30,QEM,QT>`) but as STRONG, level 1, through a WCB (`hcrFormatWcbCommand`, `NaviCore.ino:1516-1517`). The config tool offers Moderate (0) and Strong (1) and shows a legacy value of 2 or more as Strong (`config_tool/index.html:12640-12643`), so one saved action is two different commands by transport. Found writing NC-WP7. | Normalise the level to 0/1 before either transport, as the tool reads it, or send the numeric `;H,FN` form over the mesh. | `ncdev.hcr_level_same_both_ways` |
 | D-NC60 | A WLED action written without its `;` (`L1,ON`) is routed by the id after the L (`NaviCore.ino:1962-1977`): on a local slot WcbWled gets the verb body (`:2009`), but to a remote slot the command is forwarded as written (`:2013`), and a WCB runs a unicast without its command character as plain broadcast text (`WCB.ino:6010-6020`). The WLED gets nothing, and `L1,ON` goes out every port with broadcast output on. The same saved action works or not by where the WLED is. Found writing NC-WP7. | Forward `;L<id>,<body>` rebuilt from what was parsed. | `ncdev.wled_forward_normalised` |
+| D-NC61 | A line from the WebSocket is not trimmed, while every USB line is: `handleSerialInput` trims before it dispatches (NaviCore.ino:4296-4306), and `wsHandler` queues the bytes between line ends as they are (navicore_wsserver.h:447-468) for `drain()` to pass on (:545). `processInputLine` switches on the first character (NaviCore.ino:3814, :3820, :4281), so a leading space or tab drops the line with no reply, and a trailing space makes `?version` an unknown command (WcbMgmt matches whole, `WCB_Mgmt.h:166`, :373). The file's header and PROTOCOLS.md §1 say the socket speaks the same protocol because it feeds the same dispatcher (navicore_wsserver.h:5-8); the WCB's endpoint trims (`ws.line_framing`). Found writing NC-WP8. | Trim each line in `drain()` and skip one left empty, as `handleSerialInput` does. | `ncwifi.ws_line_trim` |
+| D-NC62 | One WebSocket client that stops reading blocks every client, and is then left deaf. Every socket write is a work item on the single httpd task (`wsSendWork`, navicore_wsserver.h:274-294), sent to each client in turn with a blocking send whose timeout is HTTPD_DEFAULT_CONFIG's 5 s (`begin()` keeps it, :478-492). While a stalled client holds the task, `pump()` goes on queueing (:196-233) into a control socket that holds 6 messages (CONFIG_LWIP_UDP_RECVMBOX_SIZE; CONFIG_HTTPD_QUEUE_WORK_BLOCKING is off in core 3.3.4's sdkconfig), so later work items are refused or lost, and a lost item's PSRAM copy is never freed. A refused one leaves its bytes in the sink, and once the sink is full `write()` stores past the end of its 2 KB buffer: it writes `_buf[_len++]` after a `pump()` that could not drain it (:151-167 with :212-227). When a send to the stalled client finally fails, `wsSendWork` drops it from the sink (:288-289) but leaves its session open, and only a handshake adds a client (:395-398): it can still send lines that run, and never receives another, the silent deafness the sink's own comment says it exists to prevent (:119-128). From the code, not bench-run; found writing NC-WP8. | Close a client's session when a send to it fails (`httpd_sess_trigger_close`), bound how long one client can hold the send task (a short send timeout), and make `write()` drop the whole line when `pump()` cannot free room. | `ncwifi.ws_stalled_client` |
+| D-NC63 | While any WebSocket client is connected, a `?REC,EDITLOAD` over USB is handled as one relayed over the mesh. EDITLOAD takes "relayed" from `rcSerial.captureArmed()` (NaviCore.ino:3559-3564), which meant a relayed CLI line was running (rc_serial.h:85-87) until the socket's tee became a standing arrangement for a client's whole session (navicore_wsserver.h:88-93, :526-530; `drain()` re-arms it every pass before `handleSerialInput()` runs, NaviCore.ino:5444, :5525). So with a socket open, a USB download is cut to 512 events a range (NaviCore.ino:3573-3575; BEGIN and END echo the cut count, navicore_record.h:750-753, :876-877), a whole clip over 3000 events is refused with 'connect over USB' to a client that is on USB (:3576-3579), and the stream is paced for RTERM without the wait for USB room (navicore_record.h:809-812, :829, :859) that stopped events vanishing when a host fell behind. Found writing NC-WP8. | Take "relayed" from the transport the line came in on (drainRemoteCli knows it), not from the capture slot. | `ncwifi.usb_editload_with_socket` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | INF5 built and NC-WP8 written, not bench-run: `hil/wlan.py` (s28's PC-side helpers moved unchanged, `pc_on_ap`'s `spare_only`, a scanned network list), `hil/ncws.py` (`NcWs`, the socket as a line device the INF1 driver runs over), `hil/ws.py` `rcvbuf`; `s45_navicore_wifi.py` (15 `ncwifi` tests, three `(should)`); opt-in `navicore_wifi` registered; three tests in `hil/servos.py`. New findings D-NC61 (a socket's lines are not trimmed), D-NC62 (a stalled client blocks every client and is left deaf, and `WsSink::write()` can overrun its buffer) and D-NC63 (a USB EDITLOAD is handled as relayed while a socket is open). `selftest.py`: `t_wlan_pc_on_ap`, `t_ncws_line_device`, `t_ncwifi_helpers`. The two status notes list where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-29 | `bfc5754` | NC-WP6 bench-verified (`20260929-050214`): the last four fixed tests pass; D-NC46 and D-NC48 fail as designed. |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): five of the eight fixed tests pass and `seqval_verbatim` fails as designed. New finding D-NC48 (a multi-chunk `?MGMT,FRAG` push through NaviCore goes out in the wrong frame and never arrives) with its `(should)`, `ncmesh.mgmt_frag_multichunk`, split out of `mgmt_stats_frag`. Test fixes, not yet re-run: `mgmt_etm_char` compares the relayed block with W2's own (the tag line is bare); `mgmt_stats_frag`, `seq_pull` and `seqval_verbatim` ask once more after a reply lost on the air (tracker #109; `_seq_ask`, `_reply_leg`); the SBUS gate re-reads for 4 s. |
 | 2026-09-29 | `bfe55e5` | NC-WP6's first bench run (`20260929-025701`): 21 of 35 passed, the six `(should)` failed as designed, and eight failed on the tests' own faults, fixed and not yet re-run: W2 writes undone by each test (`_put_back`, `_seq_clear`) in `mgmt_stats_frag`, `wdp_neighbour_table`, `alias_whoami`, `seq_pull` and `seqval_verbatim`; `fragment_reassembly_edges` waits for each case's ACKs (no NaviCore finding); `bridged_cmdlib` and `bridged_wcb_meta` judge SBUS by the frame counter (`_sbus_kept_up`); `mgmt_etm_char` waits for W2's send line and asks once more, because W2 sends that reply once under its own load; `crc_namespace_gates` sets DBG_MAESTRO after the burn, which clears it. `NaviMeshModel` gains a moving frame counter, an `sbus_starved` mutation and the ACK's 0.1 s lag. The status note lists what the run showed. |

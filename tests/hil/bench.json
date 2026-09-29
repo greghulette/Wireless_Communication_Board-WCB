@@ -88,6 +88,7 @@
     "etm_seq_wrap",
     "navicore_nvs",
     "intellex_reboot",
-    "intellex_nc_save"
+    "intellex_nc_save",
+    "navicore_wifi"
   ]
 }

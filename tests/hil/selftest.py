@@ -44,7 +44,9 @@ arduino-cli, and a NaviCore git worktree compiled through a staged copy (build(s
 flash() against a fake NaviCore that speaks ?OTALOCAL (ACK, a damaged line's NAK and the rewind, a lost ACK found by
 STATUS, an ACK held until the host sends, the idle reaper, a chunk written short, END's verify, the restart into the
 other slot, the old slot, no return); and the recovery ladder's decisions against a fake board and a scripted esptool,
-which may only ever write 0x10000 and 0xe000.
+which may only ever write 0x10000 and 0xe000. The PC's WiFi and NaviCore's socket (INF5): hil/wlan.py's netsh parsers
+on captured text and pc_on_ap against a faked netsh; hil/ncws.py NcWs against a stand-in endpoint on a local socket;
+and s45's pure helpers (the banner's access point block, Intellex's discovery verdict, the barrier).
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -2180,6 +2182,13 @@ GATED = {
     # IX-WP8 (suites/s34_intellex_tools.py), 2026-09-29
     "intellex.nc_save_unchanged": ("intellex_nc_save", "rewrites NaviCore's /config.json twice (chRateHz one step away "
                                                        "and back)"),
+    # NC-WP8 (suites/s45_navicore_wifi.py), 2026-09-29: three also need navicore_reboot, checked in their bodies
+    **{f"ncwifi.{n}": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s")
+       for n in ("pc_joins_ws_ping", "ws_parity", "ws_console_mirror", "ws_multi_client", "ws_line_framing",
+                 "ws_utf8_and_latch", "ws_wizard_surface", "mesh_coexist", "ws_capture_slot", "ap_boot_lines",
+                 "refuse_short_password", "ws_line_trim", "ws_stalled_client", "usb_editload_with_socket")},
+    "ncwifi.ws_ping_soak": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 6 "
+                                             "minutes while NaviCore streams to it"),
 }
 
 
@@ -2614,6 +2623,445 @@ def t_ws_frames(tmp):
     srv.close()
     assert b"Upgrade: websocket" in seen["req"] and seen["cmd"] == b"?VERSION\n", seen
     assert "Software Version: 1" in text and "End of Version" in text, text
+
+
+# ---------------------------------------------------------------------------- the PC's WiFi and NaviCore's socket (INF5)
+# `netsh wlan show interfaces` and `show networks mode=bssid` as Windows 11 prints them (English), names made up.
+NETSH_INTERFACES = """
+There are 2 interfaces on the system:
+
+    Name                   : Wi-Fi
+    Description            : Intel(R) Wi-Fi 6 AX201 160MHz
+    GUID                   : 3f1b2c4d-5e6f-4a1b-9c8d-7e6f5a4b3c2d
+    Physical address       : aa:bb:cc:dd:ee:ff
+    Interface type         : Primary
+    State                  : connected
+    SSID                   : HomeNet
+    AP BSSID               : 11:22:33:44:55:66
+    Band                   : 5 GHz
+    Radio type             : 802.11ax
+    Authentication         : WPA2-Personal
+    Cipher                 : CCMP
+    Connection mode        : Auto Connect
+    Channel                : 36
+    Signal                 : 90%
+    Profile                : HomeNet
+
+    Name                   : Wi-Fi 2
+    Description            : TP-Link Wireless USB Adapter
+    GUID                   : 9a8b7c6d-5e4f-4321-8765-0fedcba98765
+    Physical address       : 01:02:03:04:05:06
+    Interface type         : Primary
+    State                  : disconnected
+    Radio status           : Hardware On
+                             Software On
+
+    Hosted network status  : Not available
+"""
+NETSH_NETWORKS = """
+Interface name : Wi-Fi 2
+There are 3 networks currently visible.
+
+SSID 1 : HomeNet
+    Network type            : Infrastructure
+    Authentication          : WPA2-Personal
+    Encryption              : CCMP
+    BSSID 1                 : 11:22:33:44:55:66
+         Signal             : 80%
+         Radio type         : 802.11ax
+         Band               : 5 GHz
+         Channel            : 36
+         Basic rates (Mbps) : 6 12 24
+    BSSID 2                 : 11:22:33:44:55:67
+         Signal             : 40%
+         Channel            : 149
+
+SSID 2 : Droid AP
+    Network type            : Infrastructure
+    Authentication          : Open
+    Encryption              : None
+    BSSID 1                 : 02:00:00:00:00:01
+         Signal             : 99%
+         Channel            : 1
+
+SSID 3 :
+    Network type            : Infrastructure
+    Authentication          : WPA2-Personal
+    Encryption              : CCMP
+    BSSID 1                 : 02:00:00:00:00:02
+         Channel            : 6
+"""
+
+
+class FakeNetsh:
+    """`netsh wlan` for hil/wlan.py: adapters 'Wi-Fi' (the PC's internet) and 'Wi-Fi 2' (spare, on `prev` or no
+    network; left out with only_inet). 'add profile' reads the file it is handed; 'connect' to the temporary profile
+    joins its network unless `refuse`; every call is recorded in `calls`, every profile file in `xml`."""
+
+    def __init__(self, prev=None, refuse=False, only_inet=False):
+        self.calls, self.xml, self.profiles, self.refuse = [], [], {}, refuse
+        self.state = {"Wi-Fi": ["connected", "HomeNet", "HomeNet"]}
+        if not only_inet:
+            self.state["Wi-Fi 2"] = ["connected", prev, prev] if prev else ["disconnected", None, None]
+
+    def __call__(self, *args, timeout=30):
+        import re as _re
+        self.calls.append(args)
+        kw = dict(a.split("=", 1) for a in args if "=" in a)
+        if args[:2] == ("show", "interfaces"):
+            out = []
+            for k, (name, (st, ssid, prof)) in enumerate(self.state.items()):
+                out += [f"    Name                   : {name}", f"    GUID                   : 0000000{k}-0000-0000-0000-000000000000",
+                        f"    State                  : {st}"]
+                if ssid:
+                    out += [f"    SSID                   : {ssid}", f"    Profile                : {prof}"]
+            return "\n".join(out) + "\n"
+        iface = kw.get("interface")
+        if args[:2] == ("add", "profile"):
+            with open(kw["filename"], encoding="utf-8") as f:
+                xml = f.read()
+            self.xml.append(xml)
+            name = _re.search(r"<name>(.*?)</name>", xml).group(1)
+            ssid = _re.search(r"<SSID><name>(.*?)</name>", xml).group(1)
+            self.profiles[name] = ssid
+            return f"Profile {name} is added on interface {iface}."
+        if args[0] == "connect":
+            name = kw["name"]
+            if name in self.profiles and not self.refuse:
+                self.state[iface] = ["connected", self.profiles[name], name]
+            elif name not in self.profiles:
+                self.state[iface] = ["connected", name, name]
+            return "Connection request was completed successfully."
+        if args[0] == "disconnect":
+            self.state[iface] = ["disconnected", None, None]
+            return f'Disconnection request was completed successfully for interface "{iface}".'
+        if args[:2] == ("delete", "profile"):
+            self.profiles.pop(kw["name"], None)
+            return f'Profile "{kw["name"]}" is deleted from interface "{iface}".'
+        return ""
+
+
+def t_wlan_pc_on_ap(tmp):
+    """hil/wlan.py (NAVICORE.md INF5, moved out of s28 unchanged): netsh's interface and network listings parsed from
+    captured text; choose_adapter's order (bench.json's adapter, then a spare, then the only one); profile_xml escaping
+    and scrub; and pc_on_ap against a faked netsh: the spare adapter joins under a temporary HIL-<ssid> profile whose
+    file holds the password and is gone afterwards, every call names the adapter, the adapter goes back to its own
+    network, no note names a network or quotes the password; a refused association raises after the same cleanup; the
+    only adapter carrying the default route is taken as s28 always did, and refused with spare_only (D-NC14)."""
+    from hil import wlan
+    ifs = wlan.parse_interfaces(NETSH_INTERFACES)
+    assert [i["name"] for i in ifs] == ["Wi-Fi", "Wi-Fi 2"], ifs
+    assert ifs[0] == {"name": "Wi-Fi", "description": "Intel(R) Wi-Fi 6 AX201 160MHz",
+                      "guid": "3f1b2c4d-5e6f-4a1b-9c8d-7e6f5a4b3c2d", "state": "connected", "ssid": "HomeNet",
+                      "profile": "HomeNet"}, ifs[0]
+    assert ifs[1] == {"name": "Wi-Fi 2", "description": "TP-Link Wireless USB Adapter",
+                      "guid": "9a8b7c6d-5e4f-4321-8765-0fedcba98765", "state": "disconnected"}, ifs[1]
+    assert wlan.parse_interfaces("There is no wireless interface on the system.") == []
+    nets = wlan.parse_networks(NETSH_NETWORKS)
+    assert nets == [{"ssid": "HomeNet", "auth": "WPA2-Personal", "channels": [36, 149]},
+                    {"ssid": "Droid AP", "auth": "Open", "channels": [1]},
+                    {"ssid": "", "auth": "WPA2-Personal", "channels": [6]}], nets
+    assert wlan.choose_adapter(ifs, None, "Wi-Fi") == (ifs[1], "not the internet adapter (Wi-Fi)")
+    assert wlan.choose_adapter(ifs, "Wi-Fi", None) == (ifs[0], "bench.json wifi_test_interface")
+    assert wlan.choose_adapter(ifs, "Wi-Fi 9", None) == (None, "bench.json wifi_test_interface")
+    assert wlan.choose_adapter(ifs[:1], None, "Wi-Fi")[0] == ifs[0] and "offline" in wlan.choose_adapter(ifs[:1], None,
+                                                                                                         "Wi-Fi")[1]
+    assert wlan.choose_adapter([], None, None) == (None, "")
+    xml = wlan.profile_xml("HIL-A<b", "A<b", "p&w>d")
+    assert "<name>HIL-A&lt;b</name>" in xml and "<keyMaterial>p&amp;w&gt;d</keyMaterial>" in xml, xml
+    assert wlan.scrub("Profile HIL-Droid AP is added; Droid AP", "HIL-Droid AP", "Droid AP", None) == \
+        "Profile <network> is added; <network>"
+    if os.name != "nt":
+        return                                                   # pc_on_ap refuses to run anywhere but Windows
+
+    class B:
+        def __init__(self, cfg=None):
+            self.cfg, self.notes = cfg or {}, []
+
+        def note(self, text):
+            self.notes.append(text)
+    saved = {k: getattr(wlan, k) for k in ("netsh", "internet_adapter", "address_wait", "wait")}
+    try:
+        wlan.internet_adapter = lambda: "Wi-Fi"
+        wlan.address_wait = lambda name, subnet="192.168.4.": ("192.168.4.2", 1.2, "")
+        wlan.wait = lambda pred, timeout, step=1.0: pred()
+        # joined, and back to the adapter's own network afterwards
+        fn = wlan.netsh = FakeNetsh(prev="PhoneNet")
+        b, problems = B(), []
+        with wlan.pc_on_ap(b, problems, "Droid AP", "sekrit-pass-1", "NaviCore's", spare_only=True) as name:
+            assert name == "Wi-Fi 2" and fn.state["Wi-Fi 2"] == ["connected", "Droid AP", "HIL-Droid AP"], fn.state
+        verbs = [c[0] for c in fn.calls if c[0] != "show"]
+        assert verbs == ["add", "connect", "disconnect", "delete", "connect"], fn.calls
+        assert all("interface=Wi-Fi 2" in c for c in fn.calls if c[0] != "show"), fn.calls
+        assert ("connect", "name=HIL-Droid AP", "ssid=Droid AP", "interface=Wi-Fi 2") in fn.calls, fn.calls
+        assert ("connect", "name=PhoneNet", "interface=Wi-Fi 2") in fn.calls, fn.calls
+        assert fn.state["Wi-Fi 2"] == ["connected", "PhoneNet", "PhoneNet"] and not fn.profiles, (fn.state, fn.profiles)
+        assert len(fn.xml) == 1 and "<keyMaterial>sekrit-pass-1</keyMaterial>" in fn.xml[0], fn.xml
+        path = next(c for c in fn.calls if c[0] == "add")[2].split("=", 1)[1]
+        assert not os.path.exists(path), "the profile file outlived the block"
+        notes = "\n".join(b.notes)
+        assert not problems and all(s not in notes for s in ("Droid AP", "sekrit-pass-1", "PhoneNet", "HomeNet")), \
+            (problems, notes)
+        assert "lease 192.168.4.2" in notes and "it was on a network" in notes, notes
+        # the association refused: raised after the same cleanup
+        fn = wlan.netsh = FakeNetsh(prev="PhoneNet", refuse=True)
+        b, problems, msg = B(), [], None
+        try:
+            with wlan.pc_on_ap(b, problems, "Droid AP", "sekrit-pass-1", "NaviCore's", spare_only=True):
+                raise AssertionError("the block ran without an association")
+        except AssertionError as e:
+            msg = str(e)
+        assert msg and "did not associate with NaviCore's access point" in msg and "Droid AP" not in msg, msg
+        assert [c[0] for c in fn.calls if c[0] != "show"] == ["add", "connect", "disconnect", "delete", "connect"], fn.calls
+        # only the internet adapter: taken as s28 always took it, refused with spare_only
+        fn = wlan.netsh = FakeNetsh(only_inet=True)
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "sekrit-pass-1", "NaviCore's", spare_only=True):
+                raise AssertionError("spare_only took the internet adapter")
+        except runner.Skip as e:
+            assert str(e) == wlan.SPARE_ONLY_SKIP, e
+        assert [c for c in fn.calls if c[0] != "show"] == [], fn.calls
+        fn = wlan.netsh = FakeNetsh(only_inet=True)
+        b = B()
+        with wlan.pc_on_ap(b, [], "W1 AP", "sekrit-pass-2", "W1's") as name:
+            assert name == "Wi-Fi", name
+        assert any("the only WiFi adapter" in n for n in b.notes), b.notes
+        # bench.json names an adapter this PC lacks
+        wlan.netsh = FakeNetsh()
+        try:
+            with wlan.pc_on_ap(B({"wifi_test_interface": "Wi-Fi 9"}), [], "W1 AP", "x" * 8, "W1's"):
+                raise AssertionError("an unknown adapter was used")
+        except runner.Skip as e:
+            assert "wifi_test_interface names no WiFi adapter" in str(e), e
+    finally:
+        for k, v in saved.items():
+            setattr(wlan, k, v)
+
+
+def _ws_srv_frame(payload, op=0x1):
+    """A server frame (unmasked, FIN set) for a stand-in WebSocket endpoint."""
+    n = len(payload)
+    return bytes([0x80 | op]) + (bytes([n]) if n < 126 else bytes([126]) + n.to_bytes(2, "big")) + payload
+
+
+def t_ncws_line_device(tmp):
+    """hil/ncws.py NcWs (NAVICORE.md INF5) against a stand-in endpoint on a local socket: NaviCore(NcWs).ping() through
+    it, the PONG split over two frames; two lines in one frame, a UTF-8 character cut between frames and CRLF endings
+    reassembled; one frame per send() and per send_frames() piece; a server PING answered, a client ping() PONGed;
+    the log's passwords hashed and a failed expect quoting no CONFIG line; pause() holding lines back until resume();
+    a close frame recorded with its code, after which expect() fails at once and send() raises."""
+    import socket
+    from hil import ws as W
+    from hil.navicore import NaviCore
+    from hil.ncws import NcWs
+    from hil.serialdev import ExpectTimeout
+    secret, ssid, long_secret = "sekrit-pw-99", "DroidNet", "LONGSEKRIT0123456789"
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    seen = {"frames": []}
+    step = {k: threading.Event() for k in ("sent2", "held", "close")}
+
+    def frames(c, buf, n):
+        out = []
+        while len(out) < n:
+            g = W.parse(buf)
+            if g:
+                out.append(g[:2])
+                buf = buf[g[2]:]
+                continue
+            chunk = c.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return out, buf
+
+    def server():
+        c, _ = srv.accept()
+        req = b""
+        while b"\r\n\r\n" not in req:
+            req += c.recv(4096)
+        c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        got, buf = frames(c, b"", 1)                             # the driver's PING
+        seen["frames"] += got
+        c.sendall(_ws_srv_frame(b'{"type":"PO') + _ws_srv_frame(b'NG","version":"v9"}\r\n'))
+        c.sendall(_ws_srv_frame(b"line one\r\nline two\n") + _ws_srv_frame(b"caf\xc3") + _ws_srv_frame(b"\xa9 ok\n"))
+        c.sendall(_ws_srv_frame(('{"type":"CONFIG","data":{"wifiSsid":"' + ssid + '","wifiPassword":"' + secret
+                                 + '"}}\n').encode()))
+        # over LOG_CAP, with a password across the log's 200-character cut: redacted before it is cut
+        c.sendall(_ws_srv_frame(('{"type":"CONFIG","data":{"pad":"' + "x" * 140 + '","wifiPassword":"' + long_secret
+                                 + '","tail":"' + "y" * 5000 + '"}}\n').encode()))
+        c.sendall(_ws_srv_frame(b"hb", 0x9))                     # the board's PING
+        got, buf = frames(c, buf, 4)                             # the PONG, two send_frames pieces, a ping
+        seen["frames"] += got
+        ping = next((p for op, p in got if op == 0x9), None)
+        if ping is None:                                         # the client gave up early: its assertion says why
+            c.close()
+            return
+        c.sendall(_ws_srv_frame(ping, 0xA))                      # PONG the client's ping
+        step["sent2"].set()
+        step["held"].wait(5)
+        c.sendall(_ws_srv_frame(b"held\n"))
+        step["close"].wait(5)
+        c.sendall(_ws_srv_frame(b"\x03\xe8", 0x8))               # close, 1000
+        time.sleep(0.3)
+        c.close()
+
+    th = threading.Thread(target=server, daemon=True)
+    th.start()
+    logged = []
+    d = NcWs("127.0.0.1", name="ncwst", log=lambda n, dr, t: logged.append((n, dr, t)), port=port, timeout=3.0)
+    try:
+        assert d.port == f"ws://127.0.0.1:{port}/ws" and d.connected, d.port
+        assert NaviCore(d).ping() == "v9"
+        m = d.expect(r'^\{"type":"CONFIG","data":\{"wifiSsid"', timeout=3, since=0).string
+        d.expect(r'^\{"type":"CONFIG","data":\{"pad"', timeout=3, since=0)
+        text = [x for x in d.since(0)]
+        assert text[:5] == ['{"type":"PONG","version":"v9"}', "line one", "line two", "café ok", m], text
+        d.send_frames(["abc", "def\n"])
+        d.ping(b"p1")
+        assert step["sent2"].wait(5)
+        deadline = time.monotonic() + 3
+        while not d.pongs and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert [p for _, p in d.pongs] == [b"p1"], d.pongs
+        # the reader's PONG may go out before or between the test's own frames; those keep their order
+        mine = [f for f in seen["frames"][1:] if f[0] != 0xA]
+        assert seen["frames"][0] == (0x1, b'{"type":"PING"}\n') and (0xA, b"hb") in seen["frames"] and \
+            mine == [(0x1, b"abc"), (0x1, b"def\n"), (0x9, b"p1")], seen["frames"]
+        assert d.opcodes.get(0x9) == 1 and d.opcodes.get(0xA) == 1 and d.opcodes.get(0x1) == 7, d.opcodes
+        assert [f for _, f in d.frames][2:5] == [b"line one\r\nline two\n", b"caf\xc3", b"\xa9 ok\n"], d.frames
+        log = "\n".join(t for _, _, t in logged)
+        assert secret not in log and "<redacted:" in log and ("ncwst", ">", '{"type":"PING"}') in logged, logged
+        long_logged = [t for _, _, t in logged if '"pad":"xxx' in t]
+        assert len(long_logged) == 1 and long_secret[:6] not in long_logged[0] and "characters)" in long_logged[0] \
+            and len(long_logged[0]) < 300, long_logged
+        msg = None
+        try:
+            d.expect("^never$", timeout=0.3, since=0)
+        except ExpectTimeout as e:
+            msg = str(e)
+        assert msg and secret not in msg and ssid not in msg and "<a CONFIG line of" in msg and "line two" in msg, msg
+        d.pause()
+        n = d.mark()
+        step["held"].set()
+        time.sleep(0.5)
+        assert d.since(n) == [], d.since(n)
+        d.resume()
+        d.expect("^held$", timeout=3, since=n)
+        step["close"].set()
+        assert d.wait_closed(3) and d.close_code == 1000 and "close frame (code 1000)" in d.closed, d.closed
+        t0 = time.monotonic()
+        try:
+            d.expect("^nothing$", timeout=5)
+            raise AssertionError("expect() matched after the close")
+        except ExpectTimeout as e:
+            assert "the socket ended" in str(e) and time.monotonic() - t0 < 1.0, (str(e), time.monotonic() - t0)
+        try:
+            d.send("x")
+            raise AssertionError("send() on a closed socket went through")
+        except ExpectTimeout as e:
+            assert "is closed" in str(e), e
+        assert d.since(0)[-1].startswith("<<ws closed: the board sent a close frame"), d.since(0)[-1]
+    finally:
+        d.close()
+        th.join(3)
+        srv.close()
+
+
+def t_ncwifi_helpers(tmp):
+    """The pure parts of s45 (NAVICORE.md NC-WP8): ap_of derives the access point as setup() does (an empty SSID ->
+    NaviCore-<id>; off or a short password -> none, counting bytes); route_problems; intellex_verdict as Intellex's
+    probe reads a host; ap_block over a banner's SoftAP block (whole; then a wrong SSID, channel or address, a missing
+    or swapped line, a failure line), never quoting the SSID; refused_block; utf8_lines puts a flush inside a character
+    for most runs; frame_problems and held_back; data_line is the tool's 1391-character DATA line; editload_counts; and
+    _sync against a scripted console, returning past its own echo and poke."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s45_navicore_wifi as S
+    finally:
+        runner.REGISTRY[:] = saved              # helpers only: the real tests never join a selftest run
+    net = {"deviceId": 20, "channel": 1}
+    cfg = {"wifiEnabled": True, "wifiSsid": "DomeAP", "wifiPassword": "sekrit99", "wcbNetwork": net}
+    assert S.ap_of(cfg) == ("DomeAP", "sekrit99")
+    assert S.ap_of(dict(cfg, wifiSsid="")) == ("NaviCore-20", "sekrit99")
+    assert S.ap_of(dict(cfg, wifiEnabled=False)) is None and S.ap_of(dict(cfg, wifiPassword="short")) is None
+    assert S.ap_of(dict(cfg, wifiPassword="éééé")) == ("DomeAP", "é" * 4)   # 8 bytes
+    assert S.ap_of(dict(cfg, wifiPassword="ééé")) is None                              # 6 bytes
+    before = ["Wi-Fi|192.168.1.1"]
+    assert S.route_problems(before, before, "Wi-Fi 2") == []
+    got = S.route_problems(before, before + ["Wi-Fi 2|192.168.4.1"], "Wi-Fi 2")
+    assert got == ["NaviCore's DHCP gave the adapter a default route (next hop ['192.168.4.1'])"], got
+    got = S.route_problems(before, [], "Wi-Fi 2")
+    assert len(got) == 1 and "1 -> 0 routes" in got[0] and "192.168.1.1" not in got[0], got
+    assert S.route_problems(None, before, "x") == ["Get-NetRoute could not be read"]
+    selfrow = "[WDP:N=20,CLIENT=0,ALIAS=NaviCore,HW=0,HWREV=,FW=v1,CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,AGE=0,SEEN=1,PEER=3]"
+    assert S.intellex_verdict(['{"type":"PONG","version":"v1"}', "Unknown command: ?RELAY,WIFI", selfrow,
+                               "[WDP:END,count=0]"]) == ("navicore", "v1", None)
+    assert S.intellex_verdict([selfrow, '{"sys":1,"type":"PONG","id":20,"version":"v1"}', "[WDP:END,count=0]"]) == \
+        ("navicore", "v1", "20")
+    assert S.intellex_verdict([selfrow.replace("N=20", "N=1"), "[WDP:END,count=0]"])[0] == "wcb"
+    assert S.intellex_verdict(["[relay] up", selfrow.replace("N=20", "N=19"), "[WDP:END,count=0]"])[0] == "relay"
+    assert S.intellex_verdict(["Mode=1"])[0] == "unknown"
+    banner = ["=== NaviCore ===", "[MEM] rcConfig (61232 bytes) allocated in PSRAM, free PSRAM now 6751232",
+              '[WIFI] SoftAP "DomeAP" up on channel 1 — 192.168.4.1', S.ESPNOW_SHARE, S.DHCP_NO_GW,
+              "[WS] command endpoint ready — ws://192.168.4.1/ws", "[WCB] Joined network as device ID 20 (quantity=1)"]
+    problems, facts = S.ap_block(banner, cfg)
+    assert problems == [] and facts == {"ip": "192.168.4.1", "psram_free": 6751232}, (problems, facts)
+
+    def check(b, c, want):
+        got, _ = S.ap_block(b, c)
+        assert got and any(want in p for p in got) and not any("DomeAP" in p or "OtherAP" in p for p in got), (want, got)
+    check(banner, dict(cfg, wifiSsid="OtherAP"), "names another network")
+    check(banner, dict(cfg, wcbNetwork=dict(net, channel=6)), "on channel 1, the mesh on 6")
+    check([x.replace("192.168.4.1", "192.168.5.1") for x in banner], cfg, "not 192.168.4.1")
+    check([x for x in banner if x != S.DHCP_NO_GW], cfg, "missing: " + repr(S.DHCP_NO_GW))
+    check(banner[:3] + [banner[4], banner[3]] + banner[5:], cfg, "out of order")
+    check(banner + ['[WIFI] SoftAP "DomeAP" FAILED to start on channel 1.'], cfg, "a [WIFI] failure line (not quoted")
+    check(banner + ["[WS] httpd_start failed — endpoint disabled"], cfg, "a failure line: '[WS] httpd_start")
+    refused = ["=== NaviCore ===", "[WIFI] REFUSED: password is 3 character(s); WPA2 requires 8.", S.NOT_OPEN,
+               "[WCB] Joined network as device ID 20 (quantity=1)"]
+    assert S.refused_block(refused, 3) == []
+    assert "counts 3 characters, the saved password has 4" in S.refused_block(refused, 4)[0]
+    got = S.refused_block(refused[:2] + banner[2:], 3)
+    assert any("does not follow" in p for p in got) and any("SoftAP came up" in p for p in got), got
+    assert "no '[WIFI] REFUSED" in S.refused_block(banner, 3)[0]
+    lines = S.utf8_lines("HILU123456")
+    assert len(lines) == 9 and all(len(x.encode("utf-8")) >= 3000 for x in lines), [len(x) for x in lines]
+    cuts = 0
+    for x in lines:
+        echo = ("Unknown command: " + x).encode("utf-8")
+        cut = echo[:S.WS_SINK]
+        try:
+            cut.decode("utf-8")
+        except UnicodeDecodeError:
+            cuts += 1
+    assert cuts >= 5, cuts                                       # a flush from an empty sink cuts most of them
+    good, bad = "€".encode() * 3, "€".encode() * 3 + b"\xe2\x82"
+    assert S.frame_problems([good, good]) == [] and S.frame_problems([good, bad]) == \
+        ["1 of 2 text frame(s) are not valid UTF-8 on their own"]
+    assert S.held_back([b"x" * 2046, "€".encode() + b"y", b"x" * 2048, b"z"]) == 1
+    dl = S.data_line()
+    assert len(dl) == 1391 and dl.startswith("?OTALOCAL,DATA,1048576,") and len(S.data_line(0)) == 1385, len(dl)
+    ev = ['[CLIPDL:BEGIN]{"count":698,"durationMs":10832,"mode":1,"from":0,"n":512,"fp":"0A0B0C0D","fc":698,"nm":"rec_4"}',
+          '[CLIPDL:EV,0]{"t":0,"k":0}', '[CLIPDL:EVB,1]{"e":[[5,1,1,0,6000],[9,1,1,0,6100]]}', "[CLIPDL:EV,3]{bad",
+          '[CLIPDL:END]{"from":0,"n":512,"fp":"0A0B0C0D","nm":"rec_4"}']
+    assert S.editload_counts(ev) == (512, 4), S.editload_counts(ev)
+    assert S.editload_counts(["[REC] clip 'x' not found"]) == (None, 0)
+
+    def script(text, n):
+        if text.startswith("?HILB"):
+            return [f"Unknown command: {text}"]
+        if text == "#L12":
+            return ["Mode=1  matrixBtn=0  matrixVal=0"]
+        return []
+    dev = FakeNaviDev(script)
+    dev.lines.append((time.monotonic(), "Mode=2  matrixBtn=0  matrixVal=0"))   # a stale poke's line, before the barrier
+    m = S._sync(dev)
+    assert m == len(dev.lines) and dev.lines[-2][1].startswith("Unknown command: ?HILB") and \
+        dev.lines[-1][1].startswith("Mode=1"), dev.lines
+    assert dev.sent[-2].startswith("?HILB") and dev.sent[-1] == "#L12", dev.sent
 
 
 def t_nvs_parse(tmp):
@@ -9226,7 +9674,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_build_source, t_ncflash_status_parse,
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
-         t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations]
+         t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations,
+         t_wlan_pc_on_ap, t_ncws_line_device, t_ncwifi_helpers]
 
 
 def t_wizard_spec_ids(tmp):
