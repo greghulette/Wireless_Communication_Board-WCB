@@ -255,6 +255,30 @@ def default_routes():
     return None if out is None else sorted(x.strip() for x in out.splitlines() if x.strip())
 
 
+def rejoin(bench, name, ssid, whose, wait_s=30.0):
+    """Adapter `name` back on `ssid` with a 192.168.4.x lease, inside a pc_on_ap block whose access point went away and
+    came back (the board hosting it restarted) -> what it took, for a note. Windows reassociates on its own only through
+    a profile in auto mode, and pc_on_ap's temporary HIL-<ssid> profile is manual, so after `wait_s` with no association
+    this connects that profile again, naming the adapter as every netsh call here does. AssertionError when neither
+    brings it back or no lease comes in ADDR_WAIT_S; the network is never named."""
+    if wait(lambda: joined(name, ssid), wait_s):
+        how = f"Windows reassociated {name} on its own"
+    else:
+        tmp = f"HIL-{ssid}"
+        out = netsh("connect", f"name={tmp}", f"ssid={ssid}", f"interface={name}")
+        bench.note("netsh connect: " + scrub(" ".join(out.split()), tmp, ssid)[:200])
+        if not wait(lambda: joined(name, ssid), 30):
+            now = iface(name) or {}
+            raise AssertionError(f"{name} did not reassociate with {whose} access point within {wait_s:.0f} s, nor 30 s "
+                                 f"after the harness connected its temporary profile again (state {now.get('state')!r})")
+        how = f"the harness connected {name}'s temporary profile again after {wait_s:.0f} s without an association"
+    addr, secs, renewed = address_wait(name)
+    if not addr:
+        raise AssertionError(f"{name} is back on {whose} access point but got no 192.168.4.x lease in {secs} s "
+                             f"({renewed or 'no renew'})")
+    return f"{how}; lease {addr} {secs} s after associating" + (f" ({renewed})" if renewed else "")
+
+
 # ------------------------------------------------------------------ what the adapter can see
 def parse_networks(text):
     """`netsh wlan show networks mode=bssid` output -> [{'ssid', 'auth', 'channels'}], one per network, in the order

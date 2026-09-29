@@ -15,6 +15,10 @@ is parked in subprocess.wait() for the duration.
     /wire/received {wcb, port, since}      {"hex": ...}
     /wire/expect {wcb, port, text|hex, since, timeout}
     /wire/send   {wcb, port, text|hex}     inject into the WCB port through the probe
+    /hook        {name, ...}               a bench action the harness test offers its spec mid-run, by name
+                                           (hil/intellex.py run_intellex_test hooks=): move the PC's WiFi adapter,
+                                           mark or count a console's lines, judge the host's flash log. Its reply is
+                                           what the hook returns; a name the run offers none of is a 409.
 
 A pipe run (hil/wizard.py run_wizard_test(..., pipe=True)) keeps the device's port open in the harness and gives the
 page a FAKE Web Serial port (tests/wizard/lib/navicore/shim.js + pipe.js) whose bytes go through these, for the
@@ -50,9 +54,10 @@ def _data(body):
 
 
 class Bridge:
-    def __init__(self, bench, context=None):
+    def __init__(self, bench, context=None, hooks=None):
         self.bench = bench
         self.context = context or {}
+        self.hooks = dict(hooks or {})    # /hook: {name: fn(body) -> a JSON-able reply}, run under the lock
         self.signals = []                 # every /serial/signals call, in order, for the harness test to check
         self._lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
@@ -100,6 +105,11 @@ class Bridge:
         if path == "/wire/send":
             self._link(body).send(_data(body))
             return {}
+        if path == "/hook":
+            name = str(body.get("name", ""))
+            if name not in self.hooks:
+                raise AssertionError(f"this run offers no hook {name!r} (it has {sorted(self.hooks)})")
+            return self.hooks[name](body) or {}
         if path == "/serial/mark":
             return {"mark": self._pipe_dev(body)[1].mark()}
         if path == "/serial/read":

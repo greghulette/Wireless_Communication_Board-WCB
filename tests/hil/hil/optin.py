@@ -142,12 +142,14 @@ OPT_INS = {
     },
     "navicore_wifi": {
         "title": "PC joins NaviCore's access point",
-        "what": "For each of fifteen tests the PC's spare WiFi adapter joins NaviCore's access point for about 30 s and "
-                "uses its WebSocket endpoint (the ping soak streams for 5 minutes), then returns to its network. "
-                "NaviCore's SSID and password are read from its config and sit only in a temporary Windows profile that "
-                "is deleted after. A PC whose only WiFi adapter carries its internet skips them (D-NC14). With "
-                "navicore_reboot ticked too, two restart NaviCore (one saves a 3-character AP password for a boot) and "
-                "one may, if a stalled socket crashes it (D-NC62).",
+        "what": "For each of fifteen tests of NaviCore's own endpoint (s45) and six of Intellex's over WiFi (s33, s35: its "
+                "WebSocket transport, discovery, the config tool and the Wizard through NaviCore, the remote-terminal "
+                "re-arm rate, and with intellex_reboot the link loss) the PC's spare WiFi adapter joins NaviCore's access "
+                "point for about 30 s to 3 minutes and uses its WebSocket endpoint (the ping soak streams for 5 "
+                "minutes), then returns to its network. NaviCore's SSID and password are read from its config and sit "
+                "only in a temporary Windows profile that is deleted after. A PC whose only WiFi adapter carries its "
+                "internet skips them (D-NC14). With navicore_reboot ticked too, two restart NaviCore (one saves a "
+                "3-character AP password for a boot) and one may, if a stalled socket crashes it (D-NC62).",
         "why": "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s",
         "estimate_s": 90,
     },
@@ -237,9 +239,10 @@ OPT_INS = {
     },
     "intellex_reboot": {
         "title": "NaviCore restart through Intellex",
-        "what": "Sends NaviCore a REBOOT through Intellex's own serial transport, to see how the transport meets a device "
-                "that goes away: NaviCore's USB port re-enumerates, the mesh loses WCB 20 and SBUS OUT stops for about "
-                "5 s. Runs inside nc_guard, like every NaviCore restart.",
+        "what": "Sends NaviCore a REBOOT through Intellex, to see how a transport meets a device that goes away: through "
+                "its own serial transport (s33), and through a host attached over WiFi to NaviCore's access point (s35, "
+                "with navicore_wifi ticked too). NaviCore's USB port re-enumerates, the mesh loses WCB 20 and SBUS OUT "
+                "stops for about 5 s. Runs inside nc_guard, like every NaviCore restart.",
         "why": "restarts NaviCore through Intellex's transport: the mesh and SBUS OUT lose it for about 5 s",
         "estimate_s": 60,
     },
@@ -250,6 +253,48 @@ OPT_INS = {
                 "nc_guard, which proves the config byte-identical afterwards.",
         "why": "rewrites NaviCore's /config.json twice (chRateHz one step away and back)",
         "estimate_s": 90,
+    },
+    "intellex_flash": {
+        "title": "W2 re-flashed through Intellex",
+        "what": "Re-flashes W2 (the classic ESP32 on COM15) through Intellex's own esptool path with the bench image it "
+                "already runs (results/builds/wcb-esp32-meshq), from a firmware cache seeded offline: the Wizard's Update "
+                "(app only) and Flash (bootloader, partition table and app; NVS kept), an Update with a second flash "
+                "request refused meanwhile, and a full flash Intellex refuses after esptool has reset W2 into its ROM "
+                "loader. Each test ends with W2 on its version and its config unchanged; W2 is off the mesh about a "
+                "minute a flash, and one Intellex cannot bring back is flashed again the same way (INTELLEX.md "
+                "IX-WP10).",
+        "why": "re-flashes W2 through Intellex's esptool path with the bench image it runs",
+        "estimate_s": 240,
+    },
+    "intellex_flash_factory": {
+        "title": "W2 factory reset through Intellex (attended)",
+        "what": "The Wizard's Factory Reset through Intellex on W2: the bench image written in full and W2's NVS erased, "
+                "so W2 boots on the firmware's defaults (WCB 1 and the default mesh password: off the bench's mesh); "
+                "then the "
+                "harness restores W2 over its USB from its own pre-test chain and learned peers, the nvs_erase restore: "
+                "three W2 restarts in all (the flash, then ?HW's and the replay's boots). Stay at the bench: if the "
+                "restore fails, W2's chain is in session.log.",
+        "why": "erases W2's NVS through Intellex and restores it from its chain; attended only",
+        "estimate_s": 300,
+    },
+    "intellex_flash_navicore": {
+        "title": "NaviCore app re-flashed through Intellex",
+        "what": "The NaviCore config tool's Update Firmware inside Intellex, on NaviCore's own COM port: esptool writes the "
+                "bench image NaviCore already runs (results/builds/navicore-hil1) into app0 and erases otadata, so "
+                "NaviCore restarts on app0; its bootloader, partition table, NVS, config and clips are never written. "
+                "The mesh and SBUS OUT lose NaviCore for about a minute. Runs inside nc_guard; a FLASHED.md row records "
+                "the flash.",
+        "why": "rewrites NaviCore's app0 through Intellex's esptool path and restarts it; SBUS OUT stops for about a minute",
+        "estimate_s": 180,
+    },
+    "intellex_wifi_join": {
+        "title": "Intellex WiFi hop and bounce (attended)",
+        "what": "With Intellex attached to NaviCore's access point, moves the PC's spare WiFi adapter to W1's access point "
+                "and back under temporary HIL- profiles (hil/wlan.py pc_on_ap), and has Intellex's own wifi_bounce "
+                "disconnect and reconnect that adapter through the profile Windows keeps for NaviCore's network. The "
+                "adapter carrying the PC's internet is watched throughout and never touched. Stay at the bench.",
+        "why": "moves the PC's spare WiFi adapter between access points and has Intellex bounce it; attended only",
+        "estimate_s": 180,
     },
 }
 

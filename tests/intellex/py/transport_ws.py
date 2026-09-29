@@ -1,15 +1,17 @@
 """Intellex's WebSocketTransport against NaviCore's own access point, under its venv (intellex.ws_transport_navicore,
-IX-WP5). It uses whatever network this PC is already on and never changes it: no netsh, no join, no bounce. It skips
-unless this PC has an address on the host's subnet (discover.local_ip_for, a UDP connect that sends nothing) and the host
-answers a PING with a DIRECT PONG - no "sys", no "id" - carrying the version NaviCore gave the harness over USB. That is
-the proof the AP is NaviCore's: a WCB's AP at the same 192.168.4.1 mirrors NaviCore's mesh PONG, which carries both.
+IX-WP5). The harness puts the PC's spare WiFi adapter on that access point first (suites/s45_navicore_wifi.py _on_ap,
+hil/wlan.py pc_on_ap); this script never changes the network itself: no netsh, no join, no bounce. It needs an address on
+the host's subnet (discover.local_ip_for, a UDP connect that sends nothing) and a DIRECT PONG from the host - no "sys",
+no "id" - carrying the version NaviCore gave the harness over USB. That is the proof the AP is NaviCore's: a WCB's AP at
+the same 192.168.4.1 mirrors NaviCore's mesh PONG, which carries both. With args "joined" (the harness holds a lease on
+NaviCore's AP) a missing address or PONG is a failure; without it, a skip (the network was whatever the PC was on).
 
 Intellex src/ws_transport.py: frames are concatenated as bytes with no line awareness (:130-159), a write is sent as one
 UTF-8 TEXT message and a payload that is not UTF-8 raises (:106-124), and a write after close() raises (contract 2).
 GET_CONFIG, over 10 KB, arrives split across frames (NaviCore flushes its reply in ~1400-byte pieces) and must reassemble
 into one line that parses. It holds the AP and mesh passwords: only its length, frame count and key count are reported.
 
-args: host (default 192.168.4.1); version (NaviCore's PONG version, read by the harness over USB).
+args: host (default 192.168.4.1); version (NaviCore's PONG version, read by the harness over USB); joined.
 """
 import json
 import os
@@ -57,16 +59,21 @@ def navicore_ws(ctx):
     from transport import TransportError
     from ws_transport import WebSocketTransport
     host = ctx.args.get("host") or "192.168.4.1"
+
+    def need(msg):
+        # The harness joined NaviCore's access point for this test (a lease is held), so a precondition that does not
+        # hold is a failure; on whatever network the PC happened to be on, it is a skip.
+        raise (AssertionError if ctx.args.get("joined") else SkipCase)(msg)
     via = discover.local_ip_for(host)
     if not via or via.rsplit(".", 1)[0] != host.rsplit(".", 1)[0]:
-        raise SkipCase(f"this PC has no address on {host}'s network (it would leave by {via or 'nothing'}): the second "
-                       f"WiFi adapter is not on a droid's access point")
+        need(f"this PC has no address on {host}'s network (it would leave by {via or 'nothing'}): the second WiFi "
+             f"adapter is not on a droid's access point")
     sink = _Sink()
     t = WebSocketTransport(host, sink.on_data, sink.on_lost)
     try:
         t.open()
     except TransportError as e:
-        raise SkipCase(f"nothing answers ws://{host}/ws from {via}: {str(e)[:160]}")
+        need(f"nothing answers ws://{host}/ws from {via}: {str(e)[:160]}")
     try:
         mark = len(sink.data)
         t.write(b'{"type":"PING"}\n')
@@ -86,13 +93,13 @@ def navicore_ws(ctx):
                         break
             time.sleep(0.05)
         if pong is None:
-            raise SkipCase(f"{host} answered no PONG within 6 s: not NaviCore's own access point")
+            need(f"{host} answered no PONG within 6 s: not NaviCore's own access point")
         if "sys" in pong or "id" in pong:
-            raise SkipCase(f"the PONG from {host} came over the mesh (it carries sys/id): this PC is on a doorway's "
-                           f"access point, not NaviCore's")
+            need(f"the PONG from {host} came over the mesh (it carries sys/id): this PC is on a doorway's access point, "
+                 f"not NaviCore's")
         want = ctx.args.get("version")
         if want and pong.get("version") != want:
-            raise SkipCase(f"{host} is a NaviCore on {pong.get('version')!r}, not the bench NaviCore ({want!r})")
+            need(f"{host} is a NaviCore on {pong.get('version')!r}, not the bench NaviCore ({want!r})")
         ctx.note(f"on NaviCore's access point via {via}: PONG {pong.get('version')}")
 
         mark = len(sink.data)
