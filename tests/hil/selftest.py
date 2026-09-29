@@ -1688,6 +1688,78 @@ def t_rule12_remoteterm_first(tmp):
     assert rule12_problems(copy) == []
 
 
+
+# The one file that may call the driver's esp_now_send: the wrapper itself (CLAUDE.md rule 16).
+RULE16_WRAPPER = "WCB_EspNow.cpp"
+_RAW_SEND = re.compile(r"\besp_now_send\s*\(")
+_C_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
+def rule16_problems(code_dir):
+    """CLAUDE.md rule 16: every ESP-NOW send in Code/WCB goes through wcbEspNowSend (WCB_EspNow.h), which bounds the
+    frames in flight and makes a task wait for the radio. A raw esp_now_send anywhere else bypasses it and brings back
+    tracker #102 (a mesh-send flood took the heap and aborted the board) and #107 (?RTERM lines lost to a full radio
+    queue). Comments and string literals do not count. -> one line per call, naming the file and line, and one if the
+    wrapper itself no longer calls the driver."""
+    problems = []
+    for name in sorted(f for f in os.listdir(code_dir) if f.endswith((".cpp", ".h", ".ino"))):
+        with open(os.path.join(code_dir, name), encoding="utf-8", errors="replace") as f:
+            code = _C_STRING.sub('""', _strip_c_comments(f.read()))
+        hits = list(_RAW_SEND.finditer(code))
+        if name == RULE16_WRAPPER:
+            if not hits:
+                problems.append(f"{name}: the wrapper no longer calls esp_now_send")
+            continue
+        problems += [f"{name}:{code.count(chr(10), 0, m.start()) + 1}: calls esp_now_send directly, not wcbEspNowSend"
+                     for m in hits]
+    return problems
+
+
+def t_rule16_espnow_send_wrapped(tmp):
+    """CLAUDE.md rule 16 as a check that needs no bench: the firmware tree passes, and each way to break the rule,
+    planted in a copy of the tree, is caught with the file and line - a raw call in a new file, in WCB.ino, and one
+    split over two lines, and a wrapper that stopped calling the driver. The driver's name in a comment or a string,
+    and esp_now_send_status_t, do not count."""
+    code = os.path.normpath(os.path.join(HERE, "..", "..", "Code", "WCB"))
+    names = sorted(f for f in os.listdir(code) if f.endswith((".cpp", ".h", ".ino")))
+    assert RULE16_WRAPPER in names and "WCB.ino" in names, names
+    found = rule16_problems(code)
+    assert not found, "CLAUDE.md rule 16 is broken: " + "; ".join(found)
+    copy = os.path.join(tmp.root, "WCB16")
+    os.makedirs(copy)
+    for f in names:
+        shutil.copy2(os.path.join(code, f), os.path.join(copy, f))
+    assert rule16_problems(copy) == []
+
+    def plant(name, text):
+        with open(os.path.join(copy, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    new = "WCB_HilPlanted.cpp"
+    for text, want in (
+            ('#include "WCB_RemoteTerm.h"\nvoid a(const uint8_t *m) {\n  esp_now_send(m, m, 6);\n}\n',
+             [f"{new}:3: calls esp_now_send directly, not wcbEspNowSend"]),
+            ('#include "WCB_RemoteTerm.h"\nvoid a(const uint8_t *m) {\n  esp_err_t r = esp_now_send\n    (m, m, 6);\n}\n',
+             [f"{new}:3: calls esp_now_send directly, not wcbEspNowSend"]),
+            ('#include "WCB_RemoteTerm.h"\n// esp_now_send(m, m, 6) used to be here\n/* esp_now_send(x) */\n'
+             'void a(esp_now_send_status_t s) { Serial.println("esp_now_send( failed"); wcbEspNowSend(0, 0, 0); }\n', [])):
+        plant(new, text)
+        got = rule16_problems(copy)
+        assert got == want, (text, got)
+    os.remove(os.path.join(copy, new))
+    with open(os.path.join(code, "WCB.ino"), encoding="utf-8", errors="replace") as f:
+        ino = f.read()
+    plant("WCB.ino", ino + "\nvoid hilPlanted(const uint8_t *m) { esp_now_send(m, m, 1); }\n")
+    got = rule16_problems(copy)
+    assert len(got) == 1 and got[0].startswith("WCB.ino:") and "directly" in got[0], got
+    shutil.copy2(os.path.join(code, "WCB.ino"), os.path.join(copy, "WCB.ino"))
+    with open(os.path.join(code, RULE16_WRAPPER), encoding="utf-8", errors="replace") as f:
+        wrapper = f.read()
+    plant(RULE16_WRAPPER, _RAW_SEND.sub("esp_now_sendX(", wrapper))
+    assert rule16_problems(copy) == [f"{RULE16_WRAPPER}: the wrapper no longer calls esp_now_send"], rule16_problems(copy)
+    shutil.copy2(os.path.join(code, RULE16_WRAPPER), os.path.join(copy, RULE16_WRAPPER))
+    assert rule16_problems(copy) == []
+
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
 PROBE_BOOT = "BOOT wcb_probe 7 mac=AA:BB:CC:DD:EE:01"
 
@@ -7054,7 +7126,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_wizard_abort_kills_tree, t_nctool_pipe_bridge, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
-         t_rule12_remoteterm_first, t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
+         t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,

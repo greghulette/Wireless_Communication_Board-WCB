@@ -235,6 +235,19 @@ changing before editing.**
     request that asked for them (`?MGMT,PULL,<n>,P`, type 19). Nothing else may ever travel as type 6
     or under that tag. See [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md).
 
+16. **Every ESP-NOW send goes through `wcbEspNowSend()` (`WCB_EspNow.{h,cpp}`), never `esp_now_send()`.** Each frame
+    the driver accepts holds a WiFi buffer from the heap until the radio has sent it, and nothing used to wait for that.
+    A console flood of JSON broadcasts filled the driver's queue until the ~18 KB AP-mode heap was gone and the driver's
+    next allocation aborted the board (tracker #102). An `?RTERM` mirror lost ten short `?backup` lines in a row, each
+    `ESP_ERR_ESPNOW_NO_MEM` unnoticed (#107). The wrapper counts frames in flight through the send callback:
+    - A task waits in 1 ms sleeps while 6 are in flight, for up to 50 ms, then gives the frame up and returns
+      `ESP_ERR_ESPNOW_NO_MEM`.
+    - The WiFi task never waits (rule 11: the send callbacks that free a slot run on it). It sends up to 12 in flight,
+      then drops.
+    - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
+    So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
+    not, because the task's wait sleeps. `selftest.py` (`t_rule16_espnow_send_wrapped`) fails on any other call.
+
 ## Verifying
 
 ```bash

@@ -701,9 +701,10 @@ def _nc_wait(nc, pattern, since, timeout=6.0):
 @test("mesh.rterm_long_output", "A W2 -> W1 ?RTERM mirror carries ?HELP and ?backup whole: every line W2 prints on its own USB arrives as [TERM:2] lines, those over 160 bytes in 160-byte pieces, and the mirrored ?backup chain passes its CRC", needs=["wcb1", "wcb2"], links=[])
 def rterm_long_output(bench):
     """WCB-WP31 row 1 (rterm.long_output_and_long_lines). While a session is armed, WCBSerial::write copies every byte
-    W2 prints into a line buffer, and each piece goes out as one ESP-NOW unicast whose esp_now_send result nobody
-    checks; the relay queues each packet 16 deep (RTERM_QUEUE_DEPTH), dropping when full, and prints it from loop()
-    (WCB_RemoteTerm.cpp). So W2's own USB, cut the relay's way (_pieces), is exactly what W1 should print. ?HELP is a
+    W2 prints into a line buffer, and each piece goes out as one ESP-NOW unicast paced by wcbEspNowSend (CLAUDE.md
+    rule 16); the relay keeps the lines in a 3 KB ring, counts one it has no room for ('[RTERM] N line(s) from WCB2
+    lost at this relay'), and prints them from loop() (WCB_RemoteTerm.cpp, tracker #107). So W2's own USB, cut the
+    relay's way (_pieces), is exactly what W1 should print. ?HELP is a
     burst of short lines; ?backup has chains of 1-3 KB on one line, and the mirrored 'For Configured Boards' chain,
     re-joined from its pieces, must pass its CRC. A loss is reported line by line (config text by length and CRC only):
     loss under bursts would need a decision (docs/hil_plan/WCB.md WCB-WP31). A ?backup whose chain already fails its

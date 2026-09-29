@@ -6,27 +6,31 @@
 #include "WCB_RemoteTerm.h"
 #include "WCB_Storage.h"
 #include "WCB_WS.h"           // WebSocket output tee — see write() below
+#include "WCB_EspNow.h"       // wcbEspNowSend: every ESP-NOW send is paced (CLAUDE.md rule 16)
 #include <string.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
+#include <freertos/ringbuf.h>
 
-// ── Relay-side packet queue ───────────────────────────────────────────────────
-// Packets are enqueued from the WiFi-task callback and dequeued in loop().
+// ── Relay-side line ring ──────────────────────────────────────────────────────
+// Packets are queued from the WiFi-task callback and printed in loop().
 // This prevents blocking UART writes inside the ESP-NOW receive callback,
 // which caused the WiFi watchdog to fire and restart the board.
-#define RTERM_QUEUE_DEPTH  16   // max outstanding packets before dropping
+// The relay prints each line with a "[TERM:n]" prefix at the same baud rate the
+// target printed it, so a burst of short lines always leaves a backlog here. A
+// ring of variable-length items holds ~100 short lines in the heap the old 16
+// fixed 163-byte slots took, which lost ten short ?backup lines in a row
+// (tracker #107). A line that still does not fit is counted and reported.
+#define RTERM_RING_BYTES  3072
 
-struct RtermQueueItem {
-  uint8_t sourceWCB;
-  uint8_t textLen;
-  char    text[RTERM_TEXT_SIZE + 1];
-};
+static RingbufHandle_t s_rtermRing = nullptr;
+static std::atomic<uint32_t> s_rtermLost{0};   // lines the ring had no room for
+static volatile uint8_t s_rtermLostFrom = 0;   // the source WCB of the last one
 
-static QueueHandle_t s_rtermQueue = nullptr;
-
-static void ensureQueue() {
-  if (!s_rtermQueue)
-    s_rtermQueue = xQueueCreate(RTERM_QUEUE_DEPTH, sizeof(RtermQueueItem));
+static bool ensureRing() {
+  if (!s_rtermRing)
+    s_rtermRing = xRingbufferCreate(RTERM_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  return s_rtermRing != nullptr;
 }
 
 // ── Globals from WCB.ino ──────────────────────────────────────────
@@ -86,10 +90,16 @@ void WCBSerial::_bufChar(uint8_t c) {
 }
 
 // Send the accumulated line buffer via ESP-NOW and reset it.
+// The line is taken out BEFORE the send: the send may now wait for the radio
+// (wcbEspNowSend), and whatever another task printed meanwhile went into
+// _lineBuf, which a reset after the send threw away.
 void WCBSerial::_flushLine() {
   if (_lineLen == 0) return;
-  _sendPacket(_lineBuf, (uint8_t)_lineLen);
+  char line[LINEBUF_SIZE];
+  const uint8_t n = (uint8_t)_lineLen;
+  memcpy(line, _lineBuf, n);
   _lineLen = 0;
+  _sendPacket(line, n);
 }
 
 // Build and unicast a REMOTE_TERM packet to the relay board.
@@ -118,7 +128,11 @@ void WCBSerial::_sendPacket(const char *data, uint8_t len) {
     p.channel = 0; p.encrypt = false;
     esp_now_add_peer(&p);   // best-effort; if the peer table is full the send fails as before
   }
-  esp_now_send(WCBMacAddresses[_relayWCB - 1], (uint8_t *)&pkt, sizeof(pkt));
+  // Paced like every ESP-NOW send: a burst of short lines outran the radio, and each
+  // failed esp_now_send was a mirrored line lost unnoticed (tracker #107). Nothing can
+  // print here - a print would come straight back into this mirror - so a line given
+  // up is counted and loop() says so (wcbEspNowReportDrops).
+  wcbEspNowSend(WCBMacAddresses[_relayWCB - 1], (uint8_t *)&pkt, sizeof(pkt));
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -161,36 +175,40 @@ void rtermRelayHandlePacket(const uint8_t *data) {
   if (pkt.packetType != PACKET_TYPE_REMOTE_TERM) return;
   if (pkt.textLen == 0 || pkt.textLen > RTERM_TEXT_SIZE) return;
 
-  ensureQueue();
+  // One item: the source WCB, then the text (no terminator).
+  uint8_t item[1 + RTERM_TEXT_SIZE];
+  item[0] = pkt.sourceWCB;
+  memcpy(item + 1, pkt.text, pkt.textLen);
 
-  RtermQueueItem item;
-  item.sourceWCB = pkt.sourceWCB;
-  item.textLen   = pkt.textLen;
-  memcpy(item.text, pkt.text, pkt.textLen);
-  item.text[pkt.textLen] = '\0';
-
-  // Non-blocking send — drop if queue is full rather than blocking WiFi task.
-  // This runs in the WiFi-task context (NOT an ISR), so use xQueueSend with a
-  // zero timeout instead of xQueueSendFromISR. The FromISR variant has stricter
-  // calling rules and a different higher-priority-task-woken contract that
-  // doesn't apply outside ISR context.
-  xQueueSend(s_rtermQueue, &item, 0);
+  // Non-blocking — count the line lost if the ring is full rather than block the
+  // WiFi task. This runs in the WiFi-task context (NOT an ISR), so the plain send
+  // with a zero timeout, not the FromISR variant.
+  if (!ensureRing() || xRingbufferSend(s_rtermRing, item, 1 + pkt.textLen, 0) != pdTRUE) {
+    s_rtermLost++;
+    s_rtermLostFrom = pkt.sourceWCB;
+  }
 }
 
 // Called from loop() on the relay board — safe to do serial I/O here.
 void rtermRelayDrain() {
-  if (!s_rtermQueue) return;
+  if (s_rtermRing) {
+    size_t size = 0;
+    while (const uint8_t *item = (const uint8_t *)xRingbufferReceive(s_rtermRing, &size, 0)) {
+      // Strip trailing CR/LF so we control the line ending
+      const char *text = (const char *)item + 1;
+      size_t len = size > 1 ? size - 1 : 0;
+      while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r')) len--;
 
-  RtermQueueItem item;
-  while (xQueueReceive(s_rtermQueue, &item, 0) == pdTRUE) {
-    // Strip trailing CR/LF so we control the line ending
-    size_t len = item.textLen;
-    while (len > 0 && (item.text[len - 1] == '\n' || item.text[len - 1] == '\r')) len--;
-    item.text[len] = '\0';
-
-    if (len > 0) {
-      // Use parent-class printf to avoid re-triggering the WCBSerial forwarding path
-      WCBDebugSerial.HardwareSerial::printf("[TERM:%d]%s\n", (int)item.sourceWCB, item.text);
+      if (len > 0) {
+        // Use parent-class printf to avoid re-triggering the WCBSerial forwarding path
+        WCBDebugSerial.HardwareSerial::printf("[TERM:%d]%.*s\n", (int)item[0], (int)len, text);
+      }
+      vRingbufferReturnItem(s_rtermRing, (void *)item);
     }
   }
+  // After what did arrive: the lines lost came after those already in the ring.
+  const uint32_t lost = s_rtermLost.exchange(0);
+  if (lost)
+    WCBDebugSerial.HardwareSerial::printf("[RTERM] %lu line(s) from WCB%d lost at this relay: its queue was full\n",
+                                          (unsigned long)lost, (int)s_rtermLostFrom);
 }

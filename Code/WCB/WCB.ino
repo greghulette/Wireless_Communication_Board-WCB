@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_282006RSEP2026                                  *****////
+///*****                                          Version 6.2.1_282046RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -108,6 +108,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_PWM.h"
 #include "WCB_Help.h"
 #include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
+#include "WCB_EspNow.h"   // wcbEspNowSend: every ESP-NOW send is paced to the radio (CLAUDE.md rule 16)
 #include "WCB_ConfigParts.h"  // mesh config pull: parts split/framing arithmetic (pure; tests/config_parts_test.cpp)
 #include "driver/gpio.h"  // clearStaleGpioInterrupts (boot): gpio_intr_disable / gpio_set_intr_type
 #include "hal/gpio_ll.h"  // ...and the GPIO register block it inspects
@@ -197,7 +198,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_282006RSEP2026";
+String SoftwareVersion = "6.2.1_282046RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1266,7 +1267,7 @@ void sendETMHeartbeat() {
   hb.structPacketType = PACKET_TYPE_HEARTBEAT;
   hb.structSequenceNumber = 0;
 
-  esp_now_send(broadcastMACAddress[0], (uint8_t *)&hb, sizeof(hb));
+  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&hb, sizeof(hb));
   if (debugETM) {
     Serial.printf("[ETM] Heartbeat sent (WCB%d)\n", WCB_Number);
   }
@@ -1285,7 +1286,7 @@ void sendETMBootAnnounce() {
   bp.structPacketType      = PACKET_TYPE_ETM_BOOT;
   bp.structSequenceNumber  = 0;
 
-  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
   if (debugETM) Serial.printf("[ETM] Boot announce sent (WCB%d)\n", WCB_Number);
 }
 
@@ -1309,7 +1310,7 @@ static void wdpBroadcastAs(const uint8_t *payload, int len, uint8_t packetType) 
   memcpy(bp.structCommand, payload, len);
   bp.structPacketType     = packetType;
   bp.structSequenceNumber = 0;
-  esp_now_send(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
+  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&bp, sizeof(bp));
 }
 void wdpBroadcast(const uint8_t *payload, int len)   { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP); }
 void wdpDaBroadcast(const uint8_t *payload, int len) { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP_DA); }
@@ -1682,7 +1683,7 @@ void processETMAcksAndRetries() {
           p.channel = 0; p.encrypt = false;
           esp_now_add_peer(&p);   // best-effort; if the table is truly full the send just fails as before
         }
-        esp_now_send(mac, (uint8_t *)&retry, sizeof(retry));
+        wcbEspNowSend(mac, (uint8_t *)&retry, sizeof(retry));
 
         entry.retryCount[b]++;
         etmStatsRetries[b]++;
@@ -1757,7 +1758,7 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
     p.channel = 0; p.encrypt = false;
     esp_now_add_peer(&p);   // best-effort; a truly full table fails the send as before
   }
-  esp_err_t result = esp_now_send(mac, (uint8_t *)&ack, sizeof(ack));
+  esp_err_t result = wcbEspNowSend(mac, (uint8_t *)&ack, sizeof(ack));
   if (debugETM) {
     Serial.printf("[ETM] Sent ACK seq %d to WCB%d, result: %d\n", seqNum, senderWCB, result);
   }
@@ -2133,6 +2134,13 @@ String buildStatsString() {
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
            (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
   out += buf;
+  if (wcbEspNowDropped() > 0) {
+    // Frames wcbEspNowSend gave up: the radio's queue stayed full for its whole wait (WCB_EspNow.h).
+    // Printed only when non-zero, like the overflow line below.
+    snprintf(buf, sizeof(buf), "ESP-NOW: %lu frame(s) not sent - the radio's queue stayed full\n",
+             (unsigned long)wcbEspNowDropped());
+    out += buf;
+  }
   if (serialRxOverflows > 0) {
     // Counted by the onReceiveError hook in setup(): bytes the USB/S0 input lost to a full FIFO or
     // ring. Printed only when non-zero - a lost byte mid-command otherwise corrupts silently.
@@ -3113,7 +3121,7 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
 
     espnowCommandAttempts++;
-    esp_err_t result = esp_now_send(mac, (uint8_t *)&etmMsg, sizeof(etmMsg));
+    esp_err_t result = wcbEspNowSend(mac, (uint8_t *)&etmMsg, sizeof(etmMsg));
     if (result == ESP_OK) {
       espnowCommandSuccess++;
       espnowCommandDelivered++;
@@ -3150,7 +3158,7 @@ void sendESPNowMessage(uint8_t target, const char *message, bool useETM) {
     espnowCommandAttempts++;
   }
 
-  esp_err_t result = esp_now_send(mac, (uint8_t *)&msg, sizeof(msg));
+  esp_err_t result = wcbEspNowSend(mac, (uint8_t *)&msg, sizeof(msg));
   if (result == ESP_OK) {
     if (isPWMMessage) {
       espnowPWMSuccess++;
@@ -3209,7 +3217,7 @@ static void sendEtmCommandUntracked(uint8_t target, const char *message) {
   etmMsg.structSequenceNumber = nextEtmSeq();
   espnowCommandAttempts++;
   uint8_t *mac = (target == 0) ? broadcastMACAddress[0] : WCBMacAddresses[target - 1];
-  if (esp_now_send(mac, (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
+  if (wcbEspNowSend(mac, (uint8_t *)&etmMsg, sizeof(etmMsg)) == ESP_OK) {
     espnowCommandSuccess++;
     espnowCommandDelivered++;
   } else {
@@ -3250,7 +3258,7 @@ void sendESPNowRaw(const uint8_t *data, size_t len) {
         uint8_t *mac = broadcastMACAddress[0];
         espnowRawAttempts++;
 
-        esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
+        esp_err_t result = wcbEspNowSend(mac, (uint8_t*)&msg, sizeof(msg));
         if (result == ESP_OK) {
             espnowRawSuccess++;
             if (debugEnabled) {
@@ -3292,7 +3300,7 @@ esp_err_t sendESPNowRawToSpecificWCB(const uint8_t *data, size_t len, uint8_t ta
     // Send to specific WCB (not broadcast)
     uint8_t *mac = WCBMacAddresses[targetWCB - 1];
 
-    lastResult = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
+    lastResult = wcbEspNowSend(mac, (uint8_t*)&msg, sizeof(msg));
     
     offset += chunkSize;
   }
@@ -3328,7 +3336,7 @@ void sendESPNowRawToPort(const uint8_t *data, size_t len, uint8_t targetWCB, uin
     memcpy(msg.structCommand + 4, data + offset, chunkSize);
 
     // Send to specific WCB
-    esp_err_t result = esp_now_send(WCBMacAddresses[targetWCB - 1], 
+    esp_err_t result = wcbEspNowSend(WCBMacAddresses[targetWCB - 1], 
                                     (uint8_t*)&msg, sizeof(msg));
     
     if (debugEnabled && result != ESP_OK) {
@@ -3371,7 +3379,7 @@ void sendESPNowRawSerial(const uint8_t *data, size_t len, uint8_t targetWCB, uin
 
         uint8_t *mac = (targetWCB == 0) ? broadcastMACAddress[0] : WCBMacAddresses[targetWCB - 1];
 
-        esp_err_t result = esp_now_send(mac, (uint8_t*)&msg, sizeof(msg));
+        esp_err_t result = wcbEspNowSend(mac, (uint8_t*)&msg, sizeof(msg));
         if (result != ESP_OK) {
             if (debugEnabled) Serial.printf("ESP-NOW raw serial send failed! Error: %d\n", result);
             if (result == ESP_ERR_ESPNOW_NO_MEM) {
@@ -3494,7 +3502,7 @@ void handleMgmtForward(const String &args) {
   strncpy(pkt.payload, payload.c_str(), sizeof(pkt.payload) - 1);
   pkt.payload[sizeof(pkt.payload) - 1] = '\0';
 
-  esp_err_t result = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  esp_err_t result = wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
   if (debugMGMT) {
     if (result == ESP_OK)
       Serial.printf("[MGMT] Broadcast chunk %d/%d for WCB%d session %04X\n",
@@ -4261,7 +4269,7 @@ static void cpjSendOne() {
     cfgpErrorText(frag.payload, sizeof(frag.payload), s_cpj.err, s_cpj.errA, s_cpj.errB, s_cpj.errC);
   }                                          // CPM_EMPTY: one frag, empty payload - as before F13
 
-  const esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+  const esp_err_t r = wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
   s_cpjLastFragMs = millis();
   // NO_MEM is the driver's TX queue being full: nothing went on the air, so the same frag goes again
   // on a later call (>= 20 ms, as esp_now.h advises) without advancing.
@@ -4598,7 +4606,7 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
     int end   = min(start + chunkStride, totalLen);
     String chunk = data.substring(start, end);
     memcpy(frag.payload, chunk.c_str(), chunk.length());
-    esp_now_send(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
     delay(20);
   }
   if (debugMGMT) Serial.printf("[MGMT] Sent result frags (%d chunks, type %d) to WCB%d\n",
@@ -4942,7 +4950,7 @@ void handleMgmtStatsRequest(const String &targetStr) {
   pkt.packetType   = PACKET_TYPE_STATS_REQ;
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
-  esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
   if (debugMGMT) Serial.printf("[MGMT] Stats request sent to WCB%d\n", targetWCB);
 }
 
@@ -4964,7 +4972,7 @@ void handleMgmtSeqRequest(const String &targetStr) {
   // board is frequently dropped on a busy mesh). handleSeqReqPacket dedups within
   // 1.5 s, so this still produces exactly one response.
   for (int i = 0; i < 3; i++) {
-    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
     delay(15);
   }
   if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (x3)\n", targetWCB);
@@ -5000,7 +5008,7 @@ void handleMgmtSeqValRequest(const String &args) {
   // 3x for the same reason as the config pull; the target dedups on
   // (requester, key) within 1.5 s so this still produces one response.
   for (int i = 0; i < 3; i++) {
-    esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
     delay(15);
   }
   if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' sent to WCB%d (x3)\n",
@@ -5016,7 +5024,7 @@ void handleMgmtETMRequest(const String &targetStr) {
   pkt.packetType   = PACKET_TYPE_ETM_REQ;
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
-  esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
   if (debugMGMT) Serial.printf("[MGMT] ETM char request sent to WCB%d\n", targetWCB);
 }
 
@@ -5055,7 +5063,7 @@ void handleMgmtPullRequest(const String &targetStr) {
   for (int round = parts ? 0 : 1; round < 2; round++) {
     pkt.packetType = round == 0 ? PACKET_TYPE_CONFIG_REQ_PARTS : PACKET_TYPE_CONFIG_REQ;
     for (int i = 0; i < 3; i++) {
-      esp_err_t r = esp_now_send(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+      esp_err_t r = wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
       if (r != ESP_OK) result = r;
       delay(15);
     }
@@ -5091,6 +5099,7 @@ void checkConfigPullTimeout() {
 }
 
 void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+  wcbEspNowNoteWifiTask();   // before anything here sends: a send from this task must never wait (WCB_EspNow.h)
 
   // Reject packets from boards outside this MAC group (octets 2 & 3 must match).
   // This applies to ALL packet types — MGMT, CONFIG, ETM, and normal forwarding.
@@ -5795,6 +5804,7 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   colorWipeStatus("ES", blue, 10);
 }
 void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+    wcbEspNowSendDone();   // one frame fewer in flight: a paced sender may go on (WCB_EspNow.h)
     if (status != ESP_NOW_SEND_SUCCESS) {
         if (debugETM || debugEnabled) {
             Serial.printf("[SEND CB] MAC-layer FAILED to: %02X:%02X:%02X:%02X:%02X:%02X\n",
@@ -7198,6 +7208,7 @@ void processLocalCommand(const String &message) {
 //*******************************
 
 void resetESPNowStats() {
+    wcbEspNowResetStats();
     espnowCommandAttempts = 0;
     espnowCommandSuccess = 0;
     espnowCommandFailed = 0;
@@ -9640,6 +9651,9 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
     return;
   }
   espNowInitialized = true;
+  // The send callback first, before anything could send: every frame wcbEspNowSend has in flight is
+  // released there, and one sent before it was registered would hold its slot for good (WCB_EspNow.h).
+  esp_now_register_send_cb(espNowSendCallback);
 
   // Add peers
   for (int i = 0; i < Default_WCB_Quantity; i++) {
@@ -9728,9 +9742,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   if (etmEnabled) Serial.println("[ETM] Heartbeat scheduled (boot window)");
   printKyberSettings();
   esp_now_register_recv_cb(espNowReceiveCallback);
-  // Register send callback for delivery tracking
-  esp_now_register_send_cb(espNowSendCallback);
-  // Serial.println("ESP-NOW send callback registered");
+  // (The send callback was registered right after esp_now_init().)
   // Create FreeRTOS Tasks-
   // Record the bridge tasks FIRST: serialCommandTask consults these on its first pass.
   kyberLocalTaskStarted  = Kyber_Local;
@@ -9780,6 +9792,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
 
 void loop() {
   rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
+  wcbEspNowReportDrops();   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
   drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   processCommandGroups();

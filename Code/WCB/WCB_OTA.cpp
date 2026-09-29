@@ -1,5 +1,6 @@
 #include "WCB_RemoteTerm.h"   // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_OTA.h"
+#include "WCB_EspNow.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
@@ -368,7 +369,7 @@ static void otaEnsurePeer(uint8_t wcbNum) {
 static void otaUnicast(uint8_t destWcb, const void *buf, size_t len, const char *label) {
   if (destWcb < 1 || destWcb > MAX_WCB_COUNT) return;
   otaEnsurePeer(destWcb);
-  esp_err_t r = esp_now_send(WCBMacAddresses[destWcb - 1], (const uint8_t *)buf, len);
+  esp_err_t r = wcbEspNowSend(WCBMacAddresses[destWcb - 1], (const uint8_t *)buf, len);   // paced (rule 16)
   if (r != ESP_OK)
     Serial.printf("[OTA] %s -> WCB%u send failed rc=%d (ESP-NOW peer table full? cap 20)\n",
                   label, destWcb, (int)r);

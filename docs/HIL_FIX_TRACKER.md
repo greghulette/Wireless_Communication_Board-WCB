@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | **#102** and **#107** FIXED (unverified): every ESP-NOW send is paced by `wcbEspNowSend` (CLAUDE.md rule 16), and the RTERM relay keeps its lines in a byte ring and reports what it loses (D50). |
 | 2026-09-28 | Run `20260928-201415` on `6.2.1_282006RSEP2026` (14 pass, 2 fail): **#104**, **#105** and **#106** VERIFIED; the two JOIN failures (#103) showed the radio off the mesh channel during the search; `mesh.rterm_long_output` passed whole (#107 intermittent). |
 | 2026-09-28 | Full run `20260928-161745` triaged (768 pass, 28 fail, 7 skip): **#105** (a Kyber bridge task read a soft port while ?BAUD re-began it: W1 panicked) and **#106** (a stale RX-overflow claim on an OTA drop line) filed and FIXED (unverified) with **#104** (`WiFi.persistent(false)`); **#107** (the RTERM mirror loses lines of a long burst) filed. |
 | 2026-09-28 | Wave 3 group 2 on `6.2.1_280758RSEP2026` (`20260928-160300`): 17 pass. Filed **#102** (a mesh-send flood exhausts the heap and W1 aborts, `etm.seq_wrap`), **#103** (JOIN mode drops mesh unicasts while looking for an absent network; no loss or rejoin reported) and **#104** (`nvs.net80211` grows with every JOIN `WiFi.begin`). |
@@ -2120,7 +2121,7 @@ characters) - dropped`.
 
 | | |
 |---|---|
-| **Status** | TODO - high; `etm_seq_wrap` unticked until it is fixed (`docs/HIL_WEEK_DECISIONS.md` D46) |
+| **Status** | FIXED (unverified) - every ESP-NOW send is paced by `wcbEspNowSend` (D50); `etm_seq_wrap` goes back on once `etm.seq_wrap` passes on it |
 | **Owner** | `WCB_firmware` (`WCB.ino`, the ESP-NOW send paths) |
 | **Effort** | M |
 | **Tests** | `etm.seq_wrap` (opt-in `etm_seq_wrap`) crashes W1 today |
@@ -2138,9 +2139,14 @@ was gone because the sends outran the radio: every queued ESP-NOW frame holds a 
 AP-mode heap (CLAUDE.md rule 14), and the firmware keeps sending after `ESP_ERR_ESPNOW_NO_MEM`. A console flood is the
 test's way in; a raw serial mapping streaming into the mesh at a high rate is the realistic one.
 
-**Fix (proposed).** Back-pressure on the send path: count frames in flight (the ESP-NOW send callback) and, at a cap or
-on `ESP_ERR_ESPNOW_NO_MEM`, wait from task context or drop with a counted line from the WiFi task, never keep queueing.
-The receive callback's rule (CLAUDE.md rule 11: never block there) decides which paths may wait.
+**Fix.** All 22 ESP-NOW sends go through `wcbEspNowSend` (`WCB_EspNow.{h,cpp}`, CLAUDE.md rule 16), which counts the
+frames in flight through the send callback. A task waits in 1 ms sleeps while 6 are in flight, for up to 50 ms, and then
+gives the frame up with `ESP_ERR_ESPNOW_NO_MEM`. The WiFi task (the receive callback's ACKs, rule 11) never waits: it
+sends up to 12 and then drops. A frame given up is counted (`?STATS`: `ESP-NOW: N frame(s) not sent`) and `loop()` says
+so at most once a second (`[MESH] N ESP-NOW frame(s) not sent: the radio's queue stayed full`). If no frame completes
+and none is accepted for 250 ms while the count says the radio is full, the count starts over: completions lost to an
+ESP-NOW re-init must not wedge every sender. A flood now goes at the radio's pace, and the console input behind it waits
+in the command queue and the UART ring, which count what they lose.
 
 #### 103. JOIN mode drops mesh unicasts while it looks for an absent network, and reports no loss and no rejoin
 
@@ -2231,7 +2237,7 @@ happened in the last 2 s (a DATA line arrives in milliseconds).
 
 | | |
 |---|---|
-| **Status** | TODO - investigate |
+| **Status** | FIXED (unverified) - D50: the target's sends are paced, and the relay keeps its lines in a byte ring and reports what it loses |
 | **Owner** | `WCB_firmware` (`WCB_RemoteTerm.cpp`) |
 | **Effort** | M |
 | **Tests** | `mesh.rterm_long_output` |
@@ -2245,3 +2251,13 @@ back-pressure. Needs a look at the queue and a counted drop.
 **Evidence (run 20260928-201415).** The same test passed whole on `6.2.1_282006RSEP2026`: the loss is intermittent. The
 ten lines lost in `20260928-161745` were consecutive short ones, each one frame, which a target prints far faster
 than the radio sends them.
+
+**Cause.** Two drop points, neither counted. The target sent each piece with an unchecked `esp_now_send`, so a burst of
+short lines that outran the radio lost frames to `ESP_ERR_ESPNOW_NO_MEM`. The relay printed each line with an 8-byte
+`[TERM:n]` prefix at the same baud rate the target printed it, so a burst of short lines always left it a backlog, and its
+16 fixed 163-byte slots dropped when full.
+
+**Fix.** The target's sends go through `wcbEspNowSend` (#102's fix), and `_flushLine` takes the line out of the shared
+buffer before the send, which may now wait, so a print from another task meanwhile is not thrown away. The relay keeps its
+lines in a 3 KB ring of variable-length items (about 100 short lines, where 16 fitted before), and a line that still
+does not fit is counted and reported as `[RTERM] N line(s) from WCB<n> lost at this relay: its queue was full`.
