@@ -723,6 +723,15 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     Playwright rig, NC-WP3) and WCB wave 3's identity/WiFi/boot group. Next: their merges and bench runs, WCB wave
     3's second group (GPIO arms, WDP side effects, `:MQR`, JOIN, ETM wrap, OTA), INF9 (NaviCore hooks) for NC-WP2,
     tonight's full run.
+  - 2026-09-28 20:45: WCB wave 3 is complete and bench-verified: group 2 passed 17 of 21 (`20260928-160300`),
+    and its three finds are filed as #102 to #104, with `etm_seq_wrap` unticked until #102 is fixed (D46).
+    NaviCore INF9 (the hook image `navicore-hil1`) runs on the bench (D45). Full run `20260928-161745`
+    (768 pass, 28 fail, 7 skip; 20 fails are `(should)` tests) is triaged. From it, #105 (a W1 panic: a Kyber
+    task read a soft port ?BAUD was re-beginning) and #106 (an OTA drop line blamed a stale overflow) were fixed
+    with #104 in `978b58e`. W1 and W2 were flashed at 20:10 (`6.2.1_282006RSEP2026`, fallback `-wave2c`), and
+    all three fixes verified in `20260928-201415` (14 of 16; the two fails are #103's). Next: the ESP-NOW send
+    back-pressure for #102 and #107 (written and compiling on both targets, not yet on the bench); merging
+    NC-WP4/5 (33 tests, written) and NC-WP2/9/10 (being written); their bench runs; tonight's full run.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -733,9 +742,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
   3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
-- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `cc2a8a9` (the re-scan
-  batch, `6.2.1_280049RSEP2026`, flashed 2026-09-28 00:55/00:57; the CI build of that commit carries the same
-  string but is a different image, see the folder's FLASHED.md). The previous image is kept in `-f23`.
+- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `978b58e` (#104-#106,
+  `6.2.1_282006RSEP2026`, flashed 2026-09-28 about 20:10). The previous image is kept in `-wave2c`; the folder's
+  FLASHED.md lists every earlier one.
 - **COM11:** `Intellex.exe` held probe2's port from some time after 09:26 on 2026-09-24 until Greg had it stopped at
   13:28; every test that needs probe2 errored meanwhile (`20260924-120036`, `20260924-131417`) and re-ran in `20260924-133332`. If
   a probe port says "Access is denied", look for another program first.
@@ -747,7 +756,7 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   the WiFi-task came-ONLINE print, silent config-line loss); F22 (a rebooted WCB
   sees its peers offline for up to one heartbeat; recommend leave); A20 (probe literal,
   nit). F11 is deferred on Greg's word: revisit it if `results/nvs_history.csv` shows NVS filling.
-- **Committed and pushed to WIFI** through `78c4ccc` (this week's work, per Greg's standing OK).
+- **Committed and pushed to WIFI** through the 2026-09-28 20:45 docs commit (this week's work, per Greg's standing OK).
 - **Bench:** free when this was written; `ListAgents` first.
 
 ## 7. Full-coverage plan (2026-09-24)

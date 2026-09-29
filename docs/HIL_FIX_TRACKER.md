@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-28 | Run `20260928-201415` on `6.2.1_282006RSEP2026` (14 pass, 2 fail): **#104**, **#105** and **#106** VERIFIED; the two JOIN failures (#103) showed the radio off the mesh channel during the search; `mesh.rterm_long_output` passed whole (#107 intermittent). |
 | 2026-09-28 | Full run `20260928-161745` triaged (768 pass, 28 fail, 7 skip): **#105** (a Kyber bridge task read a soft port while ?BAUD re-began it: W1 panicked) and **#106** (a stale RX-overflow claim on an OTA drop line) filed and FIXED (unverified) with **#104** (`WiFi.persistent(false)`); **#107** (the RTERM mirror loses lines of a long burst) filed. |
 | 2026-09-28 | Wave 3 group 2 on `6.2.1_280758RSEP2026` (`20260928-160300`): 17 pass. Filed **#102** (a mesh-send flood exhausts the heap and W1 aborts, `etm.seq_wrap`), **#103** (JOIN mode drops mesh unicasts while looking for an absent network; no loss or rejoin reported) and **#104** (`nvs.net80211` grows with every JOIN `WiFi.begin`). |
 | 2026-09-28 | **#101 VERIFIED** (`20260928-080619`). The s12/s13/s16/s17 tests on `6.2.1_280758RSEP2026`: 16 pass in `20260928-080156`, two ERRORs from a missing `nonce` import in s12 (an agent cannot run its tests), fixed and passing. |
@@ -2160,11 +2161,18 @@ so a search never leaves the mesh channel, and `wcbWifiService` prints the loss 
 the radio channel and the WiFi events during the search (the drift check prints only while `wifiUp`), and whether the
 driver's connect attempt still leaves the channel when the pinned one has no such AP.
 
+**Evidence (run 20260928-201415, `6.2.1_282006RSEP2026`).** The first question is answered: it does leave. While W1
+looked for the absent network, four of the test's `?WIFI` samples showed the radio on channel 12 or 14 against mesh
+channel 1 (`*** MISMATCH — OFF-MESH ***`), and 26 retries were needed for the unicasts to W2 (at most 2 allowed), the
+first one not delivered at all. So the driver's connect attempt scans past the pinned channel when no AP answers on
+it. The rejoin test failed as before, and after the late rejoin `?WIFI` read association `connected (1 attempt(s))`
+with the interface `down`.
+
 #### 104. Every WiFi.begin persists the station config into the WiFi driver's own NVS namespace
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - `WiFi.persistent(false)` before the first `WiFi.mode` in `setup()` (D47) |
+| **Status** | VERIFIED - `WiFi.persistent(false)` before the first `WiFi.mode` in `setup()` (D47); run `20260928-201415` on `6.2.1_282006RSEP2026`: W1's `nvs.net80211` stayed at 36 entries (343 used) through all nine `wifi.*` tests, both JOIN tests included |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
 | **Effort** | S |
 | **Tests** | the per-run `?NVS` record |
@@ -2181,7 +2189,7 @@ calls it every 5 s while it looks. **Fix (proposed).** `WiFi.persistent(false)` 
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - D47 |
+| **Status** | VERIFIED - D47; `maestro.get_off_s1_ports` passes on `6.2.1_282006RSEP2026` (run `20260928-201415`), W1 not rebooted |
 | **Owner** | `WCB_firmware` (`WCB.ino`) |
 | **Effort** | S |
 | **Tests** | `maestro.get_off_s1_ports` (it re-bauds S3 while W1 is Maestro_Remote) |
@@ -2203,7 +2211,7 @@ run every 1 ms) did not, so a local Maestro on S3-S5 being re-bauded was read th
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - D47 |
+| **Status** | VERIFIED - D47; after `stats.usb_rx_overflow_line`, `ota.local_sha_corrupt_full` and `ota.local_full_same_image_wcb1` both pass on `6.2.1_282006RSEP2026` (run `20260928-201415`) |
 | **Owner** | `WCB_firmware` (`WCB.ino`, `WCB_OTA.cpp`) |
 | **Effort** | S |
 | **Tests** | `ota.local_sha_corrupt_full`, `ota.local_full_same_image_wcb1` (opt-in `ota_full`) after `stats.usb_rx_overflow_line` |
@@ -2233,3 +2241,7 @@ happened in the last 2 s (a DATA line arrives in milliseconds).
 the same test passed whole in `20260928-064402`. **Suspected cause** (the test writer's reading): the relay's 16-deep
 queue drops when full, and the target never checks `esp_now_send`'s result, so a burst of long lines outruns it with no
 back-pressure. Needs a look at the queue and a counted drop.
+
+**Evidence (run 20260928-201415).** The same test passed whole on `6.2.1_282006RSEP2026`: the loss is intermittent. The
+ten lines lost in `20260928-161745` were consecutive short ones, each one frame, which a target prints far faster
+than the radio sends them.
