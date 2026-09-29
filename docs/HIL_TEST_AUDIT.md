@@ -777,6 +777,15 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     the legacy spellings (WP24/29/34) were finished before it. The Wizard and Intellex agents, stopped by the
     07:10 usage limit, are resumed; an agent writes INF5 (`hil/wlan.py`, `hil/ncws.py`) and NC-WP8 (`s45`).
     Next: merge and bench-run each as it lands, then tonight's full run.
+  - 2026-09-29 12:35: phase 1 (WCB) is complete but for the attended WP23/58 and the blocked WP59. The Wizard's
+    WCB-WP20/21/40/41 are merged and bench-verified (61 of 71 pass, the ten `(should)` fail as designed; the
+    first run found four hand-off faults in the harness, fixed; D64-D66); F18 and F19 are fixed in the firmware,
+    flashed (`6.2.1_291138RSEP2026`) and verified 24/24, F22 left as recommended (D69). Intellex IX-WP7/8 are
+    merged and bench-verified (13 of 15, findings 4 and 17 confirmed, 16 not reproduced; D67-D68), and NaviCore
+    NC-WP8 (15 `ncwifi` tests, INF5 `hil/wlan.py` and `hil/ncws.py`) too (twelve pass, D-NC61-63 confirmed;
+    D70). All pushed to WIFI (`1ee970f`). The post-phase full run started about 12:30; agents write NC-WP12
+    (record and replay) and NC-WP13 (the config tool with the board). Next: triage the full run, merge and run
+    NC-WP12/13, then NC-WP11 (the SBUS controller's test verbs) and Intellex IX-WP9 onward.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -787,9 +796,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
   3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
-- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `e33b0c7` (#108, the pacing
-  retune, `6.2.1_290236RSEP2026`, flashed 2026-09-29 about 02:37). The previous image is kept in `-wave2g`; the
-  folder's FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
+- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `cf93348` (F18 and F19 on the
+  #108/pacing image, `6.2.1_291138RSEP2026`, flashed 2026-09-29 about 11:40). The previous image is kept in `-wave2h`;
+  the folder's FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
 - **COM11:** `Intellex.exe` held probe2's port from some time after 09:26 on 2026-09-24 until Greg had it stopped at
   13:28; every test that needs probe2 errored meanwhile (`20260924-120036`, `20260924-131417`) and re-ran in `20260924-133332`. If
   a probe port says "Access is denied", look for another program first.
