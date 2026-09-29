@@ -71,9 +71,9 @@ CONFIG_REF_EVERY_S = 15 * 60  # refresh the saved-config reference after this mu
 # Device kinds whose serial lines Bench.log passes through checkpoint.redact_text, in both directions (docs/hil_plan/
 # NAVICORE.md D-NC5): NaviCore's GET_CONFIG carries the mesh and AP passwords, the harness sends them back in every
 # SET_CONFIG a restore makes (hil/nc_guard.py), its ?backup prints ?EPASS, and the SBUS controller's getcfg carries its
-# WiFi networks. A WCB's lines are left as they are (its ?backup and ?MGMT,PULL chains keep ?EPASS raw, as they always
-# have).
-REDACT_KINDS = ("navicore", "sbus")
+# WiFi networks. A probe joining the mesh sends it the password as MESH JOIN ... PASS=<password> (D57). A WCB's lines
+# are left as they are (its ?backup and ?MGMT,PULL chains keep ?EPASS raw, as they always have).
+REDACT_KINDS = ("navicore", "sbus", "probe")
 
 
 def test(test_id, title, needs=(), links=None, drives=(), opt_in=None, opt_in_why=None):

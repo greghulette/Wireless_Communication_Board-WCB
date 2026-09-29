@@ -5,7 +5,7 @@ relays, and what NaviCore does while boards go quiet.
 How NaviCore is reached and watched (hil/ncmesh.py, INF6):
 - Bridged JSON is ';W20,{json}' typed on W1. W1 prints NaviCore's replies - and any mesh payload that starts with '{' -
   on its USB only while its relay window is open: 20 s from the last ';W20,' payload starting with '{' typed on it
-  (WCB.ino:7964-7966; the relay :5468-5475 and :5776-5781), a fragment envelope included. A reply too long for one
+  (WCB.ino:8019-8021; the relay :5513-5520 and :5821-5826), a fragment envelope included. A reply too long for one
   packet comes back as fragment envelopes with no "sys", one per FRAG_PACING_MS (150 ms, rc_telemetry.h:529, :557-598);
   ncmesh.reassemble joins them. A transfer longer than the window is kept open with a bridged STOP_MONITOR, which
   NaviCore accepts over the mesh and ignores (rc_telemetry.h:2399-2402).
@@ -14,10 +14,10 @@ How NaviCore is reached and watched (hil/ncmesh.py, INF6):
   heartbeat or a boot announce only (WCB_Client.cpp:2716-2769) and offline 50 s after the last one (10 s x 5,
   :2480-2508; WCB_Client.h:1097-1098). A deaf board is one that never ACKs. To take W2 off NaviCore's roster, its own
   heartbeat interval is stretched instead (ncmesh.online_tracking_flip). W1, by contrast, counts any valid ETM packet
-  as presence (WCB.ino:5286-5304), so NaviCore's 2 s rc_hb keeps it online there unless W1 itself is deaf.
+  as presence (WCB.ino:5322-5340), so NaviCore's 2 s rc_hb keeps it online there unless W1 itself is deaf.
 - The remote terminal: a '?...' or '#...' line from the mesh waits in a 3-deep queue (NaviCore.ino:4843, :2925-2930),
   runs in loop() and is teed back to its sender in 160-byte RTERM packets (navicore_rterm.h:48-86; drainRemoteCli,
-  NaviCore.ino:5010-5024), which a WCB prints as '[TERM:20]<text>', dropping empty ones (WCB_RemoteTerm.cpp:176-205).
+  NaviCore.ino:5010-5024), which a WCB prints as '[TERM:20]<text>', dropping empty ones (WCB_RemoteTerm.cpp:178-207).
   NaviCore's own USB shows the same lines (ncmesh.rterm_pieces predicts the split).
 - The probe is NaviCore's peer through ncmesh.probe_peer: joined with quantity 20, NaviCore's duplicate window burnt.
 
@@ -29,8 +29,9 @@ fragment sender is exercised with GET_WCB_META (the same String-backed sender as
 suite writes first. The probe tests join the mesh through the existing helpers, which read W1's chain and hand the mesh
 password to the probe exactly as every probe test does (suites/common.py mesh_params, probe_in_mesh).
 
-Writes: NaviCore's config only inside nc_guard (D-NC2); a WCB's only inside config_guard, and W2's ETM heartbeat - which
-config_guard does not put back on its own - is restored by the test in a finally. Line numbers are NaviCore's hil-week
+Writes: NaviCore's config only inside nc_guard (D-NC2); a WCB's only inside config_guard, and each test undoes its own
+WCB writes in a finally (_put_back, _seq_clear, W2's ETM heartbeat): config_guard fails a test whose board does not end
+as it began, even when it puts the token back itself. Line numbers are NaviCore's hil-week
 tree (6925773, the bench image), the WCB_Client and WcbCmd sketchbook copies it compiles (Arduino-Code/libraries,
 WCB_Client 1.17.1), and this repo's Code/WCB.
 """
@@ -59,6 +60,9 @@ from suites.s41_navicore_engine import _count, _engine_inert, _wait_all
 
 KEEPALIVE = {"type": "STOP_MONITOR"}    # accepted over the mesh and ignored (rc_telemetry.h:2399-2402)
 KEEPALIVE_S = 8.0                       # a renewal well inside W1's 20 s relay window
+ETM_RUN_MAX_S = 60.0                    # W2's characterization with one peer took about 4 s (run 20260929-025701)
+ETM_REPLY_WAIT_S = 3.0                  # after W2's last frag, for NaviCore's [MGMT:ETM,2] line
+ACK_SETTLE_S = 0.8                      # after a TEST_ACTION's ACK, room for a second run's (fragment_reassembly_edges)
 FRAG_GAP_MIN_S = 0.12                   # FRAG_PACING_MS 150 (rc_telemetry.h:529) less the host's line stamping
 PACKET_MAX = 185                        # a bridged WCB_STATUS / MESH_STATS page must fit this (rc_telemetry.h:1590)
 OFFLINE_S = 50.0                        # WCB_Client: 10 s heartbeat x 5 missed (WCB_Client.h:1097-1098)
@@ -165,6 +169,47 @@ def _require_full_rate(nc):
     return fps
 
 
+def _sbus_sample(nc, samples):
+    """Append (host time, #L09 dump) to `samples`: one reading for _sbus_kept_up."""
+    samples.append((time.monotonic(), nc.sbus_dump()))
+
+
+def _sbus_kept_up(samples):
+    """What #L09 readings taken before, during and after a transfer say about NaviCore's SBUS input -> a problem, or
+    None. The claim ('#L09 fps unaffected', the plan's nc.bridge.get_config row) is that the frame counter rises at the
+    full rate from the first reading to the last - at least SBUS_FULL_FPS frames a second on host time, about 111 on
+    this bench - and that no reading shows lost or failsafe. The one-second fps field is not judged: it counts a window
+    a busy loop() can stretch, and it read 88 while the counter rose 118 in 1.06 s (bridged_cmdlib, run
+    20260929-025701). Readings under 0.8 s apart are too close for the rate: host time is good to about 50 ms."""
+    bad = [(d.get("lost"), d.get("failsafe")) for _, d in samples if (d.get("lost"), d.get("failsafe")) != ("no", "no")]
+    if bad:
+        return f"#L09 showed lost/failsafe {bad} around the transfer"
+    if len(samples) < 2 or samples[-1][0] - samples[0][0] < 0.8:
+        return None
+    (t0, d0), (t1, d1) = samples[0], samples[-1]
+    try:
+        rate = (int(d1["frames"]) - int(d0["frames"])) / (t1 - t0)
+    except (TypeError, ValueError, KeyError):
+        return "#L09 printed no frame counter"
+    if rate < SBUS_FULL_FPS:
+        return f"NaviCore counted {rate:.0f} SBUS frames a second across the transfer (about 111 at full rate)"
+    return None
+
+
+def _put_back(w, before, prefix, clear):
+    """Undo a test's own write on WCB console `w`: the token starting with `prefix` from config_guard's snapshot
+    `before`, or `clear` when the snapshot had none. config_guard fails a test whose board ends up different even when
+    it puts the token back itself (it is the net, not the undo), so each test undoes its writes in a finally."""
+    w.run(token(before, prefix) or clear, timeout=8)
+
+
+def _seq_clear(w, *keys):
+    """?SEQ,CLEAR each of the test's own sequence keys on WCB console `w`; a key never stored is only dropped from the
+    key list if it is there ("No stored value found ... removed from list if present")."""
+    for k in keys:
+        w.run(f"?SEQ,CLEAR,{k}", timeout=8)
+
+
 def _no_plain_fanout(nc):
     """Skip while NaviCore writes unprefixed mesh text out an aux port (serialBcast out, NaviCore.ino:2973-2984): the
     plain-text markers these tests send would reach whatever is wired there."""
@@ -182,13 +227,13 @@ def _rx_seen(nc, since, sender, texts):
 
 def _term_lines(w1, since, nid):
     """The [TERM:<nid>] texts W1 printed since `since`, prefix removed. Only CR/LF is stripped: a piece cut at 160 bytes
-    can end in a space, and the relay keeps it (WCB_RemoteTerm.cpp:199-204)."""
+    can end in a space, and the relay keeps it (WCB_RemoteTerm.cpp:201-206)."""
     p = f"[TERM:{nid}]"
     return [x[len(p):].rstrip("\r\n") for x in w1.dev.since(since) if x.startswith(p)]
 
 
 def _relay_lost(w1, since):
-    """W1's own report of RTERM or relayed-JSON lines it dropped (WCB_RemoteTerm.cpp:207-210; WCB.ino:436-439)."""
+    """W1's own report of RTERM or relayed-JSON lines it dropped (WCB_RemoteTerm.cpp:211-215; WCB.ino:436-439)."""
     return [x.rstrip() for x in w1.dev.since(since) if x.startswith(("[RTERM] ", "[RCBRG] relay queue FULL"))
             and ("lost" in x or "FULL" in x)]
 
@@ -259,23 +304,27 @@ def bridged_wcb_meta(bench):
     secret cut across two envelopes would slip past any redaction. What GET_CONFIG adds to this sender - its ERROR guard
     and its single-flight 'dropped' line (rc_telemetry.h:748-751, :2263-2272) - stays unexercised. The USB WCB_STATUS is
     read before and after the pull; the META must equal one of them (an advert may rename a board in between) over the
-    same roster, wcbHighestKnown on both sides."""
+    same roster, wcbHighestKnown on both sides. The SBUS input is judged by _sbus_kept_up: #L09's frame counter from
+    before the pull to after it, not the one-second fps."""
     nc, w1 = _nc(bench), usb_wcb(bench)
     _require_full_rate(nc)
     nid = _open_relay(nc, w1)
     before = nc.wcb_status()
+    samples = []
+    _sbus_sample(nc, samples)
     nm, wm = nc.dev.mark(), w1.dev.mark()
     w1.send(f';W{nid},{{"type":"GET_WCB_META"}}')
     start = _nav_regex(nc, nm, r"\[RC\] WCB_META send START: (\d+) bytes \S+ (\d+) fragments to W(\d+) \(sid=(\d+)\)", 5,
                        "'WCB_META send START' line")
     total, to, sid = int(start.group(2)), int(start.group(3)), int(start.group(4))
-    fps = []
-    text = _await_reassembled(w1, nid, wm, sid, 5 + total * 0.5, sample=lambda: fps.append(nc.sbus_dump()["fps"]))
+    text = _await_reassembled(w1, nid, wm, sid, 5 + total * 0.5, sample=lambda: _sbus_sample(nc, samples))
+    _sbus_sample(nc, samples)
     after = nc.wcb_status()
     lines = _flushed(nc, nm, settle=0.2)
     times = _envelope_times(w1, wm, sid)
     gaps = [round(b - a, 3) for a, b in zip(times, times[1:])]
-    bench.note(f"WCB_META: {total} fragments (sid {sid}); W1 printed {len(times)}, gaps {gaps} s; SBUS fps {fps}")
+    bench.note(f"WCB_META: {total} fragments (sid {sid}); W1 printed {len(times)}, gaps {gaps} s; SBUS fps "
+               f"{[d['fps'] for _, d in samples]}, frames {[d['frames'] for _, d in samples]}")
     problems = []
     if to != bench.usb_wcb_number():
         problems.append(f"the reply went to W{to}, not to W{bench.usb_wcb_number()}, which asked")
@@ -294,8 +343,9 @@ def bridged_wcb_meta(bench):
         problems.append(f"no 'send COMPLETE: {total} fragments (sid={sid})' line")
     if len(gaps) >= 1 and statistics.median(gaps) < FRAG_GAP_MIN_S:
         problems.append(f"the envelopes came {gaps} s apart; the sender paces them 150 ms")
-    if fps and min(fps) < SBUS_FULL_FPS:
-        problems.append(f"SBUS read {min(fps)} fps during the transfer")
+    sbus = _sbus_kept_up(samples)
+    if sbus:
+        problems.append(sbus)
     assert not problems, "; ".join(problems)
 
 
@@ -566,7 +616,8 @@ def bridged_cmdlib(bench):
     is in, and publishes only when the FNV-1a of what landed equals "h" ('hash mismatch ... discarded' otherwise). Skips
     when no library is stored (NAVICORE.md D-NC13: an empty store cannot be put back). The bench's own library never
     crosses W1 (module docstring): what streams back is one this test wrote over USB first. nc_guard restores the
-    original over USB."""
+    original over USB. The SBUS input during GET_CMDLIB is judged by _sbus_kept_up (the frame counter across the
+    transfer): the one-second fps read 88 in run 20260929-025701 while the counter rose at 111 a second."""
     nc, w1 = _nc(bench), usb_wcb(bench)
     size0, hash0 = nc.cmdlib_meta()
     if not size0:
@@ -583,15 +634,18 @@ def bridged_cmdlib(bench):
         _require_full_rate(nc)
         lib1 = _test_library(tag, 1500)
         nc.set_cmdlib(lib1)
+        samples = []
+        _sbus_sample(nc, samples)
         nm, wm = nc.dev.mark(), w1.dev.mark()
         w1.send(f';W{nid},{{"type":"GET_CMDLIB"}}')
         start = _nav_regex(nc, nm, r"\[RC\] CMDLIB file-send START: (\d+) bytes \S+ (\d+) fragments to W\d+ \(sid=(\d+)\)",
                            6, "'CMDLIB file-send START' line")
         total, sid = int(start.group(2)), int(start.group(3))
-        fps = []
-        text = _await_reassembled(w1, nid, wm, sid, 8 + total * 0.4, sample=lambda: fps.append(nc.sbus_dump()["fps"]))
+        text = _await_reassembled(w1, nid, wm, sid, 8 + total * 0.4, sample=lambda: _sbus_sample(nc, samples))
+        _sbus_sample(nc, samples)
         body = lib1.encode("utf-8")
-        notes.append(f"GET_CMDLIB: {len(body)} bytes of library in {total} fragments; SBUS fps {fps}")
+        notes.append(f"GET_CMDLIB: {len(body)} bytes of library in {total} fragments; SBUS fps "
+                     f"{[d['fps'] for _, d in samples]}, frames {[d['frames'] for _, d in samples]}")
         m = re.match(r'^\{"type":"CMDLIB","size":(\d+),"hash":(\d+),"data":(.*)\}$', text or "", re.S)
         if not m:
             problems.append(f"GET_CMDLIB: no whole CMDLIB reply on W1 ({len(_envelope_times(w1, wm, sid))} of {total} "
@@ -599,8 +653,9 @@ def bridged_cmdlib(bench):
         elif m.group(3).encode("utf-8") != body or (int(m.group(1)), int(m.group(2))) != (len(body), fnv1a32(body)):
             problems.append(f"GET_CMDLIB: {len(m.group(3))} bytes size {m.group(1)} hash {m.group(2)} came back for "
                             f"{len(body)} bytes with hash {fnv1a32(body)}")
-        if fps and min(fps) < SBUS_FULL_FPS:
-            problems.append(f"GET_CMDLIB: SBUS read {min(fps)} fps during the transfer")
+        sbus = _sbus_kept_up(samples)
+        if sbus:
+            problems.append(f"GET_CMDLIB: {sbus}")
         obj2 = {"boards": [], "enums": {}, "hil": tag}
         lib2 = ncmesh.compact(obj2)
         r = bridged(w1, {"sys": 1, "type": "SET_CMDLIB", "data": obj2}, r'"of":"SET_CMDLIB"', timeout=6.0, target=nid)
@@ -707,21 +762,39 @@ def fragment_reassembly_edges(bench):
     "of" is fixed by its first part and a disagreeing one is dropped (:2091); a repeat of a part is not counted twice
     (:2095-2100); every part, repeats included, pushes the session's deadline FRAG_TIMEOUT_MS (5 s) on (:2110), and an
     expired session is reclaimed before the next claim (:203-207). The payload is a TEST_ACTION writing a marker out of
-    W1 S2 (the W1S2 probe), dispatched once the message is whole, with its ACK to W1. The pool case runs after the
-    malformed one, so malformed envelopes that took slots would exhaust it early; the late-part case runs last, as the
-    orphan session it leaves holds a slot for 5 s."""
+    W1 S2 (the W1S2 probe), dispatched once the message is whole, with its ACK to W1. That ACK reaches W1 about 0.1 s
+    after the marker reaches the probe, so a case that expects a run waits for its ACKs and ACK_SETTLE_S more (a second
+    run would come about 0.2 s after the first) before the next case starts: counted at the marker, the reversed and
+    the 'of' cases read 0 and the cases after them 2, each ACK landing one case late (run 20260929-025701; NaviCore ran
+    every message exactly once). The pool case runs after the malformed one, so malformed envelopes that took slots
+    would exhaust it early; the late-part case runs last, as the orphan session it leaves holds a slot for 5 s."""
     l12 = link(bench, 1, "S2")
     nc, w1 = _nc(bench), usb_wcb(bench)
     nid = _open_relay(nc, w1)
     me = bench.usb_wcb_number()
     problems, notes = [], []
 
+    def ta_acks(since):
+        return len(_json_since(w1, since, lambda o: o.get("of") == "TEST_ACTION"))
+
+    def settle_acks(since, want, timeout=2.0):
+        """The TEST_ACTION ACKs on W1 since `since` once `want` are in (or `timeout` passed), and ACK_SETTLE_S later."""
+        deadline = time.monotonic() + timeout
+        while ta_acks(since) < want and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(ACK_SETTLE_S)
+        return ta_acks(since)
+
     def case(label, tag, send, want, wait=3.0):
         pm, wm = l12.mark(), w1.dev.mark()
         send()
-        got = _wait_all(l12, pm, [tag], wait) if want else (time.sleep(wait), l12.received(pm))[1]
-        n = _count(got, tag)
-        acks = len(_json_since(w1, wm, lambda o: o.get("of") == "TEST_ACTION"))
+        if want:
+            _wait_all(l12, pm, [tag], wait)
+            acks = settle_acks(wm, want)
+        else:
+            time.sleep(wait)
+            acks = ta_acks(wm)
+        n = _count(l12.received(pm), tag)
         notes.append(f"{label}: ran {n}, {acks} ACK")
         if n != want:
             problems.append(f"{label}: the action ran {n} time(s), expected {want}")
@@ -763,18 +836,20 @@ def fragment_reassembly_edges(bench):
     case("five malformed envelopes", t, lambda: send_fragments(w1, bad, target=nid), 0, wait=1.5)
     tags = [marker(f"P{i}") for i in range(4)]
     sess = [envs_for(x, pad=150) for x in tags]
-    pm, nm = l12.mark(), nc.dev.mark()
+    pm, nm, wm = l12.mark(), nc.dev.mark(), w1.dev.mark()
     send_fragments(w1, [s[0] for s in sess], target=nid)                     # three open sessions, then a fourth
     send_fragments(w1, [x for s in sess[:3] for x in s[1:]], target=nid)     # the three complete
     _wait_all(l12, pm, tags[:3], 4.0)
     send_fragments(w1, sess[3], target=nid)                                  # the fourth, whole, now there is room
-    got = _wait_all(l12, pm, tags, 4.0)
+    _wait_all(l12, pm, tags, 4.0)
+    acks = settle_acks(wm, 4)
+    got = l12.received(pm)
     lines = _flushed(nc, nm, settle=0.3)
     full = sum(1 for x in lines if x.startswith("[RC] Fragment pool exhausted"))
     counts = [_count(got, x) for x in tags]
-    notes.append(f"pool: runs {counts}, {full} 'pool exhausted' line(s)")
-    if counts != [1, 1, 1, 1]:
-        problems.append(f"pool: the four sessions ran {counts} times, expected once each")
+    notes.append(f"pool: runs {counts}, {acks} ACK, {full} 'pool exhausted' line(s)")
+    if counts != [1, 1, 1, 1] or acks != 4:
+        problems.append(f"pool: the four sessions ran {counts} times with {acks} ACK(s), expected once each")
     if full < 1:
         problems.append("pool: no 'Fragment pool exhausted' line for the fourth session while three were open")
     t = marker("F8")
@@ -1006,14 +1081,15 @@ FILL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 12
       needs=["navicore", "wcb1", "wcb2"], links=[])
 def mgmt_stats_frag(bench):
     """WcbMgmt::handleLine (WCB_Client WCB_Mgmt.h:367-403). STATS sends one PT_STATS_REQ (7) raw packet (:398); W2
-    answers with buildStatsString (WCB.ino:4617-4626, :2076-2200) as type-9 fragments, which service() prints in ONE
+    answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments, which service() prints in ONE
     printf as '[MGMT:STATS,2]<text>' (WCB_Mgmt.h:496-511) - the text keeps its newlines, so its rows follow on lines of
     their own. FRAG (handleMgmtFrag, WCB_Mgmt.h:323-361): a one-chunk session goes to W2 as an ordinary command
     ('[relay] MGMT -> WCB2 (1/1): <payload>'), a longer one chunk by chunk as raw type-3 frags that W2 reassembles by
     session ('[relay] MGMT -> WCB2 frag i/n (session XXXX)'). Chunks are the Wizard's 179 characters, 0.25 s apart (s05
     FRAG_CHUNK, FRAG_GAP_S). A line whose text after '?MGMT,' is 400 bytes or more is refused before anything is parsed
-    (WCB_Mgmt.h:389-393). All typed on NaviCore's USB. The pushes run in config_guard(bench, 2), which clears the two
-    sequences again; a multi-chunk push that W2 did not store goes once more under a new session."""
+    (WCB_Mgmt.h:389-393). All typed on NaviCore's USB. The pushes run in config_guard(bench, 2), and the test clears
+    both sequences in a finally (the guard fails a test that leaves one, run 20260929-025701); a multi-chunk push that
+    W2 did not store goes once more under a new session."""
     nc, w2 = _nc(bench), _w2(bench)
     problems = []
     nm = nc.dev.mark()
@@ -1030,40 +1106,43 @@ def mgmt_stats_frag(bench):
     val2 = f";S3{marker('G')}{FILL}"[:395]
     with config_guard(bench, 2):
         nm = nc.dev.mark()
-        nc.dev.send(f"?MGMT,FRAG,2,{_frag_sid()},0,1,?SEQ,SAVE,{key1},{val1}")
         try:
-            _nav_regex(nc, nm, rf"^\[relay\] MGMT -> WCB2 \(1/1\): \?SEQ,SAVE,{key1},", 4, "one-chunk relay line")
-        except AssertionError as e:
-            problems.append(str(e))
-        time.sleep(1.0)
-        if _seqval(w2, key1) != f"[MGMT:SEQVAL,2]{key1},OK,{val1}":
-            problems.append(f"the one-chunk push: W2 reads {key1} as {_seqval(w2, key1)!r}")
-        payload = f"?SEQ,SAVE,{key2},{val2}"
-        parts = [payload[k:k + FRAG_CHUNK] for k in range(0, len(payload), FRAG_CHUNK)]
-        stored, relay_lines = False, []
-        for _ in range(2):
-            sid = _frag_sid()
-            nm = nc.dev.mark()
-            for k, part in enumerate(parts):
-                if k:
-                    time.sleep(0.25)
-                nc.dev.send(f"?MGMT,FRAG,2,{sid},{k},{len(parts)},{part}")
-            time.sleep(1.5)
-            relay_lines = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[relay] MGMT -> WCB2 frag ")]
-            stored = _seqval(w2, key2) == f"[MGMT:SEQVAL,2]{key2},OK,{val2}"
-            if stored:
-                break
-            bench.note(f"the {len(parts)}-chunk push under session {sid} left nothing on W2; pushing again")
-        want = [f"[relay] MGMT -> WCB2 frag {k + 1}/{len(parts)} (session {sid.upper()})" for k in range(len(parts))]
-        if relay_lines != want:
-            problems.append(f"relay lines {relay_lines}, expected {want}")
-        if not stored:
-            problems.append(f"the {len(parts)}-chunk push never stored {key2} whole on W2 (reads "
-                            f"{(_seqval(w2, key2) or '')[:60]!r}...)")
-        got = nc.seqval(2, key2)
-        if (got.get("status"), got.get("value")) != (0, val2):
-            problems.append(f"GET_WCB_SEQVAL 2 {key2}: status {got.get('status')}, a {len(got.get('value') or '')}-"
-                            f"character value (W2 holds {len(val2)})")
+            nc.dev.send(f"?MGMT,FRAG,2,{_frag_sid()},0,1,?SEQ,SAVE,{key1},{val1}")
+            try:
+                _nav_regex(nc, nm, rf"^\[relay\] MGMT -> WCB2 \(1/1\): \?SEQ,SAVE,{key1},", 4, "one-chunk relay line")
+            except AssertionError as e:
+                problems.append(str(e))
+            time.sleep(1.0)
+            if _seqval(w2, key1) != f"[MGMT:SEQVAL,2]{key1},OK,{val1}":
+                problems.append(f"the one-chunk push: W2 reads {key1} as {_seqval(w2, key1)!r}")
+            payload = f"?SEQ,SAVE,{key2},{val2}"
+            parts = [payload[k:k + FRAG_CHUNK] for k in range(0, len(payload), FRAG_CHUNK)]
+            stored, relay_lines = False, []
+            for _ in range(2):
+                sid = _frag_sid()
+                nm = nc.dev.mark()
+                for k, part in enumerate(parts):
+                    if k:
+                        time.sleep(0.25)
+                    nc.dev.send(f"?MGMT,FRAG,2,{sid},{k},{len(parts)},{part}")
+                time.sleep(1.5)
+                relay_lines = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[relay] MGMT -> WCB2 frag ")]
+                stored = _seqval(w2, key2) == f"[MGMT:SEQVAL,2]{key2},OK,{val2}"
+                if stored:
+                    break
+                bench.note(f"the {len(parts)}-chunk push under session {sid} left nothing on W2; pushing again")
+            want = [f"[relay] MGMT -> WCB2 frag {k + 1}/{len(parts)} (session {sid.upper()})" for k in range(len(parts))]
+            if relay_lines != want:
+                problems.append(f"relay lines {relay_lines}, expected {want}")
+            if not stored:
+                problems.append(f"the {len(parts)}-chunk push never stored {key2} whole on W2 (reads "
+                                f"{(_seqval(w2, key2) or '')[:60]!r}...)")
+            got = nc.seqval(2, key2)
+            if (got.get("status"), got.get("value")) != (0, val2):
+                problems.append(f"GET_WCB_SEQVAL 2 {key2}: status {got.get('status')}, a {len(got.get('value') or '')}-"
+                                f"character value (W2 holds {len(val2)})")
+        finally:
+            _seq_clear(w2, key1, key2)
     nm = nc.dev.mark()
     nc.dev.send("?MGMT,HIL" + "x" * 420)
     try:
@@ -1075,36 +1154,63 @@ def mgmt_stats_frag(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("ncmesh.mgmt_etm_char", "?MGMT,ETM,CHAR,2 on NaviCore asks W2 for its ETM characterization once, and the answer "
-      "comes back as one [MGMT:ETM,2] reply (W2 logs one request from WCB20; slow, up to ~2.5 min)",
-      needs=["navicore", "wcb2"], links=[])
+@test("ncmesh.mgmt_etm_char", "?MGMT,ETM,CHAR,2 on NaviCore asks W2 for its ETM characterization with one request (W2 "
+      "logs one from WCB20 per ask), and the answer comes back as one [MGMT:ETM,2] reply; a reply W2 sent that never "
+      "arrived is asked for once more (slow: about 10 s an ask)", needs=["navicore", "wcb2"], links=[])
 def mgmt_etm_char(bench):
     """WcbMgmt sends ONE PT_ETM_REQ (8) raw packet for ETM,CHAR (WCB_Mgmt.h:399; a PULL goes three times, :265-267). W2
-    starts its characterization for NaviCore and sends the result as type-10 fragments at the end (handleETMReqPacket,
-    WCB.ino:4730-4749); a request while a run is going is ignored (:4737-4740), and one that cannot run is answered at
-    once with the reason, which is a reply too (noted). NaviCore prints it as '[MGMT:ETM,2]<text>' (WCB_Mgmt.h:496-511).
-    The run measures the peers W2 sees online and loads the mesh for about 10 s (s99 _char). ?DEBUG,MGMT (RAM only) is
-    on on W2 meanwhile so W2 logs each request it takes. Skips while NaviCore writes plain mesh text out an aux port:
-    the run's traffic reaches NaviCore too."""
+    runs its characterization for NaviCore (handleETMReqPacket, WCB.ino:4766-4785; a request while a run is going is
+    ignored, :4773-4776, and one that cannot run is answered at once with the reason, which is a reply too) and at the
+    end sends the result with sendResultFrags: type-10 frags, ONCE, as broadcast frames 20 ms apart with no retry
+    (WCB.ino:4611-4650, called at :2358-2362). They leave while the 10 s load the run started on its peers is still on
+    the air (the generator, WCB.ino:2044-2053; W2's own phases take about 4 s), and one lost frag loses the reply: in run
+    20260929-025701 W2 printed '[MGMT] Sent result frags (3 chunks, type 10) to WCB20' and NaviCore printed nothing for
+    150 s. A config reply goes in two passes for this (WCB.ino:4552-4556); STATS, ETM and sequence replies do not. So
+    the test waits for W2's own send line (?DEBUG,MGMT, RAM only, on meanwhile), then ETM_REPLY_WAIT_S for NaviCore's
+    '[MGMT:ETM,2]<text>' (WCB_Mgmt.h:496-511), and asks once more when W2 sent and NaviCore printed nothing (noted).
+    Skips while NaviCore writes plain mesh text out an aux port: the run's traffic reaches NaviCore too."""
     nc, w2 = _nc(bench), _w2(bench)
     _no_plain_fanout(nc)
     nid = _nid(nc)
+    sent_rx = rf"^\[MGMT\] Sent result frags \((\d+) chunks, type 10\) to WCB{nid}\b"
+    asks, notes = [], []
     w2.debug("MGMT", True)
     try:
-        nm, m2 = nc.dev.mark(), w2.dev.mark()
-        nc.dev.send("?MGMT,ETM,CHAR,2")
-        _nav_regex(nc, nm, r"^\[MGMT:ETM,2\]", 150, "[MGMT:ETM,2] reply")
-        time.sleep(3.0)
-        replies = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[MGMT:ETM,2]")]
-        reqs = [x for x in w2.dev.since(m2) if x.startswith(f"[MGMT] ETM char request from WCB{nid}")]
+        for ask in (1, 2):
+            nm, m2 = nc.dev.mark(), w2.dev.mark()
+            nc.dev.send("?MGMT,ETM,CHAR,2")
+            try:
+                frags = int(w2.dev.expect(sent_rx, timeout=ETM_RUN_MAX_S, since=m2).group(1))
+            except AssertionError:
+                raise AssertionError(f"ask {ask}: W2 never sent an ETM reply to WCB{nid} within {ETM_RUN_MAX_S:g} s of "
+                                     f"the request") from None
+            try:
+                _nav_regex(nc, nm, r"^\[MGMT:ETM,2\]", ETM_REPLY_WAIT_S, "[MGMT:ETM,2] reply")
+            except AssertionError:
+                pass
+            time.sleep(1.0)
+            replies = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[MGMT:ETM,2]")]
+            reqs = [x for x in w2.dev.since(m2) if x.startswith(f"[MGMT] ETM char request from WCB{nid}")]
+            asks.append((len(reqs), frags, replies))
+            if replies:
+                break
+            notes.append(f"ask {ask}: W2 sent its reply in {frags} broadcast frag(s) and NaviCore printed none within "
+                         f"{ETM_REPLY_WAIT_S + 1:g} s (a frag lost under the run's own load)")
     finally:
         w2.debug("MGMT", False)
+    reqs, frags, replies = asks[-1]
     body = replies[0][len("[MGMT:ETM,2]"):] if replies else ""
-    bench.note(f"{len(replies)} [MGMT:ETM,2] reply(ies), starting {body[:100]!r}; W2 logged {len(reqs)} request(s)"
-               + (" - the run could not start" if "could not run" in body else ""))
-    assert len(replies) == 1, f"{len(replies)} [MGMT:ETM,2] replies to one request"
-    assert len(reqs) == 1, f"W2 logged {len(reqs)} ETM char requests from WCB{nid}; the relay sends one"
-    assert body.strip(), "the [MGMT:ETM,2] reply is empty"
+    notes.append(f"{len(asks)} ask(s); the last: {len(replies)} [MGMT:ETM,2] reply(ies) from {frags} frag(s), starting "
+                 f"{body[:100]!r}" + (" - the run could not start" if "could not run" in body else ""))
+    bench.note("; ".join(notes))
+    problems = [f"ask {k + 1}: W2 logged {n} ETM char requests from WCB{nid}; the relay sends one"
+                for k, (n, _, _) in enumerate(asks) if n != 1]
+    if len(replies) != 1:
+        problems.append(f"W2 sent its reply {len(asks)} time(s) and NaviCore printed {len(replies)} [MGMT:ETM,2] line(s) "
+                        f"for the last")
+    elif not body.strip():
+        problems.append("the [MGMT:ETM,2] reply is empty")
+    assert not problems, "; ".join(problems)
 
 
 @test("ncmesh.mgmt_rterm_relay", "A remote terminal on W2 through NaviCore: ?MGMT,FRAG carries ?RTERM,START,20 to W2, whose "
@@ -1112,10 +1218,10 @@ def mgmt_etm_char(bench):
       "relayed ?VERSION) until ?RTERM,STOP ends the session", needs=["navicore", "wcb1", "wcb2"], links=[])
 def mgmt_rterm_relay(bench):
     """A one-chunk ?MGMT,FRAG reaches W2 as an ordinary command (WCB_Mgmt.h:336-342), so '?RTERM,START,20' makes W2
-    mirror its console to WCB20 in 160-byte type-7 packets (WCB_RemoteTerm.cpp:100-125); NaviCore's raw hook hands them
+    mirror its console to WCB20 in 160-byte type-7 packets (WCB_RemoteTerm.cpp:98-127); NaviCore's raw hook hands them
     to WcbMgmt (navicore_ota.h:606-618) and service() prints '[TERM:2]<line>' (processRemoteTerm, WCB_Mgmt.h:516-532).
     W2 reaches WCB20 through its controller peer, so W2 must carry ?CONTROLLER,ON,20. '[RTERM] Session stopped' prints
-    on W2's own console only, after the relay is dropped (stopSession, WCB_RemoteTerm.cpp:150-156), and from then on
+    on W2's own console only, after the relay is dropped (stopSession, WCB_RemoteTerm.cpp:152-158), and from then on
     nothing W2 prints reaches NaviCore. STOP goes in a finally."""
     nc, w2 = _nc(bench), _w2(bench)
     nid = _nid(nc)
@@ -1199,7 +1305,7 @@ def remote_cli_order_and_drop(bench):
     3-deep queue, :4843), which runs one per loop() pass with Serial teed to the RTERM sink (:5010-5024; rc_serial.h's
     capture takes only the arming core's output, so a Core-0 line never enters it); the sink sends a packet per line and
     hard-wraps at 160 bytes (navicore_rterm.h:48-62), and W1 prints each as [TERM:20]<text>, dropping empty ones
-    (WCB_RemoteTerm.cpp:176-205) - ncmesh.rterm_pieces predicts the result from what NaviCore printed on its own USB. An
+    (WCB_RemoteTerm.cpp:178-207) - ncmesh.rterm_pieces predicts the result from what NaviCore printed on its own USB. An
     unrecognised line prints 'Unknown command: <line>' (NaviCore.ino:5019-5020). The queue-depth part needs INF9's #L90
     stall, and first makes the SBUS side of the engine inert inside nc_guard (s41 _engine_inert: a stall past ~100 ms
     can overflow the SBUS UART); it skips on another image, and when W1 took too long to send the five. The dropped
@@ -1458,7 +1564,8 @@ def wdp_neighbour_table(bench):
     own dump prints its SELF row and labels through the same scrub (WCB_WDP.cpp:1760-1792). GET_WCB_STATUS and
     GET_WCB_META strip '"', backslash and control characters from a label instead (NaviCore.ino:4190-4201,
     rc_telemetry.h:2007-2011), so a hostile label leaves both parseable. The label goes on W2's S5 inside
-    config_guard(bench, 2), which clears it; a ?WDP,POLL makes W2 advertise it, and another after the restore brings
+    config_guard(bench, 2), and the test puts S5 back in a finally (config_guard only proves it: it fails a test that
+    leaves the label, run 20260929-025701); a ?WDP,POLL makes W2 advertise it, and another after the restore brings
     NaviCore the original back."""
     nc, w1, w2 = _nc(bench), usb_wcb(bench), _w2(bench)
     me, nid = bench.usb_wcb_number(), _nid(nc)
@@ -1492,36 +1599,40 @@ def wdp_neighbour_table(bench):
     if v.get("count") != len(v["rows"]) - 1:
         problems.append(f"[WDP:END,count={v.get('count')}] for {len(v['rows']) - 1} neighbour rows")
     label = f"HIL{nonce()[:4]},]\"\\x"
-    with config_guard(bench, 2):
-        out = w2.run(f"?LABEL,S5,{label}")
-        if any("Invalid" in x or "too long" in x for x in out):
-            raise Skip(f"W2 refused the test label: {out[:2]}")
-        w1.run("?WDP,POLL")
-        deadline = time.monotonic() + 6
-        while _ifaces_of(nc.wdp_view(), 2).get(5) != ncmesh.wdp_scrub(label) and time.monotonic() < deadline:
-            time.sleep(0.5)
-        got = _ifaces_of(nc.wdp_view(), 2).get(5)
-        if got != ncmesh.wdp_scrub(label):
-            problems.append(f"NaviCore's [WDPIF:N=2,S=5] reads {got!r}, expected the scrubbed {ncmesh.wdp_scrub(label)!r}")
+    with config_guard(bench, 2) as before:
         try:
-            st = nc.wcb_status()
-            lab = (ncmesh.status_rows(st).get(2) or {}).get("labels") or []
-            if len(lab) < 5 or lab[4] != ncmesh.json_strip(label):
-                problems.append(f"GET_WCB_STATUS' label for W2 S5 is {lab[4:5]}, expected {ncmesh.json_strip(label)!r}")
-        except ValueError:
-            problems.append("GET_WCB_STATUS does not parse with the label set")
-        nid = _open_relay(nc, w1)
-        nm, wm = nc.dev.mark(), w1.dev.mark()
-        w1.send(f';W{nid},{{"type":"GET_WCB_META"}}')
-        sid = int(_nav_regex(nc, nm, r"\[RC\] WCB_META send START: \d+ bytes \S+ \d+ fragments to W\d+ \(sid=(\d+)\)", 5,
-                             "'WCB_META send START' line").group(1))
-        text = _await_reassembled(w1, nid, wm, sid, 8)
-        try:
-            meta = json.loads(text or "")
-            if (meta.get("portLabels") or [[]] * 2)[1][4:5] != [ncmesh.json_strip(label)]:
-                problems.append(f"GET_WCB_META's label for W2 S5 is {meta['portLabels'][1][4:5]}")
-        except (ValueError, IndexError, TypeError):
-            problems.append("the bridged GET_WCB_META does not parse with the label set")
+            out = w2.run(f"?LABEL,S5,{label}")
+            if any("Invalid" in x or "too long" in x for x in out):
+                raise Skip(f"W2 refused the test label: {out[:2]}")
+            w1.run("?WDP,POLL")
+            deadline = time.monotonic() + 6
+            while _ifaces_of(nc.wdp_view(), 2).get(5) != ncmesh.wdp_scrub(label) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            got = _ifaces_of(nc.wdp_view(), 2).get(5)
+            if got != ncmesh.wdp_scrub(label):
+                problems.append(f"NaviCore's [WDPIF:N=2,S=5] reads {got!r}, expected the scrubbed "
+                                f"{ncmesh.wdp_scrub(label)!r}")
+            try:
+                st = nc.wcb_status()
+                lab = (ncmesh.status_rows(st).get(2) or {}).get("labels") or []
+                if len(lab) < 5 or lab[4] != ncmesh.json_strip(label):
+                    problems.append(f"GET_WCB_STATUS' label for W2 S5 is {lab[4:5]}, expected {ncmesh.json_strip(label)!r}")
+            except ValueError:
+                problems.append("GET_WCB_STATUS does not parse with the label set")
+            nid = _open_relay(nc, w1)
+            nm, wm = nc.dev.mark(), w1.dev.mark()
+            w1.send(f';W{nid},{{"type":"GET_WCB_META"}}')
+            sid = int(_nav_regex(nc, nm, r"\[RC\] WCB_META send START: \d+ bytes \S+ \d+ fragments to W\d+ "
+                                 r"\(sid=(\d+)\)", 5, "'WCB_META send START' line").group(1))
+            text = _await_reassembled(w1, nid, wm, sid, 8)
+            try:
+                meta = json.loads(text or "")
+                if (meta.get("portLabels") or [[]] * 2)[1][4:5] != [ncmesh.json_strip(label)]:
+                    problems.append(f"GET_WCB_META's label for W2 S5 is {meta['portLabels'][1][4:5]}")
+            except (ValueError, IndexError, TypeError):
+                problems.append("the bridged GET_WCB_META does not parse with the label set")
+        finally:
+            _put_back(w2, before[2], "?LABEL,S5,", "?LABEL,CLEAR,S5")
     w1.run("?WDP,POLL")
     time.sleep(2.0)
     if _ifaces_of(nc.wdp_view(), 2).get(5) is not None and _ifaces_of(nc.wdp_view(), 2).get(5) == ncmesh.wdp_scrub(label):
@@ -1538,34 +1649,38 @@ def alias_whoami(bench):
     ALIAS_MAX_TRIES (4) per online session, re-armed only by an offline-to-online edge (rc_telemetry.h:1808-1831). The
     cache fills from each WDP advert's name (onWcbNeighbor, NaviCore.ino:5269-5281) - but an advert with no name leaves
     it alone - and from a wcb_alias reply, which overwrites it, empty included (rc_telemetry.h:2201-2204). A WCB with no
-    alias advertises no ALIAS TLV (WCB_WDP.cpp:248-251) and answers ?WHOAMI with an empty alias (WCB.ino:5522-5543), so
+    alias advertises no ALIAS TLV (WCB_WDP.cpp:248-251) and answers ?WHOAMI with an empty alias (WCB.ino:5567-5588), so
     the cache stays empty and the cap is what stops the queries. The cache is emptied by a wcb_alias message sent from
     W1, as W2 would answer. W2 logs each ?WHOAMI it receives under ?DEBUG,ETM (RAM only, on for the test). Eight USB
     status polls, half a second apart. Skips when none goes out: the session's budget was spent earlier (it re-arms only
-    when W2 goes offline and back). config_guard(bench, 2) puts W2's alias back, and a ?WDP,POLL brings NaviCore its
-    name again."""
+    when W2 goes offline and back). The test puts W2's alias back in a finally inside config_guard(bench, 2), which
+    only proves it (it fails a test that leaves the alias cleared, run 20260929-025701), and a ?WDP,POLL brings NaviCore
+    its name again."""
     nc, w1, w2 = _nc(bench), usb_wcb(bench), _w2(bench)
     nid = _nid(nc)
     tok = token(bench.config_tokens(2, refresh=True), "?ALIAS,")
     alias = tok[len("?ALIAS,"):] if tok else ""
     polls = []
-    with config_guard(bench, 2):
-        w2.run("?ALIAS,CLEAR")
-        w1.run("?WDP,POLL")
-        time.sleep(1.5)
-        w1.send(f';W{nid},{{"type":"wcb_alias","id":2,"alias":""}}')
-        time.sleep(1.0)
-        w2.debug("ETM", True)
+    with config_guard(bench, 2) as before:
         try:
-            m2 = w2.dev.mark()
-            for _ in range(8):
-                polls.append((ncmesh.status_rows(nc.wcb_status()).get(2) or {}).get("alias"))
-                time.sleep(0.5)
+            w2.run("?ALIAS,CLEAR")
+            w1.run("?WDP,POLL")
+            time.sleep(1.5)
+            w1.send(f';W{nid},{{"type":"wcb_alias","id":2,"alias":""}}')
             time.sleep(1.0)
-            asked = [x for x in w2.dev.since(m2) if re.search(rf"\[ETM\] Received seq \d+ from WCB{nid}(?: \[wizard\])?: "
-                                                              rf"\?WHOAMI$", x.rstrip())]
+            w2.debug("ETM", True)
+            try:
+                m2 = w2.dev.mark()
+                for _ in range(8):
+                    polls.append((ncmesh.status_rows(nc.wcb_status()).get(2) or {}).get("alias"))
+                    time.sleep(0.5)
+                time.sleep(1.0)
+                who = re.compile(rf"\[ETM\] Received seq \d+ from WCB{nid}(?: \[wizard\])?: \?WHOAMI$")
+                asked = [x for x in w2.dev.since(m2) if who.search(x.rstrip())]
+            finally:
+                w2.debug("ETM", False)
         finally:
-            w2.debug("ETM", False)
+            _put_back(w2, before[2], "?ALIAS,", "?ALIAS,CLEAR")
     w1.run("?WDP,POLL")
     deadline = time.monotonic() + 6
     back = None
@@ -1677,7 +1792,7 @@ def wdp_learn_forget(bench):
 def etm_ack_sender_side(bench):
     """WCB_Client ACKs every COMMAND addressed to it first thing, before its CRC check and duplicate window
     (WCB_Client.cpp:2825-2845), and onWCBCommand counts each delivery per sender (NaviCore.ino:3025-3041,
-    g_meshRxFrom). W1 tracks each ETM unicast to its controller in the '(special)' row of ?STATS (WCB.ino:2166-2178),
+    g_meshRxFrom). W1 tracks each ETM unicast to its controller in the '(special)' row of ?STATS (WCB.ino:2203-2214),
     so W1 must carry ?CONTROLLER,ON,20. The ten are '#L12', a harmless read NaviCore runs and answers over RTERM (raw
     packets, outside both counters), 0.3 s apart. A retry means an ACK lost on the air: this asserts a clean link."""
     nc, w1 = _nc(bench), usb_wcb(bench)
@@ -1702,11 +1817,11 @@ def etm_ack_sender_side(bench):
       "has passed with nothing heard, and ONLINE within seconds of hearing again; W2 is back online on W1 before the test "
       "ends (slow, about 70 s)", needs=["navicore", "wcb1"], links=[])
 def w1_tracks_20(bench):
-    """W1 counts any valid ETM packet from a peer as presence (WCB.ino:5286-5304), so NaviCore's 2 s rc_hb keeps it online
+    """W1 counts any valid ETM packet from a peer as presence (WCB.ino:5322-5340), so NaviCore's 2 s rc_hb keeps it online
     on W1 until W1 hears nothing at all: ncmesh.deaf(1) flips W1's receive filter on its own console. W1 sweeps its peers
-    and its special peer against (?ETM,HB + 1) x ?ETM,MISS seconds of its own settings (WCB.ino:1386-1405: '[ETM] WCB20
+    and its special peer against (?ETM,HB + 1) x ?ETM,MISS seconds of its own settings (WCB.ino:1400-1419: '[ETM] WCB20
     (special peer) went OFFLINE (no heartbeat for <n>s)'), counted from the last packet heard, at most 2 s before the
-    flip; the first packet after the octet is back prints '[ETM] WCB20 came ONLINE' (:5298-5303). W2 goes offline on W1
+    flip; the first packet after the octet is back prints '[ETM] WCB20 came ONLINE' (:5334-5339). W2 goes offline on W1
     the same way meanwhile, and the test waits for its next heartbeat before it ends. W1 must carry ?CONTROLLER,ON,20."""
     nc, w1 = _nc(bench), usb_wcb(bench)
     me, nid = bench.usb_wcb_number(), _nid(nc)
@@ -1745,8 +1860,8 @@ def online_tracking_flip(bench):
     after the last one (10 s x 5, :2480-2508), printing onWcbStatus's line (NaviCore.ino:5330-5335). The plan deafened
     W2 for this; that cannot work: a deaf WCB still transmits (only its receive filter changes, hil/ncmesh.deaf), so
     NaviCore keeps it online. W2's heartbeat is stretched instead: '?ETM,HB,60' on W2's own console (range 1-3600,
-    saved, WCB.ino:6424-6440) takes effect after the beat already scheduled, up to 11 s away (scheduleNextHeartbeat
-    :1343-1362), so W2 is silent 59-61 s after it - past NaviCore's 50 s. The old value goes back as soon as the OFFLINE
+    saved, WCB.ino:6469-6485) takes effect after the beat already scheduled, up to 11 s away (scheduleNextHeartbeat
+    :1357-1377), so W2 is silent 59-61 s after it - past NaviCore's 50 s. The old value goes back as soon as the OFFLINE
     line is in (in a finally, on W2's console), and W2's next beat, still on the 60 s schedule, brings it ONLINE. W1 also
     sees W2 offline for a few seconds ((10 + 1) x 5 = 55 s window), which is noted. config_guard(bench, 2) proves W2's
     settings as they were. The WCB_SEND afterwards writes a marker out of W2 S3 (the W2S3 probe)."""
@@ -1955,19 +2070,24 @@ def crc_namespace_gates(bench):
     (:2657-2674) is not reached: a probe on other octets could not even address NaviCore. The probe (probe1) joins with
     quantity 20 so it can unicast NaviCore; the first join burns NaviCore's duplicate window (ncmesh.probe_peer), and
     the checksum-off and wrong-password joins do not need it (the CRC check runs before the window, the password check
-    before everything). Plain text under DBG_MAESTRO; skips while NaviCore fans plain mesh text out an aux port."""
+    before everything). Plain text is seen under DBG_MAESTRO ('[WCB RX] from WCB<n>: <text>'), set inside the
+    probe_peer block: the burn ends by putting NaviCore's debug flags to 0 (burn_window's NaviCore.debug), so a
+    DBG_MAESTRO set around probe_peer is gone before the control command goes (run 20260929-025701: the control 'did
+    not reach NaviCore', and the two negative checks after it saw nothing because nothing could be printed). Skips
+    while NaviCore fans plain mesh text out an aux port."""
     nc = _nc(bench)
     _no_plain_fanout(nc)
     pid = _free_id(nc, (16, 15, 17, 18))
     problems = []
     tag = marker("G")
-    with nc.debug(DBG_MAESTRO):
-        with probe_peer(bench, pid) as probe:
+    with probe_peer(bench, pid) as probe:
+        with nc.debug(DBG_MAESTRO):
             nm = nc.dev.mark()
             probe.mesh_send(ncmesh.NAVICORE_ID, f"{tag}A")
             time.sleep(1.5)
             if not _rx_seen(nc, nm, pid, [f"{tag}A"]):
                 problems.append("joined as the bench is, the probe's command did not reach NaviCore")
+    with nc.debug(DBG_MAESTRO):
         with probe_in_mesh(bench, "probe1", pid, checksum=False, quantity=ncmesh.NAVICORE_ID) as probe:
             time.sleep(1.0)
             nm = nc.dev.mark()
@@ -2113,10 +2233,11 @@ def seq_pull(bench):
     :352-375: each name cut to 15 characters, then JSON-hostile characters dropped) or WCB_SEQVAL {"key","status",
     "value"} (0 OK, 1 NOTFOUND, 2 TOOBIG, :380-393); over the bridge the reply goes back fragmented (_seqDeliver
     :414-419, tick :1549-1554). Status 2 is not produced: a WCB answers TOOBIG only when the key, the value and a
-    4-character header pass 2912 characters, 16 chunks of 182 (WCB.ino:4712-4718). A WCB's own ?SEQ,NAMES is
+    4-character header pass 2912 characters, 16 chunks of 182 (WCB.ino:4748-4754). A WCB's own ?SEQ,NAMES is
     '[MGMT:SEQ,n]<hash>,<count>,<names>' (s17 _names). The value test writes its own plain sequence on W2 inside
     config_guard(bench, 2); the bench's sequences' values are never pulled (a value could hold a credential and the
-    bridged reply crosses W1's unredacted console) - names only."""
+    bridged reply crosses W1's unredacted console) - names only. The test clears its sequence in a finally; config_guard
+    only proves it (it fails a test that leaves one, run 20260929-025701)."""
     nc, w1, w2 = _nc(bench), usb_wcb(bench), _w2(bench)
     me = bench.usb_wcb_number()
     problems, notes = [], []
@@ -2132,14 +2253,17 @@ def seq_pull(bench):
                             f"{want[:5]}... hash {int(h, 16)}")
     key, val = f"HILV{nonce()[:4]}", f";S3{marker('V')}"
     with config_guard(bench, 2):
-        if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
-            raise AssertionError(f"W2 did not store the test sequence {key}")
-        got = nc.seqval(2, key)
-        if (got["key"], got["status"], got["value"]) != (key, 0, val):
-            problems.append(f"GET_WCB_SEQVAL 2 {key}: {got}, expected status 0 and the stored value")
-        missing = nc.seqval(2, f"HILNO{nonce()[:6]}")
-        if missing["status"] != 1:
-            problems.append(f"GET_WCB_SEQVAL of a missing key: status {missing['status']}, expected 1 (NOTFOUND)")
+        try:
+            if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
+                raise AssertionError(f"W2 did not store the test sequence {key}")
+            got = nc.seqval(2, key)
+            if (got["key"], got["status"], got["value"]) != (key, 0, val):
+                problems.append(f"GET_WCB_SEQVAL 2 {key}: {got}, expected status 0 and the stored value")
+            missing = nc.seqval(2, f"HILNO{nonce()[:6]}")
+            if missing["status"] != 1:
+                problems.append(f"GET_WCB_SEQVAL of a missing key: status {missing['status']}, expected 1 (NOTFOUND)")
+        finally:
+            _seq_clear(w2, key)
     nm = nc.dev.mark()
     nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": me}, separators=(",", ":")))
     nc.dev.send(json.dumps({"type": "GET_WCB_SEQ", "wcb": 2}, separators=(",", ":")))
@@ -2187,20 +2311,24 @@ def seq_pull(bench):
       "quotes (a ;L command's body) arrives with its quotes, escaped, not stripped", needs=["navicore", "wcb1", "wcb2"],
       links=[])
 def seqval_verbatim(bench):
-    """NAVICORE.md D-NC46 (found writing NC-WP6). buildWcbSeqVal passes the value through _seqAppendJsonSafe, which drops
-    every '"', backslash and control character rather than escaping it (rc_telemetry.h:340-346, :380-393; names and the
-    key go the same way, :352-375), so a sequence holding JSON - a ;L WLED command's body, say - reaches the config tool
-    with its quotes gone: the command library shows a value W2 does not hold, and one saved back through saveSequence
-    would be stored altered. The comment at :377-379 says nothing there may reformat the value. Inside
+    """NAVICORE.md D-NC46 (found writing NC-WP6). buildWcbSeqVal passes the value through _seqAppendJsonSafe, which
+    drops every '"', backslash and control character rather than escaping it (rc_telemetry.h:340-346, :380-393; names
+    and the key go the same way, :352-375), so a sequence holding JSON - a ;L WLED command's body, say - reaches the
+    config tool with its quotes gone: the command library shows a value W2 does not hold, and one saved back through
+    saveSequence would be stored altered. The comment at :377-379 says nothing there may reformat the value. Inside
     config_guard(bench, 2), W2 stores 'HILQ<n>' = ';L9,{"hil":"<nonce>"}' - never recalled, and WLED 9 exists nowhere -
-    and it is pulled over USB. Recommendation: JSON-escape the value (and the names) instead of stripping it."""
+    it is pulled over USB, and the test clears it in a finally (config_guard fails a test that leaves it).
+    Recommendation: JSON-escape the value (and the names) instead of stripping it."""
     nc, w2 = _nc(bench), _w2(bench)
     key, val = f"HILQ{nonce()[:4]}", f';L9,{{"hil":"{nonce()}"}}'
     with config_guard(bench, 2):
-        if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
-            raise AssertionError(f"W2 did not store the test sequence {key}")
-        stored = _seqval(w2, key)
-        got = nc.seqval(2, key)
+        try:
+            if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{val}", timeout=8)):
+                raise AssertionError(f"W2 did not store the test sequence {key}")
+            stored = _seqval(w2, key)
+            got = nc.seqval(2, key)
+        finally:
+            _seq_clear(w2, key)
     assert stored == f"[MGMT:SEQVAL,2]{key},OK,{val}", f"W2 reads its own sequence back as {stored!r}"
     assert got["status"] == 0 and got["value"] == val, (f"(should, D-NC46) GET_WCB_SEQVAL returned {got['value']!r} for a "
                                                         f"sequence W2 stores as {val!r}: rc_telemetry.h:340-346 drops "
@@ -2216,7 +2344,7 @@ def telemetry_fields_rates(bench):
     "id","fw","up","mode","model","sbusFps","sbusAge","sbusLost","sbusFail"}; rc_ch every 1000/chRateHz ms, read live from
     the config (:993-997), only while a tool has sent JSON in the last WCB_SUBSCRIPTION_MS (15 s, :1012-1017; renewed by
     any JSON but a fragment or an rc_* frame, :2063-2067). A PING forces both at once (:2193-2194). W1 relays either
-    only inside its own 20 s window (WCB.ino:7964-7966), so NaviCore's 15 s gate is visible between 15 and 20 s after
+    only inside its own 20 s window (WCB.ino:8019-8021), so NaviCore's 15 s gate is visible between 15 and 20 s after
     one PING. Host times are W1's lines as read (one read, up to ~100 ms, of stamping error). The channels are compared
     with #L09 within 3 counts (the controller's sticks rest). chRateHz is set inside nc_guard: rc_ch's rate only, nothing
     moves. rc_mode is left to navicore.set_mode: a mode change moves the dome."""

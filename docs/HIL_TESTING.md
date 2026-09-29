@@ -442,7 +442,8 @@ with the recent lines attached), and skips by raising `Skip`.
   and flips it back however the block ends; a board with no console of its own is refused, and one that will not
   take the octet back fails the test with the command to type. `with probe_peer(bench, id) as probe:` is
   `probe_in_mesh` with quantity 20 plus a burn of NaviCore's duplicate window (§6); it refuses an id NaviCore
-  knows, and a NaviCore with serialBcast out on.
+  knows, and a NaviCore with serialBcast out on. The burn ends by setting NaviCore's debug flags to 0, so a test that reads `[WCB RX]` lines sets
+  DBG_MAESTRO inside the `probe_peer` block, not around it.
 - **NaviCore's device transports and its Maestro** (`suites/s44_navicore_devices.py`; `docs/hil_plan/NAVICORE.md`
   NC-WP7) read bytes in four places. Remote Maestro slot 4's frames reach W1 S1 and the W2 S1 tap through both WCBs'
   Maestro_Remote forward (s44 `Wires`, `dev_stream`); the Kyber broadcast is unacknowledged, so a step the hook image's
@@ -463,7 +464,10 @@ with the recent lines attached), and skips by raising `Skip`.
   wrap and the relay's empty-packet drop), `wdp_scrub` and `json_strip` (the two ways it cleans external text),
   `port_labels` and `local_maestro_ids` (its WDP labels and Maestro ids from GET_CONFIG), `status_rows`
   (WCB_STATUS, positional or sparse), `stats_rows` (a WCB's `?STATS` rows) and `bulk_frames` (a bulk `bb`/`bc`/`bd`
-  transfer).
+  transfer). Each test undoes its own WCB writes in a finally (s43 `_put_back`, `_seq_clear`): config_guard fails
+  a test whose board does not end as it began, even when it puts the token back itself. A transfer's effect on
+  SBUS is judged by s43 `_sbus_kept_up` (the frame counter across it, and lost/failsafe), not by `#L09`'s
+  one-second fps (§6).
 - **NaviCore's RC engine** (`suites/s41_navicore_engine.py`, `s42_navicore_sbus_engine.py`; `docs/hil_plan/NAVICORE.md`
   NC-WP4 and NC-WP5) is watched through two windows that move nothing. Actions aimed at W1 S2 (s41 `_act`, a
   `wcb_unicast` of `;S2HIL<tag>`) land on the W1S2 probe and are timed on the probe clock (`_probe_ms`). NaviCore's
@@ -548,7 +552,7 @@ Each of these is current firmware behaviour that a test, or a tool, walks into.
 | NaviCore's idle auto-release is not gated by CALIB, and every config apply forgets pending releases until the knob next dispatches. The HCR-volume knob clamps at 99 while the codec takes 100. | `maestroIdleReleaseTick` `NaviCore.ino:2731-2737`; `:3355`; `:2698`, `:2536`; WcbCmd `src/WcbHcr.cpp:29-36` | `sbus.calibration_mutes_knobs`, `sbus.knob_auto_release` and `sbus.knob_hcr_volume` pin them. |
 | A WCB drops a mesh `;M<dev>` verb or get for a device it does not host, so nothing answers NaviCore's skip-if-running warm-up for such a device. | `WCB_Maestro.cpp:490-497`, `:566` | `ncengine.skip_running_fail_open` gates on Maestro 2, which W2 hosts. |
 | A mode-aware knob whose override switch has no channel follows the global mode after all. | NaviCore `NaviCore.ino:2622-2623` | `sbus.knob_mode_aware` binds its override switch to the resting ry stick. |
-| W1 opens or renews its 20 s relay window for any `;W20,` payload that starts with `{`, fragment envelopes included, so NaviCore's ACK to a fragmented message prints on W1 without a bridged send first. | `WCB.ino:7964-7966` | `ncmesh.send_fragments` relies on it. |
+| W1 opens or renews its 20 s relay window for any `;W20,` payload that starts with `{`, fragment envelopes included, so NaviCore's ACK to a fragmented message prints on W1 without a bridged send first. | `WCB.ino:8019-8021` | `ncmesh.send_fragments` relies on it. |
 | A WCB deafened by `ncmesh.deaf` still transmits, heartbeats included, so NaviCore keeps it online and tracks each unicast to it until three retries run out; NaviCore marks a board online only on a heartbeat or boot announce, offline 50 s after the last. | `WCB_Client.cpp:2716-2769`, `:2480-2508`, `:283-330`, `:2306-2323` | `ncmesh.online_tracking_flip` stretches W2's `?ETM,HB` to 60 s instead; `ncmesh.ensured_degrade` uses a deaf W2 to fill NaviCore's 10 ETM slots. |
 | NaviCore ACKs a mesh command before its CRC check, so a CRC-less command is ACKed once and then rejected with `Missing CRC`. | `WCB_Client.cpp:2825-2845`, `:2856-2880` | `ncmesh.crc_namespace_gates` counts one `Missing CRC` line per command. |
 | NaviCore's relayed CLI queues 3 lines and drops a 4th that arrives while `loop()` is busy, after ACKing it; its RTERM output is cut every 160 bytes, and a WCB relay drops an empty packet (an empty line, or the flush after a line of exactly 160 bytes). | `NaviCore.ino:4843`, `:2925-2930`; `navicore_rterm.h:48-62`; `WCB_RemoteTerm.cpp` (`rtermRelayHandlePacket`) | `ncmesh.rterm_pieces` predicts the pieces; `ncmesh.remote_cli_order_and_drop` needs the `#L90` stall for the queue. |
@@ -560,6 +564,9 @@ Each of these is current firmware behaviour that a test, or a tool, walks into.
 | `executeMaestroCmd` keeps 35 characters of an action's cmd (`char buf[36]`) and parses what is left. | NaviCore `NaviCore.ino:1308` | `ncdev.mae_remote_verbs` pins it. |
 | A remote `?MAE` read prints nothing at once: the marker lands when the hosting WCB's `:MQR` arrives, and over the bridge it is mirrored to W1 as `[TERM:20][MAE:<slot>]`. | NaviCore `NaviCore.ino:703-745`, `:802-850` | `ncdev.mae_remote_read` pokes `#L12` while it waits (`_await_mae`). |
 | A save that moves `hcrDest` off NaviCore's own port stops a local fade in that pass: no StopWAV or restore goes out, and the HCR is left at the ramp's level. | NaviCore `NaviCore.ino:5548-5552` | `ncdev.hcr_local_payload` pins it. |
+| `#L09`'s `fps` is the frames NaviCore parsed in its last one-second window, taken in `loop()`, so a stall at a window's edge reads low while no frame is lost (88 while the frame counter rose 118 in 1.06 s, run 20260929-025701). | `trackSbusFps`, `NaviCore.ino:2885-2892`; `dumpSbusState` `:2897-2904` | s43 `_sbus_kept_up` judges the counter across a transfer (at least `SBUS_FULL_FPS` a second on host time) and lost/failsafe; `NaviCore.sbus_full_rate` re-reads a low window before a gate. |
+| A TEST_ACTION's ACK reaches W1 about 0.1 s after its action's marker reaches the probe on W1 S2. | `drainTestAction`, `NaviCore.ino:2175-2190`; `rc_telemetry.h:1225-1235` | `ncmesh.fragment_reassembly_edges` waits for each case's ACKs and 0.8 s more before the next case. |
+| A WCB answers a relayed `?MGMT,STATS`, `ETM,CHAR` or sequence request once, in broadcast frames 20 ms apart with no second pass (a config reply has one); the `ETM,CHAR` reply leaves while the 10 s load its run started on the peers is still on the air, so a relay can miss it (run 20260929-025701: three frags sent, none arrived). | `sendResultFrags`, `WCB.ino:4611-4650`, called at `:2358-2362`; the load generator `:2044-2053`; config's two passes `:4552-4556` | `ncmesh.mgmt_etm_char` waits for the target's `[MGMT] Sent result frags` line (`?DEBUG,MGMT`) and asks once more; tracker #109. |
 
 ### `(should)` tests
 
@@ -1184,6 +1191,7 @@ flashing (W2 only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | `bfe55e5` | NC-WP6's first bench run (`20260929-025701`): §5's probe_peer debug-flag note and s43's undo rule; §6's `#L09` fps, TEST_ACTION-ACK lag and relayed-reply rows; the relay-window row's line numbers. Probe lines are now redacted in session.log (D57). |
 | 2026-09-29 | `ede3aca` | NaviCore's device transports and Maestro (`NAVICORE.md` NC-WP7): `s44_navicore_devices.py` (23 `ncdev` tests, five in `hil/servos.py`); opt-in `navicore_aux_tx` (§2); §5's device observation windows; five §6 behaviour rows, six `(should)` rows (D-NC23, D-NC56 to D-NC60) and two doc-disagreement rows; a §7 `ncdev.*` row. `navicore.mae_cli_local` now needs a value (D-NC15). |
 | 2026-09-29 | _(pending)_ | §6: resetting the SBUS controller can block its port write for tens of seconds, so the signal-loss test polls from before the pulse (full run `20260928-220200`). |
 | 2026-09-28 | `4170a24` | NaviCore on the mesh (`NAVICORE.md` NC-WP6): `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`), opt-in `navicore_nvs` (§2); §5's mesh bullet and the `deaf` wording; §6's relay-window, deaf-WCB, CRC-ACK, remote-CLI, WDP PEER and `?WHOAMI` rows; six `(should)` rows (D-NC16, D-NC18, D-NC26, D-NC27, D-NC46, D-NC47); a §7 `ncmesh.*` row. |

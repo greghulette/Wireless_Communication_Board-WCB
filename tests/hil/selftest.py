@@ -7230,8 +7230,8 @@ class NaviMeshModel(NaviModel):
     WCB_SEND :1512-1546), the String- and file-backed fragment senders paced 150 ms (:557-733, :946-970), GET_WCB_META
     (:1986-2030), the bulk sink (WCB_Client.cpp:959-1172, rc_telemetry.h:775-860), the remote terminal (onWCBCommand
     NaviCore.ino:3025-3126, drainRemoteCli :5010-5024, CaptureSink navicore_rterm.h:48-86 with its byte-wise 160 wrap), and
-    W1's side of it: the 20 s relay window any ';W20,{' opens (WCB.ino:7964-7966), the relay it gates (:5468-5475), the
-    [TERM:20] lines it prints and drops when empty (WCB_RemoteTerm.cpp:176-205). W1's S2 is a byte buffer that ';S2'
+    W1's side of it: the 20 s relay window any ';W20,{' opens (WCB.ino:8019-8021), the relay it gates (:5513-5520), the
+    [TERM:20] lines it prints and drops when empty (WCB_RemoteTerm.cpp:178-207). W1's S2 is a byte buffer that ';S2'
     writes land in; W2 is a console that stores and reads back sequences. As today's firmware: a bridged WCB_SEND answers
     ok:true whatever the send did and a fragmented one is dropped (D-NC27), the strip leaves wifiEnabled (D-NC18),
     RESET_DEFAULTS resets the identity too (D-NC16) and the RTERM reply uses the RAM password (D-NC17), and a sequence
@@ -7251,8 +7251,22 @@ class NaviMeshModel(NaviModel):
         self.rx = {}
         self.bulk = None
         self.w2 = None
+        self.frames_t0 = time.monotonic()
+        self.send_spans = []
 
     # ------------------------------------------------------------ plumbing
+    def sbus_frames(self):
+        """#L09's frame counter: about 111 frames a second, as on the bench; with 'sbus_starved', 40 a second while a
+        fragment send runs (a sender that held loop() off the SBUS reader)."""
+        now = time.monotonic()
+        frames = 111 * (now - self.frames_t0)
+        if "sbus_starved" in self.mut:
+            frames -= sum(71 * max(0.0, min(b, now) - a) for a, b in self.send_spans if now > a)
+        return 1000 + int(frames)
+
+    def hash_cmd(self, text):
+        return [re.sub(r"frames=\d+", f"frames={self.sbus_frames()}", x) for x in super().hash_cmd(text)]
+
     def _later(self, delay, fn, *args):
         t = threading.Timer(delay, fn, args)
         t.daemon = True
@@ -7532,7 +7546,8 @@ class NaviMeshModel(NaviModel):
                                                                         and 1 <= int(a["target"]) <= 20))
         if ok:
             self.nav._append(*self.dispatch(a))
-        self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "TEST_ACTION", "ok": ok})
+        # The ACK reaches W1 about 0.1 s after the action's marker reaches W1 S2 (run 20260929-025701).
+        self._later(0.1, self.to_sender, sender, {"sys": 1, "type": "ACK", "of": "TEST_ACTION", "ok": ok})
 
     def frag_send(self, sender, payload, what, file_backed=False):
         """_startFragSend / _startFragSendFile and the pump: code-point-safe slices (143 escaped bytes and 160 raw, or 80
@@ -7558,6 +7573,7 @@ class NaviMeshModel(NaviModel):
             cuts.append(i)
         sid, n = self.next_sid, len(cuts) - 1
         self.next_sid += 1
+        self.send_spans.append((time.monotonic(), time.monotonic() + 0.15 * (n - 1) + 0.02))
         self.nav._append(f"[RC] {what} {'file-send' if file_backed else 'send'} START: {len(data)} bytes → {n} "
                          f"fragments to W{sender} (sid={sid})")
         for k in range(n):
@@ -7688,6 +7704,7 @@ NCMESH_MUTATIONS = (
     ("ncmesh.bridged_set_config", "no_devid_line", "FAIL", "no 'deviceId ignored' line"),
     ("ncmesh.remote_cli_order_and_drop", "rterm_no_wrap", "FAIL", "came back as pieces of"),
     ("ncmesh.bridged_cmdlib", "bulk_no_verify", "FAIL", "with a wrong hash"),
+    ("ncmesh.bridged_cmdlib", "sbus_starved", "FAIL", "SBUS frames a second across the transfer"),
     ("ncmesh.bridged_reset_defaults", "reset_no_effects", "FAIL", "the live side effects did not run"),
 )
 
@@ -7697,8 +7714,8 @@ def t_ncmesh_mutations(tmp):
     stripped, the identity kept through RESET_DEFAULTS, WCB_SEND reporting the send and handling fragments, a bridged
     library taken by bracket matching, sequence values escaped) its (should) test passes; and broken one way each - a
     fragment session whose deadline is not renewed, a pool of four, no deviceId line, RTERM without its 160-byte wrap, a
-    bulk sink that publishes whatever the hash, a mesh RESET_DEFAULTS without its side effects - the test fails and says
-    why. Each runs alone on a fresh model."""
+    bulk sink that publishes whatever the hash, a fragment send that starves the SBUS reader, a mesh RESET_DEFAULTS
+    without its side effects - the test fails and says why. Each runs alone on a fresh model."""
     for tid, mut, want, why in NCMESH_MUTATIONS:
         res, _, _ = _run_mesh_suite(tmp, ids=(tid,), mut={mut}, tag=mut)
         r = res[tid]
