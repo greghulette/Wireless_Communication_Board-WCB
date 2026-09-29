@@ -1210,13 +1210,18 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 ### NC-WP6 — mesh, bridge, WDP, telemetry, relay, failure (`s43_navicore_mesh.py`, `ncmesh.*`)
 
-> **Status 2026-09-28: written, not bench-run** (`suites/s43_navicore_mesh.py`, 35 tests). Six `(should)`:
+> **Status 2026-09-29: first bench run `20260929-025701`; its eight test-side failures fixed, not yet re-run**
+> (`suites/s43_navicore_mesh.py`, 35 tests). In that run 21 passed and 14 failed: the six `(should)` and eight on the
+> tests' own faults (the last five bullets). Five of the eight leaked a W2 write that config_guard then put back, and
+> its failure ended each of them at the guard, so what they check after it has not run on the bench yet: the
+> over-long `?MGMT` line, the seq-pull refusals and the bridged pull, the POLL checks after a restore, and
+> `seqval_verbatim`'s own D-NC46 assertion. Six `(should)`:
 > `bridged_set_config_strip` (D-NC18), `bridged_reset_keeps_identity` (D-NC16), `bridged_cmdlib_keys_after_data`
 > (D-NC47, new), `bridged_wcb_send_findings` (D-NC27), `long_command_truncation` (D-NC26) and `seqval_verbatim`
 > (D-NC46, new). `wdp_learn_forget` sits behind the new opt-in `navicore_nvs` (registered, off).
 > `bridged_reset_defaults`, `bridged_reset_keeps_identity` and `remote_cli_order_and_drop` (its `#L90` stall) are in
 > `hil/servos.py`. No test restarts NaviCore or sends SET_MODE. `selftest.py` runs the 13 bridge tests against
-> `NaviMeshModel` and 11 mutations of it. The other 22 need timing or hardware the model does not keep. Where the code
+> `NaviMeshModel` and 12 mutations of it. The other 22 need timing or hardware the model does not keep. Where the code
 > differs from the plan:
 > - `ncmesh.deaf` stops a board's reception, not its transmission. A deaf W2 keeps heartbeating, so NaviCore keeps it
 >   online. `online_tracking_flip` stretches W2's `?ETM,HB` to 60 s instead and restores it in a finally. The plan's
@@ -1235,9 +1240,9 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 >   same fragment sender with a payload that holds no secret; GET_CONFIG's ERROR guard and single-flight line are not
 >   exercised. The `?backup` over RTERM in `remote_cli_order_and_drop` is not sent either.
 > - W1 opens its 20 s relay window for any `;W20,` payload that starts with `{`, fragment envelopes included
->   (`WCB.ino:7964-7966`). `hil/ncmesh.py`'s `send_fragments` docstring said otherwise and is corrected.
+>   (`WCB.ino:8019-8021`). `hil/ncmesh.py`'s `send_fragments` docstring said otherwise and is corrected.
 > - `mgmt_stats_etm_frag` is two tests, `mgmt_stats_frag` and `mgmt_etm_char`. The characterization loads the mesh for
->   about 10 s and takes up to 2.5 min.
+>   about 10 s an ask.
 > - The plan puts `nc.cmdlib.bridge_divergence` inside `bridged_cmdlib` as a `(should)`. It is a test of its own,
 >   `bridged_cmdlib_keys_after_data` (D-NC47), so `bridged_cmdlib` stays a normal test.
 > - The 5-line burst of `remote_cli_order_and_drop` needs INF9's `#L90` stall, so that part skips on a stock image.
@@ -1250,8 +1255,23 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 >   (`?CONTROLLER,ON,20`) and `PEER=2` where auto-join learned it. `HW` is 0, because NaviCore sends no HWVER TLV.
 > - Left out: `rc_mode` (`nc.telem.rc_mode`), because a mode change moves the dome (`ncengine.mode_report_content` and
 >   `navicore.set_mode` change modes, servo-listed). Also left out: `WCB_SEQVAL` status 2 (a WCB answers TOOBIG only
->   when the key, the value and a 4-character header pass 2912 characters, `WCB.ino:4712-4718`) and the source-MAC
+>   when the key, the value and a 4-character header pass 2912 characters, `WCB.ino:4748-4754`) and the source-MAC
 >   namespace check (a probe on other octets could not address NaviCore at all).
+> - A TEST_ACTION's ACK reaches W1 about 0.1 s after its marker reaches W1 S2, so `fragment_reassembly_edges` waits for
+>   each case's ACKs and 0.8 s more. Counted at the marker, each ACK landed one case late (the reversed and the `of`
+>   cases read 0 and the cases after them 2), while NaviCore ran every message exactly once: no NaviCore finding.
+> - `probe_peer`'s burn ends by setting NaviCore's debug flags to 0, so `crc_namespace_gates` sets DBG_MAESTRO inside
+>   the `probe_peer` block. Set around it, the control command printed no `[WCB RX]` line, and the negative checks
+>   after it could see nothing either.
+> - `#L09`'s one-second fps can read low around a busy `loop()` while no frame is lost: 88 while the frame counter rose
+>   118 in 1.06 s. The fragment-sender tests judge the counter across the transfer instead (at least `SBUS_FULL_FPS`
+>   frames a second on host time) and lost/failsafe in every reading (`_sbus_kept_up`).
+> - W2 sends its `ETM,CHAR` reply once, as broadcast frames 20 ms apart, while the 10 s load its run started on W1 is
+>   still on the air (`WCB.ino:4611-4650`, `:2044-2053`); a config reply has a second pass, this one does not. In the
+>   run all three frags left W2 and NaviCore printed nothing. `mgmt_etm_char` waits for W2's own send line and asks once
+>   more when the reply never came.
+> - Each test undoes its own WCB writes in a finally (`_put_back`, `_seq_clear`): config_guard fails a test whose board
+>   does not end as it began, even when it puts the token back itself.
 
 - Bridge: `ncmesh.bridged_get_config` (fragments on W1 reassemble to the USB `data`, compared by hash;
   single-flight; `#L09` fps unaffected), `ncmesh.bridged_set_config_strip`, `ncmesh.bridged_reset_defaults` (the
@@ -1733,6 +1753,7 @@ that pins it.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | NC-WP6's first bench run (`20260929-025701`): 21 of 35 passed, the six `(should)` failed as designed, and eight failed on the tests' own faults, fixed and not yet re-run: W2 writes undone by each test (`_put_back`, `_seq_clear`) in `mgmt_stats_frag`, `wdp_neighbour_table`, `alias_whoami`, `seq_pull` and `seqval_verbatim`; `fragment_reassembly_edges` waits for each case's ACKs (no NaviCore finding); `bridged_cmdlib` and `bridged_wcb_meta` judge SBUS by the frame counter (`_sbus_kept_up`); `mgmt_etm_char` waits for W2's send line and asks once more, because W2 sends that reply once under its own load; `crc_namespace_gates` sets DBG_MAESTRO after the burn, which clears it. `NaviMeshModel` gains a moving frame counter, an `sbus_starved` mutation and the ACK's 0.1 s lag. The status note lists what the run showed. |
 | 2026-09-29 | `ede3aca` | NC-WP7 written, not bench-run: `s44_navicore_devices.py` (23 `ncdev` tests, six `(should)`; five in `hil/servos.py`; five behind the new opt-in `navicore_aux_tx`, registered and off). In s21, `navicore.mae_cli_local` needs a value (D-NC15) and `navicore.maestro_mesh_fanout_0_9` reads each target back; s41's speed-4 figure corrected. New findings D-NC56 to D-NC60. `selftest.py` runs the suite against `NaviDevModel` and twelve mutations of it. The status note lists where the code differs from the plan, and NaviCore doc drift for D-NC36. |
 | 2026-09-28 | `4170a24` | NC-WP6 written, not bench-run: `s43_navicore_mesh.py` (35 `ncmesh` tests, six `(should)`). Opt-in `navicore_nvs` registered (off); three tests in `hil/servos.py`. `hil/ncmesh.py` gains pure predictors (`wdp_scrub`, `json_strip`, `rterm_pieces`, `port_labels`, `local_maestro_ids`, `status_rows`, `stats_rows`, `bulk_frames`). `selftest.py` runs the 13 bridge tests against `NaviMeshModel` and 11 mutations of it. New findings D-NC46 (sequence names and values stripped, not escaped) and D-NC47 (a bridged SET_CMDLIB stores the keys after `data`). The status note lists where the code differed from the plan. |
 | 2026-09-28 | `04e70d1` | NC-WP2, NC-WP4, NC-WP5, NC-WP9 and NC-WP10 bench-verified (`20260928-204259`, `-212818`, `-212848`, `-215752`): every normal test passes or skips for a stated reason, and the seven `(should)` tests fail as designed (D-NC19, D-NC20, D-NC25, D-NC29, D-NC44, D-NC45). |

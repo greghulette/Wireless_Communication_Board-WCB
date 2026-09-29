@@ -11,7 +11,7 @@ the air for a while, and the probe as one of NaviCore's mesh peers (docs/hil_pla
 
 What every function here is shaped around:
 - W1 prints NaviCore's JSON (every reply NaviCore sends it, and its broadcast telemetry) on its USB only while its RC
-  relay window is open: 20 s from the last ';W20,{...}' typed on it (WCB.ino:7941-7943; the relay, :5454-5455 and :5762-5763). A
+  relay window is open: 20 s from the last ';W20,{...}' typed on it (WCB.ino:8019-8021; the relay, :5513-5520 and :5821-5826). A
   bridged() send opens it, and a plain-text ';W20,<text>' never does. NaviCore answers a bridged request by unicast to
   the sender, "sys":1 first (rc_telemetry.h:2186-2195, the PONG). A reply too long for one packet comes back as
   fragment envelopes {"f","of","sid","s"} with no "sys" (rc_telemetry.h:556-595); reassemble() joins them.
@@ -22,7 +22,7 @@ What every function here is shaped around:
   FRAG_TIMEOUT_MS without a part (rc_telemetry.h:141-149, :192-227). An envelope with f < 1, of < 1, of > 192, f > of or
   sid 0 is dropped without a word, and so is one whose "of" disagrees with its session's (:2079-2091).
 - A '?MAC,3,<octet>' typed on a WCB changes its receive filter at once while its radio address changes only at boot
-  (WCB.ino:6515-6518; s18's _deaf_w1), so the board still transmits and hears nothing - and the octet is saved to NVS
+  (WCB.ino:6560-6563; s18's _deaf_w1), so the board still transmits and hears nothing - and the octet is saved to NVS
   at once, so it is put back first thing, on the board's own console, and the board is never reset in between.
 - NaviCore drops a mesh COMMAND whose sequence number it has already seen from that sender: a 32-wide window below the
   highest one heard (WCBClient WCB_Client.cpp:879-898, applied at :2891-2895). A probe restarts its sequence numbers at
@@ -57,7 +57,7 @@ PACE_FLOOR_S = 0.100          # FRAG_PACE_FLOOR_MS (index.html:5496)
 PACE_LINK_MULT = 2            # FRAG_PACE_LINK_MULT (:5497)
 LINK_BYTES_PER_MS = 11.52     # 115200 8N1 on the bridge WCB's UART0 (:5729)
 RECV_MAX_PARTS = 512          # FRAG_MAX_PARTS_RECV (:5502): what the tool accepts from NaviCore
-RELAY_WINDOW_S = 20.0         # W1 relays NaviCore's JSON to USB for this long after a ;W20,{...} (WCB.ino:7943)
+RELAY_WINDOW_S = 20.0         # W1 relays NaviCore's JSON to USB for this long after a ;W20,{...} (WCB.ino:8021)
 REPLAY_WINDOW = 32            # NaviCore's per-sender COMMAND window (WCB_Client.cpp:890-896)
 RTERM_TEXT = 160              # navicore_rterm.h:21: the text of one remote-terminal packet
 LABEL_MAX = 24                # WCB_Client setPortLabel keeps 24 characters (WCB_Client.cpp:1930-1941)
@@ -177,7 +177,7 @@ def send_fragments(w1, envelopes, order=None, target=NAVICORE_ID, gap_s=None, sl
     """Type each envelope on W1's console as ';W<target>,<envelope>', paced as the tool paces them (pace_s, nothing after
     the last) or `gap_s` apart -> W1's console mark taken before the first. `order` is a list of indexes into
     `envelopes`, repeats allowed, for out-of-order and duplicate delivery; None sends them in order. W1 opens (or renews)
-    its relay window for any ';W20,' payload that starts with '{' (WCB.ino:7964-7966), a fragment envelope included, so
+    its relay window for any ';W20,' payload that starts with '{' (WCB.ino:8019-8021), a fragment envelope included, so
     the ACK NaviCore sends once the message is whole is printed on W1."""
     idx = list(range(len(envelopes))) if order is None else list(order)
     prefix = f";W{target},"
@@ -238,7 +238,7 @@ def rterm_pieces(lines):
     """The [TERM:<n>] texts a WCB relay prints for the console `lines` NaviCore's remote terminal captured: each line cut
     into RTERM_TEXT-byte packets (CaptureSink.write hard-wraps at 160 bytes and flushes on '\\n', navicore_rterm.h:48-62),
     and every empty packet - an empty line, or the flush after a line of exactly 160 bytes - dropped by the relay, which
-    also strips a trailing CR/LF (WCB_RemoteTerm.cpp:176, :194-205). The cut is by bytes, so a multi-byte character across
+    also strips a trailing CR/LF (WCB_RemoteTerm.cpp:178, :196-207). The cut is by bytes, so a multi-byte character across
     it arrives broken, as the relay's console decodes each piece on its own."""
     out = []
     for line in lines:
@@ -305,7 +305,7 @@ def status_rows(st):
 
 
 def stats_rows(lines):
-    """A WCB's ?STATS text (buildStatsString, WCB.ino:2076-2200) -> {board: 'Online' | 'OFFLINE'} for its 'ETM Per-Board
+    """A WCB's ?STATS text (buildStatsString, WCB.ino:2105-2242) -> {board: 'Online' | 'OFFLINE'} for its 'ETM Per-Board
     Statistics' rows, 'WCB<n>: Sent: ...' and 'WCB<n> (special): Sent: ...'. The 'Reported by Other Nodes' rows, which
     carry 'Unguaranteed', are other boards' own numbers and are left out."""
     out = {}
@@ -383,7 +383,7 @@ def _octet(bench, n):
 
 
 def _set_octet(w, octet):
-    """'?MAC,3,<octet>' on WCB console `w` -> True when the board confirmed it (WCB.ino:6515-6518)."""
+    """'?MAC,3,<octet>' on WCB console `w` -> True when the board confirmed it (WCB.ino:6560-6563)."""
     out = w.run(f"?MAC,3,{octet}")
     return any(f"Updated 3rd MAC octet to 0x{octet}" in x for x in out)
 
@@ -534,7 +534,9 @@ def probe_peer(bench, device_id, probe_name="probe1", target=NAVICORE_ID, **mesh
     navicore.probe_temp_peer_not_learned). So is a NaviCore with serialBcast out on for any aux port: it writes every
     plain-text mesh command out that port (NaviCore.ino:3100-3101), so the burn's 66 or more lines would reach whatever
     is wired there; a test that needs the flag sets it after the burn. The window burnt is NaviCore's only; a test that
-    also commands W1 or W2 under this id burns their rings too (s22 _burn_ring)."""
+    also commands W1 or W2 under this id burns their rings too (s22 _burn_ring). The burn leaves NaviCore's debug flags
+    at 0 (its NaviCore.debug block), so a test that reads '[WCB RX]' lines sets DBG_MAESTRO inside this block, not around
+    it (s43 crc_namespace_gates, run 20260929-025701)."""
     from .runner import Skip
     from suites.common import probe_in_mesh     # a lazy import: hil/ stays importable without the suites
     nc = NaviCore(bench.dev("navicore"))
