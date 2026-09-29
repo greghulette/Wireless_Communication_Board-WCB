@@ -88,6 +88,73 @@ def timer_after_func_command(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("serial.timer_replaced_mid_run", "Only one timer chain runs at a time: a chain typed while another waits, or a recalled sequence with its own ;t, replaces it - the rest of the first never runs and W1 says how many groups it dropped", needs=NEEDS)
+def timer_replaced_mid_run(bench):
+    """WCB-WP29 row 2 (timer.replaced_mid_run, wcb.cmd.timer_replaced_midrun). parseCommandGroups (command_timer.cpp)
+    keeps one global timer state: a new chain clears the running one's groups and prints 'Timer sequence replaced mid-run
+    - N remaining group(s) of the previous sequence dropped'. Typed: ;S1<a>^;T3000^;S1<b>, then 500 ms later
+    ;S1<c>^;T300^;S1<d> - a, c and d arrive, b never, and the line names 1 group (b's). Recalled: a stored sequence whose
+    body has its own ;t replaces the chain that recalled it - ;S1<a1>^;T200^;CHILTB,L^;T1000^;S1<a2> delivers a1, then
+    the sequence's b1 and b2, never a2. The mesh arm (a FRAG ;T chain arriving mid-chain) takes the same path and is
+    not written: it needs W2's console to type the local chain on."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    problems = []
+    # typed
+    a, b, c, d = marker("a"), marker("b"), marker("c"), marker("d")
+    m, wm = probe.dev.mark(), w.dev.mark()
+    w.send(f";S1{a}^;T3000^;S1{b}")
+    probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+    time.sleep(0.5)
+    w.send(f";S1{c}^;T300^;S1{d}")
+    probe.expect_bytes(ch, d.encode(), timeout=3, since=m)
+    time.sleep(3.0)                                  # past b's 3000 ms, had its chain survived
+    got = probe.received(ch, m)
+    if b.encode() in got:
+        problems.append("typed: the replaced chain's second write still went out")
+    if c.encode() not in got:
+        problems.append("typed: the new chain's first write never arrived")
+    said = [x for x in w.dev.since(wm) if "replaced mid-run" in x]
+    if not any("1 remaining group" in x for x in said):
+        problems.append(f"typed: W1 did not say it dropped 1 group ({said[:2] or 'no line'})")
+    # recalled
+    key = "HILTB"
+    b1, b2, a1, a2 = marker("b1"), marker("b2"), marker("a1"), marker("a2")
+    with config_guard(bench, 1):
+        try:
+            out = w.run(f"?SEQ,SAVE,{key},;S1{b1}^;t300^;S1{b2}")
+            assert any(f"Stored: Key='{key}'" in x for x in out), f"setup: the sequence was not stored: {out[-2:]}"
+            m = probe.dev.mark()
+            w.send(f";S1{a1}^;T200^;C{key},L^;T1000^;S1{a2}")
+            probe.expect_bytes(ch, b2.encode(), timeout=4, since=m)
+            time.sleep(1.8)                          # past a2's place in the outer chain
+            got = probe.received(ch, m)
+            if a1.encode() not in got or b1.encode() not in got:
+                problems.append("recalled: the outer chain's first write or the sequence's first write never arrived")
+            if a2.encode() in got:
+                problems.append("recalled: the outer chain's last write went out after the recalled sequence replaced it")
+        finally:
+            w.run(f"?SEQ,CLEAR,{key}")
+    assert not problems, "; ".join(problems)
+
+
+@test("serial.timer_inline_payload", ";T<ms>,<command> starts a group whose first command is the payload: ;S1a^;T600,;S1b^;S1c puts b about 600 ms after a, and c right after b", needs=NEEDS)
+def timer_inline_payload(bench):
+    """WCB-WP29 row 4 (timer.inline_payload_timing). parseCommandGroups (command_timer.cpp) splits ;T<ms>,<command>
+    into a delay and a group that starts with the payload, so the payload waits out the delay and the command after it
+    joins the same group."""
+    probe, ch = wire(bench, 1, "S1")
+    a, b, c = marker("a"), marker("b"), marker("c")
+    m = probe.dev.mark()
+    usb_wcb(bench).send(f";S1{a}^;T600,;S1{b}^;S1{c}")
+    probe.expect_bytes(ch, c.encode(), timeout=3, since=m)
+    t_a, t_b, t_c = (probe.time_of(ch, x.encode(), m) for x in (a, b, c))
+    assert None not in (t_a, t_b), f"a marker never arrived (a {t_a}, b {t_b})"
+    bench.note(f"a->b {t_b - t_a} ms, b->c {t_c - t_b} ms")
+    assert 500 <= t_b - t_a <= 900, f"the payload came {t_b - t_a} ms after a, expected ~600"
+    assert t_c - t_b <= 150, f"c came {t_c - t_b} ms after b: it waited as if it were its own group"
+
+
 @test("serial.timer_sum", "Consecutive ;T delays add up (600 + 600)", needs=NEEDS)
 def timer_sum(bench):
     a, b = marker("a"), marker("b")
