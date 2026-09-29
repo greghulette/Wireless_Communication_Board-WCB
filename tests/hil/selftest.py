@@ -9004,6 +9004,52 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations]
+
+
+def t_wizard_spec_ids(tmp):
+    """The Wizard's harness tests and its Playwright specs name each other exactly: every wizard.* test registered in
+    suites/s30_wizard.py (but wizard.parser, which runs node tests) has one spec titled with its id in tests/wizard/specs,
+    every wizard.* spec title is registered once, and a spec that expects to fail (test.fail: a (should) spec) is
+    registered with a title that says '(should)'. run_wizard_test finds its spec by --grep on the id, so a typo on either
+    side otherwise shows only on the bench, as 'no Playwright test is titled ...'. No node, no browser: the spec files
+    are read as text, the registry is the real suites imported in their own process."""
+    specs_dir = os.path.normpath(os.path.join(HERE, "..", "wizard", "specs"))
+    titles, fails = [], set()
+    for name in sorted(os.listdir(specs_dir)):
+        if not name.endswith(".spec.js"):
+            continue                                  # the specs/navicore folder holds nctool.* ids, s49's
+        src = read(os.path.join(specs_dir, name))
+        for chunk in re.split(r"\n(?=test\()", src):
+            m = re.match(r"test\(\s*['\"`](wizard\.[a-z0-9_]+)[\s'\"`]", chunk)
+            if m:
+                titles.append(m.group(1))
+                if re.search(r"^\s+test\.fail\(\s*true", chunk, re.M):
+                    fails.add(m.group(1))
+    probe = (
+        "import importlib, json, pkgutil, sys\n"
+        f"sys.path.insert(0, {HERE!r})\n"
+        "from hil import runner\n"
+        "import suites\n"
+        "for m in pkgutil.iter_modules(suites.__path__):\n"
+        "    importlib.import_module('suites.' + m.name)\n"
+        "print(json.dumps([[t['id'], t['title']] for t in runner.REGISTRY if t['id'].startswith('wizard.')]))\n")
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert out.returncode == 0, out.stderr
+    reg = json.loads(out.stdout)
+    ids = [tid for tid, _ in reg]
+    dup_ids = sorted({t for t in ids if ids.count(t) > 1})
+    dup_specs = sorted({t for t in titles if titles.count(t) > 1})
+    assert not dup_ids and not dup_specs, f"registered twice: {dup_ids}; titled twice: {dup_specs}"
+    no_spec = sorted(set(ids) - set(titles) - {"wizard.parser"})
+    no_test = sorted(set(titles) - set(ids))
+    assert not no_spec, f"s30 registers wizard tests no spec is titled with: {no_spec}"
+    assert not no_test, f"specs titled with ids no suite registers (the harness never runs them): {no_test}"
+    unmarked = sorted(t for t, title in reg if t in fails and not title.startswith("(should)"))
+    assert not unmarked, f"test.fail specs registered without '(should)' in their title: {unmarked}"
+    assert len(titles) >= 60, f"only {len(titles)} wizard spec titles read: the title pattern no longer matches the specs"
+
+
+TESTS.append(t_wizard_spec_ids)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

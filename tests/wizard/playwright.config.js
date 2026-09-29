@@ -1,6 +1,7 @@
 // Playwright for the Wizard. Board tests are started one at a time by the HIL harness (tests/hil/hil/wizard.py),
 // which hands the board's COM port to Chrome and passes HIL_BRIDGE; run standalone, only the no-board tests
-// (wizard.smoke, wizard.kyber_*, wizard.remote_pull_fake_*) run.
+// (wizard.smoke, wizard.kyber_*, wizard.remote_pull_fake_*, and the fake-board specs: wizard.push_fake_*,
+// wizard.pull_fake_*, wizard.app_fake_*, wizard.editors_fake_*, wizard.flasher_fake_*) run.
 //
 // specs/navicore/ holds the NaviCore config tool's specs (nctool.*, docs/hil_plan/NAVICORE.md §5). They load the tool
 // from the sibling NaviCore repo through serve.js's /NaviCore/ alias on their own origin (NC_ORIGIN below), behind a
