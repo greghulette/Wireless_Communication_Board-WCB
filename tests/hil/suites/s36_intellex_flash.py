@@ -441,7 +441,7 @@ def flash_refused_board_runs(bench):
 @test("intellex.flash_w2_factory", "(attended) The Wizard's Factory Reset through Intellex on W2: the bench image in "
       "full and W2's NVS erased - 0x9000 written blank, every region verified - so W2 boots on the firmware's defaults; "
       "then the harness restores W2 over its USB from its own chain and learned peers, and W2 ends on its version and "
-      "config (opt-in intellex_flash_factory; 4 W2 restarts; IX-WP10)", needs=["wcb2", "wcb1"],
+      "config (opt-in intellex_flash_factory; 3 W2 restarts; IX-WP10)", needs=["wcb2", "wcb1"],
       opt_in="intellex_flash_factory")
 def flash_w2_factory(bench):
     """mode 'factory' -> flashFirmware(eraseNvs) -> write_list with the NVS blank (wcb_flash.py:326-330). pushConfig:false

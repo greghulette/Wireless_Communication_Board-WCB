@@ -269,8 +269,9 @@ OPT_INS = {
         "what": "The Wizard's Factory Reset through Intellex on W2: the bench image written in full and W2's NVS erased, "
                 "so W2 boots on the firmware's defaults (WCB 1 and the default mesh password: off the bench's mesh); "
                 "then the "
-                "harness restores W2 over its USB from its own pre-test chain and learned peers, the nvs_erase restore, "
-                "with three W2 restarts. Stay at the bench: if the restore fails, W2's chain is in session.log.",
+                "harness restores W2 over its USB from its own pre-test chain and learned peers, the nvs_erase restore: "
+                "three W2 restarts in all (the flash, then ?HW's and the replay's boots). Stay at the bench: if the "
+                "restore fails, W2's chain is in session.log.",
         "why": "erases W2's NVS through Intellex and restores it from its chain; attended only",
         "estimate_s": 300,
     },
