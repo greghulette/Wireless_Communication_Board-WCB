@@ -70,6 +70,7 @@ class WsClient:
             raise ConnectionError(f"WebSocket handshake refused: {status}")
         self.text = ""
         self.raw = b""
+        self.text_frames = []      # each text frame's payload as sent (self.text decodes with errors="replace")
 
     def send_text(self, s: str):
         self.sock.sendall(frame(s.encode()))
@@ -96,6 +97,7 @@ class WsClient:
             except socket.timeout:
                 break
             if op == 0x1:
+                self.text_frames.append(payload)
                 self.text += payload.decode(errors="replace")
             elif op == 0x2:
                 self.raw += payload

@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-29 | Filed **#110** (a PC waits up to 47 s for a lease on W1's access point) and **#111** (with an access point up the heap's low-water mark reaches 76 bytes on W1 and 240 on W2), both found writing WCB-WP22 (`20260929-055154`, `-055837`). |
 | 2026-09-29 | Filed **#109** (a relayed STATS, ETM,CHAR or sequence reply is sent once; NC-WP6's first bench run lost an ETM,CHAR reply to the load it had started). |
 | 2026-09-29 | Run `20260929-023811` on `6.2.1_290236RSEP2026` (29 pass, 1 known skip): **#108** VERIFIED; the pacing retune (D54) passes `kyber.*` with no frame given up and the whole `etm.seq_wrap` flood; the four other fixes from `20260928-220200` pass. |
 | 2026-09-29 | Full run `20260928-220200` triaged (816 pass, 31 fail, 9 skip; 26 fails are `(should)` tests): the #102 pacing retuned (a 50 ms give-up lost a Kyber frame), the RTERM ring back to 2.5 KB, and `?SEQ,SAVE` names an out-of-memory argument copy instead of 'Invalid format' (D54). |
@@ -2341,3 +2342,55 @@ so one lost frag loses the whole reply and only the requester's own retry recove
 
 **Fix (proposed).** Send these replies twice as well, as the config pull does, or hold an ETM,CHAR reply until the
 load it started is off the air. Low: a requester that asks again gets its answer.
+#### 110. A PC joining a WCB's access point waits up to 47 s for a DHCP lease, on a self-assigned address meanwhile
+
+| | |
+|---|---|
+| **Status** | TODO - cause not found |
+| **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`, `wcbWifiStartAP`), or Windows |
+| **Effort** | M (finding the cause) |
+| **Tests** | every `wifi_pc` test: `_pc_on_ap` (s28) waits up to 60 s for the lease, renews once at 20 s, and notes the time |
+| **Subsystem** | WiFi |
+
+**Evidence.** The PC's spare adapter associated with W1's access point at once every time, then held no address or a
+169.254 one (Windows gives itself one after about 6 s without a lease) for 1.8 s, 13.6 s and 46.7 s on three
+back-to-back joins (scratch run `20260929-054530`, the first right after a W1 reboot); 25-30 s with an `ipconfig
+/renew` at 20 s (`20260929-055154`). Two WebSocket tests failed on it in `20260929-054022`, when they waited 25 s. The
+same PC got a lease from W2's access point in 1.4 s.
+
+**Cause (not found).** One candidate: the ESP-IDF DHCP server allocates its message and every reply from the heap
+(`handle_dhcp`, `send_offer`/`send_ack`/`send_nak` in `dhcpserver.c`) and drops the message when that fails, and a
+Windows client's first seconds on a network are a burst of multicast (IPv6 neighbour discovery, mDNS, LLMNR, SSDP), each
+frame taking a WiFi receive buffer from the same heap, which #111 shows is within a few KB of empty during an
+association. Not proven: W2, with less heap free (7.9 KB with W1 attached), answered in 1.4 s. Another: how the server
+answers Windows' first request for the address it held last time (INIT-REBOOT).
+
+**Fix (proposed).** Find the cause first: log W1's DHCP traffic during a slow join (`esp_log_level_set("dhcps",
+ESP_LOG_DEBUG)` on a debug build, or a capture on the PC), with the heap reading beside it. A user connecting a laptop
+or phone to the droid waits this long too, which reads as "the access point is broken".
+
+#### 111. With its access point up, a classic-ESP32 WCB's heap drops to within a few hundred bytes of empty
+
+| | |
+|---|---|
+| **Status** | TODO - needs a decision |
+| **Owner** | `WCB_firmware` (`WCB_WS.cpp`, `WCB_WiFi.cpp`) |
+| **Effort** | M |
+| **Tests** | none asserts it; every `wifi_pc` test notes W1's `Free heap` line after the PC leaves (`_left_clean`, s28) |
+| **Subsystem** | WiFi / heap |
+
+**Evidence.** `?WIFI`'s `Free heap` line gives the byte-addressable heap and its low-water mark since boot
+(`WCB_WiFi.cpp`, `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`). On W1 in AP mode (scratch run
+`20260929-054530`): 18,312 bytes free with nobody attached, low-water 17,684; the PC associating and taking a lease
+took the low-water to 6,472; three WebSocket clients open, 12,580 free; opening and closing them, low-water 1,500.
+`20260929-054022` reached a low-water of **76 bytes** during `ws.backup_over_ws`, and `20260929-055154` **48 bytes** at the same test. W2 hosting its access point with W1
+attached as a station read 7,948 free, low-water **240** (`20260929-055154`). No crash, reset or error line was seen.
+
+**Why it matters.** At those moments any allocation fails. An Arduino `String` then comes back empty with no error
+(CLAUDE.md rule 14), lwIP and the WiFi driver drop packets (possibly #110), and a heap exhausted by mesh traffic has
+aborted the board before (#102).
+
+**Fix (options, Greg's call).** Measure where the transient goes first (the association, the WiFi driver's dynamic
+receive buffers, the WebSocket sockets). Then: fewer WebSocket clients (`WS_MAX_CLIENTS` 3 to 1 or 2) and a smaller
+static receive buffer; fewer AP stations (`max_conn` 4); or static WiFi buffers, which need a custom ESP-IDF build of
+the Arduino core.

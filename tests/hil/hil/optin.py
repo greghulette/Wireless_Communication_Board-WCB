@@ -153,9 +153,11 @@ OPT_INS = {
     },
     "wifi_pc": {
         "title": "PC joins W1's access point (attended)",
-        "what": "A WiFi adapter on the PC joins W1's access point for about 30 s, opens the WebSocket endpoint, then returns "
-                "to its network. The spare adapter is used when there is one; with a single adapter the PC is offline "
-                "meanwhile. The AP password sits in a temporary Windows profile that is deleted after.",
+        "what": "For each of six tests a WiFi adapter on the PC joins W1's access point for about 30 s, uses the WebSocket "
+                "endpoint (line framing, ?backup, three client slots, a small OTA session with ota_erase, DHCP with no "
+                "gateway), then returns to its network. The spare adapter is used when there is one; with a single "
+                "adapter the PC is offline meanwhile. The AP password sits in a temporary Windows profile that is "
+                "deleted after.",
         "why": "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard",
         "estimate_s": 90,
     },

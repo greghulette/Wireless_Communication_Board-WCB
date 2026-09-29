@@ -8,9 +8,12 @@
   (six in all). Nothing needs the PC's WiFi adapter. JOIN robustness (WCB-WP45) adds two more under the same key: W1
   losing W2's access point and joining it again (W2's own access point off and back: two W2 reboots), and W1 looking
   for a network nobody hosts for 70 s without leaving the mesh channel (four more W1 reboots in all).
-- `wifi_pc` (attended): a WiFi adapter on the PC joins W1's access point, opens ws://192.168.4.1/ws and gets ?VERSION
-  answered over it, then returns to the network it was on. It uses an adapter that does not carry the PC's internet
-  when there is one (this bench's TP-Link "Wi-Fi 2"); with a single adapter the PC is offline for about 30 s.
+- `wifi_pc` (attended): for each test a WiFi adapter on the PC joins W1's access point (_pc_on_w1_ap), opens
+  ws://192.168.4.1/ws, and returns to the network it was on. It uses an adapter that does not carry the PC's internet
+  when there is one (this bench's TP-Link "Wi-Fi 2"); with a single adapter the PC is offline for about 30 s a test.
+  Over the endpoint (WCB-WP22): ?VERSION answered; line framing, the over-long line and the oversized frame; ?backup
+  whole and UTF-8-clean; the three client slots and the eviction of the oldest; a DATA-sized ?OTALOCAL session (with
+  ota_erase too); and W1's DHCP handing out no gateway.
 
 Credentials: the AP and JOIN lines carry a password. It is read from the board's own chain at run time and given
 back to a board or to a Windows WiFi profile that is removed afterwards; it never goes into a note, a message or a
@@ -21,12 +24,14 @@ own ?WIFI line from its chain on its USB console (and reboot, if the board was r
 `netsh wlan delete profile name=HIL-<W1's SSID> interface=<adapter>` and `netsh wlan connect name=<its network>
 interface=<adapter>`.
 """
+import contextlib
 import os
 import re
 import subprocess
 import tempfile
 import time
 
+from hil import optin
 from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
 from hil.wcb import WCB
@@ -314,10 +319,12 @@ def off_and_back(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("wifi.join_w2_ap", "W1 joins W2's access point: JOIN saved for the next boot, then W1 associates on the mesh channel (boot lines, the ?WIFI JOIN block with an address and a WS endpoint, W2 counting a client) and the mesh still delivers; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes")
+@test("wifi.join_w2_ap", "W1 joins W2's access point: JOIN saved for the next boot, then W1 associates on the mesh channel (boot lines, the ?WIFI JOIN block with an address and a WS endpoint, W2 counting a client, the WebSocket ready line) and the mesh still delivers; with wifi_pc ticked as well, the PC joins W2's access point too and ?VERSION is answered over W1's endpoint on its joined address; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes")
 def join_w2_ap(bench):
     """wcbWifiJoinTry pins the association to meshChannel, and the JOIN state machine verifies the radio stayed there
-    (WCB_WiFi.cpp). W2's AP is on the same mesh channel, so the join is expected to settle 'connected'."""
+    (WCB_WiFi.cpp). W2's AP is on the same mesh channel, so the join is expected to settle 'connected'. Once joined,
+    wcbWsService starts the endpoint and prints '[WS] command endpoint ready - ws://<ip>/ws' (WCB_WS.cpp, wcbWsBegin),
+    the line NaviLink waits for (WCB-WP22 row 4); _pc_reaches_joined_w1 is that row's second half."""
     w2s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     problems = []
@@ -345,9 +352,14 @@ def join_w2_ap(bench):
                              timeout=45, since=bm)
             except AssertionError:
                 problems.append("W1 did not report joining W2's access point within 45 s of booting")
+            try:                                     # NaviLink waits for this exact line (WCB_WS.cpp, wcbWsBegin)
+                w.dev.expect(r"^\[WS\] command endpoint ready — ws://192\.168\.4\.\d+/ws$", timeout=10, since=bm)
+            except AssertionError:
+                problems.append("no '[WS] command endpoint ready — ws://...' line after joining")
             st = _status(w)
             if st.get("Mode") != "JOIN" or st.get("Join SSID") != ssid2:
-                problems.append(f"Mode {st.get('Mode')!r}, Join SSID {st.get('Join SSID')!r}")
+                problems.append(f"Mode {st.get('Mode')!r}, Join SSID "     # compared, never quoted
+                                f"{'is' if st.get('Join SSID') == ssid2 else 'is not'} W2's access point name")
             if not (st.get("Association", "").startswith("connected (") and st.get("Interface") == "up"):
                 problems.append(f"Association {st.get('Association')!r}, Interface {st.get('Interface')!r}")
             if not st.get("IP address", "").startswith("192.168.4."):
@@ -360,6 +372,8 @@ def join_w2_ap(bench):
             clients = next((x for x in _crun(c2, "?WIFI", 1.5) if x.startswith("Clients       : ")), "")
             if not re.match(r"^Clients       : [1-9]", clients):
                 problems.append(f"W2 counts no client while W1 is joined: {clients!r}")
+            if "wifi_pc" in optin.enabled(bench.cfg):
+                _pc_reaches_joined_w1(bench, problems, ssid2, pw2, st.get("IP address", ""))
             _unicast_ok(w, w2s2, problems, "while joined to W2's AP")
         finally:
             if changed:
@@ -641,33 +655,76 @@ def _profile_xml(name, ssid, pw):
             '  </security></MSM>\n</WLANProfile>\n')
 
 
-@test("wifi.pc_joins_ap_ws", "(attended) A WiFi adapter on the PC joins W1's access point, opens ws://192.168.4.1/ws and has ?VERSION answered over it while W1 counts the client, then returns to the network it was on; the spare adapter is used when there is one, so the PC stays online", needs=["wcb1"], links=[], opt_in="wifi_pc")
-def pc_joins_ap_ws(bench):
-    """WCB_WS.cpp: a text frame per line, the console output teed back as text frames. Read-only on the board.
+def _scrub(text, *names):
+    """`text` with each of `names` (an SSID, a profile named after one) replaced, for a note: netsh echoes profile
+    names back, and a network's name is never quoted (the module docstring)."""
+    for n in sorted((n for n in names if n), key=len, reverse=True):
+        text = text.replace(n, "<network>")
+    return text
 
-    Windows side: a temporary profile named HIL-<ssid> on the chosen adapter only, never one of the PC's own
-    profiles, and every netsh call names the adapter - with two adapters an unnamed `netsh wlan connect` is refused
-    (run 20260924-092602 failed that way, and reused the PC's own WCB1 profile on the other adapter). The profile holds
-    W1's AP password from its chain and is deleted afterwards; netsh's replies are logged, and they carry no key."""
+
+def _ps(command):
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True,
+                           timeout=20)
+        return r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _ipv4(name):
+    """The adapter's IPv4 addresses."""
+    esc = name.replace("'", "''")
+    return (_ps(f"Get-NetIPAddress -InterfaceAlias '{esc}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+                "ForEach-Object { $_.IPAddress }") or "").split()
+
+
+ADDR_WAIT_S = 60          # a lease from a WCB's access point has taken 1.8 to 46.7 s here (tracker #110)
+ADDR_RENEW_S = 20
+
+
+def _address_wait(name, subnet="192.168.4."):
+    """Wait for the adapter to hold an address in `subnet` -> (the address or None, seconds, what happened). Windows
+    gives itself a 169.254 address after about 6 s without a lease and then asks again only now and then, so one
+    `ipconfig /renew` on this adapter alone is sent at ADDR_RENEW_S."""
+    t0 = time.monotonic()
+    renewed = ""
+    while time.monotonic() - t0 < ADDR_WAIT_S:
+        got = [a for a in _ipv4(name) if a.startswith(subnet)]
+        if got:
+            return got[0], round(time.monotonic() - t0, 1), renewed
+        if not renewed and time.monotonic() - t0 >= ADDR_RENEW_S:
+            try:
+                subprocess.run(["ipconfig", "/renew", name], capture_output=True, text=True, timeout=40)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            renewed = f"renewed at {ADDR_RENEW_S} s"
+        time.sleep(1.0)
+    return None, round(time.monotonic() - t0, 1), renewed
+
+
+@contextlib.contextmanager
+def _pc_on_ap(bench, problems, ssid, pw, whose):
+    """The PC's chosen WiFi adapter on the access point `ssid` for the block, holding a 192.168.4.x lease from it ->
+    the adapter's name; Skip where that cannot be done here. `whose` names the AP in messages ("W1's"); the SSID is
+    never quoted. Windows side: a temporary profile named HIL-<ssid> on the chosen adapter only, never one of the
+    PC's own profiles, and every netsh call names the adapter - with two adapters an unnamed `netsh wlan connect` is
+    refused (run 20260924-092602 failed that way, and reused the PC's own WCB1 profile on the other adapter). The
+    profile holds the AP's password from the board's chain and is deleted afterwards. netsh's replies are noted with
+    every network name scrubbed; they carry no key. On the way out the adapter goes back to the network it was on, and
+    failing to is added to `problems` (and noted, for when the block raised). No association in 30 s, or no lease in
+    ADDR_WAIT_S, raises after the same cleanup."""
     if os.name != "nt":
         raise Skip("netsh (Windows) drives the PC's WiFi here")
-    w = usb_wcb(bench)
-    _, mode, ssid, pw = _wifi_token(bench.config_tokens(1, refresh=True))
-    if mode != "AP" or not pw or not ssid:
-        raise Skip("W1 does not host a named access point with a password")
-    st = _status(w)
-    if st.get("Interface") != "up" or not st.get("WS endpoint", "").startswith("ws://"):
-        raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
-    ip = st.get("IP address", "")
     adapter, why = _pick_adapter(bench)
     if not adapter:
         raise Skip("this PC has no WiFi adapter" if not why else "bench.json wifi_test_interface names no WiFi adapter here")
     name = adapter["name"]
     prev = adapter.get("profile") if adapter.get("state", "").lower() == "connected" else None
     tmp = f"HIL-{ssid}"
-    bench.note(f"adapter {name} ({why}); it was on {adapter.get('ssid') or '(nothing)'}; temporary profile {tmp} for "
-               f"{ssid} at {ip}")
-    problems = []
+    hide = (tmp, ssid, prev, adapter.get("ssid"))
+    bench.note(f"adapter {name} ({why}); it was {'on a network' if prev else 'on no network'}; a temporary profile "
+               f"for {whose} access point")
     added = False
     fd, path = tempfile.mkstemp(prefix="wlan-", suffix=".xml")
     os.close(fd)
@@ -679,37 +736,24 @@ def pc_joins_ap_ws(bench):
             os.remove(path)
         except OSError:
             pass
-        bench.note("netsh add profile: " + redact_text(" ".join(out.split()))[:200])
+        bench.note("netsh add profile: " + _scrub(redact_text(" ".join(out.split())), *hide)[:200])
         added = "is added" in out
         if not added:
             raise AssertionError("netsh did not add the temporary profile")
         out = _netsh("connect", f"name={tmp}", f"ssid={ssid}", f"interface={name}")
-        bench.note("netsh connect: " + " ".join(out.split())[:200])
+        bench.note("netsh connect: " + _scrub(" ".join(out.split()), *hide)[:200])
         if not _wait(lambda: _joined(name, ssid), 30):
             now = _iface(name) or {}
-            problems.append(f"{name} did not associate with W1's access point within 30 s "
-                            f"(state {now.get('state')!r}, SSID {now.get('ssid')!r})")
-        else:
-            ws = None
-            end = time.monotonic() + 25
-            while ws is None and time.monotonic() < end:          # DHCP, then the endpoint
-                try:
-                    ws = WsClient(ip, timeout=4.0)
-                except OSError:
-                    time.sleep(1.5)
-            if ws is None:
-                problems.append(f"could not open ws://{ip}/ws within 25 s of associating")
-            else:
-                try:
-                    ws.send_text("?VERSION\n")
-                    text = ws.read_until("End of Version", timeout=6)
-                    if "Software Version:" not in text:
-                        problems.append(f"?VERSION over the WebSocket was not answered (got {text[:80]!r})")
-                    ep = _status(w).get("WS endpoint", "")
-                    if not re.search(r"\([1-9]\d* client\(s\) connected\)$", ep):
-                        problems.append(f"W1 counts no WebSocket client while one is open: {ep!r}")
-                finally:
-                    ws.close()
+            on = whose if now.get("ssid") == ssid else ("another" if now.get("ssid") else "none")
+            raise AssertionError(f"{name} did not associate with {whose} access point within 30 s "
+                                 f"(state {now.get('state')!r}, network: {on})")
+        addr, secs, renewed = _address_wait(name)
+        bench.note(f"{name}: " + (f"lease {addr} {secs} s after associating" if addr else f"no lease in {secs} s")
+                   + (f" ({renewed})" if renewed else ""))
+        if not addr:
+            raise AssertionError(f"{name} associated with {whose} access point but got no 192.168.4.x lease in {secs} s "
+                                 f"({renewed or 'no renew'}; it holds {_ipv4(name) or 'no address'})")
+        yield name
     finally:
         try:
             os.remove(path)
@@ -717,14 +761,403 @@ def pc_joins_ap_ws(bench):
             pass
         _netsh("disconnect", f"interface={name}")
         if added:
-            bench.note("netsh delete profile: " + " ".join(_netsh("delete", "profile", f"name={tmp}",
-                                                                  f"interface={name}").split())[:200])
+            out = _netsh("delete", "profile", f"name={tmp}", f"interface={name}")
+            bench.note("netsh delete profile: " + _scrub(" ".join(out.split()), *hide)[:200])
         if prev:
             _netsh("connect", f"name={prev}", f"interface={name}")
             if not _wait(lambda: (_iface(name) or {}).get("state", "").lower() == "connected", 45):
-                problems.append(f"{name} did not reconnect to {prev} within 45 s: reconnect it by hand")
+                problems.append(f"{name} did not reconnect to its previous network within 45 s: reconnect it by hand")
+                bench.note(problems[-1])
+
+
+@contextlib.contextmanager
+def _pc_on_w1_ap(bench, problems):
+    """The PC on W1's access point for the block (_pc_on_ap) -> (w, W1's address, the adapter's name). Skip unless W1
+    hosts a named, password-protected access point that is up with its WebSocket endpoint running."""
+    if os.name != "nt":
+        raise Skip("netsh (Windows) drives the PC's WiFi here")
+    w = usb_wcb(bench)
+    _, mode, ssid, pw = _wifi_token(bench.config_tokens(1, refresh=True))
+    if mode != "AP" or not pw or not ssid:
+        raise Skip("W1 does not host a named access point with a password")
+    st = _status(w)
+    if st.get("Interface") != "up" or not st.get("WS endpoint", "").startswith("ws://"):
+        raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
+    ip = st.get("IP address", "")
+    with _pc_on_ap(bench, problems, ssid, pw, "W1's") as name:
+        yield w, ip, name
+
+
+def _ws_open(ip, wait=15.0):
+    """A WsClient to ws://<ip>/ws, retried for `wait` s (the lease is already held) -> the client, or None."""
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        try:
+            return WsClient(ip, timeout=4.0)
+        except OSError:
+            time.sleep(1.5)
+    return None
+
+
+def _ws_until(ws, pred, timeout):
+    """Read frames into ws.text until pred(ws.text) or the time is up -> pred's last value. A socket the board closed
+    raises ConnectionError (hil/ws.py)."""
+    end = time.monotonic() + timeout
+    while not pred(ws.text) and time.monotonic() < end:
+        ws.read_until("\x00never\x00", timeout=min(0.4, max(0.05, end - time.monotonic())))
+    return pred(ws.text)
+
+
+def _ws_quiet(ws, quiet=1.5, cap=20.0):
+    """Read frames until none has arrived for `quiet` s, or for `cap` s in all."""
+    end = time.monotonic() + cap
+    size, since = len(ws.text), time.monotonic()
+    while time.monotonic() < end and time.monotonic() - since < quiet:
+        ws.read_until("\x00never\x00", timeout=0.3)
+        if len(ws.text) != size:
+            size, since = len(ws.text), time.monotonic()
+
+
+def _ws_client_count(w):
+    m = re.search(r"\((\d+) client\(s\) connected\)$", _status(w).get("WS endpoint", ""))
+    return int(m.group(1)) if m else None
+
+
+def _left_clean(bench, w, problems):
+    """After the PC left: W1 counts no WebSocket client. W1's heap is noted, low-water mark included: with the access
+    point up a classic ESP32 has about 18 KB, and a PC's association and socket traffic take the low-water mark within
+    a few KB of nothing (tracker #111)."""
     time.sleep(2)
-    ep = _status(w).get("WS endpoint", "")
+    st = _status(w)
+    ep = st.get("WS endpoint", "")
+    bench.note(f"W1 after the PC left: free heap {st.get('Free heap')}")
     if not ep.endswith("(0 client(s) connected)"):
         problems.append(f"after the PC left, W1 still counts a client: {ep!r}")
+
+
+@test("wifi.pc_joins_ap_ws", "(attended) A WiFi adapter on the PC joins W1's access point, opens ws://192.168.4.1/ws and has ?VERSION answered over it while W1 counts the client, then returns to the network it was on; the spare adapter is used when there is one, so the PC stays online", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def pc_joins_ap_ws(bench):
+    """WCB_WS.cpp: a text frame per line, the console output teed back as text frames. Read-only on the board. The
+    join and the way back are _pc_on_ap's."""
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        if ws is None:
+            problems.append(f"could not open ws://{ip}/ws with a lease held")
+        else:
+            try:
+                ws.send_text("?VERSION\n")
+                text = ws.read_until("End of Version", timeout=6)
+                if "Software Version:" not in text:
+                    problems.append(f"?VERSION over the WebSocket was not answered (got {text[:80]!r})")
+                if not (_ws_client_count(w) or 0) >= 1:
+                    problems.append("W1 counts no WebSocket client while one is open")
+            finally:
+                ws.close()
+    _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)
+
+
+@test("ws.line_framing", "OPT-IN (wifi_pc): the WebSocket endpoint's line assembly - CR and LF both end a line and two lines in one frame both run, a line split over two frames runs once, a leading space is trimmed, a line over 1535 characters is dropped whole (neither its head nor its tail runs), and a frame over 3072 bytes closes the socket and is counted", needs=["wcb1"], links=["W1S2"], opt_in="wifi_pc")
+def ws_line_framing(bench):
+    """WCB-WP22 row 1 (ws.inbound_line_framing_and_overrun). accFeed (WCB_WS.cpp) ends a line at CR or LF and queues
+    it; a line reaching WS_LINE_MAX - 1 (1535) characters is dropped to its end, never restarted - a restarted tail has
+    no prefix, so it would be a broadcast to every board. wcbWsService trims each line before running it, as the USB
+    reader does. wsHandler reads a frame into a 3072-byte buffer; a longer frame fails the request (httpd closes the
+    socket) and counts, which loop() reports as '[WS] dropped N inbound command(s) - queue full or oversized'. The
+    dropped line is ';S2<marker>' plus filler: W1 S2 would show the marker if the line ran, and W1 S2 or W2 S3 (the
+    ports that take broadcasts here, mesh.frag_origin_rebroadcast) the filler if its tail ran as a broadcast."""
+    s2 = link(bench, 1, "S2")
+    w2s3 = bench.links.get(2, "S3")
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        try:
+            ws.text = ""
+            ws.send_text("?VERSION\r?VERSION\n")
+            if not _ws_until(ws, lambda t: t.count("End of Version") >= 2, 8):
+                problems.append(f"two lines in one frame (CR, then LF): {ws.text.count('End of Version')} answered, not 2")
+            ws.text = ""
+            ws.send_text("?VER")
+            time.sleep(0.3)
+            ws.send_text("SION\n")
+            _ws_until(ws, lambda t: "End of Version" in t, 6)
+            _ws_until(ws, lambda t: False, 1.0)                       # a second answer, had the halves run apart
+            if ws.text.count("End of Version") != 1:
+                problems.append(f"a line split over two frames: {ws.text.count('End of Version')} answers, not 1")
+            ws.text = ""
+            ws.send_text(" ?VERSION\n")
+            if not _ws_until(ws, lambda t: "End of Version" in t, 6):
+                problems.append("a line with a leading space was not run")
+            watch = Watch(s2, w2s3)
+            mk = marker("L")
+            ws.text = ""
+            ws.send_text(f";S2{mk}" + "Q" * 1600 + "\n")
+            time.sleep(1.5)
+            ws.send_text("?VERSION\n")
+            if not _ws_until(ws, lambda t: "End of Version" in t, 6):
+                problems.append("after an over-long line the next line did not run")
+            if mk.encode() in watch.got(s2):
+                problems.append("the over-long line ran (its ;S2 marker reached W1 S2)")
+            for l in (s2, w2s3):
+                if l is not None and b"QQQQ" in watch.got(l):
+                    problems.append(f"the over-long line's tail ran as a broadcast (its filler reached {l.key})")
+            wm = w.dev.mark()
+            closed = False
+            try:
+                ws.send_text("?VERSION" + " " * 3100 + "\n")
+                ws.read_until("\x00never\x00", timeout=3)
+                ws.text = ""
+                ws.send_text("?VERSION\n")
+                closed = "End of Version" not in ws.read_until("End of Version", timeout=3)
+            except (ConnectionError, OSError):
+                closed = True
+            if not closed:
+                problems.append("a 3109-byte frame did not close the socket (a later ?VERSION was still answered)")
+            try:
+                w.dev.expect(r"^\[WS\] dropped \d+ inbound command\(s\)", timeout=4, since=wm)
+            except AssertionError:
+                problems.append("W1 did not report the oversized frame ('[WS] dropped N inbound command(s)')")
+        finally:
+            ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.backup_over_ws", "OPT-IN (wifi_pc): bulk output over the WebSocket arrives whole - ?backup's 'For Configured Boards' chain passes its CRC and equals the one USB prints, every text frame is valid UTF-8 on its own, and ?HELP sent over the socket comes back as every line W1's USB console printed, in order", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_backup_over_ws(bench):
+    """WCB-WP22 row 2 (ws.outbound_tee_integrity). The tee (wcbWsSinkWrite, WCB_WS.cpp) copies console output into a
+    2 KB sink and flushes it inline when full on the loop task; sinkPump cuts each send back to a whole UTF-8
+    character, so a bulk reply goes out in several frames and each must decode on its own. The console and the socket
+    carry the same bytes, so every line USB shows during ?HELP must be in the socket's text in the same order (a line
+    the tee dropped is reported on both as '[WS] dropped N output line(s)', quoted if seen). ?backup's chains carry
+    W1's credentials: only their CRC checks and equality are compared, never shown."""
+    from suites.s05_mesh import _chain_ok, _live_chain
+    problems = []
+    usb_chain = _live_chain([x.rstrip() for x in usb_wcb(bench).run("?backup", timeout=15)], False)
+    if not _chain_ok(usb_chain):
+        raise Skip("W1's own ?backup chain fails its CRC on USB (another task's line inside it?): nothing to compare")
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        try:
+            ws.text, ws.text_frames = "", []
+            ws.send_text("?backup\n")
+            if not _ws_until(ws, lambda t: "End of Backup" in t, 20):
+                problems.append(f"?backup over the WebSocket did not finish ({len(ws.text)} characters in 20 s)")
+            chain = _live_chain([x.rstrip() for x in ws.text.split("\n")], False)
+            if not _chain_ok(chain):
+                problems.append(f"the WebSocket's chain ({len(chain or '')} characters) fails its CRC")
+            elif chain != usb_chain:
+                problems.append(f"the WebSocket's chain differs from USB's ({len(chain)} vs {len(usb_chain)} characters)")
+            backup_frames = len(ws.text_frames)
+            m = w.dev.mark()
+            ws.text = ""
+            ws.send_text("?HELP\n")
+            _ws_quiet(ws)
+            usb = [x.rstrip() for x in w.dev.since(m) if x.strip()]
+            _ws_quiet(ws, quiet=0.8, cap=3)                           # anything the socket still owed
+            got = [x.rstrip() for x in ws.text.split("\n") if x.strip()]
+            k, missing = 0, None
+            for x in usb:
+                while k < len(got) and got[k] != x:
+                    k += 1
+                if k == len(got):
+                    missing = x
+                    break
+                k += 1
+            if missing is not None:
+                drops = [x for x in usb if x.startswith("[WS] dropped")]
+                problems.append(f"?HELP: the socket lacks a console line ({missing[:70]!r}; {len(usb)} console lines, "
+                                f"{len(got)} socket lines{'; W1 said ' + drops[0] if drops else ''})")
+            bad = 0
+            for f in ws.text_frames:
+                try:
+                    f.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    bad += 1
+            if bad:
+                problems.append(f"{bad} of {len(ws.text_frames)} text frame(s) are not valid UTF-8 on their own")
+            bench.note(f"?backup over WS: {backup_frames} frame(s), chain {len(chain or '')} characters; ?HELP: "
+                       f"{len(usb)} console lines, {len(got)} socket lines, {len(ws.text_frames) - backup_frames} frame(s)")
+        finally:
+            ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.client_slots", "OPT-IN (wifi_pc): at most three WebSocket clients - a fourth evicts the least recently used, whose socket closes - each keeps its own line buffer, so a line split over frames on one client never fuses with another's, and a broadcast typed over the socket right after W2 sent W1 a command still reaches the mesh", needs=["wcb1", "wcb2"], links=["W1S2", "W2S3"], opt_in="wifi_pc")
+def ws_client_slots(bench):
+    """WCB-WP22 row 3 (ws.clients_slots_and_source_flags). wcbWsBegin sets max_open_sockets to WS_MAX_CLIENTS (3) with
+    lru_purge_enable, so httpd closes the least recently used session to take a fourth; accFor keeps one accumulator
+    per socket (WCB_WS.cpp), so interleaved partial lines from two clients stay apart. sinkPump sends the console to
+    every client, so each open client sees every answer: two commands, two answers on each. The source flags:
+    wcbWsService clears lastReceivedViaESPNOW and inSequenceBody before it runs a socket's line, as the USB reader
+    does, so a broadcast typed there right after a mesh-received command (;W1;S2 from W2's console) is not taken for a
+    received one and dropped from the mesh: it reaches W2 S3, the port that takes broadcasts on W2."""
+    s2, w2s3 = link(bench, 1, "S2"), link(bench, 2, "S3")
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        clients = []
+        try:
+            for k in range(3):
+                c = _ws_open(ip)
+                assert c is not None, f"client {k + 1} could not open ws://{ip}/ws with a lease held"
+                clients.append(c)
+                c.send_text("?VERSION\n")
+                c.read_until("End of Version", timeout=6)
+            n = _ws_client_count(w)
+            if n != 3:
+                problems.append(f"with three clients open W1 counts {n}")
+            fourth = _ws_open(ip, wait=8)
+            assert fourth is not None, "a fourth client could not connect at all"
+            clients.append(fourth)
+            time.sleep(1.0)
+            first = clients[0]
+            try:
+                _ws_quiet(first, quiet=0.8, cap=4)      # what the others' answers left in its socket
+                alive = marker("E")                      # ;S0 prints it on the console, which the tee sends to all
+                first.text = ""
+                first.send_text(f";S0,{alive}\n")
+                evicted = alive not in first.read_until(alive, timeout=3)
+            except (ConnectionError, OSError):
+                evicted = True
+            if not evicted:
+                problems.append("the first client still answers after a fourth connected: nothing was evicted")
+            n = _ws_client_count(w)
+            if n != 3:
+                problems.append(f"after the fourth connected W1 counts {n}, not 3")
+            a, b = clients[1], clients[2]
+            _ws_until(a, lambda t: False, 0.5)
+            _ws_until(b, lambda t: False, 0.5)
+            a.text, b.text = "", ""
+            a.send_text("?VER")
+            b.send_text("?VERSION\n")
+            time.sleep(0.3)
+            a.send_text("SION\n")
+            for c, who in ((a, "second"), (b, "third")):
+                _ws_until(c, lambda t: t.count("End of Version") >= 2, 6)
+                _ws_until(c, lambda t: False, 0.5)
+                if c.text.count("End of Version") != 2:
+                    problems.append(f"interleaved partial lines: the {who} client saw "
+                                    f"{c.text.count('End of Version')} answers, not 2")
+            with Console(bench, 2) as c2:
+                via, bc = marker("V"), marker("B")
+                watch = Watch(s2, w2s3)
+                c2.send(f";W1;S2{via}")
+                try:
+                    watch.expect(s2, via.encode(), timeout=4)
+                except AssertionError:
+                    problems.append("W2's ;W1;S2 never reached W1 S2: the source-flag arm has no mesh command before it")
+                a.send_text(f"{bc}\n")
+                try:
+                    watch.expect(w2s3, bc.encode(), timeout=5)
+                except AssertionError:
+                    problems.append("a broadcast typed over the socket after a mesh-received command never reached W2 S3")
+        finally:
+            for c in clients:
+                c.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+def _default_routes():
+    """The PC's 0.0.0.0/0 routes as sorted 'InterfaceAlias|NextHop' strings, or None."""
+    out = _ps("Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
+              "ForEach-Object { $_.InterfaceAlias + '|' + $_.NextHop }")
+    return None if out is None else sorted(x.strip() for x in out.splitlines() if x.strip())
+
+
+@test("wifi.ap_dhcp_no_gateway", "OPT-IN (wifi_pc): W1's access point hands the PC an address with no gateway, so the PC's default route stays where it was", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ap_dhcp_no_gateway(bench):
+    """WCB-WP22 row 6 (wifi.ap_dhcp_no_gateway). wcbWifiStartAP (WCB_WiFi.cpp) clears the DHCP server's router option,
+    so a PC on the droid's access point keeps its real internet route. On the adapter the test joined, which holds a
+    192.168.4.x lease by then (_pc_on_ap): no default route, and every other adapter's default routes the same as
+    before the join."""
+    problems = []
+    before_all = _default_routes()
+    with _pc_on_w1_ap(bench, problems) as (w, ip, name):
+        time.sleep(2.0)                                     # the lease's routes settle
+        during = _default_routes()
+        if during is None or before_all is None:
+            problems.append("Get-NetRoute could not be read")
+        else:
+            mine = [r for r in during if r.startswith(name + "|")]
+            if mine:
+                problems.append(f"W1's DHCP gave the adapter a default route: {mine}")
+            others = [r for r in during if not r.startswith(name + "|")]
+            was = [r for r in before_all if not r.startswith(name + "|")]
+            if others != was:
+                problems.append(f"the other adapters' default routes changed while on W1's access point: {was} -> {others}")
+        bench.note(f"default routes on {name} while on W1's access point: "
+                   f"{[r for r in (during or []) if r.startswith(name + '|')] or 'none'}")
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.ota_chunk", "OPT-IN (wifi_pc, and ota_erase for the session): ?OTALOCAL lines work over the WebSocket - a 4096-byte BEGIN, one 1024-byte DATA line (about 1.4 KB, inside the 1535-character line limit) ACKed as [OTA:ACK,1024], then ABORT leaves STATUS idle", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_ota_chunk(bench):
+    """WCB-WP22 row 5 (ota.over_websocket). WS_LINE_MAX (WCB_WS.cpp) is sized for a DATA line: base64 of a 1 KB chunk
+    plus its prefix is about 1,390 characters, and processOtaLocalCommand (WCB_OTA.cpp) ACKs it by offset. The chunk is
+    the head of the image W1 runs (s20's _image), as ota.local_begin_supersede sends over USB. BEGIN erases the head of
+    W1's inactive slot, so this also needs ota_erase; ABORT closes the session with no boot switch, and s20's _local
+    puts W1 back to idle over USB whatever happens."""
+    from suites.s20_ota import _b64, _image, _local
+    if "ota_erase" not in optin.enabled(bench.cfg):
+        raise Skip('opt-in: add "ota_erase" to bench.json "opt_in" as well (a BEGIN erases the head of the inactive '
+                   'app slot)')
+    img = _image(usb_wcb(bench))
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        status = ""
+        with _local(w):
+            try:
+                ota = lambda: [x.strip() for x in ws.text.splitlines() if x.strip().startswith("[OTA")]
+                ws.text = ""
+                ws.send_text("?OTALOCAL,BEGIN,4096,0\n")
+                _ws_until(ws, lambda t: "[OTA:BEGIN," in t, 15)
+                if "[OTA:BEGIN,OK,0]" not in ota():
+                    problems.append(f"BEGIN over the WebSocket: {ota()[:3]}")
+                else:
+                    line = f"?OTALOCAL,DATA,0,{_b64(img[0:1024])}"
+                    ws.text = ""
+                    ws.send_text(line + "\n")
+                    _ws_until(ws, lambda t: "[OTA:ACK," in t or "[OTA:NAK," in t, 10)
+                    if "[OTA:ACK,1024]" not in ota():
+                        problems.append(f"a {len(line)}-character DATA line: {ota()[:3]}")
+                ws.text = ""
+                ws.send_text("?OTALOCAL,ABORT\n")
+                time.sleep(1.0)
+                ws.send_text("?OTALOCAL,STATUS\n")
+                _ws_until(ws, lambda t: "Session:" in t, 6)
+                status = next((x.strip() for x in ws.text.splitlines() if x.startswith("Session:")), "")
+            finally:
+                ws.close()
+        if status != "Session:     idle":
+            problems.append(f"after ABORT over the WebSocket, STATUS reads {status!r}, not 'Session:     idle'")
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+def _pc_reaches_joined_w1(bench, problems, ssid2, pw2, ip1):
+    """WCB-WP22 row 4's second half, run by wifi.join_w2_ap when wifi_pc is ticked as well: the PC joins W2's access
+    point too and opens ws://<W1's joined address>/ws, where ?VERSION is answered - W1's endpoint serves on a JOIN
+    address, reached through W2's access point. A Skip here (not Windows, no adapter) is noted, not raised: the JOIN
+    half has run by then."""
+    try:
+        with _pc_on_ap(bench, problems, ssid2, pw2, "W2's"):
+            ws = _ws_open(ip1)
+            if ws is None:
+                problems.append(f"the PC on W2's access point could not open ws://{ip1}/ws, W1's joined address")
+                return
+            try:
+                ws.send_text("?VERSION\n")
+                if "End of Version" not in ws.read_until("End of Version", timeout=6):
+                    problems.append("?VERSION over W1's endpoint on its joined address was not answered")
+            finally:
+                ws.close()
+    except Skip as e:
+        bench.note(f"the PC half is skipped: {e}")
