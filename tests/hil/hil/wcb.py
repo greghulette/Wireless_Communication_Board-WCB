@@ -408,8 +408,10 @@ class WCB:
         return self.run("?config")
 
     def backup_chain(self):
-        """The 'For Configured Boards' chain from ?backup, CRC-checked."""
-        lines = self.run("?backup", timeout=8)
+        """The 'For Configured Boards' chain from ?backup, CRC-checked. A [TERM:<n>] line is another board's console
+        mirrored here by a ?RTERM session, whose own ?backup header and chain would otherwise be taken for this
+        board's (run 20260929-101257: W2's chain read as W1's, a CRC mismatch on every read until the session ended)."""
+        lines = [t for t in self.run("?backup", timeout=8) if not t.startswith("[TERM:")]
         for i, t in enumerate(lines):
             if "*** === For Configured Boards" in t:
                 for nxt in lines[i + 1:]:

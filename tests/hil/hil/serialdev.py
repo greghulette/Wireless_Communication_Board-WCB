@@ -57,7 +57,15 @@ class SerialDevice:
         return s
 
     def open(self):
+        """Open the port and start the reader. Also reopens a closed device (Bench.dev reuses one after a hand-off):
+        the previous reader must be gone first - two on one port would split its lines - and a partial line from
+        before the close must not prefix the first one after it."""
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise serial.SerialException(f"{self.name}: the previous reader of {self.port} has not stopped")
         self._ser = self._open_port()
+        self._partial = bytearray()
         self._stop = False
         self._thread = threading.Thread(target=self._reader, name=f"rx-{self.name}", daemon=True)
         self._thread.start()

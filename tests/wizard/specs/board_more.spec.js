@@ -96,7 +96,8 @@ test('wizard.push_reboot_path_direct a push that needs a reboot, on a direct con
   const tt = await toasts(page);
   expect(tt).not.toContain('config pull incomplete');
   expect(tt).not.toContain('did not come back');
-  expect(await page.locator(`#b${n}-conn-label`).textContent()).toBe('Connected');
+  // a card shows its connection by its Connect button (updateConnectionUI, app.js); no card has a b<n>-conn-label
+  expect(await page.evaluate((n) => document.getElementById(`b${n}-btn-connect`)?.textContent, n)).toBe('Disconnect');
   await hil.note(`push_reboot_path_direct: re-pulled ${t1 - t0} ms after Push; ` +
                  `${(await linesMatching(page, n, '^Booting up the ')).length} boot banner(s) seen by the page`);
   expect(page.wizErrors).toEqual([]);
@@ -175,7 +176,13 @@ test('wizard.mapping_bidir_relay the mapping editor on W1 with W2 behind it: Sav
   m = await w1s2.mark();
   await w2s4.send(`${a.m2}\r`);
   await w1s2.expect(`${a.m2}\r`, m, 4);
-  await page.evaluate(({ rowId, n }) => removeMappingRow(rowId, n), { rowId, n });
+  // saveMappingRow pulls W1 2 s later (app.js), which renders the mapping cards again under new ids - and a row's bidir
+  // link lives only in the page, so the pulled card has none. Remove the card that shows S2 now, as a person would.
+  await page.waitForFunction((n) => !_boardPullInFlight.has(n), n, { timeout: 15_000 });
+  const liveRow = await page.evaluate((n) => [...document.querySelectorAll(`#b${n}-mappings-container .mapping-card`)]
+    .find((c) => document.getElementById(`${c.id}-src`)?.value === '2')?.id ?? null, n);
+  expect(liveRow).not.toBeNull();
+  await page.evaluate(({ rowId, n }) => removeMappingRow(rowId, n), { rowId: liveRow, n });
   await page.waitForTimeout(1500);
   await hil.note('mapping_bidir_relay: W1 S2 <-> W2 S4 carried both ways; W1\'s side removed through the editor');
   expect(page.wizErrors).toEqual([]);
@@ -257,6 +264,9 @@ test('wizard.wdp_da_forget a device announcing on W2 S4 shows in the W1-connecte
   await connectBoard(page, hilCtx);
   const btn = `.wdp-btn-forget[data-n="${a.target}"][data-s="4"][data-type="${a.name}"]`;
   const refreshShows = async () => { await page.evaluate(() => wdpMeshRefresh()); return page.locator(btn).count(); };
+  // Chrome's open resets W1, whose record of W2's devices is RAM only, and a board hears its neighbours' device lists
+  // after their next advert - up to the 60 s backstop unless asked. The panel's Poll mesh (?WDP,POLL) asks every board.
+  await page.evaluate(() => wdpPollMesh());
   await expect.poll(refreshShows, { timeout: 20_000 }).toBe(1);
   page.on('dialog', (d) => d.accept());     // wdpForgetDevice asks first
   await page.locator(btn).click();
@@ -279,7 +289,8 @@ test('wizard.relay_terminal a remote board\'s terminal pane through W1: ;S2 type
   await type('?VERSION');
   await expect(page.locator(`#term-pane-output-${a.target}`)).toContainText('Software Version:', { timeout: 10_000 });
   await page.evaluate((n) => boardDisconnect(n), n);
-  expect(await page.evaluate((t) => [remoteRelayForBoard[t] ?? null, document.getElementById(`b${t}-conn-label`)?.textContent], a.target))
-    .toEqual([null, 'Not connected']);
+  expect(await page.evaluate((t) => [remoteRelayForBoard[t] ?? null, document.getElementById(`b${t}-status-badge`)?.textContent,
+                                     document.getElementById(`b${t}-btn-connect`)?.textContent], a.target))
+    .toEqual([null, 'Not Connected', 'Connect']);
   expect(page.wizErrors).toEqual([]);
 });

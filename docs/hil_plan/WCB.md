@@ -193,7 +193,7 @@ Add a new `tests/wizard/specs/push_fake.spec.js`. Reuse `setup()` from remote_pu
 send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register it in s30_wizard.py; it also runs in CI
 (wizard-tests.yml). **U, L.**
 
-> **Status 2026-09-29: written, no board.** `tests/wizard/specs/push_more_fake.spec.js` (fakes in
+> **Status 2026-09-29: done, no board (run `20260929-101257`: every spec passes or fails as its `(should)` mark says).** `tests/wizard/specs/push_more_fake.spec.js` (fakes in
 > `tests/wizard/lib/fake.js`): `wizard.push_fake_card_edits` (row 1's cards push_fake.spec.js left out),
 > `wizard.push_fake_relay_reboot` (row 2's reboot, confirm-and-send and optimistic baseline), `wizard.push_fake_reboot_path`
 > (row 3's timing: `?reboot` 1.5 s after the last ACK, the pull 3 s after the reconnect), `wizard.push_fake_all_staged`
@@ -218,7 +218,7 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 ### WCB-WP21: Wizard, Playwright on the bench through the HIL bridge (H/M)
 New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U; row 9 needs one attended setup. L.**
 
-> **Status 2026-09-29: written, not yet run on the bench.** `tests/wizard/specs/board_more.spec.js`, run by s30 as
+> **Status 2026-09-29: done and bench-verified (`20260929-101257`, `-104602`, `-105553`: six pass, and `wizard.mapping_bidir_relay` fails as designed, W1's mapping cleared and W2's reverse left, W-21; the first run's failures were the harness's, fixed: `docs/HIL_TESTING.md` revision log).** `tests/wizard/specs/board_more.spec.js`, run by s30 as
 > `wizard.push_reboot_path` and `wizard.push_reboot_path_direct` (row 1), `wizard.push_all_relay` (row 2),
 > `wizard.mapping_bidir_relay` (row 3, `(should)`: W-21), `wizard.seq_var_editors` (row 4), `wizard.wdp_da_forget` (row 5)
 > and `wizard.relay_terminal` (row 6). Every bench push first checks the verbs it will send (`tests/wizard/lib/wizard.js`
@@ -451,7 +451,7 @@ s24_wled_config.py. **U, M.**
 tests/wizard/unit/*.test.js (`node --test`, also run in CI). parser.js is the only Wizard file exported for node.
 Behaviour that lives in app.js goes to WP41. **U, needs no board, M.**
 
-> **Status 2026-09-29: written.** `tests/wizard/unit/model.test.js` (under `wizard.parser` and CI): row 3 as a walk over
+> **Status 2026-09-29: done** (`wizard.parser`, `20260929-101257`). `tests/wizard/unit/model.test.js` (under `wizard.parser` and CI): row 3 as a walk over
 > every field of the model, so a field added later without a `diffConfigs` line fails it (the six fields have been in
 > `diffConfigs` since W-11); row 4 (the mapping and PWM-output round trip, and that an added or edited mapping re-sends
 > the table while a removed mapping or output port builds nothing - left as found); row 8 (every claim); row 9 (WiFi,
@@ -474,7 +474,7 @@ Behaviour that lives in app.js goes to WP41. **U, needs no board, M.**
 ### WCB-WP41: Wizard, Playwright with no board: app.js logic and panels (M)
 New specs that use page.evaluate plus remote_pull_fake's `setup()`; they run in CI. **U, L.**
 
-> **Status 2026-09-29: written, no board.** `tests/wizard/specs/app_fake.spec.js`, `editors_fake.spec.js` and
+> **Status 2026-09-29: done, no board (`20260929-101257`).** `tests/wizard/specs/app_fake.spec.js`, `editors_fake.spec.js` and
 > `flasher_fake.spec.js`: row 2 `wizard.app_fake_controller`, 3 `_etm_listener`, 4 `_wdp_panel`, 5 `_mesh_tick`, 6
 > `_setup_wizard`, 7 `_partial_ack`, 8 `wizard.flasher_fake_helpers` (a fake esptool served in place of the vendored
 > bundle, `tests/wizard/lib/fake_esptool_wcb.mjs`), 9 `_serial_claims`, `_system_file` and `wizard.editors_fake_mappings`

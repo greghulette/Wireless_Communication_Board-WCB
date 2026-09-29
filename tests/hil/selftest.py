@@ -9052,6 +9052,76 @@ def t_wizard_spec_ids(tmp):
 
 
 TESTS.append(t_wizard_spec_ids)
+
+
+def t_parked_device_reused(tmp):
+    """A device closed for a hand-off comes back from Bench.dev as the same object, reopened, so a wrapper taken before
+    it still works (wizard.mapping_bidir_relay, run 20260929-101257: a stale handle's finally raised 'COM6 is gone');
+    a port still held keeps it parked for the retry; a moved port gets a fresh object. And WCB.backup_chain reads this
+    board's chain past a [TERM:2] copy of another board's ?backup mirrored ahead of it."""
+    from hil import wcb as W
+    made = []
+
+    class FakeDev:
+        busy = False
+
+        def __init__(self, name, port, baud, log=None):
+            self.name, self.port, self.baud, self.opened, self.closed = name, port, baud, 0, False
+            made.append(self)
+
+        def open(self):
+            if FakeDev.busy:
+                raise OSError("Access is denied")
+            self.opened += 1
+            self.closed = False
+            return self
+
+        def close(self):
+            self.closed = True
+
+    old = runner.SerialDevice
+    runner.SerialDevice = FakeDev
+    try:
+        b = tmp.bench()
+        d1 = b.dev("wcb1")
+        b.close_device("wcb1")
+        assert d1.closed and "wcb1" not in b.devs
+        FakeDev.busy = True
+        try:
+            b.dev("wcb1")
+            raise RuntimeError("a held port must raise")
+        except OSError:
+            pass
+        FakeDev.busy = False
+        d2 = b.dev("wcb1")
+        assert d2 is d1 and d1.opened == 2 and not d1.closed and len(made) == 1, (d2 is d1, d1.opened, len(made))
+        b.close_device("wcb1")
+        b.cfg["devices"]["wcb1"]["port"] = "COMFAKE9"
+        d3 = b.dev("wcb1")
+        assert d3 is not d1 and d3.port == "COMFAKE9" and len(made) == 2
+    finally:
+        runner.SerialDevice = old
+
+    def chk(chain):
+        return f"{chain}^?CHK{W.chain_crc(chain)}"
+
+    mine, theirs = "?HW,1^?WCB,1^?LABEL,S3,Teeces", "?HW,1^?WCB,2^?LABEL,S3,AstroPixels"
+
+    class W1(W.WCB):
+        def __init__(self, lines):
+            self._lines = lines
+
+        def run(self, cmd, timeout=None):
+            return list(self._lines)
+
+    relayed = ["[TERM:2]*** === For Configured Boards (Current Delimiter: '^') ===", "[TERM:2]" + chk(theirs)]
+    own = ["*** === For Configured Boards (Current Delimiter: '^') ===", chk(mine), "--------- End of Backup ---------"]
+    tokens, provided, calc = W1(relayed + own).backup_chain()
+    assert provided == calc == W.chain_crc(mine), (provided, calc)
+    assert any("Teeces" in t for t in tokens) and not any("AstroPixels" in t for t in tokens), tokens
+
+
+TESTS.append(t_parked_device_reused)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

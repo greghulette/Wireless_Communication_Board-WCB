@@ -190,6 +190,7 @@ class Bench:
         self.log_sink = log_sink
         self.reload_config()
         self.devs, self.probes, self.cache = {}, {}, {}
+        self._parked = {}          # name -> a SerialDevice close_device() closed, reopened by dev() (see there)
         self.out_dir = None
         self.ckpt = None           # the running run's Checkpoint while continue_run() drives it (hil/nc_guard.py)
         self._log = None
@@ -288,9 +289,24 @@ class Bench:
         return [primary] + others + mesh
 
     def dev(self, name):
+        """The open SerialDevice for `name`. One closed by close_device() - a Wizard test handing its port to Chrome,
+        a pause - comes back as the SAME object, reopened, so a wrapper a test took before the hand-off
+        (WCB(bench.dev("wcb1")), usb_wcb) still works after it, and marks taken on it stay valid: its log carries on.
+        A fresh object left the old one closed, and a test's finally raised 'COM6 is gone' through it, hiding the
+        result and skipping the ?RTERM,STOP after it (wizard.mapping_bidir_relay, run 20260929-101257). A device
+        whose port or baud changed meanwhile is opened fresh."""
         if name not in self.devs:
             d = self.cfg["devices"][name]
-            self.devs[name] = SerialDevice(name, d["port"], self.BAUD[d["kind"]], log=self.log).open()
+            baud = self.BAUD[d["kind"]]
+            parked = self._parked.pop(name, None)
+            if parked is not None and parked.port == d["port"] and parked.baud == baud:
+                try:
+                    self.devs[name] = parked.open()
+                except Exception:
+                    self._parked[name] = parked        # still held (Chrome exiting): the caller retries
+                    raise
+            else:
+                self.devs[name] = SerialDevice(name, d["port"], baud, log=self.log).open()
             time.sleep(0.2)
         return self.devs[name]
 
@@ -318,6 +334,7 @@ class Bench:
         dev = self.devs.pop(name, None)
         if dev:
             dev.close()
+            self._parked[name] = dev
 
     def close_ports(self, release=True):
         """Close every device, and no reader thread is left reopening a COM name that may belong to another board

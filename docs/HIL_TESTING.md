@@ -321,7 +321,9 @@ with the recent lines attached), and skips by raising `Skip`.
 - **Another board's console.** `Console(bench, n)` is that board's own USB port when it has one,
   and an `?RTERM` session through `wcb1` otherwise. `send()` returns the mark; `expect()` and
   `lines()` drop the `[TERM:n]` prefix. Prefer it to `remote_terminal`: RTERM splits lines at
-  160 bytes and drops empty ones.
+  160 bytes and drops empty ones. A session nobody stops goes on for good (it has no lease): a board's own
+  `?backup` is read past `[TERM:<n>]` lines (`WCB.backup_chain`), and a test that starts one stops it in its
+  `finally`.
 - **Pulses and line levels.** `l.pwm_in()`, `l.pwm_out(us)`, `l.pulses(mark)`, `l.line_level()`
   and `l.pwm_stop()` use the header pins directly, so they release the wire's serial channel; the
   next `listen()` or `send()` re-binds it.
@@ -720,6 +722,18 @@ the bench lacks its wiring).
 | `intellex.wiki_code_verbatim` | A `[[wiki link]]` inside a code block or inline code is shown as written | — (finding 15) |
 | `intellex.ui_wizard_setup_images` | Every `../Images` file the Wizard references is bundled by Intellex, and the guided setup's identity and Maestro steps show their pictures | — (finding 2) |
 | `intellex.ui_latest_fw_version` | After the host flashes a WCB, the Wizard's own `latestFirmwareVersion` names the build written | — (finding 1) |
+| `wizard.app_fake_pending_funcchar` | A function identifier typed into General but not yet pushed is not used for the board's immediate commands (no board) | — (WCB.md W-13) |
+| `wizard.push_fake_shared_reboot_repull` | A push that reboots a board on the shared port pulls it again afterwards, as a USB push does (no board) | — (WCB.md W-14) |
+| `wizard.push_fake_all_shared_relay` | Push All with the relay on the shared port reboots it without reporting it lost, and its card stays connected (no board) | — (WCB.md W-15) |
+| `wizard.push_fake_general_wcbq` | A second board whose WCB quantity differs is named in the keep/use modal, like every other General field every push writes (no board) | — (WCB.md W-16) |
+| `wizard.app_fake_system_file_reload` | A saved system file loads back as it was saved: its WCB quantity, no board it did not hold, a board above the floor whole (no board) | — (WCB.md W-17) |
+| `wizard.parser` (`unit/model.test.js` todo) | parseSystemFile keeps the WCB quantity a file was saved with when it holds a board above it or a client slot (noted, not failed) | — (WCB.md W-17) |
+| `wizard.app_fake_wcb_number_above_floor` | A board above the WCB quantity can be renumbered to any number its dropdown offers (no board) | — (WCB.md W-18) |
+| `wizard.app_fake_pull_leaves_nothing_pending` | Pulling a board leaves nothing pending in General: no 'push to all boards' toast, Push All not flagged (no board) | — (WCB.md W-19) |
+| `wizard.push_fake_kyber_own_maestro` | A local-Kyber board with a Maestro of its own and one on another board, pulled and pushed with no edit, sends nothing (no board) | — (WCB.md W-20) |
+| `wizard.parser` (`unit/model.test.js` todo) | The same Kyber targets in another order are not a change (noted, not failed) | — (WCB.md W-20) |
+| `wizard.editors_fake_bidir_remove` | Removing a bidirectional serial mapping also clears its mirror on the destination board (no board) | — (WCB.md W-21) |
+| `wizard.mapping_bidir_relay` | On the bench: Remove on W1 clears W2's reverse mapping too (the harness clears what is left) | — (WCB.md W-21) |
 
 ### Constraints the bench runs established
 
@@ -737,6 +751,7 @@ and each left a rule that is easy to break again. Later runs' finds are fix-trac
 | On a classic ESP32, S3–S5 RX and PWM inputs run on **level** interrupts that the ISR flips after every edge. ESP32 erratum GPIO-3.14 loses an edge interrupt on GPIO0–31 while the GPIO ISR handles another pin: W1 lost 2.2 % of lines when two or three soft ports received together (tracker #78). Below ~74880 baud no edge-triggered `attachInterrupt` goes on those pins. The one exception is a soft port at 115200, which keeps `rxBitSyncISR` on a FALLING edge (RISING if inverted) on both chips. That ISR busy-waits a frame, so a level trigger would re-fire forever on a line held low. The port stays exposed to GPIO-3.14 and can steal the other pins' edges; `?BAUD` warns that 115200 soft input is unreliable. The pins are reconfigured only from core 1, because the ISR rewrites the pin's interrupt type without the IDF spinlock. The ESP32-S3 keeps edges. | vendored `src/EspSoftwareSerial/SoftwareSerial.cpp:577` (`rxBitISR`), `:191-198` (level arm), `:208` (115200 FALLING exception); `WCB_PWM.cpp:120` (`pwmEdge`), `:187`; CLAUDE.md rule 13 | `softrx.erratum_pairs`, `softrx.level_irq_stuck_line`, `input.softserial_tx_rmt` |
 | A CPU-only reset (`ESP.restart()` from `?reboot`, OTA or a deferred restart, or a panic) keeps each pin's interrupt type and enable. A level arm that survives it, with no handler after the boot, re-fires as soon as the GPIO ISR service is installed, and the interrupt watchdog panics - a CPU reset again, so it loops until the line changes level. Arduino's `pinMode` re-enables it on its own (it copies the pin's current `int_type`). So `setup()` disarms every GPIO before `gpio_install_isr_service`; the probe does the same for its header pins. wcb_probe 6 hit this (full run `20260923-154611`, tracker #78). | `WCB.ino:8349` (`clearStaleGpioInterrupts`), `:8400`; `probe_main.cpp:95` (`disarmPinIrq`), `:1107`, `MESH LEAVE` `:1043` | No test reproduces it on a WCB; bench check in tracker #78. The harness fails a test when a probe restarts unplanned (table above). |
 | `boardTable[].online` / `.lastSeenMs` are written by the ESP-NOW receive callback (WiFi task, core 0) and swept by `processETMHeartbeats` (loop, core 1). Every read-modify-write holds `boardTableMux` through the `board*` helpers, with `millis()` read before the lock and prints after it. Unlocked, a peer coming back was logged OFFLINE the moment it arrived and left offline until its next packet; merely reordering the stores leaves a lost update and an unsigned wrap. | `WCB.ino:513` (`boardTableMux` + helpers), `:4519` (callback), `:1249`, `:1258` (sweeps) | `etm.offline_detection_timing` (tracker #80) |
+| A board relearns its neighbours' WDP-DA device lists only from their next advert: the 60 s backstop, unless something asks (`?WDP,POLL`, the Wizard's Poll mesh). The lists it held are RAM only, and Chrome's open resets W1, so right after a Wizard connects its mesh panel shows no remote devices. | `WCB_WDP.cpp` `wdpSendSolicit` (only `?WDP,POLL` sends one); `docs/WDP_DESIGN.md` Cadence | `wizard.wdp_da_forget` presses Poll mesh before it looks. |
 
 ### Documentation that disagrees with the code
 
@@ -816,7 +831,7 @@ third WCB, an ESP32-S3 WCB, a light sensor on the status LEDs, fault injection).
 - **Factory defaults**: only an erased board shows them, so they are checked by the attended `nvs.*` tests. The boot
   banner and each subsystem's NVS restore are tested (`boot.*` and the `*_reboot` tests).
 
-The Wizard UI is covered by the twenty `wizard.*` tests (§8) and the parser unit tests. In Kyber, only what the bench cannot reach is untested: a real Kyber brain, and the WDP
+The Wizard UI is covered by the 71 `wizard.*` tests (§8; twelve need a board) and the parser unit tests. In Kyber, only what the bench cannot reach is untested: a real Kyber brain, and the WDP
 Kyber-local ruleset, since NaviCore's controller rule is evaluated first (`WCB_WDP.cpp:475-480`).
 
 ## 8. Wizard tests (`tests/wizard`)
@@ -830,7 +845,9 @@ page. `run_wizard_test()` (`hil/wizard.py`):
 2. serves a `Bridge` (`hil/bridge.py`) on a free localhost port and passes its URL as `HIL_BRIDGE`;
 3. runs `node …/@playwright/test/cli.js test --grep <id>` in `tests/wizard`, logging its output to `session.log` as
    `wizard`, with a 300 s watchdog that kills the whole process tree (a surviving Chrome would keep the port);
-4. takes the port back and waits for `?VERSION` (Chrome's open/close can reset the board);
+4. takes the port back and waits for `?VERSION` (Chrome's open/close can reset the board). The device comes
+   back as the same object (`Bench.dev` reopens the one `close_device` parked), so a `WCB` wrapper the harness
+   test took before the hand-off still works after it;
 5. turns the Playwright JSON report into PASS / FAIL / SKIP.
 
 While Chrome holds the board, the browser test reaches the rest of the bench through the bridge: `/wire/mark`,
@@ -862,20 +879,25 @@ must ignore a mapping row's UI-only `bidir` key and a Maestro table's key order,
 a push changes the command characters in: checked against a model of the firmware's `delimCharOk`/`prefixCharOk` for
 every combination of seven characters, including every refusal's two-push advice (`docs/hil_plan/WCB.md` §3,
 W-1 to W-11).
+`unit/model.test.js` walks the rest of the model a push writes (WCB-WP40): `diffConfigs` must report a change to every field a push writes, serial and PWM mappings round-trip (an added or edited mapping re-sends the whole table; a removed one builds nothing, because no push clears a mapping), `evaluatePortClaims` for each device, mapping and Kyber mode, WiFi JOIN/AP/OFF (fake SSIDs only), the WDP OFF forms, and Kyber local. Two `todo` tests pin the parser halves of W-17 and W-20.
 Note `kyber.targets` (Maestros on other boards) is derived — the Wizard recomputes it from every connected board at
 push time — so the round-trip comparisons leave it out.
 
-**CI.** `.github/workflows/wizard-tests.yml` runs the unit tests and every no-board spec (`wizard.smoke`, the Kyber specs, the eleven `wizard.remote_pull_fake_*` pulls against a fake relay in the page, and the ten `wizard.push_fake_*` pushes through fake connections: a pulled card pushed unedited sends nothing, one edit sends only itself and an edit taken back sends nothing, the command characters change in an order the board takes, the reboot and network-group checks read each command, the relay size cap comes before any confirm or send) on every push touching
+**CI.** `.github/workflows/wizard-tests.yml` runs the unit tests and every no-board spec (`wizard.smoke`, the Kyber specs, the eleven `wizard.remote_pull_fake_*` pulls against a fake relay in the page, and the ten `wizard.push_fake_*` pushes through fake connections: a pulled card pushed unedited sends nothing, one edit sends only itself and an edit taken back sends nothing, the command characters change in an order the board takes, the reboot and network-group checks read each command, the relay size cap comes before any confirm or send), and the fake-board specs below (`push_more_fake`, `app_fake`, `editors_fake`, `flasher_fake`) on every push touching
 `Wizard/**` or `tests/wizard/**`. It is deliberately separate from `build.yml` and filtered to those paths, so a
 Wizard change never rebuilds firmware or publishes binaries (CLAUDE.md rule 9). The board tests need hardware and
 never run there; they skip themselves without `HIL_BRIDGE`. The page is served by `tests/wizard/serve.js`, Node's
 own http server, so a runner with no `python` on PATH behaves the same as this PC. `suites/s30_wizard.py` registers
-every no-board spec too (`_FAKE_PULL`, `_FAKE_PUSH`), so a full run includes them and each runs by id.
+every no-board spec too (`_FAKE_PULL`, `_FAKE_PUSH`, `_FAKE_MORE`), so a full run includes them and each runs by id.
 The names Intellex's shim reaches into the Wizard for (INTELLEX.md §1.5) are pinned by `intellex.ui_contract_wizard` (this repo's `Wizard/`) and `intellex.ui_contract_wizard_shipped` (Intellex's bundle): a Wizard change that breaks Intellex fails there, with no board.
+
+**Fake boards in the page** (WCB-WP20, WP41). `tests/wizard/lib/fake.js` replaces a slot's `BoardConnection` I/O (`send`, `sendAndAwaitIdle`, `sendAndCollect`, `closeForReconnect`, `reconnect`) with scripted replies (a `?backup`, ACKs, lines per command) and records every write under the slot the connection ends in, so the Wizard's own `boardPull`, `boardGo`, `boardGoAll`, editors and panels run unmodified. `install()` wraps `showToast`, answers `confirm()` yes and parks the WDP mesh connection until `meshOn()`. A shared fake keeps the class's real close/reconnect, which return false for a portless shared connection. `lib/fake_esptool_wcb.mjs` stands in for `vendor/esptool-js` (`page.route`) for the flasher's decisions. A `(should)` spec is `test.fail(true, '<W-row>')`: CI stays green while the defect is there, the harness reports FAIL, and CI turns red the day a fix lands, when the mark comes off. `selftest.py`'s `t_wizard_spec_ids` fails on a spec title not registered in s30, an s30 id with no spec, a duplicate, or a `test.fail` spec whose title lacks `(should)`.
+
+**The push side on the bench** (WCB-WP21, `specs/board_more.spec.js`). Before any push a spec calls `plannedVerbs(page, n)` (`lib/wizard.js`): it runs what `boardGo` runs before building (the sync functions, `autoComputeKyberTargets`, the General fields) on a copy and returns only the verbs the push would send, and the test stops on anything it did not mean to change (`wizard.push_fake_planned_verbs` checks it against real pushes). A reboot is forced with `?HW` and the board's own version, which must reboot and changes nothing (a WCBQ edit reboots nothing, D28). `connectBoardDirect` connects without the shared hub, for the paths that close and reopen the port; `manageRemote` pulls a board through the connected one; `recordLines`, `linesMatching` and `lineMark` keep board lines in the page and return only those matching the test's pattern.
 
 **Setup and running.** Once: `cd tests/wizard && npm install && npx playwright install chromium`. Then run
 `python tests/hil/run.py "wizard.*"` or pick them in the GUI. Chrome runs headed; `WIZ_HEADLESS=1` tries headless,
-which is untested with Web Serial. `npx playwright test` in `tests/wizard` runs standalone: the no-board specs run (`wizard.smoke`, the Kyber specs, `wizard.remote_pull_fake_*`), and
+which is untested with Web Serial. `npx playwright test` in `tests/wizard` runs standalone: the no-board specs run (`wizard.smoke`, the Kyber specs, `wizard.remote_pull_fake_*`, `wizard.push_fake_*`, `wizard.pull_fake_*`, `wizard.app_fake_*`, `wizard.editors_fake_*`, `wizard.flasher_fake_*`), and
 the board tests skip. The page is served from the repo root on `http://127.0.0.1:8778` by `serve.js`, because the Wizard
 loads `../Images/`. Never change that origin: grants are per origin, so every profile would need authorizing again.
 
@@ -1225,6 +1247,7 @@ only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | **Wizard tests WCB-WP20/21/40/41 (§8, `hil_plan/WCB.md`), bench-verified (`20260929-101257`, `-104602`, `-105553`).** No board: `specs/push_more_fake.spec.js`, `app_fake.spec.js`, `editors_fake.spec.js`, `flasher_fake.spec.js` (33 `wizard.*` ids, `_FAKE_MORE` in `s30_wizard.py`) on `lib/fake.js` and `lib/fake_esptool_wcb.mjs`; `unit/model.test.js` (nine tests, two `todo`). Bench: `specs/board_more.spec.js` with `wizard.push_reboot_path`, `push_reboot_path_direct`, `push_all_relay`, `mapping_bidir_relay`, `seq_var_editors`, `wdp_da_forget`, `relay_terminal`; each push checks its verbs first (`plannedVerbs` in `lib/wizard.js`, with `connectBoardDirect`, `manageRemote`, `recordLines`). Nine Wizard defects, W-13 to W-21, not fixed: twelve `(should)` rows in §6 (nine `test.fail` specs, two node `todo`s, `wizard.mapping_bidir_relay`). `selftest.py` gains `t_wizard_spec_ids`. 71 `wizard.*` tests: 61 pass, the ten `(should)` ones fail as designed. The bench found four harness faults, fixed: a device handed to Chrome came back as a new object, so a wrapper taken before the hand-off raised 'COM6 is gone' in a `finally` and skipped its `?RTERM,STOP`; the `?RTERM` session left running put W2's `?backup` on W1's console, read as W1's own (a CRC mismatch); two specs waited on a `b<n>-conn-label` no card has; the mapping spec removed a row the post-save pull had rendered again, and the device-list spec looked before W1, reset by Chrome's open, had heard W2's list (it now presses Poll mesh). `selftest.py` gains `t_parked_device_reused`. |
 | 2026-09-29 | _(pending)_ | WCB-WP22 finished: `ws.line_framing`, `ws.backup_over_ws`, `ws.client_slots`, `ws.ota_chunk`, `wifi.ap_dhcp_no_gateway`, and `wifi.join_w2_ap`'s ready line and PC half (§7's `wifi.*` row). `_pc_on_ap` waits for the lease and scrubs network names from its notes; `hil/ws.py` keeps each text frame's bytes (`text_frames`). |
 | 2026-09-29 | `7f80b87` | WCB-WP24 finished: `etm.char_relay_roundtrip`, `etm.char_per_board_clamp`, `etm.char_guard_wcbq` (§7's `etm.*` row). |
 | 2026-09-29 | `66e9d15` | WCB-WP34 finished: `wcb.cmd.legacy_wcb_wcbq_spellings` (the legacy no-comma `?WCBQ<n>` and `?WCB<n>`). |
