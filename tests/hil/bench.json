@@ -89,7 +89,8 @@
     "navicore_nvs",
     "intellex_reboot",
     "intellex_nc_save",
-    "navicore_wifi"
+    "navicore_wifi",
+    "navicore_clip_write"
   ],
   "navicore_repo": "C:/Users/ghulette/.claude-worktrees/NaviCore/hil-week"
 }

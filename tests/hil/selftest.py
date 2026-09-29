@@ -2201,6 +2201,10 @@ GATED = {
                                              "and one test rewrites its bootloader, partition table and app and erases "
                                              "its NVS with esptool-js; attended only")
        for n in ("webserial_connect_reset", "webserial_flash_same_image")},
+    # NC-WP12 (suites/s48_navicore_rec.py), 2026-09-29: every test that writes a clip file
+    **{f"ncrec.{n}": ("navicore_clip_write", "writes and removes HIL* clips on NaviCore's clips partition")
+       for n in ("record_save_list_rm", "stop_semantics", "play_timing_markers", "replay_interpolation_remote",
+                 "backstop_60s")},
 }
 
 
@@ -9662,6 +9666,682 @@ def t_ncdev_mutations(tmp):
         assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
 
 
+# ---------------------------------------------------------------------------- NC-WP12: NaviCore's recorder (s48)
+REC_EV_BYTES, REC_V1_BYTES, REC_HDR_BYTES = 140, 136, 16
+
+
+class NaviRecModel(NaviModel):
+    """NaviModel plus NaviCore's recorder, ported from the hil-week tree (6925773) s48 was written against: the state
+    machine and the one buffer (navicore_record.h: startRecord/stopRecord/stop/clearClip :292-328, pollControl
+    :1025-1067 with _takeName's latched name :1005-1009, the 60 s backstop :1012-1021), the capture tap in
+    rcExecuteActionNow (NaviCore.ino:2052; the record/play/stop controls left out, :260), the gates (rcExecuteAction's
+    calibration and replay gates :2135-2147, checkPendingActions' :2202-2220, TEST_ACTION past both :2155-2168), the
+    ?REC verbs (:3456-3608) with EDITLOAD's residency check, ranged and legacy streams (editStream :731-879), the
+    indexed upload (:883-950), the clip files (saveClip, loadClip with the 136-byte migration, renameClip's refusal,
+    listClips), CALIB dropping a take (NaviCore.ino:3995-4010), and the replay: events fired at their tMs from a loop
+    thread (replayTick :472-495), the curve follower's reset, anchor and linear interpolation (_buildCurveIndex :365-399
+    with every known channel active, D-NC64; _updateCurves :425-456). Remote Maestro frames go to the W1 S1 DevLink,
+    W1 S2 markers to the W1 S2 one, each stamped with the host clock as the probe's. Greg's clips are protected: a test
+    that saves over, renames, deletes or plays one fails the selftest outright. `mut` breaks the model in one way, or
+    applies a D-NC fix, by name (NCREC_MUTATIONS)."""
+    FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if "REC" not in rx.pattern) + (re.compile(r"^\?REC,START", re.I),)
+    CAP = 24000
+    LINKS = ("W1S1", "W1S2")
+    PENDING_SLOTS = 8
+    GREG = {"rec_3": (1, REC_V1_BYTES, [{"t": 0, "k": 1, "slot": 1, "ch": 0, "pos": 6000},
+                                        {"t": 50, "k": 1, "slot": 1, "ch": 0, "pos": 6100},
+                                        {"t": 120, "k": 0, "type": "wcb_unicast", "target": "2", "cmd": ";S2x"},
+                                        {"t": 300, "k": 2, "chan": 1, "vol": 40},
+                                        {"t": 480, "k": 1, "slot": 2, "ch": 0, "pos": 5000}]),
+            "long": (2, REC_V1_BYTES, [{"t": 10 * i, "k": 1, "slot": 1, "ch": 2, "pos": 5000 + i} for i in range(9)]),
+            "rec_7": (1, REC_EV_BYTES, [{"t": 0, "k": 0, "type": "maestro", "target": "1", "cmd": "goHome"},
+                                        {"t": 200, "k": 1, "slot": 1, "ch": 3, "pos": 7000},
+                                        {"t": 3267, "k": 0, "type": "wcb_broadcast", "cmd": ";S3y"}])}
+
+    def __init__(self, mut=(), cap_ms=60000):
+        self.mut = set(mut)
+        self.lock = threading.RLock()
+        super().__init__()
+        self.cap_ms = cap_ms
+        self.links = {k: DevLink(k) for k in self.LINKS}
+        self.files = {n: {"mode": m, "stride": s, "events": [dict(e) for e in evs]} for n, (m, s, evs) in self.GREG.items()}
+        self.state, self.buf, self.capturing, self.rec_start, self.record_name, self.rmode = "idle", [], False, 0.0, "", 1
+        self.loaded_name, self.loaded_fc = "", 0
+        self.p_ctl, self.p_name, self.p_mode, self.p_loop = None, "", 1, False
+        self.replay_start, self.cursor, self.loop_play, self.curves = 0.0, 0, False, {}
+        self.last_pos, self.spd, self.acc, self.pend = {}, {}, {}, []
+        self.alive = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    # ------------------------------------------------------------ the console, under the loop's lock
+    def script(self, text, n):
+        with self.lock:
+            return super().script(text, n)
+
+    def _loop(self):
+        """loop()'s recorder calls (NaviCore.ino:5479-5490) and checkPendingActions (:5519), every 2 ms."""
+        while self.alive:
+            with self.lock:
+                out = self._tick()
+            if out and self.nav is not None:
+                self.nav._append(*out)
+            time.sleep(0.002)
+
+    def _tick(self):
+        out = self.poll_control()
+        if self.state == "RECORDING" and self.ms(self.rec_start) > self.cap_ms and "no_backstop" not in self.mut:
+            self.capturing, self.state = False, "idle"
+            nm = self.take_name()
+            if self.save_clip(nm, out):
+                out.append(f"[REC] capped at {self.cap_ms // 1000}s — saved clip '{nm}'")
+        out += self.replay_tick()
+        now = time.monotonic()
+        for item in [p for p in self.pend if p[0] <= now]:
+            self.pend.remove(item)
+            a = item[1]
+            ctl = a["type"] in ("record", "play", "stop")
+            if not self.calib and (self.state != "REPLAYING" or ctl or "replay_ungated" in self.mut):
+                out += self.dispatch(a)
+        return out
+
+    @staticmethod
+    def ms(t0):
+        return int((time.monotonic() - t0) * 1000)
+
+    # ------------------------------------------------------------ dispatch
+    def dispatch(self, a):
+        """rcExecuteActionNow (NaviCore.ino:2047-2131): the capture tap, then the effect."""
+        if self.capturing and (a["type"] not in ("record", "play", "stop") or "capture_meta" in self.mut):
+            ev = dict(self.action_to(a))
+            if "delay_zero" in self.mut:
+                ev.pop("delay", None)
+            ev.update(t=self.ms(self.rec_start), k=0)
+            self.buf.append(ev)
+        out = super().dispatch(a)
+        t = a["type"]
+        if t == "wcb_unicast" and a["target"] == "1" and a["cmd"][:3].upper() == ";S2":
+            self.links["W1S2"].write((a["cmd"][3:] + "\r").encode())
+        elif t == "maestro":
+            out += self.maestro_cmd(int(a["target"]) if a["target"].isdigit() else 0, a["cmd"])
+        elif t == "record":
+            self.p_mode, self.p_name, self.p_ctl = self.mode, a["cmd"], "rec"
+        elif t == "play":
+            if a["cmd"] in self.GREG:
+                raise AssertionError(f"a test played clip {a['cmd']}")
+            self.p_loop, self.p_name, self.p_ctl = a["fn"] != 0, a["cmd"], "play"
+        elif t == "stop":
+            self.p_ctl = "stop"
+        return out
+
+    def execute(self, a):
+        """rcExecuteAction (NaviCore.ino:2135-2147): the calibration gate, the replay gate, the delay."""
+        if self.calib:
+            return []
+        if self.state == "REPLAYING" and a["type"] not in ("record", "play", "stop") and "replay_ungated" not in self.mut:
+            return []
+        if a["delay"] > 0:
+            if len(self.pend) < self.PENDING_SLOTS:
+                self.pend.append((time.monotonic() + a["delay"] / 1000, a))
+                return []
+            return [f"WARN: pendingActions full ({self.PENDING_SLOTS} slots) — firing now, delay dropped"] + \
+                self.dispatch(a)
+        return self.dispatch(a)
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        t = obj.get("type") if isinstance(obj, dict) and isinstance(obj.get("type"), str) else ""
+        if t == "TRIGGER" and not err:
+            mode, btn, tap = _nm_pick(obj, "mode", 1), _nm_pick(obj, "btn", 0), _nm_pick(obj, "tap", 1)
+            if not (1 <= btn <= 36 and 1 <= mode <= 3 and 1 <= tap <= 4):
+                return ['{"type":"ACK","ok":false,"msg":"bad mode/btn/tap"}']
+            out = [f"[TRIGGER] mode={mode} btn={btn} tap={tap}", self.rc_trig(mode, btn, tap)]
+            m = self.c["mappings"].get(f"{mode * 100 + btn}")
+            if m:
+                tiers = [tap - 1] if m["exclusive"] or tap == 4 else range(tap)
+                for ti in tiers:
+                    for a in m["t"][ti][0]:
+                        out += self.execute(a)
+            return out + ['{"type":"ACK","ok":true}']
+        if t == "CALIB" and not err:
+            on, out = _nm_pick(obj, "on", False), []
+            if on and not self.calib and self.state == "RECORDING":
+                self.stop_record()
+                if "calib_saves" in self.mut:
+                    self.save_clip(self.take_name(), out)
+                else:
+                    out.append("[REC] recording dropped — calibration started (not saved)")
+            self.calib = on
+            return out + [f"[CALIB] action dispatch {'SUPPRESSED (calibrating)' if on else 'resumed'}",
+                          '{"type":"ACK","ok":true}']
+        return super().json_line(line)
+
+    # ------------------------------------------------------------ the Maestro stream (remote slots to W1 S1)
+    def mwrite(self, slot, cmd, payload):
+        if not 1 <= slot <= 8:
+            return
+        m = self.c["maestros"][slot - 1]
+        if m["type"] == 2:
+            self.links["W1S1"].write(bytes([0xAA, m["device"], cmd]) + bytes(payload))
+
+    def set_target(self, slot, ch, pos):
+        if not 1 <= slot <= 8 or ch > 31:
+            return []
+        pos = min(pos, 16383)
+        self.mwrite(slot, 0x04, [ch, pos & 0x7F, pos >> 7 & 0x7F])
+        if pos == 0:
+            self.last_pos.pop((slot, ch), None)
+            if self.state == "REPLAYING" and (slot, ch) in self.curves:
+                self.curves[(slot, ch)]["reanchor"] = True
+        else:
+            self.last_pos[(slot, ch)] = pos
+        return []
+
+    def set_speed(self, slot, ch, v):
+        self.mwrite(slot, 0x07, [ch, v & 0x7F, v >> 7 & 0x7F])
+        self.spd[(slot, ch)] = v
+        return []
+
+    def set_accel(self, slot, ch, v):
+        self.mwrite(slot, 0x09, [ch, v & 0x7F, v >> 7 & 0x7F])
+        self.acc[(slot, ch)] = v
+        return []
+
+    def maestro_cmd(self, slot, cmd):
+        p = cmd.split(",")
+        nums = [_nm_toint(x) for x in p[1:]]
+        verbs = {"setTarget": self.set_target, "setSpeed": self.set_speed, "setAccel": self.set_accel}
+        if p[0] in verbs and len(nums) == 2:
+            return verbs[p[0]](slot, nums[0], nums[1])
+        return []
+
+    # ------------------------------------------------------------ the recorder
+    def take_name(self):
+        if "name_from_pending" in self.mut:
+            return self.p_name
+        if self.record_name:
+            return self.record_name
+        i = 1
+        while f"rec_{i}" in self.files:
+            i += 1
+        return f"rec_{i}"
+
+    @staticmethod
+    def clean(name):
+        s = "".join(c for c in (name or "") if c.isalnum() and c.isascii() or c in "_-")[:32]
+        return s or None
+
+    def start_record(self, mode):
+        if self.state != "idle":
+            return False
+        self.record_name, self.rmode, self.buf, self.loaded_name, self.loaded_fc = "", mode, [], "", 0
+        self.rec_start, self.state, self.capturing = time.monotonic(), "RECORDING", True
+        return True
+
+    def stop_record(self):
+        if self.state == "RECORDING":
+            self.capturing, self.state = False, "idle"
+
+    def stop(self):
+        if self.state == "EDITING":
+            return "EDITING"
+        was, self.capturing, self.state = self.state, False, "idle"
+        return was
+
+    def save_clip(self, name, out):
+        if self.state != "idle":
+            out.append(f"[REC] save aborted: recorder busy (state={self.state})")
+            return False
+        if not self.buf:
+            out.append("[REC] save aborted: clip is empty")
+            return False
+        c = self.clean(name)
+        if not c:
+            out.append(f"[REC] save aborted: bad clip name '{name}'")
+            return False
+        if c in self.GREG:
+            raise AssertionError(f"a test saved over clip {c}")
+        self.files[c] = {"mode": self.rmode, "stride": REC_EV_BYTES, "events": [dict(e) for e in self.buf]}
+        return True
+
+    def load_clip(self, name, out):
+        if self.state != "idle":
+            return False
+        self.loaded_name, self.loaded_fc = "", 0
+        c = self.clean(name)
+        if not c or c not in self.files:
+            return False
+        f = self.files[c]
+        evs = [dict(e) for e in f["events"]]
+        if f["stride"] == REC_V1_BYTES:
+            if "v1_wrong_stride" in self.mut:                 # read at 140: short, each record from its neighbours
+                evs = [dict(e, t=e["t"] + 7) for e in evs[:len(evs) * REC_V1_BYTES // REC_EV_BYTES]]
+            else:
+                out.append(f"[REC] '{name}': migrated {len(evs)} events from the pre-skipRunning clip format")
+        self.buf, self.rmode, self.loaded_name, self.loaded_fc = evs, f["mode"], name, len(f["events"])
+        if [e["t"] for e in self.buf] != sorted(e["t"] for e in self.buf):
+            self.buf.sort(key=lambda e: e["t"])
+        return bool(self.buf)
+
+    def info(self):
+        dur = self.buf[-1]["t"] if self.buf else 0
+        return f"[REC] state={self.state}  events={len(self.buf)}/{self.CAP}  dur={dur}ms  drops=0  buf=ok"
+
+    def listing(self):
+        return {n: (REC_HDR_BYTES + f["stride"] * len(f["events"]), f["events"][-1]["t"] if f["events"] else 0,
+                    len(f["events"])) for n, f in self.files.items()}
+
+    def fp(self):
+        from hil.navicore import fnv1a32
+        return f"{fnv1a32(json.dumps(self.buf, sort_keys=True)):08X}"
+
+    def stream(self, frm, want, ranged):
+        """editStream (navicore_record.h:731-879), every event on its own line (the driver reads both forms)."""
+        n_all = len(self.buf)
+        frm = min(frm, n_all)
+        end = n_all if want > n_all - frm else frm + want
+        dur = self.buf[-1]["t"] if self.buf else 0
+        j = lambda o: json.dumps(o, separators=(",", ":"))          # noqa: E731
+        if ranged:
+            out = ["[CLIPDL:BEGIN]" + j({"count": n_all, "durationMs": dur, "mode": self.rmode, "from": frm,
+                                         "n": end - frm, "fp": self.fp(), "fc": self.loaded_fc, "nm": self.loaded_name})]
+        else:
+            out = ["[CLIPDL:BEGIN]" + j({"count": n_all, "durationMs": dur, "mode": self.rmode})]
+        out += [(f"[CLIPDL:EV,{i}]" if ranged else "[CLIPDL:EV]") + j(self.buf[i]) for i in range(frm, end)]
+        return out + (["[CLIPDL:END]" + j({"from": frm, "n": end - frm, "fp": self.fp(), "nm": self.loaded_name})]
+                      if ranged else ["[CLIPDL:END]"])
+
+    def edit_add(self, idx, js):
+        if self.state != "EDITING" or idx > len(self.buf) or idx >= self.CAP:
+            return False
+        try:
+            o = json.loads(js)
+        except ValueError:
+            return False
+        if not isinstance(o, dict):
+            return False
+        t, k = _nm_pick(o, "t", 0), _nm_pick(o, "k", 0xFF)
+        if k == 0:
+            a = self.action_from(o)
+            if a is None:
+                return False
+            ev = dict(self.action_to(a), t=t, k=0)
+        elif k == 1:
+            ev = {"t": t, "k": 1, "slot": _nm_pick(o, "slot", 0), "ch": _nm_pick(o, "ch", 0), "pos": _nm_pick(o, "pos", 0)}
+        elif k == 2:
+            ev = {"t": t, "k": 2, "chan": _nm_pick(o, "chan", 0), "vol": _nm_pick(o, "vol", 0)}
+        else:
+            return False
+        if idx == len(self.buf):
+            self.buf.append(ev)
+        else:
+            self.buf[idx] = ev
+        return True
+
+    def poll_control(self):
+        c, self.p_ctl = self.p_ctl, None
+        out = []
+        if c == "rec":
+            if self.state == "RECORDING":
+                self.stop_record()
+                nm = self.take_name()
+                if self.save_clip(nm, out):
+                    out.append(f"[REC] saved clip '{nm}'")
+            elif self.state == "idle" and self.start_record(self.p_mode):
+                self.record_name = self.p_name
+        elif c == "play":
+            if self.state == "REPLAYING":
+                self.stop()
+            elif self.state == "idle":
+                if self.p_name and not self.load_clip(self.p_name, out):
+                    return out
+                self.start_replay(self.p_loop)
+        elif c == "stop":
+            if self.state == "RECORDING":
+                self.stop_record()
+                nm = self.take_name()
+                if self.save_clip(nm, out):
+                    out.append(f"[REC] stopped — saved clip '{nm}'")
+            else:
+                self.stop()
+        return out
+
+    # ------------------------------------------------------------ the replay
+    def start_replay(self, loop=False):
+        if self.state != "idle" or not self.buf:
+            return False
+        self.capturing, self.loop_play, self.curves = False, loop, {}
+        kf = {(e["slot"], e["ch"]) for e in self.buf if e["k"] == 1}
+        known = set() if "only_clip_channels" in self.mut else set(self.last_pos)
+        for key in sorted(kf | known):
+            s, c = key
+            if not (1 <= s <= 8 and 0 <= c < 32):
+                continue
+            p0 = self.last_pos.get(key, 0)
+            kfs = [(e["t"], e["pos"]) for e in self.buf if e["k"] == 1 and (e["slot"], e["ch"]) == key]
+            self.curves[key] = {"pprev": p0, "tprev": 0, "last": p0, "next": 0, "reanchor": key not in self.last_pos,
+                                "kfs": kfs}
+        for key, cv in self.curves.items():
+            self.set_speed(*key, 0)
+            self.set_accel(*key, 0)
+            if not cv["reanchor"]:
+                self.set_target(*key, cv["pprev"])
+        self.cursor, self.replay_start, self.state = 0, time.monotonic(), "REPLAYING"
+        return True
+
+    def replay_tick(self):
+        if self.state != "REPLAYING":
+            return []
+        el, out = self.ms(self.replay_start), []
+        while self.cursor < len(self.buf) and (self.buf[self.cursor]["t"] <= el or "replay_at_once" in self.mut):
+            ev = self.buf[self.cursor]
+            self.cursor += 1
+            if ev["k"] == 0:
+                a = self.action_from(ev)
+                if a is not None:
+                    out += self.dispatch(a)
+        for key, cv in self.curves.items():
+            while cv["next"] < len(cv["kfs"]) and cv["kfs"][cv["next"]][0] <= el:
+                cv["tprev"], cv["pprev"] = cv["kfs"][cv["next"]]
+                cv["reanchor"], cv["next"] = False, cv["next"] + 1
+            if cv["reanchor"]:
+                continue
+            if cv["next"] >= len(cv["kfs"]) or "no_interp" in self.mut:
+                pos = cv["pprev"]
+            else:
+                tn, pn = cv["kfs"][cv["next"]]
+                frac = (el - cv["tprev"]) / (tn - cv["tprev"]) if tn > cv["tprev"] else 1.0
+                pos = pn if tn <= cv["tprev"] else cv["pprev"] + int((pn - cv["pprev"]) * frac)
+            if pos != cv["last"]:
+                self.set_target(*key, pos)
+                cv["last"] = pos
+        if self.state == "REPLAYING" and (self.cursor >= len(self.buf) or el > self.buf[-1]["t"] + 1000):
+            self.state = "idle"
+            out.append("[REC] ▶ playback complete")
+        return out
+
+    # ------------------------------------------------------------ ?REC and ?MAE
+    def cli(self, text):
+        low = text[1:].lower()
+        if low.startswith("mae,"):
+            p = text[5:].split(",")
+            if len(p) == 3 and all(re.fullmatch(r"\d+", x) for x in p):
+                return self.set_target(int(p[0]), int(p[1]), int(p[2]))
+            return []
+        if low.startswith("rec"):
+            return self.rec_cli(text)
+        return super().cli(text)
+
+    def _guard_name(self, verb, *names):
+        for n in names:
+            c = self.clean(n)
+            if c in self.GREG:
+                raise AssertionError(f"a test sent ?REC,{verb} naming clip {c}")
+
+    def rec_cli(self, text):
+        arg = text[5:].strip() if len(text) > 5 else ""
+        sep = arg.find(",")
+        sep = arg.find(" ") if sep < 0 else sep
+        sub, name = (arg[:sep].strip(), arg[sep + 1:].strip()) if sep >= 0 else (arg, "")
+        v, out = sub.upper(), []
+        if v == "STOP":
+            if self.state == "RECORDING" and "cli_stop_saves" in self.mut:
+                self.stop_record()
+                self.save_clip(self.take_name(), out)
+                return out + [self.info()]
+            return ["[REC] replay stopped"] if self.stop() == "REPLAYING" else [self.info()]
+        if v == "PLAY":
+            self._guard_name("PLAY", name)
+            if name and self.state != "idle" and "busy_reply" in self.mut:
+                return ["[REC] busy"]
+            if name and not self.load_clip(name, out):
+                return out + [f"[REC] clip '{name}' not found"]
+            if self.start_replay():
+                return out + [f"[REC] replaying {len(self.buf)} events over {self.buf[-1]['t']}ms — ?REC,STOP to abort"]
+            return out + ["[REC] busy / empty"]
+        if v == "SAVE":
+            nm = name or self.take_name()
+            ok = self.save_clip(nm, out)
+            return out + [f"[REC] saved clip '{nm}'" if ok else "[REC] save failed (see reason above)"]
+        if v == "LOAD":
+            self._guard_name("LOAD", name)
+            return out + ["[REC] loaded" if self.load_clip(name, out) else "[REC] load failed (not found / no FS)"]
+        if v == "LS":
+            used = sum(b for b, _, _ in self.listing().values())
+            return [f'[CLIPFS]{{"total":12582912,"used":{used}}}', "[REC] clips:", "[CLIPLIST:BEGIN]"] + \
+                [f'[CLIPITEM]{{"name":"{n}","bytes":{b},"dur":{d},"n":{k}}}'
+                 for n, (b, d, k) in sorted(self.listing().items())] + \
+                ["[CLIPLIST:END]"]
+        if v == "RM":
+            self._guard_name("RM", name)
+            c = self.clean(name)
+            self.loaded_name, self.loaded_fc = "", 0
+            return ["[REC] deleted" if c and self.files.pop(c, None) else "[REC] delete failed"]
+        if v == "RENAME":
+            c2 = name.find(",")
+            if c2 <= 0:
+                return ["[REC] usage: ?REC,RENAME,<from>,<to>"]
+            src, dst = self.clean(name[:c2]), self.clean(name[c2 + 1:])
+            self._guard_name("RENAME", name[:c2], name[c2 + 1:])
+            ok = bool(src and dst) and (dst not in self.files or "rename_clobbers" in self.mut) and src in self.files
+            if ok:
+                self.files[dst] = self.files.pop(src)
+            if src and dst:
+                self.loaded_name, self.loaded_fc = "", 0
+            return ["[REC] renamed" if ok else "[REC] rename failed (exists / not found)",
+                    f"[CLIPUL:RENAME,{'OK' if ok else 'ERR'}]"]
+        if v == "EDITLOAD":
+            cname, frm, want, ranged = name, 0, 0xFFFFFFFF, False
+            c2 = name.find(",")
+            if c2 > 0:
+                cname, rest = name[:c2], name[c2 + 1:].strip()
+                c3 = rest.find(",")
+                frm = _nm_toint(rest[:c3] if c3 > 0 else rest)
+                if c3 > 0:
+                    cw = rest[c3 + 1:]
+                    c4 = cw.find(",")
+                    want = _nm_toint(cw[:c4] if c4 >= 0 else cw)
+                ranged = True
+            if self.loaded_name != cname:
+                if self.state != "idle" and "busy_reply" in self.mut:
+                    return [f"[CLIPDL:ERR]recorder busy ({self.state})"]
+                if not self.load_clip(cname, out):
+                    return out + [f"[REC] clip '{cname}' not found"]
+            return out + self.stream(frm, want, ranged)
+        if v == "EDITBEGIN":
+            if self.state != "idle":
+                return ["[CLIPUL:BEGIN,ERR,busy]"]
+            self.buf, self.loaded_name, self.loaded_fc, self.state = [], "", 0, "EDITING"
+            return ["[CLIPUL:BEGIN,OK]"]
+        if v == "EDITEV":
+            ci = name.find(",")
+            if ci > 0 and self.edit_add(_nm_toint(name[:ci]), name[ci + 1:]):
+                return [f"[CLIPUL:ACK,{name[:ci]}]"]
+            return ["[CLIPUL:NAK,bad event / bad index / not editing]"]
+        if v == "EDITEND":
+            if self.state != "EDITING":
+                return ["[CLIPUL:END,ERR,not-editing]"]
+            self.state = "idle"
+            if not self.buf:
+                return ["[CLIPUL:END,ERR,empty-clip]"]
+            self.buf.sort(key=lambda e: e["t"])
+            self._guard_name("EDITEND", name)
+            return out + ["[CLIPUL:END,OK]" if self.save_clip(name, out) else "[CLIPUL:END,ERR,save-failed]"]
+        if v == "EDITCANCEL":
+            if self.state == "EDITING":
+                self.state = "idle"
+                if "discard_fixed" in self.mut:
+                    self.buf = []
+            return ["[CLIPUL:CANCEL,OK]"]
+        if v == "CLEAR":
+            if self.state != "idle" and "discard_fixed" in self.mut:
+                return [f"[REC] busy ({self.state}) — not cleared"]
+            if self.state == "idle" and "clear_noop" not in self.mut:
+                self.buf, self.loaded_name, self.loaded_fc = [], "", 0
+            return ["[REC] cleared"]
+        return [self.info()]
+
+
+def _run_rec_suite(tmp, ids=None, mut=(), cap_ms=6000):
+    """A fake bench for s48: NaviRecModel(mut) behind NaviCore and W1, its DevLinks as the W1 S1 and S2 wires, every
+    opt-in on, the 60 s cap cut to `cap_ms` and the take's gaps shortened (the model keeps real time). Runs the ncrec
+    tests named in `ids` (default: all) through the runner and puts every patch back -> (results by id, the model,
+    facts: the config text before, Greg's clip listing before, session.log, the count)."""
+    model = NaviRecModel(mut=mut, cap_ms=cap_ms)
+    orig, greg = model.text(), model.listing()
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    b.cfg["opt_in"] = list(optin.OPT_INS)
+    nav, w1 = FakeNaviDev(model.script, "navicore"), FakeNaviDev(model.w1_script, "wcb1")
+    model.nav, model.w1 = nav, w1
+    nav.log = w1.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1}[name]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s48_navicore_rec", None)
+        import suites.s48_navicore_rec as S48
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncrec.") and (ids is None or t["id"] in ids)]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+    patches = [(S48, "link", lambda bench, w, p: model.links[f"W{w}{p}"]), (S48, "REC_MAX_MS", cap_ms),
+               (S48, "MARK_GAPS_S", (0.3, 0.5)), (S48, "SAVE_SETTLE_S", 0.1)]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        model.alive = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return {r["id"]: r for r in ck.data["results"]}, model, dict(orig=orig, greg=greg, log=log, count=len(mine))
+
+
+def t_ncrec_helpers(tmp):
+    """s48's pure helpers against fixtures in the firmware's formats: a clip's size and stride from ?REC,LS
+    (saveClip/loadClip, navicore_record.h:545-549, :609-615), rec_guard's listing comparison, the legacy resident
+    stream (editStream :755-756, :843, :878), Pololu frames with their burst times, the replayed ramp and frames
+    against their keyframes (_updateCurves :425-456), and a downloaded clip against its listing."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s48_navicore_rec as S
+    finally:
+        runner.REGISTRY[:] = saved              # helpers only: the real tests never join a selftest run
+    assert S.clip_bytes(3) == 436 and S.clip_bytes(103, 136) == 14024
+    assert S.clip_stride(436, 3) == 140 and S.clip_stride(14024, 103) == 136 and S.clip_stride(4776, 35) == 136
+    assert S.clip_stride(4916, 35) == 140 and S.clip_stride(437, 3) is None and S.clip_stride(16, 0) is None
+    before = {"rec_4": (94944, 10832, 698), "8-2": (26756, 1767, 191)}
+    assert S.clip_changes(before, dict(before)) == []
+    got = S.clip_changes(before, {"rec_4": (94944, 10832, 699), "HILa1": (156, 20, 1), "rec_11": (156, 30, 1)}, ["HILa1"])
+    assert any("rec_4 changed" in p for p in got) and any("8-2" in p and "gone" in p for p in got), got
+    assert any("HILa1, which this test made, is still there" in p for p in got), got
+    assert any("rec_11" in p and "never named" in p for p in got) and len(got) == 4, got
+    act = '{"type":"wcb_unicast","target":"1","cmd":";S2HILx","delay":600,"t":612,"k":0}'
+    kf = '{"t":700,"k":1,"slot":4,"ch":5,"pos":6000}'
+    lines = ['[CLIPDL:BEGIN]{"count":9,"durationMs":1,"mode":1,"from":0,"n":0,"fp":"00000000","fc":9,"nm":"rec_4"}',
+             '[CLIPDL:END]{"from":0,"n":0,"fp":"00000000","nm":"rec_4"}', "Mode=1  matrixBtn=0  matrixVal=992",
+             '[CLIPDL:BEGIN]{"count":2,"durationMs":700,"mode":1}', "[CLIPDL:EV]" + act, "[CLIPDL:EV]" + kf, "[CLIPDL:END]"]
+    hdr, evs = S.parse_resident(lines)
+    assert hdr == {"count": 2, "durationMs": 700, "mode": 1} and evs == [json.loads(act), json.loads(kf)], (hdr, evs)
+    for bad, why in ((lines[:-1], "never reached"), (lines[:4] + lines[5:], "streamed 1 events"),
+                     (["[REC] clip '' not found"], "named clip is resident"), (["[CLIPDL:ERR]clip too large"], "refused")):
+        assert why in str(_raises(lambda: S.parse_resident(bad))), (why, bad)
+    f = lambda d, cmd, ch, v: bytes([0xAA, d, cmd, ch, v & 0x7F, v >> 7])      # noqa: E731
+    bursts = [(100, b"\x00" + f(4, 0x07, 5, 0) + f(4, 0x09, 5, 0)[:4]), (104, f(4, 0x09, 5, 0)[4:] + f(3, 0x04, 5, 6400)),
+              (110, f(4, 0x04, 5, 6000) + bytes([0xAA, 4, 0x22]) + f(4, 0x04, 6, 7000))]
+    assert S.timed_frames(bursts, 4, {5}) == [(100, 0x07, 5, 0), (100, 0x09, 5, 0), (110, 0x04, 5, 6000)]
+    assert (104, 3, 0x04, 5, 6400) in S.all_frames(bursts) and (110, 4, 0x22, None, None) in S.all_frames(bursts)
+    keys = ((0, 6000), (1000, 6100), (1500, 6050))
+    up = list(range(6000, 6101, 3)) + [6100]
+    down = list(range(6099, 6049, -2)) + [6050]
+    assert S.ramp_problems(up + down, keys) == []
+    assert S.ramp_problems([v for v in up + down if v != 6100], keys) == []        # the peak skipped by a slow pass
+    assert "the last setTarget was 6051" in " ".join(S.ramp_problems(up + down[:-1] + [6051], keys))
+    assert "off the segment" in " ".join(S.ramp_problems(up[:10] + [5990] + up[10:] + down, keys))
+    assert "off the segment" in " ".join(S.ramp_problems(up + [6120] + down, keys))
+    assert "only 0 distinct values" in " ".join(S.ramp_problems([6000, 6100, 6050], keys))
+    assert "the first setTarget was 6003" in " ".join(S.ramp_problems(up[1:] + down, keys))
+    frames = [(0, 0x07, 5, 0), (0, 0x09, 5, 0)] + [(i * 10, 0x04, 5, v) for i, v in enumerate(up + down)]
+    span = frames[-1][0] - frames[2][0]
+    probs, _ = S.interp_problems(frames, keys, early=2000, late=2000)
+    assert probs == [], probs
+    assert "spanned" in " ".join(S.interp_problems(frames, ((0, 6000), (span + 400, 6100), (span + 900, 6050)))[0])
+    assert "expected speed 0 then accel 0" in " ".join(S.interp_problems(frames[1:], keys, early=2000, late=2000)[0])
+    assert "after the first setTarget" in " ".join(S.interp_problems(frames + [(9999, 0x07, 5, 20)], keys, early=2000,
+                                                                     late=2000)[0])
+    evs = [{"t": 0, "k": 1, "slot": 1, "ch": 0, "pos": 6000}, {"t": 120, "k": 0, "type": "wcb_unicast", "cmd": "x"},
+           {"t": 300, "k": 2, "chan": 1, "vol": 40}, {"t": 480, "k": 0, "note": "old"}]
+    probs, notes = S.clip_event_problems(evs, 4, 480)
+    assert probs == [] and any("1 action(s) with no type" in n for n in notes), (probs, notes)
+    assert "last event is at 480" in " ".join(S.clip_event_problems(evs, 4, 500)[0])
+    assert "listed 4" not in " ".join(S.clip_event_problems(evs, 4, 480)[0])
+    odd = evs + [{"t": 490, "k": 1, "slot": 9, "ch": 40, "pos": 1}, {"t": 495, "k": 7}, {"t": 499, "k": 0, "type": "x"}]
+    txt = " ".join(S.clip_event_problems(odd, 7, 499)[0])
+    assert "outside slot 1-8" in txt and "unknown kind" in txt and "type actionToJson never writes" in txt, txt
+    assert "5 events downloaded" in " ".join(S.clip_event_problems(evs[:1] * 5, 4, 0)[0])
+
+
+NCREC_SHOULD = {"ncrec.replay_only_clip_channels": "D-NC64", "ncrec.busy_load_not_missing": "D-NC65",
+                "ncrec.editcancel_empties": "D-NC66"}
+
+
+def t_ncrec_suite_against_model(tmp):
+    """Every ncrec test run whole, through the runner, against NaviRecModel with every opt-in on (the backstop at 6 s,
+    past every other test's take): each normal and opt-in test passes and each (should) test fails as on today's
+    NaviCore, naming its D-NC; the config ends as it began, in RAM and saved (both nc_guards restored it); Greg's clips
+    are listed exactly as before and no HIL clip is left; the recorder is idle and empty; no credential reached
+    session.log."""
+    res, model, x = _run_rec_suite(tmp)
+    bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCREC_SHOULD else 'PASS'}) {r['detail'][:500]}"
+           for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCREC_SHOULD else "PASS")]
+    assert len(res) == x["count"] == 12, (len(res), x["count"])
+    assert not bad, "\n".join(bad)
+    for tid, dnc in NCREC_SHOULD.items():
+        assert f"(should, {dnc})" in res[tid]["detail"], (tid, res[tid]["detail"][:300])
+    assert model.text() == x["orig"] and model.flash == x["orig"], "the model's config was not left as found"
+    assert model.listing() == x["greg"], (model.listing(), x["greg"])
+    assert model.state == "idle" and not model.buf and not model.calib, (model.state, len(model.buf), model.calib)
+    assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
+
+
+# (test, model mutation, the status it must then get, a piece of its detail): a break of the behaviour each test exists
+# to catch, and each D-NC fix its (should) test asks for.
+NCREC_MUTATIONS = (
+    ("ncrec.capture_scope", "capture_meta", "FAIL", "no play action"),
+    ("ncrec.capture_scope", "delay_zero", "FAIL", "the delays recorded"),
+    ("ncrec.stop_semantics", "cli_stop_saves", "FAIL", "nothing saved"),
+    ("ncrec.stop_semantics", "name_from_pending", "FAIL", "the name the take started with"),
+    ("ncrec.play_timing_markers", "replay_at_once", "FAIL", "replayed gap"),
+    ("ncrec.replay_gate", "replay_ungated", "FAIL", "a TRIGGERed marker fired during the replay"),
+    ("ncrec.replay_interpolation_remote", "no_interp", "FAIL", "distinct values"),
+    ("ncrec.calib_drops_take", "calib_saves", "FAIL", "the dropped take was saved"),
+    ("ncrec.calib_drops_take", "clear_noop", "FAIL", "NAVICORE CLIPS OR RECORDER NOT RESTORED"),
+    ("ncrec.backstop_60s", "no_backstop", "FAIL", "capped at"),
+    ("ncrec.record_save_list_rm", "rename_clobbers", "FAIL", "RENAME onto the existing"),
+    ("ncrec.v1_clip_migration", "v1_wrong_stride", "FAIL", "truncated"),
+    ("ncrec.replay_only_clip_channels", "only_clip_channels", "PASS", ""),
+    ("ncrec.busy_load_not_missing", "busy_reply", "PASS", ""),
+    ("ncrec.editcancel_empties", "discard_fixed", "PASS", ""),
+)
+
+
+def t_ncrec_mutations(tmp):
+    """The s48 tests catch what they exist to catch: against a NaviRecModel broken in one way each - the controls
+    captured, a delay not recorded, ?REC,STOP saving, the toggle saving under a later name, a replay firing at once or
+    ungated, keyframes not interpolated, CALIB saving the take, CLEAR clearing nothing, no backstop, RENAME
+    overwriting, a 136-byte clip read at 140 - the test fails and says why; and with each D-NC fix in the model
+    (D-NC64, D-NC65, D-NC66) its (should) test passes. Each runs alone on a fresh model."""
+    for tid, mut, want, why in NCREC_MUTATIONS:
+        res, _, _ = _run_rec_suite(tmp, ids={tid}, mut={mut})
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:400])
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -9904,6 +10584,7 @@ def t_parked_device_reused(tmp):
 
 TESTS.append(t_parked_device_reused)
 TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (suites/s34_intellex_tools.py)
+TESTS += [t_ncrec_helpers, t_ncrec_suite_against_model, t_ncrec_mutations]   # NC-WP12 (suites/s48_navicore_rec.py)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

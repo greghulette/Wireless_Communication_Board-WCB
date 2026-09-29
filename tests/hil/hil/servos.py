@@ -175,6 +175,22 @@ SERVO_TESTS = {
     "nctool.webserial_flash_same_image": "esptool-js holds NaviCore in its ROM bootloader for a minute or two, then restarts "
                                          "it (hil/ncflash may restart it once more): SBUS OUT stops meanwhile; a mode set "
                                          "before it is sent back",
+    # NC-WP12, NaviCore's recorder (s48). A replay sends speed 0, accel 0 and the last-commanded target to every channel
+    # NaviCore has moved since boot, not only the clip's (navicore_record.h:365-399, NAVICORE.md D-NC64): the dome's J2
+    # channel on its own Maestro 1, and Maestro 2 through the Kyber broadcast. The clips' own events are W1 S2 markers
+    # and remote slot 4 (device 4, hosted nowhere). The rest of s48 records, saves or reads without replaying.
+    "ncrec.stop_semantics": "replays a two-marker take and stops it: the replay's reset reaches every channel NaviCore "
+                            "has moved since boot (D-NC64)",
+    "ncrec.play_timing_markers": "replays a three-marker clip twice: the replay's reset reaches every channel NaviCore "
+                                 "has moved since boot (D-NC64)",
+    "ncrec.replay_gate": "replays a three-marker take: the replay's reset reaches every channel NaviCore has moved "
+                         "since boot (D-NC64)",
+    "ncrec.replay_interpolation_remote": "replays keyframes on remote slot 4 once or twice: the replay's reset reaches "
+                                         "every channel NaviCore has moved since boot (D-NC64)",
+    "ncrec.replay_only_clip_channels": "replays a one-marker take to show that its reset reaches every channel NaviCore "
+                                       "has moved since boot (D-NC64)",
+    "ncrec.busy_load_not_missing": "replays a two-marker take: the replay's reset reaches every channel NaviCore has "
+                                   "moved since boot (D-NC64)",
     # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
     "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                             "is sent back",
