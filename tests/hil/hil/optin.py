@@ -205,6 +205,14 @@ OPT_INS = {
         "why": "restarts NaviCore through Intellex's transport: the mesh and SBUS OUT lose it for about 5 s",
         "estimate_s": 60,
     },
+    "intellex_nc_save": {
+        "title": "NaviCore config save through Intellex",
+        "what": "Saves NaviCore's config twice from the config tool running inside Intellex: the telemetry rate (chRateHz) "
+                "one step away and back, two rewrites of its ~14 KB /config.json on LittleFS. Nothing moves; runs inside "
+                "nc_guard, which proves the config byte-identical afterwards.",
+        "why": "rewrites NaviCore's /config.json twice (chRateHz one step away and back)",
+        "estimate_s": 90,
+    },
 }
 
 

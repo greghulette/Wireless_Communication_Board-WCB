@@ -2175,6 +2175,9 @@ GATED = {
     # IX-WP5 (suites/s33_intellex_bench.py), 2026-09-29
     "intellex.serial_device_loss_navicore": ("intellex_reboot", "restarts NaviCore through Intellex's transport: the "
                                                                 "mesh and SBUS OUT lose it for about 5 s"),
+    # IX-WP8 (suites/s34_intellex_tools.py), 2026-09-29
+    "intellex.nc_save_unchanged": ("intellex_nc_save", "rewrites NaviCore's /config.json twice (chRateHz one step away "
+                                                       "and back)"),
 }
 
 
@@ -3320,6 +3323,224 @@ def t_intellex_handed_over(tmp):
         assert aborted and b.notes and "not reacquired after the abort" in b.notes[0], b.notes
     finally:
         IX._reacquire = real
+
+
+def t_intellex_run_link_check(tmp):
+    """hil/intellex.py run_intellex_test's rawLink and recovery (IX-WP7/8), with the host, Playwright and the board
+    faked: a tap is opened only for an attach with a link_check; its problems fail a passing spec and follow a failing
+    one's; a checker that raises is a problem, not a crash; a board that does not answer goes to `recover` and the test
+    fails naming both (a recovery that fails too is named), and without `recover` the reacquire's own failure is raised;
+    an all-skipped spec with a clean link is a Skip. boot_check names markers and boots, never the stream."""
+    import shutil as _shutil
+    import types
+    from hil import intellex as IX
+    from hil.runner import Skip as _Skip
+
+    class B:
+        cfg = {"devices": {"wcb1": {"port": "COMFAKE1", "kind": "wcb"}}}
+
+        def __init__(self):
+            self.out_dir, self.notes = tmp.root, []
+
+        def close_device(self, name):
+            pass
+
+        def note(self, text):
+            self.notes.append(text)
+
+        def log(self, *a):
+            pass
+
+    taps = []
+
+    class Tap:
+        def __init__(self, port, origin=None, name="tap"):
+            self.closed = False
+            taps.append(self)
+
+        def snapshot(self):
+            return b"x\r\nrst:0x1 (POWERON_RESET),boot:0x13\r\nBooting up the Wireless Communication Board\r\n" \
+                   b"[ETM] WCB2 came ONLINE (boot)\r\n[ETM] WCB2 came ONLINE (boot)\r\nthe mesh password secretish\r\n"
+
+        def close(self):
+            self.closed = True
+
+    class Host:
+        def __init__(self, bench, sd, **k):
+            self.port, self.url, self.proc = 1, "http://127.0.0.1:1", None
+
+        def start(self):
+            return self
+
+        def attach(self, spec):
+            return {"ok": True}
+
+        def stop(self):
+            pass
+
+    class Bridge:
+        def __init__(self, bench, ctx):
+            self.url = "http://127.0.0.1:2"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+    class Proc:
+        returncode = 0
+
+    def popen(cmd, **k):
+        with open(os.path.join(tmp.root, "ix.t.playwright.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        return Proc()
+
+    cli = os.path.join(tmp.root, "node_modules", "@playwright", "test", "cli.js")
+    os.makedirs(os.path.dirname(cli))
+    with open(cli, "w", encoding="utf-8") as f:
+        f.write("")
+    state = {"outcomes": [("t", "passed", "")], "reacquire": None}
+
+    def reacquire(bench, device):
+        if state["reacquire"]:
+            raise AssertionError(state["reacquire"])
+
+    names = ("require", "running_intellex", "stage", "IntellexHost", "LinkTap", "Bridge", "_wait_node", "_outcomes",
+             "copy_logs", "_reacquire", "subprocess", "INTELLEX_TESTS")
+    saved = {n: getattr(IX, n) for n in names}
+    real_which = _shutil.which
+    try:
+        IX.require = lambda bench: ("x", "y")
+        IX.running_intellex = lambda: []
+        IX.stage = lambda bench, test_id, tools="worktree", settings=None: tmp.root
+        IX.IntellexHost, IX.LinkTap, IX.Bridge = Host, Tap, Bridge
+        IX._wait_node = lambda bench, proc, timeout: ([], False)
+        IX._outcomes = lambda report: list(state["outcomes"])
+        IX.copy_logs = lambda *a: None
+        IX._reacquire = reacquire
+        IX.subprocess = types.SimpleNamespace(Popen=popen, PIPE=-1, STDOUT=-2)
+        IX.INTELLEX_TESTS = tmp.root
+        _shutil.which = lambda name: "node"
+        attach = {"kind": "serial", "port": "COMFAKE1"}
+        boot = IX.boot_check(IX.WCB_BOOT_MARKERS, "W1", boots_of=[2, 20])
+
+        def run(**k):
+            try:
+                IX.run_intellex_test(B(), "ix.t", **k)
+            except AssertionError as e:
+                return "FAIL", str(e)
+            except _Skip as e:
+                return "SKIP", str(e)
+            return "PASS", ""
+
+        got = boot(Tap(0).snapshot())
+        assert got == ["W1 printed 'rst:0x', 'Booting up the Wireless Communication Board' through the link: it "
+                       "restarted during the test", "through W1's console, WCB2 was heard booting 2 time(s) during the "
+                       "test"], got
+        assert boot(b"quiet\r\n[ETM] WCB2 came ONLINE\r\n") == []
+        taps.clear()
+        assert run(attach=attach, device="wcb1") == ("PASS", "") and not taps, "a tap without a link_check"
+        assert run(device="wcb1", link_check=boot) == ("PASS", "") and not taps, "a tap without an attach"
+        st, msg = run(attach=attach, device="wcb1", link_check=boot)
+        assert st == "FAIL" and "it restarted" in msg and "WCB2 was heard booting 2" in msg, msg
+        assert "secretish" not in msg and len(taps) == 1 and taps[0].closed, (msg, taps)
+        state["outcomes"] = [("t", "failed", "the spec's own failure")]
+        st, msg = run(attach=attach, device="wcb1", link_check=boot)
+        assert st == "FAIL" and msg.startswith("t: the spec's own failure\n") and "it restarted" in msg, msg
+
+        def broken(data):
+            raise ValueError("boom")
+        state["outcomes"] = [("t", "passed", "")]
+        st, msg = run(attach=attach, device="wcb1", link_check=broken)
+        assert st == "FAIL" and "the /_link check itself failed: ValueError: boom" in msg, msg
+        state["reacquire"] = "wcb1 did not come back"
+        st, msg = run(attach=attach, device="wcb1", link_check=lambda d: [], recover=lambda b, d: "reset it: it answers")
+        assert st == "FAIL" and msg == ("wcb1 did not answer once Intellex let it go (wcb1 did not come back); reset it: "
+                                        "it answers"), msg
+
+        def dead(bench, device):
+            raise AssertionError("still dead")
+        st, msg = run(attach=attach, device="wcb1", link_check=lambda d: [], recover=dead)
+        assert st == "FAIL" and msg.endswith("and the recovery failed too: still dead"), msg
+        assert run(attach=attach, device="wcb1") == ("FAIL", "wcb1 did not come back")
+        state["reacquire"] = None
+        state["outcomes"] = [("t", "skipped", "no such wire")]
+        assert run(attach=attach, device="wcb1", link_check=lambda d: []) == ("SKIP", "no such wire")
+        st, msg = run(attach=attach, device="wcb1", link_check=boot)
+        assert st == "FAIL" and "it restarted" in msg, "a skipped spec hid a restart"
+    finally:
+        for n, v in saved.items():
+            setattr(IX, n, v)
+        _shutil.which = real_which
+
+
+def t_intellex_tools_helpers(tmp):
+    """suites/s34_intellex_tools.py's pure helpers and hil/intellex.py reset_into_app: the CONFIG line check passes the
+    harness's own text and names lengths - never the config - for a line cut short or changed, or none at all; only the
+    named scalar fields reach a spec; reset_into_app pulses the port's lines and waits for the app's boot, and says so."""
+    from hil import intellex as IX
+    from hil import serialdev, wcb
+    from suites import s34_intellex_tools as S34
+    text = '{"wifiPassword":"hunter2secret","chRateHz":5,"wcbNetwork":{"deviceId":20,"password":"meshsecret"}}'
+    good = b'{"type":"CONFIG","data":' + text.encode() + b'}\r\n'
+    chk = S34._config_line_check(text)
+    assert chk(b"noise\r\n" + good + b"{\"type\":\"PONG\"}\r\n" + good) == []
+    cut = b'{"type":"CONFIG","data":' + text.encode()[:40] + b'}\r\n'
+    got = chk(good + cut)
+    assert len(got) == 1 and got[0].startswith("CONFIG line 2 through the link (") and "secret" not in got[0], got
+    assert chk(b"no config here\r\n") == ["no CONFIG line came through the link: the tool's GET_CONFIG was never "
+                                          "answered"]
+    cfg = {"chRateHz": 5, "sbusOutEnabled": True, "txModel": 2, "wifiSsid": "NaviCore", "wifiPassword": "x",
+           "holdMs": "700", "wcbNetwork": {"deviceId": 20, "channel": 1, "password": "y"}}
+    assert S34._nc_fields(cfg) == {"txModel": 2, "sbusOutEnabled": True, "chRateHz": 5, "wcbNetwork.deviceId": 20,
+                                   "wcbNetwork.channel": 1}, S34._nc_fields(cfg)
+    assert not any("ass" in f or "sid" in f.lower() for f in S34.NC_FIELDS), S34.NC_FIELDS
+
+    calls = []
+
+    class Dev:
+        def mark(self):
+            calls.append("mark")
+            return 7
+
+    class FakeWCB:
+        def __init__(self, dev):
+            pass
+
+        def wait_boot(self, since, timeout=20.0):
+            calls.append(("wait_boot", since))
+
+    class Bench:
+        notes = []
+
+        def dev(self, name):
+            calls.append(("dev", name))
+            return Dev()
+
+        def note(self, t):
+            self.notes.append(t)
+
+    real = (serialdev.usb_jtag_reset, wcb.WCB)
+    try:
+        serialdev.usb_jtag_reset = lambda dev, hold_s=0.2: calls.append("pulse")
+        wcb.WCB = FakeWCB
+        said = IX.reset_into_app(Bench(), "wcb1")
+        assert calls == [("dev", "wcb1"), "mark", "pulse", ("wait_boot", 7)], calls
+        assert "EN pulse" in said and "answers again" in said, said
+
+        class Dead(FakeWCB):
+            def wait_boot(self, since, timeout=20.0):
+                raise AssertionError("no boot line")
+        wcb.WCB = Dead
+        msg = None
+        try:
+            IX.reset_into_app(Bench(), "wcb1")
+        except AssertionError as e:
+            msg = str(e)
+        assert msg == "wcb1 still does not answer after an EN reset with GPIO0 high: no boot line", msg
+    finally:
+        serialdev.usb_jtag_reset, wcb.WCB = real
 
 
 # ---------------------------------------------------------------------------- NaviCore and SBUS drivers (INF1, INF2)
@@ -9004,6 +9225,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations]
+TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (suites/s34_intellex_tools.py)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 
