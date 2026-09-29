@@ -241,6 +241,8 @@ Real board, driven through Playwright. **A / O, M.**
 ### WCB-WP24: ETM characterisation: phase-3 load, relay, clamp, guards (M)
 s99_etm.py. **U, M.** Needs BUG-4, BUG-17 and BUG-18 fixed; those arms fail today.
 
+> **Status 2026-09-29: done and bench-verified.** BUG-4, 17 and 18 were fixed as re-scan #4, #17 and #18: row 1 is `etm.char_loaded` and `etm.char_load_on_peers`, and row 4's mid-run restart and relayed refusal are `etm.char_second_start_refused` and `etm.char_relay_refusal_reported`. New (runs `20260929-051753`, `-051938`): row 2 `etm.char_relay_roundtrip` (W1's relayed block recommends the same timeout W2 printed, 150 ms, first try), row 3 `etm.char_per_board_clamp` (one notice, 2 peers sampled 100 each, all three phases complete, 50 s), row 4's local guard `etm.char_guard_wcbq`. Not written: row 4's no-peer-online abort, which needs every peer off the air for W1's ~55 s offline window.
+
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
 |---|---|---|---|---|
 | wcb.etm.char_remote_load_never_starts, wcb.etm.char_load_generator_never_starts | Phase 3 ('Loaded Network') is meant to start every peer's 10 s load generator through ETMLOAD. Today the ETM receive path ignores ETMLOAD, and the generator's own traffic is non-ETM, which ETM peers drop. | WCB.ino:1807, :1900-1950, :5017-5040, :5245, :5559-5566 | On Console(bench,2), send `?DEBUG,ON` and `?STATS,RESET`, then run `?ETM,CHAR` on W1 (s99 `_char`). During phase 3, W2 must print 'ETM load test started by remote board.', then 'ETM load test complete.' about 10 s later. W2's `?STATS` attempts must rise. No ETMCHAR_, ETMLOAD or LOAD_ text may reach a W2 port. **BUG-4**. | M |

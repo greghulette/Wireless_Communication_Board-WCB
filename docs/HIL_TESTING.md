@@ -1225,6 +1225,7 @@ only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | WCB-WP24 finished: `etm.char_relay_roundtrip`, `etm.char_per_board_clamp`, `etm.char_guard_wcbq` (§7's `etm.*` row). |
 | 2026-09-29 | _(pending)_ | WCB-WP34 finished: `wcb.cmd.legacy_wcb_wcbq_spellings` (the legacy no-comma `?WCBQ<n>` and `?WCB<n>`). |
 | 2026-09-29 | _(pending)_ | WCB-WP29 finished: `serial.timer_replaced_mid_run` and `serial.timer_inline_payload` (§7's `serial.*` row). |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): a `(should)` row for D-NC48 (`ncmesh.mgmt_frag_multichunk`); §6's relayed-reply row names the s43 re-asks, and a row for the `ETM,CHAR` reply's bare tag line. |

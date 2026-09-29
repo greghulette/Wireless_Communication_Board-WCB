@@ -15,8 +15,8 @@ import time
 from hil.runner import test
 from hil.wcb import WCB
 from hil.runner import Skip
-from suites.common import (Watch, config_guard, link, marker, nonce, remote_wcbs, require_tokens, snapshot, token,
-                           usb_wcb)
+from suites.common import (Watch, config_guard, link, marker, nonce, probe_in_mesh, remote_wcbs, require_tokens,
+                           snapshot, token, usb_wcb)
 
 
 @test("etm.remote_reboot", "W2 rebooted over the mesh announces itself and answers again", needs=["wcb1"])
@@ -572,4 +572,112 @@ def full_queue_refused_not_lost(bench):
     if not refused and not discarded:
         raise Skip(f"W1's queue never refused or discarded a command while the markers arrived ({len(arrived)} of "
                    f"{len(mine)} ran): nothing was tested")
+
+
+# ============================================================ ?ETM,CHAR through a WCB relay, and its guards (WCB-WP24)
+REC_TIMEOUT = re.compile(r"Recommended ETM timeout: (\d+)ms")
+
+
+@test("etm.char_relay_roundtrip", "The Wizard's per-board Network Test: ?MGMT,ETM,CHAR,2 on W1 has W2 run the characterisation with W1 latched as the requester, and W1 prints W2's results as [MGMT:ETM,2] - the same recommended timeout W2 printed itself (one more request if the single-pass reply is lost, tracker #109)", needs=["wcb1", "wcb2"])
+def char_relay_roundtrip(bench):
+    """WCB-WP24 row 2 (wcb.mgmt.etm_char_relay_e2e, wcb.etm.char_relay_roundtrip). handleMgmtForward sends ETM_REQ;
+    handleETMReqPacket (WCB.ino) latches the requester and starts the run; the results go back as ETM_FRAG broadcasts
+    (sendResultFrags, once, unacknowledged: tracker #109) and handleETMFragPacket queues them for loop(), which prints
+    '[MGMT:ETM,2]' and the text - which starts with a newline, so the tag stands alone on its line and the block follows.
+    W2's own console prints the same block. The reply leaves while the 10 s load its run started is still on the air,
+    so one lost reply is asked for again once W2 has finished."""
+    own = bench.usb_wcbs().get(2)
+    if not own:
+        raise Skip("W2 has no USB console here: there is nothing to compare the relayed result with")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own))
+    require_tokens(bench, 1, "?ETM,ON")
+    require_tokens(bench, 2, "?ETM,ON")
+    _peers_online(bench, w)
+    notes, got, want = [], None, None
+    for attempt in (1, 2):
+        m1, m2 = w.dev.mark(), w2.dev.mark()
+        w.send("?MGMT,ETM,CHAR,2")
+        try:
+            w2.dev.expect(REC_TIMEOUT.pattern, timeout=90, since=m2)
+        except AssertionError:
+            raise AssertionError(f"try {attempt}: W2 never finished the characterisation it was asked for") from None
+        want = REC_TIMEOUT.search(" ".join(w2.dev.since(m2))).group(1)
+        try:
+            w.dev.expect(r"^\[MGMT:ETM,2\]", timeout=8, since=m1)
+        except AssertionError:
+            notes.append(f"try {attempt}: no [MGMT:ETM,2] on W1 within 8 s of W2's result (a lost single-pass reply)")
+            time.sleep(12.0)                          # past the 10 s load W2's run started, before asking again
+            continue
+        time.sleep(1.0)                               # the block after the tag line
+        lines = [x.rstrip() for x in w.dev.since(m1)]
+        i = next(k for k, x in enumerate(lines) if x.startswith("[MGMT:ETM,2]"))
+        rec = REC_TIMEOUT.search(" ".join(lines[i:]))
+        got = rec.group(1) if rec else None
+        break
+    bench.note("etm.char_relay_roundtrip: " + ("; ".join(notes) + "; " if notes else "") +
+               f"W2 recommended {want} ms, W1's relayed block {got}")
+    assert got is not None, "W1 printed no relayed result with a recommended timeout: " + "; ".join(notes)
+    assert got == want, f"W1's relayed block recommends {got} ms, W2 printed {want} ms"
+
+
+@test("etm.char_guard_wcbq", "A local ?ETM,CHAR refuses to run on a board whose mesh floor (?WCBQ) is under 2 - 'ETM Char requires at least 2 WCBs in the network (?WCBQ).' - and runs nothing (W1 at ?WCBQ,1 for a moment, then put back)", needs=["wcb1"])
+def char_guard_wcbq(bench):
+    """WCB-WP24 row 4, the local WCBQ half (wcb.etm.char_guards_abort). startETMChar (WCB.ino) refuses with WCBQ < 2
+    before anything is sent; the relayed refusal is etm.char_relay_refusal_reported. ?WCBQ applies live (peer
+    registrations reconciled, no reboot), so W1 is put back at once, and config_guard fails the test if it was not."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        q = token(before[1], "?WCBQ,")
+        if not q or int(q.split(",")[1]) < 2:
+            raise Skip(f"W1's mesh floor is {q!r}: the guard is what a normal run would hit")
+        try:
+            w.run("?WCBQ,1")
+            out = w.run("?ETM,CHAR")
+            if not any("ETM Char requires at least 2 WCBs in the network (?WCBQ)." in x for x in out):
+                problems.append(f"?ETM,CHAR at ?WCBQ,1 printed {[x for x in out if x.strip()][:3]}")
+            if any(x.startswith("Phase 1") for x in out):
+                problems.append("?ETM,CHAR started a phase at ?WCBQ,1")
+        finally:
+            w.run(q)
+    assert not problems, "; ".join(problems)
+
+
+CLAMP = re.compile(r"^\[ETM CHAR\] (\d+) online peers x (\d+) messages exceeds the 200-message phase cap .* sampling "
+                   r"(\d+) per board instead\.")
+
+
+@test("etm.char_per_board_clamp", "?ETM,COUNT,200 with two or more online peers is clamped per board so a phase never passes its 200-message row: one '[ETM CHAR] N online peers x 200 messages exceeds the 200-message phase cap - sampling M per board' notice, and every phase still completes (~1 min, probe2 joins as a temporary client)", needs=["wcb1", "wcb2", "probe2"])
+def char_per_board_clamp(bench):
+    """WCB-WP24 row 3 (wcb.etm.char_per_board_clamp). processETMChar (WCB.ino) clamps messages per board to
+    ETM_CHAR_MAX_MSGS / peerCount, the row length of etmCharPhaseSentTimes[3][200]; unclamped, phases 1-2 clobbered each
+    other's timestamps and phase 3 wrote past the array, and every phase ran to its full timeout. The one-shot notice
+    (etmCharClampWarned) prints once per run. probe2 joins as a temporary client so W1 counts at least two online
+    peers whatever else is on the mesh; W1's ?ETM,COUNT is put back in a finally, and config_guard fails the test if it
+    was not."""
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?ETM,ON")
+    with config_guard(bench, 1) as before:
+        count = token(before[1], "?ETM,COUNT,")
+        with probe_in_mesh(bench, "probe2", 15):
+            _peers_online(bench, w)
+            try:
+                w.run("?ETM,COUNT,200")
+                m = w.send("?ETM,CHAR")
+                rec = w.dev.expect(r"Recommended ETM timeout: (\d+)ms|\[ETM\] Characterization aborted: (.*)",
+                                   timeout=240, since=m)
+                time.sleep(1.0)
+                lines = [x.rstrip() for x in w.dev.since(m)]
+            finally:
+                w.run(count or "?ETM,COUNT,20")
+    notices = [c for c in map(CLAMP.match, lines) if c]
+    phases = {int(p.group(1)) for p in (re.match(r"^ Phase (\d) - ", x) for x in lines) if p}
+    bench.note(f"etm.char_per_board_clamp: {len(notices)} notice(s) "
+               f"({notices[0].group(0)[:110] if notices else '-'}); result phases {sorted(phases)}; "
+               f"recommended {rec.group(1)} ms" if rec.group(1) else f"aborted: {rec.group(2)}")
+    assert rec.group(1), f"?ETM,CHAR aborted: {rec.group(2).strip()}"
+    assert len(notices) == 1, f"{len(notices)} clamp notice(s), expected exactly one"
+    peers, per = int(notices[0].group(1)), int(notices[0].group(3))
+    assert peers >= 2 and per == 200 // peers, f"the notice says {peers} peers sampled at {per} each"
+    assert phases == {1, 2, 3}, f"the results block names phases {sorted(phases)}, not all three"
 
