@@ -59,6 +59,11 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 RESULTS = os.path.join(HERE, "results")
 BUILDS = os.path.join(RESULTS, "builds")
 KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board since 2026-09-22 (FLASHED.md)
+# Folder under BUILDS: the image the bench NaviCore runs this week (docs/HIL_WEEK_DECISIONS.md D45: hil-week 6925773,
+# App SHA256 529503cd35f1e5e5, with the NAVICORE_HIL_HOOKS hooks). The tests that flash NaviCore flash only this image
+# and end on it, verified by its App SHA256 (suites/s47_navicore_ota.py); ncota.image_identity fails when the board
+# runs anything else. A new week image changes this one line. KNOWN_GOOD above stays the rollback.
+BENCH_IMAGE = "navicore-hil1"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.
@@ -725,6 +730,48 @@ def check_image(path, slot=None):
     return info
 
 
+def image_sha16(path):
+    """The first 16 hex digits of the ELF SHA-256 an image (a build folder or its .bin) carries at 0xB0, which is what
+    the board prints as 'App SHA256:' (navicore_ota.h otaAppSha16: 8 bytes of esp_app_desc_t.app_elf_sha256), or None
+    when there is no such file or it is too short. Reads 32 bytes; checks nothing else (check_image does)."""
+    image, _, _ = _image_paths(path)
+    try:
+        with open(image, "rb") as f:
+            f.seek(ELF_SHA_AT)
+            sha = f.read(32)
+    except OSError:
+        return None
+    return sha[:8].hex() if len(sha) == 32 else None
+
+
+def builds_with_sha(app_sha, builds_root=None):
+    """The build folders under builds_root (default results/builds) whose NaviCore.ino.bin carries an ELF SHA-256 that
+    starts with `app_sha` (the board's 8 to 64 hex digits, any case), sorted by name. Two folders can match: a copy of
+    one build. [] when the board prints no SHA or none matches."""
+    root = builds_root or BUILDS
+    want = (app_sha or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{8,64}", want):
+        return []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        folder = os.path.join(root, name)
+        if not os.path.isfile(os.path.join(folder, IMAGE)):
+            continue
+        try:
+            with open(os.path.join(folder, IMAGE), "rb") as f:
+                f.seek(ELF_SHA_AT)
+                sha = f.read(32).hex()
+        except OSError:
+            continue
+        if len(sha) == 64 and sha.startswith(want[:64]):
+            out.append(folder)
+    return out
+
+
 # ---------------------------------------------------------------------------- the board
 def parse_ota_status(lines):
     """The ?OTALOCAL,STATUS block (navicore_ota.h otaPrintStatus :226-238) -> {'chip', 'family', 'firmware', 'running',
@@ -1035,6 +1082,51 @@ def record_flash(builds_root, *, folder, elf_sha, tree, how, result, what):
         text = text.rstrip("\n") + f"\n\n{FLASH_LOG_HEADING}\n\n{FLASH_LOG_INTRO}\n\n{FLASH_LOG_HEAD}\n{row}\n"
     atomic_write_text(path, text)
     return row
+
+
+def flash_rows(builds_root=None):
+    """The rows record_flash wrote to <builds_root>/FLASHED.md, oldest first -> [{'when', 'folder', 'sha', 'tree', 'how',
+    'result', 'what'}]: 'folder' without its backticks and trailing slash ('navicore-hil1'), 'sha' the 16 hex digits.
+    [] when the file or the table is missing. A cell never holds a '|' (_cell), so splitting on it is exact."""
+    path = os.path.join(builds_root or BUILDS, FLASHED)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return []
+    if FLASH_LOG_HEADING not in lines:
+        return []
+    out = []
+    for line in lines[lines.index(FLASH_LOG_HEADING) + 1:]:
+        if line.startswith("#"):
+            break                                  # a later heading ends the table
+        if not line.startswith("| ") or line.startswith(("| When ", "|---")):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 7:
+            continue
+        out.append({"when": cells[0], "folder": cells[1].strip("`").rstrip("/"), "sha": cells[2].strip("`"),
+                    "tree": cells[3], "how": cells[4], "result": cells[5], "what": cells[6]})
+    return out
+
+
+def last_written(builds_root=None):
+    """The newest FLASHED.md row after which the board runs the image it names -> the row (flash_rows) or None: an
+    ?OTALOCAL flash that came back verified ('OK: ...', flash()), or the ladder's esptool write ('written (recovery)',
+    recover()). A FAILED, VERIFY FAILED or NOT BACK row leaves the board on what ran before it, so it is passed over."""
+    rows = [r for r in flash_rows(builds_root) if r["result"].startswith("OK") or r["result"] == "written (recovery)"]
+    return rows[-1] if rows else None
+
+
+def put_back(folder=None):
+    """The commands, from tests/hil, that put NaviCore back on results/builds/<folder> (default BENCH_IMAGE), for a
+    failure message that has to leave the bench to the next reader: status first, then the ?OTALOCAL flash, then the
+    ladder with esptool."""
+    folder = folder or BENCH_IMAGE
+    return (f"from tests/hil, with no run holding the bench: `python -m hil.ncflash status`; if it does not show App "
+            f"SHA256 {image_sha16(os.path.join(BUILDS, folder)) or '<the image at 0xB0>'}, `python -m hil.ncflash "
+            f"flash results/builds/{folder} --what \"put back\"`; if NaviCore does not answer, `python -m "
+            f"hil.ncflash recover --allow-esptool --known-good results/builds/{folder}`")
 
 
 def _failure(nc, before, state, exc):
@@ -1392,7 +1484,7 @@ def _status_or_none(nc):
 
 
 # ---------------------------------------------------------------------------- command line
-_SSID = re.compile(r'(SoftAP ")([^"]*)(")')
+_SSID = re.compile(r'(SoftAP ")((?!<redacted:)[^"]*)(")')     # redact_text now hashes it first; never hash a hash
 
 
 def _log_to(path):

@@ -922,6 +922,7 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 | `navicore_ota_erase` | small OTA sessions that erase part of the inactive slot | on |
 | `navicore_ota_full` | full same-image OTA over USB, twice (a few minutes) | on |
 | `navicore_ota_relay_full` | the same image relayed through W1, twice (~12 min a pass, like W2's twin: `optin.py:44-50`) | off; run once by hand |
+| `navicore_esptool` | the recovery ladder's esptool rungs on the healthy board (`ncota.recovery_esptool`): download mode, the bench image into app0, `boot_app0.bin` into otadata | off: watched runs only (added 2026-09-28 with NC-WP2) |
 | `navicore_fault` | the HIL-hook faults (corrupt then restore `/config.json`, a failed save) | on once the hook image is flashed |
 | `navicore_identity` | persisted deviceId/channel/password changes that take NaviCore off the mesh until restored over USB | off: attended only |
 | `navicore_webserial` | the config tool over real Web Serial and esptool-js (L3): needs Chrome's one-time grant | off: attended only |
@@ -1049,6 +1050,22 @@ everything inside `nc_guard`.
   show up only as skips).
 
 ### NC-WP2 — this week's image, flash and recovery
+
+> **Status 2026-09-28: written, not bench-run** (`suites/s47_navicore_ota.py`; a full run held every port). Steps 2-4
+> were done by INF9 (D45: `navicore-hil1` is on the board). `ncota.recovery_hard_reset` (`navicore_reboot`) runs the
+> real `ncflash.recover()` with its PING rung withheld (`_Withheld`), so the ladder climbs to rung 2 as it would for a
+> hung app. The proof the chip restarted is its uptime: GET_MESH_STATS `upMs` below the time since the reset, exact
+> whatever the uptime was before. `recover()` alone cannot show it: its fallback PING calls rung 2 a success whenever the
+> app answers, which a reset that did nothing also passes (a `selftest.py` mutation caught this). `ncota.image_identity`
+> (read only) finds the build folder whose image carries the board's App SHA256 (`ncflash.builds_with_sha`) and requires
+> the ELF beside it, PONG and STATUS on its version, FLASHED.md's newest successful write (`ncflash.last_written`) naming
+> it, and `ncflash.BENCH_IMAGE` (`navicore-hil1`, one constant for the week's image); anything else fails with the
+> commands that put it back (`ncflash.put_back`). New and off by default: `ncota.recovery_esptool` (opt-in
+> `navicore_esptool`, watched runs only) repeats D35's proof through the real ladder with the bench image as the known
+> good, so NaviCore ends on `navicore-hil1` in app0. `nccfg.usb_no_late_reply` was already in s40. `selftest.py` runs
+> every s46 and s47 test but `sbus.boot_quiet` against `NaviBootModel`, a port of `hil-week`'s restart, OTA and mesh
+> behaviour (each normal and opt-in test passes, each `(should)` fails), and nine mutations of it (six breaks, each
+> caught; the three D-NC fixes, each turning its `(should)` test into a pass). Step 6 waits (D43).
 
 1. Prove the ladder: `ncota.recovery_hard_reset` (opt-in `navicore_reboot`): `hard_reset()` reboots NaviCore
    (`Reset reason` names the USB peripheral), PING answers.
@@ -1185,6 +1202,31 @@ line and no AP; restored; the AP is back).
 
 ### NC-WP9 — boot, reboot, failure (`s46_navicore_boot.py`, `ncboot.*`, opt-in `navicore_reboot`)
 
+> **Status 2026-09-28: written, not bench-run** (`suites/s46_navicore_boot.py`). Under `navicore_reboot`:
+> `ncboot.banner_order`, `reboot_resets_ram_state` (REBOOT and `#L02`), `wcbs_see_reboot` (with the healthy roll
+> call), `new_peer_after_boot` (should, D-NC25), `roll_call_missing_board`, `mesh_reboot` (should, D-NC29),
+> `boardtype2_mismatch` (should, D-NC19) and `sbus.boot_quiet`; `ncboot.bad_device_id` under `navicore_identity`
+> (registered, off). Each skips while the recorder holds anything (`NaviCore.restart_blocker`, D33) and runs inside
+> `nc_guard`; a test that saves what only a restart applies writes the snapshot back and restarts again however its body
+> ended (`_put_back`). Where the code differs from the plan below:
+> - The roll call covers only the floor 1..quantity (`NaviCore.ino:5343-5362`), quantity 1 here, so W2 is never in it,
+>   and `ncmesh.deaf` stops a board's reception, not its heartbeats. The test raises the floor to the lowest unused id
+>   (3) inside the guard, restarts, and restarts again on the snapshot; `_loadLearnedPeers` skips a learned id the floor
+>   covers and saves nothing (`WCB_Client.cpp:1745-1774`), so NVS is untouched.
+> - The map's 14 banner lines become up to 23 anchors read from `setup()` (`banner_anchors`): bauds, pin profile, SBUS
+>   OUT, the SoftAP block and the mesh join from GET_CONFIG, App SHA256 from STATUS, the hook line from `#L90`. The bench
+>   board runs the stock IDF bootloader (recorded, not asserted).
+> - The USB port does not re-enumerate across a software restart or a USB-Serial/JTAG reset on this bench
+>   (`results/builds/ncflash-logs`, session logs): noted, not asserted. A restart is proven by the uptime.
+> - `new_peer_after_boot` waits out the 8 s grace, then W1's `?WDP,POLL` makes W1 and W2 advertise at once, instead of
+>   reading 70 s of log (WCB_Client never solicits at boot, so their adverts otherwise come within 60 s).
+> - `sbus.boot_quiet`: the stick is J4 (CH4; remote slots 2-7 only, Maestro 2 moves), the switch a tier whose own marker
+>   lands on a wired port (SI's `;W2;S2HILSIB`), the button an unmapped matrix slot. Setting the easing at boot
+>   (setSpeed/setAccel frames) is by design; only a setTarget frame on W1S1 fails it.
+> - A banner's SoftAP line names the AP: `hil/checkpoint.py` `redact_text` now hashes it (NaviCore's lines in
+>   session.log, failure tails), as ncflash's logs already did. GET_CONFIG's `wifiSsid` still reaches session.log in
+>   clear: hashing it would change the redacted hash of every stored NaviCore snapshot a paused run must match.
+
 `ncboot.banner_order` (the 14 lines of the map's `nc.boot.banner` in order; bauds, deviceId and quantity equal
 GET_CONFIG; the bootloader kind recorded), `ncboot.reboot_resets_ram_state`, `ncboot.wcbs_see_reboot`,
 `ncboot.new_peer_after_boot` (70 s of log; `(should)` per D-NC25), `ncboot.roll_call_missing_board` (W2 deaf across
@@ -1193,6 +1235,25 @@ the boot), `ncboot.mesh_reboot` (`(should)` per D-NC29), `ncboot.boardtype2_mism
 positions and errors unchanged). `ncboot.bad_device_id` stays behind `navicore_identity` (off).
 
 ### NC-WP10 — OTA (`s47_navicore_ota.py`, `ncota.*`)
+
+> **Status 2026-09-28: written, not bench-run** (`suites/s47_navicore_ota.py`). Unattended: `local_status_parse`,
+> `local_nosession_errors`, `relay_target_nosession`, `navicore_as_relay_nonerasing`. Opt-in: `local_begin_abort_timeout`
+> (`navicore_ota_erase`), `local_full_same_image` (`navicore_ota_full`), `relay_full_via_w1` (`navicore_ota_relay_full`,
+> off), `relay_full_to_w2` (`ota_full_wcb2`, ticked, so it runs nightly beside its W1-relayed twin). Where the code
+> differs from the plan below:
+> - NaviCore's `?OTALOCAL` has no BAUD sub-command (the WCB's has), and `execCliLine` matches the `?OTALOCAL,` prefix
+>   case-sensitively with its comma: a bare `?OTALOCAL` and `?otalocal,status` answer 'Unknown command' (a WCB prints
+>   STATUS for both).
+> - BEGIN's guards (family 0, size 0, the Next slot's size + 1 read from STATUS) refuse before any erase
+>   (`navicore_ota.h:143-154`), so they are in the unattended `local_nosession_errors`; `_refused_begin` refuses to build
+>   any other BEGIN, and `_relay_begin` any relayed one without its family (a missing family is 0, which W2 accepts).
+> - The erase test's 4 KB land on the head of the inactive slot, which holds the rollback image since D45 (the
+>   bootloader's fallback copy); `python -m hil.ncflash flash results/builds/navicore` writes it back. Both full-image
+>   tests leave both slots holding the bench image.
+> - The reaper test's window is REAPER_S - 0.5 to REAPER_S + REAPER_S/12 (2.5 s at 30 s): a rejected chunk that
+>   refreshed the session would move it 20 s.
+> - `relay_full_to_w2` relays only `results/builds/wcb-esp32-meshq`, and only when W2 runs its version (no `Code/bin`
+>   fallback, unlike s20's `_image`).
 
 Unattended, nothing erased: `ncota.local_status_parse`, `ncota.local_nosession_errors`, `ncota.relay_target_nosession`
 (W1 relays DATA/END/ABORT with no session: ERR 0, `END: no matching active session`, ABORT OK 0),
@@ -1506,6 +1567,7 @@ none yet).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | NC-WP2, NC-WP9 and NC-WP10 written, not bench-run: `s46_navicore_boot.py` (9 tests, 3 `(should)`) and `s47_navicore_ota.py` (11); opt-ins `navicore_ota_erase`, `navicore_ota_full`, `navicore_ota_relay_full`, `navicore_identity` registered and `navicore_esptool` added (off); `ncflash.BENCH_IMAGE`, `builds_with_sha`, `flash_rows`, `last_written`, `put_back`; `NaviCore.restart_blocker`; `redact_text` hashes a SoftAP name. `selftest.py` runs both suites against `NaviBootModel` and nine mutations of it. The three status notes list where the code differs from the plan: the roll call's floor (quantity 1 leaves W2 out; `deaf` stops reception only), NaviCore's `?OTALOCAL` without BAUD and with a case-sensitive prefix, and `recover()` calling a reset that did nothing a success. |
 | 2026-09-28 | _(pending)_ | NC-WP3's Export/Import, two-tab and live-panel specs (6, two `(should)`); `FakeSerial` tags events with their page; the fixture's switch SI Up action moves to `p2`. The INF7 note lists what they found: the CSV round trip narrows every button band; D-NC35 confirmed, and both tabs also share fragment-session numbers. |
 | 2026-09-28 | `264583e` | NC-WP3's Firmware-tab and clip specs (19, five `(should)`): `lib/navicore/ota.js` (`?OTALOCAL`, the `?OTA` relay, the restart), `clips.js` (`?REC`, the clip store), `firmware.js` with the esptool-js and CryptoJS stand-ins, and `FakeSerial`'s absent device. The INF7 note lists the code facts they found: D-NC33 and D-NC34 confirmed; a refused flash leaves the session disconnected; USB OTA waits out 10 s per lost chunk; a refused Record is taken as started. |
 | 2026-09-28 | `83684b3` | INF7 built (the config-tool rig: the `/NaviCore/` alias on its own origin 8779, the fake `navigator.serial`, the emulator and its model of `rc_config.h`, the bridge pipe and the bridge's `/serial` and `/sbus` routes, `run_wizard_test(..., pipe=True)`, a bench-shaped fixture and its scrubber, suite `s49_navicore_tool.py`) and NC-WP3 started: `nctool.static`, `nctool.unit` and 33 L1 specs, 8 of them `(should)`, all passing or failing as intended with no board; one L2 spec, `nctool.board_connect_config`, for the pipe. The INF7 note lists where the build and the tool's code differ from the plan. |
