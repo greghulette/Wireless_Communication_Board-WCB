@@ -2076,6 +2076,23 @@ GATED = {
     **{f"nccfg.{n}": ("navicore_fault", "injects faults into NaviCore's config storage (a NAVICORE_HIL_HOOKS build "
                                         "only)")
        for n in ("hook_save_fail", "hook_get_config_overflow", "hook_config_unreadable")},
+    # NC-WP2, NC-WP9 and NC-WP10 (suites/s46_navicore_boot.py, s47_navicore_ota.py), 2026-09-28
+    **{t: ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s")
+       for t in ("ncboot.banner_order", "ncboot.reboot_resets_ram_state", "ncboot.wcbs_see_reboot",
+                 "ncboot.new_peer_after_boot", "ncboot.roll_call_missing_board", "ncboot.mesh_reboot",
+                 "ncboot.boardtype2_mismatch", "sbus.boot_quiet", "ncota.recovery_hard_reset")},
+    "ncboot.bad_device_id": ("navicore_identity", "takes NaviCore off the mesh with a saved invalid deviceId until it "
+                                                  "is restored over USB; attended only"),
+    "ncota.recovery_esptool": ("navicore_esptool", "resets NaviCore into ROM download mode and writes its app0 and "
+                                                   "otadata with esptool; watched runs only"),
+    "ncota.local_begin_abort_timeout": ("navicore_ota_erase", "every accepted BEGIN erases 4 KB of NaviCore's inactive "
+                                                              "app slot, which nothing restores"),
+    "ncota.local_full_same_image": ("navicore_ota_full", "rewrites NaviCore's inactive app slot and switches its boot "
+                                                         "slot twice"),
+    "ncota.relay_full_via_w1": ("navicore_ota_relay_full", "rewrites NaviCore's inactive app slot through W1's relay "
+                                                           "and switches its boot slot twice (~25 min)"),
+    "ncota.relay_full_to_w2": ("ota_full_wcb2", "erases and rewrites W2's inactive app slot and switches its boot slot "
+                                                "twice"),
 }
 
 
@@ -6199,6 +6216,835 @@ def t_ncflash_status_parse(tmp):
     assert F.ota_status(NC.NaviCore(FakeNaviDev(script)))["running"]["label"] == "app0" and cut["n"] == 2
 
 
+# ---------------------------------------------------------------------------- NaviCore boot and OTA (s46, s47)
+def t_ncflash_identity(tmp):
+    """hil/ncflash.py's image-identity helpers: image_sha16 reads the 16 hex digits the board prints as App SHA256;
+    builds_with_sha finds the build folders carrying a board's SHA (any case, 8-64 digits; nothing for a short or
+    non-hex one); flash_rows reads record_flash's table under its heading and nothing of the hand-kept text above it or
+    of a heading after it; last_written passes over FAILED, VERIFY FAILED and NOT BACK rows to the newest OK or esptool
+    write; put_back names the three commands with the bench image's SHA."""
+    from hil import ncflash as F
+    builds = os.path.join(tmp.root, "builds")
+    img_a, elf_a = _nc_image(elf=b"\x7fELF a")
+    img_b, elf_b = _nc_image(elf=b"\x7fELF b")
+    a, b = _nc_folder(builds, "navicore-a", img_a, elf_a), _nc_folder(builds, "navicore-b", img_b, elf_b)
+    _nc_folder(builds, "navicore-a-copy", img_a, elf_a)
+    os.makedirs(os.path.join(builds, "ncflash-logs"))
+    sha_a = img_a[0xB0:0xB8].hex()
+    assert F.image_sha16(a) == sha_a and F.image_sha16(os.path.join(b, "NaviCore.ino.bin")) == img_b[0xB0:0xB8].hex()
+    assert F.image_sha16(os.path.join(builds, "nothing")) is None
+    assert [os.path.basename(x) for x in F.builds_with_sha(sha_a.upper(), builds)] == ["navicore-a", "navicore-a-copy"]
+    assert [os.path.basename(x) for x in F.builds_with_sha(img_b[0xB0:0xC0].hex(), builds)] == ["navicore-b"]
+    assert F.builds_with_sha(sha_a[:7], builds) == [] and F.builds_with_sha("zz" * 8, builds) == [] and \
+        F.builds_with_sha(None, builds) == []
+    assert F.flash_rows(builds) == [] and F.last_written(builds) is None
+    with open(os.path.join(builds, "FLASHED.md"), "w", encoding="utf-8") as f:
+        f.write("# Bench images\n\n| Folder | Board |\n|---|---|\n| `navicore/` | NaviCore |\n")
+    kw = dict(elf_sha="0" * 64, tree="`abc1234` clean", how="?OTALOCAL", what="x | y")
+    F.record_flash(builds, folder=a, result="OK: 'app0' -> 'app1'", **dict(kw, elf_sha=img_a[0xB0:0xD0].hex()))
+    F.record_flash(builds, folder=b, result="FAILED at DATA 4096/6144 B: x; running app intact", **kw)
+    F.record_flash(builds, folder=b, result="VERIFY FAILED after the restart: it came back on the old slot", **kw)
+    rows = F.flash_rows(builds)
+    assert [(r["folder"], r["result"].split(":")[0].split(" at ")[0]) for r in rows] == \
+        [("navicore-a", "OK"), ("navicore-b", "FAILED"), ("navicore-b", "VERIFY FAILED after the restart")], rows
+    assert rows[0]["sha"] == sha_a and rows[0]["what"] == "x / y" and rows[0]["how"] == "?OTALOCAL", rows[0]
+    assert F.last_written(builds)["folder"] == "navicore-a"
+    F.record_flash(builds, folder=b, result="written (recovery)", **dict(kw, how="esptool app0 + otadata"))
+    F.record_flash(builds, folder=a, result="NOT BACK after END: x", **kw)
+    with open(os.path.join(builds, "FLASHED.md"), "a", encoding="utf-8") as f:
+        f.write("\n## Later notes\n\n| not | a | flash | row | at | all | here |\n")
+    assert len(F.flash_rows(builds)) == 5 and F.last_written(builds)["folder"] == "navicore-b"
+    saved = (F.BUILDS, F.BENCH_IMAGE)
+    try:
+        F.BUILDS, F.BENCH_IMAGE = builds, "navicore-a"
+        text = F.put_back()
+        assert sha_a in text and "hil.ncflash status" in text and "flash results/builds/navicore-a" in text and \
+            "recover --allow-esptool --known-good results/builds/navicore-a" in text, text
+        assert "results/builds/navicore-b" in F.put_back("navicore-b")
+    finally:
+        F.BUILDS, F.BENCH_IMAGE = saved
+
+
+class BootDev(FakeNaviDev):
+    """FakeNaviDev plus what a restart and the recovery ladder touch: a pyserial handle whose RTS pulse resets the board
+    (_PulseSer; NaviCore.hard_reset), close() and open() (recover() hands the port to esptool), connected/active."""
+
+    def __init__(self, script, name, board):
+        super().__init__(script, name)
+        self._ser = _PulseSer(board)
+        self.connected = self.active = True
+        self.closed = False
+
+    def close(self):
+        self.closed, self.connected = True, False
+
+    def open(self):
+        self.closed, self.connected = False, True
+        return self
+
+
+class FakeLink:
+    """A probe wire as the suites use one (hil.links.Link): mark() and received() over a bytearray the model writes."""
+
+    def __init__(self, key, buf):
+        self.key, self.buf, self.tap = key, buf, False
+
+    def mark(self):
+        return len(self.buf)
+
+    def received(self, since):
+        return bytes(self.buf[since:])
+
+
+class _OtaCore:
+    """One board's OTA session (navicore_ota.h otaBegin/otaWrite/otaEnd/otaAbortSession :122-224; a WCB's WCB_OTA.cpp has
+    the same core): superseding BEGIN, the brick guard, the size guard, the in-order cursor, the overrun abort,
+    esp_ota_write's 0xE9 check on the first chunk, the incomplete-END refusal and esp_ota_end's verify (the image's own
+    appended SHA-256, as FakeOtaNavi checks it). `say` prints one console line. Every accepted BEGIN is recorded in
+    `erased`, so the selftest can hold each erase to its opt-in."""
+
+    def __init__(self, family, say, run_i, slot_size=0x1E0000):
+        self.family, self.say, self.run_i, self.size = family, say, run_i, slot_size
+        self.slots = [("app0", 0x10000), ("app1", 0x1F0000)]
+        self.s, self.erased, self.pending, self.images = None, [], None, {}
+
+    @property
+    def next(self):
+        return self.slots[self.run_i ^ 1]
+
+    def written(self):
+        return self.s["written"] if self.s else 0
+
+    def abort(self, reason):
+        if self.s:
+            self.say(f"[OTA] aborted: {reason} (current app intact)")
+        self.s = None
+
+    def begin(self, sid, size, fam):
+        self.s = None
+        if fam != self.family:
+            self.say(f"[OTA] BEGIN rejected: image chip family {fam} != this board {self.family} (brick guard)")
+            return False
+        if size == 0 or size > self.size:
+            self.say(f"[OTA] BEGIN rejected: image {size} B exceeds partition '{self.next[0]}' ({self.size} B)")
+            return False
+        self.erased.append((self.next[0], size))
+        self.s = {"sid": sid, "size": size, "written": 0, "buf": bytearray(), "t": time.monotonic(), "shown": 0}
+        self.say(f"[OTA] BEGIN ok: session {sid}, {size} B -> partition '{self.next[0]}' @0x{self.next[1]:06x} "
+                 f"({self.size} B)")
+        return True
+
+    def write(self, sid, off, raw):
+        s = self.s
+        if not s or sid != s["sid"] or off != s["written"]:
+            return False
+        if s["written"] + len(raw) > s["size"]:
+            self.say(f"[OTA] write overruns image ({s['written']} + {len(raw)} > {s['size']}) — aborting")
+            self.s = None
+            return False
+        if s["written"] == 0 and raw[:1] != b"\xe9":
+            self.say(f"[OTA] esp_ota_write failed @{off}: ESP_ERR_OTA_VALIDATE_FAILED — aborting")
+            self.s = None
+            return False
+        s["buf"] += raw
+        s["written"] += len(raw)
+        s["t"] = time.monotonic()
+        if s["written"] - s["shown"] >= 65536 or s["written"] == s["size"]:
+            s["shown"] = s["written"]
+            self.say(f"[OTA] {s['written']} / {s['size']} B ({s['written'] * 100 // s['size']}%)")
+        return True
+
+    def end(self, sid):
+        import hashlib
+        s = self.s
+        if not s or sid != s["sid"]:
+            self.say("[OTA] END: no matching active session")
+            return False
+        self.s = None
+        if s["written"] != s["size"]:
+            self.say(f"[OTA] END rejected: incomplete {s['written']} / {s['size']} B")
+            return False
+        buf = bytes(s["buf"])
+        if buf[:1] != b"\xe9" or hashlib.sha256(buf[:-32]).digest() != buf[-32:]:
+            self.say("[OTA] END verify FAILED: ESP_ERR_OTA_VALIDATE_FAILED (image rejected, current app intact)")
+            return False
+        self.images[self.run_i ^ 1], self.pending = buf, self.run_i ^ 1
+        self.say(f"[OTA] END ok: verified {len(buf)} B -> next boot '{self.next[0]}'")
+        return True
+
+    def reap(self, idle_s):
+        if self.s and time.monotonic() - self.s["t"] > idle_s:
+            self.abort("session timed out")
+
+
+def _nm_b64(text, cap):
+    """mbedtls_base64_decode into a `cap`-byte buffer -> (bytes, 0), or (None, -44) for a character outside the alphabet
+    or a bad length, or (None, -42) when it decodes to more than `cap` (the size is checked after the characters)."""
+    import base64
+    import binascii
+    if not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", text) or len(text) % 4 == 1:
+        return None, -44
+    try:
+        raw = base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
+    except binascii.Error:
+        return None, -44
+    return (None, -42) if len(raw) > cap else (raw, 0)
+
+
+class NaviBootModel(NaviModel):
+    """NaviModel plus what s46 and s47 drive, from NaviCore hil-week 6925773 (the bench image, D45): restarts - REBOOT,
+    #L02, the USB-Serial/JTAG reset, a relayed REBOOT, an OTA END, an esptool write - that go quiet at once, come back
+    `boot_s` later with setup()'s banner (NaviCore.ino:4486-4953), keep the saved config, command library, clips and
+    learned peers, and lose RAM state (debug flags, the monitor, CALIB, an OTA session); ?OTALOCAL and the ?OTA relay
+    parser (navicore_ota.h:250-554) on one _OtaCore, with the idle reaper run as loop() runs it; the target side of W1's
+    relay (:372-448), its ACK printed on W1; GET_MESH_STATS' uptime (rc_telemetry.h:1371-1378); the new-peer grace
+    (:5293-5317) and the boot roll call (:5343-5362); a relayed REBOOT (rc_telemetry.h:2404-2410: no ACK); #L02, #L90 of
+    a hook build and #L01; W1's view of a restart (the boot announce, the WDP row's AGE and HWREV); W2 as a relay target
+    with its own _OtaCore and console. The waits (grace, roll call, reaper, boot) are short so the suites run in
+    seconds; the tests' own constants are patched to match."""
+    FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if rx.pattern != r"^#[Ll]0?2$")
+    WCB2_FW = "6.2.1_TEST"
+    HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
+            "never a release")
+
+    def __init__(self, app_sha, grace_s=0.5, roll_call_s=1.0, idle_s=1.5, boot_s=0.8, mut=()):
+        self.mut = set(mut)            # t_ncboot_mutations: a break, or a D-NC fix, by name (see where each is read)
+        super().__init__()
+        self.app_sha, self.grace_s, self.roll_call_s, self.idle_s, self.boot_s = app_sha, grace_s, roll_call_s, idle_s, \
+            boot_s
+        self.FW = NaviModel.FW
+        self.hooks = self.up = self.wcb_ready = self.alive = True
+        self.boot_n, self.up_t = 3, time.monotonic() - 3600
+        self.join_t, self.advert_t = time.monotonic() - 3600, time.monotonic() - 20
+        self.seen, self.on_air = {1, 2}, {1, 2}
+        self.restarts, self.w2, self.w1s2 = [], None, bytearray()
+        self.ota = _OtaCore(1, self._say, 1)
+        self.w2ota = _OtaCore(0, self._say_w2, 0, slot_size=1966080)
+        t = threading.Thread(target=self._loop, daemon=True)
+        t.start()
+
+    def _say(self, line):
+        self.nav._append(line)
+
+    def _say_w2(self, line):
+        if self.w2 is not None:
+            self.w2._append(line)
+
+    def _loop(self):
+        while self.alive:
+            if self.up:
+                self.ota.reap(self.idle_s)
+            self.w2ota.reap(30.0)
+            time.sleep(0.05)
+
+    def merge(self, d):
+        super().merge(d)
+        if "boardtype_clamped" in getattr(self, "mut", ()) and self.c["boardType"] > 1:
+            self.c["boardType"] = 0                  # the D-NC19 fix: clamp to 0-1 on input
+
+    # ------------------------------------------------------------ restarts
+    def on_reset(self):
+        if "no_reset" not in self.mut:               # break: a USB-Serial/JTAG reset that does nothing
+            self.restart(11, 21)
+
+    def restart(self, code, rtc, delay=0.0):
+        """The board goes quiet now and comes back `delay` + `boot_s` later, as setup() prints it."""
+        self.up, self.monitor = False, False
+
+        def back():
+            self.calib = False
+            if "flags_survive" not in self.mut:      # break: the debug flags outlive a restart
+                self.flags = 0
+            self.ota.s = None
+            if "old_slot" in self.mut:               # break: the bootloader refuses the new image
+                self.ota.pending = None
+            if self.ota.pending is not None:
+                self.ota.run_i, self.ota.pending = self.ota.pending, None
+                img = self.ota.images[self.ota.run_i]
+                self.app_sha = img[0xB0:0xB8].hex()
+                v = re.search(rb"v\d+\.\d+\.\d+[A-Za-z0-9.+-]*_\d{6}[A-Z]{4}\d{2}", img)
+                self.FW = v.group(0).decode() if v else self.FW
+            self.load_flash()
+            self.boot()
+            self.boot_n += 1
+            self.up_t = time.monotonic()
+            self.wcb_ready = 1 <= self.ident["id"] <= 20
+            self.seen = set()
+            self.restarts.append(code)
+            lines = self.banner(code, rtc)
+            self.up = True
+            self.nav._append(*lines)
+            if self.wcb_ready:
+                self.join_t = self.advert_t = time.monotonic()
+                self.w1._append(f"[ETM] WCB{self.ident['id']} came ONLINE (boot) (src MAC: 02:00:00:00:00:14)")
+                roll = threading.Timer(self.roll_call_s, self._roll_call, (self.boot_n,))
+                roll.daemon = True
+                roll.start()
+        t = threading.Timer(delay + self.boot_s, back)
+        t.daemon = True
+        t.start()
+
+    def banner(self, code, rtc):
+        """setup()'s lines (NaviCore.ino:4486-4953) for the config just loaded; WCB_Client's own lines as it prints them."""
+        c, net = self.c, self.c["wcbNetwork"]
+        reasons = {3: "Software restart (incl. boot-guard retry)", 7: "RTC watchdog (short-WDT bootloader fired)",
+                   11: "USB peripheral (host toggled DTR/RTS — e.g. a tool opening the port)"}
+        rtcs = {12: "see rom/rtc.h", 16: "RTC-WDT (short-WDT bootloader fired — auto-retry)", 21: "USB UART chip reset"}
+        out = ["", "", "=== NaviCore ===", f"App SHA256: {self.app_sha}"] + ([self.HOOK] if self.hooks else [])
+        out += ["Bootloader: stock (IDF v5.5.1-710-g8410210c9a, built Nov 12 2025 10:32:28)",
+                f"Reset reason: {code} - {reasons[code]}  (RTC codes core0={rtc} [{rtcs[rtc]}] core1={rtc} [{rtcs[rtc]}])",
+                f"Boot attempts since power applied: {self.boot_n}   <-- board retried/reset before this boot",
+                "[MEM] rcConfig (335892 bytes) allocated in PSRAM, free PSRAM now 8033516",
+                "RC config loaded from LittleFS.", "[CLIPS] mounted: 11496 KB free of 12288 KB"]
+        v32 = c["boardType"] == 1
+        rx, tx = (5, 4) if v32 else (4, 5)
+
+        def san(b, d):
+            return b if 1200 <= b <= 115200 else d
+        out += [f"[BOARD] {'WCB HW 3.2' if v32 else 'NaviCore v2'} pin profile",
+                f"[SBUS] IN+OUT share Serial1/UART1 — RX GPIO{rx} / TX GPIO{tx}, 100k 8E2 inverted. UART0 = hardware S3.",
+                f"[Serial2] Local Maestro open @ {san(c['maestroBaud'], 115200)} baud  TX=GPIO6",
+                f"[AUX] S3 open @ {san(c['auxBaud'][0], 9600)} baud (hw UART0)",
+                f"[AUX] S4 open @ {19200 if 'banner_s4' in self.mut else san(c['auxBaud'][1], 9600)} baud",
+                f"[AUX] S5 open @ {san(c['auxBaud'][2], 9600)} baud",
+                f"[SBUS] OUT enabled — re-emit on GPIO{tx} (100k 8E2 inverted)" if c["sbusOutEnabled"] else
+                "[SBUS] OUT disabled (passthrough off — no CPU cost)"]
+        ap = False
+        if c["wifiEnabled"]:
+            pw = c["wifiPassword"].encode("utf-8")
+            if 0 < len(pw) < 8:
+                out += [f"[WIFI] REFUSED: password is {len(pw)} character(s); WPA2 requires 8.",
+                        "[WIFI] Not starting an open AP — set a longer password and reboot."]
+            elif not pw:
+                out += ["[WIFI] REFUSED: no AP password set. Refusing to start an OPEN access point —",
+                        "[WIFI] this board accepts REBOOT / RESET_DEFAULTS / SET_CONFIG with no credential."]
+            else:
+                ap = True
+                out += [f'[WIFI] SoftAP "{c["wifiSsid"] or "NaviCore-%d" % net["deviceId"]}" up on channel '
+                        f'{net["channel"]} — 192.168.4.1', "[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).",
+                        "[WIFI] DHCP offers no default gateway — clients keep their own route.",
+                        "[WS] command endpoint ready — ws://192.168.4.1/ws"]
+        if not 1 <= net["deviceId"] <= 20:
+            out += [f"[WCB_Client] ERROR: device_id {net['deviceId']} is out of range (1–20)",
+                    "[WCB] ERROR: wcb->begin() failed — check WCB Network settings in GUI"]
+        else:
+            out += (["[WCB_Client] SoftAP detected — running WIFI_AP_STA, ESP-NOW sharing the AP's radio channel"]
+                    if ap else []) + [
+                "[WCB_Client] MAC set to 02:00:00:00:00:14", "[WCB_Client] restored 1 learned peer(s)",
+                f"[WCB_Client] Joined WCB network as device ID {net['deviceId']} (quantity={net['quantity']}, oct2=0x00, "
+                f"oct3=0x00)", f'[WCB_Client] WDP identity set: type="NaviCore" fw="{self.FW}"',
+                f"[WCB] Joined network as device ID {net['deviceId']} (quantity={net['quantity']})"]
+        return out + [f"[NaviCore] Firmware {self.FW} — setup complete.",
+                      "  Connect config_tool/index.html via Web Serial for configuration."]
+
+    def _roll_call(self, n):
+        if n != self.boot_n or not self.wcb_ready:
+            return
+        floor = [i for i in range(1, min(self.ident["q"], 20) + 1) if i != self.ident["id"]]
+        missing = [i for i in floor if i not in self.on_air]
+        self.nav._append(*[f"[WCB] roll call: WCB{i} never heard from" for i in missing],
+                         f"[WCB] roll call: {len(floor) - len(missing)}/{len(floor)} board(s) online "
+                         f"{max(1, int(self.roll_call_s))}s after join")
+
+    def advert(self, n):
+        """drainPeerEvents (NaviCore.ino:5293-5317) for WCB n's WDP advert: silent inside the grace, else the alert and the
+        configured actions (a ;S2 unicast to W1 lands on its S2 wire)."""
+        if not self.wcb_ready or n in self.seen:
+            return
+        self.seen.add(n)
+        if time.monotonic() < self.join_t + self.grace_s:
+            return
+        if "grace_fixed" in self.mut and n in self.on_air:
+            return                                   # the D-NC25 fix: a board online when the grace ended is not new
+        out = [f"[PEER] New WCB {n} W{n} detected"] if self.c["peerAlert"] else []
+        for a in self.c["peerActions"]:
+            out += self.dispatch(a)
+            if a["type"] == "wcb_unicast" and a["target"] == "1" and a["cmd"].startswith(";S2"):
+                self.w1s2 += a["cmd"][3:].encode() + b"\r"
+        if out:
+            self.nav._append(*out)
+
+    # ------------------------------------------------------------ NaviCore's console
+    def script(self, text, n):
+        if not self.up:
+            self.received.append(text)
+            return []
+        return super().script(text, n)
+
+    def hash_cmd(self, text):
+        if len(text) >= 3 and text[1] in "Ll":
+            fn = (ord(text[2]) - 48) * 10 + (ord(text[3]) - 48) if len(text) >= 4 else ord(text[2]) - 48
+            if fn == 2:
+                self.restart(3, 12)
+                return []
+            if fn == 90 and self.hooks:
+                ms = _nm_toint(text[5:]) if len(text) > 5 else 0
+                return [f"[HIL] #L90: loop() stalls {ms} ms at its next pass", "[HIL] #L90: loop() resumed after 0 ms"]
+            if fn == 1:
+                return [f"NaviCore — {'WCB HW 3.2' if self.applied['board'] == 1 else 'NaviCore v2'}"]
+        return super().hash_cmd(text)
+
+    def cli(self, text):
+        if text.startswith("?OTALOCAL,"):
+            return self.ota_local(text[10:])
+        if text.startswith("?OTA,"):
+            return self.relay_out(text[5:])
+        return super().cli(text)
+
+    def ota_status(self):
+        run, nxt, s = self.ota.slots[self.ota.run_i], self.ota.next, self.ota.s
+        return ["---------- OTA Status ----------", "Chip:        ESP32-S3 (family 1)", f"Firmware:    {self.FW}",
+                f"App SHA256:  {self.app_sha}", f"Running:     '{run[0]}' @0x{run[1]:06x} ({self.ota.size} B)",
+                f"Next (OTA):  '{nxt[0]}' @0x{nxt[1]:06x} ({self.ota.size} B)",
+                f"Session:     ACTIVE id={s['sid']}  {s['written']} / {s['size']} B" if s else "Session:     idle",
+                "--------------------------------"]
+
+    def ota_local(self, args):
+        """processOtaLocalCommand (navicore_ota.h:269-335)."""
+        c1 = args.find(",")
+        sub, rest = (args if c1 < 0 else args[:c1]).strip().upper(), ("" if c1 < 0 else args[c1 + 1:])
+        if sub in ("STATUS", ""):
+            return self.ota_status()
+        if sub == "BEGIN":
+            p = rest.find(",")
+            if p < 0:
+                return ["[OTA] BEGIN usage: ?OTALOCAL,BEGIN,<imageSize>,<family 0|1>"]
+            m = self.nav.mark()
+            ok = self.ota.begin(1, _nm_toint(rest[:p]), _nm_toint(rest[p + 1:]) & 0xFF)
+            said = self.nav.since(m)
+            del self.nav.lines[m:]                 # printed after START, in this order (:288-291)
+            return ["", "[OTA:BEGIN,START]"] + said + [f"[OTA:BEGIN,{'OK' if ok else 'ERR'},{self.ota.written()}]"]
+        if sub == "DATA":
+            p = rest.find(",")
+            if p < 0:
+                return ["[OTA] DATA usage: ?OTALOCAL,DATA,<offset>,<base64>"]
+            off = _nm_toint(rest[:p])
+            raw, rc = _nm_b64(rest[p + 1:].strip(), 1024)
+            if rc:
+                return [f"[OTA] DATA base64 error {rc} (chunk too big? max 1024 B decoded)"]
+            if not self.ota.write(1, off, raw):
+                if "reaper_refresh" in self.mut and self.ota.s:
+                    self.ota.s["t"] = time.monotonic()   # break: a rejected chunk keeps the local session alive
+                return [f"[OTA] DATA rejected at offset {off} (write cursor at {self.ota.written()})",
+                        f"[OTA:NAK,{self.ota.written()}]"]
+            return [f"[OTA:ACK,{self.ota.written()}]"]
+        if sub == "END":
+            if self.ota.end(1):
+                self.restart(3, 12, delay=0.3)
+                return ["[OTA:END,OK]", "[OTA] rebooting into new firmware in 2s..."]
+            return ["[OTA:END,ERR]"]
+        if sub == "ABORT":
+            self.ota.abort("local abort command")
+            return []
+        return [f"[OTA] unknown subcommand '{sub}' (use STATUS|BEGIN|DATA|END|ABORT)"]
+
+    def relay_out(self, args):
+        """processOtaRelayCommand (navicore_ota.h:475-554): NaviCore relaying to WCB <target>. Only W2 answers here; its
+        ACK is printed on NaviCore's console from loop() (:463-469)."""
+        import zlib
+        c1 = args.find(",")
+        sub, rest = (args if c1 < 0 else args[:c1]).strip().upper(), ("" if c1 < 0 else args[c1 + 1:])
+        c2 = rest.find(",")
+        target, r2 = _nm_toint(rest if c2 < 0 else rest[:c2]) & 0xFF, ("" if c2 < 0 else rest[c2 + 1:])
+        c3 = r2.find(",")
+        sid, r3 = _nm_toint(r2 if c3 < 0 else r2[:c3]) & 0xFFFF, ("" if c3 < 0 else r2[c3 + 1:])
+        if not self.wcb_ready:
+            return ["[OTA] relay: WCB not ready"]
+        if not 1 <= target <= 20:
+            return [f"[OTA] relay: invalid target {target}"]
+        if sub == "BEGIN":
+            p = r3.find(",")
+            return self.w2_frame(target, "BEGIN", sid, size=_nm_toint(r3 if p < 0 else r3[:p]),
+                                 fam=0 if p < 0 else _nm_toint(r3[p + 1:]) & 0xFF)
+        if sub == "DATA":
+            p = r3.find(",")
+            if p < 0:
+                return ["[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>[:<crc32>],<b64>"]
+            off_field, b64 = r3[:p], r3[p + 1:].strip()
+            off_field, _, crc = off_field.partition(":")
+            if crc:
+                want = int(re.match(r"[0-9A-Fa-f]*", crc).group(0) or "0", 16)
+                have = zlib.crc32(f"{off_field},{b64}".encode()) & 0xFFFFFFFF
+                if want != have:
+                    return [f"[OTA] relay DATA @{_nm_toint(off_field)} DROPPED: crc {have:08X} != {want:08X} "
+                            f"(b64 {len(b64)} chars)"]
+            raw, rc = _nm_b64(b64, 192)
+            if rc:
+                return [f"[OTA] relay DATA base64 error {rc}"]
+            return self.w2_frame(target, "DATA", sid, off=_nm_toint(off_field), raw=raw)
+        if sub in ("END", "ABORT"):
+            return self.w2_frame(target, sub, sid)
+        return [f"[OTA] relay: unknown subcommand '{sub}'"]
+
+    def w2_frame(self, target, sub, sid, size=0, fam=0, off=0, raw=b""):
+        """W2's target side (WCB_OTA.cpp handleOta*Packet, the twin of navicore_ota.h:372-448) for a frame NaviCore relayed:
+        its console lines, then its ACK back on NaviCore's console."""
+        if target != 2 or self.w2 is None:
+            return []
+        core = self.w2ota
+        if sub == "BEGIN":
+            ok = core.begin(sid, size, fam)
+            ack = (core.written(), 0 if ok else 1)
+        elif sub == "DATA":
+            if core.s and core.s["sid"] == sid:
+                core.s["t"] = time.monotonic()
+            core.write(sid, off, raw)
+            ack = (core.written(), 0 if core.s and core.s["sid"] == sid else 1)
+        elif sub == "END":
+            ok = core.end(sid)
+            ack = (0, 0 if ok else 1)
+            if ok:
+                def back():
+                    core.run_i, core.pending = core.pending, None
+                    self._say_w2("Reset reason: 3 - Software Reset")
+                    self.w1._append("[ETM] WCB2 came ONLINE (boot) (src MAC: 02:00:00:00:00:02)")
+                t = threading.Timer(0.5, back)
+                t.daemon = True
+                t.start()
+        else:
+            core.abort("remote abort")
+            ack = (0, 0)
+        self.nav.later(0.03, f"[OTA:ACK,2,{sid},{ack[0]},{ack[1]}]")
+        return []
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        t = obj.get("type") if isinstance(obj, dict) else None
+        if t == "REBOOT":
+            self.restart(3, 12, delay=0.25)
+            return ['{"type":"ACK","ok":true,"msg":"rebooting"}']
+        if t == "GET_MESH_STATS":
+            up = int((time.monotonic() - self.up_t) * 1000)
+            return [f'{{"type":"MESH_STATS","pg":0,"self":{self.ident["id"]},"upMs":{up},"agg":{{"sent":0,"ackd":0,'
+                    f'"rty":0,"fail":0,"ung":0,"bcast":0,"recv":0}},"peers":[],"last":1}}']
+        if t == "WCB_SEND" and _nm_pick(obj, "target", 0) == 1:
+            cmd = _nm_pick(obj, "cmd", "")
+            if not self.wcb_ready:
+                return ['{"type":"ACK","ok":false,"msg":"WCB not ready (init failed)"}']
+            if cmd.startswith(";S0,"):
+                self.w1._append(cmd[4:])
+            elif cmd.startswith(";S2"):
+                self.w1s2 += cmd[3:].encode() + b"\r"
+            return ['{"type":"ACK","ok":true}']
+        return super().json_line(line)
+
+    # ------------------------------------------------------------ W1 and W2
+    def relay_in(self, sub, sid, rest):
+        """NaviCore's target side (navicore_ota.h:372-448) for a frame W1's relay sent it -> the ACK lines W1 prints."""
+        import base64
+        if not self.wcb_ready or not self.up:
+            return []
+        if sub == "BEGIN":
+            size, _, fam = rest.partition(",")
+            ok = self.ota.begin(sid, _nm_toint(size), _nm_toint(fam or "0") & 0xFF)
+            return [f"[OTA:ACK,20,{sid},{self.ota.written()},{0 if ok else 1}]"]
+        if sub == "DATA":
+            off_field, _, b64 = rest.partition(",")
+            off_s = off_field.partition(":")[0]
+            if self.ota.s and self.ota.s["sid"] == sid:
+                self.ota.s["t"] = time.monotonic()
+            self.ota.write(sid, _nm_toint(off_s), base64.b64decode(b64))
+            live = bool(self.ota.s) and self.ota.s["sid"] == sid or "ack_ok_no_session" in self.mut   # break: #70 twin
+            return [f"[OTA:ACK,20,{sid},{self.ota.written()},{0 if live else 1}]"]
+        if sub == "END":
+            ok = self.ota.end(sid)
+            if ok:
+                self._say("[OTA] remote update verified — rebooting into new firmware...")
+                self.restart(3, 12, delay=0.35)
+            return [f"[OTA:ACK,20,{sid},0,{0 if ok else 1}]"] * (4 if ok else 1)
+        if sub == "ABORT":
+            self.ota.abort("remote abort")
+            return [f"[OTA:ACK,20,{sid},0,0]"]
+        return []
+
+    def w1_script(self, text, n):
+        if text == "?WDP,POLL":
+            for b in sorted(self.on_air):
+                self.advert(b)
+            return ["[WDP] POLL: advertised and solicited"]
+        if text == "?WDP,DUMP":
+            hw = "NaviCore v2" if self.applied["board"] == 0 else "WCB 3.2"
+            return [f"[WDP:N=20,CLIENT=1,ALIAS=NaviCore,HW=32,HWREV={hw},FW={self.FW},CAP=0000,CTRL=0,CAPTAGS=,"
+                    f"MAESTRO=1,AGE={int(time.monotonic() - self.advert_t)},SEEN=1,PEER=0]"] + \
+                [f"[WDPIF:N=20,S={p},DEV={v}]" for p, v in sorted(self.labels().items())] + ["[WDP:END,count=2]"]
+        m = re.match(r"\?OTA,(\w+),20,(\d+)(?:,(.*))?$", text)
+        if m:
+            return self.relay_in(m.group(1).upper(), int(m.group(2)), m.group(3) or "")
+        if text == ';W20,{"type":"REBOOT"}':
+            if self.wcb_ready and self.up:
+                self.nav._append("[RC] Remote REBOOT requested via WCB")
+                self.restart(3, 12, delay=0.1 if "reboot_acked" not in self.mut else 0.5)
+                if "reboot_acked" in self.mut:       # the D-NC29 fix: ACK, then a deferred restart
+                    return ['{"sys":1,"type":"ACK","of":"REBOOT","ok":true}']
+            return []
+        if text.startswith(";W20,?") and not (self.wcb_ready and self.up):
+            return []
+        return super().w1_script(text, n)
+
+    def w2_script(self, text, n):
+        if text.startswith(";S0,"):
+            return [text[4:]]
+        if text == "?OTALOCAL,STATUS":
+            core = self.w2ota
+            run, nxt = core.slots[core.run_i], core.next
+            return ["---------- OTA Status ----------", "Chip:        ESP32-D0WD-V3 (family 0)",
+                    f"Firmware:    {self.WCB2_FW}", f"Running:     '{run[0]}' @0x{run[1]:06x} (1966080 B)",
+                    f"Next (OTA):  '{nxt[0]}' @0x{nxt[1]:06x} (1966080 B)",
+                    "Session:     idle" if not core.s else f"Session:     ACTIVE id={core.s['sid']}",
+                    "--------------------------------"]
+        return []
+
+    def esptool(self, argv):
+        """esptool as recover() runs it (hil/ncflash.py kick_argv, write_argv): chip-id finds no ROM bootloader (the app
+        runs); write-flash puts the given app into app0, selects it, and the RTC watchdog boots it."""
+        if "chip-id" in argv:
+            return 2, "A fatal error occurred: Failed to connect to ESP32-S3: No serial data received."
+        with open(argv[argv.index("0x10000") + 1], "rb") as f:
+            self.ota.images[0] = f.read()
+        self.ota.pending = 0
+        self.restart(7, 16)
+        return 0, "Hash of data verified.\nLeaving...\nHard resetting via RTC WDT..."
+
+
+NCBOOT_SHOULD = {"ncboot.new_peer_after_boot", "ncboot.mesh_reboot", "ncboot.boardtype2_mismatch"}
+
+
+def t_ncboot_helpers(tmp):
+    """The pure parts of s46 and s47. The banner anchors against NaviBootModel's banner (setup()'s lines for the bench
+    config): whole, nothing to report and the facts read; then a wrong baud, a SoftAP on another SSID or channel, two
+    lines swapped, a failure line and a lost start line are each named, and no message quotes the SSID. The setTarget
+    scan finds only 0x04 frames among Pololu traffic; the stick and switch pickers take J4 (remote-only) and a switch
+    tier's marker on a wired port, and pass over the mode switch, an easing switch, a knob with a local output and an
+    unwired port. The BEGIN builders refuse anything NaviCore's or W2's guards would let through."""
+    import types
+    import suites.s46_navicore_boot as S46
+    import suites.s47_navicore_ota as S47
+    m = NaviBootModel(app_sha="529503cd35f1e5e5")
+    m.alive = False
+    cfg = json.loads(m.text())
+    lines = ["ESP-ROM:esp32s3-20210327", "rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)"] + m.banner(3, 12)
+    anchors = S46.banner_anchors(cfg, m.FW, m.app_sha, True)
+    banner = S46.banner_lines(lines)
+    assert banner[0] == "=== NaviCore ===" and banner[-1].endswith("setup complete."), banner[:2]
+    problems, facts = S46.banner_problems(banner, anchors)
+    assert not problems and facts["bootloader"] == "stock" and facts["reset"] == 3 and facts["rtc"] == (12, 12), \
+        (problems, facts)
+
+    def check(mutate, cfg_change=None, want=None):
+        c2 = json.loads(json.dumps(cfg))
+        (cfg_change or (lambda c: None))(c2)
+        got, _ = S46.banner_problems(mutate(list(banner)), S46.banner_anchors(c2, m.FW, m.app_sha, True))
+        assert got and all(want in p for p in got[:1]) and not any("HILap" in p for p in got), (want, got)
+        return got
+    check(lambda b: b, lambda c: c["auxBaud"].update(S4=19200), "S4: missing (expected '[AUX] S4 open @ 19200 baud')")
+    check(lambda b: b, lambda c: c.update(wifiSsid="OTHERap"), "the SoftAP on the mesh channel: missing")
+    check(lambda b: b, lambda c: c["wcbNetwork"].update(channel=6), "the SoftAP on the mesh channel: missing")
+    i, j = banner.index("[AUX] S3 open @ 115200 baud (hw UART0)"), banner.index("[BOARD] NaviCore v2 pin profile")
+    check(lambda b: b[:j] + [b[i]] + b[j:i] + b[i + 1:], None,
+          "S3: out of order (expected '[AUX] S3 open @ 115200 baud (hw UART0)')")
+    got = check(lambda b: b[:-1] + ['[WIFI] SoftAP "HILap" FAILED to start on channel 1.', b[-1]], None,
+                "a [WIFI] failure line (not quoted: it names the AP)")
+    assert S46.banner_lines(lines[:2]) == [] and S46.banner_anchors(cfg, m.FW, None, False)[1][0] != "App SHA256"
+    # the SoftAP line names the AP: redact_text (and so Bench.log on NaviCore's lines, and every failure detail) hashes
+    # it, once, as hil/ncflash.py's own logs do
+    from hil.checkpoint import redact_text
+    ap = next(x for x in banner if x.startswith("[WIFI] SoftAP"))
+    hashed = redact_text(ap)
+    assert "HILap" not in hashed and hashed.startswith('[WIFI] SoftAP "<redacted:') and redact_text(hashed) == hashed and \
+        hashed.endswith('" up on channel 1 — 192.168.4.1'), hashed
+    # the setTarget scan: setSpeed 0x07 and setAcceleration 0x09 frames (the easing re-applied at boot) are no motion
+    frames = bytes([0xAA, 2, 0x07, 0, 20, 0, 0xAA, 4, 0x04, 5, 0x70, 0x2E, 0xAA, 3, 0x09, 0, 3, 0, 0xAA, 2, 0x04, 0, 0, 0])
+    assert S46._set_targets(frames) == [(4, 5, 6000), (2, 0, 0)] and S46._set_targets(b"HILSIA\r") == []
+    ctl = {"lx": 3, "ly": 4, "rx": 1, "ry": 2,
+           "sw": [{"l": "SA", "c": 12, "t": 0, "pos": 0, "v": [172, 992, 1811]},
+                  {"l": "SC", "c": 10, "t": 0, "pos": 1, "v": [172, 992, 1811]},
+                  {"l": "SI", "c": 16, "t": 1, "pos": 0, "v": [172, 1811, 1811]}]}
+    ncfg = {"funcBindings": {"mode": 4}, "maestros": [{"type": 1, "device": 1}] + [{"type": 2, "device": d} for d in
+                                                                                    range(2, 9)],
+            "knobs": {"J3": {"channel": 3, "function": 1, "outputs": [{"target": 1}, {"target": 2}]},
+                      "J4": {"channel": 4, "function": 1, "outputs": [{"target": t} for t in range(2, 8)]}},
+            "switches": {"SA": {"channel": 8}, "SB": {"channel": 9}, "SC": {"channel": 10, "positions": 3,
+                                                                           "p0": [{"type": "maestro", "target": "1",
+                                                                                   "cmd": "setEasing,p0"}]},
+                         "SD": {"channel": 11}, "SE": {"channel": 12, "positions": 3,
+                                                       "p2": [{"type": "wcb_broadcast", "cmd": ";W1;S3HILMODE"}]},
+                         "SF": {"channel": 13}, "SG": {"channel": 14}, "SH": {"channel": 15},
+                         "SI": {"channel": 16, "positions": 2, "p0": [{"type": "wcb_broadcast", "cmd": ";W1;S3HILSIA"}],
+                                "p2": [{"type": "wcb_broadcast", "cmd": ";W2;S2HILSIB"}]}}}
+    assert S46._knob_stick(ctl, ncfg) == ("ly", "J4", [2, 3, 4, 5, 6, 7])
+    assert S46._knob_stick(dict(ctl, ly=9), ncfg) is None                 # J3 drives a local slot: never picked
+    wired = {(2, "S2"): FakeLink("W2S2", bytearray())}
+    bench = types.SimpleNamespace(links=types.SimpleNamespace(get=lambda w, p: wired.get((w, p))))
+    sw = S46._switch_marker(bench, ctl, ncfg)
+    assert (sw["label"], sw["index"], sw["back"], sw["go"], sw["text"], sw["link"].key) == \
+        ("SI", 2, 0, 2, "HILSIB", "W2S2"), sw                             # a 2-way switch's position 1 reads as 0
+    wired.clear()
+    assert S46._switch_marker(bench, ctl, ncfg) is None                   # W2S2 unwired; SE is the mode switch
+    nxt = {"label": "app0", "addr": 0x10000, "size": 1966080}
+    for size, fam in ((4096, 1), (1, 1), (1966080, 1), (4096, 257)):
+        _raises(lambda: S47._refused_begin(size, fam, nxt), ValueError)
+    assert [S47._refused_begin(s, f, nxt) for s, f in ((4096, 0), (0, 1), (1966081, 1))] == \
+        ["?OTALOCAL,BEGIN,4096,0", "?OTALOCAL,BEGIN,0,1", "?OTALOCAL,BEGIN,1966081,1"]
+    _raises(lambda: S47._relay_begin(2, 7, 4096, 2), ValueError)
+    assert S47._relay_begin(2, 7, 4096, 1) == "?OTA,BEGIN,2,7,4096,1"
+
+
+def _run_boot_suite(tmp, ids=None, mut=(), tag="all"):
+    """A fake bench for s46 and s47 under <tmp>/<tag>: a bench image and a rollback image in a builds folder with their
+    FLASHED.md rows, W2's bench image, the core's boot_app0.bin and NaviCore's partitions.csv for the esptool rung, a
+    fresh NaviBootModel(mut) behind NaviCore, W1 and W2, every opt-in on. Runs the tests named in `ids` (default: all
+    but sbus.boot_quiet, which needs the SBUS controller) through the runner, with the suites' waits and paths patched
+    to the model's, and puts every patch back -> (results by id, the model, facts: builds, bench_img, w2_img, log,
+    count)."""
+    import contextlib
+    import hashlib
+    from hil import ncflash as F
+    root = os.path.join(tmp.root, tag)
+    builds = os.path.join(root, "builds")
+    bench_img, bench_elf = _nc_image(version=NaviModel.FW, elf=b"\x7fELF bench")
+    old_img, old_elf = _nc_image(version=NaviModel.FW, elf=b"\x7fELF rollback")
+    bench_dir = _nc_folder(builds, "navicore-bench", bench_img, bench_elf)
+    old_dir = _nc_folder(builds, "navicore", old_img, old_elf)
+    for folder, img in ((old_dir, old_img), (bench_dir, bench_img)):
+        F.record_flash(builds, folder=folder, elf_sha=img[0xB0:0xD0].hex(), tree="not recorded", how="?OTALOCAL",
+                       result="OK: 'app0' @0x010000 -> 'app1' @0x1f0000", what="selftest")
+    w2_img = b"\xe9" + bytes(700) + NaviBootModel.WCB2_FW.encode() + bytes(900)
+    w2_img += hashlib.sha256(w2_img).digest()
+    w2_path = os.path.join(root, "WCB.ino.bin")
+    with open(w2_path, "wb") as f:
+        f.write(w2_img)
+    a15 = os.path.join(root, "a15")
+    parts = os.path.join(a15, "packages", "esp32", "hardware", "esp32", "3.3.4", "tools", "partitions")
+    os.makedirs(parts)
+    with open(os.path.join(parts, "boot_app0.bin"), "wb") as f:
+        f.write(_nc_otadata())
+    gh = os.path.join(root, "gh")
+    os.makedirs(os.path.join(gh, "NaviCore"))
+    with open(os.path.join(gh, "NaviCore", "partitions.csv"), "w", encoding="utf-8") as f:
+        f.write(NC_PARTITIONS)
+    model = NaviBootModel(app_sha=bench_img[0xB0:0xB8].hex(), mut=mut)
+    model.ota.images[1] = bench_img
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}, "sbus": {"port": "COMS", "kind": "sbus"}})
+    b.cfg["opt_in"] = list(optin.OPT_INS)
+    nav = BootDev(model.script, "navicore", model)
+    w1, w2 = FakeNaviDev(model.w1_script, "wcb1"), FakeNaviDev(model.w2_script, "wcb2")
+    model.nav, model.w1, model.w2 = nav, w1, w2
+    nav.log = w1.log = w2.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1, "wcb2": w2}[name]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        for name in ("suites.s46_navicore_boot", "suites.s47_navicore_ota"):
+            sys.modules.pop(name, None)
+        import suites.s46_navicore_boot as S46
+        import suites.s47_navicore_ota as S47
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith(("ncboot.", "ncota.")) and
+                (ids is None or t["id"] in ids)]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+    patches = [(F, "BUILDS", builds), (F, "BENCH_IMAGE", "navicore-bench"), (F, "run_esptool", model.esptool),
+               (S47, "WCB_BENCH_IMAGE", w2_path), (S47, "REAPER_S", model.idle_s),
+               (S47, "config_guard", lambda bench, *w: contextlib.nullcontext()),
+               (S46, "ROLL_CALL_S", model.roll_call_s), (S46, "PEER_GRACE_S", model.grace_s), (S46, "ADVERT_WAIT_S", 1.0),
+               (S46, "link", lambda bench, w, p: FakeLink(f"W{w}{p}", model.w1s2))]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    env = {k: os.environ.get(k) for k in ("HIL_ARDUINO15", "HIL_GITHUB_ROOT")}
+    os.environ.update(HIL_ARDUINO15=a15, HIL_GITHUB_ROOT=gh)
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        model.alive = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return ({r["id"]: r for r in ck.data["results"]}, model,
+            dict(builds=builds, bench_img=bench_img, w2_img=w2_img, log=log, count=len(mine)))
+
+
+def t_ncboot_ncota_against_model(tmp):
+    """Every test of s46 and s47 but sbus.boot_quiet (it needs the SBUS controller; t_ncboot_helpers covers its parts)
+    run whole, through the runner, against NaviBootModel, with every opt-in on and the waits shrunk to the model's: each
+    normal and opt-in test passes and each (should) test fails, as on today's NaviCore. Then the bench is as it was: the
+    model's saved config, command library and clips unchanged; NaviCore on the bench image (the esptool rung moved it to
+    app0, and the flashes come back to where each began); every accepted BEGIN belongs to an erasing or flashing test
+    (4 KB twice, then the bench image four times; W2's image twice), so no read-only test ever erased a slot; FLASHED.md
+    gained a row for each flash; no result detail and no runner note names the AP's SSID, every boot banner's SoftAP
+    line reached session.log hashed, and session.log carries no credential."""
+    from hil import ncflash as F
+    probe = NaviModel()
+    orig = (probe.flash, probe.cmdlib, list(probe.clips))
+    res, model, x = _run_boot_suite(tmp)
+    bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCBOOT_SHOULD else 'PASS'}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCBOOT_SHOULD else "PASS")]
+    assert len(res) == x["count"] == 19, (len(res), x["count"])
+    assert not bad, "\n".join(bad)
+    for tid in NCBOOT_SHOULD:
+        assert "(should, D-NC" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
+    assert (model.flash, model.cmdlib, model.clips) == orig, "the model's saved config, library or clips changed"
+    img = x["bench_img"]
+    assert model.app_sha == img[0xB0:0xB8].hex() and model.FW == NaviModel.FW, (model.app_sha, model.FW)
+    assert model.ota.slots[model.ota.run_i][0] == "app0" and model.ota.s is None, model.ota.run_i
+    n = len(img)
+    assert [size for _, size in model.ota.erased] == [4096, 4096, n, n, n, n], model.ota.erased
+    assert [size for _, size in model.w2ota.erased] == [len(x["w2_img"])] * 2 and model.w2ota.run_i == 0, \
+        model.w2ota.erased
+    rows = F.flash_rows(x["builds"])
+    assert [(r["folder"], r["how"], r["result"].split(":")[0]) for r in rows[2:]] == \
+        [("navicore-bench", "esptool app0 + otadata", "written (recovery)")] + \
+        [("navicore-bench", "?OTALOCAL", "OK")] * 2 + [("navicore-bench", "?OTA relay via W1", "OK")] * 2, rows[2:]
+    assert model.restarts.count(11) == 1 and model.restarts.count(7) == 1, model.restarts
+    log = x["log"]
+    notes = [line for line in log.splitlines() if " runner # " in line]
+    assert not any("HILap" in r["detail"] for r in res.values()), "a result detail names the AP"
+    assert not any("HILap" in line for line in notes), "a runner note names the AP"
+    assert 'SoftAP "HILap"' not in log and log.count('SoftAP "<redacted:') >= 15, "a banner's SoftAP line kept its name"
+    assert not any(s in log for s in SECRETS), "a credential reached session.log"
+
+
+# (test, model mutation, the status it must then get): a break of NaviCore's behaviour each test exists to catch, and
+# each D-NC fix its (should) test asks for.
+NCBOOT_MUTATIONS = (
+    ("ncboot.reboot_resets_ram_state", "flags_survive", "FAIL", "a debug flag survived the restart"),
+    ("ncboot.banner_order", "banner_s4", "FAIL", "S4: missing"),
+    ("ncota.relay_target_nosession", "ack_ok_no_session", "FAIL", "expected {'DATA': (0, 1)"),
+    # recover() itself calls this rung a success: its fallback PING answers, since the app never went down. Only the
+    # uptime tells.
+    ("ncota.recovery_hard_reset", "no_reset", "FAIL", "the chip did not restart"),
+    ("ncota.local_full_same_image", "old_slot", "FAIL", "came back on the old slot"),
+    ("ncota.local_begin_abort_timeout", "reaper_refresh", "FAIL", "rejected chunks refreshed the window"),
+    ("ncboot.new_peer_after_boot", "grace_fixed", "PASS", ""),
+    ("ncboot.mesh_reboot", "reboot_acked", "PASS", ""),
+    ("ncboot.boardtype2_mismatch", "boardtype_clamped", "PASS", ""),
+)
+
+
+def t_ncboot_mutations(tmp):
+    """The s46/s47 tests catch what they exist to catch: against a NaviBootModel broken in one way each - debug flags that
+    outlive a restart, a banner with the wrong S4 baud, a relayed DATA ACKed OK with no session (the #70 twin), a
+    USB-Serial/JTAG reset that does nothing, a bootloader that refuses the new image, rejected chunks that keep a local
+    session alive - the test fails and says why; and with each D-NC fix in the model (the new-peer grace, an ACKed and
+    deferred mesh REBOOT, boardType clamped on input) its (should) test passes. Each runs alone on a fresh model."""
+    for tid, mut, want, why in NCBOOT_MUTATIONS:
+        res, model, _ = _run_boot_suite(tmp, ids={tid}, mut={mut}, tag=mut)
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+        if mut == "boardtype_clamped":
+            assert model.restarts == [], f"a clamped boardType still restarted NaviCore: {model.restarts}"
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -6220,7 +7066,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_nccfg_suite_against_model,
          t_ncflash_image_check, t_ncflash_libs, t_ncflash_build, t_ncflash_build_source, t_ncflash_status_parse,
          t_ncflash_flash,
-         t_ncflash_flash_failures, t_ncflash_recover]
+         t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
+         t_ncboot_mutations]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

@@ -82,6 +82,8 @@
     "nvs_fill",
     "w1s4_soak",
     "navicore_reboot",
-    "navicore_fault"
+    "navicore_fault",
+    "navicore_ota_erase",
+    "navicore_ota_full"
   ]
 }

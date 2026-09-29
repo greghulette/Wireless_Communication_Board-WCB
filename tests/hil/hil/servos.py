@@ -118,6 +118,23 @@ SERVO_TESTS = {
                              "decode garbage, only the remote-slot detector knobs could act (the rest is made inert)",
     "sbus.reconfig_live": "moves the rx stick and holds a matrix button across saves",
     "sbus.reconfig_parked_tap_cleared": "holds a matrix button across a save",
+    # suites/s46_navicore_boot.py and s47_navicore_ota.py: every NaviCore restart, whether by REBOOT, #L02, a relayed
+    # REBOOT, the USB-Serial/JTAG reset, an OTA END or the esptool rung, stops SBUS OUT for a few seconds, and nc_guard
+    # sends a mesh SET_MODE back if the mode that came back is not the one it snapshotted (J2 moves then).
+    "ncboot.banner_order": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "ncboot.reboot_resets_ram_state": "restarts NaviCore twice (REBOOT and #L02): SBUS OUT stops each time",
+    "ncboot.wcbs_see_reboot": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "ncboot.new_peer_after_boot": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "ncboot.roll_call_missing_board": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
+    "ncboot.mesh_reboot": "a REBOOT relayed from W1 restarts NaviCore: SBUS OUT stops for a few seconds",
+    "ncboot.boardtype2_mismatch": "restarts NaviCore twice (boardType 2 boots the same v2 pins): SBUS OUT stops each time",
+    "ncboot.bad_device_id": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
+    "sbus.boot_quiet": "holds the left stick (CH4, knob J4) off-centre across a NaviCore restart: Maestro 2 ch 0 moves "
+                       "there and back; the restart stops SBUS OUT for a few seconds",
+    "ncota.recovery_hard_reset": "resets NaviCore through its USB-Serial/JTAG port: SBUS OUT stops for a few seconds",
+    "ncota.recovery_esptool": "resets NaviCore into ROM download mode for an esptool write: SBUS OUT stops for ~30 s",
+    "ncota.local_full_same_image": "two OTA flashes restart NaviCore twice: SBUS OUT stops for a few seconds each time",
+    "ncota.relay_full_via_w1": "two relayed OTA flashes restart NaviCore twice: SBUS OUT stops each time",
 }
 
 

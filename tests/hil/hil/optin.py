@@ -69,6 +69,43 @@ OPT_INS = {
         "why": "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s",
         "estimate_s": 40,
     },
+    "navicore_ota_erase": {
+        "title": "NaviCore OTA sessions",
+        "what": "Opens 4 KB ?OTALOCAL sessions on NaviCore and ends them by ABORT and by the 30 s idle reaper: each "
+                "accepted BEGIN erases the first 4 KB of its inactive app slot, the head of the image there (the "
+                "rollback copy); the boot slot never moves.",
+        "why": "every accepted BEGIN erases 4 KB of NaviCore's inactive app slot, which nothing restores",
+        "estimate_s": 45,
+    },
+    "navicore_ota_full": {
+        "title": "Full-image OTA on NaviCore",
+        "what": "Re-flashes NaviCore over USB (?OTALOCAL, hil/ncflash.py) with the bench image it runs, twice: two "
+                "~80 s transfers that each switch its boot slot and restart it, ending on the slot it started on.",
+        "why": "rewrites NaviCore's inactive app slot and switches its boot slot twice",
+        "estimate_s": 240,
+    },
+    "navicore_ota_relay_full": {
+        "title": "Full relay OTA to NaviCore (run by hand)",
+        "what": "Re-flashes NaviCore through W1's ?OTA relay with the bench image it runs, twice: about 6100 frames "
+                "of 192 bytes a pass, some 12 minutes each, and two restarts.",
+        "why": "rewrites NaviCore's inactive app slot through W1's relay and switches its boot slot twice (~25 min)",
+        "estimate_s": 1500,
+    },
+    "navicore_esptool": {
+        "title": "NaviCore esptool recovery (watched)",
+        "what": "Runs the recovery ladder's esptool rungs on the healthy NaviCore: esptool resets it into ROM download "
+                "mode, writes the bench image into app0 and boot_app0.bin into otadata, and boots it. Run it with "
+                "someone watching the log: a chip left in download mode needs the ladder's own kick rung.",
+        "why": "resets NaviCore into ROM download mode and writes its app0 and otadata with esptool; watched runs only",
+        "estimate_s": 90,
+    },
+    "navicore_identity": {
+        "title": "NaviCore mesh identity (attended)",
+        "what": "Saves an invalid NaviCore deviceId and restarts it: NaviCore is off the mesh until the test writes "
+                "the real one back over USB and restarts it again.",
+        "why": "takes NaviCore off the mesh with a saved invalid deviceId until it is restored over USB; attended only",
+        "estimate_s": 60,
+    },
     "navicore_fault": {
         "title": "NaviCore fault hooks (hook build)",
         "what": "Uses the NAVICORE_HIL_HOOKS fault verbs (#L91-#L93: a corrupted /config.json, an overflowing "

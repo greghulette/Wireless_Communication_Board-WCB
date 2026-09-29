@@ -666,6 +666,19 @@ class NaviCore:
                             since=m)
         return g.groups()
 
+    def restart_blocker(self):
+        """Why restarting NaviCore now would lose recorder state, or None. A restart ends a take being recorded, a replay
+        or a clip upload (?REC,INFO state other than idle), and empties the buffer, which may hold an unsaved take
+        (navicore_record.h keeps it in RAM only): the recorder buffer is bench state the harness leaves as found
+        (docs/HIL_WEEK_DECISIONS.md D33). The tests that restart NaviCore skip on it."""
+        state, events = self.rec_info()[:2]
+        if state != "idle":
+            return f"NaviCore's recorder is {state}: a restart would end it"
+        if int(events):
+            return (f"NaviCore's recorder buffer holds {events} events, perhaps an unsaved take, which a restart would "
+                    f"lose (D33): save it (?REC,SAVE,<name>) or clear it (?REC,CLEAR) first")
+        return None
+
     def clips(self):
         """?REC,LS -> (the lines printed, [CLIPITEM dict]). [CLIPFS]{"total","used"} and '[REC] clips:' come first
         when the clips partition is mounted (NaviCore.ino:3473-3480)."""

@@ -442,6 +442,12 @@ _SECRET_TEXT = (
     # The same fields inside a JSON string (a SET_CONFIG line quoted in another JSON document), where every quote is
     # escaped.
     (re.compile(r'(\\"[A-Za-z_]*[Pp]assword\\"\s*:\s*\\")((?!<redacted:)(?:(?!\\").)+)(\\")'), _hash_repl3),
+    # NaviCore's boot banner names its access point: '[WIFI] SoftAP "<ssid>" up on channel 1 — 192.168.4.1'
+    # (NaviCore.ino:4727-4728; a WCB prints the same form, WCB_WiFi.cpp:180-184). Not a credential, but the droid's own
+    # name, and every test that restarts NaviCore (suites/s46, s47, the s40 restarts) puts a banner in session.log and
+    # can put one in a failure's last-lines tail. hil/ncflash.py's logs hash it alike. A config's "wifiSsid" is left as
+    # it is: hashing it would change redacted_sha of every stored NaviCore snapshot, which a paused run must still match.
+    (re.compile(r'(SoftAP ")((?!<redacted:)[^"\r\n]+)(")'), _hash_repl3),
 )
 
 
