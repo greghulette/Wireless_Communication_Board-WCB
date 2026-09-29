@@ -158,6 +158,12 @@ SERVO_TESTS = {
     "ncota.recovery_esptool": "resets NaviCore into ROM download mode for an esptool write: SBUS OUT stops for ~30 s",
     "ncota.local_full_same_image": "two OTA flashes restart NaviCore twice: SBUS OUT stops for a few seconds each time",
     "ncota.relay_full_via_w1": "two relayed OTA flashes restart NaviCore twice: SBUS OUT stops each time",
+    # suites/s45_navicore_wifi.py: the two tests that restart NaviCore on purpose, and the stalled-socket (should),
+    # listed on doubt: D-NC62's buffer overrun can crash NaviCore, which restarts it.
+    "ncwifi.ap_boot_lines": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it is sent back",
+    "ncwifi.refuse_short_password": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
+    "ncwifi.ws_stalled_client": "listed on doubt: a stalled socket can crash NaviCore (D-NC62), which restarts it: SBUS "
+                                "OUT stops for a few seconds",
     # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
     "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                             "is sent back",

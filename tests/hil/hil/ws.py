@@ -50,9 +50,21 @@ def parse(buf: bytes):
 
 class WsClient:
     """origin: an Origin header to send (Intellex's /_link refuses a foreign one and allows none). Binary frames -
-    Intellex relays every byte from the board as one - are kept whole in self.raw and decoded into self.text too."""
-    def __init__(self, host, port=80, path="/ws", timeout=5.0, origin=None):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
+    Intellex relays every byte from the board as one - are kept whole in self.raw and decoded into self.text too.
+    rcvbuf: a receive buffer size set before connecting, so a client that stops reading fills its window within a few
+    KB (hil/ncws.py pause(); Windows otherwise grows the window far beyond what a test streams)."""
+    def __init__(self, host, port=80, path="/ws", timeout=5.0, origin=None, rcvbuf=None):
+        if rcvbuf:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
+            self.sock.settimeout(timeout)
+            try:
+                self.sock.connect((host, port))
+            except OSError:
+                self.sock.close()
+                raise
+        else:
+            self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         extra = f"Origin: {origin}\r\n" if origin else ""

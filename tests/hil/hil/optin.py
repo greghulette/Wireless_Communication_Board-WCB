@@ -131,6 +131,17 @@ OPT_INS = {
         "why": "injects faults into NaviCore's config storage (a NAVICORE_HIL_HOOKS build only)",
         "estimate_s": 40,
     },
+    "navicore_wifi": {
+        "title": "PC joins NaviCore's access point",
+        "what": "For each of fifteen tests the PC's spare WiFi adapter joins NaviCore's access point for about 30 s and "
+                "uses its WebSocket endpoint (the ping soak streams for 5 minutes), then returns to its network. "
+                "NaviCore's SSID and password are read from its config and sit only in a temporary Windows profile that "
+                "is deleted after. A PC whose only WiFi adapter carries its internet skips them (D-NC14). With "
+                "navicore_reboot ticked too, two restart NaviCore (one saves a 3-character AP password for a boot) and "
+                "one may, if a stalled socket crashes it (D-NC62).",
+        "why": "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s",
+        "estimate_s": 90,
+    },
     "sbus_reset": {
         "title": "SBUS controller reset",
         "what": "Reboots the SBUS controller to check NaviCore's signal-loss handling.",

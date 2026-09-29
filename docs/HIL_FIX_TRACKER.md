@@ -2349,7 +2349,7 @@ load it started is off the air. Low: a requester that asks again gets its answer
 | **Status** | TODO - cause not found |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`, `wcbWifiStartAP`), or Windows |
 | **Effort** | M (finding the cause) |
-| **Tests** | every `wifi_pc` test: `_pc_on_ap` (s28) waits up to 60 s for the lease, renews once at 20 s, and notes the time |
+| **Tests** | every `wifi_pc` and `navicore_wifi` test: `pc_on_ap` (`hil/wlan.py`, shared by s28 and s45) waits up to 60 s for the lease, renews once at 20 s, and notes the time |
 | **Subsystem** | WiFi |
 
 **Evidence.** The PC's spare adapter associated with W1's access point at once every time, then held no address or a

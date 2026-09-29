@@ -27,14 +27,14 @@ interface=<adapter>`.
 import contextlib
 import os
 import re
-import subprocess
-import tempfile
 import time
 
 from hil import optin
-from hil.checkpoint import redact_text, redact_token
+from hil.checkpoint import redact_token
 from hil.runner import Skip, test
 from hil.wcb import WCB
+from hil.wlan import default_routes as _default_routes
+from hil.wlan import pc_on_ap as _pc_on_ap
 from hil.ws import WsClient
 from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 from suites.s03_wcb import _w2_online
@@ -577,199 +577,8 @@ def join_absent_ssid_keeps_mesh(bench):
 
 
 # ============================================================ the PC on the AP (attended)
-def _netsh(*args, timeout=30):
-    r = subprocess.run(["netsh", "wlan", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout)
-    return (r.stdout or "") + (r.stderr or "")
-
-
-def _wlan_interfaces():
-    """Every WiFi adapter as {'name', 'description', 'state', 'ssid', 'profile'} (`netsh wlan show interfaces`)."""
-    ifaces, cur = [], None
-    for line in _netsh("show", "interfaces").splitlines():
-        m = re.match(r"^\s*(Name|Description|State|SSID|Profile)\s*:\s*(.*)$", line)
-        if not m:
-            continue
-        key, val = m.group(1).lower(), m.group(2).strip()
-        if key == "name":
-            cur = {"name": val}
-            ifaces.append(cur)
-        elif cur is not None and key not in cur:
-            cur[key] = val
-    return ifaces
-
-
-def _iface(name):
-    return next((i for i in _wlan_interfaces() if i["name"] == name), None)
-
-
-def _joined(name, ssid):
-    i = _iface(name) or {}
-    return i.get("state", "").lower() == "connected" and i.get("ssid") == ssid
-
-
-def _internet_adapter():
-    """The adapter carrying the PC's default route, or None."""
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
-                            "Select-Object -First 1).InterfaceAlias"],
-                           capture_output=True, text=True, timeout=20)
-        return r.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def _pick_adapter(bench):
-    """(adapter, why): bench.json "wifi_test_interface" when set; otherwise a WiFi adapter that does not carry the
-    PC's default route, so the PC stays online (this bench's TP-Link "Wi-Fi 2"); otherwise the only one, which takes
-    the PC offline until the test puts it back."""
-    ifaces = _wlan_interfaces()
-    want = bench.cfg.get("wifi_test_interface")
-    if want:
-        return next((i for i in ifaces if i["name"] == want), None), "bench.json wifi_test_interface"
-    inet = _internet_adapter()
-    spare = [i for i in ifaces if i["name"] != inet]
-    if spare:
-        return spare[0], f"not the internet adapter ({inet or 'none found'})"
-    return (ifaces[0], "the only WiFi adapter: the PC is offline until the test puts it back") if ifaces else (None, "")
-
-
-def _wait(pred, timeout, step=1.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if pred():
-            return True
-        time.sleep(step)
-    return pred()
-
-
-def _profile_xml(name, ssid, pw):
-    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return ('<?xml version="1.0"?>\n<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">\n'
-            f'  <name>{esc(name)}</name>\n  <SSIDConfig><SSID><name>{esc(ssid)}</name></SSID></SSIDConfig>\n'
-            '  <connectionType>ESS</connectionType>\n  <connectionMode>manual</connectionMode>\n'
-            '  <MSM><security>\n    <authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption>'
-            '<useOneX>false</useOneX></authEncryption>\n'
-            f'    <sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>{esc(pw)}</keyMaterial></sharedKey>\n'
-            '  </security></MSM>\n</WLANProfile>\n')
-
-
-def _scrub(text, *names):
-    """`text` with each of `names` (an SSID, a profile named after one) replaced, for a note: netsh echoes profile
-    names back, and a network's name is never quoted (the module docstring)."""
-    for n in sorted((n for n in names if n), key=len, reverse=True):
-        text = text.replace(n, "<network>")
-    return text
-
-
-def _ps(command):
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True,
-                           timeout=20)
-        return r.stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def _ipv4(name):
-    """The adapter's IPv4 addresses."""
-    esc = name.replace("'", "''")
-    return (_ps(f"Get-NetIPAddress -InterfaceAlias '{esc}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
-                "ForEach-Object { $_.IPAddress }") or "").split()
-
-
-ADDR_WAIT_S = 60          # a lease from a WCB's access point has taken 1.8 to 46.7 s here (tracker #110)
-ADDR_RENEW_S = 20
-
-
-def _address_wait(name, subnet="192.168.4."):
-    """Wait for the adapter to hold an address in `subnet` -> (the address or None, seconds, what happened). Windows
-    gives itself a 169.254 address after about 6 s without a lease and then asks again only now and then, so one
-    `ipconfig /renew` on this adapter alone is sent at ADDR_RENEW_S."""
-    t0 = time.monotonic()
-    renewed = ""
-    while time.monotonic() - t0 < ADDR_WAIT_S:
-        got = [a for a in _ipv4(name) if a.startswith(subnet)]
-        if got:
-            return got[0], round(time.monotonic() - t0, 1), renewed
-        if not renewed and time.monotonic() - t0 >= ADDR_RENEW_S:
-            try:
-                subprocess.run(["ipconfig", "/renew", name], capture_output=True, text=True, timeout=40)
-            except (OSError, subprocess.SubprocessError):
-                pass
-            renewed = f"renewed at {ADDR_RENEW_S} s"
-        time.sleep(1.0)
-    return None, round(time.monotonic() - t0, 1), renewed
-
-
-@contextlib.contextmanager
-def _pc_on_ap(bench, problems, ssid, pw, whose):
-    """The PC's chosen WiFi adapter on the access point `ssid` for the block, holding a 192.168.4.x lease from it ->
-    the adapter's name; Skip where that cannot be done here. `whose` names the AP in messages ("W1's"); the SSID is
-    never quoted. Windows side: a temporary profile named HIL-<ssid> on the chosen adapter only, never one of the
-    PC's own profiles, and every netsh call names the adapter - with two adapters an unnamed `netsh wlan connect` is
-    refused (run 20260924-092602 failed that way, and reused the PC's own WCB1 profile on the other adapter). The
-    profile holds the AP's password from the board's chain and is deleted afterwards. netsh's replies are noted with
-    every network name scrubbed; they carry no key. On the way out the adapter goes back to the network it was on, and
-    failing to is added to `problems` (and noted, for when the block raised). No association in 30 s, or no lease in
-    ADDR_WAIT_S, raises after the same cleanup."""
-    if os.name != "nt":
-        raise Skip("netsh (Windows) drives the PC's WiFi here")
-    adapter, why = _pick_adapter(bench)
-    if not adapter:
-        raise Skip("this PC has no WiFi adapter" if not why else "bench.json wifi_test_interface names no WiFi adapter here")
-    name = adapter["name"]
-    prev = adapter.get("profile") if adapter.get("state", "").lower() == "connected" else None
-    tmp = f"HIL-{ssid}"
-    hide = (tmp, ssid, prev, adapter.get("ssid"))
-    bench.note(f"adapter {name} ({why}); it was {'on a network' if prev else 'on no network'}; a temporary profile "
-               f"for {whose} access point")
-    added = False
-    fd, path = tempfile.mkstemp(prefix="wlan-", suffix=".xml")
-    os.close(fd)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(_profile_xml(tmp, ssid, pw))
-        out = _netsh("add", "profile", f"filename={path}", f"interface={name}", "user=current")
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        bench.note("netsh add profile: " + _scrub(redact_text(" ".join(out.split())), *hide)[:200])
-        added = "is added" in out
-        if not added:
-            raise AssertionError("netsh did not add the temporary profile")
-        out = _netsh("connect", f"name={tmp}", f"ssid={ssid}", f"interface={name}")
-        bench.note("netsh connect: " + _scrub(" ".join(out.split()), *hide)[:200])
-        if not _wait(lambda: _joined(name, ssid), 30):
-            now = _iface(name) or {}
-            on = whose if now.get("ssid") == ssid else ("another" if now.get("ssid") else "none")
-            raise AssertionError(f"{name} did not associate with {whose} access point within 30 s "
-                                 f"(state {now.get('state')!r}, network: {on})")
-        addr, secs, renewed = _address_wait(name)
-        bench.note(f"{name}: " + (f"lease {addr} {secs} s after associating" if addr else f"no lease in {secs} s")
-                   + (f" ({renewed})" if renewed else ""))
-        if not addr:
-            raise AssertionError(f"{name} associated with {whose} access point but got no 192.168.4.x lease in {secs} s "
-                                 f"({renewed or 'no renew'}; it holds {_ipv4(name) or 'no address'})")
-        yield name
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        _netsh("disconnect", f"interface={name}")
-        if added:
-            out = _netsh("delete", "profile", f"name={tmp}", f"interface={name}")
-            bench.note("netsh delete profile: " + _scrub(" ".join(out.split()), *hide)[:200])
-        if prev:
-            _netsh("connect", f"name={prev}", f"interface={name}")
-            if not _wait(lambda: (_iface(name) or {}).get("state", "").lower() == "connected", 45):
-                problems.append(f"{name} did not reconnect to its previous network within 45 s: reconnect it by hand")
-                bench.note(problems[-1])
-
-
+# The PC's side - netsh, the temporary profile, the lease wait, the routes - is hil/wlan.py (NAVICORE.md INF5), which
+# suites/s45_navicore_wifi.py shares.
 @contextlib.contextmanager
 def _pc_on_w1_ap(bench, problems):
     """The PC on W1's access point for the block (_pc_on_ap) -> (w, W1's address, the adapter's name). Skip unless W1
@@ -1060,13 +869,6 @@ def ws_client_slots(bench):
                 c.close()
     _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)
-
-
-def _default_routes():
-    """The PC's 0.0.0.0/0 routes as sorted 'InterfaceAlias|NextHop' strings, or None."""
-    out = _ps("Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
-              "ForEach-Object { $_.InterfaceAlias + '|' + $_.NextHop }")
-    return None if out is None else sorted(x.strip() for x in out.splitlines() if x.strip())
 
 
 @test("wifi.ap_dhcp_no_gateway", "OPT-IN (wifi_pc): W1's access point hands the PC an address with no gateway, so the PC's default route stays where it was", needs=["wcb1"], links=[], opt_in="wifi_pc")
