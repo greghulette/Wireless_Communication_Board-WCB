@@ -354,11 +354,20 @@ def copy_logs(bench, stage_dir, test_id):
 
 # ------------------------------------------------------------------ Playwright and venv scripts
 def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", settings=None, allow_ports=None,
-                      discover_hosts=(), offline=True, env=None, args=None, timeout=300.0, wiki=False):
+                      discover_hosts=(), offline=True, env=None, args=None, timeout=300.0, wiki=False,
+                      link_check=None, recover=None):
     """Run the Playwright test titled `<test_id> ...` in tests/intellex against a staged host. device: a bench device
     whose port the host is given (released from the harness first, taken back and checked after). attach: the
     /_api/attach body, or None to leave the host unattached. wiki: seed the crafted wiki (seed_wiki). Raises
-    AssertionError / Skip like run_wizard_test."""
+    AssertionError / Skip like run_wizard_test.
+
+    link_check (with `attach`): a raw /_link client of the harness's own ('rawLink', a LinkTap) reads every byte the host
+    fans out for the whole Playwright run, and link_check(bytes) -> [problem] judges them afterwards - boot_check: the
+    board printed no boot line, so nothing reset it. Its problems fail the test beside the spec's own. The bytes are
+    never logged: through NaviCore they hold GET_CONFIG, through a WCB its ?backup.
+    recover: recover(bench, device) -> what it did, called when `device` does not answer once the host has let it go
+    (reset_into_app: a WCB a test left in its ROM loader). The test then fails, naming it; without `recover` the
+    reacquire's own failure is raised, as before."""
     import shutil as _sh
     node = _sh.which("node")
     if not node:
@@ -384,10 +393,14 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
     aborted = None
     proc = None
     tail = []
+    rawlink = None
+    link_problems, lost = [], None
     try:
         host.start()
         if attach:
             host.attach(attach)
+            if link_check is not None:
+                rawlink = LinkTap(host.port, name="rawLink")
         context = {"device": device, "args": args or {}, "intellex": {"url": host.url, "stage": sd, "target": attach}}
         with Bridge(bench, context) as bridge:
             penv = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=report_path, FORCE_COLOR="0", INTELLEX_URL=host.url,
@@ -406,26 +419,45 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
             aborted = e
         raise
     finally:
+        if rawlink is not None:
+            data = rawlink.snapshot()
+            rawlink.close()
+            try:
+                link_problems = list(link_check(data) or [])
+            except Exception as e:  # noqa: BLE001 - a checker's own bug must not hide the test's result
+                link_problems = [f"the /_link check itself failed: {type(e).__name__}: {e}"]
+            for p in link_problems:
+                bench.note(f"{test_id}: rawLink: {p}")
         host.stop()
         copy_logs(bench, sd, test_id)
         if device:
             try:
                 _reacquire(bench, device)
             except AssertionError as e:
-                if aborted is None:
+                if aborted is not None:
+                    bench.note(f"{device} not reacquired after the abort: {e}")
+                elif recover is None:
                     raise
-                bench.note(f"{device} not reacquired after the abort: {e}")
+                else:
+                    try:
+                        what = recover(bench, device)
+                    except AssertionError as r:
+                        what = f"and the recovery failed too: {r}"
+                    lost = f"{device} did not answer once Intellex let it go ({e}); {what}"
+                    bench.note(f"{test_id}: {lost}")
+    extra = link_problems + ([lost] if lost else [])
     try:
         with open(report_path, encoding="utf-8") as f:
             outcomes = _outcomes(json.load(f))
     except (OSError, ValueError):
-        raise AssertionError(f"{test_id}: Playwright exited {proc.returncode if proc else '?'} with no report:\n    "
-                             + "\n    ".join(tail))
+        raise AssertionError("\n".join([f"{test_id}: Playwright exited {proc.returncode if proc else '?'} with no "
+                                        f"report:\n    " + "\n    ".join(tail)] + extra))
     if not outcomes:
-        raise AssertionError(f"{test_id}: no Playwright test is titled '{test_id} ...' in tests/intellex/specs")
+        raise AssertionError("\n".join([f"{test_id}: no Playwright test is titled '{test_id} ...' in "
+                                        f"tests/intellex/specs"] + extra))
     failed = [(t, m) for t, s, m in outcomes if s not in ("passed", "skipped")]
-    if failed:
-        raise AssertionError("\n".join(f"{t}: {m}" for t, m in failed))
+    if failed or extra:
+        raise AssertionError("\n".join([f"{t}: {m}" for t, m in failed] + extra))
     skipped = [m for _, s, m in outcomes if s == "skipped"]
     if skipped and len(skipped) == len(outcomes):
         raise Skip(skipped[0] or "skipped by the Playwright test")
@@ -751,3 +783,46 @@ NAVICORE_BOOT_MARKERS = ("ESP-ROM:", "=== NaviCore ===", "Reset reason:")
 def boot_markers_in(data, markers):
     """The boot markers present in `data` (bytes), in the order given."""
     return [m for m in markers if m.encode() in data]
+
+
+def boot_check(markers, who, boots_of=()):
+    """A run_intellex_test link_check -> check(bytes) -> [problem]: `who` printed one of `markers` through the link (it
+    restarted), or - through a WCB's console - '[ETM] WCB<n> came ONLINE (boot)' for a board n in `boots_of`, the line a
+    WCB prints for each boot announce it hears (suites/s33_intellex_bench.py _boot_edges): that board restarted. Only
+    the markers are quoted, never the stream."""
+    def check(data):
+        out = []
+        got = boot_markers_in(data, markers)
+        if got:
+            out.append(f"{who} printed {', '.join(repr(m) for m in got)} through the link: it restarted during the test")
+        for n in boots_of:
+            k = data.count(f"[ETM] WCB{n} came ONLINE (boot)".encode())
+            if k:
+                out.append(f"through {who}'s console, WCB{n} was heard booting {k} time(s) during the test")
+        return out
+    return check
+
+
+# What the ESP32 ROM prints when a reset samples GPIO0 low (a download-mode boot), and what a WCB prints once setup() has
+# finished: after a restart, the one tells a board left in its ROM loader from one back in its app.
+ROM_LOADER_MARKERS = ("DOWNLOAD_BOOT", "waiting for download")
+WCB_READY = "Raw Serial Forwarding Task Created"
+
+
+def reset_into_app(bench, device, timeout=25.0):
+    """Reset the WCB `device` into its app through its CP210x/CH9102 auto-reset circuit, for a board a test left in its
+    ROM loader -> what was done. RTS asserted with DTR released holds EN low with GPIO0 high, and releasing RTS boots the
+    app: the pulse hil/serialdev.py usb_jtag_reset gives an S3, on the same two lines (a CH9102 sends each write as it is
+    made). The harness opens its port with both lines low, so nothing here holds GPIO0 down. AssertionError when the
+    board still does not answer ?VERSION."""
+    from .serialdev import usb_jtag_reset
+    from .wcb import WCB
+    dev = bench.dev(device)
+    mark = dev.mark()
+    usb_jtag_reset(dev)
+    try:
+        WCB(dev).wait_boot(mark, timeout=timeout)
+    except AssertionError as e:
+        raise AssertionError(f"{device} still does not answer after an EN reset with GPIO0 high: {e}") from None
+    bench.note(f"{device}: reset into its app with an EN pulse (RTS, DTR low); it answers again")
+    return "the harness reset it into its app with an EN pulse (RTS, DTR low), and it answers again"

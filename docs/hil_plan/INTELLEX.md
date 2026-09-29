@@ -294,6 +294,13 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
      default view is `wcb` (`launcher.html:568-573`).
    - So picking W1's COM port likely yields a NaviCore tool that believes it is wired straight to the droid. That is
      rule 10's hazard over USB: `?OTALOCAL` lands on the WCB. Unverified, so IX-WP7 writes it as a `(should)` test.
+   - Narrowed while writing it (2026-09-29): over USB, W1 prints NaviCore's reply to that PING - unicast back to W1,
+     `rc_telemetry.h:2186-2192` - only inside its 20 s relay window, which a `;W20,{...}` line from USB opens
+     (`WCB.ino:8019-8021`, gate at `:5513`); a bare JSON line never does. So a cold connect falls back to Via WCB as it
+     should, and the hazard is a connect while the window is open: a reload (Intellex's F5), or the shim's reconnect,
+     within 20 s of the tool's last Via-WCB line - its keep-alive is every 10 s. `intellex.nc_via_usb_doorway` makes
+     both connects; in the dry run against a simulated W1 the cold one went Via WCB and the reload came up direct, with
+     "Update over USB (OTA)" enabled.
 5. **Update FW does not fully match the Wizard's.**
    - `wcb_flash.write_list(app_only=True)` writes the app alone (`wcb_flash.py:302-307`).
    - `flasher.js` first reads the board's partition table. When it differs, it escalates once to a full,
@@ -350,6 +357,31 @@ Harness notes from the same work (not Intellex defects):
 - Stage paths come close to Windows' 260-character limit. From a worktree (42 characters longer than the main
   checkout) the `include_data` stages of `intellex.smoke_repo_probe_identity` and `_reconnect_identity` fail to copy
   Greg's downloaded wiki images and firmware cache. The venv scripts keep their own branch and file names short.
+
+Found while writing IX-WP7 and IX-WP8 (2026-09-29, Intellex `e9f95f2`, the Wizard and config tool of the day). Each
+has a `(should)` test; "confirmed in the page" means against the real shim, host and tool page, with the board
+simulated (the IX-WP7/8 status notes).
+
+16. **Through Intellex the Wizard holds W1's GPIO0 low.** Every Wizard connect asserts DTR alone
+    (`Wizard/app.js:5364`, RTS left alone on purpose). Chrome's Web Serial `open()` asserts both lines, which on a
+    CH9102 or CP210x auto-reset circuit leaves EN and GPIO0 high. Intellex opens with both low
+    (`serial_transport.py:65-68`) and passes the page's `setSignals` through (`intellex_shim.js:248-260`,
+    `host.py:1239-1260`), so the circuit (DTR drives GPIO0, `docs/HIL_TESTING.md` §2) holds GPIO0 low for the whole
+    session. A restart samples the strapping pins; if it samples GPIO0 low, W1 boots the ROM loader ("waiting for
+    download") and stays there until an EN reset - `?reboot`, a push that ends in a restart, an OTA's final restart.
+    Confirmed: the DTR assert reaches the host (the dry run's `wizard_pull_w1` note: `{"dataTerminalReady":true}->200`).
+    On the bench (`20260929-110148`) W1 restarted with `?reboot` under the Wizard's DTR booted its app:
+    `intellex.wizard_reboot_w1_boots_app` (`(should)`) passes, so the hazard is not reproduced here. The test stays,
+    for a board or bridge that samples GPIO0 on a software restart; when it fails, the harness resets W1 into its
+    app (`hil/intellex.py reset_into_app`).
+17. **The shim files mesh boards under a string relay slot.** `routeMeshThroughBoard` passes `_wdpMeshConn().slot`,
+    a key of `Object.entries(boardConnections)` (`Wizard/app.js:13420-13428`), to `setRemoteConnected` and
+    `remoteBoardPull` (`intellex_shim.js:1264`, `:1279`), so `remoteRelayForBoard[2]` is `"1"`. The Wizard's own
+    entry points pass numbers (`app.js:538` relayManageOne, `:6364` modalRemoteConnect; `:2022` re-passes the stored
+    value), and its relay-slot tests are `===` against numbers: the `[TERM:n]` demux (`:5790`), the boards re-armed
+    after a relay drop (`:5939-5942`) and `clearRemoteBoardsForRelay` (`:6432-6436`). A board the shim routed is
+    therefore neither cleared nor re-armed when W1's link drops. Confirmed in the page:
+    `intellex.wizard_mesh_relay_slot_number` (`(should)`).
 
 ---
 
@@ -554,7 +586,9 @@ Wireless_Communication_Board-WCB/
                            transports, discover, the flash units, the fake-esptool pipeline, paths/applog/winsize/certs
   tests/hil/hil/intellex.py   stage(), class IntellexHost (start, attach, detach, stop), run_intellex_test(), run_intellex_py()
   tests/hil/hil/ws.py         + read BINARY frames (opcode 0x2; read_until drops them today, :85-100) and send an optional Origin header
-  tests/hil/suites/s32_intellex.py
+  tests/hil/suites/s32_intellex.py         no board (DX15)
+  tests/hil/suites/s33_intellex_bench.py   the transports and the bridge on the boards (IX-WP5, IX-WP6)
+  tests/hil/suites/s34_intellex_tools.py   the tools on the boards (IX-WP7, IX-WP8; DX26)
   tests/hil/hil/optin.py      + the intellex_* keys (§3.4)
   tests/hil/bench.json        + "intellex_dir" (default: an Intellex checkout beside this repo), optional "intellex_python"
 ```
@@ -572,9 +606,9 @@ Wireless_Communication_Board-WCB/
 `run.py` imports every module in `suites/` (`run.py:28-31`), so `s32_intellex.py` needs no registration. Its tests
 are `intellex.*`, and the GUI groups them as their own area.
 
-`run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", cache=None, settings=None, env=None,
-args=None, timeout=300)` follows `run_wizard_test` (`hil/wizard.py:175-245`, `docs/HIL_TESTING.md:563-575`) step for
-step:
+`run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", settings=None, allow_ports=None,
+discover_hosts=(), offline=True, env=None, args=None, timeout=300, wiki=False, link_check=None, recover=None)` follows
+`run_wizard_test` (`hil/wizard.py:175-245`, `docs/HIL_TESTING.md:563-575`) step for step:
 
 1. Stage and seed the instance (§2.2). Record Intellex's `git rev-parse HEAD`, with `+dirty` when the tree is dirty,
    in `session.log`.
@@ -589,9 +623,13 @@ step:
    - `POST /_api/detach`;
    - kill the host's process tree;
    - reacquire the device and wait for it to answer: a WCB `?VERSION` or a NaviCore PING, as `_reacquire` does
-     (`hil/wizard.py:93-113`);
+     (`hil/wizard.py:93-113`). With `recover`, a device that does not answer is handed to it (`reset_into_app` for a
+     WCB left in its ROM loader), and the test fails naming both;
    - copy the Intellex log next to the report.
-7. Turn the JSON report into PASS, FAIL or SKIP (reuse `_outcomes`).
+7. Turn the JSON report into PASS, FAIL or SKIP (reuse `_outcomes`). With `link_check`, a raw `/_link` client of the
+   harness's own (the rawLink) has read every byte the host fanned out since the attach, and `link_check(bytes)`'s
+   problems fail the test beside the spec's own (`boot_check`: the board printed a boot line). The bytes are never
+   logged.
 
 `run_intellex_py(bench, test_id, script, device=None, args=None)` does steps 1-2 and 6-7, and runs
 `<venv python> tests/intellex/py/<script>.py --stage <dir> --args <json> --out <json>` instead of Playwright.
@@ -781,6 +819,8 @@ host whose pyserial was replaced by simulated boards on fake port names; the oth
 - `bridge_failed_attach_w1` adds: while the harness holds the port, the reconnect loop's retries (one a second) never
   attach it; after detach and release, the host does not take the port.
 
+#### IX-WP7: The Wizard through Intellex, on W1 (and W2 over the mesh)
+
 Ports of the `wizard.*` board tests. Intellex replaces the port picker with its own auto-connect, so the specs need
 no Chrome profile.
 
@@ -789,17 +829,44 @@ no Chrome profile.
 | `intellex.wizard_pull_w1` | wcb1 | With no click, `boardBaselines[1].wcbNumber === 1` within 45 s. The bauds and labels match the harness tokens (the same as `board.spec.js:10-28`). The chip reads `Intellex · USB COM6 ▾`. No `pageerror`. Per `rawLink`, W1 was not reset. |
 | `intellex.wizard_push_label_w1` | wcb1 | `config_guard(1)`. A port of `wizard.push_label` (`s30_wizard.py:71-80`). |
 | `intellex.wizard_terminal_wire` | wcb1, probe1 | A port of `wizard.terminal_wire`: the `\r` framing through the shim, proved on the wire. |
-| `intellex.wizard_mesh_autopull_w2` | wcb1, wcb2 | `config_guard(1,2)`, and `?RTERM,STOP` on W2 in `finally` (as at `s30_wizard.py:113`). `routeMeshThroughBoard` pulls W2 through W1: `remoteRelayForBoard[2]===1`, and a baseline for 2 appears. Client 20 (NaviCore) and probe clients are never pulled. Each board is pulled once. |
+| `intellex.wizard_mesh_autopull_w2` | wcb1, wcb2 | `config_guard(1,2)`, and `?RTERM,STOP` on W2 in `finally` (as at `s30_wizard.py:113`). `routeMeshThroughBoard` pulls W2 through W1: `remoteRelayForBoard[2]` is W1's slot, and a baseline for 2 appears. Client 20 (NaviCore) and probe clients are never pulled. Each board is pulled once. The slot's type is `intellex.wizard_mesh_relay_slot_number` (`(should)`, finding 17). |
 | `intellex.wizard_remote_pull_parts` | wcb1, wcb2 | A port of `wizard.remote_pull_parts` (`s30_wizard.py:89-124`). Long `[MGMT:CFGPART` lines cross the Intellex link. |
 | `intellex.wizard_reload_no_reset_w1` | wcb1 | Three reloads. No boot line; the link reconnects each time; the slot is the same. |
 | `intellex.shell_split_w1` | wcb1 | `/_shell?view=split`. Both tools connect: the Wizard pulls W1, and the NaviCore pane shows its status. |
-| `intellex.nc_via_usb_doorway` | wcb1 | `(should)`, finding 4. The NaviCore tool reached through W1 over USB ends up with `viaWcbActive === true`. It is expected to fail until Intellex identifies a serial WCB (§4.3 DX9). Its companion check records whether the mesh PONG actually arrived. |
+| `intellex.nc_via_usb_doorway` | wcb1, navicore | `(should)`, finding 4. The NaviCore tool reached through W1 over USB ends up with `viaWcbActive === true`, on a cold connect and on a reload right after it (inside W1's relay window). It is expected to fail until Intellex identifies a serial WCB (§4.3 DX9). Its companion check records whether the mesh PONG actually arrived. |
+| `intellex.wizard_mesh_relay_slot_number` | wcb1, wcb2 | `(should)`, finding 17. A board the shim routes through W1 is filed under relay slot `1`, a number, as the Wizard's own callers file it. |
+| `intellex.wizard_reboot_w1_boots_app` | wcb1 | `(should)`, finding 16. W1 restarted with `?reboot` from the Wizard's terminal while the Wizard holds it (its DTR asserted) boots its app, not the ROM loader. One W1 restart; the harness resets W1 into its app if not, and ends with every peer online. |
 
 | | |
 |---|---|
 | Effort | 12 h. |
 | Bench | About 10 minutes. |
 | Mode | Unattended: `config_guard`, the same class as the `wizard.*` tests. |
+
+**Status (2026-09-29): done and bench-verified (`20260929-110148`: every test passes but the two findings' `(should)` tests, 4 and 17, which fail as designed; finding 16's passes).** In `suites/s34_intellex_tools.py`, with
+`tests/intellex/specs/wizard_board.spec.js` and `tests/intellex/lib/board.js`. Every row above is written, the last two
+(findings 16 and 17) added while writing. Each test stages the working-tree tools, attaches a leashed host to W1's COM
+port and lets the shim connect the Wizard; `run_intellex_test` gained `link_check` (the rawLink: a raw `/_link`
+client of the harness's own, whose bytes `boot_check` searches for a boot line of W1's and for any board W1 hears
+booting) and `recover` (`reset_into_app`, for a W1 left in the ROM loader). Dry-run end to end - real staged hosts,
+the real Wizard, shim and config tool under Playwright - against simulated boards on fake port names (W1 with W2 and
+NaviCore behind it, modelling W1's relay window); never against a board. `wizard_terminal_wire` needs a probe and
+was not dry-run.
+
+- Plan-vs-code: the shim pulls every WCB that W1's WDP sweep lists, whatever the test (`routeMeshThroughBoard`), and
+  arms its remote terminal (`setRemoteConnected` -> `startRemoteTermSession`, `Wizard/app.js:6368-6429`). So every
+  Wizard test here guards all the bench's WCBs, not only W1, and stops every other WCB's `?RTERM` afterwards.
+- `wizard_remote_pull_parts` observes the shim's own pull of W2 instead of starting one (a second pull would race it
+  on W1's stream); `remoteBoardPull` is wrapped to record each call, its caller and its one `onComplete`.
+- `wizard_mesh_autopull_w2` compares the relay slot as text: the shim files it as `"1"` (finding 17), and the plan's
+  `remoteRelayForBoard[2]===1` is that `(should)` test.
+- `wizard_push_label_w1` and `wizard_terminal_wire` wait for the shim's pull of W2 first, so W1's stream carries only
+  the test's own traffic.
+- `nc_via_usb_doorway` needs NaviCore as well as W1 (the PONG it may mirror is NaviCore's), and waits 21 s with nothing
+  attached first, so its first connect is cold: a test just before it can leave W1's relay window open, and in the
+  dry run the "cold" connect then came up direct too. `shell_split_w1` records the NaviCore pane's transport and leaves
+  the judgement to it.
+- Nothing here moves a servo (`hil/servos.py` is unchanged): the Wizard pulls, pushes one label and types a `;S1` line.
 
 #### IX-WP8: The NaviCore tool through Intellex on COM5
 
@@ -809,7 +876,7 @@ no Chrome profile.
 | `intellex.nc_reload_no_reset` | **The reason Intellex exists** (Intellex `CLAUDE.md:97-105`). Three F5 reloads, with no `Reset reason` or boot banner on `rawLink` and the PONG version stable. Afterwards, W1 shows that NaviCore stayed on the mesh without rebooting. |
 | `intellex.nc_config_matches` | Named, non-secret fields of the tool's loaded config equal the harness's `GET_CONFIG`. Passwords are never compared or printed. |
 | `intellex.nc_setsignals` | The page's `setSignals({dataTerminalReady:false, requestToSend:false})` gets 200 and causes no reset. |
-| `intellex.nc_save_unchanged` | Opt-in `intellex_nc_save`, until a NaviCore config guard exists (phase 2). Save with no edits (`SET_CONFIG`); the config must be unchanged afterwards. If it re-dispatches mode knobs, add it to `hil/servos.py`. |
+| `intellex.nc_save_unchanged` | Opt-in `intellex_nc_save`, in `nc_guard`. Save with no edits sends nothing. `chRateHz` saved one step away and back: each Save one `SET_CONFIG` carrying that branch alone, ACKed; the config ends byte-identical. It re-dispatches no mode knob, so it is not in `hil/servos.py`. |
 
 Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 
@@ -818,6 +885,29 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 | Effort | 8 h. |
 | Bench | About 5 minutes. |
 | Mode | Unattended, except the save. |
+
+**Status (2026-09-29): done and bench-verified (`20260929-110148`: all five pass, `nc_save_unchanged` under the opt-in, ticked, D67).** In `suites/s34_intellex_tools.py` with
+`tests/intellex/specs/nc_board.spec.js`; dry-run against the in-Node NaviCore emulator
+(`tests/wizard/lib/navicore/emulator.js`) behind a fake port, all five passing there.
+
+- The tool's connect writes nothing to NaviCore's flash: it compares the command library (`GET_CMDLIB_META`,
+  `config_tool/index.html:14487-14496`) and only reports a different one (`:9139-9155`); `GET_CMDLIB` is the "Load from
+  NaviCore" button (`:14500-14505`) and `SET_CMDLIB` its Save (`:14693-14733`). So the four read-only tests run without
+  `nc_guard`: each spec fails on any JSON type the tool sends that is not a read (`NC_READ_ONLY`), and the harness puts
+  back the RAM state the connect leaves (`STOP_MONITOR`, debug flags 0). They skip while NaviCore's recorder holds
+  anything (D33), since a regression here would restart it.
+- No-reset oracles: the rawLink (no ROM line, banner or reset reason), NaviCore's uptime across the test, and no
+  `[ETM] WCB20 came ONLINE (boot)` on W1.
+- `nc_config_matches` compares the whole CONFIG line byte for byte on the rawLink bytes, in the harness; the spec gets
+  only named non-secret scalars (`NC_FIELDS`). Mapping and Maestro-slot counts are left out: the tool fills what
+  GET_CONFIG omits (`rc_config.h:1262`), so they are the tool's numbers, not the board's.
+- Plan-vs-code, `nc_save_unchanged`: a Save with no edits sends nothing (`saveConfigToBoard`'s no-diff return,
+  `index.html:16911-16925`), so the spec checks that, then makes the SET_CONFIG round trip with `chRateHz` one step away
+  and back, each save ACKed and carrying that branch alone. Still behind the new opt-in `intellex_nc_save` (unticked),
+  in `nc_guard`. It moves nothing: an unchanged baud re-opens no port and easing is re-applied only where it changed
+  (`NaviCore.ino:3236-3272`, `:3321-3345`), so it is not in `hil/servos.py`.
+- `#push-budget` does not show a `chRateHz` edit (`_pushBudgetInfo` leaves the numeric fields out,
+  `index.html:16665-16676`); only Save reads the slider.
 
 #### IX-WP9: Over WiFi, through NaviCore's AP on the PC's second adapter
 
@@ -959,7 +1049,7 @@ About 6 GitHub API calls per run, well under the limit.
 | `intellex_reboot` | Reboots NaviCore through the link, to exercise device loss and reconnect. | 60 s |
 | `intellex_wifi_join` | Attended. Moves Wi-Fi 2 between APs through temporary `HIL-` profiles, and bounces it once. | 120 s |
 | `intellex_window` | Attended. Opens Intellex app windows on the desktop. | 120 s |
-| `intellex_nc_save` | Writes NaviCore's config back unchanged (an NVS write). Only until a NaviCore config guard exists. | 30 s |
+| `intellex_nc_save` | Saves NaviCore's config from the tool twice, `chRateHz` one step away and back: two rewrites of its `/config.json` (LittleFS), inside `nc_guard`. Registered in `hil/optin.py`, unticked (DX29). | 90 s |
 
 ### 3.5 Order
 
@@ -1054,6 +1144,19 @@ suites that follow are not affected (the F21 precedent).
 | DX24 | `hil/intellex.py` finds the sibling repos from a git worktree (`github_dir()`). | Every Intellex test skipped from a worktree, which is where the week's agents write tests. |
 | DX25 | Specs set a 15 s default action timeout; `ui_launcher` runs at 1280x1000. | A hidden control fails in 15 s, not at the 300 s test timeout; the app window is 1280x880, and at Playwright's 720 px the folded maintenance bar covers the device list. |
 
+### 4.5 Decisions taken writing IX-WP7 and IX-WP8 (2026-09-29)
+
+| # | Decision | Why |
+|---|---|---|
+| DX26 | The tools-through-Intellex tests go in a new `suites/s34_intellex_tools.py`; `s33` keeps the transports and the bridge. | One file per kind, as DX15; and a new file keeps this work's merges apart from the other agents'. |
+| DX27 | "Nothing reset the board" is judged in the harness, on a raw `/_link` client of its own (`run_intellex_test(link_check=...)`, `boot_check`), beside the off-stream witnesses (DX20), not in the page. | The harness sees every byte the host fans out, including what a tool never displays, and never logs it; a page's view goes through the tool's own parser. |
+| DX28 | The four read-only NaviCore tests run without `nc_guard`. Each spec fails on any JSON the tool sends that is not a read (`NC_READ_ONLY`), and the harness resets the monitor and debug flags afterwards. | The tool's connect writes nothing (its command library is compared, never synced); a full snapshot and restore (config, library, clips, peers, mode) twice would add about 20 s a test for nothing. |
+| DX29 | `nc_save_unchanged` stays behind `intellex_nc_save`, unticked, although `nc_guard` exists now; its round trip saves `chRateHz` one step away and back. | The plan registers the opt-in and new opt-ins start unticked; `nccfg.*` already saves under `nc_guard` unattended, so ticking it is Greg's call. A Save with no edits sends nothing, so the round trip needs one field, and `chRateHz` moves nothing. |
+| DX30 | Every Wizard test guards all the bench's WCBs and stops every other WCB's `?RTERM` afterwards, whatever the test is about. | The shim pulls and arms each board W1 hears within about 20 s of the page loading (`routeMeshThroughBoard`). |
+| DX31 | `wizard_remote_pull_parts` observes the shim's own pull of W2 instead of calling `remoteBoardPull` itself. | Two pulls of one board through one relay race on its stream; the shim's pull is what runs for a user. |
+| DX32 | Findings 16 and 17 get their own `(should)` tests, and every W1 test hands a W1 that does not answer afterwards to `reset_into_app` (an EN pulse with GPIO0 high), failing the test with it. | DX16; and a W1 left in the ROM loader would fail every test after it. |
+| DX33 | `nc_via_usb_doorway` waits 21 s with nothing attached to W1 before its first connect. | A relay window left open by the test before (a `;W20,{...}` line) made the cold connect come up direct too in the dry run, and the companion data could not tell the two cases apart. |
+
 ---
 
 ## Revision log
@@ -1063,3 +1166,4 @@ suites that follow are not affected (the F21 precedent).
 | 2026-09-27 | Created. Map of Intellex at `d615344`, how to run it under test, IX-WP1-14, risks and decisions. Research only: nothing run, nothing changed. |
 | 2026-09-29 | IX-WP3 and IX-WP4 finished, IX-WP5 and IX-WP6 written (35 tests; `s32` additions, `s33_intellex_bench.py`, `tests/intellex/py`, `fixtures`, five specs). Findings 12-15 and three harness notes (§1.6); status notes on IX-WP3 to IX-WP6; decisions DX15-DX25 (§4.4). The no-board tests ran standalone against Intellex `e9f95f2`; the board tests are not yet run on the bench. Commit `_(pending)_`. |
 | 2026-09-29 | IX-WP3 to IX-WP6 bench-verified (`20260929-043806`, 54 `intellex.*`): 45 pass; the seven `(should)` tests fail as designed (findings 1-3, 5, 12-15); `ws_transport_navicore` skips until the PC's second adapter is on NaviCore's AP (IX-WP9) and `serial_device_loss_navicore` ran behind `intellex_reboot`, now ticked (D59). |
+| 2026-09-29 | IX-WP7 and IX-WP8 written: 15 tests in `suites/s34_intellex_tools.py` (the 13 plan rows, plus `(should)` tests for the new findings 16 and 17), specs `wizard_board.spec.js` and `nc_board.spec.js`, `tests/intellex/lib/board.js`. `run_intellex_test` gains `link_check` (the rawLink) and `recover`; `boot_check` and `reset_into_app`; opt-in `intellex_nc_save` registered, unticked. Finding 4 narrowed to W1's relay window. Status notes on IX-WP7 and IX-WP8; decisions DX26-DX33 (§4.5). Dry-run against simulated boards; not yet run on the bench. Commit `_(pending)_`. |
