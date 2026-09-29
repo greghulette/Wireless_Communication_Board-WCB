@@ -796,7 +796,7 @@ def boot_quiet(bench):
     before the window opens."""
     w1s1 = link(bench, 1, "S1")
     ctl, nc = SbusCtl(bench.dev("sbus")), _nc(bench)
-    state = nc.sbus_dump()
+    state = nc.sbus_full_rate()             # a stall just before (a config restore) reads low for a second
     if state["fps"] < SBUS_FULL_FPS or state["variant"] != "SBUS-24":
         raise Skip(f"NaviCore sees no full-rate SBUS-24 stream (fps {state['fps']}, {state['variant']})")
     _restartable(nc)

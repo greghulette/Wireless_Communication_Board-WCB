@@ -552,6 +552,19 @@ class NaviCore:
         self.dev.expect(r"^\s*CH17-24:", timeout=3, since=m)
         return parse_sbus_dump(self.dev.since(m))
 
+    def sbus_full_rate(self, timeout=4.0):
+        """sbus_dump once it reads a full-rate stream (fps >= SBUS_FULL_FPS), read again once a second for up to
+        `timeout` s -> the last reading either way, for the caller's own gate. fps is counted over a one-second window,
+        so a stall just before - the previous test's nc_guard restore saving the config, a 100 KB line - reads low for
+        that window: gates that took the first reading skipped 17 of s42's 21 tests in run 20260928-204259, at 42 and
+        15 fps between readings of 111."""
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self.sbus_dump()
+            if state["fps"] >= SBUS_FULL_FPS or time.monotonic() >= deadline:
+                return state
+            time.sleep(1.0)
+
     def sbus_state(self, timeout=3.0):
         """#L09 without the #L12 poke -> {'fps': int, 'lost': str, 'channels': [24 ints]}; ends at the CH17-24 row. It
         can time out on a held block, which sbus_dump() cannot; s11's sbus.to_navicore still reads it this way."""

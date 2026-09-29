@@ -1124,7 +1124,7 @@ def _sbus_setup(bench):
     """(SbusCtl, NaviCore, the controller's getcfg, NaviCore's GET_CONFIG), or Skip unless NaviCore sees a full-rate
     SBUS-24 stream."""
     ctl, nc = SbusCtl(bench.dev("sbus")), _nc(bench)
-    state = nc.sbus_dump()
+    state = nc.sbus_full_rate()             # a stall just before (a config restore) reads low for a second
     if state["fps"] < SBUS_FULL_FPS or state["variant"] != "SBUS-24":
         raise Skip(f"NaviCore sees no full-rate SBUS-24 stream (fps {state['fps']}, {state['variant']})")
     return ctl, nc, ctl.cfg(), nc.config()
