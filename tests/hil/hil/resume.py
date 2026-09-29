@@ -13,7 +13,8 @@ check_bench() runs, in order:
   9. every wire that was verified: re-checked at its port's configured baud, in its recorded orientation, never
      rediscovered
  10. NaviCore PING and the SBUS controller's JSON ping; after a cut-off sbus.* test, the controller's held sticks,
-     buttons and button-mode trims are released
+     buttons and button-mode trims are released, and on an image with the INF8 test verbs its test state is cleared and
+     its switches re-sent where they are
 
 A hard block raises ResumeBlocked (the message is what to fix). A soft difference calls ask(title, text, default) and
 continues only on True; ask=None - the automatic resume after a host outage - turns every soft difference into a
@@ -615,6 +616,12 @@ def _release_sbus(dev, port, log, tid):
     the current pos/pct as their baseline. Every line starts with '{'. The cfg reply carries the controller's WiFi
     passwords (wifiNets), so SbusCtl.cfg redacts its session.log line.
 
+    On an image with the INF8 test verbs (NAVICORE.md INF8; suites/s50_navicore_sbus_faults.py) a cut-off test can
+    also leave a flags byte, a stopped stream, SBUS-16 or a raw channel value, all RAM only: SbusCtl.clear_faults puts
+    the first three back as a reset would, before the sticks are centred (a frame-format change resets them), and
+    every switch is re-sent at its position, which ends a raw value on its channel (sbus.prefix_ambiguity_raw's CH17).
+    An older image gets only the probe, which it ignores.
+
     Caveat for other benches: a released button writes 992 to its channel. On this bench every button and trim is on
     the matrix channel, so no switch or slider shares a channel with one."""
     ctl = SbusCtl(dev)
@@ -623,8 +630,17 @@ def _release_sbus(dev, port, log, tid):
     except (AssertionError, ValueError) as e:
         raise ResumeBlocked(f"SBUS on {port} answered ping but not getcfg ({_first(e)}) - power-cycle it, then "
                             f"resume again")
+    try:
+        undone = ctl.clear_faults()
+    except AssertionError as e:
+        raise ResumeBlocked(f"SBUS on {port} refused to clear its test state ({_first(e)}) - reset it, then resume "
+                            f"again")
     ctl.center_all(cfg)
-    log(f"SBUS controller: sticks centred, buttons and button-mode trims released after the cut-off test {tid}")
+    if ctl.verbs is not None:
+        ctl.reassert_switches(cfg)
+    log(f"SBUS controller: sticks centred, buttons and button-mode trims released after the cut-off test {tid}"
+        + (f"; test state put back: {', '.join(undone)}" if undone else "")
+        + ("; switches re-sent" if ctl.verbs is not None else ""))
 
 
 def _firmware_diffs(prev, cur):

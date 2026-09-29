@@ -191,6 +191,29 @@ SERVO_TESTS = {
                                        "has moved since boot (D-NC64)",
     "ncrec.busy_load_not_missing": "replays a two-marker take: the replay's reset reaches every channel NaviCore has "
                                    "moved since boot (D-NC64)",
+    # NC-WP11, SBUS faults (s50), through the SBUS controller's INF8 test verbs. Every one changes the stream NaviCore
+    # tees byte for byte to SBUS OUT - the flags byte, frames stopped, SBUS-16, a malformed burst, a raw value - and
+    # nothing records what is wired there; the controller's own RC PWM 1-4 follow CH1-4. The knobs they borrow drive
+    # remote slot 4 (nothing moves); the glitch tests make NaviCore's engine inert first, and the SBUS-16 ones unbind
+    # its CH17-24 switches and knobs (the dome's RS and J2), whose restore can re-send J2's and RS's current position.
+    "sbus.test_verbs": "sets the flags byte, stops the stream, lets 5 frames through, puts a raw 700 and a one-frame "
+                       "dip on the rx stick's channel (CH1): all re-emitted on SBUS OUT, RC PWM 1 follows CH1",
+    "sbus.failsafe_flag_freeze": "failsafe-flagged frames on SBUS OUT for several seconds; moves the rx and ry sticks "
+                                 "and presses a matrix button",
+    "sbus.lost_frame_flag_no_gate": "lost-frame-flagged frames on SBUS OUT; moves the rx and ry sticks and presses a "
+                                    "matrix button",
+    "sbus.failsafe_deferred_tap": "failsafe-flagged frames on SBUS OUT twice; presses and holds a matrix button",
+    "sbus.frame_stop_held_press": "stops SBUS OUT for about two seconds while a matrix button is held",
+    "sbus.sbus16_autodetect": "SBUS OUT carries SBUS-16 for a few seconds (CH17-24 absent); unbinding NaviCore's "
+                              "CH17-24 knobs and restoring them can re-send the dome's J2 and RS positions",
+    "sbus.sbus24_return_no_prefix_decode": "SBUS-16, then SBUS OUT stopped and one frame let through; unbinding "
+                                           "NaviCore's CH17-24 knobs and restoring them can re-send J2's and RS's",
+    "sbus.lock_after_glitch": "stops SBUS OUT around six malformed bursts, each teed byte for byte to whatever is on it",
+    "sbus.truncated_frame_no_phantom": "stops SBUS OUT around truncated frames, teed byte for byte to whatever is on it",
+    "sbus.prefix_ambiguity_raw": "puts raw values on CH17 for 15 s and presses a matrix button",
+    "sbus.one_frame_dip": "holds a matrix button with a one-frame dip of the matrix channel, twice",
+    "sbus.test_verbs_ram_only": "resets the SBUS controller after SBUS-16 and a raw rx value: SBUS OUT stops for the "
+                                "controller's boot (up to a minute while its WiFi cascade runs)",
     # suites/s33_intellex_bench.py: a REBOOT sent through Intellex's SerialTransport, inside nc_guard.
     "intellex.serial_device_loss_navicore": "restarts NaviCore: SBUS OUT stops for a few seconds; a mode set before it "
                                             "is sent back",

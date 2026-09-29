@@ -274,9 +274,9 @@ A feature counts once, by its main test; one whose main test is unattended but h
 |---|---|---|---|---|
 | `nc.sbus.uart` (H) | partial: `sbus.discover` (fps and variant) | `ncboot.banner_order` (the '[SBUS] IN+OUT share Serial1/UART1 - RX GPIO4 / TX GPIO5, 100k 8E2 inverted' line) | opt:navicore_reboot | WP9 |
 | `nc.sbus.autodetect` (H) | partial: SBUS-24 only (`sbus.discover`) | `sbus.sbus16_autodetect` (variant, chCount 16, CH17-24 = 992, #L13 25 bytes) | ctl-verbs (mode without save) | WP11 |
-| `nc.sbus.lock` (H) | partial: `sbus.signal_loss_controller_reset` (relock after a reset) | `sbus.lock_after_glitch` (truncate/garbage/double/gap reset the streak; nothing decodes before lock) | ctl-verbs | WP11 |
+| `nc.sbus.lock` (H) | partial: `sbus.signal_loss_controller_reset` (relock after a reset) | `sbus.lock_after_glitch` (truncate/garbage/double/gap reset the streak; nothing decodes before lock); `sbus.truncated_frame_no_phantom` (should, D-NC72) | ctl-verbs | WP11 |
 | `nc.sbus.partial_never_flushed` (H) | gap (every sbus.* test runs NaviCore idle) | `sbus.lock_under_load` (DBG 0x7F, monitor, ?MAE bursts, GET_CONFIG: fps >= 100, variant constant, counter monotonic) | sbus | WP5 |
-| `nc.sbus.prefix_ambiguity` (H) | gap | `sbus.prefix_ambiguity_ch17` (the controller control on CH17, found in getcfg, at 172 with CH18 resting at 992 makes frame[24]=0x00; 20 s under load, no phantom failsafe); `sbus.prefix_ambiguity_raw` | sbus (SJ's p0 tier sends text to W2S2, a probe wire); raw form ctl-verbs | WP5/11 |
+| `nc.sbus.prefix_ambiguity` (H) | gap | `sbus.prefix_ambiguity_ch17` (the controller control on CH17, found in getcfg, at 172 with CH18 resting at 992 makes frame[24]=0x00; 20 s under load, no phantom failsafe); `sbus.prefix_ambiguity_raw`; `sbus.sbus24_return_no_prefix_decode` (should, D-NC73) | sbus (SJ's p0 tier sends text to W2S2, a probe wire); raw form ctl-verbs | WP5/11 |
 | `nc.sbus.backlog_split` (M) | gap | `sbus.lock_under_load` (forced 30-60 ms stalls: counter keeps rising, values unchanged) | sbus | WP5 |
 | `nc.sbus.overflow_misalign` (H) | gap (hypothesis) | `sbus.stall_no_phantom` (20 no-op SET_CONFIG stalls of 100+ ms: no rc_trig, no switch dispatch, no PWM_UPDATE excursion) | sbus, guard | WP5 |
 | `nc.sbus.decode` (H) | strong: `sbus.switch_exact`, slider_exact, trim_exact | - (0 and 2047 unreachable: the controller clamps 172-1811) | - | - |
@@ -321,7 +321,7 @@ A feature counts once, by its main test; one whose main test is unattended but h
 | `nc.timing.nonblocking_logs` (H) | gap | `sbus.lock_under_load` (flags 0x7F plus the monitor: fps >= 100) | sbus | WP5 |
 | `nc.timing.stall_sources` (M) | gap | `sbus.stall_no_phantom`; `ncdev.serial_action_bytes` (fps dip) | sbus, guard | WP5/7 |
 | `nc.replay.outputs` (M) | partial: `navicore.rec_play_clip` | `ncrec.replay_interpolation_remote` | opt:navicore_clip_write, W1S1 | WP12 |
-| `nc.sbus.fault_injection` (H) | enabler | INF8: SBUSController RAM-only test verbs (D-NC8) | flash COM4 | WP11 |
+| `nc.sbus.fault_injection` (H) | enabler | INF8: SBUSController RAM-only test verbs (D-NC8); `sbus.test_verbs`; `sbus.test_verbs_ram_only` (opt:sbus_reset) | flash COM4 | WP11 |
 | Low risk, collapsed (13) | - | `nc.sbus.cli_diag`: covered: cli_codes, sbus_live_dump_toggle; `nc.mae.restart_script_easing`: `ncdev.easing_repeat_frames` (restartScript,n,pN,o bytes on W1S1); partial today: maestro.fanout_remote; `nc.aux.bcast_out`: `ncdev.bcast_out_opt_in` (guarded serialBcast S4 out; DBG_SERIAL line; '{' never fanned); `nc.aux.rx_monitor`: blocked: `ncwire.rx_monitor_bcast_in`; `nc.aux.bcast_in`: blocked: `ncwire.rx_monitor_bcast_in`; `nc.aux.port_labels`: `nccfg.side_effects_live`, `ncmesh.wdp_port_labels`; `nc.hcr.overload_shortcut`: `ncdev.hcr_local_payload` (chan 4 gives 'bad/unsupported', no bytes); fix the stale comments; `nc.hcr.cli_test`: `ncdev.cli_hcr_test_codes` (#L20/#L21, opt:navicore_aux_tx); `nc.dfp.wcb`: `ncdev.dfp_remote`; `nc.board.l1`: covered: `navicore.l1_names_board_profile` ((should), passes on the working-tree image); `nc.led.states`: out of scope (no optical sensor; §6); `nc.led.gpio_conflict`: out of scope until Greg reads the DevKitC revision (D-NC28); `nc.cfg.reset_defaults_drift`: `nccfg.reset_defaults_ram` (USB: no re-open lines) vs `ncmesh.bridged_reset_defaults` (mesh: lines); (should) per D-NC16 | - | - |
 
 ### Mesh, bridge, management relay, OTA, WiFi/WebSocket, failure (`mesh-remote`, 88 features)
@@ -557,7 +557,8 @@ MESH_STATS pages, the boot banner, FNV-1a against a known vector, and INF6's fra
 > `safe_channels`, `band` and `matrix_button` moved too. `encode`/`decode` pass `selftest.py` against a real frame
 > NaviCore dumped with `#L13` in run 20260922-120804, which decodes to the `#L09` values printed around it. The
 > controller's default is SBUS-24: 36-byte frames, 24 channels, flags at byte 34 and the footer at 35
-> (SBUSController.ino:122-129, :757-772); a 25-byte frame is the 16-channel variant. The INF8 verbs wait for INF8.
+> (SBUSController.ino:122-129, :757-772); a 25-byte frame is the 16-channel variant. INF8's verbs are `SbusCtl` methods
+> too since 2026-09-29 (INF8's status).
 
 The controller's JSON is duplicated in `s11_sbus.py:17-33`, `s21:1152-1207` and `hil/resume.py:568-641`. One class,
 `SbusCtl(dev)`: `ping(timeout=60)` (the controller may reset when its port opens), `cfg()` (the getcfg line carries
@@ -906,6 +907,48 @@ open instead of closing it (`wizard.py:201-202`), and `_reacquire` PINGs a NaviC
 (`:105-106`).
 
 ### INF8 — SBUSController test verbs (D-NC8)
+
+> **Status 2026-09-29: built, not yet flashed or bench-run.** SBUSController branch `hil-week` (local, never pushed: its
+> `CLAUDE.md` rule 4), from `fae0af6`, the build the bench runs (pong `fwver` `20260811-fae0af6`): commit `de99467`,
+> the five verbs in `processCommandJson` with `sendTestReply` (`:1067`), `sendGlitch` (`:957`) and the gate in `loop()`
+> (`:2118`). The image, stamped `20260929-de99467-hil` (its pong's `fwver`), is
+> `C:/Users/ghulette/.claude-worktrees/SBUSController/hil-week-image/SBUSController.ino.bin` (1,321,184 bytes; sketch
+> 1,321,031 bytes, 67 % of 1,966,080; globals 49,936 bytes, 15 %), built with SBUSController's FQBN
+> `esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=min_spiffs` on core 3.3.4 from a copy of the sketch
+> in a folder named after it (arduino-cli refuses the worktree's folder name) and the sketchbook's libraries
+> (ArduinoJson 7.4.3 as CI pins; NeoPixel 1.15.5 where CI installs 1.15.4; the ESP32Async AsyncTCP 3.5.0 and
+> ESPAsyncWebServer 3.12.0). It adds no warning of its own. Flash the app alone at 0x10000 on COM4 with esptool: the
+> custom short-watchdog bootloader and the partition table stay as they are. Rollback: the CI build of `fae0af6`,
+> `firmware/SBUSController_20260811-fae0af6_ESP32S3.bin` (committed on main at `ecc40d1`), the same way. The bench run
+> starts with the pong's `fwver`, then `sbus.test_verbs` (NC-WP11). Where the build differs from the table below:
+> - Every verb answers the asker alone, as PONG and BOOTLOG do, never gated on the ping window:
+>   `{"e":"test","t":<verb>,"ok":b,"flags":n,"stream":b,"budget":k,"sbus24":b,"saved24":b}` (`budget` -1 is no limit;
+>   `sbus24` the live frame format, `saved24` the saved one), plus `"c"`,`"v"` for `ch`, and `"kind"`,`"n"` (and
+>   `"hex"` for garbage) for `glitch`. A verb sent without its value changes nothing and just answers, so
+>   `{"t":"flags"}` is the probe; an older image never answers it (an unknown `t` falls through `processCommandJson`).
+>   `hil/sbus.py` `SbusCtl.test_state()` probes, and the verb methods send nothing until a probe answered: an older
+>   image saves `mode`, `"save":false` or not.
+> - `stream` also takes `"frames":k` (1-1000): k more frames, then the stream stops again. The glitch tests need it to
+>   let exactly one good frame follow a burst.
+> - A `glitch` goes out in the next frame slot, from `loop()`, streaming or not - never from the command handler, since
+>   a verb from the WebSocket runs on the async task and its write would interleave with a frame: `truncate` n bytes
+>   (1 to the frame length - 1), `garbage` n bytes (1-64) of a fixed xorshift sequence with any 0x0F replaced,
+>   `double` n whole frames (2-4) back to back, `gap` the frame's two halves with n ms (2-50) of silence between them,
+>   `dip` one whole frame with channel n (1 to the channel count) at 992.
+> - `mode` with `"save":false` leaves `cfg.sbus24` alone, so no later `saveConfig()` (the UI's `cfg` or `wificfg`) can
+>   persist the test's format. It resets the channels and re-applies the controls exactly as a saved switch does - the
+>   sticks and buttons go to 992 and every `ch` value ends - and answers with the test reply instead of the cfg
+>   broadcast, whose `sbus24` is the saved mode. Without `"save":false` the verb is unchanged.
+> - `flags` takes 0-255 and `ch` 0-2047 on channels 1-24; an argument out of range answers `"ok":false` and changes
+>   nothing.
+> - The line numbers in the table are Greg's checkout (`ffa2de0`). On `hil-week` the verbs are at `:1263` (`mode`),
+>   `:1300` (`flags`), `:1310` (`stream`), `:1324` (`ch`), `:1341` (`glitch`); the flags byte is set at `:769` from
+>   `g_sbusFlags` (`:139`).
+>
+> The test side: `hil/sbus.py` `SbusCtl` `test_state`, `test_verb`, `flags`, `stream`, `sbus16`, `glitch`, `channel`,
+> `clear_faults` and `reassert_switches`, and `ReaderModel` (NaviCore's framing, byte for byte) with `glitch_bursts`
+> and `reader_decodes`; after a cut-off `sbus.*` test the resume puts the controller's test state back
+> (`hil/resume.py` `_release_sbus`, docs/HIL_TESTING.md §9).
 
 RAM-only additions to `processCommandJson` (`SBUSController.ino:1035`), none of which saves:
 
@@ -1519,6 +1562,69 @@ original slot), `ncota.relay_full_via_w1` (`navicore_ota_relay_full`), `ncota.re
 
 ### NC-WP11 — SBUS faults (`sbus.*`, needs INF8)
 
+> **Status 2026-09-29: written, not yet bench-run** (`suites/s50_navicore_sbus_faults.py`, 12 `sbus` tests, four
+> `(should)`; all twelve in `hil/servos.py`; one behind `sbus_reset`). NaviCore's ten suite numbers are taken, so this
+> is s50, which runs after s49. Every test probes for the INF8 verbs first and skips, naming the image, on a controller
+> without them, before it writes anything: `selftest.py` runs the whole suite against such an image
+> (`t_sbusfault_old_image_skips`: twelve skips; the controller got only the probe and pings, NaviCore nothing).
+> Against a model of the wire (`t_sbusfault_suite_against_model`: the controller with the verbs, `ReaderModel` as
+> NaviCore's reader, NaviModel's config, guard and W1 relay), `sbus.test_verbs`, `sbus.sbus16_autodetect` and
+> `sbus.lock_after_glitch` pass, both reader findings fail as designed, and the tests that need NaviCore's tap engine
+> skip (the model has none); seven mutations (`t_sbusfault_mutations`: both findings fixed, a reader that decodes a
+> partial, a controller that ignores the frame budget, stretches a dip or saves the frame format) each get the verdict
+> they should. Nothing has run on the bench: after the flash, `sbus.test_verbs` first. The tests:
+> - `sbus.test_verbs`: INF8's acceptance. Each flags value read back by #L09; the stream stopped (the counter still,
+>   ageMs rising) and a budget of 5 frames counted exactly; a raw value and a one-frame dip on the rx stick's channel
+>   (#L13 holds the dip frame; the stick takes the channel back); thirteen bad arguments refused with nothing sent.
+> - `sbus.failsafe_flag_freeze`, `sbus.lost_frame_flag_no_gate`: a borrowed knob on the rx stick (remote slot 4, W1 S1),
+>   a borrowed switch on the ry stick (W1 S2 markers) and an unmapped matrix button, inside `nc_guard`. Failsafe (0x08):
+>   full rate with #L09 `failsafe=YES`, and no knob frame, switch tier or rc_trig; rc_hb `sbusFail` on W1 (noted when
+>   none is relayed); values moved during it and put back before it clears never act, a button held across it needs a
+>   release first, then all three act again. Lost frame (0x04): all three act, #L09 `lost=YES`, the monitor's
+>   `lost:true` (its `ok` then reads false: noted), rc_hb `sbusLost`.
+> - `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press`: D-NC21's `(should)` tests, the mechanism now read in the
+>   code (D-NC21's row).
+> - `sbus.sbus16_autodetect`: NaviCore follows to SBUS-16 at full rate: #L09 lists CH1-16 only (`NaviCore.sbus_dump`
+>   now ends at the last row printed, so a 16-channel dump no longer waits out a CH17-24 row that never comes), #L13 25
+>   bytes, the monitor's chCount 16 and frameLen 25, rc_ch's CH17-24 all 992; back on SBUS-24 CH17-24 are as they were;
+>   getcfg's saved mode never moved. NaviCore's CH17-24 bindings (switch SJ, knobs RS and J2) are unbound around it
+>   inside `nc_guard` (`_hi_inert`), since they read 992 meanwhile.
+> - `sbus.sbus24_return_no_prefix_decode`: `(should)`, D-NC73, found writing this package.
+> - `sbus.lock_after_glitch`, and `sbus.truncated_frame_no_phantom` (`(should)`, D-NC72): each case stops the stream,
+>   sends one burst, lets good frames through one at a time and reads #L09's counter and #L13 after each, the engine
+>   inert inside `nc_guard` (s41 `_engine_inert`). With the channels at rest every frame the controller sends is the
+>   same bytes, so anything else in #L13 is a frame nobody sent; `ReaderModel` says what each burst should do, and the
+>   note compares.
+> - `sbus.prefix_ambiguity_raw`: CH17 raw at 4, 8, 12, 255 and its own value, so byte 23 carries the lost and
+>   failsafe bits with byte 24 zero, three seconds each under load; NaviCore's switch SJ reads them all in its low band.
+> - `sbus.one_frame_dip`: a held press with one neutral frame in it is tap 2 at matrixDebounceFrames 1 and tap 1 at 2.
+> - `sbus.test_verbs_ram_only` (opt-in `sbus_reset`): SBUS-16, a raw value and the lost flag set, then a controller
+>   reset: all of it gone, SBUS-24 as saved.
+>
+> Where the code differs from the plan below:
+> - The plan expected every glitch to reset the lock streak ("nothing decodes before lock"). Only a burst that parses
+>   as the other variant does: a cut to 25 bytes when byte 24 is 0x00 is a whole SBUS-16 shape, and the two frames
+>   after it do not decode. A malformed burst leaves the lock as it was, because both of the reader's flushes take only
+>   a complete buffer and `tryParseAndReset`'s malformed branch is never reached (`sbus_reader.h:240-243`). So
+>   `sbus.lock_after_glitch` asserts what holds either way - a burst that is not a whole frame decodes nothing by itself,
+>   and every frame decoded after it is one the controller sent - on the glitches the reader survives (noise with no
+>   header, two frames back to back, a frame with a pause inside it, cuts whose window cannot close on 0x00), and the
+>   cuts that do close one are D-NC72's `(should)`.
+> - Most cuts cost NaviCore one or two good frames: the first is swallowed into the 40-byte drop, and the 0x0F at byte
+>   32 of this bench's resting frame starts a second misaligned partial. Only a cut at 1 or 11 bytes decodes garbage
+>   there (the resting frame's zero bytes are 24, 34 and 35).
+> - The dip is a glitch kind (`{"t":"glitch","kind":"dip","n":<channel>}`), as INF8's table named it; `sbus.one_frame_dip`
+>   uses it on the matrix channel. It is a neutral frame inside a press, so it tests the release debounce; the press
+>   debounce keeps `sbus.matrix_debounce_n`'s host-timed presses (NC-WP5).
+> - `sbus.prefix_ambiguity_raw` leaves CH18 where it rests (992, a multiple of 32), and skips when that would not zero
+>   byte 24: a raw CH18 would move a slider's channel, which NaviCore binds.
+> - "?MAE positions hold" (`nc.sbus.failsafe_freeze`) is read through the borrowed knob's frames on W1 S1, not
+>   `?MAE,GET` on the dome: a Maestro position changes only when NaviCore sends it a frame, which W1 S1 shows directly,
+>   while `?MAE,GET` on the dome would also see J2's idle auto-release, which failsafe does not gate
+>   (`maestroIdleReleaseTick`, `NaviCore.ino:2731-2752`).
+> - Four tests the plan did not name: `sbus.test_verbs` (the verbs' acceptance), `sbus.test_verbs_ram_only` (that they
+>   saved nothing), and the two new findings' `(should)` tests.
+
 `sbus.failsafe_flag_freeze`, `sbus.lost_frame_flag_no_gate`, `sbus.failsafe_deferred_tap` and
 `sbus.frame_stop_held_press` (both `(should)` per D-NC21), `sbus.sbus16_autodetect`, `sbus.lock_after_glitch`,
 `sbus.prefix_ambiguity_raw`, `sbus.one_frame_dip`.
@@ -1870,7 +1976,7 @@ own `pages-deploy.yml` gets the L0 syntax gate before it publishes (D-NC12).
 
 Greg is away and has delegated these. Each has a recommendation; once taken, it goes into
 `docs/HIL_WEEK_DECISIONS.md` with how to undo it. D-NC1 to D-NC15 and D-NC37 to D-NC41 are about the work;
-D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC71 are behaviour findings, each with the
+D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC73 are behaviour findings, each with the
 `(should)` test that pins it.
 
 ### 7.1 Process and infrastructure
@@ -1907,7 +2013,7 @@ D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC71 are be
 | D-NC18 | A bridged SET_CONFIG strips deviceId, MAC octets, password and quantity but not `channel` or the `wifi*` fields (`rc_telemetry.h:1137-1156`). | Strip them too; the tool already strips channel. | `ncmesh.bridged_set_config_strip` (sends `wifiEnabled`) |
 | D-NC19 | `boardType` is stored unchecked; 2 gives the v2 pins but advertises "WCB 3.2". | Clamp to 0-1 on input. | `ncboot.boardtype2_mismatch` |
 | D-NC20 | TEST_ACTION answers `ok:true` for an action the executor then skips (a disabled destination, an invalid slot, an unconfigured WLED id, a bad port); the tool never reads the ACK. | `ok:false` with a reason, and the tool shows it. | `ncengine.test_action_skipped_not_ok` (and the skip lines in `ncengine.test_action_matrix`), `nctool.test_action_button` |
-| D-NC21 | A deferred tap still fires during failsafe, and a press in flight when frames stop resolves once they return (`NaviCore.ino:2770-2783`, `:2356-2390`, per the map). | Failsafe and frame loss cancel any pending tap or hold; the press must be made again. | `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press` |
+| D-NC21 | A deferred tap still fires during failsafe, and a press in flight when frames stop resolves once they return. The failsafe gate resets the matrix debounce and abandons a hold but leaves the deferred tap (`NaviCore.ino:2782-2796`), and `checkDeferredTap` runs from `loop()` whatever the frames say (`:2404-2426`, called at `:5500`): a tap released just before failsafe fires tapWindowMs after its release, and a press held into it fires sooner, still held, since clearing `holdActive` (`:2790`) is what unparks it (`:2412`). With no frame nothing reaches `processSbus` (`:2757-2759`) - NaviCore has no frame timeout - so a press held when frames stop stays parked, and the first neutral frames after the outage are its release (`:2825-2837`, `rcMatrixRelease` `:2379-2402`): it fires tapWindowMs after the link returns. Read in the code writing NC-WP11. | Failsafe and frame loss cancel any pending tap or hold; the press must be made again. | `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press` |
 | D-NC22 | A null or empty `hcrDest`/`mp3Dest`/`dfpDest` object enables the device (serial S3, or WCB 2). | Read it as off. | `nccfg.dest_null_hazard` |
 | D-NC23 | Subroutine numbers 128-255 go out unmasked (`restartScript`, `subParam`, inbound `;M<dev>,<n>`), a command-range byte inside a Pololu frame. Cross-repo: `WcbMaestro` accepts up to 255. | Refuse n > 127 in WcbCmd (both firmwares; push WcbCmd first, WCB rule 1). | `ncdev.mae_subroutine_msb` and a WCB twin |
 | D-NC24 | S4/S5 transmit bit-banged with interrupts enabled (EspSoftwareSerial 8.1.0 defaults), while ARCHITECTURE §8 says they are masked. | Fix the docs now; change firmware only after a wire measures it (RMT TX, as WCB rule 13). | `ncwire.soft_tx_integrity` (blocked) |
@@ -1943,11 +2049,14 @@ D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC71 are be
 | D-NC66 | The recorder's discard verbs report what they did not do. `?REC,EDITCANCEL` answers `[CLIPUL:CANCEL,OK]` but only drops ST_EDITING (navicore_record.h:950): the staged events stay in the buffer, where `?REC,PLAY` plays and `?REC,SAVE` saves them, though editCancel's comment says it discards them (:948-949) and stop()'s says a partial upload must not be left exposed to a STOP+SAVE (:316-323); the config tool sends EDITCANCEL after a failed upload (config_tool/index.html:6957, :7183, :7367). `?REC,CLEAR` answers `[REC] cleared` whatever `clearClip` did (NaviCore.ino:3605), and `clearClip` clears only when idle (navicore_record.h:308), so during a take or a replay it answers 'cleared' and clears nothing. Found writing NC-WP12. | EDITCANCEL empties the buffer; CLEAR answers busy (or discards the take) when the recorder is not idle. | `ncrec.editcancel_empties` |
 | D-NC70 | "Connect via USB" on a port that is a tethered WCB types bare JSON onto the WCB's console: the transport probe PINGs up to six times, 500 ms apart, before it falls back to Via WCB (`openPortAndStart`, `config_tool/index.html:4568-4593`). A WCB runs any console line that starts with neither its function nor its command character as a broadcast (`handleSingleCommand`, `WCB.ino:6153-6164`): `processBroadcastCommand` writes `{"sys":1,"type":"PING"}` out of every port with broadcast output on that no Maestro, MP3 Trigger, DFPlayer or HCR is configured on, and onto the mesh (`:8494-8563`). Whatever device takes plain serial text on such a port reads six lines of JSON as its input; and within 20 s of the tool's last Via-WCB line (the relay window, `WCB.ino:8142-8144`, gate `:5611`) the WCB also prints NaviCore's reply to that broadcast PING, which is D-NC30's misdetection. Found writing NC-WP13. | Never write bare JSON to a port that may be a WCB: probe with a `?` line, which a WCB runs locally and broadcasts nothing for, and choose the transport from the answer. | `nctool.board_usb_probe_no_broadcast` |
 | D-NC71 | Connecting "Via a WCB" writes one bare `{"sys":1,"type":"GET_WCB_STATUS"}` to the WCB before anything is wrapped: `connectSharedPort` sets `sharedActive` (`config_tool/index.html:4715`) and waits for the hub's port (`:4717`), the hub's state event runs `onSharedState` -> `setConnected(true)` (`:4672-4674`) -> `startWcbStatusPoll`, which sends its first GET_WCB_STATUS at once (`:5091`), and `viaWcbActive` is only set at `:4743`, so `sendJSON` writes it unwrapped (`:5618-5620`). The comment at `:5068-5069` knows the flag comes later but only for the timer's gate. The WCB broadcasts that line as D-NC70 describes, once per connect. Found writing NC-WP13 (the L2 dry run of `nctool.board_via_wcb`). | Set `viaWcbActive` before `sharedHub.join()`, or have `onSharedState` leave the status poll to `connectSharedPort`. | `nctool.via_wcb_nothing_bare` |
+| D-NC72 | A frame cut short makes NaviCore's locked SBUS reader decode a frame nobody sent. Both of its flushes take only a complete buffer (`sbus_reader.h:115-117`, `:187-189`), so a partial frame - a truncated one, or a lone 0x0F between frames - is never dropped: the next frame's bytes fill it. Once locked, the eager flush decodes the buffer the moment its 36th byte is 0x00 (`:167-174`), and the lock is still there, since the malformed branch that would break it (`tryParseAndReset` `:240-243`) is reached by neither flush, though the lock's comment says a malformed frame breaks the streak (`:217-218`). A lone header always does it: the window ends on the next frame's flags byte, 0x00 from a healthy transmitter, so NaviCore decodes that frame shifted by one byte - every channel garbage, and its flags another channel's bits. On this bench's resting frame the cuts at 1 and 11 bytes do it, reading as failsafe (0x7C, 0xAD), which freezes dispatch for the frame, resets the matrix debounce and abandons a hold (so D-NC21's held tap fires); a window whose flags byte has no failsafe bit hands the garbage to the mode switch, the matrix, the switches and every knob, and a knob sends its servo there at once. Found writing NC-WP11 (`hil/sbus.py` `ReaderModel` ports the framing). | Never decode a window that spans a silence: drop a partial buffer when the line goes quiet (or restart it at a header after a silence), and let a burst that ends malformed break the lock, as the comment says. | `sbus.truncated_frame_no_phantom` |
+| D-NC73 | Locked on SBUS-16, the reader decodes the first 25 bytes of an SBUS-24 frame as a frame of its own before it notices the stream changed. The eager flush takes a 25-byte buffer ending in 0x00 at once (`sbus_reader.h:167-174`), and only the byte after it, not a header, drops the lock (`pendingLen16Check_`, `:134-141`) - after the misframed frame was decoded and handed to `processSbus`: CH1-16 right, CH17-24 set to 992 (`:283`), and its flags read from byte 23, CH17's low eight bits (0xAD on this bench: failsafe and lost). An SBUS-24 frame's byte 24 is 0x00 whenever CH17 is under 256 and CH18 a multiple of 32, as this bench rests, so every return from SBUS-16 to SBUS-24 - a receiver swapped while powered, the case the reader's own comment names (`:111-114`) - decodes one such frame. The comment says the prefix check is what catches the misfire (`:163-165`); it stops the wedge, not the frame. Found writing NC-WP11. | Decode a 25-byte frame on a 16-lock only once the byte after it is a header or the line goes quiet, as the gap flush already requires (`:115-117`). | `sbus.sbus24_return_no_prefix_decode` |
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | INF8 built and NC-WP11 written, neither flashed nor bench-run. SBUSController branch `hil-week` `de99467` (local; from `fae0af6`): the five RAM-only verbs, `stream`'s frame budget, the test reply and its probe; image `20260929-de99467-hil` in `.claude-worktrees/SBUSController/hil-week-image`. `hil/sbus.py`: the verb methods, `clear_faults`, `ReaderModel`; `NaviCore.sbus_dump` reads an SBUS-16 #L09; the resume clears the controller's test state. New `s50_navicore_sbus_faults.py` (12 `sbus` tests, four `(should)`: D-NC21 twice, D-NC72, D-NC73; all in `hil/servos.py`). New findings D-NC72 (a truncated frame decodes misaligned on a locked reader) and D-NC73 (a 16-locked reader decodes an SBUS-24 frame's 25-byte prefix); D-NC21's row now cites the code it was read in. `selftest.py` runs the suite against an image without the verbs and against a model of the wire, with seven mutations. The status notes list where the code differs from the plan. |
 | 2026-09-29 | _(pending)_ | NC-WP13 written, not bench-run: nine new L2 tests in `s49_navicore_tool.py` (`board_save_one_field`, `board_test_action_wire`, `board_live_grid`, `board_clips_list`, `board_cmdlib_load`, `emulator_contract`, `board_ota_usb_same_image` behind `navicore_ota_full`, `board_via_wcb`, the `(should)` `board_usb_probe_no_broadcast`) and two L3 tests behind the newly registered, attended opt-in `navicore_webserial`; the L1 `(should)` `via_wcb_nothing_bare`; four in `hil/servos.py`. New `lib/navicore/contract.js` and `lib/navicore/webserial.js`; `pipe.js` records what the page wrote by kind; the emulator's MESH_STATS and `?OTALOCAL,STATUS` follow the firmware. `hil/wizard.py` `PipeLog` keeps a bridged CONFIG's fragment envelopes out of session.log, and `nctool.*` specs run without Playwright's page snapshot. New findings D-NC70 (Connect via USB types bare JSON PINGs on a WCB, which broadcasts them) and D-NC71 (Via a WCB, the first status poll leaves bare). The status note lists where the code differs from the plan. |
 | 2026-09-29 | _(pending)_ | NC-WP12 bench-verified (`20260929-173541`, `-173612`, `-173628`; nine pass, D-NC64 to D-NC66 confirmed): `s48_navicore_rec.py` (12 `ncrec` tests, three `(should)`; the six that replay in `hil/servos.py`; five behind the new opt-in `navicore_clip_write`, registered, not ticked) and its `rec_guard` (the recorder idle and empty, HIL clips only, `?REC,LS` as found). New findings D-NC64 (a replay resets every channel with a known position, not only its clip's), D-NC65 (a busy recorder reports a listed clip missing) and D-NC66 (EDITCANCEL and CLEAR report what they did not do). `selftest.py` runs the suite against `NaviRecModel` and 15 mutations of it. The status note lists where the code differs from the plan (among them: the v1 clip migration is a bench read of Greg's 136-byte clips) and NaviCore doc drift for D-NC36. |
 | 2026-09-29 | _(pending)_ | INF5 built and NC-WP8 written, not bench-run: `hil/wlan.py` (s28's PC-side helpers moved unchanged, `pc_on_ap`'s `spare_only`, a scanned network list), `hil/ncws.py` (`NcWs`, the socket as a line device the INF1 driver runs over), `hil/ws.py` `rcvbuf`; `s45_navicore_wifi.py` (15 `ncwifi` tests, three `(should)`); opt-in `navicore_wifi` registered; three tests in `hil/servos.py`. New findings D-NC61 (a socket's lines are not trimmed), D-NC62 (a stalled client blocks every client and is left deaf, and `WsSink::write()` can overrun its buffer) and D-NC63 (a USB EDITLOAD is handled as relayed while a socket is open). `selftest.py`: `t_wlan_pc_on_ap`, `t_ncws_line_device`, `t_ncwifi_helpers`. The two status notes list where the code differs from the plan, and NaviCore doc drift for D-NC36. |

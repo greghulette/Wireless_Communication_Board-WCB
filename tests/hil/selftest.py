@@ -46,13 +46,20 @@ STATUS, an ACK held until the host sends, the idle reaper, a chunk written short
 other slot, the old slot, no return); and the recovery ladder's decisions against a fake board and a scripted esptool,
 which may only ever write 0x10000 and 0xe000. The PC's WiFi and NaviCore's socket (INF5): hil/wlan.py's netsh parsers
 on captured text and pc_on_ap against a faked netsh; hil/ncws.py NcWs against a stand-in endpoint on a local socket;
-and s45's pure helpers (the banner's access point block, Intellex's discovery verdict, the barrier).
+and s45's pure helpers (the banner's access point block, Intellex's discovery verdict, the barrier). The SBUS
+controller's INF8 test verbs (NAVICORE.md INF8, NC-WP11): SbusCtl against a scripted controller with and without them
+(the probe, each verb's exact line, refusals, clear_faults, and never a "mode" to an image that has not answered the
+probe), the resume's clean-up on both, hil/sbus.py ReaderModel against the real bench frame (the lock, the eager and
+silence flushes, the 40-byte drop, the misaligned windows D-NC72 and D-NC73 pin), NaviCore.sbus_dump on an SBUS-16 and
+an unlocked #L09, s50's pure helpers, and every s50 test run whole against an image without the verbs: each skips,
+sending the controller nothing but the probe and NaviCore nothing at all.
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
 which talks to the boards) are replaced by a stub. What only the real bench can prove is listed in
 docs/HIL_TESTING.md §9.
 """
+import collections
 import json
 import os
 import re
@@ -1026,6 +1033,89 @@ class FakeStallDev(FakeJsonDev):
         raise resume.ExpectTimeout(f"sbus: no line matching /{pattern}/ within {timeout}s; last lines:")
 
 
+class FakeInf8:
+    """The SBUS controller's JSON verbs as SBUSController.ino (branch hil-week) handles them: ping, getcfg, and the INF8
+    test verbs flags, stream, ch, glitch and mode with "save":false, each checked as processCommandJson checks it and
+    answered with sendTestReply's line. verbs=False is an older image: the test verbs fall through with no answer,
+    and a "mode" - with or without "save":false - saves (recorded in `saved`)."""
+    GLITCH_N = {"truncate": (1, 35), "garbage": (1, 64), "double": (2, 4), "gap": (2, 50), "dip": (1, 24)}
+
+    def __init__(self, verbs=True, cfg=None):
+        self.verbs, self.saved = verbs, []
+        self.st = {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True}
+        self.cfg = cfg or {"e": "cfg", "fwver": "sbus-9.9", "sbus24": True, "rx": 1, "ry": 2, "ly": 3, "lx": 4,
+                           "sw": [{"c": 5, "pos": 2}, {"c": 17, "pos": 0}], "btn": [], "tr": []}
+
+    def reply(self, t, ok, extra=""):
+        s = self.st
+        return (f'{{"e":"test","t":"{t}","ok":{json.dumps(ok)},"flags":{s["flags"]},"stream":{json.dumps(s["stream"])},'
+                f'"budget":{s["budget"]},"sbus24":{json.dumps(s["sbus24"])},"saved24":{json.dumps(s["saved24"])}{extra}}}')
+
+    @staticmethod
+    def _int(o, k):
+        v = o.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    def answer(self, o):
+        t = o.get("t")
+        if t == "ping":
+            return ['{"t":"pong","ver":3,"fwver":"sbus-9.9"}']
+        if t == "getcfg":
+            return [json.dumps(dict(self.cfg, sbus24=self.st["saved24"]), separators=(",", ":"))]
+        if t == "mode":
+            new = o.get("sbus24", self.st["sbus24"])
+            if not self.verbs or o.get("save", True) is not False:
+                self.saved.append(o)
+                self.st["sbus24"] = self.st["saved24"] = new
+                return []
+            self.st["sbus24"] = new
+            return [self.reply("mode", True)]
+        if not self.verbs:
+            return []
+        if t == "flags":
+            v = self._int(o, "v")
+            ok = "v" not in o or (v is not None and 0 <= v <= 255)
+            if "v" in o and ok:
+                self.st["flags"] = v
+            return [self.reply("flags", ok)]
+        if t == "stream":
+            k = self._int(o, "frames")
+            ok = "on" not in o or "frames" not in o or (k is not None and 1 <= k <= 1000)
+            if "on" in o and ok:
+                self.st["budget"] = k if o["on"] and "frames" in o else -1
+                self.st["stream"] = bool(o["on"])
+            return [self.reply("stream", ok)]
+        if t == "ch":
+            c, v = self._int(o, "c") or 0, self._int(o, "v")
+            ok = 1 <= c <= 24 and v is not None and 0 <= v <= 2047
+            return [self.reply("ch", ok, f',"c":{c},"v":{v if v is not None else -1}')]
+        if t == "glitch":
+            k, n = o.get("kind", ""), self._int(o, "n") or 0
+            lo, hi = self.GLITCH_N.get(k, (1, 0))
+            ok = lo <= n <= hi
+            extra = f',"kind":"{k}","n":{n}' if ok else ""
+            if ok and k == "garbage":
+                extra += ',"hex":"' + "A5" * n + '"'
+            return [self.reply("glitch", ok, extra)]
+        return []
+
+    def script(self, text, n):
+        return self.answer(json.loads(text))
+
+
+class FakeInf8JsonDev(FakeJsonDev):
+    """FakeJsonDev (the resume's controller port) answering as FakeInf8 with the verbs."""
+
+    def __init__(self, logged):
+        super().__init__(logged)
+        self.inf8 = FakeInf8(cfg=dict(self.CFG, sw=[{"c": 5, "pos": 2}, {"c": 17, "pos": 0}]))
+
+    def send(self, text, eol="\n"):
+        self.sent.append(json.loads(text))
+        for line in self.inf8.script(text, len(self.sent)):
+            self._rx(line)
+
+
 def t_sbus_reply_nudged_by_ping(tmp):
     """A controller reply stuck in its USB outbox is pinged loose (SbusCtl._reply); a prompt one sends no extra ping,
     and one that never comes fails with the whole wait in its message."""
@@ -1064,8 +1154,10 @@ def t_sbus_released_after_cutoff(tmp):
     out = resume.check_controllers(b, ck, lambda s: None)
     assert out == {"sbus": "sbus-1.2"}
     sent = d.sent[1:]
-    assert sent[0] == {"t": "getcfg"} and sent[1] == {"t": "a", "lx": 0, "ly": 0, "rx": 0, "ry": 0}, sent
-    assert sent[2:] == [{"t": "btn", "i": 0, "p": False}, {"t": "btn", "i": 1, "p": False},
+    # An image without the INF8 test verbs gets their probe and one nudge, then the release as before.
+    assert sent[:3] == [{"t": "getcfg"}, {"t": "flags"}, {"t": "ping"}], sent
+    assert sent[3] == {"t": "a", "lx": 0, "ly": 0, "rx": 0, "ry": 0}, sent
+    assert sent[4:] == [{"t": "btn", "i": 0, "p": False}, {"t": "btn", "i": 1, "p": False},
                         {"t": "tr", "i": 0, "d": 1, "p": False}, {"t": "tr", "i": 2, "d": 1, "p": False}], sent
     assert not any("sekrit99" in x for x in logged) and any('"e":"cfg"' in x for x in logged), logged
     assert d.log is not None and d.log("sbus", "<", "sekrit99") is None and logged[-1] == "sekrit99", \
@@ -1076,6 +1168,20 @@ def t_sbus_released_after_cutoff(tmp):
     ck.data["in_flight"] = {"id": "wcb.version"}
     resume.check_controllers(b, ck, lambda s: None)
     assert d2.sent == [{"t": "ping"}], d2.sent
+    # An image with the verbs, left in failsafe, SBUS-16 and the stream off by a cut-off NC-WP11 test: its test state
+    # goes back as a reset would (SBUS-24 before the sticks are centred), and every switch is re-sent where it is.
+    d3 = FakeInf8JsonDev([])
+    d3.inf8.st.update(flags=8, stream=False, budget=0, sbus24=False)
+    b.dev = lambda name: d3
+    ck.data["in_flight"] = {"id": "sbus.sbus16_autodetect"}
+    resume.check_controllers(b, ck, lambda s: None)
+    sent = d3.sent[1:]
+    assert sent[:5] == [{"t": "getcfg"}, {"t": "flags"}, {"t": "flags", "v": 0}, {"t": "stream", "on": True},
+                        {"t": "mode", "sbus24": True, "save": False}], sent
+    assert sent[5] == {"t": "a", "lx": 0, "ly": 0, "rx": 0, "ry": 0} and sent[-2:] == [
+        {"t": "sw", "i": 0, "p": 2}, {"t": "sw", "i": 1, "p": 0}], sent
+    assert not d3.inf8.saved and d3.inf8.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True,
+                                                "saved24": True}, (d3.inf8.saved, d3.inf8.st)
 
 
 def t_wizard_abort_kills_tree(tmp):
@@ -2150,6 +2256,7 @@ GATED = {
                                                         "boot slot twice"),
     "navicore.rec_play_clip": ("navicore_clip", "replays a saved clip: servo motion and recorded actions"),
     "sbus.signal_loss_controller_reset": ("sbus_reset", "reboots the SBUS controller"),
+    "sbus.test_verbs_ram_only": ("sbus_reset", "reboots the SBUS controller"),       # NC-WP11 (s50), 2026-09-29
     "softrx.erratum_pairs": ("softrx_erratum", "about 15 minutes of soft-port input into W1 S3-S5; needs wcb_probe 4"),
     "soak.w1s4_wire": ("w1s4_soak", "loads W1's S2/S4 fan-out for soak_minutes, default 20"),
     **{f"nccfg.{n}": ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s")
@@ -4670,6 +4777,206 @@ def t_sbus_ctl(tmp):
     assert SB.matrix_button(nc, cfg, ncfg, 2) == (0, {"c": 7, "v": 350}, 2)
     rest = types.SimpleNamespace(sbus_dump=lambda: {"channels": [350] * 24})
     _raises(lambda: SB.matrix_button(rest, cfg, ncfg, 1), runner.Skip)
+
+
+def t_sbus_inf8_verbs(tmp):
+    """hil/sbus.py's INF8 driver (NAVICORE.md INF8) against FakeInf8. An image without the verbs: the probe returns None
+    after one nudge, and no verb - "mode" above all, which would save there - is sent before a probe answered, nor after
+    one that did not. With them: each verb's exact line and reply, the refusals (ok:false raises; check=False returns
+    it), glitch() refusing an unknown kind locally, clear_faults putting flags, the stream and the frame format back and
+    then sending only the probe, and reassert_switches re-sending each switch at its position."""
+    from hil import sbus as SB
+    old = FakeInf8(verbs=False)
+    d = FakeNaviDev(old.script, "sbus")
+    ctl = SB.SbusCtl(d)
+    ctl.NUDGE_S = 0.02
+    for fn in (lambda: ctl.sbus16(True), lambda: ctl.flags(8), lambda: ctl.test_verb({"t": "stream", "on": False})):
+        _raises(fn, ValueError)
+    assert d.sent == [], d.sent
+    assert ctl.test_state() is None and ctl.verbs is None
+    assert d.sent == ['{"t":"flags"}', '{"t":"ping"}'], d.sent
+    _raises(lambda: ctl.sbus16(True), ValueError)
+    assert ctl.clear_faults() == [] and d.sent[2:] == ['{"t":"flags"}', '{"t":"ping"}'], d.sent
+    assert not old.saved, "a 'mode' reached an image without the verbs"
+
+    new = FakeInf8()
+    d = FakeNaviDev(new.script, "sbus")
+    ctl = SB.SbusCtl(d)
+    ctl.NUDGE_S = 0.02
+    st = ctl.test_state()
+    assert st == {"e": "test", "t": "flags", "ok": True, "flags": 0, "stream": True, "budget": -1, "sbus24": True,
+                  "saved24": True}, st
+    d.sent.clear()
+    assert ctl.flags(8)["flags"] == 8 and ctl.stream(False)["stream"] is False
+    r = ctl.stream(True, frames=3)
+    assert (r["stream"], r["budget"]) == (True, 3), r
+    r = ctl.sbus16(True)
+    assert (r["sbus24"], r["saved24"]) == (False, True) and not new.saved, (r, new.saved)
+    assert ctl.channel(17, 8)["c"] == 17 and ctl.glitch("truncate", 5)["kind"] == "truncate"
+    assert ctl.glitch("garbage", 3)["hex"] == "A5A5A5"
+    assert d.sent == ['{"t":"flags","v":8}', '{"t":"stream","on":false}', '{"t":"stream","on":true,"frames":3}',
+                      '{"t":"mode","sbus24":false,"save":false}', '{"t":"ch","c":17,"v":8}',
+                      '{"t":"glitch","kind":"truncate","n":5}', '{"t":"glitch","kind":"garbage","n":3}'], d.sent
+    _raises(lambda: ctl.glitch("zap", 1), ValueError)
+    assert "refused" in str(_raises(lambda: ctl.flags(300)))
+    assert ctl.test_verb({"t": "glitch", "kind": "dip", "n": 25}, check=False)["ok"] is False
+    assert new.st["flags"] == 8, "a refused verb changed the state"
+    d.sent.clear()
+    done = ctl.clear_faults()
+    assert len(done) == 3 and d.sent == ['{"t":"flags"}', '{"t":"flags","v":0}', '{"t":"stream","on":true}',
+                                         '{"t":"mode","sbus24":true,"save":false}'], (done, d.sent)
+    assert new.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True} and not new.saved
+    d.sent.clear()
+    assert ctl.clear_faults() == [] and d.sent == ['{"t":"flags"}'], d.sent
+    d.sent.clear()
+    ctl.reassert_switches(new.cfg)
+    assert d.sent == ['{"t":"sw","i":0,"p":2}', '{"t":"sw","i":1,"p":0}'], d.sent
+
+
+BENCH_FRAME = bytes.fromhex("0FE0031FF8C0073EF081AF15AD68452B5AD10AF0B5A215AD001FF8C0073EF0810F7C0000")   # t_sbus_codec's
+
+
+def t_sbus_reader_model(tmp):
+    """hil/sbus.py ReaderModel, NaviCore's framing (sbus_reader.h), on the frame NaviCore dumped with #L13 on this bench
+    (zeros at 24, 34 and 35; a 0x0F at 32). Unlocked, three frames in a row before the first decode; locked, a lone
+    header plus one frame decodes 0F + the frame's first 35 bytes (flags 0x7C: failsafe and lost), and the cut at 11
+    bytes decodes the cut plus the next frame's first 25 (D-NC72) - the only two cuts that do; a mid-frame cut costs two
+    frames and then every decode is real; a cut to 25 bytes parses at the silence as SBUS-16 and breaks the lock, so
+    only the third frame after it decodes; two frames back to back, a frame split by a silence, and header-free noise
+    are harmless; locked on SBUS-16, an SBUS-24 frame's first 25 bytes decode as a frame before the byte after them
+    drops the lock (D-NC73); SBUS-16 frames re-lock a 24-locked reader after three; 40 bytes drop the buffer. And
+    glitch_bursts, reader_decodes and their refusals."""
+    from hil import sbus as SB
+    F = BENCH_FRAME
+    assert [i for i, b in enumerate(F) if b == 0] == [24, 34, 35] and F[32] == 0x0F
+    m = SB.ReaderModel()
+    for _ in range(5):
+        m.burst(F).silence()
+    assert m.decoded == [F, F, F] and m.streak == 3 and m.frame_len == 36
+    dec, m = SB.reader_decodes(F, [F[:1]], 1)
+    assert dec == [b"\x0f" + F[:35]] and SB.decode(dec[0])["flags"] == 0x7C and m.idle, dec
+    dec, _ = SB.reader_decodes(F, [F[:11]], 1)
+    assert dec == [F[:11] + F[:25]], dec
+    bad = [n for n in range(1, 36) if any(x != F for x in SB.reader_decodes(F, [F[:n]], 1)[0])]
+    assert bad == [1, 11], bad
+    m = SB.ReaderModel(24).burst(F[:18]).silence()
+    steps = []
+    for _ in range(5):
+        before = len(m.decoded)
+        m.burst(F).silence()
+        steps.append(len(m.decoded) - before)
+    assert steps == [0, 0, 1, 1, 1] and all(x == F for x in m.decoded) and m.idle, steps
+    for k, want in ((1, 0), (2, 0), (3, 1), (4, 2)):
+        assert len(SB.reader_decodes(F, [F[:25]], k)[0]) == want, k
+    assert SB.reader_decodes(F, SB.glitch_bursts("double", 2, F), 1)[0] == [F, F, F]
+    assert SB.glitch_bursts("gap", 5, F) == [F[:18], F[18:]] and SB.reader_decodes(F, [F[:18], F[18:]])[0] == [F]
+    noise = bytes(b for b in range(200, 240))
+    assert SB.reader_decodes(F, SB.glitch_bursts("garbage", 40, F, noise.hex()), 1)[0] == [F]
+    ch, dip = SB.decode(F)["channels"], SB.decode(SB.glitch_bursts("dip", 8, F)[0])["channels"]
+    assert ch[7] == 173 and dip[7] == SB.SBUS_CENTER and dip[:7] + dip[8:] == ch[:7] + ch[8:], dip
+    m = SB.ReaderModel(16).burst(F).silence()
+    assert m.decoded == [F[:25]] and (m.streak, m.variant, m.frame_len) == (0, 0, 0), m.decoded
+    s16 = SB.encode(SB.decode(F)["channels"][:16], 0, 16)
+    m = SB.ReaderModel(24)
+    for _ in range(3):
+        m.burst(s16).silence()
+    assert m.decoded == [s16] and m.frame_len == 25
+    m = SB.ReaderModel(24).burst(b"\x0f" + b"\x55" * 45)
+    assert m.idle and not m.decoded
+    _raises(lambda: SB.glitch_bursts("garbage", 3, F), ValueError)
+    _raises(lambda: SB.glitch_bursts("zap", 3, F), ValueError)
+
+
+def t_sbus_dump_variants(tmp):
+    """NaviCore.sbus_dump ends at the last row #L09 prints (dumpSbusState, NaviCore.ino:2897-2915): CH17-24 for SBUS-24,
+    CH9-16 for SBUS-16, no row before a frame locked - so a read under SBUS-16 returns 16 channels instead of timing out
+    on a CH17-24 row that never comes."""
+    from hil import navicore as NC
+    rows = lambda n: [f"  CH{i * 8 + 1}-{i * 8 + 8}:   " + " ".join(["992"] * 8) for i in range(n)]   # noqa: E731
+    blocks = {"SBUS-24": rows(3), "SBUS-16": rows(2), "(none yet)": []}
+    for variant, want in (("SBUS-24", 24), ("SBUS-16", 16), ("(none yet)", 0)):
+        head = ["---- SBUS STATE ----", f"  variant={variant} ({want} ch, {want and (11 * want // 8 + 3)}-byte frame)",
+                "  frames=77  fps=111  ageMs=4  lost=no  failsafe=no"]
+
+        def script(text, n, head=head, variant=variant):
+            if text == "#L09":
+                return head + blocks[variant]
+            return [MODE_LINE] if text == "#L12" else []
+        nc = NC.NaviCore(FakeNaviDev(script, "navicore"))
+        t0 = time.monotonic()
+        d = nc.sbus_dump()
+        assert time.monotonic() - t0 < 2.0, f"{variant}: sbus_dump waited out its timeout"
+        assert d["variant"] == variant.split()[0] and len(d["channels"]) == want and d["frames"] == "77", (variant, d)
+
+
+def t_sbusfault_helpers(tmp):
+    """s50's pure helpers: the cuts of the bench frame by what NaviCore's framing makes of them (phantom 1 and 11; 4
+    clean; 18 recovers later), the dirty test state, readSwitchPos, the high band a stick reaches (Skip short of it),
+    telemetry lines from W1, and a decoded frame described against the one sent."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s50_navicore_sbus_faults as S
+    finally:
+        runner.REGISTRY[:] = saved              # helpers only: the real tests never join a selftest run
+    phantom, clean, later = S._truncations(BENCH_FRAME)
+    assert phantom == [1, 11] and 4 in clean and 25 in clean and 18 in later, (phantom, clean, later)
+    base = {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True}
+    assert not S._dirty(base)
+    for change in ({"flags": 4}, {"stream": False}, {"budget": 2}, {"sbus24": False}):
+        assert S._dirty(dict(base, **change)), change
+    assert [S._switch_pos(v, 3) for v in (173, 581, 582, 1401, 1402)] == [0, 0, 1, 1, 2]
+    assert [S._switch_pos(v, 2) for v in (900, 901)] == [0, 2]
+    cfg = {"aMin": [378, 172, 172, 172], "aMax": [1606, 1440, 1811, 1811], "aRev": [False] * 4}
+    assert S._high_band(cfg, "rx") == 1500 and S._high_band(cfg, "ry") == 1420
+    _raises(lambda: S._high_band(dict(cfg, aMax=[1606, 1400, 1811, 1811]), "ry"), runner.Skip)
+    lines = ['{"sys":1,"type":"rc_hb","id":20,"sbusFail":true}', '{"sys":1,"type":"PONG"', "HILEND", '{"sys":1,"x":2}']
+    assert S._sys_lines(lines) == [{"sys": 1, "type": "rc_hb", "id": 20, "sbusFail": True}, {"sys": 1, "x": 2}]
+    text = S._describe(b"\x0f" + BENCH_FRAME[:35], BENCH_FRAME)
+    assert "flags 0x7c (failsafe)" in text and "channels off what the controller sends (CH1 992->15" in text, text
+    assert "0 of 24 channels off" in S._describe(BENCH_FRAME, BENCH_FRAME)
+    assert "(3 bytes)" in S._describe(b"\x0f\x00\x01", BENCH_FRAME)
+
+
+def t_sbusfault_old_image_skips(tmp):
+    """Every s50 test (NC-WP11), run whole through the runner against a controller image without the INF8 verbs, every
+    opt-in on: each skips, naming the image and INF8, having sent the controller only the probe and its nudge and a ping
+    (never a "mode", which would save there), and NaviCore nothing - so the suite stays green until the controller is
+    flashed."""
+    old = FakeInf8(verbs=False)
+    sb, nav = FakeNaviDev(old.script, "sbus"), FakeNaviDev(lambda text, n: [], "navicore")
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "sbus": {"port": "COMSB", "kind": "sbus"},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    b.cfg["opt_in"] = list(optin.OPT_INS)             # W1 never opens: the runner's NVS reading notes it and goes on
+    sb.log = nav.log = b.log
+    b.dev = lambda name: {"sbus": sb, "navicore": nav}[name]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s50_navicore_sbus_faults", None)
+        import suites.s50_navicore_sbus_faults as S50
+        mine = [dict(t) for t in runner.REGISTRY if t["fn"].__module__ == S50.__name__]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+    from hil import sbus as SB
+    patches = [(S50, "link", lambda bench, w, p: object()), (SB.SbusCtl, "NUDGE_S", 0.02)]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    try:
+        ck = new_run(b, mine)
+    finally:
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+    b.close()
+    res = {r["id"]: r for r in ck.data["results"]}
+    assert len(mine) == len(res) == 12, (len(mine), sorted(res))
+    bad = {tid: (r["status"], r["detail"][:160]) for tid, r in res.items()
+           if r["status"] != "SKIP" or "no INF8 test verbs" not in r["detail"] or "sbus-9.9" not in r["detail"]}
+    assert not bad, bad
+    assert set(sb.sent) == {'{"t":"flags"}', '{"t":"ping"}'}, sorted(set(sb.sent))
+    assert not old.saved and not nav.sent, (old.saved, nav.sent)
 
 
 # ---------------------------------------------------------------------------- nc_guard (NAVICORE.md INF3)
@@ -10342,6 +10649,332 @@ def t_ncrec_mutations(tmp):
         assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:400])
 
 
+# ---------------------------------------------------------------------------- NC-WP11 against a model of the wire
+def _reader_classes():
+    """ReaderModel with D-NC72's and D-NC73's fixes, and one broken the other way: for the mutations below."""
+    from hil import sbus as SB
+
+    class FixedReader(SB.ReaderModel):
+        """A partial frame never spans a silence (D-NC72), and locked on SBUS-16 a 25-byte frame decodes only once the
+        byte after it is a header or the line goes quiet (D-NC73)."""
+        hold16 = False
+
+        def burst(self, data):
+            for b in bytes(data):
+                if self.in_frame and self.hold16:
+                    self.hold16 = False
+                    if b == SB.HEADER:
+                        self._parse()
+                    else:
+                        self.streak = self.variant = self.frame_len = 0
+                if not self.in_frame:
+                    if b == SB.HEADER:
+                        self.buf, self.in_frame = bytearray([b]), True
+                    continue
+                self.buf.append(b)
+                if (self.streak >= SB.READER_LOCK_FRAMES and self.frame_len and len(self.buf) == self.frame_len
+                        and b == SB.FOOTER):
+                    if self.frame_len == SB.FRAME_LEN[16]:
+                        self.hold16 = True
+                        continue
+                    self._parse()
+                    continue
+                if len(self.buf) >= SB.READER_OVERFLOW:
+                    self.buf, self.in_frame = bytearray(), False
+            return self
+
+        def silence(self):
+            if self.in_frame and self.hold16:
+                self.hold16 = False
+                self._parse()
+            elif self.in_frame and not self._complete():
+                self.buf, self.in_frame = bytearray(), False
+            return super().silence()
+
+    class LooseReader(SB.ReaderModel):
+        """Broken: a partial buffer the line leaves quiet is decoded as a frame of its own."""
+
+        def silence(self):
+            if self.in_frame and len(self.buf) > 1 and not self._complete():
+                self.decoded.append(bytes(self.buf))
+                self.buf, self.in_frame = bytearray(), False
+            return super().silence()
+    return FixedReader, LooseReader
+
+
+class SbusWorld(FakeInf8):
+    """The bench's SBUS link for s50, in host time: the controller with the INF8 verbs (FakeInf8's checks and replies,
+    plus its channels and the frames it sends), and NaviCore's framing (hil/sbus.py ReaderModel) at the far end of the
+    wire - 111 frames a second while the stream runs, worked out whenever either side is next asked. A malformed burst
+    goes out when its verb arrives, a frame budget at once. NaviCore's #L09, #L13, the monitor, rc_hb and rc_ch read
+    what its reader decoded last. mut: 'fixed_reader' (D-NC72's and D-NC73's fixes), 'loose_reader' (a partial buffer
+    decodes at a silence), 'no_budget' ("frames" is ignored and the stream runs on), 'mode_saves' ("save":false saves),
+    'dip_two' (a dip lasts two frames)."""
+    FPS = 111
+
+    def __init__(self, mut=()):
+        from hil import sbus as SB
+        self.SB, self.mut = SB, set(mut)
+        self.channels = list(SB.decode(BENCH_FRAME)["channels"])     # CH17 173 from switch SJ, CH18 992 from a slider
+        self.controls = {c: self.channels[c - 1] for c in range(5, 25) if c != 7}    # CH7: the matrix buttons
+        cfg = {"e": "cfg", "fwver": "sbus-9.9", "sbus24": True, "rx": 1, "ry": 2, "ly": 3, "lx": 4,
+               "aMin": [172] * 4, "aMax": [1811] * 4, "aRev": [False] * 4,
+               "sw": [{"l": "SJ", "c": 17, "t": 0, "d": 0, "pos": 0, "v": [173, 992, 1811]}],
+               "sl": [{"l": "LS", "c": 18, "pct": 50}], "tr": [], "btn": [], "lua": [],
+               "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
+        super().__init__(verbs=True, cfg=cfg)
+        fixed, loose = _reader_classes()
+        self.reader = (fixed if "fixed_reader" in self.mut else loose if "loose_reader" in self.mut
+                       else SB.ReaderModel)(24)
+        self.lock = threading.Lock()
+        t0 = time.monotonic()
+        self.count, self.last, self.last_at, self.t = 0, BENCH_FRAME, t0, t0
+        self.times = collections.deque(t0 - k / self.FPS for k in range(self.FPS, 0, -1))   # a second at full rate
+
+    # ------------------------------------------------------------ the wire
+    def frame(self):
+        n = 24 if self.st["sbus24"] else 16
+        return self.SB.encode([max(0, min(2047, v)) for v in self.channels[:n]], self.st["flags"], n)
+
+    def _decoded(self, raw, when):
+        self.count, self.last, self.last_at = self.count + 1, raw, when
+        self.times.append(when)
+
+    def _feed(self, burst, when):
+        before = len(self.reader.decoded)
+        self.reader.burst(burst).silence()
+        for raw in self.reader.decoded[before:]:
+            self._decoded(raw, when)
+
+    def advance(self):
+        """The frames the running stream sent since the last look: through the reader, or - once it is locked on them and
+        idle, after the first few - straight to the count, which is what the reader would do with each."""
+        now = time.monotonic()
+        if self.st["stream"] and self.st["budget"] == -1:
+            n = int((now - self.t) * self.FPS)
+            if n > 0:
+                f = self.frame()
+                for k in range(n):
+                    when = self.t + (k + 1) / self.FPS
+                    if (k >= 8 and self.reader.idle and self.reader.streak >= 3 and self.reader.frame_len == len(f)
+                            and not getattr(self.reader, "hold16", False)):
+                        self._decoded(f, when)
+                    else:
+                        self._feed(f, when)
+                self.t += n / self.FPS
+        else:
+            self.t = now
+
+    # ------------------------------------------------------------ the controller
+    def answer(self, o):
+        with self.lock:
+            self.advance()
+            t, was24, now = o.get("t"), self.st["sbus24"], time.monotonic()
+            if t == "a":
+                for axis, ch, neg in (("rx", 1, False), ("ry", 2, True), ("ly", 3, True), ("lx", 4, False)):
+                    f = max(-1.0, min(1.0, float(o.get(axis, 0))))
+                    f = -f if neg else f
+                    self.channels[ch - 1] = int((f * 0.5 + 0.5) * 1639 + 172 + 0.5)
+                return []
+            if t == "sw":
+                s = self.cfg["sw"][o["i"]]
+                s["pos"] = o["p"]
+                self.channels[s["c"] - 1] = s["v"][o["p"]]
+                return []
+            if t in ("btn", "lua", "tr"):
+                return []
+            out = super().answer(o)
+            if t == "mode" and "mode_saves" in self.mut and o.get("save", True) is False:
+                self.st["saved24"] = self.st["sbus24"]     # answered as the verb should, and saved anyway
+                self.saved.append(o)
+            ok = bool(out) and json.loads(out[0]).get("ok")
+            if t == "ch" and ok:
+                self.channels[o["c"] - 1] = o["v"]
+            elif t == "mode" and self.st["sbus24"] != was24:
+                for c in range(1, 25):
+                    self.channels[c - 1] = self.controls.get(c, self.SB.SBUS_CENTER)
+            elif t == "glitch" and ok:
+                reply = json.loads(out[0])
+                bursts = self.SB.glitch_bursts(o["kind"], o["n"], self.frame(), reply.get("hex"))
+                for b in bursts * (2 if o["kind"] == "dip" and "dip_two" in self.mut else 1):
+                    self._feed(b, now)
+            elif t == "stream" and ok and "on" in o:
+                if o["on"] and "frames" in o:
+                    if "no_budget" in self.mut:
+                        self.st["budget"] = -1
+                    else:
+                        for _ in range(o["frames"]):
+                            self._feed(self.frame(), now)
+                        self.st["stream"], self.st["budget"] = False, 0
+                self.t = now
+            return out
+
+    # ------------------------------------------------------------ NaviCore's view
+    def view(self):
+        """(variant, channel count, frame length, the 24 values NaviCore holds, fps, ageMs, lost, failsafe)."""
+        with self.lock:
+            self.advance()
+            now = time.monotonic()
+            while self.times and self.times[0] < now - 1.0:
+                self.times.popleft()
+            fl = self.reader.frame_len
+            cc = {36: 24, 25: 16}.get(fl, 0)
+            try:
+                d = self.SB.decode(self.last)
+            except AssertionError:          # a broken reader's partial "frame" (loose_reader): nothing to decode
+                d = {"n": 0, "channels": [], "lost": False, "failsafe": False}
+            vals = d["channels"] + [self.SB.SBUS_CENTER] * (24 - d["n"])
+            return ({36: "SBUS-24", 25: "SBUS-16"}.get(fl, "(none yet)"), cc, fl, vals, len(self.times),
+                    int((now - self.last_at) * 1000), d["lost"], d["failsafe"])
+
+    def dump_lines(self):
+        variant, cc, fl, vals, fps, age, lost, fs = self.view()
+        out = ["---- SBUS STATE ----", f"  variant={variant} ({cc} ch, {fl}-byte frame)",
+               f"  frames={self.count}  fps={fps}  ageMs={age}  lost={'YES' if lost else 'no'}  "
+               f"failsafe={'YES' if fs else 'no'}"]
+        return out + [f"  CH{r * 8 + 1}-{r * 8 + 8}:   " + " ".join(f"{v:4d}" for v in vals[r * 8:r * 8 + 8])
+                      for r in range(cc // 8)]
+
+    def raw_lines(self):
+        self.view()
+        raw = self.last
+        out = [f"---- SBUS RAW ---- ({len(raw)} bytes, {'SBUS-16' if len(raw) == 25 else 'SBUS-24'})"]
+        out += [f"  [{i:2d}] " + " ".join(f"{b:02X}" for b in raw[i:i + 8]) + " " for i in range(0, len(raw), 8)]
+        return out + ["  byte 0       = header (expect 0F)", f"  byte {len(raw) - 1}      = footer (expect 00)"]
+
+
+class NaviSbusModel(NaviModel):
+    """NaviModel - the config, what nc_guard reads and writes, W1's relay - with its SBUS side an SbusWorld: #L09, #L13
+    and #L12 read what NaviCore's reader decoded last, and so do the monitor, rc_hb and rc_ch."""
+
+    def __init__(self, world):
+        super().__init__()
+        self.world = world
+
+    def hash_cmd(self, text):
+        if len(text) >= 4 and text[1] in "Ll" and text[2:4] in ("09", "12", "13"):
+            if text[2:4] == "09":
+                return self.world.dump_lines()
+            if text[2:4] == "13":
+                return self.world.raw_lines()
+            vals = self.world.view()[3]
+            return [f"Mode={self.mode}  matrixBtn=0  matrixVal={vals[self.c['matrixChannel'] - 1]}"]
+        return super().hash_cmd(text)
+
+    def monitor_loop(self):
+        while self.monitor:
+            variant, cc, fl, vals, fps, age, lost, fs = self.world.view()
+            self.nav._append(f'{{"type":"PWM_UPDATE","matrixCh":{self.c["matrixChannel"]},"modeCh":12,"matrixVal":992,'
+                             f'"modeVal":172,"btn":0,"mode":{self.mode},"sbus":{{"ok":{json.dumps(fps > 0 and not lost)},'
+                             f'"fps":{fps},"frames":{self.world.count},"ageMs":{age},"lost":{json.dumps(lost)},'
+                             f'"failsafe":{json.dumps(fs)},"chCount":{cc},"frameLen":{fl},'
+                             f'"channels":[{",".join(str(v) for v in vals[:cc])}]}}}}')
+            time.sleep(0.05)
+
+    def w1_script(self, text, n):
+        if text.startswith(";W20,{") and '"PING"' in text:
+            variant, cc, fl, vals, fps, age, lost, fs = self.world.view()
+            ch = ",".join(str(v) for v in vals)
+            self.w1.later(0.2, f'{{"sys":1,"type":"rc_hb","id":20,"fw":"{self.FW}","up":1000,"mode":{self.mode},'
+                               f'"model":0,"sbusFps":{fps},"sbusAge":{age},"sbusLost":{json.dumps(lost)},'
+                               f'"sbusFail":{json.dumps(fs)}}}', *[f'{{"sys":1,"type":"rc_ch","id":20,"ch":[{ch}]}}'] * 3)
+            return [f'{{"sys":1,"type":"PONG","id":20,"version":"{self.FW}","model":0,"mode":{self.mode}}}']
+        return super().w1_script(text, n)
+
+
+# Against today's reader: the reader-driven tests run, both findings fail as designed, and the tests that need NaviCore's
+# tap engine or a probe wire skip on the model's controller, which has no matrix button (test_verbs_ram_only: opt-in off).
+SBUSFAULT_WANT = {"sbus.test_verbs": "PASS", "sbus.sbus16_autodetect": "PASS", "sbus.lock_after_glitch": "PASS",
+                  "sbus.sbus24_return_no_prefix_decode": "FAIL", "sbus.truncated_frame_no_phantom": "FAIL",
+                  "sbus.failsafe_flag_freeze": "SKIP", "sbus.lost_frame_flag_no_gate": "SKIP",
+                  "sbus.failsafe_deferred_tap": "SKIP", "sbus.frame_stop_held_press": "SKIP",
+                  "sbus.prefix_ambiguity_raw": "SKIP", "sbus.one_frame_dip": "SKIP", "sbus.test_verbs_ram_only": "SKIP"}
+
+
+def _run_sbusfault_suite(tmp, ids=None, mut=()):
+    """s50 through the runner against NaviSbusModel on an SbusWorld(mut), W1 relaying to it -> (results by id, the world,
+    the model, session.log)."""
+    world = SbusWorld(mut)
+    model = NaviSbusModel(world)
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "sbus": {"port": "COMSB", "kind": "sbus"},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    b.cfg["opt_in"] = []
+    sb, nav, w1 = FakeNaviDev(world.script, "sbus"), FakeNaviDev(model.script, "navicore"), \
+        FakeNaviDev(model.w1_script, "wcb1")
+    model.nav, model.w1 = nav, w1
+    sb.log = nav.log = w1.log = b.log
+    b.dev = lambda name: {"sbus": sb, "navicore": nav, "wcb1": w1}[name]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s50_navicore_sbus_faults", None)
+        import suites.s50_navicore_sbus_faults as S50
+        mine = [dict(t) for t in runner.REGISTRY if t["fn"].__module__ == S50.__name__ and (ids is None or t["id"] in ids)]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
+    from hil import sbus as SB
+    patches = [(S50, "link", lambda bench, w, p: object()), (SB.SbusCtl, "NUDGE_S", 0.05)]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        model.monitor = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return {r["id"]: r for r in ck.data["results"]}, world, model, log
+
+
+def t_sbusfault_suite_against_model(tmp):
+    """Every s50 test (NC-WP11) run whole through the runner against SbusWorld - the controller with the INF8 verbs, and
+    NaviCore's framing on the wire as hil/sbus.py ReaderModel ports it - behind NaviSbusModel (NaviModel's config,
+    guard and W1 relay): the verbs' acceptance, SBUS-16 and the glitch recovery pass; the two findings fail as today's
+    reader makes them, naming D-NC72 and D-NC73; the tests that need NaviCore's tap engine skip (the model's controller
+    has no matrix button). The controller ends as it began (flags 0, streaming SBUS-24, nothing saved) and so does
+    NaviCore's config; no credential reaches session.log."""
+    res, world, model, log = _run_sbusfault_suite(tmp)
+    bad = [f"{tid}: {r['status']} (expected {SBUSFAULT_WANT.get(tid)}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != SBUSFAULT_WANT.get(tid)]
+    assert len(res) == len(SBUSFAULT_WANT) == 12, sorted(res)
+    assert not bad, "\n".join(bad)
+    assert "(should, D-NC72)" in res["sbus.truncated_frame_no_phantom"]["detail"], res["sbus.truncated_frame_no_phantom"]
+    assert "(should, D-NC73)" in res["sbus.sbus24_return_no_prefix_decode"]["detail"]
+    assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True} and not world.saved, \
+        (world.st, world.saved)
+    assert model.text() == model.flash, "NaviCore's config was not left as found"
+    assert not any(s in log for s in SECRETS), "a credential reached session.log"
+
+
+# (test, world mutation, the status it must then get, a piece of its detail)
+SBUSFAULT_MUTATIONS = (
+    ("sbus.truncated_frame_no_phantom", "fixed_reader", "PASS", ""),
+    ("sbus.sbus24_return_no_prefix_decode", "fixed_reader", "PASS", ""),
+    ("sbus.lock_after_glitch", "fixed_reader", "PASS", ""),
+    ("sbus.lock_after_glitch", "loose_reader", "FAIL", "never sent"),
+    ("sbus.test_verbs", "no_budget", "FAIL", "a budget of 5 frames"),
+    ("sbus.test_verbs", "dip_two", "FAIL", "the dip"),
+    ("sbus.sbus16_autodetect", "mode_saves", "FAIL", "the frame format was saved"),
+)
+
+
+def t_sbusfault_mutations(tmp):
+    """The s50 tests catch what they exist to catch, each alone on a fresh SbusWorld broken one way: with D-NC72's and
+    D-NC73's fixes in the reader the two (should) tests pass and the glitch recovery test still does; a reader that
+    decodes a partial buffer at a silence fails the glitch test; a controller that ignores the frame budget, stretches a
+    dip to two frames, or saves the frame format fails the test that checks it."""
+    for tid, mut, want, why in SBUSFAULT_MUTATIONS:
+        res, _, _, _ = _run_sbusfault_suite(tmp, ids={tid}, mut={mut})
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:400])
+
+
 TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_last_press_wins,
          t_cut_off_reruns_first, t_frozen_checkpoint_records_nothing, t_pretest_outage_gate, t_outage_auto_retry,
          t_load_cleanup_and_tmp_fallback, t_dropped_ids, t_find_resumable, t_lock_held_by_child_process,
@@ -10585,6 +11218,9 @@ def t_parked_device_reused(tmp):
 TESTS.append(t_parked_device_reused)
 TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (suites/s34_intellex_tools.py)
 TESTS += [t_ncrec_helpers, t_ncrec_suite_against_model, t_ncrec_mutations]   # NC-WP12 (suites/s48_navicore_rec.py)
+TESTS += [t_sbus_inf8_verbs, t_sbus_reader_model, t_sbus_dump_variants, t_sbusfault_helpers,   # INF8, NC-WP11
+          t_sbusfault_old_image_skips, t_sbusfault_suite_against_model,                       # (s50_navicore_sbus_faults)
+          t_sbusfault_mutations]
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

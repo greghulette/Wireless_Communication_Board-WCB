@@ -8,6 +8,13 @@ here starts with '{': outside a JSON line single characters are commands, and 'm
 lasts until the controller resets: a test puts back what it moved (center_all() for sticks, buttons and button-mode
 trims). It transmits SBUS-24 every 9 ms with a constant flags byte 0x00 (:110-129, :944-955), and NaviCore decodes it
 (NaviCore sbus_reader.h); every SBUS channel it moves, NaviCore re-emits on SBUS OUT (hil/servos.py).
+
+The INF8 test verbs (NAVICORE.md INF8, D-NC8; SBUSController's local branch hil-week, not its main) add what a real
+receiver sends and this transmitter never does: the flags byte, a stopped stream, the SBUS-16 frame for one boot, a
+malformed burst, a raw channel value. All RAM only, cleared by any reset. Each answers the asker with {"e":"test",...}
+and the test state; an older image stays silent, which test_state() reports as None. The "mode" verb is the one hazard:
+without "save":false it saves, and an older image ignores "save", so SbusCtl sends it only after a probe answered.
+ReaderModel is NaviCore's framing byte for byte, so a test knows what each burst should decode to.
 """
 import json
 import re
@@ -23,6 +30,11 @@ FRAME_LEN = {16: 25, 24: 36}                              # 0x0F + 22 or 33 data
 # The flags byte, just before the footer: bits 0-1 are the digital channels 17/18 of the 16-channel standard, and
 # NaviCore reads 0x04 as a lost frame and 0x08 as failsafe (sbus_reader.h decodeFrame). The controller always sends 0.
 FLAG_CH17, FLAG_CH18, FLAG_LOST, FLAG_FAILSAFE = 0x01, 0x02, 0x04, 0x08
+
+# The INF8 test verbs (SBUSController.ino, hil-week: processCommandJson "flags", "stream", "ch", "glitch", "mode" with
+# "save":false; sendTestReply; sendGlitch). Every reply starts {"e":"test","t":"<verb>".
+TEST_REPLY = r'^\{"e":"test","t":"%s"'
+GLITCHES = ("truncate", "garbage", "double", "gap", "dip")    # sendGlitch's kinds; the controller checks each n
 
 
 # ------------------------------------------------------------------ the frame codec
@@ -72,6 +84,119 @@ def decode(data):
     flags = data[-2]
     return {"n": n, "channels": channels, "flags": flags, "lost": bool(flags & FLAG_LOST),
             "failsafe": bool(flags & FLAG_FAILSAFE)}
+
+
+# ------------------------------------------------------------------ NaviCore's framing, modelled
+READER_LOCK_FRAMES = 3                 # sbus_reader.h LOCK_FRAMES (:221): frames of one variant in a row before a decode
+READER_OVERFLOW = FRAME_LEN[24] + 4    # :177, the buffer-overflow guard: the buffer is dropped at this many bytes
+
+
+class ReaderModel:
+    """NaviCore's SBUS framing byte for byte (NaviCore sbus_reader.h SbusReader::read :76-192, tryParseAndReset
+    :232-265), with the timing reduced to what a test controls: bursts of back-to-back bytes, and silences longer than
+    INTER_FRAME_GAP_US (1.5 ms) between them, during which NaviCore's loop() calls read() again. Structure only:
+    `decoded` lists the frames the reader decodes, as the bytes #L13 would show, in order. Left out: a loop() stall in
+    the middle of a burst, which makes the reader see a gap there (it reads micros() once per call), and the in-loop
+    gap flush of a complete buffer, which the closing flush in a silence has always taken first. locked=16 or 24 starts
+    it locked on that variant and idle, as NaviCore is after a stream at full rate."""
+
+    def __init__(self, locked=None):
+        self.buf, self.in_frame, self.pending16 = bytearray(), False, False
+        self.streak, self.variant, self.frame_len = 0, 0, 0      # lockStreak_, lockVariant_, detectedFrameLen
+        self.decoded = []
+        if locked:
+            self.streak, self.variant, self.frame_len = READER_LOCK_FRAMES, locked, FRAME_LEN[locked]
+
+    def _complete(self):
+        """bufIsCompleteFrame: exactly 25 or 36 bytes, the header first and the footer last."""
+        return len(self.buf) in (FRAME_LEN[16], FRAME_LEN[24]) and self.buf[0] == HEADER and self.buf[-1] == FOOTER
+
+    def _parse(self):
+        """tryParseAndReset: a structurally valid frame adds to its variant's streak (another variant starts a new one)
+        and decodes once the streak reaches READER_LOCK_FRAMES; anything else breaks it. The buffer empties either way."""
+        variant = {FRAME_LEN[16]: 16, FRAME_LEN[24]: 24}[len(self.buf)] if self._complete() else 0
+        if not variant:
+            self.streak, self.variant = 0, 0
+        else:
+            if variant == self.variant:
+                self.streak = min(self.streak + 1, READER_LOCK_FRAMES)
+            else:
+                self.variant, self.streak = variant, 1
+            if self.streak >= READER_LOCK_FRAMES:
+                self.decoded.append(bytes(self.buf))
+                self.frame_len = len(self.buf)
+        self.buf, self.in_frame = bytearray(), False
+
+    def burst(self, data):
+        """Bytes that arrive back to back -> self. Out of a frame only a header starts one (after an eager 25-byte
+        decode, a first byte that is not a header drops the lock: :134-141); in a frame every byte is buffered, a locked
+        reader decodes the moment its frame length ends on a footer (:167-174), and 40 bytes drop the buffer (:177)."""
+        for b in bytes(data):
+            if not self.in_frame:
+                if self.pending16:
+                    self.pending16 = False
+                    if b != HEADER:
+                        self.streak = self.variant = self.frame_len = 0
+                if b == HEADER:
+                    self.buf, self.in_frame = bytearray([b]), True
+                continue
+            self.buf.append(b)
+            if (self.streak >= READER_LOCK_FRAMES and self.frame_len and len(self.buf) == self.frame_len
+                    and b == FOOTER):
+                self.pending16 = self.frame_len == FRAME_LEN[16]
+                self._parse()
+                continue
+            if len(self.buf) >= READER_OVERFLOW:
+                self.buf, self.in_frame = bytearray(), False
+        return self
+
+    def silence(self):
+        """A pause past INTER_FRAME_GAP_US -> self: read()'s closing flush (:187-189) parses a complete buffer of either
+        length. A partial one stays, and the next burst's bytes go on filling it."""
+        if self.in_frame and self._complete():
+            self._parse()
+        return self
+
+    @property
+    def idle(self):
+        """No partial frame buffered."""
+        return not self.in_frame
+
+
+def glitch_bursts(kind, n, frame, hex_=None):
+    """What the controller puts on the wire for {"t":"glitch","kind":kind,"n":n} in place of `frame`, the frame it would
+    have sent (SBUSController.ino sendGlitch) -> [burst], bytes each; a silence follows every burst. 'garbage' needs the
+    bytes its reply echoed (`hex_`)."""
+    frame = bytes(frame)
+    size = len(frame)
+    if kind == "truncate":
+        return [frame[:min(n, size - 1)]]
+    if kind == "garbage":
+        if hex_ is None:
+            raise ValueError("a garbage glitch's bytes come from its reply's hex")
+        return [bytes.fromhex(hex_)]
+    if kind == "double":
+        return [frame * n]
+    if kind == "gap":
+        return [frame[:size // 2], frame[size // 2:]]
+    if kind == "dip":
+        d = decode(frame)
+        channels = list(d["channels"])
+        channels[n - 1] = SBUS_CENTER
+        return [encode(channels, d["flags"], d["n"])]
+    raise ValueError(f"unknown glitch {kind!r} (one of {', '.join(GLITCHES)})")
+
+
+def reader_decodes(frame, bursts=(), trailing=0, locked=None):
+    """What NaviCore's framing (ReaderModel) decodes from `bursts`, each followed by a silence, then `trailing` copies of
+    the whole `frame`, each followed by a silence. It starts idle and locked on `frame`'s variant unless `locked` names
+    one -> (the frames it decodes, the model afterwards)."""
+    m = ReaderModel(locked or {FRAME_LEN[16]: 16, FRAME_LEN[24]: 24}[len(frame)])
+    for b in bursts:
+        m.burst(b).silence()
+    for _ in range(trailing):
+        m.burst(frame).silence()
+    return m.decoded, m
 
 
 # ------------------------------------------------------------------ the controller against NaviCore's bindings
@@ -127,6 +252,7 @@ class SbusCtl:
 
     def __init__(self, dev):
         self.dev = dev
+        self.verbs = None       # the INF8 test state from the last reply; None until a probe answered (test_state)
 
     def send(self, obj):
         """One JSON verb, compact, on one line. Never anything but a dict: see the module docstring."""
@@ -245,6 +371,96 @@ class SbusCtl:
         for i, tr in enumerate(cfg.get("tr") or []):
             if tr.get("m") == 1:
                 self.trim(i, 1, False)
+
+    def reassert_switches(self, cfg):
+        """Send every switch to the position it holds (getcfg `cfg`'s pos): each writes its own channel again, which ends a
+        "ch" override there (processCommandJson "sw"), and changes nothing where there was none. The resume's clean-up
+        after a cut-off sbus.* test on an image with the INF8 verbs; sticks, buttons and trims are center_all's."""
+        for i, s in enumerate(cfg.get("sw") or []):
+            self.switch(i, s.get("pos", 0))
+
+    # ------------------------------------------------------------ the INF8 test verbs (RAM only; NAVICORE.md INF8)
+    def test_state(self, tries=2):
+        """The probe: {"t":"flags"} with no value changes nothing and answers with the test state -> {'t', 'ok', 'flags',
+        'stream', 'budget', 'sbus24', 'saved24'} (budget -1 = no frame limit; saved24 is the saved frame format, sbus24
+        the live one), or None when the controller stays silent - an image without the verbs, where an unknown "t" falls
+        through processCommandJson. A ping between tries releases a held reply (NUDGE_S); at most `tries` - 1 pings, so
+        a silent image costs about `tries` seconds. Also what arms the verbs below."""
+        m = self.dev.mark()
+        self.send({"t": "flags"})
+        for k in range(tries):
+            try:
+                self.verbs = json.loads(self.dev.expect(TEST_REPLY % "flags", timeout=self.NUDGE_S, since=m).string)
+                return self.verbs
+            except AssertionError:
+                if k < tries - 1:
+                    self.send({"t": "ping"})
+        self.verbs = None
+        return None
+
+    def test_verb(self, obj, check=True, timeout=3.0):
+        """One INF8 verb -> its reply as a dict (the test state after it). Refused with ValueError until a probe on this
+        instance answered (test_state): "mode" without a working "save":false saves, so no verb goes to an image that
+        has not shown it has them. check=True raises AssertionError when the reply says ok:false."""
+        if self.verbs is None:
+            raise ValueError("SbusCtl: probe the INF8 test verbs first (test_state()); an older image would save 'mode'")
+        m = self.dev.mark()
+        self.send(obj)
+        st = json.loads(self._reply(TEST_REPLY % obj["t"], m, timeout).string)
+        self.verbs = st
+        if check and not st.get("ok"):
+            raise AssertionError(f"the SBUS controller refused {json.dumps(obj, separators=(',', ':'))}: {st}")
+        return st
+
+    def flags(self, v):
+        """Every frame's flags byte, 0-255 (0x04 lost frame, 0x08 failsafe; 0 is the controller's own)."""
+        return self.test_verb({"t": "flags", "v": v})
+
+    def stream(self, on, frames=None):
+        """Stop (False) or restart the frames with no reset; with `frames`, exactly that many more (1-1000), then the
+        stream stops again (the reply's budget counts down in loop())."""
+        obj = {"t": "stream", "on": bool(on)}
+        if frames is not None:
+            obj["frames"] = frames
+        return self.test_verb(obj)
+
+    def sbus16(self, on):
+        """SBUS-16 (on) or SBUS-24 for this boot only: "mode" with "save":false. The controller's channels reset and its
+        controls re-apply as for a saved change (sticks and buttons to 992, a "ch" value gone); the saved mode, and so
+        getcfg's sbus24, stay as they were."""
+        return self.test_verb({"t": "mode", "sbus24": not on, "save": False})
+
+    def glitch(self, kind, n):
+        """One malformed burst in place of the next frame, sent even while the stream is off (glitch_bursts says what):
+        truncate n bytes (1 to the frame length - 1), garbage n bytes (1-64, echoed as "hex"), double n frames (2-4), a
+        gap of n ms (2-50) mid-frame, a dip of channel n to 992 for one frame."""
+        if kind not in GLITCHES:
+            raise ValueError(f"unknown glitch {kind!r} (one of {', '.join(GLITCHES)})")
+        return self.test_verb({"t": "glitch", "kind": kind, "n": n})
+
+    def channel(self, c, v):
+        """A raw value (0-2047) on SBUS channel c (1-24), until a control writes that channel again."""
+        return self.test_verb({"t": "ch", "c": c, "v": v})
+
+    def clear_faults(self):
+        """Put the INF8 test state back to what a reset gives - flags 0, the stream on with no budget, the saved frame
+        format - with no reset -> what it changed, as short strings ([] when nothing was off, or the image has no verbs:
+        then only the probe went out). A "ch" value is not its business: it lasts until a control writes that channel
+        (center_all, reassert_switches); a frame format put back resets the channels anyway."""
+        st = self.test_state()
+        if st is None:
+            return []
+        done = []
+        if st.get("flags"):
+            self.flags(0)
+            done.append(f"flags {st['flags']:#04x} -> 0")
+        if not st.get("stream") or st.get("budget", -1) != -1:
+            self.stream(True)
+            done.append("the stream on again")
+        if st.get("sbus24") != st.get("saved24"):
+            self.sbus16(not st.get("saved24"))
+            done.append(f"SBUS-{24 if st.get('saved24') else 16} again, as saved")
+        return done
 
     def reset_rts(self, hold_s=0.2):
         """Reset the controller through its USB-Serial/JTAG port (serialdev.usb_jtag_reset), into its app: every
