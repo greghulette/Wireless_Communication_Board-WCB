@@ -2154,7 +2154,7 @@ in the command queue and the UART ring, which count what they lose.
 
 | | |
 |---|---|
-| **Status** | TODO - investigate |
+| **Status** | PARTLY FIXED (unverified) - the sweep (a scan of the mesh channel before each connect); the missed loss and rejoin still to investigate |
 | **Owner** | `WCB_firmware` (`WCB_WiFi.cpp`) |
 | **Effort** | M |
 | **Tests** | `wifi.join_absent_ssid_keeps_mesh`, `wifi.join_lost_and_rejoin` (opt-in `wifi_modes`) |
@@ -2175,6 +2175,19 @@ channel 1 (`*** MISMATCH — OFF-MESH ***`), and 26 retries were needed for the 
 first one not delivered at all. So the driver's connect attempt scans past the pinned channel when no AP answers on
 it. The rejoin test failed as before, and after the late rejoin `?WIFI` read association `connected (1 attempt(s))`
 with the interface `down`.
+
+**Cause of the sweep.** `WiFi.begin(ssid, pass, meshChannel)` pins nothing: the channel is where the driver's connect
+scan starts ("Channel hint ... scan starting from the specified channel", `wifi_sta_config_t.channel` in IDF 5.5's
+`esp_wifi_types_generic.h`), and with the AP absent every 5 s attempt swept the band.
+
+**Fix (the sweep).** Each attempt scans the mesh channel alone for the SSID (`WiFi.scanNetworks`, asynchronous, 120 ms,
+`WCB_WiFi.cpp` `wcbWifiJoinScan`), and only an AP heard there gets a `WiFi.begin`, with its BSSID, so the driver's own
+scan finds it on the first channel it tries.
+
+**Still open: the loss and the rejoin.** "Association connected" with "Interface down" means `WiFi.status()` read
+`WL_CONNECTED` while `wifiUp` stayed false, which `wcbWifiService` allows only once `joinSettled` is set: the off-mesh
+guard sets it when an association lands on another channel, which a sweep could do. The next bench run shows whether the
+fix above also cures the rejoin; if not, the WiFi events around the AP's disappearance need logging.
 
 #### 104. Every WiFi.begin persists the station config into the WiFi driver's own NVS namespace
 

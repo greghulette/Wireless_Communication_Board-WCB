@@ -44,7 +44,10 @@ offering a way to brick the mesh with no symptom. Every entry point passes
 - `WiFi.softAP(ssid, pass, meshChannel, …)` — the channel argument **defaults to 1**.
   Once an AP owns the radio nothing later moves it, so a defaulted channel against a
   mesh on any other channel is exactly the blackout above.
-- `WiFi.begin(ssid, pass, meshChannel)` — pins the association attempt to one channel.
+- JOIN scans `meshChannel` alone for its SSID first (`WiFi.scanNetworks`, asynchronous, 120 ms) and calls
+  `WiFi.begin(ssid, pass, meshChannel, bssid)` only for an AP heard there. `WiFi.begin`'s channel does not pin
+  anything: it is where the driver's own connect scan *starts* (`wifi_sta_config_t.channel`, a "channel hint"),
+  and with the AP absent that scan swept every channel on each attempt, taking the board off the mesh.
 - After associating, JOIN mode **verifies** the channel with `esp_wifi_get_channel()`
   and disconnects if it landed elsewhere. Being deaf is worse than having no WiFi.
 
@@ -61,7 +64,8 @@ offering a way to brick the mesh with no symptom. Every entry point passes
 **JOIN never falls back to hosting.** A board that quietly became an access point
 because it could not find its network is precisely the rogue-AP surprise this design
 avoids — and with several boards configured that way you would get several. It
-retries every 5 s indefinitely, logs occasionally, and stays a station.
+scans the mesh channel for its network every 5 s indefinitely, logs occasionally, and stays a
+station.
 
 ---
 
@@ -356,6 +360,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending)_ | §2: JOIN scans the mesh channel alone before each `WiFi.begin` (tracker #103): the channel argument was only the start of the driver's connect scan, which swept the band while the AP was absent. §3's retry line follows. |
 | 2026-09-27 | `1f629a8` | §5 item 1: PWM output pulses are RMT-clocked (tracker #94), so `PWMTask` no longer busy-waits for each pulse; re-pinning it to core 1 costs less than it did. |
 | 2026-09-10 | `b898088` | **The AP no longer offers a default gateway.** DHCP option 3 is cleared through `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS`, so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream advertising itself as the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Stop → set → start with an unconditional restart, and skipped entirely if the offer mask can't be read; see §6a. **Verified on hardware** on `6.2.1_101034RSEP2026` (`b898088`): gateway `(none)` after a full DHCP exchange, lease and WebSocket unaffected — but an already-connected client kept the old gateway through a plain renew. |
 | 2026-09-10 | `ba94d3a` | **Code review — five defects fixed, three of which defeated their own purpose.** (1) `WiFi.disconnect(true)` in the JOIN off-mesh guard: the bool is `wifioff`, and in STA-only mode it runs `STA.end()` → `WIFI_MODE_NULL`, stopping WiFi and **taking ESP-NOW with it** — the guard that exists to keep the board on the mesh was the one thing reliably killing it. Now `WiFi.disconnect()`. (2) The output sink was mutated from the printing task (including the ESP-NOW callback) while `sinkPump()` memmoved it on the loop task, with no lock — torn output indistinguishable from a real reply. Now guarded by a `portMUX`, with the critical sections deliberately never spanning the TCP send. (3) JOIN latched `joinSettled` on **success**, so with auto-reconnect off nothing ever retried after the AP rebooted or the droid drove out of range, and `wifiUp` never cleared so `?WIFI` reported "up" with no address. Only the off-mesh case settles now. (4) An oversized inbound frame returned without draining the payload, leaving it to be parsed as the next frame header and desynchronising the session permanently; it now returns `ESP_FAIL` so httpd closes cleanly. (5) `WIFI,` was missing from `dataBearingVerb`, so a passphrase ending in `?` was eaten by the trailing-`?` help shortcut and never saved. Also: the WS drain now `trim()`s like the Serial0 reader (a leading space made a line unprefixed, i.e. a mesh-wide broadcast), and bring-up prints `ws://…/ws` instead of a `http://…/` that was always a 404. |

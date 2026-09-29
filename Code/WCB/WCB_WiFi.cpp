@@ -26,13 +26,14 @@ static bool          wifiUp          = false;   // an interface is up
 static bool          joinSettled     = false;   // JOIN reached a terminal state
 static unsigned long joinNextAttempt = 0;
 static uint16_t      joinAttempts    = 0;
+static bool          joinScanning    = false;   // a scan of the mesh channel for the SSID is running
 static unsigned long lastChannelWarn = 0;
 
 // Retry cadence for JOIN. Deliberately unbounded in total: on a shared power
 // switch this board is ready long before a NaviCore raises its SoftAP (that
 // board mounts LittleFS, loads config and allocates a multi-megabyte PSRAM
 // buffer first), so a bounded window would lose the race on every cold boot.
-// Retrying costs nothing — see the note on channel pinning in wcbWifiJoinTry().
+// Retrying costs nothing — see the note on the mesh-channel scan above wcbWifiJoinScan().
 static const unsigned long JOIN_RETRY_MS   = 5000;
 // How often to re-check that the radio is still on the mesh channel, and how
 // often we are willing to complain about it.
@@ -188,17 +189,46 @@ static void wcbWifiStartAP() {
 
 // One association attempt. Non-blocking — the result is picked up by
 // wcbWifiService().
-static void wcbWifiJoinTry() {
-    // PIN THE CHANNEL. A WiFi.begin() with no channel probes EVERY channel
-    // looking for the SSID, and for the length of each sweep this board is off
-    // the mesh — which does not present as "WiFi failed", it presents as the
-    // board randomly dropping mesh traffic. Passing meshChannel confines the
-    // probe to the channel we are already on, which is the only reason retrying
-    // forever is affordable. Auto-reconnect stays OFF so a vanished AP cannot
-    // start sweeps of its own behind our back.
-    WiFi.setAutoReconnect(false);
-    WiFi.begin(wcbWifiJoinSsid.c_str(), wcbWifiJoinPass.c_str(), meshChannel);
+// STAY ON THE MESH CHANNEL. A connect scans for its AP, and for the length of a
+// sweep this board is off the mesh — which does not present as "WiFi failed", it
+// presents as the board randomly dropping mesh traffic. WiFi.begin's channel does
+// NOT confine that scan: it is only where the scan starts ("Channel hint ... scan
+// starting from the specified channel", wifi_sta_config_t.channel in
+// esp_wifi_types_generic.h), so with the AP absent every attempt swept the band
+// (tracker #103: ?WIFI caught the radio on channels 12 and 14 while it looked, and
+// unicasts to a peer needed 26 retries). So each attempt first scans the mesh
+// channel ALONE for the SSID, without blocking, and only an AP heard there gets a
+// WiFi.begin — with its BSSID, so the driver's own scan finds it on the first
+// channel it tries. Auto-reconnect stays OFF so a vanished AP cannot start sweeps
+// of its own behind our back.
+static void wcbWifiJoinScan() {
     joinAttempts++;
+    // async, hidden SSIDs too (the probe names it), active, 120 ms, the mesh channel, this SSID.
+    // A scan refused while a connect is still in progress is simply the next attempt's job.
+    joinScanning = WiFi.scanNetworks(true, true, false, 120, meshChannel, wcbWifiJoinSsid.c_str())
+                   == WIFI_SCAN_RUNNING;
+}
+
+// The scan's answer -> WiFi.begin on the mesh channel if the SSID was heard there.
+// Returns true while the scan is still running.
+static bool wcbWifiJoinScanDone() {
+    const int16_t n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return true;
+    joinScanning = false;
+    uint8_t bssid[6];
+    bool heard = false;
+    for (int16_t i = 0; i < n && !heard; i++) {
+        if (WiFi.channel(i) == meshChannel && WiFi.SSID(i) == wcbWifiJoinSsid) {
+            memcpy(bssid, WiFi.BSSID(i), sizeof(bssid));
+            heard = true;
+        }
+    }
+    WiFi.scanDelete();
+    if (heard) {
+        WiFi.setAutoReconnect(false);
+        WiFi.begin(wcbWifiJoinSsid.c_str(), wcbWifiJoinPass.c_str(), meshChannel, bssid);
+    }
+    return false;
 }
 
 void wcbWifiStart() {
@@ -276,8 +306,9 @@ void wcbWifiService() {
             Serial.printf("[WIFI] lost \"%s\" — retrying every %lu s\n",
                           wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_RETRY_MS / 1000));
         }
+        if (joinScanning && wcbWifiJoinScanDone()) return;   // still scanning the mesh channel
         if (now >= joinNextAttempt) {
-            wcbWifiJoinTry();
+            wcbWifiJoinScan();
             joinNextAttempt = now + JOIN_RETRY_MS;
             // Only say so occasionally — this can run for a long time if the
             // other board is simply switched off, and that is not an error.
