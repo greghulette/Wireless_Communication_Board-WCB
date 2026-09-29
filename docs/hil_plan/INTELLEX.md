@@ -276,14 +276,15 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
    - The Wizard's `latestFirmwareVersion` is a top-level `let` (`Wizard/app.js:128`), and the shim's own comment
      (`:1176-1181`) says assigning on `window` cannot reach one of those.
    - `boardGo` therefore labels the card with the page's GitHub "latest", not with the build the host actually wrote
-     (`app.js:7479-7480`).
+     (`app.js:7586-7587` on 2026-09-29). Confirmed in the page: `intellex.ui_latest_fw_version` (`(should)`).
 2. **Two Wizard images are never bundled.**
-   - `../Images/LabelOnly.jpg` (`Wizard/app.js:10550`) and `../Images/PololuLogo.png` (`:10811`) are missing from
-     `WCB_IMAGES` (`tools/fetch_webui.py:150`).
-   - Inside Intellex, the Setup Wizard's hardware-version and Maestro steps show broken images.
-3. **`identify_serial()` accepts any PONG** (`discover.py:217`). Its own docstring says only a direct PONG counts
-   (`:153-157`), and `probe()` does tell the two apart (`:347-359`). Low impact today, because the launcher only
-   asks 303A ports (`launcher.html:805`).
+   - `../Images/LabelOnly.jpg` (`Wizard/app.js:10691`, the identity step) and `../Images/PololuLogo.png` (`:10952`, the
+     Maestro step) are missing from `WCB_IMAGES` (`tools/fetch_webui.py:150`).
+   - Inside Intellex, the Setup Wizard's hardware-version and Maestro steps show broken images. Confirmed in the page:
+     `intellex.ui_wizard_setup_images` (`(should)`).
+3. **`identify_serial()` accepts any PONG** (`discover.py:221-222` at `e9f95f2`). Its own docstring says only a direct
+   PONG counts (`:154-158`), and `probe()` does tell the two apart (`:351-363`). Low impact today, because the launcher
+   only asks 303A ports (`launcher.html:805`). `intellex.identify_direct_pong` is its `(should)` test (DX11).
 4. **A USB-cabled WCB doorway probably leaves the NaviCore tool out of Via WCB mode.**
    - Intellex records a role only for a `ws` attach (`host.py:1138-1182`). A serial attach reports `role: ""`, so the
      shim never forces Via WCB (`intellex_shim.js:440-444`).
@@ -296,10 +297,11 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
 5. **Update FW does not fully match the Wizard's.**
    - `wcb_flash.write_list(app_only=True)` writes the app alone (`wcb_flash.py:302-307`).
    - `flasher.js` first reads the board's partition table. When it differs, it escalates once to a full,
-     NVS-preserving flash (`Wizard/flasher.js:466-504`, `:246-260`).
+     NVS-preserving flash (`Wizard/flasher.js:465-511`, `:245-260`).
    - A board still on the default table would take a min_spiffs-sized app (1.38 MB) into a 1.25 MB slot. The module
      header claims parity with `flasher.js` (`wcb_flash.py:11-14`).
-   - The bench boards are min_spiffs, so only a unit test can show this.
+   - The bench boards are min_spiffs, so only a unit test can show this: `intellex.flash_update_partition_escalates`
+     (`(should)`, confirmed: an Update onto a board holding a different table writes 0xe000 and 0x10000 only).
 6. **Stale doc about the clone directory.**
    - Intellex `CLAUDE.md:19-21` says the Windows clone is still named `NaviLink`. It is `Intellex`.
    - The venv was created at `...\NaviLink\.venv` (`.venv/pyvenv.cfg`, `command =`). So `.venv/Scripts/esptool.exe`
@@ -328,7 +330,7 @@ is fixed; none can cost a board.
     origin) can set it. `intellex.settings_branch_dotdot`.
 13. **Flash progress never moves under esptool 5.** Intellex installs esptool 5.3.1 (`requirements.txt:17` asks for
     `>=4.7`), which prints `Writing at 0x00010000 [=====>    ]  25.0% ...` (esptool `logger.py:223-248`). `_PCT_RE`
-    (`flash.py:414`, used by `wcb_flash.py:38`, `:390`) matches esptool 4's `(25 %)` only, so `/_api/flash-status`
+    (`flash.py:414`, used at `:459` and by `wcb_flash.py:38-39`, `:390`) matches esptool 4's `(25 %)` only, so `/_api/flash-status`
     reads 0 % for the whole write and then 100. `intellex.flash_esptool5_output`.
 14. **The NaviCore flash still spells esptool 4's options.** `flash.py:434-438` passes `write_flash`, `--flash_mode`,
     `default_reset` and `hard_reset`, and esptool 5 answers each with a `Deprecated:` warning in the user's flash log

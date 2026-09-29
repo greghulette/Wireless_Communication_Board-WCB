@@ -2,11 +2,11 @@
 replaced, in this process only, by a class that answers the PING from a script.
 
 group "direct_pong_should" (intellex.identify_direct_pong, a (should) test for plan finding 3): identify_serial's own
-docstring says ONLY A DIRECT PONG COUNTS (Intellex src/discover.py:153-157) - a USB-tethered doorway prints the mesh's
-JSON, a relayed PONG included - and probe() tells the two apart (:347-359), but identify_serial takes any line whose type
-is PONG (:217-218). Low impact while the launcher asks only Espressif native-USB ports (launcher.html:805), which a WCB
-doorway is not. Two controls pass today: a direct PONG identifies the port, a busy port reads as busy, and a port
-outside INTELLEX_SERIAL_ALLOW is never opened (H2, discover.py:165-166).
+docstring says ONLY A DIRECT PONG COUNTS (Intellex src/discover.py:154-158) - a USB-tethered doorway prints the mesh's
+JSON, a relayed PONG included - and probe() tells the two apart (:351-363), but identify_serial takes any line whose type
+is PONG (:221-222). Low impact while the launcher asks only Espressif native-USB ports (launcher.html:805), which a WCB
+doorway is not. Controls that pass today: a direct PONG identifies the port, a busy port reads as busy, and a port
+outside INTELLEX_SERIAL_ALLOW is never opened (H2, discover.py:167).
 """
 import os
 import sys
@@ -79,8 +79,8 @@ def relayed(ctx):
     got, _ = _identify("COMFAKE", b'{"sys":1,"type":"rc_hb","id":20,"fw":"v0.2.0_hil"}\n'
                                   b'{"sys":1,"type":"PONG","id":20,"version":"v0.2.0_hil"}\n')
     check(got.get("version") is None, f"a mesh-relayed PONG was taken for a NaviCore on the port: {got} "
-                                      f"(discover.py:217-218 accepts any PONG; its docstring, :153-157, says only a "
-                                      f"direct one counts, as probe() does, :347-359)")
+                                      f"(discover.py:221-222 accepts any PONG; its docstring, :154-158, says only a "
+                                      f"direct one counts, as probe() does, :351-363)")
 
 
 @case("a port another program holds reads as busy; one outside INTELLEX_SERIAL_ALLOW is never opened",

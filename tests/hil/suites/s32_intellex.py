@@ -636,7 +636,7 @@ def flash_pipeline_fake(bench):
       "follows the write's progress, and the NaviCore flash uses esptool 5's spellings so no 'Deprecated:' warnings land "
       "in the user's flash log (IX-WP3)")
 def flash_esptool5_output(bench):
-    """Found writing IX-WP3 (INTELLEX.md findings 13 and 14). _PCT_RE (Intellex src/flash.py:414, used by wcb_flash.py:38,
+    """Found writing IX-WP3 (INTELLEX.md findings 13 and 14). _PCT_RE (Intellex src/flash.py:414, used by wcb_flash.py:38-39,
     :390) matches esptool 4's '(25 %)'; esptool 5.3.1 prints '[=====>   ]  25.0%' (esptool logger.py:223-248), so the
     progress bar sits at 0 % through the whole write and jumps to 100. flash.py:434-438 still spells the NaviCore write
     esptool 4's way (write_flash, --flash_mode, default_reset), which esptool 5 answers with 'Deprecated:' warnings
@@ -666,7 +666,7 @@ def paths_logs_unit(bench):
       "never opened (plan finding 3)")
 def identify_direct_pong(bench):
     """INTELLEX.md finding 3 (DX11: fixed test-first): discover.identify_serial accepts any PONG (Intellex
-    src/discover.py:217-218) though its docstring says only a direct one counts (:153-157). A fake pyserial Serial
+    src/discover.py:221-222) though its docstring says only a direct one counts (:154-158). A fake pyserial Serial
     answers the PING, so no port is opened (tests/intellex/py/discover_units.py)."""
     run_intellex_py(bench, "intellex.identify_direct_pong", "discover_units.py", args={"group": "direct_pong_should"})
 

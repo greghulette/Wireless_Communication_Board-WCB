@@ -11,7 +11,7 @@ USB-only and INTELLEX_SERIAL_ALLOW refusals.
 
 group "esptool5_should" (intellex.flash_esptool5_output, a (should) test, found writing this): Intellex runs esptool 5.3.1
 (`esptool>=4.7`, requirements.txt:17), whose progress lines read `Writing at 0x00010000 [=====>   ]  25.0% ...`
-(esptool logger.py:223-248). flash.py's _PCT_RE (src/flash.py:414, also used by wcb_flash.py:38, :390) matches only
+(esptool logger.py:223-248). flash.py's _PCT_RE (src/flash.py:414, also used by wcb_flash.py:38-39, :390) matches only
 esptool 4's `(25 %)`, so /_api/flash-status reports 0 % for the whole write and jumps to 100 at the end. And flash.py
 still spells the NaviCore write esptool 4's way (write_flash, --flash_mode, default_reset: src/flash.py:434-438), which
 esptool 5 answers with 'Deprecated:' warnings in the user's flash log - what wcb_flash.py:352-354 says it avoids.
