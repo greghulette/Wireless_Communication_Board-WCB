@@ -1225,6 +1225,7 @@ only).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-29 | _(pending)_ | WCB-WP34 finished: `wcb.cmd.legacy_wcb_wcbq_spellings` (the legacy no-comma `?WCBQ<n>` and `?WCB<n>`). |
 | 2026-09-29 | _(pending)_ | WCB-WP29 finished: `serial.timer_replaced_mid_run` and `serial.timer_inline_payload` (§7's `serial.*` row). |
 | 2026-09-29 | `f521d43` | NC-WP6's second bench run (`20260929-042105`): a `(should)` row for D-NC48 (`ncmesh.mgmt_frag_multichunk`); §6's relayed-reply row names the s43 re-asks, and a row for the `ETM,CHAR` reply's bare tag line. |
 | 2026-09-29 | `c7af35b` | **Intellex IX-WP3 to IX-WP6** (`hil_plan/INTELLEX.md`): 35 tests. `s32` gains the API, docs, proxy and venv checks (`tests/intellex/py`: flash rules, a fake-esptool flash pipeline, GitHub retries, paths and logs) and nine Playwright specs; new `s33_intellex_bench.py` (Intellex's transports on W1 and NaviCore, the bridge end to end); opt-in `intellex_reboot` (§2); `hil/intellex.py` `run_intellex_py`, `handed_over`, `attached_host`, `LinkTap`, `github_dir` (§5); five §6 rows; seven `(should)` rows for Intellex findings 1-3, 5 and 12-15; the `intellex.*` coverage row (§7). |

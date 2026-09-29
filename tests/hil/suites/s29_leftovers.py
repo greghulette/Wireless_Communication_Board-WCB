@@ -287,6 +287,34 @@ def legacy_s_baud_messages(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("wcb.cmd.legacy_wcb_wcbq_spellings", "The legacy no-comma ?WCBQ<n> and ?WCB<n> reach the same setters as the comma forms: ?WCBQ at the current quantity is saved and reconciled live, ?WCB at W1's own number is saved, and 0 or 21 is refused by both - with W1's config unchanged", needs=["wcb1"])
+def legacy_wcb_wcbq_spellings(bench):
+    """WCB-WP34 row 2 (wcb.cmd.legacy_wcb_wcbq_spellings, help.legacy_wcb_wcbq). processLocalCommand's legacy chain
+    (WCB.ino) sends a message starting WCBQ to updateWCBQuantity (saveWCBQuantityPreferences, WCB_Storage.cpp: 1-20,
+    'Saved WCB quantity: <n>. Peer registrations reconciled live', then rebuildActivePeers and
+    syncActivePeerRegistrations) and one starting WCB to updateWCBNumber (1-20, saveWCBNumberToPreferences: 'Changed WCB
+    Number to: <n>'). Only values that change nothing are sent: the current quantity and W1's own number, which re-save
+    what is already stored, and refused ones. config_guard fails the test if W1's chain moved."""
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        q = token(before[1], "?WCBQ,")
+        n = token(before[1], "?WCB,")
+        if not q or not n:
+            raise Skip(f"W1's chain names no ?WCBQ or ?WCB token ({q!r}, {n!r})")
+        qty, own = int(q.split(",")[1]), int(n.split(",")[1])
+        for cmd, want in ((f"?WCBQ{qty}", f"Saved WCB quantity: {qty}. Peer registrations reconciled live"),
+                          ("?WCBQ21", "Invalid WCB quantity 21. Valid range: 1-20."),
+                          ("?WCBQ0", "Invalid WCB quantity 0. Valid range: 1-20."),
+                          (f"?WCB{own}", f"Changed WCB Number to: {own}"),
+                          ("?WCB21", "Invalid WCB number 21. Valid range: 1-20."),
+                          ("?WCB0", "Invalid WCB number 0. Valid range: 1-20.")):
+            out = w.run(cmd)
+            if not any(want in x for x in out):
+                problems.append(f"{cmd} printed {[x for x in out if x.strip()][:3]}, not '{want}'")
+    assert not problems, "; ".join(problems)
+
+
 @test("persist.label_max_30", "?LABEL,Sx refuses a label over 30 characters ('Label too long. Maximum 30 characters.', as the legacy ?SLS and the help say) and keeps the old one; exactly 30 is stored (re-scan #27)", needs=["wcb1"], links=[])
 def label_max_30(bench):
     """WCB coverage re-scan #27 (WCB-WP34 row 4). The help, the legacy ?SLS and the Wizard all cap a label at 30, and

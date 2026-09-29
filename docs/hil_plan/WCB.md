@@ -354,6 +354,8 @@ s16_vars_if.py. This replaces a vacuous test. **U, S.**
 ### WCB-WP34: Legacy spellings, label length, help-page accuracy (M)
 s29_leftovers.py. **U, M.** Needs BUG-8, BUG-27, BUG-28 and BUG-29 fixed.
 
+> **Status 2026-09-29: done and bench-verified.** BUG-8, 27, 28 and 29 were fixed as re-scan #8, #27, #28 and #29, and rows 1, 3, 4 and 5 are their tests (`wcb.cmd.legacy_prefix_typos`, `wcb.cmd.legacy_s_baud_messages`, `persist.label_max_30`, `help.corrected_pages`). Row 2 is `wcb.cmd.legacy_wcb_wcbq_spellings` (run `20260929-051346`): `?WCBQ<current>` and `?WCB<own number>` re-save what is stored, 0 and 21 are refused by both, and W1's chain does not move.
+
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
 |---|---|---|---|---|
 | wcb.cmd.legacy_prefix_typo_side_effects | Legacy prefix matches swallow near-miss typos. `?CCLEAR,ALL` saves 'L' as the command character. Any 2-character `?D<x>` sets the delimiter. An unmatched `?S…` (`?STAT`, `?SBAUDS1,9600`) is dropped silently. | WCB.ino:6759-6763, :6777, :6955, :7006-7015, :7253-7275 | `(should)`, under config_guard. `dev.send('?CCLEAR,ALL')`, then `?config` must still show the command character ';'; today it shows 'L' (restore with a raw `?CMDCHAR,;`). `?STAT` and `?SBAUDS1,9600` must print 'Unknown command'; today there is silence. Record what `?DA` does, then restore `?DELIM,^`. **BUG-8**. | M |
