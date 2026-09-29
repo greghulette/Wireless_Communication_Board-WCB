@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-09-29 | Run `20260929-023811` on `6.2.1_290236RSEP2026` (29 pass, 1 known skip): **#108** VERIFIED; the pacing retune (D54) passes `kyber.*` with no frame given up and the whole `etm.seq_wrap` flood; the four other fixes from `20260928-220200` pass. |
 | 2026-09-29 | Full run `20260928-220200` triaged (816 pass, 31 fail, 9 skip; 26 fails are `(should)` tests): the #102 pacing retuned (a 50 ms give-up lost a Kyber frame), the RTERM ring back to 2.5 KB, and `?SEQ,SAVE` names an out-of-memory argument copy instead of 'Invalid format' (D54). |
 | 2026-09-28 | **#103** VERIFIED on `6.2.1_282121RSEP2026` (`20260928-212350`, 11 of 11 `wifi.*`): JOIN scans the mesh channel before each connect (`5770675`) and reads its association from the driver (`e55ba82`). |
 | 2026-09-28 | Filed **#108** (an ETM command is ACKed before it is queued, so a full command queue loses it; seen as seven discards during `etm.seq_wrap` on the #102 image). |
@@ -2296,7 +2297,7 @@ reported as `[RTERM] N line(s) from WCB<n> lost at this relay: its queue was ful
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - `etm.full_queue_refused_not_lost` is its test |
+| **Status** | VERIFIED - run `20260929-023811` on `6.2.1_290236RSEP2026`: `etm.full_queue_refused_not_lost` passes (24 of 24 markers ran; W1 refused 20 first attempts unacknowledged and the retries got through), and `etm.seq_wrap`'s whole flood shows 16 refusals and no discard |
 | **Owner** | `WCB_firmware` (`WCB.ino`, the ETM receive path) |
 | **Effort** | S |
 | **Tests** | `etm.full_queue_refused_not_lost` (W1's queue held full by a console flood while W2 sends it markers: each must run or be reported failed) |
