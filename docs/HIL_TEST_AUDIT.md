@@ -794,6 +794,12 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     SBUSController, not pushed; the SBUS fault tests) and Intellex IX-WP9/10 (over WiFi through NaviCore's
     access point via `hil/wlan.py`; flashing W2 through Intellex). Next: flash the controller and run NC-WP11,
     run IX-WP9/10, then an overnight full run after phase 2.
+  - 2026-09-29 20:25: Greg asked for more room for stored sequences ("Do option 2"): they now live in a file of their
+    own on the unused 128 KB `spiffs` partition, 32 KB of them, not in NVS (D73, `fecd481`, `8e5d24f`,
+    SEQUENCE_INVENTORY.md §3d). W1/W2 flashed; the first boot moved W1's 3 and W2's 2 sequences with `?backup` and the
+    inventory hash byte-identical. Bench: `20260929-194057` (81 of 86; the five failures triaged), `-200710` (43 of 44) and `-201645` (4 of 4); the first run showed a 3 s idle mount costing a big restore four
+    tokens to out-of-memory, now unmounted per call. INF8/NC-WP11 and IX-WP9/10 are merged (`7aec01a`, `dfc8538`),
+    not yet bench-run. Next: flash the SBUS controller and run NC-WP11, run IX-WP9/10, then the overnight full run.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
@@ -804,9 +810,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   F13 image (478 pass, 8 fail, none F13, triaged in §5) and its reruns `20260924-205621` and `20260924-213158`; the
   F20/F21 run `20260924-233628` (43/43, with `--no-servos`); the no-servo full run `20260924-234056` (459 pass,
   3 fail, all test-side, triaged in §5), its rerun `20260925-013055` and the fixed tests in `20260925-015720` (21/21); the full run `20260925-092255` (493 pass, 2 fail, both explained in §5).
-- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `cf93348` (F18 and F19 on the
-  #108/pacing image, `6.2.1_291138RSEP2026`, flashed 2026-09-29 about 11:40). The previous image is kept in `-wave2h`;
-  the folder's FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
+- **Flashed:** W1 and W2 run `tests/hil/results/builds/wcb-esp32-meshq`, built from `8e5d24f` (the sequence store,
+  D73, on the F18/F19 image, `6.2.1_292004RSEP2026`, flashed 2026-09-29 about 20:55). The previous images are kept in
+  `-store1` (`fecd481`) and `-wave2i` (`cf93348`); the folder's FLASHED.md lists every earlier one. NaviCore runs `navicore-hil1` (D45).
 - **COM11:** `Intellex.exe` held probe2's port from some time after 09:26 on 2026-09-24 until Greg had it stopped at
   13:28; every test that needs probe2 errored meanwhile (`20260924-120036`, `20260924-131417`) and re-ran in `20260924-133332`. If
   a probe port says "Access is denied", look for another program first.

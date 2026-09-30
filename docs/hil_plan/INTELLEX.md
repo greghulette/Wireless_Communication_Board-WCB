@@ -1006,7 +1006,7 @@ Intellex's chooser attaches an identified droid.
 
 - It is a classic ESP32 (HW 2.4, CP210x) running the bench image
   `tests/hil/results/builds/wcb-esp32-meshq` (`WCB.ino.bin`, `.bootloader.bin` and `.partitions.bin`), per that
-  folder's `FLASHED.md`. Its version moves with every bench image (`6.2.1_291138RSEP2026` since `cf93348`), so a test
+  folder's `FLASHED.md`. Its version moves with every bench image (`6.2.1_292004RSEP2026` since `8e5d24f`), so a test
   reads it from W2 and skips unless the image carries it (DX39).
 - Seeded as a test branch, that image makes the flash **identity-preserving**: W2 ends the test running the image it
   started with. Its bootloader and partition table are the same files `arduino-cli upload` wrote.

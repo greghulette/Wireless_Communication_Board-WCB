@@ -1155,7 +1155,15 @@ def seqget_formats(bench):
             time.sleep(1.5)
             got = {}
             for key in ("HILSV", "HILNOPE", "hilsv"):
-                got[key] = _seqget_line(w, 2, key)
+                # The reply is broadcast once and nothing acknowledges it, so a missing one is asked for again, as a
+                # requester must (docs/SEQUENCE_INVENTORY.md 3a); a lost one failed this test in run 20260929-200710.
+                for attempt in range(1, 4):
+                    got[key] = _seqget_line(w, 2, key)
+                    if got[key] is not None:
+                        break
+                    bench.note(f"SEQGET {key} try {attempt}/3: no [MGMT:SEQVAL,2] line (the request or the reply was "
+                               f"lost); asking again")
+                    time.sleep(RELAY_SPACING_S)
                 time.sleep(0.3)
         finally:
             w.send(";W2,?SEQ,CLEAR,HILSV")
