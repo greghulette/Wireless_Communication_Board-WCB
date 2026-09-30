@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_291933RSEP2026                                  *****////
+///*****                                          Version 6.2.1_292004RSEP2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_291933RSEP2026";
+String SoftwareVersion = "6.2.1_292004RSEP2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -9985,7 +9985,6 @@ void loop() {
   serviceConfigPullJob();  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
   drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
   drainStatusOut();        // and the callback's status lines ("[ETM] WCBn came ONLINE")
-  seqStoreService();       // unmount the sequence store once idle: mounted, it holds ~2 KB of heap
   drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
   drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)

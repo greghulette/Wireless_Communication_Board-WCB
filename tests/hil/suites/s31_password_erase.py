@@ -232,7 +232,8 @@ def _erase_cycle(bench, erase_cmd, extras=False):
             try:
                 w.dev.expect(r"^NVS cleared — set \?HW,xx before use \(serial ports are inactive until then\)\.$",
                              timeout=5, since=m)
-                w.dev.expect(r"^NVS: erased \d+ storage area\(s\) - every setting, WiFi and learned peers included\.$",
+                w.dev.expect(r"^NVS: erased \d+ storage area\(s\) - every setting, WiFi, learned peers and stored sequences "
+                             r"included\.$",
                              timeout=5, since=m)
                 w.dev.expect(r"^Restart queued - restarting once the command queue is quiet$", timeout=5, since=m)
                 w.dev.expect(r"^Rebooting now", timeout=15, since=m)

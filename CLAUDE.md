@@ -260,8 +260,9 @@ changing before editing.**
     LittleFS on the min_spiffs table's 128 KB `spiffs` partition, behind `WCB_SeqStore.{h,cpp}`. Go through its calls
     (`seqStoreGet/Put/Remove/Clear/ForEach/KeyList/Hash`); `preferences` on `stored_cmds` for a sequence reads the old
     layout, which only the NVS fallback uses. See docs/SEQUENCE_INVENTORY.md §3d.
-    - **Mounted only while used**, about 2 KB of heap, unmounted after 3 s idle, refused below 6 KB free (rule 14): a
-      store call can fail for want of heap, so every caller handles `SEQ_E_*`. Loop task only, never the ESP-NOW
+    - **Mounted for each call and unmounted as it returns**, 1.7 KB of heap, refused below 6 KB free (rule 14): a
+      store call can fail for want of heap, so every caller handles `SEQ_E_*`. Don't keep it mounted between calls:
+      held for 3 s, it cost a 250-token restore four tokens to out-of-memory. Loop task only, never the ESP-NOW
       receive callback (rule 11): a replace rewrites the whole file.
     - **`SEQ_FILE_MAX` (32 KB) is set by the config pull, not the partition**: a full store's config must still fit 16
       parts of 2880 bytes (`WCB_ConfigParts.h`), and 48 KB did not. Raise one and you must re-derive the other.

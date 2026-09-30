@@ -18,12 +18,15 @@
 //  key_list format ("k1,k2,...,") and order, so the inventory hash peers compare is
 //  byte-identical across the move from NVS.
 //
-//  MOUNTED ONLY WHILE USED. A mount holds ~1.9 KB of heap and an open file ~0.7 KB
-//  more: on a classic ESP32 hosting its access point that is a tenth of what is free
-//  (CLAUDE.md rule 14). Each call mounts on demand (~12 ms); seqStoreService() in
-//  loop() unmounts after SEQ_IDLE_UNMOUNT_MS unused. Below SEQ_MIN_FREE_HEAP free the
-//  store refuses to mount (SEQ_E_NOMEM): the radio's buffers come first (rule 16).
-//  Call it from task context only - never the ESP-NOW receive callback (rule 11).
+//  MOUNTED FOR EACH CALL, NOT BETWEEN CALLS. A mount holds ~1.7 KB of heap and an
+//  open file ~0.7 KB more: on a classic ESP32 hosting its access point that is a
+//  tenth of what is free (CLAUDE.md rule 14). Each call mounts (~12 ms) and unmounts
+//  as it returns. Held mounted for 3 s after a call, the store cost a 250-token
+//  one-line restore four tokens to "Out of memory while enqueuing command!" (HIL
+//  backup.one_line_restore, run 20260929-194057): the ?backup just before it had
+//  mounted the store. Below SEQ_MIN_FREE_HEAP free it refuses to mount
+//  (SEQ_E_NOMEM): the radio's buffers come first (rule 16). Call it from task
+//  context only - never the ESP-NOW receive callback (rule 11).
 //
 //  THE SETTINGS STORE STILL DECIDES WHEN SEQUENCES ARE ERASED. A factory reset that
 //  blanks only NVS (the Wizard's) takes stored_cmds/seq_mig_done with it, and a boot
@@ -75,7 +78,6 @@ int    seqStoreForEach(const std::function<bool(const char *key, const String &v
 // FNV-1a 32 over the key list, then each value, each followed by a 0xFF separator (sequenceInventoryHash).
 int    seqStoreHash(uint32_t &hash);
 bool   seqListHas(const String &list, const String &key);   // is key an entry of a "k1,k2,...," list
-void   seqStoreService();        // loop(): unmount after SEQ_IDLE_UNMOUNT_MS unused
 void   seqStoreReport();         // ?NVS: one "Sequences: ..." line
 void   seqStoreForceNvsNextBoot();          // ?DEBUG,SEQNVS: the next boot runs on the NVS fallback (a test knob)
 const char *seqStoreError(int code);        // a short reason for a SEQ_E_* code, for messages

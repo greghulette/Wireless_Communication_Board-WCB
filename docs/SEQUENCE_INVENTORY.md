@@ -350,11 +350,13 @@ stored writes nothing, so a re-pushed config costs reads only. A replace keeps t
 a clear and re-save moves it last - the same order rules the NVS key list had, so the hash is
 byte-identical across the move from NVS.
 
-**Mounted only while used.** A mount holds about 1.9 KB of heap and each open file about
-0.7 KB more, a tenth of what a classic ESP32 hosting its access point has free (CLAUDE.md rule
-14). Each call mounts on demand (about 12 ms) and `loop()` unmounts it after 3 s unused
-(`seqStoreService`). Below 6 KB of free heap it refuses to mount, and the caller says so: a
-save prints `Failed to store sequence '<key>' (out of memory)`, a recall `Could not read
+**Mounted for each call, never between calls.** A mount holds 1.7 KB of heap (measured on
+the bench's classic boards, access point up) and each open file about 0.7 KB more, a tenth of
+what such a board has free (CLAUDE.md rule 14). Each call mounts (about 12 ms) and unmounts as
+it returns. Held for 3 s after a call instead, a `?backup` left it mounted under a 250-token
+one-line restore, which lost four tokens to `Out of memory while enqueuing command!` (HIL
+`backup.one_line_restore`). Below 6 KB of free heap it refuses to mount, and the caller says
+so: a save prints `Failed to store sequence '<key>' (out of memory)`, a recall `Could not read
 sequence`, a mesh request goes unanswered until its retry. Every call is from the loop task;
 never from the ESP-NOW receive callback.
 
@@ -549,7 +551,7 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
   `sequenceInventoryHash()`, `invalidateSequenceInventoryHash()`.
 - Where sequences are stored (§3d): `Code/WCB/WCB_SeqStore.{h,cpp}` — `seqStoreBegin()` (mount,
   factory-reset check, `moveNvsSequences()`), `seqStoreGet/Put/Remove/Clear/ForEach/KeyList/Hash`,
-  `seqStoreService()` (idle unmount), `seqStoreReport()` (`?NVS`), the NVS fallback (`nvs*`).
+  `SeqLock` (the per-call unmount), `seqStoreReport()` (`?NVS`), the NVS fallback (`nvs*`).
   Callers: `recallCommandSlot()`, `saveStoredCommandsToPreferences()`,
   `eraseStoredCommandByName()`, `listStoredCommands()`, `clearAllStoredCommands()`
   (`WCB_Storage.cpp`); `collectConfigCommands()`, `printConfigInfo()`, the `?SEQ` handler,

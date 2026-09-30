@@ -26,7 +26,6 @@ extern Preferences preferences;
 #define SEQ_PATH            SEQ_BASE "/seqs"
 #define SEQ_TMP_PATH        SEQ_BASE "/seqs.tmp"
 #define SEQ_NVS_NS          "stored_cmds"
-#define SEQ_IDLE_UNMOUNT_MS 3000     // unmount once unused this long; a config push keeps it mounted
 #define SEQ_MIN_FREE_HEAP   6144     // refuse to mount below this much free heap
 
 // RTC words, kept over every reset but a power-on (like the boot counter in WCB.ino). The core builds LittleFS with
@@ -43,7 +42,7 @@ static bool        onFile           = false;   // the file backs the store this 
 static bool        mounted          = false;
 static bool        partitionMissing = false;   // no "spiffs" partition: nothing to format or clear
 static const char *fallbackWhy      = "the store was never started";
-static uint32_t    lastUseMs        = 0;
+static int         lockDepth        = 0;       // SeqLock nesting: the outermost one unmounts
 static unsigned    walkDamaged      = 0;       // damaged lines the last walk skipped
 static bool        walkEndedClean   = true;    // the last walk to the end found the file ending in a newline
 
@@ -55,12 +54,21 @@ static int errnoCode() {
   }
 }
 
+static void unmountLocked();
+
 namespace {
 
-// Every entry point holds the store (recursively: a ForEach callback may read it again) and restarts the idle clock.
+// Every entry point holds the store (recursively: a ForEach callback may read it again), and the outermost one
+// unmounts it on the way out: a mount's 1.7 KB of heap is held for one call, never between calls (WCB_SeqStore.h).
 struct SeqLock {
-  SeqLock()  { if (seqMutex) xSemaphoreTakeRecursive(seqMutex, portMAX_DELAY); }
-  ~SeqLock() { lastUseMs = millis(); if (seqMutex) xSemaphoreGiveRecursive(seqMutex); }
+  SeqLock() {
+    if (seqMutex) xSemaphoreTakeRecursive(seqMutex, portMAX_DELAY);
+    lockDepth++;
+  }
+  ~SeqLock() {
+    if (--lockDepth == 0) unmountLocked();
+    if (seqMutex) xSemaphoreGiveRecursive(seqMutex);
+  }
 };
 
 // Reads /seqs a record at a time, with no Stream timeouts (Stream::readString waits a whole second at the end of a
@@ -821,7 +829,6 @@ void seqStoreBegin() {
   });
   Serial.printf("[SEQ] %d stored sequence(s) in the sequence store (%u of %u bytes)\n", count, (unsigned)fileSize(),
                 (unsigned)SEQ_FILE_MAX);
-  unmountLocked();
 }
 
 bool seqStoreOnFile() { return onFile; }
@@ -915,13 +922,6 @@ int seqStoreHash(uint32_t &hash) {
   const int rc = mountLocked();
   if (rc != SEQ_OK) return rc;
   return fileHash(hash);
-}
-
-void seqStoreService() {
-  if (!mounted || !seqMutex || millis() - lastUseMs < SEQ_IDLE_UNMOUNT_MS) return;
-  if (xSemaphoreTakeRecursive(seqMutex, 0) != pdTRUE) return;
-  if (mounted && millis() - lastUseMs >= SEQ_IDLE_UNMOUNT_MS) unmountLocked();
-  xSemaphoreGiveRecursive(seqMutex);
 }
 
 void seqStoreReport() {
