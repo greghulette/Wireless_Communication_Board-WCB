@@ -64,6 +64,10 @@ async function wizardFlash(page, context, rec, id) {
     },
   });
   const flashS = Math.round((Date.now() - t0) / 1000);
+  // Judge the host's flash first: a flash that failed (esptool never reached the ROM loader, run 20260929-203948)
+  // leaves nothing to reconnect to, and waiting out the re-pull would only say that.
+  const j = await B.hil.hook('flash_done', { percents: f.percents });
+  expect(j.problems, `the host's flash log (${flashS} s)`).toEqual([]);
   // boardGo returns once it has reconnected the board and (outside the guided setup) started pulling it again.
   await expect.poll(() => page.evaluate(() => window.__hilGo), { timeout: 180_000,
     message: 'boardGo did not finish after the flash' }).toBe('done');
@@ -83,10 +87,8 @@ async function wizardFlash(page, context, rec, id) {
   }
   expect(g.flashes.filter((x) => x.status === 200).map((x) => [x.name, x.body]), 'the flashes the host started')
     .toEqual([['flash-wcb', { appOnly: a.mode === 'update', eraseNvs: a.mode === 'factory' }]]);
-  const j = await B.hil.hook('flash_done', { percents: f.percents });
   await B.hil.note(`${id}: the host's flash ran about ${flashS} s; progress read ${JSON.stringify(j.facts.percents)}; ` +
     `${j.facts.written.length} region(s) written (${j.facts.written.join(', ')}), ${j.facts.verified} verified`);
-  expect(j.problems, 'the host\'s flash log').toEqual([]);
   B.expectClean(rec, 'the Wizard');
 }
 

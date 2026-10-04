@@ -11752,6 +11752,37 @@ def t_intellex_wifi_flash_helpers(tmp):
         pass
     assert S36.percent_path([0, 0, 0, 25, 25, 100]) == [0, 25, 100] and S36.percent_path(None) == []
 
+    # ---- s36 park_probes: every bound channel on W2's ports released before esptool resets W2, nothing else
+    class _L:
+        def __init__(self, wcb, port, channel):
+            self.wcb, self.port, self.channel = wcb, port, channel
+
+        @property
+        def key(self):
+            return f"W{self.wcb}{self.port}"
+
+    class _Links:
+        def __init__(self, links):
+            self.links, self.released = links, []
+
+        def all(self):
+            return list(self.links)
+
+        def release(self, link):
+            self.released.append(link.key)
+            link.channel = None
+
+    class _PB:
+        def __init__(self, links):
+            self.links, self.notes = _Links(links), []
+
+        def note(self, text):
+            self.notes.append(text)
+    pb = _PB([_L(2, "S1", "A"), _L(2, "S2", None), _L(1, "S1", "B"), _L(2, "S3", "D")])
+    assert S36.park_probes(pb, 2) == 2 and pb.links.released == ["W2S1", "W2S3"], pb.links.released
+    assert pb.notes == ["W2: released 2 probe channel(s) on its ports before esptool resets it"], pb.notes
+    assert S36.park_probes(pb, 2) == 0 and pb.notes[1:] == [], pb.notes
+
     # ---- hil/intellex.py: hide, copy_logs, main_checkout
     class B:
         def __init__(self, out):
@@ -11779,14 +11810,14 @@ def t_intellex_wifi_flash_helpers(tmp):
     main = j("C:" + os.sep, "Users", "g", "GitHub", "Wireless_Communication_Board-WCB")
     assert IX.main_checkout(j(main, ".claude", "worktrees", "agent-x")) == main and IX.main_checkout(main) == main
 
-    # ---- hil/wlan.py rejoin
+    # ---- hil/wlan.py rejoin: an association and a lease are not proof; reach= wants a connect (run 20260929-202852)
     class N:
         def __init__(self):
             self.notes = []
 
         def note(self, text):
             self.notes.append(text)
-    saved = {k: getattr(wlan, k) for k in ("netsh", "address_wait", "wait")}
+    saved = {k: getattr(wlan, k) for k in ("netsh", "address_wait", "wait", "reach_wait")}
     try:
         wlan.address_wait = lambda name, subnet="192.168.4.": ("192.168.4.2", 2.5, "")
         wlan.wait = lambda pred, timeout, step=1.0: pred()
@@ -11794,8 +11825,40 @@ def t_intellex_wifi_flash_helpers(tmp):
         fn.state["Wi-Fi 2"] = ["connected", "Droid AP", "Droid AP"]
         n = N()
         said = wlan.rejoin(n, "Wi-Fi 2", "Droid AP", "NaviCore's")
-        assert said.startswith("Windows reassociated Wi-Fi 2") and "lease 192.168.4.2" in said, said
+        assert said.startswith("Windows reports Wi-Fi 2 associated") and "lease 192.168.4.2" in said, said
         assert [c for c in fn.calls if c[0] != "show"] == [], fn.calls
+        # associated, and the link carries a connect: nothing is sent
+        wlan.reach_wait = lambda host, port=80, timeout=wlan.REACH_WAIT_S, step=1.0: 0.3
+        said = wlan.rejoin(n, "Wi-Fi 2", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80))
+        assert said.endswith("192.168.4.1:80 took a connect 0.3 s later"), said
+        assert [c for c in fn.calls if c[0] != "show"] == [], fn.calls
+        # a stale association: it reads connected with a lease and carries nothing -> disconnect, the temporary profile
+        # connected again, then the lease and the connect
+        fn = wlan.netsh = FakeNetsh()
+        fn.profiles["HIL-Droid AP"] = "Droid AP"
+        fn.state["Wi-Fi 2"] = ["connected", "Droid AP", "HIL-Droid AP"]
+        reached = iter([None, 1.2])
+        wlan.reach_wait = lambda host, port=80, timeout=wlan.REACH_WAIT_S, step=1.0: next(reached)
+        n = N()
+        said = wlan.rejoin(n, "Wi-Fi 2", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80))
+        assert "(a stale association), so the harness re-associated Wi-Fi 2" in said and \
+            said.endswith("192.168.4.1:80 took a connect 1.2 s later"), said
+        assert [c for c in fn.calls if c[0] != "show"] == [("disconnect", "interface=Wi-Fi 2"),
+                                                           ("connect", "name=HIL-Droid AP", "ssid=Droid AP",
+                                                            "interface=Wi-Fi 2")], fn.calls
+        assert any("a stale association" in x for x in n.notes), n.notes
+        assert not any("Droid AP" in x for x in n.notes + [said]), (n.notes, said)
+        # still no connect after the re-association: raised, the network unnamed
+        fn = wlan.netsh = FakeNetsh()
+        fn.profiles["HIL-Droid AP"] = "Droid AP"
+        fn.state["Wi-Fi 2"] = ["connected", "Droid AP", "HIL-Droid AP"]
+        wlan.reach_wait = lambda host, port=80, timeout=wlan.REACH_WAIT_S, step=1.0: None
+        try:
+            wlan.rejoin(N(), "Wi-Fi 2", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80))
+            raise AssertionError("a link that never carried a connect passed")
+        except AssertionError as e:
+            assert "still took no connect" in str(e) and "Droid AP" not in str(e), e
+        # dropped by Windows, which does not reconnect a manual profile: the harness connects it again
         fn = wlan.netsh = FakeNetsh()
         fn.profiles["HIL-Droid AP"] = "Droid AP"
         n = N()
@@ -11810,10 +11873,22 @@ def t_intellex_wifi_flash_helpers(tmp):
             wlan.rejoin(N(), "Wi-Fi 2", "Droid AP", "NaviCore's")
             raise AssertionError("a refused reassociation passed")
         except AssertionError as e:
-            assert "did not reassociate with NaviCore's access point" in str(e) and "Droid AP" not in str(e), e
+            assert "did not associate with NaviCore's access point" in str(e) and "Droid AP" not in str(e), e
     finally:
         for k, val in saved.items():
             setattr(wlan, k, val)
+    # reach_wait itself: a listener takes the connect at once; the same port closed gives None once the time is up
+    import socket as _socket
+    ls = _socket.socket()
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(2)
+    port = ls.getsockname()[1]
+    try:
+        got = wlan.reach_wait("127.0.0.1", port, timeout=3.0)
+        assert got is not None and got < 1.5, got
+    finally:
+        ls.close()
+    assert wlan.reach_wait("127.0.0.1", port, timeout=0.2, step=0.1) is None
 
     # ---- tests/intellex/py/wifi_units.py scrubbed (its own module, read without the venv)
     sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "intellex", "py")))
@@ -11828,7 +11903,71 @@ def t_intellex_wifi_flash_helpers(tmp):
         sys.path.pop(0)
 
 
+def t_ws_endpoint_drop_stall(tmp):
+    """INTELLEX.md finding 19's board-free test (suites/s32_intellex.py intellex.link_drop_no_stall): hil/ws.py
+    accept_key against RFC 6455's own example, server_frame read back by parse; WsEndpoint upgrades a WsClient, answers a
+    text PING line and a ping frame, and once silent refuses a new connect while the open socket stays open and
+    unanswered; drop_stall_problems on a clean drop, the drop the bench saw (a 10 s stall), a verdict with no loss shown,
+    and a probe that never fired."""
+    import socket as _socket
+    from hil import ws as W
+    from suites import s32_intellex as S32
+    assert W.accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="     # RFC 6455 section 1.3
+    assert W.parse(W.server_frame(b"hi")) == (0x1, b"hi", 4)
+    big = b"x" * 300
+    assert W.parse(W.server_frame(big, opcode=0x2)) == (0x2, big, 304)
+    ep = W.WsEndpoint("127.0.0.2", 0)
+    try:
+        c = W.WsClient("127.0.0.2", ep.port, "/ws", timeout=3)
+        try:
+            c.send_text('{"type":"PING"}\n')
+            assert '"type":"PONG"' in c.read_until('"PONG"', timeout=3), c.text
+            c.sock.sendall(W.frame(b"hb", opcode=0x9))
+            c.sock.settimeout(3)
+            assert c._frame() == (0xA, b"hb")
+            ep.go_silent()
+            try:
+                W.WsClient("127.0.0.2", ep.port, "/ws", timeout=3).close()
+                raise AssertionError("a silent endpoint took a new connect")
+            except (ConnectionError, OSError):
+                pass
+            c.send_text('{"type":"PING"}\n')
+            c.sock.settimeout(1.0)
+            try:
+                got = c.sock.recv(4096)
+                raise AssertionError(f"a silent endpoint answered or closed the socket: {got!r}")
+            except _socket.timeout:
+                pass
+        finally:
+            c.sock.close()
+        assert ep.accepted == 1 and ep.upgraded == 1, (ep.accepted, ep.upgraded)
+    finally:
+        ep.close()
+
+    def polls(until, att, t=0.0, step=0.3):
+        out = []
+        while t < until:
+            out.append((round(t, 2), round(t + 0.02, 2), att))
+            t += step
+        return out, t
+    clean, t = polls(8.0, True)
+    more, _ = polls(12.0, False, t)
+    probs, facts = S32.drop_stall_problems(clean + more, 8.05)
+    assert probs == [] and facts["longest_unanswered_s"] <= 0.4 and facts["lost_s"] == 8.1, (probs, facts)
+    stalled = clean + [(8.3 + k, 9.3 + k, None) for k in range(9)] + [(17.3, 18.12, False), (18.4, 18.45, False)]
+    probs, facts = S32.drop_stall_problems(stalled, 8.1)
+    assert len(probs) == 2 and all(p.startswith("(should)") for p in probs), probs
+    assert "went unanswered for 10.3 s" in probs[0] and "finding 19" in probs[0], probs
+    assert "showed the link lost 10.0 s after" in probs[1], probs
+    assert facts == {"verdict_s": 8.1, "lost_s": 18.1, "longest_unanswered_s": 10.3, "unanswered_polls": 9}, facts
+    probs, _ = S32.drop_stall_problems(clean, 8.1)
+    assert probs == ["(should) /_api/status never showed the link lost (INTELLEX.md finding 19)"], probs
+    probs, _ = S32.drop_stall_problems(clean + more, None)
+    assert len(probs) == 1 and not probs[0].startswith("(should)") and "never printed" in probs[0], probs
+
+
 TESTS += [t_bridge_hooks, t_intellex_wifi_flash_helpers]      # IX-WP9/10 (suites/s35, s36)
+TESTS += [t_ws_endpoint_drop_stall]      # INTELLEX.md finding 19 (suites/s32)
 ORIG = {}   # the real functions main() patches, for a test that needs one
 
 

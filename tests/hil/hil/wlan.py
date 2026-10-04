@@ -11,6 +11,10 @@ The rules every caller keeps (s28's module docstring, docs/HIL_WEEK_DECISIONS.md
   20260924-092602 failed that way, and reused the PC's own profile on the other adapter).
 - A lease from an ESP32's access point has taken 1.8 to 46.7 s on this PC (tracker #110), so address_wait waits up to
   ADDR_WAIT_S and renews once (D61).
+- 'Connected with a lease' does not prove the link carries anything. A board restart that deauthenticates nobody
+  (NaviCore's REBOOT) leaves Windows' association in place while the restarted access point drops the station's
+  frames: run 20260929-202852 sat like that for 90 s with no WLAN AutoConfig event at all. rejoin(reach=) proves a TCP
+  connect and re-associates when there is none.
 
 What only the bench shows: that netsh's English output has these field names (parse_interfaces, parse_networks); the
 selftest feeds both parsers text captured in that form.
@@ -18,6 +22,7 @@ selftest feeds both parsers text captured in that form.
 import contextlib
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -255,28 +260,83 @@ def default_routes():
     return None if out is None else sorted(x.strip() for x in out.splitlines() if x.strip())
 
 
-def rejoin(bench, name, ssid, whose, wait_s=30.0):
-    """Adapter `name` back on `ssid` with a 192.168.4.x lease, inside a pc_on_ap block whose access point went away and
-    came back (the board hosting it restarted) -> what it took, for a note. Windows reassociates on its own only through
-    a profile in auto mode, and pc_on_ap's temporary HIL-<ssid> profile is manual, so after `wait_s` with no association
-    this connects that profile again, naming the adapter as every netsh call here does. AssertionError when neither
-    brings it back or no lease comes in ADDR_WAIT_S; the network is never named."""
+REACH_WAIT_S = 10.0     # how long an adapter that reads connected, with a lease, may take to carry a TCP connect
+
+
+def reach_wait(host, port=80, timeout=REACH_WAIT_S, step=1.0):
+    """Seconds until a TCP connect to (host, port) succeeds (each try 1 s at most), or None after `timeout`: whether the
+    link carries traffic at all, which an association and a lease do not prove (rejoin). Sends nothing but the
+    handshake, as Intellex's own liveness probe (discover.tcp_open) does."""
+    t0 = time.monotonic()
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return round(time.monotonic() - t0, 1)
+        except OSError:
+            pass
+        if time.monotonic() - t0 >= timeout:
+            return None
+        time.sleep(step)
+
+
+def _connect_tmp(bench, name, ssid, whose, why):
+    """netsh connect of pc_on_ap's temporary profile on adapter `name`, then the association -> or AssertionError."""
+    tmp = f"HIL-{ssid}"
+    out = netsh("connect", f"name={tmp}", f"ssid={ssid}", f"interface={name}")
+    bench.note("netsh connect: " + scrub(" ".join(out.split()), tmp, ssid)[:200])
+    if not wait(lambda: joined(name, ssid), 30):
+        now = iface(name) or {}
+        raise AssertionError(f"{name} did not associate with {whose} access point within 30 s of the harness connecting "
+                             f"its temporary profile ({why}; state {now.get('state')!r})")
+
+
+def rejoin(bench, name, ssid, whose, wait_s=30.0, reach=None):
+    """Adapter `name` back on `ssid` with a 192.168.4.x lease - and, given `reach` ((host, port)), carrying a TCP connect
+    there - inside a pc_on_ap block whose access point went away and came back (the board hosting it restarted) -> what
+    it took, for a note.
+
+    Connected with a lease is not back. A restart that deauthenticates nobody (NaviCore's REBOOT: otaFarewellAP is empty
+    on purpose, navicore_ota.h:184-204) leaves Windows' association in place: netsh reads connected, the old lease
+    stays, and the restarted access point drops every frame from a station it no longer knows. On this bench's spare
+    adapter under the temporary profile, run 20260929-202852 (intellex.wifi_link_loss) sat like that for 90 s with no
+    WLAN AutoConfig event at all between the join and the harness's own disconnect. So with `reach`, a link that takes no
+    connect in REACH_WAIT_S is re-associated - netsh disconnect, then a connect of the temporary profile, both naming the
+    adapter (what Intellex's own bounce would do, which its --no-auto-bounce leash leaves to the harness) - and must
+    then associate, take a lease and carry the connect. An adapter Windows did drop is connected again the same way
+    after `wait_s` (the temporary profile is manual, so Windows would not). AssertionError when nothing brings it back;
+    the network is never named."""
     if wait(lambda: joined(name, ssid), wait_s):
-        how = f"Windows reassociated {name} on its own"
+        how = [f"Windows reports {name} associated"]
     else:
-        tmp = f"HIL-{ssid}"
-        out = netsh("connect", f"name={tmp}", f"ssid={ssid}", f"interface={name}")
-        bench.note("netsh connect: " + scrub(" ".join(out.split()), tmp, ssid)[:200])
-        if not wait(lambda: joined(name, ssid), 30):
-            now = iface(name) or {}
-            raise AssertionError(f"{name} did not reassociate with {whose} access point within {wait_s:.0f} s, nor 30 s "
-                                 f"after the harness connected its temporary profile again (state {now.get('state')!r})")
-        how = f"the harness connected {name}'s temporary profile again after {wait_s:.0f} s without an association"
+        _connect_tmp(bench, name, ssid, whose, f"no association in {wait_s:.0f} s")
+        how = [f"the harness connected {name}'s temporary profile again after {wait_s:.0f} s without an association"]
     addr, secs, renewed = address_wait(name)
     if not addr:
         raise AssertionError(f"{name} is back on {whose} access point but got no 192.168.4.x lease in {secs} s "
                              f"({renewed or 'no renew'})")
-    return f"{how}; lease {addr} {secs} s after associating" + (f" ({renewed})" if renewed else "")
+    how.append(f"lease {addr} {secs} s after associating" + (f" ({renewed})" if renewed else ""))
+    if reach is None:
+        return "; ".join(how)
+    target = f"{reach[0]}:{reach[1]}"
+    got = reach_wait(*reach)
+    if got is not None:
+        how.append(f"{target} took a connect {got} s later")
+        return "; ".join(how)
+    bench.note(f"{name} reads associated with lease {addr}, but {target} took no connect in {REACH_WAIT_S:.0f} s: a stale "
+               f"association (the restart deauthenticated nobody); the harness re-associates {name}")
+    netsh("disconnect", f"interface={name}")
+    _connect_tmp(bench, name, ssid, whose, f"re-associating a stale association")
+    addr, secs, renewed = address_wait(name)
+    if not addr:
+        raise AssertionError(f"{name} re-associated with {whose} access point but got no 192.168.4.x lease in {secs} s "
+                             f"({renewed or 'no renew'})")
+    got = reach_wait(*reach)
+    if got is None:
+        raise AssertionError(f"{name} re-associated with {whose} access point and holds {addr}, but {target} still took no "
+                             f"connect in {REACH_WAIT_S:.0f} s")
+    how.append(f"{target} took no connect in {REACH_WAIT_S:.0f} s (a stale association), so the harness re-associated "
+               f"{name}: lease {addr} {secs} s after, and {target} took a connect {got} s later")
+    return "; ".join(how)
 
 
 # ------------------------------------------------------------------ what the adapter can see
