@@ -14,12 +14,14 @@ the test state as a reset leaves it, the sticks centred, and every channel NaviC
 How the tests see NaviCore. The failsafe and lost-frame tests borrow a free knob on the rx stick (frames for remote
 Maestro slot 4 on W1 S1: device 4 is hosted nowhere, so nothing moves) and a free switch on the ry stick (a marker per
 position on W1 S2), inside nc_guard, plus a controller matrix button whose slot has no mapping (rc_trig only), as s42
-does. The glitch tests stop the stream, send one burst, then let good frames through one at a time: NaviCore's #L09
-counts every frame it decodes and #L13 keeps the last one's bytes, and with the channels at rest every frame the
-controller sends is the same, so any other bytes in #L13 are a frame nobody sent. What each burst should decode to is
-hil/sbus.py ReaderModel, NaviCore's framing byte for byte. Around a burst that could decode garbage the engine is made
-inert first (s41 _engine_inert), and around SBUS-16 NaviCore's bindings on CH17-24, which then read 992, are unbound
-(_hi_inert); nc_guard puts both back.
+does. NaviCore prints each dispatch as '{"sys":1,"type":"rc_trig","id":20,"mode":1,"btn":19,"tap":1}' (rcDispatch,
+NaviCore.ino:2225-2275), and s42 _taps reads them for one (mode, slot) as [(host time, tap number)]. The glitch tests
+stop the stream, send one burst, then let good frames through one at a time: NaviCore's #L09 counts each loop pass that
+decoded a frame (one per frame here, since they come one at a time) and #L13 keeps the last frame's bytes, and with the
+channels at rest every frame the controller sends is the same, so any other bytes in #L13 are a frame nobody sent.
+What each burst should decode to is hil/sbus.py ReaderModel, NaviCore's framing byte for byte. Around a burst that
+could decode garbage the engine is made inert first (s41 _engine_inert), and around SBUS-16 NaviCore's bindings on
+CH17-24, which then read 992, are unbound (_hi_inert); nc_guard puts both back.
 
 Every test here moves or stops what NaviCore re-emits on SBUS OUT (sbusOutEnabled; the tee copies every byte, a
 malformed one included) and the controller's own RC PWM outputs follow CH1-4, so all of them are in hil/servos.py.
@@ -241,8 +243,11 @@ def _truncations(frame):
 
 def _glitch_case(ctl, nc, frame, kind, n, steps):
     """One malformed burst with the stream stopped, then `steps` good frames let through one at a time -> {'steps':
-    [(frames NaviCore decoded, #L13 after)] for the burst alone and then each frame, 'model': the decodes ReaderModel
-    expects at each, 'hex': a garbage burst's bytes}. The stream is back on when it returns."""
+    [(frames NaviCore counted, #L13 after)] for the burst alone and then each frame, 'model': what ReaderModel expects
+    it to count at each, 'hex': a garbage burst's bytes}. NaviCore's #L09 counts a loop pass whose read() decoded any
+    frame, once (processSbus, NaviCore.ino:2757-2764), so the model counts a burst's decodes as one: a double burst drained
+    in one pass counts 1 (run 20260929-201950), though a pass that splits it would count 2. The stream is back on when
+    it returns."""
     f = _quiet(ctl, nc)
     st = ctl.glitch(kind, n)
     time.sleep(0.12 + (n / 1000 if kind == "gap" else 0))
@@ -256,13 +261,13 @@ def _glitch_case(ctl, nc, frame, kind, n, steps):
         f = f2
     ctl.stream(True)
     m = ReaderModel(24 if len(frame) == FRAME_LEN[24] else 16)
-    for b in glitch_bursts(kind, n, frame, st.get("hex")):
-        m.burst(b).silence()
-    model = [len(m.decoded)]
-    for _ in range(steps):
+
+    def counted(burst):
         before = len(m.decoded)
-        m.burst(frame).silence()
-        model.append(len(m.decoded) - before)
+        m.burst(burst).silence()
+        return int(len(m.decoded) > before)
+    model = [sum(counted(b) for b in glitch_bursts(kind, n, frame, st.get("hex")))]
+    model += [counted(frame) for _ in range(steps)]
     return {"steps": got, "model": model, "hex": st.get("hex")}
 
 
@@ -460,10 +465,10 @@ def failsafe_flag_freeze(bench):
                 problems.append("after the failsafe the switch did not fire position 2 once")
             _press(ctl, ib, 0.12)
             time.sleep(tap_s + 1.0)
-            trigs = _taps(nc, nm, mode, bslot)
-            if [t for _, t in trigs] != [(mode, bslot, 1)]:
-                problems.append(f"after the failsafe a matrix press gave {[t for _, t in trigs]}, expected "
-                                f"[({mode}, {bslot}, 1)]")
+            taps = [t for _, t in _taps(nc, nm, mode, bslot)]
+            if taps != [1]:
+                problems.append(f"after the failsafe a matrix press gave taps {taps} on slot {bslot} in mode {mode}, "
+                                f"expected [1]")
         finally:
             ctl.clear_faults()
             ctl.button(ib, False)
@@ -515,10 +520,10 @@ def lost_frame_flag_no_gate(bench):
                 problems.append("with lost frames flagged the switch did not fire position 2 once")
             _press(ctl, ib, 0.12)
             time.sleep(tap_s + 1.0)
-            trigs = _taps(nc, nm, mode, bslot)
-            if [t for _, t in trigs] != [(mode, bslot, 1)]:
-                problems.append(f"with lost frames flagged a matrix press gave {[t for _, t in trigs]}, expected "
-                                f"[({mode}, {bslot}, 1)]")
+            taps = [t for _, t in _taps(nc, nm, mode, bslot)]
+            if taps != [1]:
+                problems.append(f"with lost frames flagged a matrix press gave taps {taps} on slot {bslot} in mode "
+                                f"{mode}, expected [1]")
             mon = nc.monitor(1.0)
             flags = {(f["sbus"].get("lost"), f["sbus"].get("failsafe")) for f in mon}
             if not mon:
@@ -555,7 +560,10 @@ def failsafe_deferred_tap(bench):
     tapWindowMs after its release, failsafe on; and a press held into the failsafe fires sooner, still held: clearing
     holdActive (:2790) takes away the one thing that parked it (:2412), and it fires tapWindowMs after the press. The
     (should): failsafe cancels any pending tap or hold, and the press must be made again. Each case first checks that
-    NaviCore read the flag, and that the flag was on before the tap was due (else it is noted, not judged)."""
+    NaviCore read the flag, and that the flag was on before the tap was due (else it is noted, not judged). Case A
+    raises the flag 150 ms after the release: sent at once, it lands in the frame that carries the release, so the gate
+    sees the press still held and case A repeats case B (run 20260929-201950: tap 1 456 ms after the release, which is
+    tapWindowMs after the press)."""
     ctl, nc, cfg, ncfg = _setup(bench)
     found = nc.sbus_dump()["channels"]
     mode = nc.mode()
@@ -563,9 +571,10 @@ def failsafe_deferred_tap(bench):
     tap_s = ncfg.get("tapWindowMs", 500) / 1000
     problems, bad, notes = [], [], []
     try:
-        # A: a tap released, then the failsafe inside its window.
+        # A: a tap released - its neutral frames reach NaviCore first - then the failsafe inside its window.
         nm = nc.dev.mark()
         _, rel = _press(ctl, i, 0.1)
+        time.sleep(0.15)
         ctl.flags(FLAG_FAILSAFE)
         on_at = time.monotonic()
         time.sleep(0.2)
@@ -582,7 +591,7 @@ def failsafe_deferred_tap(bench):
             notes.append(f"case A inconclusive: the failsafe came on {(on_at - rel) * 1000:.0f} ms after the release")
         elif trigs:
             bad.append(f"a tap released {(on_at - rel) * 1000:.0f} ms before the failsafe came on fired tap "
-                       f"{trigs[0][1][2]} {(trigs[0][0] - rel) * 1000:.0f} ms after its release, "
+                       f"{trigs[0][1]} {(trigs[0][0] - rel) * 1000:.0f} ms after its release, "
                        f"{'during the failsafe' if trigs[0][0] < off_at else 'after it cleared'}")
         time.sleep(0.5)
         # B: a press held into the failsafe.
@@ -603,7 +612,7 @@ def failsafe_deferred_tap(bench):
         if seen != "YES":
             problems.append(f"case B: NaviCore did not read the failsafe flag (#L09 failsafe={seen})")
         elif trigs:
-            bad.append(f"a press held into the failsafe fired tap {trigs[0][1][2]} {(trigs[0][0] - press) * 1000:.0f} ms "
+            bad.append(f"a press held into the failsafe fired tap {trigs[0][1]} {(trigs[0][0] - press) * 1000:.0f} ms "
                        f"after the press, {'still held' if trigs[0][0] < released else 'after its release'}")
     finally:
         ctl.button(i, False)
@@ -654,7 +663,7 @@ def frame_stop_held_press(bench):
         if c["fps"] < SBUS_FULL_FPS:
             problems.append(f"the stream did not come back to full rate (fps {c['fps']})")
         if after:
-            bad.append(f"the press made before the frames stopped fired tap {after[0][1][2]} "
+            bad.append(f"the press made before the frames stopped fired tap {after[0][1]} "
                        f"{(after[0][0] - back) * 1000:.0f} ms after they came back, for a button let go "
                        f"{back - let_go:.1f} s before")
     finally:
@@ -1021,7 +1030,7 @@ def one_frame_dip(bench):
                 time.sleep(0.2)
                 ctl.button(i, False)
                 time.sleep(tap_s + 1.0)
-                got = [t[2] for _, t in _taps(nc, nm, mode, slot)]
+                got = [t for _, t in _taps(nc, nm, mode, slot)]
                 notes.append(f"debounce {deb}: taps {got}")
                 if got != want:
                     problems.append(f"at matrixDebounceFrames {deb} a press with one neutral frame inside it gave taps "

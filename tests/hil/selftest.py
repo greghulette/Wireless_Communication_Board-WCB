@@ -10725,9 +10725,11 @@ class SbusWorld(FakeInf8):
     plus its channels and the frames it sends), and NaviCore's framing (hil/sbus.py ReaderModel) at the far end of the
     wire - 111 frames a second while the stream runs, worked out whenever either side is next asked. A malformed burst
     goes out when its verb arrives, a frame budget at once. NaviCore's #L09, #L13, the monitor, rc_hb and rc_ch read
-    what its reader decoded last. mut: 'fixed_reader' (D-NC72's and D-NC73's fixes), 'loose_reader' (a partial buffer
-    decodes at a silence), 'no_budget' ("frames" is ignored and the stream runs on), 'mode_saves' ("save":false saves),
-    'dip_two' (a dip lasts two frames)."""
+    what its reader decoded last, and its engine (NaviSbusModel) takes each decoded frame from pull(). The controller's
+    buttons are the bench's: its SK and SL stick clicks on the matrix channel at 1074 and 1033 (slots 19 and 20), S1-S6
+    unassigned. mut: 'fixed_reader' (D-NC72's and D-NC73's fixes), 'loose_reader' (a partial buffer decodes at a
+    silence), 'no_budget' ("frames" is ignored and the stream runs on), 'mode_saves' ("save":false saves), 'dip_two' (a
+    dip lasts two frames)."""
     FPS = 111
 
     def __init__(self, mut=()):
@@ -10738,7 +10740,9 @@ class SbusWorld(FakeInf8):
         cfg = {"e": "cfg", "fwver": "sbus-9.9", "sbus24": True, "rx": 1, "ry": 2, "ly": 3, "lx": 4,
                "aMin": [172] * 4, "aMax": [1811] * 4, "aRev": [False] * 4,
                "sw": [{"l": "SJ", "c": 17, "t": 0, "d": 0, "pos": 0, "v": [173, 992, 1811]}],
-               "sl": [{"l": "LS", "c": 18, "pct": 50}], "tr": [], "btn": [], "lua": [],
+               "sl": [{"l": "LS", "c": 18, "pct": 50}], "tr": [], "lua": [],
+               "btn": [{"l": f"S{i + 1}", "c": 0, "v": 1811} for i in range(6)] + [{"l": "SK", "c": 7, "v": 1074},
+                                                                                  {"l": "SL", "c": 7, "v": 1033}],
                "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
         super().__init__(verbs=True, cfg=cfg)
         fixed, loose = _reader_classes()
@@ -10747,6 +10751,7 @@ class SbusWorld(FakeInf8):
         self.lock = threading.Lock()
         t0 = time.monotonic()
         self.count, self.last, self.last_at, self.t = 0, BENCH_FRAME, t0, t0
+        self.out = []                          # (host time, frame) decoded since NaviCore's engine last pulled
         self.times = collections.deque(t0 - k / self.FPS for k in range(self.FPS, 0, -1))   # a second at full rate
 
     # ------------------------------------------------------------ the wire
@@ -10757,12 +10762,22 @@ class SbusWorld(FakeInf8):
     def _decoded(self, raw, when):
         self.count, self.last, self.last_at = self.count + 1, raw, when
         self.times.append(when)
+        self.out.append((when, raw))
+
+    def pull(self):
+        """The frames NaviCore's reader decoded since the last pull, as (host time, bytes), oldest first."""
+        with self.lock:
+            self.advance()
+            out, self.out = self.out, []
+            return out
 
     def _feed(self, burst, when):
+        """One burst through NaviCore's reader, drained in one loop pass: processSbus counts one frame for a read() that
+        decoded any and acts on the last one decoded (NaviCore.ino:2757-2764), so two frames back to back count once."""
         before = len(self.reader.decoded)
         self.reader.burst(burst).silence()
-        for raw in self.reader.decoded[before:]:
-            self._decoded(raw, when)
+        if len(self.reader.decoded) > before:
+            self._decoded(self.reader.decoded[-1], when)
 
     def advance(self):
         """The frames the running stream sent since the last look: through the reader, or - once it is locked on them and
@@ -10799,7 +10814,13 @@ class SbusWorld(FakeInf8):
                 s["pos"] = o["p"]
                 self.channels[s["c"] - 1] = s["v"][o["p"]]
                 return []
-            if t in ("btn", "lua", "tr"):
+            if t in ("btn", "lua"):
+                i, lst = o.get("i", -1), self.cfg.get(t) or []
+                b = lst[i] if isinstance(i, int) and 0 <= i < len(lst) else {}
+                if 1 <= b.get("c", 0) <= 24:          # its value while pressed, 992 once released
+                    self.channels[b["c"] - 1] = b["v"] if o.get("p") else self.SB.SBUS_CENTER
+                return []
+            if t == "tr":
                 return []
             out = super().answer(o)
             if t == "mode" and "mode_saves" in self.mut and o.get("save", True) is False:
@@ -10862,12 +10883,244 @@ class SbusWorld(FakeInf8):
 
 
 class NaviSbusModel(NaviModel):
-    """NaviModel - the config, what nc_guard reads and writes, W1's relay - with its SBUS side an SbusWorld: #L09, #L13
-    and #L12 read what NaviCore's reader decoded last, and so do the monitor, rc_hb and rc_ch."""
+    """NaviModel - the config, what nc_guard reads and writes, W1's relay - with its SBUS side an SbusWorld, and the part
+    of NaviCore's loop() that acts on SBUS (NaviCore.ino on hil-week), on a thread of its own every 2 ms as loop() runs
+    it (:5499-5500): processSbus for each frame the reader decoded (:2757-2880: the failsafe gate, the mode switch, the
+    matrix debounce and taps - RCRadio_Matrix_Buttons :2309-2357, rcMatrixRelease :2379-2402, the long press -
+    processSwitches :2428-2481, processKnobs :2598-2700), then checkDeferredTap (:2404-2426). rcDispatch prints rc_trig
+    on USB exactly as NaviCore does (:2225-2275) and runs the mapping's tiers; a passthrough knob on a remote Maestro slot
+    puts its Pololu frame on W1 S1 (W1's Maestro_Remote forward), and a wcb_unicast ';S2<text>' to board 1 puts <text>
+    CR on W1 S2 - the two DevLinks the suite's links are. Action delays are not modelled. A USB SET_CONFIG re-seeds the
+    switches and re-arms the matrix (rc_config.h:1920; NaviCore.ino:3966-3975). #L09, #L13 and #L12 read what the
+    reader decoded last, and so do the monitor, rc_hb and rc_ch. mut, the engine's half: 'failsafe_cancels' and
+    'frame_timeout' (D-NC21's fix: failsafe, or 100 ms with no frame, cancels a pending tap and hold), and the breaks
+    'failsafe_ungated', 'failsafe_keeps_armed' (the gate leaves the matrix armed), 'lost_gates' (a lost frame gates like
+    failsafe), 'release_debounce_2' (a release needs two neutral frames at any debounce)."""
+    TIMEOUT_S = 0.1                           # frame_timeout's outage
 
-    def __init__(self, world):
+    def __init__(self, world, mut=()):
         super().__init__()
-        self.world = world
+        self.world, self.mut = world, set(mut)
+        self.links = {"W1S1": DevLink("W1S1"), "W1S2": DevLink("W1S2")}
+        self.elock = threading.RLock()        # one loop(): the console and the engine never interleave
+        self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
+        self.tap = dict(last=0, count=0, last_at=0.0, pending=False, fire_at=0.0, bid=0, taps=0, hold=False,
+                        hold_btn=0, hold_at=0.0, hold_fired=False)
+        self.knob_raw, self.knob_primed, self.knob_mode = [None] * 11, [False] * 11, [0] * 11
+        self.sw_prev, self.sw_cand, self.sw_since = [0] * 10, [-1] * 10, [0.0] * 10
+        self.seed, self.mode_val, self.last_frame = True, None, time.monotonic()
+        self.alive = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    # ------------------------------------------------------------ loop()
+    def _loop(self):
+        while self.alive:
+            with self.elock:
+                now = time.monotonic()
+                frames = self.world.pull()
+                for when, raw in frames:
+                    self._frame(when, raw)
+                if frames:
+                    self.last_frame = frames[-1][0]
+                elif "frame_timeout" in self.mut and now - self.last_frame > self.TIMEOUT_S:
+                    self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
+                    self.tap.update(pending=False, hold=False, hold_btn=0, hold_fired=False)
+                self._check_deferred(now)
+            time.sleep(0.002)
+
+    def _frame(self, when, raw):
+        """processSbus for one decoded frame."""
+        try:
+            d = self.world.SB.decode(raw)
+        except AssertionError:                # a broken reader's partial buffer (loose_reader): nothing to act on
+            return
+        vals = d["channels"] + [self.world.SB.SBUS_CENTER] * (24 - d["n"])
+        if (d["failsafe"] or ("lost_gates" in self.mut and d["lost"])) and "failsafe_ungated" not in self.mut:
+            if "failsafe_keeps_armed" not in self.mut:
+                self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
+            self.tap.update(hold=False, hold_fired=False, hold_btn=0)
+            if "failsafe_cancels" in self.mut:
+                self.tap["pending"] = False
+            return
+        self._mode_switch(vals)
+        self._matrix(vals, when)
+        self._switches(vals, when)
+        self._knobs(vals)
+
+    def _mode_switch(self, vals):
+        ms = self.c["modeSwitch"]
+        ch = self.c["switches"][ms]["channel"] if 0 <= ms < 10 else 0
+        if not 1 <= ch <= 24:
+            return
+        v = vals[ch - 1]
+        if self.mode_val is not None and abs(v - self.mode_val) <= 5:
+            return
+        self.mode_val = v
+        m = 1 if v < 582 else (2 if v < 1401 else 3)
+        if m != self.mode:
+            self.mode = m
+            for i, k in enumerate(self.c["knobs"]):             # resetModeAwareKnobs
+                if k["modeAware"] and k["modeSwitchOverride"] < 0:
+                    self.knob_raw[i] = None
+
+    def _matrix(self, vals, now):
+        mc = self.c["matrixChannel"]
+        if not 1 <= mc <= 24:
+            return
+        v = vals[mc - 1]
+        dec = next((i + 1 for i, t in enumerate(self.c["thresholds"])
+                    if (t["minPwm"], t["maxPwm"]) != (0, 0) and t["minPwm"] <= v <= t["maxPwm"]), 0)
+        deb = max(1, self.c["matrixDebounceFrames"])
+        if dec == 0:
+            self.cand = self.cand_n = 0
+            need = max(2, deb) if "release_debounce_2" in self.mut else deb
+            self.neutral_n = min(need, self.neutral_n + 1)
+            if self.neutral_n >= need:
+                self.armed = True
+                self._release(now)
+            return
+        self.neutral_n = 0
+        if dec == self.cand:
+            self.cand_n = min(deb, self.cand_n + 1)
+        else:
+            self.cand, self.cand_n = dec, 1
+        if self.armed and self.cand_n >= deb:
+            self.armed = False
+            self._press(dec, now)
+        t = self.tap
+        m = self.c["mappings"].get(str(t["bid"]))
+        if (t["hold"] and not t["hold_fired"] and dec == t["hold_btn"] and now >= t["hold_at"] + self.c["holdMs"] / 1000
+                and m and m["t"][3][0]):
+            t.update(hold_fired=True, pending=False, count=0, last=0)
+            self._dispatch(t["bid"], 4)
+
+    def _press(self, btn, now):
+        t, win = self.tap, self.c["tapWindowMs"] / 1000
+        if btn != t["last"]:
+            if t["pending"]:
+                t["pending"] = False
+                self._dispatch(t["bid"], t["taps"])
+            t.update(last=btn, count=1)
+        else:
+            t["count"] = min(3, t["count"] + 1) if now - t["last_at"] < win else 1
+        t.update(last_at=now, pending=True, fire_at=now + win, bid=self.mode * 100 + btn, taps=t["count"],
+                 hold=t["count"] == 1, hold_btn=btn, hold_at=now, hold_fired=False)
+
+    def _release(self, now):
+        t = self.tap
+        if not t["hold"]:
+            return
+        t.update(hold=False, hold_btn=0)
+        if t["hold_fired"]:
+            t.update(hold_fired=False, pending=False, count=0, last=0)
+            return
+        t["last_at"] = now
+        if t["pending"]:
+            t["fire_at"] = now + self.c["tapWindowMs"] / 1000
+
+    def _check_deferred(self, now):
+        t = self.tap
+        if t["pending"] and not t["hold"] and now >= t["fire_at"]:
+            t["pending"] = False
+            self._dispatch(t["bid"], t["taps"])
+            t.update(count=0, last=0)
+
+    def _dispatch(self, bid, taps):
+        """rcDispatch: rc_trig on USB, then the mapping's tiers (exclusive, or every tier up to this one)."""
+        if self.nav is not None:
+            self.nav._append(self.rc_trig(bid // 100, bid % 100, taps))
+        m = self.c["mappings"].get(str(bid))
+        if m:
+            for ti in ([taps - 1] if m["exclusive"] or taps == 4 else range(taps)):
+                for a in m["t"][ti][0]:
+                    self._act(a)
+
+    def _act(self, a):
+        if self.calib:
+            return
+        if a["type"] == "wcb_unicast" and a["target"] == "1" and a["cmd"].startswith(";S2"):
+            self.links["W1S2"].write(a["cmd"][3:].encode() + b"\r")
+
+    def _switches(self, vals, now):
+        settle = self.c["switchSettleMs"] / 1000
+        for i, sw in enumerate(self.c["switches"]):
+            ch = sw["channel"]
+            if not 1 <= ch <= 24:
+                continue
+            v = vals[ch - 1]
+            pos = (2 if v > 900 else 0) if sw["positions"] == 2 else (0 if v < 582 else 2 if v > 1401 else 1)
+            if self.seed:
+                self.sw_prev[i], self.sw_cand[i] = pos, -1
+                continue
+            if pos == self.sw_prev[i]:
+                self.sw_cand[i] = -1
+                continue
+            if self.sw_cand[i] != pos:
+                self.sw_cand[i], self.sw_since[i] = pos, now
+            if settle and now < self.sw_since[i] + settle:
+                continue
+            self.sw_prev[i], self.sw_cand[i] = pos, -1
+            for a in sw["t"][pos][0]:
+                self._act(a)
+        self.seed = False
+
+    @staticmethod
+    def _to_range(v, lo, hi, mid_closed):
+        """sbusToRange / sbusToRangeMidClosed (NaviCore.ino:593-627), C long arithmetic, clamped either way round."""
+        def cdiv(a, b):
+            q = abs(a) // abs(b)
+            return q if (a >= 0) == (b > 0) else -q
+        if mid_closed:
+            c = (172 + 1811) // 2
+            mapped = lo if v <= c else cdiv((v - c) * (hi - lo), 1811 - c) + lo
+        else:
+            mapped = cdiv((v - 172) * (hi - lo), 1811 - 172) + lo
+        return max(min(lo, hi), min(max(lo, hi), mapped))
+
+    def _knobs(self, vals):
+        if self.calib:
+            return
+        for i, k in enumerate(self.c["knobs"]):
+            ch = k["channel"]
+            if not 1 <= ch <= 24 or not k["function"]:
+                continue
+            m = 1
+            if k["modeAware"]:
+                ovr = k["modeSwitchOverride"]
+                sch = self.c["switches"][ovr]["channel"] if 0 <= ovr < 10 else 0
+                sv = vals[sch - 1] if ovr >= 0 and 1 <= sch <= 24 else -1
+                m = self.mode if sv < 0 else (1 if sv < 582 else 2 if sv < 1401 else 3)
+            if m != self.knob_mode[i]:
+                self.knob_mode[i], self.knob_raw[i] = m, None
+            raw = vals[ch - 1]
+            if k["reverse"]:
+                raw = max(0, min(2047, 1983 - raw))
+            if self.knob_raw[i] is not None and abs(raw - self.knob_raw[i]) < 5:
+                continue
+            self.knob_raw[i] = raw
+            if not self.knob_primed[i]:
+                self.knob_primed[i] = True
+                continue
+            outs = k["outputs"] if not k["modeAware"] or m == 1 else k["outputs2" if m == 2 else "outputs3"]
+            for o in outs:
+                if k["function"] != 1:
+                    continue
+                pos = self._to_range(raw, o["posMin"], o["posMax"], o["midClosed"])
+                slot = o["target"]
+                mae = self.c["maestros"][slot - 1] if 1 <= slot <= len(self.c["maestros"]) else {}
+                if mae.get("type") == 2:
+                    self.links["W1S1"].write(bytes([0xAA, mae["device"], 0x04, o["maestroCh"], pos & 0x7F,
+                                                    (pos >> 7) & 0x7F]))
+
+    # ------------------------------------------------------------ the console
+    def script(self, text, n):
+        with self.elock:
+            out = super().script(text, n)
+            if text.startswith("{") and '"type":"SET_CONFIG"' in text[:60] and \
+                    any('"of":"SET_CONFIG","ok":true' in x for x in out):
+                self.seed = True
+                self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
+            return out
 
     def hash_cmd(self, text):
         if len(text) >= 4 and text[1] in "Ll" and text[2:4] in ("09", "12", "13"):
@@ -10900,20 +11153,21 @@ class NaviSbusModel(NaviModel):
         return super().w1_script(text, n)
 
 
-# Against today's reader: the reader-driven tests run, both findings fail as designed, and the tests that need NaviCore's
-# tap engine or a probe wire skip on the model's controller, which has no matrix button (test_verbs_ram_only: opt-in off).
+# Against today's NaviCore (reader and engine): every test runs but the opt-in one (sbus_reset is off here), the normal
+# ones pass, and the four findings fail as designed (D-NC21 twice, D-NC72, D-NC73) - as on the bench (run
+# 20260929-201950, once the five tests read rc_trig right).
 SBUSFAULT_WANT = {"sbus.test_verbs": "PASS", "sbus.sbus16_autodetect": "PASS", "sbus.lock_after_glitch": "PASS",
                   "sbus.sbus24_return_no_prefix_decode": "FAIL", "sbus.truncated_frame_no_phantom": "FAIL",
-                  "sbus.failsafe_flag_freeze": "SKIP", "sbus.lost_frame_flag_no_gate": "SKIP",
-                  "sbus.failsafe_deferred_tap": "SKIP", "sbus.frame_stop_held_press": "SKIP",
-                  "sbus.prefix_ambiguity_raw": "SKIP", "sbus.one_frame_dip": "SKIP", "sbus.test_verbs_ram_only": "SKIP"}
+                  "sbus.failsafe_flag_freeze": "PASS", "sbus.lost_frame_flag_no_gate": "PASS",
+                  "sbus.failsafe_deferred_tap": "FAIL", "sbus.frame_stop_held_press": "FAIL",
+                  "sbus.prefix_ambiguity_raw": "PASS", "sbus.one_frame_dip": "PASS", "sbus.test_verbs_ram_only": "SKIP"}
 
 
 def _run_sbusfault_suite(tmp, ids=None, mut=()):
     """s50 through the runner against NaviSbusModel on an SbusWorld(mut), W1 relaying to it -> (results by id, the world,
     the model, session.log)."""
     world = SbusWorld(mut)
-    model = NaviSbusModel(world)
+    model = NaviSbusModel(world, mut)
     b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "sbus": {"port": "COMSB", "kind": "sbus"},
                    "navicore": {"port": "COMNAV", "kind": "navicore"}})
     b.cfg["opt_in"] = []
@@ -10933,7 +11187,7 @@ def _run_sbusfault_suite(tmp, ids=None, mut=()):
     for t in mine:
         t["needs"], t["links"], t["drives"], t["_drives"] = [], [], [], set()
     from hil import sbus as SB
-    patches = [(S50, "link", lambda bench, w, p: object()), (SB.SbusCtl, "NUDGE_S", 0.05)]
+    patches = [(S50, "link", lambda bench, w, p: model.links[f"W{w}{p}"]), (SB.SbusCtl, "NUDGE_S", 0.05)]
     saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
     for mod, name, value in patches:
         setattr(mod, name, value)
@@ -10944,19 +11198,19 @@ def _run_sbusfault_suite(tmp, ids=None, mut=()):
         _slow_guard(saved_g)
         for mod, name, value in saved:
             setattr(mod, name, value)
-        model.monitor = False
+        model.monitor = model.alive = False
     log = read(os.path.join(ck.out_dir, "session.log"))
     b.close()
     return {r["id"]: r for r in ck.data["results"]}, world, model, log
 
 
 def t_sbusfault_suite_against_model(tmp):
-    """Every s50 test (NC-WP11) run whole through the runner against SbusWorld - the controller with the INF8 verbs, and
-    NaviCore's framing on the wire as hil/sbus.py ReaderModel ports it - behind NaviSbusModel (NaviModel's config,
-    guard and W1 relay): the verbs' acceptance, SBUS-16 and the glitch recovery pass; the two findings fail as today's
-    reader makes them, naming D-NC72 and D-NC73; the tests that need NaviCore's tap engine skip (the model's controller
-    has no matrix button). The controller ends as it began (flags 0, streaming SBUS-24, nothing saved) and so does
-    NaviCore's config; no credential reaches session.log."""
+    """Every s50 test (NC-WP11) run whole through the runner against SbusWorld - the controller with the INF8 verbs and
+    the bench's matrix buttons, and NaviCore's framing on the wire as hil/sbus.py ReaderModel ports it - behind
+    NaviSbusModel (NaviModel's config, guard and W1 relay, plus NaviCore's SBUS engine: taps, switches, knobs and the
+    rc_trig lines they print): the normal tests pass; the four findings fail as today's NaviCore makes them, naming
+    D-NC21, D-NC72 and D-NC73; the opt-in test skips. The controller ends as it began (flags 0, streaming SBUS-24,
+    nothing saved) and so does NaviCore's config; no credential reaches session.log."""
     res, world, model, log = _run_sbusfault_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {SBUSFAULT_WANT.get(tid)}) {r['detail'][:400]}"
            for tid, r in res.items() if r["status"] != SBUSFAULT_WANT.get(tid)]
@@ -10964,6 +11218,8 @@ def t_sbusfault_suite_against_model(tmp):
     assert not bad, "\n".join(bad)
     assert "(should, D-NC72)" in res["sbus.truncated_frame_no_phantom"]["detail"], res["sbus.truncated_frame_no_phantom"]
     assert "(should, D-NC73)" in res["sbus.sbus24_return_no_prefix_decode"]["detail"]
+    for tid in ("sbus.failsafe_deferred_tap", "sbus.frame_stop_held_press"):
+        assert res[tid]["detail"].startswith("(should, D-NC21)"), (tid, res[tid]["detail"][:300])
     assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True} and not world.saved, \
         (world.st, world.saved)
     assert model.text() == model.flash, "NaviCore's config was not left as found"
@@ -10979,14 +11235,23 @@ SBUSFAULT_MUTATIONS = (
     ("sbus.test_verbs", "no_budget", "FAIL", "a budget of 5 frames"),
     ("sbus.test_verbs", "dip_two", "FAIL", "the dip"),
     ("sbus.sbus16_autodetect", "mode_saves", "FAIL", "the frame format was saved"),
+    ("sbus.failsafe_deferred_tap", "failsafe_cancels", "PASS", ""),
+    ("sbus.frame_stop_held_press", "frame_timeout", "PASS", ""),
+    ("sbus.failsafe_flag_freeze", "failsafe_ungated", "FAIL", "under failsafe"),
+    ("sbus.failsafe_flag_freeze", "failsafe_keeps_armed", "FAIL", "held across the failsafe"),
+    ("sbus.lost_frame_flag_no_gate", "lost_gates", "FAIL", "with lost frames flagged"),
+    ("sbus.one_frame_dip", "release_debounce_2", "FAIL", "matrixDebounceFrames 1"),
 )
 
 
 def t_sbusfault_mutations(tmp):
-    """The s50 tests catch what they exist to catch, each alone on a fresh SbusWorld broken one way: with D-NC72's and
-    D-NC73's fixes in the reader the two (should) tests pass and the glitch recovery test still does; a reader that
-    decodes a partial buffer at a silence fails the glitch test; a controller that ignores the frame budget, stretches a
-    dip to two frames, or saves the frame format fails the test that checks it."""
+    """The s50 tests catch what they exist to catch, each alone on a fresh SbusWorld and NaviSbusModel changed one way:
+    with D-NC72's and D-NC73's fixes in the reader the two (should) tests pass and the glitch recovery test still does,
+    and with D-NC21's (failsafe, or 100 ms with no frame, cancels a pending tap and hold) its two (should) tests pass; a
+    reader that decodes a partial buffer at a silence fails the glitch test; a controller that ignores the frame
+    budget, stretches a dip to two frames, or saves the frame format fails the test that checks it; and so does a
+    NaviCore whose failsafe gate is gone or leaves the matrix armed, whose lost-frame flag gates, or whose release
+    debounce ignores matrixDebounceFrames 1."""
     for tid, mut, want, why in SBUSFAULT_MUTATIONS:
         res, _, _, _ = _run_sbusfault_suite(tmp, ids={tid}, mut={mut})
         r = res[tid]
