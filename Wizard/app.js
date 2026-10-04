@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.19:38.R.OCT.2026';
+const UI_VERSION = '04.19:44.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1220,10 +1220,20 @@ function _notifyBoardChanged(n) {
   showToast(`Changes pending — push to WCB ${wcbNum} to apply`, 'info', 3000);
 }
 
+// A first pull and a file load show values a board already holds, through the same General handlers a user's edit runs
+// (syncGeneralFromConfig). Nothing is pending then: run them with the change notice held, so no "push to all boards"
+// toast and no amber Push All after every first connect (W-19). The handlers still copy the values into systemConfig,
+// every boardConfigs entry and the General baseline.
+let _mirroringGeneral = false;
 function _notifyGeneralChanged() {
+  if (_mirroringGeneral) return;
   generalSettingsDirty = true;
   updatePushAllButton();
   showToast('Changes pending — push to all boards to apply', 'info', 3000);
+}
+function _mirrorGeneral(fn) {
+  _mirroringGeneral = true;
+  try { fn(); } finally { _mirroringGeneral = false; }
 }
 
 // ─── WCB Dropdown Helpers ──────────────────────────────────────────
@@ -8989,9 +8999,11 @@ function syncGeneralFromConfig(config) {
   // oninput/onchange, so systemConfig.general would otherwise stay at its defaults.
   if (systemConfig?.general) systemConfig.general.wcbQuantity = config.wcbQuantity;
   if (systemConfig?.general) systemConfig.general.meshChannel = config.meshChannel ?? 1;
-  onGeneralPasswordChange();
-  onGeneralMacChange();
-  onGeneralCmdCharChange();
+  _mirrorGeneral(() => {          // the board's own values: nothing pending (W-19)
+    onGeneralPasswordChange();
+    onGeneralMacChange();
+    onGeneralCmdCharChange();
+  });
 
   const etmEl = document.getElementById('g-etm-enabled');
   if (etmEl) etmEl.checked = config.etm.enabled;

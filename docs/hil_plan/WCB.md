@@ -797,7 +797,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 is fixed (its row says how); W-14 to W-21 are not.
+> **Status 2026-10-04:** W-13 and W-19 are fixed (each row says how); W-14 to W-18, W-20 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -833,6 +833,9 @@ fix; per the conventions, each fix also needs its doc row.
   (app.js:8971-8973), each of which toasts "Changes pending — push to all boards to apply" and sets
   generalSettingsDirty (app.js:1212-1216): Push All is flagged after every first connect, with nothing to push.
   `wizard.app_fake_pull_leaves_nothing_pending`.
+  **Fixed:** syncGeneralFromConfig runs those handlers inside `_mirrorGeneral` (app.js), which holds
+  `_notifyGeneralChanged`: they still copy the values into systemConfig, every board's config and the General
+  baseline, and nothing toasts or flags Push All. A user's edit runs the same handlers unheld.
 - **W-20** A no-edit push of a local-Kyber board with a Maestro of its own and a target on another board re-sends
   `?KYBER,LOCAL`, and a KYBER line asks for a reboot (app.js:9075). The backup lists the Maestro table before the KYBER
   line (WCB.ino:3810, :3817), so the parser files the other board's Maestro as a target first (parser.js:877-882,

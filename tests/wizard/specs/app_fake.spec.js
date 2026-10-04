@@ -654,10 +654,6 @@ test('wizard.app_fake_hub_flash_refused a flash or an erase on the shared port i
 });
 
 test('wizard.app_fake_pull_leaves_nothing_pending (should) pulling a board leaves nothing pending in General: no "push to all boards" toast and Push All not flagged (W-19)', async ({ page }) => {
-  test.fail(true, 'W-19: syncGeneralFromConfig mirrors the pulled values through onGeneralPasswordChange, onGeneralMacChange and ' +
-                  'onGeneralCmdCharChange (app.js:8971-8973), which are the handlers for a user\'s edit: each toasts "Changes pending ' +
-                  '— push to all boards to apply" and sets generalSettingsDirty (app.js:1212-1216), so Push All turns amber after ' +
-                  'every first pull, with nothing to push');
   await openWizard(page);
   await pullFake(page, 1, board());
   expect(await page.evaluate(() => __fake.toastText())).not.toContain('push to all boards');
