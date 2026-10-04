@@ -11752,6 +11752,37 @@ def t_intellex_wifi_flash_helpers(tmp):
         pass
     assert S36.percent_path([0, 0, 0, 25, 25, 100]) == [0, 25, 100] and S36.percent_path(None) == []
 
+    # ---- s36 park_probes: every bound channel on W2's ports released before esptool resets W2, nothing else
+    class _L:
+        def __init__(self, wcb, port, channel):
+            self.wcb, self.port, self.channel = wcb, port, channel
+
+        @property
+        def key(self):
+            return f"W{self.wcb}{self.port}"
+
+    class _Links:
+        def __init__(self, links):
+            self.links, self.released = links, []
+
+        def all(self):
+            return list(self.links)
+
+        def release(self, link):
+            self.released.append(link.key)
+            link.channel = None
+
+    class _PB:
+        def __init__(self, links):
+            self.links, self.notes = _Links(links), []
+
+        def note(self, text):
+            self.notes.append(text)
+    pb = _PB([_L(2, "S1", "A"), _L(2, "S2", None), _L(1, "S1", "B"), _L(2, "S3", "D")])
+    assert S36.park_probes(pb, 2) == 2 and pb.links.released == ["W2S1", "W2S3"], pb.links.released
+    assert pb.notes == ["W2: released 2 probe channel(s) on its ports before esptool resets it"], pb.notes
+    assert S36.park_probes(pb, 2) == 0 and pb.notes[1:] == [], pb.notes
+
     # ---- hil/intellex.py: hide, copy_logs, main_checkout
     class B:
         def __init__(self, out):

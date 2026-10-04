@@ -238,12 +238,33 @@ def _last_resort(port):
             f"FLASHED.md)")
 
 
+def park_probes(bench, wcb):
+    """Release every probe channel bound to a port of WCB `wcb` before esptool resets it into its ROM loader -> how
+    many. A bound channel's TX drives that WCB's RX line high (a UART idles high); a released one is a weak pull-up
+    (wcb_probe unbindChannel). In full run 20260929-203948 every write-flash on W2 failed to reach download mode
+    ('Wrong boot mode detected (0x17)', all 38 tries) with probe2 bound to W2's S1, S3, S4 and S5 - S3's RX is GPIO4,
+    which the ESP32 latches at reset - while the same flashes passed in 20260929-203453, where no probe had bound a
+    channel since its boot. The next test that wires a port binds it again (hil/links.py bind)."""
+    n = 0
+    for link in bench.links.all():
+        if link.wcb == wcb and link.channel is not None:
+            try:
+                bench.links.release(link)
+                n += 1
+            except Exception as e:  # noqa: BLE001 - a probe that went away holds nothing
+                bench.note(f"release of {link.key} before an esptool reset of W{wcb} failed: {e}")
+    if n:
+        bench.note(f"W{wcb}: released {n} probe channel(s) on its ports before esptool resets it")
+    return n
+
+
 def reflash_w2(bench, img, device="wcb2"):
     """W2 flashed again with the same image, in full (bootloader, table, app; NVS kept), through a leashed host's own
     /_api/flash-wcb with no page - the plan's first recovery: the ESP32 ROM loader answers every auto-reset -> what
     happened. AssertionError naming the last resort when W2 still does not answer."""
     port = bench.cfg["devices"][device]["port"]
     bench.close_device(device)
+    park_probes(bench, bench.cfg["devices"][device]["wcb"])
     tid = "intellex.flash_w2_recovery"
     sd = stage(bench, tid, tools="none", settings=SETTINGS_W2)
     seed_w2(img)(sd)
@@ -307,6 +328,7 @@ def _w2_flash(bench, test_id, mode, push=False, extra=None, timeout=960.0):
     m1 = w1.dev.mark()
     judged, problems = {}, []
     others = [n for n in bench.wcb_numbers() if n != n2]
+    park_probes(bench, n2)
     with config_guard(bench, *bench.wcb_numbers()):
         try:
             run_intellex_test(bench, test_id, attach={"kind": "serial", "port": port}, device="wcb2",
@@ -401,6 +423,7 @@ def flash_refused_board_runs(bench):
     img = bench_w2_image(w2.version())
     tid = "intellex.flash_refused_board_runs"
     problems, stranded, recovered = [], None, None
+    park_probes(bench, bench.cfg["devices"]["wcb2"]["wcb"])
     with config_guard(bench, *bench.wcb_numbers()):
         bench.close_device("wcb2")
         sd = stage(bench, tid, tools="none", settings=SETTINGS_W2)
@@ -505,6 +528,7 @@ def _w2_flash_factory(bench, n2, judged):
     w1 = usb_wcb(bench)
     m1 = w1.dev.mark()
     problems = []
+    park_probes(bench, n2)
     try:
         run_intellex_test(bench, "intellex.flash_w2_factory", attach={"kind": "serial", "port": port}, device="wcb2",
                           settings=SETTINGS_W2, seed=seed_w2(img),
