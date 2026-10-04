@@ -666,10 +666,6 @@ test('wizard.app_fake_pull_leaves_nothing_pending (should) pulling a board leave
 });
 
 test('wizard.app_fake_pending_funcchar (should) a function identifier typed into General but not yet pushed is not used for the board\'s immediate commands - the board still reads its old one (W-13)', async ({ page }) => {
-  test.fail(true, 'W-13: onGeneralCmdCharChange writes the typed character into every boardConfigs entry at once (app.js:1332-1339), ' +
-                  'and the immediate sends build their command from boardConfigs[n].funcChar: sequence save (app.js:4773) - which then ' +
-                  'records the value in the baseline as saved (:4856-4861) - the debug toggles (:9500), the mesh poll (:13423) and more. ' +
-                  'The board, still on its old character, broadcasts each line as text to its ports and the mesh (WCB.ino:6063-6066)');
   await openWizard(page);
   await pullFake(page, 1, board(['SEQ,SAVE,hello,;S1hi']), { replies: { '?WDP,DUMP': DUMP } });
   await edit(page, '#g-funcchar', '!');

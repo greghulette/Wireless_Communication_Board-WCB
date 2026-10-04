@@ -794,9 +794,10 @@ fix; per the conventions, each fix also needs its doc row.
 - **W-11** diffConfigs ignores six fields (parser.js:1726-1768).
 - **W-12** The 'Firmware counts down ~3 s' comments are stale (app.js:7705, 9915).
 
-> **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6` and
-> **not fixed** (the main session decides). Each is pinned by a `(should)` test that fails today: `test.fail` in
-> Playwright (CI stays green, the harness reports FAIL), a node `todo` in `unit/model.test.js`.
+> **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
+> Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
+> the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
+> **Status 2026-10-04:** W-13 is fixed (its row says how); W-14 to W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -805,6 +806,11 @@ fix; per the conventions, each fix also needs its doc row.
   reboot (:9197), and the relay hops of a bidir mapping and a removed PWM output (:4305, :4247 - the case app.js:76-85
   says must never read boardConfigs). The board, still on its old character, broadcasts each line as text to its ports
   and the mesh (WCB.ino:6063-6066). `wizard.app_fake_pending_funcchar`.
+  **Fixed:** every immediate send reads the board's live character, `_liveFuncChar` (`_liveChar`, app.js), as the relay
+  hops already did: a switch seen since the baseline was stored (a boot banner, or a push's character switch, recorded
+  in `boardBootChars` with the baseline it was seen over), else the baseline, else the banner. So a push that switches
+  the characters and reboots is followed by the new ones until its verify pull. The command character's immediate
+  sends (the `;L` WLED controls, a sequence's Test, a temporary variable) read `_liveCmdChar` the same way.
 - **W-14** On the shared port - the connection the first board of a page gets (establishConnection) - a push that needs a
   reboot sends `?reboot` and stops: no reconnect, so no verify pull, and the baseline is not advanced (app.js:8038-8045).
   The next push sends every change of the first again and reboots the board again. `wizard.push_fake_shared_reboot_repull`.
