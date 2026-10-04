@@ -70,7 +70,7 @@ test('wizard.push_reboot_path a push that needs a reboot, on the shared port the
   await page.waitForTimeout(8000);          // nothing more: a second restart would print a second banner
   expect((await got('^Booting up the ')).length, 'one boot for one push').toBe(1);
   expect(await page.evaluate((n) => boardConnections[n].isConnected(), n)).toBe(true);
-  // The Wizard does not pull on this path (W-14, pinned by wizard.push_fake_shared_reboot_repull): pull now, and compare.
+  // The Wizard pulls 3 s after the banner (W-14, guarded by wizard.push_fake_shared_reboot_repull): pull once more, and compare.
   await page.evaluate((n) => { window.__b = boardBaselines[n]; return boardPull(n); }, n);
   await page.waitForFunction((n) => boardBaselines[n] !== window.__b && !_boardPullInFlight.has(n), n, { timeout: 30_000 });
   expect(await verbsSinceBefore(page, n), 'the board\'s config after the reboot').toEqual([]);

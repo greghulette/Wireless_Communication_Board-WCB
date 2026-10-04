@@ -233,7 +233,8 @@ New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U
 > WCBQ edit reboots nothing (D28), so the reboot push is `?HW` with the board's own version, which changes nothing; "one
 > boot banner per push" holds on the shared port, which `connectBoard` gives the first board, while on a direct connection
 > the reconnect pulses DTR and resets the board again by design (app.js:5437-5445), so that variant notes the count; on
-> the shared port the Wizard never pulls after the reboot (W-14), so the spec pulls itself; Push All runs with W1 direct
+> the shared port the Wizard pulls 3 s after the boot banner (W-14, fixed 2026-10-04), and the spec pulls once more to
+> compare; Push All runs with W1 direct
 > (W-15); "W1 and W2 on USB" is impossible with one grant per Chrome profile, so W2 is managed through W1; row 5 uses W2 S4
 > (s12's unlabelled WDP-DA port), not S3; "Manage all" exists only on a MgmtRelay card, which the bench does not have
 > (`wizard.app_fake_relay_card`). Each skips, saying why, when the bench cannot run it: W1 reports no hardware version
@@ -797,7 +798,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 and W-19 are fixed (each row says how); W-14 to W-18, W-20 and W-21 are not.
+> **Status 2026-10-04:** W-13, W-14 and W-19 are fixed (each row says how); W-15 to W-18, W-20 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -814,6 +815,11 @@ fix; per the conventions, each fix also needs its doc row.
 - **W-14** On the shared port - the connection the first board of a page gets (establishConnection) - a push that needs a
   reboot sends `?reboot` and stops: no reconnect, so no verify pull, and the baseline is not advanced (app.js:8038-8045).
   The next push sends every change of the first again and reboots the board again. `wizard.push_fake_shared_reboot_repull`.
+  **Fixed:** the shared branch starts `_pullAfterSharedReboot` (app.js), the verify pull the direct path gets from its
+  reconnect. With the port held open, the board's own lines say when it is back: the pull runs 3 s after the boot
+  banner's `Software Version:` line (the banner came 9-10 s after `?reboot` on the bench), 30 s after `Reboot queued`
+  (or an older firmware's `Rebooting in 2 seconds`) if no banner shows, and 4 s after `?reboot` if the board announced
+  no restart at all.
 - **W-15** Push All's last stage closes and reconnects every relay (app.js:9193-9218) with no shared-port branch. A shared
   relay has no port of its own, so reconnect() returns false at once (app.js:5393): "did not come back — reconnect
   manually", and the card goes Not connected while the hub still holds the port. `wizard.push_fake_all_shared_relay`.

@@ -225,8 +225,6 @@ test('wizard.push_fake_reboot_path a USB push that needs a reboot sends ?reboot 
 });
 
 test('wizard.push_fake_shared_reboot_repull (should) a push that reboots a board on the shared port pulls it again afterwards, as a USB push does (W-14)', async ({ page }) => {
-  test.fail(true, 'W-14: on the shared port boardGo sends ?reboot and stops (app.js:8038-8045): no reconnect, so no verify pull, and ' +
-                  'the baseline keeps the values from before the push - the next push sends every change again and reboots the board again');
   await openWizard(page);
   await pullFake(page, 1, board(), { shared: true });
   await edit(page, '#b1-hw-version', '23');

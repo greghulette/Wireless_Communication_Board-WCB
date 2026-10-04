@@ -221,8 +221,8 @@ def _w1_boots_noted(bench, test_id, run):
 @test("wizard.push_reboot_path", "A Wizard push that needs a reboot, on the shared port the first board gets: W1 reboots once (?HW with its own value, so nothing changes), the page stays connected and reads its boot, and a pull afterwards finds the config as it was", needs=["wcb1"])
 def push_reboot_path(bench):
     """WCB-WP21 row 1. The plan's WCBQ+1 edit needs no reboot (D28: ?WCBQ applies live), so the push is ?HW with the
-    board's own version - the reboot path with no config change. On this path the Wizard does not pull afterwards
-    (W-14, pinned by wizard.push_fake_shared_reboot_repull), so the spec pulls itself."""
+    board's own version - the reboot path with no config change. On this path the Wizard pulls 3 s after the boot
+    banner (W-14, guarded by wizard.push_fake_shared_reboot_repull); the spec pulls once more and compares."""
     with config_guard(bench, 1):
         _w1_boots_noted(bench, "wizard.push_reboot_path", lambda: run_wizard_test(bench, "wizard.push_reboot_path"))
 

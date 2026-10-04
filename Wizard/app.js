@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.19:44.R.OCT.2026';
+const UI_VERSION = '04.19:51.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -7491,6 +7491,35 @@ function _pushCharPlan(config, baseline) {
   return WCBParser.planCommandCharChange(baseline ?? null, config);
 }
 
+// The verify pull after a reboot on the shared port, which the direct path gets from its reconnect (W-14). Call it as
+// soon as `?reboot` is sent. The hub holds the port open through the reboot (a UART-bridge WCB keeps USB up through a
+// software restart), so nothing closes or reopens to say when the board is back: its own lines do. The firmware
+// answers `Reboot queued` and restarts once its command queue has been quiet for 4 s (PWM_REBOOT_QUIET_MS, WCB.ino;
+// 20 s at the latest); older firmware said `Rebooting in 2 seconds`. Then it boots and prints its banner. The pull runs
+// 3 s after the banner's `Software Version:` line - as the direct path pulls 3 s after it reopens the port, which is
+// when that board starts booting - and on the bench the banner came 9-10 s after `?reboot`, so no fixed wait fits.
+// Without a banner: 30 s after a restart was announced (the 20 s cap, a boot, a margin), or 4 s after `?reboot` when
+// none was - a board that said nothing about a restart is asked at once, and the pull says whether it answers.
+function _pullAfterSharedReboot(n, conn) {
+  let timer = null, announced = false;
+  const done = () => { clearTimeout(timer); conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine); };
+  const pullIn = (ms) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      done();
+      if (boardConnections[n] !== conn || !conn.isConnected()) return;   // disconnected, or the slot changed hands
+      termLog(n, 'Auto-pulling config…', 'sys');
+      boardPull(n);
+    }, ms);
+  };
+  const onLine = (line) => {
+    if (/^Software Version:/.test(line)) pullIn(3000);
+    else if (!announced && /^(Reboot queued|Rebooting)/.test(line)) { announced = true; pullIn(30000); }
+  };
+  conn._dataCallbacks.push(onLine);
+  pullIn(4000);
+}
+
 async function boardGo(n, opts = {}) {
   // Assume failure until a push actually finishes. Set BEFORE the relay delegation below:
   // boardGoRemote is a separate function with its own exits, and leaving the reset after the
@@ -8074,6 +8103,10 @@ async function boardGo(n, opts = {}) {
           // (this.port===null) and falsely report "did not come back". Stay Connected.
           conn._rebootManaged = false;
           termLog(n, 'Board rebooting on the shared port…', 'sys');
+          // The verify pull the direct path runs after its reconnect - without it the baseline kept the values from
+          // before this push, and the next push sent every change again and rebooted the board again (W-14).
+          // The wizard does its own (wizardWatchForConnect), as on the direct path.
+          if (!_wizardOpen) _pullAfterSharedReboot(n, conn);
         } else {
           await conn.closeForReconnect();
           updateConnectionUI(n, false);
